@@ -56,6 +56,8 @@ jobs:
       - uses: actions/checkout@v4
 
       # Tauri 2 在 Linux 上的系统依赖。
+      # 用 libayatana-appindicator3-dev 而不是 libappindicator3-dev：
+      # 后者在 Ubuntu 24.04（ubuntu-latest）已被移除，装它会直接让这步失败。
       # libdbus-1-dev 是必需的：tauri 默认开启 dbus feature（tao → dbus crate →
       # libdbus-sys 用 pkg-config 探测 "dbus-1"，缺失会直接 panic）。
       # lsof 是 nsb-core 在非 Windows 上枚举监听端口用的外部命令
@@ -66,7 +68,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
             libxdo-dev \

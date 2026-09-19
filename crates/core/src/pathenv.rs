@@ -285,15 +285,18 @@ pub fn split_win_path(value: &str) -> Vec<String> {
         .collect()
 }
 
-/// Windows 路径比较：大小写不敏感，忽略结尾分隔符
+/// `merge_win_path` / `strip_win_path` 内部用的路径比较：大小写不敏感，忽略结尾分隔符。
+///
+/// 大小写不敏感性是 **Windows PATH 格式本身**的属性（这些函数处理的都是注册表里的
+/// PATH 文本），不是运行平台的属性 —— 因此不能按 `cfg!(windows)` 分支：那样在
+/// Linux/macOS 上跑测试或做交叉验证时，`d:\RT\PHP` 与 `D:\rt\php` 会被当成两条
+/// 不同路径，托管条目清不掉。这里始终按 Windows 语义比较。
 fn same_path(a: &str, b: &str) -> bool {
     let norm = |s: &str| {
-        let t = s.trim().trim_end_matches(['\\', '/']).replace('/', "\\");
-        if cfg!(windows) {
-            t.to_ascii_lowercase()
-        } else {
-            t
-        }
+        s.trim()
+            .trim_end_matches(['\\', '/'])
+            .replace('/', "\\")
+            .to_ascii_lowercase()
     };
     norm(a) == norm(b)
 }

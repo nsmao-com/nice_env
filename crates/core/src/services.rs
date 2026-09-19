@@ -364,6 +364,10 @@ impl PortsProfile {
     }
 
     pub fn from_settings(store: &Store) -> Self {
+        // 缺省走「标准档」（80/3306/6379…）：项目里写死的 127.0.0.1:3306 这类连接串
+        // 开箱即用。与 FlyEnv/XAMPP 共存时不想抢常用端口，在设置里切「安全档」。
+        // 注意：这里必须与 packages/schema 的 AppSettings.portProfile 默认值（standard）
+        // 以及设置页展示保持一致，否则「没设置过」时会和用户看到的档位不符。
         let mut p = match store.get_setting("portProfile").as_deref() {
             Some("safe") => Self::safe(),
             _ => Self::standard(),

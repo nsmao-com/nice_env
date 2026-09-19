@@ -243,8 +243,10 @@ fn resolve_port(
     Some(start)
 }
 
+/// 是否是「标准档」。缺省视为标准档 —— 必须与 `PortsProfile::from_settings`
+/// 和设置项默认值保持一致，否则没设置过的用户会看到「档位显示标准、实际按安全档分配端口」。
 fn is_standard(store: &Store) -> bool {
-    store.get_setting("portProfile").as_deref() == Some("standard")
+    store.get_setting("portProfile").as_deref() != Some("safe")
 }
 
 /// 该服务是否需要端口（清单声明 defaultPort，或参数/配置模板里引用 {port}）

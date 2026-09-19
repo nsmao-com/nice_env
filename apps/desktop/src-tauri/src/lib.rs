@@ -1059,16 +1059,32 @@ struct ReleaseInfo {
     asset_size: Option<u64>,
 }
 
-/// 当前平台该下哪种安装包（NSIS 安装器 / DMG）
+/// 当前平台该下哪种安装包（Windows: NSIS 安装器 / macOS: 对应架构的 DMG）。
+///
+/// Release 里同时有 aarch64 与 x64 两份 macOS 包，只看扩展名会把 Intel 机器
+/// 的 .dmg 挑给 Apple Silicon（反之亦然），所以还要匹配 CPU 架构。
 fn asset_matches_platform(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     #[cfg(windows)]
     {
-        n.ends_with(".exe") || n.contains("setup") || n.contains("nsis")
+        // 只认安装器：x64-setup.exe；.app.tar.gz 之类不是 Windows 包
+        n.ends_with(".exe") || n.ends_with(".msi")
     }
     #[cfg(not(windows))]
     {
-        n.ends_with(".dmg") || n.ends_with(".app.tar.gz")
+        let is_mac_pkg = n.ends_with(".dmg") || n.ends_with(".app.tar.gz");
+        if !is_mac_pkg {
+            return false;
+        }
+        // 文件名里带 aarch64/arm64 的是 Apple Silicon 包；其余（x64/x86_64）按 Intel 处理
+        let arm = n.contains("aarch64") || n.contains("arm64");
+        let want_arm = cfg!(target_arch = "aarch64");
+        if n.contains("aarch64") || n.contains("arm64") || n.contains("x64") || n.contains("x86_64") {
+            arm == want_arm
+        } else {
+            // 名字里没写架构：不冒险挑给用户，交给下面的兜底逻辑
+            false
+        }
     }
 }
 

@@ -92,7 +92,18 @@ jobs:
         run: mkdir -p apps/web/out
 
       - name: Test core crate
-        run: cargo test -p nsb-core
+        run: |
+          set +e
+          cargo test -p nsb-core --no-fail-fast 2>&1 | tee /tmp/core-test.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            # 失败摘要写进 GitHub 注解：日志需要仓库权限才能看，注解是公开可见的，
+            # 便于在没有 admin 权限时也能定位平台相关的测试失败。
+            summary=$(grep -E "panicked at|assertion|^test .* FAILED|^test result|left:|right:|FAILED$" /tmp/core-test.log \
+              | tr '\r\n' ' ' | sed 's/%/%25/g' | cut -c1-3500)
+            echo "::error title=nsb-core 测试失败::${summary}"
+            exit "$status"
+          fi
 
       - name: Check desktop crate
         run: cargo check -p niceservbay

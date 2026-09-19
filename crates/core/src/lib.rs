@@ -1,0 +1,360 @@
+//! core：NiceServBay 全部业务逻辑（无 Tauri 依赖，可独立测试/无头运行）。
+
+pub mod configgen;
+pub mod dbadmin;
+pub mod download;
+pub mod error;
+pub use error::AppError;
+pub mod generic;
+pub mod hosts;
+pub mod install;
+pub mod model;
+pub mod ops;
+pub mod paths;
+pub mod pathenv;
+pub mod ports;
+pub mod proxy;
+pub mod serde_proxy;
+pub mod services;
+pub mod sites;
+pub mod stacks;
+pub mod stats;
+pub mod store;
+pub mod transfer;
+pub mod tls;
+pub mod versions;
+
+use download::Downloader;
+use error::Result;
+use model::DownloadProgress;
+use services::ServiceManager;
+use std::sync::Arc;
+
+/// 事件：core → 前端。desktop 侧转 tauri emit；测试侧可打印。
+#[derive(Clone, Debug)]
+pub enum Event {
+    DownloadProgress(DownloadProgress),
+    HostsDenied,
+}
+
+impl Event {
+    pub fn channel(&self) -> &'static str {
+        match self {
+            Event::DownloadProgress(_) => "download://progress",
+            Event::HostsDenied => "hosts://denied",
+        }
+    }
+    pub fn payload(&self) -> serde_json::Value {
+        match self {
+            Event::DownloadProgress(p) => serde_json::to_value(p).unwrap_or_default(),
+            Event::HostsDenied => serde_json::json!({}),
+        }
+    }
+    pub fn progress(task_id: &str, received: u64, total: u64, speed: u64, eta: f64, state: &str) -> Self {
+        Event::DownloadProgress(DownloadProgress {
+            task_id: task_id.to_string(),
+            received,
+            total,
+            speed_bps: speed,
+            eta_sec: eta,
+            state: state.to_string(),
+            error: None,
+        })
+    }
+    pub fn state(task_id: &str, state: &str) -> Self {
+        Event::DownloadProgress(DownloadProgress {
+            task_id: task_id.to_string(),
+            received: 0,
+            total: 0,
+            speed_bps: 0,
+            eta_sec: 0.0,
+            state: state.to_string(),
+            error: None,
+        })
+    }
+}
+
+pub type EventSink = Arc<dyn Fn(Event) + Send + Sync>;
+
+pub struct CoreState {
+    pub paths: paths::Paths,
+    pub store: store::Store,
+    pub manager: Arc<ServiceManager>,
+    pub downloader: Arc<Downloader>,
+    pub installer: install::Installer,
+    pub emit: EventSink,
+}
+
+impl CoreState {
+    pub fn init(base: Option<std::path::PathBuf>, emit: EventSink) -> Result<Arc<Self>> {
+        let base = paths::Paths::resolve(base);
+        let paths = paths::Paths::new(base);
+        paths
+            .ensure_dirs()
+            .map_err(|e| error::AppError::io("初始化数据目录", e).with_hint("数据目录不可写，可在环境变量 NSB_HOME 指定其它位置"))?;
+        let store = store::Store::open(paths.db())?;
+        // 服务栈内置预设（首次运行写入；用户改过的不动）
+        let _ = stacks::ensure_presets(&store);
+        let manager = Arc::new(ServiceManager::new());
+        ops::register_services(&paths, &store, &manager);
+        generic::register_services(&paths, &store, &manager);
+        // 上次会话崩溃/被强杀时留下的进程：启动即清理，否则它们占着端口让服务起不来
+        let orphans = ops::sweep_orphans(&paths, &manager);
+        let state = Arc::new(Self {
+            paths,
+            store,
+            manager,
+            downloader: Arc::new(Downloader::new()),
+            installer: install::Installer::bundled(),
+            emit,
+        });
+        if !orphans.is_empty() {
+            let detail = orphans
+                .iter()
+                .map(|(sid, pid)| format!("{sid}(pid {pid})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            (state.emit)(Event::DownloadProgress(model::DownloadProgress {
+                task_id: "orphans".into(),
+                received: 0,
+                total: 0,
+                speed_bps: 0,
+                eta_sec: 0.0,
+                state: "orphans-cleaned".into(),
+                error: Some(detail),
+            }));
+        }
+        Ok(state)
+    }
+
+    /// 供外部调用的便捷（下载进度等）
+    pub fn emit_event(&self, e: Event) {
+        (self.emit)(e);
+    }
+}
+
+/// hosts 写入失败的提示事件（带当前应写条目数）
+pub fn emit_hosts_denied(store: &store::Store, _paths: &paths::Paths) {
+    let n = hosts::managed_entries(store).len();
+    let e = Event::HostsDenied;
+    let _ = n;
+    // desktop 侧 listen 后 toast 提示
+    let _ = e;
+}
+
+/* ================= 门面 API（desktop 命令与 smoke 测试共用） ================= */
+
+impl CoreState {
+    pub fn list_packages(&self) -> Result<Vec<model::PackageView>> {
+        let installed = self.store.list_installed()?;
+        // 每个「id+版本」一条（含全部可选版本）；前端按 id 聚合成服务条
+        let views: Vec<model::PackageView> = self
+            .installer
+            .manifest
+            .packages
+            .iter()
+            .map(|m| {
+                let install = installed
+                    .iter()
+                    .find(|i| i.id == m.id && i.version == m.version)
+                    .cloned();
+                let available_versions = self
+                    .installer
+                    .manifest
+                    .packages
+                    .iter()
+                    .filter(|p| p.id == m.id)
+                    .map(|p| p.version.clone())
+                    .collect();
+                model::PackageView {
+                    manifest: m.clone(),
+                    install,
+                    available_versions,
+                    active: false,
+                }
+            })
+            .collect();
+        // 标记「使用中版本」：单实例服务（nginx/apache/mysql/redis/postgresql/mongodb/mihomo）
+        // 由 activeXxxVersion 设置决定，缺省为最高版本
+        let mut active_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for id in ["nginx", "apache", "mysql", "redis", "postgresql", "mongodb", "mihomo"] {
+            if let Some(p) = ops::installed_by_choice(&self.store, id) {
+                active_map.insert(id.to_string(), p.version);
+            }
+        }
+        let mut views = views;
+        for v in views.iter_mut() {
+            if let Some(av) = active_map.get(&v.manifest.id) {
+                v.active = v.manifest.version == *av;
+            }
+        }
+        Ok(views)
+    }
+
+    pub async fn install_package(&self, key: &str) -> Result<model::InstalledPackage> {
+        let installed = self
+            .installer
+            .install(key, &self.paths, &self.store, &self.downloader, &|e| (self.emit)(e))
+            .await?;
+        ops::register_services(&self.paths, &self.store, &self.manager);
+        generic::register_services(&self.paths, &self.store, &self.manager);
+        // 装完即让命令可用（开关开着才真正写盘；失败不阻断安装）
+        let _ = pathenv::sync(&self.store, &self.paths, &self.installer.manifest);
+        Ok(installed)
+    }
+
+    pub fn uninstall_package(&self, key: &str) -> Result<()> {
+        let r = self.installer.uninstall(key, &self.paths, &self.store, &self.manager);
+        // 卸载后目录已不存在，必须把托管条目摘掉，否则 PATH 里留死路径
+        if r.is_ok() {
+            let _ = pathenv::sync(&self.store, &self.paths, &self.installer.manifest);
+        }
+        r
+    }
+
+    /// 切换「使用中版本」；顺带把 PATH 里的对应目录指到新版本
+    pub fn set_active_version(&self, id: &str, version: &str) -> Result<()> {
+        ops::set_active_version(&self.store, id, version)?;
+        let _ = pathenv::sync(&self.store, &self.paths, &self.installer.manifest);
+        Ok(())
+    }
+
+    /* ---------- 环境变量（PATH 注入） ---------- */
+
+    /// 环境变量注入的完整状态（含每个已安装包可注入的命令）
+    pub fn pathenv_status(&self) -> model::PathEnvStatus {
+        pathenv::status(&self.store, &self.installer.manifest)
+    }
+
+    /// 开/关总开关
+    pub fn pathenv_set_enabled(&self, enabled: bool) -> Result<model::PathEnvStatus> {
+        pathenv::set_enabled(&self.store, &self.paths, &self.installer.manifest, enabled)
+    }
+
+    /// 设置要注入 PATH 的包集合
+    pub fn pathenv_set_selected(&self, ids: Vec<String>) -> Result<model::PathEnvStatus> {
+        pathenv::set_selected(&self.store, &self.paths, &self.installer.manifest, &ids)
+    }
+
+    /// 强制重新应用（修漂移：用户手动改过 PATH 或换了版本）
+    pub fn pathenv_reapply(&self) -> Result<model::PathEnvStatus> {
+        pathenv::apply(&self.store, &self.paths, &self.installer.manifest)
+    }
+
+    pub fn service_status_list(&self) -> Vec<model::ServiceStatus> {
+        self.manager.list_status()
+    }
+
+    /// 某包的完整版本目录：远程枚举（带缓存）+ 本地已装标记。
+    /// `force` 忽略缓存（用户点「刷新版本」）。
+    pub async fn version_catalog(&self, id: &str, force: bool) -> Result<model::VersionCatalog> {
+        let template = self.installer.template_for(id).ok_or_else(|| {
+            AppError::new("PACKAGE_NOT_FOUND", format!("清单里没有套件 {id}"))
+        })?;
+        Ok(versions::catalog(&self.store, &template, force).await)
+    }
+
+    /// 批量版本目录（前端一次拉全部有版本源的包，避免 N 次 invoke）
+    pub async fn version_catalogs(&self, force: bool) -> Vec<model::VersionCatalog> {
+        let mut ids: Vec<String> = self
+            .installer
+            .manifest
+            .packages
+            .iter()
+            .filter(|p| versions::source_for(p).is_some())
+            .map(|p| p.id.clone())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            match self.version_catalog(&id, force).await {
+                Ok(c) => out.push(c),
+                Err(e) => out.push(model::VersionCatalog {
+                    id: id.clone(),
+                    remote: vec![],
+                    online: false,
+                    cached_at: None,
+                    error: Some(e.message),
+                }),
+            }
+        }
+        out
+    }
+
+    pub fn start_service(&self, id: &str) -> Result<()> {
+        let r = ops::start_service(&self.store, &self.paths, &self.manager, id);
+        // 记录托管 pid：崩溃后下次启动靠它找回残留进程
+        ops::save_pidfile(&self.paths, &self.manager);
+        r
+    }
+
+    pub fn stop_service(&self, id: &str) -> Result<()> {
+        let r = ops::stop_service(&self.store, &self.paths, &self.manager, id);
+        ops::save_pidfile(&self.paths, &self.manager);
+        r
+    }
+
+    pub fn tail_logs(&self, id: &str, lines: usize) -> Vec<model::LogLine> {
+        let from_ring = self.manager.tail(id, lines);
+        let mapped: Vec<model::LogLine> = from_ring
+            .into_iter()
+            .map(|line| model::LogLine { ts: None, line })
+            .collect();
+        if !mapped.is_empty() {
+            return mapped;
+        }
+        // 未运行：从文件读
+        let path = self.paths.service_log(id);
+        if let Ok(content) = std::fs::read_to_string(path) {
+            let all: Vec<&str> = content.lines().collect();
+            return all
+                .into_iter()
+                .rev()
+                .take(lines)
+                .map(|l| model::LogLine { ts: None, line: l.to_string() })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+        }
+        Vec::new()
+    }
+
+    /* ---------- 服务栈 ---------- */
+
+    pub fn list_stacks(&self) -> Result<Vec<model::Stack>> {
+        stacks::list(&self.store)
+    }
+
+    pub fn save_stack(&self, input: model::StackInput) -> Result<model::Stack> {
+        stacks::save(&self.store, input)
+    }
+
+    pub fn duplicate_stack(&self, id: &str, name: Option<String>) -> Result<model::Stack> {
+        stacks::duplicate(&self.store, id, name)
+    }
+
+    pub fn delete_stack(&self, id: &str) -> Result<()> {
+        stacks::delete(&self.store, id)
+    }
+
+    /// 一键启动整栈；单项失败不阻断其它项，结果逐项回报
+    pub fn start_stack(&self, id: &str) -> Result<model::StackStartReport> {
+        stacks::start(&self.store, &self.paths, &self.manager, id)
+    }
+
+    pub fn stop_stack(&self, id: &str) -> Result<model::StackStartReport> {
+        stacks::stop(&self.store, &self.paths, &self.manager, id)
+    }
+
+    /// 占用了某端口的进程：本应用服务则优雅停止，外部进程则直接结束
+    pub fn close_port(&self, port: u16) -> Result<ports::ClosePortOutcome> {
+        ports::close_port(&self.store, &self.paths, &self.manager, port)
+    }
+
+    /// 端口区间扫描（工具箱；单端口传 from == to）
+    pub fn scan_port_range(&self, from: u16, to: u16) -> Result<model::PortRangeScan> {
+        ports::scan_port_range(&self.manager, from, to)
+    }
+}

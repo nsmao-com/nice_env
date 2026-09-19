@@ -1,0 +1,168 @@
+"use client";
+
+import * as React from "react";
+import { useRouter } from "next/navigation";
+import { toast } from "sonner";
+import { motion } from "motion/react";
+import { Cpu, RotateCw, ScrollText, Server, ShieldAlert } from "lucide-react";
+import type { ServiceStatus } from "@nsb/schema";
+import { cn } from "@/lib/utils";
+import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { ServiceSwitch } from "./service-switch";
+import { StatusLight } from "./status-light";
+import { StatChip } from "./stat-chip";
+import { useUI, useT } from "@/lib/store";
+import { useInvalidate, toastError, toastPortConflict } from "@/lib/hooks";
+import { fmtUptime } from "@/lib/utils";
+import * as api from "@/lib/api";
+
+/** 服务卡片：运行=极弱呼吸光，错误=脉冲红；开关即启停 */
+export function ServiceCard({ service }: { service: ServiceStatus }) {
+  const t = useT();
+  const router = useRouter();
+  const invalidate = useInvalidate();
+  const [busy, setBusy] = React.useState(false);
+  const running = service.state === "running";
+  const error = service.state === "error";
+  /** 端口冲突时后端会带上端口与占用 pid：卡片上直接给「结束占用并重试」 */
+  const conflict =
+    service.lastError?.code === "PORT_IN_USE" && service.lastError.port != null
+      ? { port: service.lastError.port, holder: service.lastError.holder }
+      : null;
+
+  const toggle = async (next: boolean) => {
+    setBusy(true);
+    try {
+      if (next) await api.startService(service.id);
+      else await api.stopService(service.id);
+    } catch (e) {
+      // 端口冲突：给带动作按钮的提示，用户点一下就能收掉占用者
+      if (!toastPortConflict(e, { onResolved: () => invalidate("services") })) toastError(e);
+    } finally {
+      setBusy(false);
+      invalidate("services");
+    }
+  };
+
+  const stateLabel: Record<string, string> = {
+    running: t("state.running"),
+    stopped: t("state.stopped"),
+    error: t("state.error"),
+    starting: t("state.starting"),
+    stopping: t("state.stopping"),
+    unknown: t("state.unknown"),
+  };
+
+  return (
+    <motion.div layout initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.98 }}>
+      <Card
+        className={cn(
+          "group flex flex-col gap-3 p-4 transition-shadow",
+          running && "breath border-running/25",
+          error && "pulse-error border-error/30"
+        )}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <div
+              className={cn(
+                "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border",
+                running
+                  ? "border-running/30 bg-running-soft"
+                  : error
+                    ? "border-error/30 bg-error-soft"
+                    : "border-border bg-card-2/60"
+              )}
+            >
+              <Server
+                className={cn("h-4 w-4", running ? "text-running" : error ? "text-error" : "text-faint")}
+                strokeWidth={1.8}
+              />
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <span className="truncate text-[13.5px] font-medium">{service.label}</span>
+                <StatusLight state={service.state} size={6} />
+              </div>
+              <span className="text-[11px] text-faint">
+                {stateLabel[service.state]}
+                {service.version ? ` · ${service.version}` : ""}
+              </span>
+            </div>
+          </div>
+          <ServiceSwitch
+            checked={running}
+            busy={busy || service.state === "starting" || service.state === "stopping"}
+            disabled={service.state === "starting" || service.state === "stopping"}
+            onCheckedChange={toggle}
+          />
+        </div>
+
+        <div className="flex flex-wrap items-center gap-1.5">
+          {service.port != null && (
+            <StatChip icon={Server} title={t("svc.port")}>
+              :{service.port}
+            </StatChip>
+          )}
+          {service.memoryMb != null && (
+            <StatChip icon={Cpu} title={t("svc.memory")}>
+              {service.memoryMb.toFixed(0)} MB
+            </StatChip>
+          )}
+          {running && service.uptimeSec != null && (
+            <StatChip icon={RotateCw} title={t("svc.uptime")}>
+              {fmtUptime(service.uptimeSec)}
+            </StatChip>
+          )}
+          {service.logFile && (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="ml-auto text-faint hover:text-secondary"
+              title={t("logs.title")}
+              onClick={() => router.push(`/logs?service=${encodeURIComponent(service.id)}`)}
+            >
+              <ScrollText className="h-3.5 w-3.5" />
+            </Button>
+          )}
+        </div>
+
+        {error && service.lastError && (
+          <div className="rounded-lg border border-error/25 bg-error-soft px-3 py-2 text-[11.5px] text-error">
+            {service.lastError.message}
+            {service.lastError.hint && (
+              <span className="mt-0.5 block text-error/70">{service.lastError.hint}</span>
+            )}
+            {conflict && (
+              <Button
+                size="sm"
+                variant="secondary"
+                className="mt-2 h-7 gap-1.5 border-error/30 text-error hover:text-error"
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  try {
+                    await api.closePort(conflict.port);
+                    toast.success(`${t("tools.portFreed")} :${conflict.port}`);
+                    // 端点已经释放，直接把服务拉起来
+                    await api.startService(service.id);
+                    toast.success(t("common.running"));
+                  } catch (e) {
+                    toastError(e);
+                  } finally {
+                    setBusy(false);
+                    invalidate("services");
+                  }
+                }}
+              >
+                <ShieldAlert className="h-3.5 w-3.5" />
+                {t("svc.freePortAndRetry")} :{conflict.port}
+              </Button>
+            )}
+          </div>
+        )}
+      </Card>
+    </motion.div>
+  );
+}

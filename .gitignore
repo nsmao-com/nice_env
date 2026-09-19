@@ -1,0 +1,31 @@
+node_modules/
+dist/
+out/
+.next/
+target/
+*.log
+.DS_Store
+.smoke-home/
+.tauri/
+apps/web/public/sw.js*
+.env*.local
+
+# ---------- 本机验收数据目录（只在本机生成，体积很大） ----------
+.extra-home/
+.dl-cache/
+.remote-home/
+.services-home/
+.versions-home/
+.pathenv-home/
+.verify-home/
+artifacts/
+
+# ---------- 构建/生成产物 ----------
+apps/web/.logic-build/
+apps/web/tsconfig.tsbuildinfo
+apps/desktop/src-tauri/gen/schemas/
+
+# ---------- 开发者本地配置 ----------
+# .cargo/config.toml 是本机 crates.io 镜像设置（rsproxy.cn）；
+# 提交上去会让 CI 也走该镜像，各人按自己网络情况本地保留即可。
+.cargo/

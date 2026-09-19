@@ -1,0 +1,15 @@
+{
+  "//": "纯逻辑单测（日志高亮等无 DOM 依赖的模块）：tsc 编译到 .logic-build 后用 node 跑断言。",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "outDir": ".logic-build",
+    "rootDir": "src/lib",
+    "types": []
+  },
+  "include": ["src/lib/__tests__/**/*.ts", "src/lib/log-highlight.ts"]
+}

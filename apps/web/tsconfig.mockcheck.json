@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "target": "ES2022", "module": "CommonJS", "moduleResolution": "node",
+    "strict": false, "skipLibCheck": true, "esModuleInterop": true,
+    "outDir": ".mockcheck", "rootDir": "..", "types": [], "baseUrl": ".",
+    "paths": { "@nsb/schema": ["../../packages/schema/src/index.ts"] }
+  },
+  "include": ["../packages/schema/src/index.ts", "src/lib/mock.ts", "../../../tmp/mockcheck.ts"]
+}

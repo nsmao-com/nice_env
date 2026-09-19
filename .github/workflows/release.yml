@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    # 手动触发时请选择一个 v* 的 tag 作为 ref —— 下面用 github.ref_name 作为 tagName，
+    # 若从分支触发会拿到分支名（例如 master）而不是版本号。
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Release (${{ matrix.platform }} ${{ matrix.targets }})
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows：默认 x86_64-pc-windows-msvc，只出 NSIS 安装包
+          # （tauri.conf.json 的 bundle.targets 里 app/dmg 会被 bundler 按平台过滤掉）
+          - platform: windows-latest
+            args: "--bundles nsis"
+            targets: ""
+          # macOS 双架构：aarch64 与 x86_64 各出一套 .app + .dmg
+          - platform: macos-latest
+            args: "--target aarch64-apple-darwin"
+            targets: "aarch64-apple-darwin"
+          - platform: macos-latest
+            args: "--target x86_64-apple-darwin"
+            targets: "x86_64-apple-darwin"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 锁文件是 pnpm 10 的 lockfileVersion 9.0；package.json 无 packageManager 字段
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Windows 矩阵项为空字符串（等价于不装额外 target）
+          targets: ${{ matrix.targets }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # 两个 macOS 矩阵项共享同一把 key 会互相覆盖缓存，按 target 区分
+          key: ${{ matrix.targets || 'host' }}
+
+      # tauri-action 会自己执行 tauri.conf.json 的 beforeBuildCommand
+      # （`pnpm --filter @nsb/web build`），所以必须先把工作区依赖装好。
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and release with Tauri
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Tauri 工程在 apps/desktop，tauri.conf.json 位于其 src-tauri 下
+          projectPath: apps/desktop
+          tauriScript: pnpm tauri
+          tagName: ${{ github.ref_name }}
+          releaseName: "NiceServBay v__VERSION__"
+          releaseBody: |
+            自动构建的安装包（v__VERSION__）：
+
+            - Windows：NSIS 安装包（x64，当前用户安装，无需管理员）
+            - macOS：`.dmg`（Apple Silicon 与 Intel 各一份）
+
+            安装包未做代码签名，Windows SmartScreen / macOS Gatekeeper 可能提示
+            来源不明，属预期现象。
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}
+          # 未接入 Tauri updater 插件（tauri.conf.json 无 plugins.updater），
+          # 关闭 latest.json 上传，避免发版时出现「找不到 .sig 签名」的告警。
+          includeUpdaterJson: false

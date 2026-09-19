@@ -1,0 +1,316 @@
+{
+  "revision": 5,
+  "updated": "2026-09-19",
+  "note": "macOS 清单（aarch64/x86_64）。当前仅收录已在源头验证可达（HTTP 206/200）的二进制；PHP/Nginx/Redis 的 macOS 官方二进制不存在或需源码编译，候选源见 README「在 macOS 上构建」章节，待 mac 端验证后补入。",
+  "packages": [
+    {
+      "id": "mysql",
+      "version": "8.0.46",
+      "category": "database",
+      "displayName": "MySQL 8.0",
+      "description": "关系型数据库（utf8mb4），数据保存在应用数据目录，独立于系统",
+      "homepage": "https://mysql.com",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "x64",
+        "arm64"
+      ],
+      "kind": "targz",
+      "url": "https://cdn.mysql.com/Downloads/MySQL-8.0/mysql-8.0.46-macos15-arm64.tar.gz",
+      "mirrors": [
+        "https://mirrors.tuna.tsinghua.edu.cn/mysql/downloads/MySQL-8.0/mysql-8.0.46-macos15-arm64.tar.gz"
+      ],
+      "sha256": "0",
+      "sizeBytes": 150000000,
+      "entry": "mysql-8.0.46-macos15-arm64/bin/mysqld",
+      "defaultPort": 23306,
+      "run": {
+        "args": [],
+        "singleInstance": false,
+        "dataDir": "mysql"
+      }
+    },
+    {
+      "id": "mihomo",
+      "version": "1.19.10",
+      "category": "tool",
+      "displayName": "mihomo (Clash 内核)",
+      "description": "代理内核：规则分流 / 全局 / 直连，节点测速与系统代理",
+      "homepage": "https://github.com/MetaCubeX/mihomo",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "targz",
+      "url": "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.10/mihomo-darwin-arm64-v1.19.10.gz",
+      "sha256": "0",
+      "sizeBytes": 12000000,
+      "entry": "mihomo-darwin-arm64-v1.19.10",
+      "defaultPort": 17890,
+      "run": {
+        "args": [
+          "-d",
+          "{root}",
+          "-f",
+          "{etc}/config.yaml"
+        ],
+        "singleInstance": true
+      },
+      "versionSource": {
+        "kind": "github",
+        "repo": "MetaCubeX/mihomo",
+        "tagPrefix": "v",
+        "assetMatch": "mihomo-windows-amd64.*\\.zip$",
+        "entryTemplate": "mihomo-windows-amd64.exe",
+        "maxVersions": 40
+      }
+    },
+    {
+      "id": "node",
+      "version": "22.14.0",
+      "category": "runtime",
+      "displayName": "Node.js 22 LTS",
+      "description": "Node.js 22 LTS 运行时（node/npm/npx）",
+      "homepage": "https://nodejs.org",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "targz",
+      "url": "https://nodejs.org/dist/v22.14.0/node-v22.14.0-darwin-arm64.tar.gz",
+      "sha256": "e9404633bc02a5162c5c573b1e2490f5fb44648345d64a958b17e325729a5e42",
+      "sizeBytes": 47035396,
+      "entry": "node-v22.14.0-darwin-arm64/bin/node",
+      "versionSource": {
+        "kind": "nodejs",
+        "entryTemplate": "node-v{version}-win-x64/node.exe",
+        "maxVersions": 60
+      }
+    },
+    {
+      "id": "go",
+      "version": "1.24.1",
+      "category": "runtime",
+      "displayName": "Go 1.24",
+      "description": "Go 工具链（go/gofmt）",
+      "homepage": "https://go.dev",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "targz",
+      "url": "https://go.dev/dl/go1.24.1.darwin-arm64.tar.gz",
+      "sha256": "295581b5619acc92f5106e5bcb05c51869337eb19742fdfa6c8346c18e78ff88",
+      "sizeBytes": 76229329,
+      "entry": "go/bin/go",
+      "versionSource": {
+        "kind": "go",
+        "entryTemplate": "go/bin/go.exe",
+        "maxVersions": 60
+      }
+    },
+    {
+      "id": "mongodb",
+      "version": "8.0.4",
+      "category": "database",
+      "displayName": "MongoDB 8.0",
+      "description": "文档数据库（官方 tgz 发行）",
+      "homepage": "https://www.mongodb.com",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "targz",
+      "url": "https://fastdl.mongodb.org/osx/mongodb-macos-arm64-8.0.4.tgz",
+      "sha256": "219e3b3d7b31c049ff7bcf7470d38eff704e56df2ac18d4df78425e2985ccf58",
+      "sizeBytes": 82223795,
+      "entry": "mongodb-macos-arm64-8.0.4/bin/mongod",
+      "defaultPort": 28017,
+      "run": {
+        "args": [
+          "--dbpath",
+          "{data}",
+          "--port",
+          "{port}",
+          "--bind_ip",
+          "127.0.0.1"
+        ],
+        "singleInstance": true,
+        "dataDir": "mongodb"
+      }
+    },
+    {
+      "id": "composer",
+      "version": "2.8.5",
+      "category": "tool",
+      "displayName": "Composer 2.8",
+      "description": "PHP 依赖管理器（php composer.phar）",
+      "homepage": "https://getcomposer.org",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "binary",
+      "url": "https://getcomposer.org/download/2.8.5/composer.phar",
+      "sha256": "9cef18212e222351aeb476b81de7b2a5383f775336474467bf5c7ccfe84ab0cc",
+      "sizeBytes": 3060478,
+      "entry": "composer.phar",
+      "depends": [
+        "php"
+      ]
+    },
+    {
+      "id": "node",
+      "version": "20.19.5",
+      "category": "runtime",
+      "displayName": "Node.js 20 LTS",
+      "description": "Node.js 20 LTS 运行时",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "targz",
+      "url": "https://nodejs.org/dist/v20.19.5/node-v20.19.5-darwin-arm64.tar.gz",
+      "sha256": "cfed7503d8d99fbcf2f52e408ec52f616058eb0867b34dbc3437259993ef5cba",
+      "sizeBytes": 41312337,
+      "entry": "node-v20.19.5-darwin-arm64/bin/node",
+      "homepage": "https://nodejs.org",
+      "versionSource": {
+        "kind": "nodejs",
+        "entryTemplate": "node-v{version}-win-x64/node.exe",
+        "maxVersions": 60
+      }
+    },
+    {
+      "id": "node",
+      "version": "18.20.8",
+      "category": "runtime",
+      "displayName": "Node.js 18 LTS",
+      "description": "Node.js 18 LTS（老项目兼容）",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "targz",
+      "url": "https://nodejs.org/dist/v18.20.8/node-v18.20.8-darwin-arm64.tar.gz",
+      "sha256": "bae4965d29d29bd32f96364eefbe3bca576a03e917ddbb70b9330d75f2cacd76",
+      "sizeBytes": 39866069,
+      "entry": "node-v18.20.8-darwin-arm64/bin/node",
+      "homepage": "https://nodejs.org",
+      "versionSource": {
+        "kind": "nodejs",
+        "entryTemplate": "node-v{version}-win-x64/node.exe",
+        "maxVersions": 60
+      }
+    },
+    {
+      "id": "go",
+      "version": "1.23.6",
+      "category": "runtime",
+      "displayName": "Go 1.23",
+      "description": "Go 工具链（go1.23）",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "targz",
+      "url": "https://go.dev/dl/go1.23.6.darwin-arm64.tar.gz",
+      "sha256": "5cae2450a1708aeb0333237a155640d5562abaf195defebc4306054565536221",
+      "sizeBytes": 71651088,
+      "entry": "go/bin/go",
+      "homepage": "https://go.dev",
+      "versionSource": {
+        "kind": "go",
+        "entryTemplate": "go/bin/go.exe",
+        "maxVersions": 60
+      }
+    },
+    {
+      "id": "mongodb",
+      "version": "7.0.24",
+      "category": "database",
+      "displayName": "MongoDB 7.0",
+      "description": "上一代 LTS（老驱动兼容）",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "targz",
+      "url": "https://fastdl.mongodb.org/osx/mongodb-macos-arm64-7.0.24.tgz",
+      "sha256": "31854a6632332ac5fbac2b601ee46ca5af2937a84caa70b18c0d8436ce982c1f",
+      "sizeBytes": 69447167,
+      "entry": "mongodb-macos-arm64-7.0.24/bin/mongod",
+      "homepage": "https://www.mongodb.com",
+      "defaultPort": 28017,
+      "run": {
+        "args": [
+          "--dbpath",
+          "{data}",
+          "--port",
+          "{port}",
+          "--bind_ip",
+          "127.0.0.1"
+        ],
+        "singleInstance": true,
+        "dataDir": "mongodb"
+      }
+    },
+    {
+      "id": "mihomo",
+      "version": "1.19.11",
+      "category": "tool",
+      "displayName": "mihomo 1.19",
+      "description": "Clash Meta 内核 1.19（最新）",
+      "homepage": "https://github.com/MetaCubeX/mihomo",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "targz",
+      "url": "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.11/mihomo-darwin-arm64-v1.19.11.gz",
+      "sha256": "4cbf130a2433e96f4255e448be19146dab70603d1268408d17efbf9d68fcbfa0",
+      "sizeBytes": 10688005,
+      "entry": "mihomo-darwin-arm64-v1.19.11",
+      "defaultPort": 17890,
+      "run": {
+        "args": [
+          "-d",
+          "{root}",
+          "-f",
+          "{etc}/config.yaml"
+        ],
+        "singleInstance": true
+      },
+      "versionSource": {
+        "kind": "github",
+        "repo": "MetaCubeX/mihomo",
+        "tagPrefix": "v",
+        "assetMatch": "mihomo-windows-amd64.*\\.zip$",
+        "entryTemplate": "mihomo-windows-amd64.exe",
+        "maxVersions": 40
+      }
+    }
+  ]
+}

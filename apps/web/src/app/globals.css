@@ -1,0 +1,421 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --accent-h: 240;
+  /* 自定义主题色（设置里选「自定义颜色」时由 JS 写入；transparent = 用 --accent-h 生成） */
+  --accent-hex: transparent;
+  /* 界面字体 / 代码字体 / 字号：由设置页写到 :root，未设置时用这里的默认值 */
+  --app-font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", "Microsoft YaHei", sans-serif;
+  --app-font-mono: "JetBrains Mono Variable", ui-monospace, "Cascadia Code",
+    Consolas, monospace;
+  --app-font-scale: 1;
+  --code-font-size: 11.5px;
+
+  /* 浅色（默认）—— shadcn 默认 zinc 中性调：白底、黑主按钮、克制阴影 */
+  --background: #ffffff;
+  --surface: #fafafa;
+  --card: #ffffff;
+  --card-2: #f4f4f5;
+  --border: #e4e4e7;
+  --border-strong: #d4d4d8;
+  --foreground: #09090b;
+  --secondary: #3f3f46;
+  --muted: #71717a;
+  --faint: #a1a1aa;
+  --primary: #18181b;
+  --primary-fg: #fafafa;
+  --primary-soft: rgba(24, 24, 27, 0.06);
+  --running: #16a34a;
+  --error: #dc2626;
+  --warn: #d97706;
+  --info: #2563eb;
+  --running-soft: rgba(22, 163, 74, 0.1);
+  --error-soft: rgba(220, 38, 38, 0.08);
+  --info-soft: rgba(37, 99, 235, 0.08);
+  --sheen: linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.9),
+    rgba(255, 255, 255, 0) 42%
+  );
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --chrome: #ececee;
+
+  /* Apple 分段控件（Segmented Control）配色：
+     轨道是低饱和的填充灰，滑块是白卡片 + 极淡描边 + 一层柔和投影。
+     参考 macOS 系统偏好设置里的分段选择器。 */
+  --seg-track: rgba(120, 120, 128, 0.12);
+  --seg-thumb: #ffffff;
+  --seg-thumb-ring: rgba(0, 0, 0, 0.04);
+  --seg-thumb-shadow: 0 1px 2px rgba(0, 0, 0, 0.12), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
+  --seg-active-text: #000000;
+  /* Apple 系统强调色（light 模式） */
+  --apple-blue: #007aff;
+  --apple-green: #34c759;
+  --apple-orange: #ff9500;
+  --apple-red: #ff3b30;
+  --apple-purple: #af52de;
+  --apple-teal: #30b0c7;
+  --apple-pink: #ff2d55;
+  --workspace-radius: 16px;
+  --workspace-inset: 12px;
+  --caption-height: 36px;
+  --workspace-shadow: 0 1px 1px rgba(15, 23, 42, 0.03), 0 10px 28px rgba(15, 23, 42, 0.06);
+}
+
+.dark {
+  --background: #09090b;
+  --surface: #111113;
+  --card: #101012;
+  --card-2: #1c1c1f;
+  --border: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.18);
+  --foreground: #fafafa;
+  --secondary: #d4d4d8;
+  --muted: #a1a1aa;
+  --faint: #71717a;
+  --primary: #fafafa;
+  --primary-fg: #18181b;
+  --primary-soft: rgba(250, 250, 250, 0.1);
+  --running: #4ade80;
+  --error: #f87171;
+  --warn: #fbbf24;
+  --info: #60a5fa;
+  --running-soft: rgba(74, 222, 128, 0.12);
+  --error-soft: rgba(248, 113, 113, 0.12);
+  --info-soft: rgba(96, 165, 250, 0.12);
+  --sheen: linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.06),
+    rgba(255, 255, 255, 0) 46%
+  );
+  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.03) inset,
+    0 8px 24px rgba(0, 0, 0, 0.28);
+  --chrome: #08080a;
+
+  /* Apple 分段控件（dark） */
+  --seg-track: rgba(120, 120, 128, 0.28);
+  --seg-thumb: #636366;
+  --seg-thumb-ring: rgba(255, 255, 255, 0.08);
+  --seg-thumb-shadow: 0 1px 3px rgba(0, 0, 0, 0.5), 0 0 0 0.5px rgba(255, 255, 255, 0.06);
+  --seg-active-text: #ffffff;
+  /* Apple 系统强调色（dark 模式，提亮一档） */
+  --apple-blue: #0a84ff;
+  --apple-green: #30d158;
+  --apple-orange: #ff9f0a;
+  --apple-red: #ff453a;
+  --apple-purple: #bf5af2;
+  --apple-teal: #40c8e0;
+  --apple-pink: #ff375f;
+  --workspace-radius: 16px;
+  --workspace-inset: 12px;
+  --caption-height: 36px;
+  --workspace-shadow: 0 1px 0 rgba(255, 255, 255, 0.045) inset,
+    0 12px 32px rgba(0, 0, 0, 0.42);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-card: var(--card);
+  --color-card-2: var(--card-2);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-foreground: var(--foreground);
+  --color-secondary: var(--secondary);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-primary: var(--primary);
+  --color-primary-fg: var(--primary-fg);
+  --color-primary-soft: var(--primary-soft);
+  --color-running: var(--running);
+  --color-error: var(--error);
+  --color-warn: var(--warn);
+  --color-info: var(--info);
+  --color-running-soft: var(--running-soft);
+  --color-error-soft: var(--error-soft);
+  --color-info-soft: var(--info-soft);
+  --color-chrome: var(--chrome);
+  --color-seg-track: var(--seg-track);
+  --color-seg-thumb: var(--seg-thumb);
+  --color-seg-active: var(--seg-active-text);
+  --color-apple-blue: var(--apple-blue);
+  --color-apple-green: var(--apple-green);
+  --color-apple-orange: var(--apple-orange);
+  --color-apple-red: var(--apple-red);
+  --color-apple-purple: var(--apple-purple);
+  --color-apple-teal: var(--apple-teal);
+  --color-apple-pink: var(--apple-pink);
+  --font-sans: var(--app-font-sans);
+  --font-mono: var(--app-font-mono);
+  --radius-lg: 12px;
+  --radius-xl: 14px;
+  --radius-2xl: 16px;
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  html,
+  body {
+    height: 100%;
+    overflow: hidden;
+    background: var(--chrome);
+  }
+  html {
+    /* 界面缩放：整体按 --app-font-scale 缩放文字（用户可选 0.85–1.25） */
+    font-size: calc(16px * var(--app-font-scale));
+  }
+  body {
+    color: var(--foreground);
+    font-family: var(--app-font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+  /* 代码 / 日志 / 终端片段统一走代码字体与字号 token */
+  code,
+  pre,
+  kbd,
+  samp,
+  .font-mono {
+    font-family: var(--app-font-mono);
+  }
+  pre,
+  code {
+    font-size: var(--code-font-size);
+  }
+  ::selection {
+    background: hsl(var(--accent-h) 82% 60% / 0.3);
+  }
+
+  /* 滚动条：默认隐藏（内容照常可滚动，只是不画滚动条）；
+     想看滚动条的用户可在设置里打开「显示滚动条」。 */
+  html.nsb-hide-scrollbars *,
+  html.nsb-hide-scrollbars *::before,
+  html.nsb-hide-scrollbars *::after {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  html.nsb-hide-scrollbars *::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+    display: none;
+  }
+
+  /* 需要滚动条的场合（极少）：加 .nsb-scrollbars 强制显示 */
+  .nsb-scrollbars::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+    display: block;
+  }
+  .nsb-scrollbars::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: 8px;
+  }
+  .nsb-scrollbars::-webkit-scrollbar-thumb:hover {
+    background: var(--muted);
+  }
+  .nsb-scrollbars::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .nsb-scrollbars {
+    scrollbar-width: thin;
+  }
+}
+
+@layer components {
+  .nsb-shell {
+    background: var(--chrome);
+  }
+
+  .nsb-sidebar {
+    background: transparent;
+  }
+
+  .nsb-sidebar-brand {
+    height: var(--caption-height);
+    padding-top: 0;
+  }
+
+  .nsb-window-controls {
+    display: none;
+  }
+
+  .nsb-workspace {
+    margin: var(--workspace-inset);
+    background: var(--card);
+    border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+    border-radius: var(--workspace-radius);
+    box-shadow: var(--workspace-shadow);
+  }
+
+  /* Windows：窗口按钮贴在窗口最右上角的灰底上，不进入圆角内容区 */
+  .nsb-shell-win .nsb-window-controls {
+    display: flex;
+    position: absolute;
+    top: 0;
+    right: 0;
+    z-index: 40;
+    height: var(--caption-height);
+  }
+
+  .nsb-shell-win .nsb-workspace {
+    margin-top: var(--caption-height);
+  }
+
+  .nsb-shell-mac .nsb-window-controls {
+    display: none;
+  }
+
+  .nsb-shell-mac .nsb-sidebar-brand {
+    height: calc(var(--workspace-inset) + 52px);
+    padding-top: var(--workspace-inset);
+  }
+
+  .nsb-shell-mac .nsb-workspace {
+    margin: var(--workspace-inset);
+  }
+
+  .nsb-topbar {
+    border-bottom: 0;
+  }
+
+  .nsb-workspace > main::-webkit-scrollbar-track {
+    margin-block: 10px;
+  }
+
+  .nsb-no-drag {
+    -webkit-app-region: no-drag;
+  }
+
+  .nsb-shell-maximized .nsb-workspace {
+    margin-right: 0;
+    margin-bottom: 0;
+    margin-left: 0;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .nsb-shell-maximized.nsb-shell-win .nsb-workspace {
+    margin-top: var(--caption-height);
+  }
+
+  .nsb-shell-maximized.nsb-shell-mac .nsb-workspace {
+    margin: 0;
+  }
+
+  .nsb-shell-maximized .nsb-sidebar {
+    border-right: 1px solid var(--border);
+  }
+
+  .nsb-shell-maximized .nsb-sidebar-brand {
+    height: var(--caption-height);
+    padding-top: 0;
+  }
+
+  .nsb-shell-desktop {
+    user-select: none;
+  }
+
+  .nsb-shell-desktop main,
+  .nsb-shell-desktop .nsb-no-drag {
+    user-select: auto;
+  }
+
+  /* 只在灰底标题带 / 明确标记的区域拖窗口，避免挡住菜单和导航 */
+  .nsb-shell-desktop .nsb-sidebar-brand,
+  .nsb-shell-desktop [data-tauri-drag-region] {
+    -webkit-app-region: drag;
+    app-region: drag;
+    cursor: default;
+  }
+
+  .nsb-shell-desktop .nsb-no-drag,
+  .nsb-shell-desktop .nsb-no-drag * {
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+    pointer-events: auto;
+  }
+}
+
+@layer utilities {
+  /* 卡片顶部 1px 高光。不要在这里写 position：会盖掉 Dialog 的 fixed，导致只有遮罩、弹窗飞出视口。 */
+  .sheen::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 1px;
+    border-radius: inherit;
+    background: var(--sheen);
+    pointer-events: none;
+  }
+  /* 运行态呼吸光 —— 极弱，仅 running */
+  .breath {
+    animation: breath 3.2s ease-in-out infinite;
+  }
+  @keyframes breath {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 transparent;
+    }
+    50% {
+      box-shadow: 0 0 18px 0 hsl(160 84% 65% / 0.13);
+    }
+  }
+  .pulse-error {
+    animation: pulse-error 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse-error {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 transparent;
+    }
+    50% {
+      box-shadow: 0 0 16px 0 hsl(351 89% 68% / 0.22);
+    }
+  }
+  .text-balance {
+    text-wrap: balance;
+  }
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .animate-progress-slide {
+    animation: progress-slide 1.2s ease-in-out infinite;
+  }
+  @keyframes progress-slide {
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(400%);
+    }
+  }
+}
+
+/* 减少动态：关闭动画 */
+.reduce-motion *,
+.reduce-motion *::before,
+.reduce-motion *::after {
+  animation-duration: 0.001s !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001s !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001s !important;
+    transition-duration: 0.001s !important;
+  }
+}

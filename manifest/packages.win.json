@@ -1,0 +1,4549 @@
+{
+  "revision": 36,
+  "updated": "2026-09-19",
+  "packages": [
+    {
+      "id": "nginx",
+      "version": "1.26.3",
+      "category": "web-server",
+      "displayName": "Nginx",
+      "description": "高性能 HTTP 服务器与反向代理，站点 vhost 的默认承载",
+      "homepage": "https://nginx.org",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://nginx.org/download/nginx-1.26.3.zip",
+      "mirrors": [
+        "https://mirrors.tuna.tsinghua.edu.cn/nginx/nginx-1.26.3.zip"
+      ],
+      "sha256": "39ca13277b361910f9e463a7e958e11566f7ede8a6f0df08a21b659ca92f3662",
+      "sizeBytes": 2095246,
+      "entry": "nginx-1.26.3/nginx.exe",
+      "defaultPort": 8080,
+      "run": {
+        "args": [
+          "-p",
+          "{root}",
+          "-c",
+          "{etc}/nginx.conf"
+        ],
+        "singleInstance": true,
+        "defaultPort": 8080
+      }
+    },
+    {
+      "id": "php",
+      "version": "8.3.33",
+      "category": "runtime",
+      "displayName": "PHP 8.3",
+      "description": "PHP 8.3 运行时（TS / php-cgi 池），按站点绑定",
+      "homepage": "https://windows.php.net",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://downloads.php.net/~windows/releases/php-8.3.33-Win32-vs16-x64.zip",
+      "sha256": "b089e370ff99eb7038b0d22617dec2f3a1d0e93ca26b11fd218f2f5b60422271",
+      "sizeBytes": 34001105,
+      "entry": "php-cgi.exe",
+      "defaultPort": 9101,
+      "run": {
+        "args": [
+          "-b",
+          "127.0.0.1:{port}"
+        ],
+        "singleInstance": false,
+        "dataDir": "php"
+      }
+    },
+    {
+      "id": "php",
+      "version": "7.4.33",
+      "category": "runtime",
+      "displayName": "PHP 7.4",
+      "description": "PHP 7.4 运行时（老项目兼容），与 8.3 可同时安装、按站点绑定",
+      "homepage": "https://windows.php.net",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://downloads.php.net/~windows/releases/php-7.4.33-Win32-vc15-x64.zip",
+      "sha256": "cdbb85b45f38f282f05764ca08648b5f92db99c75b2fb3848eb4a559f6553b48",
+      "sizeBytes": 26237519,
+      "entry": "php-cgi.exe",
+      "defaultPort": 9111,
+      "run": {
+        "args": [
+          "-b",
+          "127.0.0.1:{port}"
+        ],
+        "singleInstance": false,
+        "dataDir": "php"
+      }
+    },
+    {
+      "id": "mysql",
+      "version": "8.0.46",
+      "category": "database",
+      "displayName": "MySQL 8.0",
+      "description": "关系型数据库（utf8mb4），数据保存在应用数据目录，独立于系统",
+      "homepage": "https://mysql.com",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://cdn.mysql.com/Downloads/MySQL-8.0/mysql-8.0.46-winx64.zip",
+      "mirrors": [
+        "https://mirrors.tuna.tsinghua.edu.cn/mysql/downloads/MySQL-8.0/mysql-8.0.46-winx64.zip"
+      ],
+      "sha256": "28e9eda019d88eff4478d811ea2110b83f02a3966be157fe91cc55def3ab0d4d",
+      "sizeBytes": 248009349,
+      "entry": "mysql-8.0.46-winx64/bin/mysqld.exe",
+      "defaultPort": 23306,
+      "run": {
+        "args": [],
+        "singleInstance": false,
+        "dataDir": "mysql"
+      }
+    },
+    {
+      "id": "redis",
+      "version": "5.0.14",
+      "category": "cache",
+      "displayName": "Redis",
+      "description": "内存 KV 缓存（Windows 移植版），开发模式免密",
+      "homepage": "https://github.com/tporadowski/redis",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/tporadowski/redis/releases/download/v5.0.14.1/Redis-x64-5.0.14.1.zip",
+      "sha256": "018ea18a35876383cbb5f4cd0258adfc87747cf9d619bce1cf73a2e36f720ccf",
+      "sizeBytes": 12617669,
+      "entry": "redis-server.exe",
+      "defaultPort": 26379,
+      "run": {
+        "args": [
+          "{etc}/redis.conf"
+        ],
+        "singleInstance": true,
+        "dataDir": "redis"
+      }
+    },
+    {
+      "id": "mihomo",
+      "version": "1.19.10",
+      "category": "tool",
+      "displayName": "mihomo (Clash 内核)",
+      "description": "代理内核：规则分流 / 全局 / 直连，节点测速与系统代理",
+      "homepage": "https://github.com/MetaCubeX/mihomo",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.10/mihomo-windows-amd64-v1.19.10.zip",
+      "sha256": "22f301591e522e81ecbd4ae2987b2fcb4642c234c870094904188c4dc1aceb60",
+      "sizeBytes": 11567011,
+      "entry": "mihomo-windows-amd64.exe",
+      "defaultPort": 17890,
+      "run": {
+        "args": [
+          "-d",
+          "{root}",
+          "-f",
+          "{etc}/config.yaml"
+        ],
+        "singleInstance": true
+      }
+    },
+    {
+      "id": "adminer",
+      "version": "4.8.1",
+      "category": "tool",
+      "displayName": "Adminer 4.8.1",
+      "description": "单文件数据库管理器，作为内置站点挂载（Phase 3 启用）",
+      "homepage": "https://adminer.org",
+      "os": [
+        "windows",
+        "macos"
+      ],
+      "arch": [
+        "x64",
+        "arm64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/vrana/adminer/releases/download/v4.8.1/adminer-4.8.1.php",
+      "sha256": "0",
+      "sizeBytes": 609000,
+      "entry": "adminer-4.8.1.php"
+    },
+    {
+      "id": "apache",
+      "version": "2.4.66",
+      "category": "web-server",
+      "displayName": "Apache 2.4",
+      "description": "Apache HTTP Server（ApacheLounge VS17 构建），与 Nginx 并存，站点可自选承载",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://www.apachelounge.com/download/VS17/binaries/httpd-2.4.66-251206-Win64-VS17.zip",
+      "sha256": "2cd1f349b6705e43e784e876a233eeb1a859fa6b8abc693a91f87b35a368f7f9",
+      "sizeBytes": 11527838,
+      "entry": "Apache24/bin/httpd.exe",
+      "homepage": "https://www.apachelounge.com",
+      "defaultPort": 8180,
+      "run": {
+        "args": [
+          "-d",
+          "{root}",
+          "-f",
+          "{etc}/httpd.conf"
+        ],
+        "singleInstance": true,
+        "defaultPort": 8180
+      }
+    },
+    {
+      "id": "php",
+      "version": "8.5.10",
+      "category": "runtime",
+      "displayName": "PHP 8.5",
+      "description": "PHP 8.5 运行时（php-cgi 池），按站点绑定",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://downloads.php.net/~windows/releases/php-8.5.10-Win32-vs17-x64.zip",
+      "sha256": "a6bc8b2f3d7bfb397ccb973db2f959e61e530e0986c9cea262dd4a317ec599d8",
+      "sizeBytes": 36160267,
+      "entry": "php-cgi.exe",
+      "homepage": "https://windows.php.net",
+      "defaultPort": 9101,
+      "run": {
+        "args": [
+          "-b",
+          "127.0.0.1:{port}"
+        ],
+        "singleInstance": false,
+        "dataDir": "php"
+      }
+    },
+    {
+      "id": "php",
+      "version": "8.4.25",
+      "category": "runtime",
+      "displayName": "PHP 8.4",
+      "description": "PHP 8.4 运行时（php-cgi 池），按站点绑定",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://downloads.php.net/~windows/releases/php-8.4.25-Win32-vs17-x64.zip",
+      "sha256": "2cf521fb6bcb45b634c7e9a7ab2afb6d41698b987bbc73c4975d90a065e0f16c",
+      "sizeBytes": 35113790,
+      "entry": "php-cgi.exe",
+      "homepage": "https://windows.php.net",
+      "defaultPort": 9101,
+      "run": {
+        "args": [
+          "-b",
+          "127.0.0.1:{port}"
+        ],
+        "singleInstance": false,
+        "dataDir": "php"
+      }
+    },
+    {
+      "id": "php",
+      "version": "8.2.33",
+      "category": "runtime",
+      "displayName": "PHP 8.2",
+      "description": "PHP 8.2 运行时（php-cgi 池），按站点绑定",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://downloads.php.net/~windows/releases/php-8.2.33-Win32-vs16-x64.zip",
+      "sha256": "7d2568dfaad6ac1391e57994f52c8aed835baf9e6d89f4328770e2843311291c",
+      "sizeBytes": 33562144,
+      "entry": "php-cgi.exe",
+      "homepage": "https://windows.php.net",
+      "defaultPort": 9101,
+      "run": {
+        "args": [
+          "-b",
+          "127.0.0.1:{port}"
+        ],
+        "singleInstance": false,
+        "dataDir": "php"
+      }
+    },
+    {
+      "id": "php",
+      "version": "8.1.34",
+      "category": "runtime",
+      "displayName": "PHP 8.1",
+      "description": "PHP 8.1 运行时（php-cgi 池），按站点绑定",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://downloads.php.net/~windows/releases/php-8.1.34-Win32-vs16-x64.zip",
+      "sha256": "8e17e0804fe48d3a032c9bef16f0f922996e0b1b237061b7ce94485394db5d1b",
+      "sizeBytes": 30928744,
+      "entry": "php-cgi.exe",
+      "homepage": "https://windows.php.net",
+      "defaultPort": 9101,
+      "run": {
+        "args": [
+          "-b",
+          "127.0.0.1:{port}"
+        ],
+        "singleInstance": false,
+        "dataDir": "php"
+      }
+    },
+    {
+      "id": "node",
+      "version": "22.14.0",
+      "category": "runtime",
+      "displayName": "Node.js 22 LTS",
+      "description": "Node.js 22 LTS 运行时（node/npm/npx），前端构建与 Node 服务可用",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://nodejs.org/dist/v22.14.0/node-v22.14.0-win-x64.zip",
+      "sha256": "55b639295920b219bb2acbcfa00f90393a2789095b7323f79475c9f34795f217",
+      "sizeBytes": 34906389,
+      "entry": "node-v22.14.0-win-x64/node.exe",
+      "homepage": "https://nodejs.org"
+    },
+    {
+      "id": "python",
+      "version": "3.12.9",
+      "category": "runtime",
+      "displayName": "Python 3.12",
+      "description": "Python 3.12 嵌入式运行时（embeddable），轻量、适合脚本与工具链",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://www.python.org/ftp/python/3.12.9/python-3.12.9-embed-amd64.zip",
+      "sha256": "615861fb801e8b04c847598db4e1e46e4b046295017caa37cb5486dde72b5865",
+      "sizeBytes": 11098289,
+      "entry": "python.exe",
+      "homepage": "https://www.python.org"
+    },
+    {
+      "id": "go",
+      "version": "1.24.1",
+      "category": "runtime",
+      "displayName": "Go 1.24",
+      "description": "Go 工具链（go/gofmt），编译与运行 Go 服务",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://go.dev/dl/go1.24.1.windows-amd64.zip",
+      "sha256": "95666b551453209a2b8869d29d177285ff9573af10f085d961d7ae5440f645ce",
+      "sizeBytes": 87183196,
+      "entry": "go/bin/go.exe",
+      "homepage": "https://go.dev"
+    },
+    {
+      "id": "postgresql",
+      "version": "16.9",
+      "category": "database",
+      "displayName": "PostgreSQL 16",
+      "description": "高级开源关系数据库（EDB 官方二进制），首次启动自动 initdb",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://get.enterprisedb.com/postgresql/postgresql-16.9-1-windows-x64-binaries.zip",
+      "sha256": "304eb7dab70717015c4fd09986122e470d53a57a3a2b443d31e2c1d83d88db88",
+      "sizeBytes": 314500604,
+      "entry": "pgsql/bin/pg_ctl.exe",
+      "homepage": "https://www.postgresql.org",
+      "defaultPort": 25432,
+      "run": {
+        "args": [
+          "-D",
+          "{data}",
+          "-p",
+          "{port}"
+        ],
+        "singleInstance": true,
+        "dataDir": "postgresql"
+      }
+    },
+    {
+      "id": "mongodb",
+      "version": "8.0.4",
+      "category": "database",
+      "displayName": "MongoDB 8.0",
+      "description": "文档数据库（官方 zip 发行，含 mongod/mongos）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://fastdl.mongodb.org/windows/mongodb-windows-x86_64-8.0.4.zip",
+      "sha256": "65dd03fde4f781e0044e0726f76189f509859db0034da1dffe22a65094144dd9",
+      "sizeBytes": 775797076,
+      "entry": "mongodb-win32-x86_64-windows-8.0.4/bin/mongod.exe",
+      "homepage": "https://www.mongodb.com",
+      "defaultPort": 28017,
+      "run": {
+        "args": [
+          "--dbpath",
+          "{data}",
+          "--port",
+          "{port}",
+          "--bind_ip",
+          "127.0.0.1"
+        ],
+        "singleInstance": true,
+        "dataDir": "mongodb"
+      }
+    },
+    {
+      "id": "composer",
+      "version": "2.8.5",
+      "category": "tool",
+      "displayName": "Composer 2.8",
+      "description": "PHP 依赖管理器（php composer.phar 使用；装好 PHP 后在站点目录执行）",
+      "homepage": "https://getcomposer.org",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://getcomposer.org/download/2.8.5/composer.phar",
+      "sha256": "9cef18212e222351aeb476b81de7b2a5383f775336474467bf5c7ccfe84ab0cc",
+      "sizeBytes": 3060478,
+      "entry": "composer.phar",
+      "depends": [
+        "php"
+      ]
+    },
+    {
+      "id": "php",
+      "version": "8.0.30",
+      "category": "runtime",
+      "displayName": "PHP 8.0",
+      "description": "PHP 8.0 运行时（老项目兼容）",
+      "homepage": "https://windows.php.net",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://downloads.php.net/~windows/releases/php-8.0.30-Win32-vs16-x64.zip",
+      "sha256": "8697972b5f704885e3444422ede2b5c25d025f614ea96dc67de74dc582471562",
+      "sizeBytes": 26877638,
+      "entry": "php-cgi.exe",
+      "defaultPort": 9101,
+      "run": {
+        "args": [
+          "-b",
+          "127.0.0.1:{port}"
+        ],
+        "singleInstance": false,
+        "dataDir": "php"
+      }
+    },
+    {
+      "id": "php",
+      "version": "7.3.33",
+      "category": "runtime",
+      "displayName": "PHP 7.3",
+      "description": "PHP 7.3 运行时（vc15 构建，老项目兼容）",
+      "homepage": "https://windows.php.net",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://downloads.php.net/~windows/releases/archives/php-7.3.33-Win32-vc15-x64.zip",
+      "sha256": "eabf265d817ea534eeeeb51995693a8fd215bc6cfc42d5fcd5e5cd56a1d5da53",
+      "sizeBytes": 25760881,
+      "entry": "php-cgi.exe",
+      "defaultPort": 9101,
+      "run": {
+        "args": [
+          "-b",
+          "127.0.0.1:{port}"
+        ],
+        "singleInstance": false,
+        "dataDir": "php"
+      }
+    },
+    {
+      "id": "php",
+      "version": "7.2.34",
+      "category": "runtime",
+      "displayName": "PHP 7.2",
+      "description": "PHP 7.2 运行时（vc15 构建，老项目兼容）",
+      "homepage": "https://windows.php.net",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://downloads.php.net/~windows/releases/archives/php-7.2.34-Win32-vc15-x64.zip",
+      "sha256": "3a3d026aacf8da57ff01ace2f78f8f57494744bfb669f8545cc8f9c4ff0450a5",
+      "sizeBytes": 26265301,
+      "entry": "php-cgi.exe",
+      "defaultPort": 9101,
+      "run": {
+        "args": [
+          "-b",
+          "127.0.0.1:{port}"
+        ],
+        "singleInstance": false,
+        "dataDir": "php"
+      }
+    },
+    {
+      "id": "nginx",
+      "version": "1.28.0",
+      "category": "web-server",
+      "displayName": "Nginx 1.28",
+      "description": "最新稳定线（1.28 stable）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://nginx.org/download/nginx-1.28.0.zip",
+      "sha256": "db8c7a529f84c819702bd1c50926b27d961a48b4f72fc7c46b30314fc2bbfd7c",
+      "sizeBytes": 2110315,
+      "entry": "nginx-1.28.0/nginx.exe",
+      "homepage": "https://nginx.org",
+      "defaultPort": 8080,
+      "run": {
+        "args": [
+          "-p",
+          "{root}",
+          "-c",
+          "{etc}/nginx.conf"
+        ],
+        "singleInstance": true,
+        "defaultPort": 8080
+      }
+    },
+    {
+      "id": "nginx",
+      "version": "1.27.5",
+      "category": "web-server",
+      "displayName": "Nginx 1.27",
+      "description": "主线版本（1.27 mainline）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://nginx.org/download/nginx-1.27.5.zip",
+      "sha256": "7ca07528f52c02df33735fedbb9cf822d38079f26c3d9f2774ed512af4fdafd4",
+      "sizeBytes": 2110044,
+      "entry": "nginx-1.27.5/nginx.exe",
+      "homepage": "https://nginx.org",
+      "defaultPort": 8080,
+      "run": {
+        "args": [
+          "-p",
+          "{root}",
+          "-c",
+          "{etc}/nginx.conf"
+        ],
+        "singleInstance": true,
+        "defaultPort": 8080
+      }
+    },
+    {
+      "id": "nginx",
+      "version": "1.24.0",
+      "category": "web-server",
+      "displayName": "Nginx 1.24",
+      "description": "旧稳定线（1.24 stable，兼容老配置）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://nginx.org/download/nginx-1.24.0.zip",
+      "sha256": "69a36bfd2a61d7a736fafd392708bd0fb6cf15d741f8028fe6d8bb5ebd670eb9",
+      "sizeBytes": 1759722,
+      "entry": "nginx-1.24.0/nginx.exe",
+      "homepage": "https://nginx.org",
+      "defaultPort": 8080,
+      "run": {
+        "args": [
+          "-p",
+          "{root}",
+          "-c",
+          "{etc}/nginx.conf"
+        ],
+        "singleInstance": true,
+        "defaultPort": 8080
+      }
+    },
+    {
+      "id": "node",
+      "version": "20.19.5",
+      "category": "runtime",
+      "displayName": "Node.js 20 LTS",
+      "description": "Node.js 20 LTS 运行时（node/npm/npx）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://nodejs.org/dist/v20.19.5/node-v20.19.5-win-x64.zip",
+      "sha256": "c48159529572a5a947eef2d55d6485dfdc4ce8e67216402e2f6de52ad5d95695",
+      "sizeBytes": 29893678,
+      "entry": "node-v20.19.5-win-x64/node.exe",
+      "homepage": "https://nodejs.org"
+    },
+    {
+      "id": "node",
+      "version": "18.20.8",
+      "category": "runtime",
+      "displayName": "Node.js 18 LTS",
+      "description": "Node.js 18 LTS 运行时（老项目兼容）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://nodejs.org/dist/v18.20.8/node-v18.20.8-win-x64.zip",
+      "sha256": "1a1e40260a6facba83636e4cd0ba01eb5bd1386896824b36645afba44857384a",
+      "sizeBytes": 28782590,
+      "entry": "node-v18.20.8-win-x64/node.exe",
+      "homepage": "https://nodejs.org"
+    },
+    {
+      "id": "python",
+      "version": "3.13.7",
+      "category": "runtime",
+      "displayName": "Python 3.13",
+      "description": "Python 3.13 嵌入式运行时",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://www.python.org/ftp/python/3.13.7/python-3.13.7-embed-amd64.zip",
+      "sha256": "f6cca216a359be84797cabb54149ce5e062afb16cc7567eb7fc51cacb2d86b65",
+      "sizeBytes": 10922561,
+      "entry": "python.exe",
+      "homepage": "https://www.python.org"
+    },
+    {
+      "id": "python",
+      "version": "3.11.9",
+      "category": "runtime",
+      "displayName": "Python 3.11",
+      "description": "Python 3.11 嵌入式运行时（老项目兼容）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip",
+      "sha256": "009d6bf7e3b2ddca3d784fa09f90fe54336d5b60f0e0f305c37f400bf83cfd3b",
+      "sizeBytes": 11249023,
+      "entry": "python.exe",
+      "homepage": "https://www.python.org"
+    },
+    {
+      "id": "go",
+      "version": "1.23.6",
+      "category": "runtime",
+      "displayName": "Go 1.23",
+      "description": "Go 工具链（go1.23）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://go.dev/dl/go1.23.6.windows-amd64.zip",
+      "sha256": "53fec1586850b2cf5ad6438341ff7adc5f6700dd3ec1cfa3f5e8b141df190243",
+      "sizeBytes": 81944656,
+      "entry": "go/bin/go.exe",
+      "homepage": "https://go.dev"
+    },
+    {
+      "id": "composer",
+      "version": "2.7.9",
+      "category": "tool",
+      "displayName": "Composer 2.7",
+      "description": "PHP 依赖管理器（2.7 LTS 线）",
+      "homepage": "https://getcomposer.org",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://getcomposer.org/download/2.7.9/composer.phar",
+      "sha256": "b6de5e65c199d80ba11897fbe1364e063e858d483f6a81a176c4d60f2b1d6347",
+      "sizeBytes": 3018138,
+      "entry": "composer.phar",
+      "depends": [
+        "php"
+      ]
+    },
+    {
+      "id": "mysql",
+      "version": "5.7.44",
+      "category": "database",
+      "displayName": "MySQL 5.7",
+      "description": "经典 5.7 系列（老项目兼容）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://cdn.mysql.com//Downloads/MySQL-5.7/mysql-5.7.44-winx64.zip",
+      "sha256": "aed661fe8120254a1dc30f5a4d5de346681922f4847cf025e2d4084eca78e70e",
+      "sizeBytes": 352891656,
+      "entry": "mysql-5.7.44-winx64/bin/mysqld.exe",
+      "homepage": "https://dev.mysql.com",
+      "defaultPort": 23306,
+      "run": {
+        "args": [],
+        "singleInstance": false,
+        "dataDir": "mysql"
+      }
+    },
+    {
+      "id": "postgresql",
+      "version": "17.6",
+      "category": "database",
+      "displayName": "PostgreSQL 17",
+      "description": "最新大版本（EDB 官方二进制）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://get.enterprisedb.com/postgresql/postgresql-17.6-1-windows-x64-binaries.zip",
+      "sha256": "d378882abd001a186735acd6f6ba716bca6ccd192e800412d4fd15ed25376b3e",
+      "sizeBytes": 329891687,
+      "entry": "pgsql/bin/pg_ctl.exe",
+      "homepage": "https://www.postgresql.org",
+      "defaultPort": 25432,
+      "run": {
+        "args": [
+          "-D",
+          "{data}",
+          "-p",
+          "{port}"
+        ],
+        "singleInstance": true,
+        "dataDir": "postgresql"
+      }
+    },
+    {
+      "id": "mongodb",
+      "version": "7.0.24",
+      "category": "database",
+      "displayName": "MongoDB 7.0",
+      "description": "上一代 LTS（老驱动兼容）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://fastdl.mongodb.org/windows/mongodb-windows-x86_64-7.0.24.zip",
+      "sha256": "81bedaca4b31d88f19550cbe95af2c14a050bf14b42862c5be8edd00217db696",
+      "sizeBytes": 628810191,
+      "entry": "mongodb-win32-x86_64-windows-7.0.24/bin/mongod.exe",
+      "homepage": "https://www.mongodb.com",
+      "defaultPort": 28017,
+      "run": {
+        "args": [
+          "--dbpath",
+          "{data}",
+          "--port",
+          "{port}",
+          "--bind_ip",
+          "127.0.0.1"
+        ],
+        "singleInstance": true,
+        "dataDir": "mongodb"
+      }
+    },
+    {
+      "id": "mihomo",
+      "version": "1.19.11",
+      "category": "tool",
+      "displayName": "mihomo 1.19",
+      "description": "Clash Meta 内核 1.19（最新）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.11/mihomo-windows-amd64-v1.19.11.zip",
+      "sha256": "2e5a35615ff93efe57d8a2790d26a084db039f58f4c9659ff0907ba87c2756f9",
+      "sizeBytes": 11578659,
+      "entry": "mihomo-windows-amd64.exe",
+      "homepage": "https://github.com/MetaCubeX/mihomo",
+      "defaultPort": 17890,
+      "run": {
+        "args": [
+          "-d",
+          "{root}",
+          "-f",
+          "{etc}/config.yaml"
+        ],
+        "singleInstance": true
+      }
+    },
+    {
+      "id": "mihomo",
+      "version": "1.18.10",
+      "category": "tool",
+      "displayName": "mihomo 1.18",
+      "description": "Clash Meta 内核 1.18（稳定旧版）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/MetaCubeX/mihomo/releases/download/v1.18.10/mihomo-windows-amd64-v1.18.10.zip",
+      "sha256": "4e3bdf3dfd5966da08da79243bd774ddca3558df67350af254085978a3f9cb66",
+      "sizeBytes": 10679111,
+      "entry": "mihomo-windows-amd64.exe",
+      "homepage": "https://github.com/MetaCubeX/mihomo",
+      "defaultPort": 17890,
+      "run": {
+        "args": [
+          "-d",
+          "{root}",
+          "-f",
+          "{etc}/config.yaml"
+        ],
+        "singleInstance": true
+      }
+    },
+    {
+      "id": "frankenphp",
+      "version": "1.12.7",
+      "category": "web-server",
+      "displayName": "FrankenPHP",
+      "description": "自带 PHP 8.5 的应用服务器（Caddy + PHP 一体，免配 php-cgi）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/php/frankenphp/releases/download/v1.12.7/frankenphp-windows-x86_64.zip",
+      "sizeBytes": 59415145,
+      "entry": "frankenphp.exe",
+      "homepage": "https://frankenphp.dev",
+      "sha256": "db51302615dd121da4125072d59b7082af0540d1ae7658e2428689b26884e952",
+      "defaultPort": 8080,
+      "run": {
+        "args": [
+          "php-server",
+          "--listen",
+          "127.0.0.1:{port}",
+          "--root",
+          "{data}/www"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 15,
+        "initDirs": [
+          "www"
+        ],
+        "env": {
+          "SERVER_NAME": "http://"
+        }
+      }
+    },
+    {
+      "id": "mailpit",
+      "version": "v1.31.1",
+      "category": "mail",
+      "displayName": "Mailpit",
+      "description": "邮件测试服务器：拦截并预览所有外发邮件（本地开发必备）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/axllent/mailpit/releases/download/v1.31.1/mailpit-windows-amd64.zip",
+      "sizeBytes": 10776046,
+      "entry": "mailpit.exe",
+      "homepage": "https://mailpit.axllent.org",
+      "sha256": "73ff05204741bd89cc96e6074573c4b22e1edfadf1b3427536233ff20c751604",
+      "defaultPort": 8025,
+      "run": {
+        "args": [
+          "--database",
+          "{data}/mailpit.db",
+          "--listen",
+          "127.0.0.1:{port}",
+          "--smtp",
+          "127.0.0.1:{port-7000}",
+          "--disable-version-check"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 12
+      }
+    },
+    {
+      "id": "meilisearch",
+      "version": "v1.53.2",
+      "category": "search",
+      "displayName": "Meilisearch",
+      "description": "轻量全文搜索引擎，开箱即用的中文搜索体验",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/meilisearch/meilisearch/releases/download/v1.53.2/meilisearch-windows-amd64.exe",
+      "sizeBytes": 346635776,
+      "entry": "meilisearch-windows-amd64.exe",
+      "homepage": "https://meilisearch.com",
+      "sha256": "edb04f8288565e413a318069600954e38574714e5a2559777f8f4e8cc16d1bf3",
+      "defaultPort": 7700,
+      "run": {
+        "args": [
+          "--db-path",
+          "{data}",
+          "--http-addr",
+          "127.0.0.1:{port}",
+          "--no-analytics"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 15
+      }
+    },
+    {
+      "id": "zincsearch",
+      "version": "v0.4.10",
+      "category": "search",
+      "displayName": "ZincSearch",
+      "description": "Elasticsearch 的轻量替代（Go 实现，内置 Web UI）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "targz",
+      "url": "https://github.com/zincsearch/zincsearch/releases/download/v0.4.10/zincsearch_0.4.10_windows_x86_64.tar.gz",
+      "sizeBytes": 22960611,
+      "entry": "zincsearch.exe",
+      "homepage": "https://zincsearch.com",
+      "sha256": "d85d18398e9abab5c0f09b8400eb7ebec8f4e6dcbe28104e2734cdf91dc584ce",
+      "defaultPort": 4080,
+      "run": {
+        "args": [],
+        "health": "tcp",
+        "healthTimeoutSec": 15,
+        "env": {
+          "ZINC_FIRST_ADMIN_USER": "admin",
+          "ZINC_FIRST_ADMIN_PASSWORD": "admin",
+          "ZINC_SERVER_PORT": "{port}",
+          "ZINC_DATA_PATH": "{data}"
+        }
+      }
+    },
+    {
+      "id": "elasticsearch",
+      "version": "9.5.4",
+      "category": "search",
+      "displayName": "Elasticsearch",
+      "description": "分布式搜索分析引擎（自带 JDK，体积较大）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-9.5.4-windows-x86_64.zip",
+      "sizeBytes": 679500005,
+      "entry": "elasticsearch-9.5.4/bin/elasticsearch.bat",
+      "homepage": "https://www.elastic.co",
+      "sha256": "e8f58a5aaf23c33b8e52ab7629f9e6aae82a8d79cf4358eb6bfbbd1e3bdda931",
+      "defaultPort": 9200,
+      "run": {
+        "args": [
+          "-Epath.data={data}/es-data",
+          "-Epath.logs={data}/es-logs",
+          "-Ehttp.port={port}",
+          "-Expack.security.enabled=false"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 90,
+        "initDirs": [
+          "es-data",
+          "es-logs"
+        ],
+        "env": {
+          "ES_TMPDIR": "{data}/tmp"
+        }
+      }
+    },
+    {
+      "id": "minio",
+      "version": "RELEASE.2025-09-07T16-13-09Z",
+      "category": "object-storage",
+      "displayName": "MinIO",
+      "description": "S3 兼容对象存储（开源版最后一版含 Windows 二进制）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/minio/minio/releases/download/RELEASE.2025-09-07T16-13-09Z/minio.windows-amd64.RELEASE.2025-09-07T16-13-09Z.exe",
+      "sizeBytes": 113115136,
+      "entry": "minio.windows-amd64.RELEASE.2025-09-07T16-13-09Z.exe",
+      "homepage": "https://min.io",
+      "sha256": "af709e6ba68488404e85acdd22a3030d0f5e56a108d4b27d744f18ceb50861b4",
+      "defaultPort": 9000,
+      "run": {
+        "args": [
+          "server",
+          "{data}/data",
+          "--address",
+          "127.0.0.1:{port}",
+          "--console-address",
+          "127.0.0.1:{port+1}"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 15,
+        "initDirs": [
+          "data"
+        ],
+        "env": {
+          "MINIO_ROOT_USER": "minioadmin",
+          "MINIO_ROOT_PASSWORD": "minioadmin"
+        }
+      }
+    },
+    {
+      "id": "rustfs",
+      "version": "1.0.0",
+      "category": "object-storage",
+      "displayName": "RustFS",
+      "description": "Rust 实现的 S3 兼容对象存储（MinIO 替代）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/rustfs/rustfs/releases/download/1.0.0/rustfs-windows-x86_64-v1.0.0.zip",
+      "sizeBytes": 105040603,
+      "entry": "rustfs.exe",
+      "homepage": "https://rustfs.com",
+      "sha256": "4ccf5858ce8e6f70f01af2394c8cc0e0878ee77faa6c20d3179153476554b7d8",
+      "defaultPort": 9000,
+      "run": {
+        "args": [
+          "server",
+          "--address",
+          ":{port}",
+          "--console-enable",
+          "--console-address",
+          ":{port+1}",
+          "{data}/rustfs-data"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 20,
+        "initDirs": [
+          "rustfs-data"
+        ]
+      },
+      "note": "上游只有一个稳定版 1.0.0（其余是 1.0.1-preview.* 预发布），暂无可补的稳定版本。"
+    },
+    {
+      "id": "qdrant",
+      "version": "v1.19.1",
+      "category": "database",
+      "displayName": "Qdrant",
+      "description": "向量数据库（RAG / 语义检索），自带 Web 面板",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/qdrant/qdrant/releases/download/v1.19.1/qdrant-x86_64-pc-windows-msvc.zip",
+      "sizeBytes": 29671153,
+      "entry": "qdrant.exe",
+      "homepage": "https://qdrant.tech",
+      "sha256": "9b6f69bd85f6abed4bc13f943099f55c6ffd55f5dd90388635320d8fbb569eb0",
+      "defaultPort": 6333,
+      "run": {
+        "args": [
+          "--config-path",
+          "{etc}/config.yaml",
+          "--disable-telemetry"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 20,
+        "initDirs": [
+          "storage"
+        ],
+        "configFile": "config.yaml",
+        "configTemplate": "log_level: INFO\nservice:\n  host: 127.0.0.1\n  http_port: {port}\n  grpc_port: {port+1}\nstorage:\n  storage_path: {data}/storage\ntelemetry_disabled: true\n"
+      }
+    },
+    {
+      "id": "neo4j",
+      "version": "5.26.30",
+      "category": "database",
+      "displayName": "Neo4j 5.26 LTS",
+      "description": "图数据库（社区版，需要系统安装 Java 17/21）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://dist.neo4j.org/neo4j-community-5.26.30-windows.zip",
+      "sizeBytes": 162637544,
+      "entry": "neo4j-community-5.26.30/bin/neo4j.bat",
+      "homepage": "https://neo4j.com",
+      "sha256": "b2c2932b16f810adcc54560e90ee35847047d2d52f78cfbfabbae133be8f82cd",
+      "defaultPort": 7474,
+      "depends": [
+        "temurin-jdk21"
+      ],
+      "run": {
+        "args": [
+          "console"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 60,
+        "requires": [
+          "temurin-jdk21"
+        ],
+        "cwd": "{root}"
+      }
+    },
+    {
+      "id": "memcached",
+      "version": "1.6.8",
+      "category": "cache",
+      "displayName": "Memcached",
+      "description": "高性能内存对象缓存（Windows 第三方构建）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/jefyt/memcached-windows/releases/download/1.6.8_mingw_libressl/memcached-1.6.8-win64-mingw.zip",
+      "sizeBytes": 3540169,
+      "entry": "memcached-1.6.8-win64-mingw/bin/memcached.exe",
+      "homepage": "https://memcached.org",
+      "sha256": "48ec62cef718f0d73698414b783c0e4a69821013553ca00afe0eed324eb5994b",
+      "defaultPort": 11211,
+      "run": {
+        "args": [
+          "-p",
+          "{port}",
+          "-l",
+          "127.0.0.1",
+          "-m",
+          "512"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 10
+      }
+    },
+    {
+      "id": "consul",
+      "version": "2.0.4",
+      "category": "service-mesh",
+      "displayName": "Consul",
+      "description": "服务发现与配置中心（开发模式，自带 UI）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://releases.hashicorp.com/consul/2.0.4/consul_2.0.4_windows_amd64.zip",
+      "sizeBytes": 72737934,
+      "entry": "consul.exe",
+      "homepage": "https://developer.hashicorp.com/consul",
+      "sha256": "53430f0d0d28207005a40116f8d318aef023d3e44cad03affa29ddc3b6d43172",
+      "defaultPort": 8500,
+      "run": {
+        "args": [
+          "agent",
+          "-dev",
+          "-client",
+          "127.0.0.1",
+          "-http-port",
+          "{port}"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 20
+      }
+    },
+    {
+      "id": "etcd",
+      "version": "v3.7.1",
+      "category": "service-mesh",
+      "displayName": "etcd",
+      "description": "分布式 KV 存储（K8s 同款；Windows 为官方 Tier 3 支持）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/etcd-io/etcd/releases/download/v3.7.1/etcd-v3.7.1-windows-amd64.zip",
+      "sizeBytes": 24404364,
+      "entry": "etcd-v3.7.1-windows-amd64/etcd.exe",
+      "homepage": "https://etcd.io",
+      "sha256": "228d600d103e0f48715687c768de8dcaeacb19eef2006261160a9a677e36cc59",
+      "defaultPort": 2379,
+      "run": {
+        "args": [
+          "--data-dir",
+          "{data}",
+          "--listen-client-urls",
+          "http://127.0.0.1:{port}",
+          "--advertise-client-urls",
+          "http://127.0.0.1:{port}"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 20
+      }
+    },
+    {
+      "id": "rnacos",
+      "version": "0.8.7",
+      "category": "service-mesh",
+      "displayName": "R-Nacos",
+      "description": "Nacos 的 Rust 实现（单文件无 JVM 依赖，控制台 :10848）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/nacos-group/r-nacos/releases/download/v0.8.7/rnacos-x86_64-pc-windows-msvc-v0.8.7.tar.zip",
+      "sizeBytes": 13365000,
+      "entry": "rnacos.exe",
+      "homepage": "https://github.com/nacos-group/r-nacos",
+      "sha256": "15820b5c213ccaebe608884383d9485df407cd85370c218e7df012fc4a1b053b",
+      "defaultPort": 8848,
+      "run": {
+        "args": [],
+        "health": "tcp",
+        "healthTimeoutSec": 20,
+        "env": {
+          "RNACOS_HTTP_PORT": "{port}",
+          "RNACOS_DATA_DIR": "{data}/nacos_db"
+        },
+        "configFile": ".env",
+        "configTemplate": "RNACOS_HTTP_PORT={port}\nRNACOS_GRPC_PORT={port+1000}\nRNACOS_HTTP_CONSOLE_PORT={port+2000}\nRNACOS_DATA_DIR={data}/nacos_db\nRNACOS_CONFIG_DB_FILE={data}/nacos_db/config.db\nRNACOS_NAMING_DB_FILE={data}/nacos_db/naming.db\n"
+      }
+    },
+    {
+      "id": "temporal-cli",
+      "version": "1.9.1",
+      "category": "service-mesh",
+      "displayName": "Temporal CLI",
+      "description": "工作流引擎（内嵌 Server + Web UI，单文件即可跑）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/temporalio/cli/releases/download/v1.9.1/temporal_cli_1.9.1_windows_amd64.zip",
+      "sizeBytes": 46408338,
+      "entry": "temporal.exe",
+      "homepage": "https://temporal.io",
+      "sha256": "babb65844835045c91fb98930fe10b81de28db80c8c609180473d2c0b18c7589",
+      "defaultPort": 7233,
+      "run": {
+        "args": [
+          "server",
+          "start-dev",
+          "--db-filename",
+          "{data}/temporal.db",
+          "--port",
+          "{port}",
+          "--ui-port",
+          "{port+1000}"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 30
+      }
+    },
+    {
+      "id": "cloudflared",
+      "version": "2026.9.1",
+      "category": "tunnel",
+      "displayName": "Cloudflare Tunnel",
+      "description": "把本机服务暴露到公网（快速隧道无需账号）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/cloudflare/cloudflared/releases/download/2026.9.1/cloudflared-windows-amd64.exe",
+      "sizeBytes": 54976432,
+      "entry": "cloudflared-windows-amd64.exe",
+      "homepage": "https://developers.cloudflare.com/cloudflare-one/",
+      "sha256": "2837888cc0f5d58f15b6dc478376de90b4d3ba5241c7947455d1e0a0df429712",
+      "run": {
+        "args": [
+          "tunnel",
+          "--no-autoupdate",
+          "--url",
+          "http://localhost:{httpPort}"
+        ],
+        "health": "process",
+        "healthTimeoutSec": 25
+      }
+    },
+    {
+      "id": "coredns",
+      "version": "1.14.7",
+      "category": "dns",
+      "displayName": "CoreDNS",
+      "description": "可插拔 DNS 服务器（需自备 Corefile）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/coredns/coredns/releases/download/v1.14.7/coredns_1.14.7_windows_amd64.zip",
+      "sizeBytes": 23421098,
+      "entry": "coredns.exe",
+      "homepage": "https://coredns.io",
+      "sha256": "6b718a5ed57d7034b1e4c3df500121307830da291d15cf8387f41c297c6fdd56",
+      "defaultPort": 5353,
+      "run": {
+        "args": [
+          "-conf",
+          "{etc}/Corefile",
+          "-dns.port",
+          "{port}"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 12,
+        "configFile": "Corefile",
+        "configTemplate": ".:{port} {\n    hosts {\n        127.0.0.1 localhost\n        fallthrough\n    }\n    forward . 8.8.8.8 1.1.1.1\n    log\n    errors\n}\n"
+      }
+    },
+    {
+      "id": "sftpgo",
+      "version": "2.7.6",
+      "category": "ftp",
+      "displayName": "SFTPGo",
+      "description": "SFTP / FTP / WebDAV 服务器（带 Web 管理台）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/drakkan/sftpgo/releases/download/v2.7.6/sftpgo_v2.7.6_windows_portable.zip",
+      "sizeBytes": 60263734,
+      "entry": "sftpgo.exe",
+      "homepage": "https://sftpgo.com",
+      "sha256": "af3994bb690962c7575858aee368a4c1d6fd4748b35770bb0773eb06408d504d",
+      "defaultPort": 2022,
+      "run": {
+        "args": [
+          "serve",
+          "--config-dir",
+          "{etc}",
+          "--log-file-path",
+          "{data}/sftpgo.log"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 20
+      }
+    },
+    {
+      "id": "rabbitmq",
+      "version": "4.3.6",
+      "category": "cache",
+      "displayName": "RabbitMQ",
+      "description": "AMQP 消息队列（需要 Erlang 27+，管理台 :15672）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/rabbitmq/rabbitmq-server/releases/download/v4.3.6/rabbitmq-server-windows-4.3.6.zip",
+      "sizeBytes": 70605921,
+      "entry": "rabbitmq_server-4.3.6/sbin/rabbitmq-server.bat",
+      "homepage": "https://www.rabbitmq.com",
+      "sha256": "48161b084f1257edc112b24fccda378cc3e83c8e4b94984801cd6651817981f1",
+      "defaultPort": 5672,
+      "depends": [
+        "erlang"
+      ],
+      "run": {
+        "args": [],
+        "health": "tcp",
+        "healthTimeoutSec": 40,
+        "requires": [
+          "erlang"
+        ],
+        "env": {
+          "RABBITMQ_BASE": "{data}",
+          "RABBITMQ_NODE_PORT": "{port}"
+        }
+      }
+    },
+    {
+      "id": "mariadb",
+      "version": "12.3.3",
+      "category": "database",
+      "displayName": "MariaDB 12.3 LTS",
+      "description": "MySQL 兼容的关系型数据库（首次启动自动初始化）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://archive.mariadb.org/mariadb-12.3.3/winx64-packages/mariadb-12.3.3-winx64.zip",
+      "sizeBytes": 104081715,
+      "entry": "mariadb-12.3.3-winx64/bin/mysqld.exe",
+      "homepage": "https://mariadb.org",
+      "sha256": "4b5706b47148b47c8f36963c8352d1ddee37a1287b4690428f631a74b09b85a0",
+      "defaultPort": 3306,
+      "run": {
+        "args": [
+          "--defaults-file={etc}/my.ini"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 40,
+        "configFile": "my.ini",
+        "configTemplate": "[mysqld]\nbasedir={root}/..\ndatadir={data}\nport={port}\ncharacter-set-server=utf8mb4\ncollation-server=utf8mb4_unicode_ci\n\n[client]\nport={port}\ndefault-character-set=utf8mb4\n",
+        "initBin": "mariadb-install-db.exe",
+        "initArgs": [
+          "--datadir={data}",
+          "--service=MariaDB"
+        ],
+        "initDirs": [
+          "data"
+        ]
+      }
+    },
+    {
+      "id": "caddy",
+      "version": "2.11.4",
+      "category": "web-server",
+      "displayName": "Caddy",
+      "description": "自动 HTTPS 的现代 Web 服务器与反代（配置极简）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/caddyserver/caddy/releases/download/v2.11.4/caddy_2.11.4_windows_amd64.zip",
+      "sizeBytes": 17559418,
+      "entry": "caddy.exe",
+      "homepage": "https://caddyserver.com",
+      "sha256": "1708333f79e274c7697285afe6d592ab39314e0b131e9ec6bea08ad27df62ebf",
+      "defaultPort": 8080,
+      "run": {
+        "args": [
+          "run",
+          "--config",
+          "{etc}/Caddyfile",
+          "--adapter",
+          "caddyfile"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 12,
+        "configFile": "Caddyfile",
+        "configTemplate": "{\n\tstorage file_system {data}/storage\n\tadmin off\n}\nhttp://:{port} {\n\troot * {data}/www\n\tfile_server\n}\n",
+        "initDirs": [
+          "www",
+          "storage",
+          "xdg"
+        ],
+        "requires": [],
+        "env": {
+          "XDG_DATA_HOME": "{data}/xdg",
+          "XDG_CONFIG_HOME": "{data}/xdg"
+        }
+      }
+    },
+    {
+      "id": "bun",
+      "version": "1.4.2",
+      "category": "runtime",
+      "displayName": "Bun 1.4.2",
+      "description": "极快的 JS/TS 一体化运行时（自带包管理器与测试器）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-windows-x64.zip",
+      "sizeBytes": 39807510,
+      "entry": "bun-windows-x64/bun.exe",
+      "homepage": "https://bun.sh",
+      "sha256": "ce4c17497b2f29712a99d3d53f028de28cd42e3bacb8589599e7f000e49b6405"
+    },
+    {
+      "id": "deno",
+      "version": "2.9.7",
+      "category": "runtime",
+      "displayName": "Deno",
+      "description": "安全的 JS/TS 运行时（原生 TS、权限模型）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-pc-windows-msvc.zip",
+      "sizeBytes": 42630221,
+      "entry": "deno.exe",
+      "homepage": "https://deno.com",
+      "sha256": "a0c3101b4158d1dfb7d6a78a7bf0f3de80c96bb423c152beec8beb22786f2238"
+    },
+    {
+      "id": "zig",
+      "version": "0.16.0",
+      "category": "runtime",
+      "displayName": "Zig",
+      "description": "现代系统编程语言与 C/C++ 工具链",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip",
+      "sizeBytes": 97217739,
+      "entry": "zig-x86_64-windows-0.16.0/zig.exe",
+      "homepage": "https://ziglang.org",
+      "sha256": "68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e"
+    },
+    {
+      "id": "temurin-jdk21",
+      "version": "21.0.12.1+1",
+      "category": "runtime",
+      "displayName": "Temurin JDK 21 LTS",
+      "description": "Eclipse Temurin OpenJDK 21（Tomcat / Gradle / Neo4j 依赖它）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_x64_windows_hotspot_21.0.12.1_1.zip",
+      "sizeBytes": 205073461,
+      "entry": "jdk-21.0.12.1+1/bin/java.exe",
+      "homepage": "https://adoptium.net",
+      "sha256": "f9d6e191ab098c0d416e7d588a24420a8621cd2f4720dab2459b8b7b2d2d8b4e"
+    },
+    {
+      "id": "gradle",
+      "version": "9.7.1",
+      "category": "runtime",
+      "displayName": "Gradle 9",
+      "description": "JVM 构建工具（需要 JDK 17+）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://services.gradle.org/distributions/gradle-9.7.1-bin.zip",
+      "sizeBytes": 151433392,
+      "entry": "gradle-9.7.1/bin/gradle.bat",
+      "homepage": "https://gradle.org",
+      "sha256": "acd53f1edaf02f1a8ff99879f8a34b302661a057d9b063ae9e35b552f804d20a",
+      "depends": [
+        "temurin-jdk21"
+      ]
+    },
+    {
+      "id": "ruby",
+      "version": "4.0.7-1",
+      "category": "runtime",
+      "displayName": "Ruby",
+      "description": "Ruby 运行时（便携版，不含编译工具链）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-4.0.7-1/rubyinstaller-4.0.7-1-x64.7z",
+      "sizeBytes": 17742012,
+      "entry": "rubyinstaller-4.0.7-1-x64/bin/ruby.exe",
+      "homepage": "https://rubyinstaller.org",
+      "sha256": "7a9be96d3448ecbd9a81eccae1f619131dfcc761f2c98dded03ece6c05d0474f",
+      "note": "Windows 包为 .7z（需要 7-Zip 解压器），安装管线目前只支持 zip/tar.gz；待支持 7z 后即可补多版本。当前版本仍可正常安装使用。"
+    },
+    {
+      "id": "rust",
+      "version": "1.29.1",
+      "category": "runtime",
+      "displayName": "Rust (rustup)",
+      "description": "Rust 工具链引导器（静默安装 stable）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe",
+      "sizeBytes": 12721664,
+      "entry": "rustup-init.exe",
+      "homepage": "https://rustup.rs",
+      "sha256": "6f4bef66261261fcb43131be8720bab817d403a09edec7455c371974b90bdb7e"
+    },
+    {
+      "id": "dotnet-sdk8",
+      "version": "8.0.425",
+      "category": "runtime",
+      "displayName": ".NET SDK 8",
+      "description": ".NET 8 SDK（便携解压即用；2026-11 EOL）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.425/dotnet-sdk-8.0.425-win-x64.zip",
+      "sizeBytes": 285157731,
+      "entry": "dotnet.exe",
+      "homepage": "https://dotnet.microsoft.com",
+      "sha256": "cd6eb1df826dd168108e2c427673f9d627b7e0631963eeedf0fa7aef0913c53f"
+    },
+    {
+      "id": "erlang",
+      "version": "29.1",
+      "category": "runtime",
+      "displayName": "Erlang/OTP 29",
+      "description": "Erlang VM（RabbitMQ 依赖；含 vc_redist）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/erlang/otp/releases/download/OTP-29.1/otp_win64_29.1.zip",
+      "sizeBytes": 187146090,
+      "entry": "bin/erl.exe",
+      "homepage": "https://www.erlang.org",
+      "sha256": "db57cfdb295154397285c986f6e93e3d8f8b1c6fb56297e3e3a1b96218aa27ad"
+    },
+    {
+      "id": "flutter",
+      "version": "3.47.5",
+      "category": "runtime",
+      "displayName": "Flutter SDK",
+      "description": "跨平台 UI 工具链（1.9GB，含 Dart SDK）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://storage.googleapis.com/flutter_infra_release/releases/stable/windows/flutter_windows_3.47.5-stable.zip",
+      "sizeBytes": 1933437428,
+      "entry": "flutter/bin/flutter.bat",
+      "homepage": "https://flutter.dev",
+      "sha256": "0ccd71931f49c2fbe394b1eeb6d79af3d624058a043ea0d03d34160581624fb8",
+      "note": "官方 Windows 包走 Google storage 的 stable 通道，历史版本需按具体 release 目录拼接（每版目录含时间戳），与当前固定链接模式不同；暂缓补多版本。"
+    },
+    {
+      "id": "ruby-devkit",
+      "version": "4.0.7-1",
+      "category": "runtime",
+      "displayName": "Ruby+Devkit",
+      "description": "Ruby 安装器（含 MSYS2 编译工具链，支持原生 gem）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-4.0.7-1/rubyinstaller-devkit-4.0.7-1-x64.exe",
+      "sizeBytes": 141377256,
+      "entry": "rubyinstaller-devkit-4.0.7-1-x64.exe",
+      "homepage": "https://rubyinstaller.org",
+      "sha256": "4eb2fb0c8e7ece557c82ce7cb0411bf53df439831b2a942227606173e32dadfc",
+      "note": "同 ruby：Windows 安装器为 7z/自解压 exe，暂无法在多版本间解压安装。"
+    },
+    {
+      "id": "tomcat",
+      "version": "11.0.26",
+      "category": "web-server",
+      "displayName": "Apache Tomcat 11",
+      "description": "Servlet 容器（需要 JDK 21，端口 8080）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://downloads.apache.org/tomcat/tomcat-11/v11.0.26/bin/apache-tomcat-11.0.26-windows-x64.zip",
+      "sizeBytes": 16481996,
+      "entry": "apache-tomcat-11.0.26/bin/startup.bat",
+      "homepage": "https://tomcat.apache.org",
+      "sha256": "650a87f24e0d4cb60911fc54eee84d2c79336171099580b9ce60625ec17c61c6",
+      "defaultPort": 8080,
+      "depends": [
+        "temurin-jdk21"
+      ],
+      "run": {
+        "args": [],
+        "health": "tcp",
+        "healthTimeoutSec": 45,
+        "requires": [
+          "temurin-jdk21"
+        ],
+        "env": {
+          "CATALINA_HOME": "{root}/..",
+          "CATALINA_BASE": "{root}/.."
+        },
+        "stopArgs": [
+          "shutdown.bat"
+        ]
+      }
+    },
+    {
+      "id": "strawberry-perl",
+      "version": "5.42.3.1",
+      "category": "runtime",
+      "displayName": "Strawberry Perl",
+      "description": "Windows 便携版 Perl（自带 gcc/cmake 工具链）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_54231_64bit/strawberry-perl-5.42.3.1-64bit-portable.zip",
+      "sizeBytes": 304765269,
+      "entry": "perl/bin/perl.exe",
+      "homepage": "https://strawberryperl.com",
+      "sha256": "6a081a811781c30aca51dbc036afd93092af91e3297901f02c17043795a10690"
+    },
+    {
+      "id": "ollama",
+      "version": "0.34.2",
+      "category": "ai",
+      "displayName": "Ollama",
+      "description": "本地大模型运行时（1.4GB，含 CUDA 库；无 N 卡可删 lib/ollama/cuda_v12）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/ollama/ollama/releases/download/v0.34.2/ollama-windows-amd64.zip",
+      "sizeBytes": 1460928014,
+      "entry": "ollama.exe",
+      "homepage": "https://ollama.com",
+      "sha256": "8f3fd071a2a2f9497b562f43502c77c2b701a99d1ee5dfda28da8c786373063b",
+      "defaultPort": 11434,
+      "run": {
+        "args": [
+          "serve"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 25,
+        "env": {
+          "OLLAMA_MODELS": "{data}/models",
+          "OLLAMA_HOST": "127.0.0.1:{port}"
+        },
+        "initDirs": [
+          "models"
+        ]
+      }
+    },
+    {
+      "id": "roadrunner",
+      "version": "2025.1.15",
+      "category": "web-server",
+      "displayName": "RoadRunner",
+      "description": "Go 编写的 PHP 应用服务器（需 PHP 运行时与 .rr.yaml）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/roadrunner-server/roadrunner/releases/download/v2025.1.15/roadrunner-2025.1.15-windows-amd64.zip",
+      "sizeBytes": 20813006,
+      "entry": "roadrunner-2025.1.15-windows-amd64/rr.exe",
+      "homepage": "https://roadrunner.dev",
+      "sha256": "7d4d0461b7ed17a405a40121f0f19d7d413ea8fec724b6d23f56a5ff2993b42d",
+      "defaultPort": 8080,
+      "depends": [
+        "php"
+      ]
+    },
+    {
+      "id": "caddy",
+      "version": "2.11.3",
+      "category": "web-server",
+      "displayName": "Caddy 2.11.3",
+      "description": "自动 HTTPS 的现代 Web 服务器与反代（配置极简）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/caddyserver/caddy/releases/download/v2.11.3/caddy_2.11.3_windows_amd64.zip",
+      "sizeBytes": 17489189,
+      "entry": "caddy.exe",
+      "homepage": "https://caddyserver.com",
+      "sha256": "94ba71226d30a07d8eca3f971e88222fafb13f8bc46f391ed01afd6780f9c030",
+      "defaultPort": 8080,
+      "run": {
+        "args": [
+          "run",
+          "--config",
+          "{etc}/Caddyfile",
+          "--adapter",
+          "caddyfile"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 12,
+        "configFile": "Caddyfile",
+        "configTemplate": "{\n\tstorage file_system {data}/storage\n\tadmin off\n}\nhttp://:{port} {\n\troot * {data}/www\n\tfile_server\n}\n",
+        "initDirs": [
+          "www",
+          "storage",
+          "xdg"
+        ],
+        "requires": [],
+        "env": {
+          "XDG_DATA_HOME": "{data}/xdg",
+          "XDG_CONFIG_HOME": "{data}/xdg"
+        }
+      }
+    },
+    {
+      "id": "caddy",
+      "version": "2.11.2",
+      "category": "web-server",
+      "displayName": "Caddy 2.11.2",
+      "description": "自动 HTTPS 的现代 Web 服务器与反代（配置极简）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/caddyserver/caddy/releases/download/v2.11.2/caddy_2.11.2_windows_amd64.zip",
+      "sizeBytes": 17258333,
+      "entry": "caddy.exe",
+      "homepage": "https://caddyserver.com",
+      "sha256": "2902d2a278597e4983d70ed6d694fcab36b29b0b7d109771c59d7da7147afad8",
+      "defaultPort": 8080,
+      "run": {
+        "args": [
+          "run",
+          "--config",
+          "{etc}/Caddyfile",
+          "--adapter",
+          "caddyfile"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 12,
+        "configFile": "Caddyfile",
+        "configTemplate": "{\n\tstorage file_system {data}/storage\n\tadmin off\n}\nhttp://:{port} {\n\troot * {data}/www\n\tfile_server\n}\n",
+        "initDirs": [
+          "www",
+          "storage",
+          "xdg"
+        ],
+        "requires": [],
+        "env": {
+          "XDG_DATA_HOME": "{data}/xdg",
+          "XDG_CONFIG_HOME": "{data}/xdg"
+        }
+      }
+    },
+    {
+      "id": "caddy",
+      "version": "2.11.1",
+      "category": "web-server",
+      "displayName": "Caddy 2.11.1",
+      "description": "自动 HTTPS 的现代 Web 服务器与反代（配置极简）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/caddyserver/caddy/releases/download/v2.11.1/caddy_2.11.1_windows_amd64.zip",
+      "sizeBytes": 17229980,
+      "entry": "caddy.exe",
+      "homepage": "https://caddyserver.com",
+      "sha256": "de55cc5c227fb03d5d69fca6adf0d71e90fdcfab84c1a314598f25f3bba83fd2",
+      "defaultPort": 8080,
+      "run": {
+        "args": [
+          "run",
+          "--config",
+          "{etc}/Caddyfile",
+          "--adapter",
+          "caddyfile"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 12,
+        "configFile": "Caddyfile",
+        "configTemplate": "{\n\tstorage file_system {data}/storage\n\tadmin off\n}\nhttp://:{port} {\n\troot * {data}/www\n\tfile_server\n}\n",
+        "initDirs": [
+          "www",
+          "storage",
+          "xdg"
+        ],
+        "requires": [],
+        "env": {
+          "XDG_DATA_HOME": "{data}/xdg",
+          "XDG_CONFIG_HOME": "{data}/xdg"
+        }
+      }
+    },
+    {
+      "id": "qdrant",
+      "version": "v1.19.0",
+      "category": "database",
+      "displayName": "Qdrant vv1.19.0",
+      "description": "向量数据库（原生 Windows 构建）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/qdrant/qdrant/releases/download/v1.19.0/qdrant-x86_64-pc-windows-msvc.zip",
+      "sizeBytes": 29340688,
+      "entry": "qdrant.exe",
+      "homepage": "https://qdrant.tech",
+      "sha256": "980cb2e1ae771155cf211da8c0a8a9206b6482bd4effdc4db994d3adb707b087",
+      "defaultPort": 6333,
+      "run": {
+        "args": [
+          "--config-path",
+          "{etc}/config.yaml",
+          "--disable-telemetry"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 20,
+        "initDirs": [
+          "storage"
+        ],
+        "configFile": "config.yaml",
+        "configTemplate": "log_level: INFO\nservice:\n  host: 127.0.0.1\n  http_port: {port}\n  grpc_port: {port+1}\nstorage:\n  storage_path: {data}/storage\ntelemetry_disabled: true\n"
+      }
+    },
+    {
+      "id": "qdrant",
+      "version": "v1.18.3",
+      "category": "database",
+      "displayName": "Qdrant vv1.18.3",
+      "description": "向量数据库（原生 Windows 构建）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/qdrant/qdrant/releases/download/v1.18.3/qdrant-x86_64-pc-windows-msvc.zip",
+      "sizeBytes": 28438588,
+      "entry": "qdrant.exe",
+      "homepage": "https://qdrant.tech",
+      "sha256": "984619bbd4032ace578656174c465c5d6b71d1267ecad5b7b4c21cc6549ca833",
+      "defaultPort": 6333,
+      "run": {
+        "args": [
+          "--config-path",
+          "{etc}/config.yaml",
+          "--disable-telemetry"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 20,
+        "initDirs": [
+          "storage"
+        ],
+        "configFile": "config.yaml",
+        "configTemplate": "log_level: INFO\nservice:\n  host: 127.0.0.1\n  http_port: {port}\n  grpc_port: {port+1}\nstorage:\n  storage_path: {data}/storage\ntelemetry_disabled: true\n"
+      }
+    },
+    {
+      "id": "qdrant",
+      "version": "v1.18.2",
+      "category": "database",
+      "displayName": "Qdrant vv1.18.2",
+      "description": "向量数据库（原生 Windows 构建）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/qdrant/qdrant/releases/download/v1.18.2/qdrant-x86_64-pc-windows-msvc.zip",
+      "sizeBytes": 28772797,
+      "entry": "qdrant.exe",
+      "homepage": "https://qdrant.tech",
+      "sha256": "b2b262cba6f78cf4fa794ae78d73a8f70a221c93c76c75ac8fd6fe95d809b142",
+      "defaultPort": 6333,
+      "run": {
+        "args": [
+          "--config-path",
+          "{etc}/config.yaml",
+          "--disable-telemetry"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 20,
+        "initDirs": [
+          "storage"
+        ],
+        "configFile": "config.yaml",
+        "configTemplate": "log_level: INFO\nservice:\n  host: 127.0.0.1\n  http_port: {port}\n  grpc_port: {port+1}\nstorage:\n  storage_path: {data}/storage\ntelemetry_disabled: true\n"
+      }
+    },
+    {
+      "id": "k6",
+      "version": "1.8.1",
+      "category": "tool",
+      "displayName": "k6 1.8.1",
+      "description": "负载测试工具（脚本化的压测 CLI）",
+      "homepage": "https://k6.io",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/grafana/k6/releases/download/v1.8.1/k6-v1.8.1-windows-amd64.zip",
+      "sha256": "2a566358ec0fbd9afbf906904637e31dc5591c9574bf662772754fbe98a0a728",
+      "sizeBytes": 33432027,
+      "entry": "k6-v1.8.1-windows-amd64/k6.exe"
+    },
+    {
+      "id": "k6",
+      "version": "2.2.0",
+      "category": "tool",
+      "displayName": "k6 2.2.0",
+      "description": "负载测试工具（脚本化的压测 CLI）",
+      "homepage": "https://k6.io",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/grafana/k6/releases/download/v2.2.0/k6-v2.2.0-windows-amd64.zip",
+      "sha256": "ceb2b1e1cf9dbe1303c6c33ec83ffda86dda5c610b4def92064d3c7ebae8d9f4",
+      "sizeBytes": 31362450,
+      "entry": "k6-v2.2.0-windows-amd64/k6.exe"
+    },
+    {
+      "id": "k6",
+      "version": "2.1.0",
+      "category": "tool",
+      "displayName": "k6 2.1.0",
+      "description": "负载测试工具（脚本化的压测 CLI）",
+      "homepage": "https://k6.io",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/grafana/k6/releases/download/v2.1.0/k6-v2.1.0-windows-amd64.zip",
+      "sha256": "185ca503ead8f0348daa79c002469e5eb324473c39452f29b5f70b1c1b4c8503",
+      "sizeBytes": 30613429,
+      "entry": "k6-v2.1.0-windows-amd64/k6.exe"
+    },
+    {
+      "id": "redis",
+      "version": "5.0.10",
+      "category": "cache",
+      "displayName": "Redis 5.0.10",
+      "description": "内存 KV 缓存（Windows 移植版），开发模式免密",
+      "homepage": "https://github.com/tporadowski/redis",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/tporadowski/redis/releases/download/v5.0.10/Redis-x64-5.0.10.zip",
+      "sha256": "f0fa5b8101b286000a9d2b05d300cd0d702b4197a96cdabe6c9d9f859de44566",
+      "sizeBytes": 15067193,
+      "entry": "redis-server.exe",
+      "defaultPort": 26379,
+      "run": {
+        "args": [
+          "{etc}/redis.conf"
+        ],
+        "singleInstance": true,
+        "dataDir": "redis"
+      }
+    },
+    {
+      "id": "mariadb",
+      "version": "11.4.8",
+      "category": "database",
+      "displayName": "MariaDB 11.4.8",
+      "description": "MySQL 兼容的关系型数据库（首次启动自动初始化）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://archive.mariadb.org/mariadb-11.4.8/winx64-packages/mariadb-11.4.8-winx64.zip",
+      "sizeBytes": 92533641,
+      "entry": "mariadb-11.4.8-winx64/bin/mysqld.exe",
+      "homepage": "https://mariadb.org",
+      "sha256": "ed86e93157af46317bb49161451c2ec258498a6fa8e68ca821ef1d780d855e6b",
+      "defaultPort": 3306,
+      "run": {
+        "args": [
+          "--defaults-file={etc}/my.ini"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 40,
+        "configFile": "my.ini",
+        "configTemplate": "[mysqld]\nbasedir={root}/..\ndatadir={data}\nport={port}\ncharacter-set-server=utf8mb4\ncollation-server=utf8mb4_unicode_ci\n\n[client]\nport={port}\ndefault-character-set=utf8mb4\n",
+        "initBin": "mariadb-install-db.exe",
+        "initArgs": [
+          "--datadir={data}",
+          "--service=MariaDB"
+        ],
+        "initDirs": [
+          "data"
+        ]
+      }
+    },
+    {
+      "id": "mariadb",
+      "version": "10.11.13",
+      "category": "database",
+      "displayName": "MariaDB 10.11.13",
+      "description": "MySQL 兼容的关系型数据库（首次启动自动初始化）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://archive.mariadb.org/mariadb-10.11.13/winx64-packages/mariadb-10.11.13-winx64.zip",
+      "sizeBytes": 90975767,
+      "entry": "mariadb-10.11.13-winx64/bin/mysqld.exe",
+      "homepage": "https://mariadb.org",
+      "sha256": "33b657907c90057816e083c8c1bd6898d170a10539fa8520d011e84d3c2c0ee9",
+      "defaultPort": 3306,
+      "run": {
+        "args": [
+          "--defaults-file={etc}/my.ini"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 40,
+        "configFile": "my.ini",
+        "configTemplate": "[mysqld]\nbasedir={root}/..\ndatadir={data}\nport={port}\ncharacter-set-server=utf8mb4\ncollation-server=utf8mb4_unicode_ci\n\n[client]\nport={port}\ndefault-character-set=utf8mb4\n",
+        "initBin": "mariadb-install-db.exe",
+        "initArgs": [
+          "--datadir={data}",
+          "--service=MariaDB"
+        ],
+        "initDirs": [
+          "data"
+        ]
+      }
+    },
+    {
+      "id": "mailpit",
+      "version": "v1.31.2",
+      "category": "mail",
+      "displayName": "Mailpit vv1.31.2",
+      "description": "本地邮件捕获（SMTP + Web UI，开发期收信调试）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/axllent/mailpit/releases/download/v1.31.2/mailpit-windows-amd64.zip",
+      "sizeBytes": 10479883,
+      "entry": "mailpit.exe",
+      "homepage": "https://mailpit.axllent.org",
+      "sha256": "42c20e5c3254125ea7489847811f10d70e39de573fe41d03a61412c87913e995",
+      "defaultPort": 8025,
+      "run": {
+        "args": [
+          "--database",
+          "{data}/mailpit.db",
+          "--listen",
+          "127.0.0.1:{port}",
+          "--smtp",
+          "127.0.0.1:{port-7000}",
+          "--disable-version-check"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 12
+      }
+    },
+    {
+      "id": "mailpit",
+      "version": "v1.31.0",
+      "category": "mail",
+      "displayName": "Mailpit vv1.31.0",
+      "description": "本地邮件捕获（SMTP + Web UI，开发期收信调试）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/axllent/mailpit/releases/download/v1.31.0/mailpit-windows-amd64.zip",
+      "sizeBytes": 10768592,
+      "entry": "mailpit.exe",
+      "homepage": "https://mailpit.axllent.org",
+      "sha256": "39b5f1b9a671a5f1738e3792e8495bef2fec8176b02ee1e22635626c5888c6e3",
+      "defaultPort": 8025,
+      "run": {
+        "args": [
+          "--database",
+          "{data}/mailpit.db",
+          "--listen",
+          "127.0.0.1:{port}",
+          "--smtp",
+          "127.0.0.1:{port-7000}",
+          "--disable-version-check"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 12
+      }
+    },
+    {
+      "id": "mailpit",
+      "version": "v1.30.7",
+      "category": "mail",
+      "displayName": "Mailpit vv1.30.7",
+      "description": "本地邮件捕获（SMTP + Web UI，开发期收信调试）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/axllent/mailpit/releases/download/v1.30.7/mailpit-windows-amd64.zip",
+      "sizeBytes": 10507924,
+      "entry": "mailpit.exe",
+      "homepage": "https://mailpit.axllent.org",
+      "sha256": "e4815d2c961a4ad024f4d942d0d286fd7b7da49c49fc7f01c565ff296bd3fdce",
+      "defaultPort": 8025,
+      "run": {
+        "args": [
+          "--database",
+          "{data}/mailpit.db",
+          "--listen",
+          "127.0.0.1:{port}",
+          "--smtp",
+          "127.0.0.1:{port-7000}",
+          "--disable-version-check"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 12
+      }
+    },
+    {
+      "id": "mailpit",
+      "version": "v1.30.6",
+      "category": "mail",
+      "displayName": "Mailpit vv1.30.6",
+      "description": "本地邮件捕获（SMTP + Web UI，开发期收信调试）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/axllent/mailpit/releases/download/v1.30.6/mailpit-windows-amd64.zip",
+      "sizeBytes": 10486617,
+      "entry": "mailpit.exe",
+      "homepage": "https://mailpit.axllent.org",
+      "sha256": "23a249f8f73409be67ecb48d43e3269810a9f35388db4eba0c0115c5eb1ff31a",
+      "defaultPort": 8025,
+      "run": {
+        "args": [
+          "--database",
+          "{data}/mailpit.db",
+          "--listen",
+          "127.0.0.1:{port}",
+          "--smtp",
+          "127.0.0.1:{port-7000}",
+          "--disable-version-check"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 12
+      }
+    },
+    {
+      "id": "etcd",
+      "version": "v3.6.14",
+      "category": "service-mesh",
+      "displayName": "etcd v3.6.14",
+      "description": "分布式 KV（服务注册/配置中心）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/etcd-io/etcd/releases/download/v3.6.14/etcd-v3.6.14-windows-amd64.zip",
+      "sizeBytes": 25437057,
+      "entry": "etcd-v3.6.14-windows-amd64/etcd.exe",
+      "homepage": "https://etcd.io",
+      "sha256": "117a5c7cc0315984388ccffe1f3bd0e95fc2d5663440dea61c27d3fdc0e879b2",
+      "defaultPort": 2379,
+      "run": {
+        "args": [
+          "--data-dir",
+          "{data}",
+          "--listen-client-urls",
+          "http://127.0.0.1:{port}",
+          "--advertise-client-urls",
+          "http://127.0.0.1:{port}"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 20
+      }
+    },
+    {
+      "id": "etcd",
+      "version": "v3.5.33",
+      "category": "service-mesh",
+      "displayName": "etcd v3.5.33",
+      "description": "分布式 KV（服务注册/配置中心）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/etcd-io/etcd/releases/download/v3.5.33/etcd-v3.5.33-windows-amd64.zip",
+      "sizeBytes": 23470462,
+      "entry": "etcd-v3.5.33-windows-amd64/etcd.exe",
+      "homepage": "https://etcd.io",
+      "sha256": "140d9da097297801b310739a261c06feede69a1da4d49f76829235f639de2b3f",
+      "defaultPort": 2379,
+      "run": {
+        "args": [
+          "--data-dir",
+          "{data}",
+          "--listen-client-urls",
+          "http://127.0.0.1:{port}",
+          "--advertise-client-urls",
+          "http://127.0.0.1:{port}"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 20
+      }
+    },
+    {
+      "id": "coredns",
+      "version": "1.14.6",
+      "category": "dns",
+      "displayName": "CoreDNS 1.14.6",
+      "description": "DNS 服务器（本地域名解析，替代 hosts 编辑）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/coredns/coredns/releases/download/v1.14.6/coredns_1.14.6_windows_amd64.zip",
+      "sizeBytes": 22918413,
+      "entry": "coredns.exe",
+      "homepage": "https://coredns.io",
+      "sha256": "b2b53b72315355f3f1e9c36204fd9c0833019ec42ec893fff1116d9a99bc3165",
+      "defaultPort": 5353,
+      "run": {
+        "args": [
+          "-conf",
+          "{etc}/Corefile",
+          "-dns.port",
+          "{port}"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 12,
+        "configFile": "Corefile",
+        "configTemplate": ".:{port} {\n    hosts {\n        127.0.0.1 localhost\n        fallthrough\n    }\n    forward . 8.8.8.8 1.1.1.1\n    log\n    errors\n}\n"
+      }
+    },
+    {
+      "id": "coredns",
+      "version": "1.14.5",
+      "category": "dns",
+      "displayName": "CoreDNS 1.14.5",
+      "description": "DNS 服务器（本地域名解析，替代 hosts 编辑）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/coredns/coredns/releases/download/v1.14.5/coredns_1.14.5_windows_amd64.zip",
+      "sizeBytes": 22925923,
+      "entry": "coredns.exe",
+      "homepage": "https://coredns.io",
+      "sha256": "51f06b5a3c034b0c75b9ac7eff5c6efb282a82f81f3286ba6f380fc640c22194",
+      "defaultPort": 5353,
+      "run": {
+        "args": [
+          "-conf",
+          "{etc}/Corefile",
+          "-dns.port",
+          "{port}"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 12,
+        "configFile": "Corefile",
+        "configTemplate": ".:{port} {\n    hosts {\n        127.0.0.1 localhost\n        fallthrough\n    }\n    forward . 8.8.8.8 1.1.1.1\n    log\n    errors\n}\n"
+      }
+    },
+    {
+      "id": "coredns",
+      "version": "1.14.4",
+      "category": "dns",
+      "displayName": "CoreDNS 1.14.4",
+      "description": "DNS 服务器（本地域名解析，替代 hosts 编辑）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/coredns/coredns/releases/download/v1.14.4/coredns_1.14.4_windows_amd64.zip",
+      "sizeBytes": 22882193,
+      "entry": "coredns.exe",
+      "homepage": "https://coredns.io",
+      "sha256": "08b7d09d76cb7a5350647eeef327d3e4029cccca56673b7d52d71ee0176de56e",
+      "defaultPort": 5353,
+      "run": {
+        "args": [
+          "-conf",
+          "{etc}/Corefile",
+          "-dns.port",
+          "{port}"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 12,
+        "configFile": "Corefile",
+        "configTemplate": ".:{port} {\n    hosts {\n        127.0.0.1 localhost\n        fallthrough\n    }\n    forward . 8.8.8.8 1.1.1.1\n    log\n    errors\n}\n"
+      }
+    },
+    {
+      "id": "roadrunner",
+      "version": "2025.1.14",
+      "category": "web-server",
+      "displayName": "RoadRunner 2025.1.14",
+      "description": "PHP 常驻应用服务器（Go 编写，协程化请求处理）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/roadrunner-server/roadrunner/releases/download/v2025.1.14/roadrunner-2025.1.14-windows-amd64.zip",
+      "sizeBytes": 20317323,
+      "entry": "roadrunner-2025.1.14-windows-amd64/rr.exe",
+      "homepage": "https://roadrunner.dev",
+      "sha256": "ce8f8925a38a8d19cb38a7dce9b0e2ae70b75fd360aaa18ce15d1fee6d36f58d",
+      "defaultPort": 8080,
+      "depends": [
+        "php"
+      ]
+    },
+    {
+      "id": "roadrunner",
+      "version": "2025.1.13",
+      "category": "web-server",
+      "displayName": "RoadRunner 2025.1.13",
+      "description": "PHP 常驻应用服务器（Go 编写，协程化请求处理）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/roadrunner-server/roadrunner/releases/download/v2025.1.13/roadrunner-2025.1.13-windows-amd64.zip",
+      "sizeBytes": 19965499,
+      "entry": "roadrunner-2025.1.13-windows-amd64/rr.exe",
+      "homepage": "https://roadrunner.dev",
+      "sha256": "0511f39b6c080e1e96e85cd76c31a6b747fcc7459901504ee98058ef1d0b1579",
+      "defaultPort": 8080,
+      "depends": [
+        "php"
+      ]
+    },
+    {
+      "id": "roadrunner",
+      "version": "2025.1.12",
+      "category": "web-server",
+      "displayName": "RoadRunner 2025.1.12",
+      "description": "PHP 常驻应用服务器（Go 编写，协程化请求处理）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/roadrunner-server/roadrunner/releases/download/v2025.1.12/roadrunner-2025.1.12-windows-amd64.zip",
+      "sizeBytes": 19780217,
+      "entry": "roadrunner-2025.1.12-windows-amd64/rr.exe",
+      "homepage": "https://roadrunner.dev",
+      "sha256": "e09c68982c40d9bfd577521afc8d3160dba95d349916e1eb2d5b68e69be5e771",
+      "defaultPort": 8080,
+      "depends": [
+        "php"
+      ]
+    },
+    {
+      "id": "deno",
+      "version": "2.9.6",
+      "category": "runtime",
+      "displayName": "Deno 2.9.6",
+      "description": "现代 JS/TS 运行时（内置工具链，无需构建步骤）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/denoland/deno/releases/download/v2.9.6/deno-x86_64-pc-windows-msvc.zip",
+      "sizeBytes": 42601047,
+      "entry": "deno.exe",
+      "homepage": "https://deno.com",
+      "sha256": "15e5300b0ba3c3695a7621d90160a746ec9e710228cee639afa9d580f6e3cd11"
+    },
+    {
+      "id": "deno",
+      "version": "2.9.5",
+      "category": "runtime",
+      "displayName": "Deno 2.9.5",
+      "description": "现代 JS/TS 运行时（内置工具链，无需构建步骤）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-pc-windows-msvc.zip",
+      "sizeBytes": 42691248,
+      "entry": "deno.exe",
+      "homepage": "https://deno.com",
+      "sha256": "171efab55ac6b9881fd53ee4c20f8bf3bb1340ffc618483746909014db12216a"
+    },
+    {
+      "id": "deno",
+      "version": "2.9.4",
+      "category": "runtime",
+      "displayName": "Deno 2.9.4",
+      "description": "现代 JS/TS 运行时（内置工具链，无需构建步骤）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/denoland/deno/releases/download/v2.9.4/deno-x86_64-pc-windows-msvc.zip",
+      "sizeBytes": 42599274,
+      "entry": "deno.exe",
+      "homepage": "https://deno.com",
+      "sha256": "68ed08b05c56cf887e9aa509947dc3f468f7e12f47a13e5c1abd51d46d1453ef"
+    },
+    {
+      "id": "bun",
+      "version": "1.4.1",
+      "category": "runtime",
+      "displayName": "Bun 1.4.1",
+      "description": "一体化 JS/TS 运行时 + 包管理器（极快）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.1/bun-windows-x64.zip",
+      "sizeBytes": 39811807,
+      "entry": "bun-windows-x64/bun.exe",
+      "homepage": "https://bun.sh",
+      "sha256": "52b1f3028b01f43d37fefdf669d034a1ee2e0d96c56bb13c393bdaf169b1af84"
+    },
+    {
+      "id": "bun",
+      "version": "1.4.0",
+      "category": "runtime",
+      "displayName": "Bun 1.4.0",
+      "description": "一体化 JS/TS 运行时 + 包管理器（极快）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-windows-x64.zip",
+      "sizeBytes": 40060247,
+      "entry": "bun-windows-x64/bun.exe",
+      "homepage": "https://bun.sh",
+      "sha256": "e6f093d39da486b20262ca8cdd5ed6a9e8bc9c2f275b78e6d3a0c5b28cc95901"
+    },
+    {
+      "id": "ollama",
+      "version": "0.34.1",
+      "category": "ai",
+      "displayName": "Ollama 0.34.1",
+      "description": "本地大模型运行时（一条命令拉起开源模型）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/ollama/ollama/releases/download/v0.34.1/ollama-windows-amd64.zip",
+      "sizeBytes": 1465014498,
+      "entry": "ollama.exe",
+      "homepage": "https://ollama.com",
+      "sha256": "428c94622a04764b318ddf13a061898edf69e32ffa896f638ed6015fd3f33288",
+      "defaultPort": 11434,
+      "run": {
+        "args": [
+          "serve"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 25,
+        "env": {
+          "OLLAMA_MODELS": "{data}/models",
+          "OLLAMA_HOST": "127.0.0.1:{port}"
+        },
+        "initDirs": [
+          "models"
+        ]
+      }
+    },
+    {
+      "id": "ollama",
+      "version": "0.34.0",
+      "category": "ai",
+      "displayName": "Ollama 0.34.0",
+      "description": "本地大模型运行时（一条命令拉起开源模型）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/ollama/ollama/releases/download/v0.34.0/ollama-windows-amd64.zip",
+      "sizeBytes": 1469375054,
+      "entry": "ollama.exe",
+      "homepage": "https://ollama.com",
+      "sha256": "a7dd1b174f39d3d1b8a25d4cbc86045d0e190b17187bfdcbe2f2ee3b5a11470e",
+      "defaultPort": 11434,
+      "run": {
+        "args": [
+          "serve"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 25,
+        "env": {
+          "OLLAMA_MODELS": "{data}/models",
+          "OLLAMA_HOST": "127.0.0.1:{port}"
+        },
+        "initDirs": [
+          "models"
+        ]
+      }
+    },
+    {
+      "id": "ollama",
+      "version": "0.33.3",
+      "category": "ai",
+      "displayName": "Ollama 0.33.3",
+      "description": "本地大模型运行时（一条命令拉起开源模型）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/ollama/ollama/releases/download/v0.33.3/ollama-windows-amd64.zip",
+      "sizeBytes": 1469175900,
+      "entry": "ollama.exe",
+      "homepage": "https://ollama.com",
+      "sha256": "52cb36a62e7e501f61514f60212dec7117b6c098811357585e02fffe32d2fcd7",
+      "defaultPort": 11434,
+      "run": {
+        "args": [
+          "serve"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 25,
+        "env": {
+          "OLLAMA_MODELS": "{data}/models",
+          "OLLAMA_HOST": "127.0.0.1:{port}"
+        },
+        "initDirs": [
+          "models"
+        ]
+      }
+    },
+    {
+      "id": "cloudflared",
+      "version": "2026.9.0",
+      "category": "tunnel",
+      "displayName": "cloudflared 2026.9.0",
+      "description": "Cloudflare 隧道（把本地服务暴露到公网，免公网 IP）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/cloudflare/cloudflared/releases/download/2026.9.0/cloudflared-windows-amd64.exe",
+      "sizeBytes": 54967280,
+      "entry": "cloudflared-windows-amd64.exe",
+      "homepage": "https://developers.cloudflare.com/cloudflare-one/",
+      "sha256": "547057326266f0e1c7d50d102dbd22ff283d740c055bd61e94f10e2c606f89af",
+      "run": {
+        "args": [
+          "tunnel",
+          "--no-autoupdate",
+          "--url",
+          "http://localhost:{httpPort}"
+        ],
+        "health": "process",
+        "healthTimeoutSec": 25
+      }
+    },
+    {
+      "id": "cloudflared",
+      "version": "2026.8.3",
+      "category": "tunnel",
+      "displayName": "cloudflared 2026.8.3",
+      "description": "Cloudflare 隧道（把本地服务暴露到公网，免公网 IP）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/cloudflare/cloudflared/releases/download/2026.8.3/cloudflared-windows-amd64.exe",
+      "sizeBytes": 54841128,
+      "entry": "cloudflared-windows-amd64.exe",
+      "homepage": "https://developers.cloudflare.com/cloudflare-one/",
+      "sha256": "83e726ed18ea78c5ad5213c4c3a3a27051393950d2bc8ed4de69bec12d14eaae",
+      "run": {
+        "args": [
+          "tunnel",
+          "--no-autoupdate",
+          "--url",
+          "http://localhost:{httpPort}"
+        ],
+        "health": "process",
+        "healthTimeoutSec": 25
+      }
+    },
+    {
+      "id": "cloudflared",
+      "version": "2026.8.2",
+      "category": "tunnel",
+      "displayName": "cloudflared 2026.8.2",
+      "description": "Cloudflare 隧道（把本地服务暴露到公网，免公网 IP）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/cloudflare/cloudflared/releases/download/2026.8.2/cloudflared-windows-amd64.exe",
+      "sizeBytes": 54893480,
+      "entry": "cloudflared-windows-amd64.exe",
+      "homepage": "https://developers.cloudflare.com/cloudflare-one/",
+      "sha256": "c29eee2b121f5436a642eed69fd9767da7e7b8c510fa50aaa130337f931357b5",
+      "run": {
+        "args": [
+          "tunnel",
+          "--no-autoupdate",
+          "--url",
+          "http://localhost:{httpPort}"
+        ],
+        "health": "process",
+        "healthTimeoutSec": 25
+      }
+    },
+    {
+      "id": "cloudflared",
+      "version": "2026.8.1",
+      "category": "tunnel",
+      "displayName": "cloudflared 2026.8.1",
+      "description": "Cloudflare 隧道（把本地服务暴露到公网，免公网 IP）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/cloudflare/cloudflared/releases/download/2026.8.1/cloudflared-windows-amd64.exe",
+      "sizeBytes": 54903800,
+      "entry": "cloudflared-windows-amd64.exe",
+      "homepage": "https://developers.cloudflare.com/cloudflare-one/",
+      "sha256": "8f1d6f87b8756dbf37064b16e2c8251b69d816305e4f4373e1b80efb28d13b83",
+      "run": {
+        "args": [
+          "tunnel",
+          "--no-autoupdate",
+          "--url",
+          "http://localhost:{httpPort}"
+        ],
+        "health": "process",
+        "healthTimeoutSec": 25
+      }
+    },
+    {
+      "id": "minio",
+      "version": "RELEASE.2025-07-23T15-54-02Z",
+      "category": "object-storage",
+      "displayName": "MinIO RELEASE.2025-07-23T15-54-02Z",
+      "description": "S3 兼容对象存储（本地开发自建图床/附件服务）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/minio/minio/releases/download/RELEASE.2025-07-23T15-54-02Z/minio.windows-amd64.RELEASE.2025-07-23T15-54-02Z.exe",
+      "sizeBytes": 112905216,
+      "entry": "minio.windows-amd64.RELEASE.2025-07-23T15-54-02Z.exe",
+      "homepage": "https://min.io",
+      "sha256": "4c7c7b6e52638fbe25997a5e4dbb735c44537397ccc7c503c1cb0d02bb61b517",
+      "defaultPort": 9000,
+      "run": {
+        "args": [
+          "server",
+          "{data}/data",
+          "--address",
+          "127.0.0.1:{port}",
+          "--console-address",
+          "127.0.0.1:{port+1}"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 15,
+        "initDirs": [
+          "data"
+        ],
+        "env": {
+          "MINIO_ROOT_USER": "minioadmin",
+          "MINIO_ROOT_PASSWORD": "minioadmin"
+        }
+      }
+    },
+    {
+      "id": "minio",
+      "version": "RELEASE.2025-07-18T21-56-31Z",
+      "category": "object-storage",
+      "displayName": "MinIO RELEASE.2025-07-18T21-56-31Z",
+      "description": "S3 兼容对象存储（本地开发自建图床/附件服务）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/minio/minio/releases/download/RELEASE.2025-07-18T21-56-31Z/minio.windows-amd64.RELEASE.2025-07-18T21-56-31Z.exe",
+      "sizeBytes": 112904704,
+      "entry": "minio.windows-amd64.RELEASE.2025-07-18T21-56-31Z.exe",
+      "homepage": "https://min.io",
+      "sha256": "a01888c3d8109558220c8391bebe771df1a89f60d2a4e5c4ff40d621ddb98930",
+      "defaultPort": 9000,
+      "run": {
+        "args": [
+          "server",
+          "{data}/data",
+          "--address",
+          "127.0.0.1:{port}",
+          "--console-address",
+          "127.0.0.1:{port+1}"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 15,
+        "initDirs": [
+          "data"
+        ],
+        "env": {
+          "MINIO_ROOT_USER": "minioadmin",
+          "MINIO_ROOT_PASSWORD": "minioadmin"
+        }
+      }
+    },
+    {
+      "id": "minio",
+      "version": "RELEASE.2025-06-13T11-33-47Z",
+      "category": "object-storage",
+      "displayName": "MinIO RELEASE.2025-06-13T11-33-47Z",
+      "description": "S3 兼容对象存储（本地开发自建图床/附件服务）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/minio/minio/releases/download/RELEASE.2025-06-13T11-33-47Z/minio.windows-amd64.RELEASE.2025-06-13T11-33-47Z.exe",
+      "sizeBytes": 112886272,
+      "entry": "minio.windows-amd64.RELEASE.2025-06-13T11-33-47Z.exe",
+      "homepage": "https://min.io",
+      "sha256": "ef7f328339d931adbc9c06155bce92102b12be455c63f38235b7af86db4d0163",
+      "defaultPort": 9000,
+      "run": {
+        "args": [
+          "server",
+          "{data}/data",
+          "--address",
+          "127.0.0.1:{port}",
+          "--console-address",
+          "127.0.0.1:{port+1}"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 15,
+        "initDirs": [
+          "data"
+        ],
+        "env": {
+          "MINIO_ROOT_USER": "minioadmin",
+          "MINIO_ROOT_PASSWORD": "minioadmin"
+        }
+      }
+    },
+    {
+      "id": "elasticsearch",
+      "version": "9.4.7",
+      "category": "search",
+      "displayName": "Elasticsearch 9.4.7",
+      "description": "分布式搜索与分析引擎（生产级，吃内存）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-9.4.7-windows-x86_64.zip",
+      "sizeBytes": 654010377,
+      "entry": "elasticsearch-9.4.7/bin/elasticsearch.bat",
+      "homepage": "https://www.elastic.co",
+      "sha256": "9471063c66ff27b4983ca03d97a15d47d1b2d549186661f0c52aede14ee78554",
+      "defaultPort": 9200,
+      "run": {
+        "args": [
+          "-Epath.data={data}/es-data",
+          "-Epath.logs={data}/es-logs",
+          "-Ehttp.port={port}",
+          "-Expack.security.enabled=false"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 90,
+        "initDirs": [
+          "es-data",
+          "es-logs"
+        ],
+        "env": {
+          "ES_TMPDIR": "{data}/tmp"
+        }
+      }
+    },
+    {
+      "id": "elasticsearch",
+      "version": "8.19.4",
+      "category": "search",
+      "displayName": "Elasticsearch 8.19.4",
+      "description": "分布式搜索与分析引擎（生产级，吃内存）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-8.19.4-windows-x86_64.zip",
+      "sizeBytes": 498564795,
+      "entry": "elasticsearch-8.19.4/bin/elasticsearch.bat",
+      "homepage": "https://www.elastic.co",
+      "sha256": "f40bdbce94f2e483b42f34248c3bc1a377ab04d7395d5cadccabfb0ce951f8ac",
+      "defaultPort": 9200,
+      "run": {
+        "args": [
+          "-Epath.data={data}/es-data",
+          "-Epath.logs={data}/es-logs",
+          "-Ehttp.port={port}",
+          "-Expack.security.enabled=false"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 90,
+        "initDirs": [
+          "es-data",
+          "es-logs"
+        ],
+        "env": {
+          "ES_TMPDIR": "{data}/tmp"
+        }
+      }
+    },
+    {
+      "id": "neo4j",
+      "version": "2025.09.0",
+      "category": "database",
+      "displayName": "Neo4j 2025.09.0",
+      "description": "图数据库（Cypher 查询，适合关系型建模不便的场景）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://dist.neo4j.org/neo4j-community-2025.09.0-windows.zip",
+      "sizeBytes": 202808561,
+      "entry": "neo4j-community-2025.09.0/bin/neo4j.bat",
+      "homepage": "https://neo4j.com",
+      "sha256": "849daf891a6aec4f40777fb4e26cd85c659ae19208bd4842d8dde3e7657f5692",
+      "defaultPort": 7474,
+      "depends": [
+        "temurin-jdk21"
+      ],
+      "run": {
+        "args": [
+          "console"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 60,
+        "requires": [
+          "temurin-jdk21"
+        ],
+        "cwd": "{root}"
+      }
+    },
+    {
+      "id": "neo4j",
+      "version": "5.25.1",
+      "category": "database",
+      "displayName": "Neo4j 5.25.1",
+      "description": "图数据库（Cypher 查询，适合关系型建模不便的场景）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://dist.neo4j.org/neo4j-community-5.25.1-windows.zip",
+      "sizeBytes": 140052138,
+      "entry": "neo4j-community-5.25.1/bin/neo4j.bat",
+      "homepage": "https://neo4j.com",
+      "sha256": "6c3a6c8a1b34a21fc034ebc0003ce8d6b6877f5017249ae60d934a91cbbfaa3d",
+      "defaultPort": 7474,
+      "depends": [
+        "temurin-jdk21"
+      ],
+      "run": {
+        "args": [
+          "console"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 60,
+        "requires": [
+          "temurin-jdk21"
+        ],
+        "cwd": "{root}"
+      }
+    },
+    {
+      "id": "gradle",
+      "version": "9.6.1",
+      "category": "runtime",
+      "displayName": "Gradle 9.6.1",
+      "description": "JVM 构建工具（多版本并存，项目各自 pin）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://services.gradle.org/distributions/gradle-9.6.1-bin.zip",
+      "sizeBytes": 140682664,
+      "entry": "gradle-9.6.1/bin/gradle.bat",
+      "homepage": "https://gradle.org",
+      "sha256": "9c0f7faeeb306cb14e4279a3e084ca6b596894089a0638e68a07c945a32c9e14",
+      "depends": [
+        "temurin-jdk21"
+      ]
+    },
+    {
+      "id": "gradle",
+      "version": "8.14.3",
+      "category": "runtime",
+      "displayName": "Gradle 8.14.3",
+      "description": "JVM 构建工具（多版本并存，项目各自 pin）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://services.gradle.org/distributions/gradle-8.14.3-bin.zip",
+      "sizeBytes": 137393837,
+      "entry": "gradle-8.14.3/bin/gradle.bat",
+      "homepage": "https://gradle.org",
+      "sha256": "bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531",
+      "depends": [
+        "temurin-jdk21"
+      ]
+    },
+    {
+      "id": "memcached",
+      "version": "1.6.7",
+      "category": "cache",
+      "displayName": "Memcached 1.6.7",
+      "description": "高性能内存对象缓存（Windows 第三方构建）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/jefyt/memcached-windows/releases/download/1.6.7_mingw/memcached-1.6.7-win64-mingw.zip",
+      "sizeBytes": 5686959,
+      "entry": "memcached-1.6.7-win64-mingw/bin/memcached.exe",
+      "homepage": "https://memcached.org",
+      "sha256": "9bc481588e4999ab97394731cae6c5dc7997d40742f728c2a514641088a041a5",
+      "defaultPort": 11211,
+      "run": {
+        "args": [
+          "-p",
+          "{port}",
+          "-l",
+          "127.0.0.1",
+          "-m",
+          "512"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 10
+      }
+    },
+    {
+      "id": "rabbitmq",
+      "version": "4.3.5",
+      "category": "cache",
+      "displayName": "RabbitMQ 4.3.5",
+      "description": "消息队列（AMQP，需 Erlang 运行时）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/rabbitmq/rabbitmq-server/releases/download/v4.3.5/rabbitmq-server-windows-4.3.5.zip",
+      "sizeBytes": 70462079,
+      "entry": "rabbitmq_server-4.3.5/sbin/rabbitmq-server.bat",
+      "homepage": "https://www.rabbitmq.com",
+      "sha256": "462e626e276f1d670c0c45e96b36298e20c13d3efdd0f3f35e879e9868b4c9ab",
+      "defaultPort": 5672,
+      "depends": [
+        "erlang"
+      ],
+      "run": {
+        "args": [],
+        "health": "tcp",
+        "healthTimeoutSec": 40,
+        "requires": [
+          "erlang"
+        ],
+        "env": {
+          "RABBITMQ_BASE": "{data}",
+          "RABBITMQ_NODE_PORT": "{port}"
+        }
+      }
+    },
+    {
+      "id": "rabbitmq",
+      "version": "4.3.4",
+      "category": "cache",
+      "displayName": "RabbitMQ 4.3.4",
+      "description": "消息队列（AMQP，需 Erlang 运行时）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/rabbitmq/rabbitmq-server/releases/download/v4.3.4/rabbitmq-server-windows-4.3.4.zip",
+      "sizeBytes": 70389059,
+      "entry": "rabbitmq_server-4.3.4/sbin/rabbitmq-server.bat",
+      "homepage": "https://www.rabbitmq.com",
+      "sha256": "45f0076637fb2d5920c5d12638946222d9352259643a128073815aa9159878c9",
+      "defaultPort": 5672,
+      "depends": [
+        "erlang"
+      ],
+      "run": {
+        "args": [],
+        "health": "tcp",
+        "healthTimeoutSec": 40,
+        "requires": [
+          "erlang"
+        ],
+        "env": {
+          "RABBITMQ_BASE": "{data}",
+          "RABBITMQ_NODE_PORT": "{port}"
+        }
+      }
+    },
+    {
+      "id": "rabbitmq",
+      "version": "4.2.9",
+      "category": "cache",
+      "displayName": "RabbitMQ 4.2.9",
+      "description": "消息队列（AMQP，需 Erlang 运行时）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/rabbitmq/rabbitmq-server/releases/download/v4.2.9/rabbitmq-server-windows-4.2.9.zip",
+      "sizeBytes": 70367721,
+      "entry": "rabbitmq_server-4.2.9/sbin/rabbitmq-server.bat",
+      "homepage": "https://www.rabbitmq.com",
+      "sha256": "fc063ee718c4995b7c4d3bb4964a9f2bb0f0a74020ed4d4c52a083eb8d26d73d",
+      "defaultPort": 5672,
+      "depends": [
+        "erlang"
+      ],
+      "run": {
+        "args": [],
+        "health": "tcp",
+        "healthTimeoutSec": 40,
+        "requires": [
+          "erlang"
+        ],
+        "env": {
+          "RABBITMQ_BASE": "{data}",
+          "RABBITMQ_NODE_PORT": "{port}"
+        }
+      }
+    },
+    {
+      "id": "consul",
+      "version": "2.0.3",
+      "category": "service-mesh",
+      "displayName": "Consul 2.0.3",
+      "description": "服务发现与配置中心",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://releases.hashicorp.com/consul/2.0.3/consul_2.0.3_windows_amd64.zip",
+      "sizeBytes": 72618131,
+      "entry": "consul.exe",
+      "homepage": "https://developer.hashicorp.com/consul",
+      "sha256": "b7c642e81fd2724f207e4cf2aec3d145302556be31b0b24bd17d3d5507033bca",
+      "defaultPort": 8500,
+      "run": {
+        "args": [
+          "agent",
+          "-dev",
+          "-client",
+          "127.0.0.1",
+          "-http-port",
+          "{port}"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 20
+      }
+    },
+    {
+      "id": "consul",
+      "version": "2.0.2",
+      "category": "service-mesh",
+      "displayName": "Consul 2.0.2",
+      "description": "服务发现与配置中心",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://releases.hashicorp.com/consul/2.0.2/consul_2.0.2_windows_amd64.zip",
+      "sizeBytes": 72544597,
+      "entry": "consul.exe",
+      "homepage": "https://developer.hashicorp.com/consul",
+      "sha256": "a4d614026c67a460602727d75ca531bf410f5d31f44fc2d7db6582b00505da46",
+      "defaultPort": 8500,
+      "run": {
+        "args": [
+          "agent",
+          "-dev",
+          "-client",
+          "127.0.0.1",
+          "-http-port",
+          "{port}"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 20
+      }
+    },
+    {
+      "id": "frankenphp",
+      "version": "1.12.6",
+      "category": "web-server",
+      "displayName": "FrankenPHP 1.12.6",
+      "description": "Go 编写的现代 PHP 应用服务器（内置 Caddy）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/php/frankenphp/releases/download/v1.12.6/frankenphp-windows-x86_64.zip",
+      "sizeBytes": 59407166,
+      "entry": "frankenphp.exe",
+      "homepage": "https://frankenphp.dev",
+      "sha256": "58957bbeebc47feba977064986689738bcfc0cddaeb4df37c2035435d293a8fe",
+      "defaultPort": 8080,
+      "run": {
+        "args": [
+          "php-server",
+          "--listen",
+          "127.0.0.1:{port}",
+          "--root",
+          "{data}/www"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 15,
+        "initDirs": [
+          "www"
+        ],
+        "env": {
+          "SERVER_NAME": "http://"
+        }
+      }
+    },
+    {
+      "id": "frankenphp",
+      "version": "1.12.5",
+      "category": "web-server",
+      "displayName": "FrankenPHP 1.12.5",
+      "description": "Go 编写的现代 PHP 应用服务器（内置 Caddy）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/php/frankenphp/releases/download/v1.12.5/frankenphp-windows-x86_64.zip",
+      "sizeBytes": 59153480,
+      "entry": "frankenphp.exe",
+      "homepage": "https://frankenphp.dev",
+      "sha256": "a02128469b752aaf48ccf974f2b2da91975a77e64f67468cdfcd1650571a5ccb",
+      "defaultPort": 8080,
+      "run": {
+        "args": [
+          "php-server",
+          "--listen",
+          "127.0.0.1:{port}",
+          "--root",
+          "{data}/www"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 15,
+        "initDirs": [
+          "www"
+        ],
+        "env": {
+          "SERVER_NAME": "http://"
+        }
+      }
+    },
+    {
+      "id": "frankenphp",
+      "version": "1.12.4",
+      "category": "web-server",
+      "displayName": "FrankenPHP 1.12.4",
+      "description": "Go 编写的现代 PHP 应用服务器（内置 Caddy）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/php/frankenphp/releases/download/v1.12.4/frankenphp-windows-x86_64.zip",
+      "sizeBytes": 58938524,
+      "entry": "frankenphp.exe",
+      "homepage": "https://frankenphp.dev",
+      "sha256": "9fcf8839b1ba8fe309ab8d9b051396e4c7436ee8c62f7b319b06eafa8c742908",
+      "defaultPort": 8080,
+      "run": {
+        "args": [
+          "php-server",
+          "--listen",
+          "127.0.0.1:{port}",
+          "--root",
+          "{data}/www"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 15,
+        "initDirs": [
+          "www"
+        ],
+        "env": {
+          "SERVER_NAME": "http://"
+        }
+      }
+    },
+    {
+      "id": "erlang",
+      "version": "29.0.6",
+      "category": "runtime",
+      "displayName": "Erlang/OTP 29.0.6",
+      "description": "Erlang 运行时（RabbitMQ 的前置依赖）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/erlang/otp/releases/download/OTP-29.0.6/otp_win64_29.0.6.zip",
+      "sizeBytes": 187137781,
+      "entry": "bin/erl.exe",
+      "homepage": "https://www.erlang.org",
+      "sha256": "c13b374db73c2d7d757eb3317183d74f872354e5746976f18bbd5de46bc95d51"
+    },
+    {
+      "id": "erlang",
+      "version": "28.5.0.6",
+      "category": "runtime",
+      "displayName": "Erlang/OTP 28.5.0.6",
+      "description": "Erlang 运行时（RabbitMQ 的前置依赖）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/erlang/otp/releases/download/OTP-28.5.0.6/otp_win64_28.5.0.6.zip",
+      "sizeBytes": 184978509,
+      "entry": "bin/erl.exe",
+      "homepage": "https://www.erlang.org",
+      "sha256": "eb8a9a742f668753f8647afae8233a398baa0172a962b73d0ba0982ef590f0c2"
+    },
+    {
+      "id": "meilisearch",
+      "version": "v1.53.1",
+      "category": "search",
+      "displayName": "Meilisearch vv1.53.1",
+      "description": "轻量全文搜索引擎（开箱即用，支持中文需配置分词）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/meilisearch/meilisearch/releases/download/v1.53.1/meilisearch-windows-amd64.exe",
+      "sizeBytes": 128611840,
+      "entry": "meilisearch-windows-amd64.exe",
+      "homepage": "https://meilisearch.com",
+      "sha256": "1c242ec430f222346c26eb0971bea5d70f748d5ed10cd7b1c40fb00df51aca86",
+      "defaultPort": 7700,
+      "run": {
+        "args": [
+          "--db-path",
+          "{data}",
+          "--http-addr",
+          "127.0.0.1:{port}",
+          "--no-analytics"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 15
+      }
+    },
+    {
+      "id": "meilisearch",
+      "version": "v1.53.0",
+      "category": "search",
+      "displayName": "Meilisearch vv1.53.0",
+      "description": "轻量全文搜索引擎（开箱即用，支持中文需配置分词）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/meilisearch/meilisearch/releases/download/v1.53.0/meilisearch-windows-amd64.exe",
+      "sizeBytes": 128627712,
+      "entry": "meilisearch-windows-amd64.exe",
+      "homepage": "https://meilisearch.com",
+      "sha256": "9a13d316148cbd42608999d6ea0759c8314ab728063a5bfd4a21065d5c23d7d4",
+      "defaultPort": 7700,
+      "run": {
+        "args": [
+          "--db-path",
+          "{data}",
+          "--http-addr",
+          "127.0.0.1:{port}",
+          "--no-analytics"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 15
+      }
+    },
+    {
+      "id": "meilisearch",
+      "version": "v1.52.3",
+      "category": "search",
+      "displayName": "Meilisearch vv1.52.3",
+      "description": "轻量全文搜索引擎（开箱即用，支持中文需配置分词）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/meilisearch/meilisearch/releases/download/v1.52.3/meilisearch-windows-amd64.exe",
+      "sizeBytes": 128350720,
+      "entry": "meilisearch-windows-amd64.exe",
+      "homepage": "https://meilisearch.com",
+      "sha256": "6322db3b924c43c70968fa9ca28fcb0085be5dabe932949bf2ff5ea3ffbf732f",
+      "defaultPort": 7700,
+      "run": {
+        "args": [
+          "--db-path",
+          "{data}",
+          "--http-addr",
+          "127.0.0.1:{port}",
+          "--no-analytics"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 15
+      }
+    },
+    {
+      "id": "meilisearch",
+      "version": "v1.52.2",
+      "category": "search",
+      "displayName": "Meilisearch vv1.52.2",
+      "description": "轻量全文搜索引擎（开箱即用，支持中文需配置分词）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/meilisearch/meilisearch/releases/download/v1.52.2/meilisearch-windows-amd64.exe",
+      "sizeBytes": 128350208,
+      "entry": "meilisearch-windows-amd64.exe",
+      "homepage": "https://meilisearch.com",
+      "sha256": "9efb0f785841174448c70c52deccce884fe5d5e598c6a33df99cf6b4fad6fca5",
+      "defaultPort": 7700,
+      "run": {
+        "args": [
+          "--db-path",
+          "{data}",
+          "--http-addr",
+          "127.0.0.1:{port}",
+          "--no-analytics"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 15
+      }
+    },
+    {
+      "id": "zincsearch",
+      "version": "v1.0.0-beta3",
+      "category": "search",
+      "displayName": "ZincSearch vv1.0.0-beta3",
+      "description": "轻量搜索引擎（Elasticsearch 的轻量替代）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "targz",
+      "url": "https://github.com/zincsearch/zincsearch/releases/download/v1.0.0-beta3/zincsearch_1.0.0-beta3_windows_x86_64.tar.gz",
+      "sizeBytes": 18961527,
+      "entry": "zincsearch.exe",
+      "homepage": "https://zincsearch.com",
+      "sha256": "bf7918394b7e6eb683ec46da0d71ad46115242e9e3e3ac95fef44a6c26a38fff",
+      "defaultPort": 4080,
+      "run": {
+        "args": [],
+        "health": "tcp",
+        "healthTimeoutSec": 15,
+        "env": {
+          "ZINC_FIRST_ADMIN_USER": "admin",
+          "ZINC_FIRST_ADMIN_PASSWORD": "admin",
+          "ZINC_SERVER_PORT": "{port}",
+          "ZINC_DATA_PATH": "{data}"
+        }
+      }
+    },
+    {
+      "id": "zincsearch",
+      "version": "v1.0.0-beta2",
+      "category": "search",
+      "displayName": "ZincSearch vv1.0.0-beta2",
+      "description": "轻量搜索引擎（Elasticsearch 的轻量替代）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "targz",
+      "url": "https://github.com/zincsearch/zincsearch/releases/download/v1.0.0-beta2/zincsearch_1.0.0-beta2_windows_x86_64.tar.gz",
+      "sizeBytes": 18889806,
+      "entry": "zincsearch.exe",
+      "homepage": "https://zincsearch.com",
+      "sha256": "df0f69c16d48772388fa8a80311d207465ba6777a53dbe7fbb23f64ef16a6d3d",
+      "defaultPort": 4080,
+      "run": {
+        "args": [],
+        "health": "tcp",
+        "healthTimeoutSec": 15,
+        "env": {
+          "ZINC_FIRST_ADMIN_USER": "admin",
+          "ZINC_FIRST_ADMIN_PASSWORD": "admin",
+          "ZINC_SERVER_PORT": "{port}",
+          "ZINC_DATA_PATH": "{data}"
+        }
+      }
+    },
+    {
+      "id": "zincsearch",
+      "version": "v1.0.0-beta1",
+      "category": "search",
+      "displayName": "ZincSearch vv1.0.0-beta1",
+      "description": "轻量搜索引擎（Elasticsearch 的轻量替代）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "targz",
+      "url": "https://github.com/zincsearch/zincsearch/releases/download/v1.0.0-beta1/zincsearch_1.0.0-beta1_windows_x86_64.tar.gz",
+      "sizeBytes": 29028387,
+      "entry": "zincsearch.exe",
+      "homepage": "https://zincsearch.com",
+      "sha256": "e7a280a72e88f2ae4c09fe86c77f4798b814c6871ab02bd2abe6176d0ef90cdd",
+      "defaultPort": 4080,
+      "run": {
+        "args": [],
+        "health": "tcp",
+        "healthTimeoutSec": 15,
+        "env": {
+          "ZINC_FIRST_ADMIN_USER": "admin",
+          "ZINC_FIRST_ADMIN_PASSWORD": "admin",
+          "ZINC_SERVER_PORT": "{port}",
+          "ZINC_DATA_PATH": "{data}"
+        }
+      }
+    },
+    {
+      "id": "sftpgo",
+      "version": "2.7.5",
+      "category": "ftp",
+      "displayName": "SFTPGo 2.7.5",
+      "description": "SFTP/WebDAV/FTP 文件服务器",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/drakkan/sftpgo/releases/download/v2.7.5/sftpgo_v2.7.5_windows_x86_64.exe",
+      "sizeBytes": 16790803,
+      "entry": "sftpgo_v2.7.5_windows_x86_64.exe",
+      "homepage": "https://sftpgo.com",
+      "sha256": "30077c982530de4c301b901631a5033a854a88fe28a9dcf769e84f0097beecbf",
+      "defaultPort": 2022,
+      "run": {
+        "args": [
+          "serve",
+          "--config-dir",
+          "{etc}",
+          "--log-file-path",
+          "{data}/sftpgo.log"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 20
+      }
+    },
+    {
+      "id": "sftpgo",
+      "version": "2.7.4",
+      "category": "ftp",
+      "displayName": "SFTPGo 2.7.4",
+      "description": "SFTP/WebDAV/FTP 文件服务器",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/drakkan/sftpgo/releases/download/v2.7.4/sftpgo_v2.7.4_windows_x86_64.exe",
+      "sizeBytes": 16593050,
+      "entry": "sftpgo_v2.7.4_windows_x86_64.exe",
+      "homepage": "https://sftpgo.com",
+      "sha256": "e370c000dfa39d4ca59fc1576a8666e546fe130ca1acb8dedf18bef10d59443a",
+      "defaultPort": 2022,
+      "run": {
+        "args": [
+          "serve",
+          "--config-dir",
+          "{etc}",
+          "--log-file-path",
+          "{data}/sftpgo.log"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 20
+      }
+    },
+    {
+      "id": "sftpgo",
+      "version": "2.7.3",
+      "category": "ftp",
+      "displayName": "SFTPGo 2.7.3",
+      "description": "SFTP/WebDAV/FTP 文件服务器",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/drakkan/sftpgo/releases/download/v2.7.3/sftpgo_v2.7.3_windows_x86_64.exe",
+      "sizeBytes": 16470622,
+      "entry": "sftpgo_v2.7.3_windows_x86_64.exe",
+      "homepage": "https://sftpgo.com",
+      "sha256": "91c59bbee64d1aa0b65beb9445b68fb315f9af8b3582c24262b5e3272dd33a1d",
+      "defaultPort": 2022,
+      "run": {
+        "args": [
+          "serve",
+          "--config-dir",
+          "{etc}",
+          "--log-file-path",
+          "{data}/sftpgo.log"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 20
+      }
+    },
+    {
+      "id": "temporal-cli",
+      "version": "1.8.3",
+      "category": "service-mesh",
+      "displayName": "Temporal CLI 1.8.3",
+      "description": "工作流引擎命令行（本地跑 Temporal dev server）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/temporalio/cli/releases/download/v1.8.3/temporal_cli_1.8.3_windows_amd64.zip",
+      "sizeBytes": 42271734,
+      "entry": "temporal.exe",
+      "homepage": "https://temporal.io",
+      "sha256": "b29a65ba26ae519dc1f3c450addbf77e4676899530ac4061f851427da8d37b05",
+      "defaultPort": 7233,
+      "run": {
+        "args": [
+          "server",
+          "start-dev",
+          "--db-filename",
+          "{data}/temporal.db",
+          "--port",
+          "{port}",
+          "--ui-port",
+          "{port+1000}"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 30
+      }
+    },
+    {
+      "id": "temporal-cli",
+      "version": "1.8.2",
+      "category": "service-mesh",
+      "displayName": "Temporal CLI 1.8.2",
+      "description": "工作流引擎命令行（本地跑 Temporal dev server）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/temporalio/cli/releases/download/v1.8.2/temporal_cli_1.8.2_windows_amd64.zip",
+      "sizeBytes": 42156576,
+      "entry": "temporal.exe",
+      "homepage": "https://temporal.io",
+      "sha256": "72e02498fa7849657c369377f7de69a8709b3d2183b6f2749f6c8bd54a984501",
+      "defaultPort": 7233,
+      "run": {
+        "args": [
+          "server",
+          "start-dev",
+          "--db-filename",
+          "{data}/temporal.db",
+          "--port",
+          "{port}",
+          "--ui-port",
+          "{port+1000}"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 30
+      }
+    },
+    {
+      "id": "temporal-cli",
+      "version": "1.8.1",
+      "category": "service-mesh",
+      "displayName": "Temporal CLI 1.8.1",
+      "description": "工作流引擎命令行（本地跑 Temporal dev server）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/temporalio/cli/releases/download/v1.8.1/temporal_cli_1.8.1_windows_amd64.zip",
+      "sizeBytes": 42145435,
+      "entry": "temporal.exe",
+      "homepage": "https://temporal.io",
+      "sha256": "01d3808b1a245676c69372692265e79a42f3fbef74f22533fc0b178b467f90cc",
+      "defaultPort": 7233,
+      "run": {
+        "args": [
+          "server",
+          "start-dev",
+          "--db-filename",
+          "{data}/temporal.db",
+          "--port",
+          "{port}",
+          "--ui-port",
+          "{port+1000}"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 30
+      }
+    },
+    {
+      "id": "apache",
+      "version": "2.4.68",
+      "category": "web-server",
+      "displayName": "Apache 2.4.68",
+      "description": "Apache HTTP Server（ApacheLounge VS18 构建），与 Nginx 并存",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://www.apachelounge.com/download/VS18/binaries/httpd-2.4.68-260827-Win64-VS18.zip",
+      "sha256": "a6b7de9fdccb28456f5b1f884920fe0b2425aadfca25c63ae1c0969d43bb355b",
+      "sizeBytes": 14584378,
+      "entry": "Apache24/bin/httpd.exe",
+      "homepage": "https://www.apachelounge.com",
+      "defaultPort": 8180,
+      "run": {
+        "args": [
+          "-d",
+          "{root}",
+          "-f",
+          "{etc}/httpd.conf"
+        ],
+        "singleInstance": true,
+        "defaultPort": 8180
+      }
+    },
+    {
+      "id": "dotnet-sdk8",
+      "version": "8.0.419",
+      "category": "runtime",
+      "displayName": ".NET SDK 8.0.419",
+      "description": "跨平台应用框架 SDK（dotnet run / build）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.419/dotnet-sdk-8.0.419-win-x64.zip",
+      "sizeBytes": 286001453,
+      "entry": "dotnet.exe",
+      "homepage": "https://dotnet.microsoft.com",
+      "sha256": "1750e19f24d6802eca28706458ffa625ff5f38e91a147982da2b3d7272c9296f"
+    },
+    {
+      "id": "dotnet-sdk8",
+      "version": "8.0.414",
+      "category": "runtime",
+      "displayName": ".NET SDK 8.0.414",
+      "description": "跨平台应用框架 SDK（dotnet run / build）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.414/dotnet-sdk-8.0.414-win-x64.zip",
+      "sizeBytes": 284974828,
+      "entry": "dotnet.exe",
+      "homepage": "https://dotnet.microsoft.com",
+      "sha256": "4b7084ea97216c1f98e19bac1960b7715dfad7678d963d482976a284a8332e34"
+    },
+    {
+      "id": "temurin-jdk21",
+      "version": "21.0.9+10",
+      "category": "runtime",
+      "displayName": "Temurin JDK 21.0.9+10",
+      "description": "Eclipse Temurin JDK 21（LTS，Neo4j/Tomcat 等依赖）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.9%2B10/OpenJDK21U-jdk_x64_windows_hotspot_21.0.9_10.zip",
+      "sizeBytes": 204962060,
+      "entry": "jdk-21.0.9+10/bin/java.exe",
+      "homepage": "https://adoptium.net",
+      "sha256": "1c67df516e9795c0b09f5714bfe151da2e3cc988082042f5bbb60d75e4e63fb5"
+    },
+    {
+      "id": "temurin-jdk21",
+      "version": "21.0.8+9",
+      "category": "runtime",
+      "displayName": "Temurin JDK 21.0.8+9",
+      "description": "Eclipse Temurin JDK 21（LTS，Neo4j/Tomcat 等依赖）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.8%2B9/OpenJDK21U-jdk_x64_windows_hotspot_21.0.8_9.zip",
+      "sizeBytes": 204850009,
+      "entry": "jdk-21.0.8+9/bin/java.exe",
+      "homepage": "https://adoptium.net",
+      "sha256": "5dbb74a4edda94c2aae97a1e30f448db0ad9023a9466fe31a8c68377d9dfbac4"
+    },
+    {
+      "id": "temurin-jdk21",
+      "version": "21.0.12+8",
+      "category": "runtime",
+      "displayName": "Temurin JDK 21.0.12+8",
+      "description": "Eclipse Temurin JDK 21（LTS，Neo4j/Tomcat 等依赖）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12%2B8/OpenJDK21U-jdk_x64_windows_hotspot_21.0.12_8.zip",
+      "sizeBytes": 205069442,
+      "entry": "jdk-21.0.12+8/bin/java.exe",
+      "homepage": "https://adoptium.net",
+      "sha256": "9ba963ee2371874a74185d18bc7bb2ab9407df7683300855ed7606e0662321d0"
+    },
+    {
+      "id": "tomcat",
+      "version": "11.0.25",
+      "category": "web-server",
+      "displayName": "Tomcat 11.0.25",
+      "description": "Servlet 容器（Java Web 应用）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://archive.apache.org/dist/tomcat/tomcat-11/v11.0.25/bin/apache-tomcat-11.0.25-windows-x64.zip",
+      "sizeBytes": 16463025,
+      "entry": "apache-tomcat-11.0.25/bin/startup.bat",
+      "homepage": "https://tomcat.apache.org",
+      "sha256": "e227309ea76b36fcd420878bdba72db279d604320698f8bfd07235f222fb6320",
+      "defaultPort": 8080,
+      "depends": [
+        "temurin-jdk21"
+      ],
+      "run": {
+        "args": [],
+        "health": "tcp",
+        "healthTimeoutSec": 45,
+        "requires": [
+          "temurin-jdk21"
+        ],
+        "env": {
+          "CATALINA_HOME": "{root}/..",
+          "CATALINA_BASE": "{root}/.."
+        },
+        "stopArgs": [
+          "shutdown.bat"
+        ]
+      }
+    },
+    {
+      "id": "tomcat",
+      "version": "10.1.60",
+      "category": "web-server",
+      "displayName": "Tomcat 10.1.60",
+      "description": "Servlet 容器（Java Web 应用）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://archive.apache.org/dist/tomcat/tomcat-10/v10.1.60/bin/apache-tomcat-10.1.60-windows-x64.zip",
+      "sizeBytes": 16441684,
+      "entry": "apache-tomcat-10.1.60/bin/startup.bat",
+      "homepage": "https://tomcat.apache.org",
+      "sha256": "1e3434105dda335e896c7919f4c0075c8f1b60fb83d3611e87a60793d299b151",
+      "defaultPort": 8080,
+      "depends": [
+        "temurin-jdk21"
+      ],
+      "run": {
+        "args": [],
+        "health": "tcp",
+        "healthTimeoutSec": 45,
+        "requires": [
+          "temurin-jdk21"
+        ],
+        "env": {
+          "CATALINA_HOME": "{root}/..",
+          "CATALINA_BASE": "{root}/.."
+        },
+        "stopArgs": [
+          "shutdown.bat"
+        ]
+      }
+    },
+    {
+      "id": "rust",
+      "version": "1.28.1",
+      "category": "runtime",
+      "displayName": "rustup 1.28.1",
+      "description": "Rust 工具链安装器（rustup/cargo/rustc）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://static.rust-lang.org/rustup/archive/1.28.1/x86_64-pc-windows-msvc/rustup-init.exe",
+      "sizeBytes": 12568064,
+      "entry": "rustup-init.exe",
+      "homepage": "https://rustup.rs",
+      "sha256": "7b83039a1b9305b0c50f23b2e2f03319b8d7859b28106e49ba82c06d81289df6"
+    },
+    {
+      "id": "rust",
+      "version": "1.27.1",
+      "category": "runtime",
+      "displayName": "rustup 1.27.1",
+      "description": "Rust 工具链安装器（rustup/cargo/rustc）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://static.rust-lang.org/rustup/archive/1.27.1/x86_64-pc-windows-msvc/rustup-init.exe",
+      "sizeBytes": 8949760,
+      "entry": "rustup-init.exe",
+      "homepage": "https://rustup.rs",
+      "sha256": "193d6c727e18734edbf7303180657e96e9d5a08432002b4e6c5bbe77c60cb3e8"
+    },
+    {
+      "id": "strawberry-perl",
+      "version": "5.40.5.1",
+      "category": "runtime",
+      "displayName": "Strawberry Perl 5.40.5.1",
+      "description": "Perl 运行时（含 CPAN，Windows 原生构建）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_54051_64bit/strawberry-perl-5.40.5.1-64bit-portable.zip",
+      "sizeBytes": 304297789,
+      "entry": "perl/bin/perl.exe",
+      "homepage": "https://strawberryperl.com",
+      "sha256": "6619fe7eeef921ccddb4aac3972fb602a0c690a3074205b863ade998d7bc79a6"
+    },
+    {
+      "id": "strawberry-perl",
+      "version": "5.42.2.1",
+      "category": "runtime",
+      "displayName": "Strawberry Perl 5.42.2.1",
+      "description": "Perl 运行时（含 CPAN，Windows 原生构建）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_54221_64bit/strawberry-perl-5.42.2.1-64bit-portable.zip",
+      "sizeBytes": 304301401,
+      "entry": "perl/bin/perl.exe",
+      "homepage": "https://strawberryperl.com",
+      "sha256": "32d83be90cf04b807cfb9477482bc36302cdee6f5b04cf57e81adecbd8f07898"
+    },
+    {
+      "id": "adminer",
+      "version": "6.1.0",
+      "category": "tool",
+      "displayName": "Adminer 6.1.0",
+      "description": "单文件数据库管理器（挂在 /_adminer 入口）",
+      "homepage": "https://adminer.org",
+      "os": [
+        "windows",
+        "macos"
+      ],
+      "arch": [
+        "x64",
+        "arm64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/vrana/adminer/releases/download/v6.1.0/adminer-6.1.0-en.php",
+      "sha256": "d21891f420eac5553e9a85d8af2ef3375c1066c4b5c0f573d8e4f936666d2000",
+      "sizeBytes": 402082,
+      "entry": "adminer-6.1.0-en.php"
+    },
+    {
+      "id": "rnacos",
+      "version": "0.8.6",
+      "category": "service-mesh",
+      "displayName": "rNacos 0.8.6",
+      "description": "Nacos 的 Rust 实现（服务注册与配置中心，轻量）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/nacos-group/r-nacos/releases/download/v0.8.6/rnacos-x86_64-pc-windows-msvc-v0.8.6.zip",
+      "sizeBytes": 13344043,
+      "entry": "rnacos.exe",
+      "homepage": "https://github.com/nacos-group/r-nacos",
+      "sha256": "e4de03e9feda431e2a42b7b76e420357f000822015b5a2113b747dfb27f342be",
+      "defaultPort": 8848,
+      "run": {
+        "args": [],
+        "health": "tcp",
+        "healthTimeoutSec": 20,
+        "env": {
+          "RNACOS_HTTP_PORT": "{port}",
+          "RNACOS_DATA_DIR": "{data}/nacos_db"
+        },
+        "configFile": ".env",
+        "configTemplate": "RNACOS_HTTP_PORT={port}\nRNACOS_GRPC_PORT={port+1000}\nRNACOS_HTTP_CONSOLE_PORT={port+2000}\nRNACOS_DATA_DIR={data}/nacos_db\nRNACOS_CONFIG_DB_FILE={data}/nacos_db/config.db\nRNACOS_NAMING_DB_FILE={data}/nacos_db/naming.db\n"
+      }
+    },
+    {
+      "id": "rnacos",
+      "version": "0.8.5",
+      "category": "service-mesh",
+      "displayName": "rNacos 0.8.5",
+      "description": "Nacos 的 Rust 实现（服务注册与配置中心，轻量）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/nacos-group/r-nacos/releases/download/v0.8.5/rnacos-x86_64-pc-windows-msvc-v0.8.5.zip",
+      "sizeBytes": 13328858,
+      "entry": "rnacos.exe",
+      "homepage": "https://github.com/nacos-group/r-nacos",
+      "sha256": "5d99d7f40d6b1f9ad712894056fde9d6de1387cc9a75a8abcec4825b228d316a",
+      "defaultPort": 8848,
+      "run": {
+        "args": [],
+        "health": "tcp",
+        "healthTimeoutSec": 20,
+        "env": {
+          "RNACOS_HTTP_PORT": "{port}",
+          "RNACOS_DATA_DIR": "{data}/nacos_db"
+        },
+        "configFile": ".env",
+        "configTemplate": "RNACOS_HTTP_PORT={port}\nRNACOS_GRPC_PORT={port+1000}\nRNACOS_HTTP_CONSOLE_PORT={port+2000}\nRNACOS_DATA_DIR={data}/nacos_db\nRNACOS_CONFIG_DB_FILE={data}/nacos_db/config.db\nRNACOS_NAMING_DB_FILE={data}/nacos_db/naming.db\n"
+      }
+    },
+    {
+      "id": "rnacos",
+      "version": "0.8.4",
+      "category": "service-mesh",
+      "displayName": "rNacos 0.8.4",
+      "description": "Nacos 的 Rust 实现（服务注册与配置中心，轻量）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/nacos-group/r-nacos/releases/download/v0.8.4/rnacos-x86_64-pc-windows-msvc-v0.8.4.zip",
+      "sizeBytes": 13316635,
+      "entry": "rnacos.exe",
+      "homepage": "https://github.com/nacos-group/r-nacos",
+      "sha256": "698785b91535986177f00723d2a0b30beeb0afb684b0cbe9893301a8c05e726e",
+      "defaultPort": 8848,
+      "run": {
+        "args": [],
+        "health": "tcp",
+        "healthTimeoutSec": 20,
+        "env": {
+          "RNACOS_HTTP_PORT": "{port}",
+          "RNACOS_DATA_DIR": "{data}/nacos_db"
+        },
+        "configFile": ".env",
+        "configTemplate": "RNACOS_HTTP_PORT={port}\nRNACOS_GRPC_PORT={port+1000}\nRNACOS_HTTP_CONSOLE_PORT={port+2000}\nRNACOS_DATA_DIR={data}/nacos_db\nRNACOS_CONFIG_DB_FILE={data}/nacos_db/config.db\nRNACOS_NAMING_DB_FILE={data}/nacos_db/naming.db\n"
+      }
+    },
+    {
+      "id": "adminer",
+      "version": "6.0.2",
+      "category": "tool",
+      "displayName": "Adminer 6.0.2",
+      "description": "单文件数据库管理器（挂在 /_adminer 入口）",
+      "homepage": "https://adminer.org",
+      "os": [
+        "windows",
+        "macos"
+      ],
+      "arch": [
+        "x64",
+        "arm64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/vrana/adminer/releases/download/v6.0.2/adminer-6.0.2-en.php",
+      "sha256": "687b2d75611f41ce6789bcf9e742fd8bb2585f9f54ed9e92c160abbf4cf9af7f",
+      "sizeBytes": 386207,
+      "entry": "adminer-6.0.2-en.php"
+    },
+    {
+      "id": "adminer",
+      "version": "6.0.1",
+      "category": "tool",
+      "displayName": "Adminer 6.0.1",
+      "description": "单文件数据库管理器（挂在 /_adminer 入口）",
+      "homepage": "https://adminer.org",
+      "os": [
+        "windows",
+        "macos"
+      ],
+      "arch": [
+        "x64",
+        "arm64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/vrana/adminer/releases/download/v6.0.1/adminer-6.0.1-en.php",
+      "sha256": "c820771612aedd70b26b8f75f442cc9fc118f8225d0166cc6c5909a89f314805",
+      "sizeBytes": 372420,
+      "entry": "adminer-6.0.1-en.php"
+    },
+    {
+      "id": "adminer",
+      "version": "6.0.0",
+      "category": "tool",
+      "displayName": "Adminer 6.0.0",
+      "description": "单文件数据库管理器（挂在 /_adminer 入口）",
+      "homepage": "https://adminer.org",
+      "os": [
+        "windows",
+        "macos"
+      ],
+      "arch": [
+        "x64",
+        "arm64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/vrana/adminer/releases/download/v6.0.0/adminer-6.0.0-en.php",
+      "sha256": "a53add52eb659deeabc8341b2ffe0479f0b6fa39908d0d1bc6e292c0d789dade",
+      "sizeBytes": 360760,
+      "entry": "adminer-6.0.0-en.php"
+    },
+    {
+      "id": "zig",
+      "version": "0.15.1",
+      "category": "runtime",
+      "displayName": "Zig 0.15.1",
+      "description": "Zig 编译器与构建系统（自带 C 交叉编译工具链）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://ziglang.org/download/0.15.1/zig-x86_64-windows-0.15.1.zip",
+      "sizeBytes": 92612958,
+      "entry": "zig-x86_64-windows-0.15.1/zig.exe",
+      "homepage": "https://ziglang.org",
+      "sha256": "91e69e887ca8c943ce9a515df3af013d95a66a190a3df3f89221277ebad29e34"
+    },
+    {
+      "id": "zig",
+      "version": "0.14.1",
+      "category": "runtime",
+      "displayName": "Zig 0.14.1",
+      "description": "Zig 编译器与构建系统（自带 C 交叉编译工具链）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://ziglang.org/download/0.14.1/zig-x86_64-windows-0.14.1.zip",
+      "sizeBytes": 82229343,
+      "entry": "zig-x86_64-windows-0.14.1/zig.exe",
+      "homepage": "https://ziglang.org",
+      "sha256": "554f5378228923ffd558eac35e21af020c73789d87afeabf4bfd16f2e6feed2c"
+    }
+  ]
+}

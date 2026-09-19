@@ -1,0 +1,621 @@
+//! 平台差异层：Windows Job Object / 进程树管理、系统代理、hosts 写入、提权执行、
+//! 运行时 bin 目录注入系统 PATH。
+//! core 不直接依赖本 crate 的平台 API，统一走这里的封装。
+
+use thiserror::Error;
+
+pub mod pathenv;
+
+#[derive(Error, Debug)]
+pub enum PlatformError {
+    #[error("{0}")]
+    Io(String),
+    #[error("不支持的平台操作: {0}")]
+    Unsupported(String),
+    #[error("{0}")]
+    Win(String),
+}
+
+pub type Result<T> = std::result::Result<T, PlatformError>;
+
+fn io_err(e: std::io::Error) -> PlatformError {
+    PlatformError::Io(e.to_string())
+}
+
+/* ================= 进程树管理 ================= */
+
+/// 进程组句柄：Windows=Job Object(KILL_ON_JOB_CLOSE)，Unix=记录 pid 集合。
+pub struct ProcessGroup {
+    #[cfg(windows)]
+    job: Option<windows_job::JobObject>,
+    pids: Vec<u32>,
+}
+
+impl ProcessGroup {
+    /// 创建进程组（尚未包含任何进程）
+    pub fn new() -> Result<Self> {
+        #[cfg(windows)]
+        {
+            let job = windows_job::JobObject::create_kill_on_close()
+                .map_err(|e| PlatformError::Win(format!("CreateJobObject 失败: {e}")))?;
+            Ok(Self { job: Some(job), pids: Vec::new() })
+        }
+        #[cfg(not(windows))]
+        Ok(Self { pids: Vec::new() })
+    }
+
+    /// 把已启动的子进程加入组（Windows 下必须尽快调用，防孤儿）
+    pub fn attach(&mut self, pid: u32) -> Result<()> {
+        #[cfg(windows)]
+        {
+            if let Some(job) = &self.job {
+                windows_job::assign_process(job, pid)
+                    .map_err(|e| PlatformError::Win(format!("AssignProcessToJobObject({pid}) 失败: {e}")))?;
+            }
+        }
+        let _ = pid;
+        self.pids.push(pid);
+        Ok(())
+    }
+
+    pub fn pids(&self) -> &[u32] {
+        &self.pids
+    }
+
+    /// 终止整组。force=true 直接 SIGKILL；force=false 先发 SIGTERM。
+    /// Unix 下子进程在启动时被置为独立进程组（见 `spawn_pre_exec`），
+    /// 因此负 pid 信号能连同其 fork 出的孙子进程一起收走。
+    pub fn terminate(&mut self, force: bool) -> Result<()> {
+        #[cfg(windows)]
+        {
+            let _ = force;
+            if let Some(job) = &self.job {
+                windows_job::terminate_job(job)
+                    .map_err(|e| PlatformError::Win(format!("TerminateJobObject 失败: {e}")))?;
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let sig = if force { libc::SIGKILL } else { libc::SIGTERM };
+            for pid in &self.pids {
+                kill_tree(*pid, sig);
+            }
+        }
+        self.pids.clear();
+        Ok(())
+    }
+}
+
+/// Unix：先终止进程组，组不存在时退回单进程。
+#[cfg(not(windows))]
+fn kill_tree(pid: u32, sig: libc::c_int) {
+    let pid = pid as libc::pid_t;
+    unsafe {
+        // 负 pid = 整个进程组（子进程启动时 setpgid(0,0)，pgid == pid）
+        if libc_kill_group(pid, sig) != 0 {
+            let e = std::io::Error::last_os_error();
+            // ESRCH：组不存在，可能未被置组，退回杀单个进程
+            if e.raw_os_error() == Some(libc::ESRCH) {
+                libc_kill(pid as u32, sig);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+unsafe fn libc_kill(pid: u32, sig: i32) -> i32 {
+    libc::kill(pid as libc::pid_t, sig)
+}
+
+#[cfg(not(windows))]
+unsafe fn libc_kill_group(pid: libc::pid_t, sig: libc::c_int) -> i32 {
+    libc::kill(-pid, sig)
+}
+
+/// Unix：让子进程脱离父进程组（成为新组组长），使整棵子树可被一次性收走。
+#[cfg(not(windows))]
+pub fn spawn_pre_exec() -> std::io::Result<()> {
+    unsafe {
+        if libc::setpgid(0, 0) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// 进程是否仍存活
+pub fn process_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        windows_job::process_alive(pid)
+    }
+    #[cfg(not(windows))]
+    {
+        // macOS 无 /proc：kill(pid, 0) 探测（0=存活 ; -1 且 ESRCH=不存在，EPERM=存在但无权限）
+        unsafe {
+            if libc::kill(pid as libc::pid_t, 0) == 0 {
+                return true;
+            }
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+}
+
+/* ================= hosts ================= */
+
+pub const HOSTS_BEGIN: &str = "# BEGIN NiceServBay (managed)";
+pub const HOSTS_END: &str = "# END NiceServBay (managed)";
+
+pub fn hosts_path() -> std::path::PathBuf {
+    if cfg!(windows) {
+        let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+        std::path::PathBuf::from(sysroot).join("System32\\drivers\\etc\\hosts")
+    } else {
+        std::path::PathBuf::from("/etc/hosts")
+    }
+}
+
+/// 读取 hosts 全文
+pub fn read_hosts_file() -> Result<String> {
+    std::fs::read_to_string(hosts_path()).map_err(io_err)
+}
+
+/// 以「标记块合并」方式写入托管条目；保留块外原有内容。
+/// 无权限时返回 Err（由上层转人话提示 + 指引）。
+pub fn apply_managed_hosts(entries: &[(String, String)]) -> Result<()> {
+    let path = hosts_path();
+    let original = std::fs::read_to_string(&path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            PlatformError::Io(format!(
+                "无权限写入 hosts（需要管理员/ root）。请以管理员身份运行本应用，或手动把域名指向 127.0.0.1。"
+            ))
+        } else {
+            io_err(e)
+        }
+    })?;
+    let out = merge_hosts_content(&original, entries);
+
+    // 原子写：先写临时文件再替换（保留只读属性处理）
+    let tmp = path.with_extension("hosts.tmp");
+    std::fs::write(&tmp, out).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            PlatformError::Io("无权限写入 hosts（需要管理员权限）".into())
+        } else {
+            io_err(e)
+        }
+    })?;
+    std::fs::copy(&tmp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            PlatformError::Io("无权限替换 hosts 文件（需要管理员权限）".into())
+        } else {
+            io_err(e)
+        }
+    })?;
+    let _ = std::fs::remove_file(&tmp);
+    Ok(())
+}
+
+/// 纯函数：把托管标记块合并进 hosts 文本（可单测）
+pub fn merge_hosts_content(original: &str, entries: &[(String, String)]) -> String {
+    let mut out = String::new();
+    let mut in_block = false;
+    let mut block_written = false;
+    for line in original.lines() {
+        let t = line.trim();
+        if t == HOSTS_BEGIN {
+            in_block = true;
+            if !block_written {
+                out.push_str(&render_block(entries));
+                block_written = true;
+            }
+            continue;
+        }
+        if t == HOSTS_END {
+            in_block = false;
+            continue;
+        }
+        if !in_block {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !block_written {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&render_block(entries));
+    }
+    out
+}
+
+fn render_block(entries: &[(String, String)]) -> String {
+    let mut s = String::from(HOSTS_BEGIN);
+    s.push('\n');
+    for (ip, domain) in entries {
+        s.push_str(&format!("{ip:<15} {domain}\n"));
+    }
+    s.push_str(HOSTS_END);
+    s.push('\n');
+    s
+}
+
+/* ================= 系统代理 ================= */
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct SystemProxyState {
+    pub enabled: bool,
+    pub server: String,
+}
+
+/// 读取系统代理（Windows: 注册表；macOS: networksetup）
+pub fn get_system_proxy() -> Result<SystemProxyState> {
+    #[cfg(windows)]
+    {
+        sysproxy_win::get().map_err(|e| PlatformError::Win(e))
+    }
+    #[cfg(not(windows))]
+    {
+        // networksetup -getwebproxy Wi-Fi → 输出 "Enabled: Yes\nServer: 127.0.0.1\nPort: 8080"
+        let service = mac_network_service()?;
+        let out = std::process::Command::new("networksetup")
+            .args(["-getwebproxy", &service])
+            .output()
+            .map_err(|e| PlatformError::Io(format!("执行 networksetup 失败：{e}")))?;
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        let enabled = text.lines().any(|l| l.trim() == "Enabled: Yes");
+        let server = text
+            .lines()
+            .find(|l| l.starts_with("Server:"))
+            .and_then(|l| l.split(':').nth(1))
+            .map(|s| s.trim().to_string())
+            .and_then(|host| {
+                text.lines()
+                    .find(|l| l.starts_with("Port:"))
+                    .and_then(|l| l.split(':').nth(1))
+                    .map(|p| format!("{}:{}", host, p.trim()))
+            })
+            .unwrap_or_default();
+        Ok(SystemProxyState { enabled, server })
+    }
+}
+
+/// 设置系统代理；返回开启前的旧值供恢复。
+pub fn set_system_proxy(enable: bool, server: &str) -> Result<SystemProxyState> {
+    #[cfg(windows)]
+    {
+        sysproxy_win::set(enable, server).map_err(|e| PlatformError::Win(e))
+    }
+    #[cfg(not(windows))]
+    {
+        let old = get_system_proxy()?;
+        let service = mac_network_service()?;
+        let (host, port) = match server.split_once(':') {
+            Some((h, p)) => (h, p),
+            None => ("127.0.0.1", "7890"),
+        };
+        let run = |args: &[&str]| -> Result<()> {
+            let out = std::process::Command::new("networksetup")
+                .args(args)
+                .output()
+                .map_err(|e| PlatformError::Io(format!("networksetup 失败：{e}")))?;
+            if !out.status.success() {
+                return Err(PlatformError::Io(format!(
+                    "networksetup {} 失败：{}",
+                    args.first().unwrap_or(&""),
+                    String::from_utf8_lossy(&out.stderr)
+                )));
+            }
+            Ok(())
+        };
+        if enable {
+            run(&["-setwebproxy", &service, host, port])?;
+            run(&["-setsecurewebproxy", &service, host, port])?;
+        } else {
+            run(&["-setwebproxystate", &service, "off"])?;
+            run(&["-setsecurewebproxystate", &service, "off"])?;
+        }
+        Ok(old)
+    }
+}
+
+/// macOS：取第一个已连接的网络服务（Wi-Fi 优先）
+#[cfg(not(windows))]
+fn mac_network_service() -> Result<String> {
+    let out = std::process::Command::new("networksetup")
+        .args(["-listallnetworkservices"])
+        .output()
+        .map_err(|e| PlatformError::Io(format!("networksetup 失败：{e}")))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines().skip(1) {
+        let name = line.trim().trim_start_matches('*');
+        if name.eq_ignore_ascii_case("Wi-Fi") {
+            return Ok(name.to_string());
+        }
+    }
+    // 兜底：第一个非 VPN 服务
+    for line in text.lines().skip(1) {
+        let name = line.trim().trim_start_matches('*');
+        if !name.is_empty()
+            && !name.eq_ignore_ascii_case("VPN")
+            && !name.contains("Thunderbolt")
+            && !name.contains("Bluetooth")
+        {
+            return Ok(name.to_string());
+        }
+    }
+    Err(PlatformError::Io("找不到可用的网络服务".into()))
+}
+
+/* ================= 提权执行（预留） ================= */
+
+/// 以管理员运行命令（Windows runas / macOS osascript）。用于信任 CA、写 hosts 失败兜底。
+pub fn run_elevated(program: &str, args: &[&str]) -> Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // ShellExecuteW runas（0x0802 请求管理员）。
+        // 参数各自用引号包住，避免含空格路径被拆成多个参数
+        let quoted_args: Vec<String> = args.iter().map(|a| format!("\"{}\"", a.replace('"', "\\\""))).collect();
+        let cmd = format!(
+            "Start-Process -FilePath '{}' -ArgumentList '{}' -Verb RunAs -Wait",
+            program.replace('\'', "''"),
+            quoted_args.join(",").replace('\'', "''")
+        );
+        let out = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &cmd])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .output()
+            .map_err(io_err)?;
+        // UAC 被取消 / 命令失败时 PowerShell 返回非 0，必须让调用方知道
+        if !out.status.success() {
+            let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return Err(PlatformError::Win(if msg.is_empty() {
+                "提权被取消或执行失败（UAC）".into()
+            } else {
+                format!("提权执行失败：{msg}")
+            }));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        // 逐参数做 shell 引号转义：路径里带空格/引号时不能简单 join
+        let quoted: Vec<String> = std::iter::once(program.to_string())
+            .chain(args.iter().map(|a| a.to_string()))
+            .map(|a| shell_quote(&a))
+            .collect();
+        let inner = quoted.join(" ");
+        // 内层还有一层 AppleScript 字符串，需转义反斜杠与双引号
+        let escaped = inner.replace('\\', "\\\\").replace('"', "\\\"");
+        let script = format!("do shell script \"{escaped}\" with administrator privileges");
+        let out = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .output()
+            .map_err(io_err)?;
+        // 用户取消授权时 osascript 返回非 0；要让上层知道失败，不能静默当成功
+        if !out.status.success() {
+            let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return Err(PlatformError::Io(if msg.is_empty() {
+                "提权被取消或执行失败".into()
+            } else {
+                format!("提权执行失败：{msg}")
+            }));
+        }
+        Ok(())
+    }
+}
+
+/// POSIX 单引号转义：'`it`s`' → '\'' 包裹，可安全嵌入 shell 命令
+#[cfg(not(windows))]
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/* ================= windows 实现 ================= */
+
+#[cfg(windows)]
+mod windows_job {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
+        PROCESS_TERMINATE,
+    };
+
+    pub struct JobObject(HANDLE);
+
+    unsafe impl Send for JobObject {}
+
+    impl JobObject {
+        pub fn create_kill_on_close() -> std::io::Result<Self> {
+            unsafe {
+                let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+                if job.is_null() {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                let ok = SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    &info as *const _ as *const core::ffi::c_void,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                );
+                if ok == 0 {
+                    let e = std::io::Error::last_os_error();
+                    CloseHandle(job);
+                    return Err(e);
+                }
+                Ok(JobObject(job))
+            }
+        }
+    }
+
+    pub fn assign_process(job: &JobObject, pid: u32) -> std::io::Result<()> {
+        unsafe {
+            let proc = OpenProcess(
+                PROCESS_SET_QUOTA | PROCESS_TERMINATE,
+                0,
+                pid,
+            );
+            if proc.is_null() {
+                return Err(std::io::Error::last_os_error());
+            }
+            let ok = AssignProcessToJobObject(job.0, proc);
+            let err = if ok == 0 { Some(std::io::Error::last_os_error()) } else { None };
+            CloseHandle(proc);
+            match err {
+                Some(e) => Err(e),
+                None => Ok(()),
+            }
+        }
+    }
+
+    pub fn terminate_job(job: &JobObject) -> std::io::Result<()> {
+        unsafe {
+            if TerminateJobObject(job.0, 0) == 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl Drop for JobObject {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+
+    pub fn process_alive(pid: u32) -> bool {
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return false;
+            }
+            let mut code: u32 = 0;
+            let ok = windows_sys::Win32::System::Threading::GetExitCodeProcess(h, &mut code);
+            CloseHandle(h);
+            ok != 0 && code == 259 /* STILL_ACTIVE */
+        }
+    }
+}
+
+#[cfg(windows)]
+mod sysproxy_win {
+    use super::SystemProxyState;
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::Networking::WinInet::{
+        InternetSetOptionW, INTERNET_OPTION_REFRESH, INTERNET_OPTION_SETTINGS_CHANGED,
+    };
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
+        HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_DWORD, REG_SZ,
+    };
+
+    const SUBKEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    fn wide_to_string(buf: &[u8]) -> String {
+        let units: Vec<u16> = buf
+            .chunks_exact(2)
+            .take_while(|c| !(c[0] == 0 && c[1] == 0))
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&units)
+    }
+
+    pub fn get() -> std::result::Result<SystemProxyState, String> {
+        unsafe {
+            let subkey = wide(SUBKEY);
+            let mut hkey: HKEY = std::ptr::null_mut();
+            if RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut hkey) != ERROR_SUCCESS {
+                return Err("打开注册表失败".into());
+            }
+            let value = wide("ProxyEnable");
+            let mut data: u32 = 0;
+            let mut size: u32 = 4;
+            let t = RegQueryValueExW(
+                hkey,
+                value.as_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut data as *mut u32 as *mut u8,
+                &mut size,
+            );
+            let enabled = t == ERROR_SUCCESS && data != 0;
+
+            let mut server = String::new();
+            let value = wide("ProxyServer");
+            let mut buf = vec![0u8; 1024];
+            let mut size: u32 = buf.len() as u32;
+            let t = RegQueryValueExW(
+                hkey,
+                value.as_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                buf.as_mut_ptr(),
+                &mut size,
+            );
+            if t == ERROR_SUCCESS {
+                server = wide_to_string(&buf[..size as usize]);
+            }
+            RegCloseKey(hkey);
+            Ok(SystemProxyState { enabled, server })
+        }
+    }
+
+    pub fn set(enable: bool, server: &str) -> std::result::Result<SystemProxyState, String> {
+        unsafe {
+            let old = get()?;
+            let subkey = wide(SUBKEY);
+            let mut hkey: HKEY = std::ptr::null_mut();
+            if RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_SET_VALUE, &mut hkey) != ERROR_SUCCESS {
+                return Err("打开注册表失败（写入系统代理）".into());
+            }
+            // ProxyEnable
+            let name = wide("ProxyEnable");
+            let data: u32 = if enable { 1 } else { 0 };
+            let r1 = RegSetValueExW(
+                hkey,
+                name.as_ptr(),
+                0,
+                REG_DWORD,
+                (&data as *const u32) as *const u8,
+                4,
+            );
+            // ProxyServer
+            let mut r2 = ERROR_SUCCESS;
+            if enable {
+                let name = wide("ProxyServer");
+                let ws = wide(server);
+                r2 = RegSetValueExW(
+                    hkey,
+                    name.as_ptr(),
+                    0,
+                    REG_SZ,
+                    ws.as_ptr() as *const u8,
+                    (ws.len() * 2) as u32,
+                );
+            }
+            RegCloseKey(hkey);
+            if r1 != ERROR_SUCCESS || r2 != ERROR_SUCCESS {
+                return Err("写入注册表失败".into());
+            }
+            // 通知 WinINet 刷新
+            InternetSetOptionW(std::ptr::null_mut(), INTERNET_OPTION_SETTINGS_CHANGED, std::ptr::null(), 0);
+            InternetSetOptionW(std::ptr::null_mut(), INTERNET_OPTION_REFRESH, std::ptr::null(), 0);
+            Ok(old)
+        }
+    }
+}

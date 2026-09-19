@@ -1,0 +1,30 @@
+[package]
+name = "niceservbay"
+version = "0.1.0"
+description = "NiceServBay — 一站式本地开发环境管理器"
+edition = "2021"
+license = "Proprietary"
+
+[lib]
+name = "niceservbay_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-autostart = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+nsb-core = { path = "../../../crates/core" }
+platform = { path = "../../../crates/platform" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+
+[features]
+default = []

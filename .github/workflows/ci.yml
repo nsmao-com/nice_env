@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  # ---------- 前端：Next.js 静态导出 ----------
+  web:
+    name: Web (Next.js)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # package.json 没有 packageManager 字段，锁文件为 pnpm 10 的 lockfileVersion 9.0
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type-check (@nsb/web)
+        run: pnpm --filter @nsb/web run check
+
+      - name: Logic tests (@nsb/web)
+        run: pnpm --filter @nsb/web run check:logic
+
+      - name: Build static export (@nsb/web)
+        run: pnpm --filter @nsb/web run build
+
+      - name: Verify static export
+        run: test -f apps/web/out/index.html
+
+      - name: Upload static export
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-static-export
+          path: apps/web/out
+          if-no-files-found: error
+
+  # ---------- Rust：core 测试 + 桌面壳编译检查 ----------
+  rust:
+    name: Rust (nsb-core / niceservbay)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri 2 在 Linux 上的系统依赖。
+      # libdbus-1-dev 是必需的：tauri 默认开启 dbus feature（tao → dbus crate →
+      # libdbus-sys 用 pkg-config 探测 "dbus-1"，缺失会直接 panic）。
+      # lsof 是 nsb-core 在非 Windows 上枚举监听端口用的外部命令
+      # （ports.rs::platform_listeners，测试 scan_app_ports_distinguishes_self_and_conflict
+      # 会调用它）；GitHub 的 ubuntu 镜像并未预装 lsof。
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libdbus-1-dev \
+            libssl-dev \
+            patchelf \
+            lsof \
+            build-essential \
+            curl wget file
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      # tauri::generate_context!() 只在启用 tauri/custom-protocol（打包/发布）时才要求
+      # build.frontendDist 存在；dev 模式下有 devUrl 就已跳过（因此 cargo check 本身
+      # 不依赖 web 构建产物）。这里给个占位目录，防止将来有人打开 custom-protocol
+      # 后 cargo check 因为缺 apps/web/out 而失败。
+      - name: Ensure frontend dist placeholder
+        run: mkdir -p apps/web/out
+
+      - name: Test core crate
+        run: cargo test -p nsb-core
+
+      - name: Check desktop crate
+        run: cargo check -p niceservbay

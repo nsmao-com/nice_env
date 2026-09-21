@@ -57,7 +57,7 @@ export function PathEnvCard() {
   return (
     <Card>
       <CardHeader className="flex-row items-center gap-3">
-        <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-border bg-card-2/60">
+        <div className="flex h-9 w-9 items-center justify-center rounded-md bg-fill">
           <Terminal className="h-4 w-4 text-primary" strokeWidth={1.8} />
         </div>
         <div className="min-w-0 flex-1">

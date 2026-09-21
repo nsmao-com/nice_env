@@ -569,6 +569,29 @@ export const PhpExtensionChange = z.object({
 });
 export type PhpExtensionChange = z.infer<typeof PhpExtensionChange>;
 
+/* ============ 环境体检 ============ */
+
+export const HealthItem = z.object({
+  id: z.string(),
+  /** info / warn / error */
+  severity: z.string(),
+  title: z.string(),
+  detail: z.string(),
+  action: z.string().nullable().optional(),
+  route: z.string().nullable().optional(),
+});
+export type HealthItem = z.infer<typeof HealthItem>;
+
+export const HealthReport = z.object({
+  items: z.array(HealthItem),
+  errors: z.number(),
+  warnings: z.number(),
+  infos: z.number(),
+  summary: z.string(),
+  checkedAt: z.number(),
+});
+export type HealthReport = z.infer<typeof HealthReport>;
+
 /* ============ 诊断包 ============ */
 
 export const DiagnosticsBundle = z.object({

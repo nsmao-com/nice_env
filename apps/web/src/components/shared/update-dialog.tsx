@@ -260,7 +260,7 @@ export function UpdateDialog({
 
               {/* 更新说明 */}
               {rel?.body ? (
-                <div className="overflow-hidden rounded-xl border border-border bg-card-2/25">
+                <div className="overflow-hidden rounded-xl bg-fill">
                   <div className="border-b border-border px-3 py-1.5 text-[11px] font-medium text-secondary">
                     {t("update.changelog")}
                   </div>
@@ -315,7 +315,7 @@ export function UpdateDialog({
               )}
 
               {!isTauri && (
-                <p className="rounded-lg border border-border bg-card-2/40 px-3 py-2 text-[11px] text-faint">
+                <p className="rounded-md bg-fill px-3 py-2 text-[11px] text-faint">
                   {t("update.browserMode")}
                 </p>
               )}

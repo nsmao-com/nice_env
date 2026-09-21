@@ -208,7 +208,7 @@ export function SiteDetailSheet({
           )}
 
           {/* HTTPS */}
-          <div className="flex items-center justify-between gap-4 rounded-xl border border-border bg-card-2/40 p-3.5">
+          <div className="flex items-center justify-between gap-4 rounded-xl bg-fill p-3.5">
             <div className="flex flex-col gap-0.5">
               <span className="text-[12.5px] font-medium">HTTPS</span>
               <span className="text-[11px] text-faint">{t("sites.wizard.httpsHint")}</span>
@@ -261,7 +261,7 @@ export function SiteDetailSheet({
               danger
               onConfirm={doDelete}
             >
-              <div className="flex flex-col gap-3 rounded-xl border border-border bg-card-2/40 p-3.5 text-[12.5px]">
+              <div className="flex flex-col gap-3 rounded-xl bg-fill p-3.5 text-[12.5px]">
                 <label className="flex cursor-pointer items-center justify-between gap-3">
                   <span>{t("sites.detail.hostsRecord")}</span>
                   <Switch checked={delHosts} onCheckedChange={setDelHosts} />

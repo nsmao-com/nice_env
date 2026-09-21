@@ -11,6 +11,7 @@ pub mod envfile;
 pub mod error;
 pub use error::AppError;
 pub mod generic;
+pub mod health;
 pub mod hosts;
 pub mod install;
 pub mod model;

@@ -31,13 +31,9 @@ export function Topbar() {
       <button
         type="button"
         onClick={() => setCommandOpen(true)}
-        className="nsb-no-drag group relative flex h-8 min-w-0 w-72 items-center gap-2.5 overflow-hidden rounded-full border border-border bg-card-2/40 px-3 text-left text-[13px] text-faint transition-colors hover:border-border-strong hover:bg-card-2/80"
+        // 搜索框 = Liquid Glass 胶囊（功能层），悬停只略微提高不透明度
+        className="glass nsb-no-drag group relative flex h-8 min-w-0 w-72 items-center gap-2.5 overflow-hidden rounded-full px-3 text-left text-[13px] text-faint transition-[background-color] hover:bg-[color-mix(in_srgb,var(--glass-tint)_calc(var(--glass-alpha)+12%),transparent)]"
       >
-        {/* 悬停时从左向右扫过的强调色微光 */}
-        <span
-          aria-hidden
-          className="pointer-events-none absolute inset-y-0 -left-full w-1/2 bg-gradient-to-r from-transparent via-[hsl(var(--accent-h)_70%_55%/0.13)] to-transparent transition-[left] duration-500 group-hover:left-full"
-        />
         <Search className="relative h-3.5 w-3.5 shrink-0" />
         <span className="relative flex-1 truncate">{t("topbar.search")}</span>
         <Kbd className="relative">Ctrl K</Kbd>

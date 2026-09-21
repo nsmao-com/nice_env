@@ -41,6 +41,7 @@ import { ServiceRow } from "@/components/shared/service-row";
 import { StatusLight } from "@/components/shared/status-light";
 import { CopyButton, EmptyState, SectionHeader, Sparkline, ConfirmDialog } from "@/components/shared/misc";
 import { PageHeader } from "@/components/layout/app-shell";
+import { HealthCard } from "@/components/shared/health-card";
 
 export default function DashboardPage() {
   const t = useT();
@@ -143,7 +144,13 @@ export default function DashboardPage() {
                 disabled={stackBusy}
                 title={t("dash.stopAllHint")}
               >
-                <Square className="h-3.5 w-3.5" /> {t("dash.stopAll")}
+                <Square className="h-3.5 w-3.5" />
+
+      {/* 环境体检：所有检查项的聚合入口，放在最上面 */}
+      <section className="mb-5">
+        <HealthCard />
+      </section>
+ {t("dash.stopAll")}
               </Button>
             ) : null}
             <Button onClick={startStack} disabled={stackBusy} title={t("dash.quickStartHint")}>

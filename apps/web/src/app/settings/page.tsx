@@ -208,11 +208,11 @@ export default function SettingsPage() {
 
   const resetAppearance = async () => {
     const defaults: Partial<AppSettings> = {
-      accentHue: 250,
+      accentHue: 211,
       accentHex: "",
-      uiFont: "plex",
+      uiFont: "sf",
       uiScale: 1,
-      codeFont: "plex-mono",
+      codeFont: "sf-mono",
       codeFontSize: 11.5,
       codeLineNumbers: true,
       codeWrap: false,
@@ -287,7 +287,7 @@ export default function SettingsPage() {
                 "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[12.5px] transition-colors",
                 active === s.id
                   ? "bg-card-2 font-medium text-foreground"
-                  : "text-muted hover:bg-card-2/60 hover:text-foreground"
+                  : "text-muted hover:bg-fill hover:text-foreground"
               )}
             >
               <s.icon className="h-3.5 w-3.5 shrink-0" />
@@ -938,7 +938,7 @@ export default function SettingsPage() {
                 <CardTitle className="text-[13px]">{t("settings.updates")}</CardTitle>
               </CardHeader>
               <CardContent className="flex flex-col gap-4">
-                <div className="flex items-center justify-between gap-4 rounded-xl border border-border bg-card-2/25 p-3.5">
+                <div className="flex items-center justify-between gap-4 rounded-xl bg-fill p-3.5">
                   <div className="flex items-center gap-3">
                     <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-border bg-card">
                       <Globe className="h-4 w-4 text-primary" strokeWidth={1.8} />

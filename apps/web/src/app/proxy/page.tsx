@@ -138,7 +138,7 @@ export default function ProxyPage() {
         <Card className={cn(running && "breath border-running/25")}>
           <CardHeader className="flex-row items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-border bg-card-2/60">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-fill">
                 <Waypoints className={cn("h-5 w-5", running ? "text-running" : "text-faint")} strokeWidth={1.8} />
               </div>
               <div>
@@ -177,7 +177,7 @@ export default function ProxyPage() {
         <Card>
           <CardHeader className="flex-row items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-border bg-card-2/60">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-fill">
                 <MonitorUp className={cn("h-5 w-5", status?.systemProxyEnabled ? "text-primary" : "text-faint")} strokeWidth={1.8} />
               </div>
               <div>

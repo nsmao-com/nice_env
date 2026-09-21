@@ -37,6 +37,7 @@ import type {
   ImportedCert,
   EnvFileView,
   DiagnosticsBundle,
+  HealthReport,
   ProxyProfile,
   ProxyGroupView,
   ProxyStatusInfo,
@@ -916,6 +917,30 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "apply_hosts":
       return true as T;
+    case "health_check": {
+      const inst: unknown[] = [];
+      const items: { id: string; severity: string; title: string; detail: string; action?: string; route?: string }[] = [];
+      if (inst.length === 0) {
+        items.push({ id: "no-packages", severity: "info", title: "还没有安装任何套件", detail: "本地环境是空的，先装 Web 服务器与运行时才能建站", action: "到「套件 / 服务」安装 Nginx + PHP + MySQL", route: "/packages" });
+      }
+      items.push({ id: "cert-warn", severity: "warn", title: "1 张证书 30 天内到期", detail: "还有时间，但建议早点处理", route: "/tls" });
+      items.push({ id: "hosts-drift", severity: "warn", title: "hosts 里的托管记录与站点列表不一致", detail: "应有 3 条，实际 2 条 —— 域名可能解析不到本机", action: "到「工具箱 → 重建 hosts」一键同步", route: "/tools" });
+      items.push({ id: "broken-sites", severity: "error", title: "1 个站点配置有问题", detail: "legacy-admin（目录不存在：D:/code/legacy-admin）", action: "到「站点」修正路径，或到「套件 / 服务」补装对应版本", route: "/sites" });
+      const errors = items.filter((i) => i.severity === "error").length;
+      const warnings = items.filter((i) => i.severity === "warn").length;
+      const infos = items.filter((i) => i.severity === "info").length;
+      return {
+        items: items.sort((a, b) => {
+          const rank = (x: { severity: string }) => (x.severity === "error" ? 0 : x.severity === "warn" ? 1 : 2);
+          return rank(a) - rank(b);
+        }),
+        errors,
+        warnings,
+        infos,
+        summary: errors > 0 ? `发现 ${errors} 个需要处理的问题` : warnings > 0 ? `${warnings} 项建议处理，当前可用` : "环境正常",
+        checkedAt: Math.floor(Date.now() / 1000),
+      } as HealthReport as T;
+    }
     case "diagnostics_build": {
       const now = Math.floor(Date.now() / 1000);
       const md = [

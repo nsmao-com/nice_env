@@ -149,10 +149,10 @@ export function PageHeader({
           animate={{ opacity: 1, y: 0 }}
           className="flex items-center gap-2 text-[19px] font-semibold tracking-[-0.02em]"
         >
-          {/* 强调色小竖条：给标题一个视觉锚点，也随主题色变化 */}
+          {/* 强调色小竖条：给标题一个视觉锚点，也随主题色变化（无光晕，Apple 克制） */}
           <span
             aria-hidden
-            className="h-[18px] w-[3px] shrink-0 rounded-full bg-primary shadow-[0_0_8px_0_var(--accent-glow)]"
+            className="h-[18px] w-[3px] shrink-0 rounded-full bg-primary"
           />
           <span className="truncate">{title}</span>
         </motion.h1>

@@ -152,7 +152,7 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
             type="button"
             className={cn(
               "nsb-no-drag group relative z-10 flex min-w-0 items-center gap-2 rounded-lg px-1 py-1 text-left outline-none",
-              "hover:bg-card-2/70 focus-visible:ring-2 focus-visible:ring-primary/30",
+              "hover:bg-fill focus-visible:ring-2 focus-visible:ring-primary/30",
               collapsed && "justify-center px-0"
             )}
             aria-label={t("appmenu.label")}

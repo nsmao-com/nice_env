@@ -109,6 +109,8 @@ pub fn run() {
             read_hosts, apply_hosts, rebuild_hosts, list_certs, issue_cert, reissue_site_certs, trust_ca,
             // 项目扫描
             scan_projects,
+            // 环境体检
+            health_check,
             // 诊断包
             diagnostics_build, diagnostics_save,
             // 站点 .env
@@ -1807,4 +1809,18 @@ fn diagnostics_save(
         env!("CARGO_PKG_VERSION"),
     ))?;
     map_jh(nsb_core::diagnostics::save_to_file(&state.paths, &bundle))
+}
+
+/* ================= 环境体检 ================= */
+
+/// 汇总各项检查（端口/证书/hosts/站点/服务/扩展）成一个按严重程度排序的清单
+#[tauri::command]
+fn health_check(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+) -> Result<nsb_core::health::HealthReport, tauri::Error> {
+    map_jh(nsb_core::health::check(
+        &state.paths,
+        &state.store,
+        &state.manager,
+    ))
 }

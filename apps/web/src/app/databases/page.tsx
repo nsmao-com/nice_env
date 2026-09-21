@@ -131,7 +131,7 @@ export default function DatabasesPage() {
               <p className="text-xs text-faint">{t("db.noUsers")}</p>
             ) : (
               users.map((u) => (
-                <div key={`${u.username}@${u.host}`} className="rounded-lg border border-border bg-card-2/40 px-3 py-2">
+                <div key={`${u.username}@${u.host}`} className="rounded-md bg-fill px-3 py-2">
                   <div className="flex items-center justify-between">
                     <span className="font-mono text-[12px]">{u.username}</span>
                     <span className="text-[10px] text-faint">@{u.host}</span>
@@ -251,7 +251,7 @@ function MySqlInstanceCard() {
   return (
     <Card className="p-4">
       <div className="mb-3 flex items-center gap-2">
-        <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-border bg-card-2/60">
+        <div className="flex h-9 w-9 items-center justify-center rounded-md bg-fill">
           <Database className="h-4 w-4 text-info" strokeWidth={1.8} />
         </div>
         <div>
@@ -296,7 +296,7 @@ function RedisInstanceCard() {
   return (
     <Card className="p-4">
       <div className="mb-3 flex items-center gap-2">
-        <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-border bg-card-2/60">
+        <div className="flex h-9 w-9 items-center justify-center rounded-md bg-fill">
           <span className="font-mono text-[13px] font-bold text-error">R</span>
         </div>
         <div>

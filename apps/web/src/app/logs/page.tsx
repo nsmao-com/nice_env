@@ -68,7 +68,7 @@ function LogsPageInner() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder={t("logs.filterServices")}
-            className="mb-2 h-7 w-full shrink-0 rounded-lg border border-border bg-card-2/50 px-2.5 text-[11.5px] text-foreground placeholder:text-faint focus:border-border-strong focus:outline-none"
+            className="mb-2 h-7 w-full shrink-0 rounded-md bg-fill px-2.5 text-[11.5px] text-foreground placeholder:text-faint focus:border-border-strong focus:outline-none"
           />
           <div className="min-h-0 flex-1 overflow-y-auto">
             <p className="px-2 py-1 text-[10.5px] font-medium uppercase tracking-wider text-faint/70">
@@ -87,7 +87,7 @@ function LogsPageInner() {
                     "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors",
                     selected === item.id
                       ? "bg-card-2 font-medium text-foreground"
-                      : "text-muted hover:bg-card-2/60 hover:text-foreground"
+                      : "text-muted hover:bg-fill hover:text-foreground"
                   )}
                 >
                   <StatusLight state={item.state} size={6} />

@@ -80,7 +80,7 @@ function ToolCard({
   return (
     <Card>
       <CardHeader className="flex-row items-center gap-3">
-        <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-border bg-card-2/60">
+        <div className="flex h-9 w-9 items-center justify-center rounded-md bg-fill">
           <Icon className="h-4 w-4 text-primary" strokeWidth={1.8} />
         </div>
         <div>
@@ -128,7 +128,7 @@ function HostsTool() {
   return (
     <ToolCard icon={FilePenLine} title={t("tools.hosts")} hint={t("tools.hostsHint")}>
       <div className="flex flex-col gap-3">
-        <div className="max-h-44 overflow-y-auto rounded-lg border border-border bg-card-2/30">
+        <div className="max-h-44 overflow-y-auto rounded-md bg-fill">
           {entries.length === 0 ? (
             <p className="px-3 py-4 text-center text-[11px] text-faint">{t("tools.hostsEmpty")}</p>
           ) : (
@@ -317,14 +317,14 @@ function PortLookupTool() {
                   setPort(String(p));
                   scan(p, p);
                 }}
-                className="rounded-md border border-border bg-card-2/40 px-1.5 py-0.5 font-mono text-[10.5px] text-faint transition-colors hover:border-border-strong hover:text-secondary"
+                className="rounded-md bg-fill px-1.5 py-0.5 font-mono text-[10.5px] text-faint transition-colors hover:border-border-strong hover:text-secondary"
               >
                 {p}
               </button>
             ))}
           </div>
 
-          <div className="max-h-64 overflow-y-auto rounded-lg border border-border bg-card-2/30">
+          <div className="max-h-64 overflow-y-auto rounded-md bg-fill">
             {rows.length === 0 ? (
               <p className="px-3 py-5 text-center text-[11px] text-faint">
                 {busy ? t("tools.scanning") : scanned ? t("tools.portLookupEmpty") : t("tools.portLookupIdle")}
@@ -495,7 +495,7 @@ function PortTool() {
             {conflicts.length} {t("tools.portConflictsP2")}
           </p>
         )}
-        <div className="max-h-56 overflow-y-auto rounded-lg border border-border bg-card-2/30">
+        <div className="max-h-56 overflow-y-auto rounded-md bg-fill">
           {appRows.length === 0 ? (
             <p className="px-3 py-4 text-center text-[11px] text-faint">
               {scanning ? t("tools.scanning") : t("tools.portsEmpty")}
@@ -557,7 +557,7 @@ function PortTool() {
           </Button>
         </div>
         {results.length > 0 && (
-          <div className="max-h-40 overflow-y-auto rounded-lg border border-border bg-card-2/30">
+          <div className="max-h-40 overflow-y-auto rounded-md bg-fill">
             {results.map((r) => (
               <div key={r.port} className="flex items-center gap-2 border-b border-border/60 px-3 py-2 last:border-0">
                 <XCircle className="h-3.5 w-3.5 text-error" />
@@ -720,7 +720,7 @@ function BackupTool() {
   return (
     <ToolCard icon={DatabaseBackup} title={t("tools.backup")} hint={t("tools.backupHint")}>
       <div className="flex flex-col gap-3">
-        <div className="max-h-44 overflow-y-auto rounded-lg border border-border bg-card-2/30">
+        <div className="max-h-44 overflow-y-auto rounded-md bg-fill">
           {backups.length === 0 ? (
             <p className="px-3 py-4 text-center text-[11px] text-faint">
               {busy ? t("common.loading") : t("tools.noBackups")}
@@ -834,7 +834,7 @@ function RepairTool() {
     <ToolCard icon={Wrench} title={t("tools.fixWizard")} hint={t("tools.wizardHint")}>
       <div className="flex flex-col gap-2">
         {items.map((item) => (
-          <div key={item.id} className="flex items-center justify-between gap-3 rounded-lg border border-border bg-card-2/30 p-3">
+          <div key={item.id} className="flex items-center justify-between gap-3 rounded-md bg-fill p-3">
             <div>
               <p className="text-[12px] font-medium">{item.label}</p>
               <p className="text-[10.5px] text-faint">{item.desc}</p>

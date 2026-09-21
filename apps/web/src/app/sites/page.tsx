@@ -96,7 +96,7 @@ function SiteCard({ site, onOpenDetail }: { site: Site; onOpenDetail: () => void
       <Card className="group flex flex-col gap-3 p-4 transition-all hover:border-border-strong">
         <div className="flex items-start justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border bg-card-2/60">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-fill">
               <Globe className={`h-4 w-4 ${running ? "text-running" : "text-faint"}`} strokeWidth={1.8} />
             </div>
             <div className="min-w-0">

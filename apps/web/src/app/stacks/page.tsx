@@ -168,7 +168,7 @@ export default function StacksPage() {
                         return (
                           <span
                             key={item.serviceId}
-                            className="flex items-center gap-1.5 rounded-md border border-border bg-card-2/40 px-2 py-1 text-[11px]"
+                            className="flex items-center gap-1.5 rounded-md bg-fill px-2 py-1 text-[11px]"
                             title={svc ? `${svc.label} · ${svc.state}` : t("stack.notInstalled")}
                           >
                             <StatusLight state={svc?.state ?? "unknown"} size={5} />
@@ -438,7 +438,7 @@ function StackEditor({
             <label className="text-[12px] font-medium text-secondary">
               {t("stack.services")} ({items.length})
             </label>
-            <div className="max-h-52 overflow-y-auto rounded-lg border border-border bg-card-2/30 p-1.5">
+            <div className="max-h-52 overflow-y-auto rounded-md bg-fill p-1.5">
               {items.length === 0 ? (
                 <p className="px-2 py-4 text-center text-[11.5px] text-faint">{t("stack.noItems")}</p>
               ) : (
@@ -447,7 +447,7 @@ function StackEditor({
                   return (
                     <div
                       key={item.serviceId}
-                      className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-card-2/60"
+                      className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-fill"
                     >
                       <GripVertical className="h-3.5 w-3.5 shrink-0 text-faint/60" />
                       <span className="w-5 shrink-0 text-[10.5px] tabular text-faint">{idx + 1}</span>
@@ -460,7 +460,7 @@ function StackEditor({
                           type="button"
                           onClick={() => move(idx, -1)}
                           disabled={idx === 0}
-                          className="rounded px-1 text-[10px] text-faint hover:bg-card-2 hover:text-foreground disabled:opacity-30"
+                          className="rounded px-1 text-[10px] text-faint hover:bg-fill hover:text-foreground disabled:opacity-30"
                         >
                           ↑
                         </button>
@@ -468,7 +468,7 @@ function StackEditor({
                           type="button"
                           onClick={() => move(idx, 1)}
                           disabled={idx === items.length - 1}
-                          className="rounded px-1 text-[10px] text-faint hover:bg-card-2 hover:text-foreground disabled:opacity-30"
+                          className="rounded px-1 text-[10px] text-faint hover:bg-fill hover:text-foreground disabled:opacity-30"
                         >
                           ↓
                         </button>

@@ -184,7 +184,7 @@ export function Onboarding() {
                 <h2 className="text-[15px] font-semibold">{t("onboarding.installing")}</h2>
                 <p className="text-xs text-faint">{t("ob.stepsHint")}</p>
               </div>
-              <div className="flex max-h-56 flex-col gap-2 overflow-y-auto rounded-xl border border-border bg-card-2/30 p-3 font-mono text-[11px]">
+              <div className="flex max-h-56 flex-col gap-2 overflow-y-auto rounded-xl bg-fill p-3 font-mono text-[11px]">
                 {ids.map((id) => (
                   <div key={id} className="flex items-center justify-between text-secondary">
                     <span>{id}</span>

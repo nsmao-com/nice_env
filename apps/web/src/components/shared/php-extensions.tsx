@@ -101,15 +101,15 @@ export function PhpExtensionsDialog({
       );
       if (r.warnings.length > 0) {
         toast.warning(
-          `${ext.label} 已写入 php.ini，但 PHP 报了告警`,
+          `${ext.label} ${t("phpext.writtenWithWarnings")}`,
           { description: r.warnings.slice(0, 3).join("\n"), duration: 9000 }
         );
       } else if (r.needsRestart) {
-        toast.info(`${ext.label} 已${next ? "启用" : "禁用"}`, {
+        toast.info(`${ext.label} ${next ? t("phpext.enabledToast") : t("phpext.disabledToast")}`, {
           description: t("phpext.needsRestart"),
         });
       } else {
-        toast.success(`${ext.label} 已${next ? "启用" : "禁用"}`);
+        toast.success(`${ext.label} ${next ? t("phpext.enabledToast") : t("phpext.disabledToast")}`);
       }
       void load();
       invalidate("services");

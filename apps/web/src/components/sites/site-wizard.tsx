@@ -416,7 +416,7 @@ export function SiteWizard({
 
             {step === 3 && (
               <div className="flex flex-col gap-4">
-                <div className="flex items-center justify-between gap-4 rounded-xl border border-border bg-card-2/40 p-4">
+                <div className="flex items-center justify-between gap-4 rounded-xl bg-fill p-4">
                   <div className="flex flex-col gap-0.5">
                     <span className="flex items-center gap-2 text-[13px] font-medium">
                       <Lock className="h-3.5 w-3.5 text-primary" /> {t("sites.wizard.https")}
@@ -436,7 +436,7 @@ export function SiteWizard({
 
             {step === 4 && (
               <div className="flex flex-col gap-4">
-                <div className="flex items-center justify-between gap-4 rounded-xl border border-border bg-card-2/40 p-4">
+                <div className="flex items-center justify-between gap-4 rounded-xl bg-fill p-4">
                   <div className="flex flex-col gap-0.5">
                     <span className="flex items-center gap-2 text-[13px] font-medium">
                       <Database className="h-3.5 w-3.5 text-primary" /> {t("sites.wizard.db")}
@@ -493,7 +493,7 @@ export function SiteWizard({
                   </Select>
                 </div>
                 {/* 摘要 */}
-                <div className="flex flex-col gap-2 rounded-xl border border-border bg-card-2/40 p-4 text-[12px]">
+                <div className="flex flex-col gap-2 rounded-xl bg-fill p-4 text-[12px]">
                   <SummaryRow label={t("wz.domain")} value={[domain, ...aliases.split(/[,，\s]+/).filter(Boolean)].join(" · ")} mono />
                   <SummaryRow label={t("wz.rootDir")} value={rootDir} mono />
                   <SummaryRow

@@ -198,7 +198,7 @@ export function VersionPicker({ group, items, catalog, onRefresh, onPick, onUnin
                       disabled={busy !== null}
                       className={cn(
                         "flex w-full items-center gap-2 px-2.5 py-1.5 text-left transition-colors",
-                        "hover:bg-card-2/60 disabled:opacity-60",
+                        "hover:bg-fill disabled:opacity-60",
                         item.running && "bg-running-soft/40"
                       )}
                     >

@@ -11,7 +11,9 @@ pub mod install;
 pub mod model;
 pub mod ops;
 pub mod paths;
+use paths::write_with_backup;
 pub mod pathenv;
+pub mod phpext;
 pub mod ports;
 pub mod proxy;
 pub mod serde_proxy;
@@ -23,6 +25,7 @@ pub mod store;
 pub mod transfer;
 pub mod tls;
 pub mod versions;
+pub mod xdebug;
 
 use download::Downloader;
 use error::Result;
@@ -356,5 +359,224 @@ impl CoreState {
     /// 端口区间扫描（工具箱；单端口传 from == to）
     pub fn scan_port_range(&self, from: u16, to: u16) -> Result<model::PortRangeScan> {
         ports::scan_port_range(&self.manager, from, to)
+    }
+
+    /* ---------- PHP 扩展 ---------- */
+
+    /// 某版本 PHP 的扩展面板：磁盘上有什么 + php.ini 里开了什么
+    pub fn php_extensions(&self, version: &str) -> Result<model::PhpExtensionView> {
+        let extensions = phpext::scan_available(&self.paths, version)?;
+        let toggles = phpext::INI_TOGGLES
+            .iter()
+            .map(|t| {
+                let v = phpext::read_ini_value(&self.paths, version, t.key)
+                    .unwrap_or_else(|| if t.numeric { "0".into() } else { "Off".into() });
+                model::PhpIniToggle {
+                    key: t.key.to_string(),
+                    label: t.label.to_string(),
+                    hint: t.hint.to_string(),
+                    value: phpext::ini_truthy(&v),
+                }
+            })
+            .collect();
+        Ok(model::PhpExtensionView {
+            version: version.to_string(),
+            ini_path: phpext::ini_path_for(&self.paths, version)
+                .to_string_lossy()
+                .to_string(),
+            extensions,
+            toggles,
+        })
+    }
+
+    /// 启用/禁用扩展。改了 php.ini 只有重启 php-cgi 才生效，
+    /// 所以这里顺带告诉前端「需不需要重启」，并在该版本正在运行时真正重启它——
+    /// 否则用户勾了半天发现没效果，会以为功能坏了。
+    pub fn set_php_extension(
+        &self,
+        version: &str,
+        ext: &str,
+        enable: bool,
+    ) -> Result<model::PhpExtensionChange> {
+        let mut warnings = phpext::set_extension(&self.paths, version, ext, enable)?;
+        let service_id = format!("php@{version}");
+        let running = self
+            .manager
+            .list_status()
+            .iter()
+            .any(|s| s.id == service_id && matches!(s.state, model::ServiceState::Running));
+        let mut restarted = false;
+        if running {
+            // 重启失败不该掩盖「配置已改成功」这个事实，忽略错误但记在告警里
+            match ops::stop_service(&self.store, &self.paths, &self.manager, &service_id)
+                .and_then(|_| ops::start_service(&self.store, &self.paths, &self.manager, &service_id))
+            {
+                Ok(_) => restarted = true,
+                Err(e) => warnings.push(format!("PHP {version} 重启失败：{}", e.message)),
+            }
+        }
+        Ok(model::PhpExtensionChange {
+            name: ext.to_string(),
+            enabled: enable,
+            warnings,
+            needs_restart: running && !restarted,
+        })
+    }
+
+    /// php.ini 快捷开关（display_errors / log_errors / opcache.enable）
+    pub fn set_php_ini_toggle(&self, version: &str, key: &str, value: bool) -> Result<()> {
+        // 找到该键的声明方式（On/Off 还是 1/0）
+        let numeric = phpext::INI_TOGGLES
+            .iter()
+            .find(|t| t.key == key)
+            .map(|t| t.numeric)
+            .unwrap_or(false);
+        let v = match (numeric, value) {
+            (true, true) => "1",
+            (true, false) => "0",
+            (false, true) => "On",
+            (false, false) => "Off",
+        };
+        phpext::write_ini_value(&self.paths, version, key, v)
+    }
+
+    /* ---------- Xdebug ---------- */
+
+    /// Xdebug 现状：构建指纹 / DLL 在不在 / 真加载了没有
+    pub fn xdebug_status(&self, version: &str) -> Result<xdebug::XdebugStatus> {
+        xdebug::status(&self.paths, version)
+    }
+
+    /// 一键配置 Xdebug。
+    ///
+    /// dll_path 给了就从本地装（用户自己下好的），否则按 PHP 构建指纹在线拉。
+    /// 无论哪条路，最后都跑一次实测；加载失败就把 PHP 的原始告警带回去，
+    /// 不把「写进 php.ini 了」当成「配置成功了」。
+    pub async fn xdebug_setup(
+        &self,
+        input: xdebug::XdebugSetupInput,
+    ) -> Result<model::XdebugSetupResult> {
+        let version = input.version.clone();
+        // 用户直接给了 DLL：跳过下载
+        if let Some(p) = input.dll_path.as_deref().filter(|p| !p.trim().is_empty()) {
+            xdebug::install_from_path(
+                &self.paths,
+                &version,
+                std::path::Path::new(p),
+                &input.mode,
+                input.client_port,
+            )?;
+            let (loaded, loaded_version, warnings) = xdebug::verify(&self.paths, &version);
+            self.restart_php_if_running(&version, &mut Vec::new());
+            return Ok(model::XdebugSetupResult {
+                version,
+                installed: loaded,
+                dll_path: Some(p.to_string()),
+                loaded_version,
+                warnings,
+                manual_hint: None,
+            });
+        }
+
+        // 在线下载：按构建指纹拼候选文件名，逐个试
+        let build = xdebug::detect_build(&self.paths, &version)?;
+        let candidates = build.xdebug_dll_candidates(xdebug::DEFAULT_XDEBUG_VERSION);
+        let mut last_err: Option<String> = None;
+        for cand in &candidates {
+            let urls = xdebug::download_urls(cand);
+            // 这些 DLL 没有随包提供 sha256（官方未公开校验文件），
+            // 因此下载完必须靠 PHP 实测来兜底验真——装不上就会报出来。
+            match self
+                .downloader
+                .download(
+                    &format!("xdebug-{version}"),
+                    &urls,
+                    "",
+                    0,
+                    &self.paths,
+                    &|e| (self.emit)(e),
+                )
+                .await
+            {
+                Ok(path) => {
+                    xdebug::install_from_path(
+                        &self.paths,
+                        &version,
+                        &path,
+                        &input.mode,
+                        input.client_port,
+                    )?;
+                    let (loaded, loaded_version, mut warnings) =
+                        xdebug::verify(&self.paths, &version);
+                    if loaded {
+                        self.restart_php_if_running(&version, &mut warnings);
+                        return Ok(model::XdebugSetupResult {
+                            version,
+                            installed: true,
+                            dll_path: Some(path.to_string_lossy().to_string()),
+                            loaded_version,
+                            warnings,
+                            manual_hint: None,
+                        });
+                    }
+                    // 下载到了但加载失败：大概率是构建指纹不匹配
+                    last_err = Some(format!(
+                        "已下载 {cand}，但 PHP 加载失败：{}",
+                        warnings.join("；")
+                    ));
+                }
+                Err(e) => {
+                    last_err = Some(format!("{cand} 下载失败：{}", e.message));
+                }
+            }
+        }
+        Ok(model::XdebugSetupResult {
+            version,
+            installed: false,
+            dll_path: None,
+            loaded_version: None,
+            warnings: last_err.into_iter().collect(),
+            manual_hint: Some(build.manual_hint(xdebug::DEFAULT_XDEBUG_VERSION)),
+        })
+    }
+
+    /// PHP 在跑就重启，让 php.ini 改动立刻生效；失败只记告警不抛错
+    fn restart_php_if_running(&self, version: &str, warnings: &mut Vec<String>) {
+        let service_id = format!("php@{version}");
+        let running = self
+            .manager
+            .list_status()
+            .iter()
+            .any(|s| s.id == service_id && matches!(s.state, model::ServiceState::Running));
+        if !running {
+            return;
+        }
+        let r = ops::stop_service(&self.store, &self.paths, &self.manager, &service_id).and_then(|_| {
+            ops::start_service(&self.store, &self.paths, &self.manager, &service_id)
+        });
+        if let Err(e) = r {
+            warnings.push(format!("PHP {version} 重启失败：{}", e.message));
+        }
+    }
+
+    /// 启用/禁用 Xdebug（复用扩展开关，但会同步维护 [xdebug] 段）
+    pub fn xdebug_toggle(&self, version: &str, enabled: bool, mode: &str, port: u16) -> Result<Vec<String>> {
+        let ini_path = self.paths.php_ini(version);
+        let ini = std::fs::read_to_string(&ini_path).map_err(|e| AppError::io("读取 php.ini", e))?;
+        let mut next = phpext::apply_to_content(&ini, "xdebug", enabled);
+        if enabled {
+            let dll = self
+                .paths
+                .runtime_dir("php", version)
+                .join("ext")
+                .join(phpext::dll_file_name("xdebug"));
+            let section = xdebug::render_xdebug_section(&dll.to_string_lossy(), mode, port);
+            next = xdebug::upsert_xdebug_section(&next, &section);
+        }
+        write_with_backup(&ini_path, &next, &self.paths.backup())
+            .map_err(|e| AppError::io("写入 php.ini", e))?;
+        let mut warnings = Vec::new();
+        self.restart_php_if_running(version, &mut warnings);
+        Ok(warnings)
     }
 }

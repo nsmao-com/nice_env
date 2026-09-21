@@ -14,6 +14,10 @@ import type {
   LogLine,
   DatabaseInfo,
   DbUserInfo,
+  PhpExtensionView,
+  PhpExtensionChange,
+  XdebugStatus,
+  XdebugSetupResult,
   CertRecord,
   ProxyProfile,
   ProxyGroupView,
@@ -134,6 +138,26 @@ export const dbCreateUser = (username: string, password: string, database: strin
 export const dbResetRootPassword = (newPassword: string) =>
   safe(invoke<boolean>("db_reset_root_password", { newPassword }));
 export const dbRootPassword = () => safe(invoke<string>("db_root_password"));
+
+/* PHP 扩展 */
+export const phpExtensions = (version: string) =>
+  safe(invoke<PhpExtensionView>("php_extensions", { version }));
+export const setPhpExtension = (version: string, name: string, enabled: boolean) =>
+  safe(invoke<PhpExtensionChange>("set_php_extension", { version, name, enabled }));
+export const setPhpIniToggle = (version: string, key: string, value: boolean) =>
+  safe(invoke<boolean>("set_php_ini_toggle", { version, key, value }));
+
+/* Xdebug */
+export const xdebugStatus = (version: string) =>
+  safe(invoke<XdebugStatus>("xdebug_status", { version }));
+export const xdebugSetup = (input: {
+  version: string;
+  mode?: string;
+  clientPort?: number;
+  dllPath?: string | null;
+}) => safe(invoke<XdebugSetupResult>("xdebug_setup", { input }));
+export const xdebugToggle = (version: string, enabled: boolean, mode: string, port: number) =>
+  safe(invoke<string[]>("xdebug_toggle", { version, enabled, mode, port }));
 
 /* 代理（Clash/mihomo） */
 export const proxyStatus = () => safe(invoke<ProxyStatusInfo>("proxy_status"));

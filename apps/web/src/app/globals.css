@@ -3,118 +3,155 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* ============================================================
+   设计令牌 —— 暖中性纸感底 + 强调色驱动的主色 + 分层阴影。
+   组件只消费这里的 token；改这一层即可全局换肤。
+   ============================================================ */
 :root {
-  --accent-h: 240;
-  /* 自定义主题色（设置里选「自定义颜色」时由 JS 写入；transparent = 用 --accent-h 生成） */
+  /* 主题色：JS 写入 --accent-solid-light / -dark（见 lib/appearance.ts），
+     --primary 在这里按主题取用 —— 内联样式优先级高于类选择器，
+     所以不能让 JS 直接写 --primary。 */
+  --accent-h: 250;
   --accent-hex: transparent;
-  /* 界面字体 / 代码字体 / 字号：由设置页写到 :root，未设置时用这里的默认值 */
-  --app-font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system,
-    "Segoe UI", "Microsoft YaHei", sans-serif;
-  --app-font-mono: "JetBrains Mono Variable", ui-monospace, "Cascadia Code",
-    Consolas, monospace;
+  --accent-solid-light: hsl(250 62% 44%);
+  --accent-solid-light-hover: hsl(250 66% 51%);
+  --accent-solid-dark: hsl(250 66% 58%);
+  --accent-solid-dark-hover: hsl(250 70% 64%);
+  --accent-glow-light: hsl(250 70% 45% / 0.32);
+  --accent-glow-dark: hsl(250 70% 50% / 0.4);
+
+  /* 界面字体 / 代码字体 / 字号：设置页写到 :root，未设置时用这里的默认值 */
+  --app-font-sans: "IBM Plex Sans Variable", "Inter Variable", ui-sans-serif,
+    system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --app-font-mono: "IBM Plex Mono", "JetBrains Mono Variable", ui-monospace,
+    "Cascadia Code", Consolas, monospace;
   --app-font-scale: 1;
   --code-font-size: 11.5px;
+  /* 数字与代码的字距微调，让表格/端口/inode 一类数字更整齐 */
+  --tracking-tight-num: -0.01em;
 
-  /* 浅色（默认）—— shadcn 默认 zinc 中性调：白底、黑主按钮、克制阴影 */
-  --background: #ffffff;
-  --surface: #fafafa;
+  /* 暖中性色板（纸感底 + 墨色字） */
+  --background: #faf8f6;
+  --surface: #f5f2ef;
   --card: #ffffff;
-  --card-2: #f4f4f5;
-  --border: #e4e4e7;
-  --border-strong: #d4d4d8;
-  --foreground: #09090b;
-  --secondary: #3f3f46;
-  --muted: #71717a;
-  --faint: #a1a1aa;
-  --primary: #18181b;
-  --primary-fg: #fafafa;
-  --primary-soft: rgba(24, 24, 27, 0.06);
-  --running: #16a34a;
+  --card-2: #f2efec;
+  --border: #e6e1dc;
+  --border-strong: #d5cec8;
+  --foreground: #1c1917;
+  --secondary: #44403c;
+  --muted: #78716c;
+  --faint: #a8a29e;
+
+  /* 主色 = 强调色（设置里选的主题色真正生效的地方）。
+     这里按主题挑 JS 写好的那一组：:root 用浅色组，.dark 覆盖成深色组。
+     --accent-solid 必须在本层有定义 —— 只在 .dark 里定义会让浅色下
+     整个 --primary 失效（按钮底色透明、焦点环消失）。 */
+  --accent-solid: var(--accent-solid-light);
+  --accent-solid-hover: var(--accent-solid-light-hover);
+  --accent-glow: var(--accent-glow-light);
+  --primary: var(--accent-solid);
+  --primary-fg: #ffffff;
+  --primary-soft: hsl(var(--accent-h) 62% 45% / 0.1);
+  --primary-ring: hsl(var(--accent-h) 62% 45% / 0.35);
+
+  --running: #15a34a;
   --error: #dc2626;
   --warn: #d97706;
   --info: #2563eb;
-  --running-soft: rgba(22, 163, 74, 0.1);
-  --error-soft: rgba(220, 38, 38, 0.08);
-  --info-soft: rgba(37, 99, 235, 0.08);
+  --running-soft: hsl(145 60% 40% / 0.11);
+  --error-soft: hsl(0 72% 50% / 0.09);
+  --warn-soft: hsl(32 90% 45% / 0.11);
+  --info-soft: hsl(217 80% 50% / 0.09);
+
+  /* 卡片顶部的 1px 高光（比 border 更亮，制造“实体表面”错觉） */
   --sheen: linear-gradient(
     to bottom,
-    rgba(255, 255, 255, 0.9),
-    rgba(255, 255, 255, 0) 42%
+    rgba(255, 255, 255, 0.95),
+    rgba(255, 255, 255, 0) 46%
   );
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04);
-  --chrome: #ececee;
+  /* 卡片自身的极淡纵向渐变，避免大面积死白 */
+  --card-grad: linear-gradient(180deg, #ffffff 0%, #fdfcfb 100%);
+  --card-grad-hover: linear-gradient(180deg, #ffffff 0%, #f8f5f2 100%);
 
-  /* Apple 分段控件（Segmented Control）配色：
-     轨道是低饱和的填充灰，滑块是白卡片 + 极淡描边 + 一层柔和投影。
-     参考 macOS 系统偏好设置里的分段选择器。 */
-  --seg-track: rgba(120, 120, 128, 0.12);
-  --seg-thumb: #ffffff;
-  --seg-thumb-ring: rgba(0, 0, 0, 0.04);
-  --seg-thumb-shadow: 0 1px 2px rgba(0, 0, 0, 0.12), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
-  --seg-active-text: #000000;
-  /* Apple 系统强调色（light 模式） */
-  --apple-blue: #007aff;
-  --apple-green: #34c759;
-  --apple-orange: #ff9500;
-  --apple-red: #ff3b30;
-  --apple-purple: #af52de;
-  --apple-teal: #30b0c7;
-  --apple-pink: #ff2d55;
-  --workspace-radius: 16px;
-  --workspace-inset: 12px;
+  /* 分层阴影：近距贴地 + 中距扩散，比单层阴影更有“厚度” */
+  --shadow-card: 0 1px 1px -0.5px rgba(28, 25, 23, 0.04),
+    0 2px 4px -2px rgba(28, 25, 23, 0.06);
+  --shadow-raised: 0 1px 1px -0.5px rgba(28, 25, 23, 0.05),
+    0 4px 10px -3px rgba(28, 25, 23, 0.08),
+    0 12px 24px -12px rgba(28, 25, 23, 0.1);
+  --shadow-pop: 0 2px 6px -1px rgba(28, 25, 23, 0.08),
+    0 12px 32px -8px rgba(28, 25, 23, 0.16);
+
+  --chrome: #e9e5e1;
+  --chrome-grad: linear-gradient(180deg, #edeae6 0%, #e6e1dc 100%);
+
+  /* 浮动指示块（侧边栏选中项 / 分段控件滑块）：描边 + 投影 */
+  --thumb-ring: rgba(28, 25, 23, 0.05);
+  --thumb-shadow: 0 1px 2px rgba(28, 25, 23, 0.13),
+    0 0 0 0.5px rgba(28, 25, 23, 0.04);
+
+  --workspace-radius: 14px;
+  --workspace-inset: 10px;
   --caption-height: 36px;
-  --workspace-shadow: 0 1px 1px rgba(15, 23, 42, 0.03), 0 10px 28px rgba(15, 23, 42, 0.06);
+  --workspace-shadow: 0 1px 2px -1px rgba(28, 25, 23, 0.06),
+    0 12px 32px -12px rgba(28, 25, 23, 0.14);
 }
 
 .dark {
-  --background: #09090b;
-  --surface: #111113;
-  --card: #101012;
-  --card-2: #1c1c1f;
-  --border: rgba(255, 255, 255, 0.1);
-  --border-strong: rgba(255, 255, 255, 0.18);
-  --foreground: #fafafa;
-  --secondary: #d4d4d8;
-  --muted: #a1a1aa;
-  --faint: #71717a;
-  --primary: #fafafa;
-  --primary-fg: #18181b;
-  --primary-soft: rgba(250, 250, 250, 0.1);
+  /* 深色模式下主色换成 JS 写的深色组 */
+  --accent-solid: var(--accent-solid-dark);
+  --accent-solid-hover: var(--accent-solid-dark-hover);
+  --accent-glow: var(--accent-glow-dark);
+
+  --background: #171614;
+  --surface: #1c1a18;
+  --card: #1e1c1a;
+  --card-2: #272422;
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.17);
+  --foreground: #f5f3f1;
+  --secondary: #d6d3d1;
+  --muted: #a8a29e;
+  --faint: #78716c;
+
+  --primary: var(--accent-solid);
+  --primary-fg: #ffffff;
+  --primary-soft: hsl(var(--accent-h) 70% 60% / 0.16);
+  --primary-ring: hsl(var(--accent-h) 70% 60% / 0.45);
+
   --running: #4ade80;
   --error: #f87171;
   --warn: #fbbf24;
   --info: #60a5fa;
-  --running-soft: rgba(74, 222, 128, 0.12);
-  --error-soft: rgba(248, 113, 113, 0.12);
-  --info-soft: rgba(96, 165, 250, 0.12);
+  --running-soft: hsl(145 65% 55% / 0.14);
+  --error-soft: hsl(0 80% 65% / 0.13);
+  --warn-soft: hsl(40 90% 60% / 0.13);
+  --info-soft: hsl(217 85% 65% / 0.13);
+
   --sheen: linear-gradient(
     to bottom,
-    rgba(255, 255, 255, 0.06),
+    rgba(255, 255, 255, 0.07),
     rgba(255, 255, 255, 0) 46%
   );
-  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.03) inset,
-    0 8px 24px rgba(0, 0, 0, 0.28);
-  --chrome: #08080a;
+  --card-grad: linear-gradient(180deg, rgba(255, 255, 255, 0.028) 0%, rgba(255, 255, 255, 0) 100%);
+  --card-grad-hover: linear-gradient(180deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.01) 100%);
 
-  /* Apple 分段控件（dark） */
-  --seg-track: rgba(120, 120, 128, 0.28);
-  --seg-thumb: #636366;
-  --seg-thumb-ring: rgba(255, 255, 255, 0.08);
-  --seg-thumb-shadow: 0 1px 3px rgba(0, 0, 0, 0.5), 0 0 0 0.5px rgba(255, 255, 255, 0.06);
-  --seg-active-text: #ffffff;
-  /* Apple 系统强调色（dark 模式，提亮一档） */
-  --apple-blue: #0a84ff;
-  --apple-green: #30d158;
-  --apple-orange: #ff9f0a;
-  --apple-red: #ff453a;
-  --apple-purple: #bf5af2;
-  --apple-teal: #40c8e0;
-  --apple-pink: #ff375f;
-  --workspace-radius: 16px;
-  --workspace-inset: 12px;
-  --caption-height: 36px;
-  --workspace-shadow: 0 1px 0 rgba(255, 255, 255, 0.045) inset,
-    0 12px 32px rgba(0, 0, 0, 0.42);
+  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.028) inset,
+    0 2px 4px -2px rgba(0, 0, 0, 0.4);
+  --shadow-raised: 0 1px 0 rgba(255, 255, 255, 0.04) inset,
+    0 4px 12px -3px rgba(0, 0, 0, 0.5);
+  --shadow-pop: 0 0 0 1px rgba(255, 255, 255, 0.05),
+    0 12px 36px -8px rgba(0, 0, 0, 0.7);
+
+  --chrome: #100f0e;
+  --chrome-grad: linear-gradient(180deg, #131211 0%, #0d0c0b 100%);
+
+  --thumb-ring: rgba(255, 255, 255, 0.09);
+  --thumb-shadow: 0 1px 3px rgba(0, 0, 0, 0.55),
+    0 0 0 0.5px rgba(255, 255, 255, 0.06);
+
+  --workspace-shadow: 0 1px 0 rgba(255, 255, 255, 0.035) inset,
+    0 16px 40px -14px rgba(0, 0, 0, 0.6);
 }
 
 @theme inline {
@@ -137,23 +174,18 @@
   --color-info: var(--info);
   --color-running-soft: var(--running-soft);
   --color-error-soft: var(--error-soft);
+  --color-warn-soft: var(--warn-soft);
   --color-info-soft: var(--info-soft);
   --color-chrome: var(--chrome);
-  --color-seg-track: var(--seg-track);
-  --color-seg-thumb: var(--seg-thumb);
-  --color-seg-active: var(--seg-active-text);
-  --color-apple-blue: var(--apple-blue);
-  --color-apple-green: var(--apple-green);
-  --color-apple-orange: var(--apple-orange);
-  --color-apple-red: var(--apple-red);
-  --color-apple-purple: var(--apple-purple);
-  --color-apple-teal: var(--apple-teal);
-  --color-apple-pink: var(--apple-pink);
+
   --font-sans: var(--app-font-sans);
   --font-mono: var(--app-font-mono);
-  --radius-lg: 12px;
-  --radius-xl: 14px;
-  --radius-2xl: 16px;
+  /* 统一圆角刻度，避免 12/14/16 混用导致观感散 */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 13px;
+  --radius-2xl: 17px;
 }
 
 @layer base {
@@ -167,7 +199,6 @@
     background: var(--chrome);
   }
   html {
-    /* 界面缩放：整体按 --app-font-scale 缩放文字（用户可选 0.85–1.25） */
     font-size: calc(16px * var(--app-font-scale));
   }
   body {
@@ -175,9 +206,13 @@
     font-family: var(--app-font-sans);
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
-    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11", "ss01";
   }
-  /* 代码 / 日志 / 终端片段统一走代码字体与字号 token */
+  h1,
+  h2,
+  h3 {
+    letter-spacing: -0.018em;
+  }
   code,
   pre,
   kbd,
@@ -190,7 +225,12 @@
     font-size: var(--code-font-size);
   }
   ::selection {
-    background: hsl(var(--accent-h) 82% 60% / 0.3);
+    background: hsl(var(--accent-h) 70% 55% / 0.26);
+  }
+  /* 统一焦点环：走强调色，键盘可见、鼠标不可见 */
+  :focus-visible {
+    outline: 2px solid var(--primary-ring);
+    outline-offset: 2px;
   }
 
   /* 滚动条：默认隐藏（内容照常可滚动，只是不画滚动条）；
@@ -207,7 +247,6 @@
     display: none;
   }
 
-  /* 需要滚动条的场合（极少）：加 .nsb-scrollbars 强制显示 */
   .nsb-scrollbars::-webkit-scrollbar {
     width: 8px;
     height: 8px;
@@ -231,6 +270,7 @@
 @layer components {
   .nsb-shell {
     background: var(--chrome);
+    background-image: var(--chrome-grad);
   }
 
   .nsb-sidebar {
@@ -246,15 +286,20 @@
     display: none;
   }
 
+  /* 工作区：纸感底 + 右上角极淡强调色辉光（background-image 永远不会盖住内容） */
   .nsb-workspace {
     margin: var(--workspace-inset);
-    background: var(--card);
-    border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+    background-color: var(--card);
+    background-image: radial-gradient(
+        130% 80% at 100% 0%,
+        hsl(var(--accent-h) 70% 50% / 0.045),
+        transparent 58%
+      );
+    border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
     border-radius: var(--workspace-radius);
     box-shadow: var(--workspace-shadow);
   }
 
-  /* Windows：窗口按钮贴在窗口最右上角的灰底上，不进入圆角内容区 */
   .nsb-shell-win .nsb-window-controls {
     display: flex;
     position: absolute;
@@ -328,7 +373,6 @@
     user-select: auto;
   }
 
-  /* 只在灰底标题带 / 明确标记的区域拖窗口，避免挡住菜单和导航 */
   .nsb-shell-desktop .nsb-sidebar-brand,
   .nsb-shell-desktop [data-tauri-drag-region] {
     -webkit-app-region: drag;
@@ -345,7 +389,7 @@
 }
 
 @layer utilities {
-  /* 卡片顶部 1px 高光。不要在这里写 position：会盖掉 Dialog 的 fixed，导致只有遮罩、弹窗飞出视口。 */
+  /* 卡片顶部 1px 高光。不要在这里写 position：会盖掉 Dialog 的 fixed。 */
   .sheen::before {
     content: "";
     position: absolute;
@@ -355,6 +399,25 @@
     background: var(--sheen);
     pointer-events: none;
   }
+
+  /* 卡片实色填充：纯色 + 纵向微渐变，避免大面积死白 */
+  .card-fill {
+    background-color: var(--card);
+    background-image: var(--card-grad);
+  }
+
+  /* 数字对齐 */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+    letter-spacing: var(--tracking-tight-num);
+  }
+  .text-balance {
+    text-wrap: balance;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
   /* 运行态呼吸光 —— 极弱，仅 running */
   .breath {
     animation: breath 3.2s ease-in-out infinite;
@@ -380,15 +443,6 @@
       box-shadow: 0 0 16px 0 hsl(351 89% 68% / 0.22);
     }
   }
-  .text-balance {
-    text-wrap: balance;
-  }
-  .tabular {
-    font-variant-numeric: tabular-nums;
-  }
-  .no-scrollbar::-webkit-scrollbar {
-    display: none;
-  }
   .animate-progress-slide {
     animation: progress-slide 1.2s ease-in-out infinite;
   }
@@ -399,6 +453,11 @@
     100% {
       transform: translateX(400%);
     }
+  }
+  /* 强调色实心表面的顶部内高光：制造“实体按键”质感 */
+  .btn-solid {
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18),
+      0 1px 2px rgba(28, 25, 23, 0.14), 0 4px 12px -4px var(--accent-glow);
   }
 }
 

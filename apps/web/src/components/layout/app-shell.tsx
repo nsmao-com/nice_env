@@ -143,17 +143,22 @@ export function PageHeader({
 }) {
   return (
     <div className="mb-6 flex items-end justify-between gap-4">
-      <div>
+      <div className="min-w-0">
         <motion.h1
           initial={{ opacity: 0, y: 6 }}
           animate={{ opacity: 1, y: 0 }}
-          className="text-xl font-semibold tracking-tight"
+          className="flex items-center gap-2 text-[19px] font-semibold tracking-[-0.02em]"
         >
-          {title}
+          {/* 强调色小竖条：给标题一个视觉锚点，也随主题色变化 */}
+          <span
+            aria-hidden
+            className="h-[18px] w-[3px] shrink-0 rounded-full bg-primary shadow-[0_0_8px_0_var(--accent-glow)]"
+          />
+          <span className="truncate">{title}</span>
         </motion.h1>
-        {subtitle && <p className="mt-1 text-[13px] text-muted">{subtitle}</p>}
+        {subtitle && <p className="mt-1.5 pl-[11px] text-[13px] text-muted">{subtitle}</p>}
       </div>
-      {actions && <div className="flex items-center gap-2">{actions}</div>}
+      {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
     </div>
   );
 }

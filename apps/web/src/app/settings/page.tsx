@@ -209,9 +209,9 @@ export default function SettingsPage() {
     const defaults: Partial<AppSettings> = {
       accentHue: 250,
       accentHex: "",
-      uiFont: "inter",
+      uiFont: "plex",
       uiScale: 1,
-      codeFont: "jetbrains",
+      codeFont: "plex-mono",
       codeFontSize: 11.5,
       codeLineNumbers: true,
       codeWrap: false,

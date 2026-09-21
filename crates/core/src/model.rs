@@ -594,3 +594,83 @@ pub struct PortRangeScan {
     /// 出现在该范围、但非监听状态的占用印象（UDP 等）不作断言，仅留空
     pub scanned_at: i64,
 }
+
+/* ================= PHP 扩展 ================= */
+
+/// 一个 PHP 扩展在某个版本下的可用/启用状态。
+/// 可用性来自 `ext/` 目录里真实存在的 DLL，启用状态来自 php.ini。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PhpExtension {
+    /// 扩展名（去 php_ 前缀与 .dll 后缀），如 `curl` / `pdo_mysql`
+    pub name: String,
+    /// 友好名，如 `PDO MySQL`
+    pub label: String,
+    /// 分组：基础 / 数据库 / 缓存 / 图像 / 文本 / 网络 / 性能 / 调试 / 安全 / 归档 / 系统 / 其他
+    pub group: String,
+    /// 一句话说明（这东西干什么用的）
+    pub hint: String,
+    pub enabled: bool,
+    /// 需要 zend_extension= 加载（Xdebug / OPcache 等）
+    pub zend: bool,
+    /// PHP 内置扩展：禁用可能弄坏运行时，前端据此给出提示
+    pub builtin: bool,
+    /// 对应文件名，方便用户自己核对
+    pub dll: String,
+    /// 已启用但缺少的依赖扩展名（前端高亮提示）
+    #[serde(default)]
+    pub missing_deps: Vec<String>,
+}
+
+/// 某版本 PHP 的扩展面板数据
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PhpExtensionView {
+    pub version: String,
+    pub ini_path: String,
+    pub extensions: Vec<PhpExtension>,
+    /// php.ini 快捷开关的当前值（display_errors 等）
+    pub toggles: Vec<PhpIniToggle>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PhpIniToggle {
+    pub key: String,
+    pub label: String,
+    pub hint: String,
+    pub value: bool,
+}
+
+/// 启用/禁用扩展的结果：改了没有 + PHP 实测的告警
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PhpExtensionChange {
+    pub name: String,
+    pub enabled: bool,
+    /// PHP 加载该扩展时的原始告警（正常为空）
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// 生效建议：改了 php.ini 需要重启 php-cgi 才生效
+    pub needs_restart: bool,
+}
+
+/// Xdebug 一键配置的结果
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct XdebugSetupResult {
+    pub version: String,
+    /// 实测确认 PHP 真的加载了 Xdebug
+    pub installed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dll_path: Option<String>,
+    /// 实测到的 Xdebug 版本号
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loaded_version: Option<String>,
+    /// PHP 的原始告警（正常为空）
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// 自动下载失败时给用户的手动指引
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manual_hint: Option<String>,
+}

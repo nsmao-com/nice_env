@@ -76,7 +76,7 @@ export function Sidebar() {
         {NAV.map((section) => (
           <div key={section.group} className="flex flex-col gap-0.5">
             {!collapsed && (
-              <span className="mb-1 px-2 text-[10.5px] font-medium uppercase tracking-wider text-faint/70">
+              <span className="mb-1 px-2 text-[10px] font-semibold uppercase tracking-[0.09em] text-faint/65">
                 {t(`nav.group.${section.group}` as "nav.group.dev")}
               </span>
             )}
@@ -88,23 +88,34 @@ export function Sidebar() {
                   href={item.href}
                   className={cn(
                     "group relative flex h-9 items-center gap-2.5 rounded-lg px-2.5 text-[13px] font-medium transition-colors",
-                    active ? "text-foreground" : "text-muted hover:bg-card-2/70 hover:text-foreground",
+                    active
+                      ? "text-foreground"
+                      : "text-muted hover:bg-card-2/60 hover:text-foreground",
                     collapsed && "justify-center px-0"
                   )}
                 >
                   {active && (
-                    <motion.span
-                      layoutId="nav-active"
-                      className="absolute inset-0 rounded-lg border border-border bg-card"
-                      transition={{ type: "spring", stiffness: 500, damping: 38 }}
-                    />
+                    <>
+                      {/* 悬浮底：实色 + 1px 高光，边界比纯描边更干净 */}
+                      <motion.span
+                        layoutId="nav-active"
+                        className="card-fill absolute inset-0 rounded-lg shadow-[var(--shadow-card)] ring-1 ring-inset ring-[var(--thumb-ring)]"
+                        transition={{ type: "spring", stiffness: 500, damping: 38 }}
+                      />
+                      {/* 左侧强调色指示条：一眼看出当前页，且随主题色变化 */}
+                      <motion.span
+                        layoutId="nav-active-bar"
+                        className="absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-full bg-primary shadow-[0_0_8px_0_var(--accent-glow)]"
+                        transition={{ type: "spring", stiffness: 500, damping: 38 }}
+                      />
+                    </>
                   )}
                   <item.icon
                     className={cn(
-                      "relative h-[17px] w-[17px] shrink-0",
+                      "relative h-[17px] w-[17px] shrink-0 transition-colors",
                       active ? "text-primary" : "text-faint group-hover:text-secondary"
                     )}
-                    strokeWidth={active ? 2.1 : 1.8}
+                    strokeWidth={active ? 2.15 : 1.8}
                   />
                   {!collapsed && <span className="relative truncate">{label}</span>}
                 </Link>
@@ -130,8 +141,8 @@ export function Sidebar() {
               className={cn(
                 "flex h-9 flex-1 items-center gap-2.5 rounded-lg px-2.5 text-[13px] font-medium transition-colors",
                 pathname === "/settings"
-                  ? "border border-border bg-card text-foreground"
-                  : "text-muted hover:bg-card-2/70 hover:text-foreground",
+                  ? "card-fill text-foreground shadow-[var(--shadow-card)] ring-1 ring-inset ring-[var(--thumb-ring)]"
+                  : "text-muted hover:bg-card-2/60 hover:text-foreground",
                 collapsed && "justify-center px-0"
               )}
             >

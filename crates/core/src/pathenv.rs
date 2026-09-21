@@ -238,7 +238,6 @@ pub fn status(store: &Store, manifest: &Manifest) -> PathEnvStatus {
     let desired = if enabled { desired_dirs(store, manifest) } else { Vec::new() };
     let drift = enabled
         && desired.iter().any(|d| !current_path.iter().any(|p| same_path(p, d)));
-    let _ = applied;
 
     PathEnvStatus {
         enabled,

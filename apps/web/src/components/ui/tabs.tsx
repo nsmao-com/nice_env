@@ -32,9 +32,12 @@ const Tabs = ({
 };
 
 /**
- * Apple 分段控件（Segmented Control）。
- * 视觉按 macOS 系统偏好设置实现：低饱和圆角轨道 + 白色浮动滑块
- * （1px 极淡描边 + 轻微投影），滑块用 spring 动画平滑移动。
+ * 分段控件（Segmented Control）。
+ *
+ * 刻意不做成 macOS 系统偏好设置那种「灰轨道 + 白滑块」——那是最容易被一眼
+ * 认成系统原生控件的形态。这里改成：内凹轨道（inset 阴影而不是投影片）、
+ * 悬浮滑块用卡片渐变 + 分层阴影 + 强调色描边，激活文字也走强调色，
+ * 让「当前选中」在视觉上真正有重量。
  *
  * 溢出处理：项数多时（如套件页 13+ 个分类）轨道自动折行成多行。
  * 不采用横向滚动 —— 隐藏滚动条后普通鼠标滚轮并不会横滚，等于把
@@ -51,9 +54,9 @@ const TabsList = React.forwardRef<
       <TabsPrimitive.List
         ref={ref}
         className={cn(
-          // p-[2px] / rounded-[9px] 贴近系统控件的紧凑比例；
-          // 单行时高度 2+28+2=32px，与固定 h-8 观感一致
-          "inline-flex min-h-8 flex-wrap items-center gap-y-[3px] rounded-[9px] bg-seg-track p-[2px] text-muted",
+          // p-[3px] + 内凹阴影：轨道看起来是「凹槽」，滑块浮在槽里
+          "inline-flex min-h-[34px] flex-wrap items-center gap-y-[3px] rounded-xl border border-border/70 bg-card-2/60 p-[3px] text-muted",
+          "shadow-[inset_0_1px_2px_rgba(28,25,23,0.045)]",
           className
         )}
         {...props}
@@ -77,21 +80,20 @@ const TabsTrigger = React.forwardRef<
       value={value}
       className={cn(
         // h-7 而非 h-full：折行成多行后每一行都要保持固定高度
-        "relative inline-flex h-7 cursor-pointer select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-[7px] px-3 text-[13px] font-medium transition-colors duration-150",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/40",
+        "relative inline-flex h-7 cursor-pointer select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-[9px] px-3 text-[13px] font-medium transition-colors duration-150",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary-ring)]",
         "disabled:pointer-events-none disabled:opacity-40",
-        active ? "text-seg-active" : "text-muted hover:text-foreground",
+        active ? "text-primary" : "text-muted hover:text-foreground",
         className
       )}
       {...props}
     >
-      {/* 滑块：白卡片 + 极淡描边 + 柔和投影，spring 平滑滑到当前 trigger */}
+      {/* 滑块：卡片渐变 + 分层阴影 + 强调色描边；spring 平滑滑到当前 trigger */}
       {active && (
         <motion.span
           aria-hidden
           layoutId={pill}
-          className="absolute inset-0 rounded-[7px] bg-seg-thumb ring-1 ring-inset ring-[var(--seg-thumb-ring)]"
-          style={{ boxShadow: "var(--seg-thumb-shadow)" }}
+          className="card-fill absolute inset-0 rounded-[9px] shadow-[var(--thumb-shadow)] ring-1 ring-inset ring-[hsl(var(--accent-h)_62%_45%/0.3)]"
           transition={{ type: "spring", stiffness: 520, damping: 40, mass: 0.7 }}
         />
       )}

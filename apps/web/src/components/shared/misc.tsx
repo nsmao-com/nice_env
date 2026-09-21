@@ -71,17 +71,19 @@ export function EmptyState({
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3, ease: "easeOut" }}
       className={cn(
-        "flex flex-col items-center justify-center gap-4 rounded-2xl border border-dashed border-border py-16",
+        "flex flex-col items-center justify-center gap-4 rounded-xl border border-dashed border-border-strong/70 bg-card-2/20 py-16",
         className
       )}
     >
       <div className="relative">
-        <div className="absolute inset-0 rounded-full bg-primary/10 blur-2xl" />
-        <Icon className="relative h-12 w-12 text-faint" strokeWidth={1.2} />
+        <div className="absolute inset-0 rounded-full bg-primary/15 blur-2xl" />
+        <div className="relative flex h-14 w-14 items-center justify-center rounded-2xl border border-border bg-card-2/60 shadow-[var(--shadow-card)]">
+          <Icon className="h-6 w-6 text-faint" strokeWidth={1.5} />
+        </div>
       </div>
       <div className="flex flex-col items-center gap-1">
         <p className="text-sm font-medium text-secondary">{title}</p>
-        {hint && <p className="text-xs text-faint">{hint}</p>}
+        {hint && <p className="max-w-sm text-center text-xs text-faint">{hint}</p>}
       </div>
       {action}
     </motion.div>
@@ -147,8 +149,8 @@ export function SectionHeader({
   return (
     <div className={cn("flex items-center justify-between gap-4", className)}>
       <div className="flex flex-col gap-0.5">
-        <h2 className="text-[15px] font-semibold tracking-tight">{title}</h2>
-        {hint && <p className="text-xs text-faint">{hint}</p>}
+        <h2 className="text-[14.5px] font-semibold tracking-tight">{title}</h2>
+        {hint && <p className="text-xs tabular text-faint">{hint}</p>}
       </div>
       {actions && <div className="flex items-center gap-2">{actions}</div>}
     </div>

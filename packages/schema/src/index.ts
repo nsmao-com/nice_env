@@ -525,6 +525,88 @@ export const DbUserInfo = z.object({
 });
 export type DbUserInfo = z.infer<typeof DbUserInfo>;
 
+/* ============ PHP 扩展 ============ */
+
+export const PhpExtension = z.object({
+  name: z.string(),
+  label: z.string(),
+  group: z.string(),
+  hint: z.string(),
+  enabled: z.boolean(),
+  /** 需要 zend_extension= 加载（Xdebug / OPcache） */
+  zend: z.boolean(),
+  /** PHP 内置扩展，禁用可能弄坏运行时 */
+  builtin: z.boolean(),
+  dll: z.string(),
+  /** 已启用但缺依赖的扩展名 */
+  missingDeps: z.array(z.string()).default([]),
+});
+export type PhpExtension = z.infer<typeof PhpExtension>;
+
+export const PhpIniToggle = z.object({
+  key: z.string(),
+  label: z.string(),
+  hint: z.string(),
+  value: z.boolean(),
+});
+export type PhpIniToggle = z.infer<typeof PhpIniToggle>;
+
+export const PhpExtensionView = z.object({
+  version: z.string(),
+  iniPath: z.string(),
+  extensions: z.array(PhpExtension),
+  toggles: z.array(PhpIniToggle),
+});
+export type PhpExtensionView = z.infer<typeof PhpExtensionView>;
+
+export const PhpExtensionChange = z.object({
+  name: z.string(),
+  enabled: z.boolean(),
+  /** PHP 实测加载告警（正常为空） */
+  warnings: z.array(z.string()).default([]),
+  /** 需重启 php-cgi 才生效 */
+  needsRestart: z.boolean(),
+});
+export type PhpExtensionChange = z.infer<typeof PhpExtensionChange>;
+
+/* ============ Xdebug ============ */
+
+/** PHP 构建指纹：决定该装哪个 Xdebug DLL */
+export const PhpBuild = z.object({
+  phpVersion: z.string(),
+  api: z.string(),
+  ts: z.boolean(),
+  compiler: z.string(),
+  arch: z.string(),
+});
+export type PhpBuild = z.infer<typeof PhpBuild>;
+
+export const XdebugStatus = z.object({
+  version: z.string(),
+  build: PhpBuild.nullable().optional(),
+  dllPresent: z.boolean(),
+  enabled: z.boolean(),
+  /** php -m 实测是否真的加载了 */
+  loaded: z.boolean(),
+  loadedVersion: z.string().nullable().optional(),
+  recommended: z.string(),
+  dllCandidates: z.array(z.string()).default([]),
+  manualHint: z.string(),
+  settings: z.record(z.string(), z.string()).default({}),
+});
+export type XdebugStatus = z.infer<typeof XdebugStatus>;
+
+export const XdebugSetupResult = z.object({
+  version: z.string(),
+  installed: z.boolean(),
+  dllPath: z.string().nullable().optional(),
+  loadedVersion: z.string().nullable().optional(),
+  warnings: z.array(z.string()).default([]),
+  /** 自动下载失败时的手动指引 */
+  manualHint: z.string().nullable().optional(),
+});
+export type XdebugSetupResult = z.infer<typeof XdebugSetupResult>;
+
 /* ============ Clash / mihomo 代理 ============ */
 
 export const ProxyProfile = z.object({
@@ -564,12 +646,17 @@ export type ProxyStatusInfo = z.infer<typeof ProxyStatusInfo>;
 
 /* ============ 设置 ============ */
 
-/** 可选界面字体（stack 即 CSS font-family；Inter / JetBrains Mono 随应用打包） */
+/** 可选界面字体（stack 即 CSS font-family；随应用打包，离线可用） */
 export const UI_FONT_OPTIONS = [
+  {
+    id: "plex",
+    label: "IBM Plex Sans（默认）",
+    stack: '"IBM Plex Sans Variable", "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
+  },
   {
     id: "inter",
     label: "Inter",
-    stack: '"Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif',
+    stack: '"Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
   },
   {
     id: "system",
@@ -590,6 +677,11 @@ export const UI_FONT_OPTIONS = [
 
 /** 可选代码字体（日志 / 代码块 / 终端片段共用） */
 export const MONO_FONT_OPTIONS = [
+  {
+    id: "plex-mono",
+    label: "IBM Plex Mono（默认）",
+    stack: '"IBM Plex Mono", "JetBrains Mono Variable", ui-monospace, "Cascadia Code", Consolas, monospace',
+  },
   {
     id: "jetbrains",
     label: "JetBrains Mono",
@@ -626,11 +718,11 @@ export const AppSettings = z.object({
   /** 自定义主题色（#RRGGBB）；非空时优先于 accentHue */
   accentHex: z.string().default(""),
   /** 界面字体 id（见 UI_FONT_OPTIONS） */
-  uiFont: z.string().default("inter"),
+  uiFont: z.string().default("plex"),
   /** 界面缩放（0.85–1.25，1 = 默认） */
   uiScale: z.number().default(1),
   /** 代码字体 id（见 MONO_FONT_OPTIONS） */
-  codeFont: z.string().default("jetbrains"),
+  codeFont: z.string().default("plex-mono"),
   /** 代码块 / 日志字号（px，10–18） */
   codeFontSize: z.number().default(11.5),
   /** 代码块默认显示行号 */

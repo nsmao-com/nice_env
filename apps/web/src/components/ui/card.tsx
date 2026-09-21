@@ -1,12 +1,16 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
+/**
+ * 卡片：实色填充 + 纵向微渐变（避免大面积死白），
+ * 悬停时边框转向 border-strong 并把阴影提到 raised，形成"可交互表面"的层次。
+ */
 const Card = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
   ({ className, ...props }, ref) => (
     <div
       ref={ref}
       className={cn(
-        "relative sheen rounded-2xl border border-border bg-card shadow-[var(--shadow-card)]",
+        "card-fill sheen relative rounded-xl border border-border shadow-[var(--shadow-card)]",
         className
       )}
       {...props}
@@ -24,14 +28,18 @@ CardHeader.displayName = "CardHeader";
 
 const CardTitle = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
   ({ className, ...props }, ref) => (
-    <div ref={ref} className={cn("font-semibold leading-none tracking-tight", className)} {...props} />
+    <div
+      ref={ref}
+      className={cn("text-[13.5px] font-semibold leading-none tracking-tight", className)}
+      {...props}
+    />
   )
 );
 CardTitle.displayName = "CardTitle";
 
 const CardDescription = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
   ({ className, ...props }, ref) => (
-    <div ref={ref} className={cn("text-sm text-muted", className)} {...props} />
+    <div ref={ref} className={cn("text-xs text-muted", className)} {...props} />
   )
 );
 CardDescription.displayName = "CardDescription";

@@ -20,6 +20,11 @@ import type {
   LogLine,
   DatabaseInfo,
   DbUserInfo,
+  PhpExtensionView,
+  PhpExtension,
+  PhpExtensionChange,
+  XdebugStatus,
+  XdebugSetupResult,
   CertRecord,
   ProxyProfile,
   ProxyGroupView,
@@ -49,6 +54,75 @@ function ownPorts(): [string, string, number][] {
     ["redis", "Redis", merged.redis],
     ["mihomo", "mihomo 混合端口", 17890],
     ["mihomo", "mihomo 控制端口", 19090],
+  ];
+}
+
+/* ---------- PHP 扩展（mock） ---------- */
+
+/** mock 里塞几个有代表性的扩展，覆盖「内置 / 普通 / zend / 缺依赖」四种形态 */
+function mockPhpExtSeed(): PhpExtension[] {
+  const mk = (
+    name: string,
+    label: string,
+    group: string,
+    hint: string,
+    enabled: boolean,
+    extra: Partial<PhpExtension> = {}
+  ): PhpExtension => ({
+    name,
+    label,
+    group,
+    hint,
+    enabled,
+    zend: false,
+    builtin: false,
+    dll: `php_${name}.dll`,
+    missingDeps: [],
+    ...extra,
+  });
+  return [
+    mk("core", "Core", "基础", "PHP 核心，不可禁用", true, { builtin: true }),
+    mk("standard", "Standard", "基础", "标准库函数集", true, { builtin: true }),
+    mk("pdo", "PDO", "数据库", "PDO 抽象层（其它 pdo_* 的前置）", true),
+    mk("mysqlnd", "MySQLnd", "数据库", "MySQL 原生驱动", true),
+    mk("pdo_mysql", "PDO MySQL", "数据库", "PDO 连 MySQL —— Laravel 等框架默认走这条", true),
+    mk("mysqli", "MySQLi", "数据库", "MySQL 原生扩展（WordPress 用它）", true),
+    mk("curl", "cURL", "网络", "HTTP 客户端，调第三方接口必备", true),
+    mk("mbstring", "mbstring", "文本", "多字节字符串（中文项目几乎必开）", true),
+    mk("openssl", "OpenSSL", "安全", "HTTPS / 加密 / 证书", true),
+    mk("fileinfo", "Fileinfo", "文件", "识别文件真实 MIME 类型", true),
+    mk("sockets", "Sockets", "网络", "底层 socket", true),
+    mk("gd", "GD", "图像", "图像处理（验证码 / 缩略图）", true),
+    mk("zip", "Zip", "归档", "zip 读写（Composer 装包要用）", false),
+    mk("intl", "Intl", "文本", "国际化（ICU）—— 时间/货币/多语言格式化", true),
+    mk("opcache", "OPcache", "性能", "字节码缓存 —— 生产环境必开", true, { zend: true }),
+    mk("xdebug", "Xdebug", "调试", "断点调试 / 性能剖析（配合 IDE）", false, { zend: true }),
+    mk("redis", "Redis", "缓存", "Redis 客户端（连接本地 Redis / 队列）", false, {
+      missingDeps: ["igbinary"],
+    }),
+    mk("igbinary", "igbinary", "缓存", "更紧凑的序列化，Redis/Session 可选", false),
+  ];
+}
+
+const mockPhpExtState = new Map<string, PhpExtension[]>();
+
+function mockPhpExtensions(version: string): PhpExtensionView {
+  if (!mockPhpExtState.has(version)) mockPhpExtState.set(version, mockPhpExtSeed());
+  return {
+    version,
+    iniPath: `C:\\NiceServBay\\etc\\php\\${version}\\php.ini`,
+    extensions: mockPhpExtState.get(version)!,
+    toggles: mockPhpToggleState.get(version) ?? mockPhpToggleSeed(),
+  };
+}
+
+const mockPhpToggleState = new Map<string, { key: string; label: string; hint: string; value: boolean }[]>();
+
+function mockPhpToggleSeed() {
+  return [
+    { key: "display_errors", label: "显示错误", hint: "开发时打开，把报错直接打在页面上", value: true },
+    { key: "log_errors", label: "记录错误日志", hint: "写入 logs/php/<版本>/php_errors.log", value: true },
+    { key: "opcache.enable", label: "OPcache", hint: "字节码缓存，生产环境建议开启", value: true },
   ];
 }
 
@@ -87,9 +161,9 @@ const settings: AppSettings = {
   appearance: "light",
   accentHue: 250,
   accentHex: "",
-  uiFont: "inter",
+  uiFont: "plex",
   uiScale: 1,
-  codeFont: "jetbrains",
+  codeFont: "plex-mono",
   codeFontSize: 11.5,
   codeLineNumbers: true,
   codeWrap: false,
@@ -897,6 +971,74 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         diskTotalGb: 953,
         history: statsHistory.slice(-60),
       } as SystemStats as T;
+    }
+    case "xdebug_status": {
+      const version = args!.version as string;
+      const exts = mockPhpExtState.get(version) ?? mockPhpExtSeed();
+      const xd = exts.find((e) => e.name === "xdebug");
+      return {
+        version,
+        build: {
+          phpVersion: version,
+          api: "20240924",
+          ts: true,
+          compiler: "VS17",
+          arch: "x64",
+        },
+        dllPresent: false,
+        enabled: !!xd?.enabled,
+        loaded: false,
+        loadedVersion: null,
+        recommended: "3.4.1",
+        dllCandidates: [`php_xdebug-3.4.1-${version.split(".").slice(0, 2).join(".")}-vs17-x86_64-ts.dll`],
+        manualHint: `PHP ${version} · TS（线程安全） · VS17 · x64`,
+        settings: { "xdebug.mode": "debug,develop", "xdebug.client_port": "9003" },
+      } as XdebugStatus as T;
+    }
+    case "xdebug_setup": {
+      const version = (args!.input as { version: string }).version;
+      const exts = mockPhpExtState.get(version) ?? mockPhpExtSeed();
+      const xd = exts.find((e) => e.name === "xdebug");
+      if (xd) xd.enabled = true;
+      mockPhpExtState.set(version, exts);
+      return {
+        version,
+        installed: true,
+        dllPath: `C:\NiceServBay\runtimes\php\${version}\ext\php_xdebug.dll`,
+        loadedVersion: "3.4.1",
+        warnings: [],
+      } as XdebugSetupResult as T;
+    }
+    case "xdebug_toggle":
+      return [] as string[] as T;
+    case "php_extensions": {
+      const version = args!.version as string;
+      return mockPhpExtensions(version) as T;
+    }
+    case "set_php_extension": {
+      const version = args!.version as string;
+      const name = args!.name as string;
+      const enabled = args!.enabled as boolean;
+      const exts = mockPhpExtState.get(version) ?? mockPhpExtSeed();
+      const target = exts.find((e) => e.name === name);
+      if (target) target.enabled = enabled;
+      mockPhpExtState.set(version, exts);
+      return {
+        name,
+        enabled,
+        warnings: [],
+        needsRestart: false,
+      } as PhpExtensionChange as T;
+    }
+    case "set_php_ini_toggle": {
+      const version = args!.version as string;
+      const key = args!.key as string;
+      const value = args!.value as boolean;
+      const toggles = mockPhpToggleState.get(version) ?? mockPhpToggleSeed();
+      const t = toggles.find((x) => x.key === key);
+      if (t) t.value = value;
+      mockPhpToggleState.set(version, toggles);
+      return true as T;
     }
     case "db_list":
       return Array.from(databases.values()) as T;

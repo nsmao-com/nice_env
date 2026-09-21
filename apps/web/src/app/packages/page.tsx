@@ -42,6 +42,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { RingProgress } from "@/components/shared/ring-progress";
 import { VersionPicker, type VersionItem } from "@/components/shared/version-picker";
+import { PhpExtensionsDialog, PhpExtBadge } from "@/components/shared/php-extensions";
 import { ConfirmDialog } from "@/components/shared/misc";
 import { InstallDialog, type InstallTarget } from "@/components/shared/install-dialog";
 import { PageHeader } from "@/components/layout/app-shell";
@@ -346,12 +347,21 @@ function PackageRow({
   const t = useT();
   const invalidate = useInvalidate();
   const progress = useDownloadProgress();
+  // PHP 扩展面板：挂在已安装且被选为「使用中」的那个版本上
+  // （扩展的开关写进该版本的 php.ini，所以必须明确是哪一个版本）
+  const [extVersion, setExtVersion] = React.useState<string | null>(null);
 
   const Icon = CATEGORY_ICONS[group.category] ?? Boxes;
   const installedCount = group.versions.filter((v) => v.installed).length;
   const svc = group.isService;
   // 该包任一版本运行中 → 行首状态灯
   const anyRunning = group.versions.some((v) => (v.serviceId ? runningServices.has(v.serviceId) : false));
+  /** 扩展面板作用的版本：优先「使用中」，其次任一已装版本 */
+  const phpActiveVersion = React.useMemo(() => {
+    const active = group.versions.find((v) => v.installed && v.active);
+    const fallback = group.versions.find((v) => v.installed);
+    return active?.version ?? fallback?.version ?? null;
+  }, [group.versions]);
 
   /** 合并「清单内置版本」与「远程枚举版本」为统一下拉项。
    *  已装/已内置的优先用本地元数据；远程独有的版本标 remote。 */
@@ -482,6 +492,11 @@ function PackageRow({
           </div>
         </div>
 
+        {/* PHP：扩展面板入口。放在版本下拉左边，和「选版本」是同一类操作 */}
+        {group.id === "php" && phpActiveVersion && (
+          <PhpExtBadge version={phpActiveVersion} onOpen={() => setExtVersion(phpActiveVersion)} />
+        )}
+
         {/* 右：版本下拉（清单内置 + 远程枚举的完整版本历史） */}
         <VersionPicker
           group={{ id: group.id, displayName: group.displayName, multiInstance: group.multiInstance }}
@@ -536,6 +551,14 @@ function PackageRow({
           <span className="hidden text-[10px] text-faint xl:inline">{t("packages.runtimeNote")}</span>
         )}
       </Card>
+
+      {group.id === "php" && (
+        <PhpExtensionsDialog
+          version={extVersion}
+          open={extVersion != null}
+          onOpenChange={(v) => !v && setExtVersion(null)}
+        />
+      )}
     </motion.div>
   );
 }

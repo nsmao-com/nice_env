@@ -10,6 +10,8 @@
     "check:logic": "tsc -p tsconfig.logic.json && node .logic-build/__tests__/log-highlight.check.js"
   },
   "dependencies": {
+    "@fontsource-variable/ibm-plex-sans": "^5.3.0",
+    "@fontsource/ibm-plex-mono": "^5.3.0",
     "@nsb/schema": "workspace:*",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-dropdown-menu": "^2.1.16",

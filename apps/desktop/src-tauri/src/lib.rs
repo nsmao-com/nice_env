@@ -85,6 +85,10 @@ pub fn run() {
             list_sites, create_site, update_site, delete_site, start_site, stop_site,
             // hosts / 证书
             read_hosts, apply_hosts, rebuild_hosts, list_certs, issue_cert, reissue_site_certs, trust_ca,
+            // PHP 扩展
+            php_extensions, set_php_extension, set_php_ini_toggle,
+            // Xdebug 调试
+            xdebug_status, xdebug_setup, xdebug_toggle,
             // 日志 / 诊断 / 统计
             tail_logs, diagnose_port, scan_ports, scan_port_range, close_port, kill_pid, get_system_stats,
             list_backups, restore_backup,
@@ -908,9 +912,9 @@ fn get_settings(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> serde_
         "appearance": state.store.get_setting("appearance").unwrap_or_else(|| "light".into()),
         "accentHue": state.store.get_setting("accentHue").map(|v| v.parse::<i64>().unwrap_or(250)).unwrap_or(250),
         "accentHex": state.store.get_setting("accentHex").unwrap_or_default(),
-        "uiFont": state.store.get_setting("uiFont").unwrap_or_else(|| "inter".into()),
+        "uiFont": state.store.get_setting("uiFont").unwrap_or_else(|| "plex".into()),
         "uiScale": state.store.get_setting("uiScale").map(|v| v.parse::<f64>().unwrap_or(1.0)).unwrap_or(1.0),
-        "codeFont": state.store.get_setting("codeFont").unwrap_or_else(|| "jetbrains".into()),
+        "codeFont": state.store.get_setting("codeFont").unwrap_or_else(|| "plex-mono".into()),
         "codeFontSize": state.store.get_setting("codeFontSize").map(|v| v.parse::<f64>().unwrap_or(11.5)).unwrap_or(11.5),
         "codeLineNumbers": state.store.get_setting("codeLineNumbers").map(|v| v != "false").unwrap_or(true),
         "codeWrap": state.store.get_setting("codeWrap").map(|v| v == "true").unwrap_or(false),
@@ -1394,4 +1398,71 @@ fn open_update_dir(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> Res
     open_target(&dir.to_string_lossy(), true)
         .map(|_| true)
         .map_err(|e| box_err(nsb_core::AppError::new("OPEN_FAILED", e)))
+}
+
+/* ================= PHP 扩展 ================= */
+
+#[tauri::command]
+fn php_extensions(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    version: String,
+) -> Result<nsb_core::model::PhpExtensionView, tauri::Error> {
+    map_jh(state.php_extensions(&version))
+}
+
+/// 启用/禁用扩展；该版本 PHP 正在运行时顺带重启，让改动立即生效
+#[tauri::command]
+fn set_php_extension(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    version: String,
+    name: String,
+    enabled: bool,
+) -> Result<nsb_core::model::PhpExtensionChange, tauri::Error> {
+    map_jh(state.set_php_extension(&version, &name, enabled))
+}
+
+/// php.ini 快捷开关（display_errors / log_errors / opcache.enable）
+#[tauri::command]
+fn set_php_ini_toggle(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    version: String,
+    key: String,
+    value: bool,
+) -> Result<bool, tauri::Error> {
+    map_jh(state.set_php_ini_toggle(&version, &key, value).map(|_| true))
+}
+
+/* ================= Xdebug ================= */
+
+#[tauri::command]
+fn xdebug_status(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    version: String,
+) -> Result<nsb_core::xdebug::XdebugStatus, tauri::Error> {
+    map_jh(state.xdebug_status(&version))
+}
+
+/// 一键配置 Xdebug：dllPath 给了就从本地装，否则按 PHP 构建指纹在线拉
+#[tauri::command]
+async fn xdebug_setup(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    input: nsb_core::xdebug::XdebugSetupInput,
+) -> Result<nsb_core::model::XdebugSetupResult, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        tauri::async_runtime::block_on(async move { map_jh(st.xdebug_setup(input).await) })
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+fn xdebug_toggle(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    version: String,
+    enabled: bool,
+    mode: String,
+    port: u16,
+) -> Result<Vec<String>, tauri::Error> {
+    map_jh(state.xdebug_toggle(&version, enabled, &mode, port))
 }

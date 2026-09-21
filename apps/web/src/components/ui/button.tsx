@@ -4,20 +4,24 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 
+/**
+ * 按钮：主色走强调色（--primary 由外观层写入），实心表面带一层内高光，
+ * 悬停时轻微上浮。克制但有“实体按键”的手感，避免默认 shadcn 的塑料感。
+ */
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg text-sm font-medium transition-all outline-none focus-visible:ring-2 focus-visible:ring-primary/50 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 active:scale-[0.98] cursor-pointer select-none",
+  "relative inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg text-sm font-medium outline-none transition-[background-color,box-shadow,transform,border-color,color] duration-150 disabled:pointer-events-none disabled:opacity-45 disabled:shadow-none [&_svg]:pointer-events-none [&_svg]:shrink-0 cursor-pointer select-none",
   {
     variants: {
       variant: {
         default:
-          "bg-primary text-primary-fg shadow-sm hover:bg-primary/90",
+          "btn-solid bg-primary text-primary-fg hover:-translate-y-px hover:brightness-110 active:translate-y-0 active:brightness-95",
         secondary:
-          "bg-card-2 text-foreground border border-border hover:bg-card-2/70 hover:border-border-strong",
+          "card-fill border border-border text-foreground shadow-[var(--shadow-card)] hover:border-border-strong hover:-translate-y-px active:translate-y-0",
         outline:
-          "border border-border bg-transparent text-foreground hover:bg-card-2 hover:border-border-strong",
-        ghost: "text-secondary hover:bg-card-2 hover:text-foreground",
+          "border border-border bg-transparent text-secondary hover:border-border-strong hover:bg-card-2/70 hover:text-foreground",
+        ghost: "text-secondary hover:bg-card-2/80 hover:text-foreground",
         destructive:
-          "bg-error text-white shadow-sm hover:bg-error/90",
+          "bg-error text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_1px_2px_rgba(28,25,23,0.16)] hover:-translate-y-px hover:brightness-110 active:translate-y-0",
         link: "text-primary underline-offset-4 hover:underline",
       },
       size: {

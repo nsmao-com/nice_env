@@ -84,22 +84,64 @@ export function monoFontStack(id: string): string {
 }
 
 /**
+ * 主题色 → 实心填充色（主按钮/选中态用），浅色与深色各一组。
+ * 预设色：按 hue 生成；自定义色：浅色下保持用户亮度，深色下抬亮以保证对比度。
+ */
+export function accentSolids(s: Pick<AppSettings, "accentHex" | "accentHue">) {
+  if (s.accentHex) {
+    const hsl = hexToHsl(s.accentHex);
+    if (hsl) {
+      const l = Math.min(94, Math.max(8, hsl.l));
+      const dk = Math.max(l, 56); // 深色底上太暗会看不清
+      return {
+        light: `hsl(${hsl.h} ${hsl.s}% ${l}%)`,
+        lightHover: `hsl(${hsl.h} ${hsl.s}% ${Math.min(94, l + 7)}%)`,
+        dark: `hsl(${hsl.h} ${hsl.s}% ${dk}%)`,
+        darkHover: `hsl(${hsl.h} ${hsl.s}% ${Math.min(94, dk + 6)}%)`,
+      };
+    }
+  }
+  const h = s.accentHue;
+  return {
+    light: `hsl(${h} 62% 44%)`,
+    lightHover: `hsl(${h} 66% 51%)`,
+    dark: `hsl(${h} 66% 58%)`,
+    darkHover: `hsl(${h} 70% 64%)`,
+  };
+}
+
+/**
  * 把外观设置写到 DOM。桌面端由启动同步 + 设置页调用；浏览器（dev）同样生效。
  * 幂等：重复调用只是重写同一组变量。
+ *
+ * 注意：这里只写「原料」变量（色相 / 浅色组 / 深色组），
+ * 具体 --primary 交给 CSS 按 .dark 选择 —— 因为内联样式优先级高于类选择器，
+ * 直接写 --primary 会导致深色模式失效。
  */
 export function applyAppearance(s: Partial<AppSettings>) {
   if (typeof document === "undefined") return;
   const root = document.documentElement;
 
-  /* 主题色：自定义颜色优先 */
-  const hue = effectiveHue({ accentHex: s.accentHex ?? "", accentHue: s.accentHue ?? 250 });
+  /* 主题色：自定义颜色优先。这里同时写实心色，
+     否则设置里选的强调色只会影响 ::selection，看起来像没生效。 */
+  const accent = { accentHex: s.accentHex ?? "", accentHue: s.accentHue ?? 250 };
+  const hue = effectiveHue(accent);
   root.style.setProperty("--accent-h", String(hue));
   const custom = s.accentHex ? parseHex(s.accentHex) : null;
   root.style.setProperty("--accent-hex", custom && s.accentHex ? s.accentHex : "transparent");
+  const solid = accentSolids(accent);
+  root.style.setProperty("--accent-solid-light", solid.light);
+  root.style.setProperty("--accent-solid-light-hover", solid.lightHover);
+  root.style.setProperty("--accent-solid-dark", solid.dark);
+  root.style.setProperty("--accent-solid-dark-hover", solid.darkHover);
+  /* 辉光同样写成浅/深两组，由 CSS 按 .dark 取用 —— 只写一个 --accent-glow
+     会以内联样式压过 .dark 里的覆盖，深色模式拿到的是浅色辉光。 */
+  root.style.setProperty("--accent-glow-light", `hsl(${hue} 70% 45% / 0.32)`);
+  root.style.setProperty("--accent-glow-dark", `hsl(${hue} 70% 50% / 0.4)`);
 
   /* 字体与字号 */
-  root.style.setProperty("--app-font-sans", uiFontStack(s.uiFont ?? "inter"));
-  root.style.setProperty("--app-font-mono", monoFontStack(s.codeFont ?? "jetbrains"));
+  root.style.setProperty("--app-font-sans", uiFontStack(s.uiFont ?? "plex"));
+  root.style.setProperty("--app-font-mono", monoFontStack(s.codeFont ?? "plex-mono"));
   const size = Math.min(18, Math.max(10, s.codeFontSize ?? 11.5));
   root.style.setProperty("--code-font-size", `${size}px`);
   const scale = Math.min(1.25, Math.max(0.85, s.uiScale ?? 1));

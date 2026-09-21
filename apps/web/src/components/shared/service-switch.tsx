@@ -35,10 +35,12 @@ export function ServiceSwitch({
         onCheckedChange(!checked);
       }}
       className={cn(
-        "relative inline-flex h-[22px] w-[40px] shrink-0 cursor-pointer items-center rounded-full transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-60",
+        "relative inline-flex h-[22px] w-[40px] shrink-0 cursor-pointer items-center rounded-full transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary-ring)] disabled:cursor-not-allowed disabled:opacity-60",
+        // 开启态走强调色而不是 iOS 那种固定绿，与主按钮同一套色；
+        // 轨道用 inset 阴影压成凹槽，thumb 才有「落在轨道里」的层次
         checked
-          ? "bg-running/90 shadow-[0_0_12px_0_hsl(160_84%_65%/0.35)]"
-          : "bg-border-strong",
+          ? "bg-primary shadow-[inset_0_1px_2px_rgba(28,25,23,0.2),0_0_12px_-2px_var(--accent-glow)]"
+          : "bg-card-2 shadow-[inset_0_1px_2px_rgba(28,25,23,0.09)] ring-1 ring-inset ring-border",
         className
       )}
     >
@@ -46,7 +48,7 @@ export function ServiceSwitch({
         layout
         transition={{ type: "spring", stiffness: 700, damping: 34 }}
         className={cn(
-          "absolute flex h-[18px] w-[18px] items-center justify-center rounded-full bg-white shadow",
+          "absolute flex h-[18px] w-[18px] items-center justify-center rounded-full bg-white shadow-[0_1px_2px_rgba(28,25,23,0.22),0_0_0_0.5px_rgba(28,25,23,0.06)]",
           checked ? "right-[2px]" : "left-[2px]"
         )}
       >
@@ -58,7 +60,7 @@ export function ServiceSwitch({
               exit={{ scale: 0, opacity: 0 }}
               transition={{ duration: 0.18 }}
             >
-              <Check className="h-3 w-3 text-running" strokeWidth={3} />
+              <Check className="h-3 w-3 text-primary" strokeWidth={3} />
             </motion.span>
           )}
         </AnimatePresence>

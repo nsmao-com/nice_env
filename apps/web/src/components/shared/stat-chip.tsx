@@ -19,11 +19,11 @@ export function StatChip({
   const body = (
     <span
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-md bg-card-2/70 px-2 py-1 text-[11px] text-muted tabular",
+        "inline-flex items-center gap-1.5 rounded-md border border-border/70 bg-card-2/50 px-2 py-[3px] text-[11px] text-muted tabular",
         className
       )}
     >
-      <Icon className="h-3 w-3 shrink-0" />
+      <Icon className="h-3 w-3 shrink-0 text-faint" />
       {children}
     </span>
   );

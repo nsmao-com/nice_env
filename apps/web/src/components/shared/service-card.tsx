@@ -58,7 +58,7 @@ export function ServiceCard({ service }: { service: ServiceStatus }) {
     <motion.div layout initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.98 }}>
       <Card
         className={cn(
-          "group flex flex-col gap-3 p-4 transition-shadow",
+          "group flex flex-col gap-3 p-4 transition-[box-shadow,border-color,transform] duration-200 hover:-translate-y-0.5 hover:border-border-strong hover:shadow-[var(--shadow-raised)]",
           running && "breath border-running/25",
           error && "pulse-error border-error/30"
         )}
@@ -67,12 +67,12 @@ export function ServiceCard({ service }: { service: ServiceStatus }) {
           <div className="flex min-w-0 items-center gap-2.5">
             <div
               className={cn(
-                "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border",
+                "flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border transition-colors",
                 running
-                  ? "border-running/30 bg-running-soft"
+                  ? "border-running/25 bg-running-soft shadow-[0_0_0_3px_hsl(145_60%_45%/0.07)]"
                   : error
-                    ? "border-error/30 bg-error-soft"
-                    : "border-border bg-card-2/60"
+                    ? "border-error/25 bg-error-soft shadow-[0_0_0_3px_hsl(0_72%_50%/0.06)]"
+                    : "border-border bg-card-2/70"
               )}
             >
               <Server
@@ -82,7 +82,7 @@ export function ServiceCard({ service }: { service: ServiceStatus }) {
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
-                <span className="truncate text-[13.5px] font-medium">{service.label}</span>
+                <span className="truncate text-[13.5px] font-semibold tracking-tight">{service.label}</span>
                 <StatusLight state={service.state} size={6} />
               </div>
               <span className="text-[11px] text-faint">

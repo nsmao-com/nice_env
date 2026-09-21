@@ -38,6 +38,8 @@ import type {
   EnvFileView,
   DiagnosticsBundle,
   HealthReport,
+  BulkReport,
+  BulkSelectionSummary,
   ProxyProfile,
   ProxyGroupView,
   ProxyStatusInfo,
@@ -917,6 +919,42 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "apply_hosts":
       return true as T;
+    case "bulk_start":
+    case "bulk_stop":
+    case "bulk_restart": {
+      const ids = args!.ids as string[];
+      const action = (args?.action as string) ?? "start";
+      // mock：按依赖分层排序，让 UI 的顺序展示是真的
+      const tier = (id: string) => {
+        const base = id.split("@")[0];
+        if (["mysql", "redis", "postgresql", "mongodb", "memcached"].includes(base)) return 0;
+        if (["php", "node", "python", "go", "java"].includes(base)) return 1;
+        if (["nginx", "apache", "caddy", "mihomo"].includes(base)) return 2;
+        return 3;
+      };
+      const order = [...ids].sort((a, b) => tier(a) - tier(b));
+      return {
+        action,
+        succeeded: order,
+        already: [],
+        failed: [],
+        order,
+      } as BulkReport as T;
+    }
+    case "bulk_summary": {
+      const ids = args!.ids as string[];
+      const running = ids.filter((id) => {
+        const st = services.get(id);
+        return st?.state === "running";
+      }).length;
+      return {
+        total: ids.length,
+        running,
+        stopped: ids.length - running,
+        canStop: running > 0,
+        canStart: ids.length > running,
+      } as BulkSelectionSummary as T;
+    }
     case "health_check": {
       const inst: unknown[] = [];
       const items: { id: string; severity: string; title: string; detail: string; action?: string; route?: string }[] = [];

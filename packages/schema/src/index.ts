@@ -569,6 +569,35 @@ export const PhpExtensionChange = z.object({
 });
 export type PhpExtensionChange = z.infer<typeof PhpExtensionChange>;
 
+/* ============ 批量服务操作 ============ */
+
+export const BulkFailure = z.object({
+  serviceId: z.string(),
+  error: AppErrorInfo,
+});
+export type BulkFailure = z.infer<typeof BulkFailure>;
+
+export const BulkReport = z.object({
+  /** start / stop / restart */
+  action: z.string(),
+  succeeded: z.array(z.string()).default([]),
+  /** 本来就在目标状态，跳过 */
+  already: z.array(z.string()).default([]),
+  failed: z.array(BulkFailure).default([]),
+  /** 实际执行顺序（按依赖排序后） */
+  order: z.array(z.string()).default([]),
+});
+export type BulkReport = z.infer<typeof BulkReport>;
+
+export const BulkSelectionSummary = z.object({
+  total: z.number(),
+  running: z.number(),
+  stopped: z.number(),
+  canStop: z.boolean(),
+  canStart: z.boolean(),
+});
+export type BulkSelectionSummary = z.infer<typeof BulkSelectionSummary>;
+
 /* ============ 环境体检 ============ */
 
 export const HealthItem = z.object({

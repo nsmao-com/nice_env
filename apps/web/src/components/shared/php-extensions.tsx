@@ -46,6 +46,31 @@ import { Skeleton } from "@/components/ui/misc";
  *    告警直接摊给用户看，而不是让他对着一个「已启用」的假状态；
  * 3. **顺带重启**——PHP 正在运行时自动重启 php-cgi，否则勾了没反应。
  */
+
+/** 后端下发的分组是稳定 key（Rust phpext.rs），文案在这里本地化 */
+const GROUP_KEYS = [
+  "basic",
+  "database",
+  "cache",
+  "network",
+  "text",
+  "image",
+  "archive",
+  "performance",
+  "debug",
+  "security",
+  "file",
+  "system",
+  "other",
+] as const;
+
+/** key → 当前语言标签；未知 key（前向兼容旧清单）原样展示 */
+function groupLabel(group: string, t: (k: never) => string) {
+  if ((GROUP_KEYS as readonly string[]).includes(group)) {
+    return t(`phpext.group.${group}` as never);
+  }
+  return group;
+}
 export function PhpExtensionsDialog({
   version,
   open,
@@ -146,29 +171,16 @@ export function PhpExtensionsDialog({
       return (
         e.name.toLowerCase().includes(q) ||
         e.label.toLowerCase().includes(q) ||
-        e.group.toLowerCase().includes(q) ||
+        groupLabel(e.group, t).toLowerCase().includes(q) ||
         e.hint.toLowerCase().includes(q)
       );
     });
-  }, [view, query, onlyEnabled]);
+  }, [view, query, onlyEnabled, t]);
 
   // 按分组归拢，顺序固定，避免每次刷新跳来跳去
+  // 后端只发稳定 key（basic/database…），文案本地化在前端做
   const grouped = React.useMemo(() => {
-    const order = [
-      "基础",
-      "数据库",
-      "缓存",
-      "网络",
-      "文本",
-      "图像",
-      "归档",
-      "性能",
-      "调试",
-      "安全",
-      "文件",
-      "系统",
-      "其他",
-    ];
+    const order = GROUP_KEYS;
     const map = new Map<string, PhpExtension[]>();
     for (const e of filtered) {
       const arr = map.get(e.group) ?? [];

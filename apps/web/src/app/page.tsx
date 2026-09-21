@@ -38,6 +38,7 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ServiceCard } from "@/components/shared/service-card";
 import { ServiceRow } from "@/components/shared/service-row";
+import { BulkActions } from "@/components/shared/bulk-actions";
 import { StatusLight } from "@/components/shared/status-light";
 import { CopyButton, EmptyState, SectionHeader, Sparkline, ConfirmDialog } from "@/components/shared/misc";
 import { PageHeader } from "@/components/layout/app-shell";
@@ -144,13 +145,7 @@ export default function DashboardPage() {
                 disabled={stackBusy}
                 title={t("dash.stopAllHint")}
               >
-                <Square className="h-3.5 w-3.5" />
-
-      {/* 环境体检：所有检查项的聚合入口，放在最上面 */}
-      <section className="mb-5">
-        <HealthCard />
-      </section>
- {t("dash.stopAll")}
+                <Square className="h-3.5 w-3.5" /> {t("dash.stopAll")}
               </Button>
             ) : null}
             <Button onClick={startStack} disabled={stackBusy} title={t("dash.quickStartHint")}>
@@ -165,6 +160,11 @@ export default function DashboardPage() {
           </>
         }
       />
+
+      {/* 环境体检：所有检查项的聚合入口，放在最上面 */}
+      <section className="mb-5">
+        <HealthCard />
+      </section>
 
       {services.length === 0 && sites.length === 0 ? (
         /* 首次进入：漂亮空状态 */
@@ -204,6 +204,8 @@ export default function DashboardPage() {
                       </TabsTrigger>
                     </TabsList>
                   </Tabs>
+                  {/* 批量操作：不用为一次性的一批服务专门存一个栈 */}
+                  <BulkActions services={services} />
                   <Button variant="ghost" size="sm" asChild>
                     <Link href="/packages">
                       {t("dashboard.managePackages")} <ChevronRight className="h-3.5 w-3.5" />

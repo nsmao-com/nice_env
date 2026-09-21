@@ -21,7 +21,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useUI, useT } from "@/lib/store";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { useCaptionDoubleClick, useDesktopWindow } from "./titlebar";
+import { useDesktopWindow } from "./titlebar";
 import { AppMenu } from "./app-menu";
 
 const NAV = [
@@ -52,7 +52,6 @@ export function Sidebar() {
   const t = useT();
   const pathname = usePathname();
   const { isMac, isDesktop } = useDesktopWindow();
-  const onCaptionDoubleClick = useCaptionDoubleClick();
 
   return (
     <motion.aside
@@ -60,16 +59,17 @@ export function Sidebar() {
       transition={{ type: "spring", stiffness: 420, damping: 36 }}
       className="nsb-sidebar relative z-20 flex h-full shrink-0 select-none flex-col"
     >
+      {/* 品牌行整行可拖动窗口；菜单按钮可点击，双击最大化走 Tauri 原生脚本 */}
       <div
         className={cn(
           "nsb-sidebar-brand flex shrink-0 items-center gap-2.5 px-3.5",
           isDesktop && isMac && !collapsed && "pl-[78px]",
           isDesktop && isMac && collapsed && "px-0"
         )}
-        onDoubleClick={onCaptionDoubleClick}
+        data-tauri-drag-region="deep"
       >
         {!(isDesktop && isMac && collapsed) && <AppMenu collapsed={collapsed} />}
-        <div className="h-full min-w-2 flex-1 self-stretch" data-tauri-drag-region />
+        <div className="h-full min-w-2 flex-1 self-stretch" />
       </div>
 
       <nav className="nsb-no-drag flex flex-1 flex-col gap-4 overflow-y-auto overflow-x-hidden px-2.5 py-1.5 no-scrollbar">

@@ -6,7 +6,7 @@ import { useUI, useT } from "@/lib/store";
 import { useSystemStats } from "@/lib/hooks";
 import { Kbd } from "@/components/ui/misc";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { useDesktopWindow, useCaptionDoubleClick } from "./titlebar";
+import { useDesktopWindow } from "./titlebar";
 
 /** 顶部：搜索入口 + 资源微条 + 窗口控制（区域可拖动窗口） */
 export function Topbar() {
@@ -14,7 +14,6 @@ export function Topbar() {
   const t = useT();
   const { data: stats } = useSystemStats(3000);
   const { isDesktop } = useDesktopWindow();
-  const onCaptionDoubleClick = useCaptionDoubleClick();
 
   const cpu = stats?.cpuPercent ?? 0;
   const memPct = stats ? Math.round((stats.memUsedMb / Math.max(1, stats.memTotalMb)) * 100) : 0;
@@ -23,10 +22,12 @@ export function Topbar() {
     : 0;
 
   return (
+    // data-tauri-drag-region="deep"：整条顶栏都是拖拽区（点子元素也能拖）。
+    // 裸属性只在本元素被点中时生效，文字/图标上会拖不动；
+    // 双击最大化由 Tauri 原生脚本处理，不要再挂 React 的 onDoubleClick（会切换两次互相抵消）。
     <header
       className="nsb-topbar flex h-[52px] shrink-0 select-none items-center gap-3 px-4"
-      data-tauri-drag-region
-      onDoubleClick={onCaptionDoubleClick}
+      data-tauri-drag-region="deep"
     >
       <button
         type="button"
@@ -39,9 +40,9 @@ export function Topbar() {
         <Kbd className="relative">Ctrl K</Kbd>
       </button>
 
-      <div className="h-px min-w-4 flex-1" data-tauri-drag-region />
+      <div className="h-px min-w-4 flex-1" />
 
-      <div className="hidden items-center gap-3 md:flex" data-tauri-drag-region>
+      <div className="hidden items-center gap-3 md:flex">
         <MicroBar label="CPU" pct={cpu} />
         <MicroBar label="RAM" pct={memPct} />
         <MicroBar label="DISK" pct={diskPct} />
@@ -50,7 +51,7 @@ export function Topbar() {
       {isDesktop && (
         <Tooltip>
           <TooltipTrigger asChild>
-            <span className="flex items-center gap-1.5 text-[11px] text-faint" data-tauri-drag-region>
+            <span className="flex items-center gap-1.5 text-[11px] text-faint">
               <span className="relative flex h-1.5 w-1.5">
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-running opacity-60" />
                 <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-running" />
@@ -71,9 +72,9 @@ function MicroBar({ label, pct }: { label: string; pct: number }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <div className="flex items-center gap-1.5" data-tauri-drag-region>
+        <div className="flex items-center gap-1.5">
           <span className="text-[10px] font-medium tracking-wide text-faint">{label}</span>
-          <div className="h-1 w-14 overflow-hidden rounded-full bg-card-2" data-tauri-drag-region>
+          <div className="h-1 w-14 overflow-hidden rounded-full bg-card-2">
             <div
               className={`h-full rounded-full ${color} transition-all duration-500`}
               style={{ width: `${clamped}%` }}

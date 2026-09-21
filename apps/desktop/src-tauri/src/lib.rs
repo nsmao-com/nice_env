@@ -109,6 +109,8 @@ pub fn run() {
             read_hosts, apply_hosts, rebuild_hosts, list_certs, issue_cert, reissue_site_certs, trust_ca,
             // 项目扫描
             scan_projects,
+            // 批量服务操作
+            bulk_start, bulk_stop, bulk_restart, bulk_summary,
             // 环境体检
             health_check,
             // 诊断包
@@ -1823,4 +1825,55 @@ fn health_check(
         &state.store,
         &state.manager,
     ))
+}
+
+/* ================= 批量服务操作 ================= */
+
+/// 批量启动：按依赖分层排序（数据层 → 运行时 → Web 服务器），逐项回报
+#[tauri::command]
+fn bulk_start(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    ids: Vec<String>,
+) -> Result<nsb_core::bulk::BulkReport, tauri::Error> {
+    map_jh(nsb_core::bulk::start_many(
+        &state.store,
+        &state.paths,
+        &state.manager,
+        &ids,
+    ))
+}
+
+#[tauri::command]
+fn bulk_stop(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    ids: Vec<String>,
+) -> Result<nsb_core::bulk::BulkReport, tauri::Error> {
+    map_jh(nsb_core::bulk::stop_many(
+        &state.store,
+        &state.paths,
+        &state.manager,
+        &ids,
+    ))
+}
+
+#[tauri::command]
+fn bulk_restart(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    ids: Vec<String>,
+) -> Result<nsb_core::bulk::BulkReport, tauri::Error> {
+    map_jh(nsb_core::bulk::restart_many(
+        &state.store,
+        &state.paths,
+        &state.manager,
+        &ids,
+    ))
+}
+
+/// 选中集合的运行统计（前端据此决定按钮可点性）
+#[tauri::command]
+fn bulk_summary(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    ids: Vec<String>,
+) -> nsb_core::bulk::BulkSelectionSummary {
+    nsb_core::bulk::summarize(&state.manager, &ids)
 }

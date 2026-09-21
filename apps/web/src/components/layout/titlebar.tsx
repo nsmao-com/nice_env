@@ -32,19 +32,9 @@ export function useDesktopWindow() {
   return React.useContext(DesktopWindowContext);
 }
 
-/** 双击空白拖拽区 → 最大化 / 还原（macOS 走系统红绿灯） */
-export function useCaptionDoubleClick() {
-  const { isDesktop, isMac, toggleMaximize } = useDesktopWindow();
-  return React.useCallback(
-    (e: React.MouseEvent) => {
-      if (!isDesktop || isMac) return;
-      const el = e.target as HTMLElement | null;
-      if (el?.closest("a, button, input, textarea, [data-no-maximize]")) return;
-      toggleMaximize();
-    },
-    [isDesktop, isMac, toggleMaximize]
-  );
-}
+// 双击拖拽区最大化 / 还原由 Tauri 原生脚本（internal_toggle_maximize）处理：
+// macOS 上 mouseup 触发、可拖动取消，行为与系统一致。应用层不要再挂
+// onDoubleClick 切换，否则会和原生脚本各切换一次，看起来像没反应。
 
 export function DesktopWindowProvider({ children }: { children: React.ReactNode }) {
   const [mounted, setMounted] = React.useState(false);

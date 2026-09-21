@@ -244,7 +244,12 @@ pub fn build(
     }
 
     // ---------- 配置摘要（脱敏） ----------
+    //
+    // 注意：某个配置读不到时**必须明确写出来**，不能静默跳过。
+    // 否则用户报「PHP 起不来」，拿到的诊断包里却没有 php.ini，
+    // 看的人无从判断是「配置正常」还是「压根没采到」。
     md.push_str("## 配置摘要（已脱敏）\n\n");
+    let mut skipped: Vec<String> = Vec::new();
     for kind in [
         crate::cfgeditor::ConfigKind::NginxMain,
         crate::cfgeditor::ConfigKind::PhpIni,
@@ -253,9 +258,17 @@ pub fn build(
     ] {
         let path = match crate::cfgeditor::resolve_path(paths, store, kind) {
             Ok(p) => p,
-            Err(_) => continue,
+            Err(e) => {
+                skipped.push(format!("{}：{}", kind_label(kind).0, e.message));
+                continue;
+            }
         };
         if !path.is_file() {
+            skipped.push(format!(
+                "{}：尚未生成（{}）",
+                kind_label(kind).0,
+                path.display()
+            ));
             continue;
         }
         let (label, _, _) = kind_label(kind);
@@ -273,6 +286,14 @@ pub fn build(
             }
         }
         md.push_str("```\n\n");
+    }
+
+    if !skipped.is_empty() {
+        md.push_str("### 未能采集的配置\n\n");
+        for s in &skipped {
+            md.push_str(&format!("- {s}\n"));
+        }
+        md.push('\n');
     }
 
     // ---------- 日志尾部 ----------

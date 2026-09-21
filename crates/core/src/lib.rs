@@ -32,6 +32,7 @@ pub mod stats;
 pub mod store;
 pub mod transfer;
 pub mod tls;
+pub mod toolmirror;
 pub mod versions;
 pub mod watchdog;
 pub mod xdebug;

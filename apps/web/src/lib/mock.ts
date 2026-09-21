@@ -40,6 +40,7 @@ import type {
   HealthReport,
   BulkReport,
   BulkSelectionSummary,
+  ToolMirrorStatus,
   ProxyProfile,
   ProxyGroupView,
   ProxyStatusInfo,
@@ -918,6 +919,50 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return list as T;
     }
     case "apply_hosts":
+      return true as T;
+    case "tool_mirrors":
+      return [
+        {
+          manager: "composer",
+          current: "https://mirrors.aliyun.com/composer/",
+          matched: "aliyun",
+          available: true,
+          configPath: "C:\\Users\\demo\\AppData\\Roaming\\Composer\\config.json",
+          options: [
+            { id: "official", label: "Packagist 官方", url: "https://repo.packagist.org", note: "官方源，国内直连较慢", official: true },
+            { id: "aliyun", label: "阿里云", url: "https://mirrors.aliyun.com/composer/", note: "覆盖全、长期稳定，最常用", official: false },
+            { id: "tencent", label: "腾讯云", url: "https://mirrors.cloud.tencent.com/composer/", note: "国内速度快", official: false },
+            { id: "huawei", label: "华为云", url: "https://repo.huaweicloud.com/repository/php/", note: "国内速度快", official: false },
+          ],
+        },
+        {
+          manager: "npm",
+          current: "https://registry.npmmirror.com",
+          matched: "npmmirror",
+          available: true,
+          configPath: "C:\\Users\\demo\\.npmrc",
+          options: [
+            { id: "official", label: "npm 官方", url: "https://registry.npmjs.org", note: "官方源，国内直连较慢", official: true },
+            { id: "npmmirror", label: "淘宝 npmmirror", url: "https://registry.npmmirror.com", note: "同步频率高，国内最常用", official: false },
+            { id: "tencent", label: "腾讯云", url: "https://mirrors.cloud.tencent.com/npm/", note: "国内速度快", official: false },
+          ],
+        },
+        {
+          manager: "pip",
+          current: null,
+          matched: "official",
+          available: true,
+          configPath: "C:\\Users\\demo\\AppData\\Roaming\\pip\\pip.ini",
+          options: [
+            { id: "official", label: "PyPI 官方", url: "https://pypi.org/simple", note: "官方源，国内直连较慢", official: true },
+            { id: "tsinghua", label: "清华 TUNA", url: "https://pypi.tuna.tsinghua.edu.cn/simple", note: "覆盖全、稳定，最常用", official: false },
+            { id: "aliyun", label: "阿里云", url: "https://mirrors.aliyun.com/pypi/simple/", note: "国内速度快", official: false },
+          ],
+        },
+      ] as ToolMirrorStatus[] as T;
+    case "tool_mirror_set":
+      return true as T;
+    case "tool_mirror_reset":
       return true as T;
     case "bulk_start":
     case "bulk_stop":

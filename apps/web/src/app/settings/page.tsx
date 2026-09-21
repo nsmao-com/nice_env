@@ -50,6 +50,7 @@ import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { CopyButton, ConfirmDialog } from "@/components/shared/misc";
+import { ToolMirrorCard } from "@/components/shared/tool-mirror-card";
 import { UpdateDialog } from "@/components/shared/update-dialog";
 import { PageHeader } from "@/components/layout/app-shell";
 
@@ -843,6 +844,11 @@ export default function SettingsPage() {
                       </SelectContent>
                     </Select>
                   </SettingRow>
+
+                  {/* 工具链镜像：与套件下载镜像分开，因为它影响的是用户项目里的包管理器 */}
+                  <div className="mt-4 border-t border-border pt-4">
+                    <ToolMirrorCard />
+                  </div>
                   {settings.mirror === "custom" && (
                     <Input
                       value={settings.customMirror}

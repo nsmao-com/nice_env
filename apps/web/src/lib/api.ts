@@ -32,6 +32,7 @@ import type {
   HealthReport,
   BulkReport,
   BulkSelectionSummary,
+  ToolMirrorStatus,
   CertRecord,
   ProxyProfile,
   ProxyGroupView,
@@ -232,6 +233,13 @@ export const bulkStop = (ids: string[]) => safe(invoke<BulkReport>("bulk_stop", 
 export const bulkRestart = (ids: string[]) => safe(invoke<BulkReport>("bulk_restart", { ids }));
 export const bulkSummary = (ids: string[]) =>
   safe(invoke<BulkSelectionSummary>("bulk_summary", { ids }));
+
+/* 工具链镜像源 */
+export const toolMirrors = () => safe(invoke<ToolMirrorStatus[]>("tool_mirrors"));
+export const toolMirrorSet = (manager: string, url: string) =>
+  safe(invoke<boolean>("tool_mirror_set", { manager, url }));
+export const toolMirrorReset = (manager: string) =>
+  safe(invoke<boolean>("tool_mirror_reset", { manager }));
 
 /* 代理（Clash/mihomo） */
 export const proxyStatus = () => safe(invoke<ProxyStatusInfo>("proxy_status"));

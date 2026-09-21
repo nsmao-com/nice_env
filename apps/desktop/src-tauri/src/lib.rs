@@ -109,6 +109,8 @@ pub fn run() {
             read_hosts, apply_hosts, rebuild_hosts, list_certs, issue_cert, reissue_site_certs, trust_ca,
             // 项目扫描
             scan_projects,
+            // 工具链镜像
+            tool_mirrors, tool_mirror_set, tool_mirror_reset,
             // 批量服务操作
             bulk_start, bulk_stop, bulk_restart, bulk_summary,
             // 环境体检
@@ -1876,4 +1878,51 @@ fn bulk_summary(
     ids: Vec<String>,
 ) -> nsb_core::bulk::BulkSelectionSummary {
     nsb_core::bulk::summarize(&state.manager, &ids)
+}
+
+/* ================= 工具链镜像源 ================= */
+
+/// 列出 Composer / npm / pip 的当前源与可选项
+#[tauri::command]
+fn tool_mirrors(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+) -> Vec<nsb_core::toolmirror::ToolMirrorStatus> {
+    use nsb_core::toolmirror::ToolManager;
+    [ToolManager::Composer, ToolManager::Npm, ToolManager::Pip]
+        .into_iter()
+        .map(|m| nsb_core::toolmirror::status(m, &state.store))
+        .collect()
+}
+
+/// 切换某个包管理器的镜像源（会改全局配置文件，前端需二次确认）
+#[tauri::command]
+fn tool_mirror_set(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    manager: String,
+    url: String,
+) -> Result<bool, tauri::Error> {
+    let m = nsb_core::toolmirror::ToolManager::parse(&manager)
+        .ok_or_else(|| box_err(nsb_core::AppError::new("BAD_MANAGER", "未知的包管理器")))?;
+    // 记下用户选过的源，便于设置页展示「你上次选的是哪个」
+    let _ = state.store.set_setting(m_setting_key(&manager), &url);
+    map_jh(nsb_core::toolmirror::set_mirror(m, &url).map(|_| true))
+}
+
+/// 恢复官方源
+#[tauri::command]
+fn tool_mirror_reset(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    manager: String,
+) -> Result<bool, tauri::Error> {
+    let m = nsb_core::toolmirror::ToolManager::parse(&manager)
+        .ok_or_else(|| box_err(nsb_core::AppError::new("BAD_MANAGER", "未知的包管理器")))?;
+    map_jh(nsb_core::toolmirror::reset_mirror(m).map(|_| true))
+}
+
+fn m_setting_key(manager: &str) -> &'static str {
+    match manager {
+        "composer" => "composerRegistry",
+        "npm" => "npmRegistry",
+        _ => "pipIndexUrl",
+    }
 }

@@ -187,14 +187,14 @@ export function PhpExtensionsDialog({
       arr.push(e);
       map.set(e.group, arr);
     }
-    return order
+    // 未知分组（旧清单前向兼容）排在已知分组后面；统一放宽成 string 元组便于 concat
+    const known = order
       .filter((g) => map.has(g))
-      .map((g) => [g, map.get(g)!] as const)
-      .concat(
-        Array.from(map.keys())
-          .filter((g) => !order.includes(g))
-          .map((g) => [g, map.get(g)!] as const)
-      );
+      .map((g) => [g, map.get(g)!] as readonly [string, PhpExtension[]]);
+    const unknown = Array.from(map.keys())
+      .filter((g) => !(order as readonly string[]).includes(g))
+      .map((g) => [g, map.get(g)!] as readonly [string, PhpExtension[]]);
+    return [...known, ...unknown];
   }, [filtered]);
 
   const enabledCount = view?.extensions.filter((e) => e.enabled).length ?? 0;
@@ -289,7 +289,7 @@ export function PhpExtensionsDialog({
                 <div key={group}>
                   <div className="mb-2 flex items-center gap-2">
                     <span className="text-[10px] font-semibold uppercase tracking-[0.09em] text-faint/70">
-                      {group}
+                      {groupLabel(group, t)}
                     </span>
                     <span className="h-px flex-1 bg-border/60" />
                   </div>

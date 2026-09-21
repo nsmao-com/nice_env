@@ -569,6 +569,30 @@ export const PhpExtensionChange = z.object({
 });
 export type PhpExtensionChange = z.infer<typeof PhpExtensionChange>;
 
+/* ============ 工具链镜像源 ============ */
+
+export const MirrorOption = z.object({
+  id: z.string(),
+  label: z.string(),
+  url: z.string(),
+  note: z.string(),
+  official: z.boolean(),
+});
+export type MirrorOption = z.infer<typeof MirrorOption>;
+
+export const ToolMirrorStatus = z.object({
+  /** composer / npm / pip */
+  manager: z.string(),
+  current: z.string().nullable().optional(),
+  /** 匹配到的预设 id（自定义地址时为空） */
+  matched: z.string().nullable().optional(),
+  available: z.boolean(),
+  /** 会改动哪个文件 */
+  configPath: z.string().nullable().optional(),
+  options: z.array(MirrorOption),
+});
+export type ToolMirrorStatus = z.infer<typeof ToolMirrorStatus>;
+
 /* ============ 批量服务操作 ============ */
 
 export const BulkFailure = z.object({

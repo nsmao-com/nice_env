@@ -13,10 +13,11 @@ import {
   XCircle,
   Search,
   Power,
+  Trash2,
 } from "lucide-react";
 import type { ListenerInfo, PortDiagnosis, PortScanEntry } from "@nsb/schema";
 import { useUI, useT } from "@/lib/store";
-import { useHosts, useInvalidate, toastError, useSettings } from "@/lib/hooks";
+import { useHosts, useInvalidate, toastError, useSettings, useSites } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
@@ -91,10 +92,33 @@ function ToolCard({
 function HostsTool() {
   const t = useT();
   const { data: entries } = useHosts();
+  const { data: sites } = useSites();
   const invalidate = useInvalidate();
   const [newDomain, setNewDomain] = React.useState("");
   const [newIp, setNewIp] = React.useState("127.0.0.1");
   const [busy, setBusy] = React.useState(false);
+
+  /** 站点域名由站点配置自动重建，删不掉；其余托管条目（用户手动加的）可以删 */
+  const siteDomains = React.useMemo(
+    () => new Set(sites.flatMap((s) => s.domains)),
+    [sites]
+  );
+  const removable = (e: { domain: string; managed: boolean }) => e.managed && !siteDomains.has(e.domain);
+
+  const remove = async (target: { ip: string; domain: string }) => {
+    setBusy(true);
+    try {
+      await api.applyHosts(
+        entries.filter((e) => !(e.domain === target.domain && e.ip === target.ip))
+      );
+      toast.success(t("tools.hostsDeleted"));
+      invalidate("hosts");
+    } catch (e) {
+      toastError(e, t("tools.hostsWriteFailed"));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <ToolCard icon={FilePenLine} title={t("tools.hosts")} hint={t("tools.hostsHint")}>
@@ -108,6 +132,18 @@ function HostsTool() {
                 <code className="w-24 shrink-0 font-mono text-[11.5px] text-faint">{e.ip}</code>
                 <code className="flex-1 truncate font-mono text-[11.5px]">{e.domain}</code>
                 {e.managed && <Badge variant="default">{t("tools.managed")}</Badge>}
+                {removable(e) && (
+                  <Button
+                    size="icon-sm"
+                    variant="ghost"
+                    disabled={busy}
+                    title={t("common.delete")}
+                    className="text-faint hover:text-error"
+                    onClick={() => remove(e)}
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </Button>
+                )}
               </div>
             ))
           )}
@@ -588,13 +624,13 @@ function TerminalInjectTool() {
             : `export PATH="${withBin}:$PATH"`;
         });
         if (lines.length === 0) {
-          setScript(isWin ? "# 还没有已安装的运行时" : "# 还没有已安装的运行时");
+          setScript(`# ${t("tools.termInjectNone")}`);
           return;
         }
         const checks = [php ? "php -v" : "", mysql ? "mysql --version" : ""].filter(Boolean).join("; ");
         const header = isWin
-          ? "# PowerShell - 将本应用运行时注入当前会话 PATH（不污染系统）"
-          : "# zsh / bash - 将本应用运行时注入当前会话 PATH（不污染系统）";
+          ? `# ${t("tools.termInjectPsHeader")}`
+          : `# ${t("tools.termInjectShHeader")}`;
         setScript([header, ...lines, checks].filter(Boolean).join("\n"));
       })
       .catch(() => undefined);

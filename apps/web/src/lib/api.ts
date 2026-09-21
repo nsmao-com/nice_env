@@ -25,6 +25,8 @@ import type {
   ConfigFileInfo,
   ConfigValidation,
   ConfigBackup,
+  CertReport,
+  ImportedCert,
   CertRecord,
   ProxyProfile,
   ProxyGroupView,
@@ -196,6 +198,14 @@ export const configSave = (kind: string, content: string, force = false) =>
 export const configBackups = () => safe(invoke<ConfigBackup[]>("config_backups"));
 export const configRollback = (name: string) =>
   safe(invoke<boolean>("config_rollback", { name }));
+
+/* 证书体检 */
+export const certHealth = () => safe(invoke<CertReport>("cert_health"));
+export const certImport = (certPath: string, keyPath: string) =>
+  safe(invoke<ImportedCert>("cert_import", { certPath, keyPath }));
+export const certImportedList = () => safe(invoke<ImportedCert[]>("cert_imported_list"));
+export const certImportedDelete = (certPath: string) =>
+  safe(invoke<boolean>("cert_imported_delete", { certPath }));
 
 /* 代理（Clash/mihomo） */
 export const proxyStatus = () => safe(invoke<ProxyStatusInfo>("proxy_status"));

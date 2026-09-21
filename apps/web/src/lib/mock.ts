@@ -33,6 +33,8 @@ import type {
   ConfigValidation,
   ConfigBackup,
   CertRecord,
+  CertReport,
+  ImportedCert,
   ProxyProfile,
   ProxyGroupView,
   ProxyStatusInfo,
@@ -911,6 +913,30 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return list as T;
     }
     case "apply_hosts":
+      return true as T;
+    case "cert_health": {
+      const now = Math.floor(Date.now() / 1000);
+      const day = 86400;
+      return {
+        certs: [
+          { id: "ca", kind: "ca", subject: "NiceServBay Local CA", sans: [], notAfter: now + 3600 * day, daysLeft: 3600, status: "ok", filePresent: true, usedBySites: [], missingSans: [], advice: "" },
+          { id: "laravel-shop", kind: "site", subject: "shop.test", sans: ["shop.test"], notAfter: now + 12 * day, daysLeft: 12, status: "warn", filePresent: true, usedBySites: ["laravel-shop"], missingSans: [], advice: "还有 12 天到期，建议尽快重新签发" },
+          { id: "legacy-admin", kind: "site", subject: "admin.test", sans: ["admin.test"], notAfter: now - 2 * day, daysLeft: -2, status: "expired", filePresent: true, usedBySites: ["legacy-admin"], missingSans: ["old.admin.test"], advice: "已过期：到站点详情里重新签发证书即可" },
+        ],
+        expired: 1,
+        critical: 0,
+        warning: 1,
+        caTrusted: true,
+        checkedAt: now,
+      } as CertReport as T;
+    }
+    case "cert_imported_list":
+      return [
+        { certPath: "C:\NiceServBay\certs\imported\corp-wildcard.crt", keyPath: "C:\NiceServBay\certs\imported\corp-wildcard.key", subject: "*.corp.internal", sans: ["*.corp.internal", "corp.internal"], notBefore: 1700000000, notAfter: 1800000000, daysLeft: 210 },
+      ] as ImportedCert[] as T;
+    case "cert_import":
+      return { certPath: "x", keyPath: "y", subject: "imported", sans: [], notBefore: 0, notAfter: 0, daysLeft: 365 } as ImportedCert as T;
+    case "cert_imported_delete":
       return true as T;
     case "list_certs":
       return Array.from(certs.values()) as T;

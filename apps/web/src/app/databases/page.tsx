@@ -2,9 +2,9 @@
 
 import * as React from "react";
 import { toast } from "sonner";
-import { Database, HardDrive, KeyRound, Plus, Table2, Trash2, UserRound, ExternalLink } from "lucide-react";
+import { Database, HardDrive, KeyRound, Play, Plus, Table2, Trash2, UserRound, ExternalLink, Loader2 } from "lucide-react";
 import { useUI, useT } from "@/lib/store";
-import { useDatabases, useDbUsers, useInvalidate, toastError, usePorts } from "@/lib/hooks";
+import { useDatabases, useDbUsers, useInvalidate, toastError, usePorts, useServices } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DbBackupCard } from "@/components/shared/db-backup";
@@ -13,9 +13,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/misc";
-import { ServiceCard } from "@/components/shared/service-card";
 import { CopyButton, SectionHeader, ConfirmDialog } from "@/components/shared/misc";
 import { StatChip } from "@/components/shared/stat-chip";
+import { StatusLight } from "@/components/shared/status-light";
 import {
   Dialog,
   DialogContent,
@@ -192,6 +192,58 @@ export default function DatabasesPage() {
   );
 }
 
+/** 实例卡对应的服务状态（栈 id 可能带版本后缀：mysql / mysql@8.0.46） */
+function useInstanceState(base: string) {
+  const { data: services } = useServices(3000);
+  return React.useMemo(
+    () =>
+      services.find((s) => s.id === base) ??
+      services.find((s) => s.id.startsWith(`${base}@`)) ??
+      null,
+    [services, base]
+  );
+}
+
+/** 服务没跑就一键拉起：修数据库的人不用再跳回总览找开关 */
+function InstanceStartButton({ base }: { base: string }) {
+  const t = useT();
+  const invalidate = useInvalidate();
+  const svc = useInstanceState(base);
+  const [busy, setBusy] = React.useState(false);
+  if (!svc) return null;
+  if (svc.state === "running") {
+    return <StatusLight state={svc.state} size={8} />;
+  }
+  const start = async () => {
+    setBusy(true);
+    try {
+      await api.startService(svc.id);
+      toast.success(`${svc.label} · ${t("common.running")}`);
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setBusy(false);
+      invalidate("services");
+    }
+  };
+  return (
+    <Button
+      size="sm"
+      variant="secondary"
+      disabled={busy || svc.state === "starting" || svc.state === "stopping"}
+      title={t("db.serviceStoppedHint")}
+      onClick={start}
+    >
+      {busy || svc.state === "starting" ? (
+        <Loader2 className="h-3 w-3 animate-spin" />
+      ) : (
+        <Play className="h-3 w-3" />
+      )}
+      {t("common.start")}
+    </Button>
+  );
+}
+
 function MySqlInstanceCard() {
   const t = useT();
   const ports = usePorts();
@@ -205,6 +257,9 @@ function MySqlInstanceCard() {
         <div>
           <p className="text-[13px] font-medium">MySQL</p>
           <p className="text-[11px] text-faint">127.0.0.1:{ports.mysql} · utf8mb4</p>
+        </div>
+        <div className="ml-auto">
+          <InstanceStartButton base="mysql" />
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-1.5">
@@ -247,6 +302,9 @@ function RedisInstanceCard() {
         <div>
           <p className="text-[13px] font-medium">Redis</p>
           <p className="text-[11px] text-faint">127.0.0.1:{ports.redis} · {t("db.redisDevHint")}</p>
+        </div>
+        <div className="ml-auto">
+          <InstanceStartButton base="redis" />
         </div>
       </div>
       <div className="flex flex-col gap-1.5">

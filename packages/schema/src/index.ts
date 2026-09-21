@@ -569,6 +569,48 @@ export const PhpExtensionChange = z.object({
 });
 export type PhpExtensionChange = z.infer<typeof PhpExtensionChange>;
 
+/* ============ 证书体检 ============ */
+
+export const CertHealth = z.object({
+  id: z.string(),
+  /** ca / site */
+  kind: z.string(),
+  subject: z.string(),
+  sans: z.array(z.string()).default([]),
+  notAfter: z.number(),
+  /** 剩余天数；负数表示已过期 */
+  daysLeft: z.number(),
+  /** ok / warn / critical / expired */
+  status: z.string(),
+  filePresent: z.boolean(),
+  usedBySites: z.array(z.string()).default([]),
+  /** 站点域名里证书没覆盖的 */
+  missingSans: z.array(z.string()).default([]),
+  advice: z.string(),
+});
+export type CertHealth = z.infer<typeof CertHealth>;
+
+export const CertReport = z.object({
+  certs: z.array(CertHealth),
+  expired: z.number(),
+  critical: z.number(),
+  warning: z.number(),
+  caTrusted: z.boolean(),
+  checkedAt: z.number(),
+});
+export type CertReport = z.infer<typeof CertReport>;
+
+export const ImportedCert = z.object({
+  certPath: z.string(),
+  keyPath: z.string(),
+  subject: z.string(),
+  sans: z.array(z.string()).default([]),
+  notBefore: z.number(),
+  notAfter: z.number(),
+  daysLeft: z.number(),
+});
+export type ImportedCert = z.infer<typeof ImportedCert>;
+
 /* ============ 配置文件编辑 ============ */
 
 export const ConfigFileInfo = z.object({

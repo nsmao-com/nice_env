@@ -109,6 +109,8 @@ pub fn run() {
             read_hosts, apply_hosts, rebuild_hosts, list_certs, issue_cert, reissue_site_certs, trust_ca,
             // 项目扫描
             scan_projects,
+            // 证书体检
+            cert_health, cert_import, cert_imported_list, cert_imported_delete,
             // 配置文件编辑
             config_list, config_read, config_validate, config_save, config_backups, config_rollback,
             // PHP 扩展
@@ -1706,4 +1708,41 @@ fn config_rollback(
     map_jh(
         nsb_core::cfgeditor::rollback_config(&state.paths, &state.store, &name).map(|_| true),
     )
+}
+
+/* ================= 证书体检 ================= */
+
+#[tauri::command]
+fn cert_health(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+) -> Result<nsb_core::certs::CertReport, tauri::Error> {
+    map_jh(nsb_core::certs::report(&state.paths, &state.store))
+}
+
+#[tauri::command]
+fn cert_import(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    cert_path: String,
+    key_path: String,
+) -> Result<nsb_core::certs::ImportedCert, tauri::Error> {
+    map_jh(nsb_core::certs::import_cert_pair(
+        &state.paths,
+        std::path::Path::new(&cert_path),
+        std::path::Path::new(&key_path),
+    ))
+}
+
+#[tauri::command]
+fn cert_imported_list(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+) -> Vec<nsb_core::certs::ImportedCert> {
+    nsb_core::certs::list_imported(&state.paths)
+}
+
+#[tauri::command]
+fn cert_imported_delete(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    cert_path: String,
+) -> Result<bool, tauri::Error> {
+    map_jh(nsb_core::certs::delete_imported(&state.paths, &cert_path).map(|_| true))
 }

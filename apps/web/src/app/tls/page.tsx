@@ -22,6 +22,7 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { PageHeader } from "@/components/layout/app-shell";
+import { CertHealthCard } from "@/components/shared/cert-health";
 
 export default function TlsPage() {
   const t = useT();
@@ -42,7 +43,12 @@ export default function TlsPage() {
         subtitle={t("tls.subtitle")}
         actions={
           <Button onClick={() => setIssueOpen(true)}>
-            <Plus className="h-3.5 w-3.5" /> {t("tls.issueTitle")}
+            <Plus className="h-3.5 w-3.5" />
+
+      <section className="mb-6">
+        <CertHealthCard />
+      </section>
+ {t("tls.issueTitle")}
           </Button>
         }
       />

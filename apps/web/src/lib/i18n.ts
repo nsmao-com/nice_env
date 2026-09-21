@@ -1024,6 +1024,11 @@ const dict = {
     "wz.tplSpaHint": "伪静态设为 SPA fallback，深链可用",
     "wz.tplNextExport": "Next.js 静态导出",
     "wz.tplNextExportHint": "文档根指向 out/，构建完即可访问",
+    "cmd.scanProjects": "扫描项目目录…",
+    "cmd.healthCheck": "检查环境问题…",
+    "cmd.diagnostics": "生成诊断报告…",
+    "cmd.configEditor": "编辑配置文件…",
+    "cmd.restart": "重启",
   },
   en: {
     "nav.dashboard": "Dashboard",
@@ -2048,6 +2053,11 @@ const dict = {
     "wz.tplSpaHint": "Rewrite set to SPA fallback so deep links work",
     "wz.tplNextExport": "Next.js static export",
     "wz.tplNextExportHint": "Document root points at out/; just build",
+    "cmd.scanProjects": "Scan project folder…",
+    "cmd.healthCheck": "Check environment health…",
+    "cmd.diagnostics": "Generate diagnostics report…",
+    "cmd.configEditor": "Edit config files…",
+    "cmd.restart": "Restart",
   },
 } as const;
 

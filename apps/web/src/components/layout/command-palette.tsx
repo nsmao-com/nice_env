@@ -19,6 +19,12 @@ import {
   Square,
   Plus,
   Layers,
+  RotateCw,
+  FolderSearch,
+  Activity,
+  Stethoscope,
+  FileCog,
+  FileText,
 } from "lucide-react";
 import { CommandDialog, CommandGroup, CommandInput, CommandItem, CommandList, CommandEmpty } from "@/components/ui/command";
 import { useUI, useT } from "@/lib/store";
@@ -146,6 +152,48 @@ export function CommandPalette() {
           <CommandItem onSelect={() => run(startStack)}>
             <Rocket /> {t("cmd.quickStart")}
           </CommandItem>
+          {/* 扫描项目：手上已有一堆项目目录时最快的一条路 */}
+          <CommandItem
+            value="scan projects folder 扫描项目 导入"
+            onSelect={() =>
+              run(() => {
+                useUI.getState().requestScan();
+                router.push("/sites");
+              })
+            }
+          >
+            <FolderSearch /> {t("cmd.scanProjects")}
+          </CommandItem>
+          {/* 体检与诊断：出问题时的第一落点 */}
+          <CommandItem
+            value="health check 体检 诊断 问题"
+            onSelect={() => run(() => router.push("/"))}
+          >
+            <Activity /> {t("cmd.healthCheck")}
+          </CommandItem>
+          <CommandItem
+            value="diagnostics report 诊断报告 报bug"
+            onSelect={() =>
+              run(() => {
+                useUI.getState().requestTool("diagnostics");
+                router.push("/tools");
+              })
+            }
+          >
+            <Stethoscope /> {t("cmd.diagnostics")}
+          </CommandItem>
+          {/* 编辑配置：改 nginx/php 配置的入口 */}
+          <CommandItem
+            value="config editor nginx php ini 配置"
+            onSelect={() =>
+              run(() => {
+                useUI.getState().requestTool("config");
+                router.push("/tools");
+              })
+            }
+          >
+            <FileCog /> {t("cmd.configEditor")}
+          </CommandItem>
           <CommandItem onSelect={() => run(stopAll)}>
             <Square /> {t("cmd.stopAll")}
           </CommandItem>
@@ -213,21 +261,39 @@ export function CommandPalette() {
         {services.length > 0 && (
           <CommandGroup heading={t("cmd.services")}>
             {services.map((s) => (
-              <CommandItem
-                key={s.id}
-                value={`service ${s.label} ${s.id}`}
-                onSelect={() =>
-                  run(() =>
-                    s.state === "running" ? api.stopService(s.id) : api.startService(s.id)
-                  )
-                }
-              >
-                <StatusLight state={s.state} size={7} />
-                <span className="flex-1">{s.label}</span>
-                <span className="text-[10px] text-faint">
-                  {s.state === "running" ? t("common.stop") : t("common.start")}
-                </span>
-              </CommandItem>
+              <React.Fragment key={s.id}>
+                <CommandItem
+                  value={`service start stop ${s.label} ${s.id}`}
+                  onSelect={() =>
+                    run(() =>
+                      s.state === "running" ? api.stopService(s.id) : api.startService(s.id)
+                    )
+                  }
+                >
+                  <StatusLight state={s.state} size={7} />
+                  <span className="flex-1">{s.label}</span>
+                  <span className="text-[10px] text-faint">
+                    {s.state === "running" ? t("common.stop") : t("common.start")}
+                  </span>
+                </CommandItem>
+                {/* 重启是日常里比「先停再启」更常用的一步，单独给一条 */}
+                {s.state === "running" && (
+                  <CommandItem
+                    value={`service restart ${s.label} ${s.id} 重启`}
+                    onSelect={() =>
+                      run(async () => {
+                        await api.restartService(s.id);
+                        toast.success(`${s.label} · ${t("common.running")}`);
+                      })
+                    }
+                  >
+                    <RotateCw />
+                    <span className="flex-1 pl-1">
+                      {t("cmd.restart")} · {s.label}
+                    </span>
+                  </CommandItem>
+                )}
+              </React.Fragment>
             ))}
           </CommandGroup>
         )}

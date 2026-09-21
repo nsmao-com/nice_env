@@ -36,6 +36,21 @@ const COMMON_PORTS = [80, 443, 8080, 8443, 3306, 23306, 6379, 26379, 9000, 5432]
 
 export default function ToolsPage() {
   const t = useT();
+  const pendingTool = useUI((st) => st.pendingTool);
+  const consumeTool = useUI((st) => st.consumeTool);
+
+  // 命令面板选「诊断报告 / 编辑配置」时，滚到对应卡片并让用户看到它
+  React.useEffect(() => {
+    if (!pendingTool) return;
+    const id = pendingTool === "diagnostics" ? "nsb-tool-diagnostics" : "nsb-tool-config";
+    // 等一帧，确保卡片已挂载
+    const raf = window.requestAnimationFrame(() => {
+      document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+    consumeTool();
+    return () => window.cancelAnimationFrame(raf);
+  }, [pendingTool, consumeTool]);
+
   return (
     <div className="pb-8">
       <PageHeaderInline title={t("tools.title")} subtitle={t("tools.subtitle")} />
@@ -46,10 +61,14 @@ export default function ToolsPage() {
         <PathEnvCard />
         <TerminalInjectTool />
         <RewriteTemplates />
-        <ConfigEditor />
-        <ToolCard icon={Stethoscope} title={t("diag.title")} hint={t("diag.hint")}>
-          <DiagnosticsCard />
-        </ToolCard>
+        <div id="nsb-tool-config">
+          <ConfigEditor />
+        </div>
+        <div id="nsb-tool-diagnostics">
+          <ToolCard icon={Stethoscope} title={t("diag.title")} hint={t("diag.hint")}>
+            <DiagnosticsCard />
+          </ToolCard>
+        </div>
         <BackupTool />
         <RepairTool />
       </div>

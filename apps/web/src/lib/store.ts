@@ -25,6 +25,19 @@ interface UIState {
   /** 代码块默认形态（由设置页同步；避免每个 CodeBlock 都去查一次设置） */
   codeDefaults: { lineNumbers: boolean; wrap: boolean };
   setCodeDefaults: (v: { lineNumbers: boolean; wrap: boolean }) => void;
+
+  /* ---- 跨页意图：命令面板/托盘等入口让目标页自动打开某个面板 ----
+     用 store 而不是 URL query，因为桌面端是静态导出，
+     query 参数在客户端路由下不一定触发页面的 effect。
+     消费方读到后应立即清除，避免以后每次进这个页面都弹一次。 */
+  /** 站点页：打开「扫描项目」对话框 */
+  pendingScan: boolean;
+  requestScan: () => void;
+  consumeScan: () => void;
+  /** 工具箱页：定位到诊断报告 / 配置编辑器 */
+  pendingTool: "diagnostics" | "config" | null;
+  requestTool: (which: "diagnostics" | "config") => void;
+  consumeTool: () => void;
 }
 
 export type ServiceView = "card" | "list";
@@ -47,6 +60,12 @@ export const useUI = create<UIState>()(
       t: (key) => translate(get().lang, key),
       codeDefaults: { lineNumbers: true, wrap: false },
       setCodeDefaults: (v) => set({ codeDefaults: v }),
+      pendingScan: false,
+      requestScan: () => set({ pendingScan: true }),
+      consumeScan: () => set({ pendingScan: false }),
+      pendingTool: null,
+      requestTool: (which) => set({ pendingTool: which }),
+      consumeTool: () => set({ pendingTool: null }),
     }),
     {
       name: "nsb-ui",

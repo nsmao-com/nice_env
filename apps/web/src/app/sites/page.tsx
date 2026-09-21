@@ -24,6 +24,15 @@ export default function SitesPage() {
   const { data: sites } = useSites();
   const [detail, setDetail] = React.useState<Site | null>(null);
   const [scanOpen, setScanOpen] = React.useState(false);
+  // 命令面板/其它入口可能请求直接打开扫描对话框
+  const pendingScan = useUI((st) => st.pendingScan);
+  const consumeScan = useUI((st) => st.consumeScan);
+  React.useEffect(() => {
+    if (pendingScan) {
+      setScanOpen(true);
+      consumeScan();
+    }
+  }, [pendingScan, consumeScan]);
 
   return (
     <div className="pb-8">

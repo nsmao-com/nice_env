@@ -26,6 +26,7 @@ pub mod store;
 pub mod transfer;
 pub mod tls;
 pub mod versions;
+pub mod watchdog;
 pub mod xdebug;
 
 use download::Downloader;
@@ -91,6 +92,8 @@ pub struct CoreState {
     pub downloader: Arc<Downloader>,
     pub installer: install::Installer,
     pub emit: EventSink,
+    /// 服务看门狗：意外退出后自动拉起（用户主动停止的除外）
+    pub watchdog: Arc<watchdog::Watchdog>,
 }
 
 impl CoreState {
@@ -115,6 +118,7 @@ impl CoreState {
             downloader: Arc::new(Downloader::new()),
             installer: install::Installer::bundled(),
             emit,
+            watchdog: Arc::new(watchdog::Watchdog::new()),
         });
         if !orphans.is_empty() {
             let detail = orphans
@@ -294,12 +298,21 @@ impl CoreState {
         let r = ops::start_service(&self.store, &self.paths, &self.manager, id);
         // 记录托管 pid：崩溃后下次启动靠它找回残留进程
         ops::save_pidfile(&self.paths, &self.manager);
+        // 只有真的起来了才算「用户希望它运行」，失败时不该纳入看门狗监控
+        if r.is_ok() {
+            self.watchdog.note_started(id);
+        }
         r
     }
 
     pub fn stop_service(&self, id: &str) -> Result<()> {
         let r = ops::stop_service(&self.store, &self.paths, &self.manager, id);
         ops::save_pidfile(&self.paths, &self.manager);
+        // 用户主动停止 → 标记，看门狗不得再拉起它（否则点了停止又被拉起来，
+        // 那个体验比不自动重启还糟）
+        if r.is_ok() {
+            self.watchdog.note_user_stopped(id);
+        }
         r
     }
 
@@ -583,5 +596,54 @@ impl CoreState {
         let mut warnings = Vec::new();
         self.restart_php_if_running(version, &mut warnings);
         Ok(warnings)
+    }
+
+    /* ---------- 服务看门狗 ---------- */
+
+    pub fn watchdog_config(&self) -> watchdog::WatchdogConfig {
+        watchdog::config_from_store(&self.store)
+    }
+
+    pub fn watchdog_status(&self) -> watchdog::WatchdogStatus {
+        self.watchdog.status(&self.watchdog_config())
+    }
+
+    pub fn watchdog_set_enabled(&self, on: bool) -> Result<()> {
+        self.store.set_setting("watchdogEnabled", if on { "true" } else { "false" })?;
+        Ok(())
+    }
+
+    pub fn watchdog_reset(&self, id: &str) {
+        self.watchdog.reset(id);
+    }
+
+    /// 看门狗单轮检查：把所有「非用户停止、且确实不在跑」的受监控服务拉起来。
+    ///
+    /// 返回本轮实际尝试过的 (服务 id, 是否成功)。调用方（desktop 的背景线程）
+    /// 自己决定多久跑一次；间隔由 `WatchdogConfig::interval_sec` 提供。
+    pub fn watchdog_tick(&self) -> Vec<(String, bool)> {
+        let cfg = self.watchdog_config();
+        if !cfg.enabled {
+            return Vec::new();
+        }
+        let statuses = self.manager.list_status();
+        let mut acted = Vec::new();
+        for st in statuses {
+            if matches!(st.state, model::ServiceState::Running | model::ServiceState::Starting) {
+                continue;
+            }
+            if !self.watchdog.should_restart(&st.id, &cfg) {
+                continue;
+            }
+            // 只重启「曾经成功跑起来过」的服务：note_started 只在启动成功时调用，
+            // 所以没被 note 过的服务压根不在 entries 里，should_restart 会返回 false。
+            let ok = ops::start_service(&self.store, &self.paths, &self.manager, &st.id).is_ok();
+            self.watchdog.note_restart(&st.id, ok, &cfg);
+            if ok {
+                ops::save_pidfile(&self.paths, &self.manager);
+            }
+            acted.push((st.id.clone(), ok));
+        }
+        acted
     }
 }

@@ -20,6 +20,7 @@ import type {
   XdebugSetupResult,
   DbBackupFile,
   DbRestoreResult,
+  WatchdogStatus,
   CertRecord,
   ProxyProfile,
   ProxyGroupView,
@@ -170,6 +171,12 @@ export const dbBackupRestore = (path: string, safetyBackup = true) =>
   safe(invoke<DbRestoreResult>("db_backup_restore", { path, safetyBackup }));
 export const dbBackupDelete = (path: string) =>
   safe(invoke<boolean>("db_backup_delete", { path }));
+
+/* 服务看门狗 */
+export const watchdogStatus = () => safe(invoke<WatchdogStatus>("watchdog_status"));
+export const watchdogSetEnabled = (enabled: boolean) =>
+  safe(invoke<boolean>("watchdog_set_enabled", { enabled }));
+export const watchdogReset = (id: string) => safe(invoke<boolean>("watchdog_reset", { id }));
 
 /* 代理（Clash/mihomo） */
 export const proxyStatus = () => safe(invoke<ProxyStatusInfo>("proxy_status"));

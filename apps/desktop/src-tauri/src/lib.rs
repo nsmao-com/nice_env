@@ -45,6 +45,26 @@ pub fn run() {
                 });
             }
 
+            /* ---------- 服务看门狗：意外退出自动拉起 ---------- */
+            // 只在用户开启时真正做事（enabled 由 CoreState 判断）。
+            // 轮询间隔取自设置，默认 3s——够快，又不至于让服务列表被不停地查。
+            {
+                let st = tray_state.clone();
+                let handle_for_wd = app.handle().clone();
+                std::thread::spawn(move || loop {
+                    let cfg = st.watchdog_config();
+                    std::thread::sleep(std::time::Duration::from_secs(cfg.interval_sec.max(1)));
+                    if !st.watchdog_config().enabled {
+                        continue;
+                    }
+                    let acted = st.watchdog_tick();
+                    if !acted.is_empty() {
+                        // 重启改变了运行态，托盘勾选/角标要跟着刷新
+                        tray::refresh(&handle_for_wd);
+                    }
+                });
+            }
+
             /* ---------- 关闭窗口 → 最小化到托盘 ---------- */
             let window = app.get_webview_window("main").ok_or("找不到主窗口")?;
             /* 窗口在配置里以无装饰创建（Windows/Linux 自定义标题栏）；
@@ -79,6 +99,8 @@ pub fn run() {
             version_catalog, version_catalogs,
             // 服务
             list_service_status, start_service, stop_service, restart_service,
+            // 看门狗
+            watchdog_status, watchdog_set_enabled, watchdog_reset,
             // 服务栈
             list_stacks, save_stack, duplicate_stack, delete_stack, start_stack, stop_stack,
             // 站点
@@ -1566,4 +1588,31 @@ fn db_backup_delete(
     path: String,
 ) -> Result<bool, tauri::Error> {
     map_jh(nsb_core::dbbackup::delete_backup(&state.paths, &path).map(|_| true))
+}
+
+/* ================= 服务看门狗 ================= */
+
+#[tauri::command]
+fn watchdog_status(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+) -> nsb_core::watchdog::WatchdogStatus {
+    state.watchdog_status()
+}
+
+#[tauri::command]
+fn watchdog_set_enabled(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    enabled: bool,
+) -> Result<bool, tauri::Error> {
+    map_jh(state.watchdog_set_enabled(enabled).map(|_| true))
+}
+
+/// 清空某服务的重试计数（重试次数用尽后按钮走这里）
+#[tauri::command]
+fn watchdog_reset(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    id: String,
+) -> bool {
+    state.watchdog_reset(&id);
+    true
 }

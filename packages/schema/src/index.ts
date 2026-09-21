@@ -569,6 +569,27 @@ export const PhpExtensionChange = z.object({
 });
 export type PhpExtensionChange = z.infer<typeof PhpExtensionChange>;
 
+/* ============ 服务看门狗 ============ */
+
+export const WatchedService = z.object({
+  id: z.string(),
+  enabled: z.boolean(),
+  attempts: z.number(),
+  /** 重试次数已用尽，停止自动重启 */
+  exhausted: z.boolean(),
+  restartCount: z.number(),
+  lastRestartAt: z.number().nullable().optional(),
+});
+export type WatchedService = z.infer<typeof WatchedService>;
+
+export const WatchdogStatus = z.object({
+  enabled: z.boolean(),
+  maxAttempts: z.number(),
+  intervalSec: z.number(),
+  watched: z.array(WatchedService),
+});
+export type WatchdogStatus = z.infer<typeof WatchdogStatus>;
+
 /* ============ 数据库备份 ============ */
 
 export const DbBackupFile = z.object({
@@ -770,7 +791,9 @@ export const AppSettings = z.object({
   /** 启动应用时自动拉起的服务栈 id（空 = 不自动启动） */
   startStackOnLaunch: z.string().default(""),
   /** 启动服务前自动收掉端口占用者（默认为真） */
-  autoClosePortOnStart: z.boolean().default(true),
+  autoClosePortOnStart: z.boolean(),
+  /** 服务意外退出时自动拉起（用户主动停止的不重启） */
+  watchdogEnabled: z.boolean().default(false).default(true),
   /** 远端套件清单地址（用于「检查更新」） */
   manifestUrl: z.string().default(""),
   /** 启动应用后自动检查一次更新（有新版弹窗提示） */

@@ -27,6 +27,7 @@ import type {
   XdebugSetupResult,
   DbBackupFile,
   DbRestoreResult,
+  WatchdogStatus,
   CertRecord,
   ProxyProfile,
   ProxyGroupView,
@@ -199,6 +200,7 @@ const settings: AppSettings = {
   minimizeToTray: true,
   startStackOnLaunch: "",
   autoClosePortOnStart: true,
+  watchdogEnabled: false,
   manifestUrl: "",
   checkUpdateOnLaunch: true,
   autoDownloadUpdate: false,
@@ -993,6 +995,25 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         history: statsHistory.slice(-60),
       } as SystemStats as T;
     }
+    case "watchdog_status":
+      return {
+        enabled: settings.watchdogEnabled === true,
+        maxAttempts: 5,
+        intervalSec: 3,
+        watched: Array.from(services.keys()).map((id) => ({
+          id,
+          enabled: true,
+          attempts: 0,
+          exhausted: false,
+          restartCount: 0,
+        })),
+      } as WatchdogStatus as T;
+    case "watchdog_set_enabled": {
+      settings.watchdogEnabled = args!.enabled as boolean;
+      return true as T;
+    }
+    case "watchdog_reset":
+      return true as T;
     case "db_backup_list":
       return Array.from(mockDbBackups.values()).sort((a, b) => b.createdAt - a.createdAt) as T;
     case "db_backup_dir":

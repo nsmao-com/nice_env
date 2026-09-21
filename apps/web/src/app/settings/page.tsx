@@ -29,6 +29,7 @@ import {
   Server,
   Check,
   Globe,
+  Activity,
 } from "lucide-react";
 import { isTauri } from "@/lib/backend";
 import {
@@ -717,6 +718,17 @@ export default function SettingsPage() {
                     hint={t("settings.autoClosePortHint")}
                     checked={settings.autoClosePortOnStart}
                     onChange={(v) => update("autoClosePortOnStart", v)}
+                  />
+                  <ToggleRow
+                    label={
+                      <span className="flex items-center gap-2">
+                        <Activity className="h-3.5 w-3.5 text-faint" />
+                        {t("settings.watchdog")}
+                      </span>
+                    }
+                    hint={t("settings.watchdogHint")}
+                    checked={settings.watchdogEnabled === true}
+                    onChange={(v) => update("watchdogEnabled", v)}
                   />
                 </CardContent>
               </Card>

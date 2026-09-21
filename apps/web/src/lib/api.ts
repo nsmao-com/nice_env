@@ -32,6 +32,7 @@ import type {
   HealthReport,
   BulkReport,
   BulkSelectionSummary,
+  SiteBulkReport,
   ToolMirrorStatus,
   CertRecord,
   ProxyProfile,
@@ -233,6 +234,12 @@ export const bulkStop = (ids: string[]) => safe(invoke<BulkReport>("bulk_stop", 
 export const bulkRestart = (ids: string[]) => safe(invoke<BulkReport>("bulk_restart", { ids }));
 export const bulkSummary = (ids: string[]) =>
   safe(invoke<BulkSelectionSummary>("bulk_summary", { ids }));
+
+/* 批量站点操作 */
+export const sitesStartMany = (ids: string[]) =>
+  safe(invoke<SiteBulkReport>("sites_start_many", { ids }));
+export const sitesStopMany = (ids: string[]) =>
+  safe(invoke<SiteBulkReport>("sites_stop_many", { ids }));
 
 /* 日志导出 */
 export const logExport = (serviceId: string, content: string, suggestedName?: string) =>

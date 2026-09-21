@@ -113,6 +113,8 @@ pub fn run() {
             log_export,
             // 工具链镜像
             tool_mirrors, tool_mirror_set, tool_mirror_reset,
+            // 批量站点操作
+            sites_start_many, sites_stop_many,
             // 批量服务操作
             bulk_start, bulk_stop, bulk_restart, bulk_summary,
             // 环境体检
@@ -1947,5 +1949,34 @@ fn log_export(
         &service_id,
         &content,
         suggested_name.as_deref(),
+    ))
+}
+
+/* ================= 批量站点操作 ================= */
+
+/// 批量启用站点：只为每个站点写 vhost，最后统一 reload 一次
+#[tauri::command]
+fn sites_start_many(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    ids: Vec<String>,
+) -> Result<nsb_core::sites::SiteBulkReport, tauri::Error> {
+    map_jh(nsb_core::sites::start_many(
+        &state.paths,
+        &state.store,
+        &state.manager,
+        &ids,
+    ))
+}
+
+#[tauri::command]
+fn sites_stop_many(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    ids: Vec<String>,
+) -> Result<nsb_core::sites::SiteBulkReport, tauri::Error> {
+    map_jh(nsb_core::sites::stop_many(
+        &state.paths,
+        &state.store,
+        &state.manager,
+        &ids,
     ))
 }

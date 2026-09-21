@@ -40,6 +40,7 @@ import type {
   HealthReport,
   BulkReport,
   BulkSelectionSummary,
+  SiteBulkReport,
   ToolMirrorStatus,
   ProxyProfile,
   ProxyGroupView,
@@ -974,6 +975,29 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return true as T;
     case "tool_mirror_reset":
       return true as T;
+    case "sites_start_many":
+    case "sites_stop_many": {
+      const ids = args!.ids as string[];
+      // 用命令名判断动作，别依赖一个不存在的参数
+      const action = cmd === "sites_start_many" ? "start" : "stop";
+      if (cmd === "sites_start_many") {
+        for (const id of ids) {
+          const st = sites.get(id);
+          if (st) st.status = "running";
+        }
+      } else {
+        for (const id of ids) {
+          const st = sites.get(id);
+          if (st) st.status = "stopped";
+        }
+      }
+      return {
+        action,
+        succeeded: ids,
+        already: [],
+        failed: [],
+      } as SiteBulkReport as T;
+    }
     case "bulk_start":
     case "bulk_stop":
     case "bulk_restart": {

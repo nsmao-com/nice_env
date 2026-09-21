@@ -1029,6 +1029,12 @@ const dict = {
     "cmd.diagnostics": "生成诊断报告…",
     "cmd.configEditor": "编辑配置文件…",
     "cmd.restart": "重启",
+    "siteBulk.title": "批量启停站点",
+    "siteBulk.subtitle": "已选 {n} 个站点",
+    "siteBulk.start": "启用",
+    "siteBulk.stop": "停用",
+    "siteBulk.done": "{action}完成（{n} 个）",
+    "siteBulk.partial": "成功 {ok} 个，失败 {fail} 个",
   },
   en: {
     "nav.dashboard": "Dashboard",
@@ -2058,6 +2064,12 @@ const dict = {
     "cmd.diagnostics": "Generate diagnostics report…",
     "cmd.configEditor": "Edit config files…",
     "cmd.restart": "Restart",
+    "siteBulk.title": "Batch sites",
+    "siteBulk.subtitle": "{n} sites selected",
+    "siteBulk.start": "Enable",
+    "siteBulk.stop": "Disable",
+    "siteBulk.done": "{action} finished ({n})",
+    "siteBulk.partial": "{ok} succeeded, {fail} failed",
   },
 } as const;
 

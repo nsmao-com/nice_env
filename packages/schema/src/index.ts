@@ -608,6 +608,23 @@ export const ToolMirrorStatus = z.object({
 });
 export type ToolMirrorStatus = z.infer<typeof ToolMirrorStatus>;
 
+/* ============ 批量站点操作 ============ */
+
+export const SiteBulkFailure = z.object({
+  siteId: z.string(),
+  error: AppErrorInfo,
+});
+export type SiteBulkFailure = z.infer<typeof SiteBulkFailure>;
+
+export const SiteBulkReport = z.object({
+  /** start / stop */
+  action: z.string(),
+  succeeded: z.array(z.string()).default([]),
+  already: z.array(z.string()).default([]),
+  failed: z.array(SiteBulkFailure).default([]),
+});
+export type SiteBulkReport = z.infer<typeof SiteBulkReport>;
+
 /* ============ 批量服务操作 ============ */
 
 export const BulkFailure = z.object({

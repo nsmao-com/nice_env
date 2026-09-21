@@ -210,18 +210,8 @@ pub fn start_site(id: &str, paths: &Paths, store: &Store, manager: &Arc<ServiceM
 /// 停止站点：禁用 vhost 并重载（不动 web server 本体）
 pub fn stop_site(id: &str, paths: &Paths, store: &Store, manager: &Arc<ServiceManager>) -> Result<()> {
     let site = get(store, id)?;
-    let web_server = if site.runtime.web_server == "apache" { "apache" } else { "nginx" };
-    let dir = if web_server == "apache" { paths.apache_sites_dir() } else { paths.nginx_sites_dir() };
-    let conf = dir.join(format!("{}.conf", site.id));
-    if conf.exists() {
-        std::fs::rename(&conf, conf.with_extension("conf.disabled"))?;
-    }
-    // 另一个 web server 若残留同名 conf 也一并禁用
-    let other_dir = if web_server == "apache" { paths.nginx_sites_dir() } else { paths.apache_sites_dir() };
-    let other = other_dir.join(format!("{}.conf", site.id));
-    if other.exists() {
-        let _ = std::fs::rename(&other, other.with_extension("conf.disabled"));
-    }
+    // 与批量停止共用同一段禁用逻辑，避免两处实现漂移
+    disable_site_conf(paths, &site)?;
     crate::ops::rebuild_and_reload(store, paths, manager)?;
     let mut s = site;
     s.status = "stopped".into();
@@ -699,4 +689,177 @@ mod scaffold_tests {
         let t = Tmp::new("unknown");
         assert!(scaffold_template("totally-made-up", &t.0, &input(SiteKind::Php)).is_ok());
     }
+}
+
+/* ================= 批量站点操作 ================= */
+
+/// 批量启停的结果（与服务的 BulkReport 同形，便于前端复用展示）
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteBulkReport {
+    /// start / stop
+    pub action: String,
+    pub succeeded: Vec<String>,
+    /// 本来就在目标状态
+    pub already: Vec<String>,
+    pub failed: Vec<SiteBulkFailure>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteBulkFailure {
+    pub site_id: String,
+    pub error: crate::model::AppErrorInfo,
+}
+
+/// 批量启动站点。
+///
+/// 关键点：**最后只 reload 一次**。
+/// 逐个调 `start_site` 会让 nginx 被反复重建配置 + reload N 次 ——
+/// 几十个站点时很明显，而且中途失败会留下半套配置。
+/// 这里先把所有站点的 vhost 写出来，再统一 rebuild_and_reload。
+pub fn start_many(
+    paths: &Paths,
+    store: &Store,
+    manager: &Arc<ServiceManager>,
+    ids: &[String],
+) -> Result<SiteBulkReport> {
+    let mut report = SiteBulkReport {
+        action: "start".into(),
+        succeeded: Vec::new(),
+        already: Vec::new(),
+        failed: Vec::new(),
+    };
+    let mut dirty = false;
+
+    for id in ids {
+        let site = match get(store, id) {
+            Ok(s) => s,
+            Err(e) => {
+                report.failed.push(SiteBulkFailure {
+                    site_id: id.clone(),
+                    error: e.into(),
+                });
+                continue;
+            }
+        };
+        if site.status == "running" {
+            report.already.push(id.clone());
+            continue;
+        }
+        // 只为这个站点写 vhost（不做 reload）
+        match write_site_conf_and_enable(paths, store, &site) {
+            Ok(()) => {
+                let mut s = site;
+                s.status = "running".into();
+                s.updated_at = now_ms();
+                if let Err(e) = store.save_site(&s) {
+                    report.failed.push(SiteBulkFailure {
+                        site_id: id.clone(),
+                        error: e.into(),
+                    });
+                } else {
+                    report.succeeded.push(id.clone());
+                    dirty = true;
+                }
+            }
+            Err(e) => report.failed.push(SiteBulkFailure {
+                site_id: id.clone(),
+                error: e.into(),
+            }),
+        }
+    }
+
+    if dirty {
+        // 统一重建 + reload 一次
+        crate::ops::rebuild_and_reload(store, paths, manager)?;
+    }
+    Ok(report)
+}
+
+/// 批量停止站点：把 vhost 全部禁用后**只 reload 一次**
+pub fn stop_many(
+    paths: &Paths,
+    store: &Store,
+    manager: &Arc<ServiceManager>,
+    ids: &[String],
+) -> Result<SiteBulkReport> {
+    let mut report = SiteBulkReport {
+        action: "stop".into(),
+        succeeded: Vec::new(),
+        already: Vec::new(),
+        failed: Vec::new(),
+    };
+    let mut dirty = false;
+
+    for id in ids {
+        let site = match get(store, id) {
+            Ok(s) => s,
+            Err(e) => {
+                report.failed.push(SiteBulkFailure {
+                    site_id: id.clone(),
+                    error: e.into(),
+                });
+                continue;
+            }
+        };
+        if site.status != "running" {
+            report.already.push(id.clone());
+            continue;
+        }
+        match disable_site_conf(paths, &site) {
+            Ok(()) => {
+                let mut s = site;
+                s.status = "stopped".into();
+                s.updated_at = now_ms();
+                if let Err(e) = store.save_site(&s) {
+                    report.failed.push(SiteBulkFailure {
+                        site_id: id.clone(),
+                        error: e.into(),
+                    });
+                } else {
+                    report.succeeded.push(id.clone());
+                    dirty = true;
+                }
+            }
+            Err(e) => report.failed.push(SiteBulkFailure {
+                site_id: id.clone(),
+                error: e.into(),
+            }),
+        }
+    }
+
+    if dirty {
+        crate::ops::rebuild_and_reload(store, paths, manager)?;
+    }
+    Ok(report)
+}
+
+/// 写出 vhost 并启用（不做 reload）
+fn write_site_conf_and_enable(paths: &Paths, store: &Store, site: &Site) -> Result<()> {
+    write_site_conf(paths, store, site)?;
+    let web_server = if site.runtime.web_server == "apache" { "apache" } else { "nginx" };
+    let dir = if web_server == "apache" { paths.apache_sites_dir() } else { paths.nginx_sites_dir() };
+    // 启用：把 .conf.disabled 改回 .conf（若存在）
+    let disabled = dir.join(format!("{}.conf.disabled", site.id));
+    if disabled.exists() {
+        std::fs::rename(&disabled, dir.join(format!("{}.conf", site.id)))?;
+    }
+    Ok(())
+}
+
+/// 禁用 vhost（不做 reload）
+fn disable_site_conf(paths: &Paths, site: &Site) -> Result<()> {
+    let web_server = if site.runtime.web_server == "apache" { "apache" } else { "nginx" };
+    let dir = if web_server == "apache" { paths.apache_sites_dir() } else { paths.nginx_sites_dir() };
+    let conf = dir.join(format!("{}.conf", site.id));
+    if conf.exists() {
+        std::fs::rename(&conf, conf.with_extension("conf.disabled"))?;
+    }
+    let other_dir = if web_server == "apache" { paths.nginx_sites_dir() } else { paths.apache_sites_dir() };
+    let other = other_dir.join(format!("{}.conf", site.id));
+    if other.exists() {
+        let _ = std::fs::rename(&other, other.with_extension("conf.disabled"));
+    }
+    Ok(())
 }

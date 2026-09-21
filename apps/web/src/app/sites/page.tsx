@@ -17,6 +17,7 @@ import { CopyButton, EmptyState } from "@/components/shared/misc";
 import { PageHeader } from "@/components/layout/app-shell";
 import { SiteDetailSheet } from "@/components/sites/site-detail";
 import { ProjectScannerDialog } from "@/components/sites/project-scanner";
+import { SiteBulkActions } from "@/components/sites/site-bulk-actions";
 
 export default function SitesPage() {
   const t = useT();
@@ -45,6 +46,8 @@ export default function SitesPage() {
             <Button variant="secondary" onClick={() => setScanOpen(true)}>
               <FolderSearch className="h-3.5 w-3.5" /> {t("scanner.scan")}
             </Button>
+            {/* 批量启停：站点多了以后一个个点开关很费事 */}
+            <SiteBulkActions sites={sites} />
             <Button onClick={() => setWizardOpen(true)}>
               <Plus className="h-3.5 w-3.5" /> {t("sites.create")}
             </Button>

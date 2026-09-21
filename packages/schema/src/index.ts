@@ -353,7 +353,18 @@ export const CreateSiteInput = z.object({
     .optional(),
   writeEnvExample: z.boolean().default(true),
   template: z
-    .enum(["blank-php", "laravel", "static", "none"])
+    .enum([
+      "blank-php",
+      "laravel",
+      "static",
+      "wordpress",
+      "thinkphp",
+      "symfony",
+      "codeigniter",
+      "next-export",
+      "spa",
+      "none",
+    ])
     .default("none"),
 });
 export type CreateSiteInput = z.infer<typeof CreateSiteInput>;

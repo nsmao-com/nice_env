@@ -300,12 +300,36 @@ export function SiteWizard({
                         { v: "none", labelKey: "wz.useExistingOpt", hintKey: "wz.existingCodeHint" },
                         { v: "blank-php", labelKey: "wz.blankPhp", hintKey: "wz.tplBlankPhpHint2" },
                         { v: "laravel", labelKey: "wz.laravelOpt", hintKey: "wz.laravelOptHint" },
+                        { v: "thinkphp", labelKey: "wz.tplThinkPhp", hintKey: "wz.tplThinkPhpHint" },
+                        { v: "wordpress", labelKey: "wz.tplWordPress", hintKey: "wz.tplWordPressHint" },
+                        { v: "symfony", labelKey: "wz.tplSymfony", hintKey: "wz.tplSymfonyHint" },
+                        { v: "codeigniter", labelKey: "wz.tplCodeIgniter", hintKey: "wz.tplCodeIgniterHint" },
                         { v: "static", labelKey: "wz.staticHome", hintKey: "wz.staticOptHint" },
+                        { v: "spa", labelKey: "wz.tplSpa", hintKey: "wz.tplSpaHint" },
+                        { v: "next-export", labelKey: "wz.tplNextExport", hintKey: "wz.tplNextExportHint" },
                       ] as const
                     ).map((opt) => (
                       <button
                         key={opt.v}
-                        onClick={() => setTemplate(opt.v)}
+                        onClick={() => {
+                          setTemplate(opt.v);
+                          // 模板与伪静态是强绑定的：选了 Laravel 就该给 laravel 规则。
+                          // 让用户再手动选一次纯属多余，而且选错就 404。
+                          const auto: Record<string, RewritePreset> = {
+                            laravel: "laravel",
+                            thinkphp: "thinkphp",
+                            wordpress: "wordpress",
+                            symfony: "laravel",
+                            codeigniter: "none",
+                            "next-export": "next-export",
+                            spa: "spa-fallback",
+                            static: "none",
+                            "blank-php": "none",
+                            none: "none",
+                          };
+                          const r = auto[opt.v];
+                          if (r) setRewrite(r);
+                        }}
                         className={cn(
                           "flex flex-col items-start gap-1 rounded-xl border p-3 text-left transition-all",
                           template === opt.v

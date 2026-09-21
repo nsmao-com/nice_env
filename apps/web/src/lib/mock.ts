@@ -29,6 +29,9 @@ import type {
   DbRestoreResult,
   WatchdogStatus,
   ScannedProject,
+  ConfigFileInfo,
+  ConfigValidation,
+  ConfigBackup,
   CertRecord,
   ProxyProfile,
   ProxyGroupView,
@@ -996,6 +999,84 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         history: statsHistory.slice(-60),
       } as SystemStats as T;
     }
+    case "config_list":
+      return [
+        { kind: "nginx-main", label: "Nginx 主配置", description: "站点 vhost 是自动生成的；这里改全局项（worker、日志、gzip 等）", path: "C:\\NiceServBay\\etc\\nginx\\nginx.conf", exists: true, sizeBytes: 4096, language: "nginx", validated: true, usedByService: "nginx", requiresPackage: "nginx" },
+        { kind: "php-ini", label: "php.ini", description: "PHP 运行时设置。扩展开关建议走「PHP 扩展」面板，那里有主动校验", path: "C:\\NiceServBay\\etc\\php\\8.3.33\\php.ini", exists: true, sizeBytes: 2048, language: "ini", validated: false, usedByService: "php", requiresPackage: "php" },
+        { kind: "mysql-ini", label: "my.ini", description: "MySQL 服务配置（端口、缓冲池、字符集）", path: "C:\\NiceServBay\\etc\\mysql\\8.0.46\\my.ini", exists: true, sizeBytes: 1024, language: "ini", validated: false, usedByService: "mysql", requiresPackage: "mysql" },
+        { kind: "redis-conf", label: "redis.conf", description: "Redis 配置（端口、持久化、内存上限）", path: "C:\\NiceServBay\\etc\\redis\\redis.conf", exists: false, sizeBytes: 0, language: "conf", validated: false, usedByService: "redis", requiresPackage: "redis" },
+      ] as ConfigFileInfo[] as T;
+    case "config_read": {
+      const kind = args!.kind as string;
+      if (kind === "nginx-main") {
+        return `worker_processes  1;
+
+events {
+    worker_connections  1024;
+}
+
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+    sendfile      on;
+    keepalive_timeout  65;
+
+    include sites/*.conf;
+}
+` as T;
+      }
+      if (kind === "php-ini") {
+        return `[PHP]
+engine=On
+expose_php=Off
+memory_limit=256M
+error_reporting=E_ALL
+display_errors=On
+
+[Extensions]
+extension=curl
+extension=mbstring
+extension=pdo_mysql
+` as T;
+      }
+      return `[mysqld]
+port=3306
+character-set-server=utf8mb4
+max_connections=200
+` as T;
+    }
+    case "config_validate": {
+      const content = args!.content as string;
+      // 只做一个够用的示意：括号配平 + 结尾分号
+      const issues: { line: number; severity: string; message: string }[] = [];
+      const lines = content.split("\n");
+      let depth = 0;
+      lines.forEach((raw, i) => {
+        const t = raw.split("#")[0].trim();
+        if (!t) return;
+        depth += (t.match(/\{/g) || []).length - (t.match(/\}/g) || []).length;
+        const last = t[t.length - 1];
+        if (![";", "{", "}"].includes(last)) {
+          issues.push({ line: i + 1, severity: "error", message: `指令行缺少结尾分号 ;：${t}` });
+        }
+      });
+      if (depth !== 0) {
+        issues.push({ line: 0, severity: "error", message: `花括号没有配平：还差 ${depth} 个右花括号 }` });
+      }
+      return {
+        ok: !issues.some((x) => x.severity === "error"),
+        messages: [],
+        issues,
+      } as ConfigValidation as T;
+    }
+    case "config_save":
+      return { ok: true, messages: [], issues: [] } as ConfigValidation as T;
+    case "config_backups":
+      return [
+        { name: "nginx.conf.20260921-203045.bak", path: "C:\\NiceServBay\\backup\\config\\nginx.conf.20260921-203045.bak", sizeBytes: 4010, createdAt: Math.floor(Date.now() / 1000) - 3600 },
+      ] as ConfigBackup[] as T;
+    case "config_rollback":
+      return true as T;
     case "scan_projects": {
       const root = args!.root as string;
       return [

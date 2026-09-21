@@ -109,6 +109,8 @@ pub fn run() {
             read_hosts, apply_hosts, rebuild_hosts, list_certs, issue_cert, reissue_site_certs, trust_ca,
             // 项目扫描
             scan_projects,
+            // 配置文件编辑
+            config_list, config_read, config_validate, config_save, config_backups, config_rollback,
             // PHP 扩展
             php_extensions, set_php_extension, set_php_ini_toggle,
             // Xdebug 调试
@@ -1632,4 +1634,76 @@ fn scan_projects(
         &state.store,
         std::path::Path::new(&root),
     ))
+}
+
+/* ================= 配置文件编辑 ================= */
+
+#[tauri::command]
+fn config_list(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+) -> Vec<nsb_core::cfgeditor::ConfigFileInfo> {
+    nsb_core::cfgeditor::list_configs(&state.paths, &state.store)
+}
+
+#[tauri::command]
+fn config_read(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    kind: String,
+) -> Result<String, tauri::Error> {
+    let k = nsb_core::cfgeditor::ConfigKind::parse(&kind)
+        .ok_or_else(|| box_err(nsb_core::AppError::new("BAD_KIND", "未知的配置类型")))?;
+    map_jh(nsb_core::cfgeditor::read_config(&state.paths, &state.store, k))
+}
+
+/// 只校验不写入：前端可做实时校验
+#[tauri::command]
+fn config_validate(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    kind: String,
+    content: String,
+) -> Result<nsb_core::cfgeditor::ConfigValidation, tauri::Error> {
+    let k = nsb_core::cfgeditor::ConfigKind::parse(&kind)
+        .ok_or_else(|| box_err(nsb_core::AppError::new("BAD_KIND", "未知的配置类型")))?;
+    map_jh(nsb_core::cfgeditor::validate(
+        &state.paths,
+        &state.store,
+        k,
+        &content,
+    ))
+}
+
+/// 保存：默认校验不过就拒写；force=true 才允许跳过（带备份）
+#[tauri::command]
+fn config_save(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    kind: String,
+    content: String,
+    force: Option<bool>,
+) -> Result<nsb_core::cfgeditor::ConfigValidation, tauri::Error> {
+    let k = nsb_core::cfgeditor::ConfigKind::parse(&kind)
+        .ok_or_else(|| box_err(nsb_core::AppError::new("BAD_KIND", "未知的配置类型")))?;
+    map_jh(nsb_core::cfgeditor::save_config(
+        &state.paths,
+        &state.store,
+        k,
+        &content,
+        force.unwrap_or(false),
+    ))
+}
+
+#[tauri::command]
+fn config_backups(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+) -> Vec<nsb_core::cfgeditor::ConfigBackup> {
+    nsb_core::cfgeditor::list_config_backups(&state.paths)
+}
+
+#[tauri::command]
+fn config_rollback(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    name: String,
+) -> Result<bool, tauri::Error> {
+    map_jh(
+        nsb_core::cfgeditor::rollback_config(&state.paths, &state.store, &name).map(|_| true),
+    )
 }

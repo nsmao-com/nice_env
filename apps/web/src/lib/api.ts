@@ -22,6 +22,9 @@ import type {
   DbRestoreResult,
   WatchdogStatus,
   ScannedProject,
+  ConfigFileInfo,
+  ConfigValidation,
+  ConfigBackup,
   CertRecord,
   ProxyProfile,
   ProxyGroupView,
@@ -182,6 +185,17 @@ export const watchdogReset = (id: string) => safe(invoke<boolean>("watchdog_rese
 /* 项目扫描 */
 export const scanProjects = (root: string) =>
   safe(invoke<ScannedProject[]>("scan_projects", { root }));
+
+/* 配置文件编辑 */
+export const configList = () => safe(invoke<ConfigFileInfo[]>("config_list"));
+export const configRead = (kind: string) => safe(invoke<string>("config_read", { kind }));
+export const configValidate = (kind: string, content: string) =>
+  safe(invoke<ConfigValidation>("config_validate", { kind, content }));
+export const configSave = (kind: string, content: string, force = false) =>
+  safe(invoke<ConfigValidation>("config_save", { kind, content, force }));
+export const configBackups = () => safe(invoke<ConfigBackup[]>("config_backups"));
+export const configRollback = (name: string) =>
+  safe(invoke<boolean>("config_rollback", { name }));
 
 /* 代理（Clash/mihomo） */
 export const proxyStatus = () => safe(invoke<ProxyStatusInfo>("proxy_status"));

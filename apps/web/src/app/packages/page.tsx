@@ -45,6 +45,7 @@ import { VersionPicker, type VersionItem } from "@/components/shared/version-pic
 import { PhpExtensionsDialog, PhpExtBadge } from "@/components/shared/php-extensions";
 import { ConfirmDialog } from "@/components/shared/misc";
 import { InstallDialog, type InstallTarget } from "@/components/shared/install-dialog";
+import { PathEnvToggle } from "@/components/shared/path-env-toggle";
 import { PageHeader } from "@/components/layout/app-shell";
 import { cmpVersionDesc } from "@/lib/utils";
 
@@ -311,7 +312,7 @@ export default function PackagesPage() {
       <InstallDialog
         target={installTarget}
         onOpenChange={(o) => !o && setInstallTarget(null)}
-        onDone={() => invalidate("packages", "services", "version-catalogs")}
+        onDone={() => invalidate("packages", "services", "version-catalogs", "pathenv")}
         startableAs={
           installTarget
             ? (() => {
@@ -496,6 +497,9 @@ function PackageRow({
         {group.id === "php" && phpActiveVersion && (
           <PhpExtBadge version={phpActiveVersion} onOpen={() => setExtVersion(phpActiveVersion)} />
         )}
+
+        {/* 已装即可一键注入/移出系统 PATH —— 操作就地完成，不再绕去工具箱 */}
+        {installedCount > 0 && <PathEnvToggle pkgId={group.id} />}
 
         {/* 右：版本下拉（清单内置 + 远程枚举的完整版本历史） */}
         <VersionPicker

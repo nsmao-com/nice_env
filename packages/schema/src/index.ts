@@ -569,6 +569,47 @@ export const PhpExtensionChange = z.object({
 });
 export type PhpExtensionChange = z.infer<typeof PhpExtensionChange>;
 
+/* ============ 配置文件编辑 ============ */
+
+export const ConfigFileInfo = z.object({
+  kind: z.string(),
+  label: z.string(),
+  description: z.string(),
+  path: z.string(),
+  exists: z.boolean(),
+  sizeBytes: z.number(),
+  language: z.string(),
+  /** 是否有真正的语法校验器 */
+  validated: z.boolean(),
+  usedByService: z.string().nullable().optional(),
+  requiresPackage: z.string().nullable().optional(),
+});
+export type ConfigFileInfo = z.infer<typeof ConfigFileInfo>;
+
+export const ConfigIssue = z.object({
+  /** 1-based 行号；0 表示与具体行无关 */
+  line: z.number(),
+  /** error / warning */
+  severity: z.string(),
+  message: z.string(),
+});
+export type ConfigIssue = z.infer<typeof ConfigIssue>;
+
+export const ConfigValidation = z.object({
+  ok: z.boolean(),
+  messages: z.array(z.string()).default([]),
+  issues: z.array(ConfigIssue).default([]),
+});
+export type ConfigValidation = z.infer<typeof ConfigValidation>;
+
+export const ConfigBackup = z.object({
+  name: z.string(),
+  path: z.string(),
+  sizeBytes: z.number(),
+  createdAt: z.number(),
+});
+export type ConfigBackup = z.infer<typeof ConfigBackup>;
+
 /* ============ 项目扫描 ============ */
 
 export const ScannedProject = z.object({

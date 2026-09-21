@@ -31,6 +31,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { RingProgress } from "@/components/shared/ring-progress";
+import { PathEnvToggle } from "@/components/shared/path-env-toggle";
 
 /* ============================================================
    套件安装向导：把「下载 → 校验 → 解压 → 写配置 → 完成」
@@ -298,6 +299,12 @@ export function InstallDialog({
                   </span>
                   <span className="text-[11px] text-faint">{t("install.doneHint")}</span>
                 </div>
+                {/* 装完顺手把命令加进环境变量：就地一步，不再跑去找入口 */}
+                {target && (
+                  <div className="ml-auto shrink-0">
+                    <PathEnvToggle pkgId={target.id} />
+                  </div>
+                )}
               </motion.div>
             ) : (
               <motion.div

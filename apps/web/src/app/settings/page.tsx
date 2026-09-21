@@ -255,6 +255,26 @@ export default function SettingsPage() {
 
       <PageHeader title={t("settings.title")} subtitle={t("settings.subtitle")} />
 
+      {/* 窄窗口：左侧竖排导航放不下，改为横向一排 —— 不然除「外观」外的分区根本进不去 */}
+      <div className="mb-4 flex gap-1 overflow-x-auto pb-1 lg:hidden">
+        {SECTIONS.map((s) => (
+          <button
+            key={s.id}
+            type="button"
+            onClick={() => setActive(s.id)}
+            className={cn(
+              "flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-[12px] transition-colors",
+              active === s.id
+                ? "border-primary/40 bg-primary-soft font-medium text-primary"
+                : "border-border bg-card-2/40 text-muted hover:text-foreground"
+            )}
+          >
+            <s.icon className="h-3.5 w-3.5" />
+            {t(s.labelKey as never)}
+          </button>
+        ))}
+      </div>
+
       <div className="flex gap-6">
         {/* 左侧分区导航：设置项一多，卡片平铺就难找了 */}
         <nav className="sticky top-0 hidden h-fit w-[172px] shrink-0 flex-col gap-0.5 lg:flex">
@@ -980,24 +1000,6 @@ export default function SettingsPage() {
               </CardHeader>
               <CardContent className="flex flex-col gap-4">
                 <p className="text-[11.5px] text-faint">{t("settings.advancedHint")}</p>
-                <ToggleRow
-                  label={t("settings.confirmKill")}
-                  hint={t("settings.confirmKillHint")}
-                  checked={settings.confirmKill}
-                  onChange={(v) => update("confirmKill", v)}
-                />
-                <ToggleRow
-                  label={t("settings.autoClosePort")}
-                  hint={t("settings.autoClosePortHint")}
-                  checked={settings.autoClosePortOnStart}
-                  onChange={(v) => update("autoClosePortOnStart", v)}
-                />
-                <ToggleRow
-                  label={t("appearance.hideScrollbars")}
-                  hint={t("appearance.hideScrollbarsHint")}
-                  checked={settings.hideScrollbars}
-                  onChange={(v) => update("hideScrollbars", v)}
-                />
                 <Divider />
                 <div className="flex items-center justify-between gap-4">
                   <div className="flex flex-col gap-0.5">

@@ -2,18 +2,22 @@ import * as React from "react";
 import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
+/**
+ * 徽标 —— Apple 风格：胶囊形、语义色淡底 + 语义色文字（tinted fill），
+ * 不用 1px 灰框；颜色只表达状态，不做大面积高饱和。
+ */
 const badgeVariants = cva(
-  "inline-flex items-center gap-1 rounded-md border px-1.5 py-px text-[11px] font-medium leading-[18px] transition-colors whitespace-nowrap tabular",
+  "inline-flex items-center gap-1 rounded-full px-2 py-px text-[11px] font-medium leading-[18px] transition-colors whitespace-nowrap tabular",
   {
     variants: {
       variant: {
-        default: "border-[hsl(var(--accent-h)_62%_45%/0.18)] bg-primary-soft text-primary",
-        running: "border-running/20 bg-running-soft text-running",
-        error: "border-error/20 bg-error-soft text-error",
-        warn: "border-warn/20 bg-warn-soft text-warn",
-        info: "border-info/20 bg-info-soft text-info",
-        outline: "border-border text-muted",
-        muted: "border-transparent bg-card-2 text-muted",
+        default: "bg-primary-soft text-primary",
+        running: "bg-running-soft text-running",
+        error: "bg-error-soft text-error",
+        warn: "bg-warn-soft text-warn",
+        info: "bg-info-soft text-info",
+        outline: "bg-fill text-muted",
+        muted: "bg-fill text-secondary",
       },
     },
     defaultVariants: { variant: "default" },

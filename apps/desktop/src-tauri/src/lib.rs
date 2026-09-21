@@ -109,6 +109,8 @@ pub fn run() {
             read_hosts, apply_hosts, rebuild_hosts, list_certs, issue_cert, reissue_site_certs, trust_ca,
             // 项目扫描
             scan_projects,
+            // 诊断包
+            diagnostics_build, diagnostics_save,
             // 站点 .env
             env_read, env_save, env_apply_db,
             // 证书体检
@@ -1776,4 +1778,33 @@ fn env_apply_db(
     site_id: String,
 ) -> Result<Vec<String>, tauri::Error> {
     map_jh(nsb_core::envfile::apply_db_vars(&state.paths, &state.store, &site_id))
+}
+
+/* ================= 诊断包 ================= */
+
+/// 生成诊断报告（Markdown）。内容已脱敏：密码/token 打码、用户主目录替换为 <home>。
+#[tauri::command]
+fn diagnostics_build(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+) -> Result<nsb_core::diagnostics::DiagnosticsBundle, tauri::Error> {
+    map_jh(nsb_core::diagnostics::build(
+        &state.paths,
+        &state.store,
+        &state.manager,
+        env!("CARGO_PKG_VERSION"),
+    ))
+}
+
+/// 把诊断包另存为 .md 文件，返回路径
+#[tauri::command]
+fn diagnostics_save(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+) -> Result<String, tauri::Error> {
+    let bundle = map_jh(nsb_core::diagnostics::build(
+        &state.paths,
+        &state.store,
+        &state.manager,
+        env!("CARGO_PKG_VERSION"),
+    ))?;
+    map_jh(nsb_core::diagnostics::save_to_file(&state.paths, &bundle))
 }

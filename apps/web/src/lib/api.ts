@@ -28,6 +28,7 @@ import type {
   CertReport,
   ImportedCert,
   EnvFileView,
+  DiagnosticsBundle,
   CertRecord,
   ProxyProfile,
   ProxyGroupView,
@@ -214,6 +215,10 @@ export const envSave = (siteId: string, changes: [string, string][]) =>
   safe(invoke<boolean>("env_save", { siteId, changes }));
 export const envApplyDb = (siteId: string) =>
   safe(invoke<string[]>("env_apply_db", { siteId }));
+
+/* 诊断包 */
+export const diagnosticsBuild = () => safe(invoke<DiagnosticsBundle>("diagnostics_build"));
+export const diagnosticsSave = () => safe(invoke<string>("diagnostics_save"));
 
 /* 代理（Clash/mihomo） */
 export const proxyStatus = () => safe(invoke<ProxyStatusInfo>("proxy_status"));

@@ -2,15 +2,16 @@ import * as React from "react";
 import { cn } from "@/lib/utils";
 
 /**
- * 卡片：实色填充 + 纵向微渐变（避免大面积死白），
- * 悬停时边框转向 border-strong 并把阴影提到 raised，形成"可交互表面"的层次。
+ * 卡片 —— Apple 内容层：纯平实色表面（白 / 深色 #1C1C1E），无边框；
+ * 浅色下用双层极淡阴影（接触 + 环境）表达浮起，深色下靠抬升背景分层。
+ * 圆角 18（普通卡片档），与分组页 #F2F2F7 衬底形成层次。
  */
 const Card = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
   ({ className, ...props }, ref) => (
     <div
       ref={ref}
       className={cn(
-        "card-fill sheen relative rounded-xl border border-border shadow-[var(--shadow-card)]",
+        "card-fill relative rounded-xl shadow-[var(--shadow-card)]",
         className
       )}
       {...props}

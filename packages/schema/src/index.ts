@@ -569,6 +569,19 @@ export const PhpExtensionChange = z.object({
 });
 export type PhpExtensionChange = z.infer<typeof PhpExtensionChange>;
 
+/* ============ 诊断包 ============ */
+
+export const DiagnosticsBundle = z.object({
+  markdown: z.string(),
+  serviceCount: z.number(),
+  siteCount: z.number(),
+  logLines: z.number(),
+  /** 被打码的敏感条目数 */
+  redacted: z.number(),
+  generatedAt: z.number(),
+});
+export type DiagnosticsBundle = z.infer<typeof DiagnosticsBundle>;
+
 /* ============ 站点 .env ============ */
 
 export const EnvEntry = z.object({

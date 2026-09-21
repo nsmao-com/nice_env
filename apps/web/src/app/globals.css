@@ -437,6 +437,17 @@
       var(--shadow-pop);
   }
 
+  /* 通知胶囊（sonner toast）：比 glass-pop 略厚，浮在内容最上层 */
+  .glass-toast {
+    background: color-mix(in srgb, var(--glass-tint) calc(var(--glass-alpha) + 20%), transparent) !important;
+    -webkit-backdrop-filter: blur(32px) saturate(var(--glass-saturate));
+    backdrop-filter: blur(32px) saturate(var(--glass-saturate));
+    box-shadow: inset 0 0 0 0.5px var(--glass-edge),
+      inset 0 1px 0 var(--glass-highlight),
+      var(--shadow-pop) !important;
+    border: 0 !important;
+  }
+
   /* 卡片顶部 1px 高光（历史类名，Apple 化后仅深色保留微高光）。 */
   .sheen::before {
     content: "";

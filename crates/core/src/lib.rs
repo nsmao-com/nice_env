@@ -5,6 +5,7 @@ pub mod cfgeditor;
 pub mod configgen;
 pub mod dbadmin;
 pub mod dbbackup;
+pub mod diagnostics;
 pub mod download;
 pub mod envfile;
 pub mod error;

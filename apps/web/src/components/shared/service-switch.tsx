@@ -35,12 +35,10 @@ export function ServiceSwitch({
         onCheckedChange(!checked);
       }}
       className={cn(
-        "relative inline-flex h-[22px] w-[40px] shrink-0 cursor-pointer items-center rounded-full transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary-ring)] disabled:cursor-not-allowed disabled:opacity-60",
-        // 开启态走强调色而不是 iOS 那种固定绿，与主按钮同一套色；
-        // 轨道用 inset 阴影压成凹槽，thumb 才有「落在轨道里」的层次
-        checked
-          ? "bg-primary shadow-[inset_0_1px_2px_rgba(28,25,23,0.2),0_0_12px_-2px_var(--accent-glow)]"
-          : "bg-card-2 shadow-[inset_0_1px_2px_rgba(28,25,23,0.09)] ring-1 ring-inset ring-border",
+        "relative inline-flex h-[24px] w-[40px] shrink-0 cursor-pointer items-center rounded-full transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary-ring)] disabled:cursor-not-allowed disabled:opacity-60",
+        // 开启态走强调色（systemBlue 档）而非固定绿，与主按钮同一套色；
+        // Apple 开关不做凹槽与光晕，层次全交给白色 thumb 的极淡投影
+        checked ? "bg-primary" : "bg-fill",
         className
       )}
     >
@@ -48,7 +46,7 @@ export function ServiceSwitch({
         layout
         transition={{ type: "spring", stiffness: 700, damping: 34 }}
         className={cn(
-          "absolute flex h-[18px] w-[18px] items-center justify-center rounded-full bg-white shadow-[0_1px_2px_rgba(28,25,23,0.22),0_0_0_0.5px_rgba(28,25,23,0.06)]",
+          "absolute flex h-[20px] w-[20px] items-center justify-center rounded-full bg-white shadow-[0_1px_2px_rgba(0,0,0,0.18),0_0_0_0.5px_rgba(0,0,0,0.04)]",
           checked ? "right-[2px]" : "left-[2px]"
         )}
       >

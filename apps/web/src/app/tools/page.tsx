@@ -14,6 +14,7 @@ import {
   Search,
   Power,
   Trash2,
+  Stethoscope,
 } from "lucide-react";
 import type { ListenerInfo, PortDiagnosis, PortScanEntry } from "@nsb/schema";
 import { useUI, useT } from "@/lib/store";
@@ -29,6 +30,7 @@ import { CopyButton, ConfirmDialog } from "@/components/shared/misc";
 import { CodeBlock } from "@/components/shared/code-block";
 import { PathEnvCard } from "@/components/shared/path-env-card";
 import { ConfigEditor } from "@/components/shared/config-editor";
+import { DiagnosticsCard } from "@/components/shared/diagnostics-card";
 
 const COMMON_PORTS = [80, 443, 8080, 8443, 3306, 23306, 6379, 26379, 9000, 5432];
 
@@ -45,6 +47,9 @@ export default function ToolsPage() {
         <TerminalInjectTool />
         <RewriteTemplates />
         <ConfigEditor />
+        <ToolCard icon={Stethoscope} title={t("diag.title")} hint={t("diag.hint")}>
+          <DiagnosticsCard />
+        </ToolCard>
         <BackupTool />
         <RepairTool />
       </div>

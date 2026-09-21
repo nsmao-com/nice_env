@@ -23,6 +23,7 @@ export type CodeLang =
   | "php"
   | "sql"
   | "env"
+  | "markdown"
   | "plain";
 
 const LANG_LABEL: Record<CodeLang, string> = {
@@ -34,6 +35,7 @@ const LANG_LABEL: Record<CodeLang, string> = {
   php: "php",
   sql: "sql",
   env: "env",
+  markdown: "markdown",
   plain: "text",
 };
 
@@ -104,6 +106,17 @@ const RULES: Record<Exclude<CodeLang, "plain">, Rule[]> = {
     { re: /(^|\s)(#.*)$/gm, cls: "text-faint italic" },
     { re: /^[A-Z][A-Z0-9_]*(?==)/gm, cls: "text-info" },
     { re: /=.*$/gm, cls: "text-running" },
+  ],
+  markdown: [
+    // 标题 → 重一点，正文层次才看得出来
+    { re: /^#{1,6} .*$/gm, cls: "text-foreground font-semibold" },
+    { re: /^\s*[-*+] /gm, cls: "text-primary" },
+    { re: /^\s*> .*$/gm, cls: "text-muted italic" },
+    { re: /`[^`]*`/g, cls: "text-running" },
+    { re: /^```.*$/gm, cls: "text-faint" },
+    { re: /\[[^\]]*\]\([^)]*\)/g, cls: "text-info" },
+    { re: /^\|.*\|$/gm, cls: "text-secondary" },
+    { re: /\*\*[^*]+\*\*/g, cls: "text-foreground font-medium" },
   ],
 };
 

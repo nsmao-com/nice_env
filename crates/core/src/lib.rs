@@ -17,6 +17,7 @@ pub mod pathenv;
 pub mod phpext;
 pub mod ports;
 pub mod proxy;
+pub mod scanner;
 pub mod serde_proxy;
 pub mod services;
 pub mod sites;

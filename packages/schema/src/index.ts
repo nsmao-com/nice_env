@@ -569,6 +569,26 @@ export const PhpExtensionChange = z.object({
 });
 export type PhpExtensionChange = z.infer<typeof PhpExtensionChange>;
 
+/* ============ 项目扫描 ============ */
+
+export const ScannedProject = z.object({
+  path: z.string(),
+  name: z.string(),
+  /** laravel / think-php / wordpress / next-js / vite / go / python … */
+  kind: z.string(),
+  documentRoot: z.string(),
+  siteKind: z.string(),
+  rewrite: z.string(),
+  phpMinVersion: z.string().nullable().optional(),
+  /** 识别依据，供用户核对 */
+  evidence: z.array(z.string()).default([]),
+  runHint: z.string(),
+  needsDevServer: z.boolean(),
+  suggestedDomain: z.string(),
+  alreadyConfigured: z.boolean(),
+});
+export type ScannedProject = z.infer<typeof ScannedProject>;
+
 /* ============ 服务看门狗 ============ */
 
 export const WatchedService = z.object({

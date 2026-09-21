@@ -21,6 +21,7 @@ import type {
   DbBackupFile,
   DbRestoreResult,
   WatchdogStatus,
+  ScannedProject,
   CertRecord,
   ProxyProfile,
   ProxyGroupView,
@@ -177,6 +178,10 @@ export const watchdogStatus = () => safe(invoke<WatchdogStatus>("watchdog_status
 export const watchdogSetEnabled = (enabled: boolean) =>
   safe(invoke<boolean>("watchdog_set_enabled", { enabled }));
 export const watchdogReset = (id: string) => safe(invoke<boolean>("watchdog_reset", { id }));
+
+/* 项目扫描 */
+export const scanProjects = (root: string) =>
+  safe(invoke<ScannedProject[]>("scan_projects", { root }));
 
 /* 代理（Clash/mihomo） */
 export const proxyStatus = () => safe(invoke<ProxyStatusInfo>("proxy_status"));

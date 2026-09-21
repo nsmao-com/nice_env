@@ -3,7 +3,7 @@
 import * as React from "react";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "motion/react";
-import { Globe, Plus, ExternalLink, FolderOpen, ScrollText, Power, Settings2, TerminalSquare } from "lucide-react";
+import { Globe, Plus, ExternalLink, FolderOpen, ScrollText, Power, Settings2, TerminalSquare, FolderSearch } from "lucide-react";
 import type { Site } from "@nsb/schema";
 import { useUI, useT } from "@/lib/store";
 import { useSites, useInvalidate, toastError, siteUrl, usePorts } from "@/lib/hooks";
@@ -16,12 +16,14 @@ import { StatusLight } from "@/components/shared/status-light";
 import { CopyButton, EmptyState } from "@/components/shared/misc";
 import { PageHeader } from "@/components/layout/app-shell";
 import { SiteDetailSheet } from "@/components/sites/site-detail";
+import { ProjectScannerDialog } from "@/components/sites/project-scanner";
 
 export default function SitesPage() {
   const t = useT();
   const setWizardOpen = useUI((s) => s.setWizardOpen);
   const { data: sites } = useSites();
   const [detail, setDetail] = React.useState<Site | null>(null);
+  const [scanOpen, setScanOpen] = React.useState(false);
 
   return (
     <div className="pb-8">
@@ -29,9 +31,15 @@ export default function SitesPage() {
         title={t("sites.title")}
         subtitle={t("sites.subtitle")}
         actions={
-          <Button onClick={() => setWizardOpen(true)}>
-            <Plus className="h-3.5 w-3.5" /> {t("sites.create")}
-          </Button>
+          <>
+            {/* 已有项目的人多半不想手填表单，先给「扫一下」这条路 */}
+            <Button variant="secondary" onClick={() => setScanOpen(true)}>
+              <FolderSearch className="h-3.5 w-3.5" /> {t("scanner.scan")}
+            </Button>
+            <Button onClick={() => setWizardOpen(true)}>
+              <Plus className="h-3.5 w-3.5" /> {t("sites.create")}
+            </Button>
+          </>
         }
       />
 
@@ -58,6 +66,8 @@ export default function SitesPage() {
           </AnimatePresence>
         </div>
       )}
+
+      <ProjectScannerDialog open={scanOpen} onOpenChange={setScanOpen} />
 
       <SiteDetailSheet site={detail} onClose={() => setDetail(null)} />
     </div>

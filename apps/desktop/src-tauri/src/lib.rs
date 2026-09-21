@@ -107,6 +107,8 @@ pub fn run() {
             list_sites, create_site, update_site, delete_site, start_site, stop_site,
             // hosts / 证书
             read_hosts, apply_hosts, rebuild_hosts, list_certs, issue_cert, reissue_site_certs, trust_ca,
+            // 项目扫描
+            scan_projects,
             // PHP 扩展
             php_extensions, set_php_extension, set_php_ini_toggle,
             // Xdebug 调试
@@ -1615,4 +1617,19 @@ fn watchdog_reset(
 ) -> bool {
     state.watchdog_reset(&id);
     true
+}
+
+/* ================= 项目扫描 ================= */
+
+/// 扫描一个目录，识别其中的项目并给出建站建议（只读，不改任何东西）
+#[tauri::command]
+fn scan_projects(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    root: String,
+) -> Result<Vec<nsb_core::scanner::ScannedProject>, tauri::Error> {
+    map_jh(nsb_core::scanner::scan_dir(
+        &state.paths,
+        &state.store,
+        std::path::Path::new(&root),
+    ))
 }

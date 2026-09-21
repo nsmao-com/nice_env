@@ -28,6 +28,7 @@ import type {
   DbBackupFile,
   DbRestoreResult,
   WatchdogStatus,
+  ScannedProject,
   CertRecord,
   ProxyProfile,
   ProxyGroupView,
@@ -994,6 +995,53 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         diskTotalGb: 953,
         history: statsHistory.slice(-60),
       } as SystemStats as T;
+    }
+    case "scan_projects": {
+      const root = args!.root as string;
+      return [
+        {
+          path: `${root}\my-shop`,
+          name: "my-shop",
+          kind: "laravel",
+          documentRoot: `${root}\my-shop\public`,
+          siteKind: "php",
+          rewrite: "laravel",
+          phpMinVersion: ">=8.2",
+          evidence: ["存在 artisan（Laravel 命令行入口）", "composer.json 要求 php >=8.2"],
+          runHint: "需要 PHP + Composer；首次运行前执行 composer install",
+          needsDevServer: false,
+          suggestedDomain: "my-shop.test",
+          alreadyConfigured: false,
+        },
+        {
+          path: `${root}\admin-ui`,
+          name: "admin-ui",
+          kind: "next-js",
+          documentRoot: `${root}\admin-ui\out`,
+          siteKind: "node",
+          rewrite: "spa-fallback",
+          phpMinVersion: null,
+          evidence: ["存在 next.config.js（Next.js）"],
+          runHint: "需要 Node；开发用 npm run dev（本应用可按 Node 站点代理），静态导出用 npm run build + out 目录",
+          needsDevServer: true,
+          suggestedDomain: "admin-ui.test",
+          alreadyConfigured: false,
+        },
+        {
+          path: `${root}\landing`,
+          name: "landing",
+          kind: "static-html",
+          documentRoot: `${root}\landing`,
+          siteKind: "static",
+          rewrite: "none",
+          phpMinVersion: null,
+          evidence: ["存在 index.html"],
+          runHint: "纯静态，无需运行时",
+          needsDevServer: false,
+          suggestedDomain: "landing.test",
+          alreadyConfigured: true,
+        },
+      ] as ScannedProject[] as T;
     }
     case "watchdog_status":
       return {

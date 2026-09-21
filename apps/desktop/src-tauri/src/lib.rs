@@ -109,6 +109,8 @@ pub fn run() {
             read_hosts, apply_hosts, rebuild_hosts, list_certs, issue_cert, reissue_site_certs, trust_ca,
             // 项目扫描
             scan_projects,
+            // 日志导出
+            log_export,
             // 工具链镜像
             tool_mirrors, tool_mirror_set, tool_mirror_reset,
             // 批量服务操作
@@ -1925,4 +1927,25 @@ fn m_setting_key(manager: &str) -> &'static str {
         "npm" => "npmRegistry",
         _ => "pipIndexUrl",
     }
+}
+
+/* ================= 日志导出 ================= */
+
+/// 把一段日志文本存成文件（用户在「日志」页选好过滤/搜索后导出当前视图）。
+///
+/// 内容由前端传进来，而不是后端重新读一遍 —— 因为用户看到的是
+/// **过滤后**的视图，导出必须和他看到的一致，否则「我明明搜了 error 导出却是全量」。
+#[tauri::command]
+fn log_export(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    service_id: String,
+    content: String,
+    suggested_name: Option<String>,
+) -> Result<String, tauri::Error> {
+    map_jh(nsb_core::logs_export::write_log_file(
+        &state.paths,
+        &service_id,
+        &content,
+        suggested_name.as_deref(),
+    ))
 }

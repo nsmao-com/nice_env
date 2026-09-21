@@ -923,6 +923,13 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "apply_hosts":
       return true as T;
+    case "log_export": {
+      const sid = args!.serviceId as string;
+      // 后端会强制 .log 后缀并清洗文件名，mock 也照做，避免演示时出现假路径
+      const raw = (args!.suggestedName as string | null) ?? `${sid}-20260921-210000`;
+      const base = raw.replace(/\.log$/, "");
+      return `C:\\NiceServBay\\logs\\export\\${base}.log` as T;
+    }
     case "tool_mirrors":
       return [
         {

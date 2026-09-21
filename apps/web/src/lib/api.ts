@@ -234,6 +234,10 @@ export const bulkRestart = (ids: string[]) => safe(invoke<BulkReport>("bulk_rest
 export const bulkSummary = (ids: string[]) =>
   safe(invoke<BulkSelectionSummary>("bulk_summary", { ids }));
 
+/* 日志导出 */
+export const logExport = (serviceId: string, content: string, suggestedName?: string) =>
+  safe(invoke<string>("log_export", { serviceId, content, suggestedName: suggestedName ?? null }));
+
 /* 工具链镜像源 */
 export const toolMirrors = () => safe(invoke<ToolMirrorStatus[]>("tool_mirrors"));
 export const toolMirrorSet = (manager: string, url: string) =>

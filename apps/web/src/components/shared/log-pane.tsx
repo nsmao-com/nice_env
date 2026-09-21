@@ -13,9 +13,14 @@ import {
   Search,
   WrapText,
   X,
+  Download,
+  Loader2,
 } from "lucide-react";
+import { toast } from "sonner";
 import { useT } from "@/lib/store";
 import { cn } from "@/lib/utils";
+import * as api from "@/lib/api";
+import { toastError } from "@/lib/hooks";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useLogTail } from "@/lib/hooks";
@@ -49,6 +54,7 @@ export function LogPane({
   defaultAutoRefresh?: boolean;
 }) {
   const t = useT();
+  const [exporting, setExporting] = React.useState(false);
   const [paused, setPaused] = React.useState(!defaultAutoRefresh);
   const [visibleLines, setVisibleLines] = React.useState(tailLines);
   const { lines, error } = useLogTail(serviceId, 1500, Math.max(visibleLines, tailLines), !paused);
@@ -118,6 +124,26 @@ export function LogPane({
     }
     if (i < text.length) parts.push(text.slice(i));
     return parts;
+  };
+
+  /**
+   * 导出当前视图。
+   *
+   * 用 `joined` 而不是重新拼 filtered —— joined 就是渲染用的那份原始文本
+   * （无损，高亮只做着色不改内容），导出内容与屏幕上看到的逐字节一致。
+   */
+  const doExport = async () => {
+    if (!serviceId || filtered.length === 0) return;
+    setExporting(true);
+    try {
+      const text = joined.endsWith("\n") ? joined : joined + "\n";
+      const path = await api.logExport(serviceId, text);
+      toast.success(t("log.exported"), { description: path });
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setExporting(false);
+    }
   };
 
   return (
@@ -204,6 +230,21 @@ export function LogPane({
             onClick={() => navigator.clipboard.writeText(joined)}
           >
             <Copy className="h-3.5 w-3.5" />
+          </Button>
+          {/* 导出：导出的正是当前过滤/搜索后的内容，而不是全量 —— 否则
+              「我搜了 error 导出却是全部」会让人不信任这个功能 */}
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            title={t("log.export")}
+            disabled={filtered.length === 0}
+            onClick={() => void doExport()}
+          >
+            {exporting ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Download className="h-3.5 w-3.5" />
+            )}
           </Button>
         </div>
       </div>

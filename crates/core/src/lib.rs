@@ -15,6 +15,7 @@ pub mod generic;
 pub mod health;
 pub mod hosts;
 pub mod install;
+pub mod logs_export;
 pub mod model;
 pub mod ops;
 pub mod paths;

@@ -63,7 +63,8 @@ export function hslToHex(h: number, s: number, l: number): string {
 
 /** 主题色的「预设色卡」颜色（与设置页色卡显示一致） */
 export function presetSwatch(hue: number, dark: boolean) {
-  return `hsl(${hue} 82% ${dark ? 62 : 55}%)`;
+  if (Math.abs(hue - 211) <= 2) return dark ? "#0091FF" : "#0088FF";
+  return `hsl(${hue} 84% ${dark ? 58 : 48}%)`;
 }
 
 /** 当前主题色对应的 hue（自定义颜色会被换算成 hue，供 ::selection 等使用） */
@@ -102,11 +103,21 @@ export function accentSolids(s: Pick<AppSettings, "accentHex" | "accentHue">) {
     }
   }
   const h = s.accentHue;
+  /* systemBlue 档（蔚蓝预设）：浅色 #0088FF / 深色 #0091FF，与 Apple 语义色完全一致 */
+  if (Math.abs(h - 211) <= 2) {
+    return {
+      light: "hsl(211 100% 50%)",
+      lightHover: "hsl(211 100% 54%)",
+      dark: "hsl(211 100% 50%)",
+      darkHover: "hsl(211 100% 56%)",
+    };
+  }
+  /* 其余预设：高饱和 + 中亮度，贴近 Apple 强调色的鲜艳度但不刺眼 */
   return {
-    light: `hsl(${h} 62% 44%)`,
-    lightHover: `hsl(${h} 66% 51%)`,
-    dark: `hsl(${h} 66% 58%)`,
-    darkHover: `hsl(${h} 70% 64%)`,
+    light: `hsl(${h} 84% 48%)`,
+    lightHover: `hsl(${h} 86% 54%)`,
+    dark: `hsl(${h} 90% 58%)`,
+    darkHover: `hsl(${h} 92% 64%)`,
   };
 }
 
@@ -124,7 +135,7 @@ export function applyAppearance(s: Partial<AppSettings>) {
 
   /* 主题色：自定义颜色优先。这里同时写实心色，
      否则设置里选的强调色只会影响 ::selection，看起来像没生效。 */
-  const accent = { accentHex: s.accentHex ?? "", accentHue: s.accentHue ?? 250 };
+  const accent = { accentHex: s.accentHex ?? "", accentHue: s.accentHue ?? 211 };
   const hue = effectiveHue(accent);
   root.style.setProperty("--accent-h", String(hue));
   const custom = s.accentHex ? parseHex(s.accentHex) : null;
@@ -136,12 +147,12 @@ export function applyAppearance(s: Partial<AppSettings>) {
   root.style.setProperty("--accent-solid-dark-hover", solid.darkHover);
   /* 辉光同样写成浅/深两组，由 CSS 按 .dark 取用 —— 只写一个 --accent-glow
      会以内联样式压过 .dark 里的覆盖，深色模式拿到的是浅色辉光。 */
-  root.style.setProperty("--accent-glow-light", `hsl(${hue} 70% 45% / 0.32)`);
-  root.style.setProperty("--accent-glow-dark", `hsl(${hue} 70% 50% / 0.4)`);
+  root.style.setProperty("--accent-glow-light", `hsl(${hue} 70% 45% / 0.28)`);
+  root.style.setProperty("--accent-glow-dark", `hsl(${hue} 70% 50% / 0.34)`);
 
   /* 字体与字号 */
-  root.style.setProperty("--app-font-sans", uiFontStack(s.uiFont ?? "plex"));
-  root.style.setProperty("--app-font-mono", monoFontStack(s.codeFont ?? "plex-mono"));
+  root.style.setProperty("--app-font-sans", uiFontStack(s.uiFont ?? "sf"));
+  root.style.setProperty("--app-font-mono", monoFontStack(s.codeFont ?? "sf-mono"));
   const size = Math.min(18, Math.max(10, s.codeFontSize ?? 11.5));
   root.style.setProperty("--code-font-size", `${size}px`);
   const scale = Math.min(1.25, Math.max(0.85, s.uiScale ?? 1));

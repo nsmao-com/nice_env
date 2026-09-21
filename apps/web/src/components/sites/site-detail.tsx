@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { EnvEditor } from "./env-editor";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/misc";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -271,6 +272,17 @@ export function SiteDetailSheet({
                 </label>
               </div>
             </ConfirmDialog>
+
+            {/* .env 编辑：Laravel/WordPress 类项目最常改的文件 */}
+            <div>
+              <div className="mb-2 flex items-center gap-2">
+                <span className="text-[10px] font-semibold uppercase tracking-[0.09em] text-faint/70">
+                  {t("env.title")}
+                </span>
+                <span className="h-px flex-1 bg-border/60" />
+              </div>
+              <EnvEditor siteId={site.id} />
+            </div>
           </div>
         </div>
       </SheetContent>

@@ -569,6 +569,40 @@ export const PhpExtensionChange = z.object({
 });
 export type PhpExtensionChange = z.infer<typeof PhpExtensionChange>;
 
+/* ============ 站点 .env ============ */
+
+export const EnvEntry = z.object({
+  key: z.string(),
+  value: z.string(),
+  /** 注释行，保留但不生效 */
+  commented: z.boolean(),
+  /** 值像敏感信息，前端默认打码 */
+  secret: z.boolean(),
+  line: z.number(),
+  /** 值含空格/# 但没加引号 —— 会被 dotenv 解析错 */
+  needsQuote: z.boolean(),
+});
+export type EnvEntry = z.infer<typeof EnvEntry>;
+
+export const EnvFileView = z.object({
+  siteId: z.string(),
+  siteName: z.string(),
+  path: z.string(),
+  exists: z.boolean(),
+  entries: z.array(EnvEntry),
+  dbHint: z
+    .object({
+      database: z.string(),
+      username: z.string(),
+      password: z.string(),
+      port: z.number(),
+    })
+    .nullable()
+    .optional(),
+  variants: z.array(z.string()).default([]),
+});
+export type EnvFileView = z.infer<typeof EnvFileView>;
+
 /* ============ 证书体检 ============ */
 
 export const CertHealth = z.object({
@@ -800,8 +834,13 @@ export type ProxyStatusInfo = z.infer<typeof ProxyStatusInfo>;
 /** 可选界面字体（stack 即 CSS font-family；随应用打包，离线可用） */
 export const UI_FONT_OPTIONS = [
   {
+    id: "sf",
+    label: "SF Pro / 系统（默认）",
+    stack: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
+  },
+  {
     id: "plex",
-    label: "IBM Plex Sans（默认）",
+    label: "IBM Plex Sans",
     stack: '"IBM Plex Sans Variable", "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
   },
   {
@@ -829,8 +868,13 @@ export const UI_FONT_OPTIONS = [
 /** 可选代码字体（日志 / 代码块 / 终端片段共用） */
 export const MONO_FONT_OPTIONS = [
   {
+    id: "sf-mono",
+    label: "SF Mono / 系统（默认）",
+    stack: 'ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono Variable", Consolas, monospace',
+  },
+  {
     id: "plex-mono",
-    label: "IBM Plex Mono（默认）",
+    label: "IBM Plex Mono",
     stack: '"IBM Plex Mono", "JetBrains Mono Variable", ui-monospace, "Cascadia Code", Consolas, monospace',
   },
   {
@@ -850,30 +894,31 @@ export const MONO_FONT_OPTIONS = [
   },
 ] as const;
 
-/** 主题色预设：写 accentHue；选「自定义」则写 accentHex */
+/** 主题色预设：写 accentHue；选「自定义」则写 accentHex。
+    默认蔚蓝 = systemBlue（Light #0088FF / Dark #0091FF），Apple 强调色。 */
 export const ACCENT_PRESETS = [
+  { id: "blue", label: "蔚蓝", hue: 211 },
+  { id: "teal", label: "青碧", hue: 187 },
+  { id: "green", label: "苔绿", hue: 135 },
+  { id: "indigo", label: "靛蓝", hue: 235 },
   { id: "violet", label: "紫罗兰", hue: 262 },
-  { id: "indigo", label: "靛蓝", hue: 240 },
-  { id: "blue", label: "蔚蓝", hue: 217 },
-  { id: "teal", label: "青碧", hue: 173 },
-  { id: "green", label: "苔绿", hue: 145 },
-  { id: "amber", label: "琥珀", hue: 32 },
-  { id: "rose", label: "玫瑰", hue: 350 },
   { id: "pink", label: "品红", hue: 320 },
+  { id: "rose", label: "玫瑰", hue: 350 },
+  { id: "amber", label: "琥珀", hue: 35 },
 ] as const;
 
 export const AppSettings = z.object({
   language: z.enum(["zh", "en"]).default("zh"),
   appearance: z.enum(["dark", "light", "system"]).default("light"),
-  accentHue: z.number().default(250),
+  accentHue: z.number().default(211),
   /** 自定义主题色（#RRGGBB）；非空时优先于 accentHue */
   accentHex: z.string().default(""),
   /** 界面字体 id（见 UI_FONT_OPTIONS） */
-  uiFont: z.string().default("plex"),
+  uiFont: z.string().default("sf"),
   /** 界面缩放（0.85–1.25，1 = 默认） */
   uiScale: z.number().default(1),
   /** 代码字体 id（见 MONO_FONT_OPTIONS） */
-  codeFont: z.string().default("plex-mono"),
+  codeFont: z.string().default("sf-mono"),
   /** 代码块 / 日志字号（px，10–18） */
   codeFontSize: z.number().default(11.5),
   /** 代码块默认显示行号 */

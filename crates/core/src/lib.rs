@@ -6,6 +6,7 @@ pub mod configgen;
 pub mod dbadmin;
 pub mod dbbackup;
 pub mod download;
+pub mod envfile;
 pub mod error;
 pub use error::AppError;
 pub mod generic;

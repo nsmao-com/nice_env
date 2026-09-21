@@ -27,6 +27,7 @@ import type {
   ConfigBackup,
   CertReport,
   ImportedCert,
+  EnvFileView,
   CertRecord,
   ProxyProfile,
   ProxyGroupView,
@@ -206,6 +207,13 @@ export const certImport = (certPath: string, keyPath: string) =>
 export const certImportedList = () => safe(invoke<ImportedCert[]>("cert_imported_list"));
 export const certImportedDelete = (certPath: string) =>
   safe(invoke<boolean>("cert_imported_delete", { certPath }));
+
+/* 站点 .env */
+export const envRead = (siteId: string) => safe(invoke<EnvFileView>("env_read", { siteId }));
+export const envSave = (siteId: string, changes: [string, string][]) =>
+  safe(invoke<boolean>("env_save", { siteId, changes }));
+export const envApplyDb = (siteId: string) =>
+  safe(invoke<string[]>("env_apply_db", { siteId }));
 
 /* 代理（Clash/mihomo） */
 export const proxyStatus = () => safe(invoke<ProxyStatusInfo>("proxy_status"));

@@ -4,97 +4,111 @@
 @custom-variant dark (&:is(.dark *));
 
 /* ============================================================
-   设计令牌 —— 暖中性纸感底 + 强调色驱动的主色 + 分层阴影。
+   设计令牌 —— Apple HIG / iOS 26 Liquid Glass。
+   三个层次：
+   · 内容层（列表、卡片、正文）：实色，浅色白/分组灰，深色 #1C1C1E 抬升；
+   · 功能层（侧边栏、顶栏、菜单、浮层）：Liquid Glass —— 半透明 +
+     背景模糊 20–40px + 饱和度提升 + 顶部高光，无硬阴影；
+   · 主题色：JS 写入 --accent-solid-light/-dark（lib/appearance.ts），
+     默认 systemBlue；所有「可点击/选中」语义都消费 --primary。
    组件只消费这里的 token；改这一层即可全局换肤。
    ============================================================ */
 :root {
-  /* 主题色：JS 写入 --accent-solid-light / -dark（见 lib/appearance.ts），
-     --primary 在这里按主题取用 —— 内联样式优先级高于类选择器，
+  /* 主题色：JS 写入（见 lib/appearance.ts）。这里的回退值 = systemBlue：
+     Light #0088FF，Dark #0091FF。内联样式优先级高于类选择器，
      所以不能让 JS 直接写 --primary。 */
-  --accent-h: 250;
+  --accent-h: 211;
   --accent-hex: transparent;
-  --accent-solid-light: hsl(250 62% 44%);
-  --accent-solid-light-hover: hsl(250 66% 51%);
-  --accent-solid-dark: hsl(250 66% 58%);
-  --accent-solid-dark-hover: hsl(250 70% 64%);
-  --accent-glow-light: hsl(250 70% 45% / 0.32);
-  --accent-glow-dark: hsl(250 70% 50% / 0.4);
+  --accent-solid-light: #0088ff;
+  --accent-solid-light-hover: #1a94ff;
+  --accent-solid-dark: #0091ff;
+  --accent-solid-dark-hover: #1a9cff;
+  --accent-glow-light: rgba(0, 136, 255, 0.28);
+  --accent-glow-dark: rgba(0, 145, 255, 0.34);
 
-  /* 界面字体 / 代码字体 / 字号：设置页写到 :root，未设置时用这里的默认值 */
-  --app-font-sans: "IBM Plex Sans Variable", "Inter Variable", ui-sans-serif,
-    system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-  --app-font-mono: "IBM Plex Mono", "JetBrains Mono Variable", ui-monospace,
-    "Cascadia Code", Consolas, monospace;
+  /* 界面字体 / 代码字体 / 字号：设置页写到 :root，未设置时用这里的默认值。
+     SF Pro 栈：macOS 命中原生字体，Windows 逐级回退到 Segoe UI。 */
+  --app-font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+    "Helvetica Neue", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --app-font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono Variable",
+    Consolas, monospace;
   --app-font-scale: 1;
   --code-font-size: 11.5px;
   /* 数字与代码的字距微调，让表格/端口/inode 一类数字更整齐 */
   --tracking-tight-num: -0.01em;
 
-  /* 暖中性色板（纸感底 + 墨色字） */
-  --background: #faf8f6;
-  --surface: #f5f2ef;
-  --card: #ffffff;
-  --card-2: #f2efec;
-  --border: #e6e1dc;
-  --border-strong: #d5cec8;
-  --foreground: #1c1917;
-  --secondary: #44403c;
-  --muted: #78716c;
-  --faint: #a8a29e;
+  /* ---- 中性色（systemGray 阶）---- */
+  --background: #f2f2f7; /* 分组页背景 systemGray6 */
+  --surface: #fbfbfd; /* 菜单/浮层底（glass 的回退实色） */
+  --card: #ffffff; /* 卡片/单元格 */
+  --card-2: #eef0f4; /* 次级填充（hover、轨道、Kbd 底） */
+  --fill: rgba(120, 120, 128, 0.12); /* systemFill 四阶 */
+  --fill-2: rgba(120, 120, 128, 0.08);
+  --border: rgba(60, 60, 67, 0.1); /* 极淡描边（输入框 0.5pt 一类） */
+  --border-strong: rgba(60, 60, 67, 0.22);
+  --separator: rgba(60, 60, 67, 0.29); /* 列表分隔线 hairline */
+
+  /* ---- 文字（Label 体系）---- */
+  --foreground: #000000; /* label */
+  --secondary: rgba(60, 60, 67, 0.6); /* secondaryLabel */
+  --muted: rgba(60, 60, 67, 0.6); /* 与 secondary 同阶（历史名） */
+  --faint: rgba(60, 60, 67, 0.32); /* tertiaryLabel / placeholder */
+  --quaternary: rgba(60, 60, 67, 0.18);
 
   /* 主色 = 强调色（设置里选的主题色真正生效的地方）。
-     这里按主题挑 JS 写好的那一组：:root 用浅色组，.dark 覆盖成深色组。
      --accent-solid 必须在本层有定义 —— 只在 .dark 里定义会让浅色下
-     整个 --primary 失效（按钮底色透明、焦点环消失）。 */
+     整个 --primary 失效。 */
   --accent-solid: var(--accent-solid-light);
   --accent-solid-hover: var(--accent-solid-light-hover);
   --accent-glow: var(--accent-glow-light);
   --primary: var(--accent-solid);
   --primary-fg: #ffffff;
-  --primary-soft: hsl(var(--accent-h) 62% 45% / 0.1);
-  --primary-ring: hsl(var(--accent-h) 62% 45% / 0.35);
+  --primary-soft: rgba(0, 136, 255, 0.12); /* 次按钮淡蓝底 rgba(0,136,255,0.12) */
+  --primary-ring: rgba(0, 136, 255, 0.3);
 
-  --running: #15a34a;
-  --error: #dc2626;
-  --warn: #d97706;
-  --info: #2563eb;
-  --running-soft: hsl(145 60% 40% / 0.11);
-  --error-soft: hsl(0 72% 50% / 0.09);
-  --warn-soft: hsl(32 90% 45% / 0.11);
-  --info-soft: hsl(217 80% 50% / 0.09);
+  /* ---- 语义色（Light）---- */
+  --running: #34c759; /* systemGreen */
+  --error: #ff383c; /* systemRed */
+  --warn: #ff8d28; /* systemOrange */
+  --info: #0088ff; /* systemBlue */
+  --caution: #ffcc00; /* systemYellow */
+  --running-soft: rgba(52, 199, 89, 0.12);
+  --error-soft: rgba(255, 56, 60, 0.1);
+  --warn-soft: rgba(255, 141, 40, 0.12);
+  --info-soft: rgba(0, 136, 255, 0.1);
 
-  /* 卡片顶部的 1px 高光（比 border 更亮，制造“实体表面”错觉） */
-  --sheen: linear-gradient(
-    to bottom,
-    rgba(255, 255, 255, 0.95),
-    rgba(255, 255, 255, 0) 46%
-  );
-  /* 卡片自身的极淡纵向渐变，避免大面积死白 */
-  --card-grad: linear-gradient(180deg, #ffffff 0%, #fdfcfb 100%);
-  --card-grad-hover: linear-gradient(180deg, #ffffff 0%, #f8f5f2 100%);
+  /* 卡片顶部的 1px 高光：Apple 内容卡几乎不可见，保留变量仅为兼容 */
+  --sheen: linear-gradient(to bottom, rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0) 46%);
+  /* 卡片实色填充：Apple 用纯平表面，不再纵向渐变 */
+  --card-grad: none;
+  --card-grad-hover: none;
 
-  /* 分层阴影：近距贴地 + 中距扩散，比单层阴影更有“厚度” */
-  --shadow-card: 0 1px 1px -0.5px rgba(28, 25, 23, 0.04),
-    0 2px 4px -2px rgba(28, 25, 23, 0.06);
-  --shadow-raised: 0 1px 1px -0.5px rgba(28, 25, 23, 0.05),
-    0 4px 10px -3px rgba(28, 25, 23, 0.08),
-    0 12px 24px -12px rgba(28, 25, 23, 0.1);
-  --shadow-pop: 0 2px 6px -1px rgba(28, 25, 23, 0.08),
-    0 12px 32px -8px rgba(28, 25, 23, 0.16);
+  /* 阴影 —— 非常克制：接触阴影 + 环境阴影双层（浅色专用）。
+     分组列表默认无阴影，靠 #F2F2F7 / #FFFFFF 衬底分层。 */
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
+  --shadow-raised: 0 1px 2px rgba(0, 0, 0, 0.04), 0 10px 30px rgba(0, 0, 0, 0.08);
+  --shadow-pop: 0 2px 8px rgba(0, 0, 0, 0.06), 0 20px 48px -12px rgba(0, 0, 0, 0.16);
 
-  --chrome: #e9e5e1;
-  --chrome-grad: linear-gradient(180deg, #edeae6 0%, #e6e1dc 100%);
+  /* 窗口底（侧边栏后面那层）：冷灰环境光，给 Liquid Glass 提供可折射的背景 */
+  --chrome: #e3e3ea;
+  --chrome-grad: linear-gradient(155deg, #ececf2 0%, #dcdce4 100%);
 
-  /* 浮动指示块（侧边栏选中项 / 分段控件滑块）：描边 + 投影 */
-  --thumb-ring: rgba(28, 25, 23, 0.05);
-  --thumb-shadow: 0 1px 2px rgba(28, 25, 23, 0.13),
-    0 0 0 0.5px rgba(28, 25, 23, 0.04);
+  /* 悬浮指示块（侧边栏选中项 / 分段控件滑块）：白胶囊 + 极淡投影 */
+  --thumb-ring: rgba(0, 0, 0, 0.04);
+  --thumb-shadow: 0 1px 2px rgba(0, 0, 0, 0.08), 0 3px 8px rgba(0, 0, 0, 0.06);
 
-  --workspace-radius: 14px;
-  --workspace-inset: 10px;
+  /* Liquid Glass 材质参数 */
+  --glass-tint: #fbfbfd; /* 玻璃底色 */
+  --glass-alpha: 58%; /* 玻璃不透明度 */
+  --glass-blur: 28px;
+  --glass-saturate: 1.8;
+  --glass-highlight: rgba(255, 255, 255, 0.55); /* 顶部 45° 内高光 */
+  --glass-edge: rgba(0, 0, 0, 0.06); /* 极淡外描边 */
+
+  --workspace-radius: 22px; /* 分组容器 20–26pt 档 */
+  --workspace-inset: 12px;
   --caption-height: 36px;
-  --workspace-shadow: 0 1px 2px -1px rgba(28, 25, 23, 0.06),
-    0 12px 32px -12px rgba(28, 25, 23, 0.14);
+  --workspace-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 16px 48px -12px rgba(0, 0, 0, 0.14);
 }
 
 .dark {
@@ -103,55 +117,64 @@
   --accent-solid-hover: var(--accent-solid-dark-hover);
   --accent-glow: var(--accent-glow-dark);
 
-  --background: #171614;
-  --surface: #1c1a18;
-  --card: #1e1c1a;
-  --card-2: #272422;
-  --border: rgba(255, 255, 255, 0.09);
-  --border-strong: rgba(255, 255, 255, 0.17);
-  --foreground: #f5f3f1;
-  --secondary: #d6d3d1;
-  --muted: #a8a29e;
-  --faint: #78716c;
+  /* 深色不是反色：主背景纯黑，层级靠抬升 #1C1C1E → #2C2C2E */
+  --background: #000000;
+  --surface: #1c1c1e;
+  --card: #1c1c1e; /* 次级背景 */
+  --card-2: #2c2c2e; /* 三级/抬升 */
+  --fill: rgba(120, 120, 128, 0.24);
+  --fill-2: rgba(120, 120, 128, 0.18);
+  --border: rgba(84, 84, 88, 0.4);
+  --border-strong: rgba(84, 84, 88, 0.65);
+  --separator: rgba(84, 84, 88, 0.6); /* Dark 分隔线 rgba(84,84,88,0.60) */
+
+  --foreground: #ffffff;
+  --secondary: rgba(235, 235, 245, 0.6);
+  --muted: rgba(235, 235, 245, 0.6);
+  --faint: rgba(235, 235, 245, 0.3);
+  --quaternary: rgba(235, 235, 245, 0.16);
 
   --primary: var(--accent-solid);
   --primary-fg: #ffffff;
-  --primary-soft: hsl(var(--accent-h) 70% 60% / 0.16);
-  --primary-ring: hsl(var(--accent-h) 70% 60% / 0.45);
+  --primary-soft: rgba(0, 145, 255, 0.16);
+  --primary-ring: rgba(0, 145, 255, 0.4);
 
-  --running: #4ade80;
-  --error: #f87171;
-  --warn: #fbbf24;
-  --info: #60a5fa;
-  --running-soft: hsl(145 65% 55% / 0.14);
-  --error-soft: hsl(0 80% 65% / 0.13);
-  --warn-soft: hsl(40 90% 60% / 0.13);
-  --info-soft: hsl(217 85% 65% / 0.13);
+  /* ---- 语义色（Dark）---- */
+  --running: #30d158;
+  --error: #ff4245;
+  --warn: #ff9230;
+  --info: #0091ff;
+  --caution: #ffd600;
+  --running-soft: rgba(48, 209, 88, 0.16);
+  --error-soft: rgba(255, 66, 69, 0.14);
+  --warn-soft: rgba(255, 146, 48, 0.16);
+  --info-soft: rgba(0, 145, 255, 0.14);
 
-  --sheen: linear-gradient(
-    to bottom,
-    rgba(255, 255, 255, 0.07),
-    rgba(255, 255, 255, 0) 46%
-  );
-  --card-grad: linear-gradient(180deg, rgba(255, 255, 255, 0.028) 0%, rgba(255, 255, 255, 0) 100%);
-  --card-grad-hover: linear-gradient(180deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.01) 100%);
+  --sheen: linear-gradient(to bottom, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0) 46%);
+  --card-grad: none;
+  --card-grad-hover: none;
 
-  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.028) inset,
-    0 2px 4px -2px rgba(0, 0, 0, 0.4);
-  --shadow-raised: 0 1px 0 rgba(255, 255, 255, 0.04) inset,
-    0 4px 12px -3px rgba(0, 0, 0, 0.5);
-  --shadow-pop: 0 0 0 1px rgba(255, 255, 255, 0.05),
-    0 12px 36px -8px rgba(0, 0, 0, 0.7);
+  /* Dark 几乎不用投影：抬升背景 + 微弱高光 */
+  --shadow-card: inset 0 0.5px 0 rgba(255, 255, 255, 0.04);
+  --shadow-raised: inset 0 0.5px 0 rgba(255, 255, 255, 0.06);
+  --shadow-pop: inset 0 0 0 0.5px rgba(255, 255, 255, 0.08),
+    0 12px 36px rgba(0, 0, 0, 0.5);
 
-  --chrome: #100f0e;
-  --chrome-grad: linear-gradient(180deg, #131211 0%, #0d0c0b 100%);
+  --chrome: #0b0b0d;
+  --chrome-grad: linear-gradient(155deg, #161618 0%, #060607 100%);
 
-  --thumb-ring: rgba(255, 255, 255, 0.09);
-  --thumb-shadow: 0 1px 3px rgba(0, 0, 0, 0.55),
-    0 0 0 0.5px rgba(255, 255, 255, 0.06);
+  --thumb-ring: rgba(255, 255, 255, 0.1);
+  --thumb-shadow: 0 1px 3px rgba(0, 0, 0, 0.5), inset 0 0.5px 0 rgba(255, 255, 255, 0.12);
 
-  --workspace-shadow: 0 1px 0 rgba(255, 255, 255, 0.035) inset,
-    0 16px 40px -14px rgba(0, 0, 0, 0.6);
+  --glass-tint: #2c2c2e;
+  --glass-alpha: 55%;
+  --glass-blur: 28px;
+  --glass-saturate: 1.6;
+  --glass-highlight: rgba(255, 255, 255, 0.1);
+  --glass-edge: rgba(255, 255, 255, 0.12);
+
+  --workspace-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.08),
+    0 16px 48px -12px rgba(0, 0, 0, 0.6);
 }
 
 @theme inline {
@@ -159,12 +182,16 @@
   --color-surface: var(--surface);
   --color-card: var(--card);
   --color-card-2: var(--card-2);
+  --color-fill: var(--fill);
+  --color-fill-2: var(--fill-2);
   --color-border: var(--border);
   --color-border-strong: var(--border-strong);
+  --color-separator: var(--separator);
   --color-foreground: var(--foreground);
   --color-secondary: var(--secondary);
   --color-muted: var(--muted);
   --color-faint: var(--faint);
+  --color-quaternary: var(--quaternary);
   --color-primary: var(--primary);
   --color-primary-fg: var(--primary-fg);
   --color-primary-soft: var(--primary-soft);
@@ -172,6 +199,7 @@
   --color-error: var(--error);
   --color-warn: var(--warn);
   --color-info: var(--info);
+  --color-caution: var(--caution);
   --color-running-soft: var(--running-soft);
   --color-error-soft: var(--error-soft);
   --color-warn-soft: var(--warn-soft);
@@ -180,12 +208,14 @@
 
   --font-sans: var(--app-font-sans);
   --font-mono: var(--app-font-mono);
-  /* 统一圆角刻度，避免 12/14/16 混用导致观感散 */
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 10px;
-  --radius-xl: 13px;
-  --radius-2xl: 17px;
+  /* Apple 圆角刻度：小控件 10 / 输入框与内嵌块 12 / 嵌套模块 16 /
+     普通卡片 18 / 分组容器 22 / 半高 Sheet 28。胶囊一律 rounded-full。 */
+  --radius-sm: 10px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 18px;
+  --radius-2xl: 22px;
+  --radius-3xl: 28px;
 }
 
 @layer base {
@@ -206,12 +236,11 @@
     font-family: var(--app-font-sans);
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
-    font-feature-settings: "cv02", "cv03", "cv04", "cv11", "ss01";
   }
   h1,
   h2,
   h3 {
-    letter-spacing: -0.018em;
+    letter-spacing: -0.014em;
   }
   code,
   pre,
@@ -225,7 +254,7 @@
     font-size: var(--code-font-size);
   }
   ::selection {
-    background: hsl(var(--accent-h) 70% 55% / 0.26);
+    background: color-mix(in srgb, var(--accent-solid) 24%, transparent);
   }
   /* 统一焦点环：走强调色，键盘可见、鼠标不可见 */
   :focus-visible {
@@ -273,8 +302,12 @@
     background-image: var(--chrome-grad);
   }
 
+  /* 侧边栏：Liquid Glass 功能层 —— 半透明 + 背景模糊 + 饱和度提升，
+     随背后环境光染色；不透明内容（工作区）压在旁边。 */
   .nsb-sidebar {
-    background: transparent;
+    background: color-mix(in srgb, var(--glass-tint) var(--glass-alpha), transparent);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
   }
 
   .nsb-sidebar-brand {
@@ -286,16 +319,11 @@
     display: none;
   }
 
-  /* 工作区：纸感底 + 右上角极淡强调色辉光（background-image 永远不会盖住内容） */
+  /* 工作区：内容层，分组页实色 —— 与玻璃侧边栏形成「材质对比」 */
   .nsb-workspace {
     margin: var(--workspace-inset);
-    background-color: var(--card);
-    background-image: radial-gradient(
-        130% 80% at 100% 0%,
-        hsl(var(--accent-h) 70% 50% / 0.045),
-        transparent 58%
-      );
-    border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+    background-color: var(--background);
+    border: 0;
     border-radius: var(--workspace-radius);
     box-shadow: var(--workspace-shadow);
   }
@@ -356,7 +384,7 @@
   }
 
   .nsb-shell-maximized .nsb-sidebar {
-    border-right: 1px solid var(--border);
+    border-right: 1px solid var(--separator);
   }
 
   .nsb-shell-maximized .nsb-sidebar-brand {
@@ -389,7 +417,27 @@
 }
 
 @layer utilities {
-  /* 卡片顶部 1px 高光。不要在这里写 position：会盖掉 Dialog 的 fixed。 */
+  /* Liquid Glass 功能层材质：菜单 / 浮层 / 悬浮胶囊。
+     半透明 + 模糊 + 饱和度提升；体积感靠顶部高光与极淡外描边，
+     禁止硬阴影。叠在 .glass-pop 上再配 --shadow-pop 的环境光。 */
+  .glass {
+    background: color-mix(in srgb, var(--glass-tint) var(--glass-alpha), transparent);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    box-shadow: inset 0 0 0 0.5px var(--glass-edge),
+      inset 0 1px 0 var(--glass-highlight);
+  }
+  /* 更厚一档的玻璃（命令面板 / 对话框 / 菜单）：不透明度更高，字更稳 */
+  .glass-pop {
+    background: color-mix(in srgb, var(--glass-tint) calc(var(--glass-alpha) + 24%), transparent);
+    -webkit-backdrop-filter: blur(40px) saturate(var(--glass-saturate));
+    backdrop-filter: blur(40px) saturate(var(--glass-saturate));
+    box-shadow: inset 0 0 0 0.5px var(--glass-edge),
+      inset 0 1px 0 var(--glass-highlight),
+      var(--shadow-pop);
+  }
+
+  /* 卡片顶部 1px 高光（历史类名，Apple 化后仅深色保留微高光）。 */
   .sheen::before {
     content: "";
     position: absolute;
@@ -400,7 +448,7 @@
     pointer-events: none;
   }
 
-  /* 卡片实色填充：纯色 + 纵向微渐变，避免大面积死白 */
+  /* 卡片实色填充：Apple 内容层用纯平表面 */
   .card-fill {
     background-color: var(--card);
     background-image: var(--card-grad);
@@ -428,7 +476,7 @@
       box-shadow: 0 0 0 0 transparent;
     }
     50% {
-      box-shadow: 0 0 18px 0 hsl(160 84% 65% / 0.13);
+      box-shadow: 0 0 18px 0 rgba(52, 199, 89, 0.16);
     }
   }
   .pulse-error {
@@ -440,7 +488,7 @@
       box-shadow: 0 0 0 0 transparent;
     }
     50% {
-      box-shadow: 0 0 16px 0 hsl(351 89% 68% / 0.22);
+      box-shadow: 0 0 16px 0 rgba(255, 66, 69, 0.2);
     }
   }
   .animate-progress-slide {
@@ -454,10 +502,10 @@
       transform: translateX(400%);
     }
   }
-  /* 强调色实心表面的顶部内高光：制造“实体按键”质感 */
+  /* 强调色实心表面的顶部内高光：克制的一点体积感，不做立体按钮 */
   .btn-solid {
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18),
-      0 1px 2px rgba(28, 25, 23, 0.14), 0 4px 12px -4px var(--accent-glow);
+    box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.22),
+      inset 0 -0.5px 0 rgba(0, 0, 0, 0.08);
   }
 }
 

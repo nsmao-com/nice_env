@@ -35,6 +35,7 @@ import type {
   CertRecord,
   CertReport,
   ImportedCert,
+  EnvFileView,
   ProxyProfile,
   ProxyGroupView,
   ProxyStatusInfo,
@@ -187,11 +188,11 @@ const hostsManaged = new Map<string, string>();
 const settings: AppSettings = {
   language: "zh",
   appearance: "light",
-  accentHue: 250,
+  accentHue: 211,
   accentHex: "",
-  uiFont: "plex",
+  uiFont: "sf",
   uiScale: 1,
-  codeFont: "plex-mono",
+  codeFont: "sf-mono",
   codeFontSize: 11.5,
   codeLineNumbers: true,
   codeWrap: false,
@@ -914,6 +915,34 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "apply_hosts":
       return true as T;
+    case "env_read": {
+      return {
+        siteId: args!.siteId as string,
+        siteName: "laravel-shop",
+        path: "D:\code\laravel-shop\.env",
+        exists: true,
+        entries: [
+          { key: "APP_NAME", value: "Laravel", commented: false, secret: false, line: 1, needsQuote: false },
+          { key: "APP_ENV", value: "local", commented: false, secret: false, line: 2, needsQuote: false },
+          { key: "APP_KEY", value: "base64:abcdefghijklmnop=", commented: false, secret: true, line: 3, needsQuote: false },
+          { key: "APP_DEBUG", value: "true", commented: false, secret: false, line: 4, needsQuote: false },
+          { key: "APP_URL", value: "https://shop.test", commented: false, secret: false, line: 5, needsQuote: false },
+          { key: "DB_CONNECTION", value: "mysql", commented: false, secret: false, line: 7, needsQuote: false },
+          { key: "DB_HOST", value: "127.0.0.1", commented: false, secret: false, line: 8, needsQuote: false },
+          { key: "DB_PORT", value: "3306", commented: false, secret: false, line: 9, needsQuote: false },
+          { key: "DB_DATABASE", value: "laravel_shop", commented: false, secret: false, line: 10, needsQuote: false },
+          { key: "DB_USERNAME", value: "shop_user", commented: false, secret: false, line: 11, needsQuote: false },
+          { key: "DB_PASSWORD", value: "my secret pass", commented: false, secret: true, line: 12, needsQuote: true },
+          { key: "REDIS_PASSWORD", value: "abc", commented: true, secret: true, line: 14, needsQuote: false },
+        ],
+        dbHint: { database: "laravel_shop", username: "shop_user", password: "my secret pass", port: 3306 },
+        variants: [".env", ".env.example"],
+      } as EnvFileView as T;
+    }
+    case "env_save":
+      return true as T;
+    case "env_apply_db":
+      return ["DB_CONNECTION", "DB_HOST", "DB_PORT", "DB_DATABASE", "DB_USERNAME", "DB_PASSWORD"] as string[] as T;
     case "cert_health": {
       const now = Math.floor(Date.now() / 1000);
       const day = 86400;

@@ -109,6 +109,8 @@ pub fn run() {
             read_hosts, apply_hosts, rebuild_hosts, list_certs, issue_cert, reissue_site_certs, trust_ca,
             // 项目扫描
             scan_projects,
+            // 站点 .env
+            env_read, env_save, env_apply_db,
             // 证书体检
             cert_health, cert_import, cert_imported_list, cert_imported_delete,
             // 配置文件编辑
@@ -1745,4 +1747,33 @@ fn cert_imported_delete(
     cert_path: String,
 ) -> Result<bool, tauri::Error> {
     map_jh(nsb_core::certs::delete_imported(&state.paths, &cert_path).map(|_| true))
+}
+
+/* ================= 站点 .env ================= */
+
+#[tauri::command]
+fn env_read(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    site_id: String,
+) -> Result<nsb_core::envfile::EnvFileView, tauri::Error> {
+    map_jh(nsb_core::envfile::read_env(&state.paths, &state.store, &site_id))
+}
+
+/// 保存 .env：只改传进来的键，其余连注释一起原样保留；写前备份到 .env.nsb-backup
+#[tauri::command]
+fn env_save(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    site_id: String,
+    changes: Vec<(String, String)>,
+) -> Result<bool, tauri::Error> {
+    map_jh(nsb_core::envfile::save_env(&state.paths, &state.store, &site_id, &changes).map(|_| true))
+}
+
+/// 一键把站点绑定的数据库信息写进 .env（DB_* 变量）
+#[tauri::command]
+fn env_apply_db(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    site_id: String,
+) -> Result<Vec<String>, tauri::Error> {
+    map_jh(nsb_core::envfile::apply_db_vars(&state.paths, &state.store, &site_id))
 }

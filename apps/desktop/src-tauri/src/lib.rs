@@ -448,7 +448,7 @@ async fn stop_stack(
 
 #[tauri::command]
 fn list_sites(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> Result<Vec<nsb_core::model::Site>, tauri::Error> {
-    map_jh(nsb_core::sites::list(&state.store))
+    map_jh(nsb_core::sites::list_with_status(&state.paths, &state.store))
 }
 
 #[tauri::command]

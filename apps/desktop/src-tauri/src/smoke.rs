@@ -55,6 +55,14 @@ fn check<T>(state: &Arc<CoreState>, name: &str, r: nsb_core::error::Result<T>) -
     }
 }
 
+/// 跳过一项：不算失败，但要明确打印出来。
+/// 冒烟测试的价值在于「跑过的都验过」，所以跳过必须可见，
+/// 不能静默略过让人误以为覆盖了。
+fn skip(name: &str, why: &str) {
+    let n = STEP.fetch_add(1, Ordering::SeqCst);
+    println!("[SKIP] {:>2}. {:<38} {}", n + 1, name, why);
+}
+
 fn assert_(cond: bool, name: &str, detail: impl AsRef<str>) -> bool {
     if cond {
         ok(name, detail);
@@ -524,6 +532,277 @@ echo implode("\n", $out);
     /* ---------- 12. 日志管线 ---------- */
     let log_target = ["redis", "nginx", "mihomo"].iter().find(|id| !state.tail_logs(id, 5).is_empty());
     assert_(log_target.is_some(), "日志 tail", format!("{:?} 有输出", log_target));
+
+    /* ---------- 13. PHP 扩展管理 ---------- */
+    // 用冒烟环境里真装好的 PHP 8.3 跑一遍：扫描 → 启用 → 再扫描确认
+    {
+        let ver = "8.3.33";
+        match nsb_core::phpext::scan_available(&state.paths, ver) {
+            Ok(exts) => {
+                let total = exts.len();
+                let enabled_before = exts.iter().filter(|e| e.enabled).count();
+                let target = exts.iter().find(|e| !e.enabled).map(|e| e.name.clone());
+                match target {
+                    Some(name) => {
+                        let r = nsb_core::phpext::set_extension(&state.paths, ver, &name, true);
+                        let after = nsb_core::phpext::scan_available(&state.paths, ver)
+                            .map(|v| v.iter().filter(|e| e.enabled).count())
+                            .unwrap_or(0);
+                        match r {
+                            Ok(_) => {
+                                assert_(
+                                    after > enabled_before,
+                                    "PHP 扩展启停",
+                                    format!(
+                                        "{total} 个可用；启用 {name} 后 {enabled_before}→{after}"
+                                    ),
+                                );
+                            }
+                            Err(e) => {
+                                fail("PHP 扩展启停", &e);
+                            }
+                        }
+                    }
+                    None => {
+                        skip("PHP 扩展启停", "所有扩展都已启用，无法验证开→关");
+                    }
+                }
+            }
+            Err(e) => {
+                fail("PHP 扩展扫描", &e);
+            }
+        }
+    }
+
+    /* ---------- 14. Xdebug 构建指纹 ---------- */
+    match nsb_core::xdebug::status(&state.paths, "8.3.33") {
+        Ok(st) => {
+            assert_(
+                st.build.is_some(),
+                "Xdebug 构建指纹识别",
+                format!(
+                    "PHP {} · {} · {} · {}（建议 xdebug {}）",
+                    st.build.as_ref().map(|b| b.php_version.clone()).unwrap_or_default(),
+                    if st.build.as_ref().map(|b| b.ts).unwrap_or(false) { "TS" } else { "NTS" },
+                    st.build.as_ref().map(|b| b.compiler.clone()).unwrap_or_default(),
+                    st.build.as_ref().map(|b| b.arch.clone()).unwrap_or_default(),
+                    st.recommended
+                ),
+            );
+        }
+        Err(e) => {
+            fail("Xdebug 构建指纹识别", &e);
+        }
+    }
+
+    /* ---------- 15. 配置校验与保存 ---------- */
+    {
+        use nsb_core::cfgeditor::{ConfigKind, list_config_backups, save_config, validate};
+        // 写坏的配置必须被拦下（nginx 装了会跑真 nginx -t，否则走结构自检）
+        let bad = "events {}\nhttp {\n  server {\n    listen 80\n  }\n}\n";
+        match validate(&state.paths, &state.store, ConfigKind::NginxMain, bad) {
+            Ok(v) => {
+                assert_(
+                    !v.ok,
+                    "配置校验拦住坏配置",
+                    format!("识别出 {} 个问题（缺分号）", v.issues.len()),
+                );
+            }
+            Err(e) => {
+                fail("配置校验", &e);
+            }
+        }
+        // 合法配置可保存（写前自动备份）
+        let good = "events { worker_connections 256; }\nhttp {}\n";
+        match save_config(&state.paths, &state.store, ConfigKind::NginxMain, good, false) {
+            Ok(v) => {
+                assert_(v.ok, "配置保存（校验通过后写入）", "写入前已自动备份");
+            }
+            Err(e) => {
+                fail("配置保存", &e);
+            }
+        }
+        let baks = list_config_backups(&state.paths);
+        assert_(
+            !baks.is_empty(),
+            "配置备份可列出",
+            format!("{} 个历史版本", baks.len()),
+        );
+    }
+
+    /* ---------- 16. 证书体检 ---------- */
+    match nsb_core::certs::report(&state.paths, &state.store) {
+        Ok(r) => {
+            let matched = r
+                .certs
+                .iter()
+                .any(|c| c.sans.iter().any(|s| s.contains("smoke-https")));
+            assert_(
+                matched,
+                "证书体检识别站点证书",
+                format!(
+                    "{} 张证书；过期 {} / 7天内 {} / 30天内 {}",
+                    r.certs.len(),
+                    r.expired,
+                    r.critical,
+                    r.warning
+                ),
+            );
+        }
+        Err(e) => {
+            fail("证书体检", &e);
+        }
+    }
+
+    /* ---------- 17. 批量服务操作（按依赖分层） ---------- */
+    {
+        let ids = vec!["nginx".to_string(), "php@8.3.33".to_string()];
+        match nsb_core::bulk::start_many(&state.store, &state.paths, &state.manager, &ids) {
+            Ok(rep) => {
+                let order_ok = rep.order.first().map(|f| f.starts_with("php")).unwrap_or(false);
+                assert_(
+                    order_ok,
+                    "批量启动按依赖分层",
+                    format!("顺序 {:?}；成功 {} 个", rep.order, rep.succeeded.len()),
+                );
+                match nsb_core::bulk::stop_many(&state.store, &state.paths, &state.manager, &ids) {
+                    Ok(sr) => {
+                        assert_(
+                            sr.failed.is_empty(),
+                            "批量停止",
+                            format!("停止 {:?}", sr.succeeded),
+                        );
+                    }
+                    Err(e) => {
+                        fail("批量停止", &e);
+                    }
+                }
+            }
+            Err(e) => {
+                fail("批量启动", &e);
+            }
+        }
+    }
+
+    /* ---------- 18. 站点批量启停（只 reload 一次） ---------- */
+    {
+        let all = state.store.list_sites().unwrap_or_default();
+        let ids: Vec<String> = all.iter().take(2).map(|s| s.id.clone()).collect();
+        if ids.len() >= 2 {
+            // 先确认真的停掉了，否则 start_many 会把它们全算进 already，
+            // 测试「通过」但根本没走到启用逻辑（这个坑踩过一次）
+            let stop_rep = nsb_core::sites::stop_many(&state.paths, &state.store, &state.manager, &ids);
+            let stopped_ok = stop_rep.map(|r| !r.succeeded.is_empty()).unwrap_or(false);
+            match nsb_core::sites::start_many(&state.paths, &state.store, &state.manager, &ids) {
+                Ok(rep) => {
+                    // 必须真的启用了（succeeded 非空），而不是全落到 already
+                    assert_(
+                        rep.failed.is_empty() && stopped_ok && !rep.succeeded.is_empty(),
+                        "站点批量启用（只 reload 一次）",
+                        format!(
+                            "停用 → 启用 {} 个（already {}）",
+                            rep.succeeded.len(),
+                            rep.already.len()
+                        ),
+                    );
+                }
+                Err(e) => {
+                    fail("站点批量启用", &e);
+                }
+            }
+        } else {
+            skip("站点批量启用（只 reload 一次）", "站点不足 2 个");
+        }
+    }
+
+    /* ---------- 19. 诊断包脱敏 ---------- */
+    match nsb_core::diagnostics::build(&state.paths, &state.store, &state.manager, "smoke") {
+        Ok(b) => {
+            // 报告必须含服务状态段，且不能把密码原文带出来
+            let no_secret = !b.markdown.contains("SuperSecret123");
+            assert_(
+                no_secret && b.markdown.contains("## 服务状态"),
+                "诊断包生成与脱敏",
+                format!(
+                    "{} 个服务 / {} 个站点 / {} 行日志 / 打码 {} 处",
+                    b.service_count, b.site_count, b.log_lines, b.redacted
+                ),
+            );
+        }
+        Err(e) => {
+            fail("诊断包生成", &e);
+        }
+    }
+
+    /* ---------- 20. 环境体检 ---------- */
+    match nsb_core::health::check(&state.paths, &state.store, &state.manager) {
+        Ok(r) => {
+            assert_(
+                r.items.iter().all(|i| !i.title.is_empty()),
+                "环境体检",
+                format!("{}（错误 {} / 警告 {}）", r.summary, r.errors, r.warnings),
+            );
+        }
+        Err(e) => {
+            fail("环境体检", &e);
+        }
+    }
+
+    /* ---------- 21. 项目扫描 ---------- */
+    {
+        let sites = state.store.list_sites().unwrap_or_default();
+        let parent = sites
+            .first()
+            .and_then(|s| std::path::Path::new(&s.root_dir).parent().map(|p| p.to_path_buf()));
+        match parent {
+            Some(dir) => match nsb_core::scanner::scan_dir(&state.paths, &state.store, &dir) {
+                Ok(found) => {
+                    assert_(
+                        !found.is_empty(),
+                        "项目扫描",
+                        format!("在 {} 下识别出 {} 个项目", dir.display(), found.len()),
+                    );
+                }
+                Err(e) => {
+                    fail("项目扫描", &e);
+                }
+            },
+            None => {
+                skip("项目扫描", "没有站点可作扫描目标");
+            }
+        }
+    }
+
+    /* ---------- 22. 日志导出 ---------- */
+    {
+        let target = ["nginx", "redis", "mihomo"]
+            .iter()
+            .find(|id| !state.tail_logs(id, 5).is_empty());
+        match target {
+            Some(id) => {
+                let lines = state.tail_logs(id, 20);
+                let mut text = String::new();
+                for l in &lines {
+                    text.push_str(&l.line);
+                    text.push('\n');
+                }
+                match nsb_core::logs_export::write_log_file(&state.paths, id, &text, None) {
+                    Ok(p) => {
+                        let name = p.rsplit(['/', '\\']).next().unwrap_or_default().to_string();
+                        let exists = std::path::Path::new(&p).is_file();
+                        assert_(exists, "日志导出", format!("已写出 {name}"));
+                        let _ = nsb_core::logs_export::delete_export(&state.paths, &name);
+                    }
+                    Err(e) => {
+                        fail("日志导出", &e);
+                    }
+                }
+            }
+            None => {
+                skip("日志导出", "没有可导出的日志");
+            }
+        }
+    }
 
     /* ---------- 清理：停止全部（保留安装，便于复测） ---------- */
     nsb_core::ops::stop_all(&state.store, &state.paths, &state.manager);

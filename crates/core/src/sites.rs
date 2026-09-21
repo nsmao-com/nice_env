@@ -8,8 +8,54 @@ use crate::services::*;
 use crate::store::Store;
 use std::sync::Arc;
 
+/// 站点状态是**派生**的，不是持久化的字段。
+///
+/// 之前 store 里把 status 硬编码成 "running"，导致所有站点都显示运行中，
+/// 批量启停也因此永远认为「已经在跑」。真实依据是磁盘上的 vhost 文件：
+/// `.conf` 存在 = 已启用（nginx 会加载），`.conf.disabled` = 已停用。
+/// 这比在数据库里存一个会漂移的布尔值可靠 —— 用户手动删过文件也能反映出来。
+pub fn derive_status(paths: &Paths, site: &Site) -> &'static str {
+    let dirs = [paths.nginx_sites_dir(), paths.apache_sites_dir()];
+    let base = format!("{}.conf", site.id);
+    let disabled = format!("{}.conf.disabled", site.id);
+    let mut any_enabled = false;
+    let mut any_disabled = false;
+    for d in &dirs {
+        if d.join(&base).is_file() {
+            any_enabled = true;
+        }
+        if d.join(&disabled).is_file() {
+            any_disabled = true;
+        }
+    }
+    if any_enabled {
+        "running"
+    } else if any_disabled {
+        "stopped"
+    } else {
+        // 两边都没有：还没写过配置（新建但从未启用）
+        "unconfigured"
+    }
+}
+
 pub fn list(store: &Store) -> Result<Vec<Site>> {
     store.list_sites()
+}
+
+/// 带真实状态的站点列表（需要 Paths 才能判断 vhost 在不在）
+pub fn list_with_status(paths: &Paths, store: &Store) -> Result<Vec<Site>> {
+    let mut sites = store.list_sites()?;
+    for s in sites.iter_mut() {
+        s.status = derive_status(paths, s).to_string();
+    }
+    Ok(sites)
+}
+
+/// 单个站点 + 真实状态
+pub fn get_with_status(paths: &Paths, store: &Store, id: &str) -> Result<Site> {
+    let mut site = get(store, id)?;
+    site.status = derive_status(paths, &site).to_string();
+    Ok(site)
 }
 
 pub fn get(store: &Store, id: &str) -> Result<Site> {
@@ -743,7 +789,8 @@ pub fn start_many(
                 continue;
             }
         };
-        if site.status == "running" {
+        // 用磁盘上的 vhost 判断，而不是可能过期的字段
+        if derive_status(paths, &site) == "running" {
             report.already.push(id.clone());
             continue;
         }
@@ -803,7 +850,7 @@ pub fn stop_many(
                 continue;
             }
         };
-        if site.status != "running" {
+        if derive_status(paths, &site) != "running" {
             report.already.push(id.clone());
             continue;
         }

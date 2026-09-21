@@ -36,6 +36,7 @@ import type {
   CertReport,
   ImportedCert,
   EnvFileView,
+  DiagnosticsBundle,
   ProxyProfile,
   ProxyGroupView,
   ProxyStatusInfo,
@@ -915,6 +916,51 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "apply_hosts":
       return true as T;
+    case "diagnostics_build": {
+      const now = Math.floor(Date.now() / 1000);
+      const md = [
+        "# NiceServBay 诊断报告",
+        "",
+        "- 应用版本：0.1.0",
+        `- 生成时间：${new Date().toLocaleString()}`,
+        "- 操作系统：windows x86_64",
+        "- 数据目录：C:\NiceServBay",
+        "",
+        "## 服务状态",
+        "",
+        "| 服务 | 状态 | 端口 | 版本 |",
+        "|------|------|------|------|",
+        "| nginx | Running | 80 | 1.26.2 |",
+        "| mysql@8.0.46 | Running | 3306 | 8.0.46 |",
+        "| redis | Stopped | 6379 | 7.2.5 |",
+        "",
+        "## 端口",
+        "",
+        "| 用途 | 端口 | 占用者 |",
+        "|------|------|--------|",
+        "| HTTP (nginx) | 80 | nginx.exe(pid 1234) |",
+        "| MySQL | 3306 | mysqld.exe(pid 5678) |",
+        "| Redis | 6379 | 空闲 |",
+        "",
+        "## 配置摘要（已脱敏）",
+        "",
+        "```",
+        "[mysqld]",
+        "port=3306",
+        "password=se******",
+        "```",
+      ].join("\n");
+      return {
+        markdown: md,
+        serviceCount: 3,
+        siteCount: 3,
+        logLines: 82,
+        redacted: 4,
+        generatedAt: now,
+      } as DiagnosticsBundle as T;
+    }
+    case "diagnostics_save":
+      return "C:\NiceServBay\diagnostics\niceservbay-diagnostics-20260921-210000.md" as T;
     case "env_read": {
       return {
         siteId: args!.siteId as string,

@@ -71,13 +71,13 @@ export function EmptyState({
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3, ease: "easeOut" }}
       className={cn(
-        "flex flex-col items-center justify-center gap-4 rounded-xl border border-dashed border-border-strong/70 bg-card-2/20 py-16",
+        "flex flex-col items-center justify-center gap-4 rounded-xl bg-fill/40 py-16",
         className
       )}
     >
       <div className="relative">
         <div className="absolute inset-0 rounded-full bg-primary/15 blur-2xl" />
-        <div className="relative flex h-14 w-14 items-center justify-center rounded-2xl border border-border bg-card-2/60 shadow-[var(--shadow-card)]">
+        <div className="relative flex h-14 w-14 items-center justify-center rounded-2xl bg-card shadow-[var(--shadow-card)]">
           <Icon className="h-6 w-6 text-faint" strokeWidth={1.5} />
         </div>
       </div>

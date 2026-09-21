@@ -76,7 +76,8 @@ export function Sidebar() {
         {NAV.map((section) => (
           <div key={section.group} className="flex flex-col gap-0.5">
             {!collapsed && (
-              <span className="mb-1 px-2 text-[10px] font-semibold uppercase tracking-[0.09em] text-faint/65">
+              // Apple 分组标题：小号次级文字，不做全大写
+              <span className="mb-1 px-2.5 text-[11px] font-medium text-faint">
                 {t(`nav.group.${section.group}` as "nav.group.dev")}
               </span>
             )}
@@ -87,28 +88,21 @@ export function Sidebar() {
                 <Link
                   href={item.href}
                   className={cn(
-                    "group relative flex h-9 items-center gap-2.5 rounded-lg px-2.5 text-[13px] font-medium transition-colors",
+                    "group relative flex h-9 items-center gap-2.5 rounded-full px-2.5 text-[13px] font-medium transition-colors active:scale-[0.98]",
                     active
                       ? "text-foreground"
-                      : "text-muted hover:bg-card-2/60 hover:text-foreground",
+                      : "text-secondary hover:bg-fill hover:text-foreground",
                     collapsed && "justify-center px-0"
                   )}
                 >
                   {active && (
-                    <>
-                      {/* 悬浮底：实色 + 1px 高光，边界比纯描边更干净 */}
-                      <motion.span
-                        layoutId="nav-active"
-                        className="card-fill absolute inset-0 rounded-lg shadow-[var(--shadow-card)] ring-1 ring-inset ring-[var(--thumb-ring)]"
-                        transition={{ type: "spring", stiffness: 500, damping: 38 }}
-                      />
-                      {/* 左侧强调色指示条：一眼看出当前页，且随主题色变化 */}
-                      <motion.span
-                        layoutId="nav-active-bar"
-                        className="absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-full bg-primary shadow-[0_0_8px_0_var(--accent-glow)]"
-                        transition={{ type: "spring", stiffness: 500, damping: 38 }}
-                      />
-                    </>
+                    /* 悬浮选中胶囊：白色（深色抬升）+ 极淡投影 —— Apple 侧栏选中态，
+                       不再用强调色指示条与光晕 */
+                    <motion.span
+                      layoutId="nav-active"
+                      className="absolute inset-0 rounded-full bg-card shadow-[var(--thumb-shadow)]"
+                      transition={{ type: "spring", stiffness: 500, damping: 38 }}
+                    />
                   )}
                   <item.icon
                     className={cn(
@@ -139,10 +133,10 @@ export function Sidebar() {
             <Link
               href="/settings"
               className={cn(
-                "flex h-9 flex-1 items-center gap-2.5 rounded-lg px-2.5 text-[13px] font-medium transition-colors",
+                "flex h-9 flex-1 items-center gap-2.5 rounded-full px-2.5 text-[13px] font-medium transition-colors",
                 pathname === "/settings"
-                  ? "card-fill text-foreground shadow-[var(--shadow-card)] ring-1 ring-inset ring-[var(--thumb-ring)]"
-                  : "text-muted hover:bg-card-2/60 hover:text-foreground",
+                  ? "bg-card text-foreground shadow-[var(--thumb-shadow)]"
+                  : "text-secondary hover:bg-fill hover:text-foreground",
                 collapsed && "justify-center px-0"
               )}
             >
@@ -157,7 +151,7 @@ export function Sidebar() {
             <button
               type="button"
               onClick={toggle}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-faint transition-colors hover:bg-card-2/70 hover:text-secondary"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-faint transition-colors hover:bg-fill hover:text-secondary"
             >
               {collapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
             </button>

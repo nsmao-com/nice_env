@@ -569,6 +569,33 @@ export const PhpExtensionChange = z.object({
 });
 export type PhpExtensionChange = z.infer<typeof PhpExtensionChange>;
 
+/* ============ 数据库备份 ============ */
+
+export const DbBackupFile = z.object({
+  name: z.string(),
+  path: z.string(),
+  sizeBytes: z.number(),
+  createdAt: z.number(),
+});
+export type DbBackupFile = z.infer<typeof DbBackupFile>;
+
+export const DbBackupProgress = z.object({
+  database: z.string(),
+  bytes: z.number(),
+  total: z.number().nullable().optional(),
+  /** running / done / error */
+  state: z.string(),
+  message: z.string().nullable().optional(),
+});
+export type DbBackupProgress = z.infer<typeof DbBackupProgress>;
+
+export const DbRestoreResult = z.object({
+  ok: z.boolean(),
+  /** 还原前自动备份的位置 */
+  safetyBackup: z.string().nullable().optional(),
+});
+export type DbRestoreResult = z.infer<typeof DbRestoreResult>;
+
 /* ============ Xdebug ============ */
 
 /** PHP 构建指纹：决定该装哪个 Xdebug DLL */

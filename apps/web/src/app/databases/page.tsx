@@ -7,6 +7,7 @@ import { useUI, useT } from "@/lib/store";
 import { useDatabases, useDbUsers, useInvalidate, toastError, usePorts } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { DbBackupCard } from "@/components/shared/db-backup";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -64,6 +65,11 @@ export default function DatabasesPage() {
           <MySqlInstanceCard />
           <RedisInstanceCard />
         </div>
+      </section>
+
+      {/* 备份 / 还原 */}
+      <section className="mb-6">
+        <DbBackupCard />
       </section>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">

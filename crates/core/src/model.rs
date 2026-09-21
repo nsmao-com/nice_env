@@ -674,3 +674,39 @@ pub struct XdebugSetupResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manual_hint: Option<String>,
 }
+
+/* ================= 数据库备份 ================= */
+
+/// 备份目录里的一个 .sql 文件
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DbBackupFile {
+    pub name: String,
+    pub path: String,
+    pub size_bytes: u64,
+    /// Unix 秒
+    pub created_at: i64,
+}
+
+/// 备份/还原进度（事件回传）
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DbBackupProgress {
+    pub database: String,
+    pub bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    /// running / done / error
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// 还原结果：带回「还原前自动备份」的位置
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DbRestoreResult {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety_backup: Option<String>,
+}

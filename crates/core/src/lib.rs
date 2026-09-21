@@ -2,6 +2,7 @@
 
 pub mod configgen;
 pub mod dbadmin;
+pub mod dbbackup;
 pub mod download;
 pub mod error;
 pub use error::AppError;
@@ -38,6 +39,8 @@ use std::sync::Arc;
 pub enum Event {
     DownloadProgress(DownloadProgress),
     HostsDenied,
+    /// 数据库备份 / 还原进度
+    DbBackup(model::DbBackupProgress),
 }
 
 impl Event {
@@ -45,12 +48,14 @@ impl Event {
         match self {
             Event::DownloadProgress(_) => "download://progress",
             Event::HostsDenied => "hosts://denied",
+            Event::DbBackup(_) => "db://backup",
         }
     }
     pub fn payload(&self) -> serde_json::Value {
         match self {
             Event::DownloadProgress(p) => serde_json::to_value(p).unwrap_or_default(),
             Event::HostsDenied => serde_json::json!({}),
+            Event::DbBackup(p) => serde_json::to_value(p).unwrap_or_default(),
         }
     }
     pub fn progress(task_id: &str, received: u64, total: u64, speed: u64, eta: f64, state: &str) -> Self {

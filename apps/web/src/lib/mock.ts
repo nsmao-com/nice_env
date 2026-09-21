@@ -25,6 +25,8 @@ import type {
   PhpExtensionChange,
   XdebugStatus,
   XdebugSetupResult,
+  DbBackupFile,
+  DbRestoreResult,
   CertRecord,
   ProxyProfile,
   ProxyGroupView,
@@ -125,6 +127,25 @@ function mockPhpToggleSeed() {
     { key: "opcache.enable", label: "OPcache", hint: "字节码缓存，生产环境建议开启", value: true },
   ];
 }
+
+/** 备份文件（mock）：预置两条，方便看列表样式 */
+const mockDbBackups = new Map<string, DbBackupFile>(
+  [
+    ["shop-20260921-113000.sql", 1024 * 512],
+    ["wordpress-20260920-220000.sql", 1024 * 180],
+  ].map(([name, size], i) => {
+    const path = `C:\NiceServBay\backup\db\${name}`;
+    return [
+      path,
+      {
+        name: name as string,
+        path,
+        sizeBytes: size as number,
+        createdAt: Math.floor((Date.now() - (i + 1) * 86400000) / 1000),
+      },
+    ] as const;
+  })
+);
 
 const now = () => Date.now();
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -972,6 +993,27 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         history: statsHistory.slice(-60),
       } as SystemStats as T;
     }
+    case "db_backup_list":
+      return Array.from(mockDbBackups.values()).sort((a, b) => b.createdAt - a.createdAt) as T;
+    case "db_backup_dir":
+      return `C:\NiceServBay\backup\db` as T;
+    case "db_backup_dump": {
+      const dbs = args!.databases as string[];
+      const name = (args!.outName as string | null) ?? `${dbs[0] ?? "db"}-${Date.now()}.sql`;
+      const f: DbBackupFile = {
+        name,
+        path: `C:\NiceServBay\backup\db\${name}`,
+        sizeBytes: 1024 * (40 + Math.floor(Math.random() * 400)),
+        createdAt: Math.floor(Date.now() / 1000),
+      };
+      mockDbBackups.set(f.path, f);
+      return f.path as T;
+    }
+    case "db_backup_restore":
+      return { ok: true } as DbRestoreResult as T;
+    case "db_backup_delete":
+      mockDbBackups.delete(args!.path as string);
+      return true as T;
     case "xdebug_status": {
       const version = args!.version as string;
       const exts = mockPhpExtState.get(version) ?? mockPhpExtSeed();

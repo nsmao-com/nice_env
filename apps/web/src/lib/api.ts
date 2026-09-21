@@ -18,6 +18,8 @@ import type {
   PhpExtensionChange,
   XdebugStatus,
   XdebugSetupResult,
+  DbBackupFile,
+  DbRestoreResult,
   CertRecord,
   ProxyProfile,
   ProxyGroupView,
@@ -158,6 +160,16 @@ export const xdebugSetup = (input: {
 }) => safe(invoke<XdebugSetupResult>("xdebug_setup", { input }));
 export const xdebugToggle = (version: string, enabled: boolean, mode: string, port: number) =>
   safe(invoke<string[]>("xdebug_toggle", { version, enabled, mode, port }));
+
+/* 数据库备份 / 还原 */
+export const dbBackupList = () => safe(invoke<DbBackupFile[]>("db_backup_list"));
+export const dbBackupDir = () => safe(invoke<string>("db_backup_dir"));
+export const dbBackupDump = (databases: string[], outName?: string) =>
+  safe(invoke<string>("db_backup_dump", { databases, outName: outName ?? null }));
+export const dbBackupRestore = (path: string, safetyBackup = true) =>
+  safe(invoke<DbRestoreResult>("db_backup_restore", { path, safetyBackup }));
+export const dbBackupDelete = (path: string) =>
+  safe(invoke<boolean>("db_backup_delete", { path }));
 
 /* 代理（Clash/mihomo） */
 export const proxyStatus = () => safe(invoke<ProxyStatusInfo>("proxy_status"));

@@ -96,6 +96,8 @@ pub fn run() {
             open_in_browser, open_in_folder, open_terminal,
             // 数据库
             db_list, db_create, db_drop, db_users, db_create_user, db_reset_root_password, db_root_password,
+            // 数据库备份 / 还原
+            db_backup_list, db_backup_dump, db_backup_restore, db_backup_delete, db_backup_dir,
             // 代理
             proxy_status, proxy_start, proxy_stop, proxy_set_system, proxy_set_mode,
             proxy_profiles, proxy_import, proxy_activate_profile, proxy_delete_profile,
@@ -1465,4 +1467,103 @@ fn xdebug_toggle(
     port: u16,
 ) -> Result<Vec<String>, tauri::Error> {
     map_jh(state.xdebug_toggle(&version, enabled, &mode, port))
+}
+
+/* ================= 数据库备份 / 还原 ================= */
+
+/// 复用既有连接信息（版本 / 端口 / root 密码）
+fn db_conn_of(state: &CoreState) -> nsb_core::error::Result<nsb_core::dbbackup::ConnInfo> {
+    let version = state
+        .store
+        .find_installed("mysql", None)
+        .map(|p| p.version)
+        .ok_or_else(|| nsb_core::AppError::not_installed("MySQL"))?;
+    let ports = nsb_core::services::PortsProfile::from_settings(&state.store);
+    let root_password = state
+        .store
+        .get_setting("mysqlRootPassword")
+        .unwrap_or_else(|| "root".into());
+    Ok(nsb_core::dbbackup::ConnInfo {
+        version,
+        port: ports.mysql,
+        root_password,
+    })
+}
+
+#[tauri::command]
+fn db_backup_list(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+) -> Vec<nsb_core::model::DbBackupFile> {
+    nsb_core::dbbackup::list_backups(&state.paths)
+}
+
+#[tauri::command]
+fn db_backup_dir(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> String {
+    nsb_core::dbbackup::backup_dir(&state.paths)
+        .to_string_lossy()
+        .to_string()
+}
+
+/// 导出选中的数据库。进度走 db://backup 事件回传。
+#[tauri::command]
+async fn db_backup_dump(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    databases: Vec<String>,
+    out_name: Option<String>,
+) -> Result<String, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db_conn_of(&st)?;
+        let dir = nsb_core::dbbackup::backup_dir(&st.paths);
+        let name = out_name
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| nsb_core::dbbackup::default_dump_name(&databases));
+        let path = dir.join(name);
+        let emit = st.emit.clone();
+        let p = path.clone();
+        nsb_core::dbbackup::dump_databases(&st.paths, &conn, &databases, &path, &move |prog| {
+            emit(nsb_core::Event::DbBackup(prog));
+            let _ = &p;
+        })?;
+        Ok(path.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+    .map_err(box_err)
+}
+
+/// 从 .sql 还原；默认先自动备份一份当前状态
+#[tauri::command]
+async fn db_backup_restore(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    path: String,
+    safety_backup: Option<bool>,
+) -> Result<nsb_core::model::DbRestoreResult, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db_conn_of(&st)?;
+        let emit = st.emit.clone();
+        let safety = nsb_core::dbbackup::restore_from_file(
+            &st.paths,
+            &conn,
+            std::path::Path::new(&path),
+            safety_backup.unwrap_or(true),
+            &move |prog| emit(nsb_core::Event::DbBackup(prog)),
+        )?;
+        Ok(nsb_core::model::DbRestoreResult {
+            ok: true,
+            safety_backup: safety.map(|p| p.to_string_lossy().to_string()),
+        })
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+    .map_err(box_err)
+}
+
+#[tauri::command]
+fn db_backup_delete(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    path: String,
+) -> Result<bool, tauri::Error> {
+    map_jh(nsb_core::dbbackup::delete_backup(&state.paths, &path).map(|_| true))
 }

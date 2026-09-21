@@ -281,7 +281,7 @@ export default function DashboardPage() {
                                 <StatusLight state={site.status === "unconfigured" ? "unknown" : site.status} size={7} />
                                 <span className="text-[13.5px] font-medium">{site.name}</span>
                               </div>
-                              <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                              <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
                                 <CopyButton text={url} />
                                 <Button variant="ghost" size="icon-sm" className="text-faint hover:text-foreground" title={t("dashboard.openBrowser")} onClick={() => api.openInBrowser(url).catch(toastError)}>
                                   <ExternalLink className="h-3.5 w-3.5" />

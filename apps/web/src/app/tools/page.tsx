@@ -680,7 +680,7 @@ rewrite /wp-admin$ $scheme://$host$uri/ permanent;`,
 function RewriteTemplates() {
   const t = useT();
   return (
-    <ToolCard icon={FileCode2} title={t("tools.rewriteTemplates")} hint="nginx location 预设，创建站点时可直接选择">
+    <ToolCard icon={FileCode2} title={t("tools.rewriteTemplates")} hint={t("tools.rewriteTemplatesHint")}>
       <div className="flex flex-col gap-2">
         {Object.entries(REWRITE_SNIPPETS).map(([name, code]) => (
           <CodeBlock key={name} title={name} code={code} lang="nginx" compact showLineNumbers={false} />

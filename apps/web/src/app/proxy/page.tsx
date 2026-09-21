@@ -146,7 +146,7 @@ export default function ProxyPage() {
                   mihomo <StatusLight state={running ? "running" : "stopped"} size={7} />
                 </CardTitle>
                 <CardDescription className="mt-1 font-mono text-[11px]">
-                  {status ? `${t("proxy.mixedPort")} ${status.mixedPort} · API ${status.controllerPort}${status.version ? ` · ${status.version}` : ""}` : "加载中…"}
+                  {status ? `${t("proxy.mixedPort")} ${status.mixedPort} · API ${status.controllerPort}${status.version ? ` · ${status.version}` : ""}` : t("common.loading")}
                 </CardDescription>
               </div>
             </div>

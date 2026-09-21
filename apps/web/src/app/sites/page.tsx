@@ -107,7 +107,7 @@ function SiteCard({ site, onOpenDetail }: { site: Site; onOpenDetail: () => void
               <span className="truncate text-[11px] text-faint">{site.domains.join(", ")}</span>
             </div>
           </div>
-          <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+          <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
             <CopyButton text={url} />
             <Tooltip>
               <TooltipTrigger asChild>

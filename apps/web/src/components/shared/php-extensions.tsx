@@ -621,6 +621,7 @@ export function PhpQuickSetupButton({
 
 /** 供外部展示「已启用 N 个」的小徽标 */
 export function PhpExtBadge({ version, onOpen }: { version: string; onOpen: () => void }) {
+  const t = useT();
   const [count, setCount] = React.useState<number | null>(null);
   React.useEffect(() => {
     let alive = true;
@@ -641,7 +642,7 @@ export function PhpExtBadge({ version, onOpen }: { version: string; onOpen: () =
       className="inline-flex items-center gap-1 rounded-md border border-border/70 bg-card-2/50 px-1.5 py-0.5 text-[10.5px] text-muted transition-colors hover:border-border-strong hover:text-foreground"
     >
       <Puzzle className="h-3 w-3" />
-      {count == null ? "…" : `扩展 ${count}`}
+      {count == null ? "…" : t("phpext.badge").replace("{n}", String(count))}
     </button>
   );
 }

@@ -349,10 +349,10 @@ function StackEditor({
   React.useEffect(() => {
     if (!open) return;
     // 内置预设不可直接改：打开时引导用户「另存为」（保存时由后端拦住，这里给出更早的提示）
-    setName(stack ? (stack.builtin ? `${stack.name} 副本` : stack.name) : "");
+    setName(stack ? (stack.builtin ? `${stack.name} ${t("stack.copySuffix")}` : stack.name) : "");
     setDescription(stack?.description ?? "");
     setItems(stack ? stack.items.map((i) => ({ ...i })) : []);
-  }, [open, stack]);
+  }, [open, stack, t]);
 
   /** 可选服务：已注册的（可启停的）服务，按 id 排序 */
   const candidates = React.useMemo(() => {

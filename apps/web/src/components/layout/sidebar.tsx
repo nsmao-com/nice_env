@@ -100,7 +100,7 @@ export function Sidebar() {
                        不再用强调色指示条与光晕 */
                     <motion.span
                       layoutId="nav-active"
-                      className="absolute inset-0 rounded-full bg-card shadow-[var(--thumb-shadow)]"
+                      className="absolute inset-0 rounded-full bg-[var(--thumb-bg)] shadow-[var(--thumb-shadow)]"
                       transition={{ type: "spring", stiffness: 500, damping: 38 }}
                     />
                   )}
@@ -135,7 +135,7 @@ export function Sidebar() {
               className={cn(
                 "flex h-9 flex-1 items-center gap-2.5 rounded-full px-2.5 text-[13px] font-medium transition-colors",
                 pathname === "/settings"
-                  ? "bg-card text-foreground shadow-[var(--thumb-shadow)]"
+                  ? "bg-[var(--thumb-bg)] text-foreground shadow-[var(--thumb-shadow)]"
                   : "text-secondary hover:bg-fill hover:text-foreground",
                 collapsed && "justify-center px-0"
               )}

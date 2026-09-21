@@ -194,7 +194,10 @@
       "url": "https://github.com/vrana/adminer/releases/download/v4.8.1/adminer-4.8.1.php",
       "sha256": "0",
       "sizeBytes": 609000,
-      "entry": "adminer-4.8.1.php"
+      "entry": "adminer-4.8.1.php",
+      "requires": [
+        "php"
+      ]
     },
     {
       "id": "apache",
@@ -476,6 +479,9 @@
       "sizeBytes": 3060478,
       "entry": "composer.phar",
       "depends": [
+        "php"
+      ],
+      "requires": [
         "php"
       ]
     },
@@ -768,6 +774,9 @@
       "entry": "composer.phar",
       "depends": [
         "php"
+      ],
+      "requires": [
+        "php"
       ]
     },
     {
@@ -949,7 +958,10 @@
         ],
         "env": {
           "SERVER_NAME": "http://"
-        }
+        },
+        "requires": [
+          "php"
+        ]
       }
     },
     {
@@ -1692,6 +1704,9 @@
       "sha256": "acd53f1edaf02f1a8ff99879f8a34b302661a057d9b063ae9e35b552f804d20a",
       "depends": [
         "temurin-jdk21"
+      ],
+      "requires": [
+        "temurin-jdk21"
       ]
     },
     {
@@ -1922,6 +1937,9 @@
       "sha256": "7d4d0461b7ed17a405a40121f0f19d7d413ea8fec724b6d23f56a5ff2993b42d",
       "defaultPort": 8080,
       "depends": [
+        "php"
+      ],
+      "requires": [
         "php"
       ]
     },
@@ -2627,6 +2645,9 @@
       "defaultPort": 8080,
       "depends": [
         "php"
+      ],
+      "requires": [
+        "php"
       ]
     },
     {
@@ -2650,6 +2671,9 @@
       "defaultPort": 8080,
       "depends": [
         "php"
+      ],
+      "requires": [
+        "php"
       ]
     },
     {
@@ -2672,6 +2696,9 @@
       "sha256": "e09c68982c40d9bfd577521afc8d3160dba95d349916e1eb2d5b68e69be5e771",
       "defaultPort": 8080,
       "depends": [
+        "php"
+      ],
+      "requires": [
         "php"
       ]
     },
@@ -3267,6 +3294,9 @@
       "sha256": "9c0f7faeeb306cb14e4279a3e084ca6b596894089a0638e68a07c945a32c9e14",
       "depends": [
         "temurin-jdk21"
+      ],
+      "requires": [
+        "temurin-jdk21"
       ]
     },
     {
@@ -3288,6 +3318,9 @@
       "homepage": "https://gradle.org",
       "sha256": "bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531",
       "depends": [
+        "temurin-jdk21"
+      ],
+      "requires": [
         "temurin-jdk21"
       ]
     },
@@ -3526,7 +3559,10 @@
         ],
         "env": {
           "SERVER_NAME": "http://"
-        }
+        },
+        "requires": [
+          "php"
+        ]
       }
     },
     {
@@ -3563,7 +3599,10 @@
         ],
         "env": {
           "SERVER_NAME": "http://"
-        }
+        },
+        "requires": [
+          "php"
+        ]
       }
     },
     {
@@ -3600,7 +3639,10 @@
         ],
         "env": {
           "SERVER_NAME": "http://"
-        }
+        },
+        "requires": [
+          "php"
+        ]
       }
     },
     {
@@ -4349,7 +4391,10 @@
       "url": "https://github.com/vrana/adminer/releases/download/v6.1.0/adminer-6.1.0-en.php",
       "sha256": "d21891f420eac5553e9a85d8af2ef3375c1066c4b5c0f573d8e4f936666d2000",
       "sizeBytes": 402082,
-      "entry": "adminer-6.1.0-en.php"
+      "entry": "adminer-6.1.0-en.php",
+      "requires": [
+        "php"
+      ]
     },
     {
       "id": "rnacos",
@@ -4463,7 +4508,10 @@
       "url": "https://github.com/vrana/adminer/releases/download/v6.0.2/adminer-6.0.2-en.php",
       "sha256": "687b2d75611f41ce6789bcf9e742fd8bb2585f9f54ed9e92c160abbf4cf9af7f",
       "sizeBytes": 386207,
-      "entry": "adminer-6.0.2-en.php"
+      "entry": "adminer-6.0.2-en.php",
+      "requires": [
+        "php"
+      ]
     },
     {
       "id": "adminer",
@@ -4484,7 +4532,10 @@
       "url": "https://github.com/vrana/adminer/releases/download/v6.0.1/adminer-6.0.1-en.php",
       "sha256": "c820771612aedd70b26b8f75f442cc9fc118f8225d0166cc6c5909a89f314805",
       "sizeBytes": 372420,
-      "entry": "adminer-6.0.1-en.php"
+      "entry": "adminer-6.0.1-en.php",
+      "requires": [
+        "php"
+      ]
     },
     {
       "id": "adminer",
@@ -4505,7 +4556,10 @@
       "url": "https://github.com/vrana/adminer/releases/download/v6.0.0/adminer-6.0.0-en.php",
       "sha256": "a53add52eb659deeabc8341b2ffe0479f0b6fa39908d0d1bc6e292c0d789dade",
       "sizeBytes": 360760,
-      "entry": "adminer-6.0.0-en.php"
+      "entry": "adminer-6.0.0-en.php",
+      "requires": [
+        "php"
+      ]
     },
     {
       "id": "zig",

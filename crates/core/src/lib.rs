@@ -261,8 +261,44 @@ impl CoreState {
         pathenv::apply(&self.store, &self.paths, &self.installer.manifest)
     }
 
+    /// 服务列表 + 前置依赖信息。
+    ///
+    /// 依赖来自清单的 `run.requires`，在这里补齐而不是塞进 ServiceManager：
+    /// - manager 只关心进程，不该知道清单；
+    /// - 判断「依赖是否已安装」需要 store，而 manager 拿不到 store。
     pub fn service_status_list(&self) -> Vec<model::ServiceStatus> {
-        self.manager.list_status()
+        let mut list = self.manager.list_status();
+        let installed = self.store.list_installed().unwrap_or_default();
+        for st in list.iter_mut() {
+            // 服务 id 形如 php@8.3.33，清单里查的是基础 id
+            let base = st.id.split('@').next().unwrap_or(&st.id);
+            if let Some(entry) = self
+                .installer
+                .manifest
+                .packages
+                .iter()
+                .find(|p| p.id == base)
+            {
+                // 服务类看 run.requires；纯运行时（composer/gradle）看顶层 requires。
+                // 两处都查，才不会出现「清单里写了但界面不提示」。
+                let mut deps: Vec<String> = Vec::new();
+                if let Some(run) = &entry.run {
+                    deps.extend(run.requires.iter().cloned());
+                }
+                deps.extend(entry.requires.iter().cloned());
+                deps.sort();
+                deps.dedup();
+                if !deps.is_empty() {
+                    st.missing_requires = deps
+                        .iter()
+                        .filter(|dep| !installed.iter().any(|i| &i.id == *dep))
+                        .cloned()
+                        .collect();
+                    st.requires = deps;
+                }
+            }
+        }
+        list
     }
 
     /// 某包的完整版本目录：远程枚举（带缓存）+ 本地已装标记。
@@ -653,5 +689,71 @@ impl CoreState {
             acted.push((st.id.clone(), ok));
         }
         acted
+    }
+}
+
+#[cfg(test)]
+mod dep_tests {
+    /// 清单里声明的依赖必须真的能被读到。
+    ///
+    /// 这个测试专门守住一个真实踩过的坑：`requires` 写在顶层时 Rust 侧读不到
+    /// （要么在 run.requires，要么在顶层 requires，两处都得查）。
+    /// 当时是 manifest 写了、界面不提示，很难发现。
+    #[test]
+    fn manifest_dependencies_are_readable() {
+        let manifest = crate::install::Installer::bundled();
+        let found: Vec<(String, Vec<String>)> = manifest
+            .manifest
+            .packages
+            .iter()
+            .filter_map(|p| {
+                let mut deps: Vec<String> = Vec::new();
+                if let Some(run) = &p.run {
+                    deps.extend(run.requires.iter().cloned());
+                }
+                deps.extend(p.requires.iter().cloned());
+                if deps.is_empty() {
+                    None
+                } else {
+                    deps.sort();
+                    deps.dedup();
+                    Some((p.id.clone(), deps))
+                }
+            })
+            .collect();
+        assert!(
+            !found.is_empty(),
+            "清单里应至少有一个套件声明了依赖（否则说明字段又写错位置了）"
+        );
+        // 抽查几个语义上必然有依赖的
+        let ids: Vec<&str> = found.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(ids.contains(&"composer"), "composer 依赖 php：{found:?}");
+        assert!(ids.contains(&"tomcat"), "tomcat 依赖 JDK：{found:?}");
+    }
+
+    /// 依赖不能指向清单里不存在的套件 id，否则用户永远装不上
+    #[test]
+    fn declared_dependencies_exist_in_manifest() {
+        let manifest = crate::install::Installer::bundled();
+        let all: std::collections::HashSet<&str> = manifest
+            .manifest
+            .packages
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect();
+        for p in &manifest.manifest.packages {
+            let mut deps: Vec<String> = Vec::new();
+            if let Some(run) = &p.run {
+                deps.extend(run.requires.iter().cloned());
+            }
+            deps.extend(p.requires.iter().cloned());
+            for d in deps {
+                assert!(
+                    all.contains(d.as_str()),
+                    "{} 声明了不存在的依赖 {d}",
+                    p.id
+                );
+            }
+        }
     }
 }

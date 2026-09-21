@@ -95,6 +95,7 @@
 
   /* 悬浮指示块（侧边栏选中项 / 分段控件滑块）：白胶囊 + 极淡投影 */
   --thumb-ring: rgba(0, 0, 0, 0.04);
+  --thumb-bg: #ffffff;
   --thumb-shadow: 0 1px 2px rgba(0, 0, 0, 0.08), 0 3px 8px rgba(0, 0, 0, 0.06);
 
   /* Liquid Glass 材质参数 */
@@ -160,11 +161,14 @@
   --shadow-pop: inset 0 0 0 0.5px rgba(255, 255, 255, 0.08),
     0 12px 36px rgba(0, 0, 0, 0.5);
 
-  --chrome: #0b0b0d;
-  --chrome-grad: linear-gradient(155deg, #161618 0%, #060607 100%);
+  /* 深色 chrome 比纯黑工作区亮一级：侧栏与底融为一体，
+     工作区靠这一级亮度差 + 0.5px 内高光读出圆角边界 */
+  --chrome: #131315;
+  --chrome-grad: linear-gradient(155deg, #1b1b1e 0%, #101012 100%);
 
   --thumb-ring: rgba(255, 255, 255, 0.1);
-  --thumb-shadow: 0 1px 3px rgba(0, 0, 0, 0.5), inset 0 0.5px 0 rgba(255, 255, 255, 0.12);
+  --thumb-bg: #333336; /* 比 chrome / 卡片都亮一级，融合底上仍清晰 */
+  --thumb-shadow: 0 1px 3px rgba(0, 0, 0, 0.5), inset 0 0.5px 0 rgba(255, 255, 255, 0.14);
 
   --glass-tint: #2c2c2e;
   --glass-alpha: 55%;
@@ -302,12 +306,11 @@
     background-image: var(--chrome-grad);
   }
 
-  /* 侧边栏：Liquid Glass 功能层 —— 半透明 + 背景模糊 + 饱和度提升，
-     随背后环境光染色；不透明内容（工作区）压在旁边。 */
+  /* 侧边栏：与窗口底（chrome 环境光渐变）完全融为一体，不做独立材质；
+     整个窗口只有右侧工作区是「一块」带圆角的内容层，
+     层次由工作区的圆角 + 阴影与侧栏形成对比。 */
   .nsb-sidebar {
-    background: color-mix(in srgb, var(--glass-tint) var(--glass-alpha), transparent);
-    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
-    backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    background: transparent;
   }
 
   .nsb-sidebar-brand {
@@ -319,7 +322,7 @@
     display: none;
   }
 
-  /* 工作区：内容层，分组页实色 —— 与玻璃侧边栏形成「材质对比」 */
+  /* 工作区：唯一的内容层 —— 分组页实色 + 大圆角 + 浮起阴影 */
   .nsb-workspace {
     margin: var(--workspace-inset);
     background-color: var(--background);

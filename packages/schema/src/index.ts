@@ -274,6 +274,10 @@ export const ServiceStatus = z.object({
   lastError: AppErrorInfo.optional(),
   logFile: z.string().optional(),
   category: PackageCategory.optional(),
+  /** 清单声明的前置依赖（服务 id） */
+  requires: z.array(z.string()).default([]),
+  /** 已声明但当前未安装的前置依赖 —— 前端在启动前就能提示 */
+  missingRequires: z.array(z.string()).default([]),
 });
 export type ServiceStatus = z.infer<typeof ServiceStatus>;
 

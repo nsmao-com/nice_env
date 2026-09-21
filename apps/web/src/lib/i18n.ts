@@ -1009,6 +1009,7 @@ const dict = {
     "mirror.confirmTitle": "切换全局依赖源？",
     "mirror.confirmDesc": "将把依赖源改为「{name}」\n\n{url}\n\n这会修改全局配置文件，影响本机所有项目（不只是当前项目）。随时可以用「恢复官方源」改回来。",
     "mirror.confirmBtn": "切换",
+    "svc.needDeps": "需要先安装：",
   },
   en: {
     "nav.dashboard": "Dashboard",
@@ -2018,6 +2019,7 @@ const dict = {
     "mirror.confirmTitle": "Switch the global dependency registry?",
     "mirror.confirmDesc": "The registry will be changed to \"{name}\"\n\n{url}\n\nThis edits a global config file and affects every project on this machine, not just the current one. You can revert anytime with Reset to official.",
     "mirror.confirmBtn": "Switch",
+    "svc.needDeps": "Requires: ",
   },
 } as const;
 

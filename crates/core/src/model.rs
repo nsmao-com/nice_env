@@ -68,6 +68,13 @@ pub struct ServiceStatus {
     pub log_file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// 清单声明的前置依赖（服务 id）
+    #[serde(default)]
+    pub requires: Vec<String>,
+    /// 已声明但当前未安装的前置依赖 —— 让前端在启动前就能提示，
+    /// 而不是等启动失败才报错（如 Tomcat 缺 JDK）
+    #[serde(default)]
+    pub missing_requires: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -257,6 +264,10 @@ pub struct PackageManifestEntry {
     /// 声明后该包注册为可启停服务（清单驱动的通用启停路径）
     #[serde(default)]
     pub run: Option<ServiceRunSpec>,
+    /// 前置依赖（纯运行时用：composer 需要 php、gradle 需要 JDK）。
+    /// 服务类套件请用 `run.requires` —— 那条路会在服务列表里显示缺失提示。
+    #[serde(default)]
+    pub requires: Vec<String>,
     /// 声明后可从上游枚举该包的历史版本（含最新）
     #[serde(default)]
     pub version_source: Option<VersionSource>,

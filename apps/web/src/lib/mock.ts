@@ -857,6 +857,9 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
             label: `${p.displayName}`,
             state: "stopped",
             pids: [],
+            // 清单里的 requires 在 mock 里没有，给个空数组即可
+            requires: [],
+            missingRequires: [],
             version: p.version,
             category: p.category,
             port: p.defaultPort,

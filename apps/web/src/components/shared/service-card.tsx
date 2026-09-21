@@ -4,7 +4,7 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { motion } from "motion/react";
-import { Cpu, RotateCw, ScrollText, Server, ShieldAlert } from "lucide-react";
+import { Cpu, RotateCw, ScrollText, Server, ShieldAlert, AlertTriangle } from "lucide-react";
 import type { ServiceStatus } from "@nsb/schema";
 import { cn } from "@/lib/utils";
 import { Card } from "@/components/ui/card";
@@ -112,6 +112,18 @@ export function ServiceCard({ service }: { service: ServiceStatus }) {
             onCheckedChange={toggle}
           />
         </div>
+
+        {/* 前置依赖缺失：在启动前就提示，而不是让用户点了开关再看报错
+            （Tomcat 缺 JDK、Composer 缺 PHP 都属于这类） */}
+        {service.missingRequires.length > 0 && (
+          <div className="flex items-start gap-2 rounded-lg border border-warn/25 bg-warn-soft px-2.5 py-1.5">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warn" strokeWidth={2} />
+            <span className="text-[11px] leading-relaxed">
+              {t("svc.needDeps")}
+              <span className="font-mono">{service.missingRequires.join(", ")}</span>
+            </span>
+          </div>
+        )}
 
         <div className="flex flex-wrap items-center gap-1.5">
           {service.port != null && (

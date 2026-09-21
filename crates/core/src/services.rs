@@ -29,6 +29,9 @@ pub struct ServiceEntry {
     /// 本进程实际启动时使用的端口。停机命令（mysqladmin/redis-cli）必须用它，
     /// 而不是当前设置里的端口——用户在运行期切换端口方案时会变。
     pub started_port: Mutex<Option<u16>>,
+    /// 清单声明的前置依赖（服务 id）。注册时从清单带入，
+    /// 这样列表就能显示「需要先装 X」而不必再查一次清单。
+    pub requires: Vec<String>,
 }
 
 pub struct ServiceManager {
@@ -66,6 +69,7 @@ impl ServiceManager {
                     log_file,
                     port,
                     started_port: Mutex::new(None),
+                    requires: Vec::new(),
                 }),
             );
         }
@@ -172,6 +176,9 @@ impl ServiceManager {
             last_error,
             log_file: Some(e.log_file.to_string_lossy().to_string()),
             category: e.category.clone(),
+            requires: e.requires.clone(),
+            // missing 需要 store 才能判断，由门面层补齐
+            missing_requires: Vec::new(),
         })
     }
 

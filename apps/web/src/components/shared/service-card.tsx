@@ -45,6 +45,20 @@ export function ServiceCard({ service }: { service: ServiceStatus }) {
     }
   };
 
+  /** 改完配置/出错后的高频动作：就地重启，不用先停再启两步 */
+  const restart = async () => {
+    setBusy(true);
+    try {
+      await api.restartService(service.id);
+      toast.success(`${service.label} · ${t("common.running")}`);
+    } catch (e) {
+      if (!toastPortConflict(e, { onResolved: () => invalidate("services") })) toastError(e);
+    } finally {
+      setBusy(false);
+      invalidate("services");
+    }
+  };
+
   const stateLabel: Record<string, string> = {
     running: t("state.running"),
     stopped: t("state.stopped"),
@@ -116,15 +130,27 @@ export function ServiceCard({ service }: { service: ServiceStatus }) {
             </StatChip>
           )}
           {service.logFile && (
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className="ml-auto text-faint hover:text-secondary"
-              title={t("logs.title")}
-              onClick={() => router.push(`/logs?service=${encodeURIComponent(service.id)}`)}
-            >
-              <ScrollText className="h-3.5 w-3.5" />
-            </Button>
+            <>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="ml-auto text-faint hover:text-secondary"
+                title={t("common.restart")}
+                disabled={busy || service.state === "starting" || service.state === "stopping"}
+                onClick={restart}
+              >
+                <RotateCw className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="text-faint hover:text-secondary"
+                title={t("logs.title")}
+                onClick={() => router.push(`/logs?service=${encodeURIComponent(service.id)}`)}
+              >
+                <ScrollText className="h-3.5 w-3.5" />
+              </Button>
+            </>
           )}
         </div>
 

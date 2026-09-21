@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
+import { toast } from "sonner";
 import { motion } from "motion/react";
 import { RotateCw, ScrollText, Server, ShieldAlert } from "lucide-react";
 import type { ServiceStatus } from "@nsb/schema";
@@ -34,6 +35,20 @@ export function ServiceRow({ service }: { service: ServiceStatus }) {
     try {
       if (next) await api.startService(service.id);
       else await api.stopService(service.id);
+    } catch (e) {
+      if (!toastPortConflict(e, { onResolved: () => invalidate("services") })) toastError(e);
+    } finally {
+      setBusy(false);
+      invalidate("services");
+    }
+  };
+
+  /** 就地重启：改配置 / 出错后的高频动作，省去先停再启两步 */
+  const restart = async () => {
+    setBusy(true);
+    try {
+      await api.restartService(service.id);
+      toast.success(`${service.label} · ${t("common.running")}`);
     } catch (e) {
       if (!toastPortConflict(e, { onResolved: () => invalidate("services") })) toastError(e);
     } finally {
@@ -125,15 +140,27 @@ export function ServiceRow({ service }: { service: ServiceStatus }) {
       )}
 
       {service.logFile && (
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          className="shrink-0 text-faint opacity-0 transition-opacity hover:text-secondary group-hover/item:opacity-100"
-          title={t("logs.title")}
-          onClick={() => router.push(`/logs?service=${encodeURIComponent(service.id)}`)}
-        >
-          <ScrollText className="h-3.5 w-3.5" />
-        </Button>
+        <>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="shrink-0 text-faint opacity-0 transition-opacity hover:text-secondary group-hover/item:opacity-100"
+            title={t("common.restart")}
+            disabled={busy || service.state === "starting" || service.state === "stopping"}
+            onClick={restart}
+          >
+            <RotateCw className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="shrink-0 text-faint opacity-0 transition-opacity hover:text-secondary group-hover/item:opacity-100"
+            title={t("logs.title")}
+            onClick={() => router.push(`/logs?service=${encodeURIComponent(service.id)}`)}
+          >
+            <ScrollText className="h-3.5 w-3.5" />
+          </Button>
+        </>
       )}
 
       <ServiceSwitch

@@ -1,5 +1,6 @@
 //! core：NiceServBay 全部业务逻辑（无 Tauri 依赖，可独立测试/无头运行）。
 
+pub mod certs;
 pub mod cfgeditor;
 pub mod configgen;
 pub mod dbadmin;

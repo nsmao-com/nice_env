@@ -97,7 +97,10 @@ fn xdebug_status_and_section_write() {
     let e = Env::new("xdebug");
     let ext_dir = e.paths.runtime_dir("php", "8.3.33").join("ext");
     std::fs::create_dir_all(&ext_dir).unwrap();
-    std::fs::write(ext_dir.join("php_xdebug.dll"), b"MZ fake").unwrap();
+    // 文件名必须问 dll_file_name：Windows 是 php_xdebug.dll，其它平台是 xdebug.so。
+    // 写死 .dll 的话 Linux CI 上 dll_present 永远是 false。
+    let dll_name = nsb_core::phpext::dll_file_name("xdebug");
+    std::fs::write(ext_dir.join(&dll_name), b"MZ fake").unwrap();
     let ini = e.paths.php_ini("8.3.33");
     std::fs::create_dir_all(ini.parent().unwrap()).unwrap();
     std::fs::write(&ini, "[PHP]\nengine=On\n").unwrap();
@@ -109,7 +112,7 @@ fn xdebug_status_and_section_write() {
 
     // 写入 [xdebug] 段
     let sec = nsb_core::xdebug::render_xdebug_section(
-        &ext_dir.join("php_xdebug.dll").to_string_lossy(),
+        &ext_dir.join(&dll_name).to_string_lossy(),
         "debug,develop",
         9003,
     );

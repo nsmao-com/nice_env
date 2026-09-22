@@ -21,6 +21,8 @@ export interface VersionItem {
   sizeBytes?: number;
   note?: string;
   prerelease?: boolean;
+  /** 清单声明不支持当前平台（os/arch 不含本机）；后端也会在下载前拦截 */
+  incompatible?: boolean;
 }
 
 interface Props {
@@ -95,6 +97,9 @@ export function VersionPicker({ group, items, catalog, onRefresh, onPick, onUnin
   }, [filtered, t]);
 
   const pick = async (item: VersionItem) => {
+    if (item.incompatible && !item.installed) {
+      return; // UI 已明确标注；真正拦截在后端（PLATFORM_UNSUPPORTED）
+    }
     setBusy(item.version);
     try {
       await onPick(item);
@@ -195,10 +200,11 @@ export function VersionPicker({ group, items, catalog, onRefresh, onPick, onUnin
                   >
                     <button
                       onClick={() => pick(item)}
-                      disabled={busy !== null}
+                      disabled={busy !== null || (!!item.incompatible && !item.installed)}
+                      title={item.incompatible && !item.installed ? t("versions.incompatible") : undefined}
                       className={cn(
                         "flex w-full items-center gap-2 px-2.5 py-1.5 text-left transition-colors",
-                        "hover:bg-fill disabled:opacity-60",
+                        "hover:bg-fill disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent",
                         item.running && "bg-running-soft/40"
                       )}
                     >
@@ -231,6 +237,11 @@ export function VersionPicker({ group, items, catalog, onRefresh, onPick, onUnin
                           {item.prerelease && (
                             <span className="rounded-full border border-warning/40 px-1.5 py-px text-[9px] text-warning">
                               {t("versions.pre")}
+                            </span>
+                          )}
+                          {item.incompatible && (
+                            <span className="rounded-full border border-error/40 px-1.5 py-px text-[9px] text-error/90">
+                              {t("versions.incompatible")}
                             </span>
                           )}
                         </span>

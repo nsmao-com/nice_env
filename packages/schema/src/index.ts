@@ -1015,6 +1015,112 @@ export const MONO_FONT_OPTIONS = [
   },
 ] as const;
 
+/** 代码块配色主题。colors 缺省（auto）= 跟随界面明暗在 dark/light 间切换。 */
+export interface CodePalette {
+  bg: string;
+  fg: string;
+  comment: string;
+  key: string;
+  keyword: string;
+  string: string;
+  number: string;
+  variable: string;
+}
+
+export const CODE_THEME_OPTIONS = [
+  { id: "auto", label: "跟随界面（推荐）" },
+  {
+    id: "dark",
+    label: "暗黑 · 默认",
+    dark: true,
+    colors: {
+      bg: "#0A0C0F",
+      fg: "#D6DBE3",
+      comment: "#6E7A8A",
+      key: "#7CB7FF",
+      keyword: "#59A7FF",
+      string: "#5CC97F",
+      number: "#E0A869",
+      variable: "#56C8D8",
+    },
+  },
+  {
+    id: "light",
+    label: "浅色 · GitHub",
+    dark: false,
+    colors: {
+      bg: "#F5F6F8",
+      fg: "#24292F",
+      comment: "#8A929C",
+      key: "#0550AE",
+      keyword: "#0963CE",
+      string: "#1A7F37",
+      number: "#B45309",
+      variable: "#8250DF",
+    },
+  },
+  {
+    id: "midnight",
+    label: "午夜蓝",
+    dark: true,
+    colors: {
+      bg: "#0F1526",
+      fg: "#D8E0F0",
+      comment: "#5E6C8F",
+      key: "#8FB8FF",
+      keyword: "#7AA2F7",
+      string: "#9ECE6A",
+      number: "#FFC777",
+      variable: "#7DCFFF",
+    },
+  },
+  {
+    id: "monokai",
+    label: "Monokai",
+    dark: true,
+    colors: {
+      bg: "#272822",
+      fg: "#F8F8F2",
+      comment: "#8C8775",
+      key: "#66D9EF",
+      keyword: "#F92672",
+      string: "#E6DB74",
+      number: "#AE81FF",
+      variable: "#A6E22E",
+    },
+  },
+  {
+    id: "solarized-dark",
+    label: "Solarized 暗色",
+    dark: true,
+    colors: {
+      bg: "#002B36",
+      fg: "#93A1A1",
+      comment: "#586E75",
+      key: "#268BD2",
+      keyword: "#859900",
+      string: "#2AA198",
+      number: "#6C71C4",
+      variable: "#B58900",
+    },
+  },
+  {
+    id: "solarized-light",
+    label: "Solarized 亮色",
+    dark: false,
+    colors: {
+      bg: "#FDF6E3",
+      fg: "#586E75",
+      comment: "#93A1A1",
+      key: "#268BD2",
+      keyword: "#859900",
+      string: "#2AA198",
+      number: "#6C71C4",
+      variable: "#B58900",
+    },
+  },
+] as const;
+
 /** 主题色预设：写 accentHue；选「自定义」则写 accentHex。
     默认蔚蓝 = systemBlue（Light #0088FF / Dark #0091FF），Apple 强调色。 */
 export const ACCENT_PRESETS = [
@@ -1045,7 +1151,11 @@ export const AppSettings = z.object({
   /** 代码块默认显示行号 */
   codeLineNumbers: z.boolean().default(true),
   /** 代码块默认自动换行 */
-  codeWrap: z.boolean().default(false),
+  codeWrap: z.boolean().default(true),
+  /** 代码块配色主题 id（见 CODE_THEME_OPTIONS；auto = 跟随界面明暗） */
+  codeTheme: z.string().default("auto"),
+  /** 自定义代码块背景色（#RRGGBB）；非空时覆盖主题自带的背景 */
+  codeBg: z.string().default(""),
   reduceMotion: z.boolean().default(false),
   defaultTld: z.string().default("test"),
   defaultWebServer: z.string().default("nginx"),

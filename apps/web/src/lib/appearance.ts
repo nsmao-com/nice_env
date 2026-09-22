@@ -76,11 +76,28 @@ export function effectiveHue(settings: Pick<AppSettings, "accentHex" | "accentHu
   return settings.accentHue;
 }
 
+/** 本机字体 id 前缀：`local:<字体族名>`，字体名来自系统扫描或用户手填 */
+export const LOCAL_FONT_PREFIX = "local:";
+
+export function isLocalFontId(id: string): boolean {
+  return id.startsWith(LOCAL_FONT_PREFIX) && id.slice(LOCAL_FONT_PREFIX.length).trim().length > 0;
+}
+
+export function localFontFamily(id: string): string {
+  return id.slice(LOCAL_FONT_PREFIX.length).trim().replace(/"/g, "");
+}
+
 export function uiFontStack(id: string): string {
+  if (isLocalFontId(id)) {
+    return `"${localFontFamily(id)}", -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif`;
+  }
   return UI_FONT_OPTIONS.find((f) => f.id === id)?.stack ?? UI_FONT_OPTIONS[0].stack;
 }
 
 export function monoFontStack(id: string): string {
+  if (isLocalFontId(id)) {
+    return `"${localFontFamily(id)}", ui-monospace, Consolas, "Courier New", monospace`;
+  }
   return MONO_FONT_OPTIONS.find((f) => f.id === id)?.stack ?? MONO_FONT_OPTIONS[0].stack;
 }
 

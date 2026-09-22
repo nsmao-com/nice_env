@@ -614,7 +614,16 @@ mod scaffold_tests {
     struct Tmp(PathBuf);
     impl Tmp {
         fn new(tag: &str) -> Self {
-            let p = std::env::temp_dir().join(format!("nsb-scaffold-{tag}-{}", std::process::id()));
+            // 目录名必须全局唯一：不同测试会用同一个 tag（如两个测试都建
+            // "wordpress"），并行执行时一个测试的 Drop 清理会删掉另一个
+            // 正在写的目录。pid 只隔离进程，加原子计数才能隔离同进程内的测试。
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static SEQ: AtomicU64 = AtomicU64::new(0);
+            let n = SEQ.fetch_add(1, Ordering::Relaxed);
+            let p = std::env::temp_dir().join(format!(
+                "nsb-scaffold-{tag}-{}-{n}",
+                std::process::id()
+            ));
             let _ = std::fs::remove_dir_all(&p);
             std::fs::create_dir_all(&p).unwrap();
             Tmp(p)

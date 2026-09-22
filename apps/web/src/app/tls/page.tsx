@@ -43,15 +43,15 @@ export default function TlsPage() {
         subtitle={t("tls.subtitle")}
         actions={
           <Button onClick={() => setIssueOpen(true)}>
-            <Plus className="h-3.5 w-3.5" />
-
-      <section className="mb-6">
-        <CertHealthCard />
-      </section>
- {t("tls.issueTitle")}
+            <Plus className="h-3.5 w-3.5" /> {t("tls.issueTitle")}
           </Button>
         }
       />
+
+      {/* 证书体检：放在页头下方，不要塞进 actions —— 那会变成 button 套 button */}
+      <section className="mb-6">
+        <CertHealthCard />
+      </section>
 
       {/* 根 CA */}
       <Card className="mb-6">

@@ -695,6 +695,19 @@ impl CoreState {
 
 #[cfg(test)]
 mod dep_tests {
+    /// 从磁盘直接读指定清单文件。
+    ///
+    /// 不能用 `Installer::bundled()`：它按编译目标 OS 选清单
+    /// （Windows→win、其它→mac），Linux CI 上读到的是 mac 清单，
+    /// 断言 win 清单的内容必然失败。检查对象是仓库里的文件本身，
+    /// 与运行平台无关，所以显式读文件。
+    fn manifest_from_disk(name: &str) -> crate::model::Manifest {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../manifest/");
+        let raw = std::fs::read_to_string(format!("{dir}{name}"))
+            .expect("清单文件应在仓库内");
+        serde_json::from_str(&raw).expect("清单 JSON 必须合法")
+    }
+
     /// 清单里声明的依赖必须真的能被读到。
     ///
     /// 这个测试专门守住一个真实踩过的坑：`requires` 写在顶层时 Rust 侧读不到
@@ -702,9 +715,9 @@ mod dep_tests {
     /// 当时是 manifest 写了、界面不提示，很难发现。
     #[test]
     fn manifest_dependencies_are_readable() {
-        let manifest = crate::install::Installer::bundled();
+        // 依赖声明目前只写在 win 清单（mac 清单尚无可声明依赖的套件组合）
+        let manifest = manifest_from_disk("packages.win.json");
         let found: Vec<(String, Vec<String>)> = manifest
-            .manifest
             .packages
             .iter()
             .filter_map(|p| {
@@ -732,17 +745,23 @@ mod dep_tests {
         assert!(ids.contains(&"tomcat"), "tomcat 依赖 JDK：{found:?}");
     }
 
-    /// 依赖不能指向清单里不存在的套件 id，否则用户永远装不上
+    /// 依赖不能指向清单里不存在的套件 id，否则用户永远装不上。
+    /// 两份清单都查 —— 将来给 mac 清单补声明时同样受保护。
     #[test]
     fn declared_dependencies_exist_in_manifest() {
-        let manifest = crate::install::Installer::bundled();
+        for name in ["packages.win.json", "packages.mac.json"] {
+            declared_dependencies_exist_in(name);
+        }
+    }
+
+    fn declared_dependencies_exist_in(name: &str) {
+        let manifest = manifest_from_disk(name);
         let all: std::collections::HashSet<&str> = manifest
-            .manifest
             .packages
             .iter()
             .map(|p| p.id.as_str())
             .collect();
-        for p in &manifest.manifest.packages {
+        for p in &manifest.packages {
             let mut deps: Vec<String> = Vec::new();
             if let Some(run) = &p.run {
                 deps.extend(run.requires.iter().cloned());

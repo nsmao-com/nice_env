@@ -415,6 +415,96 @@ pub struct CertRecord {
     pub trusted: Option<bool>,
 }
 
+/* ============ 证书自动化（ACME 签发 / 定时续签 / 多平台部署） ============ */
+
+/// 部署结果（每个目标一份，失败不阻断其它目标）
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DeployResult {
+    pub ok: bool,
+    pub message: String,
+    pub at: i64,
+}
+
+/// 部署目标。config 按平台放各自的连接参数，避免字段爆炸：
+/// - btpanel:  url, apiSk, siteName(把证书直接配到该站点，缺省仅入库证书列表)
+/// - onepanel: url, token
+/// - aliyun:   accessKeyId, accessKeySecret, region(缺省 cn-hangzhou；上传到 SSL 证书服务)
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DeployTarget {
+    pub id: String,
+    /// btpanel | onepanel | aliyun
+    pub kind: String,
+    pub name: String,
+    #[serde(default)]
+    pub config: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_result: Option<DeployResult>,
+}
+
+/// DNS 服务商凭据（DNS-01 验证；域名解析权在你手里才能签发）
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DnsProvider {
+    /// aliyun | cloudflare | dnspod
+    pub kind: String,
+    /// aliyun AccessKeyId / cloudflare API Token / dnspod ID
+    #[serde(default)]
+    pub access_key: String,
+    /// aliyun AccessKeySecret / dnspod Token（cloudflare 不用）
+    #[serde(default)]
+    pub secret: String,
+}
+
+/// 一条自动化：要给哪些域名签发、用什么 DNS 验证、签完部署到哪。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CertAutomation {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub domains: Vec<String>,
+    #[serde(default)]
+    pub email: String,
+    /// letsencrypt | letsencrypt-staging | zerossl
+    #[serde(default = "default_ca")]
+    pub ca: String,
+    #[serde(default)]
+    pub dns: DnsProvider,
+    /// 签发后写入本地站点证书（按主域名落 certs/sites/，命中站点即重载）
+    #[serde(default)]
+    pub deploy_local: bool,
+    #[serde(default)]
+    pub targets: Vec<DeployTarget>,
+    #[serde(default = "default_true_fn")]
+    pub enabled: bool,
+    /// idle | issuing | ok | error
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub last_error: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issued_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+    /// 到期前 30 天自动续签；0 = 未计划
+    #[serde(default)]
+    pub next_renew_at: i64,
+    #[serde(default)]
+    pub last_run_at: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+fn default_ca() -> String {
+    "letsencrypt".into()
+}
+fn default_true_fn() -> bool {
+    true
+}
+
 /* ============ 统计 / 诊断 / 日志 ============ */
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

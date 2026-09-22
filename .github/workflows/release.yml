@@ -32,16 +32,16 @@ jobs:
             targets: "x86_64-apple-darwin"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # 锁文件是 pnpm 10 的 lockfileVersion 9.0；package.json 无 packageManager 字段
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5
         with:
           version: 10
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: pnpm

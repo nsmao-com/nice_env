@@ -75,3 +75,24 @@ export function cmpVersionDesc(a: string, b: string): number {
   if (ra !== rb) return ra - rb; // 正式版（0）排前面
   return b.localeCompare(a);
 }
+
+/* ---------- 平台兼容性（与 Rust 侧 install::current_os/arch 对齐） ---------- */
+
+/** 粗粒度平台判定：OS 用 UA；架构尽力而为——
+ *  Mac 默认按 arm64（2026 年 Apple Silicon 为主，Intel 机型 UA 无法区分），
+ *  Windows 按 x64（WoA 上 x64 包可经仿真运行）。空数组 = 不限平台。 */
+export function frontendPlatform(): { os: "windows" | "macos" | "linux"; arch: "x64" | "arm64" } {
+  const ua = typeof navigator === "undefined" ? "" : navigator.userAgent;
+  const os = /Win/i.test(ua) ? "windows" : /Mac/i.test(ua) ? "macos" : "linux";
+  const arch: "x64" | "arm64" =
+    os === "macos" && /Intel/.test(ua) ? "x64" : os === "macos" ? "arm64" : "x64";
+  return { os, arch };
+}
+
+export function isPlatformCompatible(osList: string[] | undefined, archList: string[] | undefined): boolean {
+  if (!osList?.length && !archList?.length) return true;
+  const cur = frontendPlatform();
+  const osOk = !osList?.length || osList.includes(cur.os);
+  const archOk = !archList?.length || archList.includes(cur.arch);
+  return osOk && archOk;
+}

@@ -23,8 +23,8 @@ interface UIState {
   setLang: (l: Lang) => void;
   t: (key: TKey) => string;
   /** 代码块默认形态（由设置页同步；避免每个 CodeBlock 都去查一次设置） */
-  codeDefaults: { lineNumbers: boolean; wrap: boolean };
-  setCodeDefaults: (v: { lineNumbers: boolean; wrap: boolean }) => void;
+  codeDefaults: { lineNumbers: boolean; wrap: boolean; theme: string; bg: string };
+  setCodeDefaults: (v: { lineNumbers: boolean; wrap: boolean; theme: string; bg: string }) => void;
 
   /* ---- 跨页意图：命令面板/托盘等入口让目标页自动打开某个面板 ----
      用 store 而不是 URL query，因为桌面端是静态导出，
@@ -58,7 +58,7 @@ export const useUI = create<UIState>()(
       lang: "zh",
       setLang: (l) => set({ lang: l }),
       t: (key) => translate(get().lang, key),
-      codeDefaults: { lineNumbers: true, wrap: false },
+      codeDefaults: { lineNumbers: true, wrap: true, theme: "auto", bg: "" },
       setCodeDefaults: (v) => set({ codeDefaults: v }),
       pendingScan: false,
       requestScan: () => set({ pendingScan: true }),

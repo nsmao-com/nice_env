@@ -31,7 +31,7 @@ import {
 } from "lucide-react";
 import type { PackageView, PackageCategory, ServiceStatus } from "@nsb/schema";
 import { PACKAGE_CATEGORY_ORDER } from "@nsb/schema";
-import { cn, fmtBytes, fmtSpeed, fmtDuration } from "@/lib/utils";
+import { cn, fmtBytes, fmtSpeed, fmtDuration, isPlatformCompatible } from "@/lib/utils";
 import { useUI, useT } from "@/lib/store";
 import { usePackages, useDownloadProgress, useInvalidate, toastError, useServices, useVersionCatalogs } from "@/lib/hooks";
 import * as api from "@/lib/api";
@@ -99,6 +99,8 @@ interface PackageGroup {
     installed: boolean;
     active: boolean;
     serviceId: string | null;
+    /** 该清单条目不支持当前平台（下载前会被后端拦截） */
+    incompatible?: boolean;
   }[];
 }
 
@@ -126,6 +128,7 @@ function groupPackages(packages: PackageView[]): PackageGroup[] {
       installed: !!p.install,
       active: !!p.active,
       serviceId: serviceIdOf(p),
+      incompatible: !isPlatformCompatible(p.os as string[] | undefined, p.arch as string[] | undefined),
     });
   }
   for (const g of map.values()) {
@@ -377,6 +380,7 @@ function PackageRow({
         active: v.active,
         running: v.serviceId ? runningServices.has(v.serviceId) : false,
         sizeBytes: v.sizeBytes,
+        incompatible: v.incompatible,
       });
     }
     for (const r of catalog?.remote ?? []) {

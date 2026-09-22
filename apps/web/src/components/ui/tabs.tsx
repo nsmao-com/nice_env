@@ -51,8 +51,11 @@ const TabsList = React.forwardRef<
       <TabsPrimitive.List
         ref={ref}
         className={cn(
-          // p-[2px]：胶囊轨道包胶囊滑块，滑块半径 = 轨道半径 − 2（同心）
-          "inline-flex min-h-8 flex-wrap items-center gap-y-[3px] rounded-full bg-fill p-[2px] text-muted",
+          // p-[2px]：胶囊轨道包胶囊滑块，滑块半径 = 轨道半径 − 2（同心）。
+          // 半径用固定 16px 而不是 rounded-full：折行成多行时（套件页 13+ 分类），
+          // 全圆角会在两端形成很深的椭圆弧，首行第一个/末行最后一个会戳出轨道外；
+          // 单行下 16px 与 rounded-full（32px 高的一半）视觉完全一致。
+          "inline-flex min-h-8 flex-wrap items-center gap-y-[3px] rounded-2xl bg-fill p-[2px] text-muted",
           className
         )}
         {...props}

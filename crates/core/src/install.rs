@@ -136,6 +136,26 @@ impl Installer {
             }
         };
 
+        // 平台过滤：mac 清单里有 arm64-only 的包，x64 Mac 装上启动必崩；
+        // 在下载前就拦下，给出明确原因
+        if !Self::is_platform_compatible(&entry) {
+            return Err(AppError::new(
+                "PLATFORM_UNSUPPORTED",
+                format!(
+                    "{} {} 不支持当前平台（{}-{}）",
+                    entry.display_name,
+                    entry.version,
+                    current_os(),
+                    current_arch()
+                ),
+                )
+                .with_hint(format!(
+                    "该条目声明的平台：os={:?} arch={:?}。请安装与本机架构匹配的版本",
+                    entry.os, entry.arch
+                )),
+            );
+        }
+
         let version = entry.version.clone();
         let task_id = format!("{}@{}", entry.id, version);
 
@@ -350,4 +370,77 @@ fn extract_targz(archive: &Path, dest: &Path, entry: &str) -> Result<()> {
         let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755));
     }
     Ok(())
+}
+
+/* ================= 平台兼容性 ================= */
+
+/// 当前运行平台，取值与清单 os 字段一致（windows / macos / linux）
+pub fn current_os() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    }
+}
+
+/// 当前架构，取值与清单 arch 字段一致（x64 / arm64）
+pub fn current_arch() -> &'static str {
+    if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x64"
+    }
+}
+
+impl Installer {
+    /// 清单条目是否支持当前平台。
+    /// os/arch 为空数组视为「不限平台」（宽容处理老清单）；
+    /// 非空则必须包含当前平台——下载前拦截，避免 arm64 包装上 x64 机器启动即崩。
+    pub fn is_platform_compatible(entry: &crate::model::PackageManifestEntry) -> bool {
+        let (os_ok, arch_ok) = (
+            entry.os.is_empty() || entry.os.iter().any(|o| o == current_os()),
+            entry.arch.is_empty() || entry.arch.iter().any(|a| a == current_arch()),
+        );
+        os_ok && arch_ok
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::PackageManifestEntry;
+
+    fn entry_with(os: Vec<&str>, arch: Vec<&str>) -> PackageManifestEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": "test", "version": "1.0.0", "category": "tool",
+            "displayName": "T", "description": "",
+            "os": os, "arch": arch,
+            "kind": "binary", "url": "https://example.com/x",
+            "sha256": "0", "sizeBytes": 1, "entry": "x"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn platform_filter_matches_current_machine() {
+        // 本机（编译目标）必须兼容：win/mac 清单里对应本机的条目
+        let e = entry_with(vec![current_os()], vec![current_arch()]);
+        assert!(Installer::is_platform_compatible(&e));
+
+        // 空数组 = 不限平台
+        let e = entry_with(vec![], vec![]);
+        assert!(Installer::is_platform_compatible(&e));
+
+        // 仅其它 OS → 不兼容
+        let other_os = if current_os() == "windows" { "macos" } else { "windows" };
+        let e = entry_with(vec![other_os], vec![current_arch()]);
+        assert!(!Installer::is_platform_compatible(&e));
+
+        // 仅其它架构 → 不兼容（arm64-only 包装上 x64 必须被拦下）
+        let other_arch = if current_arch() == "x64" { "arm64" } else { "x64" };
+        let e = entry_with(vec![current_os()], vec![other_arch]);
+        assert!(!Installer::is_platform_compatible(&e));
+    }
 }

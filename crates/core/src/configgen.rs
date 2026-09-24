@@ -46,7 +46,7 @@ pub fn render_nginx_conf(
     }
 
     format!(
-        r#"# NiceServBay managed nginx.conf — 修改会被「修复向导」备份重写
+        r#"# NiceEnv managed nginx.conf — 修改会被「修复向导」备份重写
 worker_processes  2;
 pid        {pid};
 error_log  {error_log} warn;
@@ -91,7 +91,7 @@ http {{
         ssl_certificate_key {certs}/ca.key;
         location / {{
             default_type text/html;
-            return 200 "<h1>NiceServBay is running</h1><p>创建站点后用你的本地域名访问，例如 http://demo.test:{http_port}</p>";
+            return 200 "<h1>NiceEnv is running</h1><p>创建站点后用你的本地域名访问，例如 http://demo.test:{http_port}</p>";
         }}
 {adminer_loc}
     }}
@@ -154,6 +154,27 @@ pub fn rewrite_snippet(preset: &RewritePreset) -> &'static str {
         RewritePreset::NextExport => {
             "    location / {\n        try_files $uri $uri/ /index.html;\n    }\n"
         }
+        RewritePreset::Symfony => {
+            // 入口在 public/，站点根目录应指向 public；这里兜 front controller
+            "    location / {\n        try_files $uri $uri/ /index.php$is_args$args;\n    }\n"
+        }
+        RewritePreset::Yii2 => {
+            "    location / {\n        try_files $uri $uri/ /index.php?$args;\n    }\n"
+        }
+        RewritePreset::Codeigniter => {
+            // CI4：隐藏 index.php；保护 app/system/writable 等非公开目录
+            "    location / {\n        try_files $uri $uri/ /index.php$is_args$args;\n    }\n    location ~* ^/(app|system|writable)/ {\n        deny all;\n    }\n"
+        }
+        RewritePreset::Cakephp => {
+            // 经典 cake 食谱：webroot 剥离
+            "    location / {\n        try_files $uri $uri/ /index.php?url=$uri&$args;\n    }\n"
+        }
+        RewritePreset::Drupal => {
+            "    location / {\n        try_files $uri $uri/ /index.php?$query_string;\n    }\n    location ~* \\.(engine|inc|info|install|module|profile|po|sh|.*sql|theme|tpl(\\.php)?|xtmpl)$ {\n        deny all;\n    }\n"
+        }
+        RewritePreset::Joomla => {
+            "    location / {\n        try_files $uri $uri/ /index.php?$args;\n    }\n"
+        }
     }
 }
 
@@ -164,6 +185,7 @@ pub fn render_site_conf(
     https_port: u16,
     fastcgi_params_path: &std::path::Path,
     cert_dir: &std::path::Path,
+    log_dir: &std::path::Path,
 ) -> String {
     let server_names = site.domains.join(" ");
     let primary = site
@@ -223,7 +245,7 @@ pub fn render_site_conf(
     };
 
     format!(
-        r#"# site: {name} ({id}) — NiceServBay 托管
+        r#"# site: {name} ({id}) — NiceEnv 托管
 server {{
     {listen};
     server_name {server_names};
@@ -232,12 +254,18 @@ server {{
     index index.php index.html index.htm;
     charset utf-8;
 
+    # 站点级日志（日志页按站点查看就靠它）
+    access_log {access_log};
+    error_log {error_log} warn;
+
     location ~ /\.ht {{ deny all; }}
 
 {body}}}
 "#,
         name = site.name,
         id = site.id,
+        access_log = nginx_path(&log_dir.join(format!("{}.access.log", site.id))),
+        error_log = nginx_path(&log_dir.join(format!("{}.error.log", site.id))),
         listen = listen,
         server_names = server_names,
         ssl_lines = ssl_lines,
@@ -250,7 +278,7 @@ server {{
 
 pub fn render_php_ini(paths: &Paths, version: &str, runtime_dir: &std::path::Path) -> String {
     format!(
-        r#"; NiceServBay managed php.ini ({version})
+        r#"; NiceEnv managed php.ini ({version})
 [PHP]
 engine=On
 expose_php=Off
@@ -311,7 +339,7 @@ pub fn render_mysql_ini(
     // mysqlx（X Protocol）仅 8.x 有；5.7 传入会拒启
     let mysqlx = if version.starts_with('8') { "mysqlx=OFF\n" } else { "" };
     format!(
-        r#"# NiceServBay managed my.ini ({version})
+        r#"# NiceEnv managed my.ini ({version})
 [mysqld]
 basedir="{basedir}"
 datadir="{datadir}"
@@ -343,7 +371,7 @@ default-character-set=utf8mb4
 
 pub fn render_redis_conf(paths: &Paths, version: &str, port: u16) -> String {
     format!(
-        r#"# NiceServBay managed redis.conf ({version})
+        r#"# NiceEnv managed redis.conf ({version})
 bind 127.0.0.1
 protected-mode yes
 port {port}
@@ -374,7 +402,7 @@ pub const MIHOMO_CONTROLLER_PORT: u16 = 19090;
 
 pub fn render_mihomo_builtin_config() -> String {
     format!(
-        r#"# NiceServBay 内置直连配置（导入订阅后自动替换）
+        r#"# NiceEnv 内置直连配置（导入订阅后自动替换）
 mixed-port: {mixed}
 external-controller: 127.0.0.1:{controller}
 secret: ""
@@ -524,7 +552,7 @@ pub fn render_httpd_conf(
     // php balancer 定义在各站点 vhost 内（BalancerMember 需携带 docroot 路径）
     // MPM 在 ApacheLounge 发行中为静态编译（无 mod_mpm_*.so），不 LoadModule
     format!(
-        r#"# NiceServBay 托管 httpd.conf — 修改会被覆盖（备份在 backup/）
+        r#"# NiceEnv 托管 httpd.conf — 修改会被覆盖（备份在 backup/）
 ServerRoot "{root}"
 Define NSB_ETC "{etc}"
 
@@ -642,7 +670,7 @@ pub fn render_httpd_vhost(
     };
 
     format!(
-        r#"# site: {name} ({id}) — NiceServBay 托管
+        r#"# site: {name} ({id}) — NiceEnv 托管
 {listen}
     ServerName {primary}
     ServerAlias {server_names}

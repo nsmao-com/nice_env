@@ -117,7 +117,7 @@ pub fn build(
     let mut redacted = 0usize;
     let mut md = String::new();
 
-    md.push_str("# NiceServBay 诊断报告\n\n");
+    md.push_str("# NiceEnv 诊断报告\n\n");
     md.push_str(&format!(
         "- 应用版本：{}\n- 生成时间：{}\n- 操作系统：{} {}\n- 数据目录：{}\n\n",
         app_version,
@@ -368,7 +368,7 @@ pub fn save_to_file(paths: &Paths, bundle: &DiagnosticsBundle) -> Result<String>
     let dir = paths.base.join("diagnostics");
     std::fs::create_dir_all(&dir).map_err(|e| AppError::io("创建诊断目录", e))?;
     let name = format!(
-        "niceservbay-diagnostics-{}.md",
+        "niceenv-diagnostics-{}.md",
         chrono::Local::now().format("%Y%m%d-%H%M%S")
     );
     let path = dir.join(&name);

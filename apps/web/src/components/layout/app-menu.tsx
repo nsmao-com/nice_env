@@ -161,7 +161,7 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
             {!collapsed && (
               <>
                 <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold tracking-tight">
-                  NiceServBay
+                  NiceEnv
                 </span>
                 <ChevronDown className="h-3.5 w-3.5 shrink-0 text-faint transition-transform group-data-[state=open]:rotate-180" />
               </>
@@ -170,7 +170,7 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="w-56" onCloseAutoFocus={(e) => e.preventDefault()}>
           <DropdownMenuLabel>
-            NiceServBay <span className="font-mono text-faint">v{version}</span>
+            NiceEnv <span className="font-mono text-faint">v{version}</span>
           </DropdownMenuLabel>
           <DropdownMenuSeparator />
           <DropdownMenuItem disabled={checking} onSelect={() => run(checkUpdate)}>
@@ -274,7 +274,7 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
             <div className="mb-2">
               <AppLogo className="h-9 w-9 rounded-xl" />
             </div>
-            <DialogTitle>NiceServBay</DialogTitle>
+            <DialogTitle>NiceEnv</DialogTitle>
             <DialogDescription>{t("about.desc")}</DialogDescription>
           </DialogHeader>
           <p className="text-[13px] text-secondary">

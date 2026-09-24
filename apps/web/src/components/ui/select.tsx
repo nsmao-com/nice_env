@@ -16,7 +16,7 @@ const SelectTrigger = React.forwardRef<
   <SelectPrimitive.Trigger
     ref={ref}
     className={cn(
-      "flex h-9 w-full items-center justify-between gap-2 whitespace-nowrap rounded-md bg-fill px-3 py-2 text-sm shadow-none placeholder:text-faint focus:outline-none focus:shadow-[0_0_0_2.5px_var(--primary-ring)] disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1 cursor-pointer",
+      "flex h-9 w-full items-center justify-between gap-2 whitespace-nowrap rounded-md border border-border bg-fill px-3 py-2 text-sm placeholder:text-faint focus:outline-none focus:border-primary disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1 cursor-pointer",
       className
     )}
     {...props}
@@ -102,7 +102,12 @@ const SelectSeparator = React.forwardRef<
   React.ComponentRef<typeof SelectPrimitive.Separator>,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Separator>
 >(({ className, ...props }, ref) => (
-  <SelectPrimitive.Separator ref={ref} className={cn("-mx-1 my-1 h-px bg-separator", className)} {...props} />
+  // 虚线 + 左右留边：通栏实线太重，内缩的细虚线更接近 Apple 分组分隔线
+  <SelectPrimitive.Separator
+    ref={ref}
+    className={cn("mx-2 my-1 border-t border-dashed border-separator", className)}
+    {...props}
+  />
 ));
 SelectSeparator.displayName = "SelectSeparator";
 

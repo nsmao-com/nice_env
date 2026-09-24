@@ -19,7 +19,7 @@ fn hosts_merge_adds_block() {
 
 #[test]
 fn hosts_merge_replaces_existing_block_and_keeps_user_lines() {
-    let original = "127.0.0.1 localhost\n# BEGIN NiceServBay (managed)\n127.0.0.1 old.test\n# END NiceServBay (managed)\n10.0.0.1 myserver\n";
+    let original = "127.0.0.1 localhost\n# BEGIN NiceEnv (managed)\n127.0.0.1 old.test\n# END NiceEnv (managed)\n10.0.0.1 myserver\n";
     let out = platform::merge_hosts_content(
         original,
         &[("127.0.0.1".into(), "new.test".into())],
@@ -29,6 +29,21 @@ fn hosts_merge_replaces_existing_block_and_keeps_user_lines() {
     assert!(out.contains("10.0.0.1 myserver"), "块外用户行必须保留");
     // 只有一个托管块
     assert_eq!(out.matches(platform::HOSTS_BEGIN).count(), 1);
+}
+
+/// 产品由 NiceServBay 改名而来：老用户 hosts 文件里是旧标记块，
+/// 合并时必须把旧块替换成新标记块，而不是追加第二个托管块
+#[test]
+fn hosts_merge_replaces_legacy_niceservbay_block() {
+    let original = "127.0.0.1 localhost\n# BEGIN NiceServBay (managed)\n127.0.0.1 old.test\n# END NiceServBay (managed)\n";
+    let out = platform::merge_hosts_content(
+        original,
+        &[("127.0.0.1".into(), "new.test".into())],
+    );
+    assert!(!out.contains("old.test"), "旧块内容必须被清掉");
+    assert!(!out.contains("NiceServBay"), "旧标记必须消失");
+    assert_eq!(out.matches(platform::HOSTS_BEGIN).count(), 1, "只应剩一个新标记块");
+    assert!(out.contains("new.test"));
 }
 
 /* ---------- mihomo 订阅适配 ---------- */
@@ -74,12 +89,13 @@ fn site_conf_php_has_fastcgi_upstream() {
         https: true,
         rewrite: nsb_core::model::RewritePreset::Laravel,
         db: None,
+        php_overrides: None,
         status: "running".into(),
         created_at: 0,
         updated_at: 0,
     };
     let paths = Paths::new(std::env::temp_dir().join("nsb-test-conf"));
-    let conf = nsb_core::configgen::render_site_conf(&site, 8080, 8443, &paths.etc().join("nginx/fastcgi_params"), &paths.certs().join("sites"));
+    let conf = nsb_core::configgen::render_site_conf(&site, 8080, 8443, &paths.etc().join("nginx/fastcgi_params"), &paths.certs().join("sites"), &paths.logs().join("nginx"));
     assert!(conf.contains("fastcgi_pass nsb_php_8_3_33;"));
     assert!(conf.contains("server_name x.test;"));
     assert!(conf.contains("listen 8443 ssl;"));
@@ -105,12 +121,13 @@ fn site_conf_proxy_has_websocket_headers() {
         https: false,
         rewrite: nsb_core::model::RewritePreset::None,
         db: None,
+        php_overrides: None,
         status: "running".into(),
         created_at: 0,
         updated_at: 0,
     };
     let paths = Paths::new(std::env::temp_dir().join("nsb-test-conf2"));
-    let conf = nsb_core::configgen::render_site_conf(&site, 8080, 8443, &paths.etc().join("nginx/fastcgi_params"), &paths.certs().join("sites"));
+    let conf = nsb_core::configgen::render_site_conf(&site, 8080, 8443, &paths.etc().join("nginx/fastcgi_params"), &paths.certs().join("sites"), &paths.logs().join("nginx"));
     assert!(conf.contains("proxy_pass http://127.0.0.1:5173;"));
     assert!(conf.contains("proxy_set_header Upgrade $http_upgrade;"));
 }
@@ -556,4 +573,189 @@ fn import_rejects_foreign_json() {
     std::fs::write(&broken, "{not json").unwrap();
     let err = nsb_core::transfer::import_from(&broken, &paths, &store, &manager).unwrap_err();
     assert_eq!(err.code, "BAD_BACKUP");
+}
+
+/* ---------- 通配符证书：*.test 域名可签发且 SAN 正确 ---------- */
+
+#[test]
+fn wildcard_cert_can_be_issued_and_recorded() {
+    let base = tempfile::tempdir().unwrap();
+    let paths = Paths::new(base.path().to_path_buf());
+    paths.ensure_dirs().unwrap();
+    let store = nsb_core::store::Store::open(paths.db()).unwrap();
+
+    let rec = nsb_core::tls::issue_site_cert(
+        &paths,
+        &store,
+        &["*.dev.test".to_string(), "dev.test".to_string()],
+    )
+    .unwrap();
+
+    assert_eq!(rec.subject, "*.dev.test");
+    assert!(rec.sans.iter().any(|s| s == "*.dev.test"), "SAN 必须含通配符");
+    assert!(rec.sans.iter().any(|s| s == "dev.test"), "SAN 应含裸域名");
+    // 证书与私钥文件真实落盘
+    assert!(std::path::Path::new(&rec.cert_path).is_file());
+    assert!(std::path::Path::new(&rec.key_path.clone().unwrap()).is_file());
+    // CA 也一并生成
+    assert!(paths.certs().join("ca.crt").is_file());
+}
+
+/* ---------- 状态历史：变更被记录、错误被记录 ---------- */
+
+#[test]
+fn service_history_records_transitions() {
+    let manager = std::sync::Arc::new(nsb_core::services::ServiceManager::new());
+    manager.register("nginx", "Nginx", None, None, None, std::env::temp_dir().join("h.log"));
+    manager.set_state("nginx", nsb_core::model::ServiceState::Starting);
+    manager.set_state("nginx", nsb_core::model::ServiceState::Running);
+    manager.set_error("nginx", nsb_core::AppError::new("X", "boom"));
+
+    let h = manager.history_tail(10);
+    assert!(h.len() >= 3, "至少 3 条：Starting/Running/Error");
+    // 新→旧：最新一条是 Error
+    assert_eq!(h[0].1, "nginx");
+    assert!(h[0].2.contains("Error"), "最新一条应为 Error：{}", h[0].2);
+}
+
+/* ---------- 站点级 PHP 覆盖：.user.ini 写入与防注入 ---------- */
+
+#[test]
+fn user_ini_written_for_php_sites_only() {
+    let mk = |kind: nsb_core::model::SiteKind| nsb_core::model::Site {
+        id: "s1".into(), name: "t".into(), domains: vec!["a.test".into()],
+        root_dir: std::env::temp_dir().join(format!("nsb-userini-{}", std::process::id()))
+            .to_string_lossy().to_string(),
+        runtime: nsb_core::model::SiteRuntime {
+            web_server: "nginx".into(), kind,
+            php_version: Some("8.3".into()), proxy_target: None, command: None, cwd: None,
+        },
+        https: false, rewrite: nsb_core::model::RewritePreset::None, db: None,
+        php_overrides: Some(
+            [
+                ("memory_limit".to_string(), "512M".to_string()),
+                ("evil\nkey".to_string(), "x".to_string()), // 非法键 → 丢弃
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        status: "stopped".into(), created_at: 0, updated_at: 0,
+    };
+
+    let root = std::path::PathBuf::from(
+        mk(nsb_core::model::SiteKind::Php).root_dir.clone()
+    );
+    std::fs::create_dir_all(&root).unwrap();
+
+    // php 站点：写入；合法键在、非法键被丢弃、值内无换行
+    let site = mk(nsb_core::model::SiteKind::Php);
+    nsb_core::sites::write_user_ini(&site);
+    let ini = std::fs::read_to_string(root.join(".user.ini")).unwrap();
+    assert!(ini.contains("memory_limit=512M"));
+    assert!(!ini.contains("evil"));
+    assert!(!ini.contains('\r'));
+
+    // 非 php 站点：不写
+    let static_site = mk(nsb_core::model::SiteKind::Static);
+    nsb_core::sites::write_user_ini(&static_site);
+    assert!(!root.join(".user.ini").exists() || {
+        // 若上面 php 用例写过则文件存在；这里只断言 static 没改内容 —— 直接删掉重验
+        let _ = std::fs::remove_file(root.join(".user.ini"));
+        nsb_core::sites::write_user_ini(&static_site);
+        !root.join(".user.ini").exists()
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/* ---------- 项目级运行时锁定 .nsb.json ---------- */
+
+#[test]
+fn project_pin_read_and_validation() {
+    let base = tempfile::tempdir().unwrap();
+    let root = base.path().join("proj");
+    std::fs::create_dir_all(&root).unwrap();
+
+    // 没有文件 → None
+    assert!(nsb_core::sites::read_project_pin(root.to_str().unwrap()).is_none());
+
+    // 合法 → Some
+    std::fs::write(root.join(".nsb.json"), r#"{ "php": "8.3.33" }"#).unwrap();
+    let pin = nsb_core::sites::read_project_pin(root.to_str().unwrap()).unwrap();
+    assert_eq!(pin, ("php".to_string(), "8.3.33".to_string()));
+
+    // 非法版本串（注入尝试）→ None
+    std::fs::write(root.join(".nsb.json"), r#"{ "php": "8.3; drop" }"#).unwrap();
+    assert!(nsb_core::sites::read_project_pin(root.to_str().unwrap()).is_none());
+
+    // 坏 JSON → None
+    std::fs::write(root.join(".nsb.json"), "not json").unwrap();
+    assert!(nsb_core::sites::read_project_pin(root.to_str().unwrap()).is_none());
+}
+
+/* ---------- 伪静态模板：新增框架片段语法有效 ---------- */
+
+#[test]
+fn new_rewrite_presets_render_nginx_snippets() {
+    use nsb_core::configgen::rewrite_snippet;
+    // 每个新预设都能产出非空、含 try_files/rewrite 的片段
+    for preset in [
+        (nsb_core::model::RewritePreset::Symfony, "index.php"),
+        (nsb_core::model::RewritePreset::Yii2, "index.php"),
+        (nsb_core::model::RewritePreset::Codeigniter, "deny all"),
+        (nsb_core::model::RewritePreset::Cakephp, "index.php"),
+        (nsb_core::model::RewritePreset::Drupal, "deny all"),
+        (nsb_core::model::RewritePreset::Joomla, "index.php"),
+    ] {
+        let snip = rewrite_snippet(&preset.0);
+        assert!(!snip.is_empty());
+        assert!(snip.contains(preset.1), "{:?} 应含 {}：{}", preset.0, preset.1, snip);
+    }
+}
+
+/* ---------- 站点级访问日志指令 ---------- */
+
+#[test]
+fn site_conf_contains_per_site_access_log() {
+    let base = tempfile::tempdir().unwrap();
+    let paths = Paths::new(base.path().to_path_buf());
+    paths.ensure_dirs().unwrap();
+    let store = nsb_core::store::Store::open(paths.db()).unwrap();
+    let site = nsb_core::sites::list(&store).unwrap();
+    let _ = site;
+
+    let s = nsb_core::model::Site {
+        id: "site-log".into(),
+        name: "logtest".into(),
+        domains: vec!["log.test".into()],
+        root_dir: "D:/code/logtest".into(),
+        runtime: nsb_core::model::SiteRuntime {
+            web_server: "nginx".into(),
+            kind: nsb_core::model::SiteKind::Php,
+            php_version: Some("8.3.33".into()),
+            proxy_target: None,
+            command: None,
+            cwd: None,
+        },
+        https: false,
+        rewrite: nsb_core::model::RewritePreset::None,
+        db: None,
+        php_overrides: None,
+        status: "stopped".into(),
+        created_at: 0,
+        updated_at: 0,
+    };
+    let conf = nsb_core::configgen::render_site_conf(
+        &s,
+        8080,
+        8443,
+        std::path::Path::new("fastcgi_params"),
+        std::path::Path::new("certs"),
+        &paths.logs().join("nginx"),
+    );
+    assert!(
+        conf.contains("access_log"),
+        "站点 conf 必须带 access_log：{conf}"
+    );
+    assert!(conf.contains("site-log.access.log"));
+    assert!(conf.contains("error_log"));
 }

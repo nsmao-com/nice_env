@@ -43,6 +43,8 @@ import type {
   VersionCatalog,
   PathEnvStatus,
   UpdateCheckResult,
+  CertAutomation,
+  CertMonitor,
   DownloadUpdateResult,
 } from "@nsb/schema";
 import { invoke, safe } from "./backend";
@@ -110,6 +112,57 @@ export const rebuildHosts = () => safe(invoke<boolean>("rebuild_hosts"));
 /** 补齐缺失/过期的站点证书，返回重新签发的域名 */
 export const reissueSiteCerts = () => safe(invoke<string[]>("reissue_site_certs"));
 
+/* 证书自动化（ACME 签发 / 定时续签 / 多平台部署） */
+export const certAutoList = () => safe(invoke<CertAutomation[]>("certauto_list"));
+export const certAutoSave = (a: CertAutomation) =>
+  safe(invoke<CertAutomation>("certauto_save", { a }));
+export const certAutoDelete = (id: string) =>
+  safe(invoke<boolean>("certauto_delete", { id }));
+export const certAutoSetEnabled = (id: string, enabled: boolean) =>
+  safe(invoke<CertAutomation>("certauto_set_enabled", { id, enabled }));
+/** 立即签发/续签：同步跑完整 ACME 流程（约 1–2 分钟），前端要提示等待 */
+export const certAutoIssue = (id: string) =>
+  safe(invoke<CertAutomation>("certauto_issue", { id }));
+
+
+/* 网站证书监控 */
+export const certMonitorList = () => safe(invoke<CertMonitor[]>("certmonitor_list"));
+export const certMonitorAdd = (m: CertMonitor) =>
+  safe(invoke<CertMonitor>("certmonitor_add", { m }));
+export const certMonitorDelete = (id: string) =>
+  safe(invoke<boolean>("certmonitor_delete", { id }));
+/** 同步做一次 TLS 握手刷新到期时间 */
+export const certMonitorCheck = (id: string) =>
+  safe(invoke<CertMonitor>("certmonitor_check", { id }));
+/** 导出本机证书为 PFX (PKCS#12)，返回保存路径 */
+export const certExportPfx = (certId: string, password: string, outPath: string) =>
+  safe(invoke<string>("cert_export_pfx", { certId, password, outPath }));
+/** 导出 DER（二进制 X.509） */
+export const certExportDer = (certId: string, outPath: string) =>
+  safe(invoke<string>("cert_export_der", { certId, outPath }));
+/** 导出 JKS（Java Keystore；密码至少 6 位） */
+export const certExportJks = (certId: string, password: string, outPath: string) =>
+  safe(invoke<string>("cert_export_jks", { certId, password, outPath }));
+/** 导出 PEM 打包（证书链+私钥 单文件） */
+export const certExportPem = (certId: string, outPath: string) =>
+  safe(invoke<string>("cert_export_pem", { certId, outPath }));
+/** 从文件夹批量导入证书（certd 输出目录 / 任意一堆 crt+key） */
+export interface ImportedCertSummary {
+  certPath: string;
+  keyPath: string;
+  subject: string;
+  sans: string[];
+  notBefore: number;
+  notAfter: number;
+  daysLeft: number;
+}
+export interface DirImportResult {
+  imported: ImportedCertSummary[];
+  skipped: string[];
+}
+export const certImportDir = (dir: string) =>
+  safe(invoke<DirImportResult>("cert_import_dir", { dir }));
+
 /* 日志 / 诊断 / 统计 */
 export const tailLogs = (id: string, lines = 200) =>
   safe(invoke<LogLine[]>("tail_logs", { id, lines }));
@@ -154,6 +207,14 @@ export const dbCreateUser = (username: string, password: string, database: strin
 export const dbResetRootPassword = (newPassword: string) =>
   safe(invoke<boolean>("db_reset_root_password", { newPassword }));
 export const dbRootPassword = () => safe(invoke<string>("db_root_password"));
+export interface RedisStats {
+  reachable: boolean;
+  usedMemoryHuman?: string;
+  keys?: number;
+  uptimeDays?: number;
+  connectedClients?: number;
+}
+export const redisStats = () => safe(invoke<RedisStats>("redis_stats"));
 
 /* PHP 扩展 */
 export const phpExtensions = (version: string) =>
@@ -273,6 +334,86 @@ export const proxySelectNode = (group: string, node: string) =>
 export const proxyDelayTest = (node: string) =>
   safe(invoke<number>("proxy_delay_test", { node }));
 
+/** mihomo 实时连接（GET /connections 直通） */
+export interface ProxyConnection {
+  id: string;
+  upload: number;
+  download: number;
+  start: string;
+  chains: string[];
+  metadata?: {
+    network?: string;
+    type?: string;
+    host?: string;
+    destinationIP?: string;
+    destinationPort?: string;
+    sourceIP?: string;
+  };
+}
+export interface ProxyConnectionsInfo {
+  downloadTotal?: number;
+  uploadTotal?: number;
+  connections?: ProxyConnection[] | null;
+}
+export const proxyConnections = () =>
+  safe(invoke<ProxyConnectionsInfo>("proxy_connections"));
+/** 重新拉取订阅并覆盖原文件（激活中的订阅会自动重写主配置并重启内核） */
+export const proxyUpdateProfile = (id: string) =>
+  safe(invoke<boolean>("proxy_update_profile", { id }));
+
+/* ================= 工具箱扩展（计划任务 / 快速隧道 / Ollama / Adminer） ================= */
+
+export interface CronJob {
+  id: string;
+  name: string;
+  command: string;
+  intervalMin: number;
+  enabled: boolean;
+  createdAt: number;
+  lastRunAt?: number | null;
+  lastExit?: string | null;
+  lastOutput?: string | null;
+}
+export const cronJobs = () => safe(invoke<CronJob[]>("cron_jobs"));
+export const cronSave = (job: CronJob) =>
+  safe(invoke<boolean>("cron_save", { job }));
+export const cronDelete = (id: string) =>
+  safe(invoke<boolean>("cron_delete", { id }));
+export const cronSetEnabled = (id: string, enabled: boolean) =>
+  safe(invoke<boolean>("cron_set_enabled", { id, enabled }));
+export const cronRunNow = (id: string) =>
+  safe(invoke<CronJob>("cron_run_now", { id }));
+
+export interface TunnelInfo {
+  id: string;
+  port: number;
+  url?: string | null;
+  startedAt: number;
+  alive: boolean;
+}
+export const tunnelStart = (port: number) =>
+  safe(invoke<TunnelInfo>("tunnel_start", { port }));
+export const tunnelList = () => safe(invoke<TunnelInfo[]>("tunnel_list"));
+export const tunnelStop = (id: string) =>
+  safe(invoke<boolean>("tunnel_stop", { id }));
+
+export interface OllamaModelRow {
+  name: string;
+  digest: string;
+  size: string;
+  modified: string;
+}
+export const ollamaModels = () =>
+  safe(invoke<OllamaModelRow[]>("ollama_models"));
+export const ollamaDelete = (name: string) =>
+  safe(invoke<boolean>("ollama_delete", { name }));
+export const ollamaPull = (name: string) =>
+  safe(invoke<boolean>("ollama_pull", { name }));
+
+export const adminerStart = () =>
+  safe(invoke<{ port: number; file: string }>("adminer_start"));
+export const adminerStop = () => safe(invoke<boolean>("adminer_stop"));
+
 /* 环境变量注入（PATH） */
 export const pathenvStatus = () => safe(invoke<PathEnvStatus>("pathenv_status"));
 export const pathenvSetEnabled = (enabled: boolean) =>
@@ -310,9 +451,48 @@ export interface ImportReport {
   settings: number;
   proxyProfiles: number;
   stacks: number;
+  certAutomations: number;
+  certMonitors: number;
   missingPackages: string[];
 }
 export const importConfig = (path: string) => safe(invoke<ImportReport>("import_config", { path }));
 /** 拖拽导入：WebView 拿不到文件真实路径，读文本交给后端解析 */
 export const importConfigText = (json: string) =>
   safe(invoke<ImportReport>("import_config_text", { json }));
+
+export const exportLog = (id: string, dest: string) =>
+  safe(invoke<number>("export_log", { id, dest }));
+
+export interface ConfigCheck {
+  name: string;
+  ok: boolean;
+  status: "ok" | "fail" | "skipped";
+  detail: string;
+}
+export const validateConfigs = () => safe(invoke<ConfigCheck[]>("validate_configs"));
+
+/* hosts 文件导入/导出用的纯文本读写 */
+export const readTextFile = (path: string) => safe(invoke<string>("read_text_file", { path }));
+export const writeTextFile = (path: string, content: string) =>
+  safe(invoke<boolean>("write_text_file", { path, content }));
+
+/* ===== 从其它环境（FlyEnv/phpStudy/ServBay/XAMPP）迁移 MySQL ===== */
+export interface SourceDb {
+  name: string;
+  sizeKb?: number;
+}
+export interface ImportReport {
+  imported: string[];
+  failed: [string, string][];
+}
+export const migrateListSource = (host: string, port: number, user: string, password: string) =>
+  safe(invoke<SourceDb[]>("migrate_list_source", { host, port, user, password }));
+export const migrateImport = (
+  host: string, port: number, user: string, password: string, databases: string[]
+) => safe(invoke<ImportReport>("migrate_import", { host, port, user, password, databases }));
+
+/* ===== DNS 一键接管（本地域名解析配套） ===== */
+export const dnsInterfaces = () => safe(invoke<string[]>("dns_interfaces"));
+export const dnsStatusOf = (name: string) => safe(invoke<string>("dns_status_of", { name }));
+export const dnsTakeover = (name: string) => safe(invoke<boolean>("dns_takeover", { name }));
+export const dnsRestore = (name: string) => safe(invoke<boolean>("dns_restore", { name }));

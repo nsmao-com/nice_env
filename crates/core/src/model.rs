@@ -77,7 +77,7 @@ pub struct ServiceStatus {
     pub missing_requires: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum SiteKind {
     Php,
@@ -100,6 +100,18 @@ pub enum RewritePreset {
     Wordpress,
     SpaFallback,
     NextExport,
+    #[serde(rename = "symfony")]
+    Symfony,
+    #[serde(rename = "yii2")]
+    Yii2,
+    #[serde(rename = "codeigniter")]
+    Codeigniter,
+    #[serde(rename = "cakephp")]
+    Cakephp,
+    #[serde(rename = "drupal")]
+    Drupal,
+    #[serde(rename = "joomla")]
+    Joomla,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -145,6 +157,9 @@ pub struct Site {
     pub db: Option<SiteDbBinding>,
     #[serde(default = "default_site_status")]
     pub status: String,
+    /// 站点级 PHP 覆盖（写入 rootDir/.user.ini）；仅 kind=php 时生效
+    #[serde(default)]
+    pub php_overrides: Option<std::collections::BTreeMap<String, String>>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -170,6 +185,8 @@ pub struct CreateSiteInput {
     pub write_env_example: bool,
     #[serde(default)]
     pub template: String,
+    #[serde(default)]
+    pub php_overrides: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -426,6 +443,19 @@ pub struct DeployResult {
     pub at: i64,
 }
 
+/// 一次签发/续签执行的留痕（参考 certd 的执行日志；最近 N 条随自动化保存）
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CertRunRecord {
+    pub at: i64,
+    pub ok: bool,
+    /// 一步人话结论
+    pub message: String,
+    /// 过程日志行（下单 / TXT 写入 / 验证 / 部署…）
+    #[serde(default)]
+    pub log: Vec<String>,
+}
+
 /// 部署目标。config 按平台放各自的连接参数，避免字段爆炸：
 /// - btpanel:  url, apiSk, siteName(把证书直接配到该站点，缺省仅入库证书列表)
 /// - onepanel: url, token
@@ -495,8 +525,121 @@ pub struct CertAutomation {
     pub next_renew_at: i64,
     #[serde(default)]
     pub last_run_at: i64,
+    /* ---- certd 式高级选项 ---- */
+    /// 证书私钥算法：ec256(默认) | ec384 | rsa2048 | rsa3072 | rsa4096
+    #[serde(default = "default_key_alg")]
+    pub key_alg: String,
+    /// ACME 外部账号绑定（ZeroSSL / Google Trust Services / BuyPass 需要）
+    #[serde(default)]
+    pub eab_kid: String,
+    #[serde(default)]
+    pub eab_hmac_key: String,
+    /// TXT 写入后等待生效的秒数（DNS 同步慢的服务商可调大）
+    #[serde(default)]
+    pub dns_wait_sec: i64,
+    /// CNAME 代理验证（certd 的别名模式）：_acme-challenge.<域名> CNAME 到该授权域。
+    /// 支持 {domain} 占位符（每个域名映射到自己的子域），留空 = 不用代理。
+    #[serde(default)]
+    pub cname_target: String,
+    /// 到期前多少天续签（默认 30）
+    #[serde(default = "default_renew_days")]
+    pub renew_days_ahead: i64,
+    /// 失败重试：最多 N 次，间隔 M 分钟；超过后每天再试一次等人工介入
+    #[serde(default = "default_retry_times")]
+    pub retry_times: i64,
+    #[serde(default = "default_retry_interval")]
+    pub retry_interval_min: i64,
+    #[serde(default)]
+    pub fail_count: i64,
+    /// 通知：none | generic | dingtalk | wecom | feishu | email
+    #[serde(default)]
+    pub notify_kind: String,
+    /// 邮件通知的 SMTP 配置（notify_kind=email 时必填）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_smtp: Option<NotifySmtp>,
+    #[serde(default)]
+    pub notify_url: String,
+    /// 执行历史（最近 20 条，新的在前）
+    #[serde(default)]
+    pub runs: Vec<CertRunRecord>,
+    /// 手动 DNS（kind=manual）等待用户添加的 TXT 记录
+    #[serde(default)]
+    pub manual_records: Vec<DnsTxtRecord>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+fn default_key_alg() -> String {
+    "ec256".into()
+}
+fn default_renew_days() -> i64 {
+    30
+}
+fn default_retry_times() -> i64 {
+    3
+}
+fn default_retry_interval() -> i64 {
+    30
+}
+
+/// SMTP 邮件通知配置（notify_kind=email 时使用；对齐 certd 的邮件通知插件）
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NotifySmtp {
+    pub host: String,
+    #[serde(default = "default_smtp_port")]
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    /// 发件人地址（多数服务商要求与 username 一致）
+    pub from: String,
+    /// 收件人，逗号分隔
+    pub to: String,
+    /// 走 TLS(465) 还是 STARTTLS(587，默认)
+    #[serde(default = "default_smtp_tls")]
+    pub implicit_tls: bool,
+}
+fn default_smtp_port() -> u16 {
+    587
+}
+fn default_smtp_tls() -> bool {
+    false
+}
+
+/// 手动 DNS 模式下等待用户添加的 TXT 记录（等待期非空，前端展示+复制）
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DnsTxtRecord {
+    pub name: String,
+    pub value: String,
+}
+
+/// 第三方网站证书监控（certd 的「站点证书监控」）：盯任意 host:port 的
+/// 对端证书到期时间，不动它的配置。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CertMonitor {
+    pub id: String,
+    pub host: String,
+    #[serde(default = "default_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub name: String,
+    /// idle | ok | expiring | expired | error
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub issuer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_checked: Option<i64>,
+    #[serde(default)]
+    pub last_error: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+fn default_port() -> u16 {
+    443
 }
 fn default_ca() -> String {
     "letsencrypt".into()
@@ -593,6 +736,16 @@ pub struct HostsEntry {
     pub domain: String,
     #[serde(default)]
     pub managed: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelInfo {
+    pub id: String,
+    pub port: u16,
+    pub url: Option<String>,
+    pub started_at: i64,
+    pub alive: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

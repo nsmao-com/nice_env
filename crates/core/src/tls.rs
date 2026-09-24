@@ -26,7 +26,7 @@ pub fn ensure_ca(paths: &Paths) -> Result<()> {
     if ca_key.exists() && ca_crt.exists() {
         return Ok(());
     }
-    let subject = "NiceServBay Local Root CA";
+    let subject = "NiceEnv Local Root CA";
     let key_pair = rcgen::KeyPair::generate()
         .map_err(|e| AppError::internal("生成 CA 密钥", e.to_string()))?;
     let mut params = rcgen::CertificateParams::new(vec![])
@@ -37,7 +37,7 @@ pub fn ensure_ca(paths: &Paths) -> Result<()> {
         .push(rcgen::DnType::CommonName, subject);
     params
         .distinguished_name
-        .push(rcgen::DnType::OrganizationName, "NiceServBay");
+        .push(rcgen::DnType::OrganizationName, "NiceEnv");
     params.not_before = now_minus(1);
     params.not_after = now_plus(CA_DAYS);
     params.key_usages = vec![
@@ -101,8 +101,10 @@ pub fn issue_site_cert(paths: &Paths, store: &Store, domains: &[String]) -> Resu
         .signed_by(&key_pair, &ca_cert, &ca_key)
         .map_err(|e| AppError::internal("签发站点证书", e.to_string()))?;
 
-    let crt_path = paths.certs().join("sites").join(format!("{primary}.crt"));
-    let key_path = paths.certs().join("sites").join(format!("{primary}.key"));
+    // 通配符域名带 `*`，Windows 文件名不允许 —— 落盘名做净化（SAN 里保留原样）
+    let file_stem = primary.replace('*', "_wildcard");
+    let crt_path = paths.certs().join("sites").join(format!("{file_stem}.crt"));
+    let key_path = paths.certs().join("sites").join(format!("{file_stem}.key"));
     std::fs::create_dir_all(paths.certs().join("sites"))?;
     write_with_backup(&crt_path, &certified.pem(), &paths.backup())?;
     write_with_backup(&key_path, &key_pair.serialize_pem(), &paths.backup())?;
@@ -160,22 +162,32 @@ pub fn trust_ca(paths: &Paths) -> Result<()> {
     }
 }
 
-/// CA 是否已信任（Windows: certutil 按 CN 查找 Root store）
+/// CA 是否已信任（Windows: certutil 按 CN 查找 Root store）。
+/// 历史安装的 CA 叫 "NiceServBay Local Root CA"，改名为 NiceEnv 后
+/// 两者都视为已信任——不然老用户会永远显示「未信任」。
 pub fn ca_trusted(_paths: &Paths) -> bool {
+    /// CN → certutil 查找时无法用通配，逐个名字查
+    const CA_CN_NEW: &str = "NiceEnv Local Root CA";
+    const CA_CN_LEGACY: &str = "NiceServBay Local Root CA";
     #[cfg(windows)]
     {
-        let Ok(out) = std::process::Command::new("certutil")
-            .args(["-verify", "-store", "Root", "NiceServBay Local Root CA"])
-            .output()
-        else {
-            return false;
-        };
-        let text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        text.contains("NiceServBay")
+        for cn in [CA_CN_NEW, CA_CN_LEGACY] {
+            let Ok(out) = std::process::Command::new("certutil")
+                .args(["-verify", "-store", "Root", cn])
+                .output()
+            else {
+                return false;
+            };
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            if text.contains(cn) {
+                return true;
+            }
+        }
+        false
     }
     #[cfg(not(windows))]
     {
@@ -191,7 +203,7 @@ pub fn list_certs(paths: &Paths, store: &Store) -> Result<Vec<CertRecord>> {
         let rec = CertRecord {
             id: "ca".into(),
             kind: "ca".into(),
-            subject: "NiceServBay Local Root CA".into(),
+            subject: "NiceEnv Local Root CA".into(),
             sans: vec![],
             not_before: to_ms(now_minus(1)),
             not_after: to_ms(now_plus(CA_DAYS)),
@@ -238,4 +250,212 @@ pub fn reissue_missing_site_certs(paths: &Paths, store: &Store) -> Result<Vec<St
         }
     }
     Ok(issued)
+}
+
+/* ================= PFX (PKCS#12) 导出 ================= */
+
+/// 把一段 PEM（可能是链）拆成 DER 列表
+fn pem_chain_to_certs(pem: &str) -> Result<Vec<p12_keystore::Certificate>> {
+    let mut out = Vec::new();
+    for block in pem.split("-----END CERTIFICATE-----") {
+        let b = block.trim();
+        if b.is_empty() {
+            continue;
+        }
+        let b64: String = b
+            .lines()
+            .filter(|l| !l.starts_with("-----"))
+            .collect();
+        use base64::Engine as _;
+        let der = base64::engine::general_purpose::STANDARD
+            .decode(b64.trim())
+            .map_err(|e| AppError::new("PFX_DECODE", format!("证书 PEM 解码失败：{e}")))?;
+        out.push(
+            p12_keystore::Certificate::from_der(&der)
+                .map_err(|e| AppError::new("PFX_DECODE", format!("证书 DER 解析失败：{e}")))?,
+        );
+    }
+    Ok(out)
+}
+
+/// 把某张本机证书（含私钥与证书链）导出为 PKCS#12 (.pfx)。
+/// Windows IIS / 部分设备导入只认这个格式。password 可为空（不加密）。
+pub fn export_pfx(
+    store: &Store,
+    cert_id: &str,
+    password: &str,
+    out_path: &std::path::Path,
+) -> Result<String> {
+    let rec = store
+        .list_certs()?
+        .into_iter()
+        .find(|c| c.id == cert_id)
+        .ok_or_else(|| AppError::new("NOT_FOUND", "证书不存在"))?;
+    let key_pem = std::fs::read_to_string(
+        rec.key_path
+            .as_deref()
+            .ok_or_else(|| AppError::new("PFX_NO_KEY", "该证书没有私钥，无法导出 PFX"))?,
+    )
+    .map_err(|e| AppError::io("读取私钥失败", e))?;
+    let cert_pem = std::fs::read_to_string(&rec.cert_path)
+        .map_err(|e| AppError::io("读取证书失败", e))?;
+
+    // 私钥 PEM → PKCS#8 DER
+    let key_b64: String = key_pem
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .collect();
+    use base64::Engine as _;
+    let key_der = base64::engine::general_purpose::STANDARD
+        .decode(key_b64.trim())
+        .map_err(|e| AppError::new("PFX_DECODE", format!("私钥 PEM 解码失败：{e}")))?;
+    let key = p12_keystore::PrivateKey::from_der(&key_der)
+        .map_err(|e| AppError::new("PFX_DECODE", format!("私钥解析失败：{e}")))?;
+    let certs = pem_chain_to_certs(&cert_pem)?;
+    if certs.is_empty() {
+        return Err(AppError::new("PFX_DECODE", "证书文件里没有证书"));
+    }
+
+    let chain = p12_keystore::PrivateKeyChain::new(rec.subject.clone(), key, certs);
+    let mut store12 = p12_keystore::KeyStore::new();
+    store12.add_entry(&rec.subject, p12_keystore::KeyStoreEntry::PrivateKeyChain(chain));
+    let pfx = store12
+        .writer(password)
+        .write()
+        .map_err(|e| AppError::new("PFX_BUILD", format!("生成 PFX 失败：{e}")))?;
+    if let Some(parent) = out_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(out_path, pfx).map_err(|e| AppError::io("写入 PFX 失败", e))?;
+    Ok(out_path.to_string_lossy().to_string())
+}
+
+/// 导出 DER（二进制 X.509，部分设备/中间件要这个格式）：取链里第一张（leaf）
+pub fn export_der(store: &Store, cert_id: &str, out_path: &std::path::Path) -> Result<String> {
+    let rec = store
+        .list_certs()?
+        .into_iter()
+        .find(|c| c.id == cert_id)
+        .ok_or_else(|| AppError::new("NOT_FOUND", "证书不存在"))?;
+    let pem = std::fs::read_to_string(&rec.cert_path).map_err(|e| AppError::io("读取证书失败", e))?;
+    let leaf = pem
+        .split("-----END CERTIFICATE-----")
+        .next()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| AppError::new("PFX_DECODE", "证书文件为空"))?;
+    let b64: String = leaf.lines().filter(|l| !l.starts_with("-----")).collect();
+    use base64::Engine as _;
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .map_err(|e| AppError::new("PFX_DECODE", format!("证书解码失败：{e}")))?;
+    if let Some(parent) = out_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(out_path, der).map_err(|e| AppError::io("写入 DER 失败", e))?;
+    Ok(out_path.to_string_lossy().to_string())
+}
+
+/// 导出 JKS（Java Keystore，Tomcat 等 Java 系中间件用）。
+/// JKS 规范要求密码 ≥ 6 字符，这里如实转述错误而不是悄悄放行。
+pub fn export_jks(
+    store: &Store,
+    cert_id: &str,
+    password: &str,
+    out_path: &std::path::Path,
+) -> Result<String> {
+    let rec = store
+        .list_certs()?
+        .into_iter()
+        .find(|c| c.id == cert_id)
+        .ok_or_else(|| AppError::new("NOT_FOUND", "证书不存在"))?;
+    let key_pem = std::fs::read_to_string(
+        rec.key_path
+            .as_deref()
+            .ok_or_else(|| AppError::new("JKS_NO_KEY", "该证书没有私钥，无法导出 JKS"))?,
+    )
+    .map_err(|e| AppError::io("读取私钥失败", e))?;
+    let cert_pem = std::fs::read_to_string(&rec.cert_path)
+        .map_err(|e| AppError::io("读取证书失败", e))?;
+    if password.chars().count() < 6 {
+        return Err(AppError::new(
+            "JKS_PASSWORD",
+            "JKS 密码至少 6 个字符（Java Keystore 规范）",
+        ));
+    }
+
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let key_b64: String = key_pem.lines().filter(|l| !l.starts_with("-----")).collect();
+    let key_der = b64
+        .decode(key_b64.trim())
+        .map_err(|e| AppError::new("JKS_DECODE", format!("私钥解码失败：{e}")))?;
+    let mut chain = Vec::new();
+    for block in cert_pem.split("-----END CERTIFICATE-----") {
+        let b = block.trim();
+        if b.is_empty() {
+            continue;
+        }
+        let c_b64: String = b.lines().filter(|l| !l.starts_with("-----")).collect();
+        let der = b64
+            .decode(c_b64.trim())
+            .map_err(|e| AppError::new("JKS_DECODE", format!("证书解码失败：{e}")))?;
+        chain.push(jks::Certificate {
+            cert_type: "X509".into(),
+            content: der,
+        });
+    }
+    if chain.is_empty() {
+        return Err(AppError::new("JKS_DECODE", "证书文件里没有证书"));
+    }
+
+    let mut ks = jks::KeyStore::new();
+    ks.set_private_key_entry(
+        &rec.subject,
+        jks::PrivateKeyEntry {
+            creation_time: std::time::SystemTime::now(),
+            private_key: key_der,
+            certificate_chain: chain,
+        },
+        password.as_bytes(),
+    )
+    .map_err(|e| AppError::new("JKS_BUILD", format!("构建 JKS 失败：{e}")))?;
+    let mut buf = Vec::new();
+    ks.store(&mut buf, password.as_bytes())
+        .map_err(|e| AppError::new("JKS_BUILD", format!("序列化 JKS 失败：{e}")))?;
+
+    if let Some(parent) = out_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(out_path, buf).map_err(|e| AppError::io("写入 JKS 失败", e))?;
+    Ok(out_path.to_string_lossy().to_string())
+}
+
+/// 导出 PEM 打包（证书链 + 私钥 拼一个 .pem，nginx / 迁移别家最顺手）
+pub fn export_pem_bundle(store: &Store, cert_id: &str, out_path: &std::path::Path) -> Result<String> {
+    let rec = store
+        .list_certs()?
+        .into_iter()
+        .find(|c| c.id == cert_id)
+        .ok_or_else(|| AppError::new("NOT_FOUND", "证书不存在"))?;
+    let key_pem = std::fs::read_to_string(
+        rec.key_path
+            .as_deref()
+            .ok_or_else(|| AppError::new("PEM_NO_KEY", "该证书没有私钥，无法打包"))?,
+    )
+    .map_err(|e| AppError::io("读取私钥失败", e))?;
+    let cert_pem = std::fs::read_to_string(&rec.cert_path)
+        .map_err(|e| AppError::io("读取证书失败", e))?;
+    let mut bundle = String::new();
+    if !cert_pem.ends_with('\n') {
+        bundle.push('\n');
+    }
+    bundle.push_str(&cert_pem);
+    bundle.push('\n');
+    bundle.push_str(&key_pem);
+    if let Some(parent) = out_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(out_path, bundle).map_err(|e| AppError::io("写入 PEM 失败", e))?;
+    Ok(out_path.to_string_lossy().to_string())
 }

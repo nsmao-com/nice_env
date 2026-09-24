@@ -100,9 +100,13 @@ impl Downloader {
         emit: &dyn Fn(crate::Event),
     ) -> Result<std::path::PathBuf> {
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
-            .connect_timeout(Duration::from_secs(20))
-            .user_agent("NiceServBay/0.1 (+local dev env manager)")
+            // 总时长放宽：慢速但仍在推进的下载（弱网 + 加速前缀）不该被掐断；
+            // 卡死的连接交给 read_timeout——20 秒没有任何数据就断开换下一个源，
+            // 不然被墙的直连要干等满超时，前端看起来像「卡在 0 B」
+            .timeout(Duration::from_secs(300))
+            .connect_timeout(Duration::from_secs(15))
+            .read_timeout(Duration::from_secs(20))
+            .user_agent("NiceEnv/0.1 (+local dev env manager)")
             .build()
             .map_err(|e| AppError::internal("创建 HTTP 客户端", e.to_string()))?;
 

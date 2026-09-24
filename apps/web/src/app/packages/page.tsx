@@ -46,6 +46,7 @@ import { PhpExtensionsDialog, PhpExtBadge } from "@/components/shared/php-extens
 import { ConfirmDialog } from "@/components/shared/misc";
 import { InstallDialog, type InstallTarget } from "@/components/shared/install-dialog";
 import { PathEnvToggle } from "@/components/shared/path-env-toggle";
+import { ServiceIcon } from "@/components/shared/service-icon";
 import { PageHeader } from "@/components/layout/app-shell";
 import { cmpVersionDesc } from "@/lib/utils";
 
@@ -67,6 +68,37 @@ const CATEGORY_ICONS: Record<string, React.ComponentType<{ className?: string; s
   "object-storage": HardDrive,
   other: FolderArchive,
 };
+
+/** 分类 → 大类归属（大类+小类两级筛选）；清单新出现的未知类别自动落进「其他」 */
+const CATEGORY_GROUP: Record<string, string> = {
+  "web-server": "web",
+  "service-mesh": "web",
+  runtime: "runtime",
+  database: "data",
+  cache: "data",
+  search: "data",
+  "object-storage": "data",
+  dns: "net",
+  ftp: "net",
+  mail: "net",
+  tunnel: "net",
+  ai: "ai",
+  "ai-coding": "ai",
+  tool: "tools",
+  container: "tools",
+  other: "other",
+};
+
+/** 大类展示顺序；只有清单里真正出现的才会出现 */
+const CATEGORY_GROUPS = [
+  { id: "web", icon: Server },
+  { id: "runtime", icon: Boxes },
+  { id: "data", icon: Database },
+  { id: "net", icon: Waypoints },
+  { id: "ai", icon: Sparkles },
+  { id: "tools", icon: Wrench },
+  { id: "other", icon: FolderArchive },
+] as const;
 
 /**
  * 服务语义完全由清单声明驱动：
@@ -168,25 +200,43 @@ export default function PackagesPage() {
     [services]
   );
 
-  const cats = React.useMemo(() => {
+  /** 大类（第一行胶囊）→ 小类（选中大类后出现的第二行胶囊）。
+      归属见 CATEGORY_GROUP；某个大类下只剩一个分类时不再显示小类行。 */
+  const catGroups = React.useMemo(() => {
+    type CatItem = { value: string; label: string; icon: React.ComponentType<{ className?: string; strokeWidth?: number }> };
     const used = new Set(groups.map((g) => g.category));
-    const known: { value: string; label: string; icon: React.ComponentType<{ className?: string; strokeWidth?: number }> }[] =
-      PACKAGE_CATEGORY_ORDER.filter((c) => used.has(c)).map((c) => ({
+    const byGroup = new Map<string, CatItem[]>();
+    const push = (gid: string, item: CatItem) => {
+      const arr = byGroup.get(gid) ?? [];
+      arr.push(item);
+      byGroup.set(gid, arr);
+    };
+    // 先按 schema 的固定顺序归位，保证小类行顺序稳定
+    for (const c of PACKAGE_CATEGORY_ORDER) {
+      if (!used.has(c)) continue;
+      push(CATEGORY_GROUP[c] ?? "other", {
         value: c,
         label: t(`packages.cat.${c}` as never),
         icon: CATEGORY_ICONS[c] ?? Boxes,
-      }));
-    // 清单里出现的未知类别也展示（前向兼容远程更新的清单）
-    for (const c of used) {
-      if (!PACKAGE_CATEGORY_ORDER.includes(c as PackageCategory)) {
-        known.push({ value: c, label: c, icon: Boxes });
-      }
+      });
     }
-    return [{ value: "all", label: t("packages.cat.all"), icon: LayoutGrid }, ...known];
+    // 清单里新出现的未知类别 → 归入「其他」（前向兼容远程更新的清单）
+    for (const c of used) {
+      if (PACKAGE_CATEGORY_ORDER.includes(c as PackageCategory)) continue;
+      push("other", { value: c, label: c, icon: Boxes });
+    }
+    return CATEGORY_GROUPS.filter((g) => byGroup.has(g.id)).map((g) => ({
+      id: g.id,
+      icon: g.icon,
+      subs: byGroup.get(g.id) ?? [],
+    }));
   }, [groups, t]);
 
-  const countOf = (v: string) =>
-    v === "all" ? filtered.length : filtered.filter((g) => g.category === v).length;
+  const catCount = (v: string) => filtered.filter((g) => g.category === v).length;
+  const groupCount = (gid: string) => {
+    const grp = catGroups.find((x) => x.id === gid);
+    return grp ? filtered.filter((g) => grp.subs.some((s) => s.value === g.category)).length : 0;
+  };
 
   const startAll = async () => {
     const targets = groups
@@ -243,7 +293,7 @@ export default function PackagesPage() {
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder={t("packages.search")}
-                className="h-8 w-52 rounded-lg border border-border bg-card pl-8 pr-3 text-[13px] outline-none transition-colors placeholder:text-faint focus:border-border-strong"
+                className="h-8 w-52 rounded-lg border border-border bg-card pl-8 pr-3 text-[13px] outline-none transition-colors placeholder:text-faint focus:border-primary"
               />
             </div>
             <Button variant="outline" size="sm" onClick={startAll}>
@@ -257,38 +307,97 @@ export default function PackagesPage() {
       />
 
       <Tabs defaultValue="all">
+        {/* 第一行：大类（全部 + 分组）；小类在选中大类后出现在第二行 */}
         <TabsList>
-          {cats.map((c) => (
-            <TabsTrigger key={c.value} value={c.value}>
-              <c.icon className="h-3.5 w-3.5" />
-              {c.label}
-              <span className="text-[10.5px] tabular text-faint">{countOf(c.value)}</span>
+          <TabsTrigger value="all">
+            <LayoutGrid className="h-3.5 w-3.5" />
+            {t("packages.cat.all")}
+            <span className="text-[10.5px] tabular text-faint">{filtered.length}</span>
+          </TabsTrigger>
+          {catGroups.map((g) => (
+            <TabsTrigger key={g.id} value={g.id}>
+              <g.icon className="h-3.5 w-3.5" />
+              {t(`packages.group.${g.id}` as never)}
+              <span className="text-[10.5px] tabular text-faint">{groupCount(g.id)}</span>
             </TabsTrigger>
           ))}
         </TabsList>
-        {cats.map((c) => (
-          <TabsContent key={c.value} value={c.value} className="mt-4">
-            <div className="flex flex-col gap-2.5">
-              <AnimatePresence initial={false}>
-                {(c.value === "all" ? filtered : filtered.filter((g) => g.category === c.value)).map((g) => (
-                  <PackageRow
-                    key={g.id}
-                    group={g}
-                    services={services}
-                    runningServices={runningServices}
-                    catalog={catalogById.get(g.id)}
-                    onRefresh={refreshCatalogs}
-                    onUninstall={(v) => setUninstallTarget({ id: g.id, version: v, name: g.displayName })}
-                    onInstall={(target) => setInstallTarget(target)}
-                  />
-                ))}
-              </AnimatePresence>
-            </div>
-            {countOf(c.value) === 0 && (
-              <p className="py-12 text-center text-[13px] text-faint">{t("packages.noMatches")}</p>
-            )}
-          </TabsContent>
-        ))}
+
+        <TabsContent value="all" className="mt-4">
+          <PackageRows
+            list={filtered}
+            services={services}
+            runningServices={runningServices}
+            catalogById={catalogById}
+            onRefresh={refreshCatalogs}
+            onUninstallTarget={(g, v) => setUninstallTarget({ id: g.id, version: v, name: g.displayName })}
+            onInstall={(target) => setInstallTarget(target)}
+            empty={t("packages.noMatches")}
+          />
+        </TabsContent>
+
+        {catGroups.map((g) => {
+          const rows = filtered.filter((x) => g.subs.some((s) => s.value === x.category));
+          return (
+            <TabsContent key={g.id} value={g.id} className="mt-4">
+              {g.subs.length > 1 ? (
+                // 小类行：嵌套一层 Tabs，默认「全部」，各小类独立过滤
+                <Tabs defaultValue="__all__">
+                  <TabsList className="mb-3">
+                    <TabsTrigger value="__all__">
+                      {t("packages.cat.all")}
+                      <span className="text-[10.5px] tabular text-faint">{rows.length}</span>
+                    </TabsTrigger>
+                    {g.subs.map((s) => (
+                      <TabsTrigger key={s.value} value={s.value}>
+                        <s.icon className="h-3.5 w-3.5" />
+                        {s.label}
+                        <span className="text-[10.5px] tabular text-faint">{catCount(s.value)}</span>
+                      </TabsTrigger>
+                    ))}
+                  </TabsList>
+                  <TabsContent value="__all__">
+                    <PackageRows
+                      list={rows}
+                      services={services}
+                      runningServices={runningServices}
+                      catalogById={catalogById}
+                      onRefresh={refreshCatalogs}
+                      onUninstallTarget={(grp, v) => setUninstallTarget({ id: grp.id, version: v, name: grp.displayName })}
+                      onInstall={(target) => setInstallTarget(target)}
+                      empty={t("packages.noMatches")}
+                    />
+                  </TabsContent>
+                  {g.subs.map((s) => (
+                    <TabsContent key={s.value} value={s.value}>
+                      <PackageRows
+                        list={filtered.filter((x) => x.category === s.value)}
+                        services={services}
+                        runningServices={runningServices}
+                        catalogById={catalogById}
+                        onRefresh={refreshCatalogs}
+                        onUninstallTarget={(grp, v) => setUninstallTarget({ id: grp.id, version: v, name: grp.displayName })}
+                        onInstall={(target) => setInstallTarget(target)}
+                        empty={t("packages.noMatches")}
+                      />
+                    </TabsContent>
+                  ))}
+                </Tabs>
+              ) : (
+                <PackageRows
+                  list={rows}
+                  services={services}
+                  runningServices={runningServices}
+                  catalogById={catalogById}
+                  onRefresh={refreshCatalogs}
+                  onUninstallTarget={(grp, v) => setUninstallTarget({ id: grp.id, version: v, name: grp.displayName })}
+                  onInstall={(target) => setInstallTarget(target)}
+                  empty={t("packages.noMatches")}
+                />
+              )}
+            </TabsContent>
+          );
+        })}
       </Tabs>
 
       <ConfirmDialog
@@ -355,11 +464,19 @@ function PackageRow({
   // （扩展的开关写进该版本的 php.ini，所以必须明确是哪一个版本）
   const [extVersion, setExtVersion] = React.useState<string | null>(null);
 
-  const Icon = CATEGORY_ICONS[group.category] ?? Boxes;
   const installedCount = group.versions.filter((v) => v.installed).length;
   const svc = group.isService;
   // 该包任一版本运行中 → 行首状态灯
   const anyRunning = group.versions.some((v) => (v.serviceId ? runningServices.has(v.serviceId) : false));
+  // 已装版本之外还有更高正式版 → 「可更新」徽标（离线判定：用清单内置版本表）
+  const hasNewer = React.useMemo(() => {
+    const installedVers = group.versions.filter((v) => v.installed).map((v) => v.version);
+    if (installedVers.length === 0) return false;
+    const maxInstalled = installedVers.reduce((a, b) => (cmpVersionDesc(a, b) < 0 ? b : a));
+    return group.versions.some(
+      (v) => !v.installed && !v.incompatible && cmpVersionDesc(v.version, maxInstalled) > 0
+    );
+  }, [group.versions]);
   /** 扩展面板作用的版本：优先「使用中」，其次任一已装版本 */
   const phpActiveVersion = React.useMemo(() => {
     const active = group.versions.find((v) => v.installed && v.active);
@@ -475,7 +592,10 @@ function PackageRow({
                 installedCount > 0 ? "border-primary/30 bg-primary-soft" : "border-border bg-card-2/60"
               )}
             >
-              <Icon className={cn("h-[18px] w-[18px]", installedCount > 0 ? "text-primary" : "text-faint")} strokeWidth={1.8} />
+              <ServiceIcon
+                id={group.id}
+                className={cn("h-[18px] w-[18px]", installedCount > 0 ? "" : "opacity-55")}
+              />
             </div>
             {anyRunning && (
               <span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-card bg-running" />
@@ -484,6 +604,14 @@ function PackageRow({
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <span className="truncate text-[13.5px] font-medium">{group.displayName}</span>
+              {hasNewer && (
+                <span
+                  className="rounded-full border border-info/40 px-1.5 py-px text-[9px] text-info"
+                  title={t("packages.hasNewer")}
+                >
+                  {t("packages.hasNewer")}
+                </span>
+              )}
               {installedCount > 0 && (
                 <Badge variant="outline" className="shrink-0 text-[10px]">
                   {installedCount}/{group.versions.length} {t("packages.installedCount")}
@@ -568,5 +696,48 @@ function PackageRow({
         />
       )}
     </motion.div>
+  );
+}
+
+/** 包组列表（大类/小类/全部 共用的渲染块） */
+function PackageRows({
+  list,
+  services,
+  runningServices,
+  catalogById,
+  onRefresh,
+  onUninstallTarget,
+  onInstall,
+  empty,
+}: {
+  list: PackageGroup[];
+  services: ServiceStatus[];
+  runningServices: Set<string>;
+  catalogById: ReturnType<typeof useVersionCatalogs>["byId"];
+  onRefresh: () => void;
+  onUninstallTarget: (g: PackageGroup, version: string) => void;
+  onInstall: (target: InstallTarget) => void;
+  empty: string;
+}) {
+  return (
+    <>
+      <div className="flex flex-col gap-2.5">
+        <AnimatePresence initial={false}>
+          {list.map((g) => (
+            <PackageRow
+              key={g.id}
+              group={g}
+              services={services}
+              runningServices={runningServices}
+              catalog={catalogById.get(g.id)}
+              onRefresh={onRefresh}
+              onUninstall={(v) => onUninstallTarget(g, v)}
+              onInstall={onInstall}
+            />
+          ))}
+        </AnimatePresence>
+      </div>
+      {list.length === 0 && <p className="py-12 text-center text-[13px] text-faint">{empty}</p>}
+    </>
   );
 }

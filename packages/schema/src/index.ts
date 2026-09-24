@@ -301,6 +301,12 @@ export const RewritePreset = z.enum([
   "wordpress",
   "spa-fallback",
   "next-export",
+  "symfony",
+  "yii2",
+  "codeigniter",
+  "cakephp",
+  "drupal",
+  "joomla",
 ]);
 export type RewritePreset = z.infer<typeof RewritePreset>;
 
@@ -335,6 +341,8 @@ export const Site = z.object({
   rewrite: RewritePreset,
   db: SiteDbBinding.nullable(),
   status: SiteState,
+  /** 站点级 PHP 覆盖（写入 rootDir/.user.ini）；仅 kind=php 时生效 */
+  phpOverrides: z.record(z.string(), z.string()).optional(),
   createdAt: z.number(),
   updatedAt: z.number(),
 });
@@ -449,7 +457,7 @@ export type ClosePortOutcome = z.infer<typeof ClosePortOutcome>;
 
 export const CertRecord = z.object({
   id: z.string(),
-  kind: z.enum(["ca", "site"]),
+  kind: z.enum(["ca", "site", "acme"]),
   subject: z.string(),
   sans: z.array(z.string()).default([]),
   notBefore: z.number(),
@@ -1236,3 +1244,127 @@ export const DownloadUpdateResult = z.object({
   sizeBytes: z.number(),
 });
 export type DownloadUpdateResult = z.infer<typeof DownloadUpdateResult>;
+
+/* ============ 证书自动化（ACME 签发 / 定时续签 / 多平台部署，参考 certd） ============ */
+
+/** 每个部署目标一次推送的结果 */
+export const DeployResult = z.object({
+  ok: z.boolean(),
+  message: z.string(),
+  at: z.number(),
+});
+export type DeployResult = z.infer<typeof DeployResult>;
+
+/** 部署目标。config 按平台放各自参数：
+ *  - btpanel:  url / apiSk / siteName（配置到指定站点）
+ *  - onepanel: url / token（上传到证书库）
+ *  - aliyun:   accessKeyId / accessKeySecret / region（上传 SSL 证书服务） */
+export const DeployTarget = z.object({
+  id: z.string(),
+  kind: z.string(), // btpanel | onepanel | aliyun
+  name: z.string(),
+  config: z.record(z.string(), z.string()).default({}),
+  lastResult: DeployResult.nullable().default(null),
+});
+export type DeployTarget = z.infer<typeof DeployTarget>;
+
+/** DNS 服务商凭据（DNS-01 验证） */
+export const DnsProvider = z.object({
+  kind: z.string(), // aliyun | cloudflare | dnspod
+  accessKey: z.string().default(""),
+  secret: z.string().default(""),
+});
+export type DnsProvider = z.infer<typeof DnsProvider>;
+
+/** 一次签发/续签执行的留痕（certd 式执行日志） */
+export const CertRunRecord = z.object({
+  at: z.number(),
+  ok: z.boolean(),
+  message: z.string(),
+  log: z.array(z.string()).default([]),
+});
+export type CertRunRecord = z.infer<typeof CertRunRecord>;
+
+/** 手动 DNS 模式等待用户添加的 TXT 记录 */
+export const DnsTxtRecord = z.object({
+  name: z.string(),
+  value: z.string(),
+});
+export type DnsTxtRecord = z.infer<typeof DnsTxtRecord>;
+
+/** 第三方网站证书监控（TLS 握手读对端证书链） */
+export const CertMonitor = z.object({
+  id: z.string(),
+  host: z.string(),
+  port: z.number().default(443),
+  name: z.string().default(""),
+  /** idle | ok | expiring | expired | error */
+  state: z.string().default("idle"),
+  issuer: z.string().default(""),
+  expiresAt: z.number().nullable().default(null),
+  lastChecked: z.number().nullable().default(null),
+  lastError: z.string().default(""),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+});
+export type CertMonitor = z.infer<typeof CertMonitor>;
+
+/** 一条自动化：签哪些域名、怎么验证、部署到哪、何时续 */
+export const CertAutomation = z.object({
+  id: z.string(),
+  name: z.string(),
+  domains: z.array(z.string()).default([]),
+  email: z.string().default(""),
+  /** letsencrypt | letsencrypt-staging | zerossl */
+  ca: z.string().default("letsencrypt"),
+  dns: DnsProvider.default({ kind: "aliyun", accessKey: "", secret: "" }),
+  /** 签发后写入本地站点证书并按需重载 */
+  deployLocal: z.boolean().default(true),
+  targets: z.array(DeployTarget).default([]),
+  enabled: z.boolean().default(true),
+  /** idle | issuing | ok | error */
+  state: z.string().default("idle"),
+  lastError: z.string().default(""),
+  certId: z.string().nullable().default(null),
+  issuedAt: z.number().nullable().default(null),
+  expiresAt: z.number().nullable().default(null),
+  /** 到期前 30 天自动续签；0 = 待首签 */
+  nextRenewAt: z.number().default(0),
+  lastRunAt: z.number().default(0),
+  /* ---- certd 式高级选项 ---- */
+  /** 证书私钥算法：ec256(默认) | ec384 | rsa2048 | rsa3072 | rsa4096 */
+  keyAlg: z.string().default("ec256"),
+  /** ACME 外部账号绑定（ZeroSSL / Google / BuyPass 需要） */
+  eabKid: z.string().default(""),
+  eabHmacKey: z.string().default(""),
+  /** TXT 写入后等待生效秒数 */
+  dnsWaitSec: z.number().default(0),
+  /** CNAME 代理验证：_acme-challenge.<域名> CNAME 到该授权域；支持 {domain} 占位符 */
+  cnameTarget: z.string().default(""),
+  /** 到期前多少天续签 */
+  renewDaysAhead: z.number().default(30),
+  retryTimes: z.number().default(3),
+  retryIntervalMin: z.number().default(30),
+  failCount: z.number().default(0),
+  /** none | generic | dingtalk | wecom | feishu | email */
+  notifyKind: z.string().default("none"),
+  notifyUrl: z.string().default(""),
+  notifySmtp: z
+    .object({
+      host: z.string().default(""),
+      port: z.number().default(587),
+      username: z.string().default(""),
+      password: z.string().default(""),
+      from: z.string().default(""),
+      to: z.string().default(""),
+      implicitTls: z.boolean().default(false),
+    })
+    .nullable()
+    .default(null),
+  runs: z.array(CertRunRecord).default([]),
+  /** 手动 DNS（kind=manual）等待用户添加的 TXT 记录 */
+  manualRecords: z.array(DnsTxtRecord).default([]),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+});
+export type CertAutomation = z.infer<typeof CertAutomation>;

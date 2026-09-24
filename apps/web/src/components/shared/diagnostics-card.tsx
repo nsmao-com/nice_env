@@ -70,8 +70,6 @@ export function DiagnosticsCard() {
 
   return (
     <div className="flex flex-col gap-3">
-      <p className="text-[12px] leading-relaxed text-muted">{t("diag.hint")}</p>
-
       <div className="flex items-center gap-2">
         <Button size="sm" variant="secondary" className="h-8" onClick={() => void build()} disabled={loading}>
           {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Stethoscope className="h-3.5 w-3.5" />}

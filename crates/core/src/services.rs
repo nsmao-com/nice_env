@@ -37,6 +37,8 @@ pub struct ServiceEntry {
 pub struct ServiceManager {
     pub services: Mutex<HashMap<String, Arc<ServiceEntry>>>,
     pub shutting_down: AtomicBool,
+    /// 状态变更历史（新→旧，最多 200 条）：(ts ms, serviceId, 变更说明)
+    pub history: Mutex<VecDeque<(i64, String, String)>>,
 }
 
 impl ServiceManager {
@@ -44,6 +46,7 @@ impl ServiceManager {
         Self {
             services: Mutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
+            history: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -106,15 +109,61 @@ impl ServiceManager {
             if matches!(state, ServiceState::Running | ServiceState::Starting) {
                 *e.last_error.lock() = None;
             }
-            *e.state.lock() = state;
+            let prev = {
+                let mut st = e.state.lock();
+                let prev = st.clone();
+                *st = state.clone();
+                prev
+            };
+            if prev != state {
+                self.push_history(id, format!("{prev:?} → {state:?}"));
+            }
         }
+    }
+
+    fn push_history(&self, id: &str, detail: String) {
+        let mut h = self.history.lock();
+        h.push_front((crate::services::now_ms(), id.to_string(), detail));
+        while h.len() > 200 {
+            h.pop_back();
+        }
+    }
+
+    /// 最近 n 条状态变更（新→旧）
+    pub fn history_tail(&self, n: usize) -> Vec<(i64, String, String)> {
+        self.history
+            .lock()
+            .iter()
+            .take(n)
+            .cloned()
+            .collect()
     }
 
     pub fn set_error(&self, id: &str, err: AppError) {
         if let Some(e) = self.entry(id) {
-            *e.last_error.lock() = Some(err);
-            *e.state.lock() = ServiceState::Error;
+            *e.last_error.lock() = Some(err.clone());
+            let prev = {
+                let mut st = e.state.lock();
+                let prev = st.clone();
+                *st = ServiceState::Error;
+                prev
+            };
+            if prev != ServiceState::Error {
+                self.push_history(id, format!("{prev:?} → Error：{}", err.message));
+            }
         }
+    }
+
+    /// 收养上次会话/CLI 留下的进程：恢复 pid 列表、Running 态与启动端口。
+    /// 收养后的组没有 Job 句柄，停止走「优雅命令 + 按 pid taskkill」兜底。
+    pub fn adopt(&self, id: &str, pids: &[u32], port: Option<u16>) {
+        let Some(e) = self.entry(id) else { return };
+        *e.pids.lock() = pids.to_vec();
+        *e.started_at.lock() = Some(std::time::SystemTime::now());
+        if let Some(p) = port {
+            *e.started_port.lock() = Some(p);
+        }
+        *e.state.lock() = ServiceState::Running;
     }
 
     /// 记录本次启动实际绑定的端口（停机命令据此寻址）
@@ -197,6 +246,16 @@ pub struct SpawnSpec {
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
     pub env: Vec<(String, String)>,
+    /// CLI（nsbctl）分离启动：Windows 用无 KILL_ON_JOB_CLOSE 的 Job，
+    /// 服务不随 CLI 进程退出而被杀；桌面 App 正常路径保持 false。
+    /// None = 跟随环境变量 NSB_CLI（CLI 二进制里会设为 1）。
+    pub detached: Option<bool>,
+}
+
+impl SpawnSpec {
+    pub fn detach_requested(&self) -> bool {
+        self.detached.unwrap_or_else(|| std::env::var("NSB_CLI").map(|v| v == "1").unwrap_or(false))
+    }
 }
 
 /// 启动子进程：CREATE_NO_WINDOW + 管道输出 → 日志线程 + Job Object
@@ -235,11 +294,14 @@ pub fn spawn_tracked(
         .map_err(|e| AppError::io(&format!("启动 {}", spec.program.display()), e))?;
     let pid = child.id();
 
-    // Job Object 归组（Windows 防孤儿）
+    // Job Object 归组（Windows 防孤儿）；CLI 分离模式用普通 Job
     if let Some(entry) = manager.entry(service_id) {
         let mut group = entry.group.lock();
         if group.is_none() {
-            *group = Some(platform::ProcessGroup::new().map_err(AppError::from)?);
+            *group = Some(
+                platform::ProcessGroup::new_detached(spec.detach_requested())
+                    .map_err(AppError::from)?,
+            );
         }
         group
             .as_mut()
@@ -469,4 +531,70 @@ pub fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/* ================= 端口自动回落 ================= */
+
+/// 在 desired 附近找一个空闲端口（desired+1 起，最多 tries 个）。
+/// avoid：同档位里其它服务已占用的端口（含本档刚回落过的），绝不撞车。
+/// 纯逻辑 + tcp 探测，测试可直接绑定真实 socket。
+pub fn find_free_port_near(desired: u16, avoid: &[u16], tries: u16) -> Option<u16> {
+    for off in 1..=tries {
+        let cand = desired + off;
+        if avoid.contains(&cand) || tcp_port_open(cand) {
+            continue;
+        }
+        return Some(cand);
+    }
+    None
+}
+
+/// 「端口被占且开了自动回落」时的统一处理：
+/// 找到回落端口并**写成端口覆盖**（重启后仍用同一端口，连接串稳定）。
+/// 设置关闭或找不到空闲端口时返回 None（调用方继续走原有的 PORT_IN_USE 报错）。
+pub fn fallback_port_for(
+    store: &Store,
+    key: &str,
+    desired: u16,
+    avoid: &[u16],
+) -> Option<u16> {
+    let enabled = store
+        .get_setting("autoFallbackPort")
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    if !enabled {
+        return None;
+    }
+    let found = find_free_port_near(desired, avoid, 32)?;
+    store.set_port_override(key, Some(found)).ok()?;
+    Some(found)
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+
+    #[test]
+    fn skips_taken_and_avoid_ports() {
+        // 占住 desired+2
+        let l1 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let taken = l1.local_addr().unwrap().port();
+        let desired = taken - 2;
+
+        // desired 本身空闲（没人听）→ 应返回 desired+1？不：desired 空闲不属于本函数语义，
+        // 本函数从 desired+1 起找。这里 desired+1 = taken-1 空闲 → 命中
+        let got = find_free_port_near(desired, &[], 8);
+        assert_eq!(got, Some(desired + 1));
+
+        // avoid 挡掉 desired+1、desired+2 → 返回 desired+3
+        let got = find_free_port_near(desired, &[desired + 1, desired + 2], 8);
+        assert_eq!(got, Some(desired + 3));
+    }
+
+    #[test]
+    fn returns_none_when_range_exhausted() {
+        // avoid 覆盖整个搜索窗 → None
+        let avoid: Vec<u16> = (1..=64).map(|o| 40000u16 + o).collect();
+        assert_eq!(find_free_port_near(40000, &avoid, 64), None);
+    }
 }

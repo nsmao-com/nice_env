@@ -1,4 +1,4 @@
-# NiceServBay — 本地开发环境集成管理器
+# NiceEnv — 本地开发环境集成管理器
 
 Windows + macOS 一站式本地开发环境管理器（对标 ServBay / FlyEnv / phpStudy，交互与视觉更现代）。
 Tauri 2 + Rust 后端能力 + Next.js (App Router, 静态导出) 前端。
@@ -203,7 +203,7 @@ nginx 80/443 · apache 8080/8443 · php-cgi 9100+ · MySQL 3306 · PostgreSQL 54
 
 ## 4. 安全红线（本机测试）
 
-- 独立数据目录（`{LocalAppData}/NiceServBay`，冒烟测试用 `.smoke-home`），绝不读写 FlyEnv 目录
+- 独立数据目录（`{LocalAppData}/NiceEnv`，冒烟测试用 `.smoke-home`），绝不读写 FlyEnv 目录
 - 默认端口走标准档（80/3306/6379…），但本机已有环境占用时会**明确报错并给出占用进程**，
   绝不静默改端口；要并存可在设置切安全档（8080/23306/26379…，避开 FlyEnv/Clash Party 占用的 7890 等）
 - 冒烟测试强制切到安全档并关掉「自动释放端口」，保证 **--smoke-test 全程不结束任何进程**

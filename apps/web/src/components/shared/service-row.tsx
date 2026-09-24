@@ -9,6 +9,7 @@ import type { ServiceStatus } from "@nsb/schema";
 import { cn, fmtUptime } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { ServiceSwitch } from "./service-switch";
+import { ServiceIcon } from "./service-icon";
 import { StatusLight } from "./status-light";
 import { useT } from "@/lib/store";
 import { useInvalidate, toastError, toastPortConflict } from "@/lib/hooks";
@@ -82,6 +83,8 @@ export function ServiceRow({ service }: { service: ServiceStatus }) {
       )}
     >
       <StatusLight state={service.state} size={7} />
+
+      <ServiceIcon id={service.id} className="h-4 w-4" />
 
       <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{service.label}</span>
 

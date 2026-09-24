@@ -31,6 +31,21 @@ p256 = { version = "0.14.0", features = ["ecdsa", "pem"] }
 hmac = "0.13.0"
 sha1 = "0.11.0"
 md-5 = "0.11.0"
+russh-sftp = "3.0.0"
+rsa = { version = "0.9.10", features = ["pem"] }
+russh = { version = "0.63.3", default-features = false, features = ["ring"] }
+p12-keystore = "0.3.2"
+tokio-rustls = "0.26.5"
+rustls = { version = "0.23.45", features = ["ring"] }
+x509-parser = "0.18.1"
+jks = { version = "0.3.3", default-features = false, features = ["rand"] }
+# 证书到期通知邮件（certdeploy.rs 的 AsyncSmtpTransport relay/starttls_relay）
+lettre = { version = "0.11", default-features = false, features = [
+  "builder",
+  "smtp-transport",
+  "tokio1",
+  "tokio1-native-tls",
+] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

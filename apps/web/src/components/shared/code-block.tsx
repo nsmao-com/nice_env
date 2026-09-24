@@ -2,9 +2,12 @@
 
 import * as React from "react";
 import { Check, Copy, Hash, AlignLeft, WrapText, Sparkles } from "lucide-react";
+import { useTheme } from "next-themes";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/store";
 import { useUI } from "@/lib/store";
+import { parseHex } from "@/lib/appearance";
+import { CODE_THEME_OPTIONS, type CodePalette } from "@nsb/schema";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 
 /* ============================================================
@@ -12,6 +15,10 @@ import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip
    纯前端实现、零依赖 —— 只覆盖本地环境管理器里真正会出现的
    几种语法（nginx.conf / ini / shell / json / yaml / php / sql / 日志），
    够用且不会为了高亮引入几百 KB 的完整 parser。
+
+   配色：RULES 产出语义 token（注释/关键字/字符串…），具体颜色由
+   设置里的代码主题（CODE_THEME_OPTIONS）通过 CSS 变量注入，
+   支持跟随界面明暗与自定义背景色。
    ============================================================ */
 
 export type CodeLang =
@@ -41,9 +48,12 @@ const LANG_LABEL: Record<CodeLang, string> = {
 
 /* ---------- 语法着色 ---------- */
 
+/** 语义 token 种类；颜色见 globals.css 的 .ck-*（由主题变量驱动） */
+type TokenKind = "comment" | "key" | "keyword" | "string" | "number" | "variable" | "strong" | "";
+
 interface Rule {
   re: RegExp;
-  cls: string;
+  tk: TokenKind;
 }
 
 /**
@@ -52,80 +62,80 @@ interface Rule {
  */
 const RULES: Record<Exclude<CodeLang, "plain">, Rule[]> = {
   nginx: [
-    { re: /(^|\s)(#.*)$/m, cls: "text-faint italic" },
-    { re: /\$[a-zA-Z_]\w*/g, cls: "text-info" },
-    { re: /\b(server|location|upstream|http|events|map|if|return|rewrite|proxy_pass|fastcgi_pass|listen|server_name|root|index|include|set|add_header|try_files|error_page|ssl_certificate|ssl_certificate_key|worker_processes|worker_connections|keepalive_timeout|client_max_body_size|gzip|expires|deny|allow|alias|proxy_set_header|fastcgi_param)\b/g, cls: "text-primary" },
-    { re: /\b\d+(\.\d+)?[kKmMgG]?\b/g, cls: "text-warn" },
-    { re: /"[^"]*"|'[^']*'/g, cls: "text-running" },
+    { re: /(^|\s)(#.*)$/m, tk: "comment" },
+    { re: /\$[a-zA-Z_]\w*/g, tk: "variable" },
+    { re: /\b(server|location|upstream|http|events|map|if|return|rewrite|proxy_pass|fastcgi_pass|listen|server_name|root|index|include|set|add_header|try_files|error_page|ssl_certificate|ssl_certificate_key|worker_processes|worker_connections|keepalive_timeout|client_max_body_size|gzip|expires|deny|allow|alias|proxy_set_header|fastcgi_param)\b/g, tk: "keyword" },
+    { re: /\b\d+(\.\d+)?[kKmMgG]?\b/g, tk: "number" },
+    { re: /"[^"]*"|'[^']*'/g, tk: "string" },
   ],
   ini: [
-    { re: /(^|\s)([;#].*)$/gm, cls: "text-faint italic" },
-    { re: /^\s*\[[^\]]+\]/gm, cls: "text-primary font-medium" },
-    { re: /^[A-Za-z_][\w.\-]*(?=\s*=)/gm, cls: "text-info" },
-    { re: /\b(on|off|true|false|yes|no|1|0)\b/gi, cls: "text-warn" },
-    { re: /"[^"]*"|'[^']*'/g, cls: "text-running" },
+    { re: /(^|\s)([;#].*)$/gm, tk: "comment" },
+    { re: /^\s*\[[^\]]+\]/gm, tk: "keyword" },
+    { re: /^[A-Za-z_][\w.\-]*(?=\s*=)/gm, tk: "key" },
+    { re: /\b(on|off|true|false|yes|no|1|0)\b/gi, tk: "number" },
+    { re: /"[^"]*"|'[^']*'/g, tk: "string" },
   ],
   json: [
-    { re: /"(?:[^"\\]|\\.)*"(?=\s*:)/g, cls: "text-info" },
-    { re: /"(?:[^"\\]|\\.)*"/g, cls: "text-running" },
-    { re: /\b(true|false|null)\b/g, cls: "text-primary font-medium" },
-    { re: /-?\b\d+(\.\d+)?([eE][+-]?\d+)?\b/g, cls: "text-warn" },
+    { re: /"(?:[^"\\]|\\.)*"(?=\s*:)/g, tk: "key" },
+    { re: /"(?:[^"\\]|\\.)*"/g, tk: "string" },
+    { re: /\b(true|false|null)\b/g, tk: "keyword" },
+    { re: /-?\b\d+(\.\d+)?([eE][+-]?\d+)?\b/g, tk: "number" },
   ],
   yaml: [
-    { re: /(^|\s)(#.*)$/gm, cls: "text-faint italic" },
-    { re: /^(\s*)([\w.\-/]+)(?=\s*:)/gm, cls: "text-info" },
-    { re: /(:\s*)("[^"]*"|'[^']*')/g, cls: "text-running" },
-    { re: /\b(true|false|null|yes|no|on|off)\b/gi, cls: "text-primary" },
-    { re: /\b\d+(\.\d+)?\b/g, cls: "text-warn" },
-    { re: /^\s*-\s/gm, cls: "text-faint" },
+    { re: /(^|\s)(#.*)$/gm, tk: "comment" },
+    { re: /^(\s*)([\w.\-/]+)(?=\s*:)/gm, tk: "key" },
+    { re: /(:\s*)("[^"]*"|'[^']*')/g, tk: "string" },
+    { re: /\b(true|false|null|yes|no|on|off)\b/gi, tk: "keyword" },
+    { re: /\b\d+(\.\d+)?\b/g, tk: "number" },
+    { re: /^\s*-\s/gm, tk: "comment" },
   ],
   shell: [
-    { re: /(^|\s)(#.*)$/gm, cls: "text-faint italic" },
-    { re: /\b(PATH|HOME|USER|SHELL|PWD)\b/g, cls: "text-info" },
-    { re: /\$[\w{}]+/g, cls: "text-info" },
-    { re: /\b(export|set|source|cd|echo|if|then|else|fi|for|do|done|foreach|function|\$env:|Get-|Set-|Import-|Start-)\b/gi, cls: "text-primary" },
-    { re: /"[^"]*"|'[^']*'/g, cls: "text-running" },
-    { re: /\b\d+\b/g, cls: "text-warn" },
+    { re: /(^|\s)(#.*)$/gm, tk: "comment" },
+    { re: /\b(PATH|HOME|USER|SHELL|PWD)\b/g, tk: "variable" },
+    { re: /\$[\w{}]+/g, tk: "variable" },
+    { re: /\b(export|set|source|cd|echo|if|then|else|fi|for|do|done|foreach|function|\$env:|Get-|Set-|Import-|Start-)\b/gi, tk: "keyword" },
+    { re: /"[^"]*"|'[^']*'/g, tk: "string" },
+    { re: /\b\d+\b/g, tk: "number" },
   ],
   php: [
-    { re: /(^|\s)(\/\/.*|\/\*[\s\S]*?\*\/|#.*)$/gm, cls: "text-faint italic" },
-    { re: /<\?php|<\?=/g, cls: "text-primary font-semibold" },
-    { re: /\$[a-zA-Z_]\w*/g, cls: "text-info" },
-    { re: /\b(function|class|public|private|protected|static|return|new|echo|if|else|foreach|for|while|try|catch|throw|namespace|use|extends|implements|array|fn|match)\b/g, cls: "text-primary" },
-    { re: /\b(true|false|null|TRUE|FALSE|NULL)\b/g, cls: "text-warn" },
-    { re: /"[^"]*"|'[^']*'/g, cls: "text-running" },
-    { re: /\b\d+(\.\d+)?\b/g, cls: "text-warn" },
+    { re: /(^|\s)(\/\/.*|\/\*[\s\S]*?\*\/|#.*)$/gm, tk: "comment" },
+    { re: /<\?php|<\?=/g, tk: "keyword" },
+    { re: /\$[a-zA-Z_]\w*/g, tk: "variable" },
+    { re: /\b(function|class|public|private|protected|static|return|new|echo|if|else|foreach|for|while|try|catch|throw|namespace|use|extends|implements|array|fn|match)\b/g, tk: "keyword" },
+    { re: /\b(true|false|null|TRUE|FALSE|NULL)\b/g, tk: "number" },
+    { re: /"[^"]*"|'[^']*'/g, tk: "string" },
+    { re: /\b\d+(\.\d+)?\b/g, tk: "number" },
   ],
   sql: [
-    { re: /--[^\n]*/g, cls: "text-faint italic" },
-    { re: /\b(SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|TABLE|DATABASE|USER|GRANT|REVOKE|FROM|WHERE|VALUES|INTO|SET|IDENTIFIED|BY|PRIVILEGES|ON|EXISTS|IF|NOT|DEFAULT|CHARACTER|COLLATE|PRIMARY|KEY|INDEX|LIMIT|ORDER|GROUP)\b/gi, cls: "text-primary" },
-    { re: /"[^"]*"|'[^']*'|`[^`]*`/g, cls: "text-running" },
-    { re: /\b\d+(\.\d+)?\b/g, cls: "text-warn" },
+    { re: /--[^\n]*/g, tk: "comment" },
+    { re: /\b(SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|TABLE|DATABASE|USER|GRANT|REVOKE|FROM|WHERE|VALUES|INTO|SET|IDENTIFIED|BY|PRIVILEGES|ON|EXISTS|IF|NOT|DEFAULT|CHARACTER|COLLATE|PRIMARY|KEY|INDEX|LIMIT|ORDER|GROUP)\b/gi, tk: "keyword" },
+    { re: /"[^"]*"|'[^']*'|`[^`]*`/g, tk: "string" },
+    { re: /\b\d+(\.\d+)?\b/g, tk: "number" },
   ],
   env: [
-    { re: /(^|\s)(#.*)$/gm, cls: "text-faint italic" },
-    { re: /^[A-Z][A-Z0-9_]*(?==)/gm, cls: "text-info" },
-    { re: /=.*$/gm, cls: "text-running" },
+    { re: /(^|\s)(#.*)$/gm, tk: "comment" },
+    { re: /^[A-Z][A-Z0-9_]*(?==)/gm, tk: "key" },
+    { re: /=.*$/gm, tk: "string" },
   ],
   markdown: [
     // 标题 → 重一点，正文层次才看得出来
-    { re: /^#{1,6} .*$/gm, cls: "text-foreground font-semibold" },
-    { re: /^\s*[-*+] /gm, cls: "text-primary" },
-    { re: /^\s*> .*$/gm, cls: "text-muted italic" },
-    { re: /`[^`]*`/g, cls: "text-running" },
-    { re: /^```.*$/gm, cls: "text-faint" },
-    { re: /\[[^\]]*\]\([^)]*\)/g, cls: "text-info" },
-    { re: /^\|.*\|$/gm, cls: "text-secondary" },
-    { re: /\*\*[^*]+\*\*/g, cls: "text-foreground font-medium" },
+    { re: /^#{1,6} .*$/gm, tk: "strong" },
+    { re: /^\s*[-*+] /gm, tk: "keyword" },
+    { re: /^\s*> .*$/gm, tk: "comment" },
+    { re: /`[^`]*`/g, tk: "string" },
+    { re: /^```.*$/gm, tk: "comment" },
+    { re: /\[[^\]]*\]\([^)]*\)/g, tk: "variable" },
+    { re: /^\|.*\|$/gm, tk: "key" },
+    { re: /\*\*[^*]+\*\*/g, tk: "strong" },
   ],
 };
 
-/** 把一段代码切成 [{text, cls}] —— 逐行处理，保证行号与内容对应 */
-function tokenize(line: string, lang: CodeLang): { text: string; cls: string }[] {
-  if (lang === "plain") return [{ text: line, cls: "" }];
+/** 把一段代码切成 [{text, tk}] —— 逐行处理，保证行号与内容对应 */
+function tokenize(line: string, lang: CodeLang): { text: string; tk: TokenKind }[] {
+  if (lang === "plain") return [{ text: line, tk: "" }];
   const rules = RULES[lang];
-  // 用一个「占位」数组记录每个字符命中的 class，后写的规则不覆盖先写的（先写优先级高）
-  const owner: (string | null)[] = new Array(line.length).fill(null);
+  // 用一个「占位」数组记录每个字符命中的 token，后写的规则不覆盖先写的（先写优先级高）
+  const owner: (TokenKind | null)[] = new Array(line.length).fill(null);
   for (const rule of rules) {
     const re = new RegExp(rule.re.source, rule.re.flags.includes("g") ? rule.re.flags : rule.re.flags + "g");
     let m: RegExpExecArray | null;
@@ -139,25 +149,55 @@ function tokenize(line: string, lang: CodeLang): { text: string; cls: string }[]
       const start = m.index + lead;
       const end = m.index + m[0].length;
       for (let i = start; i < end; i++) {
-        if (owner[i] === null) owner[i] = rule.cls;
+        if (owner[i] === null) owner[i] = rule.tk;
       }
     }
   }
-  const out: { text: string; cls: string }[] = [];
+  const out: { text: string; tk: TokenKind }[] = [];
   let cur = "";
-  let curCls: string | null = null;
+  let curTk: TokenKind | null = null;
   for (let i = 0; i < line.length; i++) {
-    const cls = owner[i];
-    if (cls === curCls) {
+    const tk = owner[i];
+    if (tk === curTk) {
       cur += line[i];
     } else {
-      if (cur) out.push({ text: cur, cls: curCls ?? "" });
+      if (cur) out.push({ text: cur, tk: curTk ?? "" });
       cur = line[i];
-      curCls = cls;
+      curTk = tk;
     }
   }
-  if (cur) out.push({ text: cur, cls: curCls ?? "" });
-  return out.length > 0 ? out : [{ text: "", cls: "" }];
+  if (cur) out.push({ text: cur, tk: curTk ?? "" });
+  return out.length > 0 ? out : [{ text: "", tk: "" }];
+}
+
+/* ---------- 配色 ---------- */
+
+type ThemeOption = { id: string; label: string; dark?: boolean; colors?: CodePalette };
+const THEME_LIST = CODE_THEME_OPTIONS as readonly ThemeOption[];
+
+function themeColors(id: string): CodePalette | undefined {
+  return THEME_LIST.find((t) => t.id === id)?.colors;
+}
+
+/** #RRGGBB 感知亮度（0–1）：自定义背景时用来挑前景色组 */
+function bgLuminance(hex: string): number {
+  const p = parseHex(hex);
+  if (!p) return 1;
+  return (0.2126 * p.r + 0.7152 * p.g + 0.0722 * p.b) / 255;
+}
+
+function resolveCodePalette(themeId: string, customBg: string, resolvedDark: boolean): { colors: CodePalette; bg: string } {
+  const dark = themeColors("dark")!;
+  const light = themeColors("light")!;
+  const preset = themeId === "auto" ? undefined : themeColors(themeId);
+  let colors = preset ?? (resolvedDark ? dark : light);
+  let bg = colors.bg;
+  if (customBg) {
+    // 背景被用户改掉：按亮度换一套前景/语义色，保证可读
+    bg = customBg;
+    colors = bgLuminance(customBg) >= 0.5 ? light : dark;
+  }
+  return { colors, bg };
 }
 
 /* ---------- 格式化 ---------- */
@@ -228,6 +268,7 @@ export function CodeBlock({
   compact?: boolean;
 }) {
   const t = useT();
+  const { resolvedTheme } = useTheme();
   const settingsDefaults = useUI((s) => s.codeDefaults);
   const [copied, setCopied] = React.useState(false);
   const [showNum, setShowNum] = React.useState(showLineNumbers ?? settingsDefaults.lineNumbers);
@@ -246,6 +287,23 @@ export function CodeBlock({
   const lines = React.useMemo(() => active.split("\n"), [active]);
   const tokenized = React.useMemo(() => lines.map((l) => tokenize(l, lang)), [lines, lang]);
 
+  // 主题解析放渲染期：设置或明暗切换立刻生效，无需 effect
+  const { colors, bg } = resolveCodePalette(
+    settingsDefaults.theme,
+    settingsDefaults.bg,
+    resolvedTheme === "dark"
+  );
+  const paletteVars = {
+    "--code-bg": bg,
+    "--code-fg": colors.fg,
+    "--code-comment": colors.comment,
+    "--code-key": colors.key,
+    "--code-keyword": colors.keyword,
+    "--code-string": colors.string,
+    "--code-number": colors.number,
+    "--code-variable": colors.variable,
+  } as React.CSSProperties;
+
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(active);
@@ -257,13 +315,18 @@ export function CodeBlock({
   };
 
   return (
-    <div className={cn("group/code overflow-hidden rounded-xl border border-border bg-[#0A0C0F]", className)}>
+    <div
+      className={cn("nsb-code group/code overflow-hidden rounded-xl border border-border", className)}
+      style={paletteVars}
+    >
       {/* 工具条 */}
-      <div className="flex items-center gap-2 border-b border-white/[0.06] bg-white/[0.03] px-2.5 py-1.5">
+      <div className="flex items-center gap-2 border-b border-[color-mix(in_srgb,var(--code-fg)_9%,transparent)] bg-[color-mix(in_srgb,var(--code-fg)_4%,transparent)] px-2.5 py-1.5">
         {title ? (
-          <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-secondary">{title}</span>
+          <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-[color-mix(in_srgb,var(--code-fg)_72%,transparent)]">
+            {title}
+          </span>
         ) : (
-          <span className="min-w-0 flex-1 font-mono text-[10px] uppercase tracking-wide text-faint">
+          <span className="min-w-0 flex-1 font-mono text-[10px] uppercase tracking-wide text-[color-mix(in_srgb,var(--code-fg)_45%,transparent)]">
             {LANG_LABEL[lang]}
           </span>
         )}
@@ -279,7 +342,9 @@ export function CodeBlock({
                 }}
                 className={cn(
                   "flex h-6 w-6 items-center justify-center rounded-md transition-colors",
-                  formatted ? "bg-primary/15 text-primary" : "text-faint hover:bg-white/[0.06] hover:text-secondary"
+                  formatted
+                    ? "bg-primary/15 text-primary"
+                    : "text-[color-mix(in_srgb,var(--code-fg)_45%,transparent)] hover:bg-[color-mix(in_srgb,var(--code-fg)_8%,transparent)] hover:text-[color-mix(in_srgb,var(--code-fg)_72%,transparent)]"
                 )}
               >
                 <Sparkles className="h-3 w-3" />
@@ -297,7 +362,9 @@ export function CodeBlock({
                 }}
                 className={cn(
                   "flex h-6 w-6 items-center justify-center rounded-md transition-colors",
-                  showNum ? "bg-primary/15 text-primary" : "text-faint hover:bg-white/[0.06] hover:text-secondary"
+                  showNum
+                    ? "bg-primary/15 text-primary"
+                    : "text-[color-mix(in_srgb,var(--code-fg)_45%,transparent)] hover:bg-[color-mix(in_srgb,var(--code-fg)_8%,transparent)] hover:text-[color-mix(in_srgb,var(--code-fg)_72%,transparent)]"
                 )}
               >
                 <Hash className="h-3 w-3" />
@@ -315,7 +382,9 @@ export function CodeBlock({
                 }}
                 className={cn(
                   "flex h-6 w-6 items-center justify-center rounded-md transition-colors",
-                  doWrap ? "bg-primary/15 text-primary" : "text-faint hover:bg-white/[0.06] hover:text-secondary"
+                  doWrap
+                    ? "bg-primary/15 text-primary"
+                    : "text-[color-mix(in_srgb,var(--code-fg)_45%,transparent)] hover:bg-[color-mix(in_srgb,var(--code-fg)_8%,transparent)] hover:text-[color-mix(in_srgb,var(--code-fg)_72%,transparent)]"
                 )}
               >
                 {doWrap ? <WrapText className="h-3 w-3" /> : <AlignLeft className="h-3 w-3" />}
@@ -328,7 +397,7 @@ export function CodeBlock({
               <button
                 type="button"
                 onClick={copy}
-                className="flex h-6 w-6 items-center justify-center rounded-md text-faint transition-colors hover:bg-white/[0.06] hover:text-secondary"
+                className="flex h-6 w-6 items-center justify-center rounded-md text-[color-mix(in_srgb,var(--code-fg)_45%,transparent)] transition-colors hover:bg-[color-mix(in_srgb,var(--code-fg)_8%,transparent)] hover:text-[color-mix(in_srgb,var(--code-fg)_72%,transparent)]"
               >
                 {copied ? <Check className="h-3 w-3 text-running" /> : <Copy className="h-3 w-3" />}
               </button>
@@ -347,13 +416,13 @@ export function CodeBlock({
           {tokenized.map((tokens, i) => (
             <div key={i} className="flex gap-3 leading-relaxed">
               {showNum && (
-                <span className="w-7 shrink-0 select-none text-right font-mono text-[0.85em] tabular text-white/20">
+                <span className="w-7 shrink-0 select-none text-right font-mono text-[0.85em] tabular text-[color-mix(in_srgb,var(--code-fg)_30%,transparent)]">
                   {i + 1}
                 </span>
               )}
-              <code className="min-w-0 flex-1 font-mono text-secondary">
+              <code className="min-w-0 flex-1 font-mono text-[var(--code-fg)]">
                 {tokens.map((tk, j) => (
-                  <span key={j} className={tk.cls}>
+                  <span key={j} className={tk.tk ? `ck-${tk.tk}` : undefined}>
                     {tk.text}
                   </span>
                 ))}

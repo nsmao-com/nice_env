@@ -281,7 +281,7 @@ export function UpdateDialog({
                   <div className="flex min-w-0 flex-1 flex-col gap-1">
                     <div className="flex items-center justify-between gap-2 text-[11.5px]">
                       <span className="truncate font-mono text-secondary">
-                        {rel?.assetName ?? "NiceServBay setup"}
+                        {rel?.assetName ?? "NiceEnv setup"}
                       </span>
                       <span className="shrink-0 tabular text-faint">
                         {fmtBytes(progress.received)}

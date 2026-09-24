@@ -37,6 +37,7 @@ impl Store {
                 https INTEGER NOT NULL DEFAULT 0,
                 rewrite TEXT NOT NULL,
                 db TEXT,                        -- JSON or NULL
+                php_overrides TEXT,             -- JSON or NULL（站点级 PHP 覆盖）
                 created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS certs(
@@ -62,8 +63,22 @@ impl Store {
             CREATE TABLE IF NOT EXISTS cert_automations(
                 id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS cert_monitors(
+                id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS cron_jobs(
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, command TEXT NOT NULL,
+                interval_min INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL,
+                last_run_at INTEGER, last_exit TEXT, last_output TEXT
+            );
             "#,
         )?;
+        // 轻量迁移：旧库补列（已存在则报错被忽略）
+        let _ = conn.execute(
+            "ALTER TABLE sites ADD COLUMN php_overrides TEXT",
+            [],
+        );
         Ok(Self {
             conn: parking_lot::Mutex::new(conn),
         })
@@ -176,11 +191,11 @@ impl Store {
     pub fn save_site(&self, s: &Site) -> Result<()> {
         let conn = self.conn.lock();
         conn.execute(
-            "INSERT INTO sites(id,name,domains,root_dir,runtime,https,rewrite,db,created_at,updated_at)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+            "INSERT INTO sites(id,name,domains,root_dir,runtime,https,rewrite,db,php_overrides,created_at,updated_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
              ON CONFLICT(id) DO UPDATE SET
                name=?2, domains=?3, root_dir=?4, runtime=?5, https=?6,
-               rewrite=?7, db=?8, updated_at=?10",
+               rewrite=?7, db=?8, php_overrides=?9, updated_at=?11",
             params![
                 s.id,
                 s.name,
@@ -190,6 +205,7 @@ impl Store {
                 s.https as i32,
                 serde_json::to_string(&s.rewrite).unwrap(),
                 s.db.as_ref().map(|d| serde_json::to_string(d).unwrap()),
+                s.php_overrides.as_ref().map(|o| serde_json::to_string(o).unwrap()),
                 s.created_at,
                 s.updated_at
             ],
@@ -206,7 +222,7 @@ impl Store {
     pub fn list_sites(&self) -> Result<Vec<Site>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT id,name,domains,root_dir,runtime,https,rewrite,db,created_at,updated_at
+            "SELECT id,name,domains,root_dir,runtime,https,rewrite,db,php_overrides,created_at,updated_at
              FROM sites ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -214,6 +230,7 @@ impl Store {
             let runtime: String = r.get(4)?;
             let rewrite: String = r.get(6)?;
             let db: Option<String> = r.get(7)?;
+            let php_overrides: Option<String> = r.get(8).ok().flatten();
             Ok(Site {
                 id: r.get(0)?,
                 name: r.get(1)?,
@@ -230,9 +247,11 @@ impl Store {
                 https: r.get::<_, i32>(5)? != 0,
                 rewrite: serde_json::from_str(&rewrite).unwrap_or_default(),
                 db: db.and_then(|d| serde_json::from_str(&d).ok()),
+                php_overrides: php_overrides
+                    .and_then(|o| serde_json::from_str(&o).ok()),
                 status: "running".into(),
-                created_at: r.get(8)?,
-                updated_at: r.get(9)?,
+                created_at: r.get(9)?,
+                updated_at: r.get(10)?,
             })
         })?;
         let mut out = Vec::new();
@@ -323,6 +342,85 @@ impl Store {
         let conn = self.conn.lock();
         conn.execute("UPDATE proxy_profiles SET active=0", [])?;
         conn.execute("UPDATE proxy_profiles SET active=1 WHERE id=?1", params![id])?;
+        Ok(())
+    }
+
+    /* ---------- cron（计划任务，任务本体在 cron 模块） ---------- */
+
+    pub fn list_cron_jobs(&self) -> Result<Vec<crate::cron::CronJob>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id,name,command,interval_min,enabled,created_at,last_run_at,last_exit,last_output
+             FROM cron_jobs ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(crate::cron::CronJob {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                command: r.get(2)?,
+                interval_min: r.get(3)?,
+                enabled: r.get::<_, i64>(4)? != 0,
+                created_at: r.get(5)?,
+                last_run_at: r.get(6)?,
+                last_exit: r.get(7)?,
+                last_output: r.get(8)?,
+            })
+        })?;
+        Ok(rows.flatten().collect())
+    }
+
+    pub fn get_cron_job(&self, id: &str) -> Result<Option<crate::cron::CronJob>> {
+        Ok(self.list_cron_jobs()?.into_iter().find(|j| j.id == id))
+    }
+
+    /// 新建/改名改命令改周期（不动 enabled 与上次运行信息）
+    pub fn upsert_cron_job(&self, job: &crate::cron::CronJob) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO cron_jobs(id,name,command,interval_min,enabled,created_at)
+             VALUES(?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(id) DO UPDATE SET name=?2, command=?3, interval_min=?4",
+            params![
+                job.id,
+                job.name,
+                job.command,
+                job.interval_min,
+                job.enabled as i32,
+                job.created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_cron_job(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM cron_jobs WHERE id=?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn set_cron_enabled(&self, id: &str, enabled: bool) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE cron_jobs SET enabled=?2 WHERE id=?1",
+            params![id, enabled as i32],
+        )?;
+        Ok(())
+    }
+
+    /// 记录一次运行：开始时 last_output 传 None 保留旧输出，结束传实际输出
+    pub fn mark_cron_run(
+        &self,
+        id: &str,
+        last_run_at: i64,
+        last_exit: &str,
+        last_output: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE cron_jobs SET last_run_at=?2, last_exit=?3,
+             last_output=COALESCE(?4, last_output) WHERE id=?1",
+            params![id, last_run_at, last_exit, last_output],
+        )?;
         Ok(())
     }
 
@@ -492,6 +590,39 @@ impl Store {
     pub fn delete_cert_automation(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock();
         conn.execute("DELETE FROM cert_automations WHERE id=?1", params![id])?;
+        Ok(())
+    }
+
+    /* ---------- 网站证书监控 ---------- */
+
+    pub fn save_cert_monitor(&self, m: &CertMonitor) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO cert_monitors(id,data,updated_at) VALUES(?1,?2,?3)
+             ON CONFLICT(id) DO UPDATE SET data=?2, updated_at=?3",
+            params![m.id, serde_json::to_string(m).unwrap_or_else(|_| "{}".into()), m.updated_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_cert_monitors(&self) -> Result<Vec<CertMonitor>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT data FROM cert_monitors ORDER BY updated_at DESC")?;
+        let list = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .filter_map(|s| serde_json::from_str(&s).ok())
+            .collect();
+        Ok(list)
+    }
+
+    pub fn get_cert_monitor(&self, id: &str) -> Result<Option<CertMonitor>> {
+        Ok(self.list_cert_monitors()?.into_iter().find(|m| m.id == id))
+    }
+
+    pub fn delete_cert_monitor(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM cert_monitors WHERE id=?1", params![id])?;
         Ok(())
     }
 }

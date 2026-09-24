@@ -55,9 +55,23 @@ impl Paths {
                 }
             }
         }
-        dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("NiceServBay")
+        // 产品改名（NiceServBay → NiceEnv）：把旧数据目录整体迁过来，
+        // 设置/已装套件/站点注册全都无缝带走；迁移失败（如被占用）就沿用旧目录
+        let data_local = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
+        let base = data_local.join("NiceEnv");
+        if !base.exists() {
+            // "niceEnv" 是改名中途短暂的拼写，一并兼容
+            for legacy_name in ["NiceServBay", "niceEnv"] {
+                let legacy = data_local.join(legacy_name);
+                if legacy.exists() {
+                    if std::fs::rename(&legacy, &base).is_ok() {
+                        break;
+                    }
+                    return legacy; // 迁移失败（如被占用）：沿用旧目录，保证还能读到数据
+                }
+            }
+        }
+        base
     }
 
     pub fn new(base: PathBuf) -> Self {

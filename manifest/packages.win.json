@@ -1,5 +1,5 @@
 {
-  "revision": 36,
+  "revision": 37,
   "updated": "2026-09-19",
   "packages": [
     {
@@ -1435,7 +1435,7 @@
       "version": "1.14.7",
       "category": "dns",
       "displayName": "CoreDNS",
-      "description": "可插拔 DNS 服务器（需自备 Corefile）",
+      "description": "本地域名解析：*.{tld} 通配解析到 127.0.0.1，其余转发公共 DNS",
       "os": [
         "windows"
       ],
@@ -1448,7 +1448,7 @@
       "entry": "coredns.exe",
       "homepage": "https://coredns.io",
       "sha256": "6b718a5ed57d7034b1e4c3df500121307830da291d15cf8387f41c297c6fdd56",
-      "defaultPort": 5353,
+      "defaultPort": 53,
       "run": {
         "args": [
           "-conf",
@@ -1459,7 +1459,7 @@
         "health": "tcp",
         "healthTimeoutSec": 12,
         "configFile": "Corefile",
-        "configTemplate": ".:{port} {\n    hosts {\n        127.0.0.1 localhost\n        fallthrough\n    }\n    forward . 8.8.8.8 1.1.1.1\n    log\n    errors\n}\n"
+        "configTemplate": "test {\n    template IN ANY test {\n        answer \"{{ .Name }} 60 IN A 127.0.0.1\"\n    }\n    errors\n}\n. {\n    forward . 8.8.8.8 1.1.1.1\n    errors\n}\n"
       }
     },
     {
@@ -2533,7 +2533,7 @@
       "version": "1.14.6",
       "category": "dns",
       "displayName": "CoreDNS 1.14.6",
-      "description": "DNS 服务器（本地域名解析，替代 hosts 编辑）",
+      "description": "本地域名解析：*.{tld} 通配解析到 127.0.0.1，其余转发公共 DNS",
       "os": [
         "windows"
       ],
@@ -2546,7 +2546,7 @@
       "entry": "coredns.exe",
       "homepage": "https://coredns.io",
       "sha256": "b2b53b72315355f3f1e9c36204fd9c0833019ec42ec893fff1116d9a99bc3165",
-      "defaultPort": 5353,
+      "defaultPort": 53,
       "run": {
         "args": [
           "-conf",
@@ -2557,7 +2557,7 @@
         "health": "tcp",
         "healthTimeoutSec": 12,
         "configFile": "Corefile",
-        "configTemplate": ".:{port} {\n    hosts {\n        127.0.0.1 localhost\n        fallthrough\n    }\n    forward . 8.8.8.8 1.1.1.1\n    log\n    errors\n}\n"
+        "configTemplate": "test {\n    template IN ANY test {\n        answer \"{{ .Name }} 60 IN A 127.0.0.1\"\n    }\n    errors\n}\n. {\n    forward . 8.8.8.8 1.1.1.1\n    errors\n}\n"
       }
     },
     {
@@ -2565,7 +2565,7 @@
       "version": "1.14.5",
       "category": "dns",
       "displayName": "CoreDNS 1.14.5",
-      "description": "DNS 服务器（本地域名解析，替代 hosts 编辑）",
+      "description": "本地域名解析：*.{tld} 通配解析到 127.0.0.1，其余转发公共 DNS",
       "os": [
         "windows"
       ],
@@ -2578,7 +2578,7 @@
       "entry": "coredns.exe",
       "homepage": "https://coredns.io",
       "sha256": "51f06b5a3c034b0c75b9ac7eff5c6efb282a82f81f3286ba6f380fc640c22194",
-      "defaultPort": 5353,
+      "defaultPort": 53,
       "run": {
         "args": [
           "-conf",
@@ -2589,7 +2589,7 @@
         "health": "tcp",
         "healthTimeoutSec": 12,
         "configFile": "Corefile",
-        "configTemplate": ".:{port} {\n    hosts {\n        127.0.0.1 localhost\n        fallthrough\n    }\n    forward . 8.8.8.8 1.1.1.1\n    log\n    errors\n}\n"
+        "configTemplate": "test {\n    template IN ANY test {\n        answer \"{{ .Name }} 60 IN A 127.0.0.1\"\n    }\n    errors\n}\n. {\n    forward . 8.8.8.8 1.1.1.1\n    errors\n}\n"
       }
     },
     {
@@ -2597,7 +2597,7 @@
       "version": "1.14.4",
       "category": "dns",
       "displayName": "CoreDNS 1.14.4",
-      "description": "DNS 服务器（本地域名解析，替代 hosts 编辑）",
+      "description": "本地域名解析：*.{tld} 通配解析到 127.0.0.1，其余转发公共 DNS",
       "os": [
         "windows"
       ],
@@ -2610,7 +2610,7 @@
       "entry": "coredns.exe",
       "homepage": "https://coredns.io",
       "sha256": "08b7d09d76cb7a5350647eeef327d3e4029cccca56673b7d52d71ee0176de56e",
-      "defaultPort": 5353,
+      "defaultPort": 53,
       "run": {
         "args": [
           "-conf",
@@ -2621,7 +2621,7 @@
         "health": "tcp",
         "healthTimeoutSec": 12,
         "configFile": "Corefile",
-        "configTemplate": ".:{port} {\n    hosts {\n        127.0.0.1 localhost\n        fallthrough\n    }\n    forward . 8.8.8.8 1.1.1.1\n    log\n    errors\n}\n"
+        "configTemplate": "test {\n    template IN ANY test {\n        answer \"{{ .Name }} 60 IN A 127.0.0.1\"\n    }\n    errors\n}\n. {\n    forward . 8.8.8.8 1.1.1.1\n    errors\n}\n"
       }
     },
     {

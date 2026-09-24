@@ -34,6 +34,7 @@ import {
 import { isTauri } from "@/lib/backend";
 import {
   ACCENT_PRESETS,
+  CODE_THEME_OPTIONS,
   MONO_FONT_OPTIONS,
   UI_FONT_OPTIONS,
   type AppSettings,
@@ -43,12 +44,23 @@ import { useUI, useT } from "@/lib/store";
 import { toastError, useStacks } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import { applyAppearance, matchingPreset, effectiveHue, hslToHex } from "@/lib/appearance";
+import { detectLocalFonts, scanLocalFonts as scanFonts } from "@/lib/fonts";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectSeparator,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { CodeBlock } from "@/components/shared/code-block";
 import { CopyButton, ConfirmDialog } from "@/components/shared/misc";
 import { ToolMirrorCard } from "@/components/shared/tool-mirror-card";
 import { UpdateDialog } from "@/components/shared/update-dialog";
@@ -80,6 +92,89 @@ const SECTIONS = [
 const CODE_SIZES = [10, 11, 11.5, 12, 13, 14, 16];
 const UI_SCALES = [0.85, 0.9, 0.95, 1, 1.05, 1.1, 1.15, 1.25];
 
+/**
+ * 字体选择：内置预设 + 「扫描本机字体」拿到的系统字体 + 手动输入字体名。
+ * 本机字体以 `local:<字体族名>` 存进设置（见 appearance.ts），无权限时也能手填。
+ */
+function FontSelect({
+  value,
+  presets,
+  localFonts,
+  onChange,
+  customLabel,
+}: {
+  value: string;
+  presets: readonly { id: string; label: string }[];
+  localFonts: string[];
+  onChange: (v: string) => void;
+  customLabel: string;
+}) {
+  const isLocal = value.startsWith("local:");
+  const [customOpen, setCustomOpen] = React.useState(false);
+  const t = useT();
+  // 重启应用后扫描列表还没回来：把当前值临时注入，保证下拉框显示不空
+  const known = localFonts.some((f) => `local:${f}` === value);
+  const locals = React.useMemo(
+    () => (isLocal && !known ? [value.slice("local:".length), ...localFonts] : localFonts),
+    [localFonts, isLocal, known, value]
+  );
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <Select
+        value={customOpen ? "__custom__" : value}
+        onValueChange={(v) => {
+          if (v === "__custom__") {
+            setCustomOpen(true);
+            return;
+          }
+          setCustomOpen(false);
+          onChange(v);
+        }}
+      >
+        <SelectTrigger className="h-8 w-52 text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {presets.map((f) => (
+            <SelectItem key={f.id} value={f.id}>
+              {f.label}
+            </SelectItem>
+          ))}
+          {locals.length > 0 && (
+            <SelectGroup>
+              <SelectSeparator />
+              <SelectLabel>{t("appearance.localFonts")}</SelectLabel>
+              {locals.slice(0, 400).map((f) => (
+                <SelectItem key={f} value={`local:${f}`}>
+                  {f}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          )}
+          <SelectSeparator />
+          <SelectItem value="__custom__">{customLabel}</SelectItem>
+        </SelectContent>
+      </Select>
+      {(customOpen || isLocal) && (
+        <Input
+          autoFocus={customOpen}
+          defaultValue={isLocal ? value.slice("local:".length) : ""}
+          placeholder={customLabel}
+          className="h-7 w-52 font-mono text-[11px]"
+          onKeyDown={(e) => {
+            if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+          }}
+          onBlur={(e) => {
+            const fam = e.target.value.trim().replace(/"/g, "");
+            if (fam) onChange(`local:${fam}`);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   const t = useT();
   const { setTheme, resolvedTheme } = useTheme();
@@ -93,6 +188,7 @@ export default function SettingsPage() {
   const [updateOpen, setUpdateOpen] = React.useState(false);
   const [active, setActive] = React.useState<string>("appearance");
   const [importConfirm, setImportConfirm] = React.useState<string | null>(null);
+  const [localFonts, setLocalFonts] = React.useState<string[]>([]);
   const { data: stacks } = useStacks();
 
   const load = React.useCallback(async () => {
@@ -102,7 +198,7 @@ export default function SettingsPage() {
       setLang(s.language);
       // 外观统一走 applyAppearance，避免只生效一半（主题色变了字体没变这类）
       applyAppearance(s);
-      setCodeDefaults({ lineNumbers: s.codeLineNumbers, wrap: s.codeWrap });
+      setCodeDefaults({ lineNumbers: s.codeLineNumbers, wrap: s.codeWrap, theme: s.codeTheme, bg: s.codeBg });
     } catch (e) {
       toastError(e);
     }
@@ -119,8 +215,18 @@ export default function SettingsPage() {
     const next = { ...settings, [key]: value } as AppSettings;
     setSettings(next);
     applyAppearance(next);
-    if (key === "codeLineNumbers" || key === "codeWrap") {
-      setCodeDefaults({ lineNumbers: next.codeLineNumbers, wrap: next.codeWrap });
+    if (
+      key === "codeLineNumbers" ||
+      key === "codeWrap" ||
+      key === "codeTheme" ||
+      key === "codeBg"
+    ) {
+      setCodeDefaults({
+        lineNumbers: next.codeLineNumbers,
+        wrap: next.codeWrap,
+        theme: next.codeTheme,
+        bg: next.codeBg,
+      });
     }
     try {
       await api.setSetting(key, value);
@@ -128,6 +234,29 @@ export default function SettingsPage() {
       toastError(e);
     }
   };
+
+  /** 本机字体：进设置页先做零权限 canvas 探测（不用点按钮就有列表）；
+      「扫描本机字体」再做原生枚举 + 探测合并。两条路都拿不到才提示手填。 */
+  const loadLocalFonts = React.useCallback(() => {
+    setLocalFonts(detectLocalFonts());
+  }, []);
+
+  React.useEffect(() => {
+    loadLocalFonts();
+  }, [loadLocalFonts]);
+
+  const scanLocalFonts = React.useCallback(async () => {
+    try {
+      const { families, native } = await scanFonts();
+      if (families.length === 0) throw new Error("empty");
+      setLocalFonts(families);
+      toast.success(t("appearance.scanDone").replace("{n}", String(families.length)), {
+        description: native ? undefined : t("appearance.scanCanvasHint"),
+      });
+    } catch {
+      toast.error(t("appearance.scanFail"), { description: t("appearance.scanFailHint") });
+    }
+  }, [t]);
 
   /** 导入成功后的统一收尾：重载设置 + 通知其它页面刷新缓存 */
   const afterImport = React.useCallback(
@@ -137,6 +266,8 @@ export default function SettingsPage() {
         `${t("settings.backup.rptSettings")}: ${r.settings}`,
         `${t("settings.backup.rptProfiles")}: ${r.proxyProfiles}`,
         `${t("settings.backup.rptStacks")}: ${r.stacks}`,
+        ...(r.certAutomations > 0 ? [`${t("settings.backup.rptCertAuto")}: ${r.certAutomations}`] : []),
+        ...(r.certMonitors > 0 ? [`${t("settings.backup.rptCertMon")}: ${r.certMonitors}`] : []),
         ...(r.skippedSites > 0 ? [`${t("settings.backup.rptSkipped")}: ${r.skippedSites}`] : []),
       ].join(" · ");
       if (r.missingPackages.length > 0) {
@@ -216,13 +347,15 @@ export default function SettingsPage() {
       codeFont: "sf-mono",
       codeFontSize: 11.5,
       codeLineNumbers: true,
-      codeWrap: false,
+      codeWrap: true,
+      codeTheme: "auto",
+      codeBg: "",
       hideScrollbars: true,
     };
     const next = { ...settings, ...defaults } as AppSettings;
     setSettings(next);
     applyAppearance(next);
-    setCodeDefaults({ lineNumbers: true, wrap: false });
+    setCodeDefaults({ lineNumbers: true, wrap: true, theme: "auto", bg: "" });
     for (const [k, v] of Object.entries(defaults)) {
       await api.setSetting(k, v).catch(() => undefined);
     }
@@ -423,20 +556,23 @@ export default function SettingsPage() {
                     <div className="flex items-center gap-2">
                       <Type className="h-3.5 w-3.5 text-faint" />
                       <span className="text-[12.5px] font-medium text-secondary">{t("appearance.fonts")}</span>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="ml-auto h-6 text-[11px] text-faint hover:text-foreground"
+                        onClick={() => void scanLocalFonts()}
+                      >
+                        <RefreshCw className="h-3 w-3" /> {t("appearance.scanFonts")}
+                      </Button>
                     </div>
                     <SettingRow label={t("appearance.uiFont")}>
-                      <Select value={settings.uiFont} onValueChange={(v) => update("uiFont", v)}>
-                        <SelectTrigger className="h-8 w-52 text-xs">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {UI_FONT_OPTIONS.map((f) => (
-                            <SelectItem key={f.id} value={f.id}>
-                              {f.label}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                      <FontSelect
+                        value={settings.uiFont}
+                        presets={UI_FONT_OPTIONS}
+                        localFonts={localFonts}
+                        onChange={(v) => update("uiFont", v)}
+                        customLabel={t("appearance.customFont")}
+                      />
                     </SettingRow>
                     <SettingRow label={t("appearance.uiScale")}>
                       <Select value={String(settings.uiScale)} onValueChange={(v) => update("uiScale", Number(v))}>
@@ -453,18 +589,13 @@ export default function SettingsPage() {
                       </Select>
                     </SettingRow>
                     <SettingRow label={t("appearance.codeFont")}>
-                      <Select value={settings.codeFont} onValueChange={(v) => update("codeFont", v)}>
-                        <SelectTrigger className="h-8 w-52 text-xs">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {MONO_FONT_OPTIONS.map((f) => (
-                            <SelectItem key={f.id} value={f.id}>
-                              {f.label}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                      <FontSelect
+                        value={settings.codeFont}
+                        presets={MONO_FONT_OPTIONS}
+                        localFonts={localFonts}
+                        onChange={(v) => update("codeFont", v)}
+                        customLabel={t("appearance.customFont")}
+                      />
                     </SettingRow>
                     <SettingRow label={t("appearance.codeFontSize")}>
                       <Select
@@ -502,9 +633,12 @@ export default function SettingsPage() {
                         </span>
                         <Badge variant="running">{t("common.running")}</Badge>
                       </div>
-                      <pre className="rounded-lg border border-border bg-[#0A0C0F] p-2.5 font-mono leading-relaxed text-secondary">
-                        {`server {\n    listen ${profile === "safe" ? 8080 : 80};\n    server_name demo.${settings.defaultTld};\n}`}
-                      </pre>
+                      {/* 实时预览走真正的 CodeBlock：代码主题/背景/字体/换行/行号改了立刻能看到 */}
+                      <CodeBlock
+                        compact
+                        lang="nginx"
+                        code={`# 预览：站点配置长这样\nserver {\n    listen ${profile === "safe" ? 8080 : 80};\n    server_name demo.${settings.defaultTld};\n    root "/www/demo";\n}`}
+                      />
                       <p className="text-[11px] text-faint">{t("appearance.previewHint")}</p>
                     </div>
                   </div>
@@ -536,6 +670,53 @@ export default function SettingsPage() {
                       {t("appearance.codeDefaults")}
                     </span>
                   </div>
+                  <SettingRow label={t("appearance.codeTheme")}>
+                    <Select value={settings.codeTheme} onValueChange={(v) => update("codeTheme", v)}>
+                      <SelectTrigger className="h-8 w-52 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {CODE_THEME_OPTIONS.map((th) => (
+                          <SelectItem key={th.id} value={th.id}>
+                            {th.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </SettingRow>
+                  <SettingRow label={t("appearance.codeBg")}>
+                    <div className="flex items-center gap-2">
+                      <label
+                        className="relative h-6 w-6 cursor-pointer overflow-hidden rounded-md border border-border"
+                        style={{ background: settings.codeBg || "var(--card-2)" }}
+                        title={t("appearance.codeBg")}
+                      >
+                        <input
+                          type="color"
+                          value={settings.codeBg || "#0a0c0f"}
+                          onChange={(e) => setSettings({ ...settings, codeBg: e.target.value })}
+                          onBlur={(e) => update("codeBg", e.target.value)}
+                          className="absolute inset-0 cursor-pointer opacity-0"
+                        />
+                      </label>
+                      <HexInput
+                        value={settings.codeBg}
+                        onCommit={(hex) => update("codeBg", hex)}
+                        invalidLabel={t("appearance.accentInvalid")}
+                      />
+                      {settings.codeBg && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 text-[11px] text-faint hover:text-foreground"
+                          onClick={() => update("codeBg", "")}
+                        >
+                          <RotateCcw className="h-3 w-3" /> {t("appearance.codeBgReset")}
+                        </Button>
+                      )}
+                    </div>
+                  </SettingRow>
+                  <p className="text-[10.5px] text-faint">{t("appearance.codeThemeHint")}</p>
                   <ToggleRow
                     label={t("code.lineNumbers")}
                     checked={settings.codeLineNumbers}
@@ -896,7 +1077,7 @@ export default function SettingsPage() {
                           const path = await save({
                             title: t("settings.backup.exportTitle"),
                             defaultPath: `nsb-backup-${stamp}.json`,
-                            filters: [{ name: "NiceServBay Backup", extensions: ["json"] }],
+                            filters: [{ name: "NiceEnv Backup", extensions: ["json"] }],
                           });
                           if (!path) return;
                           const n = await api.exportConfig(path);
@@ -919,7 +1100,7 @@ export default function SettingsPage() {
                           const path = await open({
                             title: t("settings.backup.importTitle"),
                             multiple: false,
-                            filters: [{ name: "NiceServBay Backup", extensions: ["json"] }],
+                            filters: [{ name: "NiceEnv Backup", extensions: ["json"] }],
                           });
                           if (!path || typeof path !== "string") return;
                           setImportConfirm(path);
@@ -1127,7 +1308,7 @@ function HexInput({
         if (e.key === "Enter") (e.target as HTMLInputElement).blur();
       }}
       placeholder="#3b82f6"
-      className="h-6 w-[74px] rounded-md border border-border bg-card px-1.5 font-mono text-[11px] outline-none placeholder:text-faint focus:border-border-strong"
+      className="h-6 w-[74px] rounded-md border border-border bg-card px-1.5 font-mono text-[11px] outline-none placeholder:text-faint focus:border-primary"
     />
   );
 }

@@ -26,9 +26,15 @@ import { ConfirmDialog } from "@/components/shared/misc";
 
 const REWRITE_OPTIONS: { value: RewritePreset; label?: string; labelKey?: string }[] = [
   { value: "none", labelKey: "detail.none" },
-  { value: "laravel", label: "Laravel / Symfony" },
+  { value: "laravel", label: "Laravel" },
+  { value: "symfony", label: "Symfony" },
   { value: "thinkphp", label: "ThinkPHP" },
   { value: "wordpress", label: "WordPress" },
+  { value: "yii2", label: "Yii2" },
+  { value: "codeigniter", label: "CodeIgniter 4" },
+  { value: "cakephp", label: "CakePHP" },
+  { value: "drupal", label: "Drupal" },
+  { value: "joomla", label: "Joomla" },
   { value: "spa-fallback", label: "SPA fallback" },
   { value: "next-export", label: "Next.js (export)" },
 ];

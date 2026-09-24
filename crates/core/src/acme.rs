@@ -9,10 +9,11 @@
 //! - 全程 reqwest blocking：签发本来就串行，包一层线程即可，不引 tokio 复杂度。
 
 use crate::error::{AppError, Result};
-use base64::engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD as B64URL};
-use hmac::{Hmac, Mac};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+use base64::Engine as _;
 use p256::ecdsa::signature::Signer;
 use p256::ecdsa::{Signature, SigningKey};
+use p256::elliptic_curve::point::AffineCoordinates;
 use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -22,6 +23,8 @@ pub fn directory_url(ca: &str) -> &'static str {
     match ca {
         "letsencrypt-staging" => "https://acme-staging-v02.api.letsencrypt.org/directory",
         "zerossl" => "https://acme.zerossl.com/v2/DV90",
+        "google" => "https://dv.acme-v02.api.pki.goog/directory",
+        "buypass" => "https://api.buypass.com/acme/directory",
         // 缺省按 Let's Encrypt 生产
         _ => "https://acme-v02.api.letsencrypt.org/directory",
     }
@@ -65,32 +68,37 @@ impl AccountKey {
     pub fn from_pem(pem: &str) -> Result<Self> {
         let signing = SigningKey::from_pkcs8_pem(pem)
             .map_err(|e| AppError::internal("解析 ACME 账号密钥", e.to_string()))?;
-        Ok(Self::from_signing(signing))
+        Self::build(signing)
     }
 
-    /// 生成新账号并导出 PEM（调用方负责持久化）
+    /// 生成新账号并导出 PEM（调用方负责持久化）。
+    /// rand 0.8 的系统熵源出 32 字节标量（p256 0.14 未启用自带 OsRng 特性）；
+    /// 非法标量概率约 2^-32，重试几次是纯理论保险。
     pub fn generate() -> Result<(Self, String)> {
-        let secret = p256::SecretKey::random(&mut rand::rngs::OsRng);
-        let signing = SigningKey::from(&secret);
-        let pem = secret
-            .to_pkcs8_pem(p256::pkcs8::LineEnding::LF)
-            .map_err(|e| AppError::internal("导出 ACME 账号密钥", e.to_string()))?
-            .to_string();
-        Ok((Self::from_signing(signing), pem))
+        for _ in 0..8 {
+            let bytes = rand::random::<[u8; 32]>();
+            if let Ok(sk) = SigningKey::from_slice(&bytes) {
+                let pem = sk
+                    .to_pkcs8_pem(p256::pkcs8::LineEnding::LF)
+                    .map_err(|e| AppError::internal("导出 ACME 账号密钥", e.to_string()))?
+                    .to_string();
+                return Ok((Self::build(sk)?, pem));
+            }
+        }
+        Err(AppError::internal("生成 ACME 账号密钥", "随机标量反复非法"))
     }
 
-    fn from_signing(signing: SigningKey) -> Self {
-        let point = signing.verifying_key().to_encoded_point(false);
-        // 非压缩格式：0x04 || X(32) || Y(32)
-        let bytes = point.as_bytes();
-        let (x, y) = (bytes[1..33].to_vec(), bytes[33..65].to_vec());
+    fn build(signing: SigningKey) -> Result<Self> {
+        // 公钥坐标直接取自仿射点（JWK 的 x / y 各 32 字节）
+        let affine = signing.verifying_key().as_affine();
+        let (x, y) = (affine.x().to_vec(), affine.y().to_vec());
         let thumbprint = jwk_thumbprint(&x, &y);
-        Self {
+        Ok(Self {
             signing,
             x,
             y,
             thumbprint,
-        }
+        })
     }
 
     pub fn thumbprint(&self) -> &str {
@@ -124,11 +132,18 @@ pub struct AcmeClient {
 }
 
 impl AcmeClient {
-    /// 建客户端：拉 directory；有账号 PEM 就复用，否则新建（返回新 PEM 供调用方保存）
-    pub fn connect(ca: &str, account_pem: Option<&str>) -> Result<(Self, Option<String>)> {
+    /// 建客户端：拉 directory；有账号 PEM 就复用，否则新建（返回新 PEM 供调用方保存）。
+    /// `eab = (kid, hmac_key)`：ZeroSSL / Google Trust Services / BuyPass 需要
+    /// 外部账号绑定（RFC 8555 §7.3.4）。
+    pub fn connect(
+        ca: &str,
+        account_pem: Option<&str>,
+        email: &str,
+        eab: Option<(&str, &str)>,
+    ) -> Result<(Self, Option<String>)> {
         let http = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(30))
-            .user_agent("NiceServBay/0.1 (+https://github.com)")
+            .user_agent("NiceEnv/0.1 (+https://github.com)")
             .build()
             .map_err(|e| AppError::internal("构建 HTTP 客户端", e.to_string()))?;
 
@@ -168,10 +183,17 @@ impl AcmeClient {
             .and_then(|v| v.as_str())
             .ok_or_else(|| AppError::new("ACME_DIRECTORY", "directory 缺少 newAccount"))?
             .to_string();
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "termsOfServiceAgreed": true,
             "onlyReturnExisting": false,
         });
+        // contact 是 CA 发到期/吊销提醒的通道；空邮箱就不带（ACME 允许）
+        if !email.trim().is_empty() {
+            payload["contact"] = serde_json::json!([format!("mailto:{}", email.trim())]);
+        }
+        if let Some((kid, hmac_key)) = eab {
+            payload["externalAccountBinding"] = eab_jws(kid, hmac_key, &account_url, &client.account)?;
+        }
         let resp = client.jws_post_new(&account_url, &payload)?;
         let kid = resp
             .headers()
@@ -246,7 +268,7 @@ impl AcmeClient {
         if new_account {
             protected["jwk"] = self.account.jwk_json();
         } else {
-            protected["kid"] = self.kid.clone();
+            protected["kid"] = serde_json::Value::String(self.kid.clone());
         }
         // POST-as-GET：payload 为空字符串
         let payload_str = if payload.is_null() {
@@ -278,14 +300,17 @@ impl AcmeClient {
         ensure_ok(resp, url)
     }
 
-    /// 完整签发流程：下单 → DNS-01 验证全部域名 → finalize → 拿证书链
+    /// 带触点签发流程：下单 → DNS-01 验证全部域名 → finalize → 拿证书链
     ///
-    /// `set_txt` / `clear_txt` 由调用方注入（DNS 服务商差异隔离在 dnsprov）。
+    /// `set_txt(domain, prefix, value) -> (zone, record_id)` 与
+    /// `clear_txt(zone, name, record_id)` 由调用方注入（DNS 服务商差异隔离在 dnsprov）。
     /// 返回（证书链 PEM、证书私钥 PEM、leaf notBefore/notAfter 毫秒）。
     pub fn issue(
         &mut self,
         domains: &[String],
-        set_txt: &mut dyn FnMut(&str, &str, &str) -> Result<String>,
+        key_alg: &str,
+        dns_wait_sec: i64,
+        set_txt: &mut dyn FnMut(&str, &str, &str) -> Result<(String, String)>,
         clear_txt: &mut dyn FnMut(&str, &str, &str) -> Result<()>,
     ) -> Result<(String, String, i64, i64)> {
         if domains.is_empty() {
@@ -297,6 +322,12 @@ impl AcmeClient {
             .map(|d| serde_json::json!({"type": "dns", "value": d}))
             .collect();
         let resp = self.jws_post(&new_order_url, &serde_json::json!({ "identifiers": identifiers }))?;
+        // order 资源 URL 在 Location 头里，finalize 后轮询要用
+        self.pending_order_url = resp
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
         let order: serde_json::Value = serde_json::from_str(&ensure_ok(resp, "newOrder")?)
             .map_err(|e| AppError::new("ACME_ORDER", format!("order 响应解析失败：{e}")))?;
 
@@ -337,6 +368,10 @@ impl AcmeClient {
 
                 // 记录名：_acme-challenge.{去掉 zone 后的主机部分}；zone 由 DNS 侧解析
                 let (zone, record_id) = set_txt(&domain, "_acme-challenge", &txt)?;
+                // DNS 同步慢的服务商：给用户可配的生效等待（certd 的「DNS 生效等待」）
+                if dns_wait_sec > 0 {
+                    std::thread::sleep(Duration::from_secs(dns_wait_sec.min(600) as u64));
+                }
                 pendings.push(PendingTxt {
                     zone: zone.clone(),
                     name: format!("_acme-challenge.{domain}"),
@@ -358,9 +393,8 @@ impl AcmeClient {
         }
         result?;
 
-        // finalize：CSR（ECDSA P-256，证书密钥随证书一起落盘）
-        let key_pair = rcgen::KeyPair::generate()
-            .map_err(|e| AppError::internal("生成证书密钥", e.to_string()))?;
+        // finalize：CSR（证书私钥算法可配，密钥随证书一起落盘）
+        let (key_pair, _) = generate_cert_key(key_alg)?;
         let mut params = rcgen::CertificateParams::new(domains.to_vec())
             .map_err(|e| AppError::internal("证书参数", e.to_string()))?;
         params
@@ -380,7 +414,7 @@ impl AcmeClient {
         ensure_ok(resp, "finalize")?;
 
         // 轮询 order 直到 valid
-        let order_url = self.kid_order_url(&new_order_url, domains)?;
+        let order_url = self.kid_order_url()?;
         let deadline = std::time::Instant::now() + Duration::from_secs(120);
         let cert_url = loop {
             let body = self.post_as_get(&order_url)?;
@@ -425,14 +459,11 @@ impl AcmeClient {
         Ok((chain, key_pair.serialize_pem(), not_before, not_after))
     }
 
-    /// newOrder 没有 Location 的话，重新 GET 一次 order（换个姿势兜底拿 order url）
-    fn kid_order_url(&self, _new_order: &str, _domains: &[String]) -> Result<String> {
-        // jws_post 已带出 Location 的场景最常见；这里由调用方在 jws_post 后补：
-        // 简化：jws_post 的响应 Location 在 issue() 里保存不了，改为在此重新下单是浪费。
-        // —— 所以 issue() 里直接用响应头 Location 存进 self.pending_order_url。
+    /// order URL：newOrder 的 Location（保存在 client 里）；拿不到就明说，不瞎猜
+    fn kid_order_url(&self) -> Result<String> {
         self.pending_order_url
             .clone()
-            .ok_or_else(|| AppError::new("ACME_ORDER", "无法确定 order URL"))
+            .ok_or_else(|| AppError::new("ACME_ORDER", "newOrder 未返回 order URL (Location)"))
     }
 
     fn wait_authorization(&mut self, authz_url: &str, domain: &str) -> Result<()> {
@@ -471,11 +502,77 @@ impl AcmeClient {
     }
 }
 
-// order Location 的传递容器（放进 client 更顺；字段级 dirty 简化生命周期）
-impl AcmeClient {
-    pub(crate) fn set_pending_order_url(&mut self, url: Option<String>) {
-        self.pending_order_url = url;
+/// HMAC-SHA256（RFC 2104）：EAB 与华为云签名共用。
+/// 仓库里 sha2 是 0.10 而 hmac 0.13 只认 digest 0.11 —— 为了对齐两个版本
+/// 引两套同名依赖不值当，HMAC 本身十几行，配 RFC 固定向量测试更稳。
+pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+    let mut k = [0u8; 64];
+    if key.len() > 64 {
+        k[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        k[..key.len()].copy_from_slice(key);
     }
+    let ipad: Vec<u8> = k.iter().map(|b| b ^ 0x36).collect();
+    let opad: Vec<u8> = k.iter().map(|b| b ^ 0x5c).collect();
+    let inner = Sha256::digest([&ipad[..], data].concat());
+    let outer = Sha256::digest([&opad[..], &inner].concat());
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&outer);
+    out
+}
+
+/// EAB：用 CA 预共享的 HMAC 密钥给账号 JWK 再签一层 JWS（HS256）
+fn eab_jws(kid: &str, hmac_key: &str, url: &str, account: &AccountKey) -> Result<serde_json::Value> {
+    let key = B64URL
+        .decode(hmac_key.trim())
+        .map_err(|e| AppError::new("ACME_EAB", format!("EAB HMAC 密钥不是合法 base64url：{e}")))?;
+    let payload = account.jwk_json().to_string();
+    let protected = serde_json::json!({
+        "alg": "HS256",
+        "kid": kid,
+        "url": url,
+    });
+    let signing_input = format!(
+        "{}.{}",
+        b64url(protected.to_string().as_bytes()),
+        b64url(payload.as_bytes())
+    );
+    let sig = hmac_sha256(&key, signing_input.as_bytes());
+    Ok(serde_json::json!({
+        "protected": b64url(protected.to_string().as_bytes()),
+        "payload": b64url(payload.as_bytes()),
+        "signature": b64url(&sig),
+    }))
+}
+
+/// 证书私钥生成：ECDSA P-256（默认）/ P-384，或 RSA 2048/3072/4096。
+/// ring 不能生成 RSA 密钥，RSA 走 rsa crate 生成后以 PKCS8 交给 rcgen 签名。
+pub fn generate_cert_key(alg: &str) -> Result<(rcgen::KeyPair, String)> {
+    let kp = match alg {
+        "ec384" => rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384)
+            .map_err(|e| AppError::internal("生成 P-384 密钥", e.to_string()))?,
+        "rsa2048" | "rsa3072" | "rsa4096" => {
+            let bits = match alg {
+                "rsa2048" => 2048,
+                "rsa3072" => 3072,
+                _ => 4096,
+            };
+            let mut rng = rand::thread_rng();
+            let key = rsa::RsaPrivateKey::new(&mut rng, bits)
+                .map_err(|e| AppError::internal("生成 RSA 密钥", e.to_string()))?;
+            use rsa::pkcs8::EncodePrivateKey;
+            let pem = key
+                .to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)
+                .map_err(|e| AppError::internal("导出 RSA 密钥", e.to_string()))?
+                .to_string();
+            rcgen::KeyPair::from_pkcs8_pem_and_sign_algo(&pem, &rcgen::PKCS_RSA_SHA256)
+                .map_err(|e| AppError::internal("导入 RSA 密钥", e.to_string()))?
+        }
+        _ => rcgen::KeyPair::generate()
+            .map_err(|e| AppError::internal("生成 P-256 密钥", e.to_string()))?,
+    };
+    let pem = kp.serialize_pem();
+    Ok((kp, pem))
 }
 
 fn dir_str(dir: &serde_json::Value, key: &str) -> Result<String> {
@@ -497,7 +594,7 @@ fn ensure_ok(resp: reqwest::blocking::Response, what: &str) -> Result<String> {
 
 /// ACME 错误体是 JSON {type, detail}；尽量翻出 detail 给人话
 fn acme_error(body: &str, what: &str) -> AppError {
-    let parsed: Result<serde_json::Value, _> = serde_json::from_str(body);
+    let parsed = serde_json::from_str::<serde_json::Value>(body);
     let (code, detail) = match parsed {
         Ok(v) => (
             v["type"]
@@ -558,6 +655,44 @@ mod tests {
         assert!(directory_url("letsencrypt").contains("acme-v02"));
         assert!(directory_url("letsencrypt-staging").contains("staging"));
         assert!(directory_url("zerossl").contains("zerossl"));
+        assert!(directory_url("google").contains("pki.goog"));
+        assert!(directory_url("buypass").contains("buypass"));
         assert!(directory_url("其它").contains("acme-v02"));
+    }
+
+    #[test]
+    fn hmac_sha256_matches_rfc_vector() {
+        // RFC 4231 / 著名测试向量
+        assert_eq!(
+            hex::encode(hmac_sha256(b"key", b"The quick brown fox jumps over the lazy dog")),
+            "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
+        );
+    }
+
+    #[test]
+    fn eab_signature_is_hs256_of_signing_input() {
+        // 固定向量自校验：HS256(base64url 段拼接) 与手工 hmac 一致
+        let (k, _) = AccountKey::generate().unwrap();
+        let payload = k.jwk_json().to_string();
+        let protected = serde_json::json!({"alg":"HS256","kid":"kid-1","url":"https://x/dir"});
+        let signing_input = format!(
+            "{}.{}",
+            b64url(protected.to_string().as_bytes()),
+            b64url(payload.as_bytes())
+        );
+        let v = eab_jws("kid-1", &b64url(b"0123456789abcdef"), "https://x/dir", &k).unwrap();
+        assert_eq!(
+            v["signature"],
+            b64url(&hmac_sha256(b"0123456789abcdef", signing_input.as_bytes()))
+        );
+    }
+
+    #[test]
+    fn cert_key_algorithms_supported() {
+        for alg in ["ec256", "ec384", "rsa2048"] {
+            let (kp, pem) = generate_cert_key(alg).unwrap();
+            assert!(!pem.is_empty());
+            assert!(!kp.serialize_pem().is_empty());
+        }
     }
 }

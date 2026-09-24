@@ -1,4 +1,4 @@
-# NiceServBay
+# NiceEnv
 
 **Windows + macOS 一站式本地开发环境管理器** — 装一个桌面 App，点几下就能跑站点。
 对标 ServBay / FlyEnv / phpStudy，交互与视觉全面现代化（Linear / Raycast 气质）。
@@ -129,6 +129,63 @@ FTP（SFTPGo）、隧道（Cloudflare Tunnel）、工具（Composer / Adminer / 
   设置里还能选「启动应用时自动拉起某个栈」。
 - 栈只是有序服务 id 列表，启动仍然走 `ops::start_service`——
   nginx 的 reload、MySQL 的初始化、php 端口池这些关键处理一个都不会绕过。
+
+## 本地 DNS 解析（CoreDNS）
+
+hosts 文件不支持通配符；`*.test` 域名的根治方案是 DNS。安装 CoreDNS 后到
+「工具箱 → 本地域名解析」一键启停：任意 `*.{TLD}` 都解析到 127.0.0.1，其余查询转发
+公共 DNS（新增站点无需任何配置）。一次性接入：把网卡首选 DNS 设为 `127.0.0.1`
+（标准档监听 53 端口），`nslookup anything.test 127.0.0.1` 即可验证。
+Corefile 每次启动按当前 TLD 设置自动重建。
+
+## CLI 与 AI 集成（nsbctl / nsb-mcp）
+
+**nsbctl**：随应用分发的命令行工具（与桌面端共用数据目录）。
+
+```
+nsbctl status [--json]    服务状态总览
+nsbctl start <service>    启动（nginx / php@8.3.33 / mysql@8.0.46 / …）
+nsbctl stop <service>     停止
+nsbctl restart <service>  重启
+nsbctl start-all          启动常用栈（与托盘一致）
+nsbctl sites / open <站点> / packages / logs <服务> [n] / diagnose <端口>
+nsbctl pin php@8.3.33 <项目目录>   # 项目级运行时锁定（写入 .nsb.json，向导「跟随项目」时自动采用）
+```
+
+CLI 启动的服务走**分离模式**：CLI 退出服务不退；桌面 App 下次启动会**自动收养**
+这些进程（恢复 pid/端口/运行态显示），而不是把终端里起的服务当孤儿杀掉。
+
+**nsb-mcp**：Model Context Protocol 服务器（stdio JSON-RPC）。给 Claude Desktop /
+Cursor 等 AI 客户端加上即可用自然语言操作本地环境——列服务/起停服务/列站点/查端口占用：
+
+```json
+{ "mcpServers": { "niceservbay": { "command": "nsb-mcp" } } }
+```
+
+## 套件与运维增强
+
+- **平台过滤**：安装前按清单 `os`/`arch` 拦截不兼容条目（arm64 包装上 x64 机器直接报
+  `PLATFORM_UNSUPPORTED`，而不是装完启动崩）；套件页给对应版本打「当前平台不可用」徽标并禁点。
+- **PHP 扩展面板**：扫描该版本 `ext/` 目录真实存在的扩展，勾选即改 php.ini（注释保留、
+  改前备份），并用 `php -m` 实测加载结果；附 display_errors/OPcache 等快捷开关。
+- **远端清单 + 用户自定义模块**：设置 manifestUrl 后可一键拉取远端清单（校验通过才落盘，
+  重启生效）；`{数据目录}/user-modules/*.json` 里的自定义套件会被合并进清单
+  （同 id+version 覆盖内置），坏文件自动跳过不影响启动。
+- **通配符证书**：站点域名支持 `*.dev.test`，证书签发/落盘/记录全链路打通
+  （Windows 文件名禁 `*`，落盘自动净化为 `_wildcard`）。
+- **端口自动回落**（可选）：开启后服务端口被占时自动换到附近空闲端口，并固化为
+  端口覆盖项——重启后仍用同一端口，连接串保持稳定。
+- **站点级 PHP 覆盖**：PHP 站点可按站点写 `memory_limit`/`upload_max_filesize` 等
+  覆盖项，落到站点根目录 `.user.ini`（键值白名单校验，防 ini 注入）。
+- **定时配置备份**：off/daily/weekly 三档，自动备份到 `backup/auto/`，保留最近 10 份。
+- **服务状态历史**：最近 200 次状态变更（含失败原因）可查，前端日志页/诊断联动。
+- **可更新徽标**：套件页已装条目出现更高正式版时显示「可更新」。
+- **批量打开 / 复制站点地址**：站点页一键在浏览器依次打开全部站点，或复制全部 URL。
+- **MySQL 库大小 / Redis 实时统计**：数据库列表直接显示每个库占用量；Redis 卡显示
+  内存占用、键数量、连接数与运行天数（原生 RESP，每 5s 刷新）。
+- **日志导出**：日志页一键把选中服务的完整日志另存为文件。
+- **配置体检（只读）**：修复向导新增「nginx -t / httpd -t / PHP ini 加载测试」，
+  只检查不改动文件，坏了先体检再重写。
 
 ## 端口冲突与进程治理
 
@@ -384,9 +441,9 @@ MySQL / mihomo / Node / Go / MongoDB / Composer，**PHP、Nginx、Redis、Apache
 
 ## 安装形态与数据目录
 
-- NSIS 安装包（`target/release/bundle/nsis/`）为 **currentUser 模式**：安装向导可自选任意可写目录（默认 `%LOCALAPPDATA%\Programs\NiceServBay`）
+- NSIS 安装包（`target/release/bundle/nsis/`）为 **currentUser 模式**：安装向导可自选任意可写目录（默认 `%LOCALAPPDATA%\Programs\NiceEnv`）
 - **数据跟随安装目录**：安装版把 `runtimes / etc / data / logs / certs / backup` 全部放在 `{安装目录}/nsb-data/`，整个目录可拷贝迁移；安装目录不可写时自动回退 LocalAppData
-- 开发模式（cargo target 下运行）仍使用 `%LOCALAPPDATA%\NiceServBay`，`NSB_HOME` 环境变量可强制覆盖
+- 开发模式（cargo target 下运行）仍使用 `%LOCALAPPDATA%\NiceEnv`，`NSB_HOME` 环境变量可强制覆盖
 - 设置页「数据目录」卡片实时显示真实路径（`get_data_dir`）
 
 ## 配置导入 / 导出
@@ -577,9 +634,9 @@ MySQL / mihomo / Node / Go / MongoDB / Composer，**PHP、Nginx、Redis、Apache
 
 ## 安装形态与数据目录
 
-- NSIS 安装包（`target/release/bundle/nsis/`）为 **currentUser 模式**：安装向导可自选任意可写目录（默认 `%LOCALAPPDATA%\Programs\NiceServBay`）
+- NSIS 安装包（`target/release/bundle/nsis/`）为 **currentUser 模式**：安装向导可自选任意可写目录（默认 `%LOCALAPPDATA%\Programs\NiceEnv`）
 - **数据跟随安装目录**：安装版把 `runtimes / etc / data / logs / certs / backup` 全部放在 `{安装目录}/nsb-data/`，整个目录可拷贝迁移；安装目录不可写时自动回退 LocalAppData
-- 开发模式（cargo target 下运行）仍使用 `%LOCALAPPDATA%\NiceServBay`，`NSB_HOME` 环境变量可强制覆盖
+- 开发模式（cargo target 下运行）仍使用 `%LOCALAPPDATA%\NiceEnv`，`NSB_HOME` 环境变量可强制覆盖
 - 设置页「数据目录」卡片实时显示真实路径（`get_data_dir`）
 
 ## 配置导入 / 导出
@@ -695,7 +752,7 @@ MySQL 8.0.46（`cdn.mysql.com` macos15 tarball）与 mihomo（darwin-arm64）。
 
 ## 安全红线（测试即证明）
 
-- 所有运行时装在 `{LocalAppData}/NiceServBay`，非侵入、不污染 PATH
+- 所有运行时装在 `{LocalAppData}/NiceEnv`，非侵入、不污染 PATH
 - hosts 以标记块写入，失败给人话指引（不静默强写）
 - 冒烟测试全程：不改系统 hosts、不开系统代理、不 kill 非本应用进程
 - MySQL 数据目录在应用数据目录内，root 密码只存本机 SQLite

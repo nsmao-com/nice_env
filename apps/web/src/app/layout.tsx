@@ -10,8 +10,8 @@ import { Providers } from "@/components/layout/providers";
 import { AppShell } from "@/components/layout/app-shell";
 
 export const metadata: Metadata = {
-  title: "NiceServBay",
-  description: "NiceServBay — all-in-one local dev env",
+  title: "NiceEnv",
+  description: "NiceEnv — all-in-one local dev env",
 };
 
 export const viewport: Viewport = {

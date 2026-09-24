@@ -63,8 +63,9 @@
   --accent-glow: var(--accent-glow-light);
   --primary: var(--accent-solid);
   --primary-fg: #ffffff;
-  --primary-soft: rgba(0, 136, 255, 0.12); /* 次按钮淡蓝底 rgba(0,136,255,0.12) */
-  --primary-ring: rgba(0, 136, 255, 0.3);
+  /* soft/ring 从强调色派生（跟随设置的主题色），不要写死某个色值 */
+  --primary-soft: color-mix(in srgb, var(--accent-solid) 12%, transparent);
+  --primary-ring: color-mix(in srgb, var(--accent-solid) 30%, transparent);
 
   /* ---- 语义色（Light）---- */
   --running: #34c759; /* systemGreen */
@@ -137,8 +138,8 @@
 
   --primary: var(--accent-solid);
   --primary-fg: #ffffff;
-  --primary-soft: rgba(0, 145, 255, 0.16);
-  --primary-ring: rgba(0, 145, 255, 0.4);
+  --primary-soft: color-mix(in srgb, var(--accent-solid) 16%, transparent);
+  --primary-ring: color-mix(in srgb, var(--accent-solid) 40%, transparent);
 
   /* ---- 语义色（Dark）---- */
   --running: #30d158;
@@ -399,9 +400,13 @@
     user-select: none;
   }
 
+  /* 内容区整体可选中。注意必须用 text 而不是 auto：
+     祖先为 none 时 auto 的 used value 仍是 none，不会恢复选择能力。
+     按钮/侧栏等自带 select-none 的显式 none 不受影响。 */
+  .nsb-shell-desktop .nsb-workspace,
   .nsb-shell-desktop main,
   .nsb-shell-desktop .nsb-no-drag {
-    user-select: auto;
+    user-select: text;
   }
 
   .nsb-shell-desktop .nsb-sidebar-brand,
@@ -472,6 +477,34 @@
   .tabular {
     font-variant-numeric: tabular-nums;
     letter-spacing: var(--tracking-tight-num);
+  }
+
+  /* 代码块语义 token：颜色由 CodeBlock 按设置的主题/背景写成 CSS 变量 */
+  .nsb-code {
+    background: var(--code-bg);
+  }
+  .nsb-code .ck-comment {
+    color: var(--code-comment);
+    font-style: italic;
+  }
+  .nsb-code .ck-key {
+    color: var(--code-key);
+  }
+  .nsb-code .ck-keyword {
+    color: var(--code-keyword);
+  }
+  .nsb-code .ck-string {
+    color: var(--code-string);
+  }
+  .nsb-code .ck-number {
+    color: var(--code-number);
+  }
+  .nsb-code .ck-variable {
+    color: var(--code-variable);
+  }
+  .nsb-code .ck-strong {
+    color: var(--code-fg);
+    font-weight: 600;
   }
   .text-balance {
     text-wrap: balance;

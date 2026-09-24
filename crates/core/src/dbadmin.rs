@@ -54,6 +54,25 @@ impl MySqlClient {
         let out = self.run(
             "SELECT schema_name FROM information_schema.schemata ORDER BY schema_name;",
         )?;
+        // 库大小：一次查询带全（空库无行 → size=None）
+        let sizes = self.run(
+            "SELECT table_schema, SUM(data_length+index_length) FROM information_schema.tables
+             GROUP BY table_schema;",
+        )
+        .ok()
+        .map(|o| {
+            o.lines()
+                .skip(1)
+                .filter_map(|l| {
+                    let mut it = l.split('\t');
+                    let schema = it.next()?.trim().to_string();
+                    let bytes: u64 = it.next()?.trim().parse().ok()?;
+                    Some((schema, bytes / 1024))
+                })
+                .collect::<std::collections::HashMap<String, u64>>()
+        })
+        .unwrap_or_default();
+
         let mut list = Vec::new();
         for name in out.lines().skip(1).map(str::trim).filter(|l| !l.is_empty()) {
             let tables = self
@@ -65,7 +84,7 @@ impl MySqlClient {
             list.push(DatabaseInfo {
                 name: name.to_string(),
                 tables,
-                size_kb: None,
+                size_kb: sizes.get(name).copied(),
             });
         }
         Ok(list)
@@ -140,7 +159,7 @@ fn sanitize_ident(s: &str) -> Result<String> {
 /// 生成 .env.example 内容
 pub fn render_env_example(db: &str, user: &str, pass: &str, port: u16) -> String {
     format!(
-        r#"# NiceServBay 自动生成的本地数据库连接信息
+        r#"# NiceEnv 自动生成的本地数据库连接信息
 DB_CONNECTION=mysql
 DB_HOST=127.0.0.1
 DB_PORT={port}

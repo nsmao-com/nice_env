@@ -11,8 +11,11 @@
 use crate::Result;
 
 /// 托管标记块（macOS shell profile 用），与 hosts 保持一致风格
-pub const PATH_BEGIN: &str = "# BEGIN NiceServBay (managed PATH)";
-pub const PATH_END: &str = "# END NiceServBay (managed PATH)";
+pub const PATH_BEGIN: &str = "# BEGIN NiceEnv (managed PATH)";
+pub const PATH_END: &str = "# END NiceEnv (managed PATH)";
+/// 旧版产品名（NiceServBay）写入的标记：解析/合并时同样识别，避免残留旧块
+pub const PATH_BEGIN_LEGACY: &str = "# BEGIN NiceServBay (managed PATH)";
+pub const PATH_END_LEGACY: &str = "# END NiceServBay (managed PATH)";
 
 /// Windows 用户环境变量所在的注册表位置（写用户级，不需要管理员）
 #[cfg(windows)]
@@ -126,11 +129,11 @@ pub fn merge_profile_content(original: &str, dirs: &[String]) -> String {
     let mut in_block = false;
     for line in original.lines() {
         let t = line.trim();
-        if t == PATH_BEGIN {
+        if t == PATH_BEGIN || t == PATH_BEGIN_LEGACY {
             in_block = true;
             continue;
         }
-        if t == PATH_END {
+        if t == PATH_END || t == PATH_END_LEGACY {
             in_block = false;
             continue;
         }
@@ -172,11 +175,11 @@ pub fn parse_profile_managed_dirs(content: &str) -> Vec<String> {
     let mut file_order = Vec::new();
     for line in content.lines() {
         let t = line.trim();
-        if t == PATH_BEGIN {
+        if t == PATH_BEGIN || t == PATH_BEGIN_LEGACY {
             in_block = true;
             continue;
         }
-        if t == PATH_END {
+        if t == PATH_END || t == PATH_END_LEGACY {
             in_block = false;
             continue;
         }

@@ -3,7 +3,7 @@
 import * as React from "react";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "motion/react";
-import { Globe, Plus, ExternalLink, FolderOpen, ScrollText, Power, Settings2, TerminalSquare, FolderSearch } from "lucide-react";
+import { Globe, Plus, ExternalLink, FolderOpen, ScrollText, Power, Settings2, TerminalSquare, FolderSearch, Copy, AppWindow } from "lucide-react";
 import type { Site } from "@nsb/schema";
 import { useUI, useT } from "@/lib/store";
 import { useSites, useInvalidate, toastError, siteUrl, usePorts } from "@/lib/hooks";
@@ -48,6 +48,8 @@ export default function SitesPage() {
             </Button>
             {/* 批量启停：站点多了以后一个个点开关很费事 */}
             <SiteBulkActions sites={sites} />
+            {/* 批量打开 / 复制全部地址：起一套站点后逐个点开太磨人 */}
+            <BatchUrlActions sites={sites} />
             <Button onClick={() => setWizardOpen(true)}>
               <Plus className="h-3.5 w-3.5" /> {t("sites.create")}
             </Button>
@@ -182,5 +184,48 @@ function SiteCard({ site, onOpenDetail }: { site: Site; onOpenDetail: () => void
         </div>
       </Card>
     </motion.div>
+  );
+}
+
+
+/* ============ 批量打开 / 复制全部站点地址 ============ */
+function BatchUrlActions({ sites }: { sites: Site[] }) {
+  const t = useT();
+  const ports = usePorts();
+  const urls = React.useMemo(
+    () => sites.map((s) => siteUrl(s, ports.http, ports.https)),
+    [sites, ports]
+  );
+
+  const openAll = async () => {
+    if (urls.length === 0) return;
+    // 逐个打开：浏览器会聚成一组标签页；间隔一点避免被弹窗拦截
+    for (const u of urls) {
+      await api.openInBrowser(u).catch(() => undefined);
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    toast.success(`${t("sites.openedAllP1")} ${urls.length} ${t("sites.openedAllP2")}`);
+  };
+
+  const copyAll = async () => {
+    if (urls.length === 0) return;
+    try {
+      await navigator.clipboard.writeText(urls.join("\n"));
+      toast.success(t("sites.copiedAll"));
+    } catch {
+      toast.error(t("sites.copyFailed"));
+    }
+  };
+
+  if (sites.length === 0) return null;
+  return (
+    <>
+      <Button variant="ghost" onClick={copyAll} title={t("sites.copyAllHint")}>
+        <Copy className="h-3.5 w-3.5" /> {t("sites.copyAll")}
+      </Button>
+      <Button variant="ghost" onClick={openAll} title={t("sites.openAllHint")}>
+        <AppWindow className="h-3.5 w-3.5" /> {t("sites.openAll")}
+      </Button>
+    </>
   );
 }

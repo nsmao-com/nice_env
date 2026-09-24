@@ -1,18 +1,28 @@
-//! core：NiceServBay 全部业务逻辑（无 Tauri 依赖，可独立测试/无头运行）。
+//! core：NiceEnv 全部业务逻辑（无 Tauri 依赖，可独立测试/无头运行）。
 
+pub mod acme;
 pub mod bulk;
 pub mod certs;
+pub mod certauto;
+pub mod certdeploy;
+pub mod certmonitor;
 pub mod cfgeditor;
 pub mod configgen;
 pub mod dbadmin;
+pub mod dbmigrate;
 pub mod dbbackup;
 pub mod diagnostics;
+pub mod dnsprov;
+pub mod dns;
+pub mod cron;
 pub mod download;
 pub mod envfile;
 pub mod error;
 pub use error::AppError;
 pub mod generic;
 pub mod health;
+pub mod toolbox;
+pub mod tunnel;
 pub mod hosts;
 pub mod install;
 pub mod logs_export;
@@ -21,6 +31,8 @@ pub mod ops;
 pub mod paths;
 use paths::write_with_backup;
 pub mod pathenv;
+pub mod backup_job;
+pub mod mcp;
 pub mod phpext;
 pub mod ports;
 pub mod proxy;
@@ -51,6 +63,14 @@ pub enum Event {
     HostsDenied,
     /// 数据库备份 / 还原进度
     DbBackup(model::DbBackupProgress),
+    /// 证书自动化状态变化（签发中 / 成功 / 失败），前端可在任意页面监听
+    CertAuto {
+        id: String,
+        state: String,
+        message: String,
+    },
+    /// 网站证书监控告警：状态跃迁为 expiring / expired / error 时发
+    CertMonitorAlert { host: String, state: String, message: String },
 }
 
 impl Event {
@@ -59,6 +79,8 @@ impl Event {
             Event::DownloadProgress(_) => "download://progress",
             Event::HostsDenied => "hosts://denied",
             Event::DbBackup(_) => "db://backup",
+            Event::CertAuto { .. } => "certauto://status",
+            Event::CertMonitorAlert { .. } => "certmonitor://alert",
         }
     }
     pub fn payload(&self) -> serde_json::Value {
@@ -66,6 +88,12 @@ impl Event {
             Event::DownloadProgress(p) => serde_json::to_value(p).unwrap_or_default(),
             Event::HostsDenied => serde_json::json!({}),
             Event::DbBackup(p) => serde_json::to_value(p).unwrap_or_default(),
+            Event::CertAuto { id, state, message } => {
+                serde_json::json!({ "id": id, "state": state, "message": message })
+            }
+            Event::CertMonitorAlert { host, state, message } => {
+                serde_json::json!({ "host": host, "state": state, "message": message })
+            }
         }
     }
     pub fn progress(task_id: &str, received: u64, total: u64, speed: u64, eta: f64, state: &str) -> Self {
@@ -120,31 +148,51 @@ impl CoreState {
         generic::register_services(&paths, &store, &manager);
         // 上次会话崩溃/被强杀时留下的进程：启动即清理，否则它们占着端口让服务起不来
         let orphans = ops::sweep_orphans(&paths, &manager);
+        // effective() 要在 paths 被 move 进 state 之前用掉
+        let installer = install::Installer::effective(&paths);
         let state = Arc::new(Self {
             paths,
             store,
             manager,
             downloader: Arc::new(Downloader::new()),
-            installer: install::Installer::bundled(),
+            installer,
             emit,
             watchdog: Arc::new(watchdog::Watchdog::new()),
         });
-        if !orphans.is_empty() {
-            let detail = orphans
-                .iter()
-                .map(|(sid, pid)| format!("{sid}(pid {pid})"))
-                .collect::<Vec<_>>()
-                .join(", ");
+        if !orphans.adopted.is_empty() || !orphans.killed.is_empty() {
+            let mut parts = Vec::new();
+            if !orphans.adopted.is_empty() {
+                let d = orphans
+                    .adopted
+                    .iter()
+                    .map(|(sid, pid)| format!("{sid}(pid {pid})"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                parts.push(format!("接管 {}", d));
+            }
+            if !orphans.killed.is_empty() {
+                let d = orphans
+                    .killed
+                    .iter()
+                    .map(|(sid, pid)| format!("{sid}(pid {pid})"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                parts.push(format!("清理 {}", d));
+            }
             (state.emit)(Event::DownloadProgress(model::DownloadProgress {
                 task_id: "orphans".into(),
                 received: 0,
                 total: 0,
                 speed_bps: 0,
                 eta_sec: 0.0,
-                state: "orphans-cleaned".into(),
-                error: Some(detail),
+                state: "orphans-resolved".into(),
+                error: Some(parts.join("；")),
             }));
         }
+        // 自动备份调度（off/daily/weekly；线程内自己判断档位）
+        backup_job::spawn_scheduler(state.paths.clone());
+        // 计划任务调度（应用级 cron，应用退出即停）
+        crate::cron::spawn_scheduler(state.paths.clone());
         Ok(state)
     }
 
@@ -240,6 +288,70 @@ impl CoreState {
         Ok(())
     }
 
+    /* ---------- 工具箱扩展（计划任务 / 快速隧道 / Ollama / Adminer） ---------- */
+
+    pub fn cron_jobs(&self) -> Result<Vec<crate::cron::CronJob>> {
+        self.store.list_cron_jobs()
+    }
+
+    pub fn cron_save(&self, mut job: crate::cron::CronJob) -> Result<()> {
+        if job.id.trim().is_empty() {
+            job.id = crate::cron::new_id();
+        }
+        if job.command.trim().is_empty() {
+            return Err(AppError::new("CRON_BAD_JOB", "命令不能为空"));
+        }
+        if job.interval_min <= 0 {
+            job.interval_min = 5;
+        }
+        self.store.upsert_cron_job(&job)
+    }
+
+    pub fn cron_delete(&self, id: &str) -> Result<()> {
+        self.store.delete_cron_job(id)
+    }
+
+    pub fn cron_set_enabled(&self, id: &str, enabled: bool) -> Result<()> {
+        self.store.set_cron_enabled(id, enabled)
+    }
+
+    pub fn cron_run_now(&self, id: &str) -> Result<crate::cron::CronJob> {
+        crate::cron::run_job(&self.store, id, true)
+    }
+
+    pub fn tunnel_start(&self, port: u16) -> Result<model::TunnelInfo> {
+        let exe = toolbox::resolve_exe(&self.store, &self.paths, &self.installer, "cloudflared")?;
+        crate::tunnel::start(&exe, port)
+    }
+
+    pub fn tunnel_list(&self) -> Vec<model::TunnelInfo> {
+        crate::tunnel::list()
+    }
+
+    pub fn tunnel_stop(&self, id: &str) -> Result<()> {
+        crate::tunnel::stop(id)
+    }
+
+    pub fn ollama_models(&self) -> Result<Vec<toolbox::OllamaModelRow>> {
+        toolbox::ollama_models(&self.store, &self.paths, &self.installer)
+    }
+
+    pub fn ollama_delete(&self, name: &str) -> Result<()> {
+        toolbox::ollama_delete(&self.store, &self.paths, &self.installer, name)
+    }
+
+    pub fn ollama_pull(&self, name: &str) -> Result<()> {
+        toolbox::ollama_pull(&self.store, &self.paths, &self.installer, name)
+    }
+
+    pub fn adminer_start(&self) -> Result<(u16, String)> {
+        toolbox::adminer_start(&self.store, &self.paths, &self.installer)
+    }
+
+    pub fn adminer_stop(&self) -> Result<()> {
+        toolbox::adminer_stop()
+    }
+
     /* ---------- 环境变量（PATH 注入） ---------- */
 
     /// 环境变量注入的完整状态（含每个已安装包可注入的命令）
@@ -267,6 +379,56 @@ impl CoreState {
     /// 依赖来自清单的 `run.requires`，在这里补齐而不是塞进 ServiceManager：
     /// - manager 只关心进程，不该知道清单；
     /// - 判断「依赖是否已安装」需要 store，而 manager 拿不到 store。
+    pub fn migrate_list_source(&self, host: String, port: u16, user: String, password: String) -> Result<Vec<dbmigrate::SourceDb>> {
+        let bin = self.installed_mysql_bin_dir()?;
+        dbmigrate::list_source_databases(&bin, &dbmigrate::SourceConn { host, port, user, password })
+    }
+
+    pub fn migrate_import(
+        &self,
+        host: String, port: u16, user: String, password: String,
+        databases: Vec<String>,
+    ) -> Result<dbmigrate::ImportReport> {
+        let bin = self.installed_mysql_bin_dir()?;
+        let src = dbmigrate::SourceConn { host, port, user, password };
+        let ports = crate::services::PortsProfile::from_settings(&self.store);
+        let pass = self.store.get_setting("mysqlRootPassword").unwrap_or_else(|| "root".into());
+        let version = self
+            .store
+            .find_installed("mysql", None)
+            .map(|p| p.version)
+            .ok_or_else(|| crate::error::AppError::not_installed("MySQL"))?;
+        let target = dbmigrate::SourceConn {
+            host: "127.0.0.1".into(),
+            port: ports.mysql,
+            user: "root".into(),
+            password: pass,
+        };
+        let emit = Arc::clone(&self.emit);
+        dbmigrate::import_databases(&bin, &src, &databases, &target, move |_db, st| {
+            (emit)(crate::Event::progress("db-import", 0, 0, 0, 0.0, st));
+        })
+    }
+
+    /// 本应用安装的 mysql 客户端目录（mysqldump/mysql 都在这）
+    fn installed_mysql_bin_dir(&self) -> Result<std::path::PathBuf> {
+        let v = self
+            .store
+            .find_installed("mysql", None)
+            .map(|p| p.version)
+            .ok_or_else(|| crate::error::AppError::not_installed("MySQL"))?;
+        let basedir = self.paths.runtime_dir("mysql", &v).join(crate::ops::mysql_root_name(&v));
+        Ok(basedir.join("bin"))
+    }
+
+    pub fn redis_stats(&self, port: u16) -> stats::RedisStats {
+        stats::redis_stats(port)
+    }
+
+    pub fn service_history(&self, n: usize) -> Vec<(i64, String, String)> {
+        self.manager.history_tail(n)
+    }
+
     pub fn service_status_list(&self) -> Vec<model::ServiceStatus> {
         let mut list = self.manager.list_status();
         let installed = self.store.list_installed().unwrap_or_default();
@@ -362,6 +524,21 @@ impl CoreState {
     }
 
     pub fn tail_logs(&self, id: &str, lines: usize) -> Vec<model::LogLine> {
+        // 站点日志：id 形如 "site:{siteId}"，读站点专属 access 日志
+        // （站点 conf 现在带 per-site access_log，日志页才能按站点看流量）
+        if let Some(site_id) = id.strip_prefix("site:") {
+            let f = self.paths.logs().join("nginx").join(format!("{site_id}.access.log"));
+            if let Ok(content) = std::fs::read_to_string(&f) {
+                // Lines 不支持 double rev，先收进 Vec 再取末尾 lines 行
+                let all: Vec<&str> = content.lines().collect();
+                let start = all.len().saturating_sub(lines);
+                return all[start..]
+                    .iter()
+                    .map(|l| model::LogLine { ts: None, line: l.to_string() })
+                    .collect();
+            }
+            return Vec::new();
+        }
         let from_ring = self.manager.tail(id, lines);
         let mapped: Vec<model::LogLine> = from_ring
             .into_iter()

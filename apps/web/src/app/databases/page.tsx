@@ -2,12 +2,16 @@
 
 import * as React from "react";
 import { toast } from "sonner";
-import { Database, HardDrive, KeyRound, Play, Plus, Table2, Trash2, UserRound, ExternalLink, Loader2 } from "lucide-react";
+import { Database, HardDrive, KeyRound, Play, Plus, Table2, Trash2, UserRound, ExternalLink, Loader2, Import } from "lucide-react";
 import { useUI, useT } from "@/lib/store";
+import { fmtBytes } from "@/lib/utils";
 import { useDatabases, useDbUsers, useInvalidate, toastError, usePorts, useServices } from "@/lib/hooks";
+import { useQuery } from "@tanstack/react-query";
 import * as api from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DbBackupCard } from "@/components/shared/db-backup";
+import { DbImportDialog } from "@/components/shared/db-import-dialog";
+import { ServiceIcon } from "@/components/shared/service-icon";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -35,6 +39,7 @@ export default function DatabasesPage() {
   const [createOpen, setCreateOpen] = React.useState(false);
   const [userOpen, setUserOpen] = React.useState(false);
   const [rootOpen, setRootOpen] = React.useState(false);
+  const [importOpen, setImportOpen] = React.useState(false);
   const [dropTarget, setDropTarget] = React.useState<string | null>(null);
   const [dropping, setDropping] = React.useState(false);
   const [dropTyped, setDropTyped] = React.useState("");
@@ -43,6 +48,7 @@ export default function DatabasesPage() {
 
   return (
     <div className="pb-8">
+      <DbImportDialog open={importOpen} onOpenChange={setImportOpen} />
       <PageHeader
         title={t("db.title")}
         subtitle={t("db.subtitle")}
@@ -50,6 +56,9 @@ export default function DatabasesPage() {
           <>
             <Button variant="secondary" onClick={() => setRootOpen(true)}>
               <KeyRound className="h-3.5 w-3.5" /> {t("db.resetRoot")}
+            </Button>
+            <Button variant="secondary" onClick={() => setImportOpen(true)}>
+              <Import className="h-3.5 w-3.5" /> {t("dbImport.open")}
             </Button>
             <Button onClick={() => setCreateOpen(true)}>
               <Plus className="h-3.5 w-3.5" /> {t("db.createDb")}
@@ -95,6 +104,9 @@ export default function DatabasesPage() {
                     <Table2 className="h-3.5 w-3.5 shrink-0 text-faint" />
                     <span className="flex-1 truncate font-mono text-[12.5px]">{db.name}</span>
                     {db.tables != null && <StatChip icon={Table2}>{db.tables} {t("db.tables")}</StatChip>}
+                    {db.sizeKb != null && db.sizeKb > 0 && (
+                      <StatChip icon={HardDrive}>{fmtBytes(db.sizeKb * 1024)}</StatChip>
+                    )}
                     {systemDbs.has(db.name) && <Badge variant="muted">{t("db.systemDb")}</Badge>}
                     <CopyButton text={`mysql://root@127.0.0.1:${ports.mysql}/${db.name}`} />
                     {/* 系统库不给删：删了 MySQL 直接起不来 */}
@@ -252,7 +264,7 @@ function MySqlInstanceCard() {
     <Card className="p-4">
       <div className="mb-3 flex items-center gap-2">
         <div className="flex h-9 w-9 items-center justify-center rounded-md bg-fill">
-          <Database className="h-4 w-4 text-info" strokeWidth={1.8} />
+          <ServiceIcon id="mysql" className="h-[18px] w-[18px]" />
         </div>
         <div>
           <p className="text-[13px] font-medium">MySQL</p>
@@ -293,15 +305,27 @@ function MySqlInstanceCard() {
 function RedisInstanceCard() {
   const t = useT();
   const ports = usePorts();
+  const { data: rs } = useQuery({
+    queryKey: ["redis-stats"],
+    queryFn: api.redisStats,
+    refetchInterval: 5000,
+  });
   return (
     <Card className="p-4">
       <div className="mb-3 flex items-center gap-2">
         <div className="flex h-9 w-9 items-center justify-center rounded-md bg-fill">
-          <span className="font-mono text-[13px] font-bold text-error">R</span>
+          <ServiceIcon id="redis" className="h-[18px] w-[18px]" />
         </div>
         <div>
           <p className="text-[13px] font-medium">Redis</p>
-          <p className="text-[11px] text-faint">127.0.0.1:{ports.redis} · {t("db.redisDevHint")}</p>
+          <p className="text-[11px] text-faint">
+            127.0.0.1:{ports.redis} · {t("db.redisDevHint")}
+            {rs?.reachable && (
+              <span className="ml-1.5 text-success">
+                · {rs.usedMemoryHuman ?? "—"} · {rs.keys ?? 0} keys
+              </span>
+            )}
+          </p>
         </div>
         <div className="ml-auto">
           <InstanceStartButton base="redis" />

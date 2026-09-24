@@ -4,6 +4,9 @@
 
 use thiserror::Error;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 pub mod pathenv;
 
 #[derive(Error, Debug)]
@@ -32,16 +35,31 @@ pub struct ProcessGroup {
 }
 
 impl ProcessGroup {
-    /// 创建进程组（尚未包含任何进程）
-    pub fn new() -> Result<Self> {
+    /// 创建进程组（尚未包含任何进程）。
+    /// `detached=true`：Windows 上用不带 KILL_ON_JOB_CLOSE 的 Job——
+    /// 进程树仍可被整体终止（stop 正常工作），但创建者退出时服务继续存活
+    /// （nsbctl CLI 启动的服务不随 CLI 退出而被杀）。
+    pub fn new_detached(detached: bool) -> Result<Self> {
         #[cfg(windows)]
         {
-            let job = windows_job::JobObject::create_kill_on_close()
-                .map_err(|e| PlatformError::Win(format!("CreateJobObject 失败: {e}")))?;
+            let job = if detached {
+                windows_job::JobObject::create_detached()
+            } else {
+                windows_job::JobObject::create_kill_on_close()
+            }
+            .map_err(|e| PlatformError::Win(format!("CreateJobObject 失败: {e}")))?;
             Ok(Self { job: Some(job), pids: Vec::new() })
         }
         #[cfg(not(windows))]
-        Ok(Self { pids: Vec::new() })
+        {
+            let _ = detached;
+            Ok(Self { pids: Vec::new() })
+        }
+    }
+
+    /// 常规创建（随创建者退出而终止整组）
+    pub fn new() -> Result<Self> {
+        Self::new_detached(false)
     }
 
     /// 把已启动的子进程加入组（Windows 下必须尽快调用，防孤儿）
@@ -72,6 +90,14 @@ impl ProcessGroup {
             if let Some(job) = &self.job {
                 windows_job::terminate_job(job)
                     .map_err(|e| PlatformError::Win(format!("TerminateJobObject 失败: {e}")))?;
+            } else {
+                // 无 Job 句柄（收养的孤儿/历史组）：按 pid 逐个强杀（含子树）
+                for pid in &self.pids {
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/PID", &pid.to_string(), "/T", "/F"])
+                        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+                        .output();
+                }
             }
         }
         #[cfg(not(windows))]
@@ -143,8 +169,12 @@ pub fn process_alive(pid: u32) -> bool {
 
 /* ================= hosts ================= */
 
-pub const HOSTS_BEGIN: &str = "# BEGIN NiceServBay (managed)";
-pub const HOSTS_END: &str = "# END NiceServBay (managed)";
+pub const HOSTS_BEGIN: &str = "# BEGIN NiceEnv (managed)";
+pub const HOSTS_END: &str = "# END NiceEnv (managed)";
+/// 旧版产品名（NiceServBay）写入的托管标记：合并时同样识别并清掉，
+/// 否则老用户 hosts 文件里的旧块不会被替换，会残留成重复托管块
+pub const HOSTS_BEGIN_LEGACY: &str = "# BEGIN NiceServBay (managed)";
+pub const HOSTS_END_LEGACY: &str = "# END NiceServBay (managed)";
 
 pub fn hosts_path() -> std::path::PathBuf {
     if cfg!(windows) {
@@ -203,7 +233,7 @@ pub fn merge_hosts_content(original: &str, entries: &[(String, String)]) -> Stri
     let mut block_written = false;
     for line in original.lines() {
         let t = line.trim();
-        if t == HOSTS_BEGIN {
+        if t == HOSTS_BEGIN || t == HOSTS_BEGIN_LEGACY {
             in_block = true;
             if !block_written {
                 out.push_str(&render_block(entries));
@@ -211,7 +241,7 @@ pub fn merge_hosts_content(original: &str, entries: &[(String, String)]) -> Stri
             }
             continue;
         }
-        if t == HOSTS_END {
+        if t == HOSTS_END || t == HOSTS_END_LEGACY {
             in_block = false;
             continue;
         }
@@ -432,6 +462,18 @@ mod windows_job {
     unsafe impl Send for JobObject {}
 
     impl JobObject {
+        /// 不带 KILL_ON_JOB_CLOSE 的普通 Job：进程树仍可被整体终止，
+        /// 但创建者（如 CLI）退出、句柄关闭时**不会**连带杀掉服务。
+        pub fn create_detached() -> std::io::Result<Self> {
+            unsafe {
+                let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+                if job.is_null() {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(JobObject(job))
+            }
+        }
+
         pub fn create_kill_on_close() -> std::io::Result<Self> {
             unsafe {
                 let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
@@ -617,5 +659,122 @@ mod sysproxy_win {
             InternetSetOptionW(std::ptr::null_mut(), INTERNET_OPTION_REFRESH, std::ptr::null(), 0);
             Ok(old)
         }
+    }
+}
+
+/* ================= 系统 DNS 接管（本地域名解析配套） ================= */
+
+/// 枚举已连接的网络接口名（Windows: netsh；macOS: networksetup）。
+/// 用于让用户/调用方选择要把 DNS 指向本地解析器的网卡。
+#[cfg(windows)]
+pub fn connected_interfaces() -> Result<Vec<String>> {
+    let out = std::process::Command::new("netsh")
+        .args(["interface", "show", "interface"])
+        .creation_flags(0x0800_0000)
+        .output()
+        .map_err(|e| PlatformError::Io(format!("netsh 失败：{e}")))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut names = Vec::new();
+    for line in text.lines().skip(3) {
+        // 列：Admin State State Type Interface Name
+        let mut parts = line.split_whitespace();
+        let _admin = parts.next();
+        let state = parts.next().unwrap_or("");
+        let _type_ = parts.next();
+        parts.next(); // loopback 标记列
+        if state.eq_ignore_ascii_case("connected") || state.eq_ignore_ascii_case("已连接") {
+            let rest: Vec<&str> = line.splitn(4, ' ').collect();
+            if let Some(name) = rest.last() {
+                let name = name.trim().to_string();
+                if !name.is_empty() {
+                    names.push(name);
+                }
+            }
+        }
+    }
+    Ok(names)
+}
+
+#[cfg(not(windows))]
+pub fn connected_interfaces() -> Result<Vec<String>> {
+    let out = std::process::Command::new("networksetup")
+        .args(["-listallnetworkservices"])
+        .output()
+        .map_err(|e| PlatformError::Io(format!("networksetup 失败：{e}")))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    Ok(text
+        .lines()
+        .skip(1)
+        .map(|l| l.trim().trim_start_matches('*').to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
+/// 读取接口当前 DNS 服务器（原始文本，前端展示用）
+#[cfg(windows)]
+pub fn interface_dns_status(name: &str) -> Result<String> {
+    let out = std::process::Command::new("netsh")
+        .args(["interface", "ip", "show", "dns", "name=", name])
+        .creation_flags(0x0800_0000)
+        .output()
+        .map_err(|e| PlatformError::Io(format!("netsh 失败：{e}")))?;
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+#[cfg(not(windows))]
+pub fn interface_dns_status(name: &str) -> Result<String> {
+    let out = std::process::Command::new("networksetup")
+        .args(["-getdns", name])
+        .output()
+        .map_err(|e| PlatformError::Io(format!("networksetup 失败：{e}")))?;
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// 提权把接口 DNS 设为 127.0.0.1（本地解析器接管）。
+/// Windows: netsh set dns（单个主 DNS 即可）；macOS: networksetup -setdnsservers。
+pub fn set_dns_localhost_elevated(name: &str) -> Result<()> {
+    #[cfg(windows)]
+    {
+        run_elevated(
+            "netsh",
+            &[
+                "interface",
+                "ip",
+                "set",
+                "dns",
+                "name=".to_string().leak(),
+                name,
+                "source=static",
+                "addr=127.0.0.1",
+                "register=primary",
+            ],
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        run_elevated("networksetup", &["-setdnsservers", name, "127.0.0.1"])
+    }
+}
+
+/// 恢复为自动获取（DHCP 下发）的 DNS
+pub fn restore_dns_elevated(name: &str) -> Result<()> {
+    #[cfg(windows)]
+    {
+        run_elevated(
+            "netsh",
+            &[
+                "interface",
+                "ip",
+                "set",
+                "dns",
+                "name=".to_string().leak(),
+                name,
+                "source=dhcp",
+            ],
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        run_elevated("networksetup", &["-setdnsservers", name, "empty"])
     }
 }

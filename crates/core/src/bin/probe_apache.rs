@@ -41,6 +41,7 @@ fn main() {
         create_db: None,
         write_env_example: false,
         template: "blank-php".into(),
+        php_overrides: None,
     };
     match nsb_core::sites::create(&input, &state.paths, &state.store, &state.manager) {
         Ok(s) => println!("— 重建站点 {}", s.id),

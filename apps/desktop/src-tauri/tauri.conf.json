@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "NiceServBay",
+  "productName": "NiceEnv",
   "version": "0.1.0",
   "identifier": "com.niceservbay.app",
   "build": {
@@ -10,9 +10,10 @@
     "frontendDist": "../../web/out"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
-        "title": "NiceServBay",
+        "title": "NiceEnv",
         "width": 1280,
         "height": 800,
         "minWidth": 1100,
@@ -28,11 +29,6 @@
     ],
     "security": {
       "csp": null
-    },
-    "trayIcon": {
-      "iconPath": "icons/icon.ico",
-      "iconAsTemplate": false,
-      "tooltip": "NiceServBay — 本地开发环境"
     }
   },
   "bundle": {

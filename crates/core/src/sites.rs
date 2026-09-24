@@ -125,13 +125,21 @@ pub fn create(
     }
 
     // ---- 站点记录 ----
+    // 项目级运行时锁定：rootDir/.nsb.json 里 {"php": "8.3.33"} 优先于向导选择
+    // （向导留空「跟随项目」时生效；显式选了版本则以向导为准）
+    let mut runtime = input.runtime.clone();
+    if runtime.kind == crate::model::SiteKind::Php && runtime.php_version.is_none() {
+        if let Some((_, ver)) = read_project_pin(&input.root_dir) {
+            runtime.php_version = Some(ver);
+        }
+    }
     let now = now_ms();
     let site = Site {
         id: format!("site-{}", now),
         name: input.name.trim().to_string(),
         domains: input.domains.clone(),
         root_dir: input.root_dir.clone(),
-        runtime: input.runtime.clone(),
+        runtime,
         https: input.https,
         rewrite: input.rewrite.clone(),
         db: input.create_db.as_ref().map(|d| crate::model::SiteDbBinding {
@@ -140,11 +148,13 @@ pub fn create(
             username: d.username.clone(),
             password: d.password.clone(),
         }),
+        php_overrides: input.php_overrides.clone(),
         status: "running".into(),
         created_at: now,
         updated_at: now,
     };
     store.save_site(&site)?;
+    write_user_ini(&site);
 
     // ---- 证书 ----
     if site.https {
@@ -178,8 +188,10 @@ pub fn update(
     let https_changed = current.https != site_patch.https;
     current.https = site_patch.https;
     current.rewrite = site_patch.rewrite.clone();
+    current.php_overrides = site_patch.php_overrides.clone();
     current.updated_at = now_ms();
     store.save_site(&current)?;
+    write_user_ini(&current);
 
     if https_changed && current.https {
         crate::tls::issue_site_cert(paths, store, &current.domains)?;
@@ -283,7 +295,14 @@ pub fn write_site_conf(paths: &Paths, store: &Store, site: &Site) -> Result<()> 
     } else {
         let fastcgi = paths.etc().join("nginx").join("fastcgi_params");
         let cert_dir = paths.certs().join("sites");
-        let conf = configgen::render_site_conf(site, ports.http, ports.https, &fastcgi, &cert_dir);
+        let conf = configgen::render_site_conf(
+            site,
+            ports.http,
+            ports.https,
+            &fastcgi,
+            &cert_dir,
+            &paths.logs().join("nginx"),
+        );
         let path = paths.nginx_sites_dir().join(format!("{}.conf", site.id));
         write_with_backup(&path, &conf, &paths.backup())?;
     }
@@ -298,7 +317,7 @@ pub fn scaffold_template(template: &str, root: &std::path::Path, input: &CreateS
         "blank-php" => {
             std::fs::write(
                 root.join("index.php"),
-                "<?php\nheader('Content-Type: text/html; charset=utf-8');\necho '<h1>It works!</h1><p>NiceServBay PHP site.</p>';\necho '<p>PHP ' . PHP_VERSION . '</p>';\n",
+                "<?php\nheader('Content-Type: text/html; charset=utf-8');\necho '<h1>It works!</h1><p>NiceEnv PHP site.</p>';\necho '<p>PHP ' . PHP_VERSION . '</p>';\n",
             )?;
             std::fs::write(
                 root.join("phpinfo.php"),
@@ -442,7 +461,7 @@ const SPA_INDEX_HTML: &str = r#"<!doctype html>
 
 /// WordPress 占位入口：能跑、能自我说明，覆盖即可
 const WORDPRESS_PLACEHOLDER: &str = r#"<?php
-// 这是 NiceServBay 生成的占位入口。
+// 这是 NiceEnv 生成的占位入口。
 // 把 WordPress 官方包解压到这个目录覆盖即可（保留 wp-config.php 里的库配置）。
 header('Content-Type: text/html; charset=utf-8');
 ?>
@@ -464,7 +483,7 @@ li{margin:4px 0}</style>
 /// wp-config 样例：把该填的位置标出来，用户改名即可用
 const WORDPRESS_CONFIG_SAMPLE: &str = r#"<?php
 /**
- * NiceServBay 生成的 wp-config.php 样例。
+ * NiceEnv 生成的 wp-config.php 样例。
  * 把 DB_* 换成「站点绑定的数据库」那一组（可在「数据库」页查到），
  * 然后改名为 wp-config.php。
  */
@@ -509,7 +528,7 @@ if (is_file($autoload)) {
 
 const THINKPHP_README: &str = r#"# ThinkPHP 站点
 
-NiceServBay 已按 ThinkPHP 6+ 的约定建好：
+NiceEnv 已按 ThinkPHP 6+ 的约定建好：
 
 - **文档根**：`public/`（入口 `public/index.php`）
 - **伪静态**：已设为 `thinkphp`
@@ -562,7 +581,7 @@ if (is_file($paths)) {
 
 const NEXT_EXPORT_README: &str = r#"# Next.js 静态导出站点
 
-NiceServBay 已把文档根指向 `out/`（Next.js 静态导出的默认产物目录）。
+NiceEnv 已把文档根指向 `out/`（Next.js 静态导出的默认产物目录）。
 
 ## 先在 next.config 里开启导出
 
@@ -608,6 +627,7 @@ mod scaffold_tests {
             create_db: None,
             write_env_example: false,
             template: "none".into(),
+            php_overrides: None,
         }
     }
 
@@ -918,4 +938,47 @@ fn disable_site_conf(paths: &Paths, site: &Site) -> Result<()> {
         let _ = std::fs::rename(&other, other.with_extension("conf.disabled"));
     }
     Ok(())
+}
+
+
+/// 站点级 PHP 覆盖 → rootDir/.user.ini（PHP 默认的用户级 ini 文件名）。
+/// 仅 php 站点写；键值做白名单字符校验，防止换行注入任意 ini 指令。
+pub fn write_user_ini(site: &Site) {
+    if site.runtime.kind != crate::model::SiteKind::Php {
+        return;
+    }
+    let Some(overrides) = &site.php_overrides else { return };
+    let root = std::path::PathBuf::from(&site.root_dir);
+    if !root.is_dir() {
+        return;
+    }
+    let mut body = String::from("; NiceEnv managed .user.ini\n");
+    for (k, v) in overrides {
+        let k = k.trim();
+        let v = v.trim();
+        if k.is_empty() {
+            continue;
+        }
+        // 键只允许 ini 键字符；值不允许换行（防注入第二条指令）
+        if !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.') {
+            continue;
+        }
+        let v = v.replace('\n', " ").replace('\r', " ");
+        body.push_str(&format!("{k}={v}\n"));
+    }
+    std::fs::write(root.join(".user.ini"), body).ok();
+}
+
+
+/// 读取项目运行时锁定文件 {rootDir}/.nsb.json。
+/// 目前支持 {"php": "x.y.z"}；返回 (kind, version)。文件损坏/字段非法 → None。
+pub fn read_project_pin(root_dir: &str) -> Option<(String, String)> {
+    let raw = std::fs::read_to_string(std::path::Path::new(root_dir).join(".nsb.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let ver = v.get("php")?.as_str()?.trim().to_string();
+    // 版本串防注入：只允许数字与点
+    if ver.is_empty() || !ver.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return None;
+    }
+    Some(("php".to_string(), ver))
 }

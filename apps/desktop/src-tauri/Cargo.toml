@@ -1,7 +1,7 @@
 [package]
 name = "niceservbay"
 version = "0.1.0"
-description = "NiceServBay — 一站式本地开发环境管理器"
+description = "NiceEnv — 一站式本地开发环境管理器"
 edition = "2021"
 license = "Proprietary"
 

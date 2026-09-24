@@ -4,7 +4,7 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { motion } from "motion/react";
-import { Cpu, RotateCw, ScrollText, Server, ShieldAlert, AlertTriangle } from "lucide-react";
+import { Cpu, RotateCw, ScrollText, Server, ShieldAlert, AlertTriangle, Stethoscope } from "lucide-react";
 import type { ServiceStatus } from "@nsb/schema";
 import { cn } from "@/lib/utils";
 import { Card } from "@/components/ui/card";
@@ -12,6 +12,8 @@ import { Button } from "@/components/ui/button";
 import { ServiceSwitch } from "./service-switch";
 import { StatusLight } from "./status-light";
 import { StatChip } from "./stat-chip";
+import { ServiceDiagnostics } from "./service-diagnostics";
+import { ServiceIcon } from "./service-icon";
 import { useUI, useT } from "@/lib/store";
 import { useInvalidate, toastError, toastPortConflict } from "@/lib/hooks";
 import { fmtUptime } from "@/lib/utils";
@@ -23,6 +25,7 @@ export function ServiceCard({ service }: { service: ServiceStatus }) {
   const router = useRouter();
   const invalidate = useInvalidate();
   const [busy, setBusy] = React.useState(false);
+  const [diagOpen, setDiagOpen] = React.useState(false);
   const running = service.state === "running";
   const error = service.state === "error";
   /** 端口冲突时后端会带上端口与占用 pid：卡片上直接给「结束占用并重试」 */
@@ -89,10 +92,7 @@ export function ServiceCard({ service }: { service: ServiceStatus }) {
                     : "border-border bg-card-2/70"
               )}
             >
-              <Server
-                className={cn("h-4 w-4", running ? "text-running" : error ? "text-error" : "text-faint")}
-                strokeWidth={1.8}
-              />
+              <ServiceIcon id={service.id} className="h-[18px] w-[18px]" />
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
@@ -141,12 +141,21 @@ export function ServiceCard({ service }: { service: ServiceStatus }) {
               {fmtUptime(service.uptimeSec)}
             </StatChip>
           )}
-          {service.logFile && (
+          {service.logFile ? (
             <>
               <Button
                 variant="ghost"
                 size="icon-sm"
                 className="ml-auto text-faint hover:text-secondary"
+                title={t("svc.diagnose")}
+                onClick={() => setDiagOpen(true)}
+              >
+                <Stethoscope className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="text-faint hover:text-secondary"
                 title={t("common.restart")}
                 disabled={busy || service.state === "starting" || service.state === "stopping"}
                 onClick={restart}
@@ -163,6 +172,16 @@ export function ServiceCard({ service }: { service: ServiceStatus }) {
                 <ScrollText className="h-3.5 w-3.5" />
               </Button>
             </>
+          ) : (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="ml-auto text-faint hover:text-secondary"
+              title={t("svc.diagnose")}
+              onClick={() => setDiagOpen(true)}
+            >
+              <Stethoscope className="h-3.5 w-3.5" />
+            </Button>
           )}
         </div>
 
@@ -201,6 +220,7 @@ export function ServiceCard({ service }: { service: ServiceStatus }) {
           </div>
         )}
       </Card>
+      <ServiceDiagnostics service={service} open={diagOpen} onOpenChange={setDiagOpen} />
     </motion.div>
   );
 }

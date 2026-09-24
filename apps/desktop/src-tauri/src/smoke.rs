@@ -121,7 +121,7 @@ fn proxy_http_get_via_mihomo(url_host: &str, url_port: u16, path: &str) -> Resul
 pub fn run() {
     // 安全红线：不改系统 hosts、不动系统代理
     std::env::set_var("NSB_SKIP_HOSTS", "1");
-    println!(" NiceServBay smoke-test");
+    println!(" NiceEnv smoke-test");
     println!("==========================================");
     let begin = std::time::Instant::now();
 
@@ -178,31 +178,29 @@ pub fn run() {
     let downloads = state.paths.downloads();
     std::fs::create_dir_all(&downloads).ok();
     let mut copied = 0;
-    // 预置缓存的版本必须与「实际会安装的版本」一致：install_package("nginx") 取清单最新版。
-    // 之前硬编码 1.26.3 而清单最新已是 1.28.0，导致每次冒烟都绕过缓存去真实下载。
-    let latest_key = |id: &str, fallback: &str| -> String {
-        nsb_core::install::Installer::bundled()
-            .find(id)
-            .map(|e| format!("{id}@{}", e.version))
-            .unwrap_or_else(|| fallback.to_string())
-    };
-    let nginx_key = latest_key("nginx", "nginx@1.28.0");
-    let mihomo_key = latest_key("mihomo", "mihomo@1.19.11");
-    let redis_key = latest_key("redis", "redis@5.0.14");
-    let pairs: Vec<(String, String)> = vec![
-        (format!("nginx-{}.zip", nginx_key.trim_start_matches("nginx@")), format!("{nginx_key}.pkg")),
-        ("php-8.3.33.zip".into(), "php@8.3.33.pkg".into()),
-        ("php-7.4.33.zip".into(), "php@7.4.33.pkg".into()),
-        ("mysql-8.0.46.zip".into(), "mysql@8.0.46.pkg".into()),
-        (
-            format!("redis-{}.1.zip", redis_key.trim_start_matches("redis@")),
-            format!("{redis_key}.pkg"),
-        ),
-        (
-            format!("mihomo-{}.zip", mihomo_key.trim_start_matches("mihomo@")),
-            format!("{mihomo_key}.pkg"),
-        ),
+    // 单一事实来源：安装列表钉到哪些版本，缓存就预热哪些版本。
+    // （历史教训：两处各自硬编码，清单/缓存一变就互相错位 → 离线环境直接失败。）
+    const INSTALL_KEYS: &[&str] = &[
+        "nginx@1.26.3",
+        "php@8.3.33",
+        "php@7.4.33",
+        "mysql@8.0.46",
+        "redis@5.0.14",
+        "mihomo@1.19.10",
     ];
+    let pairs: Vec<(String, String)> = INSTALL_KEYS
+        .iter()
+        .map(|key| {
+            // 缓存源文件名按各家发布习惯：redis 是 Redis-x64-{v}.1，其余 {id}-{v}
+            let src = if let Some(v) = key.strip_prefix("redis@") {
+                format!("redis-{v}.1.zip")
+            } else {
+                let (id, ver) = key.split_once('@').unwrap_or((key, ""));
+                format!("{id}-{ver}.zip")
+            };
+            (src, format!("{key}.pkg"))
+        })
+        .collect();
     for (src, dst) in pairs.iter() {
         let from = cache.join(src);
         let to = downloads.join(dst);
@@ -260,6 +258,7 @@ pub fn run() {
         },
         https: false,
         rewrite: nsb_core::model::RewritePreset::None,
+        php_overrides: None,
         create_db: Some(nsb_core::model::CreateDbInfo {
             database: "smoke_db".into(),
             username: "smoke_user".into(),
@@ -350,6 +349,7 @@ echo implode("\n", $out);
         },
         https: false,
         rewrite: nsb_core::model::RewritePreset::None,
+        php_overrides: None,
         create_db: None,
         write_env_example: false,
         template: "blank-php".into(),
@@ -390,6 +390,7 @@ echo implode("\n", $out);
         },
         https: false,
         rewrite: nsb_core::model::RewritePreset::None,
+        php_overrides: None,
         create_db: None,
         write_env_example: false,
         template: "none".into(),

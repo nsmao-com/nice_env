@@ -33,6 +33,8 @@ import type {
   ConfigValidation,
   ConfigBackup,
   CertRecord,
+  CertAutomation,
+  CertMonitor,
   CertReport,
   ImportedCert,
   EnvFileView,
@@ -126,7 +128,7 @@ function mockPhpExtensions(version: string): PhpExtensionView {
   if (!mockPhpExtState.has(version)) mockPhpExtState.set(version, mockPhpExtSeed());
   return {
     version,
-    iniPath: `C:\\NiceServBay\\etc\\php\\${version}\\php.ini`,
+    iniPath: `C:\\NiceEnv\\etc\\php\\${version}\\php.ini`,
     extensions: mockPhpExtState.get(version)!,
     toggles: mockPhpToggleState.get(version) ?? mockPhpToggleSeed(),
   };
@@ -148,7 +150,7 @@ const mockDbBackups = new Map<string, DbBackupFile>(
     ["shop-20260921-113000.sql", 1024 * 512],
     ["wordpress-20260920-220000.sql", 1024 * 180],
   ].map(([name, size], i) => {
-    const path = `C:\NiceServBay\backup\db\${name}`;
+    const path = `C:\NiceEnv\backup\db\${name}`;
     return [
       path,
       {
@@ -187,9 +189,51 @@ const mockRun = (singleInstance: boolean): NonNullable<PackageView["run"]> => ({
   singleInstance,
 });
 const certs = new Map<string, CertRecord>();
+/* 证书自动化（ACME）：mock 一条样例，覆盖列表/编辑/签发的浏览器预览 */
+const certAutos = new Map<string, CertAutomation>();
+function seedCertAutos() {
+  if (certAutos.size > 0) return;
+  certAutos.set("auto-demo", {
+    id: "auto-demo",
+    name: "demo.example.com",
+    domains: ["demo.example.com", "*.demo.example.com"],
+    email: "me@example.com",
+    ca: "letsencrypt",
+    dns: { kind: "aliyun", accessKey: "AKID…", secret: "…" },
+    deployLocal: true,
+    targets: [
+      { id: "t1", kind: "btpanel", name: "我的宝塔",
+        config: { url: "http://bt.example.com", apiSk: "…", siteName: "demo.example.com" },
+        lastResult: { ok: true, message: "已将证书配置到宝塔站点 demo.example.com", at: Date.now() } },
+      { id: "t2", kind: "aliyun", name: "阿里云 SSL",
+        config: { accessKeyId: "AKID…", accessKeySecret: "…", region: "cn-hangzhou" },
+        lastResult: { ok: false, message: "mock 示例：目标失败不影响其它目标", at: Date.now() } },
+    ],
+    enabled: true,
+    state: "ok", lastError: "",
+    keyAlg: "ec256", eabKid: "", eabHmacKey: "", cnameTarget: "",
+    dnsWaitSec: 0, renewDaysAhead: 30, retryTimes: 3, retryIntervalMin: 30, failCount: 0,
+    notifyKind: "dingtalk", notifyUrl: "https://oapi.dingtalk.com/robot/send?access_token=demo",
+    notifySmtp: null,
+    manualRecords: [],
+    runs: [
+      { at: Date.now() - 86400_000 * 3, ok: true, message: "签发成功", log: ["开始处理：demo.example.com", "ACME 签发成功，开始部署", "本地部署完成：…/certs/sites/demo.example.com.crt", "已上传到阿里云 SSL 证书服务（单号 12345）"] },
+      { at: Date.now() - 86400_000 * 93, ok: true, message: "签发成功", log: ["开始处理：demo.example.com", "完成"] },
+    ],
+    certId: "acme-demo.example.com",
+    issuedAt: Date.now() - 86400_000 * 3,
+    expiresAt: Date.now() + 86400_000 * 87,
+    nextRenewAt: Date.now() + 86400_000 * 57,
+    lastRunAt: Date.now() - 86400_000 * 3,
+    createdAt: Date.now() - 86400_000 * 3,
+    updatedAt: Date.now() - 86400_000 * 3,
+  });
+}
 const databases = new Map<string, DatabaseInfo>();
 const dbUsers = new Map<string, DbUserInfo>();
 const proxyProfiles = new Map<string, ProxyProfile>();
+const cronJobs = new Map<string, { id: string; name: string; command: string; intervalMin: number; enabled: boolean; createdAt: number; lastRunAt: number | null; lastExit: string | null; lastOutput: string | null }>();
+let mockTunnel: { id: string; port: number; url: string; startedAt: number; alive: boolean } | null = null;
 const hostsManaged = new Map<string, string>();
 const settings: AppSettings = {
   language: "zh",
@@ -201,7 +245,9 @@ const settings: AppSettings = {
   codeFont: "sf-mono",
   codeFontSize: 11.5,
   codeLineNumbers: true,
-  codeWrap: false,
+  codeWrap: true,
+  codeTheme: "auto",
+  codeBg: "",
   reduceMotion: false,
   defaultTld: "test",
   defaultWebServer: "nginx",
@@ -293,6 +339,9 @@ function seed() {
       state: "stopped",
       pids: [],
       category: "web-server",
+      // schema 里两个数组带 default，但 mock 不走 zod 解析，这里必须自己带上
+      requires: [],
+      missingRequires: [],
       ...s,
     } as ServiceStatus);
 
@@ -574,7 +623,7 @@ function seed() {
   certs.set("ca", {
     id: "ca",
     kind: "ca",
-    subject: "NiceServBay Local Root CA",
+    subject: "NiceEnv Local Root CA",
     sans: [],
     notBefore: now() - 86400_000 * 12,
     notAfter: now() + 86400_000 * 3650,
@@ -754,7 +803,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         .map(([serviceId, label, port]) => ({
           port,
           pid: 4528,
-          processName: "NiceServBay (demo)",
+          processName: "NiceEnv (demo)",
           cmdline: `${label} — 浏览器演示数据，非真实进程`,
           ownedBySelf: true,
           serviceId,
@@ -929,7 +978,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       // 后端会强制 .log 后缀并清洗文件名，mock 也照做，避免演示时出现假路径
       const raw = (args!.suggestedName as string | null) ?? `${sid}-20260921-210000`;
       const base = raw.replace(/\.log$/, "");
-      return `C:\\NiceServBay\\logs\\export\\${base}.log` as T;
+      return `C:\\NiceEnv\\logs\\export\\${base}.log` as T;
     }
     case "tool_mirrors":
       return [
@@ -1061,12 +1110,12 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "diagnostics_build": {
       const now = Math.floor(Date.now() / 1000);
       const md = [
-        "# NiceServBay 诊断报告",
+        "# NiceEnv 诊断报告",
         "",
         "- 应用版本：0.1.0",
         `- 生成时间：${new Date().toLocaleString()}`,
         "- 操作系统：windows x86_64",
-        "- 数据目录：C:\NiceServBay",
+        "- 数据目录：C:\NiceEnv",
         "",
         "## 服务状态",
         "",
@@ -1102,7 +1151,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       } as DiagnosticsBundle as T;
     }
     case "diagnostics_save":
-      return "C:\NiceServBay\diagnostics\niceservbay-diagnostics-20260921-210000.md" as T;
+      return "C:\NiceEnv\diagnostics\niceenv-diagnostics-20260921-210000.md" as T;
     case "env_read": {
       return {
         siteId: args!.siteId as string,
@@ -1136,7 +1185,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const day = 86400;
       return {
         certs: [
-          { id: "ca", kind: "ca", subject: "NiceServBay Local CA", sans: [], notAfter: now + 3600 * day, daysLeft: 3600, status: "ok", filePresent: true, usedBySites: [], missingSans: [], advice: "" },
+          { id: "ca", kind: "ca", subject: "NiceEnv Local Root CA", sans: [], notAfter: now + 3600 * day, daysLeft: 3600, status: "ok", filePresent: true, usedBySites: [], missingSans: [], advice: "" },
           { id: "laravel-shop", kind: "site", subject: "shop.test", sans: ["shop.test"], notAfter: now + 12 * day, daysLeft: 12, status: "warn", filePresent: true, usedBySites: ["laravel-shop"], missingSans: [], advice: "还有 12 天到期，建议尽快重新签发" },
           { id: "legacy-admin", kind: "site", subject: "admin.test", sans: ["admin.test"], notAfter: now - 2 * day, daysLeft: -2, status: "expired", filePresent: true, usedBySites: ["legacy-admin"], missingSans: ["old.admin.test"], advice: "已过期：到站点详情里重新签发证书即可" },
         ],
@@ -1147,9 +1196,17 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         checkedAt: now,
       } as CertReport as T;
     }
+    case "cert_import_dir":
+      return {
+        imported: [
+          { certPath: "D:\mock\a.crt", keyPath: "D:\mock\a.key", subject: "a.example.com",
+            sans: ["a.example.com"], notBefore: Date.now() - 86400_000 * 30, notAfter: Date.now() + 86400_000 * 60, daysLeft: 60 },
+        ],
+        skipped: ["b.crt：找不到同名私钥"],
+      } as T;
     case "cert_imported_list":
       return [
-        { certPath: "C:\NiceServBay\certs\imported\corp-wildcard.crt", keyPath: "C:\NiceServBay\certs\imported\corp-wildcard.key", subject: "*.corp.internal", sans: ["*.corp.internal", "corp.internal"], notBefore: 1700000000, notAfter: 1800000000, daysLeft: 210 },
+        { certPath: "C:\NiceEnv\certs\imported\corp-wildcard.crt", keyPath: "C:\NiceEnv\certs\imported\corp-wildcard.key", subject: "*.corp.internal", sans: ["*.corp.internal", "corp.internal"], notBefore: 1700000000, notAfter: 1800000000, daysLeft: 210 },
       ] as ImportedCert[] as T;
     case "cert_import":
       return { certPath: "x", keyPath: "y", subject: "imported", sans: [], notBefore: 0, notAfter: 0, daysLeft: 365 } as ImportedCert as T;
@@ -1191,7 +1248,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           port,
           inUse: true,
           pid: 4528,
-          processName: "NiceServBay (demo)",
+          processName: "NiceEnv (demo)",
           cmdline: "浏览器演示数据，非真实进程",
         } as PortDiagnosis as T;
       }
@@ -1207,7 +1264,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           port,
           ownedBySelf: running,
           pid: running ? 4528 : undefined,
-          processName: running ? "NiceServBay (demo)" : undefined,
+          processName: running ? "NiceEnv (demo)" : undefined,
           running,
           verdict: running ? "self" : "free",
         });
@@ -1244,10 +1301,10 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "config_list":
       return [
-        { kind: "nginx-main", label: "Nginx 主配置", description: "站点 vhost 是自动生成的；这里改全局项（worker、日志、gzip 等）", path: "C:\\NiceServBay\\etc\\nginx\\nginx.conf", exists: true, sizeBytes: 4096, language: "nginx", validated: true, usedByService: "nginx", requiresPackage: "nginx" },
-        { kind: "php-ini", label: "php.ini", description: "PHP 运行时设置。扩展开关建议走「PHP 扩展」面板，那里有主动校验", path: "C:\\NiceServBay\\etc\\php\\8.3.33\\php.ini", exists: true, sizeBytes: 2048, language: "ini", validated: false, usedByService: "php", requiresPackage: "php" },
-        { kind: "mysql-ini", label: "my.ini", description: "MySQL 服务配置（端口、缓冲池、字符集）", path: "C:\\NiceServBay\\etc\\mysql\\8.0.46\\my.ini", exists: true, sizeBytes: 1024, language: "ini", validated: false, usedByService: "mysql", requiresPackage: "mysql" },
-        { kind: "redis-conf", label: "redis.conf", description: "Redis 配置（端口、持久化、内存上限）", path: "C:\\NiceServBay\\etc\\redis\\redis.conf", exists: false, sizeBytes: 0, language: "conf", validated: false, usedByService: "redis", requiresPackage: "redis" },
+        { kind: "nginx-main", label: "Nginx 主配置", description: "站点 vhost 是自动生成的；这里改全局项（worker、日志、gzip 等）", path: "C:\\NiceEnv\\etc\\nginx\\nginx.conf", exists: true, sizeBytes: 4096, language: "nginx", validated: true, usedByService: "nginx", requiresPackage: "nginx" },
+        { kind: "php-ini", label: "php.ini", description: "PHP 运行时设置。扩展开关建议走「PHP 扩展」面板，那里有主动校验", path: "C:\\NiceEnv\\etc\\php\\8.3.33\\php.ini", exists: true, sizeBytes: 2048, language: "ini", validated: false, usedByService: "php", requiresPackage: "php" },
+        { kind: "mysql-ini", label: "my.ini", description: "MySQL 服务配置（端口、缓冲池、字符集）", path: "C:\\NiceEnv\\etc\\mysql\\8.0.46\\my.ini", exists: true, sizeBytes: 1024, language: "ini", validated: false, usedByService: "mysql", requiresPackage: "mysql" },
+        { kind: "redis-conf", label: "redis.conf", description: "Redis 配置（端口、持久化、内存上限）", path: "C:\\NiceEnv\\etc\\redis\\redis.conf", exists: false, sizeBytes: 0, language: "conf", validated: false, usedByService: "redis", requiresPackage: "redis" },
       ] as ConfigFileInfo[] as T;
     case "config_read": {
       const kind = args!.kind as string;
@@ -1316,7 +1373,7 @@ max_connections=200
       return { ok: true, messages: [], issues: [] } as ConfigValidation as T;
     case "config_backups":
       return [
-        { name: "nginx.conf.20260921-203045.bak", path: "C:\\NiceServBay\\backup\\config\\nginx.conf.20260921-203045.bak", sizeBytes: 4010, createdAt: Math.floor(Date.now() / 1000) - 3600 },
+        { name: "nginx.conf.20260921-203045.bak", path: "C:\\NiceEnv\\backup\\config\\nginx.conf.20260921-203045.bak", sizeBytes: 4010, createdAt: Math.floor(Date.now() / 1000) - 3600 },
       ] as ConfigBackup[] as T;
     case "config_rollback":
       return true as T;
@@ -1389,13 +1446,13 @@ max_connections=200
     case "db_backup_list":
       return Array.from(mockDbBackups.values()).sort((a, b) => b.createdAt - a.createdAt) as T;
     case "db_backup_dir":
-      return `C:\NiceServBay\backup\db` as T;
+      return `C:\NiceEnv\backup\db` as T;
     case "db_backup_dump": {
       const dbs = args!.databases as string[];
       const name = (args!.outName as string | null) ?? `${dbs[0] ?? "db"}-${Date.now()}.sql`;
       const f: DbBackupFile = {
         name,
-        path: `C:\NiceServBay\backup\db\${name}`,
+        path: `C:\NiceEnv\backup\db\${name}`,
         sizeBytes: 1024 * (40 + Math.floor(Math.random() * 400)),
         createdAt: Math.floor(Date.now() / 1000),
       };
@@ -1439,7 +1496,7 @@ max_connections=200
       return {
         version,
         installed: true,
-        dllPath: `C:\NiceServBay\runtimes\php\${version}\ext\php_xdebug.dll`,
+        dllPath: `C:\NiceEnv\runtimes\php\${version}\ext\php_xdebug.dll`,
         loadedVersion: "3.4.1",
         warnings: [],
       } as XdebugSetupResult as T;
@@ -1553,6 +1610,79 @@ max_connections=200
       await delay(800);
       return Math.floor(60 + Math.random() * 220) as T;
     }
+    case "proxy_connections": {
+      const total = proxyRunning ? 128 + Math.floor(Math.random() * 40) : 0;
+      return {
+        downloadTotal: proxyRunning ? 8 * 1024 * 1024 * 1024 + total * 913 : 0,
+        uploadTotal: proxyRunning ? 640 * 1024 * 1024 + total * 231 : 0,
+        connections: proxyRunning
+          ? [
+              { id: uid(), upload: 91300, download: 41_300_000, start: 't', chains: ['🇭🇰 香港 01', 'PROXY'], metadata: { type: 'HTTPS', host: 'www.youtube.com', destinationIP: '142.250.7.106', destinationPort: '443' } },
+              { id: uid(), upload: 51200, download: 18_800_000, start: 't', chains: ['🇯🇵 日本 01', 'PROXY'], metadata: { type: 'TLS', host: 'api.openai.com', destinationIP: '104.18.33.45', destinationPort: '443' } },
+              { id: uid(), upload: 22000, download: 2_300_000, start: 't', chains: ['DIRECT'], metadata: { type: 'HTTP', host: 'cn.bing.com', destinationIP: '202.89.233.100', destinationPort: '80' } },
+            ]
+          : [],
+      } as T;
+    }
+    case "proxy_update_profile": {
+      const pid = args!.id as string;
+      const old = proxyProfiles.get(pid);
+      if (old) proxyProfiles.set(pid, { ...old });
+      return true as T;
+    }
+    case "cron_jobs":
+      return Array.from(cronJobs.values()) as T;
+    case "cron_save": {
+      const j = args!.job as { id: string; name: string; command: string; intervalMin: number; enabled: boolean; createdAt: number };
+      const id = j.id || `cron-${Date.now()}`;
+      cronJobs.set(id, { ...j, id, lastRunAt: null, lastExit: null, lastOutput: null });
+      return true as T;
+    }
+    case "cron_delete":
+      cronJobs.delete(args!.id as string);
+      return true as T;
+    case "cron_set_enabled": {
+      const c = cronJobs.get(args!.id as string);
+      if (c) c.enabled = args!.enabled as boolean;
+      return true as T;
+    }
+    case "cron_run_now": {
+      const c = cronJobs.get(args!.id as string);
+      if (c) {
+        c.lastRunAt = Date.now();
+        c.lastExit = "exit 0";
+        c.lastOutput = "（mock）任务已执行";
+        return { ...c } as T;
+      }
+      throw new Error("cron job not found");
+    }
+    case "tunnel_start": {
+      mockTunnel = {
+        id: uid(),
+        port: args!.port as number,
+        url: `https://mock-${Math.floor(Math.random() * 9999)}.trycloudflare.com`,
+        startedAt: Date.now(),
+        alive: true,
+      };
+      return { ...mockTunnel } as T;
+    }
+    case "tunnel_list":
+      return (mockTunnel ? [mockTunnel] : []) as T;
+    case "tunnel_stop":
+      mockTunnel = null;
+      return true as T;
+    case "ollama_models":
+      return [
+        { name: "qwen2.5:0.5b", digest: "a8b0c5e2d110", size: "398 MB", modified: "2 hours ago" },
+        { name: "llama3.2:3b", digest: "de729584469e", size: "2.0 GB", modified: "3 days ago" },
+      ] as T;
+    case "ollama_delete":
+    case "ollama_pull":
+      return true as T;
+    case "adminer_start":
+      return { port: 8991, file: "adminer-6.1.0-en.php" } as T;
+    case "adminer_stop":
+      return true as T;
     case "get_settings":
       return { ...settings } as T;
     case "set_setting": {
@@ -1577,6 +1707,7 @@ max_connections=200
         settings: 0,
         proxyProfiles: 0,
         stacks: 0,
+        certAutomations: 0, certMonitors: 0,
         missingPackages: [],
       } as T;
     case "import_config_text": {
@@ -1585,7 +1716,7 @@ max_connections=200
       try {
         const parsed = JSON.parse(raw) as { format?: string };
         if (!parsed?.format?.startsWith("niceservbay/")) {
-          throw new Error("不是 NiceServBay 的备份文件");
+          throw new Error("不是 NiceEnv 的备份文件");
         }
       } catch (e) {
         throw new Error(String((e as Error).message ?? e));
@@ -1602,7 +1733,7 @@ max_connections=200
     case "get_app_version":
       return "0.1.0" as T;
     case "get_data_dir":
-      return "C:\\Users\\Demo\\AppData\\Local\\NiceServBay" as T;
+      return "C:\\Users\\Demo\\AppData\\Local\\NiceEnv" as T;
     case "open_in_browser": {
       const url = args?.url as string | undefined;
       if (url && typeof window !== "undefined") window.open(url, "_blank", "noopener,noreferrer");
@@ -1624,8 +1755,8 @@ max_connections=200
           htmlUrl: "https://github.com/nsmao-com/nice_env/releases/tag/v0.2.0",
           body: "## 更新内容\n\n- 设置页新增主题色与字体自定义\n- 代码块支持行号 / 高亮 / 复制\n- 托盘菜单重新设计\n- 修复若干问题",
           publishedAt: new Date(now() - 86400_000).toISOString(),
-          assetName: "NiceServBay_0.2.0_x64-setup.exe",
-          assetUrl: "https://github.com/nsmao-com/nice_env/releases/download/v0.2.0/NiceServBay_0.2.0_x64-setup.exe",
+          assetName: "NiceEnv_0.2.0_x64-setup.exe",
+          assetUrl: "https://github.com/nsmao-com/nice_env/releases/download/v0.2.0/NiceEnv_0.2.0_x64-setup.exe",
           assetSize: 8_400_000,
         },
       } as T;
@@ -1644,11 +1775,80 @@ max_connections=200
         });
       }
       return {
-        path: "C:\\Users\\demo\\AppData\\Roaming\\NiceServBay\\updates\\NiceServBay_0.2.0_x64-setup.exe",
-        fileName: "NiceServBay_0.2.0_x64-setup.exe",
+        path: "C:\\Users\\demo\\AppData\\Roaming\\NiceEnv\\updates\\NiceEnv_0.2.0_x64-setup.exe",
+        fileName: "NiceEnv_0.2.0_x64-setup.exe",
         sizeBytes: total,
       } as T;
     }
+    case "certauto_list":
+      seedCertAutos();
+      return [...certAutos.values()] as T;
+    case "certauto_save": {
+      seedCertAutos();
+      const a = args!.a as CertAutomation;
+      const next: CertAutomation = { ...a, id: a.id || `auto-${uid()}`, updatedAt: Date.now() };
+      certAutos.set(next.id, next);
+      return next as T;
+    }
+    case "certauto_delete": {
+      certAutos.delete(args!.id as string);
+      return true as T;
+    }
+    case "certauto_set_enabled": {
+      const a0 = certAutos.get(args!.id as string);
+      if (a0) certAutos.set(a0.id, { ...a0, enabled: args!.enabled as boolean });
+      return a0 as T;
+    }
+    case "certauto_issue": {
+      seedCertAutos();
+      const a1 = certAutos.get(args!.id as string);
+      if (a1) {
+        const next = { ...a1, state: "ok", issuedAt: Date.now(), expiresAt: Date.now() + 86400_000 * 90,
+          nextRenewAt: Date.now() + 86400_000 * 60, lastRunAt: Date.now() };
+        certAutos.set(next.id, next);
+        return next as T;
+      }
+      throw new Error("mock: 自动化不存在");
+    }
+    case "certmonitor_list":
+      return [
+        {
+          id: "mon-demo", host: "demo.example.com", port: 443, name: "",
+          state: "ok", issuer: "CN=R11, O=Let's Encrypt, C=US",
+          expiresAt: Date.now() + 86400_000 * 62,
+          lastChecked: Date.now() - 3600_000, lastError: "",
+          createdAt: Date.now(), updatedAt: Date.now(),
+        },
+        {
+          id: "mon-old", host: "old-router.lan", port: 443, name: "",
+          state: "expiring", issuer: "CN=self-signed",
+          expiresAt: Date.now() + 86400_000 * 5,
+          lastChecked: Date.now() - 3600_000, lastError: "",
+          createdAt: Date.now(), updatedAt: Date.now(),
+        },
+      ] as T;
+    case "certmonitor_add":
+      return { ...(args!.m as CertMonitor), id: `mon-${uid()}` } as T;
+    case "certmonitor_delete":
+      return true as T;
+    case "certmonitor_check": {
+      const m = args!.id as string;
+      return {
+        id: m, host: m, port: 443, name: "", state: "ok",
+        issuer: "CN=R11, O=Let's Encrypt, C=US",
+        expiresAt: Date.now() + 86400_000 * 62,
+        lastChecked: Date.now(), lastError: "",
+        createdAt: Date.now(), updatedAt: Date.now(),
+      } as T;
+    }
+    case "cert_export_pfx":
+      return "D:\\mock\\cert.pfx" as T;
+    case "cert_export_der":
+      return "D:\\mock\\cert.der" as T;
+    case "cert_export_jks":
+      return "D:\\mock\\cert.jks" as T;
+    case "cert_export_pem":
+      return "D:\\mock\\cert.pem" as T;
     case "install_update":
       return true as T;
     case "open_update_dir":

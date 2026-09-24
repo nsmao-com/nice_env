@@ -143,7 +143,7 @@ export function VersionPicker({ group, items, catalog, onRefresh, onPick, onUnin
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder={t("versions.search")}
-            className="h-7 flex-1 rounded-md border border-border bg-card px-2 text-[12px] outline-none placeholder:text-faint focus:border-border-strong"
+            className="h-7 flex-1 rounded-md border border-border bg-card px-2 text-[12px] outline-none placeholder:text-faint focus:border-primary"
           />
           <Tooltip>
             <TooltipTrigger asChild>

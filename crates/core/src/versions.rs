@@ -192,7 +192,7 @@ fn http() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(45))
         .connect_timeout(std::time::Duration::from_secs(15))
-        .user_agent("NiceServBay/0.1 (+local dev env manager)")
+        .user_agent("NiceEnv/0.1 (+local dev env manager)")
         .build()
         .map_err(|e| AppError::internal("创建 HTTP 客户端", e.to_string()))
 }

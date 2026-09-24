@@ -328,7 +328,7 @@ pub fn render_xdebug_section(dll_path: &str, mode: &str, client_port: u16) -> St
     format!(
         r#"
 [xdebug]
-; 由 NiceServBay 生成：反斜杠已转义，改动请保持同格式
+; 由 NiceEnv 生成：反斜杠已转义，改动请保持同格式
 zend_extension="{escaped}"
 xdebug.mode={mode}
 xdebug.start_with_request=trigger

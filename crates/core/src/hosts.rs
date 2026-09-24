@@ -44,11 +44,11 @@ pub fn read_all() -> Result<Vec<HostsEntry>> {
     let mut out = Vec::new();
     for line in content.lines() {
         let t = line.trim();
-        if t == platform::HOSTS_BEGIN {
+        if t == platform::HOSTS_BEGIN || t == platform::HOSTS_BEGIN_LEGACY {
             in_managed = true;
             continue;
         }
-        if t == platform::HOSTS_END {
+        if t == platform::HOSTS_END || t == platform::HOSTS_END_LEGACY {
             in_managed = false;
             continue;
         }

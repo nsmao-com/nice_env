@@ -60,9 +60,15 @@ const KINDS: { value: SiteKind; labelKey: string; hintKey: string }[] = [
 
 const REWRITES: { value: RewritePreset; label: string }[] = [
   { value: "none", label: "—SKIP—" },
-  { value: "laravel", label: "Laravel / Symfony" },
+  { value: "laravel", label: "Laravel" },
+  { value: "symfony", label: "Symfony" },
   { value: "thinkphp", label: "ThinkPHP" },
   { value: "wordpress", label: "WordPress" },
+  { value: "yii2", label: "Yii2" },
+  { value: "codeigniter", label: "CodeIgniter 4" },
+  { value: "cakephp", label: "CakePHP" },
+  { value: "drupal", label: "Drupal" },
+  { value: "joomla", label: "Joomla" },
   { value: "spa-fallback", label: "SPA fallback" },
   { value: "next-export", label: "Next.js export" },
 ];
@@ -144,7 +150,7 @@ export function SiteWizard({
   const canNext = React.useMemo(() => {
     switch (step) {
       case 0:
-        return name.trim().length > 0 && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain.trim());
+        return name.trim().length > 0 && /^(\*\.)?[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain.trim());
       case 1:
         return rootDir.trim().length > 0;
       case 2:
@@ -319,7 +325,7 @@ export function SiteWizard({
                             laravel: "laravel",
                             thinkphp: "thinkphp",
                             wordpress: "wordpress",
-                            symfony: "laravel",
+                            symfony: "symfony",
                             codeigniter: "none",
                             "next-export": "next-export",
                             spa: "spa-fallback",

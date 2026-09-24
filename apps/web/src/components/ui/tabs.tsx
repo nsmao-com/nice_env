@@ -36,10 +36,11 @@ const Tabs = ({
  * 轨道 = systemFill 灰胶囊；滑块 = 白色（深色下抬升一级）胶囊 +
  * 极淡投影，spring 滑到当前项；激活文字 = label 色。无边框、无强调色描边。
  *
- * 溢出处理：项数多时（如套件页 13+ 个分类）轨道自动折行成多行。
- * 不采用横向滚动 —— 隐藏滚动条后普通鼠标滚轮并不会横滚，等于把
- * 尾部几个分类藏了起来；折行能让所有页签始终可见，一次点击即达。
- * 折行不影响滑块：layoutId 动画会跨行平滑移动。
+ * 每个 TabsList 的滑块 layoutId 独立（useId），一个 Tabs 下可以放多个
+ * TabsList：激活滑块只会出现在包含激活项的那条轨道里。
+ * 页签过多时（如套件页分类）不要让单条轨道折行 —— 折行后首行第一个 /
+ * 末行最后一个会顶着轨道圆角，显得突兀；把页签拆成几行、每行一个
+ * TabsList，每条轨道都是完整的胶囊。
  */
 const TabsList = React.forwardRef<
   React.ComponentRef<typeof TabsPrimitive.List>,
@@ -51,11 +52,8 @@ const TabsList = React.forwardRef<
       <TabsPrimitive.List
         ref={ref}
         className={cn(
-          // p-[2px]：胶囊轨道包胶囊滑块，滑块半径 = 轨道半径 − 2（同心）。
-          // 半径用固定 16px 而不是 rounded-full：折行成多行时（套件页 13+ 分类），
-          // 全圆角会在两端形成很深的椭圆弧，首行第一个/末行最后一个会戳出轨道外；
-          // 单行下 16px 与 rounded-full（32px 高的一半）视觉完全一致。
-          "inline-flex min-h-8 flex-wrap items-center gap-y-[3px] rounded-2xl bg-fill p-[2px] text-muted",
+          // p-[2px]：胶囊轨道包胶囊滑块，滑块半径 = 轨道半径 − 2（同心）
+          "inline-flex min-h-8 items-center rounded-full bg-fill p-[2px] text-muted",
           className
         )}
         {...props}

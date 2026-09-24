@@ -113,6 +113,7 @@ fn main() {
         create_db: None,
         write_env_example: false,
         template: "blank-php".into(),
+        php_overrides: None,
     };
     check!("创建 Apache PHP 站点", {
         nsb_core::sites::create(&input, &state.paths, &state.store, &state.manager)
@@ -124,12 +125,12 @@ fn main() {
         std::thread::sleep(Duration::from_millis(1200));
         (|| -> Result<String, String> {
             let body = http_get("127.0.0.1", 8180, "extra-apache.nsb.test", "/")?;
-            if body.contains("8.5.10") || body.contains("NiceServBay PHP site") {
+            if body.contains("8.5.10") || body.contains("NiceEnv PHP site") {
                 return Ok(format!("Apache 执行 PHP OK（{} 字节）", body.len()));
             }
             std::thread::sleep(Duration::from_millis(1500));
             let body = http_get("127.0.0.1", 8180, "extra-apache.nsb.test", "/")?;
-            if body.contains("8.5.10") || body.contains("NiceServBay PHP site") {
+            if body.contains("8.5.10") || body.contains("NiceEnv PHP site") {
                 Ok(format!("Apache 执行 PHP OK（重试后，{} 字节）", body.len()))
             } else {
                 let full: String = body.chars().take(1500).collect();

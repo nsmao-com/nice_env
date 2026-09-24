@@ -421,6 +421,147 @@ pub fn is_actionable(h: &CertHealth) -> bool {
     !h.file_present || !h.advice.is_empty()
 }
 
+
+/* ================= 从文件夹批量导入（certd 迁移的兜底路：没有 db.json、只有证书文件） ================= */
+
+/// 目录批量导入结果
+#[derive(Serialize, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DirImportResult {
+    pub imported: Vec<ImportedCert>,
+    /// 没配成对的文件（只有证书没私钥 / 只剩私钥 / 不认识的格式）
+    pub skipped: Vec<String>,
+}
+
+const CERT_EXTS: [&str; 2] = ["crt", "pem"];
+const KEY_EXTS: [&str; 2] = ["key", "pem"];
+
+/// 纯配对逻辑：同一目录下的证书文件与同名 .key 配成对。
+/// 规则（对齐 certd 的输出习惯 fullchain.pem/cert.pem + private.pem/privkey.pem）：
+/// - `x.crt` / `x.pem` 配 `x.key`
+/// - `fullchain/cert/certificate` 类证书名配 `private/privkey/key` 类私钥名（常见命名族）
+/// - 私钥文件永远不当证书用；`chain`/`ca`/`issuer` 只当链的一部分，不单独导入
+pub fn pair_cert_files(names: &[String]) -> Vec<(String, String)> {
+    let stem = |n: &str| -> (String, Option<String>) {
+        match n.rsplit_once('.') {
+            Some((s, e)) => (s.to_string(), Some(e.to_ascii_lowercase())),
+            None => (n.to_string(), None),
+        }
+    };
+    let keyish = |stem: &str| {
+        ["private", "privkey", "privatekey"].iter().any(|c| stem.to_ascii_lowercase().contains(c))
+    };
+    let is_key = |n: &str| {
+        let (s, ext) = stem(n);
+        ext.as_deref() == Some("key") || (ext.as_deref() == Some("pem") && keyish(&s))
+    };
+    let is_cert = |n: &str| {
+        let (s, ext) = stem(n);
+        let cert_name = ["fullchain", "cert", "certificate", "server", "domain"].iter().any(|c| s.eq_ignore_ascii_case(c));
+        // fullchain 是「完整证书链（leaf 在前）」，仍按证书导入；
+        // 只排除纯中间链命名（chain/ca/issuer/…）
+        let fullchain = s.to_ascii_lowercase().contains("fullchain");
+        let chain_only = !fullchain
+            && ["chain", "ca.", ".ca", "issuer", "intermediate", "root"].iter().any(|c| s.to_ascii_lowercase().contains(c));
+        let looks_key = keyish(&s);
+        ext.as_deref() == Some("crt")
+            || (ext.as_deref() == Some("pem") && !chain_only && !looks_key)
+            || (ext.is_none() && cert_name)
+            || (ext.as_deref() == Some("pem") && cert_name && !chain_only && !looks_key)
+    };
+    let mut keys: Vec<(String, String)> = Vec::new(); // (stem_lower, filename)
+    for n in names {
+        if is_key(n) {
+            let (s, _) = stem(n);
+            keys.push((s.to_ascii_lowercase(), n.clone()));
+        }
+    }
+    let family_key = |cert_stem: &str, keys: &[(String, String)]| -> Option<String> {
+        let cs = cert_stem.to_ascii_lowercase();
+        // 同名优先；fullchain/cert 族配 private/privkey 族
+        if let Some((_, k)) = keys.iter().find(|(ks, _)| *ks == cs) {
+            return Some(k.clone());
+        }
+        let cert_family = cs.contains("fullchain") || cs.contains("cert") || cs.contains("server") || cs.contains("domain");
+        if cert_family {
+            for cand in ["private", "privkey", "key", "privatekey"] {
+                if let Some((_, k)) = keys.iter().find(|(ks, _)| ks.contains(cand)) {
+                    return Some(k.clone());
+                }
+            }
+        }
+        None
+    };
+    let mut pairs = Vec::new();
+    let mut used_keys: Vec<String> = Vec::new();
+    for n in names {
+        if is_cert(n) {
+            let (s, _) = stem(n);
+            if let Some(k) = family_key(&s, &keys) {
+                if !used_keys.contains(&k) {
+                    used_keys.push(k.clone());
+                    pairs.push((n.clone(), k));
+                }
+            }
+        }
+    }
+    pairs
+}
+
+/// 扫描目录（含一层子目录），把所有「证书 + 私钥」对导入。
+/// 单个失败（解析不了 / 缺私钥）记进 skipped 继续，不阻断其它。
+pub fn import_cert_dir(paths: &Paths, dir: &Path) -> Result<DirImportResult> {
+    let mut out = DirImportResult::default();
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    collect_files(dir, 0, &mut files)?;
+    let names: Vec<String> = files
+        .iter()
+        .map(|f| f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())
+        .collect();
+    let pairs = pair_cert_files(&names);
+    for (cert_name, key_name) in pairs.iter() {
+        let cert_path = files
+            .iter()
+            .find(|f| f.file_name().map(|n| n.to_string_lossy() == cert_name.as_str()).unwrap_or(false));
+        let key_path = files
+            .iter()
+            .find(|f| f.file_name().map(|n| n.to_string_lossy() == key_name.as_str()).unwrap_or(false));
+        if let (Some(c), Some(k)) = (cert_path, key_path) {
+            match import_cert_pair(paths, c, k) {
+                Ok(ic) => out.imported.push(ic),
+                Err(e) => out.skipped.push(format!("{cert_name}：{}", e)),
+            }
+        }
+    }
+    // 报告没配上的证书文件（只有私钥的不报，避免噪音）
+    let paired_certs: Vec<String> = pairs.iter().map(|(c, _)| c.clone()).collect();
+    for n in &names {
+        let (s, ext) = match n.rsplit_once('.') {
+            Some((s, e)) => (s.to_string(), Some(e.to_ascii_lowercase())),
+            None => (n.clone(), None),
+        };
+        let _ = s;
+        if ext.as_deref() == Some("crt") && !paired_certs.contains(n) {
+            out.skipped.push(format!("{n}：找不到同名私钥"));
+        }
+    }
+    Ok(out)
+}
+
+/// 收集目录文件（最多两层：certd 输出目录常见 `{域名}/cert|key` 一层子目录）
+fn collect_files(dir: &Path, depth: u8, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
+    let read = std::fs::read_dir(dir).map_err(|e| AppError::io("读取目录", e))?;
+    for entry in read.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            out.push(path);
+        } else if depth < 1 && path.is_dir() {
+            collect_files(&path, depth + 1, out)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,6 +661,26 @@ mod tests {
     }
 
     #[test]
+    fn pair_files_same_stem_and_families() {
+        use super::pair_cert_files;
+        // 同名成对
+        let p = pair_cert_files(&["a.com.crt".into(), "a.com.key".into()]);
+        assert_eq!(p, vec![("a.com.crt".to_string(), "a.com.key".to_string())]);
+        // certd 常见命名族：fullchain/cert 配 private/privkey
+        let p = pair_cert_files(&["fullchain.pem".into(), "private.pem".into()]);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].1, "private.pem");
+        // 链文件不当证书导；纯私钥不报
+        let p = pair_cert_files(&["chain.pem".into(), "ca.pem".into(), "privkey.pem".into()]);
+        assert!(p.is_empty());
+        // 只剩证书没私钥 → 无对
+        let p = pair_cert_files(&["b.com.crt".into()]);
+        assert!(p.is_empty());
+        // 一个私钥不重复配两张证书
+        let p = pair_cert_files(&["cert.pem".into(), "fullchain.pem".into(), "private.key".into()]);
+        assert_eq!(p.len(), 1);
+    }
+
     fn import_rejects_non_certificate_file() {
         let t = std::env::temp_dir().join(format!("nsb-imp-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&t);

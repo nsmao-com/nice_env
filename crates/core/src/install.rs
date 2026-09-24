@@ -12,6 +12,19 @@ pub struct Installer {
     pub manifest: crate::model::Manifest,
 }
 
+/// GitHub 直连的加速前缀，按近期可用性排序；仅对 github.com / *.githubusercontent.com 生效
+const GH_ACCELERATORS: [&str; 3] = [
+    "https://ghproxy.net/",
+    "https://ghfast.top/",
+    "https://gh-proxy.com/",
+];
+
+fn is_github_url(url: &str) -> bool {
+    url.starts_with("https://github.com/")
+        || url.starts_with("https://raw.githubusercontent.com/")
+        || url.starts_with("https://objects.githubusercontent.com/")
+}
+
 impl Installer {
     pub fn bundled() -> Self {
         #[cfg(windows)]
@@ -21,6 +34,56 @@ impl Installer {
         let manifest: crate::model::Manifest = serde_json::from_str(raw)
             .expect("内置清单 JSON 必须合法");
         Self { manifest }
+    }
+
+    /// 构造「生效清单」：内置 → 叠加远端快照（etc/manifest.json，若存在且合法）
+    /// → 叠加用户自定义模块（user-modules/*.json）。
+    /// 任何一层损坏都跳过该层，绝不因外部文件让 App 起不来。
+    pub fn effective(paths: &Paths) -> Self {
+        let mut inst = Self::bundled();
+
+        // 层 1：远端清单快照
+        let snap = paths.etc().join("manifest.json");
+        if snap.is_file() {
+            if let Ok(raw) = std::fs::read_to_string(&snap) {
+                match parse_manifest_str(&raw) {
+                    Ok(m) => inst.manifest = m,
+                    Err(_) => { /* 损坏快照：忽略，继续用内置 */ }
+                }
+            }
+        }
+
+        // 层 2：用户自定义模块（同 id+version 覆盖内置，否则追加）
+        let dir = paths.base.join("user-modules");
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            let mut files: Vec<_> = rd
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+                .collect();
+            files.sort();
+            for f in files {
+                let Ok(raw) = std::fs::read_to_string(&f) else { continue };
+                let Ok(m) = parse_manifest_str(&raw) else { continue };
+                inst.merge_manifest(m);
+            }
+        }
+        inst
+    }
+
+    /// 把另一份清单合并进来：同 (id, version) 以新清单为准（用户覆盖内置），否则追加
+    pub fn merge_manifest(&mut self, other: crate::model::Manifest) {
+        for p in other.packages {
+            match self
+                .manifest
+                .packages
+                .iter_mut()
+                .find(|e| e.id == p.id && e.version == p.version)
+            {
+                Some(slot) => *slot = p,
+                None => self.manifest.packages.push(p),
+            }
+        }
     }
 
     pub fn find(&self, key: &str) -> Option<crate::model::PackageManifestEntry> {
@@ -86,20 +149,24 @@ impl Installer {
         Some(Self::entry_from_remote(&template, remote))
     }
 
-    /// 镜像策略：official → [url] + mirrors；ghproxy → github 前缀加速；custom → 自定义前缀
+    /// 镜像策略：official → [url] + mirrors；ghproxy → github 前缀加速；custom → 自定义前缀。
+    /// 无论镜像怎么设置，GitHub 直连失败后都会自动尝试加速前缀兜底 ——
+    /// 默认设置下被墙不再需要用户手动到设置里切镜像再装一遍。
     fn candidate_urls(&self, entry: &crate::model::PackageManifestEntry, store: &Store) -> Vec<String> {
         let mirror = store.get_setting("mirror").unwrap_or_else(|| "official".into());
+        let gh = is_github_url(&entry.url);
         let mut urls = vec![entry.url.clone()];
         match mirror.as_str() {
             "ghproxy" => {
-                let mut gh: Vec<String> = entry
-                    .url
-                    .starts_with("https://github.com")
-                    .then(|| format!("https://ghproxy.net/{}", entry.url))
-                    .into_iter()
-                    .collect();
-                gh.extend(urls.clone());
-                urls = gh;
+                if gh {
+                    // 加速源优先，直连殿后
+                    let mut acc: Vec<String> = GH_ACCELERATORS
+                        .iter()
+                        .map(|p| format!("{p}{}", entry.url))
+                        .collect();
+                    acc.extend(urls.drain(..));
+                    urls = acc;
+                }
             }
             "custom" => {
                 if let Some(prefix) = store.get_setting("customMirror") {
@@ -110,6 +177,14 @@ impl Installer {
                 }
             }
             _ => {}
+        }
+        if gh {
+            for p in GH_ACCELERATORS {
+                let u = format!("{p}{}", entry.url);
+                if !urls.contains(&u) {
+                    urls.push(u);
+                }
+            }
         }
         urls.extend(entry.mirrors.iter().cloned());
         urls.dedup();
@@ -193,16 +268,35 @@ impl Installer {
             }
         }
 
-        // 校验入口存在。entry 清单里一律用 '/' 分隔；按段 join，Windows/macOS 通用
-        // （不能整串 replace('/','\\')：macOS 上会变成单个含反斜杠的文件名而永远找不到）
-        let entry_path = runtime_dir.join(entry_relative_path(&entry.entry));
-        if !entry_path.exists() {
-            return Err(AppError::new(
-                "ENTRY_MISSING",
-                format!("解压后找不到主程序 {}", entry.entry),
-            )
-            .with_detail(format!("期望路径：{}", entry_path.display())));
-        }
+        // 入口归位。解包产物的内部命名五花八门：顶层目录、版本化文件名
+        // （mihomo-windows-amd64-v1.19.31.exe）、单文件 gz 解出的内名不可控。
+        // entry 声明的路径不存在时按「精确文件名 → 包内唯一文件」容错定位并搬移。
+        let entry_rel = entry_relative_path(&entry.entry);
+        let entry_path = match settle_entry_file(&runtime_dir, &entry_rel) {
+            Some(p) => p,
+            None => {
+                // 列出解压产物顶层内容，方便排障（清单与包内容不一致时一眼能看出差在哪）
+                let listing = std::fs::read_dir(&runtime_dir)
+                    .map(|rd| {
+                        rd.flatten()
+                            .map(|e| e.file_name().to_string_lossy().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                return Err(AppError::new(
+                    "ENTRY_MISSING",
+                    format!("解压后找不到主程序 {}", entry.entry),
+                )
+                .with_hint("清单声明的入口与压缩包实际内容不一致；已保留解压产物，可反馈补清单")
+                .with_detail(format!(
+                    "期望路径：{}；解压目录内容：{}",
+                    runtime_dir.join(&entry_rel).display(),
+                    if listing.is_empty() { "（空）" } else { &listing }
+                )));
+            }
+        };
+        let _ = entry_path;
 
         emit(crate::Event::state(&task_id, "configuring"));
         let installed = InstalledPackage {
@@ -308,6 +402,81 @@ pub fn entry_relative_path(entry: &str) -> std::path::PathBuf {
     p
 }
 
+/// 解包后把主程序归位到 entry 声明的路径，三级容错：
+///  1. 声明路径已存在 → 直接用；
+///  2. 解压树里按文件名精确匹配（不分大小写，取目录最浅的）→ 搬到声明位置；
+///  3. 整棵解压树只有一个文件时认定它是主程序（gz 内名/版本化单文件包）→ 搬移。
+/// 都不命中返回 None（调用方报 ENTRY_MISSING）。
+fn settle_entry_file(
+    runtime_dir: &Path,
+    entry_rel: &Path,
+) -> Option<std::path::PathBuf> {
+    let expected = runtime_dir.join(entry_rel);
+    if expected.exists() {
+        return Some(expected);
+    }
+    let want = entry_rel.file_name()?.to_string_lossy().to_lowercase();
+
+    fn walk(
+        dir: &Path,
+        depth: usize,
+        want: &str,
+        hits: &mut Vec<(usize, std::path::PathBuf)>,
+        files: &mut usize,
+    ) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, depth + 1, want, hits, files);
+            } else {
+                *files += 1;
+                let name = p
+                    .file_name()
+                    .map(|x| x.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
+                if name == want {
+                    hits.push((depth, p));
+                }
+            }
+        }
+    }
+
+    let mut hits = Vec::new();
+    let mut files = 0usize;
+    walk(runtime_dir, 0, &want, &mut hits, &mut files);
+
+    let src = if let Some((_, p)) = hits.first() {
+        p.clone()
+    } else if files == 1 {
+        let mut only = Vec::new();
+        fn collect_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(rd) = std::fs::read_dir(dir) else { return };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    collect_files(&p, out);
+                } else {
+                    out.push(p);
+                }
+            }
+        }
+        collect_files(runtime_dir, &mut only);
+        only.into_iter().next()?
+    } else {
+        return None;
+    };
+
+    if let Some(parent) = expected.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    // 同卷 rename 一般可用；万一失败（文件被占用等）退回复制
+    if std::fs::rename(&src, &expected).is_err() {
+        std::fs::copy(&src, &expected).ok()?;
+    }
+    Some(expected)
+}
+
 fn extract_zip(archive: &Path, dest: &Path) -> Result<()> {    let file = std::fs::File::open(archive).map_err(|e| AppError::io("打开压缩包", e))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| AppError::internal("读取压缩包", e.to_string()))?;
     for i in 0..zip.len() {
@@ -408,6 +577,63 @@ impl Installer {
 }
 
 #[cfg(test)]
+mod settle_entry_tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("nsb-settle-{}-{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write(p: &std::path::Path, body: &[u8]) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    #[test]
+    fn keeps_expected_path_when_present() {
+        let d = temp_dir("exact");
+        write(&d.join("bin/mihomo.exe"), b"x");
+        let got = settle_entry_file(&d, std::path::Path::new("bin/mihomo.exe")).unwrap();
+        assert_eq!(got, d.join("bin/mihomo.exe"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn relocates_versioned_name_in_nested_dir() {
+        let d = temp_dir("versioned");
+        // 包内是「顶层目录 + 版本化文件名」，entry 声明的是根下不带版本号的名字
+        write(&d.join("mihomo-v1.19.31/mihomo-windows-amd64-v1.19.31.exe"), b"x");
+        let got = settle_entry_file(&d, std::path::Path::new("mihomo-windows-amd64.exe")).unwrap();
+        assert_eq!(got, d.join("mihomo-windows-amd64.exe"));
+        assert!(got.exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn single_file_in_tree_is_the_entry() {
+        let d = temp_dir("single");
+        // gz 单文件包解出的内名不可控：整棵树只有一个文件
+        write(&d.join("mihomo-windows-amd64-v1.19.31"), b"x");
+        let got = settle_entry_file(&d, std::path::Path::new("mihomo-windows-amd64.exe")).unwrap();
+        assert_eq!(got, d.join("mihomo-windows-amd64.exe"));
+        assert!(got.exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn returns_none_when_nothing_matches() {
+        let d = temp_dir("nomatch");
+        write(&d.join("a.txt"), b"x");
+        write(&d.join("b.txt"), b"y");
+        assert!(settle_entry_file(&d, std::path::Path::new("mihomo.exe")).is_none());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::PackageManifestEntry;
@@ -442,5 +668,63 @@ mod tests {
         let other_arch = if current_arch() == "x64" { "arm64" } else { "x64" };
         let e = entry_with(vec![current_os()], vec![other_arch]);
         assert!(!Installer::is_platform_compatible(&e));
+    }
+}
+
+
+/// 清单解析 + 基本合法性校验（远端快照 / 用户模块共用）。
+/// 返回 Err 时调用方必须放弃该来源，绝不能带病上线。
+pub fn parse_manifest_str(raw: &str) -> Result<crate::model::Manifest> {
+    let m: crate::model::Manifest = serde_json::from_str(raw)
+        .map_err(|e| AppError::new("BAD_MANIFEST", format!("清单 JSON 不合法：{e}")))?;
+    if m.packages.is_empty() {
+        return Err(AppError::new("BAD_MANIFEST", "清单里没有任何套件"));
+    }
+    for p in &m.packages {
+        if p.id.trim().is_empty() || p.version.trim().is_empty() || p.url.trim().is_empty() {
+            return Err(AppError::new(
+                "BAD_MANIFEST",
+                format!("清单条目缺 id/version/url：{}", p.display_name),
+            ));
+        }
+    }
+    Ok(m)
+}
+
+#[cfg(test)]
+mod manifest_layer_tests {
+    use super::*;
+
+    fn manifest_with(id: &str, ver: &str, url: &str) -> crate::model::Manifest {
+        serde_json::from_value(serde_json::json!({
+            "revision": 1, "updated": "t",
+            "packages": [{
+                "id": id, "version": ver, "category": "tool",
+                "displayName": id, "description": "", "os": [], "arch": [],
+                "kind": "binary", "url": url, "sha256": "0",
+                "sizeBytes": 1, "entry": "x"
+            }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn parse_rejects_garbage_and_empty() {
+        assert!(parse_manifest_str("not json").is_err());
+        assert!(parse_manifest_str("{\"revision\":1,\"packages\":[]}").is_err());
+        // 缺 url 的条目
+        let bad = r#"{"revision":1,"packages":[{"id":"x","version":"1"}]}"#;
+        assert!(parse_manifest_str(bad).is_err());
+    }
+
+    #[test]
+    fn merge_overrides_same_id_version_and_appends_new() {
+        let mut base = Installer { manifest: manifest_with("foo", "1.0.0", "https://a/1") };
+        base.merge_manifest(manifest_with("foo", "1.0.0", "https://b/1"));
+        assert_eq!(base.manifest.packages.len(), 1);
+        assert_eq!(base.manifest.packages[0].url, "https://b/1", "同版本应被覆盖");
+
+        base.merge_manifest(manifest_with("bar", "2.0.0", "https://c/2"));
+        assert_eq!(base.manifest.packages.len(), 2);
     }
 }

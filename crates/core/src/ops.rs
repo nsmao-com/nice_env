@@ -310,6 +310,7 @@ fn start_nginx(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, port
         ],
         cwd: Some(root.clone()),
         env: vec![],
+        detached: None,
     };
     let pid = spawn_tracked(manager, "nginx", &spec)?;
     let _ = pid;
@@ -349,6 +350,7 @@ fn start_php(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, versio
                 ("PHP_INI_SCAN_DIR".into(), "".into()),
                 ("PHP_FCGI_MAX_REQUESTS".into(), "1000".into()),
             ],
+            detached: None,
         };
         spawn_tracked(manager, &service_id, &spec)?;
     }
@@ -367,8 +369,11 @@ fn start_php(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, versio
 fn start_mysql(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, version: &str, ports: &PortsProfile) -> Result<()> {
     let service_id = format!("mysql@{version}");
     let (basedir, mysqld) = mysql_paths(store, version)?;
+    // 端口被占 + 自动回落开启 → 换附近空闲端口（写入覆盖项；ini 每次启动重写，自动跟上）
+    let mysql_port = crate::services::fallback_port_for(store, "mysql", ports.mysql, &[])
+        .unwrap_or(ports.mysql);
     // 每次启动前重写 ini（镜像策略/端口方案可能变化；写前自动备份）
-    configgen::write_mysql_ini(paths, version, &basedir, ports.mysql)?;
+    configgen::write_mysql_ini(paths, version, &basedir, mysql_port)?;
     let datadir = paths.mysql_data_dir(version);
     if !datadir.exists() || std::fs::read_dir(&datadir).map(|mut d| d.next().is_none()).unwrap_or(true) {
         // 首次初始化（insecure → 启动后设密）
@@ -395,7 +400,7 @@ fn start_mysql(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, vers
         }
     }
 
-    precheck_port(ports.mysql, "MySQL")?;
+    precheck_port(mysql_port, "MySQL")?;
     let ini = paths.mysql_ini(version);
     let mut mysql_args: Vec<String> = vec![format!("--defaults-file={}", ini.to_string_lossy())];
     if cfg!(windows) {
@@ -406,6 +411,7 @@ fn start_mysql(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, vers
         args: mysql_args,
         cwd: Some(basedir.clone()),
         env: vec![],
+        detached: None,
     };
     spawn_tracked(manager, &service_id, &spec)?;
     if !wait_healthy(ports.mysql, Duration::from_secs(30)) {
@@ -450,17 +456,21 @@ fn set_root_password_via(paths: &Paths, version: &str, port: u16, old: &str, new
 fn start_redis(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, ports: &PortsProfile) -> Result<()> {
     let (_, exe) = redis_paths(store)?;
     let version = installed_by_choice(store, "redis").map(|p| p.version).unwrap_or_default();
-    configgen::write_redis_conf(paths, &version, ports.redis)?;
-    precheck_port(ports.redis, "Redis")?;
+    // 端口被占 + 自动回落开启 → 换附近空闲端口（写入覆盖项，重启稳定）
+    let redis_port = crate::services::fallback_port_for(store, "redis", ports.redis, &[])
+        .unwrap_or(ports.redis);
+    configgen::write_redis_conf(paths, &version, redis_port)?;
+    precheck_port(redis_port, "Redis")?;
     let conf = paths.redis_conf(&version);
     let spec = SpawnSpec {
         program: exe.clone(),
         args: vec![conf.to_string_lossy().to_string()],
         cwd: Some(exe.parent().map(PathBuf::from).unwrap_or_default()),
         env: vec![],
+        detached: None,
     };
     spawn_tracked(manager, "redis", &spec)?;
-    if !wait_healthy(ports.redis, Duration::from_secs(10)) {
+    if !wait_healthy(redis_port, Duration::from_secs(10)) {
         return Err(AppError::new("REDIS_START_TIMEOUT", "Redis 启动超时")
             .with_hint("查看日志页 redis 输出；通常是端口冲突"));
     }
@@ -486,6 +496,7 @@ fn start_mihomo(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>) -> 
         ],
         cwd: Some(paths.mihomo_dir()),
         env: vec![],
+        detached: None,
     };
     spawn_tracked(manager, "mihomo", &spec)?;
     if !wait_healthy(configgen::MIHOMO_CONTROLLER_PORT, Duration::from_secs(10)) {
@@ -517,6 +528,7 @@ fn start_apache(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, por
         ],
         cwd: Some(root.clone()),
         env: vec![],
+        detached: None,
     };
     spawn_tracked(manager, "apache", &spec)?;
     if !wait_healthy(ports.apache_http, Duration::from_secs(12)) {
@@ -580,6 +592,7 @@ fn start_postgresql(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>,
         args: pg_args,
         cwd: Some(root.clone()),
         env: vec![],
+        detached: None,
     };
     spawn_tracked(manager, "postgresql", &spec)?;
     if !wait_healthy(ports.postgres, Duration::from_secs(20)) {
@@ -614,6 +627,7 @@ fn start_mongodb(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, po
         ],
         cwd: Some(dir.clone()),
         env: vec![],
+        detached: None,
     };
     spawn_tracked(manager, "mongodb", &spec)?;
     if !wait_healthy(ports.mongodb, Duration::from_secs(15)) {
@@ -945,34 +959,48 @@ pub fn save_pidfile(paths: &Paths, manager: &Arc<ServiceManager>) {
     let json = serde_json::json!({
         "appPid": std::process::id(),
         "savedAt": crate::services::now_ms(),
-        "services": entries.iter().map(|(k, v)| serde_json::json!({"id": k, "pids": v})).collect::<Vec<_>>(),
+        "services": entries.iter().map(|(k, v)| {
+            let port = manager.started_port_or(k, 0);
+            serde_json::json!({"id": k, "pids": v, "port": port})
+        }).collect::<Vec<_>>(),
     });
     let _ = std::fs::write(dir.join("pids.json"), json.to_string());
 }
 
-/// 启动时清理上次会话残留。
+/// 启动时对上次会话残留的处置：**能收养就收养，收养不了才清杀**。
 ///
-/// 安全护栏（缺一不可，误杀别人的服务比留下孤儿更糟）：
-/// 1. 写 pidfile 的那个实例如果还活着，说明是并发运行的另一个实例 → 整体跳过；
-/// 2. 只处理 pidfile 里记录过、且当前仍存活的 pid；
-/// 3. 该 pid 的可执行文件路径必须位于本应用数据目录内（runntimes/）才算「我们的进程」；
-/// 4. 本会话里已经起来的服务不动。
-/// 返回被清理的 (serviceId, pid)。
-pub fn sweep_orphans(paths: &Paths, manager: &Arc<ServiceManager>) -> Vec<(String, u32)> {
+/// 背景：nsbctl CLI 分离启动的服务在 CLI 退出后仍存活（无 KILL_ON_JOB_CLOSE），
+/// 桌面 App 启动时应该接管它们（按 pidfile 恢复 pid/端口/Running 态），
+/// 而不是把它们当孤儿杀掉——用户在终端里起的服务被桌面端顺手杀掉会很意外。
+///
+/// 安全护栏：
+/// 1. pidfile 写入者仍存活 → 是并发运行的另一个实例 → 整体跳过；
+/// 2. 只处理 pidfile 记录过、且当前仍存活的 pid；
+/// 3. pid 的可执行文件必须位于本应用 runtimes/ 内；
+/// 4. 服务在注册表里 → 收养；不在（已卸载版本残留）→ 清杀；
+/// 5. 本会话已 Running 的服务不动。
+#[derive(Default, Debug)]
+pub struct OrphanReport {
+    pub adopted: Vec<(String, u32)>,
+    pub killed: Vec<(String, u32)>,
+}
+
+pub fn sweep_orphans(paths: &Paths, manager: &Arc<ServiceManager>) -> OrphanReport {
     let path = paths.data().join("run").join("pids.json");
+    let mut report = OrphanReport::default();
     let Ok(raw) = std::fs::read_to_string(&path) else {
-        return Vec::new();
+        return report;
     };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
         let _ = std::fs::remove_file(&path);
-        return Vec::new();
+        return report;
     };
 
     // 护栏 1：写入者仍存活 → 那是另一个正在运行的实例，它的服务不能被我们收走
     let writer_pid = v.get("appPid").and_then(|p| p.as_u64()).map(|p| p as u32);
     if let Some(w) = writer_pid {
         if w == std::process::id() || platform::process_alive(w) {
-            return Vec::new();
+            return report;
         }
     }
 
@@ -995,7 +1023,6 @@ pub fn sweep_orphans(paths: &Paths, manager: &Arc<ServiceManager>) -> Vec<(Strin
         }
     };
 
-    let mut killed = Vec::new();
     if let Some(arr) = v.get("services").and_then(|s| s.as_array()) {
         for item in arr {
             let Some(sid) = item.get("id").and_then(|i| i.as_str()) else {
@@ -1004,7 +1031,7 @@ pub fn sweep_orphans(paths: &Paths, manager: &Arc<ServiceManager>) -> Vec<(Strin
             let Some(pids) = item.get("pids").and_then(|p| p.as_array()) else {
                 continue;
             };
-            // 护栏 4：本会话里该服务已经起来的，不动
+            // 护栏 4：本会话里已经起来的，不动
             if manager
                 .snapshot(sid)
                 .map(|s| s.state == ServiceState::Running)
@@ -1012,17 +1039,154 @@ pub fn sweep_orphans(paths: &Paths, manager: &Arc<ServiceManager>) -> Vec<(Strin
             {
                 continue;
             }
-            for pid in pids.iter().filter_map(|p| p.as_u64()) {
-                let pid = pid as u32;
-                // 护栏 2 + 3
-                if !platform::process_alive(pid) || !belongs_to_us(pid) {
-                    continue;
+            let alive: Vec<u32> = pids
+                .iter()
+                .filter_map(|p| p.as_u64())
+                .map(|p| p as u32)
+                .filter(|pid| platform::process_alive(*pid) && belongs_to_us(*pid))
+                .collect();
+            if alive.is_empty() {
+                continue;
+            }
+            let port = item.get("port").and_then(|p| p.as_u64()).map(|p| p as u16);
+            // 护栏 4b：注册表里的服务 → 收养；否则清杀
+            if manager.snapshot(sid).is_some() {
+                manager.adopt(sid, &alive, port);
+                for pid in &alive {
+                    report.adopted.push((sid.to_string(), *pid));
                 }
-                let _ = crate::ports::kill_pid(pid);
-                killed.push((sid.to_string(), pid));
+            } else {
+                for pid in &alive {
+                    let _ = crate::ports::kill_pid(*pid);
+                    report.killed.push((sid.to_string(), *pid));
+                }
             }
         }
     }
     let _ = std::fs::remove_file(&path);
-    killed
+    report
+}
+
+/* ================= 配置体检（只读，不改任何文件） ================= */
+
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigCheck {
+    pub name: String,
+    pub ok: bool,
+    /// 未安装时为 skipped（前端显示灰）；失败时带 stderr 摘要
+    pub status: String, // ok | fail | skipped
+    pub detail: String,
+}
+
+/// 对已安装服务的配置做一次只读体检：
+/// nginx `-t` / httpd `-t` / php `-n -c ini -v` / 配置文件存在性。
+/// 修复向导的「重写配置」会改动文件；这里只看不动。
+pub fn validate_configs(store: &Store, paths: &Paths) -> Vec<ConfigCheck> {
+    let mut out = Vec::new();
+
+    // nginx
+    if let Ok((root, exe)) = nginx_exe(store) {
+        let conf = paths.nginx_conf();
+        if !conf.exists() {
+            out.push(ConfigCheck { name: "Nginx".into(), ok: false, status: "fail".into(), detail: "nginx.conf 不存在（先启动一次生成）".into() });
+        } else {
+            let o = std::process::Command::new(&exe)
+                .args(["-p".into(), root.to_string_lossy().to_string(), "-t".into(), "-c".into(), conf.to_string_lossy().to_string()])
+                .output();
+            match o {
+                Ok(o) if o.status.success() => out.push(ConfigCheck { name: "Nginx".into(), ok: true, status: "ok".into(), detail: "syntax ok".into() }),
+                Ok(o) => out.push(ConfigCheck { name: "Nginx".into(), ok: false, status: "fail".into(), detail: String::from_utf8_lossy(&o.stderr).lines().take(3).collect::<Vec<_>>().join(" / ") }),
+                Err(e) => out.push(ConfigCheck { name: "Nginx".into(), ok: false, status: "fail".into(), detail: e.to_string() }),
+            }
+        }
+    } else {
+        out.push(ConfigCheck { name: "Nginx".into(), ok: true, status: "skipped".into(), detail: "未安装".into() });
+    }
+
+    // apache
+    if let Ok((root, exe)) = apache_paths(store) {
+        let conf = paths.apache_conf();
+        if !conf.exists() {
+            out.push(ConfigCheck { name: "Apache".into(), ok: false, status: "fail".into(), detail: "httpd.conf 不存在".into() });
+        } else {
+            let o = std::process::Command::new(&exe)
+                .args(["-d".into(), root.to_string_lossy().to_string(), "-t".into(), "-f".into(), conf.to_string_lossy().to_string()])
+                .output();
+            match o {
+                Ok(o) if o.status.success() => out.push(ConfigCheck { name: "Apache".into(), ok: true, status: "ok".into(), detail: "syntax ok".into() }),
+                Ok(o) => out.push(ConfigCheck { name: "Apache".into(), ok: false, status: "fail".into(), detail: String::from_utf8_lossy(&o.stderr).lines().take(3).collect::<Vec<_>>().join(" / ") }),
+                Err(e) => out.push(ConfigCheck { name: "Apache".into(), ok: false, status: "fail".into(), detail: e.to_string() }),
+            }
+        }
+    } else {
+        out.push(ConfigCheck { name: "Apache".into(), ok: true, status: "skipped".into(), detail: "未安装".into() });
+    }
+
+    // php：每个已装版本 -n -c ini -v（能跑起来 = ini 没写坏）
+    if let Ok(list) = store.list_installed() {
+        let phps: Vec<_> = list.iter().filter(|p| p.id == "php").collect();
+        if phps.is_empty() {
+            out.push(ConfigCheck { name: "PHP".into(), ok: true, status: "skipped".into(), detail: "未安装".into() });
+        }
+        for p in phps {
+            let exe = PathBuf::from(&p.install_path).join(exe_name("php"));
+            let ini = paths.php_ini(&p.version);
+            if !ini.exists() {
+                out.push(ConfigCheck { name: format!("PHP {}", p.version), ok: false, status: "fail".into(), detail: "php.ini 不存在".into() });
+                continue;
+            }
+            let ok = std::process::Command::new(&exe)
+                .args(["-n", "-c"].iter().copied().chain(std::iter::once(ini.to_string_lossy().as_ref())))
+                .arg("-v")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            out.push(ConfigCheck {
+                name: format!("PHP {}", p.version),
+                ok,
+                status: if ok { "ok".into() } else { "fail".into() },
+                detail: if ok { "ini loads".into() } else { "php.ini 加载失败（看日志页 PHP 输出）".into() },
+            });
+        }
+    }
+
+    // redis / mysql 配置存在性
+    if let Some(p) = store.find_installed("redis", None) {
+        let conf = paths.redis_conf(&p.version);
+        let ok = conf.exists();
+        out.push(ConfigCheck {
+            name: "Redis".into(), ok,
+            status: if ok { "ok".into() } else { "fail".into() },
+            detail: if ok { "redis.conf 存在".into() } else { "redis.conf 不存在（先启动一次生成）".into() },
+        });
+    }
+    if let Some(p) = store.find_installed("mysql", None) {
+        let ini = paths.mysql_ini(&p.version);
+        let ok = ini.exists();
+        out.push(ConfigCheck {
+            name: format!("MySQL {}", p.version), ok,
+            status: if ok { "ok".into() } else { "fail".into() },
+            detail: if ok { "my.ini 存在".into() } else { "my.ini 不存在（先启动一次生成）".into() },
+        });
+    }
+    out
+}
+
+#[cfg(test)]
+mod validate_tests {
+    use super::*;
+
+    #[test]
+    fn empty_install_reports_all_skipped() {
+        let base = tempfile::tempdir().unwrap();
+        let paths = Paths::new(base.path().to_path_buf());
+        paths.ensure_dirs().unwrap();
+        let store = Store::open(paths.db()).unwrap();
+        let checks = validate_configs(&store, &paths);
+        assert!(!checks.is_empty());
+        // 什么都没装时体检不该有失败项
+        assert!(checks.iter().all(|c| c.ok), "未安装不应报 fail：{:?}", checks);
+        assert!(checks.iter().any(|c| c.status == "skipped"));
+    }
 }

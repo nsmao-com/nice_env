@@ -307,6 +307,14 @@ pub fn start(
             write_with_backup(&dest, &content, &paths.backup())?;
         }
     }
+    // CoreDNS 特例：Corefile 每次启动都重写——TLD 设置或转发策略变化要自动跟上，
+    // 且通配解析模板含 {{ .Name }} 占位符，不能走通用模板渲染
+    if r.entry.id == "coredns" {
+        let tld = store
+            .get_setting("defaultTld")
+            .unwrap_or_else(|| "test".into());
+        crate::dns::write_corefile(paths, &tld, &[]).map_err(AppError::from)?;
+    }
 
     // 启动前自建的数据子目录（如 Temurin/Qdrant 的 storage、RabbitMQ 的 mnesia）
     for d in &r.spec.init_dirs {
@@ -317,6 +325,11 @@ pub fn start(
     run_init_if_needed(&r)?;
 
     if let Some(port) = r.port {
+        // 被占 + 开了自动回落 → 换到附近空闲端口并固化为覆盖项
+        let port = match crate::services::fallback_port_for(store, &r.service_id, port, &[]) {
+            Some(p) => p,
+            None => port,
+        };
         precheck_port(port, &r.entry.display_name)?;
         store.set_port_assign(&r.service_id, port)?;
     }
@@ -355,6 +368,7 @@ pub fn start(
         args,
         cwd: Some(cwd),
         env,
+        detached: None,
     };
     spawn_tracked(manager, &r.service_id, &spec)?;
 

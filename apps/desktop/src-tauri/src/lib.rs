@@ -1,4 +1,4 @@
-//! NiceServBay 桌面壳：Tauri 命令接线 + 托盘 + 窗口行为。
+//! NiceEnv 桌面壳：Tauri 命令接线 + 托盘 + 窗口行为。
 //! 业务逻辑全部在 crates/core，这里只做参数转换与 UI 适配。
 
 pub mod smoke;
@@ -26,6 +26,12 @@ pub fn run() {
             let state = CoreState::init(None, emit)
                 .map_err(|e| Box::new(std::io::Error::other(format!("{e}"))) as Box<dyn std::error::Error>)?;
             app.manage(state);
+
+            /* ---------- 证书自动化调度：启动 30s 后先补一轮，之后每小时检查到期 ---------- */
+            {
+                let st = app.state::<Arc<CoreState>>().inner().clone();
+                nsb_core::certauto::spawn_scheduler(st);
+            }
 
             /* ---------- 托盘 ---------- */
             let tray_state = app.state::<Arc<CoreState>>().inner().clone();
@@ -98,7 +104,7 @@ pub fn run() {
             pathenv_status, pathenv_set_enabled, pathenv_set_selected, pathenv_reapply,
             version_catalog, version_catalogs,
             // 服务
-            list_service_status, start_service, stop_service, restart_service,
+            list_service_status, start_service, stop_service, restart_service, service_history, export_log, validate_configs, read_text_file, write_text_file, migrate_list_source, migrate_import, dns_interfaces, dns_status_of, dns_takeover, dns_restore,
             // 看门狗
             watchdog_status, watchdog_set_enabled, watchdog_reset,
             // 服务栈
@@ -124,7 +130,11 @@ pub fn run() {
             // 站点 .env
             env_read, env_save, env_apply_db,
             // 证书体检
-            cert_health, cert_import, cert_imported_list, cert_imported_delete,
+            cert_health, cert_import, cert_imported_list, cert_imported_delete, cert_import_dir,
+            // 证书自动化（ACME 签发 / 定时续签 / 多平台部署）
+            certauto_list, certauto_save, certauto_delete, certauto_set_enabled, certauto_issue,
+            // 证书监控 + PFX 导出
+            certmonitor_list, certmonitor_add, certmonitor_delete, certmonitor_check, cert_export_pfx, cert_export_der, cert_export_jks, cert_export_pem,
             // 配置文件编辑
             config_list, config_read, config_validate, config_save, config_backups, config_rollback,
             // PHP 扩展
@@ -137,22 +147,29 @@ pub fn run() {
             // 打开外部
             open_in_browser, open_in_folder, open_terminal,
             // 数据库
-            db_list, db_create, db_drop, db_users, db_create_user, db_reset_root_password, db_root_password,
+            db_list, db_create, db_drop, db_users, db_create_user, db_reset_root_password, db_root_password, redis_stats,
             // 数据库备份 / 还原
             db_backup_list, db_backup_dump, db_backup_restore, db_backup_delete, db_backup_dir,
             // 代理
             proxy_status, proxy_start, proxy_stop, proxy_set_system, proxy_set_mode,
             proxy_profiles, proxy_import, proxy_activate_profile, proxy_delete_profile,
-            proxy_nodes, proxy_select_node, proxy_delay_test,
+            proxy_nodes, proxy_select_node, proxy_delay_test, proxy_connections, proxy_update_profile,
+            // 工具箱扩展：计划任务 / 快速隧道 / Ollama / Adminer
+            cron_jobs, cron_save, cron_delete, cron_set_enabled, cron_run_now,
+            tunnel_start, tunnel_list, tunnel_stop,
+            ollama_models, ollama_delete, ollama_pull, adminer_start, adminer_stop,
             // 设置
             get_settings, set_setting, set_port_override, get_app_version, check_updates,
             export_config, import_config, import_config_text, get_data_dir,
             quit_app,
             // 应用更新（在线下载 + 就地安装）
             download_update, install_update, open_update_dir,
+            // 托盘面板（自绘小窗：数据 / 动作 / 尺寸与显隐）
+            tray::tray_panel_state, tray::tray_stop_all, tray::tray_open_main,
+            tray::tray_panel_resize, tray::tray_panel_hide,
         ])
         .run(tauri::generate_context!())
-        .expect("NiceServBay 启动失败");
+        .expect("NiceEnv 启动失败");
 }
 
 /// 退出前收尾：停掉本应用拉起的服务，并清掉 pidfile
@@ -534,9 +551,122 @@ fn apply_hosts(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, entries: V
     map_jh(nsb_core::hosts::apply(&state.store, &state.paths, Some(entries)).map(|_| true))
 }
 
+// ---- 证书自动化：签发耗时（ACME 全流程 1–2 分钟），手动签发放后台线程，前端轮询列表 ----
+#[tauri::command]
+fn certauto_list(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> Result<Vec<nsb_core::model::CertAutomation>, tauri::Error> {
+    map_jh(state.certauto_list())
+}
+
+#[tauri::command]
+fn certauto_save(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, a: nsb_core::model::CertAutomation) -> Result<nsb_core::model::CertAutomation, tauri::Error> {
+    map_jh(state.certauto_save(a))
+}
+
+#[tauri::command]
+fn certauto_delete(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: String) -> Result<bool, tauri::Error> {
+    map_jh(state.certauto_delete(&id))
+}
+
+#[tauri::command]
+fn certauto_set_enabled(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: String, enabled: bool) -> Result<nsb_core::model::CertAutomation, tauri::Error> {
+    map_jh(state.certauto_set_enabled(&id, enabled))
+}
+
+#[tauri::command]
+fn certauto_issue(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: String) -> Result<bool, tauri::Error> {
+    let st = state.inner().clone();
+    std::thread::spawn(move || {
+        let _ = nsb_core::certauto::run_once(&st, &id);
+    });
+    Ok(true)
+}
+
 #[tauri::command]
 fn list_certs(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> Result<Vec<nsb_core::model::CertRecord>, tauri::Error> {
     map_jh(nsb_core::tls::list_certs(&state.paths, &state.store))
+}
+
+#[tauri::command]
+async fn cert_export_pem(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    cert_id: String,
+    out_path: String,
+) -> Result<String, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(nsb_core::tls::export_pem_bundle(&st.store, &cert_id, std::path::Path::new(&out_path)))
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn cert_export_jks(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    cert_id: String,
+    password: String,
+    out_path: String,
+) -> Result<String, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(nsb_core::tls::export_jks(&st.store, &cert_id, &password, std::path::Path::new(&out_path)))
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn cert_export_der(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    cert_id: String,
+    out_path: String,
+) -> Result<String, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(nsb_core::tls::export_der(&st.store, &cert_id, std::path::Path::new(&out_path)))
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+// ---- 网站证书监控：盯任意站点/设备的证书到期时间 ----
+#[tauri::command]
+fn certmonitor_list(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> Result<Vec<nsb_core::model::CertMonitor>, tauri::Error> {
+    map_jh(state.certmonitor_list())
+}
+
+#[tauri::command]
+fn certmonitor_add(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, m: nsb_core::model::CertMonitor) -> Result<nsb_core::model::CertMonitor, tauri::Error> {
+    map_jh(state.certmonitor_add(m))
+}
+
+#[tauri::command]
+fn certmonitor_delete(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: String) -> Result<bool, tauri::Error> {
+    map_jh(state.certmonitor_delete(&id))
+}
+
+#[tauri::command]
+async fn certmonitor_check(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: String) -> Result<nsb_core::model::CertMonitor, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.certmonitor_check(&id)))
+        .await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+// ---- PFX 导出：本机证书 + 私钥打包 PKCS#12（Windows IIS / 设备导入用） ----
+#[tauri::command]
+async fn cert_export_pfx(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    cert_id: String,
+    password: String,
+    out_path: String,
+) -> Result<String, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(nsb_core::tls::export_pfx(&st.store, &cert_id, &password, std::path::Path::new(&out_path)))
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
@@ -638,6 +768,128 @@ fn kill_pid(pid: u32) -> Result<bool, tauri::Error> {
 #[tauri::command]
 fn get_system_stats() -> nsb_core::model::SystemStats {
     nsb_core::stats::get_system_stats()
+}
+
+/// 配置只读体检：nginx -t / httpd -t / php ini 加载 / 配置文件存在性。
+/// 与「重写配置」不同：这里不改任何文件。
+#[tauri::command]
+fn validate_configs(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> Result<Vec<nsb_core::ops::ConfigCheck>, tauri::Error> {
+    map_jh(Ok(nsb_core::ops::validate_configs(&state.store, &state.paths)))
+}
+
+/// Redis 运行统计（内存 / 键数 / 连接数 / 运行天数）
+#[tauri::command]
+fn redis_stats(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> nsb_core::stats::RedisStats {
+    let ports = nsb_core::services::PortsProfile::from_settings(&state.store);
+    state.redis_stats(ports.redis)
+}
+
+/// 已连接的网络接口（供 DNS 接管选择）
+#[tauri::command]
+fn dns_interfaces() -> Result<Vec<String>, tauri::Error> {
+    platform::connected_interfaces()
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))
+}
+
+/// 指定接口当前 DNS 状态（原始文本）
+#[tauri::command]
+fn dns_status_of(name: String) -> Result<String, tauri::Error> {
+    platform::interface_dns_status(&name)
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))
+}
+
+/// 提权把接口 DNS 指向 127.0.0.1（本地域名解析接管；触发 UAC）
+#[tauri::command]
+fn dns_takeover(name: String) -> Result<bool, tauri::Error> {
+    platform::set_dns_localhost_elevated(&name)
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))?;
+    Ok(true)
+}
+
+/// 恢复接口 DNS 为自动获取（触发 UAC）
+#[tauri::command]
+fn dns_restore(name: String) -> Result<bool, tauri::Error> {
+    platform::restore_dns_elevated(&name)
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))?;
+    Ok(true)
+}
+
+/// 列出源 MySQL 实例（FlyEnv/phpStudy/ServBay/XAMPP 等）上的用户数据库
+#[tauri::command]
+async fn migrate_list_source(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    host: String, port: u16, user: String, password: String,
+) -> Result<Vec<nsb_core::dbmigrate::SourceDb>, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(st.migrate_list_source(host, port, user, password))
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+/// 把源实例的指定库导入到本地托管 MySQL（mysqldump | mysql 流式管道）
+#[tauri::command]
+async fn migrate_import(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    host: String, port: u16, user: String, password: String,
+    databases: Vec<String>,
+) -> Result<nsb_core::dbmigrate::ImportReport, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(st.migrate_import(host, port, user, password, databases))
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+/// hosts 文件导入用的纯文本读取（限单个文件，返回全文）
+#[tauri::command]
+fn read_text_file(path: String) -> Result<String, tauri::Error> {
+    std::fs::read_to_string(&path).map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("读取失败：{e}")))
+}
+
+/// hosts 导出用纯文本写入
+#[tauri::command]
+fn write_text_file(path: String, content: String) -> Result<bool, tauri::Error> {
+    std::fs::write(&path, content).map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("写入失败：{e}")))?;
+    Ok(true)
+}
+
+/// 导出服务日志到用户指定路径（前端走保存对话框）。
+/// 源 = 该服务的 log 文件（ring 之外还有完整落盘）；不存在时报 LOG_EMPTY。
+#[tauri::command]
+fn export_log(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: String, dest: String) -> Result<u64, tauri::Error> {
+    let src = {
+        let status = state
+            .service_status_list()
+            .into_iter()
+            .find(|s| s.id == id);
+        status
+            .and_then(|s| s.log_file)
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_file())
+            .ok_or_else(|| {
+                tauri::Error::Anyhow(anyhow::anyhow!("该服务还没有日志文件（先启动一次）"))
+            })?
+    };
+    let dest_path = std::path::PathBuf::from(&dest);
+    if let Some(parent) = dest_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("创建目标目录失败：{e}")))?;
+    }
+    std::fs::copy(&src, &dest_path)
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("复制日志失败：{e}")))
+}
+
+/// 最近的服务状态变更（新→旧，最多 200 条）
+#[tauri::command]
+fn service_history(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, n: Option<usize>) -> Vec<serde_json::Value> {
+    state
+        .service_history(n.unwrap_or(50))
+        .into_iter()
+        .map(|(ts, id, detail)| serde_json::json!({ "ts": ts, "serviceId": id, "detail": detail }))
+        .collect()
 }
 
 /* ================= 打开外部 ================= */
@@ -927,6 +1179,143 @@ fn proxy_nodes() -> Result<Vec<nsb_core::model::serde_proxy::ProxyGroupView>, ta
     Ok(nsb_core::model::serde_proxy::parse_groups(&v))
 }
 
+/* ================= 工具箱扩展（计划任务 / 快速隧道 / Ollama / Adminer） ================= */
+
+#[tauri::command]
+fn cron_jobs(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+) -> Result<Vec<nsb_core::cron::CronJob>, tauri::Error> {
+    map_jh(state.store.list_cron_jobs())
+}
+
+#[tauri::command]
+fn cron_save(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    job: nsb_core::cron::CronJob,
+) -> Result<bool, tauri::Error> {
+    map_jh(state.cron_save(job).map(|_| true))
+}
+
+#[tauri::command]
+fn cron_delete(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    id: String,
+) -> Result<bool, tauri::Error> {
+    map_jh(state.cron_delete(&id).map(|_| true))
+}
+
+#[tauri::command]
+fn cron_set_enabled(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    id: String,
+    enabled: bool,
+) -> Result<bool, tauri::Error> {
+    map_jh(state.cron_set_enabled(&id, enabled).map(|_| true))
+}
+
+#[tauri::command]
+fn cron_run_now(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    id: String,
+) -> Result<nsb_core::cron::CronJob, tauri::Error> {
+    map_jh(state.cron_run_now(&id))
+}
+
+#[tauri::command]
+fn tunnel_start(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    port: u16,
+) -> Result<nsb_core::model::TunnelInfo, tauri::Error> {
+    map_jh(state.tunnel_start(port))
+}
+
+#[tauri::command]
+fn tunnel_list(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+) -> Vec<nsb_core::model::TunnelInfo> {
+    state.tunnel_list()
+}
+
+#[tauri::command]
+fn tunnel_stop(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    id: String,
+) -> Result<bool, tauri::Error> {
+    map_jh(state.tunnel_stop(&id).map(|_| true))
+}
+
+#[tauri::command]
+async fn ollama_models(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+) -> Result<Vec<nsb_core::toolbox::OllamaModelRow>, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.ollama_models()))
+        .await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+fn ollama_delete(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    name: String,
+) -> Result<bool, tauri::Error> {
+    map_jh(state.ollama_delete(&name).map(|_| true))
+}
+
+#[tauri::command]
+fn ollama_pull(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    name: String,
+) -> Result<bool, tauri::Error> {
+    map_jh(state.ollama_pull(&name).map(|_| true))
+}
+
+/// 启动 Adminer 管理台，浏览器打开 http://127.0.0.1:{port}/{file}
+#[tauri::command]
+fn adminer_start(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+) -> Result<serde_json::Value, tauri::Error> {
+    let (port, file) = map_jh(state.adminer_start())?;
+    Ok(serde_json::json!({ "port": port, "file": file }))
+}
+
+#[tauri::command]
+fn adminer_stop(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> Result<bool, tauri::Error> {
+    map_jh(state.adminer_stop().map(|_| true))
+}
+
+#[tauri::command]
+fn proxy_connections() -> Result<serde_json::Value, tauri::Error> {
+    let rt = nsb_core::proxy::ProxyRuntime::new();
+    map_jh(rt.connections())
+}
+
+/// 重新拉取订阅并覆盖原文件；该订阅处于激活态且内核在跑时，重启内核生效
+#[tauri::command]
+async fn proxy_update_profile(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    id: String,
+) -> Result<bool, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(tauri::async_runtime::block_on(async {
+            nsb_core::proxy::update_profile(&st.paths, &st.store, &id).await
+        }))?;
+        let running = st
+            .manager
+            .snapshot("mihomo")
+            .map(|s| s.state == nsb_core::model::ServiceState::Running)
+            .unwrap_or(false);
+        if running {
+            let _ = st.stop_service("mihomo");
+            let _ = st.start_service("mihomo");
+        }
+        Ok(true)
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
 #[tauri::command]
 fn proxy_select_node(group: String, node: String) -> Result<bool, tauri::Error> {
     map_jh(nsb_core::proxy::ProxyRuntime::new().select(&group, &node).map(|_| true))
@@ -1143,7 +1532,7 @@ fn fetch_latest_release_info(
 ) -> Result<Option<ReleaseInfo>, ()> {
     let resp = client
         .get(APP_RELEASES_API)
-        .header("User-Agent", "NiceServBay")
+        .header("User-Agent", "NiceEnv")
         .header("Accept", "application/vnd.github+json")
         .send()
         .map_err(|_| ())?;
@@ -1214,6 +1603,93 @@ fn fetch_latest_release_info(
         asset_url,
         asset_size,
     }))
+}
+
+
+/* ================= 清单：远端刷新 / 用户模块 / 状态 ================= */
+
+/// 拉取远端清单（设置项 manifestUrl）→ 校验 → 落盘为 etc/manifest.json 快照。
+/// 快照在**下次启动**生效（Installer::effective 会叠加它）；
+/// 返回快照的 revision / 条目数，前端提示「重启后生效」。
+#[tauri::command]
+fn refresh_remote_manifest(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    url: Option<String>,
+) -> Result<serde_json::Value, tauri::Error> {
+    let target = url
+        .or_else(|| state.store.get_setting("manifestUrl"))
+        .filter(|u| !u.trim().is_empty())
+        .ok_or_else(|| {
+            tauri::Error::Anyhow(anyhow::anyhow!(
+                "未配置远端清单地址（设置 → 更新 → manifestUrl）"
+            ))
+        })?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?;
+    let raw = client
+        .get(&target)
+        .send()
+        .and_then(|r| r.text())
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("下载失败：{e}")))?;
+    let m = nsb_core::install::parse_manifest_str(&raw)
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))?;
+    let dest = state.paths.etc().join("manifest.json");
+    std::fs::create_dir_all(state.paths.etc()).ok();
+    std::fs::write(&dest, &raw).map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("写入快照失败：{e}")))?;
+    Ok(serde_json::json!({
+        "revision": m.revision,
+        "packages": m.packages.len(),
+        "path": dest.to_string_lossy(),
+        "takesEffect": "restart",
+    }))
+}
+
+/// 删除远端清单快照，回退到内置清单（下次启动生效）
+#[tauri::command]
+fn reset_remote_manifest(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> Result<bool, tauri::Error> {
+    let dest = state.paths.etc().join("manifest.json");
+    if dest.exists() {
+        std::fs::remove_file(&dest)
+            .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("删除快照失败：{e}")))?;
+    }
+    Ok(true)
+}
+
+/// 当前生效清单的状态：来源（内置/远端/含用户模块）、revision、条目数、
+/// 用户模块文件列表（含解析失败的文件，便于用户自查）。
+#[tauri::command]
+fn manifest_status(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> serde_json::Value {
+    let bundled = nsb_core::install::Installer::bundled();
+    let eff = nsb_core::install::Installer::effective(&state.paths);
+    let snap = state.paths.etc().join("manifest.json");
+    let remote_active = snap.is_file();
+    let dir = state.paths.base.join("user-modules");
+    let mut modules = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.extension().map(|x| x == "json").unwrap_or(false) {
+                let ok = std::fs::read_to_string(&p)
+                    .ok()
+                    .and_then(|r| nsb_core::install::parse_manifest_str(&r).ok())
+                    .is_some();
+                modules.push(serde_json::json!({
+                    "file": p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+                    "valid": ok,
+                }));
+            }
+        }
+    }
+    serde_json::json!({
+        "bundledRevision": bundled.manifest.revision,
+        "bundledPackages": bundled.manifest.packages.len(),
+        "effectiveRevision": eff.manifest.revision,
+        "effectivePackages": eff.manifest.packages.len(),
+        "remoteActive": remote_active,
+        "userModules": modules,
+    })
 }
 
 /// 检查更新。
@@ -1325,7 +1801,7 @@ async fn download_update(
         .filter(|n| !n.trim().is_empty() && !n.contains(['/', '\\']))
         .unwrap_or_else(|| {
             let ext = if url.to_ascii_lowercase().ends_with(".dmg") { "dmg" } else { "exe" };
-            format!("NiceServBay-{version}-setup.{ext}")
+            format!("NiceEnv-{version}-setup.{ext}")
         });
     let dest = dir.join(&file_name);
 
@@ -1335,7 +1811,7 @@ async fn download_update(
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?;
     let resp = client
         .get(&url)
-        .header("User-Agent", "NiceServBay")
+        .header("User-Agent", "NiceEnv")
         .send()
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("下载失败：{e}")))?;
     if !resp.status().is_success() {
@@ -1746,6 +2222,14 @@ fn cert_import(
         std::path::Path::new(&cert_path),
         std::path::Path::new(&key_path),
     ))
+}
+
+#[tauri::command]
+fn cert_import_dir(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    dir: String,
+) -> Result<nsb_core::certs::DirImportResult, tauri::Error> {
+    map_jh(nsb_core::certs::import_cert_dir(&state.paths, std::path::Path::new(&dir)))
 }
 
 #[tauri::command]

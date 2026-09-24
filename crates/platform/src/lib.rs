@@ -205,7 +205,8 @@ pub fn apply_managed_hosts(entries: &[(String, String)]) -> Result<()> {
     })?;
     let out = merge_hosts_content(&original, entries);
 
-    // 原子写：先写临时文件再替换（保留只读属性处理）
+    // 先完整写出临时文件（写不进去就不碰 hosts），再覆盖复制回 hosts。
+    // 注意这不是原子替换：用 copy 而非 rename 是为了保留 hosts 原有的属主/ACL。
     let tmp = path.with_extension("hosts.tmp");
     std::fs::write(&tmp, out).map_err(|e| {
         if e.kind() == std::io::ErrorKind::PermissionDenied {
@@ -226,22 +227,54 @@ pub fn apply_managed_hosts(entries: &[(String, String)]) -> Result<()> {
     Ok(())
 }
 
+fn is_hosts_begin(t: &str) -> bool {
+    t == HOSTS_BEGIN || t == HOSTS_BEGIN_LEGACY
+}
+
+fn is_hosts_end(t: &str) -> bool {
+    t == HOSTS_END || t == HOSTS_END_LEGACY
+}
+
+/// 逐行标出「这一行是开始标记，且它之后的下一个标记是结束标记」——
+/// 只有这样的开始标记才真正开启一个托管块。结束标记被手工删掉时，
+/// 孤立的开始标记后面的内容（哪怕后面还跟着一个完整托管块）都不算托管内容。
+pub fn hosts_block_starts(lines: &[&str]) -> Vec<bool> {
+    let mut out = vec![false; lines.len()];
+    let mut next_marker_is_end: Option<bool> = None;
+    for i in (0..lines.len()).rev() {
+        let t = lines[i].trim();
+        if is_hosts_begin(t) {
+            out[i] = next_marker_is_end == Some(true);
+            next_marker_is_end = Some(false);
+        } else if is_hosts_end(t) {
+            next_marker_is_end = Some(true);
+        }
+    }
+    out
+}
+
 /// 纯函数：把托管标记块合并进 hosts 文本（可单测）
+///
+/// 只有「开始标记后面确实还有结束标记」才当作托管块整段替换；
+/// 结束标记被手工删掉时只丢弃孤立的开始标记行，其后的行原样保留——
+/// 宁可残留几条旧托管条目，也不能把用户自己的 hosts 条目一并删掉。
 pub fn merge_hosts_content(original: &str, entries: &[(String, String)]) -> String {
+    let lines: Vec<&str> = original.lines().collect();
+    let starts = hosts_block_starts(&lines);
     let mut out = String::new();
     let mut in_block = false;
     let mut block_written = false;
-    for line in original.lines() {
+    for (i, line) in lines.iter().enumerate() {
         let t = line.trim();
-        if t == HOSTS_BEGIN || t == HOSTS_BEGIN_LEGACY {
-            in_block = true;
+        if is_hosts_begin(t) {
+            in_block = starts[i];
             if !block_written {
                 out.push_str(&render_block(entries));
                 block_written = true;
             }
             continue;
         }
-        if t == HOSTS_END || t == HOSTS_END_LEGACY {
+        if is_hosts_end(t) {
             in_block = false;
             continue;
         }

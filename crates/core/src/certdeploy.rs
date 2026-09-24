@@ -372,7 +372,7 @@ fn ssh_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, key_pem
             .channel_open_session()
             .await
             .map_err(|e| AppError::new("SSH_SFTP", format!("打开 SFTP 通道失败：{e}")))?;
-        let mut sftp = russh_sftp::client::SftpSession::new(channel.into_stream())
+        let sftp = russh_sftp::client::SftpSession::new(channel.into_stream())
             .await
             .map_err(|e| AppError::new("SSH_SFTP", format!("SFTP 初始化失败：{e}")))?;
         for (path, content) in [(remote_cert.as_str(), cert_pem), (remote_key.as_str(), key_pem)] {

@@ -40,12 +40,15 @@ pub fn managed_entries(store: &Store) -> Vec<(String, String)> {
 /// 读取整个 hosts 解析为条目列表（含托管标记）
 pub fn read_all() -> Result<Vec<HostsEntry>> {
     let content = platform::read_hosts_file().map_err(crate::error::AppError::from)?;
+    let lines: Vec<&str> = content.lines().collect();
+    // 与 platform::merge_hosts_content 同一口径：结束标记缺失时，孤立的开始标记不算托管块
+    let starts = platform::hosts_block_starts(&lines);
     let mut in_managed = false;
     let mut out = Vec::new();
-    for line in content.lines() {
+    for (i, line) in lines.iter().enumerate() {
         let t = line.trim();
         if t == platform::HOSTS_BEGIN || t == platform::HOSTS_BEGIN_LEGACY {
-            in_managed = true;
+            in_managed = starts[i];
             continue;
         }
         if t == platform::HOSTS_END || t == platform::HOSTS_END_LEGACY {

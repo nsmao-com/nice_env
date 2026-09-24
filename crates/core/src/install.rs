@@ -99,7 +99,8 @@ impl Installer {
             .filter(|p| p.id == id && version.map_or(true, |v| p.version == v))
             .cloned()
             .collect();
-        candidates.sort_by(|a, b| b.version.cmp(&a.version));
+        // 按版本号语义取最新：字符串比较会把 5.26.30 排在 2025.09.0 前、21.0.9 排在 21.0.12 前
+        candidates.sort_by(|a, b| crate::versions::cmp_version_desc(&a.version, &b.version));
         candidates.into_iter().next()
     }
 
@@ -232,6 +233,7 @@ impl Installer {
         }
 
         let version = entry.version.clone();
+        ensure_safe_key(&entry.id, &version)?;
         let task_id = format!("{}@{}", entry.id, version);
 
         // 已装则幂等返回
@@ -374,6 +376,8 @@ impl Installer {
                 (inst.id, inst.version)
             }
         };
+        // 下面会 remove_dir_all(runtimes/{id}/{version})，先挡住 `x@../..` 这类 key
+        ensure_safe_key(&id, &version)?;
         // 停服务（忽略未运行错误）
         let service_id = if id == "php" || id == "mysql" {
             format!("{id}@{version}")
@@ -396,7 +400,11 @@ impl Installer {
 /// 清单统一用 '/'；Windows 的 Path::join 能正确吃掉 '/'，macOS 也如此。
 pub fn entry_relative_path(entry: &str) -> std::path::PathBuf {
     let mut p = std::path::PathBuf::new();
-    for seg in entry.split(['/', '\\']).filter(|s| !s.is_empty() && *s != ".") {
+    // `..` 与带 `:` 的段（盘符）直接丢弃：entry 也可能来自远程版本源，不能借它写到解压目录外
+    for seg in entry
+        .split(['/', '\\'])
+        .filter(|s| !s.is_empty() && *s != "." && *s != ".." && !s.contains(':'))
+    {
         p.push(seg);
     }
     p
@@ -477,18 +485,61 @@ fn settle_entry_file(
     Some(expected)
 }
 
-fn extract_zip(archive: &Path, dest: &Path) -> Result<()> {    let file = std::fs::File::open(archive).map_err(|e| AppError::io("打开压缩包", e))?;
+/// 压缩包条目名 → 安全的相对路径；会逃出解压目录的条目返回 None。
+///
+/// 拒绝：绝对路径（`/etc/x`、`\\server\x`）、`..` 段、带 `:` 的段（`C:` 盘符 /
+/// NTFS 备用数据流）。`\\` 统一当分隔符（Windows 打的 zip 常见），`.` 与空段忽略。
+/// 只看整段是否为 `..`，所以 `nginx..conf` 这类合法文件名不会被误杀。
+fn safe_archive_path(name: &str) -> Option<std::path::PathBuf> {
+    let name = name.replace('\\', "/");
+    if name.starts_with('/') {
+        return None;
+    }
+    let mut p = std::path::PathBuf::new();
+    for seg in name.split('/') {
+        match seg {
+            "" | "." => continue,
+            ".." => return None,
+            s if s.contains(':') => return None,
+            s => p.push(s),
+        }
+    }
+    if p.as_os_str().is_empty() {
+        None
+    } else {
+        Some(p)
+    }
+}
+
+/// 套件 id / 版本号会直接拼进目录路径（runtimes/{id}/{version}），
+/// 必须是单个普通路径段，不能借 `..` 或分隔符指到别处。
+fn is_safe_path_component(s: &str) -> bool {
+    !s.is_empty() && s != "." && s != ".." && !s.contains(['/', '\\', ':'])
+}
+
+fn ensure_safe_key(id: &str, version: &str) -> Result<()> {
+    if is_safe_path_component(id) && is_safe_path_component(version) {
+        Ok(())
+    } else {
+        Err(AppError::new(
+            "INVALID_PACKAGE_KEY",
+            format!("非法的套件标识 {id}@{version}"),
+        ))
+    }
+}
+
+fn extract_zip(archive: &Path, dest: &Path) -> Result<()> {
+    let file = std::fs::File::open(archive).map_err(|e| AppError::io("打开压缩包", e))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| AppError::internal("读取压缩包", e.to_string()))?;
     for i in 0..zip.len() {
         let mut entry = zip
             .by_index(i)
             .map_err(|e| AppError::internal("读取压缩条目", e.to_string()))?;
-        // 防路径穿越
-        let name = entry.name().replace('\\', "/");
-        if name.contains("..") {
+        // 防路径穿越（Zip Slip）：绝对路径 / 盘符 / `..` 的条目一律跳过
+        let Some(rel) = safe_archive_path(entry.name()) else {
             continue;
-        }
-        let out_path = dest.join(&name);
+        };
+        let out_path = dest.join(rel);
         if entry.is_dir() {
             // 保留压缩包里的空目录（nginx 的 logs/temp 等）
             std::fs::create_dir_all(&out_path)?;
@@ -726,5 +777,122 @@ mod manifest_layer_tests {
 
         base.merge_manifest(manifest_with("bar", "2.0.0", "https://c/2"));
         assert_eq!(base.manifest.packages.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod find_latest_tests {
+    use super::*;
+
+    #[test]
+    fn bare_id_picks_semantically_latest_version() {
+        let pkg = |id: &str, ver: &str| {
+            serde_json::json!({
+                "id": id, "version": ver, "category": "tool",
+                "displayName": id, "description": "", "os": [], "arch": [],
+                "kind": "binary", "url": "https://example.com/x", "sha256": "0",
+                "sizeBytes": 1, "entry": "x"
+            })
+        };
+        // 真实清单里的两组：字符串比较会选成 5.26.30 / 21.0.9+10
+        let manifest: crate::model::Manifest = serde_json::from_value(serde_json::json!({
+            "revision": 1, "updated": "t",
+            "packages": [
+                pkg("neo4j", "5.26.30"), pkg("neo4j", "2025.09.0"), pkg("neo4j", "5.25.1"),
+                pkg("jdk", "21.0.9+10"), pkg("jdk", "21.0.8+9"), pkg("jdk", "21.0.12+8"),
+            ]
+        }))
+        .unwrap();
+        let inst = Installer { manifest };
+        assert_eq!(inst.find("neo4j").unwrap().version, "2025.09.0");
+        assert_eq!(inst.find("jdk").unwrap().version, "21.0.12+8");
+        // 显式指定版本不受影响
+        assert_eq!(inst.find("neo4j@5.25.1").unwrap().version, "5.25.1");
+    }
+}
+
+#[cfg(test)]
+mod zip_slip_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn safe_archive_path_rejects_escapes() {
+        for bad in [
+            "/etc/cron.d/evil",
+            "\\Windows\\evil.dll",
+            "C:/Windows/evil.dll",
+            "C:\\Windows\\evil.dll",
+            "../evil",
+            "a/../../evil",
+            "a\\..\\..\\evil",
+            "file.txt:stream",
+            "",
+            "./",
+        ] {
+            assert!(safe_archive_path(bad).is_none(), "应拒绝 {bad:?}");
+        }
+    }
+
+    #[test]
+    fn safe_archive_path_keeps_normal_entries() {
+        let p = safe_archive_path("nginx-1.28.0\\conf\\nginx.conf").unwrap();
+        assert_eq!(p, std::path::Path::new("nginx-1.28.0").join("conf").join("nginx.conf"));
+        // 文件名里带 `..` 但不是 `..` 段：合法，不能误杀
+        let p = safe_archive_path("./php/ext/php..ini-dev").unwrap();
+        assert_eq!(p, std::path::Path::new("php").join("ext").join("php..ini-dev"));
+    }
+
+    #[test]
+    fn extract_zip_never_writes_outside_dest() {
+        let base = std::env::temp_dir().join(format!("nsb-zipslip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dest = base.join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let outside = base.join("outside.txt");
+        let archive = base.join("evil.zip");
+
+        let mut w = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        w.start_file("ok/readme.txt", opts).unwrap();
+        w.write_all(b"ok").unwrap();
+        w.start_file("../outside.txt", opts).unwrap();
+        w.write_all(b"evil").unwrap();
+        w.start_file(outside.to_string_lossy().to_string(), opts).unwrap();
+        w.write_all(b"evil").unwrap();
+        w.finish().unwrap();
+        // 确认恶意条目名原样进了压缩包（否则这个测试什么也没测到）
+        let names: Vec<String> = zip::ZipArchive::new(std::fs::File::open(&archive).unwrap())
+            .unwrap()
+            .file_names()
+            .map(String::from)
+            .collect();
+        assert!(names.iter().any(|n| n == "../outside.txt"));
+        assert!(names.iter().any(|n| *n == outside.to_string_lossy()));
+
+        extract_zip(&archive, &dest).unwrap();
+        assert_eq!(std::fs::read_to_string(dest.join("ok/readme.txt")).unwrap(), "ok");
+        assert!(!outside.exists(), "绝对路径 / .. 条目不能写到解压目录之外");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn package_key_must_be_plain_path_segments() {
+        assert!(ensure_safe_key("php", "8.3.33").is_ok());
+        assert!(ensure_safe_key("temurin-jdk21", "21.0.12+8").is_ok());
+        assert!(ensure_safe_key("x", "../..").is_err());
+        assert!(ensure_safe_key("..", "1.0").is_err());
+        assert!(ensure_safe_key("a/b", "1.0").is_err());
+        assert!(ensure_safe_key("a", "1\\..\\..").is_err());
+        assert!(ensure_safe_key("a", "").is_err());
+    }
+
+    #[test]
+    fn entry_relative_path_drops_traversal_segments() {
+        assert_eq!(
+            entry_relative_path("../../bin/../mysqld"),
+            std::path::Path::new("bin").join("mysqld")
+        );
+        assert_eq!(entry_relative_path("C:/x/y.exe"), std::path::Path::new("x").join("y.exe"));
     }
 }

@@ -46,6 +46,42 @@ fn hosts_merge_replaces_legacy_niceservbay_block() {
     assert!(out.contains("new.test"));
 }
 
+/// 结束标记被手工删掉时，开始标记之后的用户条目必须原样保留，
+/// 不能被当成托管块内容一并删除
+#[test]
+fn hosts_merge_keeps_user_lines_when_end_marker_missing() {
+    let original = "127.0.0.1 localhost\n# BEGIN NiceEnv (managed)\n127.0.0.1 old.test\n# user stuff below\n10.0.0.5 intranet.corp\n";
+    let out = platform::merge_hosts_content(
+        original,
+        &[("127.0.0.1".into(), "new.test".into())],
+    );
+    assert!(out.contains("10.0.0.5 intranet.corp"), "孤立开始标记之后的用户行必须保留");
+    assert!(out.contains("# user stuff below"));
+    assert!(out.contains("new.test"));
+    assert_eq!(out.matches(platform::HOSTS_BEGIN).count(), 1, "只应有一个完整托管块");
+    assert_eq!(out.matches(platform::HOSTS_END).count(), 1);
+    // 再合并一次结果稳定（幂等）
+    let again = platform::merge_hosts_content(&out, &[("127.0.0.1".into(), "new.test".into())]);
+    assert_eq!(again.matches(platform::HOSTS_BEGIN).count(), 1);
+    assert!(again.contains("10.0.0.5 intranet.corp"));
+}
+
+/// 孤立开始标记后面还跟着一个完整托管块：两者之间的用户条目也必须保留，
+/// 只替换那个完整的块
+#[test]
+fn hosts_merge_keeps_lines_between_dangling_begin_and_real_block() {
+    let original = "# BEGIN NiceEnv (managed)\n10.0.0.5 intranet.corp\n# BEGIN NiceEnv (managed)\n127.0.0.1 old.test\n# END NiceEnv (managed)\n10.0.0.6 after.corp\n";
+    let out = platform::merge_hosts_content(
+        original,
+        &[("127.0.0.1".into(), "new.test".into())],
+    );
+    assert!(out.contains("10.0.0.5 intranet.corp"));
+    assert!(out.contains("10.0.0.6 after.corp"));
+    assert!(!out.contains("old.test"), "完整托管块的旧内容应被替换");
+    assert!(out.contains("new.test"));
+    assert_eq!(out.matches(platform::HOSTS_BEGIN).count(), 1);
+}
+
 /* ---------- mihomo 订阅适配 ---------- */
 
 #[test]

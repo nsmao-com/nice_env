@@ -12,7 +12,7 @@
 //! - **密码不走命令行**：用临时 defaults-file 传，避免出现在进程列表里
 //!   （Windows 上任何用户都能看到别人的命令行）。
 
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -247,7 +247,7 @@ pub fn restore_from_file(
     let file = std::fs::File::open(sql_path).map_err(|e| AppError::io("打开备份文件", e))?;
     let total = file.metadata().ok().map(|m| m.len());
 
-    let mut child = Command::new(&mysql)
+    let child = Command::new(&mysql)
         .arg(format!("--defaults-extra-file={}", defaults.display()))
         .args(["-h", "127.0.0.1", "-P", &conn.port.to_string()])
         .arg("--default-character-set=utf8mb4")

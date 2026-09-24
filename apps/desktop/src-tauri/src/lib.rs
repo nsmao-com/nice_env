@@ -160,6 +160,8 @@ pub fn run() {
             ollama_models, ollama_delete, ollama_pull, adminer_start, adminer_stop,
             // 设置
             get_settings, set_setting, set_port_override, get_app_version, check_updates,
+            // 套件清单：远端刷新 / 恢复内置 / 状态
+            refresh_remote_manifest, reset_remote_manifest, manifest_status,
             export_config, import_config, import_config_text, get_data_dir,
             quit_app,
             // 应用更新（在线下载 + 就地安装）
@@ -1631,6 +1633,7 @@ fn refresh_remote_manifest(
     let raw = client
         .get(&target)
         .send()
+        .and_then(|r| r.error_for_status())
         .and_then(|r| r.text())
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("下载失败：{e}")))?;
     let m = nsb_core::install::parse_manifest_str(&raw)
@@ -1698,7 +1701,8 @@ fn manifest_status(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> ser
 ///   远端地址可用设置项 `manifestUrl` 覆盖；未配置或网络失败时该字段为 null（未知）。
 #[tauri::command]
 fn check_updates(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> Result<serde_json::Value, tauri::Error> {
-    let current_rev = nsb_core::install::Installer::bundled().manifest.revision;
+    // 与「当前生效」的清单比：已应用过远端快照后，再拿内置 revision 比会永远提示有更新
+    let current_rev = nsb_core::install::Installer::effective(&state.paths).manifest.revision;
     let current_ver = env!("CARGO_PKG_VERSION");
     let url = state
         .store
@@ -2401,7 +2405,7 @@ fn tool_mirror_set(
 /// 恢复官方源
 #[tauri::command]
 fn tool_mirror_reset(
-    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    _state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     manager: String,
 ) -> Result<bool, tauri::Error> {
     let m = nsb_core::toolmirror::ToolManager::parse(&manager)

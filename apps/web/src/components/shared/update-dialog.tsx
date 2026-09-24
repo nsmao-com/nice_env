@@ -59,6 +59,7 @@ export function UpdateDialog({
   const [error, setError] = React.useState<string | null>(null);
   const [dl, setDl] = React.useState<DownloadUpdateResult | null>(null);
   const [progress, setProgress] = React.useState<UpdateProgress | null>(null);
+  const [manifestState, setManifestState] = React.useState<"idle" | "applying" | "applied">("idle");
 
   const check = React.useCallback(
     async (silent = false) => {
@@ -66,6 +67,7 @@ export function UpdateDialog({
       setError(null);
       setProgress(null);
       setDl(null);
+      setManifestState("idle");
       try {
         const r = await api.checkUpdates();
         setResult(r);
@@ -112,6 +114,19 @@ export function UpdateDialog({
       setPhase("available");
       setProgress(null);
       toastError(e, t("update.downloadFailed"));
+    }
+  };
+
+  // 套件清单更新：拉取远端清单落盘为快照（下次启动生效）
+  const applyManifest = async () => {
+    setManifestState("applying");
+    try {
+      await api.refreshRemoteManifest();
+      setManifestState("applied");
+      toast.success(t("update.manifestApplied"));
+    } catch (e) {
+      setManifestState("idle");
+      toastError(e);
     }
   };
 
@@ -258,6 +273,19 @@ export function UpdateDialog({
                 ) : null}
               </div>
 
+              {/* 套件清单更新（与应用本体更新相互独立） */}
+              {result?.manifestUpdate && (
+                <div className="flex items-start gap-3 rounded-xl border border-primary/25 bg-primary-soft/50 p-3">
+                  <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                  <div className="flex min-w-0 flex-col gap-0.5">
+                    <span className="text-[12.5px] font-medium text-secondary">
+                      {manifestState === "applied" ? t("update.manifestApplied") : t("update.manifestAvailable")}
+                    </span>
+                    <span className="text-[11px] text-faint">{t("update.manifestAvailableHint")}</span>
+                  </div>
+                </div>
+              )}
+
               {/* 更新说明 */}
               {rel?.body ? (
                 <div className="overflow-hidden rounded-xl bg-fill">
@@ -333,10 +361,29 @@ export function UpdateDialog({
               <Button variant="ghost" onClick={() => onOpenChange(false)}>
                 {t("update.later")}
               </Button>
-              <Button onClick={startDownload} disabled={!rel?.assetUrl}>
-                <Download className="h-3.5 w-3.5" />
-                {rel?.assetUrl ? t("update.downloadNow") : t("update.openRelease")}
-              </Button>
+              {result?.manifestUpdate && (
+                <Button
+                  variant={result.appUpdate ? "secondary" : "default"}
+                  onClick={applyManifest}
+                  disabled={manifestState !== "idle"}
+                >
+                  {manifestState === "applying" ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : manifestState === "applied" ? (
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                  ) : (
+                    <ShieldCheck className="h-3.5 w-3.5" />
+                  )}
+                  {t("update.applyManifest")}
+                </Button>
+              )}
+              {/* 只有清单有更新时，应用本体没有新版可下 */}
+              {result?.appUpdate !== false && (
+                <Button onClick={startDownload} disabled={!rel?.assetUrl}>
+                  <Download className="h-3.5 w-3.5" />
+                  {rel?.assetUrl ? t("update.downloadNow") : t("update.openRelease")}
+                </Button>
+              )}
             </>
           )}
           {phase === "downloading" && (

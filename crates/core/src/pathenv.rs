@@ -343,11 +343,12 @@ pub fn strip_win_path(existing: &str, previously_managed: &[String]) -> String {
 pub fn apply(store: &Store, paths: &Paths, manifest: &Manifest) -> Result<PathEnvStatus> {
     let _ = paths;
     let enabled = is_enabled(store);
-    let prev = managed_dirs(store);
     let desired = if enabled { desired_dirs(store, manifest) } else { Vec::new() };
 
     #[cfg(windows)]
     {
+        // 上次写入的托管目录：先从 PATH 里摘掉再放新的
+        let prev = managed_dirs(store);
         let raw = platform::pathenv::read_user_path().map_err(AppError::from)?;
         let merged = merge_win_path(&raw.value, &prev, &desired);
         if merged != raw.value {

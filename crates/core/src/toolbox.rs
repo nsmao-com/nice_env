@@ -210,7 +210,8 @@ pub fn adminer_start(
 }
 
 fn entry_of(store: &Store, installer: &crate::install::Installer) -> Result<String> {
-    let adm = store.find_installed("adminer", None).ok_or_else(|| {
+    // 只校验已安装；入口文件名取清单模板
+    store.find_installed("adminer", None).ok_or_else(|| {
         AppError::not_installed("adminer").with_hint("先到「套件 / 服务」安装 Adminer")
     })?;
     Ok(installer

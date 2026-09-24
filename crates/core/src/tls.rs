@@ -162,7 +162,8 @@ pub fn trust_ca(paths: &Paths) -> Result<()> {
     }
 }
 
-/// CA 是否已信任（Windows: certutil 按 CN 查找 Root store）。
+/// CA 是否已信任（Windows: certutil 按 CN 查找 Root store；
+/// macOS: `security dump-trust-settings` 查管理员域与用户域的信任设置）。
 /// 历史安装的 CA 叫 "NiceServBay Local Root CA"，改名为 NiceEnv 后
 /// 两者都视为已信任——不然老用户会永远显示「未信任」。
 pub fn ca_trusted(_paths: &Paths) -> bool {
@@ -191,7 +192,78 @@ pub fn ca_trusted(_paths: &Paths) -> bool {
     }
     #[cfg(not(windows))]
     {
+        // trust_ca 用 `add-trusted-cert -d` 写在管理员域；用户在钥匙串里手动设成
+        // 「始终信任」则落在用户域，两个域都查。没有 security 命令（Linux）时恒为 false。
+        for admin in [true, false] {
+            let mut cmd = std::process::Command::new("security");
+            cmd.arg("dump-trust-settings");
+            if admin {
+                cmd.arg("-d");
+            }
+            let Ok(out) = cmd.output() else {
+                return false;
+            };
+            let text = String::from_utf8_lossy(&out.stdout);
+            if [CA_CN_NEW, CA_CN_LEGACY]
+                .iter()
+                .any(|cn| trust_settings_trusts(&text, cn))
+            {
+                return true;
+            }
+        }
         false
+    }
+}
+
+/// 解析 `security dump-trust-settings` 输出：名为 `cn` 的证书存在信任设置、且没有被设成拒绝。
+///
+/// 输出形如：
+/// ```text
+/// Number of trusted certs = 1
+/// Cert 0: NiceEnv Local Root CA
+///    Number of trust settings : 0
+/// ```
+#[cfg_attr(windows, allow(dead_code))]
+fn trust_settings_trusts(output: &str, cn: &str) -> bool {
+    // 逐个证书块收集 (名称, 是否被设成拒绝)
+    let mut certs: Vec<(&str, bool)> = Vec::new();
+    for line in output.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("Cert ") {
+            let name = rest.split_once(':').map(|(_, n)| n.trim()).unwrap_or("");
+            certs.push((name, false));
+        } else if t.contains("kSecTrustSettingsResultDeny") {
+            if let Some(last) = certs.last_mut() {
+                last.1 = true;
+            }
+        }
+    }
+    certs.iter().any(|(name, denied)| *name == cn && !denied)
+}
+
+#[cfg(test)]
+mod trust_settings_tests {
+    use super::trust_settings_trusts;
+
+    const CN: &str = "NiceEnv Local Root CA";
+
+    #[test]
+    fn finds_trusted_ca_among_other_certs() {
+        let out = "Number of trusted certs = 2\nCert 0: Some Corp CA\n   Number of trust settings : 0\nCert 1: NiceEnv Local Root CA\n   Number of trust settings : 1\n   Trust Setting 0:\n      Result Type           : kSecTrustSettingsResultTrustRoot\n";
+        assert!(trust_settings_trusts(out, CN));
+        assert!(!trust_settings_trusts(out, "NiceServBay Local Root CA"));
+    }
+
+    #[test]
+    fn deny_setting_is_not_trusted() {
+        let out = "Number of trusted certs = 2\nCert 0: NiceEnv Local Root CA\n   Number of trust settings : 1\n   Trust Setting 0:\n      Result Type           : kSecTrustSettingsResultDeny\nCert 1: Other CA\n   Number of trust settings : 0\n";
+        assert!(!trust_settings_trusts(out, CN));
+    }
+
+    #[test]
+    fn empty_or_error_output_is_not_trusted() {
+        assert!(!trust_settings_trusts("", CN));
+        assert!(!trust_settings_trusts("SecTrustSettingsCopyCertificates: No Trust Settings were found.", CN));
     }
 }
 

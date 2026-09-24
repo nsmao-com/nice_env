@@ -1,6 +1,6 @@
 {
-  "revision": 37,
-  "updated": "2026-09-19",
+  "revision": 38,
+  "updated": "2026-09-24",
   "packages": [
     {
       "id": "nginx",
@@ -192,8 +192,8 @@
       ],
       "kind": "binary",
       "url": "https://github.com/vrana/adminer/releases/download/v4.8.1/adminer-4.8.1.php",
-      "sha256": "0",
-      "sizeBytes": 609000,
+      "sha256": "2fd7e6d8f987b243ab1839249551f62adce19704c47d3d0c8dd9e57ea5b9c6b3",
+      "sizeBytes": 476603,
       "entry": "adminer-4.8.1.php",
       "requires": [
         "php"

@@ -1173,7 +1173,22 @@ export default function SettingsPage() {
                     className="h-8 w-80 font-mono text-[11px]"
                   />
                 </SettingRow>
-                <p className="text-[10.5px] text-faint">{t("settings.manifestUrlHint")}</p>
+                <div className="flex items-center gap-2">
+                  <p className="text-[10.5px] text-faint">{t("settings.manifestUrlHint")}</p>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="ml-auto h-7 shrink-0 text-[11px] text-faint hover:text-foreground"
+                    onClick={() =>
+                      api
+                        .resetRemoteManifest()
+                        .then(() => toast.success(t("settings.resetManifestDone")))
+                        .catch(toastError)
+                    }
+                  >
+                    <RotateCcw className="h-3 w-3" /> {t("settings.resetManifest")}
+                  </Button>
+                </div>
               </CardContent>
             </Card>
           )}

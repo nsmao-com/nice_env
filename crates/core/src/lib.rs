@@ -393,11 +393,6 @@ impl CoreState {
         let src = dbmigrate::SourceConn { host, port, user, password };
         let ports = crate::services::PortsProfile::from_settings(&self.store);
         let pass = self.store.get_setting("mysqlRootPassword").unwrap_or_else(|| "root".into());
-        let version = self
-            .store
-            .find_installed("mysql", None)
-            .map(|p| p.version)
-            .ok_or_else(|| crate::error::AppError::not_installed("MySQL"))?;
         let target = dbmigrate::SourceConn {
             host: "127.0.0.1".into(),
             port: ports.mysql,

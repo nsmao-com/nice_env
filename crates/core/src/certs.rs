@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, Result};
-use crate::model::CertRecord;
 use crate::paths::Paths;
 
 /// 剩余天数到多少就该提醒
@@ -433,9 +432,6 @@ pub struct DirImportResult {
     pub skipped: Vec<String>,
 }
 
-const CERT_EXTS: [&str; 2] = ["crt", "pem"];
-const KEY_EXTS: [&str; 2] = ["key", "pem"];
-
 /// 纯配对逻辑：同一目录下的证书文件与同名 .key 配成对。
 /// 规则（对齐 certd 的输出习惯 fullchain.pem/cert.pem + private.pem/privkey.pem）：
 /// - `x.crt` / `x.pem` 配 `x.key`
@@ -681,6 +677,7 @@ mod tests {
         assert_eq!(p.len(), 1);
     }
 
+    #[test]
     fn import_rejects_non_certificate_file() {
         let t = std::env::temp_dir().join(format!("nsb-imp-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&t);

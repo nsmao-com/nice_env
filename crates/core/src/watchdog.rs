@@ -15,7 +15,6 @@
 //! - 依赖顺序：MySQL 崩了不该去重启依赖它的站点进程，所以只重启服务本身。
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;

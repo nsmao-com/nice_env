@@ -118,7 +118,7 @@ pub fn stop(id: &str) -> Result<()> {
     let mut v = map().lock();
     v.retain(|t| alive(t));
     if let Some(pos) = v.iter().position(|t| t.id == id) {
-        let mut entry = v.remove(pos);
+        let entry = v.remove(pos);
         let _ = entry.child.lock().kill();
         let _ = entry.child.lock().wait();
         Ok(())
@@ -127,22 +127,91 @@ pub fn stop(id: &str) -> Result<()> {
     }
 }
 
+/// 持续读取 cloudflared 的一路输出，抓到公网地址后写入 sink。
+///
+/// 抓到地址后**不能停止读取**：cloudflared 会一直打日志，没人读的话管道缓冲区
+/// 写满后它会卡在写日志上，隧道随之假死。所以一直读到 EOF（进程退出）为止。
+/// 按字节读再有损转 UTF-8：遇到非 UTF-8 输出也不会中断（`lines()` 会在那一行报错）。
 fn read_url(stream: impl std::io::Read, sink: Arc<Mutex<Option<String>>>) {
-    for line in BufReader::new(stream).lines().flatten() {
-        if sink.lock().is_some() {
-            return;
+    let mut reader = BufReader::new(stream);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
         }
-        if let Some(pos) = line.find("trycloudflare.com") {
-            let head = &line[..pos];
-            let start = head.rfind("https://").map(|p| p).unwrap_or(0);
-            let candidate = line[start..]
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .to_string();
-            if !candidate.is_empty() {
-                *sink.lock() = Some(candidate);
+        let mut url = sink.lock();
+        if url.is_none() {
+            *url = extract_tunnel_url(&String::from_utf8_lossy(&buf));
+        }
+    }
+}
+
+/// 从一行 cloudflared 输出里提取快速隧道公网地址（`https://<随机名>.trycloudflare.com`）。
+///
+/// cloudflared 在给出地址之前会先打一行
+/// `... INF Requesting new quick Tunnel on trycloudflare.com...`，
+/// 失败时还会打出 `https://api.trycloudflare.com/tunnel` 这类 API 地址，二者都不是隧道地址。
+fn extract_tunnel_url(line: &str) -> Option<String> {
+    const SUFFIX: &str = ".trycloudflare.com";
+    let mut rest = line;
+    while let Some(pos) = rest.find("https://") {
+        let after = &rest[pos + "https://".len()..];
+        let host: String = after
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '.')
+            .collect();
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        if let Some(sub) = host.strip_suffix(SUFFIX) {
+            if !sub.is_empty() && sub != "api" && !sub.contains('.') {
+                return Some(format!("https://{host}"));
             }
         }
+        rest = after;
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ignores_request_line_before_url() {
+        // 旧实现会把这一行行首的时间戳当成公网地址
+        let l = "2026-09-24T10:00:00Z INF Requesting new quick Tunnel on trycloudflare.com...";
+        assert_eq!(extract_tunnel_url(l), None);
+    }
+
+    #[test]
+    fn ignores_api_endpoint_in_errors() {
+        let l = r#"2026-09-24T10:00:00Z ERR failed to request quick Tunnel: Post "https://api.trycloudflare.com/tunnel": dial tcp: i/o timeout"#;
+        assert_eq!(extract_tunnel_url(l), None);
+    }
+
+    #[test]
+    fn extracts_url_from_banner_box() {
+        let l = "2026-09-24T10:00:01Z INF |  https://Brave-Otter-Sample-42.trycloudflare.com                                     |";
+        assert_eq!(
+            extract_tunnel_url(l).as_deref(),
+            Some("https://brave-otter-sample-42.trycloudflare.com")
+        );
+    }
+
+    #[test]
+    fn read_url_takes_real_url_and_drains_the_rest() {
+        let out = "2026-09-24T10:00:00Z INF Thank you for trying Cloudflare Tunnel.\n\
+2026-09-24T10:00:00Z INF Requesting new quick Tunnel on trycloudflare.com...\n\
+2026-09-24T10:00:01Z INF |  https://first-url.trycloudflare.com  |\n\
+2026-09-24T10:00:02Z INF |  https://second-url.trycloudflare.com  |\n";
+        let mut bytes = out.as_bytes().to_vec();
+        // 夹一段非 UTF-8 字节，读取不能因此中断
+        bytes.extend_from_slice(b"\xff\xfe garbage\n");
+        bytes.extend_from_slice(b"2026-09-24T10:00:03Z INF Registered tunnel connection\n");
+        let cursor = std::io::Cursor::new(bytes);
+        let sink = Arc::new(Mutex::new(None));
+        read_url(cursor, sink.clone());
+        assert_eq!(sink.lock().as_deref(), Some("https://first-url.trycloudflare.com"));
     }
 }

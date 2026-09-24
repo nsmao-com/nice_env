@@ -343,14 +343,12 @@ xdebug.log_level=0
 pub fn upsert_xdebug_section(ini: &str, section: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
     let mut in_section = false;
-    let mut removed = false;
     for line in ini.lines() {
         let t = line.trim();
         if t.starts_with('[') && t.ends_with(']') {
             if t.eq_ignore_ascii_case("[xdebug]") {
                 // 丢掉旧段，稍后用新的替换
                 in_section = true;
-                removed = true;
                 continue;
             }
             in_section = false;
@@ -368,10 +366,9 @@ pub fn upsert_xdebug_section(ini: &str, section: &str) -> String {
     if !s.is_empty() {
         s.push('\n');
     }
-    if removed || true {
-        s.push_str(section.trim_end());
-        s.push('\n');
-    }
+    // 无论原来有没有 [xdebug] 段，都在末尾写入新段
+    s.push_str(section.trim_end());
+    s.push('\n');
     s
 }
 

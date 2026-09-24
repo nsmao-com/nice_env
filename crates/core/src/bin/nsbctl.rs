@@ -219,14 +219,13 @@ fn cmd_open(state: &std::sync::Arc<nsb_core::CoreState>, name: Option<&str>) -> 
     };
     let domain = site.domains.first().map(|d| d.as_str()).unwrap_or("localhost");
     let url = format!("{}://{}", if site.https { "https" } else { "http" }, domain);
-    let r = if cfg!(windows) {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", &url])
-            .creation_flags(0x0800_0000)
-            .spawn()
-    } else {
-        std::process::Command::new("open").arg(&url).spawn()
-    };
+    #[cfg(windows)]
+    let r = std::process::Command::new("cmd")
+        .args(["/C", "start", "", &url])
+        .creation_flags(0x0800_0000)
+        .spawn();
+    #[cfg(not(windows))]
+    let r = std::process::Command::new("open").arg(&url).spawn();
     match r {
         Ok(_) => {
             println!("opened {url}");

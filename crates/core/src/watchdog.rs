@@ -411,7 +411,11 @@ mod tests {
         }
         let st = w.status(&cfg);
         let e = st.watched.iter().find(|x| x.id == "x").unwrap();
-        assert!(e.restart_count <= 20, "历史应被截断，实际 {}", e.restart_count);
+        assert!(
+            e.restart_count <= 20,
+            "历史应被截断，实际 {}",
+            e.restart_count
+        );
     }
 
     #[test]

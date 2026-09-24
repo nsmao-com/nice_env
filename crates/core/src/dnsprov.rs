@@ -43,8 +43,7 @@ pub fn aliyun_percent_encode(s: &str) -> String {
 
 /// 阿里云 RPC 请求签名：StringToSign = GET&%2F&encode(query)，HMAC-SHA1(secret + "&")
 pub fn aliyun_sign(secret: &str, string_to_sign: &str) -> String {
-    let mut mac = HmacSha1::new_from_slice(format!("{secret}&").as_bytes())
-        .expect("hmac key");
+    let mut mac = HmacSha1::new_from_slice(format!("{secret}&").as_bytes()).expect("hmac key");
     mac.update(string_to_sign.as_bytes());
     B64_STANDARD.encode(mac.finalize().into_bytes())
 }
@@ -84,7 +83,11 @@ fn aliyun_rpc(
         .map(|(k, v)| format!("{}={}", aliyun_percent_encode(k), aliyun_percent_encode(v)))
         .collect::<Vec<_>>()
         .join("&");
-    let string_to_sign = format!("GET&{}&{}", aliyun_percent_encode("/"), aliyun_percent_encode(&query));
+    let string_to_sign = format!(
+        "GET&{}&{}",
+        aliyun_percent_encode("/"),
+        aliyun_percent_encode(&query)
+    );
     let signature = aliyun_sign(secret, &string_to_sign);
     let url = format!("{endpoint}/?Signature={signature}&{query}");
 
@@ -133,7 +136,12 @@ fn aliyun_add_txt(ak: &str, secret: &str, zone: &str, rr: &str, value: &str) -> 
         "AddDomainRecord",
         ak,
         secret,
-        &[("DomainName", zone), ("RR", rr), ("Type", "TXT"), ("Value", value)],
+        &[
+            ("DomainName", zone),
+            ("RR", rr),
+            ("Type", "TXT"),
+            ("Value", value),
+        ],
     )?;
     Ok(body["RecordId"]
         .as_i64()
@@ -163,7 +171,9 @@ fn cf_request(
     path: &str,
     json: Option<serde_json::Value>,
 ) -> Result<serde_json::Value> {
-    let mut req = http().request(method.clone(), format!("{CF_BASE}{path}")).bearer_auth(token);
+    let mut req = http()
+        .request(method.clone(), format!("{CF_BASE}{path}"))
+        .bearer_auth(token);
     if let Some(j) = &json {
         req = req.json(j);
     }
@@ -182,7 +192,10 @@ fn cf_request(
                     .join("; ")
             })
             .unwrap_or_else(|| "Cloudflare 返回失败".into());
-        return Err(AppError::new("DNS_CLOUDFLARE", format!("Cloudflare：{msg}")));
+        return Err(AppError::new(
+            "DNS_CLOUDFLARE",
+            format!("Cloudflare：{msg}"),
+        ));
     }
     Ok(body["result"].clone())
 }
@@ -191,7 +204,12 @@ fn cf_zones(token: &str) -> Result<Vec<String>> {
     let mut zones = Vec::new();
     let mut page = 1;
     loop {
-        let result = cf_request(token, reqwest::Method::GET, &format!("/zones?per_page=50&page={page}"), None)?;
+        let result = cf_request(
+            token,
+            reqwest::Method::GET,
+            &format!("/zones?per_page=50&page={page}"),
+            None,
+        )?;
         if let Some(list) = result.as_array() {
             for z in list {
                 if let Some(name) = z["name"].as_str() {
@@ -228,7 +246,12 @@ fn cf_add_txt(token: &str, zone_id: &str, name: &str, value: &str) -> Result<Str
 }
 
 fn cf_del_txt(token: &str, zone_id: &str, record_id: &str) -> Result<()> {
-    cf_request(token, reqwest::Method::DELETE, &format!("/zones/{zone_id}/dns_records/{record_id}"), None)?;
+    cf_request(
+        token,
+        reqwest::Method::DELETE,
+        &format!("/zones/{zone_id}/dns_records/{record_id}"),
+        None,
+    )?;
     Ok(())
 }
 
@@ -295,10 +318,16 @@ fn dnspod_add_txt(token: &str, zone: &str, sub: &str, value: &str) -> Result<Str
 }
 
 fn dnspod_del_txt(token: &str, zone: &str, record_id: &str) -> Result<()> {
-    dnspod_post(token, &[("action", "Record.Delete"), ("domain", zone), ("record_id", record_id)])?;
+    dnspod_post(
+        token,
+        &[
+            ("action", "Record.Delete"),
+            ("domain", zone),
+            ("record_id", record_id),
+        ],
+    )?;
     Ok(())
 }
-
 
 /* ================= GoDaddy（sso-key 头 + REST） ================= */
 
@@ -320,7 +349,13 @@ fn godaddy_zones(ak: &str, secret: &str) -> Result<Vec<String>> {
 }
 
 /// GoDaddy 的 TXT 是「按名字整体替换」：PUT 该名字下的全部记录
-fn godaddy_put(ak: &str, secret: &str, zone: &str, rr: &str, records: serde_json::Value) -> Result<()> {
+fn godaddy_put(
+    ak: &str,
+    secret: &str,
+    zone: &str,
+    rr: &str,
+    records: serde_json::Value,
+) -> Result<()> {
     let resp = http()
         .put(format!(
             "https://api.godaddy.com/v1/domains/{zone}/records/TXT/{rr}"
@@ -384,7 +419,9 @@ fn do_zones(token: &str) -> Result<Vec<String>> {
 
 fn do_add_txt(token: &str, zone: &str, name: &str, value: &str) -> Result<String> {
     let resp = http()
-        .post(format!("https://api.digitalocean.com/v2/domains/{zone}/records"))
+        .post(format!(
+            "https://api.digitalocean.com/v2/domains/{zone}/records"
+        ))
         .bearer_auth(token)
         .json(&serde_json::json!({ "type": "TXT", "name": name, "data": value, "ttl": 120 }))
         .send()
@@ -409,7 +446,12 @@ fn do_del_txt(token: &str, zone: &str, record_id: &str) -> Result<()> {
 
 /* ================= Porkbun（apikey + secret，JSON POST） ================= */
 
-fn porkbun_post(path: &str, ak: &str, secret: &str, extra: serde_json::Value) -> Result<serde_json::Value> {
+fn porkbun_post(
+    path: &str,
+    ak: &str,
+    secret: &str,
+    extra: serde_json::Value,
+) -> Result<serde_json::Value> {
     let mut body = serde_json::json!({ "apikey": ak, "secretapikey": secret });
     if let (Some(obj), Some(extra_obj)) = (body.as_object_mut(), extra.as_object()) {
         for (k, v) in extra_obj {
@@ -468,7 +510,12 @@ fn porkbun_add_txt(ak: &str, secret: &str, zone: &str, name: &str, value: &str) 
 }
 
 fn porkbun_del_txt(ak: &str, secret: &str, zone: &str, record_id: &str) -> Result<()> {
-    porkbun_post(&format!("/dns/delete/{zone}/{record_id}"), ak, secret, serde_json::json!({}))?;
+    porkbun_post(
+        &format!("/dns/delete/{zone}/{record_id}"),
+        ak,
+        secret,
+        serde_json::json!({}),
+    )?;
     Ok(())
 }
 
@@ -477,7 +524,10 @@ fn porkbun_del_txt(ak: &str, secret: &str, zone: &str, record_id: &str) -> Resul
 /// 华为云签名串：`SDK-HMAC-SHA256\n{时间戳}\n{规范请求哈希}`，HMAC-SHA256(AK/SK)
 pub fn hws_signature(sk: &str, sdk_date: &str, canonical_request_hash: &str) -> String {
     let string_to_sign = format!("SDK-HMAC-SHA256\n{sdk_date}\n{canonical_request_hash}");
-    hex::encode(crate::acme::hmac_sha256(sk.as_bytes(), string_to_sign.as_bytes()))
+    hex::encode(crate::acme::hmac_sha256(
+        sk.as_bytes(),
+        string_to_sign.as_bytes(),
+    ))
 }
 
 /// RFC3986 URI 编码（华为云规范；`/` 可选不编码）
@@ -485,7 +535,9 @@ fn hws_uri_encode(s: &str, slash_safe: bool) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             b'/' if slash_safe => out.push('/'),
             _ => out.push_str(&format!("%{b:02X}")),
         }
@@ -562,7 +614,9 @@ pub fn hws_request(
         .header("Host", host)
         .header("Authorization", authorization);
     if payload.is_some() {
-        req = req.header("Content-Type", "application/json").body(payload_str);
+        req = req
+            .header("Content-Type", "application/json")
+            .body(payload_str);
     }
     let resp = req
         .send()
@@ -583,12 +637,23 @@ pub fn hws_request(
 }
 
 fn hw_zones(ak: &str, sk: &str) -> Result<Vec<String>> {
-    let body = hws_request(ak, sk, "dns.myhuaweicloud.com", reqwest::Method::GET, "/v2/zones?type=public&limit=500", None)?;
+    let body = hws_request(
+        ak,
+        sk,
+        "dns.myhuaweicloud.com",
+        reqwest::Method::GET,
+        "/v2/zones?type=public&limit=500",
+        None,
+    )?;
     Ok(body["zones"]
         .as_array()
         .map(|a| {
             a.iter()
-                .filter_map(|z| z["name"].as_str().map(|n| n.trim_end_matches('.').to_string()))
+                .filter_map(|z| {
+                    z["name"]
+                        .as_str()
+                        .map(|n| n.trim_end_matches('.').to_string())
+                })
                 .collect()
         })
         .unwrap_or_default())
@@ -631,11 +696,16 @@ fn hw_add_txt(ak: &str, sk: &str, zone: &str, name: &str, value: &str) -> Result
 
 fn hw_del_txt(ak: &str, sk: &str, record_id: &str) -> Result<()> {
     // record_id 即完整资源路径（add 时拼好）
-    hws_request(ak, sk, "dns.myhuaweicloud.com", reqwest::Method::DELETE, &format!("/v2/{record_id}"), None)?;
+    hws_request(
+        ak,
+        sk,
+        "dns.myhuaweicloud.com",
+        reqwest::Method::DELETE,
+        &format!("/v2/{record_id}"),
+        None,
+    )?;
     Ok(())
 }
-
-
 
 /* ================= TXT 传播检测（DoH 公共解析，手动模式的核心） ================= */
 
@@ -663,9 +733,7 @@ pub fn doh_query_txt(name: &str) -> Vec<String> {
         format!("https://dns.google/resolve?name={name}&type=TXT"),
         format!("https://cloudflare-dns.com/dns-query?name={name}&type=TXT"),
     ] {
-        let req = http()
-            .get(&url)
-            .header("accept", "application/dns-json");
+        let req = http().get(&url).header("accept", "application/dns-json");
         if let Ok(resp) = req.send() {
             if let Ok(body) = resp.text() {
                 let got = parse_doh_txt(&body);
@@ -706,11 +774,16 @@ pub fn split_zone<'a>(zones: &'a [String], domain: &str) -> Result<(&'a str, Str
     let d = domain.trim_end_matches('.').to_ascii_lowercase();
     let zone = zones
         .iter()
-        .filter(|z| d == *z.to_ascii_lowercase() || d.ends_with(&format!(".{}", z.to_ascii_lowercase())))
+        .filter(|z| {
+            d == *z.to_ascii_lowercase() || d.ends_with(&format!(".{}", z.to_ascii_lowercase()))
+        })
         .max_by_key(|z| z.len())
         .ok_or_else(|| {
-            AppError::new("DNS_ZONE", format!("域名 {domain} 不在你的 DNS 账号下（找不到托管区）"))
-                .with_hint("确认该域名的解析确实托管在所选 DNS 服务商，且凭据有读取域名列表的权限")
+            AppError::new(
+                "DNS_ZONE",
+                format!("域名 {domain} 不在你的 DNS 账号下（找不到托管区）"),
+            )
+            .with_hint("确认该域名的解析确实托管在所选 DNS 服务商，且凭据有读取域名列表的权限")
         })?;
     let rr = d
         .strip_suffix(&format!(".{}", zone.to_ascii_lowercase()))
@@ -721,7 +794,12 @@ pub fn split_zone<'a>(zones: &'a [String], domain: &str) -> Result<(&'a str, Str
 
 /// 写 TXT：自动找 zone，返回 (zone, record_id)。
 /// manual 模式不走这里 —— 由 certauto 编排（提示用户 + 等传播），见 wait_txt_visible。
-pub fn set_txt(dns: &DnsProvider, domain: &str, prefix: &str, value: &str) -> Result<(String, String)> {
+pub fn set_txt(
+    dns: &DnsProvider,
+    domain: &str,
+    prefix: &str,
+    value: &str,
+) -> Result<(String, String)> {
     if dns.kind == "manual" {
         return Err(AppError::new(
             "DNS_MANUAL",
@@ -737,7 +815,10 @@ pub fn set_txt(dns: &DnsProvider, domain: &str, prefix: &str, value: &str) -> Re
         "porkbun" => porkbun_zones(&dns.access_key, &dns.secret)?,
         "huawei" => hw_zones(&dns.access_key, &dns.secret)?,
         other => {
-            return Err(AppError::new("DNS_PROVIDER", format!("不支持的 DNS 服务商：{other}")));
+            return Err(AppError::new(
+                "DNS_PROVIDER",
+                format!("不支持的 DNS 服务商：{other}"),
+            ));
         }
     };
     let (zone, sub) = split_zone(&zones, domain)?;
@@ -760,7 +841,10 @@ pub fn set_txt(dns: &DnsProvider, domain: &str, prefix: &str, value: &str) -> Re
         _ => dnspod_add_txt(&dns.access_key_with_secret(), zone, &name, value)?,
     };
     if record_id.is_empty() {
-        return Err(AppError::new("DNS_PROVIDER", "服务商未返回记录 id，无法后续清理"));
+        return Err(AppError::new(
+            "DNS_PROVIDER",
+            "服务商未返回记录 id，无法后续清理",
+        ));
     }
     Ok((zone.to_string(), record_id))
 }

@@ -35,13 +35,20 @@ fn main() -> ExitCode {
     }
     let (cmd, rest): (&str, &[String]) = (&args[0], &args[1..]);
     let json = rest.iter().any(|a| a == "--json");
-    let pos: Vec<&str> = rest.iter().filter(|a| !a.starts_with("--")).map(String::as_str).collect();
+    let pos: Vec<&str> = rest
+        .iter()
+        .filter(|a| !a.starts_with("--"))
+        .map(String::as_str)
+        .collect();
 
     let emit: nsb_core::EventSink = std::sync::Arc::new(|_| {});
     let state = match nsb_core::CoreState::init(None, emit) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("nsbctl: 初始化失败：{}（提示：数据目录不可写时可设 NSB_HOME）", e.message);
+            eprintln!(
+                "nsbctl: 初始化失败：{}（提示：数据目录不可写时可设 NSB_HOME）",
+                e.message
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -59,7 +66,7 @@ fn main() -> ExitCode {
         "start-all" => stack(&state, true),
         "stop-all" => stack(&state, false),
         "open" => cmd_open(&state, pos.first().copied()),
-                "logs" => cmd_logs(&state, pos.first().copied(), pos.get(1).copied()),
+        "logs" => cmd_logs(&state, pos.first().copied(), pos.get(1).copied()),
         "diagnose" => cmd_diagnose(pos.first().copied()),
         "pin" => cmd_pin(&pos),
         "help" | "--help" | "-h" => {
@@ -109,7 +116,10 @@ fn one_service(
 fn cmd_status(state: &std::sync::Arc<nsb_core::CoreState>, json: bool) -> ExitCode {
     let list = state.service_status_list();
     if json {
-        println!("{}", serde_json::to_string_pretty(&list).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&list).unwrap_or_default()
+        );
         return ExitCode::SUCCESS;
     }
     println!("{:<22} {:<9} {:>8}  {}", "SERVICE", "STATE", "PORT", "PIDS");
@@ -119,7 +129,11 @@ fn cmd_status(state: &std::sync::Arc<nsb_core::CoreState>, json: bool) -> ExitCo
             s.id,
             format!("{:?}", s.state).to_lowercase(),
             s.port.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
-            s.pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",")
+            s.pids
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
         );
     }
     ExitCode::SUCCESS
@@ -134,7 +148,10 @@ fn cmd_sites(state: &std::sync::Arc<nsb_core::CoreState>, json: bool) -> ExitCod
         }
     };
     if json {
-        println!("{}", serde_json::to_string_pretty(&sites).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&sites).unwrap_or_default()
+        );
         return ExitCode::SUCCESS;
     }
     for s in &sites {
@@ -158,7 +175,10 @@ fn cmd_packages(state: &std::sync::Arc<nsb_core::CoreState>, json: bool) -> Exit
     };
     let installed: Vec<_> = views.into_iter().filter(|v| v.install.is_some()).collect();
     if json {
-        println!("{}", serde_json::to_string_pretty(&installed).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&installed).unwrap_or_default()
+        );
         return ExitCode::SUCCESS;
     }
     for v in &installed {
@@ -188,7 +208,11 @@ fn stack(state: &std::sync::Arc<nsb_core::CoreState>, start: bool) -> ExitCode {
     });
     let mut fail = 0;
     for id in &ids {
-        let r = if start { state.start_service(id) } else { state.stop_service(id) };
+        let r = if start {
+            state.start_service(id)
+        } else {
+            state.stop_service(id)
+        };
         match r {
             Ok(()) => println!("{} {id}", if start { "started" } else { "stopped" }),
             Err(e) => {
@@ -202,7 +226,11 @@ fn stack(state: &std::sync::Arc<nsb_core::CoreState>, start: bool) -> ExitCode {
             }
         }
     }
-    if fail > 0 { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+    if fail > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 fn cmd_open(state: &std::sync::Arc<nsb_core::CoreState>, name: Option<&str>) -> ExitCode {
@@ -217,7 +245,11 @@ fn cmd_open(state: &std::sync::Arc<nsb_core::CoreState>, name: Option<&str>) -> 
         eprintln!("nsbctl: 找不到站点 {name}");
         return ExitCode::FAILURE;
     };
-    let domain = site.domains.first().map(|d| d.as_str()).unwrap_or("localhost");
+    let domain = site
+        .domains
+        .first()
+        .map(|d| d.as_str())
+        .unwrap_or("localhost");
     let url = format!("{}://{}", if site.https { "https" } else { "http" }, domain);
     #[cfg(windows)]
     let r = std::process::Command::new("cmd")
@@ -238,7 +270,11 @@ fn cmd_open(state: &std::sync::Arc<nsb_core::CoreState>, name: Option<&str>) -> 
     }
 }
 
-fn cmd_logs(state: &std::sync::Arc<nsb_core::CoreState>, id: Option<&str>, n: Option<&str>) -> ExitCode {
+fn cmd_logs(
+    state: &std::sync::Arc<nsb_core::CoreState>,
+    id: Option<&str>,
+    n: Option<&str>,
+) -> ExitCode {
     let Some(id) = id else {
         eprintln!("nsbctl: 缺少服务 id");
         return ExitCode::from(2);
@@ -275,7 +311,6 @@ fn cmd_diagnose(port: Option<&str>) -> ExitCode {
     }
 }
 
-
 /// nsbctl pin <php@x.y.z> <dir> —— 把运行时版本锁定写入 <dir>/.nsb.json，
 /// 此后在 App 里在该目录创建站点（PHP 版本选「跟随项目」）会自动使用该版本。
 fn cmd_pin(args: &[&str]) -> ExitCode {
@@ -301,8 +336,10 @@ fn cmd_pin(args: &[&str]) -> ExitCode {
         return ExitCode::FAILURE;
     }
     let file = dir_path.join(".nsb.json");
-    let body = format!("{{ \"php\": \"{ver}\" }}
-");
+    let body = format!(
+        "{{ \"php\": \"{ver}\" }}
+"
+    );
     match std::fs::write(&file, body) {
         Ok(()) => {
             println!("pinned php@{ver} → {}", file.display());

@@ -28,8 +28,10 @@ impl ProxyRuntime {
             .client
             .get(format!("{}{path}", self.base_url))
             .send()
-            .map_err(|e| AppError::new("MIHOMO_API", format!("无法连接 mihomo 控制接口：{e}"))
-                .with_hint("请确认内核已启动；端口被占计时可在套件页查看冲突"))?;
+            .map_err(|e| {
+                AppError::new("MIHOMO_API", format!("无法连接 mihomo 控制接口：{e}"))
+                    .with_hint("请确认内核已启动；端口被占计时可在套件页查看冲突")
+            })?;
         resp.json::<T>()
             .map_err(|e| AppError::internal("解析 mihomo 响应", e.to_string()))
     }
@@ -61,7 +63,10 @@ impl ProxyRuntime {
             .send()
             .map_err(|e| AppError::internal("切换节点请求", e.to_string()))?;
         if !resp.status().is_success() {
-            return Err(AppError::new("SELECT_FAILED", format!("切换节点失败（HTTP {}）", resp.status())));
+            return Err(AppError::new(
+                "SELECT_FAILED",
+                format!("切换节点失败（HTTP {}）", resp.status()),
+            ));
         }
         Ok(())
     }
@@ -134,27 +139,24 @@ async fn fetch_subscription(url: &str) -> Result<String> {
 
 fn ensure_clash_config(raw: &str) -> Result<()> {
     if !raw.contains("proxies") && !raw.contains("proxy-groups") {
-        return Err(AppError::new(
-            "NOT_A_CLASH_CONFIG",
-            "订阅内容不是 Clash YAML 配置",
-        )
-        .with_hint("请确认链接是 Clash 订阅（YAML），而不是 v2ray base64 节点链接"));
+        return Err(
+            AppError::new("NOT_A_CLASH_CONFIG", "订阅内容不是 Clash YAML 配置")
+                .with_hint("请确认链接是 Clash 订阅（YAML），而不是 v2ray base64 节点链接"),
+        );
     }
     Ok(())
 }
 
-pub async fn import_profile(
-    name: &str,
-    url: &str,
-    paths: &Paths,
-    store: &Store,
-) -> Result<String> {
+pub async fn import_profile(name: &str, url: &str, paths: &Paths, store: &Store) -> Result<String> {
     let raw = fetch_subscription(url).await?;
     ensure_clash_config(&raw)?;
 
     let id = format!("profile-{}", crate::services::now_ms());
     let adapted = configgen::adapt_mihomo_profile(&raw);
-    let file = paths.mihomo_dir().join("profiles").join(format!("{id}.yaml"));
+    let file = paths
+        .mihomo_dir()
+        .join("profiles")
+        .join(format!("{id}.yaml"));
     std::fs::create_dir_all(paths.mihomo_dir().join("profiles"))?;
     std::fs::write(&file, &adapted).map_err(|e| AppError::io("保存订阅配置", e))?;
     store.save_proxy_profile(&id, name, url, false)?;
@@ -173,7 +175,10 @@ pub async fn update_profile(paths: &Paths, store: &Store, id: &str) -> Result<()
     let raw = fetch_subscription(&url).await?;
     ensure_clash_config(&raw)?;
     let adapted = configgen::adapt_mihomo_profile(&raw);
-    let file = paths.mihomo_dir().join("profiles").join(format!("{id}.yaml"));
+    let file = paths
+        .mihomo_dir()
+        .join("profiles")
+        .join(format!("{id}.yaml"));
     std::fs::create_dir_all(paths.mihomo_dir().join("profiles"))?;
     std::fs::write(&file, &adapted).map_err(|e| AppError::io("保存订阅配置", e))?;
     if active {
@@ -197,9 +202,11 @@ fn decode_subscription(bytes: &[u8]) -> String {
 
 /// 激活订阅：内容写入主配置
 pub fn activate_profile(paths: &Paths, store: &Store, id: &str) -> Result<()> {
-    let file = paths.mihomo_dir().join("profiles").join(format!("{id}.yaml"));
-    let content = std::fs::read_to_string(&file)
-        .map_err(|e| AppError::io("读取订阅配置", e))?;
+    let file = paths
+        .mihomo_dir()
+        .join("profiles")
+        .join(format!("{id}.yaml"));
+    let content = std::fs::read_to_string(&file).map_err(|e| AppError::io("读取订阅配置", e))?;
     configgen::write_mihomo_config(paths, &content)?;
     store.set_active_proxy_profile(id)?;
     Ok(())
@@ -208,11 +215,8 @@ pub fn activate_profile(paths: &Paths, store: &Store, id: &str) -> Result<()> {
 /* ============ 系统代理（带备份恢复） ============ */
 
 pub fn system_proxy_on() -> Result<()> {
-    platform::set_system_proxy(
-        true,
-        &format!("127.0.0.1:{}", configgen::MIHOMO_MIXED_PORT),
-    )
-    .map_err(AppError::from)?;
+    platform::set_system_proxy(true, &format!("127.0.0.1:{}", configgen::MIHOMO_MIXED_PORT))
+        .map_err(AppError::from)?;
     Ok(())
 }
 

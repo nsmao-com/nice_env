@@ -7,10 +7,7 @@ use nsb_core::paths::Paths;
 #[test]
 fn hosts_merge_adds_block() {
     let original = "127.0.0.1 localhost\n::1 localhost\n";
-    let out = platform::merge_hosts_content(
-        original,
-        &[("127.0.0.1".into(), "a.test".into())],
-    );
+    let out = platform::merge_hosts_content(original, &[("127.0.0.1".into(), "a.test".into())]);
     assert!(out.contains("127.0.0.1 localhost"));
     assert!(out.contains(platform::HOSTS_BEGIN));
     assert!(out.contains(platform::HOSTS_END));
@@ -20,10 +17,7 @@ fn hosts_merge_adds_block() {
 #[test]
 fn hosts_merge_replaces_existing_block_and_keeps_user_lines() {
     let original = "127.0.0.1 localhost\n# BEGIN NiceEnv (managed)\n127.0.0.1 old.test\n# END NiceEnv (managed)\n10.0.0.1 myserver\n";
-    let out = platform::merge_hosts_content(
-        original,
-        &[("127.0.0.1".into(), "new.test".into())],
-    );
+    let out = platform::merge_hosts_content(original, &[("127.0.0.1".into(), "new.test".into())]);
     assert!(!out.contains("old.test"));
     assert!(out.contains("new.test"));
     assert!(out.contains("10.0.0.1 myserver"), "块外用户行必须保留");
@@ -36,13 +30,14 @@ fn hosts_merge_replaces_existing_block_and_keeps_user_lines() {
 #[test]
 fn hosts_merge_replaces_legacy_niceservbay_block() {
     let original = "127.0.0.1 localhost\n# BEGIN NiceServBay (managed)\n127.0.0.1 old.test\n# END NiceServBay (managed)\n";
-    let out = platform::merge_hosts_content(
-        original,
-        &[("127.0.0.1".into(), "new.test".into())],
-    );
+    let out = platform::merge_hosts_content(original, &[("127.0.0.1".into(), "new.test".into())]);
     assert!(!out.contains("old.test"), "旧块内容必须被清掉");
     assert!(!out.contains("NiceServBay"), "旧标记必须消失");
-    assert_eq!(out.matches(platform::HOSTS_BEGIN).count(), 1, "只应剩一个新标记块");
+    assert_eq!(
+        out.matches(platform::HOSTS_BEGIN).count(),
+        1,
+        "只应剩一个新标记块"
+    );
     assert!(out.contains("new.test"));
 }
 
@@ -51,14 +46,18 @@ fn hosts_merge_replaces_legacy_niceservbay_block() {
 #[test]
 fn hosts_merge_keeps_user_lines_when_end_marker_missing() {
     let original = "127.0.0.1 localhost\n# BEGIN NiceEnv (managed)\n127.0.0.1 old.test\n# user stuff below\n10.0.0.5 intranet.corp\n";
-    let out = platform::merge_hosts_content(
-        original,
-        &[("127.0.0.1".into(), "new.test".into())],
+    let out = platform::merge_hosts_content(original, &[("127.0.0.1".into(), "new.test".into())]);
+    assert!(
+        out.contains("10.0.0.5 intranet.corp"),
+        "孤立开始标记之后的用户行必须保留"
     );
-    assert!(out.contains("10.0.0.5 intranet.corp"), "孤立开始标记之后的用户行必须保留");
     assert!(out.contains("# user stuff below"));
     assert!(out.contains("new.test"));
-    assert_eq!(out.matches(platform::HOSTS_BEGIN).count(), 1, "只应有一个完整托管块");
+    assert_eq!(
+        out.matches(platform::HOSTS_BEGIN).count(),
+        1,
+        "只应有一个完整托管块"
+    );
     assert_eq!(out.matches(platform::HOSTS_END).count(), 1);
     // 再合并一次结果稳定（幂等）
     let again = platform::merge_hosts_content(&out, &[("127.0.0.1".into(), "new.test".into())]);
@@ -71,10 +70,7 @@ fn hosts_merge_keeps_user_lines_when_end_marker_missing() {
 #[test]
 fn hosts_merge_keeps_lines_between_dangling_begin_and_real_block() {
     let original = "# BEGIN NiceEnv (managed)\n10.0.0.5 intranet.corp\n# BEGIN NiceEnv (managed)\n127.0.0.1 old.test\n# END NiceEnv (managed)\n10.0.0.6 after.corp\n";
-    let out = platform::merge_hosts_content(
-        original,
-        &[("127.0.0.1".into(), "new.test".into())],
-    );
+    let out = platform::merge_hosts_content(original, &[("127.0.0.1".into(), "new.test".into())]);
     assert!(out.contains("10.0.0.5 intranet.corp"));
     assert!(out.contains("10.0.0.6 after.corp"));
     assert!(!out.contains("old.test"), "完整托管块的旧内容应被替换");
@@ -88,7 +84,10 @@ fn hosts_merge_keeps_lines_between_dangling_begin_and_real_block() {
 fn mihomo_adapt_overrides_ports() {
     let raw = "mixed-port: 7890\nport: 7891\nexternal-controller: 0.0.0.0:9090\nallow-lan: true\nproxies: []\nrules:\n  - MATCH,DIRECT\n";
     let adapted = nsb_core::configgen::adapt_mihomo_profile(raw);
-    assert!(adapted.contains(&format!("mixed-port: {}", nsb_core::configgen::MIHOMO_MIXED_PORT)));
+    assert!(adapted.contains(&format!(
+        "mixed-port: {}",
+        nsb_core::configgen::MIHOMO_MIXED_PORT
+    )));
     assert!(adapted.contains(&format!(
         "external-controller: 127.0.0.1:{}",
         nsb_core::configgen::MIHOMO_CONTROLLER_PORT
@@ -102,7 +101,8 @@ fn mihomo_adapt_overrides_ports() {
 #[test]
 fn php_ini_enables_pdo_mysql() {
     let paths = Paths::new(std::env::temp_dir().join("nsb-test-ini"));
-    let ini = nsb_core::configgen::render_php_ini(&paths, "8.3.33", &paths.runtime_dir("php", "8.3.33"));
+    let ini =
+        nsb_core::configgen::render_php_ini(&paths, "8.3.33", &paths.runtime_dir("php", "8.3.33"));
     assert!(ini.contains("extension=pdo_mysql"));
     assert!(ini.contains("cgi.force_redirect=0"));
 }
@@ -131,12 +131,22 @@ fn site_conf_php_has_fastcgi_upstream() {
         updated_at: 0,
     };
     let paths = Paths::new(std::env::temp_dir().join("nsb-test-conf"));
-    let conf = nsb_core::configgen::render_site_conf(&site, 8080, 8443, &paths.etc().join("nginx/fastcgi_params"), &paths.certs().join("sites"), &paths.logs().join("nginx"));
+    let conf = nsb_core::configgen::render_site_conf(
+        &site,
+        8080,
+        8443,
+        &paths.etc().join("nginx/fastcgi_params"),
+        &paths.certs().join("sites"),
+        &paths.logs().join("nginx"),
+    );
     assert!(conf.contains("fastcgi_pass nsb_php_8_3_33;"));
     assert!(conf.contains("server_name x.test;"));
     assert!(conf.contains("listen 8443 ssl;"));
     assert!(conf.contains("x.test.crt"));
-    assert!(conf.contains("try_files $uri $uri/ /index.php?$query_string;"), "laravel 伪静态");
+    assert!(
+        conf.contains("try_files $uri $uri/ /index.php?$query_string;"),
+        "laravel 伪静态"
+    );
 }
 
 #[test]
@@ -163,7 +173,14 @@ fn site_conf_proxy_has_websocket_headers() {
         updated_at: 0,
     };
     let paths = Paths::new(std::env::temp_dir().join("nsb-test-conf2"));
-    let conf = nsb_core::configgen::render_site_conf(&site, 8080, 8443, &paths.etc().join("nginx/fastcgi_params"), &paths.certs().join("sites"), &paths.logs().join("nginx"));
+    let conf = nsb_core::configgen::render_site_conf(
+        &site,
+        8080,
+        8443,
+        &paths.etc().join("nginx/fastcgi_params"),
+        &paths.certs().join("sites"),
+        &paths.logs().join("nginx"),
+    );
     assert!(conf.contains("proxy_pass http://127.0.0.1:5173;"));
     assert!(conf.contains("proxy_set_header Upgrade $http_upgrade;"));
 }
@@ -186,7 +203,9 @@ async fn downloader_resume_and_checksum() {
     std::thread::spawn(move || {
         use std::io::{Read, Write};
         for _ in 0..8 {
-            let Ok((mut s, _)) = listener.accept() else { break };
+            let Ok((mut s, _)) = listener.accept() else {
+                break;
+            };
             let mut buf = [0u8; 4096];
             let n = s.read(&mut buf).unwrap_or(0);
             let req = String::from_utf8_lossy(&buf[..n]).to_string();
@@ -239,11 +258,16 @@ async fn downloader_rejects_bad_checksum() {
     std::thread::spawn(move || {
         use std::io::{Read, Write};
         for _ in 0..4 {
-            let Ok((mut s, _)) = listener.accept() else { break };
+            let Ok((mut s, _)) = listener.accept() else {
+                break;
+            };
             let mut buf = [0u8; 4096];
             let n = s.read(&mut buf).unwrap_or(0);
             let _ = n;
-            let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", p2.len());
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                p2.len()
+            );
             let _ = s.write_all(resp.as_bytes());
             let _ = s.write_all(&p2);
         }
@@ -254,7 +278,14 @@ async fn downloader_rejects_bad_checksum() {
     let downloader = nsb_core::download::Downloader::new();
     let url = format!("http://127.0.0.1:{port}/f.bin");
     let err = downloader
-        .download("badsum", &[url], "deadbeef", payload.len() as u64, &paths, &|_| {})
+        .download(
+            "badsum",
+            &[url],
+            "deadbeef",
+            payload.len() as u64,
+            &paths,
+            &|_| {},
+        )
         .await
         .expect_err("错误 sha 必须被拒绝");
     assert_eq!(err.code, "CHECKSUM_MISMATCH");
@@ -328,7 +359,10 @@ fn scan_app_ports_distinguishes_self_and_conflict() {
             "结论必须是 free/self/conflict，得到 {}",
             r.verdict
         );
-        assert!(!r.verdict.eq("conflict") || r.pid.is_some(), "冲突必须给出 pid");
+        assert!(
+            !r.verdict.eq("conflict") || r.pid.is_some(),
+            "冲突必须给出 pid"
+        );
     }
     // 应用自己的端口不会因为「被占」而报 conflict（没有进程在跑时都是 free）
     assert!(
@@ -352,15 +386,28 @@ fn hosts_extra_entries_persist_and_merge() {
 
     // 用户添加两个自定义条目（其中一个是非 127.0.0.1 的 IP）
     let entries = vec![
-        nsb_core::model::HostsEntry { ip: "127.0.0.1".into(), domain: "mytest.test".into(), managed: true },
-        nsb_core::model::HostsEntry { ip: "10.0.0.9".into(), domain: "remote.test".into(), managed: true },
+        nsb_core::model::HostsEntry {
+            ip: "127.0.0.1".into(),
+            domain: "mytest.test".into(),
+            managed: true,
+        },
+        nsb_core::model::HostsEntry {
+            ip: "10.0.0.9".into(),
+            domain: "remote.test".into(),
+            managed: true,
+        },
     ];
     std::env::set_var("NSB_SKIP_HOSTS", "1");
     nsb_core::hosts::apply(&store, &paths, Some(entries)).unwrap();
 
     let extras = nsb_core::hosts::extra_entries(&store);
     assert_eq!(extras.len(), 2, "自定义条目必须被持久化");
-    assert!(extras.iter().any(|(ip, d)| ip == "10.0.0.9" && d == "remote.test"), "非 127.0.0.1 的 IP 不能被丢掉");
+    assert!(
+        extras
+            .iter()
+            .any(|(ip, d)| ip == "10.0.0.9" && d == "remote.test"),
+        "非 127.0.0.1 的 IP 不能被丢掉"
+    );
 
     // 托管条目 = 自定义条目（此时没有站点）
     let merged = nsb_core::hosts::managed_entries(&store);
@@ -368,7 +415,11 @@ fn hosts_extra_entries_persist_and_merge() {
 
     // 重建（修复向导）不应清空自定义条目
     nsb_core::hosts::rebuild(&store, &paths).unwrap();
-    assert_eq!(nsb_core::hosts::extra_entries(&store).len(), 2, "重建不得丢失自定义条目");
+    assert_eq!(
+        nsb_core::hosts::extra_entries(&store).len(),
+        2,
+        "重建不得丢失自定义条目"
+    );
 }
 
 /* ---------- 备份：可列出、可恢复 ---------- */
@@ -392,7 +443,11 @@ fn backup_list_and_restore() {
 
     let restored = nsb_core::paths::restore_backup(&paths.base, name).unwrap();
     assert_eq!(restored, target);
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), "v1\n", "恢复应写回旧内容");
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "v1\n",
+        "恢复应写回旧内容"
+    );
 }
 
 /* ---------- 端口方案：默认标准端口 + 逐个覆盖 ---------- */
@@ -469,9 +524,21 @@ fn stacks_presets_and_crud() {
             description: "desc".into(),
             // 故意乱序 + 重复，验证排序与去重
             items: vec![
-                nsb_core::model::StackItem { service_id: "nginx".into(), label: None, order: 30 },
-                nsb_core::model::StackItem { service_id: "mysql".into(), label: None, order: 10 },
-                nsb_core::model::StackItem { service_id: "nginx".into(), label: None, order: 20 },
+                nsb_core::model::StackItem {
+                    service_id: "nginx".into(),
+                    label: None,
+                    order: 30,
+                },
+                nsb_core::model::StackItem {
+                    service_id: "mysql".into(),
+                    label: None,
+                    order: 10,
+                },
+                nsb_core::model::StackItem {
+                    service_id: "nginx".into(),
+                    label: None,
+                    order: 20,
+                },
             ],
         },
     )
@@ -484,14 +551,27 @@ fn stacks_presets_and_crud() {
     // 空栈 / 空名被拒
     assert!(nsb_core::stacks::save(
         &store,
-        nsb_core::model::StackInput { id: None, name: " ".into(), description: String::new(), items: vec![] },
+        nsb_core::model::StackInput {
+            id: None,
+            name: " ".into(),
+            description: String::new(),
+            items: vec![]
+        },
     )
     .is_err());
-    assert!(nsb_core::stacks::save(
-        &store,
-        nsb_core::model::StackInput { id: None, name: "x".into(), description: String::new(), items: vec![] },
-    )
-    .is_err(), "空栈必须被拒（否则一键启动毫无意义）");
+    assert!(
+        nsb_core::stacks::save(
+            &store,
+            nsb_core::model::StackInput {
+                id: None,
+                name: "x".into(),
+                description: String::new(),
+                items: vec![]
+            },
+        )
+        .is_err(),
+        "空栈必须被拒（否则一键启动毫无意义）"
+    );
 
     // 复制预设 → 可编辑副本
     let copy = nsb_core::stacks::duplicate(&store, "builtin-lnmp", Some("副本".into())).unwrap();
@@ -501,16 +581,23 @@ fn stacks_presets_and_crud() {
 
     // 内置预设不可修改、不可删除
     assert!(nsb_core::stacks::delete(&store, "builtin-lnmp").is_err());
-    assert!(nsb_core::stacks::save(
-        &store,
-        nsb_core::model::StackInput {
-            id: Some("builtin-lnmp".into()),
-            name: "改名".into(),
-            description: String::new(),
-            items: vec![nsb_core::model::StackItem { service_id: "nginx".into(), label: None, order: 10 }],
-        },
-    )
-    .is_err(), "内置预设不能被直接改写");
+    assert!(
+        nsb_core::stacks::save(
+            &store,
+            nsb_core::model::StackInput {
+                id: Some("builtin-lnmp".into()),
+                name: "改名".into(),
+                description: String::new(),
+                items: vec![nsb_core::model::StackItem {
+                    service_id: "nginx".into(),
+                    label: None,
+                    order: 10
+                }],
+            },
+        )
+        .is_err(),
+        "内置预设不能被直接改写"
+    );
 
     // 自定义栈可删
     nsb_core::stacks::delete(&store, &saved.id).unwrap();
@@ -562,8 +649,16 @@ fn export_import_roundtrips_stacks_and_settings() {
             name: "导出用栈".into(),
             description: "d".into(),
             items: vec![
-                nsb_core::model::StackItem { service_id: "mysql".into(), label: None, order: 10 },
-                nsb_core::model::StackItem { service_id: "nginx".into(), label: None, order: 20 },
+                nsb_core::model::StackItem {
+                    service_id: "mysql".into(),
+                    label: None,
+                    order: 10,
+                },
+                nsb_core::model::StackItem {
+                    service_id: "nginx".into(),
+                    label: None,
+                    order: 20,
+                },
             ],
         },
     )
@@ -587,7 +682,10 @@ fn export_import_roundtrips_stacks_and_settings() {
         .expect("导入后应存在同名栈");
     assert!(!imported.builtin);
     assert_eq!(imported.items.len(), 2);
-    assert_ne!(imported.id, mine.id, "导入端要重新分配 id，避免覆盖本机同名栈");
+    assert_ne!(
+        imported.id, mine.id,
+        "导入端要重新分配 id，避免覆盖本机同名栈"
+    );
 
     // 设置里的端口覆盖跟着走
     let p = nsb_core::services::PortsProfile::from_settings(&s2);
@@ -628,7 +726,10 @@ fn wildcard_cert_can_be_issued_and_recorded() {
     .unwrap();
 
     assert_eq!(rec.subject, "*.dev.test");
-    assert!(rec.sans.iter().any(|s| s == "*.dev.test"), "SAN 必须含通配符");
+    assert!(
+        rec.sans.iter().any(|s| s == "*.dev.test"),
+        "SAN 必须含通配符"
+    );
     assert!(rec.sans.iter().any(|s| s == "dev.test"), "SAN 应含裸域名");
     // 证书与私钥文件真实落盘
     assert!(std::path::Path::new(&rec.cert_path).is_file());
@@ -642,7 +743,14 @@ fn wildcard_cert_can_be_issued_and_recorded() {
 #[test]
 fn service_history_records_transitions() {
     let manager = std::sync::Arc::new(nsb_core::services::ServiceManager::new());
-    manager.register("nginx", "Nginx", None, None, None, std::env::temp_dir().join("h.log"));
+    manager.register(
+        "nginx",
+        "Nginx",
+        None,
+        None,
+        None,
+        std::env::temp_dir().join("h.log"),
+    );
     manager.set_state("nginx", nsb_core::model::ServiceState::Starting);
     manager.set_state("nginx", nsb_core::model::ServiceState::Running);
     manager.set_error("nginx", nsb_core::AppError::new("X", "boom"));
@@ -659,14 +767,24 @@ fn service_history_records_transitions() {
 #[test]
 fn user_ini_written_for_php_sites_only() {
     let mk = |kind: nsb_core::model::SiteKind| nsb_core::model::Site {
-        id: "s1".into(), name: "t".into(), domains: vec!["a.test".into()],
-        root_dir: std::env::temp_dir().join(format!("nsb-userini-{}", std::process::id()))
-            .to_string_lossy().to_string(),
+        id: "s1".into(),
+        name: "t".into(),
+        domains: vec!["a.test".into()],
+        root_dir: std::env::temp_dir()
+            .join(format!("nsb-userini-{}", std::process::id()))
+            .to_string_lossy()
+            .to_string(),
         runtime: nsb_core::model::SiteRuntime {
-            web_server: "nginx".into(), kind,
-            php_version: Some("8.3".into()), proxy_target: None, command: None, cwd: None,
+            web_server: "nginx".into(),
+            kind,
+            php_version: Some("8.3".into()),
+            proxy_target: None,
+            command: None,
+            cwd: None,
         },
-        https: false, rewrite: nsb_core::model::RewritePreset::None, db: None,
+        https: false,
+        rewrite: nsb_core::model::RewritePreset::None,
+        db: None,
         php_overrides: Some(
             [
                 ("memory_limit".to_string(), "512M".to_string()),
@@ -675,12 +793,12 @@ fn user_ini_written_for_php_sites_only() {
             .into_iter()
             .collect(),
         ),
-        status: "stopped".into(), created_at: 0, updated_at: 0,
+        status: "stopped".into(),
+        created_at: 0,
+        updated_at: 0,
     };
 
-    let root = std::path::PathBuf::from(
-        mk(nsb_core::model::SiteKind::Php).root_dir.clone()
-    );
+    let root = std::path::PathBuf::from(mk(nsb_core::model::SiteKind::Php).root_dir.clone());
     std::fs::create_dir_all(&root).unwrap();
 
     // php 站点：写入；合法键在、非法键被丢弃、值内无换行
@@ -694,12 +812,14 @@ fn user_ini_written_for_php_sites_only() {
     // 非 php 站点：不写
     let static_site = mk(nsb_core::model::SiteKind::Static);
     nsb_core::sites::write_user_ini(&static_site);
-    assert!(!root.join(".user.ini").exists() || {
-        // 若上面 php 用例写过则文件存在；这里只断言 static 没改内容 —— 直接删掉重验
-        let _ = std::fs::remove_file(root.join(".user.ini"));
-        nsb_core::sites::write_user_ini(&static_site);
-        !root.join(".user.ini").exists()
-    });
+    assert!(
+        !root.join(".user.ini").exists() || {
+            // 若上面 php 用例写过则文件存在；这里只断言 static 没改内容 —— 直接删掉重验
+            let _ = std::fs::remove_file(root.join(".user.ini"));
+            nsb_core::sites::write_user_ini(&static_site);
+            !root.join(".user.ini").exists()
+        }
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -744,7 +864,13 @@ fn new_rewrite_presets_render_nginx_snippets() {
     ] {
         let snip = rewrite_snippet(&preset.0);
         assert!(!snip.is_empty());
-        assert!(snip.contains(preset.1), "{:?} 应含 {}：{}", preset.0, preset.1, snip);
+        assert!(
+            snip.contains(preset.1),
+            "{:?} 应含 {}：{}",
+            preset.0,
+            preset.1,
+            snip
+        );
     }
 }
 

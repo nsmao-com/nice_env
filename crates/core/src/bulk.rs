@@ -56,10 +56,10 @@ pub fn tier_of(service_id: &str) -> u8 {
     let base = service_id.split('@').next().unwrap_or(service_id);
     match base {
         "mysql" | "mariadb" | "postgresql" | "mongodb" | "qdrant" | "neo4j" | "redis"
-        | "memcached" | "rabbitmq" | "elasticsearch" | "meilisearch" | "zincsearch"
-        | "minio" | "rustfs" | "consul" | "etcd" | "r-nacos" | "temporal" => 0,
-        "php" | "node" | "python" | "java" | "go" | "dotnet" | "bun" | "deno" | "ruby"
-        | "rust" | "zig" | "flutter" | "perl" | "erlang" | "ollama" => 1,
+        | "memcached" | "rabbitmq" | "elasticsearch" | "meilisearch" | "zincsearch" | "minio"
+        | "rustfs" | "consul" | "etcd" | "r-nacos" | "temporal" => 0,
+        "php" | "node" | "python" | "java" | "go" | "dotnet" | "bun" | "deno" | "ruby" | "rust"
+        | "zig" | "flutter" | "perl" | "erlang" | "ollama" => 1,
         "nginx" | "apache" | "caddy" | "frankenphp" | "tomcat" | "roadrunner" | "mihomo" => 2,
         _ => 3,
     }
@@ -231,7 +231,11 @@ mod tests {
 
     #[test]
     fn start_order_puts_databases_before_webserver() {
-        let ids = vec!["nginx".to_string(), "mysql@8.0".to_string(), "php@8.3".to_string()];
+        let ids = vec![
+            "nginx".to_string(),
+            "mysql@8.0".to_string(),
+            "php@8.3".to_string(),
+        ];
         let o = order_for_start(&ids);
         assert_eq!(o[0], "mysql@8.0", "数据库必须先起：{o:?}");
         assert_eq!(o[1], "php@8.3");
@@ -240,7 +244,11 @@ mod tests {
 
     #[test]
     fn stop_order_is_reverse_of_start() {
-        let ids = vec!["nginx".to_string(), "mysql@8.0".to_string(), "php@8.3".to_string()];
+        let ids = vec![
+            "nginx".to_string(),
+            "mysql@8.0".to_string(),
+            "php@8.3".to_string(),
+        ];
         let o = order_for_stop(&ids);
         assert_eq!(o[0], "nginx", "先断流量：{o:?}");
         assert_eq!(o[2], "mysql@8.0", "数据库最后停：{o:?}");
@@ -249,7 +257,11 @@ mod tests {
     #[test]
     fn order_preserves_relative_order_within_tier() {
         // 同层级内不该被打乱（用稳定排序），否则界面勾选顺序变了会让用户困惑
-        let ids = vec!["redis".to_string(), "mysql".to_string(), "mongodb".to_string()];
+        let ids = vec![
+            "redis".to_string(),
+            "mysql".to_string(),
+            "mongodb".to_string(),
+        ];
         let o = order_for_start(&ids);
         assert_eq!(o, ids, "同层应保持原序：{o:?}");
     }
@@ -333,16 +345,48 @@ mod tests {
     fn tiers_cover_every_known_manifest_service() {
         // 清单里的服务都应能落到某个层级（未知会落 3，也算落位）
         for id in [
-            "nginx", "apache", "caddy", "frankenphp", "tomcat", "roadrunner",
-            "php@8.3.33", "node@20.11", "python@3.12", "go@1.22", "java@21",
-            "dotnet@8", "bun@1.1", "deno@1.44", "ruby@3.3", "rust@1.79",
-            "zig@0.13", "flutter@3.24", "perl@5.40", "erlang@27",
-            "mysql@8.0.46", "mariadb@11", "postgresql@16", "mongodb@7",
-            "qdrant@1.9", "neo4j@5", "redis@7.2", "memcached@1.6",
-            "rabbitmq@3.13", "elasticsearch@8", "meilisearch@1.8",
-            "zincsearch@0.4", "minio@2024", "rustfs@0.1", "consul@1.19",
-            "etcd@3.5", "r-nacos@0.6", "temporal@1.24", "ollama@0.3",
-            "mihomo@1.18", "composer@2.7", "adminer@4.8",
+            "nginx",
+            "apache",
+            "caddy",
+            "frankenphp",
+            "tomcat",
+            "roadrunner",
+            "php@8.3.33",
+            "node@20.11",
+            "python@3.12",
+            "go@1.22",
+            "java@21",
+            "dotnet@8",
+            "bun@1.1",
+            "deno@1.44",
+            "ruby@3.3",
+            "rust@1.79",
+            "zig@0.13",
+            "flutter@3.24",
+            "perl@5.40",
+            "erlang@27",
+            "mysql@8.0.46",
+            "mariadb@11",
+            "postgresql@16",
+            "mongodb@7",
+            "qdrant@1.9",
+            "neo4j@5",
+            "redis@7.2",
+            "memcached@1.6",
+            "rabbitmq@3.13",
+            "elasticsearch@8",
+            "meilisearch@1.8",
+            "zincsearch@0.4",
+            "minio@2024",
+            "rustfs@0.1",
+            "consul@1.19",
+            "etcd@3.5",
+            "r-nacos@0.6",
+            "temporal@1.24",
+            "ollama@0.3",
+            "mihomo@1.18",
+            "composer@2.7",
+            "adminer@4.8",
         ] {
             let t = tier_of(id);
             assert!(t <= 3, "{id} 层级越界：{t}");

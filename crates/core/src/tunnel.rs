@@ -212,6 +212,9 @@ mod tests {
         let cursor = std::io::Cursor::new(bytes);
         let sink = Arc::new(Mutex::new(None));
         read_url(cursor, sink.clone());
-        assert_eq!(sink.lock().as_deref(), Some("https://first-url.trycloudflare.com"));
+        assert_eq!(
+            sink.lock().as_deref(),
+            Some("https://first-url.trycloudflare.com")
+        );
     }
 }

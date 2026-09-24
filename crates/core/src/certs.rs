@@ -204,7 +204,10 @@ fn pem_to_der(pem: &str) -> Option<Vec<u8>> {
     let begin = pem.find("-----BEGIN CERTIFICATE-----")?;
     let after = &pem[begin + "-----BEGIN CERTIFICATE-----".len()..];
     let end = after.find("-----END CERTIFICATE-----")?;
-    let b64: String = after[..end].chars().filter(|c| !c.is_whitespace()).collect();
+    let b64: String = after[..end]
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
     base64_decode(&b64)
 }
 
@@ -311,7 +314,11 @@ pub fn parse_asn1_time(s: &str, generalized: bool) -> Option<i64> {
     if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || se > 60 {
         return None;
     }
-    chrono::NaiveDate::from_ymd_opt(y, mo, d)?.and_hms_opt(h, mi, se)?.and_utc().timestamp().into()
+    chrono::NaiveDate::from_ymd_opt(y, mo, d)?
+        .and_hms_opt(h, mi, se)?
+        .and_utc()
+        .timestamp()
+        .into()
 }
 
 /// 导入一对证书文件到本应用（复制而非移动，不动用户的原始文件）
@@ -319,11 +326,8 @@ pub fn import_cert_pair(paths: &Paths, cert_src: &Path, key_src: &Path) -> Resul
     let cert_pem =
         std::fs::read_to_string(cert_src).map_err(|e| AppError::io("读取证书文件", e))?;
     if !cert_pem.contains("BEGIN CERTIFICATE") {
-        return Err(AppError::new(
-            "NOT_A_CERT",
-            "这个文件里没有 PEM 格式的证书",
-        )
-        .with_hint("请选择 .crt / .pem 证书文件（不是 .key 私钥，也不是 .pfx 二进制格式）"));
+        return Err(AppError::new("NOT_A_CERT", "这个文件里没有 PEM 格式的证书")
+            .with_hint("请选择 .crt / .pem 证书文件（不是 .key 私钥，也不是 .pfx 二进制格式）"));
     }
     let key_pem = std::fs::read_to_string(key_src).map_err(|e| AppError::io("读取私钥文件", e))?;
     if !key_pem.contains("PRIVATE KEY") {
@@ -339,7 +343,13 @@ pub fn import_cert_pair(paths: &Paths, cert_src: &Path, key_src: &Path) -> Resul
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let safe_subject: String = subject
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let base = format!("{safe_subject}-{stamp}");
     let cert_dst = dir.join(format!("{base}.crt"));
@@ -399,7 +409,9 @@ pub fn list_imported(paths: &Paths) -> Vec<ImportedCert> {
 pub fn delete_imported(paths: &Paths, cert_path: &str) -> Result<()> {
     let dir = paths.certs().join("imported");
     let target = PathBuf::from(cert_path);
-    let canon_dir = dir.canonicalize().map_err(|e| AppError::io("定位导入目录", e))?;
+    let canon_dir = dir
+        .canonicalize()
+        .map_err(|e| AppError::io("定位导入目录", e))?;
     let canon = target
         .canonicalize()
         .map_err(|e| AppError::io("定位证书", e))?;
@@ -419,7 +431,6 @@ pub fn delete_imported(paths: &Paths, cert_path: &str) -> Result<()> {
 pub fn is_actionable(h: &CertHealth) -> bool {
     !h.file_present || !h.advice.is_empty()
 }
-
 
 /* ================= 从文件夹批量导入（certd 迁移的兜底路：没有 db.json、只有证书文件） ================= */
 
@@ -445,7 +456,9 @@ pub fn pair_cert_files(names: &[String]) -> Vec<(String, String)> {
         }
     };
     let keyish = |stem: &str| {
-        ["private", "privkey", "privatekey"].iter().any(|c| stem.to_ascii_lowercase().contains(c))
+        ["private", "privkey", "privatekey"]
+            .iter()
+            .any(|c| stem.to_ascii_lowercase().contains(c))
     };
     let is_key = |n: &str| {
         let (s, ext) = stem(n);
@@ -453,12 +466,16 @@ pub fn pair_cert_files(names: &[String]) -> Vec<(String, String)> {
     };
     let is_cert = |n: &str| {
         let (s, ext) = stem(n);
-        let cert_name = ["fullchain", "cert", "certificate", "server", "domain"].iter().any(|c| s.eq_ignore_ascii_case(c));
+        let cert_name = ["fullchain", "cert", "certificate", "server", "domain"]
+            .iter()
+            .any(|c| s.eq_ignore_ascii_case(c));
         // fullchain 是「完整证书链（leaf 在前）」，仍按证书导入；
         // 只排除纯中间链命名（chain/ca/issuer/…）
         let fullchain = s.to_ascii_lowercase().contains("fullchain");
         let chain_only = !fullchain
-            && ["chain", "ca.", ".ca", "issuer", "intermediate", "root"].iter().any(|c| s.to_ascii_lowercase().contains(c));
+            && ["chain", "ca.", ".ca", "issuer", "intermediate", "root"]
+                .iter()
+                .any(|c| s.to_ascii_lowercase().contains(c));
         let looks_key = keyish(&s);
         ext.as_deref() == Some("crt")
             || (ext.as_deref() == Some("pem") && !chain_only && !looks_key)
@@ -478,7 +495,10 @@ pub fn pair_cert_files(names: &[String]) -> Vec<(String, String)> {
         if let Some((_, k)) = keys.iter().find(|(ks, _)| *ks == cs) {
             return Some(k.clone());
         }
-        let cert_family = cs.contains("fullchain") || cs.contains("cert") || cs.contains("server") || cs.contains("domain");
+        let cert_family = cs.contains("fullchain")
+            || cs.contains("cert")
+            || cs.contains("server")
+            || cs.contains("domain");
         if cert_family {
             for cand in ["private", "privkey", "key", "privatekey"] {
                 if let Some((_, k)) = keys.iter().find(|(ks, _)| ks.contains(cand)) {
@@ -512,16 +532,24 @@ pub fn import_cert_dir(paths: &Paths, dir: &Path) -> Result<DirImportResult> {
     collect_files(dir, 0, &mut files)?;
     let names: Vec<String> = files
         .iter()
-        .map(|f| f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())
+        .map(|f| {
+            f.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default()
+        })
         .collect();
     let pairs = pair_cert_files(&names);
     for (cert_name, key_name) in pairs.iter() {
-        let cert_path = files
-            .iter()
-            .find(|f| f.file_name().map(|n| n.to_string_lossy() == cert_name.as_str()).unwrap_or(false));
-        let key_path = files
-            .iter()
-            .find(|f| f.file_name().map(|n| n.to_string_lossy() == key_name.as_str()).unwrap_or(false));
+        let cert_path = files.iter().find(|f| {
+            f.file_name()
+                .map(|n| n.to_string_lossy() == cert_name.as_str())
+                .unwrap_or(false)
+        });
+        let key_path = files.iter().find(|f| {
+            f.file_name()
+                .map(|n| n.to_string_lossy() == key_name.as_str())
+                .unwrap_or(false)
+        });
         if let (Some(c), Some(k)) = (cert_path, key_path) {
             match import_cert_pair(paths, c, k) {
                 Ok(ic) => out.imported.push(ic),
@@ -591,7 +619,10 @@ mod tests {
         // 2026-09-21 20:30:45Z
         let ts = parse_asn1_time("260921203045Z", false).unwrap();
         let dt = chrono::DateTime::from_timestamp(ts, 0).unwrap();
-        assert_eq!(dt.format("%Y-%m-%d %H:%M:%S").to_string(), "2026-09-21 20:30:45");
+        assert_eq!(
+            dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+            "2026-09-21 20:30:45"
+        );
     }
 
     #[test]
@@ -613,8 +644,14 @@ mod tests {
     fn parse_time_rejects_garbage() {
         assert!(parse_asn1_time("", false).is_none());
         assert!(parse_asn1_time("abc", false).is_none());
-        assert!(parse_asn1_time("991399000000Z", false).is_none(), "13 月应被拒绝");
-        assert!(parse_asn1_time("990101250000Z", false).is_none(), "25 时应被拒绝");
+        assert!(
+            parse_asn1_time("991399000000Z", false).is_none(),
+            "13 月应被拒绝"
+        );
+        assert!(
+            parse_asn1_time("990101250000Z", false).is_none(),
+            "25 时应被拒绝"
+        );
     }
 
     #[test]
@@ -673,7 +710,11 @@ mod tests {
         let p = pair_cert_files(&["b.com.crt".into()]);
         assert!(p.is_empty());
         // 一个私钥不重复配两张证书
-        let p = pair_cert_files(&["cert.pem".into(), "fullchain.pem".into(), "private.key".into()]);
+        let p = pair_cert_files(&[
+            "cert.pem".into(),
+            "fullchain.pem".into(),
+            "private.key".into(),
+        ]);
         assert_eq!(p.len(), 1);
     }
 
@@ -699,7 +740,11 @@ mod tests {
         let paths = Paths::new(t.clone());
         let c = t.join("a.crt");
         let k = t.join("b.key");
-        std::fs::write(&c, "-----BEGIN CERTIFICATE-----\nTWFu\n-----END CERTIFICATE-----\n").unwrap();
+        std::fs::write(
+            &c,
+            "-----BEGIN CERTIFICATE-----\nTWFu\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
         std::fs::write(&k, "not a key").unwrap();
         let r = import_cert_pair(&paths, &c, &k);
         assert!(r.is_err());

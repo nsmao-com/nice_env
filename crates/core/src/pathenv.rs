@@ -235,9 +235,15 @@ pub fn status(store: &Store, manifest: &Manifest) -> PathEnvStatus {
     // 漂移检测：开关开着，但磁盘上的实际内容与「应该注入的」不符。
     // 判据用真实 PATH（而不是我们的记录）：记录只能说明上次写了什么，
     // 用户手动删掉条目、或另一个程序覆盖了 PATH，都只有看磁盘才发现。
-    let desired = if enabled { desired_dirs(store, manifest) } else { Vec::new() };
+    let desired = if enabled {
+        desired_dirs(store, manifest)
+    } else {
+        Vec::new()
+    };
     let drift = enabled
-        && desired.iter().any(|d| !current_path.iter().any(|p| same_path(p, d)));
+        && desired
+            .iter()
+            .any(|d| !current_path.iter().any(|p| same_path(p, d)));
 
     PathEnvStatus {
         enabled,
@@ -250,7 +256,8 @@ pub fn status(store: &Store, manifest: &Manifest) -> PathEnvStatus {
 
 fn platform_note() -> String {
     if cfg!(windows) {
-        "写入的是当前用户的环境变量（无需管理员）。已打开的终端不会自动更新，请新开一个终端窗口。".to_string()
+        "写入的是当前用户的环境变量（无需管理员）。已打开的终端不会自动更新，请新开一个终端窗口。"
+            .to_string()
     } else {
         "写入 ~/.zshrc 的托管块。请新开终端窗口，或执行 source ~/.zshrc 立即生效。".to_string()
     }
@@ -270,7 +277,12 @@ fn read_current_path_entries(store: &Store) -> Vec<String> {
     #[cfg(not(windows))]
     {
         std::env::var("PATH")
-            .map(|p| p.split(':').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+            .map(|p| {
+                p.split(':')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 }
@@ -308,7 +320,11 @@ fn same_path(a: &str, b: &str) -> bool {
 ///
 /// 前置而非追加：用户输入 `php` 时应该命中我们管理的版本，
 /// 而不是系统里可能存在的另一个 PHP。
-pub fn merge_win_path(existing: &str, previously_managed: &[String], new_dirs: &[String]) -> String {
+pub fn merge_win_path(
+    existing: &str,
+    previously_managed: &[String],
+    new_dirs: &[String],
+) -> String {
     let mut kept: Vec<String> = Vec::new();
     for item in split_win_path(existing) {
         let owned = previously_managed.iter().any(|m| same_path(m, &item));
@@ -343,7 +359,11 @@ pub fn strip_win_path(existing: &str, previously_managed: &[String]) -> String {
 pub fn apply(store: &Store, paths: &Paths, manifest: &Manifest) -> Result<PathEnvStatus> {
     let _ = paths;
     let enabled = is_enabled(store);
-    let desired = if enabled { desired_dirs(store, manifest) } else { Vec::new() };
+    let desired = if enabled {
+        desired_dirs(store, manifest)
+    } else {
+        Vec::new()
+    };
 
     #[cfg(windows)]
     {
@@ -361,8 +381,11 @@ pub fn apply(store: &Store, paths: &Paths, manifest: &Manifest) -> Result<PathEn
         let dirs = desired.clone();
         let profiles = platform::pathenv::shell_profiles();
         if profiles.is_empty() {
-            return Err(AppError::new("NO_SHELL_PROFILE", "找不到用户 HOME 目录，无法写入 shell 配置")
-                .with_hint("请确认 HOME 环境变量已设置"));
+            return Err(AppError::new(
+                "NO_SHELL_PROFILE",
+                "找不到用户 HOME 目录，无法写入 shell 配置",
+            )
+            .with_hint("请确认 HOME 环境变量已设置"));
         }
         for p in &profiles {
             platform::pathenv::write_profile_managed_block(p, &dirs).map_err(AppError::from)?;
@@ -444,13 +467,20 @@ mod tests {
     fn merge_prepends_and_preserves_foreign_entries() {
         let existing = "%SystemRoot%\\system32;C:\\Other\\bin";
         let out = merge_win_path(existing, &[], &v(&["D:\\rt\\php\\8.3.33"]));
-        assert_eq!(out, "D:\\rt\\php\\8.3.33;%SystemRoot%\\system32;C:\\Other\\bin");
+        assert_eq!(
+            out,
+            "D:\\rt\\php\\8.3.33;%SystemRoot%\\system32;C:\\Other\\bin"
+        );
     }
 
     #[test]
     fn merge_removes_previously_managed_dirs() {
         let existing = "D:\\rt\\php\\8.3.33;C:\\Other\\bin";
-        let out = merge_win_path(existing, &v(&["D:\\rt\\php\\8.3.33"]), &v(&["D:\\rt\\php\\8.4.25"]));
+        let out = merge_win_path(
+            existing,
+            &v(&["D:\\rt\\php\\8.3.33"]),
+            &v(&["D:\\rt\\php\\8.4.25"]),
+        );
         assert_eq!(out, "D:\\rt\\php\\8.4.25;C:\\Other\\bin");
     }
 
@@ -473,10 +503,7 @@ mod tests {
     #[test]
     fn strip_removes_only_managed() {
         let existing = "D:\\rt\\php\\8.3.33;C:\\Other\\bin;D:\\rt\\go\\1.24.1";
-        let out = strip_win_path(
-            existing,
-            &v(&["D:\\rt\\php\\8.3.33", "D:\\rt\\go\\1.24.1"]),
-        );
+        let out = strip_win_path(existing, &v(&["D:\\rt\\php\\8.3.33", "D:\\rt\\go\\1.24.1"]));
         assert_eq!(out, "C:\\Other\\bin");
     }
 
@@ -498,7 +525,11 @@ mod tests {
 
     #[test]
     fn trailing_slash_treated_as_same_path() {
-        let out = merge_win_path("D:\\rt\\php\\8.3.33\\;C:\\keep", &[], &v(&["D:\\rt\\php\\8.3.33"]));
+        let out = merge_win_path(
+            "D:\\rt\\php\\8.3.33\\;C:\\keep",
+            &[],
+            &v(&["D:\\rt\\php\\8.3.33"]),
+        );
         assert_eq!(out, "D:\\rt\\php\\8.3.33;C:\\keep");
     }
 }

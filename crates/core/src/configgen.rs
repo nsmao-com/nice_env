@@ -210,7 +210,8 @@ pub fn render_site_conf(
 
     let body = match &site.runtime.kind {
         crate::model::SiteKind::Php => {
-            let upstream = nginx_upstream_name(site.runtime.php_version.as_deref().unwrap_or("8.3"));
+            let upstream =
+                nginx_upstream_name(site.runtime.php_version.as_deref().unwrap_or("8.3"));
             let mut s = rewrite_snippet(&site.rewrite).to_string();
             if matches!(site.rewrite, RewritePreset::None) {
                 s.push_str("    location / {\n        try_files $uri $uri/ /index.php?$query_string;\n    }\n");
@@ -322,7 +323,13 @@ session.save_path="{sess}"
 define_syslog_variables=Off
 "#,
         version = version,
-        error_log = nginx_path(&paths.logs().join("php").join(version).join("php_errors.log")),
+        error_log = nginx_path(
+            &paths
+                .logs()
+                .join("php")
+                .join(version)
+                .join("php_errors.log")
+        ),
         ext = nginx_path(&runtime_dir.join("ext")),
         sess = nginx_path(&paths.data().join("php").join(version).join("sess")),
     )
@@ -337,7 +344,11 @@ pub fn render_mysql_ini(
     port: u16,
 ) -> String {
     // mysqlx（X Protocol）仅 8.x 有；5.7 传入会拒启
-    let mysqlx = if version.starts_with('8') { "mysqlx=OFF\n" } else { "" };
+    let mysqlx = if version.starts_with('8') {
+        "mysqlx=OFF\n"
+    } else {
+        ""
+    };
     format!(
         r#"# NiceEnv managed my.ini ({version})
 [mysqld]
@@ -428,7 +439,10 @@ pub fn adapt_mihomo_profile(raw: &str) -> String {
         ("mixed-port:", MIHOMO_MIXED_PORT.to_string()),
         ("port:", "0".to_string()),
         ("socks-port:", "0".to_string()),
-        ("external-controller:", format!("127.0.0.1:{MIHOMO_CONTROLLER_PORT}")),
+        (
+            "external-controller:",
+            format!("127.0.0.1:{MIHOMO_CONTROLLER_PORT}"),
+        ),
         ("secret:", r#""""#.to_string()),
         ("allow-lan:", "false".to_string()),
         ("external-ui:", "".to_string()),
@@ -465,7 +479,14 @@ pub fn adapt_mihomo_profile(raw: &str) -> String {
 
 /* ================= 统一生成入口（修复向导也用） ================= */
 
-pub fn ensure_all_configs(paths: &Paths, _pools: &[(String, u16)], _http_port: u16, _https_port: u16, _mysql_port: u16, _redis_port: u16) -> Result<()> {
+pub fn ensure_all_configs(
+    paths: &Paths,
+    _pools: &[(String, u16)],
+    _http_port: u16,
+    _https_port: u16,
+    _mysql_port: u16,
+    _redis_port: u16,
+) -> Result<()> {
     // nginx 主配置需要 nginx 运行时目录（mime.types）；由调用方传入已安装 nginx
     // 这里只生成 fastcgi_params / rewrites / 各服务配置
     let fp = paths.etc().join("nginx").join("fastcgi_params");
@@ -473,12 +494,25 @@ pub fn ensure_all_configs(paths: &Paths, _pools: &[(String, u16)], _http_port: u
     Ok(())
 }
 
-pub fn write_nginx_conf(paths: &Paths, nginx_root: &std::path::Path, pools: &[(String, u16)], http_port: u16, https_port: u16) -> Result<()> {
+pub fn write_nginx_conf(
+    paths: &Paths,
+    nginx_root: &std::path::Path,
+    pools: &[(String, u16)],
+    http_port: u16,
+    https_port: u16,
+) -> Result<()> {
     std::fs::create_dir_all(paths.logs().join("nginx"))?;
     std::fs::create_dir_all(paths.etc().join("nginx").join("temp"))?;
     std::fs::create_dir_all(paths.etc().join("nginx").join("run"))?;
     let adminer = adminer_path(paths);
-    let conf = render_nginx_conf(paths, nginx_root, http_port, https_port, pools, adminer.as_deref());
+    let conf = render_nginx_conf(
+        paths,
+        nginx_root,
+        http_port,
+        https_port,
+        pools,
+        adminer.as_deref(),
+    );
     write_with_backup(&paths.nginx_conf(), &conf, &paths.backup())?;
     let fp = paths.etc().join("nginx").join("fastcgi_params");
     if !fp.exists() {
@@ -498,7 +532,12 @@ pub fn write_php_ini(paths: &Paths, version: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn write_mysql_ini(paths: &Paths, version: &str, basedir: &std::path::Path, port: u16) -> Result<()> {
+pub fn write_mysql_ini(
+    paths: &Paths,
+    version: &str,
+    basedir: &std::path::Path,
+    port: u16,
+) -> Result<()> {
     std::fs::create_dir_all(paths.logs().join("mysql"))?;
     let ini = render_mysql_ini(paths, version, basedir, port);
     write_with_backup(&paths.mysql_ini(version), &ini, &paths.backup())?;
@@ -527,12 +566,11 @@ pub fn validate_nginx(nginx_exe: &std::path::Path, conf: &std::path::Path) -> Re
         .output()
         .map_err(|e| AppError::io("运行 nginx -t", e))?;
     if !out.status.success() {
-        return Err(AppError::new(
-            "NGINX_CONF_INVALID",
-            "nginx 配置语法校验失败",
-        )
-        .with_hint("请检查高级设置里改过的内容；系统会在修改前自动备份")
-        .with_detail(String::from_utf8_lossy(&out.stderr).to_string()));
+        return Err(
+            AppError::new("NGINX_CONF_INVALID", "nginx 配置语法校验失败")
+                .with_hint("请检查高级设置里改过的内容；系统会在修改前自动备份")
+                .with_detail(String::from_utf8_lossy(&out.stderr).to_string()),
+        );
     }
     Ok(())
 }
@@ -610,7 +648,11 @@ pub fn render_httpd_vhost(
     php_pool: Option<u16>,
 ) -> String {
     let server_names = site.domains.join(" ");
-    let primary = site.domains.first().cloned().unwrap_or_else(|| "localhost".into());
+    let primary = site
+        .domains
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "localhost".into());
     let root = nginx_path(std::path::Path::new(&site.root_dir));
 
     let (listen, ssl_lines) = if site.https {
@@ -623,10 +665,7 @@ pub fn render_httpd_vhost(
             ),
         )
     } else {
-        (
-            format!("<VirtualHost *:{http_port}>"),
-            String::new(),
-        )
+        (format!("<VirtualHost *:{http_port}>"), String::new())
     };
 
     let body = match &site.runtime.kind {
@@ -636,7 +675,9 @@ pub fn render_httpd_vhost(
                 // mod_proxy_balancer 依赖 slotmem-shm，Windows 重启存在已知缺陷；
                 // 改为每站点直连池内一个 worker（按站点 id 轮转，4 worker 跨站点分摊）。
                 // 用 RewriteRule [P] 而非 ProxyPassMatch：后者不处理 DirectoryIndex 内部重定向
-                let worker = base + (site.id.chars().map(|c| c as usize).sum::<usize>() % PHP_POOL_WORKERS as usize) as u16;
+                let worker = base
+                    + (site.id.chars().map(|c| c as usize).sum::<usize>()
+                        % PHP_POOL_WORKERS as usize) as u16;
                 s.push_str("    RewriteEngine On\n");
                 s.push_str(&format!(
                     "    RewriteRule ^/?(.*\\.ph(p[3457]?|t|tml)(/.*)?)$ \"fcgi://127.0.0.1:{worker}/{root}/$1\" [P,L]\n"
@@ -692,7 +733,13 @@ pub fn render_httpd_vhost(
     .replace("{root}", &root)
 }
 
-pub fn write_httpd_conf(paths: &Paths, apache_root: &std::path::Path, pools: &[(String, u16)], http_port: u16, https_port: u16) -> Result<()> {
+pub fn write_httpd_conf(
+    paths: &Paths,
+    apache_root: &std::path::Path,
+    pools: &[(String, u16)],
+    http_port: u16,
+    https_port: u16,
+) -> Result<()> {
     std::fs::create_dir_all(paths.apache_sites_dir())?;
     std::fs::create_dir_all(paths.apache_run_dir())?;
     std::fs::create_dir_all(paths.etc().join("apache").join("logs"))?;
@@ -719,11 +766,8 @@ pub fn validate_httpd(httpd_exe: &std::path::Path, conf: &std::path::Path) -> Re
         .output()
         .map_err(|e| AppError::io("运行 httpd -t", e))?;
     if !out.status.success() {
-        return Err(AppError::new(
-            "HTTPD_CONF_INVALID",
-            "Apache 配置校验未通过",
-        )
-        .with_detail(String::from_utf8_lossy(&out.stderr).to_string()));
+        return Err(AppError::new("HTTPD_CONF_INVALID", "Apache 配置校验未通过")
+            .with_detail(String::from_utf8_lossy(&out.stderr).to_string()));
     }
     Ok(())
 }
@@ -743,7 +787,11 @@ pub fn adminer_path(paths: &Paths) -> Option<std::path::PathBuf> {
     versions.sort();
     versions.reverse();
     for v in versions {
-        let p = paths.runtimes().join("adminer").join(&v).join("adminer.php");
+        let p = paths
+            .runtimes()
+            .join("adminer")
+            .join(&v)
+            .join("adminer.php");
         if p.exists() {
             return Some(p);
         }

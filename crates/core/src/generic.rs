@@ -21,7 +21,14 @@ pub const SAFE_PORT_OFFSET: u16 = 20000;
 /// 它们同样在清单里声明 run（供前端展示启停语义），但启停必须走内置路径，
 /// 否则会绕过 nginx reload / mysql 初始化 / php-cgi 端口池等关键处理。
 pub const BUILTIN_SERVICE_IDS: &[&str] = &[
-    "nginx", "apache", "php", "mysql", "postgresql", "mongodb", "redis", "mihomo",
+    "nginx",
+    "apache",
+    "php",
+    "mysql",
+    "postgresql",
+    "mongodb",
+    "redis",
+    "mihomo",
 ];
 
 pub fn is_builtin(id: &str) -> bool {
@@ -98,7 +105,11 @@ fn substitute_ports(text: &str, port: Option<u16>) -> String {
             let value = match port {
                 None => String::new(),
                 Some(base) => {
-                    let delta: i32 = expr.trim_start_matches(['+', '-']).trim().parse().unwrap_or(0);
+                    let delta: i32 = expr
+                        .trim_start_matches(['+', '-'])
+                        .trim()
+                        .parse()
+                        .unwrap_or(0);
                     let signed = if expr.starts_with('-') { -delta } else { delta };
                     (base as i32 + signed).clamp(1, 65535).to_string()
                 }
@@ -188,7 +199,10 @@ pub fn resolve(store: &Store, paths: &Paths, service_id: &str) -> Result<Resolve
                 .with_hint("套件可能损坏；卸载后在套件页重新安装"),
         );
     }
-    let root = bin.parent().map(PathBuf::from).unwrap_or_else(|| root_dir.clone());
+    let root = bin
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root_dir.clone());
     let data = paths
         .data()
         .join(spec.data_dir.clone().unwrap_or_else(|| id.clone()));
@@ -388,7 +402,11 @@ pub fn start(
                 "{} 启动超时（{}s 内{}）",
                 r.entry.display_name,
                 r.spec.health_timeout_sec,
-                if r.port.is_some() { "端口未就绪" } else { "进程未存活" }
+                if r.port.is_some() {
+                    "端口未就绪"
+                } else {
+                    "进程未存活"
+                }
             ),
         )
         .with_hint(format!(
@@ -447,7 +465,12 @@ fn run_init_if_needed(r: &Resolved) -> Result<()> {
             .unwrap_or_else(|| PathBuf::from(name)),
         None => r.bin.clone(),
     };
-    let init_exe = if cfg!(windows) && !init_exe.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe")) && !init_exe.exists() {
+    let init_exe = if cfg!(windows)
+        && !init_exe
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+        && !init_exe.exists()
+    {
         PathBuf::from(format!("{}.exe", init_exe.to_string_lossy()))
     } else {
         init_exe

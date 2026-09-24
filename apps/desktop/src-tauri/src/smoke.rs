@@ -37,7 +37,10 @@ fn fail(name: &str, err: &nsb_core::AppError) {
         println!("         hint: {h}");
     }
     if let Some(d) = &err.detail {
-        println!("         detail: {}", d.chars().take(600).collect::<String>());
+        println!(
+            "         detail: {}",
+            d.chars().take(600).collect::<String>()
+        );
     }
 }
 
@@ -93,26 +96,36 @@ fn http_get(host: &str, port: u16, path: &str) -> Result<String, String> {
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(10)))
         .ok();
-    let req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nUser-Agent: nsb-smoke\r\n\r\n");
-    stream.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+    let req = format!(
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nUser-Agent: nsb-smoke\r\n\r\n"
+    );
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| e.to_string())?;
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).map_err(|e| e.to_string())?;
     let text = String::from_utf8_lossy(&buf).to_string();
     let body = text.splitn(2, "\r\n\r\n").nth(1).unwrap_or("");
-    Ok(format!("{}||{}", text.split("\r\n").next().unwrap_or(""), body))
+    Ok(format!(
+        "{}||{}",
+        text.split("\r\n").next().unwrap_or(""),
+        body
+    ))
 }
 
 /// 通过 mihomo 混合端口发 HTTP 代理请求（CONNECT 走 https 麻烦，直接用绝对 URI 的 GET）
 fn proxy_http_get_via_mihomo(url_host: &str, url_port: u16, path: &str) -> Result<String, String> {
-    let mut stream =
-        TcpStream::connect(("127.0.0.1", nsb_core::configgen::MIHOMO_MIXED_PORT)).map_err(|e| e.to_string())?;
+    let mut stream = TcpStream::connect(("127.0.0.1", nsb_core::configgen::MIHOMO_MIXED_PORT))
+        .map_err(|e| e.to_string())?;
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(12)))
         .ok();
     let req = format!(
         "GET http://{url_host}:{url_port}{path} HTTP/1.1\r\nHost: {url_host}\r\nConnection: close\r\nUser-Agent: nsb-smoke\r\n\r\n"
     );
-    stream.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| e.to_string())?;
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).map_err(|e| e.to_string())?;
     Ok(String::from_utf8_lossy(&buf).to_string())
@@ -127,7 +140,10 @@ pub fn run() {
 
     /* ---------- 1. 初始化 ---------- */
     let base = find_workspace().join(".smoke-home");
-    if std::env::var("NSB_SMOKE_FRESH").map(|v| v == "1").unwrap_or(false) {
+    if std::env::var("NSB_SMOKE_FRESH")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
         let _ = std::fs::remove_dir_all(&base);
     }
     let _ = std::fs::remove_dir_all(base.join("logs"));
@@ -162,16 +178,19 @@ pub fn run() {
     ok("CoreState 初始化", base.display().to_string());
 
     /* ---------- 1b. 安全红线：强制安全端口档 ----------
-       应用默认走标准端口（80/3306/6379…），好让项目里写死的连接串直接可用；
-       但本机很可能已经跑着真实的 MySQL/Redis/Nginx。冒烟测试必须与它们共存，
-       所以这里显式钉住安全档（8080/23306/26379…），不受本机设置影响。 */
+    应用默认走标准端口（80/3306/6379…），好让项目里写死的连接串直接可用；
+    但本机很可能已经跑着真实的 MySQL/Redis/Nginx。冒烟测试必须与它们共存，
+    所以这里显式钉住安全档（8080/23306/26379…），不受本机设置影响。 */
     state.store.set_setting("portProfile", "safe").ok();
     // 清掉可能从本机配置带过来的端口覆盖，让冒烟跑在确定的端口上
     for key in nsb_core::services::PortsProfile::keys() {
         let _ = state.store.set_port_override(key, None);
     }
     // 冒烟全程不自动结束任何进程（端口被占也必须如实失败，绝不误杀本机服务）
-    state.store.set_setting("autoClosePortOnStart", "false").ok();
+    state
+        .store
+        .set_setting("autoClosePortOnStart", "false")
+        .ok();
 
     /* ---------- 2. 预置下载缓存 ---------- */
     let cache = find_workspace().join(".dl-cache");
@@ -219,14 +238,31 @@ pub fn run() {
             }
         }
     }
-    let all_present = pairs.iter().all(|(_, dst)| base.join("downloads").join(dst).exists());
-    assert_(copied >= 1 || all_present, "预置下载缓存", if all_present { "全部已缓存".to_string() } else { format!("{copied} 个包") });
+    let all_present = pairs
+        .iter()
+        .all(|(_, dst)| base.join("downloads").join(dst).exists());
+    assert_(
+        copied >= 1 || all_present,
+        "预置下载缓存",
+        if all_present {
+            "全部已缓存".to_string()
+        } else {
+            format!("{copied} 个包")
+        },
+    );
 
     /* ---------- 3. 安装 ---------- */
     // 全部钉到缓存里已有的确切版本：不带版本号的 key 会解析成清单里的最新版，
     // 清单更新后就会去下载新文件（冒烟测试要保持离线可重复）
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    for key in ["nginx@1.26.3", "php@8.3.33", "php@7.4.33", "mysql@8.0.46", "redis@5.0.14", "mihomo@1.19.10"] {
+    for key in [
+        "nginx@1.26.3",
+        "php@8.3.33",
+        "php@7.4.33",
+        "mysql@8.0.46",
+        "redis@5.0.14",
+        "mihomo@1.19.10",
+    ] {
         let r = rt.block_on(state.install_package(key));
         check(&state, &format!("安装 {key}"), r.map(|_| ()));
     }
@@ -239,8 +275,15 @@ pub fn run() {
     }
 
     let statuses = state.service_status_list();
-    let running = statuses.iter().filter(|s| s.state == nsb_core::model::ServiceState::Running).count();
-    assert_(running >= 5, "服务状态灯=运行", format!("{running}/{} running", statuses.len()));
+    let running = statuses
+        .iter()
+        .filter(|s| s.state == nsb_core::model::ServiceState::Running)
+        .count();
+    assert_(
+        running >= 5,
+        "服务状态灯=运行",
+        format!("{running}/{} running", statuses.len()),
+    );
 
     /* ---------- 5. 创建 PHP 站点（8.3 + 数据库） ---------- */
     let site_root = base.join("sites").join("smoke-php83");
@@ -267,7 +310,11 @@ pub fn run() {
         write_env_example: true,
         template: "blank-php".into(),
     };
-    let site = check(&state, "创建 PHP 8.3 站点(含库)", nsb_core::sites::create(&input, &state.paths, &state.store, &state.manager));
+    let site = check(
+        &state,
+        "创建 PHP 8.3 站点(含库)",
+        nsb_core::sites::create(&input, &state.paths, &state.store, &state.manager),
+    );
 
     // hosts 写入：冒烟环境跳过（避免无管理员权限时的系统级改动）
     if site.is_some() {
@@ -287,7 +334,11 @@ pub fn run() {
         };
         // env.example
         let env = std::fs::read_to_string(site_root.join(".env.example")).unwrap_or_default();
-        assert_(env.contains("DB_DATABASE=smoke_db"), ".env.example 写入", "");
+        assert_(
+            env.contains("DB_DATABASE=smoke_db"),
+            ".env.example 写入",
+            "",
+        );
     }
 
     /* ---------- 6. PHP 连 MySQL + Redis ---------- */
@@ -327,10 +378,20 @@ echo implode("\n", $out);
     match resp {
         Ok(r) => {
             let body = r.splitn(2, "||").nth(1).unwrap_or("");
-            assert_(body.contains("MYSQL_OK"), "PHP PDO 连 MySQL", body.lines().next().unwrap_or(""));
-            assert_(body.contains("REDIS_OK"), "PHP 连 Redis (RESP)", body.trim());
+            assert_(
+                body.contains("MYSQL_OK"),
+                "PHP PDO 连 MySQL",
+                body.lines().next().unwrap_or(""),
+            );
+            assert_(
+                body.contains("REDIS_OK"),
+                "PHP 连 Redis (RESP)",
+                body.trim(),
+            );
         }
-        Err(e) => { assert_(false, "PHP 数据库连接测试", e); }
+        Err(e) => {
+            assert_(false, "PHP 数据库连接测试", e);
+        }
     };
 
     /* ---------- 7. 多版本共存：PHP 7.4 站点 ---------- */
@@ -354,11 +415,19 @@ echo implode("\n", $out);
         write_env_example: false,
         template: "blank-php".into(),
     };
-    let site2 = check(&state, "创建 PHP 7.4 站点", nsb_core::sites::create(&input2, &state.paths, &state.store, &state.manager));
+    let site2 = check(
+        &state,
+        "创建 PHP 7.4 站点",
+        nsb_core::sites::create(&input2, &state.paths, &state.store, &state.manager),
+    );
     if site2.is_some() {
         let resp = http_get("smoke74.nsb.test", 8080, "/");
         match resp {
-            Ok(r) => assert_(r.contains("200") && r.contains("PHP 7.4"), "双 PHP 版本同时服务", "8.3 与 7.4 并存"),
+            Ok(r) => assert_(
+                r.contains("200") && r.contains("PHP 7.4"),
+                "双 PHP 版本同时服务",
+                "8.3 与 7.4 并存",
+            ),
             Err(e) => assert_(false, "双 PHP 版本同时服务", e),
         };
     }
@@ -372,14 +441,23 @@ echo implode("\n", $out);
             let _ = s.read(&mut buf);
             let body = "hello-from-backend-go:18080";
             let _ = s.write_all(
-                format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).as_bytes(),
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .as_bytes(),
             );
         }
     });
     let input3 = nsb_core::model::CreateSiteInput {
         name: "smoke-proxy".into(),
         domains: vec!["smokeproxy.nsb.test".into()],
-        root_dir: base.join("sites").join("smoke-proxy").to_string_lossy().to_string(),
+        root_dir: base
+            .join("sites")
+            .join("smoke-proxy")
+            .to_string_lossy()
+            .to_string(),
         runtime: nsb_core::model::SiteRuntime {
             web_server: "nginx".into(),
             kind: nsb_core::model::SiteKind::ReverseProxy,
@@ -395,10 +473,20 @@ echo implode("\n", $out);
         write_env_example: false,
         template: "none".into(),
     };
-    if check(&state, "创建反代站点 (:18080)", nsb_core::sites::create(&input3, &state.paths, &state.store, &state.manager)).is_some() {
+    if check(
+        &state,
+        "创建反代站点 (:18080)",
+        nsb_core::sites::create(&input3, &state.paths, &state.store, &state.manager),
+    )
+    .is_some()
+    {
         let resp = http_get("smokeproxy.nsb.test", 8080, "/");
         match resp {
-            Ok(r) => assert_(r.contains("hello-from-backend"), "反代转发到本机端口", "Host 头方式验证"),
+            Ok(r) => assert_(
+                r.contains("hello-from-backend"),
+                "反代转发到本机端口",
+                "Host 头方式验证",
+            ),
             Err(e) => assert_(false, "反代转发到本机端口", e),
         };
     }
@@ -412,20 +500,52 @@ echo implode("\n", $out);
         Err(e) => fail("mihomo REST API", &e),
     };
     match proxy_http_get_via_mihomo("www.baidu.com", 80, "/") {
-        Ok(r) if r.contains("HTTP/1.1 200") || r.contains("HTTP/1.0 200") || r.contains("Location") => {
-            ok("混合端口代理可用", "http://www.baidu.com via 127.0.0.1:17890")
+        Ok(r)
+            if r.contains("HTTP/1.1 200")
+                || r.contains("HTTP/1.0 200")
+                || r.contains("Location") =>
+        {
+            ok(
+                "混合端口代理可用",
+                "http://www.baidu.com via 127.0.0.1:17890",
+            )
         }
-        Ok(r) => { assert_(false, "混合端口代理可用", format!("非 200：{}", &r[..r.len().min(120)])); }
-        Err(e) => { assert_(false, "混合端口代理可用", e); }
+        Ok(r) => {
+            assert_(
+                false,
+                "混合端口代理可用",
+                format!("非 200：{}", &r[..r.len().min(120)]),
+            );
+        }
+        Err(e) => {
+            assert_(false, "混合端口代理可用", e);
+        }
     };
     // 系统代理：只验证读取，不开启（避免影响用户 Clash Party）
     let sys = nsb_core::proxy::system_proxy_state();
-    ok("系统代理状态读取", format!("enabled={}（未做任何修改）", sys.enabled));
+    ok(
+        "系统代理状态读取",
+        format!("enabled={}（未做任何修改）", sys.enabled),
+    );
 
     /* ---------- 10. HTTPS 证书 ---------- */
-    match nsb_core::tls::issue_site_cert(&state.paths, &state.store, &["smoke-https.nsb.test".to_string()]) {
+    match nsb_core::tls::issue_site_cert(
+        &state.paths,
+        &state.store,
+        &["smoke-https.nsb.test".to_string()],
+    ) {
         Ok(c) => {
-            ok("CA + 站点证书签发", format!("{} → {}", c.subject, Path::new(&c.cert_path).file_name().unwrap_or_default().to_string_lossy()));
+            ok(
+                "CA + 站点证书签发",
+                format!(
+                    "{} → {}",
+                    c.subject,
+                    Path::new(&c.cert_path)
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                ),
+            );
 
             // 链验证：openssl verify 证明「信任 CA 后浏览器无警告」的密码学前提
             // （SAN 匹配 + 有效期 + 签名链均由 openssl 校验）
@@ -437,16 +557,26 @@ echo implode("\n", $out);
                 .output();
             match out {
                 Ok(o) if o.status.success() => {
-                    ok("证书链验证 (openssl)", "信任根 CA 后浏览器即无警告（链+SAN+有效期通过）");
+                    ok(
+                        "证书链验证 (openssl)",
+                        "信任根 CA 后浏览器即无警告（链+SAN+有效期通过）",
+                    );
                 }
                 Ok(o) => {
-                    assert_(false, "证书链验证 (openssl)", format!(
-                        "{}{}",
-                        String::from_utf8_lossy(&o.stdout),
-                        String::from_utf8_lossy(&o.stderr)
-                    ));
+                    assert_(
+                        false,
+                        "证书链验证 (openssl)",
+                        format!(
+                            "{}{}",
+                            String::from_utf8_lossy(&o.stdout),
+                            String::from_utf8_lossy(&o.stderr)
+                        ),
+                    );
                 }
-                Err(_) => ok("证书链验证 (openssl)", "本机无 openssl，跳过（不影响其它验收）"),
+                Err(_) => ok(
+                    "证书链验证 (openssl)",
+                    "本机无 openssl，跳过（不影响其它验收）",
+                ),
             }
         }
         Err(e) => fail("CA + 站点证书签发", &e),
@@ -454,7 +584,10 @@ echo implode("\n", $out);
 
     /* ---------- 11. 端口诊断（不 kill 任何进程） ---------- */
     match nsb_core::ports::diagnose_port(8080) {
-        Ok(d) => ok("端口诊断", format!("8080 in_use={} pid={:?}", d.in_use, d.pid)),
+        Ok(d) => ok(
+            "端口诊断",
+            format!("8080 in_use={} pid={:?}", d.in_use, d.pid),
+        ),
         Err(e) => fail("端口诊断", &e),
     };
 
@@ -476,7 +609,11 @@ echo implode("\n", $out);
     // 未经用户确认，close_port 不该被任何自动路径调用；这里只验证「空闲端口」是安全的空操作
     match state.close_port(1) {
         Ok(o) => {
-            assert_(o.killed_pids.is_empty(), "空闲端口 close_port 无副作用", "无进程被结束");
+            assert_(
+                o.killed_pids.is_empty(),
+                "空闲端口 close_port 无副作用",
+                "无进程被结束",
+            );
         }
         Err(e) => fail("空闲端口 close_port", &e),
     }
@@ -492,8 +629,16 @@ echo implode("\n", $out);
                 name: "smoke 栈".into(),
                 description: "冒烟用".into(),
                 items: vec![
-                    nsb_core::model::StackItem { service_id: "php@8.3.33".into(), label: None, order: 10 },
-                    nsb_core::model::StackItem { service_id: "nginx".into(), label: None, order: 20 },
+                    nsb_core::model::StackItem {
+                        service_id: "php@8.3.33".into(),
+                        label: None,
+                        order: 10,
+                    },
+                    nsb_core::model::StackItem {
+                        service_id: "nginx".into(),
+                        label: None,
+                        order: 20,
+                    },
                 ],
             },
         );
@@ -502,18 +647,28 @@ echo implode("\n", $out);
                 // 幂等：重复存同一个栈不得报错
                 match state.start_stack(&stack.id) {
                     Ok(rep) => {
-                        let ok2 = rep.started.len() + rep.already_running.len() >= 2 && rep.failed.is_empty();
+                        let ok2 = rep.started.len() + rep.already_running.len() >= 2
+                            && rep.failed.is_empty();
                         assert_(
                             ok2,
                             "服务栈一键启动",
-                            format!("started={:?} already={:?} failed={}", rep.started, rep.already_running, rep.failed.len()),
+                            format!(
+                                "started={:?} already={:?} failed={}",
+                                rep.started,
+                                rep.already_running,
+                                rep.failed.len()
+                            ),
                         );
                     }
                     Err(e) => fail("服务栈一键启动", &e),
                 }
                 match state.stop_stack(&stack.id) {
                     Ok(rep) => {
-                        assert_(rep.failed.is_empty(), "服务栈一键停止", format!("stopped={:?}", rep.started));
+                        assert_(
+                            rep.failed.is_empty(),
+                            "服务栈一键停止",
+                            format!("stopped={:?}", rep.started),
+                        );
                     }
                     Err(e) => fail("服务栈一键停止", &e),
                 }
@@ -531,8 +686,14 @@ echo implode("\n", $out);
     }
 
     /* ---------- 12. 日志管线 ---------- */
-    let log_target = ["redis", "nginx", "mihomo"].iter().find(|id| !state.tail_logs(id, 5).is_empty());
-    assert_(log_target.is_some(), "日志 tail", format!("{:?} 有输出", log_target));
+    let log_target = ["redis", "nginx", "mihomo"]
+        .iter()
+        .find(|id| !state.tail_logs(id, 5).is_empty());
+    assert_(
+        log_target.is_some(),
+        "日志 tail",
+        format!("{:?} 有输出", log_target),
+    );
 
     /* ---------- 13. PHP 扩展管理 ---------- */
     // 用冒烟环境里真装好的 PHP 8.3 跑一遍：扫描 → 启用 → 再扫描确认
@@ -583,10 +744,23 @@ echo implode("\n", $out);
                 "Xdebug 构建指纹识别",
                 format!(
                     "PHP {} · {} · {} · {}（建议 xdebug {}）",
-                    st.build.as_ref().map(|b| b.php_version.clone()).unwrap_or_default(),
-                    if st.build.as_ref().map(|b| b.ts).unwrap_or(false) { "TS" } else { "NTS" },
-                    st.build.as_ref().map(|b| b.compiler.clone()).unwrap_or_default(),
-                    st.build.as_ref().map(|b| b.arch.clone()).unwrap_or_default(),
+                    st.build
+                        .as_ref()
+                        .map(|b| b.php_version.clone())
+                        .unwrap_or_default(),
+                    if st.build.as_ref().map(|b| b.ts).unwrap_or(false) {
+                        "TS"
+                    } else {
+                        "NTS"
+                    },
+                    st.build
+                        .as_ref()
+                        .map(|b| b.compiler.clone())
+                        .unwrap_or_default(),
+                    st.build
+                        .as_ref()
+                        .map(|b| b.arch.clone())
+                        .unwrap_or_default(),
                     st.recommended
                 ),
             );
@@ -598,7 +772,7 @@ echo implode("\n", $out);
 
     /* ---------- 15. 配置校验与保存 ---------- */
     {
-        use nsb_core::cfgeditor::{ConfigKind, list_config_backups, save_config, validate};
+        use nsb_core::cfgeditor::{list_config_backups, save_config, validate, ConfigKind};
         // 写坏的配置必须被拦下（nginx 装了会跑真 nginx -t，否则走结构自检）
         let bad = "events {}\nhttp {\n  server {\n    listen 80\n  }\n}\n";
         match validate(&state.paths, &state.store, ConfigKind::NginxMain, bad) {
@@ -615,7 +789,13 @@ echo implode("\n", $out);
         }
         // 合法配置可保存（写前自动备份）
         let good = "events { worker_connections 256; }\nhttp {}\n";
-        match save_config(&state.paths, &state.store, ConfigKind::NginxMain, good, false) {
+        match save_config(
+            &state.paths,
+            &state.store,
+            ConfigKind::NginxMain,
+            good,
+            false,
+        ) {
             Ok(v) => {
                 assert_(v.ok, "配置保存（校验通过后写入）", "写入前已自动备份");
             }
@@ -660,7 +840,11 @@ echo implode("\n", $out);
         let ids = vec!["nginx".to_string(), "php@8.3.33".to_string()];
         match nsb_core::bulk::start_many(&state.store, &state.paths, &state.manager, &ids) {
             Ok(rep) => {
-                let order_ok = rep.order.first().map(|f| f.starts_with("php")).unwrap_or(false);
+                let order_ok = rep
+                    .order
+                    .first()
+                    .map(|f| f.starts_with("php"))
+                    .unwrap_or(false);
                 assert_(
                     order_ok,
                     "批量启动按依赖分层",
@@ -692,7 +876,8 @@ echo implode("\n", $out);
         if ids.len() >= 2 {
             // 先确认真的停掉了，否则 start_many 会把它们全算进 already，
             // 测试「通过」但根本没走到启用逻辑（这个坑踩过一次）
-            let stop_rep = nsb_core::sites::stop_many(&state.paths, &state.store, &state.manager, &ids);
+            let stop_rep =
+                nsb_core::sites::stop_many(&state.paths, &state.store, &state.manager, &ids);
             let stopped_ok = stop_rep.map(|r| !r.succeeded.is_empty()).unwrap_or(false);
             match nsb_core::sites::start_many(&state.paths, &state.store, &state.manager, &ids) {
                 Ok(rep) => {
@@ -752,9 +937,11 @@ echo implode("\n", $out);
     /* ---------- 21. 项目扫描 ---------- */
     {
         let sites = state.store.list_sites().unwrap_or_default();
-        let parent = sites
-            .first()
-            .and_then(|s| std::path::Path::new(&s.root_dir).parent().map(|p| p.to_path_buf()));
+        let parent = sites.first().and_then(|s| {
+            std::path::Path::new(&s.root_dir)
+                .parent()
+                .map(|p| p.to_path_buf())
+        });
         match parent {
             Some(dir) => match nsb_core::scanner::scan_dir(&state.paths, &state.store, &dir) {
                 Ok(found) => {
@@ -813,12 +1000,21 @@ echo implode("\n", $out);
         .iter()
         .filter(|s| s.state != nsb_core::model::ServiceState::Running)
         .count();
-    assert_(stopped == statuses.len(), "全部服务已停止", "无孤儿进程（Job Object）");
+    assert_(
+        stopped == statuses.len(),
+        "全部服务已停止",
+        "无孤儿进程（Job Object）",
+    );
 
     println!("==========================================");
     let failed = FAILED.load(Ordering::SeqCst);
     let total = STEP.load(Ordering::SeqCst);
-    println!(" 结果：{} 通过 / {} 失败（用时 {:.1}s）", total - failed, failed, begin.elapsed().as_secs_f32());
+    println!(
+        " 结果：{} 通过 / {} 失败（用时 {:.1}s）",
+        total - failed,
+        failed,
+        begin.elapsed().as_secs_f32()
+    );
     println!(" 测试数据目录：{}", base.display());
     println!(" 注意：全程未修改系统 hosts、未开启系统代理、未触碰本机其它服务。");
     if failed > 0 {

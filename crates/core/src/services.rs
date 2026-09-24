@@ -54,7 +54,15 @@ impl ServiceManager {
         self.services.lock().get(id).cloned()
     }
 
-    pub fn register(&self, id: &str, label: &str, version: Option<String>, category: Option<String>, port: Option<u16>, log_file: PathBuf) {
+    pub fn register(
+        &self,
+        id: &str,
+        label: &str,
+        version: Option<String>,
+        category: Option<String>,
+        port: Option<u16>,
+        log_file: PathBuf,
+    ) {
         let mut map = self.services.lock();
         if !map.contains_key(id) {
             map.insert(
@@ -92,7 +100,14 @@ impl ServiceManager {
         match self.entry(id) {
             Some(e) => {
                 let ring = e.ring.lock();
-                ring.iter().rev().take(lines).cloned().collect::<Vec<_>>().into_iter().rev().collect()
+                ring.iter()
+                    .rev()
+                    .take(lines)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect()
             }
             None => {
                 // 未运行过：尝试读日志文件
@@ -131,12 +146,7 @@ impl ServiceManager {
 
     /// 最近 n 条状态变更（新→旧）
     pub fn history_tail(&self, n: usize) -> Vec<(i64, String, String)> {
-        self.history
-            .lock()
-            .iter()
-            .take(n)
-            .cloned()
-            .collect()
+        self.history.lock().iter().take(n).cloned().collect()
     }
 
     pub fn set_error(&self, id: &str, err: AppError) {
@@ -199,10 +209,12 @@ impl ServiceManager {
         } else {
             state
         };
-        let uptime = e
-            .started_at
-            .lock()
-            .map(|t| SystemTime::now().duration_since(t).unwrap_or_default().as_secs());
+        let uptime = e.started_at.lock().map(|t| {
+            SystemTime::now()
+                .duration_since(t)
+                .unwrap_or_default()
+                .as_secs()
+        });
         let memory_mb = if !pids.is_empty() {
             Some(crate::stats::processes_memory_mb(&pids))
         } else {
@@ -254,7 +266,8 @@ pub struct SpawnSpec {
 
 impl SpawnSpec {
     pub fn detach_requested(&self) -> bool {
-        self.detached.unwrap_or_else(|| std::env::var("NSB_CLI").map(|v| v == "1").unwrap_or(false))
+        self.detached
+            .unwrap_or_else(|| std::env::var("NSB_CLI").map(|v| v == "1").unwrap_or(false))
     }
 }
 
@@ -359,7 +372,11 @@ fn append_to_log_file(manager: &ServiceManager, service_id: &str, line: &str) {
         if let Some(parent) = e.log_file.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&e.log_file) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&e.log_file)
+        {
             let _ = writeln!(f, "{line}");
         }
     }
@@ -416,9 +433,14 @@ pub struct PortsProfile {
 impl PortsProfile {
     pub fn safe() -> Self {
         Self {
-            http: 8080, https: 8443, mysql: 23306, redis: 26379,
-            apache_http: 8180, apache_https: 8444,
-            postgres: 25432, mongodb: 28017,
+            http: 8080,
+            https: 8443,
+            mysql: 23306,
+            redis: 26379,
+            apache_http: 8180,
+            apache_https: 8444,
+            postgres: 25432,
+            mongodb: 28017,
         }
     }
 
@@ -426,9 +448,14 @@ impl PortsProfile {
     /// 这是新装应用的默认档：与项目里 `127.0.0.1:3306` 这类写死的连接串一致。
     pub fn standard() -> Self {
         Self {
-            http: 80, https: 443, mysql: 3306, redis: 6379,
-            apache_http: 8080, apache_https: 8443,
-            postgres: 5432, mongodb: 27017,
+            http: 80,
+            https: 443,
+            mysql: 3306,
+            redis: 6379,
+            apache_http: 8080,
+            apache_https: 8443,
+            postgres: 5432,
+            mongodb: 27017,
         }
     }
 
@@ -468,7 +495,14 @@ impl PortsProfile {
     /// 端口项的稳定 key（设置页与 from_settings 共用同一套命名）
     pub fn keys() -> &'static [&'static str] {
         &[
-            "http", "https", "mysql", "redis", "apacheHttp", "apacheHttps", "postgres", "mongodb",
+            "http",
+            "https",
+            "mysql",
+            "redis",
+            "apacheHttp",
+            "apacheHttps",
+            "postgres",
+            "mongodb",
         ]
     }
 }
@@ -522,8 +556,10 @@ pub fn allocate_php_pool(store: &Store, service_id: &str) -> Result<u16> {
         }
         base += 4;
     }
-    Err(AppError::new("NO_FREE_PORT", "php-cgi 端口池耗尽（9100-9200）")
-        .with_hint("重开应用或检查是否有异常进程占用 9100+ 端段"))
+    Err(
+        AppError::new("NO_FREE_PORT", "php-cgi 端口池耗尽（9100-9200）")
+            .with_hint("重开应用或检查是否有异常进程占用 9100+ 端段"),
+    )
 }
 
 pub fn now_ms() -> i64 {
@@ -552,12 +588,7 @@ pub fn find_free_port_near(desired: u16, avoid: &[u16], tries: u16) -> Option<u1
 /// 「端口被占且开了自动回落」时的统一处理：
 /// 找到回落端口并**写成端口覆盖**（重启后仍用同一端口，连接串稳定）。
 /// 设置关闭或找不到空闲端口时返回 None（调用方继续走原有的 PORT_IN_USE 报错）。
-pub fn fallback_port_for(
-    store: &Store,
-    key: &str,
-    desired: u16,
-    avoid: &[u16],
-) -> Option<u16> {
+pub fn fallback_port_for(store: &Store, key: &str, desired: u16, avoid: &[u16]) -> Option<u16> {
     let enabled = store
         .get_setting("autoFallbackPort")
         .map(|v| v == "true")

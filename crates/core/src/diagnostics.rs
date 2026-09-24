@@ -352,7 +352,9 @@ pub fn build(
     })
 }
 
-fn kind_label(k: crate::cfgeditor::ConfigKind) -> (&'static str, &'static str, Option<&'static str>) {
+fn kind_label(
+    k: crate::cfgeditor::ConfigKind,
+) -> (&'static str, &'static str, Option<&'static str>) {
     match k {
         crate::cfgeditor::ConfigKind::NginxMain => ("Nginx 主配置", "", Some("nginx")),
         crate::cfgeditor::ConfigKind::PhpIni => ("php.ini", "", Some("php")),

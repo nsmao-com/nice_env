@@ -155,9 +155,9 @@ impl AcmeClient {
                 AppError::new("ACME_DIRECTORY", format!("拉取 ACME directory 失败：{e}"))
                     .with_hint("检查网络能否访问证书颁发机构；国内可先在代理页开启系统代理")
             })?;
-        let dir: serde_json::Value = dir_resp
-            .json()
-            .map_err(|e| AppError::new("ACME_DIRECTORY", format!("directory 不是合法 JSON：{e}")))?;
+        let dir: serde_json::Value = dir_resp.json().map_err(|e| {
+            AppError::new("ACME_DIRECTORY", format!("directory 不是合法 JSON：{e}"))
+        })?;
 
         let (account, fresh_pem) = match account_pem {
             Some(p) if !p.trim().is_empty() => (AccountKey::from_pem(p)?, None),
@@ -192,7 +192,8 @@ impl AcmeClient {
             payload["contact"] = serde_json::json!([format!("mailto:{}", email.trim())]);
         }
         if let Some((kid, hmac_key)) = eab {
-            payload["externalAccountBinding"] = eab_jws(kid, hmac_key, &account_url, &client.account)?;
+            payload["externalAccountBinding"] =
+                eab_jws(kid, hmac_key, &account_url, &client.account)?;
         }
         let resp = client.jws_post_new(&account_url, &payload)?;
         let kid = resp
@@ -229,7 +230,11 @@ impl AcmeClient {
     }
 
     /// 带 JWS 的 POST（用既有 kid）；坏 nonce 自动换一个重试（ACME 高频坑）
-    fn jws_post(&mut self, url: &str, payload: &serde_json::Value) -> Result<reqwest::blocking::Response> {
+    fn jws_post(
+        &mut self,
+        url: &str,
+        payload: &serde_json::Value,
+    ) -> Result<reqwest::blocking::Response> {
         let mut last = None;
         for _ in 0..3 {
             let resp = self.jws_post_once(url, payload, false)?;
@@ -249,7 +254,11 @@ impl AcmeClient {
     }
 
     /// newAccount 专用：protected 里带 jwk 而不是 kid
-    fn jws_post_new(&mut self, url: &str, payload: &serde_json::Value) -> Result<reqwest::blocking::Response> {
+    fn jws_post_new(
+        &mut self,
+        url: &str,
+        payload: &serde_json::Value,
+    ) -> Result<reqwest::blocking::Response> {
         self.jws_post_once(url, payload, true)
     }
 
@@ -321,7 +330,10 @@ impl AcmeClient {
             .iter()
             .map(|d| serde_json::json!({"type": "dns", "value": d}))
             .collect();
-        let resp = self.jws_post(&new_order_url, &serde_json::json!({ "identifiers": identifiers }))?;
+        let resp = self.jws_post(
+            &new_order_url,
+            &serde_json::json!({ "identifiers": identifiers }),
+        )?;
         // order 资源 URL 在 Location 头里，finalize 后轮询要用
         self.pending_order_url = resp
             .headers()
@@ -334,7 +346,11 @@ impl AcmeClient {
         // 逐条 authorization 完成 DNS-01
         let authz_urls: Vec<String> = order["authorizations"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         if authz_urls.is_empty() {
             return Err(AppError::new("ACME_ORDER", "order 未返回 authorizations"));
@@ -349,16 +365,16 @@ impl AcmeClient {
         let result = (|| -> Result<()> {
             for url in &authz_urls {
                 let authz: serde_json::Value = serde_json::from_str(&self.post_as_get(url)?)
-                    .map_err(|e| AppError::new("ACME_AUTHZ", format!("authorization 解析失败：{e}")))?;
+                    .map_err(|e| {
+                        AppError::new("ACME_AUTHZ", format!("authorization 解析失败：{e}"))
+                    })?;
                 let domain = authz["identifier"]["value"]
                     .as_str()
                     .unwrap_or_default()
                     .to_string();
                 let challenge = authz["challenges"]
                     .as_array()
-                    .and_then(|cs| {
-                        cs.iter().find(|c| c["type"] == "dns-01")
-                    })
+                    .and_then(|cs| cs.iter().find(|c| c["type"] == "dns-01"))
                     .ok_or_else(|| {
                         AppError::new("ACME_CHALLENGE", format!("{domain} 未提供 dns-01 验证方式"))
                     })?;
@@ -421,10 +437,14 @@ impl AcmeClient {
             let ord: serde_json::Value = serde_json::from_str(&body)
                 .map_err(|e| AppError::new("ACME_ORDER", format!("order 轮询解析失败：{e}")))?;
             match ord["status"].as_str() {
-                Some("valid") => break ord["certificate"]
-                    .as_str()
-                    .ok_or_else(|| AppError::new("ACME_ORDER", "order valid 但缺少 certificate"))?
-                    .to_string(),
+                Some("valid") => {
+                    break ord["certificate"]
+                        .as_str()
+                        .ok_or_else(|| {
+                            AppError::new("ACME_ORDER", "order valid 但缺少 certificate")
+                        })?
+                        .to_string()
+                }
                 Some("invalid") => {
                     return Err(AppError::new(
                         "ACME_INVALID",
@@ -495,7 +515,10 @@ impl AcmeClient {
                 _ => {}
             }
             if std::time::Instant::now() > deadline {
-                return Err(AppError::new("ACME_TIMEOUT", format!("{domain} DNS 验证超时（3 分钟）")));
+                return Err(AppError::new(
+                    "ACME_TIMEOUT",
+                    format!("{domain} DNS 验证超时（3 分钟）"),
+                ));
             }
             std::thread::sleep(Duration::from_secs(4));
         }
@@ -522,7 +545,12 @@ pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
 }
 
 /// EAB：用 CA 预共享的 HMAC 密钥给账号 JWK 再签一层 JWS（HS256）
-fn eab_jws(kid: &str, hmac_key: &str, url: &str, account: &AccountKey) -> Result<serde_json::Value> {
+fn eab_jws(
+    kid: &str,
+    hmac_key: &str,
+    url: &str,
+    account: &AccountKey,
+) -> Result<serde_json::Value> {
     let key = B64URL
         .decode(hmac_key.trim())
         .map_err(|e| AppError::new("ACME_EAB", format!("EAB HMAC 密钥不是合法 base64url：{e}")))?;
@@ -664,7 +692,10 @@ mod tests {
     fn hmac_sha256_matches_rfc_vector() {
         // RFC 4231 / 著名测试向量
         assert_eq!(
-            hex::encode(hmac_sha256(b"key", b"The quick brown fox jumps over the lazy dog")),
+            hex::encode(hmac_sha256(
+                b"key",
+                b"The quick brown fox jumps over the lazy dog"
+            )),
             "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
         );
     }

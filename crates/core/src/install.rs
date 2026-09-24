@@ -31,8 +31,8 @@ impl Installer {
         let raw = include_str!("../../../manifest/packages.win.json");
         #[cfg(not(windows))]
         let raw = include_str!("../../../manifest/packages.mac.json");
-        let manifest: crate::model::Manifest = serde_json::from_str(raw)
-            .expect("内置清单 JSON 必须合法");
+        let manifest: crate::model::Manifest =
+            serde_json::from_str(raw).expect("内置清单 JSON 必须合法");
         Self { manifest }
     }
 
@@ -63,8 +63,12 @@ impl Installer {
                 .collect();
             files.sort();
             for f in files {
-                let Ok(raw) = std::fs::read_to_string(&f) else { continue };
-                let Ok(m) = parse_manifest_str(&raw) else { continue };
+                let Ok(raw) = std::fs::read_to_string(&f) else {
+                    continue;
+                };
+                let Ok(m) = parse_manifest_str(&raw) else {
+                    continue;
+                };
                 inst.merge_manifest(m);
             }
         }
@@ -106,11 +110,7 @@ impl Installer {
 
     /// 找「模板条目」：同 id 的任一条目（用于合成远程版本的可安装条目）。
     pub fn template_for(&self, id: &str) -> Option<crate::model::PackageManifestEntry> {
-        self.manifest
-            .packages
-            .iter()
-            .find(|p| p.id == id)
-            .cloned()
+        self.manifest.packages.iter().find(|p| p.id == id).cloned()
     }
 
     /// 把远程枚举到的版本合成为可安装条目：继承模板的 category/run/entry 结构，
@@ -153,8 +153,14 @@ impl Installer {
     /// 镜像策略：official → [url] + mirrors；ghproxy → github 前缀加速；custom → 自定义前缀。
     /// 无论镜像怎么设置，GitHub 直连失败后都会自动尝试加速前缀兜底 ——
     /// 默认设置下被墙不再需要用户手动到设置里切镜像再装一遍。
-    fn candidate_urls(&self, entry: &crate::model::PackageManifestEntry, store: &Store) -> Vec<String> {
-        let mirror = store.get_setting("mirror").unwrap_or_else(|| "official".into());
+    fn candidate_urls(
+        &self,
+        entry: &crate::model::PackageManifestEntry,
+        store: &Store,
+    ) -> Vec<String> {
+        let mirror = store
+            .get_setting("mirror")
+            .unwrap_or_else(|| "official".into());
         let gh = is_github_url(&entry.url);
         let mut urls = vec![entry.url.clone()];
         match mirror.as_str() {
@@ -224,12 +230,11 @@ impl Installer {
                     current_os(),
                     current_arch()
                 ),
-                )
-                .with_hint(format!(
-                    "该条目声明的平台：os={:?} arch={:?}。请安装与本机架构匹配的版本",
-                    entry.os, entry.arch
-                )),
-            );
+            )
+            .with_hint(format!(
+                "该条目声明的平台：os={:?} arch={:?}。请安装与本机架构匹配的版本",
+                entry.os, entry.arch
+            )));
         }
 
         let version = entry.version.clone();
@@ -244,7 +249,14 @@ impl Installer {
         emit(crate::Event::state(&task_id, "downloading"));
         let urls = self.candidate_urls(&entry, store);
         let archive = downloader
-            .download(&task_id, &urls, entry.sha256.as_deref().unwrap_or("0"), entry.size_bytes, paths, emit)
+            .download(
+                &task_id,
+                &urls,
+                entry.sha256.as_deref().unwrap_or("0"),
+                entry.size_bytes,
+                paths,
+                emit,
+            )
             .await?;
 
         emit(crate::Event::state(&task_id, "extracting"));
@@ -258,7 +270,8 @@ impl Installer {
             "binary" => {
                 let dest = runtime_dir.join(entry_relative_path(&entry.entry));
                 if let Some(parent) = dest.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| AppError::io("创建单文件包目录", e))?;
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| AppError::io("创建单文件包目录", e))?;
                 }
                 std::fs::copy(&archive, &dest).map_err(|e| AppError::io("写入单文件包", e))?;
             }
@@ -294,7 +307,11 @@ impl Installer {
                 .with_detail(format!(
                     "期望路径：{}；解压目录内容：{}",
                     runtime_dir.join(&entry_rel).display(),
-                    if listing.is_empty() { "（空）" } else { &listing }
+                    if listing.is_empty() {
+                        "（空）"
+                    } else {
+                        &listing
+                    }
                 )));
             }
         };
@@ -306,7 +323,10 @@ impl Installer {
             version: version.clone(),
             category: entry.category.clone(),
             install_path: runtime_dir.to_string_lossy().to_string(),
-            config_path: paths.etc_dir(&entry.id, &version).to_string_lossy().to_string(),
+            config_path: paths
+                .etc_dir(&entry.id, &version)
+                .to_string_lossy()
+                .to_string(),
             installed_at: crate::services::now_ms(),
         };
         store.upsert_installed(&installed)?;
@@ -359,14 +379,26 @@ impl Installer {
                     .map(|(sid, base)| (sid.trim_start_matches("php@").to_string(), base))
                     .collect();
                 let ports = crate::services::PortsProfile::from_settings(store);
-                crate::configgen::write_httpd_conf(paths, &root, &pools, ports.apache_http, ports.apache_https)?;
+                crate::configgen::write_httpd_conf(
+                    paths,
+                    &root,
+                    &pools,
+                    ports.apache_http,
+                    ports.apache_https,
+                )?;
             }
             _ => {}
         }
         Ok(())
     }
 
-    pub fn uninstall(&self, key: &str, paths: &Paths, store: &Store, manager: &Arc<crate::services::ServiceManager>) -> Result<()> {
+    pub fn uninstall(
+        &self,
+        key: &str,
+        paths: &Paths,
+        store: &Store,
+        manager: &Arc<crate::services::ServiceManager>,
+    ) -> Result<()> {
         let (id, version) = match key.split_once('@') {
             Some((i, v)) => (i.to_string(), v.to_string()),
             None => {
@@ -388,8 +420,7 @@ impl Installer {
 
         let runtime_dir = paths.runtime_dir(&id, &version);
         if runtime_dir.exists() {
-            std::fs::remove_dir_all(&runtime_dir)
-                .map_err(|e| AppError::io("删除运行时目录", e))?;
+            std::fs::remove_dir_all(&runtime_dir).map_err(|e| AppError::io("删除运行时目录", e))?;
         }
         store.remove_installed(&id, &version)?;
         Ok(())
@@ -415,10 +446,7 @@ pub fn entry_relative_path(entry: &str) -> std::path::PathBuf {
 ///  2. 解压树里按文件名精确匹配（不分大小写，取目录最浅的）→ 搬到声明位置；
 ///  3. 整棵解压树只有一个文件时认定它是主程序（gz 内名/版本化单文件包）→ 搬移。
 /// 都不命中返回 None（调用方报 ENTRY_MISSING）。
-fn settle_entry_file(
-    runtime_dir: &Path,
-    entry_rel: &Path,
-) -> Option<std::path::PathBuf> {
+fn settle_entry_file(runtime_dir: &Path, entry_rel: &Path) -> Option<std::path::PathBuf> {
     let expected = runtime_dir.join(entry_rel);
     if expected.exists() {
         return Some(expected);
@@ -432,7 +460,9 @@ fn settle_entry_file(
         hits: &mut Vec<(usize, std::path::PathBuf)>,
         files: &mut usize,
     ) {
-        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
@@ -459,7 +489,9 @@ fn settle_entry_file(
     } else if files == 1 {
         let mut only = Vec::new();
         fn collect_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
-            let Ok(rd) = std::fs::read_dir(dir) else { return };
+            let Ok(rd) = std::fs::read_dir(dir) else {
+                return;
+            };
             for e in rd.flatten() {
                 let p = e.path();
                 if p.is_dir() {
@@ -530,7 +562,8 @@ fn ensure_safe_key(id: &str, version: &str) -> Result<()> {
 
 fn extract_zip(archive: &Path, dest: &Path) -> Result<()> {
     let file = std::fs::File::open(archive).map_err(|e| AppError::io("打开压缩包", e))?;
-    let mut zip = zip::ZipArchive::new(file).map_err(|e| AppError::internal("读取压缩包", e.to_string()))?;
+    let mut zip =
+        zip::ZipArchive::new(file).map_err(|e| AppError::internal("读取压缩包", e.to_string()))?;
     for i in 0..zip.len() {
         let mut entry = zip
             .by_index(i)
@@ -548,8 +581,7 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<()> {
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut out = std::fs::File::create(&out_path)
-            .map_err(|e| AppError::io("创建文件", e))?;
+        let mut out = std::fs::File::create(&out_path).map_err(|e| AppError::io("创建文件", e))?;
         std::io::copy(&mut entry, &mut out).map_err(|e| AppError::io("解压写入", e))?;
     }
     Ok(())
@@ -656,7 +688,10 @@ mod settle_entry_tests {
     fn relocates_versioned_name_in_nested_dir() {
         let d = temp_dir("versioned");
         // 包内是「顶层目录 + 版本化文件名」，entry 声明的是根下不带版本号的名字
-        write(&d.join("mihomo-v1.19.31/mihomo-windows-amd64-v1.19.31.exe"), b"x");
+        write(
+            &d.join("mihomo-v1.19.31/mihomo-windows-amd64-v1.19.31.exe"),
+            b"x",
+        );
         let got = settle_entry_file(&d, std::path::Path::new("mihomo-windows-amd64.exe")).unwrap();
         assert_eq!(got, d.join("mihomo-windows-amd64.exe"));
         assert!(got.exists());
@@ -711,17 +746,24 @@ mod tests {
         assert!(Installer::is_platform_compatible(&e));
 
         // 仅其它 OS → 不兼容
-        let other_os = if current_os() == "windows" { "macos" } else { "windows" };
+        let other_os = if current_os() == "windows" {
+            "macos"
+        } else {
+            "windows"
+        };
         let e = entry_with(vec![other_os], vec![current_arch()]);
         assert!(!Installer::is_platform_compatible(&e));
 
         // 仅其它架构 → 不兼容（arm64-only 包装上 x64 必须被拦下）
-        let other_arch = if current_arch() == "x64" { "arm64" } else { "x64" };
+        let other_arch = if current_arch() == "x64" {
+            "arm64"
+        } else {
+            "x64"
+        };
         let e = entry_with(vec![current_os()], vec![other_arch]);
         assert!(!Installer::is_platform_compatible(&e));
     }
 }
-
 
 /// 清单解析 + 基本合法性校验（远端快照 / 用户模块共用）。
 /// 返回 Err 时调用方必须放弃该来源，绝不能带病上线。
@@ -770,10 +812,15 @@ mod manifest_layer_tests {
 
     #[test]
     fn merge_overrides_same_id_version_and_appends_new() {
-        let mut base = Installer { manifest: manifest_with("foo", "1.0.0", "https://a/1") };
+        let mut base = Installer {
+            manifest: manifest_with("foo", "1.0.0", "https://a/1"),
+        };
         base.merge_manifest(manifest_with("foo", "1.0.0", "https://b/1"));
         assert_eq!(base.manifest.packages.len(), 1);
-        assert_eq!(base.manifest.packages[0].url, "https://b/1", "同版本应被覆盖");
+        assert_eq!(
+            base.manifest.packages[0].url, "https://b/1",
+            "同版本应被覆盖"
+        );
 
         base.merge_manifest(manifest_with("bar", "2.0.0", "https://c/2"));
         assert_eq!(base.manifest.packages.len(), 2);
@@ -837,10 +884,18 @@ mod zip_slip_tests {
     #[test]
     fn safe_archive_path_keeps_normal_entries() {
         let p = safe_archive_path("nginx-1.28.0\\conf\\nginx.conf").unwrap();
-        assert_eq!(p, std::path::Path::new("nginx-1.28.0").join("conf").join("nginx.conf"));
+        assert_eq!(
+            p,
+            std::path::Path::new("nginx-1.28.0")
+                .join("conf")
+                .join("nginx.conf")
+        );
         // 文件名里带 `..` 但不是 `..` 段：合法，不能误杀
         let p = safe_archive_path("./php/ext/php..ini-dev").unwrap();
-        assert_eq!(p, std::path::Path::new("php").join("ext").join("php..ini-dev"));
+        assert_eq!(
+            p,
+            std::path::Path::new("php").join("ext").join("php..ini-dev")
+        );
     }
 
     #[test]
@@ -858,7 +913,8 @@ mod zip_slip_tests {
         w.write_all(b"ok").unwrap();
         w.start_file("../outside.txt", opts).unwrap();
         w.write_all(b"evil").unwrap();
-        w.start_file(outside.to_string_lossy().to_string(), opts).unwrap();
+        w.start_file(outside.to_string_lossy().to_string(), opts)
+            .unwrap();
         w.write_all(b"evil").unwrap();
         w.finish().unwrap();
         // 确认恶意条目名原样进了压缩包（否则这个测试什么也没测到）
@@ -871,7 +927,10 @@ mod zip_slip_tests {
         assert!(names.iter().any(|n| *n == outside.to_string_lossy()));
 
         extract_zip(&archive, &dest).unwrap();
-        assert_eq!(std::fs::read_to_string(dest.join("ok/readme.txt")).unwrap(), "ok");
+        assert_eq!(
+            std::fs::read_to_string(dest.join("ok/readme.txt")).unwrap(),
+            "ok"
+        );
         assert!(!outside.exists(), "绝对路径 / .. 条目不能写到解压目录之外");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -893,6 +952,9 @@ mod zip_slip_tests {
             entry_relative_path("../../bin/../mysqld"),
             std::path::Path::new("bin").join("mysqld")
         );
-        assert_eq!(entry_relative_path("C:/x/y.exe"), std::path::Path::new("x").join("y.exe"));
+        assert_eq!(
+            entry_relative_path("C:/x/y.exe"),
+            std::path::Path::new("x").join("y.exe")
+        );
     }
 }

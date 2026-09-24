@@ -19,7 +19,14 @@ pub fn register_services(paths: &Paths, store: &Store, manager: &Arc<ServiceMana
     };
     let ports = PortsProfile::from_settings(store);
     const SERVICE_IDS: &[&str] = &[
-        "nginx", "apache", "php", "mysql", "postgresql", "mongodb", "redis", "mihomo",
+        "nginx",
+        "apache",
+        "php",
+        "mysql",
+        "postgresql",
+        "mongodb",
+        "redis",
+        "mihomo",
     ];
     for p in installed {
         if !SERVICE_IDS.contains(&p.id.as_str()) {
@@ -64,10 +71,10 @@ pub fn register_services(paths: &Paths, store: &Store, manager: &Arc<ServiceMana
 }
 
 fn php_exe(store: &Store, version: &str) -> Result<PathBuf> {
-    let inst = store
-        .find_installed("php", Some(version))
-        .ok_or_else(|| AppError::new("NOT_INSTALLED", format!("PHP {version} 尚未安装"))
-            .with_hint("到「套件 / 服务」页安装该版本"))?;
+    let inst = store.find_installed("php", Some(version)).ok_or_else(|| {
+        AppError::new("NOT_INSTALLED", format!("PHP {version} 尚未安装"))
+            .with_hint("到「套件 / 服务」页安装该版本")
+    })?;
     let exe = PathBuf::from(&inst.install_path).join(exe_name("php-cgi"));
     if !exe.exists() {
         return Err(AppError::new("BROKEN_INSTALL", "找不到 php-cgi"));
@@ -83,8 +90,10 @@ fn nginx_exe(store: &Store) -> Result<(PathBuf, PathBuf)> {
     let exe_name = if cfg!(windows) { "nginx.exe" } else { "nginx" };
     let exe = root.join(exe_name);
     if !exe.exists() {
-        return Err(AppError::new("BROKEN_INSTALL", format!("找不到 {exe_name}，套件可能损坏"))
-            .with_hint("在套件页卸载后重新安装 Nginx"));
+        return Err(
+            AppError::new("BROKEN_INSTALL", format!("找不到 {exe_name}，套件可能损坏"))
+                .with_hint("在套件页卸载后重新安装 Nginx"),
+        );
     }
     Ok((root, exe))
 }
@@ -98,7 +107,9 @@ pub fn installed_by_choice(store: &Store, id: &str) -> Option<crate::model::Inst
             return store.find_installed(id, Some(&v));
         }
     }
-    let mut list = store.list_installed().ok()?
+    let mut list = store
+        .list_installed()
+        .ok()?
         .into_iter()
         .filter(|p| p.id == id)
         .collect::<Vec<_>>();
@@ -108,10 +119,9 @@ pub fn installed_by_choice(store: &Store, id: &str) -> Option<crate::model::Inst
 
 /// 套件页「切换使用版本」：仅已装版本可切换
 pub fn set_active_version(store: &Store, id: &str, version: &str) -> Result<()> {
-    let inst = store
-        .find_installed(id, Some(version))
-        .ok_or_else(|| AppError::not_installed(&format!("{id} {version}"))
-            .with_hint("先安装该版本再切换"))?;
+    let inst = store.find_installed(id, Some(version)).ok_or_else(|| {
+        AppError::not_installed(&format!("{id} {version}")).with_hint("先安装该版本再切换")
+    })?;
     store.set_setting(&format!("active{id}Version"), &inst.version)?;
     Ok(())
 }
@@ -152,8 +162,8 @@ pub fn mysql_paths(store: &Store, version: &str) -> Result<(PathBuf, PathBuf)> {
 }
 
 fn redis_paths(store: &Store) -> Result<(PathBuf, PathBuf)> {
-    let inst = installed_by_choice(store, "redis")
-        .ok_or_else(|| AppError::not_installed("Redis"))?;
+    let inst =
+        installed_by_choice(store, "redis").ok_or_else(|| AppError::not_installed("Redis"))?;
     let dir = PathBuf::from(&inst.install_path);
     let exe = dir.join(exe_name("redis-server"));
     Ok((dir, exe))
@@ -186,8 +196,8 @@ fn mihomo_paths(store: &Store) -> Result<(PathBuf, PathBuf)> {
 }
 
 fn apache_paths(store: &Store) -> Result<(PathBuf, PathBuf)> {
-    let inst = installed_by_choice(store, "apache")
-        .ok_or_else(|| AppError::not_installed("Apache"))?;
+    let inst =
+        installed_by_choice(store, "apache").ok_or_else(|| AppError::not_installed("Apache"))?;
     let root = PathBuf::from(&inst.install_path).join("Apache24");
     let exe = root.join("bin").join(exe_name("httpd"));
     if !exe.exists() {
@@ -202,14 +212,17 @@ fn postgres_paths(store: &Store) -> Result<(PathBuf, PathBuf)> {
     let root = PathBuf::from(&inst.install_path).join("pgsql");
     let exe = root.join("bin").join(exe_name("postgres"));
     if !exe.exists() {
-        return Err(AppError::new("BROKEN_INSTALL", "找不到 postgres 可执行文件"));
+        return Err(AppError::new(
+            "BROKEN_INSTALL",
+            "找不到 postgres 可执行文件",
+        ));
     }
     Ok((root, exe))
 }
 
 fn mongodb_paths(store: &Store) -> Result<(PathBuf, PathBuf)> {
-    let inst = installed_by_choice(store, "mongodb")
-        .ok_or_else(|| AppError::not_installed("MongoDB"))?;
+    let inst =
+        installed_by_choice(store, "mongodb").ok_or_else(|| AppError::not_installed("MongoDB"))?;
     let dir = PathBuf::from(&inst.install_path);
     // 官方 zip 根目录带版本号，向下一层找 bin/mongod
     let direct = dir.join("bin").join(exe_name("mongod"));
@@ -229,7 +242,12 @@ fn mongodb_paths(store: &Store) -> Result<(PathBuf, PathBuf)> {
 
 /* ================= 启动 ================= */
 
-pub fn start_service(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, id: &str) -> Result<()> {
+pub fn start_service(
+    store: &Store,
+    paths: &Paths,
+    manager: &Arc<ServiceManager>,
+    id: &str,
+) -> Result<()> {
     if let Some(e) = manager.snapshot(id) {
         if e.state == ServiceState::Running || e.state == ServiceState::Starting {
             return Ok(());
@@ -245,8 +263,16 @@ pub fn start_service(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>
         "mihomo" => start_mihomo(store, paths, manager),
         "postgresql" => start_postgresql(store, paths, manager, &ports),
         "mongodb" => start_mongodb(store, paths, manager, &ports),
-        s if s.starts_with("php@") => start_php(store, paths, manager, s.trim_start_matches("php@"), &ports),
-        s if s.starts_with("mysql@") => start_mysql(store, paths, manager, s.trim_start_matches("mysql@"), &ports),
+        s if s.starts_with("php@") => {
+            start_php(store, paths, manager, s.trim_start_matches("php@"), &ports)
+        }
+        s if s.starts_with("mysql@") => start_mysql(
+            store,
+            paths,
+            manager,
+            s.trim_start_matches("mysql@"),
+            &ports,
+        ),
         // 清单声明 `run` 的包（Caddy/Meilisearch/MinIO/Mailpit …）走通用路径
         other => crate::generic::start(store, paths, manager, other, &ports),
     };
@@ -281,7 +307,12 @@ pub fn start_service(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>
     }
 }
 
-fn start_nginx(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, ports: &PortsProfile) -> Result<()> {
+fn start_nginx(
+    store: &Store,
+    paths: &Paths,
+    manager: &Arc<ServiceManager>,
+    ports: &PortsProfile,
+) -> Result<()> {
     let (root, exe) = nginx_exe(store)?;
     precheck_port(ports.http, "Nginx")?;
     // 默认 server 块无条件 listen https（见 configgen::render_nginx_conf），
@@ -315,13 +346,21 @@ fn start_nginx(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, port
     let pid = spawn_tracked(manager, "nginx", &spec)?;
     let _ = pid;
     if !wait_healthy(ports.http, Duration::from_secs(10)) {
-        return Err(AppError::new("NGINX_START_TIMEOUT", "Nginx 启动超时（端口未就绪）")
-            .with_hint("查看日志页 nginx 的最后输出；常见原因是配置错误或端口冲突"));
+        return Err(
+            AppError::new("NGINX_START_TIMEOUT", "Nginx 启动超时（端口未就绪）")
+                .with_hint("查看日志页 nginx 的最后输出；常见原因是配置错误或端口冲突"),
+        );
     }
     Ok(())
 }
 
-fn start_php(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, version: &str, _ports: &PortsProfile) -> Result<()> {
+fn start_php(
+    store: &Store,
+    paths: &Paths,
+    manager: &Arc<ServiceManager>,
+    version: &str,
+    _ports: &PortsProfile,
+) -> Result<()> {
     let service_id = format!("php@{version}");
     let exe = php_exe(store, version)?;
     configgen::write_php_ini(paths, version)?;
@@ -355,27 +394,43 @@ fn start_php(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, versio
         spawn_tracked(manager, &service_id, &spec)?;
     }
     if !wait_pids_alive(manager, &service_id, Duration::from_secs(8)) {
-        return Err(AppError::new("PHP_START_FAILED", format!("PHP {version} 进程启动失败")
-            .clone())
-            .with_hint("查看日志；常见原因是 php.ini 扩展加载失败或缺少 VC 运行库"));
+        return Err(AppError::new(
+            "PHP_START_FAILED",
+            format!("PHP {version} 进程启动失败").clone(),
+        )
+        .with_hint("查看日志；常见原因是 php.ini 扩展加载失败或缺少 VC 运行库"));
     }
     // nginx 运行中则热加载新 upstream
-    if manager.snapshot("nginx").map(|s| s.state == ServiceState::Running).unwrap_or(false) {
+    if manager
+        .snapshot("nginx")
+        .map(|s| s.state == ServiceState::Running)
+        .unwrap_or(false)
+    {
         let _ = reload_nginx(store, paths);
     }
     Ok(())
 }
 
-fn start_mysql(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, version: &str, ports: &PortsProfile) -> Result<()> {
+fn start_mysql(
+    store: &Store,
+    paths: &Paths,
+    manager: &Arc<ServiceManager>,
+    version: &str,
+    ports: &PortsProfile,
+) -> Result<()> {
     let service_id = format!("mysql@{version}");
     let (basedir, mysqld) = mysql_paths(store, version)?;
     // 端口被占 + 自动回落开启 → 换附近空闲端口（写入覆盖项；ini 每次启动重写，自动跟上）
-    let mysql_port = crate::services::fallback_port_for(store, "mysql", ports.mysql, &[])
-        .unwrap_or(ports.mysql);
+    let mysql_port =
+        crate::services::fallback_port_for(store, "mysql", ports.mysql, &[]).unwrap_or(ports.mysql);
     // 每次启动前重写 ini（镜像策略/端口方案可能变化；写前自动备份）
     configgen::write_mysql_ini(paths, version, &basedir, mysql_port)?;
     let datadir = paths.mysql_data_dir(version);
-    if !datadir.exists() || std::fs::read_dir(&datadir).map(|mut d| d.next().is_none()).unwrap_or(true) {
+    if !datadir.exists()
+        || std::fs::read_dir(&datadir)
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(true)
+    {
         // 首次初始化（insecure → 启动后设密）
         std::fs::create_dir_all(&datadir)?;
         let ini = paths.mysql_ini(version);
@@ -394,9 +449,15 @@ fn start_mysql(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, vers
         if !out.status.success() {
             // 清理半初始化目录，避免下次误判为已初始化
             let _ = std::fs::remove_dir_all(&datadir);
-            return Err(AppError::new("MYSQL_INIT_FAILED", "MySQL 数据目录初始化失败")
-                .with_hint("检查磁盘空间；数据目录路径不要包含中文或空格")
-                .with_detail(format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))));
+            return Err(
+                AppError::new("MYSQL_INIT_FAILED", "MySQL 数据目录初始化失败")
+                    .with_hint("检查磁盘空间；数据目录路径不要包含中文或空格")
+                    .with_detail(format!(
+                        "{}\n{}",
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr)
+                    )),
+            );
         }
     }
 
@@ -415,14 +476,17 @@ fn start_mysql(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, vers
     };
     spawn_tracked(manager, &service_id, &spec)?;
     if !wait_healthy(ports.mysql, Duration::from_secs(30)) {
-        return Err(AppError::new("MYSQL_START_TIMEOUT", "MySQL 启动超时（30s 内端口未就绪）")
-            .with_hint("首次启动需要初始化，可能较慢；持续失败请看日志页错误输出"));
+        return Err(
+            AppError::new("MYSQL_START_TIMEOUT", "MySQL 启动超时（30s 内端口未就绪）")
+                .with_hint("首次启动需要初始化，可能较慢；持续失败请看日志页错误输出"),
+        );
     }
 
     // 首次设置 root 密码（若未设置过）
     if store.get_setting("mysqlRootPassword").is_none() {
         let default_pass = "root";
-        let client = crate::dbadmin::MySqlClient::from_state(paths, version, ports.mysql, String::new());
+        let client =
+            crate::dbadmin::MySqlClient::from_state(paths, version, ports.mysql, String::new());
         if client.ping().is_ok() {
             // insecure 模式空密码可连，直接设置默认密码
             if set_root_password_via(paths, version, ports.mysql, "", default_pass).is_ok() {
@@ -433,8 +497,16 @@ fn start_mysql(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, vers
     Ok(())
 }
 
-fn set_root_password_via(paths: &Paths, version: &str, port: u16, old: &str, new: &str) -> Result<()> {
-    let inst = paths.runtime_dir("mysql", version).join(mysql_root_name(version));
+fn set_root_password_via(
+    paths: &Paths,
+    version: &str,
+    port: u16,
+    old: &str,
+    new: &str,
+) -> Result<()> {
+    let inst = paths
+        .runtime_dir("mysql", version)
+        .join(mysql_root_name(version));
     let exe = inst.join("bin").join(exe_name("mysql"));
     let out = std::process::Command::new(&exe)
         .args([
@@ -447,18 +519,27 @@ fn set_root_password_via(paths: &Paths, version: &str, port: u16, old: &str, new
         .output()
         .map_err(|e| AppError::io("设置 root 密码", e))?;
     if !out.status.success() {
-        return Err(AppError::new("MYSQL_PASSWORD_FAILED", "MySQL root 密码设置失败")
-            .with_detail(String::from_utf8_lossy(&out.stderr).to_string()));
+        return Err(
+            AppError::new("MYSQL_PASSWORD_FAILED", "MySQL root 密码设置失败")
+                .with_detail(String::from_utf8_lossy(&out.stderr).to_string()),
+        );
     }
     Ok(())
 }
 
-fn start_redis(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, ports: &PortsProfile) -> Result<()> {
+fn start_redis(
+    store: &Store,
+    paths: &Paths,
+    manager: &Arc<ServiceManager>,
+    ports: &PortsProfile,
+) -> Result<()> {
     let (_, exe) = redis_paths(store)?;
-    let version = installed_by_choice(store, "redis").map(|p| p.version).unwrap_or_default();
+    let version = installed_by_choice(store, "redis")
+        .map(|p| p.version)
+        .unwrap_or_default();
     // 端口被占 + 自动回落开启 → 换附近空闲端口（写入覆盖项，重启稳定）
-    let redis_port = crate::services::fallback_port_for(store, "redis", ports.redis, &[])
-        .unwrap_or(ports.redis);
+    let redis_port =
+        crate::services::fallback_port_for(store, "redis", ports.redis, &[]).unwrap_or(ports.redis);
     configgen::write_redis_conf(paths, &version, redis_port)?;
     precheck_port(redis_port, "Redis")?;
     let conf = paths.redis_conf(&version);
@@ -506,7 +587,12 @@ fn start_mihomo(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>) -> 
     Ok(())
 }
 
-fn start_apache(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, ports: &PortsProfile) -> Result<()> {
+fn start_apache(
+    store: &Store,
+    paths: &Paths,
+    manager: &Arc<ServiceManager>,
+    ports: &PortsProfile,
+) -> Result<()> {
     let (root, exe) = apache_paths(store)?;
     precheck_port(ports.apache_http, "Apache")?;
     // httpd.conf 里 Listen ... https 是无条件写出的，端口冲突会导致启动失败
@@ -532,19 +618,30 @@ fn start_apache(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, por
     };
     spawn_tracked(manager, "apache", &spec)?;
     if !wait_healthy(ports.apache_http, Duration::from_secs(12)) {
-        return Err(AppError::new("APACHE_START_TIMEOUT", "Apache 启动超时（端口未就绪）")
-            .with_hint("查看日志页 apache 输出；常见原因是端口冲突或缺少 VC 运行库"));
+        return Err(
+            AppError::new("APACHE_START_TIMEOUT", "Apache 启动超时（端口未就绪）")
+                .with_hint("查看日志页 apache 输出；常见原因是端口冲突或缺少 VC 运行库"),
+        );
     }
     Ok(())
 }
 
-fn start_postgresql(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, ports: &PortsProfile) -> Result<()> {
+fn start_postgresql(
+    store: &Store,
+    paths: &Paths,
+    manager: &Arc<ServiceManager>,
+    ports: &PortsProfile,
+) -> Result<()> {
     let (root, _exe) = postgres_paths(store)?;
-    let version = installed_by_choice(store, "postgresql").map(|p| p.version).unwrap_or_default();
+    let version = installed_by_choice(store, "postgresql")
+        .map(|p| p.version)
+        .unwrap_or_default();
     let datadir = paths.postgres_data_dir(&version);
     let initdb = root.join("bin").join(exe_name("initdb"));
     let needs_init = !datadir.exists()
-        || std::fs::read_dir(&datadir).map(|mut d| d.next().is_none()).unwrap_or(true);
+        || std::fs::read_dir(&datadir)
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(true);
     if needs_init {
         std::fs::create_dir_all(&datadir)?;
         // macOS 的 initdb 拒绝以 root 用户运行，且 -U 指定的是数据库超级用户；
@@ -565,8 +662,10 @@ fn start_postgresql(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>,
             .map_err(|e| AppError::io("初始化 PostgreSQL 数据目录", e))?;
         if !out.status.success() {
             let _ = std::fs::remove_dir_all(&datadir);
-            return Err(AppError::new("PG_INIT_FAILED", "PostgreSQL 数据目录初始化失败")
-                .with_detail(String::from_utf8_lossy(&out.stderr).to_string()));
+            return Err(
+                AppError::new("PG_INIT_FAILED", "PostgreSQL 数据目录初始化失败")
+                    .with_detail(String::from_utf8_lossy(&out.stderr).to_string()),
+            );
         }
     }
 
@@ -596,15 +695,25 @@ fn start_postgresql(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>,
     };
     spawn_tracked(manager, "postgresql", &spec)?;
     if !wait_healthy(ports.postgres, Duration::from_secs(20)) {
-        return Err(AppError::new("PG_START_TIMEOUT", "PostgreSQL 启动超时（20s 内端口未就绪）")
-            .with_hint("查看日志页 postgresql 输出；首次初始化可能较慢"));
+        return Err(AppError::new(
+            "PG_START_TIMEOUT",
+            "PostgreSQL 启动超时（20s 内端口未就绪）",
+        )
+        .with_hint("查看日志页 postgresql 输出；首次初始化可能较慢"));
     }
     Ok(())
 }
 
-fn start_mongodb(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, ports: &PortsProfile) -> Result<()> {
+fn start_mongodb(
+    store: &Store,
+    paths: &Paths,
+    manager: &Arc<ServiceManager>,
+    ports: &PortsProfile,
+) -> Result<()> {
     let (dir, exe) = mongodb_paths(store)?;
-    let version = installed_by_choice(store, "mongodb").map(|p| p.version).unwrap_or_default();
+    let version = installed_by_choice(store, "mongodb")
+        .map(|p| p.version)
+        .unwrap_or_default();
     let dbpath = paths.mongo_data_dir(&version);
     std::fs::create_dir_all(&dbpath)?;
     let logfile = paths.service_log("mongodb");
@@ -656,7 +765,12 @@ fn running_php_pools(store: &Store, manager: &Arc<ServiceManager>) -> Vec<(Strin
 
 /* ================= 停止 ================= */
 
-pub fn stop_service(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, id: &str) -> Result<()> {
+pub fn stop_service(
+    store: &Store,
+    paths: &Paths,
+    manager: &Arc<ServiceManager>,
+    id: &str,
+) -> Result<()> {
     if let Some(e) = manager.snapshot(id) {
         if e.state == ServiceState::Stopped {
             return Ok(());
@@ -707,11 +821,16 @@ pub fn stop_service(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>,
             "postgresql" => {
                 if let Ok((root, _)) = postgres_paths(store) {
                     let pg_ctl = root.join("bin").join(exe_name("pg_ctl"));
-                    let version = installed_by_choice(store, "postgresql").map(|p| p.version).unwrap_or_default();
+                    let version = installed_by_choice(store, "postgresql")
+                        .map(|p| p.version)
+                        .unwrap_or_default();
                     let _ = std::process::Command::new(&pg_ctl)
                         .args([
                             "-D".into(),
-                            paths.postgres_data_dir(&version).to_string_lossy().to_string(),
+                            paths
+                                .postgres_data_dir(&version)
+                                .to_string_lossy()
+                                .to_string(),
                             "-m".into(),
                             "fast".into(),
                             "stop".into(),
@@ -746,11 +865,19 @@ pub fn stop_service(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>,
                 let version = s.trim_start_matches("mysql@");
                 if let Ok((basedir, _)) = mysql_paths(store, version) {
                     let admin = basedir.join("bin").join(exe_name("mysqladmin"));
-                    let pass = store.get_setting("mysqlRootPassword").unwrap_or_else(|| "root".into());
+                    let pass = store
+                        .get_setting("mysqlRootPassword")
+                        .unwrap_or_else(|| "root".into());
                     let _ = std::process::Command::new(&admin)
                         .args([
-                            "-h", "127.0.0.1", "-P", &mysql_port.to_string(),
-                            "-u", "root", &format!("--password={pass}"), "shutdown",
+                            "-h",
+                            "127.0.0.1",
+                            "-P",
+                            &mysql_port.to_string(),
+                            "-u",
+                            "root",
+                            &format!("--password={pass}"),
+                            "shutdown",
                         ])
                         .output();
                     // 优雅关闭最多等 10s
@@ -778,7 +905,11 @@ pub fn stop_service(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>,
     if let Some(e) = manager.services.lock().get(id).cloned() {
         let pids = e.pids.lock().clone();
         for _ in 0..10 {
-            survivors = pids.iter().copied().filter(|p| platform::process_alive(*p)).collect();
+            survivors = pids
+                .iter()
+                .copied()
+                .filter(|p| platform::process_alive(*p))
+                .collect();
             if survivors.is_empty() {
                 break;
             }
@@ -795,9 +926,12 @@ pub fn stop_service(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>,
         manager.set_state(id, ServiceState::Stopped);
     } else {
         // 进程仍在：不要谎报 Stopped，否则后续 stop 会被短路掉再也杀不掉
-        let err = AppError::new("STOP_FAILED", format!("{id} 仍有 {} 个进程未退出", survivors.len()))
-            .with_hint("尝试以管理员身份重开应用后再停止；或用「工具箱 → 端口扫描」结束占用进程")
-            .with_detail(format!("残留 pid: {survivors:?}"));
+        let err = AppError::new(
+            "STOP_FAILED",
+            format!("{id} 仍有 {} 个进程未退出", survivors.len()),
+        )
+        .with_hint("尝试以管理员身份重开应用后再停止；或用「工具箱 → 端口扫描」结束占用进程")
+        .with_detail(format!("残留 pid: {survivors:?}"));
         manager.set_error(id, err.clone());
         return Err(err);
     }
@@ -841,7 +975,11 @@ pub fn reload_nginx(store: &Store, paths: &Paths) -> Result<()> {
 /// Windows 上 nginx -s reload 存在已知信号语义差异（新增 server 块可能不生效），
 /// 因此 Windows 采用「快速重启」（stop→start，亚秒级）；类 Unix 用热 reload。
 /// Apache 同样重建：运行中则 httpd -k restart（信号经 pidfile，跨平台可靠）。
-pub fn rebuild_and_reload(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>) -> Result<()> {
+pub fn rebuild_and_reload(
+    store: &Store,
+    paths: &Paths,
+    manager: &Arc<ServiceManager>,
+) -> Result<()> {
     let ports = PortsProfile::from_settings(store);
     let pools: Vec<(String, u16)> = store
         .all_port_assigns()
@@ -854,7 +992,11 @@ pub fn rebuild_and_reload(store: &Store, paths: &Paths, manager: &Arc<ServiceMan
     if nginx_exe(store).is_ok() {
         let (root, exe) = nginx_exe(store)?;
         configgen::write_nginx_conf(paths, &root, &pools, ports.http, ports.https)?;
-        if manager.snapshot("nginx").map(|s| s.state == ServiceState::Running).unwrap_or(false) {
+        if manager
+            .snapshot("nginx")
+            .map(|s| s.state == ServiceState::Running)
+            .unwrap_or(false)
+        {
             configgen::validate_nginx(&exe, &paths.nginx_conf())?;
             #[cfg(windows)]
             {
@@ -872,7 +1014,10 @@ pub fn rebuild_and_reload(store: &Store, paths: &Paths, manager: &Arc<ServiceMan
     // ---- apache ----
     if apache_paths(store).is_ok() {
         let (root, exe) = apache_paths(store)?;
-        let running = manager.snapshot("apache").map(|s| s.state == ServiceState::Running).unwrap_or(false);
+        let running = manager
+            .snapshot("apache")
+            .map(|s| s.state == ServiceState::Running)
+            .unwrap_or(false);
         let active_pools: Vec<(String, u16)> = if running {
             let mut p = pools.clone();
             p.retain(|(ver, _)| {
@@ -885,7 +1030,13 @@ pub fn rebuild_and_reload(store: &Store, paths: &Paths, manager: &Arc<ServiceMan
         } else {
             pools.clone()
         };
-        configgen::write_httpd_conf(paths, &root, &active_pools, ports.apache_http, ports.apache_https)?;
+        configgen::write_httpd_conf(
+            paths,
+            &root,
+            &active_pools,
+            ports.apache_http,
+            ports.apache_https,
+        )?;
         if running {
             configgen::validate_httpd(&exe, &paths.apache_conf())?;
             // Windows 上 `-k restart` 是异步的：命令返回时新子进程可能尚未加载配置。
@@ -1089,55 +1240,140 @@ pub fn validate_configs(store: &Store, paths: &Paths) -> Vec<ConfigCheck> {
     if let Ok((root, exe)) = nginx_exe(store) {
         let conf = paths.nginx_conf();
         if !conf.exists() {
-            out.push(ConfigCheck { name: "Nginx".into(), ok: false, status: "fail".into(), detail: "nginx.conf 不存在（先启动一次生成）".into() });
+            out.push(ConfigCheck {
+                name: "Nginx".into(),
+                ok: false,
+                status: "fail".into(),
+                detail: "nginx.conf 不存在（先启动一次生成）".into(),
+            });
         } else {
             let o = std::process::Command::new(&exe)
-                .args(["-p".into(), root.to_string_lossy().to_string(), "-t".into(), "-c".into(), conf.to_string_lossy().to_string()])
+                .args([
+                    "-p".into(),
+                    root.to_string_lossy().to_string(),
+                    "-t".into(),
+                    "-c".into(),
+                    conf.to_string_lossy().to_string(),
+                ])
                 .output();
             match o {
-                Ok(o) if o.status.success() => out.push(ConfigCheck { name: "Nginx".into(), ok: true, status: "ok".into(), detail: "syntax ok".into() }),
-                Ok(o) => out.push(ConfigCheck { name: "Nginx".into(), ok: false, status: "fail".into(), detail: String::from_utf8_lossy(&o.stderr).lines().take(3).collect::<Vec<_>>().join(" / ") }),
-                Err(e) => out.push(ConfigCheck { name: "Nginx".into(), ok: false, status: "fail".into(), detail: e.to_string() }),
+                Ok(o) if o.status.success() => out.push(ConfigCheck {
+                    name: "Nginx".into(),
+                    ok: true,
+                    status: "ok".into(),
+                    detail: "syntax ok".into(),
+                }),
+                Ok(o) => out.push(ConfigCheck {
+                    name: "Nginx".into(),
+                    ok: false,
+                    status: "fail".into(),
+                    detail: String::from_utf8_lossy(&o.stderr)
+                        .lines()
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .join(" / "),
+                }),
+                Err(e) => out.push(ConfigCheck {
+                    name: "Nginx".into(),
+                    ok: false,
+                    status: "fail".into(),
+                    detail: e.to_string(),
+                }),
             }
         }
     } else {
-        out.push(ConfigCheck { name: "Nginx".into(), ok: true, status: "skipped".into(), detail: "未安装".into() });
+        out.push(ConfigCheck {
+            name: "Nginx".into(),
+            ok: true,
+            status: "skipped".into(),
+            detail: "未安装".into(),
+        });
     }
 
     // apache
     if let Ok((root, exe)) = apache_paths(store) {
         let conf = paths.apache_conf();
         if !conf.exists() {
-            out.push(ConfigCheck { name: "Apache".into(), ok: false, status: "fail".into(), detail: "httpd.conf 不存在".into() });
+            out.push(ConfigCheck {
+                name: "Apache".into(),
+                ok: false,
+                status: "fail".into(),
+                detail: "httpd.conf 不存在".into(),
+            });
         } else {
             let o = std::process::Command::new(&exe)
-                .args(["-d".into(), root.to_string_lossy().to_string(), "-t".into(), "-f".into(), conf.to_string_lossy().to_string()])
+                .args([
+                    "-d".into(),
+                    root.to_string_lossy().to_string(),
+                    "-t".into(),
+                    "-f".into(),
+                    conf.to_string_lossy().to_string(),
+                ])
                 .output();
             match o {
-                Ok(o) if o.status.success() => out.push(ConfigCheck { name: "Apache".into(), ok: true, status: "ok".into(), detail: "syntax ok".into() }),
-                Ok(o) => out.push(ConfigCheck { name: "Apache".into(), ok: false, status: "fail".into(), detail: String::from_utf8_lossy(&o.stderr).lines().take(3).collect::<Vec<_>>().join(" / ") }),
-                Err(e) => out.push(ConfigCheck { name: "Apache".into(), ok: false, status: "fail".into(), detail: e.to_string() }),
+                Ok(o) if o.status.success() => out.push(ConfigCheck {
+                    name: "Apache".into(),
+                    ok: true,
+                    status: "ok".into(),
+                    detail: "syntax ok".into(),
+                }),
+                Ok(o) => out.push(ConfigCheck {
+                    name: "Apache".into(),
+                    ok: false,
+                    status: "fail".into(),
+                    detail: String::from_utf8_lossy(&o.stderr)
+                        .lines()
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .join(" / "),
+                }),
+                Err(e) => out.push(ConfigCheck {
+                    name: "Apache".into(),
+                    ok: false,
+                    status: "fail".into(),
+                    detail: e.to_string(),
+                }),
             }
         }
     } else {
-        out.push(ConfigCheck { name: "Apache".into(), ok: true, status: "skipped".into(), detail: "未安装".into() });
+        out.push(ConfigCheck {
+            name: "Apache".into(),
+            ok: true,
+            status: "skipped".into(),
+            detail: "未安装".into(),
+        });
     }
 
     // php：每个已装版本 -n -c ini -v（能跑起来 = ini 没写坏）
     if let Ok(list) = store.list_installed() {
         let phps: Vec<_> = list.iter().filter(|p| p.id == "php").collect();
         if phps.is_empty() {
-            out.push(ConfigCheck { name: "PHP".into(), ok: true, status: "skipped".into(), detail: "未安装".into() });
+            out.push(ConfigCheck {
+                name: "PHP".into(),
+                ok: true,
+                status: "skipped".into(),
+                detail: "未安装".into(),
+            });
         }
         for p in phps {
             let exe = PathBuf::from(&p.install_path).join(exe_name("php"));
             let ini = paths.php_ini(&p.version);
             if !ini.exists() {
-                out.push(ConfigCheck { name: format!("PHP {}", p.version), ok: false, status: "fail".into(), detail: "php.ini 不存在".into() });
+                out.push(ConfigCheck {
+                    name: format!("PHP {}", p.version),
+                    ok: false,
+                    status: "fail".into(),
+                    detail: "php.ini 不存在".into(),
+                });
                 continue;
             }
             let ok = std::process::Command::new(&exe)
-                .args(["-n", "-c"].iter().copied().chain(std::iter::once(ini.to_string_lossy().as_ref())))
+                .args(
+                    ["-n", "-c"]
+                        .iter()
+                        .copied()
+                        .chain(std::iter::once(ini.to_string_lossy().as_ref())),
+                )
                 .arg("-v")
                 .output()
                 .map(|o| o.status.success())
@@ -1146,7 +1382,11 @@ pub fn validate_configs(store: &Store, paths: &Paths) -> Vec<ConfigCheck> {
                 name: format!("PHP {}", p.version),
                 ok,
                 status: if ok { "ok".into() } else { "fail".into() },
-                detail: if ok { "ini loads".into() } else { "php.ini 加载失败（看日志页 PHP 输出）".into() },
+                detail: if ok {
+                    "ini loads".into()
+                } else {
+                    "php.ini 加载失败（看日志页 PHP 输出）".into()
+                },
             });
         }
     }
@@ -1156,18 +1396,28 @@ pub fn validate_configs(store: &Store, paths: &Paths) -> Vec<ConfigCheck> {
         let conf = paths.redis_conf(&p.version);
         let ok = conf.exists();
         out.push(ConfigCheck {
-            name: "Redis".into(), ok,
+            name: "Redis".into(),
+            ok,
             status: if ok { "ok".into() } else { "fail".into() },
-            detail: if ok { "redis.conf 存在".into() } else { "redis.conf 不存在（先启动一次生成）".into() },
+            detail: if ok {
+                "redis.conf 存在".into()
+            } else {
+                "redis.conf 不存在（先启动一次生成）".into()
+            },
         });
     }
     if let Some(p) = store.find_installed("mysql", None) {
         let ini = paths.mysql_ini(&p.version);
         let ok = ini.exists();
         out.push(ConfigCheck {
-            name: format!("MySQL {}", p.version), ok,
+            name: format!("MySQL {}", p.version),
+            ok,
             status: if ok { "ok".into() } else { "fail".into() },
-            detail: if ok { "my.ini 存在".into() } else { "my.ini 不存在（先启动一次生成）".into() },
+            detail: if ok {
+                "my.ini 存在".into()
+            } else {
+                "my.ini 不存在（先启动一次生成）".into()
+            },
         });
     }
     out
@@ -1186,7 +1436,11 @@ mod validate_tests {
         let checks = validate_configs(&store, &paths);
         assert!(!checks.is_empty());
         // 什么都没装时体检不该有失败项
-        assert!(checks.iter().all(|c| c.ok), "未安装不应报 fail：{:?}", checks);
+        assert!(
+            checks.iter().all(|c| c.ok),
+            "未安装不应报 fail：{:?}",
+            checks
+        );
         assert!(checks.iter().any(|c| c.status == "skipped"));
     }
 }

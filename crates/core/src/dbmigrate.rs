@@ -10,12 +10,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-pub const SYSTEM_DATABASES: &[&str] = &[
-    "information_schema",
-    "mysql",
-    "performance_schema",
-    "sys",
-];
+pub const SYSTEM_DATABASES: &[&str] = &["information_schema", "mysql", "performance_schema", "sys"];
 
 #[derive(serde::Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -43,9 +38,12 @@ pub struct SourceConn {
 impl SourceConn {
     fn client_args(&self) -> Vec<String> {
         vec![
-            "-h".into(), self.host.clone(),
-            "-P".into(), self.port.to_string(),
-            "-u".into(), self.user.clone(),
+            "-h".into(),
+            self.host.clone(),
+            "-P".into(),
+            self.port.to_string(),
+            "-u".into(),
+            self.user.clone(),
         ]
     }
     fn envs(&self) -> Vec<(String, String)> {
@@ -67,10 +65,7 @@ fn mysql_bin(bin_dir: &Path, name: &str) -> PathBuf {
 }
 
 /// 列出源实例上的用户数据库（含大致大小）
-pub fn list_source_databases(
-    bin_dir: &Path,
-    src: &SourceConn,
-) -> Result<Vec<SourceDb>> {
+pub fn list_source_databases(bin_dir: &Path, src: &SourceConn) -> Result<Vec<SourceDb>> {
     let out = Command::new(mysql_bin(bin_dir, "mysql"))
         .args(src.client_args())
         .args(["-N", "-B", "-e", "SELECT schema_name, COALESCE(SUM(data_length+index_length),0) FROM information_schema.schemata LEFT JOIN information_schema.tables ON table_schema=schema_name GROUP BY schema_name ORDER BY schema_name;"])
@@ -82,7 +77,10 @@ pub fn list_source_databases(
             "SOURCE_CONNECT_FAILED",
             format!(
                 "连不上源数据库：{}",
-                String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("")
+                String::from_utf8_lossy(&out.stderr)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
             ),
         )
         .with_hint("确认源环境（FlyEnv/phpStudy/ServBay）正在运行，host/port/账号密码正确"));
@@ -95,7 +93,10 @@ pub fn list_source_databases(
         if name.is_empty() {
             continue;
         }
-        let size_kb = it.next().and_then(|v| v.trim().parse::<u64>().ok()).map(|b| b / 1024);
+        let size_kb = it
+            .next()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|b| b / 1024);
         list.push(SourceDb { name, size_kb });
     }
     Ok(list
@@ -121,7 +122,8 @@ pub fn import_databases(
     let dump = mysql_bin(bin_dir, "mysqldump");
     let client = mysql_bin(bin_dir, "mysql");
     if !dump.is_file() || !client.is_file() {
-        return Err(AppError::not_installed("MySQL").with_hint("导入用的是本应用安装的 mysqldump/mysql 客户端，先在套件页装 MySQL"));
+        return Err(AppError::not_installed("MySQL")
+            .with_hint("导入用的是本应用安装的 mysqldump/mysql 客户端，先在套件页装 MySQL"));
     }
 
     for db in databases {
@@ -166,8 +168,12 @@ pub fn import_databases(
 
         // 泵：dump stdout → importer stdin（独立线程，避免双方管道死锁）
         let pump = std::thread::spawn(move || {
-            let Some(mut reader) = dump_stdout else { return };
-            let Some(mut writer) = importer_stdin else { return };
+            let Some(mut reader) = dump_stdout else {
+                return;
+            };
+            let Some(mut writer) = importer_stdin else {
+                return;
+            };
             let mut buf = [0u8; 65536];
             loop {
                 match reader.read(&mut buf) {
@@ -202,10 +208,15 @@ pub fn import_databases(
             report.imported.push(safe.to_string());
             emit_state(safe.to_string(), "imported");
         } else {
-            let msg = if !dumper_err.is_empty() { dumper_err } else { importer_err };
-            report
-                .failed
-                .push((safe.to_string(), msg.lines().next().unwrap_or("").to_string()));
+            let msg = if !dumper_err.is_empty() {
+                dumper_err
+            } else {
+                importer_err
+            };
+            report.failed.push((
+                safe.to_string(),
+                msg.lines().next().unwrap_or("").to_string(),
+            ));
             emit_state(safe.to_string(), "failed");
         }
     }
@@ -247,9 +258,17 @@ mod tests {
     fn empty_database_list_is_noop_report() {
         // 不需要真实服务器：空列表直接返回空报告
         let bin = Path::new(".");
-        let src = SourceConn { host: "".into(), port: 0, user: "".into(), password: "".into() };
+        let src = SourceConn {
+            host: "".into(),
+            port: 0,
+            user: "".into(),
+            password: "".into(),
+        };
         let mut states = Vec::new();
-        let r = import_databases(bin, &src, &[], &src, |db, st| states.push((db, st.to_string()))).unwrap();
+        let r = import_databases(bin, &src, &[], &src, |db, st| {
+            states.push((db, st.to_string()))
+        })
+        .unwrap();
         assert!(r.imported.is_empty() && r.failed.is_empty() && states.is_empty());
     }
 }

@@ -2,37 +2,37 @@
 
 pub mod acme;
 pub mod bulk;
-pub mod certs;
 pub mod certauto;
 pub mod certdeploy;
 pub mod certmonitor;
+pub mod certs;
 pub mod cfgeditor;
 pub mod configgen;
-pub mod dbadmin;
-pub mod dbmigrate;
-pub mod dbbackup;
-pub mod diagnostics;
-pub mod dnsprov;
-pub mod dns;
 pub mod cron;
+pub mod dbadmin;
+pub mod dbbackup;
+pub mod dbmigrate;
+pub mod diagnostics;
+pub mod dns;
+pub mod dnsprov;
 pub mod download;
 pub mod envfile;
 pub mod error;
 pub use error::AppError;
 pub mod generic;
 pub mod health;
-pub mod toolbox;
-pub mod tunnel;
 pub mod hosts;
 pub mod install;
 pub mod logs_export;
 pub mod model;
 pub mod ops;
 pub mod paths;
+pub mod toolbox;
+pub mod tunnel;
 use paths::write_with_backup;
-pub mod pathenv;
 pub mod backup_job;
 pub mod mcp;
+pub mod pathenv;
 pub mod phpext;
 pub mod ports;
 pub mod proxy;
@@ -43,9 +43,9 @@ pub mod sites;
 pub mod stacks;
 pub mod stats;
 pub mod store;
-pub mod transfer;
 pub mod tls;
 pub mod toolmirror;
+pub mod transfer;
 pub mod versions;
 pub mod watchdog;
 pub mod xdebug;
@@ -70,7 +70,11 @@ pub enum Event {
         message: String,
     },
     /// 网站证书监控告警：状态跃迁为 expiring / expired / error 时发
-    CertMonitorAlert { host: String, state: String, message: String },
+    CertMonitorAlert {
+        host: String,
+        state: String,
+        message: String,
+    },
 }
 
 impl Event {
@@ -91,12 +95,23 @@ impl Event {
             Event::CertAuto { id, state, message } => {
                 serde_json::json!({ "id": id, "state": state, "message": message })
             }
-            Event::CertMonitorAlert { host, state, message } => {
+            Event::CertMonitorAlert {
+                host,
+                state,
+                message,
+            } => {
                 serde_json::json!({ "host": host, "state": state, "message": message })
             }
         }
     }
-    pub fn progress(task_id: &str, received: u64, total: u64, speed: u64, eta: f64, state: &str) -> Self {
+    pub fn progress(
+        task_id: &str,
+        received: u64,
+        total: u64,
+        speed: u64,
+        eta: f64,
+        state: &str,
+    ) -> Self {
         Event::DownloadProgress(DownloadProgress {
             task_id: task_id.to_string(),
             received,
@@ -137,9 +152,10 @@ impl CoreState {
     pub fn init(base: Option<std::path::PathBuf>, emit: EventSink) -> Result<Arc<Self>> {
         let base = paths::Paths::resolve(base);
         let paths = paths::Paths::new(base);
-        paths
-            .ensure_dirs()
-            .map_err(|e| error::AppError::io("初始化数据目录", e).with_hint("数据目录不可写，可在环境变量 NSB_HOME 指定其它位置"))?;
+        paths.ensure_dirs().map_err(|e| {
+            error::AppError::io("初始化数据目录", e)
+                .with_hint("数据目录不可写，可在环境变量 NSB_HOME 指定其它位置")
+        })?;
         let store = store::Store::open(paths.db())?;
         // 服务栈内置预设（首次运行写入；用户改过的不动）
         let _ = stacks::ensure_presets(&store);
@@ -245,8 +261,17 @@ impl CoreState {
             .collect();
         // 标记「使用中版本」：单实例服务（nginx/apache/mysql/redis/postgresql/mongodb/mihomo）
         // 由 activeXxxVersion 设置决定，缺省为最高版本
-        let mut active_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        for id in ["nginx", "apache", "mysql", "redis", "postgresql", "mongodb", "mihomo"] {
+        let mut active_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for id in [
+            "nginx",
+            "apache",
+            "mysql",
+            "redis",
+            "postgresql",
+            "mongodb",
+            "mihomo",
+        ] {
             if let Some(p) = ops::installed_by_choice(&self.store, id) {
                 active_map.insert(id.to_string(), p.version);
             }
@@ -263,7 +288,9 @@ impl CoreState {
     pub async fn install_package(&self, key: &str) -> Result<model::InstalledPackage> {
         let installed = self
             .installer
-            .install(key, &self.paths, &self.store, &self.downloader, &|e| (self.emit)(e))
+            .install(key, &self.paths, &self.store, &self.downloader, &|e| {
+                (self.emit)(e)
+            })
             .await?;
         ops::register_services(&self.paths, &self.store, &self.manager);
         generic::register_services(&self.paths, &self.store, &self.manager);
@@ -273,7 +300,9 @@ impl CoreState {
     }
 
     pub fn uninstall_package(&self, key: &str) -> Result<()> {
-        let r = self.installer.uninstall(key, &self.paths, &self.store, &self.manager);
+        let r = self
+            .installer
+            .uninstall(key, &self.paths, &self.store, &self.manager);
         // 卸载后目录已不存在，必须把托管条目摘掉，否则 PATH 里留死路径
         if r.is_ok() {
             let _ = pathenv::sync(&self.store, &self.paths, &self.installer.manifest);
@@ -379,20 +408,45 @@ impl CoreState {
     /// 依赖来自清单的 `run.requires`，在这里补齐而不是塞进 ServiceManager：
     /// - manager 只关心进程，不该知道清单；
     /// - 判断「依赖是否已安装」需要 store，而 manager 拿不到 store。
-    pub fn migrate_list_source(&self, host: String, port: u16, user: String, password: String) -> Result<Vec<dbmigrate::SourceDb>> {
+    pub fn migrate_list_source(
+        &self,
+        host: String,
+        port: u16,
+        user: String,
+        password: String,
+    ) -> Result<Vec<dbmigrate::SourceDb>> {
         let bin = self.installed_mysql_bin_dir()?;
-        dbmigrate::list_source_databases(&bin, &dbmigrate::SourceConn { host, port, user, password })
+        dbmigrate::list_source_databases(
+            &bin,
+            &dbmigrate::SourceConn {
+                host,
+                port,
+                user,
+                password,
+            },
+        )
     }
 
     pub fn migrate_import(
         &self,
-        host: String, port: u16, user: String, password: String,
+        host: String,
+        port: u16,
+        user: String,
+        password: String,
         databases: Vec<String>,
     ) -> Result<dbmigrate::ImportReport> {
         let bin = self.installed_mysql_bin_dir()?;
-        let src = dbmigrate::SourceConn { host, port, user, password };
+        let src = dbmigrate::SourceConn {
+            host,
+            port,
+            user,
+            password,
+        };
         let ports = crate::services::PortsProfile::from_settings(&self.store);
-        let pass = self.store.get_setting("mysqlRootPassword").unwrap_or_else(|| "root".into());
+        let pass = self
+            .store
+            .get_setting("mysqlRootPassword")
+            .unwrap_or_else(|| "root".into());
         let target = dbmigrate::SourceConn {
             host: "127.0.0.1".into(),
             port: ports.mysql,
@@ -412,7 +466,10 @@ impl CoreState {
             .find_installed("mysql", None)
             .map(|p| p.version)
             .ok_or_else(|| crate::error::AppError::not_installed("MySQL"))?;
-        let basedir = self.paths.runtime_dir("mysql", &v).join(crate::ops::mysql_root_name(&v));
+        let basedir = self
+            .paths
+            .runtime_dir("mysql", &v)
+            .join(crate::ops::mysql_root_name(&v));
         Ok(basedir.join("bin"))
     }
 
@@ -462,9 +519,10 @@ impl CoreState {
     /// 某包的完整版本目录：远程枚举（带缓存）+ 本地已装标记。
     /// `force` 忽略缓存（用户点「刷新版本」）。
     pub async fn version_catalog(&self, id: &str, force: bool) -> Result<model::VersionCatalog> {
-        let template = self.installer.template_for(id).ok_or_else(|| {
-            AppError::new("PACKAGE_NOT_FOUND", format!("清单里没有套件 {id}"))
-        })?;
+        let template = self
+            .installer
+            .template_for(id)
+            .ok_or_else(|| AppError::new("PACKAGE_NOT_FOUND", format!("清单里没有套件 {id}")))?;
         Ok(versions::catalog(&self.store, &template, force).await)
     }
 
@@ -522,14 +580,21 @@ impl CoreState {
         // 站点日志：id 形如 "site:{siteId}"，读站点专属 access 日志
         // （站点 conf 现在带 per-site access_log，日志页才能按站点看流量）
         if let Some(site_id) = id.strip_prefix("site:") {
-            let f = self.paths.logs().join("nginx").join(format!("{site_id}.access.log"));
+            let f = self
+                .paths
+                .logs()
+                .join("nginx")
+                .join(format!("{site_id}.access.log"));
             if let Ok(content) = std::fs::read_to_string(&f) {
                 // Lines 不支持 double rev，先收进 Vec 再取末尾 lines 行
                 let all: Vec<&str> = content.lines().collect();
                 let start = all.len().saturating_sub(lines);
                 return all[start..]
                     .iter()
-                    .map(|l| model::LogLine { ts: None, line: l.to_string() })
+                    .map(|l| model::LogLine {
+                        ts: None,
+                        line: l.to_string(),
+                    })
                     .collect();
             }
             return Vec::new();
@@ -550,7 +615,10 @@ impl CoreState {
                 .into_iter()
                 .rev()
                 .take(lines)
-                .map(|l| model::LogLine { ts: None, line: l.to_string() })
+                .map(|l| model::LogLine {
+                    ts: None,
+                    line: l.to_string(),
+                })
                 .collect::<Vec<_>>()
                 .into_iter()
                 .rev()
@@ -601,19 +669,20 @@ impl CoreState {
     /// 某版本 PHP 的扩展面板：磁盘上有什么 + php.ini 里开了什么
     pub fn php_extensions(&self, version: &str) -> Result<model::PhpExtensionView> {
         let extensions = phpext::scan_available(&self.paths, version)?;
-        let toggles = phpext::INI_TOGGLES
-            .iter()
-            .map(|t| {
-                let v = phpext::read_ini_value(&self.paths, version, t.key)
-                    .unwrap_or_else(|| if t.numeric { "0".into() } else { "Off".into() });
-                model::PhpIniToggle {
-                    key: t.key.to_string(),
-                    label: t.label.to_string(),
-                    hint: t.hint.to_string(),
-                    value: phpext::ini_truthy(&v),
-                }
-            })
-            .collect();
+        let toggles =
+            phpext::INI_TOGGLES
+                .iter()
+                .map(|t| {
+                    let v = phpext::read_ini_value(&self.paths, version, t.key)
+                        .unwrap_or_else(|| if t.numeric { "0".into() } else { "Off".into() });
+                    model::PhpIniToggle {
+                        key: t.key.to_string(),
+                        label: t.label.to_string(),
+                        hint: t.hint.to_string(),
+                        value: phpext::ini_truthy(&v),
+                    }
+                })
+                .collect();
         Ok(model::PhpExtensionView {
             version: version.to_string(),
             ini_path: phpext::ini_path_for(&self.paths, version)
@@ -643,9 +712,9 @@ impl CoreState {
         let mut restarted = false;
         if running {
             // 重启失败不该掩盖「配置已改成功」这个事实，忽略错误但记在告警里
-            match ops::stop_service(&self.store, &self.paths, &self.manager, &service_id)
-                .and_then(|_| ops::start_service(&self.store, &self.paths, &self.manager, &service_id))
-            {
+            match ops::stop_service(&self.store, &self.paths, &self.manager, &service_id).and_then(
+                |_| ops::start_service(&self.store, &self.paths, &self.manager, &service_id),
+            ) {
                 Ok(_) => restarted = true,
                 Err(e) => warnings.push(format!("PHP {version} 重启失败：{}", e.message)),
             }
@@ -786,18 +855,24 @@ impl CoreState {
         if !running {
             return;
         }
-        let r = ops::stop_service(&self.store, &self.paths, &self.manager, &service_id).and_then(|_| {
-            ops::start_service(&self.store, &self.paths, &self.manager, &service_id)
-        });
+        let r = ops::stop_service(&self.store, &self.paths, &self.manager, &service_id)
+            .and_then(|_| ops::start_service(&self.store, &self.paths, &self.manager, &service_id));
         if let Err(e) = r {
             warnings.push(format!("PHP {version} 重启失败：{}", e.message));
         }
     }
 
     /// 启用/禁用 Xdebug（复用扩展开关，但会同步维护 [xdebug] 段）
-    pub fn xdebug_toggle(&self, version: &str, enabled: bool, mode: &str, port: u16) -> Result<Vec<String>> {
+    pub fn xdebug_toggle(
+        &self,
+        version: &str,
+        enabled: bool,
+        mode: &str,
+        port: u16,
+    ) -> Result<Vec<String>> {
         let ini_path = self.paths.php_ini(version);
-        let ini = std::fs::read_to_string(&ini_path).map_err(|e| AppError::io("读取 php.ini", e))?;
+        let ini =
+            std::fs::read_to_string(&ini_path).map_err(|e| AppError::io("读取 php.ini", e))?;
         let mut next = phpext::apply_to_content(&ini, "xdebug", enabled);
         if enabled {
             let dll = self
@@ -826,7 +901,8 @@ impl CoreState {
     }
 
     pub fn watchdog_set_enabled(&self, on: bool) -> Result<()> {
-        self.store.set_setting("watchdogEnabled", if on { "true" } else { "false" })?;
+        self.store
+            .set_setting("watchdogEnabled", if on { "true" } else { "false" })?;
         Ok(())
     }
 
@@ -846,7 +922,10 @@ impl CoreState {
         let statuses = self.manager.list_status();
         let mut acted = Vec::new();
         for st in statuses {
-            if matches!(st.state, model::ServiceState::Running | model::ServiceState::Starting) {
+            if matches!(
+                st.state,
+                model::ServiceState::Running | model::ServiceState::Starting
+            ) {
                 continue;
             }
             if !self.watchdog.should_restart(&st.id, &cfg) {
@@ -875,8 +954,7 @@ mod dep_tests {
     /// 与运行平台无关，所以显式读文件。
     fn manifest_from_disk(name: &str) -> crate::model::Manifest {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../manifest/");
-        let raw = std::fs::read_to_string(format!("{dir}{name}"))
-            .expect("清单文件应在仓库内");
+        let raw = std::fs::read_to_string(format!("{dir}{name}")).expect("清单文件应在仓库内");
         serde_json::from_str(&raw).expect("清单 JSON 必须合法")
     }
 
@@ -928,11 +1006,8 @@ mod dep_tests {
 
     fn declared_dependencies_exist_in(name: &str) {
         let manifest = manifest_from_disk(name);
-        let all: std::collections::HashSet<&str> = manifest
-            .packages
-            .iter()
-            .map(|p| p.id.as_str())
-            .collect();
+        let all: std::collections::HashSet<&str> =
+            manifest.packages.iter().map(|p| p.id.as_str()).collect();
         for p in &manifest.packages {
             let mut deps: Vec<String> = Vec::new();
             if let Some(run) = &p.run {
@@ -940,11 +1015,7 @@ mod dep_tests {
             }
             deps.extend(p.requires.iter().cloned());
             for d in deps {
-                assert!(
-                    all.contains(d.as_str()),
-                    "{} 声明了不存在的依赖 {d}",
-                    p.id
-                );
+                assert!(all.contains(d.as_str()), "{} 声明了不存在的依赖 {d}", p.id);
             }
         }
     }

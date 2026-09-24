@@ -12,9 +12,9 @@ use crate::acme::AcmeClient;
 use crate::certdeploy;
 use crate::dnsprov;
 use crate::error::{AppError, Result};
+use crate::model;
 use crate::model::{CertAutomation, CertRecord, CertRunRecord, DeployResult};
 use crate::paths::write_with_backup;
-use crate::model;
 use crate::{CoreState, Event};
 use std::sync::Arc;
 use time::OffsetDateTime;
@@ -46,7 +46,9 @@ const DNS_KINDS: &[&str] = &[
     "manual",
 ];
 const TARGET_KINDS: &[&str] = &["btpanel", "onepanel", "aliyun", "tencent", "ssh", "local"];
-const NOTIFY_KINDS: &[&str] = &["", "none", "generic", "dingtalk", "wecom", "feishu", "email"];
+const NOTIFY_KINDS: &[&str] = &[
+    "", "none", "generic", "dingtalk", "wecom", "feishu", "email",
+];
 const KEY_ALGS: &[&str] = &["ec256", "ec384", "rsa2048", "rsa3072", "rsa4096"];
 /// 执行历史最多保留条数
 const MAX_RUNS: usize = 20;
@@ -58,7 +60,10 @@ fn validate(a: &CertAutomation) -> Result<()> {
     for d in &a.domains {
         let d = d.trim_end_matches('.');
         if d.contains('*') && !d.starts_with("*.") {
-            return Err(AppError::new("BAD_DOMAINS", format!("通配符域名格式不对：{d}")));
+            return Err(AppError::new(
+                "BAD_DOMAINS",
+                format!("通配符域名格式不对：{d}"),
+            ));
         }
         if !d.contains('.') {
             return Err(AppError::new("BAD_DOMAINS", format!("域名不完整：{d}")));
@@ -73,7 +78,9 @@ fn validate(a: &CertAutomation) -> Result<()> {
     // manual：无需任何凭据
     if a.dns.kind != "manual"
         && (a.dns.access_key.trim().is_empty()
-            || (a.dns.kind != "cloudflare" && a.dns.kind != "digitalocean" && a.dns.secret.trim().is_empty()))
+            || (a.dns.kind != "cloudflare"
+                && a.dns.kind != "digitalocean"
+                && a.dns.secret.trim().is_empty()))
     {
         return Err(AppError::new("DNS_PROVIDER", "DNS 凭据不完整"));
     }
@@ -96,11 +103,22 @@ fn validate(a: &CertAutomation) -> Result<()> {
     if !NOTIFY_KINDS.contains(&a.notify_kind.as_str()) {
         return Err(AppError::new(
             "BAD_NOTIFY",
-            format!("通知方式仅支持：{}", NOTIFY_KINDS.iter().filter(|k| !k.is_empty()).copied().collect::<Vec<_>>().join(" / ")),
+            format!(
+                "通知方式仅支持：{}",
+                NOTIFY_KINDS
+                    .iter()
+                    .filter(|k| !k.is_empty())
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+            ),
         ));
     }
     if !KEY_ALGS.contains(&a.key_alg.as_str()) {
-        return Err(AppError::new("BAD_KEY_ALG", format!("私钥算法仅支持：{}", KEY_ALGS.join(" / "))));
+        return Err(AppError::new(
+            "BAD_KEY_ALG",
+            format!("私钥算法仅支持：{}", KEY_ALGS.join(" / ")),
+        ));
     }
     Ok(())
 }
@@ -120,8 +138,16 @@ fn deploy_local(
     let primary = a.domains[0].clone();
     // 通配符域名带 `*`，Windows 文件名不允许 —— 与 tls::issue_site_cert 同一套净化规则
     let file_stem = primary.replace('*', "_wildcard");
-    let crt_path = state.paths.certs().join("sites").join(format!("{file_stem}.crt"));
-    let key_path = state.paths.certs().join("sites").join(format!("{file_stem}.key"));
+    let crt_path = state
+        .paths
+        .certs()
+        .join("sites")
+        .join(format!("{file_stem}.crt"));
+    let key_path = state
+        .paths
+        .certs()
+        .join("sites")
+        .join(format!("{file_stem}.key"));
     std::fs::create_dir_all(state.paths.certs().join("sites"))?;
     write_with_backup(&crt_path, chain, &state.paths.backup())?;
     write_with_backup(&key_path, key_pem, &state.paths.backup())?;
@@ -231,14 +257,23 @@ fn run_inner(
             // 手动模式：把要加的记录摆给用户，然后盯公共解析直到记录可见
             let name = format!("{prefix}.{dns_domain}");
             mark_manual_wait(state, &auto_id, &name, value, log)?;
-            let timeout = if a.dns_wait_sec > 0 { (a.dns_wait_sec * 60) as u64 } else { 3600 };
-            log.push(format!("等待 TXT 生效（每 10s 检查一次，最长 {} 分钟）…", timeout / 60));
+            let timeout = if a.dns_wait_sec > 0 {
+                (a.dns_wait_sec * 60) as u64
+            } else {
+                3600
+            };
+            log.push(format!(
+                "等待 TXT 生效（每 10s 检查一次，最长 {} 分钟）…",
+                timeout / 60
+            ));
             dnsprov::wait_txt_visible(&name, value, timeout)?;
             log.push("TXT 已生效，继续验证".into());
             Ok(("manual".into(), name))
         } else {
             if dns_domain != domain {
-                log.push(format!("CNAME 代理：TXT 写到 {dns_domain}（{domain} 的验证经 CNAME 命中）"));
+                log.push(format!(
+                    "CNAME 代理：TXT 写到 {dns_domain}（{domain} 的验证经 CNAME 命中）"
+                ));
             }
             let (zone, record_id) = dnsprov::set_txt(&a.dns, &dns_domain, prefix, value)?;
             // 传播预检：公共解析确认可见再触发验证，避免 CA 查不到而 invalid
@@ -262,8 +297,13 @@ fn run_inner(
             dnsprov::clear_txt(&a.dns, _zone, _name, _record_id)
         }
     };
-    let (chain, key_pem, not_before, not_after) =
-        client.issue(&a.domains, &a.key_alg, a.dns_wait_sec, &mut set_txt, &mut clear_txt)?;
+    let (chain, key_pem, not_before, not_after) = client.issue(
+        &a.domains,
+        &a.key_alg,
+        a.dns_wait_sec,
+        &mut set_txt,
+        &mut clear_txt,
+    )?;
 
     log.push("ACME 签发成功，开始部署".into());
     let record = if a.deploy_local {
@@ -280,11 +320,19 @@ fn run_inner(
         let r = match certdeploy::deploy(t, &a.domains, &chain, &key_pem) {
             Ok(msg) => {
                 log.push(format!("[{}] {}", t.name, msg));
-                DeployResult { ok: true, message: msg, at: now_ms() }
+                DeployResult {
+                    ok: true,
+                    message: msg,
+                    at: now_ms(),
+                }
             }
             Err(e) => {
                 log.push(format!("[{}] 失败：{}", t.name, e));
-                DeployResult { ok: false, message: e.to_string(), at: now_ms() }
+                DeployResult {
+                    ok: false,
+                    message: e.to_string(),
+                    at: now_ms(),
+                }
             }
         };
         t.last_result = Some(r);
@@ -305,7 +353,11 @@ pub fn run_once(state: &CoreState, id: &str) -> Result<CertAutomation> {
     a.last_run_at = now_ms();
     a.updated_at = now_ms();
     state.store.save_cert_automation(&a)?;
-    state.emit_event(Event::CertAuto { id: a.id.clone(), state: "issuing".into(), message: String::new() });
+    state.emit_event(Event::CertAuto {
+        id: a.id.clone(),
+        state: "issuing".into(),
+        message: String::new(),
+    });
     log.push(format!("开始处理：{}", a.domains.join(", ")));
     if a.key_alg != "ec256" {
         log.push(format!("证书私钥算法：{}", a.key_alg));
@@ -324,7 +376,11 @@ pub fn run_once(state: &CoreState, id: &str) -> Result<CertAutomation> {
             // 到期前 renew_days_ahead 天续签（certd 默认 30 天）；没拿到到期时间就 60 天后再看
             a.next_renew_at = match a.expires_at {
                 Some(exp) if exp > 0 => {
-                    let ahead = if a.renew_days_ahead > 0 { a.renew_days_ahead } else { RENEW_AHEAD_DAYS };
+                    let ahead = if a.renew_days_ahead > 0 {
+                        a.renew_days_ahead
+                    } else {
+                        RENEW_AHEAD_DAYS
+                    };
                     exp - ahead * 86_400_000
                 }
                 _ => run_at + 60 * 86_400_000,
@@ -336,7 +392,11 @@ pub fn run_once(state: &CoreState, id: &str) -> Result<CertAutomation> {
             a.last_error = e.to_string();
             a.fail_count += 1;
             // 重试节奏：按配置间隔重试；连续失败超过次数后改为每天兜底重试，等人工修配置
-            let interval = if a.retry_interval_min > 0 { a.retry_interval_min } else { 30 };
+            let interval = if a.retry_interval_min > 0 {
+                a.retry_interval_min
+            } else {
+                30
+            };
             a.next_renew_at = run_at
                 + if a.fail_count > a.retry_times.max(1) {
                     24 * 3600 * 1000
@@ -368,7 +428,11 @@ pub fn run_once(state: &CoreState, id: &str) -> Result<CertAutomation> {
     a.updated_at = now_ms();
     state.store.save_cert_automation(&a)?;
 
-    let message = if a.state == "error" { a.last_error.clone() } else { "ok".into() };
+    let message = if a.state == "error" {
+        a.last_error.clone()
+    } else {
+        "ok".into()
+    };
     state.emit_event(Event::CertAuto {
         id: a.id.clone(),
         state: a.state.clone(),
@@ -378,7 +442,15 @@ pub fn run_once(state: &CoreState, id: &str) -> Result<CertAutomation> {
     // 通知：钉钉 / 企微 / 飞书 / 通用 webhook，或 SMTP 邮件。失败只报进度事件，不影响签发结果。
     if a.notify_kind == "email" {
         if let Some(smtp) = a.notify_smtp.as_ref() {
-            let title = format!("证书{}：{}", if a.state == "ok" { "签发成功" } else { "签发失败" }, a.domains.join(", "));
+            let title = format!(
+                "证书{}：{}",
+                if a.state == "ok" {
+                    "签发成功"
+                } else {
+                    "签发失败"
+                },
+                a.domains.join(", ")
+            );
             let detail = match &outcome {
                 Ok(_) => format!("有效期至 {}", fmt_date(a.expires_at)),
                 Err(e) => e.to_string(),
@@ -386,13 +458,19 @@ pub fn run_once(state: &CoreState, id: &str) -> Result<CertAutomation> {
             if let Err(ne) = certdeploy::notify_email(smtp, a.state == "ok", &title, &detail) {
                 (state.emit)(Event::DownloadProgress(model::DownloadProgress {
                     task_id: format!("certauto-notify-{}", a.id),
-                    received: 0, total: 0, speed_bps: 0, eta_sec: 0.0,
+                    received: 0,
+                    total: 0,
+                    speed_bps: 0,
+                    eta_sec: 0.0,
                     state: "notify-failed".into(),
                     error: Some(ne.to_string()),
                 }));
             }
         }
-    } else if !a.notify_kind.is_empty() && a.notify_kind != "none" && !a.notify_url.trim().is_empty() {
+    } else if !a.notify_kind.is_empty()
+        && a.notify_kind != "none"
+        && !a.notify_url.trim().is_empty()
+    {
         let title = if a.state == "ok" {
             format!("证书签发成功：{}", a.domains.join(", "))
         } else {
@@ -402,7 +480,13 @@ pub fn run_once(state: &CoreState, id: &str) -> Result<CertAutomation> {
             Ok(_) => format!("有效期至 {}", fmt_date(a.expires_at)),
             Err(e) => e.to_string(),
         };
-        if let Err(ne) = certdeploy::notify(&a.notify_kind, &a.notify_url, a.state == "ok", &title, &detail) {
+        if let Err(ne) = certdeploy::notify(
+            &a.notify_kind,
+            &a.notify_url,
+            a.state == "ok",
+            &title,
+            &detail,
+        ) {
             (state.emit)(Event::DownloadProgress(model::DownloadProgress {
                 task_id: format!("certauto-notify-{}", a.id),
                 received: 0,
@@ -487,7 +571,6 @@ pub fn spawn_scheduler(state: Arc<CoreState>) {
     });
 }
 
-
 /* ---------- 门面（desktop 命令直通） ---------- */
 
 impl CoreState {
@@ -513,7 +596,12 @@ impl CoreState {
         if a.next_renew_at == 0 {
             a.next_renew_at = now_ms();
         }
-        a.domains = a.domains.iter().map(|d| d.trim().trim_end_matches('.').to_string()).filter(|d| !d.is_empty()).collect();
+        a.domains = a
+            .domains
+            .iter()
+            .map(|d| d.trim().trim_end_matches('.').to_string())
+            .filter(|d| !d.is_empty())
+            .collect();
         self.store.save_cert_automation(&a)?;
         Ok(a)
     }
@@ -578,9 +666,6 @@ mod tests {
         a.domains = vec!["*x.a.com".into()];
         assert!(validate(&a).is_err());
     }
-
-
-
 
     #[test]
     fn cname_alias_mapping() {

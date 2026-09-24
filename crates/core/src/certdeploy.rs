@@ -53,7 +53,12 @@ fn cfg<'a>(t: &'a DeployTarget, key: &str) -> Result<&'a str> {
 }
 
 /// 部署一个目标；返回结果消息（人话）
-pub fn deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, key_pem: &str) -> Result<String> {
+pub fn deploy(
+    target: &DeployTarget,
+    domains: &[String],
+    cert_pem: &str,
+    key_pem: &str,
+) -> Result<String> {
     match target.kind.as_str() {
         "btpanel" => bt_deploy(target, cert_pem, key_pem),
         "onepanel" => onepanel_deploy(target, domains, cert_pem, key_pem),
@@ -87,12 +92,12 @@ pub fn notify(kind: &str, url: &str, ok: bool, title: &str, detail: &str) -> Res
         "dingtalk" | "wecom" => serde_json::json!({
             "msgtype": "text",
             "text": { "content": format!("[NiceEnv] {title}
-{detail}") }
+        {detail}") }
         }),
         "feishu" => serde_json::json!({
             "msg_type": "text",
             "content": { "text": format!("[NiceEnv] {title}
-{detail}") }
+        {detail}") }
         }),
         _ => serde_json::json!({
             "event": if ok { "cert_issued" } else { "cert_failed" },
@@ -124,16 +129,26 @@ pub fn bt_request_token(api_sk: &str, timestamp_secs: u64) -> String {
     md5_hex(&sha1_hex(&format!("{timestamp_secs}{}", md5_hex(api_sk))))
 }
 
-fn bt_post(target: &DeployTarget, path: &str, action_query: &str, form: &[(&str, &str)]) -> Result<serde_json::Value> {
+fn bt_post(
+    target: &DeployTarget,
+    path: &str,
+    action_query: &str,
+    form: &[(&str, &str)],
+) -> Result<serde_json::Value> {
     let base = cfg(target, "url")?.trim_end_matches('/');
     let api_sk = cfg(target, "apiSk")?;
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let url = format!("{base}{path}?{action_query}&request_token={}&request_time={ts}", bt_request_token(api_sk, ts));
-    let mut form_vec: Vec<(String, String)> =
-        form.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect();
+    let url = format!(
+        "{base}{path}?{action_query}&request_token={}&request_time={ts}",
+        bt_request_token(api_sk, ts)
+    );
+    let mut form_vec: Vec<(String, String)> = form
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect();
     form_vec.push(("request_time".into(), ts.to_string()));
     let resp = http()
         .post(&url)
@@ -141,15 +156,16 @@ fn bt_post(target: &DeployTarget, path: &str, action_query: &str, form: &[(&str,
         .send()
         .map_err(|e| AppError::new("DEPLOY_HTTP", format!("宝塔请求失败：{e}")))?;
     let text = resp.text().unwrap_or_default();
-    let body: serde_json::Value = serde_json::from_str(&text)
-        .unwrap_or(serde_json::Value::Null);
+    let body: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
     // 宝塔错误返回 {status:false, msg:"..."}
     if body.get("status") == Some(&serde_json::Value::Bool(false)) {
         return Err(AppError::new(
             "DEPLOY_BT",
             format!(
                 "宝塔：{}",
-                body["msg"].as_str().unwrap_or(&text.chars().take(200).collect::<String>())
+                body["msg"]
+                    .as_str()
+                    .unwrap_or(&text.chars().take(200).collect::<String>())
             ),
         ));
     }
@@ -174,7 +190,14 @@ fn bt_deploy(target: &DeployTarget, cert_pem: &str, key_pem: &str) -> Result<Str
         &[
             ("siteName", site_name.as_str()),
             ("ssl", &ssl.to_string()),
-            ("forceHTTPS", target.config.get("forceHttps").map(|s| s.as_str()).unwrap_or("false")),
+            (
+                "forceHTTPS",
+                target
+                    .config
+                    .get("forceHttps")
+                    .map(|s| s.as_str())
+                    .unwrap_or("false"),
+            ),
         ],
     )?;
     Ok(format!("已将证书配置到宝塔站点 {site_name}"))
@@ -187,7 +210,12 @@ pub fn onepanel_token(api_key: &str, timestamp_secs: u64) -> String {
     md5_hex(&format!("1panel{timestamp_secs}{api_key}"))
 }
 
-fn onepanel_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, key_pem: &str) -> Result<String> {
+fn onepanel_deploy(
+    target: &DeployTarget,
+    domains: &[String],
+    cert_pem: &str,
+    key_pem: &str,
+) -> Result<String> {
     let base = cfg(target, "url")?.trim_end_matches('/');
     let api_key = cfg(target, "token")?;
     let ts = std::time::SystemTime::now()
@@ -218,10 +246,7 @@ fn onepanel_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, ke
     if body["code"].as_i64() != Some(200) {
         return Err(AppError::new(
             "DEPLOY_1PANEL",
-            format!(
-                "1Panel：{}",
-                body["message"].as_str().unwrap_or("返回异常")
-            ),
+            format!("1Panel：{}", body["message"].as_str().unwrap_or("返回异常")),
         ));
     }
     Ok("已上传到 1Panel 证书库".into())
@@ -232,7 +257,12 @@ fn onepanel_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, ke
 fn aliyun_upload(target: &DeployTarget, cert_pem: &str, key_pem: &str) -> Result<String> {
     let ak = cfg(target, "accessKeyId")?;
     let sk = cfg(target, "accessKeySecret")?;
-    let region = target.config.get("region").map(|s| s.as_str()).filter(|s| !s.is_empty()).unwrap_or("cn-hangzhou");
+    let region = target
+        .config
+        .get("region")
+        .map(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("cn-hangzhou");
     let name = target
         .config
         .get("certName")
@@ -265,7 +295,11 @@ fn aliyun_upload(target: &DeployTarget, cert_pem: &str, key_pem: &str) -> Result
         .map(|(k, v)| format!("{}={}", aliyun_percent_encode(k), aliyun_percent_encode(v)))
         .collect::<Vec<_>>()
         .join("&");
-    let string_to_sign = format!("GET&{}&{}", aliyun_percent_encode("/"), aliyun_percent_encode(&query));
+    let string_to_sign = format!(
+        "GET&{}&{}",
+        aliyun_percent_encode("/"),
+        aliyun_percent_encode(&query)
+    );
     let signature = aliyun_sign(sk, &string_to_sign);
 
     let resp = http()
@@ -307,13 +341,17 @@ fn uuid_v4() -> String {
     )
 }
 
-
 /* ================= SSH / SFTP 主机部署（certd 的招牌能力） ================= */
 
 /// 上传证书/私钥到远程主机并可选执行脚本（如 `nginx -s reload`）。
 /// config: host / port(默认22) / user / auth=password|key(默认password) /
 ///         password / keyPath(私钥文件路径) / certPath / keyPath / script
-fn ssh_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, key_pem: &str) -> Result<String> {
+fn ssh_deploy(
+    target: &DeployTarget,
+    domains: &[String],
+    cert_pem: &str,
+    key_pem: &str,
+) -> Result<String> {
     use russh::client::{AuthResult, Handler};
     use std::sync::Arc;
 
@@ -321,7 +359,10 @@ fn ssh_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, key_pem
     impl Handler for AcceptAll {
         type Error = russh::Error;
         // 首连信任主机指纹（accept-new 语义）；桌面端场景可接受
-        async fn check_server_key(&mut self, _k: &russh::keys::PublicKeyOrCertificate) -> std::result::Result<bool, Self::Error> {
+        async fn check_server_key(
+            &mut self,
+            _k: &russh::keys::PublicKeyOrCertificate,
+        ) -> std::result::Result<bool, Self::Error> {
             Ok(true)
         }
     }
@@ -333,7 +374,11 @@ fn ssh_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, key_pem
         .and_then(|p| p.parse().ok())
         .unwrap_or(22);
     let user = cfg(target, "user")?.to_string();
-    let auth_kind = target.config.get("auth").map(|s| s.as_str()).unwrap_or("password");
+    let auth_kind = target
+        .config
+        .get("auth")
+        .map(|s| s.as_str())
+        .unwrap_or("password");
     let remote_cert = cfg(target, "certPath")?.to_string();
     let remote_key = cfg(target, "keyPath")?.to_string();
     let script = target.config.get("script").cloned().unwrap_or_default();
@@ -344,7 +389,9 @@ fn ssh_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, key_pem
         let config = Arc::new(russh::client::Config::default());
         let mut handle = russh::client::connect(config, (host.as_str(), port), AcceptAll)
             .await
-            .map_err(|e| AppError::new("SSH_CONNECT", format!("SSH 连接 {host}:{port} 失败：{e}")))?;
+            .map_err(|e| {
+                AppError::new("SSH_CONNECT", format!("SSH 连接 {host}:{port} 失败：{e}"))
+            })?;
 
         let authed = if auth_kind == "key" {
             let key_path = cfg(target, "keyPath")
@@ -353,7 +400,10 @@ fn ssh_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, key_pem
             let key = russh::keys::load_secret_key(&key_path, None)
                 .map_err(|e| AppError::new("SSH_AUTH", format!("读取 SSH 私钥失败：{e}")))?;
             handle
-                .authenticate_publickey(user, russh::keys::PrivateKeyWithHashAlg::new(Arc::new(key), None))
+                .authenticate_publickey(
+                    user,
+                    russh::keys::PrivateKeyWithHashAlg::new(Arc::new(key), None),
+                )
                 .await
                 .map_err(|e| AppError::new("SSH_AUTH", format!("SSH 公钥认证失败：{e}")))?
         } else {
@@ -364,7 +414,10 @@ fn ssh_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, key_pem
                 .map_err(|e| AppError::new("SSH_AUTH", format!("SSH 密码认证失败：{e}")))?
         };
         if !matches!(authed, AuthResult::Success) {
-            return Err(AppError::new("SSH_AUTH", "SSH 认证被拒绝（检查密码/密钥/用户名）"));
+            return Err(AppError::new(
+                "SSH_AUTH",
+                "SSH 认证被拒绝（检查密码/密钥/用户名）",
+            ));
         }
 
         // SFTP 上传两份文件
@@ -375,7 +428,10 @@ fn ssh_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, key_pem
         let sftp = russh_sftp::client::SftpSession::new(channel.into_stream())
             .await
             .map_err(|e| AppError::new("SSH_SFTP", format!("SFTP 初始化失败：{e}")))?;
-        for (path, content) in [(remote_cert.as_str(), cert_pem), (remote_key.as_str(), key_pem)] {
+        for (path, content) in [
+            (remote_cert.as_str(), cert_pem),
+            (remote_key.as_str(), key_pem),
+        ] {
             if let Some(parent) = std::path::Path::new(path).parent() {
                 if let Some(p) = parent.to_str() {
                     if !p.is_empty() && p != "/" {
@@ -395,9 +451,7 @@ fn ssh_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, key_pem
         }
 
         // 可选：执行重启脚本
-        let mut message = format!(
-            "已上传证书到 {host}:{port}（{remote_cert} / {remote_key}）"
-        );
+        let mut message = format!("已上传证书到 {host}:{port}（{remote_cert} / {remote_key}）");
         if !script.trim().is_empty() {
             let mut ch = handle
                 .channel_open_session()
@@ -410,7 +464,9 @@ fn ssh_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, key_pem
             let mut code: Option<u32> = None;
             while let Some(msg) = ch.wait().await {
                 match msg {
-                    russh::ChannelMsg::Data { data } => out.push_str(&String::from_utf8_lossy(&data)),
+                    russh::ChannelMsg::Data { data } => {
+                        out.push_str(&String::from_utf8_lossy(&data))
+                    }
                     russh::ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status),
                     russh::ChannelMsg::Eof | russh::ChannelMsg::Close => break,
                     _ => {}
@@ -423,7 +479,10 @@ fn ssh_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, key_pem
                 Some(0) => {
                     message = format!("{message}，脚本已执行");
                     if !out.trim().is_empty() {
-                        message = format!("{message}：{}", out.trim().chars().take(200).collect::<String>());
+                        message = format!(
+                            "{message}：{}",
+                            out.trim().chars().take(200).collect::<String>()
+                        );
                     }
                 }
                 other => {
@@ -446,7 +505,12 @@ fn ssh_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, key_pem
 
 /// 把证书复制到本机任意目录，可选执行一条本地命令（如重启本机 nginx）。
 /// config: certPath / keyPath / script(可选)
-fn local_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, key_pem: &str) -> Result<String> {
+fn local_deploy(
+    target: &DeployTarget,
+    domains: &[String],
+    cert_pem: &str,
+    key_pem: &str,
+) -> Result<String> {
     let cert_path = cfg(target, "certPath")?.to_string();
     let key_path = cfg(target, "keyPath")?.to_string();
     for (path, content) in [(cert_path.as_str(), cert_pem), (key_path.as_str(), key_pem)] {
@@ -459,7 +523,11 @@ fn local_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, key_p
     if let Some(script) = target.config.get("script").filter(|s| !s.trim().is_empty()) {
         // 部署后命令在本机执行；这是用户显式配置的动作
         let out = std::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" })
-            .args(if cfg!(windows) { ["/C", script] } else { ["-c", script] })
+            .args(if cfg!(windows) {
+                ["/C", script]
+            } else {
+                ["-c", script]
+            })
             .output()
             .map_err(|e| AppError::io("执行部署脚本失败", e))?;
         if !out.status.success() {
@@ -468,7 +536,10 @@ fn local_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, key_p
                 format!(
                     "部署脚本退出码 {:?}：{}",
                     out.status.code(),
-                    String::from_utf8_lossy(&out.stderr).chars().take(300).collect::<String>()
+                    String::from_utf8_lossy(&out.stderr)
+                        .chars()
+                        .take(300)
+                        .collect::<String>()
                 ),
             ));
         }
@@ -481,16 +552,14 @@ fn local_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, key_p
 /* ================= 腾讯云 SSL 证书入库（TC3-HMAC-SHA256 签名） ================= */
 
 /// 腾讯云 TC3 签名（可复用于腾讯云其它产品）
-pub fn tc3_signature(
-    secret_key: &str,
-    date: &str,
-    service: &str,
-    string_to_sign: &str,
-) -> String {
+pub fn tc3_signature(secret_key: &str, date: &str, service: &str, string_to_sign: &str) -> String {
     let k_date = hmac_sha256_hex(format!("TC3{secret_key}").as_bytes(), date.as_bytes());
     let k_region = hmac_sha256_hex(k_date.as_bytes(), service.as_bytes());
     let k_signing = hmac_sha256_hex(k_region.as_bytes(), b"tc3_request");
-    hex::encode(hmac_sha256_bytes(k_signing.as_bytes(), string_to_sign.as_bytes()))
+    hex::encode(hmac_sha256_bytes(
+        k_signing.as_bytes(),
+        string_to_sign.as_bytes(),
+    ))
 }
 
 fn hmac_sha256_hex(key: &[u8], data: &[u8]) -> String {
@@ -501,7 +570,12 @@ fn hmac_sha256_bytes(key: &[u8], data: &[u8]) -> [u8; 32] {
     crate::acme::hmac_sha256(key, data)
 }
 
-fn tencent_upload(target: &DeployTarget, domains: &[String], cert_pem: &str, key_pem: &str) -> Result<String> {
+fn tencent_upload(
+    target: &DeployTarget,
+    domains: &[String],
+    cert_pem: &str,
+    key_pem: &str,
+) -> Result<String> {
     let ak = cfg(target, "secretId")?;
     let sk = cfg(target, "secretKey")?;
     let name = target
@@ -552,7 +626,10 @@ fn tencent_upload(target: &DeployTarget, domains: &[String], cert_pem: &str, key
         .header("X-TC-Action", action)
         .header("X-TC-Version", "2019-12-05")
         .header("X-TC-Timestamp", timestamp)
-        .header("X-TC-Region", target.config.get("region").cloned().unwrap_or_default())
+        .header(
+            "X-TC-Region",
+            target.config.get("region").cloned().unwrap_or_default(),
+        )
         .header("Authorization", authorization)
         .header("Content-Type", "application/json; charset=utf-8")
         .body(payload)
@@ -565,7 +642,9 @@ fn tencent_upload(target: &DeployTarget, domains: &[String], cert_pem: &str, key
             format!(
                 "腾讯云：{} - {}",
                 body["Response"]["Error"]["Code"].as_str().unwrap_or(""),
-                body["Response"]["Error"]["Message"].as_str().unwrap_or("失败")
+                body["Response"]["Error"]["Message"]
+                    .as_str()
+                    .unwrap_or("失败")
             ),
         ));
     }
@@ -573,7 +652,6 @@ fn tencent_upload(target: &DeployTarget, domains: &[String], cert_pem: &str, key
     let _ = domains;
     Ok(format!("已上传到腾讯云 SSL 证书服务（CertId {cert_id}）"))
 }
-
 
 /* ================= 群晖 DSM（certd 首页点名的平台） ================= */
 
@@ -589,7 +667,10 @@ fn synology_login(base: &str, account: &str, password: &str) -> Result<String> {
     if body["success"].as_bool() != Some(true) {
         return Err(AppError::new(
             "DEPLOY_SYNOLOGY",
-            format!("群晖登录失败：{}", body["error"]["code"].as_i64().unwrap_or_default()),
+            format!(
+                "群晖登录失败：{}",
+                body["error"]["code"].as_i64().unwrap_or_default()
+            ),
         )
         .with_hint("code 400=账号密码错；401=账号被停用；403=IP 被黑名单"));
     }
@@ -600,7 +681,12 @@ fn synology_login(base: &str, account: &str, password: &str) -> Result<String> {
 }
 
 /// 上传证书到 DSM 并设为默认（multipart：key=私钥文件、cert=证书链文件）
-fn synology_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, key_pem: &str) -> Result<String> {
+fn synology_deploy(
+    target: &DeployTarget,
+    domains: &[String],
+    cert_pem: &str,
+    key_pem: &str,
+) -> Result<String> {
     let base = cfg(target, "url")?.trim_end_matches('/').to_string();
     let account = cfg(target, "account")?;
     let password = cfg(target, "password")?;
@@ -635,7 +721,12 @@ fn synology_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, ke
     if body["success"].as_bool() != Some(true) {
         return Err(AppError::new(
             "DEPLOY_SYNOLOGY",
-            format!("群晖上传失败：{}", body["error"]["errors"]["id"].as_str().unwrap_or("详见 DSM 日志")),
+            format!(
+                "群晖上传失败：{}",
+                body["error"]["errors"]["id"]
+                    .as_str()
+                    .unwrap_or("详见 DSM 日志")
+            ),
         ));
     }
     // 顺手登出，别留会话
@@ -647,19 +738,32 @@ fn synology_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, ke
     Ok(format!("已上传到群晖 DSM 并设为默认证书（{name}）"))
 }
 
-
 /* ================= Kubernetes Secret（tls 类型） ================= */
 
 /// 把证书写进 k8s Secret（type: kubernetes.io/tls），存在则更新、不存在则创建。
 /// config: serverUrl(如 https://k8s.example.com:6443) / token(可选，内网匿名 API 常见)
 ///         namespace(默认 default) / secretName / insecure(可选 "true" 跳过 TLS 校验)
-fn k8s_secret_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, key_pem: &str) -> Result<String> {
+fn k8s_secret_deploy(
+    target: &DeployTarget,
+    domains: &[String],
+    cert_pem: &str,
+    key_pem: &str,
+) -> Result<String> {
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD;
     let server = cfg(target, "serverUrl")?.trim_end_matches('/').to_string();
-    let namespace = target.config.get("namespace").map(|s| s.as_str()).filter(|s| !s.is_empty()).unwrap_or("default");
+    let namespace = target
+        .config
+        .get("namespace")
+        .map(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("default");
     let secret_name = cfg(target, "secretName")?;
-    let insecure = target.config.get("insecure").map(|s| s == "true").unwrap_or(false);
+    let insecure = target
+        .config
+        .get("insecure")
+        .map(|s| s == "true")
+        .unwrap_or(false);
 
     let mut client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -667,7 +771,9 @@ fn k8s_secret_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, 
     if insecure {
         client = client.danger_accept_invalid_certs(true); // 自签集群证书
     }
-    let client = client.build().map_err(|e| AppError::internal("HTTP 客户端", e.to_string()))?;
+    let client = client
+        .build()
+        .map_err(|e| AppError::internal("HTTP 客户端", e.to_string()))?;
 
     let body = serde_json::json!({
         "apiVersion": "v1",
@@ -702,14 +808,20 @@ fn k8s_secret_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, 
         let status2 = resp2.status();
         let text2 = resp2.text().unwrap_or_default();
         if !status2.is_success() {
-            return Err(AppError::new("DEPLOY_K8S", format!("K8s 创建 Secret {}：{}", status2, api_message(&text2))));
+            return Err(AppError::new(
+                "DEPLOY_K8S",
+                format!("K8s 创建 Secret {}：{}", status2, api_message(&text2)),
+            ));
         }
         return Ok(format!("已在 {namespace}/{secret_name} 创建 tls Secret"));
     }
     let status = resp.status();
     let text = resp.text().unwrap_or_default();
     if !status.is_success() {
-        return Err(AppError::new("DEPLOY_K8S", format!("K8s 更新 Secret {}：{}", status, api_message(&text))));
+        return Err(AppError::new(
+            "DEPLOY_K8S",
+            format!("K8s 更新 Secret {}：{}", status, api_message(&text)),
+        ));
     }
     let _ = domains;
     Ok(format!("已更新 {namespace}/{secret_name} 的 tls Secret"))
@@ -733,7 +845,12 @@ pub fn qbox_sign(sk: &str, path: &str, body: &str) -> String {
     B64URL_SAFE.encode(mac.finalize().into_bytes())
 }
 
-fn qiniu_upload(target: &DeployTarget, domains: &[String], cert_pem: &str, key_pem: &str) -> Result<String> {
+fn qiniu_upload(
+    target: &DeployTarget,
+    domains: &[String],
+    cert_pem: &str,
+    key_pem: &str,
+) -> Result<String> {
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD;
     let ak = cfg(target, "accessKey")?;
@@ -767,7 +884,11 @@ fn qiniu_upload(target: &DeployTarget, domains: &[String], cert_pem: &str, key_p
     if !status.is_success() {
         return Err(AppError::new(
             "DEPLOY_QINIU",
-            format!("七牛上传证书 {}：{}", status, text.chars().take(250).collect::<String>()),
+            format!(
+                "七牛上传证书 {}：{}",
+                status,
+                text.chars().take(250).collect::<String>()
+            ),
         ));
     }
     let v: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
@@ -778,7 +899,12 @@ fn qiniu_upload(target: &DeployTarget, domains: &[String], cert_pem: &str, key_p
 /* ================= 华为云 SSL 证书管理（SCM 上传入库） ================= */
 
 /// 华为云 SCM：POST /v3/scm/certificates（复用 HWS 签名体系，host 换 scm）
-fn hw_ssl_upload(target: &DeployTarget, domains: &[String], cert_pem: &str, key_pem: &str) -> Result<String> {
+fn hw_ssl_upload(
+    target: &DeployTarget,
+    domains: &[String],
+    cert_pem: &str,
+    key_pem: &str,
+) -> Result<String> {
     let ak = cfg(target, "accessKeyId")?;
     let sk = cfg(target, "accessKeySecret")?;
     let region = target
@@ -811,10 +937,11 @@ fn hw_ssl_upload(target: &DeployTarget, domains: &[String], cert_pem: &str, key_
     )?;
     Ok(format!(
         "已上传到华为云 SSL 证书管理（{}）",
-        resp["certificate_id"].as_str().unwrap_or("证书 ID 见控制台")
+        resp["certificate_id"]
+            .as_str()
+            .unwrap_or("证书 ID 见控制台")
     ))
 }
-
 
 /* ================= SMTP 邮件通知（certd 的邮件通知插件） ================= */
 
@@ -830,9 +957,16 @@ pub fn notify_email(
     use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
     if smtp.host.trim().is_empty() || smtp.to.trim().is_empty() {
-        return Err(AppError::new("SMTP_CONFIG", "SMTP 服务器 / 收件人没有填完整"));
+        return Err(AppError::new(
+            "SMTP_CONFIG",
+            "SMTP 服务器 / 收件人没有填完整",
+        ));
     }
-    let from = if smtp.from.trim().is_empty() { smtp.username.clone() } else { smtp.from.clone() };
+    let from = if smtp.from.trim().is_empty() {
+        smtp.username.clone()
+    } else {
+        smtp.from.clone()
+    };
     if from.trim().is_empty() {
         return Err(AppError::new("SMTP_CONFIG", "发件人不能为空"));
     }
@@ -865,21 +999,27 @@ pub fn notify_email(
             .first()
             .cloned()
             .ok_or_else(|| AppError::new("SMTP_TO", "收件人地址不合法"))?)
-        .subject(format!("[NiceServBay] {title}{}", if ok { "" } else { " ⚠" }))
+        .subject(format!(
+            "[NiceServBay] {title}{}",
+            if ok { "" } else { " ⚠" }
+        ))
         .header(ContentType::TEXT_PLAIN)
-        .body(format!("{title}
+        .body(format!(
+            "{title}
 
 {detail}
 
-—— NiceServBay 证书自动化"))
+—— NiceServBay 证书自动化"
+        ))
         .map_err(|e| AppError::new("SMTP_BUILD", format!("邮件构建失败：{e}")))?;
 
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| AppError::internal("构建 tokio runtime", e.to_string()))?;
     rt.block_on(async move {
         mailer.build().send(email).await.map_err(|e| {
-            AppError::new("SMTP_SEND", format!("邮件发送失败：{e}"))
-                .with_hint("检查端口（587=STARTTLS / 465=TLS）、授权码（多数服务商要用授权码而非登录密码）")
+            AppError::new("SMTP_SEND", format!("邮件发送失败：{e}")).with_hint(
+                "检查端口（587=STARTTLS / 465=TLS）、授权码（多数服务商要用授权码而非登录密码）",
+            )
         })?;
         Ok(())
     })

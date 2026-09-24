@@ -30,11 +30,7 @@ pub fn diagnose_port(port: u16) -> Result<PortDiagnosis> {
 
 /// 端口区间扫描：一次拿全表，返回范围内所有监听者（含归属标注）。
 /// 工具箱「扫某个端口 → 结束占用它的进程」用这个；单端口也能用（from == to）。
-pub fn scan_port_range(
-    manager: &Arc<ServiceManager>,
-    from: u16,
-    to: u16,
-) -> Result<PortRangeScan> {
+pub fn scan_port_range(manager: &Arc<ServiceManager>, from: u16, to: u16) -> Result<PortRangeScan> {
     let (lo, hi) = if from <= to { (from, to) } else { (to, from) };
     let listeners = platform_listeners()?;
     // pid → serviceId：用于标注「这个监听者是本应用哪个服务」
@@ -49,7 +45,10 @@ pub fn scan_port_range(
         .into_iter()
         .filter(|(p, _)| *p >= lo && *p <= hi)
         .map(|(port, pid)| {
-            let service_id = owned.iter().find(|(op, _)| *op == pid).map(|(_, sid)| sid.clone());
+            let service_id = owned
+                .iter()
+                .find(|(op, _)| *op == pid)
+                .map(|(_, sid)| sid.clone());
             ListenerInfo {
                 port,
                 pid,
@@ -126,12 +125,11 @@ pub fn close_port(
         }
     }
     if killed.is_empty() {
-        return Err(crate::AppError::new(
-            "KILL_FAILED",
-            format!("无法结束占用端口 {port} 的进程"),
-        )
-        .with_hint("该进程可能需要管理员权限；试着以管理员身份重开应用后再操作")
-        .with_pid(pids[0]));
+        return Err(
+            crate::AppError::new("KILL_FAILED", format!("无法结束占用端口 {port} 的进程"))
+                .with_hint("该进程可能需要管理员权限；试着以管理员身份重开应用后再操作")
+                .with_pid(pids[0]),
+        );
     }
     Ok(ClosePortOutcome {
         port,
@@ -245,16 +243,16 @@ pub fn scan_app_ports(store: &Store, manager: &Arc<ServiceManager>) -> Result<Ve
             .snapshot(&service_id)
             .map(|s| s.pids)
             .unwrap_or_default();
-        let holder = listeners.iter().find(|(p, _)| *p == port).map(|(_, pid)| *pid);
+        let holder = listeners
+            .iter()
+            .find(|(p, _)| *p == port)
+            .map(|(_, pid)| *pid);
 
         let (verdict, pid, pname, cmdline) = match holder {
             None => ("free", None, None, None),
-            Some(pid) if own_pids.contains(&pid) => (
-                "self",
-                Some(pid),
-                process_name(pid),
-                process_cmdline(pid),
-            ),
+            Some(pid) if own_pids.contains(&pid) => {
+                ("self", Some(pid), process_name(pid), process_cmdline(pid))
+            }
             Some(pid) => (
                 "conflict",
                 Some(pid),
@@ -371,18 +369,17 @@ pub fn process_cmdline(pid: u32) -> Option<String> {
     use sysinfo::{Pid, ProcessesToUpdate, System};
     let mut sys = System::new();
     sys.refresh_processes(ProcessesToUpdate::Some(&[Pid::from_u32(pid)]), true);
-    sys.process(Pid::from_u32(pid))
-        .and_then(|p| {
-            let cmd = p.cmd();
-            if cmd.is_empty() {
-                None
-            } else {
-                Some(
-                    cmd.iter()
-                        .map(|s| s.to_string_lossy())
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                )
-            }
-        })
+    sys.process(Pid::from_u32(pid)).and_then(|p| {
+        let cmd = p.cmd();
+        if cmd.is_empty() {
+            None
+        } else {
+            Some(
+                cmd.iter()
+                    .map(|s| s.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+        }
+    })
 }

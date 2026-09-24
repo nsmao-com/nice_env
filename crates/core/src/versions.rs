@@ -17,27 +17,153 @@ pub const CACHE_TTL_MS: i64 = 6 * 60 * 60 * 1000;
 /// 这样即使清单被换成旧版（或远程清单尚未更新），版本枚举依然可用。
 fn builtin_source(id: &str) -> Option<VersionSource> {
     let (kind, repo, tag_prefix, asset_match, entry_template) = match id {
-        "caddy" => ("github", "caddyserver/caddy", "v", r"caddy_.*_windows_amd64\.zip$", "caddy.exe"),
-        "frankenphp" => ("github", "php/frankenphp", "v", r"frankenphp-windows-x86_64\.zip$", "frankenphp.exe"),
-        "mailpit" => ("github", "axllent/mailpit", "v", r"mailpit-windows-amd64\.zip$", "mailpit.exe"),
-        "meilisearch" => ("github", "meilisearch/meilisearch", "v", r"meilisearch-windows-amd64\.exe$", "meilisearch-windows-amd64.exe"),
-        "minio" => ("github", "minio/minio", "", r"minio\.windows-amd64\..*\.exe$", "minio.windows-amd64.{version}.exe"),
-        "rustfs" => ("github", "rustfs/rustfs", "", r"rustfs-windows-x86_64.*\.zip$", "rustfs.exe"),
-        "qdrant" => ("github", "qdrant/qdrant", "v", r"qdrant-x86_64-pc-windows-msvc\.zip$", "qdrant.exe"),
-        "memcached" => ("github", "jefyt/memcached-windows", "", r"memcached-.*-win64.*\.zip$", "memcached-{version}-win64-mingw/bin/memcached.exe"),
-        "etcd" => ("github", "etcd-io/etcd", "v", r"etcd-v?[\d.]+-windows-amd64\.zip$", "etcd-v{version}-windows-amd64/etcd.exe"),
-        "sftpgo" => ("github", "drakkan/sftpgo", "v", r"sftpgo_v[\d.]+_windows_portable\.zip$", "sftpgo.exe"),
-        "rnacos" => ("github", "nacos-group/r-nacos", "v", r"rnacos-x86_64-pc-windows-msvc.*\.zip$", "rnacos.exe"),
-        "temporal-cli" => ("github", "temporalio/cli", "v", r"temporal_cli_[\d.]+_windows_amd64\.zip$", "temporal.exe"),
-        "cloudflared" => ("github", "cloudflare/cloudflared", "", r"cloudflared-windows-amd64\.exe$", "cloudflared-windows-amd64.exe"),
-        "coredns" => ("github", "coredns/coredns", "v", r"coredns_[\d.]+_windows_amd64\.zip$", "coredns.exe"),
-        "zincsearch" => ("github", "zincsearch/zincsearch", "v", r"zincsearch_[\d.]+_windows_x86_64\.tar\.gz$", "zincsearch.exe"),
-        "rabbitmq" => ("github", "rabbitmq/rabbitmq-server", "v", r"rabbitmq-server-windows-[\d.]+\.zip$", "rabbitmq_server-{version}/sbin/rabbitmq-server.bat"),
-        "consul" => ("github", "hashicorp/consul", "v", r"consul_[\d.]+_windows_amd64\.zip$", "consul.exe"),
-        "ollama" => ("github", "ollama/ollama", "v", r"ollama-windows-amd64\.zip$", "ollama.exe"),
-        "mihomo" => ("github", "MetaCubeX/mihomo", "v", r"mihomo-windows-amd64.*\.zip$", "mihomo-windows-amd64.exe"),
-        "adminer" => ("github", "vrana/adminer", "v", r"adminer-[\d.]+\.php$", "adminer.php"),
-        "k6" => ("github", "grafana/k6", "v", r"k6-v[\d.]+-windows-amd64\.zip$", "k6-v{version}-windows-amd64/k6.exe"),
+        "caddy" => (
+            "github",
+            "caddyserver/caddy",
+            "v",
+            r"caddy_.*_windows_amd64\.zip$",
+            "caddy.exe",
+        ),
+        "frankenphp" => (
+            "github",
+            "php/frankenphp",
+            "v",
+            r"frankenphp-windows-x86_64\.zip$",
+            "frankenphp.exe",
+        ),
+        "mailpit" => (
+            "github",
+            "axllent/mailpit",
+            "v",
+            r"mailpit-windows-amd64\.zip$",
+            "mailpit.exe",
+        ),
+        "meilisearch" => (
+            "github",
+            "meilisearch/meilisearch",
+            "v",
+            r"meilisearch-windows-amd64\.exe$",
+            "meilisearch-windows-amd64.exe",
+        ),
+        "minio" => (
+            "github",
+            "minio/minio",
+            "",
+            r"minio\.windows-amd64\..*\.exe$",
+            "minio.windows-amd64.{version}.exe",
+        ),
+        "rustfs" => (
+            "github",
+            "rustfs/rustfs",
+            "",
+            r"rustfs-windows-x86_64.*\.zip$",
+            "rustfs.exe",
+        ),
+        "qdrant" => (
+            "github",
+            "qdrant/qdrant",
+            "v",
+            r"qdrant-x86_64-pc-windows-msvc\.zip$",
+            "qdrant.exe",
+        ),
+        "memcached" => (
+            "github",
+            "jefyt/memcached-windows",
+            "",
+            r"memcached-.*-win64.*\.zip$",
+            "memcached-{version}-win64-mingw/bin/memcached.exe",
+        ),
+        "etcd" => (
+            "github",
+            "etcd-io/etcd",
+            "v",
+            r"etcd-v?[\d.]+-windows-amd64\.zip$",
+            "etcd-v{version}-windows-amd64/etcd.exe",
+        ),
+        "sftpgo" => (
+            "github",
+            "drakkan/sftpgo",
+            "v",
+            r"sftpgo_v[\d.]+_windows_portable\.zip$",
+            "sftpgo.exe",
+        ),
+        "rnacos" => (
+            "github",
+            "nacos-group/r-nacos",
+            "v",
+            r"rnacos-x86_64-pc-windows-msvc.*\.zip$",
+            "rnacos.exe",
+        ),
+        "temporal-cli" => (
+            "github",
+            "temporalio/cli",
+            "v",
+            r"temporal_cli_[\d.]+_windows_amd64\.zip$",
+            "temporal.exe",
+        ),
+        "cloudflared" => (
+            "github",
+            "cloudflare/cloudflared",
+            "",
+            r"cloudflared-windows-amd64\.exe$",
+            "cloudflared-windows-amd64.exe",
+        ),
+        "coredns" => (
+            "github",
+            "coredns/coredns",
+            "v",
+            r"coredns_[\d.]+_windows_amd64\.zip$",
+            "coredns.exe",
+        ),
+        "zincsearch" => (
+            "github",
+            "zincsearch/zincsearch",
+            "v",
+            r"zincsearch_[\d.]+_windows_x86_64\.tar\.gz$",
+            "zincsearch.exe",
+        ),
+        "rabbitmq" => (
+            "github",
+            "rabbitmq/rabbitmq-server",
+            "v",
+            r"rabbitmq-server-windows-[\d.]+\.zip$",
+            "rabbitmq_server-{version}/sbin/rabbitmq-server.bat",
+        ),
+        "consul" => (
+            "github",
+            "hashicorp/consul",
+            "v",
+            r"consul_[\d.]+_windows_amd64\.zip$",
+            "consul.exe",
+        ),
+        "ollama" => (
+            "github",
+            "ollama/ollama",
+            "v",
+            r"ollama-windows-amd64\.zip$",
+            "ollama.exe",
+        ),
+        "mihomo" => (
+            "github",
+            "MetaCubeX/mihomo",
+            "v",
+            r"mihomo-windows-amd64.*\.zip$",
+            "mihomo-windows-amd64.exe",
+        ),
+        "adminer" => (
+            "github",
+            "vrana/adminer",
+            "v",
+            r"adminer-[\d.]+\.php$",
+            "adminer.php",
+        ),
+        "k6" => (
+            "github",
+            "grafana/k6",
+            "v",
+            r"k6-v[\d.]+-windows-amd64\.zip$",
+            "k6-v{version}-windows-amd64/k6.exe",
+        ),
         // 官方索引/目录页
         "node" => ("nodejs", "", "", "", "node-v{version}-win-x64/node.exe"),
         "php" => ("php", "", "", "", "php-cgi.exe"),
@@ -60,8 +186,18 @@ fn builtin_source(id: &str) -> Option<VersionSource> {
             _ => None,
         },
         // memcached 的 tag 形如 `1.6.8_mingw_libressl`；安装路径只认 `1.6.8`
-        version_strip: if id == "memcached" { Some(r"^(\d+(?:\.\d+)+).*$".to_string()) } else { None },
-        max_versions: Some(if matches!(id, "php" | "node" | "python" | "go" | "nginx") { 80 } else { 40 }),
+        version_strip: if id == "memcached" {
+            Some(r"^(\d+(?:\.\d+)+).*$".to_string())
+        } else {
+            None
+        },
+        max_versions: Some(
+            if matches!(id, "php" | "node" | "python" | "go" | "nginx") {
+                80
+            } else {
+                40
+            },
+        ),
         include_prerelease: Some(false),
     })
 }
@@ -73,7 +209,6 @@ pub fn source_for(template: &PackageManifestEntry) -> Option<VersionSource> {
         .clone()
         .or_else(|| builtin_source(&template.id))
 }
-
 
 /// 拉取（或取缓存）某包的版本目录。
 /// `force = true` 时忽略缓存（用户手动点「刷新版本列表」）。
@@ -122,10 +257,7 @@ pub async fn catalog(
             fallback.id = template.id.clone();
             fallback.online = false;
             if fallback.remote.is_empty() {
-                fallback.error = Some(format!(
-                    "{}；当前只能用清单内置版本",
-                    e.message
-                ));
+                fallback.error = Some(format!("{}；当前只能用清单内置版本", e.message));
             } else {
                 fallback.error = Some(format!("{}；显示上次缓存结果", e.message));
             }
@@ -198,7 +330,10 @@ fn http() -> Result<reqwest::Client> {
 }
 
 /// GitHub Releases：一次请求拿到该 repo 最近 100 个 release（含 asset digest）
-async fn fetch_github(src: &VersionSource, template: &PackageManifestEntry) -> Result<Vec<RemoteVersion>> {
+async fn fetch_github(
+    src: &VersionSource,
+    template: &PackageManifestEntry,
+) -> Result<Vec<RemoteVersion>> {
     let repo = src.repo.as_deref().ok_or_else(|| {
         AppError::new("BAD_VERSION_SOURCE", "github 版本源缺少 repo（owner/name）")
     })?;
@@ -253,7 +388,11 @@ async fn fetch_github(src: &VersionSource, template: &PackageManifestEntry) -> R
         }
         let mut version = tag.strip_prefix(strip).unwrap_or(tag).to_string();
         // 规范化（如 memcached 的 1.6.8_mingw_libressl → 1.6.8）
-        if let Some(re) = src.version_strip.as_ref().and_then(|p| regex::Regex::new(p).ok()) {
+        if let Some(re) = src
+            .version_strip
+            .as_ref()
+            .and_then(|p| regex::Regex::new(p).ok())
+        {
             if let Some(c) = re.captures(&version) {
                 if let Some(m) = c.get(1) {
                     version = m.as_str().to_string();
@@ -266,9 +405,9 @@ async fn fetch_github(src: &VersionSource, template: &PackageManifestEntry) -> R
 
         let assets = rel["assets"].as_array().cloned().unwrap_or_default();
         let picked = match &asset_re {
-            Some(re) => assets.iter().find(|a| {
-                a["name"].as_str().map(|n| re.is_match(n)).unwrap_or(false)
-            }),
+            Some(re) => assets
+                .iter()
+                .find(|a| a["name"].as_str().map(|n| re.is_match(n)).unwrap_or(false)),
             None => assets.first(),
         };
         let Some(asset) = picked else { continue };
@@ -299,7 +438,10 @@ async fn fetch_github(src: &VersionSource, template: &PackageManifestEntry) -> R
 /// Node.js：官方 dist 索引含全部历史版本（866+）。
 /// sha256 不在索引里，但对每个版本都可推导 SHASUMS256.txt —— 只对
 /// 「最新 12 个版本」额外取校验值（多 12 次请求），更老的留空（下载时跳过校验）。
-async fn fetch_nodejs(src: &VersionSource, template: &PackageManifestEntry) -> Result<Vec<RemoteVersion>> {
+async fn fetch_nodejs(
+    src: &VersionSource,
+    template: &PackageManifestEntry,
+) -> Result<Vec<RemoteVersion>> {
     let client = http()?;
     let url = "https://nodejs.org/dist/index.json";
     let rows: Vec<serde_json::Value> = client
@@ -378,7 +520,10 @@ async fn node_sha256(client: &reqwest::Client, version: &str) -> Result<String> 
 }
 
 /// PHP（Windows 官方 builds）：releases + archives 两个目录页
-async fn fetch_php(src: &VersionSource, template: &PackageManifestEntry) -> Result<Vec<RemoteVersion>> {
+async fn fetch_php(
+    src: &VersionSource,
+    template: &PackageManifestEntry,
+) -> Result<Vec<RemoteVersion>> {
     let client = http()?;
     let ver_filter = src
         .version_filter
@@ -423,7 +568,10 @@ async fn fetch_php(src: &VersionSource, template: &PackageManifestEntry) -> Resu
 }
 
 /// Go：官方 dl 索引含 sha256，最省事
-async fn fetch_go(src: &VersionSource, template: &PackageManifestEntry) -> Result<Vec<RemoteVersion>> {
+async fn fetch_go(
+    src: &VersionSource,
+    template: &PackageManifestEntry,
+) -> Result<Vec<RemoteVersion>> {
     let client = http()?;
     let url = "https://go.dev/dl/?mode=json&include=all";
     let rows: Vec<serde_json::Value> = client
@@ -444,7 +592,9 @@ async fn fetch_go(src: &VersionSource, template: &PackageManifestEntry) -> Resul
     let mut out = Vec::new();
     for row in rows {
         let ver = row["version"].as_str().unwrap_or(""); // go1.27.1
-        let Some(bare) = ver.strip_prefix("go") else { continue };
+        let Some(bare) = ver.strip_prefix("go") else {
+            continue;
+        };
         if ver_filter.as_ref().is_some_and(|re| !re.is_match(bare)) {
             continue;
         }
@@ -454,12 +604,15 @@ async fn fetch_go(src: &VersionSource, template: &PackageManifestEntry) -> Resul
         }
         let files = row["files"].as_array().cloned().unwrap_or_default();
         // Windows x64 的 zip 包
-        let Some(f) = files.iter().find(|f| {
-            f["os"] == "windows" && f["arch"] == "amd64" && f["kind"] == "archive"
-        }) else {
+        let Some(f) = files
+            .iter()
+            .find(|f| f["os"] == "windows" && f["arch"] == "amd64" && f["kind"] == "archive")
+        else {
             continue;
         };
-        let Some(fname) = f["filename"].as_str() else { continue };
+        let Some(fname) = f["filename"].as_str() else {
+            continue;
+        };
         out.push(RemoteVersion {
             version: bare.to_string(),
             url: format!("https://go.dev/dl/{fname}"),
@@ -477,7 +630,10 @@ async fn fetch_go(src: &VersionSource, template: &PackageManifestEntry) -> Resul
 
 /// nginx：下载目录列出全部历史版本（255+）。
 /// 注意不要用 /en/download.html —— 那页只列每个分支的最新一个。
-async fn fetch_nginx(src: &VersionSource, template: &PackageManifestEntry) -> Result<Vec<RemoteVersion>> {
+async fn fetch_nginx(
+    src: &VersionSource,
+    template: &PackageManifestEntry,
+) -> Result<Vec<RemoteVersion>> {
     let client = http()?;
     let url = "https://nginx.org/download/";
     let html = client
@@ -521,7 +677,10 @@ async fn fetch_nginx(src: &VersionSource, template: &PackageManifestEntry) -> Re
 }
 
 /// Python：ftp 目录列出所有 3.x（含嵌入式 amd64 包）
-async fn fetch_python(src: &VersionSource, template: &PackageManifestEntry) -> Result<Vec<RemoteVersion>> {
+async fn fetch_python(
+    src: &VersionSource,
+    template: &PackageManifestEntry,
+) -> Result<Vec<RemoteVersion>> {
     let client = http()?;
     let url = "https://www.python.org/ftp/python/";
     let html = client
@@ -551,9 +710,7 @@ async fn fetch_python(src: &VersionSource, template: &PackageManifestEntry) -> R
         }
         out.push(RemoteVersion {
             version: ver.clone(),
-            url: format!(
-                "https://www.python.org/ftp/python/{ver}/python-{ver}-embed-amd64.zip"
-            ),
+            url: format!("https://www.python.org/ftp/python/{ver}/python-{ver}-embed-amd64.zip"),
             sha256: None,
             size_bytes: None,
             entry: render_template(src.entry_template.as_deref(), &ver, template),
@@ -618,9 +775,11 @@ pub fn cmp_version_desc(a: &str, b: &str) -> std::cmp::Ordering {
 /// 预发布判定：出现 rc / beta / alpha / dev / preview / snapshot 等标记
 fn is_prerelease(v: &str) -> bool {
     let low = v.to_ascii_lowercase();
-    ["rc", "beta", "alpha", "dev", "preview", "snapshot", "nightly"]
-        .iter()
-        .any(|m| low.contains(m))
+    [
+        "rc", "beta", "alpha", "dev", "preview", "snapshot", "nightly",
+    ]
+    .iter()
+    .any(|m| low.contains(m))
 }
 
 fn version_parts(v: &str) -> Vec<u64> {
@@ -660,7 +819,11 @@ mod tests {
     #[test]
     fn version_prefix_v_is_ignored() {
         let v = sorted(&["v1.19.1", "1.19.0", "v1.18.3"]);
-        assert_eq!(v, vec!["v1.19.1", "1.19.0", "v1.18.3"], "v 前缀不能被当成第 0 段");
+        assert_eq!(
+            v,
+            vec!["v1.19.1", "1.19.0", "v1.18.3"],
+            "v 前缀不能被当成第 0 段"
+        );
 
         let v = sorted(&["v3.7.1", "v3.6.14", "v3.5.33"]);
         assert_eq!(v, vec!["v3.7.1", "v3.6.14", "v3.5.33"]);

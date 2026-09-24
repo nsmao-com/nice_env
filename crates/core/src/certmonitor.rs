@@ -89,9 +89,10 @@ pub fn fetch_chain(host: &str, port: u16) -> Result<ChainInfo> {
             .with_root_certificates(rustls::RootCertStore::empty())
             .with_no_client_auth();
         cfg.alpn_protocols = vec![]; // 不协商应用协议，只要证书
-        // 关键：装上 NoVerify —— 不装的话空根存储会让自签/过期证书在握手期就失败，
-        // 监控反而读不到「坏证书」（这正是要盯的东西）
-        cfg.dangerous().set_certificate_verifier(std::sync::Arc::new(NoVerify));
+                                     // 关键：装上 NoVerify —— 不装的话空根存储会让自签/过期证书在握手期就失败，
+                                     // 监控反而读不到「坏证书」（这正是要盯的东西）
+        cfg.dangerous()
+            .set_certificate_verifier(std::sync::Arc::new(NoVerify));
         let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(cfg));
 
         let addr = (host.as_str(), port);
@@ -101,7 +102,9 @@ pub fn fetch_chain(host: &str, port: u16) -> Result<ChainInfo> {
         )
         .await
         .map_err(|_| AppError::new("MONITOR_TIMEOUT", format!("连接 {host}:{port} 超时")))
-        .and_then(|r| r.map_err(|e| AppError::new("MONITOR_CONNECT", format!("连接 {host}:{port} 失败：{e}"))))?;
+        .and_then(|r| {
+            r.map_err(|e| AppError::new("MONITOR_CONNECT", format!("连接 {host}:{port} 失败：{e}")))
+        })?;
 
         let server_name = rustls::pki_types::ServerName::try_from(host.clone())
             .map_err(|e| AppError::new("MONITOR_SNI", format!("主机名非法：{e}")))?;

@@ -112,14 +112,10 @@ pub fn ollama_pull(
         .map_err(|e| AppError::io("启动模型拉取", e))?;
     // 排水管：不读的话子进程写满管道缓冲会卡死
     if let Some(so) = child.stdout.take() {
-        std::thread::spawn(move || {
-            for _ in BufReader::new(so).lines() {}
-        });
+        std::thread::spawn(move || for _ in BufReader::new(so).lines() {});
     }
     if let Some(se) = child.stderr.take() {
-        std::thread::spawn(move || {
-            for _ in BufReader::new(se).lines() {}
-        });
+        std::thread::spawn(move || for _ in BufReader::new(se).lines() {});
     }
     std::thread::spawn(move || {
         let _ = child.wait();
@@ -154,9 +150,9 @@ pub fn adminer_start(
     }
 
     // PHP 主程序：php 包的 runtime 目录里与 php-cgi.exe 同级的 php.exe
-    let php = store
-        .find_installed("php", None)
-        .ok_or_else(|| AppError::not_installed("php").with_hint("先到「套件 / 服务」安装任意版本的 PHP"))?;
+    let php = store.find_installed("php", None).ok_or_else(|| {
+        AppError::not_installed("php").with_hint("先到「套件 / 服务」安装任意版本的 PHP")
+    })?;
     let php_exe = paths.runtime_dir("php", &php.version).join("php.exe");
     if !php_exe.exists() {
         return Err(AppError::new(
@@ -186,14 +182,10 @@ pub fn adminer_start(
         .spawn()
         .map_err(|e| AppError::io("启动 Adminer 管理台", e))?;
     if let Some(so) = child.stdout.take() {
-        std::thread::spawn(move || {
-            for _ in BufReader::new(so).lines() {}
-        });
+        std::thread::spawn(move || for _ in BufReader::new(so).lines() {});
     }
     if let Some(se) = child.stderr.take() {
-        std::thread::spawn(move || {
-            for _ in BufReader::new(se).lines() {}
-        });
+        std::thread::spawn(move || for _ in BufReader::new(se).lines() {});
     }
     *adminer_child().lock() = Some(child);
 

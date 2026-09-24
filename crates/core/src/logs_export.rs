@@ -225,7 +225,10 @@ mod tests {
         let p = write_log_file(&paths, "nginx", "x\n", Some("../../evil.exe")).unwrap();
         assert!(p.ends_with(".log"), "必须强制 .log 后缀：{p}");
         assert!(!p.contains(".."), "不能穿越路径：{p}");
-        assert!(is_in_export_dir(&paths, Path::new(&p)), "必须落在导出目录内");
+        assert!(
+            is_in_export_dir(&paths, Path::new(&p)),
+            "必须落在导出目录内"
+        );
         let _ = std::fs::remove_dir_all(&t);
     }
 

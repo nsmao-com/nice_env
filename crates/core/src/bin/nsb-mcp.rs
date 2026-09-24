@@ -31,7 +31,9 @@ fn main() {
             })),
         };
         if let Some(v) = resp {
-            let Ok(mut out) = serde_json::to_string(&v) else { continue };
+            let Ok(mut out) = serde_json::to_string(&v) else {
+                continue;
+            };
             out.push('\n');
             if stdout.write_all(out.as_bytes()).is_err() {
                 break; // 客户端断开

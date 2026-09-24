@@ -109,11 +109,10 @@ pub fn dump_databases(
     }
     let dump = tool_path(paths, &conn.version, "mysqldump");
     if !dump.is_file() {
-        return Err(AppError::new(
-            "MYSQL_TOOL_MISSING",
-            "找不到 mysqldump，无法备份",
-        )
-        .with_hint("确认已安装 MySQL 套件；该工具随 MySQL 客户端一起提供"));
+        return Err(
+            AppError::new("MYSQL_TOOL_MISSING", "找不到 mysqldump，无法备份")
+                .with_hint("确认已安装 MySQL 套件；该工具随 MySQL 客户端一起提供"),
+        );
     }
     if let Some(parent) = out_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| AppError::io("创建备份目录", e))?;
@@ -126,15 +125,18 @@ pub fn dump_databases(
         // --databases：把 CREATE DATABASE 一起写进去，还原时不用先建库
         .arg("--databases")
         // 单事务导出（InnoDB），避免锁表影响正在跑的站点
-        .args(["--single-transaction", "--routines", "--triggers", "--events"])
+        .args([
+            "--single-transaction",
+            "--routines",
+            "--triggers",
+            "--events",
+        ])
         .args(["--hex-blob", "--default-character-set=utf8mb4"])
         .args(databases)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| AppError::io("启动 mysqldump", e))?;
+    let mut child = cmd.spawn().map_err(|e| AppError::io("启动 mysqldump", e))?;
 
     let mut written: u64 = 0;
     {
@@ -292,7 +294,9 @@ pub fn restore_from_file(
         bytes: total.unwrap_or(0),
         total,
         state: "done".into(),
-        message: safety.as_ref().map(|p| format!("还原前备份：{}", p.display())),
+        message: safety
+            .as_ref()
+            .map(|p| format!("还原前备份：{}", p.display())),
     });
     Ok(safety)
 }
@@ -350,7 +354,9 @@ pub fn delete_backup(paths: &Paths, path: &str) -> Result<()> {
     let canon_target = target
         .canonicalize()
         .map_err(|e| AppError::io("定位备份文件", e))?;
-    let canon_dir = dir.canonicalize().map_err(|e| AppError::io("定位备份目录", e))?;
+    let canon_dir = dir
+        .canonicalize()
+        .map_err(|e| AppError::io("定位备份目录", e))?;
     if !canon_target.starts_with(&canon_dir) {
         return Err(AppError::new("FORBIDDEN", "只能删除备份目录内的文件"));
     }
@@ -380,7 +386,13 @@ mod tests {
 
     #[test]
     fn system_databases_are_detected() {
-        for s in ["mysql", "MySQL", "information_schema", "performance_schema", "sys"] {
+        for s in [
+            "mysql",
+            "MySQL",
+            "information_schema",
+            "performance_schema",
+            "sys",
+        ] {
             assert!(is_system_db(s), "{s} 应判为系统库");
         }
         for s in ["app", "wordpress", "mydb"] {
@@ -404,7 +416,10 @@ mod tests {
     #[test]
     fn default_dump_name_is_filesystem_safe() {
         let n = default_dump_name(&["a/b:c".to_string()]);
-        assert!(!n.contains('/') && !n.contains(':'), "不能带路径分隔符：{n}");
+        assert!(
+            !n.contains('/') && !n.contains(':'),
+            "不能带路径分隔符：{n}"
+        );
     }
 
     #[test]

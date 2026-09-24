@@ -239,11 +239,7 @@ pub fn env_variants(root: &Path) -> Vec<String> {
 }
 
 /// 读取某站点的 .env
-pub fn read_env(
-    paths: &Paths,
-    store: &crate::store::Store,
-    site_id: &str,
-) -> Result<EnvFileView> {
+pub fn read_env(paths: &Paths, store: &crate::store::Store, site_id: &str) -> Result<EnvFileView> {
     let site = crate::sites::list(store)?
         .into_iter()
         .find(|s| s.id == site_id)
@@ -316,10 +312,10 @@ pub fn apply_db_vars(
     site_id: &str,
 ) -> Result<Vec<String>> {
     let view = read_env(_paths, store, site_id)?;
-    let hint = view
-        .db_hint
-        .ok_or_else(|| AppError::new("NO_DB_BINDING", "该站点没有绑定数据库")
-            .with_hint("先到站点详情里为它创建/绑定一个数据库"))?;
+    let hint = view.db_hint.ok_or_else(|| {
+        AppError::new("NO_DB_BINDING", "该站点没有绑定数据库")
+            .with_hint("先到站点详情里为它创建/绑定一个数据库")
+    })?;
     let vars = db_env_vars(&hint);
     save_env(_paths, store, site_id, &vars)?;
     Ok(vars.into_iter().map(|(k, _)| k).collect())
@@ -466,7 +462,10 @@ mod tests {
         let src = "DB_HOST=localhost\nDB_PORT=3306\n";
         let out = apply_env_changes(
             src,
-            &[("DB_HOST".into(), "127.0.0.1".into()), ("DB_PORT".into(), "23306".into())],
+            &[
+                ("DB_HOST".into(), "127.0.0.1".into()),
+                ("DB_PORT".into(), "23306".into()),
+            ],
         );
         assert!(out.contains("DB_HOST=127.0.0.1"));
         assert!(out.contains("DB_PORT=23306"));
@@ -491,7 +490,10 @@ mod tests {
         assert_eq!(map.get("DB_CONNECTION").map(String::as_str), Some("mysql"));
         assert_eq!(map.get("DB_HOST").map(String::as_str), Some("127.0.0.1"));
         assert_eq!(map.get("DB_DATABASE").map(String::as_str), Some("shop"));
-        assert_eq!(map.get("DB_USERNAME").map(String::as_str), Some("shop_user"));
+        assert_eq!(
+            map.get("DB_USERNAME").map(String::as_str),
+            Some("shop_user")
+        );
         assert_eq!(map.get("DB_PORT").map(String::as_str), Some("3306"));
     }
 
@@ -505,7 +507,10 @@ mod tests {
         let v = env_variants(&t);
         assert!(v.contains(&".env".to_string()));
         assert!(v.contains(&".env.example".to_string()));
-        assert!(!v.contains(&".env.production".to_string()), "不存在的变体不该列出");
+        assert!(
+            !v.contains(&".env.production".to_string()),
+            "不存在的变体不该列出"
+        );
         let _ = std::fs::remove_dir_all(&t);
     }
 

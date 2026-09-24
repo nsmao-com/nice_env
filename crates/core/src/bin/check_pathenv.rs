@@ -129,7 +129,10 @@ fn main() {
     });
 
     check!("幂等：重复应用不产生重复条目", {
-        let dirs = vec!["D:\\rt\\php\\8.3.33".to_string(), "D:\\rt\\go\\1.24.1".to_string()];
+        let dirs = vec![
+            "D:\\rt\\php\\8.3.33".to_string(),
+            "D:\\rt\\go\\1.24.1".to_string(),
+        ];
         let once = pathenv::merge_win_path("C:\\keep", &[], &dirs);
         let twice = pathenv::merge_win_path(&once, &dirs, &dirs);
         if once != twice {
@@ -149,11 +152,16 @@ fn main() {
         if st.enabled {
             return Err("新数据目录不该是开启状态".into());
         }
-        Ok(format!("enabled=false，已托管 {} 个目录", st.managed_dirs.len()))
+        Ok(format!(
+            "enabled=false，已托管 {} 个目录",
+            st.managed_dirs.len()
+        ))
     });
 
     check!("开启注入（真实写注册表）", {
-        let st = state.pathenv_set_enabled(true).map_err(|e| e.message.clone())?;
+        let st = state
+            .pathenv_set_enabled(true)
+            .map_err(|e| e.message.clone())?;
         if !st.enabled {
             return Err("开启后 enabled 仍为 false".into());
         }
@@ -173,7 +181,9 @@ fn main() {
     });
 
     check!("关闭注入后真实 PATH 逐字符还原", {
-        let st = state.pathenv_set_enabled(false).map_err(|e| e.message.clone())?;
+        let st = state
+            .pathenv_set_enabled(false)
+            .map_err(|e| e.message.clone())?;
         if st.enabled {
             return Err("关闭后 enabled 仍为 true".into());
         }
@@ -211,7 +221,9 @@ fn main() {
             })
             .map_err(|e| e.message.clone())?;
 
-        state.pathenv_set_enabled(true).map_err(|e| e.message.clone())?;
+        state
+            .pathenv_set_enabled(true)
+            .map_err(|e| e.message.clone())?;
         let after = state.pathenv_reapply().map_err(|e| e.message.clone())?;
         if after.managed_dirs.is_empty() {
             return Err("已装 php 8.3.33 却没有任何托管目录，推导链路断了".into());
@@ -245,7 +257,12 @@ fn main() {
         // 手工摘掉托管目录，漂移检测应能发现
         let stripped: Vec<String> = pathenv::split_win_path(&disk.value)
             .into_iter()
-            .filter(|x| !after2.managed_dirs.iter().any(|m| m.eq_ignore_ascii_case(x)))
+            .filter(|x| {
+                !after2
+                    .managed_dirs
+                    .iter()
+                    .any(|m| m.eq_ignore_ascii_case(x))
+            })
             .collect();
         platform::pathenv::write_user_path(&stripped.join(";"), disk.reg_type)
             .map_err(|e| e.to_string())?;

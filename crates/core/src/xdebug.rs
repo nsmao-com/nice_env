@@ -59,7 +59,11 @@ impl PhpBuild {
             .collect::<Vec<_>>()
             .join(".");
         let ts = self.ts_tag();
-        let arch = if self.arch.contains("arm") { "aarch64" } else { "x86_64" };
+        let arch = if self.arch.contains("arm") {
+            "aarch64"
+        } else {
+            "x86_64"
+        };
         let vs = self.compiler.to_ascii_lowercase().replace(' ', "");
         vec![
             // 3.x 命名（带架构）
@@ -176,7 +180,9 @@ pub fn detect_build(paths: &Paths, version: &str) -> Result<PhpBuild> {
 }
 
 fn php_exe(paths: &Paths, version: &str) -> std::path::PathBuf {
-    paths.runtime_dir("php", version).join(crate::ops::exe_name("php"))
+    paths
+        .runtime_dir("php", version)
+        .join(crate::ops::exe_name("php"))
 }
 
 /// Xdebug 当前稳定版（内置默认值；可由远端清单覆盖）。
@@ -241,10 +247,7 @@ pub fn read_xdebug_section(ini: &str) -> std::collections::BTreeMap<String, Stri
             continue;
         }
         if let Some((k, v)) = t.split_once('=') {
-            out.insert(
-                k.trim().to_string(),
-                v.trim().trim_matches('"').to_string(),
-            );
+            out.insert(k.trim().to_string(), v.trim().trim_matches('"').to_string());
         }
     }
     out
@@ -283,9 +286,17 @@ pub fn status(paths: &Paths, version: &str) -> Result<XdebugStatus> {
     let ini = std::fs::read_to_string(&ini_path).unwrap_or_default();
     let state = crate::phpext::IniExtState::parse(&ini);
     let ext_dir = paths.runtime_dir("php", version).join("ext");
-    let dll_present = ext_dir.join(crate::phpext::dll_file_name("xdebug")).is_file();
+    let dll_present = ext_dir
+        .join(crate::phpext::dll_file_name("xdebug"))
+        .is_file();
     let build = detect_build(paths, version).ok();
-    let recommended = xdebug_version_for(&build.as_ref().map(|b| b.php_version.clone()).unwrap_or_else(|| version.to_string())).to_string();
+    let recommended = xdebug_version_for(
+        &build
+            .as_ref()
+            .map(|b| b.php_version.clone())
+            .unwrap_or_else(|| version.to_string()),
+    )
+    .to_string();
     let candidates = build
         .as_ref()
         .map(|b| b.xdebug_dll_candidates(&recommended))
@@ -343,14 +354,12 @@ xdebug.log_level=0
 pub fn upsert_xdebug_section(ini: &str, section: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
     let mut in_section = false;
-    let mut removed = false;
     for line in ini.lines() {
         let t = line.trim();
         if t.starts_with('[') && t.ends_with(']') {
             if t.eq_ignore_ascii_case("[xdebug]") {
                 // 丢掉旧段，稍后用新的替换
                 in_section = true;
-                removed = true;
                 continue;
             }
             in_section = false;
@@ -368,10 +377,9 @@ pub fn upsert_xdebug_section(ini: &str, section: &str) -> String {
     if !s.is_empty() {
         s.push('\n');
     }
-    if removed || true {
-        s.push_str(section.trim_end());
-        s.push('\n');
-    }
+    // 无论原来有没有 [xdebug] 段，都在末尾写入新段
+    s.push_str(section.trim_end());
+    s.push('\n');
     s
 }
 
@@ -390,11 +398,10 @@ pub fn install_from_path(
     }
     let head = std::fs::read(src).map_err(|e| AppError::io("读取 DLL", e))?;
     if head.len() < 2 || &head[0..2] != b"MZ" {
-        return Err(AppError::new(
-            "NOT_A_DLL",
-            "这个文件不是 Windows DLL（缺少 MZ 头）",
-        )
-        .with_hint("请确认下载的是 php_xdebug-*.dll，而不是源码包或说明文件"));
+        return Err(
+            AppError::new("NOT_A_DLL", "这个文件不是 Windows DLL（缺少 MZ 头）")
+                .with_hint("请确认下载的是 php_xdebug-*.dll，而不是源码包或说明文件"),
+        );
     }
     let ext_dir = paths.runtime_dir("php", version).join("ext");
     std::fs::create_dir_all(&ext_dir).map_err(|e| AppError::io("创建 ext 目录", e))?;
@@ -435,7 +442,9 @@ pub fn verify(paths: &Paths, version: &str) -> (bool, Option<String>, Vec<String
                 .map(|l| l.trim())
                 .filter(|l| {
                     let low = l.to_ascii_lowercase();
-                    low.contains("warning") || low.contains("unable to load") || low.contains("failed")
+                    low.contains("warning")
+                        || low.contains("unable to load")
+                        || low.contains("failed")
                 })
                 .map(|l| l.to_string())
                 .collect();
@@ -576,7 +585,10 @@ Thread Safety => disabled
         let ini = "memory_limit=256M\n\n[xdebug]\nxdebug.mode=debug\nxdebug.client_port=9003\n\n[Session]\na=1\n";
         let m = read_xdebug_section(ini);
         assert_eq!(m.get("xdebug.mode").map(String::as_str), Some("debug"));
-        assert_eq!(m.get("xdebug.client_port").map(String::as_str), Some("9003"));
+        assert_eq!(
+            m.get("xdebug.client_port").map(String::as_str),
+            Some("9003")
+        );
         assert!(!m.contains_key("a"), "不该跨段读取");
     }
 
@@ -591,7 +603,11 @@ Thread Safety => disabled
     fn upsert_replaces_existing_section_in_place() {
         let ini = "engine=On\n\n[xdebug]\nxdebug.mode=debug\n\n[Session]\nsave=files\n";
         let out = upsert_xdebug_section(ini, "[xdebug]\nxdebug.mode=develop\n");
-        assert_eq!(out.matches("[xdebug]").count(), 1, "不能出现两个 xdebug 段：{out}");
+        assert_eq!(
+            out.matches("[xdebug]").count(),
+            1,
+            "不能出现两个 xdebug 段：{out}"
+        );
         assert!(out.contains("xdebug.mode=develop"));
         assert!(!out.contains("xdebug.mode=debug"), "旧值应被替换：{out}");
         // 其它段必须完好
@@ -628,7 +644,10 @@ Thread Safety => disabled
             "应写成双反斜杠：{s}"
         );
         // 断言确实没有未转义的单反斜杠路径漏出去
-        assert!(!s.contains(r#"zend_extension="C:\php"#), "存在未转义路径：{s}");
+        assert!(
+            !s.contains(r#"zend_extension="C:\php"#),
+            "存在未转义路径：{s}"
+        );
         assert!(s.contains("xdebug.mode=debug,develop"));
         // 默认必须是 trigger，否则没开 IDE 时每个请求都要等超时
         assert!(

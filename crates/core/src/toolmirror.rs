@@ -242,7 +242,9 @@ pub fn apply_npmrc(content: &str, url: &str) -> String {
         let t = line.trim();
         let is_registry = !t.starts_with('#')
             && !t.starts_with(';')
-            && t.split_once('=').map(|(k, _)| k.trim() == "registry").unwrap_or(false);
+            && t.split_once('=')
+                .map(|(k, _)| k.trim() == "registry")
+                .unwrap_or(false);
         if is_registry {
             if !replaced {
                 out.push(format!("registry={url}"));
@@ -406,7 +408,11 @@ pub fn apply_pip_ini(content: &str, url: &str) -> String {
             }
             continue;
         }
-        if has_global && t.split_once('=').map(|(k, _)| k.trim().eq_ignore_ascii_case("index-url")).unwrap_or(false) {
+        if has_global
+            && t.split_once('=')
+                .map(|(k, _)| k.trim().eq_ignore_ascii_case("index-url"))
+                .unwrap_or(false)
+        {
             lines[i] = format!("index-url = {url}");
             replaced = true;
             break;
@@ -510,7 +516,8 @@ pub fn set_mirror(m: ToolManager, url: &str) -> Result<()> {
             let existing = std::fs::read_to_string(&path).unwrap_or_default();
             let next = apply_composer_registry(&existing, url)?;
             if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir).map_err(|e| AppError::io("创建 Composer 配置目录", e))?;
+                std::fs::create_dir_all(dir)
+                    .map_err(|e| AppError::io("创建 Composer 配置目录", e))?;
             }
             std::fs::write(&path, next).map_err(|e| AppError::io("写入 Composer 配置", e))?;
         }
@@ -532,8 +539,8 @@ pub fn set_mirror(m: ToolManager, url: &str) -> Result<()> {
 pub fn reset_mirror(m: ToolManager) -> Result<()> {
     match m {
         ToolManager::Npm => {
-            let path = npmrc_path()
-                .ok_or_else(|| AppError::new("NO_HOME", "无法定位用户主目录"))?;
+            let path =
+                npmrc_path().ok_or_else(|| AppError::new("NO_HOME", "无法定位用户主目录"))?;
             if !path.is_file() {
                 return Ok(());
             }
@@ -552,8 +559,8 @@ pub fn reset_mirror(m: ToolManager) -> Result<()> {
             std::fs::write(&path, next).map_err(|e| AppError::io("写入 Composer 配置", e))?;
         }
         ToolManager::Pip => {
-            let path =
-                pip_config_path().ok_or_else(|| AppError::new("NO_APPDATA", "无法定位 pip 配置目录"))?;
+            let path = pip_config_path()
+                .ok_or_else(|| AppError::new("NO_APPDATA", "无法定位 pip 配置目录"))?;
             if !path.is_file() {
                 return Ok(());
             }
@@ -597,7 +604,12 @@ mod tests {
         // 包管理器源必须走 https，否则依赖会被中间人替换
         for m in [ToolManager::Composer, ToolManager::Npm, ToolManager::Pip] {
             for o in options_for(m) {
-                assert!(o.url.starts_with("https://"), "{} 不是 https：{}", o.id, o.url);
+                assert!(
+                    o.url.starts_with("https://"),
+                    "{} 不是 https：{}",
+                    o.id,
+                    o.url
+                );
             }
         }
     }
@@ -616,7 +628,10 @@ mod tests {
 
     #[test]
     fn match_option_returns_none_for_custom() {
-        assert_eq!(match_option(ToolManager::Npm, "https://my.internal.registry"), None);
+        assert_eq!(
+            match_option(ToolManager::Npm, "https://my.internal.registry"),
+            None
+        );
     }
 
     #[test]
@@ -721,7 +736,10 @@ mod tests {
         let src = r#"{"repositories":{"packagist":{"type":"composer","url":"https://mirror.example"}},"name":"a/b"}"#;
         let out = reset_composer_registry(src).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert!(v.get("repositories").is_none(), "空 repositories 应被删掉：{out}");
+        assert!(
+            v.get("repositories").is_none(),
+            "空 repositories 应被删掉：{out}"
+        );
         assert_eq!(v["name"], "a/b", "其它内容保留");
     }
 
@@ -731,7 +749,10 @@ mod tests {
         let out = reset_composer_registry(src).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert!(v["repositories"].get("packagist").is_none());
-        assert!(v["repositories"].get("private").is_some(), "私有源不该被误删");
+        assert!(
+            v["repositories"].get("private").is_some(),
+            "私有源不该被误删"
+        );
     }
 
     #[test]
@@ -793,7 +814,9 @@ mod tests {
         assert!(set_mirror(ToolManager::Npm, "").is_err());
         assert!(set_mirror(ToolManager::Npm, "   ").is_err());
         assert_eq!(
-            set_mirror(ToolManager::Npm, "registry.npmjs.org").unwrap_err().code,
+            set_mirror(ToolManager::Npm, "registry.npmjs.org")
+                .unwrap_err()
+                .code,
             "BAD_URL"
         );
         assert!(set_mirror(ToolManager::Npm, "ftp://x.example").is_err());

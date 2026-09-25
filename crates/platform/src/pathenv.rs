@@ -40,7 +40,10 @@ pub fn read_user_path() -> Result<RawPath> {
     #[cfg(not(windows))]
     {
         // macOS 以 shell profile 为准，没有「注册表原文」概念
-        Ok(RawPath { value: String::new(), reg_type: 0 })
+        Ok(RawPath {
+            value: String::new(),
+            reg_type: 0,
+        })
     }
 }
 
@@ -67,7 +70,9 @@ pub fn write_user_path(value: &str, reg_type: u32) -> Result<()> {
 pub fn has_user_path() -> bool {
     #[cfg(windows)]
     {
-        windows_path::read().map(|p| !p.value.trim().is_empty()).unwrap_or(false)
+        windows_path::read()
+            .map(|p| !p.value.trim().is_empty())
+            .unwrap_or(false)
     }
     #[cfg(not(windows))]
     {
@@ -257,8 +262,13 @@ mod windows_path {
             );
             if rc != ERROR_SUCCESS {
                 // 值不存在（用户从未设过用户级 PATH）按空处理，不算错误
-                if rc == 2 /* ERROR_FILE_NOT_FOUND */ {
-                    return Ok(RawPath { value: String::new(), reg_type: REG_EXPAND_SZ });
+                if rc == 2
+                /* ERROR_FILE_NOT_FOUND */
+                {
+                    return Ok(RawPath {
+                        value: String::new(),
+                        reg_type: REG_EXPAND_SZ,
+                    });
                 }
                 return Err(PlatformError::Win(format!(
                     "读取用户 PATH 失败（注册表错误 {rc}）"
@@ -266,7 +276,11 @@ mod windows_path {
             }
             Ok(RawPath {
                 value: wide_to_string(&buf[..size as usize]),
-                reg_type: if reg_type == 0 { REG_EXPAND_SZ } else { reg_type },
+                reg_type: if reg_type == 0 {
+                    REG_EXPAND_SZ
+                } else {
+                    reg_type
+                },
             })
         }
     }
@@ -289,7 +303,11 @@ mod windows_path {
             }
             let name = wide(VALUE);
             let ws = wide(value);
-            let ty = if reg_type == 0 { REG_EXPAND_SZ } else { reg_type };
+            let ty = if reg_type == 0 {
+                REG_EXPAND_SZ
+            } else {
+                reg_type
+            };
             let rc = RegSetValueExW(
                 hkey,
                 name.as_ptr(),

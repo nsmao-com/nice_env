@@ -76,13 +76,21 @@ fn meta_for(name: &str) -> Option<Meta> {
         "ldap" => ("LDAP", "network", "目录服务"),
 
         "pdo" => ("PDO", "database", "PDO 抽象层（其它 pdo_* 的前置）"),
-        "pdo_mysql" => ("PDO MySQL", "database", "PDO 连 MySQL —— Laravel 等框架默认走这条"),
+        "pdo_mysql" => (
+            "PDO MySQL",
+            "database",
+            "PDO 连 MySQL —— Laravel 等框架默认走这条",
+        ),
         "pdo_sqlite" => ("PDO SQLite", "database", "PDO 连 SQLite"),
         "pdo_pgsql" => ("PDO PostgreSQL", "database", "PDO 连 PostgreSQL"),
         "pdo_sqlsrv" => ("PDO SQL Server", "database", "PDO 连 SQL Server"),
         "pdo_oci" => ("PDO Oracle", "database", "PDO 连 Oracle"),
         "mysqli" => ("MySQLi", "database", "MySQL 原生扩展（WordPress 用它）"),
-        "mysqlnd" => ("MySQLnd", "database", "MySQL 原生驱动（mysqli / pdo_mysql 的底层）"),
+        "mysqlnd" => (
+            "MySQLnd",
+            "database",
+            "MySQL 原生驱动（mysqli / pdo_mysql 的底层）",
+        ),
         "pgsql" => ("PostgreSQL", "database", "PostgreSQL 原生扩展"),
         "sqlite3" => ("SQLite3", "database", "SQLite 原生扩展"),
         "mongodb" => ("MongoDB", "database", "MongoDB 驱动（需另外下载）"),
@@ -135,11 +143,7 @@ fn meta_for(name: &str) -> Option<Meta> {
     if label.is_empty() {
         None
     } else {
-        Some(Meta {
-            label,
-            group,
-            hint,
-        })
+        Some(Meta { label, group, hint })
     }
 }
 
@@ -242,7 +246,9 @@ pub fn parse_ext_line(line: &str) -> Option<IniExtLine> {
         .unwrap_or(value);
     // 去掉平台后缀后可能是完整文件名，也可能只是个裸名字
     let ext = {
-        let no_dll = base.strip_suffix(".dll").or_else(|| base.strip_suffix(".so"));
+        let no_dll = base
+            .strip_suffix(".dll")
+            .or_else(|| base.strip_suffix(".so"));
         let stem = no_dll.unwrap_or(base);
         stem.strip_prefix("php_").unwrap_or(stem).to_string()
     };
@@ -311,7 +317,11 @@ impl IniExtState {
         }
 
         if !handled && enable {
-            let key = if is_zend(ext) { "zend_extension" } else { "extension" };
+            let key = if is_zend(ext) {
+                "zend_extension"
+            } else {
+                "extension"
+            };
             let new_line = format!("{key}={ext}");
             // 优先塞进 [Extensions] 段末尾，没有该段就追加到文件末尾
             match find_section_end(&out, "Extensions") {
@@ -336,7 +346,11 @@ fn rewrite_line(line: &str, ext: &str, enable: bool) -> String {
         Some(p) => p,
         None => return line.to_string(),
     };
-    let key = if parsed.zend { "zend_extension" } else { "extension" };
+    let key = if parsed.zend {
+        "zend_extension"
+    } else {
+        "extension"
+    };
     let new_body = format!("{key}={ext}");
     if enable {
         // 去掉行首注释；若原本是绝对路径写法，这里统一收成裸名字，
@@ -385,7 +399,8 @@ pub fn scan_available(paths: &Paths, version: &str) -> Result<Vec<PhpExtension>>
     };
 
     let mut names: BTreeSet<String> = BTreeSet::new();
-    for entry in std::fs::read_dir(&ext_dir).map_err(|e| AppError::io("读取 PHP ext 目录", e))? {
+    for entry in std::fs::read_dir(&ext_dir).map_err(|e| AppError::io("读取 PHP ext 目录", e))?
+    {
         let entry = match entry {
             Ok(e) => e,
             Err(_) => continue,
@@ -413,7 +428,10 @@ pub fn scan_available(paths: &Paths, version: &str) -> Result<Vec<PhpExtension>>
             .collect();
         out.push(PhpExtension {
             name: name.clone(),
-            label: meta.as_ref().map(|m| m.label.to_string()).unwrap_or(name.clone()),
+            label: meta
+                .as_ref()
+                .map(|m| m.label.to_string())
+                .unwrap_or(name.clone()),
             group: meta
                 .as_ref()
                 .map(|m| m.group.to_string())
@@ -436,20 +454,16 @@ pub fn scan_available(paths: &Paths, version: &str) -> Result<Vec<PhpExtension>>
 ///
 /// 流程：改 ini（自动备份）→ 用 `php -n -c <ini> -m` 实测 →
 /// 若目标扩展没出现在模块列表里，把 stderr 原样带回。
-pub fn set_extension(
-    paths: &Paths,
-    version: &str,
-    ext: &str,
-    enable: bool,
-) -> Result<Vec<String>> {
+pub fn set_extension(paths: &Paths, version: &str, ext: &str, enable: bool) -> Result<Vec<String>> {
     let ini_path = paths.php_ini(version);
     if !ini_path.is_file() {
-        return Err(AppError::new("NO_INI", format!(
-            "PHP {version} 的 php.ini 还不存在"
-        ))
-        .with_hint("先启动一次该版本 PHP，或到「套件 / 服务」重装 PHP"));
+        return Err(
+            AppError::new("NO_INI", format!("PHP {version} 的 php.ini 还不存在"))
+                .with_hint("先启动一次该版本 PHP，或到「套件 / 服务」重装 PHP"),
+        );
     }
-    let content = std::fs::read_to_string(&ini_path).map_err(|e| AppError::io("读取 php.ini", e))?;
+    let content =
+        std::fs::read_to_string(&ini_path).map_err(|e| AppError::io("读取 php.ini", e))?;
     let state = IniExtState::parse(&content);
     let next = if enable {
         state.with_enabled(ext)
@@ -460,7 +474,9 @@ pub fn set_extension(
         .map_err(|e| AppError::io("写入 php.ini", e))?;
 
     // 实测：能加载才算真的成功，否则把 PHP 的原始告警回给前端
-    let php_exe = paths.runtime_dir("php", version).join(crate::ops::exe_name("php"));
+    let php_exe = paths
+        .runtime_dir("php", version)
+        .join(crate::ops::exe_name("php"));
     let mut warnings = Vec::new();
     if php_exe.is_file() {
         let out = platform::command(&php_exe)
@@ -488,9 +504,7 @@ pub fn set_extension(
                     }
                 }
                 if enable {
-                    let loaded = stdout
-                        .lines()
-                        .any(|l| l.trim().eq_ignore_ascii_case(ext));
+                    let loaded = stdout.lines().any(|l| l.trim().eq_ignore_ascii_case(ext));
                     if !loaded && warnings.is_empty() {
                         warnings.push(format!(
                             "PHP 未报告 {ext} 已加载；若扩展名与 DLL 不匹配，请确认 ext 目录下存在 {}",
@@ -559,7 +573,10 @@ pub fn read_ini_value(paths: &Paths, version: &str, key: &str) -> Option<String>
 pub fn write_ini_value(paths: &Paths, version: &str, key: &str, value: &str) -> Result<()> {
     let ini = paths.php_ini(version);
     if !ini.is_file() {
-        return Err(AppError::new("NO_INI", format!("PHP {version} 的 php.ini 不存在")));
+        return Err(AppError::new(
+            "NO_INI",
+            format!("PHP {version} 的 php.ini 不存在"),
+        ));
     }
     let content = std::fs::read_to_string(&ini).map_err(|e| AppError::io("读取 php.ini", e))?;
     let mut replaced = false;
@@ -683,7 +700,8 @@ mod tests {
 
     #[test]
     fn enable_appends_into_extensions_section_not_eof() {
-        let src = "engine=On\n\n[Extensions]\nextension=curl\n\n[Session]\nsession.save_handler=files\n";
+        let src =
+            "engine=On\n\n[Extensions]\nextension=curl\n\n[Session]\nsession.save_handler=files\n";
         let out = apply_to_content(src, "redis", true);
         let ext_pos = out.find("extension=redis").expect("应追加 redis");
         let session_pos = out.find("[Session]").expect("Session 段还在");
@@ -732,8 +750,10 @@ mod tests {
 
     #[test]
     fn find_section_end_skips_trailing_blanks_before_next_header() {
-        let lines: Vec<String> =
-            "a=1\n[Extensions]\nx=1\ny=2\n\n[Session]\nz=1\n".lines().map(String::from).collect();
+        let lines: Vec<String> = "a=1\n[Extensions]\nx=1\ny=2\n\n[Session]\nz=1\n"
+            .lines()
+            .map(String::from)
+            .collect();
         let idx = find_section_end(&lines, "Extensions").unwrap();
         // 返回的是「新扩展该插在哪」——应落在 y=2 之后、空行之前，
         // 这样新条目紧贴已有扩展，不会隔着空行
@@ -743,7 +763,10 @@ mod tests {
         copy.insert(idx, "extension=redis".to_string());
         let joined = copy.join("\n");
         assert!(joined.contains("y=2\nextension=redis"));
-        assert!(joined.contains("extension=redis\n\n[Session]"), "得留在 Session 之前：{joined}");
+        assert!(
+            joined.contains("extension=redis\n\n[Session]"),
+            "得留在 Session 之前：{joined}"
+        );
     }
 
     #[test]
@@ -760,13 +783,23 @@ mod tests {
     fn ext_name_of_strips_prefix_and_suffix() {
         assert_eq!(ext_name_of(Path::new("/x/php_gd.dll")).unwrap(), "gd");
         assert_eq!(ext_name_of(Path::new("/x/redis.so")).unwrap(), "redis");
-        assert_eq!(ext_name_of(Path::new("/x/php_xdebug.dll")).unwrap(), "xdebug");
+        assert_eq!(
+            ext_name_of(Path::new("/x/php_xdebug.dll")).unwrap(),
+            "xdebug"
+        );
         assert!(ext_name_of(Path::new("/x/readme.txt")).is_none());
     }
 
     #[test]
     fn metainfo_covers_common_extensions() {
-        for name in ["curl", "xdebug", "redis", "mbstring", "pdo_mysql", "opcache"] {
+        for name in [
+            "curl",
+            "xdebug",
+            "redis",
+            "mbstring",
+            "pdo_mysql",
+            "opcache",
+        ] {
             let m = meta_for(name).unwrap_or_else(|| panic!("{name} 应有友好名"));
             assert!(!m.group.is_empty() && !m.hint.is_empty());
         }

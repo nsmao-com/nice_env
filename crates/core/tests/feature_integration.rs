@@ -42,7 +42,12 @@ fn php_extension_toggle_round_trip_through_ini() {
     // 造一个假的 PHP 安装：ext 目录 + php.ini
     let ext_dir = e.paths.runtime_dir("php", "8.3.33").join("ext");
     std::fs::create_dir_all(&ext_dir).unwrap();
-    for f in ["php_curl.dll", "php_gd.dll", "php_xdebug.dll", "php_redis.dll"] {
+    for f in [
+        "php_curl.dll",
+        "php_gd.dll",
+        "php_xdebug.dll",
+        "php_redis.dll",
+    ] {
         std::fs::write(ext_dir.join(f), b"MZ fake").unwrap();
     }
     let ini = e.paths.php_ini("8.3.33");
@@ -183,10 +188,13 @@ fn config_editor_validate_save_and_rollback() {
     // 造一个 nginx.conf
     let conf = e.paths.nginx_conf();
     std::fs::create_dir_all(conf.parent().unwrap()).unwrap();
-    std::fs::write(&conf, "events { worker_connections 1024; }\nhttp { server { listen 80; } }\n")
-        .unwrap();
+    std::fs::write(
+        &conf,
+        "events { worker_connections 1024; }\nhttp { server { listen 80; } }\n",
+    )
+    .unwrap();
     // nginx 未安装 → 只做结构自检
-    use nsb_core::cfgeditor::{ConfigKind, save_config, validate};
+    use nsb_core::cfgeditor::{save_config, validate, ConfigKind};
 
     // 合法内容应通过
     let ok = validate(
@@ -199,7 +207,13 @@ fn config_editor_validate_save_and_rollback() {
     assert!(ok.ok, "{:?}", ok.issues);
 
     // 缺分号应被拦
-    let bad = validate(&e.paths, &e.store, ConfigKind::NginxMain, "http {\n listen 80\n}\n").unwrap();
+    let bad = validate(
+        &e.paths,
+        &e.store,
+        ConfigKind::NginxMain,
+        "http {\n listen 80\n}\n",
+    )
+    .unwrap();
     assert!(!bad.ok);
     assert!(bad.issues.iter().any(|i| i.line == 2), "应指出行号");
 
@@ -236,13 +250,20 @@ fn env_read_save_round_trip() {
     // 建一个站点（直接写 store，避免依赖 nginx 存在）
     let root = e.dir.join("site");
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join(".env"), "APP_NAME=Old\n# 分组注释\nDB_HOST=localhost\n").unwrap();
+    std::fs::write(
+        root.join(".env"),
+        "APP_NAME=Old\n# 分组注释\nDB_HOST=localhost\n",
+    )
+    .unwrap();
 
     // 直接走 envfile 的纯函数验证「只改指定键、保留注释」
     let src = std::fs::read_to_string(root.join(".env")).unwrap();
     let out = nsb_core::envfile::apply_env_changes(
         &src,
-        &[("APP_NAME".into(), "New".into()), ("DB_PORT".into(), "23306".into())],
+        &[
+            ("APP_NAME".into(), "New".into()),
+            ("DB_PORT".into(), "23306".into()),
+        ],
     );
     assert!(out.contains("APP_NAME=New"));
     assert!(out.contains("# 分组注释"), "注释必须保留：{out}");
@@ -264,13 +285,9 @@ fn env_read_save_round_trip() {
 #[test]
 fn log_export_writes_and_lists() {
     let e = Env::new("logexp");
-    let p = nsb_core::logs_export::write_log_file(
-        &e.paths,
-        "nginx",
-        "[error] boom\n[info] ok\n",
-        None,
-    )
-    .unwrap();
+    let p =
+        nsb_core::logs_export::write_log_file(&e.paths, "nginx", "[error] boom\n[info] ok\n", None)
+            .unwrap();
     assert!(std::path::Path::new(&p).is_file());
     assert!(p.ends_with(".log"));
 
@@ -344,14 +361,23 @@ fn bulk_ordering_and_summary() {
             _ => (9, pos),
         }
     };
-    assert!(tier("redis").1 < tier("php@8.3.33").1, "数据层应先于运行层：{start:?}");
+    assert!(
+        tier("redis").1 < tier("php@8.3.33").1,
+        "数据层应先于运行层：{start:?}"
+    );
     assert!(tier("mysql@8.0.46").1 < tier("php@8.3.33").1, "{start:?}");
-    assert!(tier("php@8.3.33").1 < tier("nginx").1, "nginx 必须最后：{start:?}");
+    assert!(
+        tier("php@8.3.33").1 < tier("nginx").1,
+        "nginx 必须最后：{start:?}"
+    );
 
     let stop = nsb_core::bulk::order_for_stop(&ids);
     let pos = |id: &str| stop.iter().position(|x| x == id).unwrap();
     assert!(pos("nginx") < pos("php@8.3.33"), "停止应先断流量：{stop:?}");
-    assert!(pos("php@8.3.33") < pos("mysql@8.0.46"), "数据库最后停：{stop:?}");
+    assert!(
+        pos("php@8.3.33") < pos("mysql@8.0.46"),
+        "数据库最后停：{stop:?}"
+    );
     assert!(pos("php@8.3.33") < pos("redis"), "{stop:?}");
 
     let m = std::sync::Arc::new(nsb_core::services::ServiceManager::new());
@@ -381,8 +407,16 @@ fn diagnostics_redacts_secrets_end_to_end() {
             id: "php".into(),
             version: "8.3.33".into(),
             category: "runtime".into(),
-            install_path: e.paths.runtime_dir("php", "8.3.33").to_string_lossy().to_string(),
-            config_path: e.paths.etc_dir("php", "8.3.33").to_string_lossy().to_string(),
+            install_path: e
+                .paths
+                .runtime_dir("php", "8.3.33")
+                .to_string_lossy()
+                .to_string(),
+            config_path: e
+                .paths
+                .etc_dir("php", "8.3.33")
+                .to_string_lossy()
+                .to_string(),
             installed_at: chrono::Local::now().timestamp(),
         })
         .unwrap();
@@ -494,8 +528,12 @@ fn diagnostics_lists_configs_it_could_not_collect() {
     // 造一份 nginx.conf（不需要 store 登记），但不装 PHP
     let conf = e.paths.nginx_conf();
     std::fs::create_dir_all(conf.parent().unwrap()).unwrap();
-    std::fs::write(&conf, "events {}
-").unwrap();
+    std::fs::write(
+        &conf,
+        "events {}
+",
+    )
+    .unwrap();
 
     let m = std::sync::Arc::new(nsb_core::services::ServiceManager::new());
     let bundle = nsb_core::diagnostics::build(&e.paths, &e.store, &m, "0.1.0").unwrap();
@@ -506,8 +544,5 @@ fn diagnostics_lists_configs_it_could_not_collect() {
         "应明确列出未采集的配置：{}",
         &bundle.markdown[..bundle.markdown.len().min(1200)]
     );
-    assert!(
-        bundle.markdown.contains("php.ini"),
-        "应点名 php.ini 没采到"
-    );
+    assert!(bundle.markdown.contains("php.ini"), "应点名 php.ini 没采到");
 }

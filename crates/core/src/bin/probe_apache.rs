@@ -9,32 +9,59 @@ fn main() {
     let base = PathBuf::from(".extra-home");
     std::env::set_var("NSB_SKIP_HOSTS", "1");
     let state = nsb_core::CoreState::init(Some(base), Arc::new(|_| {})).expect("init");
-    state.store.set_setting("portProfile", "safe").expect("safe");
+    state
+        .store
+        .set_setting("portProfile", "safe")
+        .expect("safe");
 
     state.start_service("php@8.5.10").expect("php pool");
     state.start_service("apache").expect("apache");
     // 复刻验收路径：确认当前 use 的 vhost 与 DocumentRoot
     println!("— vhost 文件:");
-    for e in std::fs::read_dir(state.paths.apache_sites_dir()).into_iter().flatten().flatten() {
+    for e in std::fs::read_dir(state.paths.apache_sites_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
         let p = e.path();
-        println!("   {} ({:?})", p.file_name().unwrap_or_default().to_string_lossy(), std::fs::metadata(&p).map(|m| m.len()));
+        println!(
+            "   {} ({:?})",
+            p.file_name().unwrap_or_default().to_string_lossy(),
+            std::fs::metadata(&p).map(|m| m.len())
+        );
     }
     // 复刻验收的幂等清理：删掉同域站点再重建
     if let Ok(sites) = state.store.list_sites() {
-        for s in sites.iter().filter(|s| s.domains.iter().any(|d| d == "extra-apache.nsb.test")) {
+        for s in sites
+            .iter()
+            .filter(|s| s.domains.iter().any(|d| d == "extra-apache.nsb.test"))
+        {
             println!("— 删除旧站点 {}", s.id);
-            let _ = nsb_core::sites::delete(&s.id, true, true, &state.paths, &state.store, &state.manager);
+            let _ = nsb_core::sites::delete(
+                &s.id,
+                true,
+                true,
+                &state.paths,
+                &state.store,
+                &state.manager,
+            );
         }
     }
     let input = nsb_core::model::CreateSiteInput {
         name: "extra-apache".into(),
         domains: vec!["extra-apache.nsb.test".into()],
-        root_dir: std::env::current_dir().unwrap().join(".extra-home/site-apache").to_string_lossy().to_string(),
+        root_dir: std::env::current_dir()
+            .unwrap()
+            .join(".extra-home/site-apache")
+            .to_string_lossy()
+            .to_string(),
         runtime: nsb_core::model::SiteRuntime {
             web_server: "apache".into(),
             kind: nsb_core::model::SiteKind::Php,
             php_version: Some("8.5.10".into()),
-            proxy_target: None, command: None, cwd: None,
+            proxy_target: None,
+            command: None,
+            cwd: None,
         },
         https: false,
         rewrite: nsb_core::model::RewritePreset::default(),
@@ -48,11 +75,22 @@ fn main() {
         Err(e) => println!("— 重建失败: {e}"),
     }
     println!("— rebuild 后 vhost:");
-    for e in std::fs::read_dir(state.paths.apache_sites_dir()).into_iter().flatten().flatten() {
+    for e in std::fs::read_dir(state.paths.apache_sites_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
         let p = e.path();
-        println!("   {} ({:?})", p.file_name().unwrap_or_default().to_string_lossy(), std::fs::metadata(&p).map(|m| m.len()));
+        println!(
+            "   {} ({:?})",
+            p.file_name().unwrap_or_default().to_string_lossy(),
+            std::fs::metadata(&p).map(|m| m.len())
+        );
     }
-    println!("— 服务已启动，端口池 = {:?}", state.store.get_port_assign("php@8.5.10"));
+    println!(
+        "— 服务已启动，端口池 = {:?}",
+        state.store.get_port_assign("php@8.5.10")
+    );
 
     for i in 1..=3 {
         std::thread::sleep(Duration::from_millis(600));
@@ -66,12 +104,26 @@ fn main() {
     }
     println!("== Apache error.log 末尾 ==");
     if let Ok(s) = std::fs::read_to_string(".extra-home/etc/apache/logs/error.log") {
-        let tail: String = s.chars().rev().take(900).collect::<Vec<_>>().into_iter().rev().collect();
+        let tail: String = s
+            .chars()
+            .rev()
+            .take(900)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         println!("{tail}");
     }
     println!("== php 池日志末尾 ==");
     if let Ok(s) = std::fs::read_to_string(".extra-home/logs/php_8.5.10/out.log") {
-        let tail: String = s.chars().rev().take(600).collect::<Vec<_>>().into_iter().rev().collect();
+        let tail: String = s
+            .chars()
+            .rev()
+            .take(600)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         println!("{tail}");
     }
     nsb_core::ops::stop_all(&state.store, &state.paths, &state.manager);

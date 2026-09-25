@@ -18,7 +18,11 @@ impl MySqlClient {
             .join(crate::ops::mysql_root_name(version))
             .join("bin")
             .join(crate::ops::exe_name("mysql"));
-        Self { exe, port, root_password }
+        Self {
+            exe,
+            port,
+            root_password,
+        }
     }
 
     fn run(&self, sql: &str) -> Result<String> {
@@ -39,9 +43,11 @@ impl MySqlClient {
             .map_err(|e| AppError::io("执行 mysql 客户端", e))?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
-            return Err(AppError::new("MYSQL_EXEC_FAILED", format!("MySQL 命令执行失败"))
-                .with_hint("确认 MySQL 服务已启动；root 密码可在「数据库」页重置")
-                .with_detail(err));
+            return Err(
+                AppError::new("MYSQL_EXEC_FAILED", format!("MySQL 命令执行失败"))
+                    .with_hint("确认 MySQL 服务已启动；root 密码可在「数据库」页重置")
+                    .with_detail(err),
+            );
         }
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     }
@@ -51,27 +57,27 @@ impl MySqlClient {
     }
 
     pub fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {
-        let out = self.run(
-            "SELECT schema_name FROM information_schema.schemata ORDER BY schema_name;",
-        )?;
+        let out =
+            self.run("SELECT schema_name FROM information_schema.schemata ORDER BY schema_name;")?;
         // 库大小：一次查询带全（空库无行 → size=None）
-        let sizes = self.run(
-            "SELECT table_schema, SUM(data_length+index_length) FROM information_schema.tables
+        let sizes = self
+            .run(
+                "SELECT table_schema, SUM(data_length+index_length) FROM information_schema.tables
              GROUP BY table_schema;",
-        )
-        .ok()
-        .map(|o| {
-            o.lines()
-                .skip(1)
-                .filter_map(|l| {
-                    let mut it = l.split('\t');
-                    let schema = it.next()?.trim().to_string();
-                    let bytes: u64 = it.next()?.trim().parse().ok()?;
-                    Some((schema, bytes / 1024))
-                })
-                .collect::<std::collections::HashMap<String, u64>>()
-        })
-        .unwrap_or_default();
+            )
+            .ok()
+            .map(|o| {
+                o.lines()
+                    .skip(1)
+                    .filter_map(|l| {
+                        let mut it = l.split('\t');
+                        let schema = it.next()?.trim().to_string();
+                        let bytes: u64 = it.next()?.trim().parse().ok()?;
+                        Some((schema, bytes / 1024))
+                    })
+                    .collect::<std::collections::HashMap<String, u64>>()
+            })
+            .unwrap_or_default();
 
         let mut list = Vec::new();
         for name in out.lines().skip(1).map(str::trim).filter(|l| !l.is_empty()) {
@@ -135,7 +141,10 @@ impl MySqlClient {
 
     pub fn reset_root_password(&self, new_password: &str) -> Result<()> {
         if new_password.is_empty() || new_password.contains('\'') {
-            return Err(AppError::new("BAD_PASSWORD", "密码不能为空且不能包含单引号"));
+            return Err(AppError::new(
+                "BAD_PASSWORD",
+                "密码不能为空且不能包含单引号",
+            ));
         }
         self.run(&format!(
             "ALTER USER 'root'@'localhost' IDENTIFIED BY '{new_password}';\

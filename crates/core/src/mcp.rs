@@ -160,7 +160,10 @@ pub fn handle_request(state: &Arc<crate::CoreState>, req: &Value) -> Option<Valu
                 .pointer("/params/name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let args = req.pointer("/params/arguments").cloned().unwrap_or(json!({}));
+            let args = req
+                .pointer("/params/arguments")
+                .cloned()
+                .unwrap_or(json!({}));
             let result = handle_tool_call(state, name, &args);
             Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
         }

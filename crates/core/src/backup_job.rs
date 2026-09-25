@@ -21,7 +21,9 @@ pub fn run_backup_now(store: &Store, paths: &Paths) -> Result<PathBuf> {
 
 /// 只保留最近 keep 份（按文件名倒序 = 时间倒序），多余的删除。
 pub fn rotate(dir: &std::path::Path, keep: usize) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut files: Vec<(String, std::path::PathBuf)> = rd
         .filter_map(|e| e.ok())
         .filter(|e| {
@@ -38,7 +40,10 @@ pub fn rotate(dir: &std::path::Path, keep: usize) {
 
 /// 距上次备份是否已到间隔（毫秒）。从未备份过 = 已到期。
 pub fn due(store: &Store, interval_ms: i64) -> bool {
-    match store.get_setting("lastAutoBackupAt").and_then(|v| v.parse::<i64>().ok()) {
+    match store
+        .get_setting("lastAutoBackupAt")
+        .and_then(|v| v.parse::<i64>().ok())
+    {
         Some(last) => crate::services::now_ms() - last >= interval_ms,
         None => true,
     }
@@ -53,8 +58,12 @@ pub const WEEKLY_MS: i64 = 7 * DAILY_MS;
 pub fn spawn_scheduler(paths: Paths) {
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(6 * 3600));
-        let Ok(store) = Store::open(paths.db()) else { continue };
-        let mode = store.get_setting("backupSchedule").unwrap_or_else(|| "off".into());
+        let Ok(store) = Store::open(paths.db()) else {
+            continue;
+        };
+        let mode = store
+            .get_setting("backupSchedule")
+            .unwrap_or_else(|| "off".into());
         let interval = match mode.as_str() {
             "daily" => Some(DAILY_MS),
             "weekly" => Some(WEEKLY_MS),
@@ -82,7 +91,11 @@ mod tests {
         // 一份备份落盘 + lastAutoBackupAt 更新
         let p = run_backup_now(&store, &paths).unwrap();
         assert!(p.is_file());
-        assert!(p.file_name().unwrap().to_string_lossy().starts_with("auto-"));
+        assert!(p
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("auto-"));
         assert!(store.get_setting("lastAutoBackupAt").is_some());
 
         // 内容是合法导出 JSON（含 format 标记）
@@ -109,7 +122,9 @@ mod tests {
         paths.ensure_dirs().unwrap();
         let store = Store::open(paths.db()).unwrap();
         assert!(due(&store, DAILY_MS), "从未备份 = 到期");
-        store.set_setting("lastAutoBackupAt", &crate::services::now_ms().to_string()).unwrap();
+        store
+            .set_setting("lastAutoBackupAt", &crate::services::now_ms().to_string())
+            .unwrap();
         assert!(!due(&store, DAILY_MS), "刚备份过 = 未到期");
     }
 }

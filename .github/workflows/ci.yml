@@ -80,6 +80,12 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # 格式不对直接失败，最先跑（秒级）；本地 `cargo fmt --all` 即可修复
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
@@ -107,3 +113,8 @@ jobs:
 
       - name: Check desktop crate
         run: cargo check -p niceservbay
+
+      # 不加 -D warnings：存量的风格类警告只提示不拦截，
+      # 但 clippy 默认 deny 的逻辑错误（如 `x || true` 恒真表达式）会让这步失败
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets

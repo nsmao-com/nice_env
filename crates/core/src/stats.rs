@@ -44,7 +44,11 @@ pub fn get_system_stats() -> SystemStats {
     let point = StatsPoint {
         t,
         cpu,
-        mem: if mem_total > 0.0 { (mem_used / mem_total) * 100.0 } else { 0.0 },
+        mem: if mem_total > 0.0 {
+            (mem_used / mem_total) * 100.0
+        } else {
+            0.0
+        },
     };
     {
         let mut h = HISTORY.lock();
@@ -154,12 +158,12 @@ pub fn redis_stats(port: u16) -> RedisStats {
         uptime_days: None,
         connected_clients: None,
     };
-    let Ok(mut stream) =
-        std::net::TcpStream::connect(("127.0.0.1", port))
-    else {
+    let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
         return empty;
     };
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).ok();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .ok();
     let cmd = resp_command(&["INFO"]);
     if stream.write_all(cmd.as_bytes()).is_err() {
         return empty;

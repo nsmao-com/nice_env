@@ -86,9 +86,14 @@ pub fn run_job(store: &Store, id: &str, manual: bool) -> Result<CronJob> {
 
 fn run_shell(command: &str) -> (String, String) {
     #[cfg(windows)]
-    let out = platform::command("cmd").args(["/C", command]).output();
+    let out = platform::command("cmd")
+        .args(["/C", command])
+        .output();
     #[cfg(not(windows))]
-    let out = platform::command("sh").arg("-c").arg(command).output();
+    let out = platform::command("sh")
+        .arg("-c")
+        .arg(command)
+        .output();
     match out {
         Ok(o) => {
             let text = format!(

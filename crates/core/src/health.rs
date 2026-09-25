@@ -166,7 +166,10 @@ pub fn check(
             let why = if root_missing {
                 format!("目录不存在：{}", s.root_dir)
             } else {
-                format!("需要的 PHP 版本未安装：{}", s.runtime.php_version.clone().unwrap_or_default())
+                format!(
+                    "需要的 PHP 版本未安装：{}",
+                    s.runtime.php_version.clone().unwrap_or_default()
+                )
             };
             broken_sites.push(format!("{}（{why}）", s.name));
         }
@@ -426,7 +429,13 @@ mod tests {
             if rank > 0 {
                 seen_lower = true;
             } else if seen_lower {
-                panic!("error 应排在最前，实际顺序：{:?}", r.items.iter().map(|x| format!("{:?}", x.severity)).collect::<Vec<_>>());
+                panic!(
+                    "error 应排在最前，实际顺序：{:?}",
+                    r.items
+                        .iter()
+                        .map(|x| format!("{:?}", x.severity))
+                        .collect::<Vec<_>>()
+                );
             }
         }
         let _ = std::fs::remove_dir_all(&t);

@@ -2,7 +2,7 @@
 
 use crate::configgen;
 use crate::error::{AppError, Result};
-use crate::model::{CreateSiteInput, Site, SiteKind, ServiceState};
+use crate::model::{CreateSiteInput, ServiceState, Site, SiteKind};
 use crate::paths::{write_with_backup, Paths};
 use crate::services::*;
 use crate::store::Store;
@@ -76,8 +76,10 @@ pub fn create(
     if input.name.trim().is_empty() {
         return Err(AppError::new("BAD_INPUT", "站点名称不能为空"));
     }
-    let domain_re = regex::Regex::new(r"^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$")
-        .unwrap();
+    let domain_re = regex::Regex::new(
+        r"^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$",
+    )
+    .unwrap();
     for d in &input.domains {
         if !domain_re.is_match(d) {
             return Err(AppError::new(
@@ -86,9 +88,11 @@ pub fn create(
             ));
         }
     }
-    if let Some(existing) = store.list_sites()?.iter().find(|s| {
-        s.domains.iter().any(|d| input.domains.contains(d))
-    }) {
+    if let Some(existing) = store
+        .list_sites()?
+        .iter()
+        .find(|s| s.domains.iter().any(|d| input.domains.contains(d)))
+    {
         return Err(AppError::new(
             "DOMAIN_CONFLICT",
             format!("域名已被站点「{}」使用", existing.name),
@@ -109,17 +113,30 @@ pub fn create(
         let version = store
             .find_installed("mysql", None)
             .map(|p| p.version)
-            .ok_or_else(|| AppError::not_installed("MySQL").with_hint("勾选创建数据库前需要先安装 MySQL"))?;
+            .ok_or_else(|| {
+                AppError::not_installed("MySQL").with_hint("勾选创建数据库前需要先安装 MySQL")
+            })?;
         // 确保运行
-        if manager.snapshot(&format!("mysql@{version}")).map(|s| s.state != ServiceState::Running).unwrap_or(true) {
+        if manager
+            .snapshot(&format!("mysql@{version}"))
+            .map(|s| s.state != ServiceState::Running)
+            .unwrap_or(true)
+        {
             crate::ops::start_service(store, paths, manager, &format!("mysql@{version}"))?;
         }
-        let pass = store.get_setting("mysqlRootPassword").unwrap_or_else(|| "root".into());
+        let pass = store
+            .get_setting("mysqlRootPassword")
+            .unwrap_or_else(|| "root".into());
         let client = crate::dbadmin::MySqlClient::from_state(paths, &version, ports.mysql, pass);
         client.create_database(&db.database)?;
         client.create_user_grant(&db.username, &db.password, &db.database)?;
         if input.write_env_example {
-            let env = crate::dbadmin::render_env_example(&db.database, &db.username, &db.password, ports.mysql);
+            let env = crate::dbadmin::render_env_example(
+                &db.database,
+                &db.username,
+                &db.password,
+                ports.mysql,
+            );
             std::fs::write(root.join(".env.example"), env).ok();
         }
     }
@@ -142,12 +159,15 @@ pub fn create(
         runtime,
         https: input.https,
         rewrite: input.rewrite.clone(),
-        db: input.create_db.as_ref().map(|d| crate::model::SiteDbBinding {
-            enabled: true,
-            database: d.database.clone(),
-            username: d.username.clone(),
-            password: d.password.clone(),
-        }),
+        db: input
+            .create_db
+            .as_ref()
+            .map(|d| crate::model::SiteDbBinding {
+                enabled: true,
+                database: d.database.clone(),
+                username: d.username.clone(),
+                password: d.password.clone(),
+            }),
         php_overrides: input.php_overrides.clone(),
         status: "running".into(),
         created_at: now,
@@ -213,8 +233,16 @@ pub fn delete(
     let site = get(store, id)?;
     let _ = std::fs::remove_file(paths.nginx_sites_dir().join(format!("{}.conf", site.id)));
     let _ = std::fs::remove_file(paths.apache_sites_dir().join(format!("{}.conf", site.id)));
-    let _ = std::fs::remove_file(paths.nginx_sites_dir().join(format!("{}.conf.disabled", site.id)));
-    let _ = std::fs::remove_file(paths.apache_sites_dir().join(format!("{}.conf.disabled", site.id)));
+    let _ = std::fs::remove_file(
+        paths
+            .nginx_sites_dir()
+            .join(format!("{}.conf.disabled", site.id)),
+    );
+    let _ = std::fs::remove_file(
+        paths
+            .apache_sites_dir()
+            .join(format!("{}.conf.disabled", site.id)),
+    );
     if remove_certs {
         for d in &site.domains {
             let _ = std::fs::remove_file(paths.certs().join("sites").join(format!("{d}.crt")));
@@ -235,7 +263,12 @@ pub fn delete(
 }
 
 /// 启动站点 = 确保 web server + php 运行 + 配置生效
-pub fn start_site(id: &str, paths: &Paths, store: &Store, manager: &Arc<ServiceManager>) -> Result<()> {
+pub fn start_site(
+    id: &str,
+    paths: &Paths,
+    store: &Store,
+    manager: &Arc<ServiceManager>,
+) -> Result<()> {
     let site = get(store, id)?;
     if let crate::model::SiteKind::Php = site.runtime.kind {
         let ver = site
@@ -244,16 +277,32 @@ pub fn start_site(id: &str, paths: &Paths, store: &Store, manager: &Arc<ServiceM
             .clone()
             .ok_or_else(|| AppError::new("NO_PHP_VERSION", "站点未绑定 PHP 版本"))?;
         let sid = format!("php@{ver}");
-        if manager.snapshot(&sid).map(|s| s.state != ServiceState::Running).unwrap_or(true) {
+        if manager
+            .snapshot(&sid)
+            .map(|s| s.state != ServiceState::Running)
+            .unwrap_or(true)
+        {
             crate::ops::start_service(store, paths, manager, &sid)?;
         }
     }
-    let web_server = if site.runtime.web_server == "apache" { "apache" } else { "nginx" };
-    if manager.snapshot(web_server).map(|s| s.state != ServiceState::Running).unwrap_or(true) {
+    let web_server = if site.runtime.web_server == "apache" {
+        "apache"
+    } else {
+        "nginx"
+    };
+    if manager
+        .snapshot(web_server)
+        .map(|s| s.state != ServiceState::Running)
+        .unwrap_or(true)
+    {
         crate::ops::start_service(store, paths, manager, web_server)?;
     }
     // 恢复 conf（若被停用）
-    let dir = if web_server == "apache" { paths.apache_sites_dir() } else { paths.nginx_sites_dir() };
+    let dir = if web_server == "apache" {
+        paths.apache_sites_dir()
+    } else {
+        paths.nginx_sites_dir()
+    };
     let disabled = dir.join(format!("{}.conf.disabled", site.id));
     if disabled.exists() {
         let enabled = dir.join(format!("{}.conf", site.id));
@@ -266,7 +315,12 @@ pub fn start_site(id: &str, paths: &Paths, store: &Store, manager: &Arc<ServiceM
 }
 
 /// 停止站点：禁用 vhost 并重载（不动 web server 本体）
-pub fn stop_site(id: &str, paths: &Paths, store: &Store, manager: &Arc<ServiceManager>) -> Result<()> {
+pub fn stop_site(
+    id: &str,
+    paths: &Paths,
+    store: &Store,
+    manager: &Arc<ServiceManager>,
+) -> Result<()> {
     let site = get(store, id)?;
     // 与批量停止共用同一段禁用逻辑，避免两处实现漂移
     disable_site_conf(paths, &site)?;
@@ -289,7 +343,13 @@ pub fn write_site_conf(paths: &Paths, store: &Store, site: &Site) -> Result<()> 
             }
             _ => None,
         };
-        let conf = configgen::render_httpd_vhost(site, ports.apache_http, ports.apache_https, &cert_dir, php_pool);
+        let conf = configgen::render_httpd_vhost(
+            site,
+            ports.apache_http,
+            ports.apache_https,
+            &cert_dir,
+            php_pool,
+        );
         let path = paths.apache_sites_dir().join(format!("{}.conf", site.id));
         write_with_backup(&path, &conf, &paths.backup())?;
     } else {
@@ -311,7 +371,11 @@ pub fn write_site_conf(paths: &Paths, store: &Store, site: &Site) -> Result<()> 
 
 /* ---- 模板脚手架 ---- */
 
-pub fn scaffold_template(template: &str, root: &std::path::Path, input: &CreateSiteInput) -> Result<()> {
+pub fn scaffold_template(
+    template: &str,
+    root: &std::path::Path,
+    input: &CreateSiteInput,
+) -> Result<()> {
     let is_php = matches!(input.runtime.kind, SiteKind::Php);
     match template {
         "blank-php" => {
@@ -319,10 +383,7 @@ pub fn scaffold_template(template: &str, root: &std::path::Path, input: &CreateS
                 root.join("index.php"),
                 "<?php\nheader('Content-Type: text/html; charset=utf-8');\necho '<h1>It works!</h1><p>NiceEnv PHP site.</p>';\necho '<p>PHP ' . PHP_VERSION . '</p>';\n",
             )?;
-            std::fs::write(
-                root.join("phpinfo.php"),
-                "<?php\nphpinfo();\n",
-            )?;
+            std::fs::write(root.join("phpinfo.php"), "<?php\nphpinfo();\n")?;
         }
         "laravel" => {
             let public = root.join("public");
@@ -640,10 +701,8 @@ mod scaffold_tests {
             use std::sync::atomic::{AtomicU64, Ordering};
             static SEQ: AtomicU64 = AtomicU64::new(0);
             let n = SEQ.fetch_add(1, Ordering::Relaxed);
-            let p = std::env::temp_dir().join(format!(
-                "nsb-scaffold-{tag}-{}-{n}",
-                std::process::id()
-            ));
+            let p =
+                std::env::temp_dir().join(format!("nsb-scaffold-{tag}-{}-{n}", std::process::id()));
             let _ = std::fs::remove_dir_all(&p);
             std::fs::create_dir_all(&p).unwrap();
             Tmp(p)
@@ -694,7 +753,13 @@ mod scaffold_tests {
         assert!(t.has("wp-config-sample.php"), "应给出配置样例");
         let c = std::fs::read_to_string(t.0.join("wp-config-sample.php")).unwrap();
         // 关键常量必须齐全，否则用户改名后 WordPress 起不来
-        for k in ["DB_NAME", "DB_USER", "DB_PASSWORD", "DB_HOST", "table_prefix"] {
+        for k in [
+            "DB_NAME",
+            "DB_USER",
+            "DB_PASSWORD",
+            "DB_HOST",
+            "table_prefix",
+        ] {
             assert!(c.contains(k), "wp-config 样例缺 {k}");
         }
     }
@@ -715,7 +780,11 @@ mod scaffold_tests {
         for tpl in ["wordpress", "thinkphp", "symfony", "codeigniter"] {
             let t = Tmp::new(tpl);
             scaffold_template(tpl, &t.0, &input(SiteKind::Php)).unwrap();
-            let entry = if tpl == "wordpress" { "index.php" } else { "public/index.php" };
+            let entry = if tpl == "wordpress" {
+                "index.php"
+            } else {
+                "public/index.php"
+            };
             let c = std::fs::read_to_string(t.0.join(entry)).unwrap();
             assert!(c.starts_with("<?php"), "{tpl} 的入口应以 <?php 开头");
         }
@@ -914,8 +983,16 @@ pub fn stop_many(
 /// 写出 vhost 并启用（不做 reload）
 fn write_site_conf_and_enable(paths: &Paths, store: &Store, site: &Site) -> Result<()> {
     write_site_conf(paths, store, site)?;
-    let web_server = if site.runtime.web_server == "apache" { "apache" } else { "nginx" };
-    let dir = if web_server == "apache" { paths.apache_sites_dir() } else { paths.nginx_sites_dir() };
+    let web_server = if site.runtime.web_server == "apache" {
+        "apache"
+    } else {
+        "nginx"
+    };
+    let dir = if web_server == "apache" {
+        paths.apache_sites_dir()
+    } else {
+        paths.nginx_sites_dir()
+    };
     // 启用：把 .conf.disabled 改回 .conf（若存在）
     let disabled = dir.join(format!("{}.conf.disabled", site.id));
     if disabled.exists() {
@@ -926,13 +1003,25 @@ fn write_site_conf_and_enable(paths: &Paths, store: &Store, site: &Site) -> Resu
 
 /// 禁用 vhost（不做 reload）
 fn disable_site_conf(paths: &Paths, site: &Site) -> Result<()> {
-    let web_server = if site.runtime.web_server == "apache" { "apache" } else { "nginx" };
-    let dir = if web_server == "apache" { paths.apache_sites_dir() } else { paths.nginx_sites_dir() };
+    let web_server = if site.runtime.web_server == "apache" {
+        "apache"
+    } else {
+        "nginx"
+    };
+    let dir = if web_server == "apache" {
+        paths.apache_sites_dir()
+    } else {
+        paths.nginx_sites_dir()
+    };
     let conf = dir.join(format!("{}.conf", site.id));
     if conf.exists() {
         std::fs::rename(&conf, conf.with_extension("conf.disabled"))?;
     }
-    let other_dir = if web_server == "apache" { paths.nginx_sites_dir() } else { paths.apache_sites_dir() };
+    let other_dir = if web_server == "apache" {
+        paths.nginx_sites_dir()
+    } else {
+        paths.apache_sites_dir()
+    };
     let other = other_dir.join(format!("{}.conf", site.id));
     if other.exists() {
         let _ = std::fs::rename(&other, other.with_extension("conf.disabled"));
@@ -940,14 +1029,15 @@ fn disable_site_conf(paths: &Paths, site: &Site) -> Result<()> {
     Ok(())
 }
 
-
 /// 站点级 PHP 覆盖 → rootDir/.user.ini（PHP 默认的用户级 ini 文件名）。
 /// 仅 php 站点写；键值做白名单字符校验，防止换行注入任意 ini 指令。
 pub fn write_user_ini(site: &Site) {
     if site.runtime.kind != crate::model::SiteKind::Php {
         return;
     }
-    let Some(overrides) = &site.php_overrides else { return };
+    let Some(overrides) = &site.php_overrides else {
+        return;
+    };
     let root = std::path::PathBuf::from(&site.root_dir);
     if !root.is_dir() {
         return;
@@ -960,7 +1050,10 @@ pub fn write_user_ini(site: &Site) {
             continue;
         }
         // 键只允许 ini 键字符；值不允许换行（防注入第二条指令）
-        if !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.') {
+        if !k
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+        {
             continue;
         }
         let v = v.replace('\n', " ").replace('\r', " ");
@@ -968,7 +1061,6 @@ pub fn write_user_ini(site: &Site) {
     }
     std::fs::write(root.join(".user.ini"), body).ok();
 }
-
 
 /// 读取项目运行时锁定文件 {rootDir}/.nsb.json。
 /// 目前支持 {"php": "x.y.z"}；返回 (kind, version)。文件损坏/字段非法 → None。

@@ -433,6 +433,17 @@ export const getAppVersion = () => safe(invoke<string>("get_app_version"));
 export const getDataDir = () => safe(invoke<string>("get_data_dir"));
 export const checkUpdates = () => safe(invoke<UpdateCheckResult>("check_updates"));
 
+/** 拉取远端套件清单（设置项 manifestUrl）并落盘为快照；下次启动生效 */
+export const refreshRemoteManifest = (url?: string) =>
+  safe(
+    invoke<{ revision: number; packages: number; path: string; takesEffect: "restart" }>(
+      "refresh_remote_manifest",
+      { url: url ?? null }
+    )
+  );
+/** 删除远端清单快照，回退到内置清单；下次启动生效 */
+export const resetRemoteManifest = () => safe(invoke<boolean>("reset_remote_manifest"));
+
 /** 在线下载更新包；进度通过 `update://progress` 事件回报 */
 export const downloadUpdate = (url: string, version: string, assetName?: string | null) =>
   safe(invoke<DownloadUpdateResult>("download_update", { url, version, assetName: assetName ?? null }));

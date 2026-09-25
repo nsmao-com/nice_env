@@ -182,7 +182,9 @@ impl Paths {
         self.data().join("mongodb").join(version)
     }
     pub fn service_log(&self, service_id: &str) -> PathBuf {
-        self.logs().join(service_id.replace(['@', ':'], "_")).join("out.log")
+        self.logs()
+            .join(service_id.replace(['@', ':'], "_"))
+            .join("out.log")
     }
 }
 
@@ -260,12 +262,18 @@ pub fn restore_backup(base: &Path, backup_name: &str) -> std::io::Result<PathBuf
     let mut target: Option<PathBuf> = None;
     let mut stack = vec![etc.clone()];
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in rd.filter_map(|e| e.ok()) {
             let p = e.path();
             if p.is_dir() {
                 stack.push(p);
-            } else if p.file_name().map(|n| n.to_string_lossy() == orig).unwrap_or(false) {
+            } else if p
+                .file_name()
+                .map(|n| n.to_string_lossy() == orig)
+                .unwrap_or(false)
+            {
                 target = Some(p);
                 break;
             }

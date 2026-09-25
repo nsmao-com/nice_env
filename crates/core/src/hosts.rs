@@ -40,12 +40,15 @@ pub fn managed_entries(store: &Store) -> Vec<(String, String)> {
 /// 读取整个 hosts 解析为条目列表（含托管标记）
 pub fn read_all() -> Result<Vec<HostsEntry>> {
     let content = platform::read_hosts_file().map_err(crate::error::AppError::from)?;
+    let lines: Vec<&str> = content.lines().collect();
+    // 与 platform::merge_hosts_content 同一口径：结束标记缺失时，孤立的开始标记不算托管块
+    let starts = platform::hosts_block_starts(&lines);
     let mut in_managed = false;
     let mut out = Vec::new();
-    for line in content.lines() {
+    for (i, line) in lines.iter().enumerate() {
         let t = line.trim();
         if t == platform::HOSTS_BEGIN || t == platform::HOSTS_BEGIN_LEGACY {
-            in_managed = true;
+            in_managed = starts[i];
             continue;
         }
         if t == platform::HOSTS_END || t == platform::HOSTS_END_LEGACY {
@@ -82,7 +85,11 @@ pub fn apply(store: &Store, paths: &Paths, entries: Option<Vec<HostsEntry>>) -> 
             .filter(|e| !e.domain.trim().is_empty())
             .filter(|e| !site_domains.contains(&e.domain))
             .map(|e| {
-                let ip = if e.ip.trim().is_empty() { "127.0.0.1".to_string() } else { e.ip.trim().to_string() };
+                let ip = if e.ip.trim().is_empty() {
+                    "127.0.0.1".to_string()
+                } else {
+                    e.ip.trim().to_string()
+                };
                 (ip, e.domain.trim().to_string())
             })
             .collect();
@@ -90,7 +97,10 @@ pub fn apply(store: &Store, paths: &Paths, entries: Option<Vec<HostsEntry>>) -> 
     }
 
     // 冒烟/无头测试跳过（避免无管理员权限时改系统 hosts）
-    if std::env::var("NSB_SKIP_HOSTS").map(|v| v == "1").unwrap_or(false) {
+    if std::env::var("NSB_SKIP_HOSTS")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
         return Ok(());
     }
     let merged = managed_entries(store);

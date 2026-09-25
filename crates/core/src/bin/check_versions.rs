@@ -15,8 +15,19 @@ async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let ids: Vec<String> = if args.is_empty() {
         // 覆盖每一种版本源类型
-        ["php", "node", "go", "nginx", "caddy", "mailpit", "minio", "memcached"]
-            .iter().map(|s| s.to_string()).collect()
+        [
+            "php",
+            "node",
+            "go",
+            "nginx",
+            "caddy",
+            "mailpit",
+            "minio",
+            "memcached",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
     } else {
         args
     };
@@ -66,7 +77,10 @@ async fn main() {
                     .await;
                 match probe {
                     Ok(r) if r.status().is_success() || r.status().is_redirection() => {
-                        println!("       ✓ 最新版本下载地址可达（HTTP {}）", r.status().as_u16());
+                        println!(
+                            "       ✓ 最新版本下载地址可达（HTTP {}）",
+                            r.status().as_u16()
+                        );
                         pass += 1;
                     }
                     Ok(r) => {
@@ -96,11 +110,17 @@ async fn main() {
         let ms = t.elapsed().as_millis();
         match cached {
             Ok(c) if !c.remote.is_empty() && ms < 400 => {
-                println!("[PASS] 缓存命中        {first} 二次拉取 {ms}ms（{} 个版本）", c.remote.len());
+                println!(
+                    "[PASS] 缓存命中        {first} 二次拉取 {ms}ms（{} 个版本）",
+                    c.remote.len()
+                );
                 pass += 1;
             }
             Ok(c) => {
-                println!("[FAIL] 缓存命中        {first} 二次拉取 {ms}ms（{} 个版本，期望 <400ms）", c.remote.len());
+                println!(
+                    "[FAIL] 缓存命中        {first} 二次拉取 {ms}ms（{} 个版本，期望 <400ms）",
+                    c.remote.len()
+                );
                 fail += 1;
             }
             Err(e) => {

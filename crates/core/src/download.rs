@@ -2,8 +2,8 @@
 //! 进度通过 EventSink 以 "download://progress" 推给前端；smoke 测试用打印 sink。
 
 use crate::error::{AppError, Result};
-use crate::paths::Paths;
 use crate::model::DownloadProgress;
+use crate::paths::Paths;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -54,14 +54,25 @@ impl Downloader {
         }
 
         let cancel = Arc::new(AtomicBool::new(false));
-        self.cancels.lock().insert(task_id.to_string(), cancel.clone());
+        self.cancels
+            .lock()
+            .insert(task_id.to_string(), cancel.clone());
 
         let part_path = paths.downloads().join(format!("{task_id}.part"));
         let mut last_err: Option<String> = None;
 
         for url in urls {
             match self
-                .download_one(task_id, url, &part_path, &final_path, expected_sha256, expected_size, &cancel, emit)
+                .download_one(
+                    task_id,
+                    url,
+                    &part_path,
+                    &final_path,
+                    expected_sha256,
+                    expected_size,
+                    &cancel,
+                    emit,
+                )
                 .await
             {
                 Ok(p) => {
@@ -75,7 +86,14 @@ impl Downloader {
                         return Err(e);
                     }
                     last_err = Some(format!("{url} → {e}"));
-                    emit(crate::Event::progress(task_id, 0, expected_size, 0, 0.0, "downloading"));
+                    emit(crate::Event::progress(
+                        task_id,
+                        0,
+                        expected_size,
+                        0,
+                        0.0,
+                        "downloading",
+                    ));
                 }
             }
         }
@@ -117,7 +135,10 @@ impl Downloader {
         if offset > 0 {
             req = req.header("Range", format!("bytes={offset}-"));
         }
-        let resp = req.send().await.map_err(|e| AppError::download(url, e.to_string()))?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| AppError::download(url, e.to_string()))?;
 
         let status = resp.status();
         let resumable = status.as_u16() == 206;
@@ -164,7 +185,8 @@ impl Downloader {
             if cancel.load(Ordering::SeqCst) {
                 file.flush().await.ok();
                 drop(file);
-                return Err(AppError::new("CANCELLED", "下载已取消").with_hint("已下载的部分会保留，下次继续"));
+                return Err(AppError::new("CANCELLED", "下载已取消")
+                    .with_hint("已下载的部分会保留，下次继续"));
             }
             let chunk = chunk.map_err(|e| AppError::download(url, e.to_string()))?;
             hasher.update(&chunk);
@@ -201,7 +223,14 @@ impl Downloader {
         file.flush().await.map_err(|e| AppError::io("落盘", e))?;
         drop(file);
 
-        emit(crate::Event::progress(task_id, received, total, speed_bps, 0.0, "verifying"));
+        emit(crate::Event::progress(
+            task_id,
+            received,
+            total,
+            speed_bps,
+            0.0,
+            "verifying",
+        ));
 
         // 校验
         let actual = {
@@ -212,7 +241,10 @@ impl Downloader {
             let mut buf = vec![0u8; 1024 * 512];
             let mut hasher = Sha256::new();
             loop {
-                let n = f.read(&mut buf).await.map_err(|e| AppError::io("读取", e))?;
+                let n = f
+                    .read(&mut buf)
+                    .await
+                    .map_err(|e| AppError::io("读取", e))?;
                 if n == 0 {
                     break;
                 }
@@ -222,9 +254,11 @@ impl Downloader {
         };
         if expected_sha256 != "0" && actual != expected_sha256.to_lowercase() {
             let _ = std::fs::remove_file(part_path);
-            return Err(AppError::new("CHECKSUM_MISMATCH", "文件校验失败（sha256 不匹配）")
-                .with_hint("下载可能被中断或源损坏，已自动清理，请重试")
-                .with_detail(format!("expect={expected_sha256} actual={actual}")));
+            return Err(
+                AppError::new("CHECKSUM_MISMATCH", "文件校验失败（sha256 不匹配）")
+                    .with_hint("下载可能被中断或源损坏，已自动清理，请重试")
+                    .with_detail(format!("expect={expected_sha256} actual={actual}")),
+            );
         }
 
         // part → final
@@ -234,7 +268,14 @@ impl Downloader {
         tokio::fs::rename(part_path, final_path)
             .await
             .map_err(|e| AppError::io("重命名下载文件", e))?;
-        emit(crate::Event::progress(task_id, total, total, speed_bps, 0.0, "downloaded"));
+        emit(crate::Event::progress(
+            task_id,
+            total,
+            total,
+            speed_bps,
+            0.0,
+            "downloaded",
+        ));
         Ok(final_path.to_path_buf())
     }
 }

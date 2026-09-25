@@ -28,7 +28,8 @@ pub const PANEL_LABEL: &str = "tray-panel";
 pub const PANEL_W: f64 = 384.0;
 
 /// 最近一次托盘图标的屏幕矩形（物理像素：x, y, w, h），用于把面板弹到图标旁边
-static LAST_TRAY_RECT: std::sync::Mutex<(f64, f64, f64, f64)> = std::sync::Mutex::new((0.0, 0.0, 0.0, 0.0));
+static LAST_TRAY_RECT: std::sync::Mutex<(f64, f64, f64, f64)> =
+    std::sync::Mutex::new((0.0, 0.0, 0.0, 0.0));
 /// 面板因失焦被隐藏的时间点：Windows 上点托盘会先让面板失焦（触发 hide），
 /// 紧接着才收到 Click 事件。若刚因失焦隐藏过，就认定这次点击是「想收起」，
 /// 不再重新弹出——否则面板会永远关不上。
@@ -37,7 +38,13 @@ static PANEL_BLURRED_AT: std::sync::Mutex<Option<std::time::Instant>> = std::syn
 /* ================= 服务元数据 ================= */
 
 /// 服务分组标题（下标与 `group_of` 的返回值一一对应）
-const GROUP_TITLES: [&str; 5] = ["Web 服务器", "语言运行时", "数据库", "缓存 / 队列", "工具 / 代理"];
+const GROUP_TITLES: [&str; 5] = [
+    "Web 服务器",
+    "语言运行时",
+    "数据库",
+    "缓存 / 队列",
+    "工具 / 代理",
+];
 
 /// 服务分组顺序：Web 服务器 → 语言运行时 → 数据库 → 缓存/队列 → 工具/代理（含长尾服务）
 fn group_of(id: &str) -> u8 {
@@ -45,7 +52,13 @@ fn group_of(id: &str) -> u8 {
     match base {
         "nginx" | "apache" => 0,
         "php" | "node" | "python" | "go" => 1,
-        s if s.starts_with("java") || s.starts_with("temurin") || s.contains("jdk") || s.contains("jre") => 1,
+        s if s.starts_with("java")
+            || s.starts_with("temurin")
+            || s.contains("jdk")
+            || s.contains("jre") =>
+        {
+            1
+        }
         "mysql" | "postgresql" | "mongodb" => 2,
         "redis" | "memcached" => 3,
         // mihomo 与清单里的长尾服务（caddy / minio / meilisearch …）统一收在最后一组
@@ -138,7 +151,12 @@ fn badge_icon(base: &Image<'static>, running: usize) -> Image<'static> {
             }
             let a = cov.clamp(0.0, 1.0);
             // 覆盖式混色：角标压在原图标之上
-            let (sr, sg, sb, sa) = (px[i] as f32 / 255.0, px[i + 1] as f32 / 255.0, px[i + 2] as f32 / 255.0, px[i + 3] as f32 / 255.0);
+            let (sr, sg, sb, sa) = (
+                px[i] as f32 / 255.0,
+                px[i + 1] as f32 / 255.0,
+                px[i + 2] as f32 / 255.0,
+                px[i + 3] as f32 / 255.0,
+            );
             let nr = (br as f32 / 255.0) * a + sr * (1.0 - a);
             let ng = (bg as f32 / 255.0) * a + sg * (1.0 - a);
             let nb = (bb as f32 / 255.0) * a + sb * (1.0 - a);
@@ -172,7 +190,10 @@ fn base_icon<R: Runtime>(app: &AppHandle<R>) -> Image<'static> {
 
 fn tooltip_text(state: &Arc<CoreState>) -> String {
     let services = state.service_status_list();
-    let running = services.iter().filter(|s| s.state == ServiceState::Running).count();
+    let running = services
+        .iter()
+        .filter(|s| s.state == ServiceState::Running)
+        .count();
     if running == 0 {
         "NiceEnv — 本地开发环境（全部已停止）".into()
     } else {
@@ -183,9 +204,15 @@ fn tooltip_text(state: &Arc<CoreState>) -> String {
 /* ================= 面板数据 ================= */
 
 /// 面板渲染所需的全部状态（一次拉齐，前端零业务逻辑）
-pub fn panel_state_json<R: Runtime>(app: &AppHandle<R>, state: &Arc<CoreState>) -> serde_json::Value {
+pub fn panel_state_json<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &Arc<CoreState>,
+) -> serde_json::Value {
     let services = state.service_status_list();
-    let running = services.iter().filter(|s| s.state == ServiceState::Running).count();
+    let running = services
+        .iter()
+        .filter(|s| s.state == ServiceState::Running)
+        .count();
     let active = services
         .iter()
         .filter(|s| matches!(s.state, ServiceState::Running | ServiceState::Starting))
@@ -223,7 +250,11 @@ pub fn panel_state_json<R: Runtime>(app: &AppHandle<R>, state: &Arc<CoreState>) 
         .into_iter()
         .take(6)
         .map(|s| {
-            let domain = s.domains.first().cloned().unwrap_or_else(|| "localhost".into());
+            let domain = s
+                .domains
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "localhost".into());
             let scheme = if s.https { "https" } else { "http" };
             let port = if s.https { ports.https } else { ports.http };
             let std_port = (s.https && port == 443) || (!s.https && port == 80);
@@ -284,7 +315,8 @@ fn build_panel<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let handle = app.clone();
     panel.on_window_event(move |e| {
         if let tauri::WindowEvent::Focused(false) = e {
-            *PANEL_BLURRED_AT.lock().unwrap_or_else(|p| p.into_inner()) = Some(std::time::Instant::now());
+            *PANEL_BLURRED_AT.lock().unwrap_or_else(|p| p.into_inner()) =
+                Some(std::time::Instant::now());
             if let Some(w) = handle.get_webview_window(PANEL_LABEL) {
                 let _ = w.hide();
             }
@@ -317,14 +349,17 @@ fn position_panel<R: Runtime>(app: &AppHandle<R>) {
         if let Some(m) = mon {
             let margin = 8.0;
             let min_x = m.position().x as f64 + margin;
-            let max_x = (m.position().x + m.size().width as i32) as f64 - size.width as f64 - margin;
+            let max_x =
+                (m.position().x + m.size().width as i32) as f64 - size.width as f64 - margin;
             let min_y = m.position().y as f64 + margin;
             x = x.clamp(min_x, max_x.max(min_x));
             y = y.max(min_y);
         }
     }
 
-    let _ = panel.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x as i32, y as i32)));
+    let _ = panel.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+        x as i32, y as i32,
+    )));
 }
 
 /// 托盘点击 → 弹出 / 收起面板。（tx/ty/tw/th = 托盘图标矩形，物理像素）
@@ -417,7 +452,10 @@ pub fn refresh<R: Runtime>(app: &AppHandle<R>) {
 
 /// 面板初始数据（HTML 加载后 invoke 一次；此后靠 tray://state 增量推送）
 #[tauri::command]
-pub fn tray_panel_state(app: tauri::AppHandle, state: State<'_, Arc<CoreState>>) -> serde_json::Value {
+pub fn tray_panel_state(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<CoreState>>,
+) -> serde_json::Value {
     panel_state_json(&app, state.inner())
 }
 
@@ -438,7 +476,11 @@ pub fn tray_stop_all(app: tauri::AppHandle, state: State<'_, Arc<CoreState>>) ->
 /// 打开主窗口；path → 路由跳转，action → 让前端开「检查更新 / 关于」弹窗。
 /// 同时收起面板（主窗口抢焦点后面板也该消失）。
 #[tauri::command]
-pub fn tray_open_main<R: Runtime>(app: tauri::AppHandle<R>, path: Option<String>, action: Option<String>) -> bool {
+pub fn tray_open_main<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    path: Option<String>,
+    action: Option<String>,
+) -> bool {
     show_main(&app);
     match action.as_deref() {
         Some("check-update") => {

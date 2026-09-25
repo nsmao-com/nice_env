@@ -75,10 +75,7 @@ impl Store {
             "#,
         )?;
         // 轻量迁移：旧库补列（已存在则报错被忽略）
-        let _ = conn.execute(
-            "ALTER TABLE sites ADD COLUMN php_overrides TEXT",
-            [],
-        );
+        let _ = conn.execute("ALTER TABLE sites ADD COLUMN php_overrides TEXT", []);
         Ok(Self {
             conn: parking_lot::Mutex::new(conn),
         })
@@ -88,9 +85,11 @@ impl Store {
 
     pub fn get_setting(&self, key: &str) -> Option<String> {
         let conn = self.conn.lock();
-        conn.query_row("SELECT value FROM settings WHERE key=?1", params![key], |r| {
-            r.get(0)
-        })
+        conn.query_row(
+            "SELECT value FROM settings WHERE key=?1",
+            params![key],
+            |r| r.get(0),
+        )
         .optional()
         .ok()
         .flatten()
@@ -115,7 +114,11 @@ impl Store {
     }
 
     pub fn set_setting_json<T: serde::Serialize>(&self, key: &str, value: &T) -> Result<()> {
-        self.set_setting(key, &serde_json::to_string(value).map_err(|e| AppError::internal("序列化设置", e.to_string()))?)
+        self.set_setting(
+            key,
+            &serde_json::to_string(value)
+                .map_err(|e| AppError::internal("序列化设置", e.to_string()))?,
+        )
     }
 
     /// 全量设置（导出配置用）
@@ -153,7 +156,10 @@ impl Store {
 
     pub fn remove_installed(&self, id: &str, version: &str) -> Result<()> {
         let conn = self.conn.lock();
-        conn.execute("DELETE FROM installed WHERE id=?1 AND version=?2", params![id, version])?;
+        conn.execute(
+            "DELETE FROM installed WHERE id=?1 AND version=?2",
+            params![id, version],
+        )?;
         Ok(())
     }
 
@@ -247,8 +253,7 @@ impl Store {
                 https: r.get::<_, i32>(5)? != 0,
                 rewrite: serde_json::from_str(&rewrite).unwrap_or_default(),
                 db: db.and_then(|d| serde_json::from_str(&d).ok()),
-                php_overrides: php_overrides
-                    .and_then(|o| serde_json::from_str(&o).ok()),
+                php_overrides: php_overrides.and_then(|o| serde_json::from_str(&o).ok()),
                 status: "running".into(),
                 created_at: r.get(9)?,
                 updated_at: r.get(10)?,
@@ -327,7 +332,13 @@ impl Store {
             "INSERT INTO proxy_profiles(id,name,url,active,added_at)
              VALUES(?1,?2,?3,?4,?5)
              ON CONFLICT(id) DO UPDATE SET name=?2, url=?3, active=?4",
-            params![id, name, url, active as i32, chrono::Utc::now().timestamp_millis()],
+            params![
+                id,
+                name,
+                url,
+                active as i32,
+                chrono::Utc::now().timestamp_millis()
+            ],
         )?;
         Ok(())
     }
@@ -341,7 +352,10 @@ impl Store {
     pub fn set_active_proxy_profile(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock();
         conn.execute("UPDATE proxy_profiles SET active=0", [])?;
-        conn.execute("UPDATE proxy_profiles SET active=1 WHERE id=?1", params![id])?;
+        conn.execute(
+            "UPDATE proxy_profiles SET active=1 WHERE id=?1",
+            params![id],
+        )?;
         Ok(())
     }
 
@@ -426,10 +440,17 @@ impl Store {
 
     pub fn list_proxy_profiles(&self) -> Result<Vec<(String, String, String, bool, i64)>> {
         let conn = self.conn.lock();
-        let mut stmt =
-            conn.prepare("SELECT id,name,url,active,added_at FROM proxy_profiles ORDER BY added_at DESC")?;
+        let mut stmt = conn.prepare(
+            "SELECT id,name,url,active,added_at FROM proxy_profiles ORDER BY added_at DESC",
+        )?;
         let rows = stmt.query_map([], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i32>(3)? != 0, r.get(4)?))
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get::<_, i32>(3)? != 0,
+                r.get(4)?,
+            ))
         })?;
         let mut out = Vec::new();
         for row in rows {
@@ -471,7 +492,9 @@ impl Store {
         let Ok(mut stmt) = conn.prepare("SELECT service_id,base_port FROM port_assign") else {
             return Vec::new();
         };
-        let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u16))) else {
+        let Ok(rows) = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u16))
+        }) else {
             return Vec::new();
         };
         rows.filter_map(|r| r.ok()).collect()
@@ -483,10 +506,13 @@ impl Store {
     /// 键名与 PortsProfile 的字段一一对应（http/https/mysql/redis/…）。
     pub fn port_overrides(&self) -> Vec<(String, String)> {
         let conn = self.conn.lock();
-        let Ok(mut stmt) = conn.prepare("SELECT key, value FROM settings WHERE key LIKE 'portOverride.%'") else {
+        let Ok(mut stmt) =
+            conn.prepare("SELECT key, value FROM settings WHERE key LIKE 'portOverride.%'")
+        else {
             return Vec::new();
         };
-        let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) else {
+        let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        else {
             return Vec::new();
         };
         rows.filter_map(|r| r.ok())
@@ -499,7 +525,10 @@ impl Store {
             Some(p) => self.set_setting(&format!("portOverride.{key}"), &p.to_string()),
             None => {
                 let conn = self.conn.lock();
-                conn.execute("DELETE FROM settings WHERE key=?1", params![format!("portOverride.{key}")])?;
+                conn.execute(
+                    "DELETE FROM settings WHERE key=?1",
+                    params![format!("portOverride.{key}")],
+                )?;
                 Ok(())
             }
         }
@@ -567,14 +596,19 @@ impl Store {
         conn.execute(
             "INSERT INTO cert_automations(id,data,updated_at) VALUES(?1,?2,?3)
              ON CONFLICT(id) DO UPDATE SET data=?2, updated_at=?3",
-            params![a.id, serde_json::to_string(a).unwrap_or_else(|_| "{}".into()), a.updated_at],
+            params![
+                a.id,
+                serde_json::to_string(a).unwrap_or_else(|_| "{}".into()),
+                a.updated_at
+            ],
         )?;
         Ok(())
     }
 
     pub fn list_cert_automations(&self) -> Result<Vec<CertAutomation>> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare("SELECT data FROM cert_automations ORDER BY updated_at DESC")?;
+        let mut stmt =
+            conn.prepare("SELECT data FROM cert_automations ORDER BY updated_at DESC")?;
         let list = stmt
             .query_map([], |r| r.get::<_, String>(0))?
             .filter_map(|r| r.ok())
@@ -584,7 +618,10 @@ impl Store {
     }
 
     pub fn get_cert_automation(&self, id: &str) -> Result<Option<CertAutomation>> {
-        Ok(self.list_cert_automations()?.into_iter().find(|a| a.id == id))
+        Ok(self
+            .list_cert_automations()?
+            .into_iter()
+            .find(|a| a.id == id))
     }
 
     pub fn delete_cert_automation(&self, id: &str) -> Result<()> {
@@ -600,7 +637,11 @@ impl Store {
         conn.execute(
             "INSERT INTO cert_monitors(id,data,updated_at) VALUES(?1,?2,?3)
              ON CONFLICT(id) DO UPDATE SET data=?2, updated_at=?3",
-            params![m.id, serde_json::to_string(m).unwrap_or_else(|_| "{}".into()), m.updated_at],
+            params![
+                m.id,
+                serde_json::to_string(m).unwrap_or_else(|_| "{}".into()),
+                m.updated_at
+            ],
         )?;
         Ok(())
     }

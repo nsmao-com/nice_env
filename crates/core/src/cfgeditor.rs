@@ -115,30 +115,38 @@ pub struct ConfigIssue {
 }
 
 /// 解析出配置文件路径。只认白名单，其余一律拒绝。
-pub fn resolve_path(paths: &Paths, store: &crate::store::Store, kind: ConfigKind) -> Result<PathBuf> {
+pub fn resolve_path(
+    paths: &Paths,
+    store: &crate::store::Store,
+    kind: ConfigKind,
+) -> Result<PathBuf> {
     let installed = |id: &str| store.find_installed(id, None).map(|p| p.version);
     let p = match kind {
         ConfigKind::NginxMain => paths.nginx_conf(),
         ConfigKind::PhpIni => {
-            let v = installed("php")
-                .ok_or_else(|| AppError::not_installed("PHP").with_hint("先到「套件 / 服务」安装一个 PHP 版本"))?;
+            let v = installed("php").ok_or_else(|| {
+                AppError::not_installed("PHP").with_hint("先到「套件 / 服务」安装一个 PHP 版本")
+            })?;
             paths.php_ini(&v)
         }
         ConfigKind::MySqlIni => {
-            let v = installed("mysql")
-                .ok_or_else(|| AppError::not_installed("MySQL").with_hint("先到「套件 / 服务」安装 MySQL"))?;
+            let v = installed("mysql").ok_or_else(|| {
+                AppError::not_installed("MySQL").with_hint("先到「套件 / 服务」安装 MySQL")
+            })?;
             paths.mysql_ini(&v)
         }
         ConfigKind::RedisConf => {
-            let v = installed("redis")
-                .ok_or_else(|| AppError::not_installed("Redis").with_hint("先到「套件 / 服务」安装 Redis"))?;
+            let v = installed("redis").ok_or_else(|| {
+                AppError::not_installed("Redis").with_hint("先到「套件 / 服务」安装 Redis")
+            })?;
             paths.redis_conf(&v)
         }
         ConfigKind::ApacheConf => paths.apache_conf(),
         ConfigKind::MihomoConfig => {
             if installed("mihomo").is_none() {
-                return Err(AppError::not_installed("mihomo")
-                    .with_hint("先到「套件 / 服务」安装 mihomo"));
+                return Err(
+                    AppError::not_installed("mihomo").with_hint("先到「套件 / 服务」安装 mihomo")
+                );
             }
             paths.mihomo_config()
         }
@@ -168,11 +176,7 @@ fn label_of(kind: ConfigKind) -> (&'static str, &'static str, Option<&'static st
             "Redis 配置（端口、持久化、内存上限）",
             Some("redis"),
         ),
-        ConfigKind::ApacheConf => (
-            "httpd.conf",
-            "Apache 主配置",
-            Some("apache"),
-        ),
+        ConfigKind::ApacheConf => ("httpd.conf", "Apache 主配置", Some("apache")),
         ConfigKind::MihomoConfig => (
             "config.yaml",
             "Clash / mihomo 配置。用「代理」页导入订阅会覆盖这里",
@@ -217,11 +221,8 @@ pub fn list_configs(paths: &Paths, store: &crate::store::Store) -> Vec<ConfigFil
 pub fn read_config(paths: &Paths, store: &crate::store::Store, kind: ConfigKind) -> Result<String> {
     let path = resolve_path(paths, store, kind)?;
     if !path.is_file() {
-        return Err(AppError::new(
-            "CONFIG_NOT_GENERATED",
-            "该配置文件还没生成",
-        )
-        .with_hint("先启动一次对应的服务，配置会自动生成"));
+        return Err(AppError::new("CONFIG_NOT_GENERATED", "该配置文件还没生成")
+            .with_hint("先启动一次对应的服务，配置会自动生成"));
     }
     std::fs::read_to_string(&path).map_err(|e| AppError::io("读取配置文件", e))
 }
@@ -445,7 +446,8 @@ pub fn validate(
                     // 临时文件必须与真实配置同目录：nginx 的相对路径 include 才成立
                     let tmp = paths.etc().join("nginx").join(".nsb-validate.conf");
                     std::fs::create_dir_all(paths.etc().join("nginx")).ok();
-                    std::fs::write(&tmp, content).map_err(|e| AppError::io("写入临时校验文件", e))?;
+                    std::fs::write(&tmp, content)
+                        .map_err(|e| AppError::io("写入临时校验文件", e))?;
                     let out = platform::command(&exe)
                         .arg("-t")
                         .arg("-c")
@@ -577,7 +579,10 @@ pub fn list_config_backups(paths: &Paths) -> Vec<ConfigBackup> {
     };
     for e in rd.flatten() {
         let p = e.path();
-        let name = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let name = p
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
         if !name.ends_with(".bak") {
             continue;
         }
@@ -603,7 +608,11 @@ pub fn list_config_backups(paths: &Paths) -> Vec<ConfigBackup> {
 }
 
 /// 回滚到某个备份。目标由备份文件名反推（去掉 .时间戳.bak）。
-pub fn rollback_config(paths: &Paths, store: &crate::store::Store, backup_name: &str) -> Result<()> {
+pub fn rollback_config(
+    paths: &Paths,
+    store: &crate::store::Store,
+    backup_name: &str,
+) -> Result<()> {
     let dir = paths.backup().join("config");
     let src = dir.join(backup_name);
     // 防路径穿越：文件名里不能带分隔符
@@ -629,9 +638,7 @@ pub fn rollback_config(paths: &Paths, store: &crate::store::Store, backup_name: 
                 .map(|f| f.to_string_lossy() == orig)
                 .unwrap_or(false)
         })
-        .ok_or_else(|| {
-            AppError::new("FORBIDDEN", "该备份不对应任何可编辑的配置文件")
-        })?;
+        .ok_or_else(|| AppError::new("FORBIDDEN", "该备份不对应任何可编辑的配置文件"))?;
 
     let content = std::fs::read_to_string(&src).map_err(|e| AppError::io("读取备份", e))?;
     // 回滚前把当前内容也存一份，免得回滚本身变成不可逆操作
@@ -724,13 +731,15 @@ mod tests {
     #[test]
     fn nginx_lint_ignores_braces_in_comments() {
         // 注释里的花括号不应该影响配平
-        let issues = lint_nginx("http {\n  # note: use { } carefully\n  server { listen 80; }\n}\n");
+        let issues =
+            lint_nginx("http {\n  # note: use { } carefully\n  server { listen 80; }\n}\n");
         assert!(issues.is_empty(), "注释里的花括号不该干扰：{issues:?}");
     }
 
     #[test]
     fn nginx_lint_accepts_valid_config() {
-        let good = "events { worker_connections 1024; }\nhttp {\n  server {\n    listen 80;\n  }\n}\n";
+        let good =
+            "events { worker_connections 1024; }\nhttp {\n  server {\n    listen 80;\n  }\n}\n";
         assert!(lint_nginx(good).is_empty());
     }
 
@@ -746,7 +755,10 @@ mod tests {
             parse_nginx_line_no(r#"nginx: [emerg] unknown directive "xx" in C:\etc\nginx.conf:42"#),
             Some(42)
         );
-        assert_eq!(parse_nginx_line_no("nginx: configuration file test is successful"), None);
+        assert_eq!(
+            parse_nginx_line_no("nginx: configuration file test is successful"),
+            None
+        );
         assert_eq!(parse_nginx_line_no(""), None);
     }
 
@@ -776,7 +788,10 @@ mod tests {
     #[test]
     fn redis_lint_allows_space_separated_directives() {
         // redis.conf 不是 ini，没有 = 号也不该报错
-        let issues = lint(ConfigKind::RedisConf, "port 6379\nmaxmemory 256mb\nsave 900 1\n");
+        let issues = lint(
+            ConfigKind::RedisConf,
+            "port 6379\nmaxmemory 256mb\nsave 900 1\n",
+        );
         assert!(issues.is_empty(), "{issues:?}");
     }
 
@@ -784,7 +799,13 @@ mod tests {
     fn validate_reports_not_ok_on_lint_error() {
         let paths = Paths::new(std::env::temp_dir().join("nsb-val-1"));
         let store = crate::store::Store::open(paths.base.join("s.sqlite")).unwrap();
-        let v = validate(&paths, &store, ConfigKind::NginxMain, "http {\n listen 80\n}\n").unwrap();
+        let v = validate(
+            &paths,
+            &store,
+            ConfigKind::NginxMain,
+            "http {\n listen 80\n}\n",
+        )
+        .unwrap();
         assert!(!v.ok);
         assert!(!v.issues.is_empty());
     }

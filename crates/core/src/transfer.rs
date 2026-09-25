@@ -89,8 +89,8 @@ pub fn import_from(
     manager: &Arc<ServiceManager>,
 ) -> Result<ImportReport> {
     let raw = std::fs::read_to_string(path).map_err(|e| AppError::io("读取备份文件", e))?;
-    let bundle: ExportBundle =
-        serde_json::from_str(&raw).map_err(|e| AppError::new("BAD_BACKUP", format!("备份文件解析失败：{e}")))?;
+    let bundle: ExportBundle = serde_json::from_str(&raw)
+        .map_err(|e| AppError::new("BAD_BACKUP", format!("备份文件解析失败：{e}")))?;
     if !bundle.format.starts_with("niceservbay/") {
         return Err(AppError::new("BAD_BACKUP", "不是 NiceEnv 的备份文件"));
     }
@@ -134,8 +134,11 @@ pub fn import_from(
     }
 
     // ---- 站点（域名冲突跳过；目录缺失则创建） ----
-    let current_domains: Vec<String> =
-        store.list_sites()?.into_iter().flat_map(|s| s.domains).collect();
+    let current_domains: Vec<String> = store
+        .list_sites()?
+        .into_iter()
+        .flat_map(|s| s.domains)
+        .collect();
     for site in &bundle.sites {
         if site.domains.iter().any(|d| current_domains.contains(d)) {
             report.skipped_sites += 1;
@@ -203,9 +206,7 @@ pub fn import_from(
     // ---- 套件缺失报告 ----
     for (id, version) in &bundle.packages {
         if store.find_installed(id, Some(version)).is_none() {
-            report
-                .missing_packages
-                .push(format!("{id}@{version}"));
+            report.missing_packages.push(format!("{id}@{version}"));
         }
     }
     Ok(report)

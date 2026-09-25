@@ -56,10 +56,7 @@ impl AppError {
 
     /// 端口被占用 → 给出占用人
     pub fn port_conflict(port: u16, holder: Option<&str>) -> Self {
-        let mut e = Self::new(
-            "PORT_IN_USE",
-            format!("端口 {port} 已被占用"),
-        );
+        let mut e = Self::new("PORT_IN_USE", format!("端口 {port} 已被占用"));
         if let Some(h) = holder {
             e.message = format!("端口 {port} 已被 {h} 占用");
             e.holder = Some(h.to_string());

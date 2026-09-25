@@ -68,7 +68,10 @@ impl ProcessGroup {
                 windows_job::JobObject::create_kill_on_close()
             }
             .map_err(|e| PlatformError::Win(format!("CreateJobObject 失败: {e}")))?;
-            Ok(Self { job: Some(job), pids: Vec::new() })
+            Ok(Self {
+                job: Some(job),
+                pids: Vec::new(),
+            })
         }
         #[cfg(not(windows))]
         {
@@ -87,8 +90,9 @@ impl ProcessGroup {
         #[cfg(windows)]
         {
             if let Some(job) = &self.job {
-                windows_job::assign_process(job, pid)
-                    .map_err(|e| PlatformError::Win(format!("AssignProcessToJobObject({pid}) 失败: {e}")))?;
+                windows_job::assign_process(job, pid).map_err(|e| {
+                    PlatformError::Win(format!("AssignProcessToJobObject({pid}) 失败: {e}"))
+                })?;
             }
         }
         let _ = pid;
@@ -225,7 +229,8 @@ pub fn apply_managed_hosts(entries: &[(String, String)]) -> Result<()> {
     })?;
     let out = merge_hosts_content(&original, entries);
 
-    // 原子写：先写临时文件再替换（保留只读属性处理）
+    // 先完整写出临时文件（写不进去就不碰 hosts），再覆盖复制回 hosts。
+    // 注意这不是原子替换：用 copy 而非 rename 是为了保留 hosts 原有的属主/ACL。
     let tmp = path.with_extension("hosts.tmp");
     std::fs::write(&tmp, out).map_err(|e| {
         if e.kind() == std::io::ErrorKind::PermissionDenied {
@@ -246,22 +251,54 @@ pub fn apply_managed_hosts(entries: &[(String, String)]) -> Result<()> {
     Ok(())
 }
 
+fn is_hosts_begin(t: &str) -> bool {
+    t == HOSTS_BEGIN || t == HOSTS_BEGIN_LEGACY
+}
+
+fn is_hosts_end(t: &str) -> bool {
+    t == HOSTS_END || t == HOSTS_END_LEGACY
+}
+
+/// 逐行标出「这一行是开始标记，且它之后的下一个标记是结束标记」——
+/// 只有这样的开始标记才真正开启一个托管块。结束标记被手工删掉时，
+/// 孤立的开始标记后面的内容（哪怕后面还跟着一个完整托管块）都不算托管内容。
+pub fn hosts_block_starts(lines: &[&str]) -> Vec<bool> {
+    let mut out = vec![false; lines.len()];
+    let mut next_marker_is_end: Option<bool> = None;
+    for i in (0..lines.len()).rev() {
+        let t = lines[i].trim();
+        if is_hosts_begin(t) {
+            out[i] = next_marker_is_end == Some(true);
+            next_marker_is_end = Some(false);
+        } else if is_hosts_end(t) {
+            next_marker_is_end = Some(true);
+        }
+    }
+    out
+}
+
 /// 纯函数：把托管标记块合并进 hosts 文本（可单测）
+///
+/// 只有「开始标记后面确实还有结束标记」才当作托管块整段替换；
+/// 结束标记被手工删掉时只丢弃孤立的开始标记行，其后的行原样保留——
+/// 宁可残留几条旧托管条目，也不能把用户自己的 hosts 条目一并删掉。
 pub fn merge_hosts_content(original: &str, entries: &[(String, String)]) -> String {
+    let lines: Vec<&str> = original.lines().collect();
+    let starts = hosts_block_starts(&lines);
     let mut out = String::new();
     let mut in_block = false;
     let mut block_written = false;
-    for line in original.lines() {
+    for (i, line) in lines.iter().enumerate() {
         let t = line.trim();
-        if t == HOSTS_BEGIN || t == HOSTS_BEGIN_LEGACY {
-            in_block = true;
+        if is_hosts_begin(t) {
+            in_block = starts[i];
             if !block_written {
                 out.push_str(&render_block(entries));
                 block_written = true;
             }
             continue;
         }
-        if t == HOSTS_END || t == HOSTS_END_LEGACY {
+        if is_hosts_end(t) {
             in_block = false;
             continue;
         }
@@ -406,7 +443,10 @@ pub fn run_elevated(program: &str, args: &[&str]) -> Result<()> {
         use std::os::windows::process::CommandExt;
         // ShellExecuteW runas（0x0802 请求管理员）。
         // 参数各自用引号包住，避免含空格路径被拆成多个参数
-        let quoted_args: Vec<String> = args.iter().map(|a| format!("\"{}\"", a.replace('"', "\\\""))).collect();
+        let quoted_args: Vec<String> = args
+            .iter()
+            .map(|a| format!("\"{}\"", a.replace('"', "\\\"")))
+            .collect();
         let cmd = format!(
             "Start-Process -FilePath '{}' -ArgumentList '{}' -Verb RunAs -Wait",
             program.replace('\'', "''"),
@@ -473,8 +513,7 @@ mod windows_job {
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
     use windows_sys::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
-        PROCESS_TERMINATE,
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
     };
 
     pub struct JobObject(HANDLE);
@@ -520,16 +559,16 @@ mod windows_job {
 
     pub fn assign_process(job: &JobObject, pid: u32) -> std::io::Result<()> {
         unsafe {
-            let proc = OpenProcess(
-                PROCESS_SET_QUOTA | PROCESS_TERMINATE,
-                0,
-                pid,
-            );
+            let proc = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
             if proc.is_null() {
                 return Err(std::io::Error::last_os_error());
             }
             let ok = AssignProcessToJobObject(job.0, proc);
-            let err = if ok == 0 { Some(std::io::Error::last_os_error()) } else { None };
+            let err = if ok == 0 {
+                Some(std::io::Error::last_os_error())
+            } else {
+                None
+            };
             CloseHandle(proc);
             match err {
                 Some(e) => Err(e),
@@ -578,8 +617,8 @@ mod sysproxy_win {
         InternetSetOptionW, INTERNET_OPTION_REFRESH, INTERNET_OPTION_SETTINGS_CHANGED,
     };
     use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
-        HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_DWORD, REG_SZ,
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+        KEY_READ, KEY_SET_VALUE, REG_DWORD, REG_SZ,
     };
 
     const SUBKEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
@@ -601,7 +640,9 @@ mod sysproxy_win {
         unsafe {
             let subkey = wide(SUBKEY);
             let mut hkey: HKEY = std::ptr::null_mut();
-            if RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut hkey) != ERROR_SUCCESS {
+            if RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut hkey)
+                != ERROR_SUCCESS
+            {
                 return Err("打开注册表失败".into());
             }
             let value = wide("ProxyEnable");
@@ -642,7 +683,14 @@ mod sysproxy_win {
             let old = get()?;
             let subkey = wide(SUBKEY);
             let mut hkey: HKEY = std::ptr::null_mut();
-            if RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_SET_VALUE, &mut hkey) != ERROR_SUCCESS {
+            if RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                subkey.as_ptr(),
+                0,
+                KEY_SET_VALUE,
+                &mut hkey,
+            ) != ERROR_SUCCESS
+            {
                 return Err("打开注册表失败（写入系统代理）".into());
             }
             // ProxyEnable
@@ -675,8 +723,18 @@ mod sysproxy_win {
                 return Err("写入注册表失败".into());
             }
             // 通知 WinINet 刷新
-            InternetSetOptionW(std::ptr::null_mut(), INTERNET_OPTION_SETTINGS_CHANGED, std::ptr::null(), 0);
-            InternetSetOptionW(std::ptr::null_mut(), INTERNET_OPTION_REFRESH, std::ptr::null(), 0);
+            InternetSetOptionW(
+                std::ptr::null_mut(),
+                INTERNET_OPTION_SETTINGS_CHANGED,
+                std::ptr::null(),
+                0,
+            );
+            InternetSetOptionW(
+                std::ptr::null_mut(),
+                INTERNET_OPTION_REFRESH,
+                std::ptr::null(),
+                0,
+            );
             Ok(old)
         }
     }

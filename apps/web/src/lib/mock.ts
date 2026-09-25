@@ -1741,6 +1741,10 @@ max_connections=200
     }
     case "open_in_folder":
       return true as T;
+    case "refresh_remote_manifest":
+      return { revision: 2, packages: 160, path: "C:\\Users\\Demo\\AppData\\Local\\NiceEnv\\etc\\manifest.json", takesEffect: "restart" } as T;
+    case "reset_remote_manifest":
+      return true as T;
     case "check_updates":
       // 演示模式：报告一个可用新版，方便在浏览器里走通「检查更新 → 弹窗 → 下载」流程
       return {
@@ -1748,7 +1752,8 @@ max_connections=200
         latestVersion: "0.2.0",
         releaseUrl: "https://github.com/nsmao-com/nice_env/releases",
         manifestRevision: 1,
-        manifestUpdate: false,
+        // 同时演示「套件清单有更新 → 应用新清单」
+        manifestUpdate: true,
         appUpdate: true,
         release: {
           tag: "v0.2.0",

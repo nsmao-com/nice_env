@@ -1,20 +1,19 @@
 {
-  "revision": 5,
-  "updated": "2026-09-19",
-  "note": "macOS 清单（aarch64/x86_64）。当前仅收录已在源头验证可达（HTTP 206/200）的二进制；PHP/Nginx/Redis 的 macOS 官方二进制不存在或需源码编译，候选源见 README「在 macOS 上构建」章节，待 mac 端验证后补入。",
+  "revision": 6,
+  "updated": "2026-09-24",
+  "note": "macOS 清单（aarch64/x86_64；当前条目均为 arm64 构建，Intel Mac 的 x86_64 条目待补）。当前仅收录已在源头验证可达（HTTP 206/200）的二进制；PHP/Nginx/Redis 的 macOS 官方二进制不存在或需源码编译，候选源见 README「在 macOS 上构建」章节，待 mac 端验证后补入。",
   "packages": [
     {
       "id": "mysql",
       "version": "8.0.46",
       "category": "database",
       "displayName": "MySQL 8.0",
-      "description": "关系型数据库（utf8mb4），数据保存在应用数据目录，独立于系统",
+      "description": "关系型数据库（utf8mb4），数据保存在应用数据目录，独立于系统（Apple Silicon，官方 macOS 15 构建）",
       "homepage": "https://mysql.com",
       "os": [
         "macos"
       ],
       "arch": [
-        "x64",
         "arm64"
       ],
       "kind": "targz",
@@ -47,8 +46,8 @@
       ],
       "kind": "targz",
       "url": "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.10/mihomo-darwin-arm64-v1.19.10.gz",
-      "sha256": "0",
-      "sizeBytes": 12000000,
+      "sha256": "3d4533130f2357f49cdb01e1b49f392cda2e2fe2e50b60bc72471e0ecf442259",
+      "sizeBytes": 10676180,
       "entry": "mihomo-darwin-arm64-v1.19.10",
       "defaultPort": 17890,
       "run": {

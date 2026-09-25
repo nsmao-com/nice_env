@@ -53,7 +53,10 @@ mod tests {
         assert!(c.contains("test {"), "应有 test 区：{c}");
         assert!(c.contains("template IN ANY test"));
         assert!(c.contains("127.0.0.1"));
-        assert!(c.contains("forward . 8.8.8.8 1.1.1.1"), "其余应转发公共 DNS");
+        assert!(
+            c.contains("forward . 8.8.8.8 1.1.1.1"),
+            "其余应转发公共 DNS"
+        );
         // {{ .Name }} 是 CoreDNS 模板占位符，不能被 Rust 格式化吃掉
         assert!(c.contains("{{ .Name }}"), "模板占位符必须保留：{c}");
     }

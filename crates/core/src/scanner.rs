@@ -69,9 +69,10 @@ impl ProjectKind {
             ProjectKind::Laravel | ProjectKind::Symfony => "laravel",
             ProjectKind::ThinkPhp => "thinkphp",
             ProjectKind::WordPress => "wordpress",
-            ProjectKind::NextJs | ProjectKind::NuxtJs | ProjectKind::Vite | ProjectKind::NodeGeneric => {
-                "spa-fallback"
-            }
+            ProjectKind::NextJs
+            | ProjectKind::NuxtJs
+            | ProjectKind::Vite
+            | ProjectKind::NodeGeneric => "spa-fallback",
             _ => "none",
         }
     }
@@ -155,7 +156,11 @@ pub struct ScannedProject {
 ///
 /// 只扫一层深度是有意的：用户给的「工作目录」下面通常就是一个个项目文件夹，
 /// 递归下去会把 vendor/node_modules 里的东西也当成项目，噪音远大于收益。
-pub fn scan_dir(paths: &crate::paths::Paths, store: &crate::store::Store, root: &Path) -> Result<Vec<ScannedProject>> {
+pub fn scan_dir(
+    paths: &crate::paths::Paths,
+    store: &crate::store::Store,
+    root: &Path,
+) -> Result<Vec<ScannedProject>> {
     if !root.is_dir() {
         return Err(AppError::new("NOT_A_DIR", "指定的路径不是目录"));
     }
@@ -212,13 +217,19 @@ fn is_noise_dir(name: &str) -> bool {
 }
 
 fn normalize(p: &str) -> String {
-    p.replace('\\', "/").trim_end_matches('/').to_ascii_lowercase()
+    p.replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
 }
 
 /// 判断单个目录是什么项目
 pub fn detect_one(dir: &Path, configured: &[String]) -> Option<ScannedProject> {
     let has = |rel: &str| dir.join(rel).exists();
-    let read = |rel: &str| std::fs::read_to_string(dir.join(rel)).ok().unwrap_or_default();
+    let read = |rel: &str| {
+        std::fs::read_to_string(dir.join(rel))
+            .ok()
+            .unwrap_or_default()
+    };
 
     let mut evidence: Vec<String> = Vec::new();
     let mut kind = ProjectKind::Unknown;
@@ -347,9 +358,15 @@ pub fn detect_one(dir: &Path, configured: &[String]) -> Option<ScannedProject> {
         None => dir.to_path_buf(),
     };
     // 文档根不存在时退回项目根，免得建出一个指向空目录的站点
-    let doc_root = if doc_root.is_dir() { doc_root } else { dir.to_path_buf() };
+    let doc_root = if doc_root.is_dir() {
+        doc_root
+    } else {
+        dir.to_path_buf()
+    };
 
-    let already = configured.iter().any(|c| *c == normalize(&doc_root.to_string_lossy()));
+    let already = configured
+        .iter()
+        .any(|c| *c == normalize(&doc_root.to_string_lossy()));
 
     Some(ScannedProject {
         path: dir.to_string_lossy().to_string(),
@@ -421,10 +438,7 @@ mod tests {
     struct Tmp(std::path::PathBuf);
     impl Tmp {
         fn new(tag: &str) -> Self {
-            let p = std::env::temp_dir().join(format!(
-                "nsb-scan-{tag}-{}",
-                std::process::id()
-            ));
+            let p = std::env::temp_dir().join(format!("nsb-scan-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&p);
             std::fs::create_dir_all(&p).unwrap();
             Tmp(p)
@@ -520,9 +534,15 @@ mod tests {
             extract_php_requirement(r#"{"require":{"php":">=8.1"}}"#),
             Some(">=8.1".into())
         );
-        assert_eq!(extract_php_requirement(r#"{"require":{"php":"^8.2"}}"#), Some("^8.2".into()));
+        assert_eq!(
+            extract_php_requirement(r#"{"require":{"php":"^8.2"}}"#),
+            Some("^8.2".into())
+        );
         // 没有 php 约束
-        assert_eq!(extract_php_requirement(r#"{"require":{"x/y":"1.0"}}"#), None);
+        assert_eq!(
+            extract_php_requirement(r#"{"require":{"x/y":"1.0"}}"#),
+            None
+        );
         // 非法 JSON 不该 panic
         assert_eq!(extract_php_requirement("not json"), None);
         assert_eq!(extract_php_requirement(""), None);
@@ -614,7 +634,9 @@ mod tests {
         let names: Vec<&str> = found.iter().map(|p| p.name.as_str()).collect();
         assert!(names.contains(&"proj-a"), "应找到 proj-a：{names:?}");
         assert!(
-            !names.iter().any(|n| *n == "node_modules" || *n == "vendor" || n.starts_with('.')),
+            !names
+                .iter()
+                .any(|n| *n == "node_modules" || *n == "vendor" || n.starts_with('.')),
             "不该把噪音目录当项目：{names:?}"
         );
     }

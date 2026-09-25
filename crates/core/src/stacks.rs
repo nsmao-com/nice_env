@@ -136,7 +136,10 @@ pub fn duplicate(store: &Store, id: &str, name: Option<String>) -> Result<Stack>
 
 pub fn delete(store: &Store, id: &str) -> Result<()> {
     match store.get_stack(id)? {
-        None => Err(AppError::new("STACK_NOT_FOUND", format!("找不到服务栈 {id}"))),
+        None => Err(AppError::new(
+            "STACK_NOT_FOUND",
+            format!("找不到服务栈 {id}"),
+        )),
         Some(s) if s.builtin => Err(AppError::new("STACK_BUILTIN", "内置预设不能删除")
             .with_hint("它是模板；可以复制成自己的栈再删副本")),
         Some(_) => {
@@ -157,7 +160,11 @@ fn normalized_items(mut items: Vec<StackItem>) -> Vec<StackItem> {
 /// 把栈里的 id 展开成「实际存在、能启动的服务 id」。
 /// - 无版本的通用 id（mysql/php/nginx）→ 当前「使用中版本」对应的 service id
 /// - 未安装 / 非服务的项直接跳过，并在报告里说明
-fn resolve_items(store: &Store, manager: &Arc<ServiceManager>, stack: &Stack) -> (Vec<StackItem>, Vec<String>) {
+fn resolve_items(
+    store: &Store,
+    manager: &Arc<ServiceManager>,
+    stack: &Stack,
+) -> (Vec<StackItem>, Vec<String>) {
     let known: Vec<String> = manager.list_status().into_iter().map(|s| s.id).collect();
     let mut runnable = Vec::new();
     let mut skipped = Vec::new();
@@ -208,11 +215,14 @@ pub fn start(
         .ok_or_else(|| AppError::new("STACK_NOT_FOUND", format!("找不到服务栈 {id}")))?;
     let (items, skipped) = resolve_items(store, manager, &stack);
     if items.is_empty() {
-        return Err(AppError::new("STACK_EMPTY", format!("「{}」里没有可启动的服务", stack.name))
-            .with_hint(format!(
-                "栈里的服务都还没安装（{}）；先到「套件 / 服务」页装好再启动",
-                skipped.join(", ")
-            )));
+        return Err(AppError::new(
+            "STACK_EMPTY",
+            format!("「{}」里没有可启动的服务", stack.name),
+        )
+        .with_hint(format!(
+            "栈里的服务都还没安装（{}）；先到「套件 / 服务」页装好再启动",
+            skipped.join(", ")
+        )));
     }
 
     let mut report = StackStartReport {
@@ -245,7 +255,12 @@ pub fn start(
 }
 
 /// 停止栈里所有正在运行的服务（逆序停止：先 web 后库）
-pub fn stop(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, id: &str) -> Result<StackStartReport> {
+pub fn stop(
+    store: &Store,
+    paths: &Paths,
+    manager: &Arc<ServiceManager>,
+    id: &str,
+) -> Result<StackStartReport> {
     ensure_presets(store)?;
     let stack = store
         .get_stack(id)?
@@ -292,8 +307,15 @@ pub fn status_of(manager: &Arc<ServiceManager>, stack: &Stack) -> (usize, usize)
         let sid = if known.iter().any(|k| k == &item.service_id) {
             Some(item.service_id.clone())
         } else {
-            let base = item.service_id.split('@').next().unwrap_or(&item.service_id);
-            known.iter().find(|k| k.starts_with(&format!("{base}@"))).cloned()
+            let base = item
+                .service_id
+                .split('@')
+                .next()
+                .unwrap_or(&item.service_id);
+            known
+                .iter()
+                .find(|k| k.starts_with(&format!("{base}@")))
+                .cloned()
         };
         if let Some(sid) = sid {
             total += 1;

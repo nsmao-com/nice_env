@@ -94,9 +94,9 @@ export type ServiceRunSpec = z.infer<typeof ServiceRunSpec>;
  * 清单里只放少量常用版本作为离线兜底，其余版本按需从上游拉取（带缓存）。
  */
 export const VersionSource = z.object({
-  /** github=Release API | nodejs=dist 索引 | php=官方目录 | go=dl 索引
-   *  | nginx=下载页 | python=ftp 目录 | static=仅用清单内固定版本 */
-  kind: z.enum(["github", "nodejs", "php", "go", "nginx", "python", "static"]),
+  /** github=Release API；其余动态源读取对应的官方发行索引或下载页。
+   * static=仅用清单内固定版本。 */
+  kind: z.enum(["github", "nodejs", "php", "go", "nginx", "python", "composer", "consul", "gradle", "zig", "dotnet", "flutter", "mongodb", "mysql", "mariadb", "postgresql", "apache", "tomcat", "elasticsearch", "neo4j", "rustup", "static"]),
   /** github：owner/repo */
   repo: z.string().optional(),
   /** github：匹配发行包文件名的正则（每个 release 取第一个命中的 asset） */

@@ -159,6 +159,7 @@ const dict = {
     "versions.fromRemote": "版本来自上游（在线）",
     "versions.fromCache": "版本来自缓存",
     "versions.fromManifest": "版本来自内置清单",
+    "versions.preview": "清单预览 · 桌面端可查询上游新版本",
     "packages.installedCount": "已装",
     "packages.runtimeNote": "纯运行时不作为服务启动；站点与其绑定的 PHP 版本会自动管理。",
     /* ---- PHP 扩展 ---- */
@@ -1516,6 +1517,7 @@ const dict = {
     "versions.fromRemote": "Versions from upstream (online)",
     "versions.fromCache": "Versions from cache",
     "versions.fromManifest": "Versions from built-in manifest",
+    "versions.preview": "Manifest preview · Live updates in the desktop app",
     "packages.installedCount": "installed",
     "packages.runtimeNote": "Pure runtimes are not started as services; sites manage their bound PHP version automatically.",
     "phpext.title": "PHP Extensions",

@@ -54,6 +54,7 @@ export function isPrerelease(v: string): boolean {
 export function versionParts(v: string): number[] {
   return v
     .replace(/^[vV]/, "")
+    .split("+")[0]
     .split(/[.\-_+]/)
     .map((s) => {
       const m = s.match(/^\d+/);

@@ -49,7 +49,7 @@ import { InstallDialog, type InstallTarget } from "@/components/shared/install-d
 import { PathEnvToggle } from "@/components/shared/path-env-toggle";
 import { ServiceIcon } from "@/components/shared/service-icon";
 import { PageHeader } from "@/components/layout/app-shell";
-import { cmpVersionDesc } from "@/lib/utils";
+import { cmpVersionDesc, isPrerelease } from "@/lib/utils";
 
 const CATEGORY_ICONS: Record<string, React.ComponentType<{ className?: string; strokeWidth?: number }>> = {
   "web-server": Server,
@@ -144,8 +144,13 @@ function groupPackages(packages: PackageView[]): PackageGroup[] {
     if (!g) {
       g = {
         id: p.id,
-        displayName: p.displayName,
-        description: p.description,
+        // 分组名称不绑定内置清单第一条的旧版本；固定大版本的套件仍保留名称。
+        displayName: ["php", "node", "python", "go", "mysql", "mongodb", "postgresql", "composer", "adminer", "mariadb", "gradle", "tomcat", "erlang", "bun", "k6", "neo4j"].includes(p.id)
+          ? p.displayName.replace(/\s+\d[\d.]*\s*(?:LTS)?$/, "")
+          : p.displayName,
+        description: ["php", "node", "python"].includes(p.id)
+          ? p.description.replace(/^(PHP|Node\.js|Python)\s+[\d.]+(?: LTS)?/, "$1")
+          : p.description,
         category: p.category,
         defaultPort: p.defaultPort,
         isService: isService(p),
@@ -178,8 +183,7 @@ export default function PackagesPage() {
   const {
     byId: catalogById,
     refresh: refreshCatalogs,
-    isLoading: catalogsLoading,
-  } = useVersionCatalogs();
+  } = useVersionCatalogs(packages.map((p) => p.id));
   const [query, setQuery] = React.useState("");
   const [uninstallTarget, setUninstallTarget] = React.useState<{ id: string; version: string; name: string } | null>(null);
   const [installTarget, setInstallTarget] = React.useState<InstallTarget | null>(null);
@@ -453,7 +457,7 @@ function PackageRow({
   group: PackageGroup;
   services: ServiceStatus[];
   runningServices: Set<string>;
-  catalog?: { online: boolean; cachedAt?: number; error?: string; remote: { version: string; sizeBytes?: number; note?: string; prerelease: boolean }[]; };
+  catalog?: ReturnType<typeof useVersionCatalogs>["byId"] extends Map<string, infer Catalog> ? Catalog : never;
   onRefresh: () => Promise<void> | void;
   onUninstall: (version: string) => void;
   onInstall: (target: InstallTarget) => void;
@@ -471,15 +475,15 @@ function PackageRow({
   const svc = group.isService;
   // 该包任一版本运行中 → 行首状态灯
   const anyRunning = group.versions.some((v) => (v.serviceId ? runningServices.has(v.serviceId) : false));
-  // 已装版本之外还有更高正式版 → 「可更新」徽标（离线判定：用清单内置版本表）
+  // 已装版本之外还有更高正式版：同时检查内置与上游目录。
   const hasNewer = React.useMemo(() => {
     const installedVers = group.versions.filter((v) => v.installed).map((v) => v.version);
     if (installedVers.length === 0) return false;
-    const maxInstalled = installedVers.reduce((a, b) => (cmpVersionDesc(a, b) < 0 ? b : a));
+    const maxInstalled = installedVers.reduce((a, b) => (cmpVersionDesc(a, b) < 0 ? a : b));
     return group.versions.some(
-      (v) => !v.installed && !v.incompatible && cmpVersionDesc(v.version, maxInstalled) > 0
-    );
-  }, [group.versions]);
+      (v) => !v.installed && !v.incompatible && !isPrerelease(v.version) && cmpVersionDesc(v.version, maxInstalled) < 0
+    ) || (catalog?.remote ?? []).some((v) => !v.prerelease && cmpVersionDesc(v.version, maxInstalled) < 0);
+  }, [group.versions, catalog]);
   /** 扩展面板作用的版本：优先「使用中」，其次任一已装版本 */
   const phpActiveVersion = React.useMemo(() => {
     const active = group.versions.find((v) => v.installed && v.active);
@@ -493,7 +497,7 @@ function PackageRow({
     const seen = new Set<string>();
     const list: VersionItem[] = [];
     for (const v of group.versions) {
-      seen.add(v.version);
+      seen.add(v.version.replace(/^[vV]/, ""));
       list.push({
         version: v.version,
         installed: v.installed,
@@ -501,17 +505,18 @@ function PackageRow({
         running: v.serviceId ? runningServices.has(v.serviceId) : false,
         sizeBytes: v.sizeBytes,
         incompatible: v.incompatible,
+        prerelease: isPrerelease(v.version),
       });
     }
     for (const r of catalog?.remote ?? []) {
-      if (seen.has(r.version)) continue;
-      seen.add(r.version);
+      if (seen.has(r.version.replace(/^[vV]/, ""))) continue;
+      seen.add(r.version.replace(/^[vV]/, ""));
       list.push({
         version: r.version,
         installed: false,
         active: false,
         running: false,
-        remote: r as never,
+        remote: r,
         sizeBytes: r.sizeBytes,
         note: r.note,
         prerelease: r.prerelease,
@@ -643,7 +648,7 @@ function PackageRow({
                   online: catalog.online,
                   cachedAt: catalog.cachedAt,
                   error: catalog.error,
-                  loading: false,
+                  loading: catalog.loading,
                 }
               : undefined
           }
@@ -708,7 +713,7 @@ function PackageRows({
   services: ServiceStatus[];
   runningServices: Set<string>;
   catalogById: ReturnType<typeof useVersionCatalogs>["byId"];
-  onRefresh: () => void;
+  onRefresh: (id: string) => Promise<void>;
   onUninstallTarget: (g: PackageGroup, version: string) => void;
   onInstall: (target: InstallTarget) => void;
   empty: string;
@@ -724,7 +729,7 @@ function PackageRows({
               services={services}
               runningServices={runningServices}
               catalog={catalogById.get(g.id)}
-              onRefresh={onRefresh}
+              onRefresh={() => onRefresh(g.id)}
               onUninstall={(v) => onUninstallTarget(g, v)}
               onInstall={onInstall}
             />

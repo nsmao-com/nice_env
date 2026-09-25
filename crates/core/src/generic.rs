@@ -150,11 +150,12 @@ pub fn manifest_entry_for(store: &Store, service_id: &str) -> Option<PackageMani
     };
     let installer = crate::install::Installer::bundled();
     if let Some(v) = version {
-        return installer.find(&format!("{id}@{v}"));
+        let installed = store.find_installed(id, Some(v))?;
+        return Some(installer.installed_entry(&installed));
     }
     // 无版本：跟随「使用中版本」
     let inst = crate::ops::installed_by_choice(store, id)?;
-    installer.find(&format!("{id}@{}", inst.version))
+    Some(installer.installed_entry(&inst))
 }
 
 /// 解析服务上下文：安装信息 + 清单条目 + run 描述 + 各占位符取值
@@ -509,7 +510,7 @@ pub fn register_services(paths: &Paths, store: &Store, manager: &Arc<ServiceMana
     let Ok(installed) = store.list_installed() else {
         return;
     };
-    let installer = crate::install::Installer::bundled();
+    let installer = crate::install::Installer::effective(paths);
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for p in installed {
         // 内置编排服务（nginx/mysql/php…）由 ops::register_services 注册，此处跳过
@@ -517,10 +518,7 @@ pub fn register_services(paths: &Paths, store: &Store, manager: &Arc<ServiceMana
             continue;
         }
         // 单实例服务只注册「使用中版本」；多实例逐版本注册
-        let entry = match installer.find(&format!("{}@{}", p.id, p.version)) {
-            Some(e) => e,
-            None => continue,
-        };
+        let entry = installer.installed_entry(&p);
         let Some(run) = &entry.run else { continue };
         if run.single_instance {
             let active = crate::ops::installed_by_choice(store, &p.id);

@@ -9,6 +9,10 @@
 use crate::error::{AppError, Result};
 use crate::model::{PackageManifestEntry, RemoteVersion, VersionCatalog, VersionSource};
 use crate::store::Store;
+use futures_util::{stream, StreamExt};
+use sha2::{Digest, Sha256};
+
+static FETCH_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(6);
 
 /// 缓存有效期：6 小时（GitHub 匿名限流 60/h，多人/多次刷新也够用）
 pub const CACHE_TTL_MS: i64 = 6 * 60 * 60 * 1000;
@@ -129,13 +133,7 @@ fn builtin_source(id: &str) -> Option<VersionSource> {
             r"rabbitmq-server-windows-[\d.]+\.zip$",
             "rabbitmq_server-{version}/sbin/rabbitmq-server.bat",
         ),
-        "consul" => (
-            "github",
-            "hashicorp/consul",
-            "v",
-            r"consul_[\d.]+_windows_amd64\.zip$",
-            "consul.exe",
-        ),
+        "consul" => ("consul", "", "", "", "consul.exe"),
         "ollama" => (
             "github",
             "ollama/ollama",
@@ -147,7 +145,7 @@ fn builtin_source(id: &str) -> Option<VersionSource> {
             "github",
             "MetaCubeX/mihomo",
             "v",
-            r"mihomo-windows-amd64.*\.zip$",
+            r"^mihomo-windows-amd64-v[\d.]+\.zip$",
             "mihomo-windows-amd64.exe",
         ),
         "adminer" => (
@@ -164,6 +162,113 @@ fn builtin_source(id: &str) -> Option<VersionSource> {
             r"k6-v[\d.]+-windows-amd64\.zip$",
             "k6-v{version}-windows-amd64/k6.exe",
         ),
+        "bun" => (
+            "github",
+            "oven-sh/bun",
+            "bun-v",
+            r"^bun-windows-x64\.zip$",
+            "bun-windows-x64/bun.exe",
+        ),
+        "deno" => (
+            "github",
+            "denoland/deno",
+            "v",
+            r"^deno-x86_64-pc-windows-msvc\.zip$",
+            "deno.exe",
+        ),
+        "erlang" => (
+            "github",
+            "erlang/otp",
+            "OTP-",
+            r"^otp_win64_[\d.]+\.zip$",
+            "bin/erl.exe",
+        ),
+        "roadrunner" => (
+            "github",
+            "roadrunner-server/roadrunner",
+            "v",
+            r"^roadrunner-[\d.]+-windows-amd64\.zip$",
+            "roadrunner-{version}-windows-amd64/rr.exe",
+        ),
+        "ruby" => (
+            "github",
+            "oneclick/rubyinstaller2",
+            "RubyInstaller-",
+            r"^rubyinstaller-[\d.]+-\d+-x64\.7z$",
+            "rubyinstaller-{version}-x64/bin/ruby.exe",
+        ),
+        "ruby-devkit" => (
+            "github",
+            "oneclick/rubyinstaller2",
+            "RubyInstaller-",
+            r"^rubyinstaller-devkit-[\d.]+-\d+-x64\.exe$",
+            "{asset}",
+        ),
+        "temurin-jdk21" => (
+            "github",
+            "adoptium/temurin21-binaries",
+            "jdk-",
+            r"^OpenJDK21U-jdk_x64_windows_hotspot_.*\.zip$",
+            "jdk-{version}/bin/java.exe",
+        ),
+        "redis" => (
+            "github",
+            "tporadowski/redis",
+            "v",
+            r"^Redis-x64-[\d.]+\.zip$",
+            "redis-server.exe",
+        ),
+        "strawberry-perl" => (
+            "github",
+            "StrawberryPerl/Perl-Dist-Strawberry",
+            "",
+            r"^strawberry-perl-[\d.]+-64bit-portable\.zip$",
+            "perl/bin/perl.exe",
+        ),
+        "composer" => ("composer", "", "", "", "composer.phar"),
+        "gradle" => ("gradle", "", "", "", "gradle-{version}/bin/gradle.bat"),
+        "zig" => ("zig", "", "", "", ""),
+        "dotnet-sdk8" => ("dotnet", "", "", "", "dotnet.exe"),
+        "flutter" => ("flutter", "", "", "", "flutter/bin/flutter.bat"),
+        "mongodb" => (
+            "mongodb",
+            "",
+            "",
+            "",
+            "mongodb-win32-x86_64-windows-{version}/bin/mongod.exe",
+        ),
+        "mysql" => ("mysql", "", "", "", "mysql-{version}-winx64/bin/mysqld.exe"),
+        "mariadb" => (
+            "mariadb",
+            "",
+            "",
+            "",
+            "mariadb-{version}-winx64/bin/mysqld.exe",
+        ),
+        "postgresql" => ("postgresql", "", "", "", "pgsql/bin/pg_ctl.exe"),
+        "apache" => ("apache", "", "", "", "Apache24/bin/httpd.exe"),
+        "tomcat" => (
+            "tomcat",
+            "",
+            "",
+            "",
+            "apache-tomcat-{version}/bin/startup.bat",
+        ),
+        "elasticsearch" => (
+            "elasticsearch",
+            "",
+            "",
+            "",
+            "elasticsearch-{version}/bin/elasticsearch.bat",
+        ),
+        "neo4j" => (
+            "neo4j",
+            "",
+            "",
+            "",
+            "neo4j-community-{version}/bin/neo4j.bat",
+        ),
+        "rust" => ("rustup", "", "", "", "rustup-init.exe"),
         // 官方索引/目录页
         "node" => ("nodejs", "", "", "", "node-v{version}-win-x64/node.exe"),
         "php" => ("php", "", "", "", "php-cgi.exe"),
@@ -181,8 +286,8 @@ fn builtin_source(id: &str) -> Option<VersionSource> {
         entry_template: Some(entry_template.to_string()),
         checksum_url: None,
         version_filter: match id {
-            "php" => Some(r"^(8|7)\.".to_string()),
-            "python" => Some(r"^3\.(9|1[0-9])\.".to_string()),
+            "php" => Some(r"^(?:[7-9]|[1-9]\d+)\.".to_string()),
+            "python" => Some(r"^3\.(?:9|[1-9]\d+)\.".to_string()),
             _ => None,
         },
         // memcached 的 tag 形如 `1.6.8_mingw_libressl`；安装路径只认 `1.6.8`
@@ -204,6 +309,19 @@ fn builtin_source(id: &str) -> Option<VersionSource> {
 
 /// 解析某包的版本源：清单声明优先，缺失时回退到内置表
 pub fn source_for(template: &PackageManifestEntry) -> Option<VersionSource> {
+    if template.os.iter().any(|os| os == "macos") && !template.os.iter().any(|os| os == "windows") {
+        // macOS 只使用该平台明确声明的规则，禁止回退到 Windows 的内置匹配器。
+        return template
+            .version_source
+            .clone()
+            .or_else(|| match template.id.as_str() {
+                "composer" | "mongodb" | "mysql" => builtin_source(&template.id).map(|mut s| {
+                    s.entry_template = None;
+                    s
+                }),
+                _ => None,
+            });
+    }
     template
         .version_source
         .clone()
@@ -237,13 +355,29 @@ pub async fn catalog(
         };
     }
 
-    let cache_key = format!("versionCatalog:{}", template.id);
+    // 源/平台/入口发生变化后不复用旧缓存，更不能跨平台使用下载地址。
+    let signature = format!(
+        "{src:?}:{:?}:{:?}:{}:{}",
+        template.os, template.arch, template.entry, template.kind
+    );
+    let cache_key = format!(
+        "versionCatalog:v2:{}:{:x}",
+        template.id,
+        Sha256::digest(signature)
+    );
     if !force {
         if let Some(hit) = read_cache(store, &cache_key) {
             return hit;
         }
     }
 
+    let _permit = FETCH_SLOTS.acquire().await;
+    // 排队期间其它调用可能已经填入缓存。
+    if !force {
+        if let Some(hit) = read_cache(store, &cache_key) {
+            return hit;
+        }
+    }
     match fetch(&src, template).await {
         Ok(mut cat) => {
             cat.online = true;
@@ -269,14 +403,16 @@ pub async fn catalog(
 /* ================= 缓存 ================= */
 
 fn read_cache(store: &Store, key: &str) -> Option<VersionCatalog> {
-    let raw = store.get_setting(key)?;
-    let cat: VersionCatalog = serde_json::from_str(&raw).ok()?;
+    let cat = read_cache_any(store, key)?;
     let age = crate::services::now_ms() - cat.cached_at.unwrap_or(0);
     (age >= 0 && age < CACHE_TTL_MS).then_some(cat)
 }
 
 fn read_cache_any(store: &Store, key: &str) -> Option<VersionCatalog> {
-    serde_json::from_str(&store.get_setting(key)?).ok()
+    let mut cat: VersionCatalog = serde_json::from_str(&store.get_setting(key)?).ok()?;
+    cat.remote
+        .sort_by(|a, b| cmp_version_desc(&a.version, &b.version));
+    Some(cat)
 }
 
 fn write_cache(store: &Store, key: &str, cat: &VersionCatalog) {
@@ -297,6 +433,13 @@ pub fn clear_cache(store: &Store) {
 /* ================= 各上游抓取 ================= */
 
 async fn fetch(src: &VersionSource, template: &PackageManifestEntry) -> Result<VersionCatalog> {
+    for pattern in [&src.asset_match, &src.version_filter, &src.version_strip]
+        .into_iter()
+        .flatten()
+    {
+        regex::Regex::new(pattern)
+            .map_err(|e| AppError::new("BAD_VERSION_SOURCE", format!("版本源规则无效：{e}")))?;
+    }
     let list = match src.kind.as_str() {
         "github" => fetch_github(src, template).await?,
         "nodejs" => fetch_nodejs(src, template).await?,
@@ -304,13 +447,14 @@ async fn fetch(src: &VersionSource, template: &PackageManifestEntry) -> Result<V
         "go" => fetch_go(src, template).await?,
         "nginx" => fetch_nginx(src, template).await?,
         "python" => fetch_python(src, template).await?,
-        other => {
-            return Err(AppError::new(
-                "UNKNOWN_VERSION_SOURCE",
-                format!("未知的版本源类型 {other}"),
-            ))
-        }
+        _ => upstream::fetch(src, template).await?,
     };
+    if list.is_empty() {
+        return Err(AppError::new(
+            "EMPTY_VERSION_CATALOG",
+            "上游未返回适用于当前平台的版本，请稍后重试",
+        ));
+    }
     Ok(VersionCatalog {
         id: template.id.clone(),
         remote: list,
@@ -318,6 +462,26 @@ async fn fetch(src: &VersionSource, template: &PackageManifestEntry) -> Result<V
         cached_at: None,
         error: None,
     })
+}
+
+#[path = "version_upstreams.rs"]
+mod upstream;
+
+async fn get_text(client: &reqwest::Client, url: &str) -> Result<String> {
+    client
+        .get(url)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|e| AppError::download(url, e.to_string()))?
+        .text()
+        .await
+        .map_err(|e| AppError::download(url, e.to_string()))
+}
+
+async fn get_json(client: &reqwest::Client, url: &str) -> Result<serde_json::Value> {
+    serde_json::from_str(&get_text(client, url).await?)
+        .map_err(|e| AppError::internal("解析上游版本索引", e.to_string()))
 }
 
 fn http() -> Result<reqwest::Client> {
@@ -366,7 +530,9 @@ async fn fetch_github(
     let asset_re = src
         .asset_match
         .as_ref()
-        .and_then(|p| regex::Regex::new(p).ok());
+        .map(|p| regex::Regex::new(p))
+        .transpose()
+        .map_err(|e| AppError::new("BAD_VERSION_SOURCE", format!("下载文件匹配规则无效：{e}")))?;
     let ver_filter = src
         .version_filter
         .as_ref()
@@ -408,12 +574,20 @@ async fn fetch_github(
             Some(re) => assets
                 .iter()
                 .find(|a| a["name"].as_str().map(|n| re.is_match(n)).unwrap_or(false)),
-            None => assets.first(),
+            None => None,
         };
         let Some(asset) = picked else { continue };
         let Some(asset_url) = asset["browser_download_url"].as_str() else {
             continue;
         };
+        let filename = asset["name"].as_str().unwrap_or("");
+        // Strawberry Perl 使用 SP_54231_64bit 形式的 tag，实际版本在发行文件名中。
+        if template.id == "strawberry-perl" {
+            version = filename
+                .trim_start_matches("strawberry-perl-")
+                .trim_end_matches("-64bit-portable.zip")
+                .to_string();
+        }
         // digest 形如 "sha256:abcd..."；老 release 无此字段则留空（下载时跳过校验）
         let sha256 = asset["digest"]
             .as_str()
@@ -425,8 +599,9 @@ async fn fetch_github(
             url: asset_url.to_string(),
             sha256,
             size_bytes: asset["size"].as_u64(),
-            entry: render_template(src.entry_template.as_deref(), &version, template),
-            kind: template.kind.clone(),
+            entry: render_template(src.entry_template.as_deref(), &version, template)
+                .replace("{asset}", filename),
+            kind: archive_kind(asset_url).to_string(),
             prerelease: pre,
             note: None,
             released_at: rel["published_at"].as_str().map(|s| s.to_string()),
@@ -435,19 +610,35 @@ async fn fetch_github(
     Ok(limit_and_sort(out, src))
 }
 
-/// Node.js：官方 dist 索引含全部历史版本（866+）。
-/// sha256 不在索引里，但对每个版本都可推导 SHASUMS256.txt —— 只对
-/// 「最新 12 个版本」额外取校验值（多 12 次请求），更老的留空（下载时跳过校验）。
+/// Node.js：官方 dist 索引；校验文件延迟到安装选中的版本时读取。
 async fn fetch_nodejs(
     src: &VersionSource,
     template: &PackageManifestEntry,
 ) -> Result<Vec<RemoteVersion>> {
     let client = http()?;
     let url = "https://nodejs.org/dist/index.json";
+    let mac = template.os.iter().any(|os| os == "macos");
+    let arch = if template.arch.iter().any(|a| a == "arm64") {
+        "arm64"
+    } else {
+        "x64"
+    };
+    let platform = if mac {
+        format!("darwin-{arch}")
+    } else {
+        format!("win-{arch}")
+    };
+    let extension = if mac { "tar.gz" } else { "zip" };
+    let file_key = if mac {
+        format!("osx-{arch}-tar")
+    } else {
+        format!("win-{arch}-zip")
+    };
     let rows: Vec<serde_json::Value> = client
         .get(url)
         .send()
         .await
+        .and_then(reqwest::Response::error_for_status)
         .map_err(|e| AppError::download(url, e.to_string()))?
         .json()
         .await
@@ -468,19 +659,19 @@ async fn fetch_nodejs(
         if ver_filter.as_ref().is_some_and(|re| !re.is_match(bare)) {
             continue;
         }
-        // 只保留带 win-x64 构建的版本（老版本早期无 Windows 包）
+        // 只保留带目标系统和架构构建的版本。
         let files = row["files"].as_array().cloned().unwrap_or_default();
-        if !files.iter().any(|f| f.as_str() == Some("win-x64-zip")) {
+        if !files.iter().any(|f| f.as_str() == Some(&file_key)) {
             continue;
         }
         let lts = row["lts"].as_str().map(|s| s.to_string());
         out.push(RemoteVersion {
             version: bare.to_string(),
-            url: format!("https://nodejs.org/dist/{ver}/node-{ver}-win-x64.zip"),
-            sha256: None, // 稍后为前若干个版本补
+            url: format!("https://nodejs.org/dist/{ver}/node-{ver}-{platform}.{extension}"),
+            sha256: None, // 安装选定版本时读取官方校验值。
             size_bytes: None,
             entry: render_template(src.entry_template.as_deref(), bare, template),
-            kind: "archive".into(),
+            kind: if mac { "targz" } else { "archive" }.into(),
             prerelease: false,
             note: lts.map(|l| format!("{l} LTS")),
             released_at: row["date"].as_str().map(|s| s.to_string()),
@@ -488,33 +679,31 @@ async fn fetch_nodejs(
     }
     out = limit_and_sort(out, src);
 
-    // 前 12 个版本补 sha256（SHASUMS256.txt 与包同在 dist/{tag}/ 下）
-    for item in out.iter_mut().take(12) {
-        if let Ok(h) = node_sha256(&client, &item.version).await {
-            item.sha256 = Some(h);
-        }
-    }
+    // 校验值在选择安装版本时读取，避免版本列表多等 12 次网络请求。
     Ok(out)
 }
 
-/// 取 Node 某版本的 win-x64.zip 校验值
-async fn node_sha256(client: &reqwest::Client, version: &str) -> Result<String> {
+/// 按实际下载文件名读取 Node 的官方校验值，支持 Windows 与 macOS。
+pub async fn node_sha256(version: &str, download_url: &str) -> Result<String> {
+    let client = http()?;
     let url = format!("https://nodejs.org/dist/v{version}/SHASUMS256.txt");
     let text = client
         .get(&url)
         .send()
         .await
+        .and_then(reqwest::Response::error_for_status)
         .map_err(|e| AppError::download(&url, e.to_string()))?
         .text()
         .await
         .map_err(|e| AppError::internal("读取 Node 校验文件", e.to_string()))?;
-    let needle = format!("node-v{version}-win-x64.zip");
+    let needle = download_url.rsplit('/').next().unwrap_or("");
     text.lines()
         .find_map(|line| {
             let mut it = line.split_whitespace();
             let hash = it.next()?;
             let name = it.next()?.trim_start_matches('*');
-            (name == needle).then(|| hash.to_string())
+            (name == needle && hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+                .then(|| hash.to_string())
         })
         .ok_or_else(|| AppError::new("CHECKSUM_NOT_FOUND", format!("校验文件里没有 {needle}")))
 }
@@ -538,8 +727,8 @@ async fn fetch_php(
         "https://downloads.php.net/~windows/releases/",
         "https://downloads.php.net/~windows/releases/archives/",
     ] {
-        let html = match client.get(base).send().await {
-            Ok(r) => r.text().await.unwrap_or_default(),
+        let html = match get_text(&client, base).await {
+            Ok(html) => html,
             Err(_) => continue,
         };
         for cap in file_re.captures_iter(&html) {
@@ -554,7 +743,7 @@ async fn fetch_php(
             out.push(RemoteVersion {
                 version: ver.clone(),
                 url: format!("{base}{}", &cap[0]),
-                sha256: None, // PHP 官方不提供 sha256 文件，下载后仅做大小校验
+                sha256: None, // 目录页不含哈希；发行清单的已验证条目保留官方 SHA256。
                 size_bytes: None,
                 entry: render_template(src.entry_template.as_deref(), &ver, template),
                 kind: "archive".into(),
@@ -573,11 +762,22 @@ async fn fetch_go(
     template: &PackageManifestEntry,
 ) -> Result<Vec<RemoteVersion>> {
     let client = http()?;
+    let os = if template.os.iter().any(|os| os == "macos") {
+        "darwin"
+    } else {
+        "windows"
+    };
+    let arch = if template.arch.iter().any(|a| a == "arm64") {
+        "arm64"
+    } else {
+        "amd64"
+    };
     let url = "https://go.dev/dl/?mode=json&include=all";
     let rows: Vec<serde_json::Value> = client
         .get(url)
         .send()
         .await
+        .and_then(reqwest::Response::error_for_status)
         .map_err(|e| AppError::download(url, e.to_string()))?
         .json()
         .await
@@ -603,10 +803,10 @@ async fn fetch_go(
             continue;
         }
         let files = row["files"].as_array().cloned().unwrap_or_default();
-        // Windows x64 的 zip 包
+        // 选择目标系统与架构对应的压缩包。
         let Some(f) = files
             .iter()
-            .find(|f| f["os"] == "windows" && f["arch"] == "amd64" && f["kind"] == "archive")
+            .find(|f| f["os"] == os && f["arch"] == arch && f["kind"] == "archive")
         else {
             continue;
         };
@@ -619,7 +819,7 @@ async fn fetch_go(
             sha256: f["sha256"].as_str().map(|s| s.to_string()),
             size_bytes: f["size"].as_u64(),
             entry: render_template(src.entry_template.as_deref(), bare, template),
-            kind: "archive".into(),
+            kind: archive_kind(fname).into(),
             prerelease: pre,
             note: None,
             released_at: None,
@@ -629,21 +829,17 @@ async fn fetch_go(
 }
 
 /// nginx：下载目录列出全部历史版本（255+）。
-/// 注意不要用 /en/download.html —— 那页只列每个分支的最新一个。
+/// 目录不可用时回退到下载页，至少保留仍在发布的分支。
 async fn fetch_nginx(
     src: &VersionSource,
     template: &PackageManifestEntry,
 ) -> Result<Vec<RemoteVersion>> {
     let client = http()?;
     let url = "https://nginx.org/download/";
-    let html = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| AppError::download(url, e.to_string()))?
-        .text()
-        .await
-        .map_err(|e| AppError::internal("读取 nginx 下载目录", e.to_string()))?;
+    let html = match get_text(&client, url).await {
+        Ok(html) if html.contains(".zip") => html,
+        _ => get_text(&client, "https://nginx.org/en/download.html").await?,
+    };
 
     let re = regex::Regex::new(r"nginx-(\d+\.\d+\.\d+)\.zip").unwrap();
     let ver_filter = src
@@ -669,7 +865,19 @@ async fn fetch_nginx(
             entry: render_template(src.entry_template.as_deref(), &ver, template),
             kind: "archive".into(),
             prerelease: false,
-            note: None,
+            note: Some(
+                if ver
+                    .split('.')
+                    .nth(1)
+                    .and_then(|n| n.parse::<u32>().ok())
+                    .is_some_and(|n| n % 2 == 1)
+                {
+                    "Mainline"
+                } else {
+                    "Stable"
+                }
+                .into(),
+            ),
             released_at: None,
         });
     }
@@ -683,14 +891,7 @@ async fn fetch_python(
 ) -> Result<Vec<RemoteVersion>> {
     let client = http()?;
     let url = "https://www.python.org/ftp/python/";
-    let html = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| AppError::download(url, e.to_string()))?
-        .text()
-        .await
-        .map_err(|e| AppError::internal("读取 Python 目录", e.to_string()))?;
+    let html = get_text(&client, url).await?;
 
     let re = regex::Regex::new(r">(3\.\d+\.\d+)/<").unwrap();
     let ver_filter = src
@@ -720,7 +921,24 @@ async fn fetch_python(
             released_at: None,
         });
     }
-    Ok(limit_and_sort(out, src))
+    // FTP 目录还包括只有源码的安全维护版，以及尚未发布正式安装包的版本。
+    // 必须确认目录里真实存在 Windows embed 包，不能根据版本号拼出不存在的 URL。
+    let candidates = limit_and_sort(out, src);
+    let verified = stream::iter(candidates)
+        .map(|item| {
+            let client = &client;
+            async move {
+                let directory = item.url.rsplit_once('/')?.0;
+                let file = item.url.rsplit('/').next()?;
+                let html = get_text(client, &format!("{directory}/")).await.ok()?;
+                html.contains(&format!("\"{file}\"")).then_some(item)
+            }
+        })
+        .buffer_unordered(6)
+        .filter_map(|item| async move { item })
+        .collect()
+        .await;
+    Ok(limit_and_sort(verified, src))
 }
 
 /* ================= 工具 ================= */
@@ -729,12 +947,39 @@ async fn fetch_python(
 fn render_template(tpl: Option<&str>, version: &str, template: &PackageManifestEntry) -> String {
     match tpl {
         Some(t) => t.replace("{version}", version),
-        None => template.entry.replace("{version}", version),
+        None => template
+            .entry
+            .replace(&template.version, version)
+            .replace("{version}", version),
+    }
+}
+
+fn archive_kind(url: &str) -> &'static str {
+    if url.ends_with(".tar.gz")
+        || url.ends_with(".tgz")
+        || url.ends_with(".gz")
+        || url.ends_with(".7z")
+    {
+        "targz"
+    } else if url.ends_with(".zip") {
+        "archive"
+    } else {
+        "binary"
     }
 }
 
 /// 版本号降序（数值比较，避免 1.9 > 1.10 的字符串陷阱）+ 去重 + 截断
 fn limit_and_sort(mut list: Vec<RemoteVersion>, src: &VersionSource) -> Vec<RemoteVersion> {
+    let filter = src
+        .version_filter
+        .as_ref()
+        .and_then(|p| regex::Regex::new(p).ok());
+    list.retain(|v| {
+        !v.version.is_empty()
+            && (src.include_prerelease.unwrap_or(false)
+                || !v.prerelease && !is_prerelease(&v.version))
+            && filter.as_ref().is_none_or(|re| re.is_match(&v.version))
+    });
     // 同版本的双胞 tag（如 memcached 的 1.6.8_mingw_libressl 与 1.6.8_mingw
     // 都规范化到 1.6.8）排序时让带 sha256 的那条胜出
     list.sort_by(|a, b| {
@@ -784,7 +1029,11 @@ fn is_prerelease(v: &str) -> bool {
 
 fn version_parts(v: &str) -> Vec<u64> {
     // 去掉 v/V 版本前缀（tag 常见写法 v1.19.1），否则首段会解析成 0
-    let v = v.trim_start_matches(['v', 'V']);
+    let v = v
+        .trim_start_matches(['v', 'V'])
+        .split('+')
+        .next()
+        .unwrap_or(v);
     v.split(['.', '-', '_', '+'])
         .map(|s| {
             // 取段内前导数字：1.2.3rc1 → 1,2,3(,1)

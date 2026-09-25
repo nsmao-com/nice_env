@@ -108,9 +108,116 @@ impl Installer {
         candidates.into_iter().next()
     }
 
-    /// 找「模板条目」：同 id 的任一条目（用于合成远程版本的可安装条目）。
+    /// 找合成远程版本的模板：优先当前平台、显式版本源与较新版本。
     pub fn template_for(&self, id: &str) -> Option<crate::model::PackageManifestEntry> {
-        self.manifest.packages.iter().find(|p| p.id == id).cloned()
+        let mut entries: Vec<_> = self
+            .manifest
+            .packages
+            .iter()
+            .filter(|p| p.id == id)
+            .collect();
+        entries.sort_by(|a, b| {
+            Self::is_platform_compatible(b)
+                .cmp(&Self::is_platform_compatible(a))
+                .then_with(|| b.version_source.is_some().cmp(&a.version_source.is_some()))
+                .then_with(|| crate::versions::cmp_version_desc(&a.version, &b.version))
+        });
+        entries.first().map(|p| (*p).clone())
+    }
+
+    /// 安装记录是已安装版本的依据。优先读取安装时保存的实际入口和服务描述，
+    /// 旧版安装未保存描述时，再用清单的同版本条目或同套件模板恢复。
+    pub fn installed_entry(
+        &self,
+        installed: &InstalledPackage,
+    ) -> crate::model::PackageManifestEntry {
+        let snapshot = Path::new(&installed.install_path).join(".niceenv-package.json");
+        if let Some(entry) = std::fs::read_to_string(snapshot)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<crate::model::PackageManifestEntry>(&raw).ok())
+            .filter(|entry| entry.id == installed.id && entry.version == installed.version)
+        {
+            return entry;
+        }
+        if let Some(entry) = self.find(&format!("{}@{}", installed.id, installed.version)) {
+            return entry;
+        }
+        if let Some(mut entry) = self.template_for(&installed.id) {
+            let source = crate::versions::source_for(&entry);
+            entry.entry = source
+                .and_then(|s| s.entry_template)
+                .filter(|tpl| !tpl.contains("{asset}"))
+                .map(|tpl| tpl.replace("{version}", &installed.version))
+                .unwrap_or_else(|| entry.entry.replace(&entry.version, &installed.version));
+            entry.display_name = entry
+                .display_name
+                .replace(&entry.version, &installed.version);
+            entry.version = installed.version.clone();
+            // 历史安装只能恢复运行描述，不能沿用另一个版本的下载信息。
+            entry.url.clear();
+            entry.mirrors.clear();
+            entry.sha256 = None;
+            entry.size_bytes = 0;
+            return entry;
+        }
+        // 用户模块已被移除时仍保留安装记录的展示和卸载入口，不猜测启动命令。
+        crate::model::PackageManifestEntry {
+            id: installed.id.clone(),
+            version: installed.version.clone(),
+            category: installed.category.clone(),
+            display_name: installed.id.clone(),
+            description: String::new(),
+            homepage: None,
+            os: vec![],
+            arch: vec![],
+            kind: "binary".into(),
+            url: String::new(),
+            mirrors: vec![],
+            sha256: None,
+            size_bytes: 0,
+            entry: String::new(),
+            default_port: None,
+            depends: vec![],
+            run: None,
+            requires: vec![],
+            version_source: None,
+        }
+    }
+
+    pub fn package_views(&self, installed: &[InstalledPackage]) -> Vec<crate::model::PackageView> {
+        let mut entries = self.manifest.packages.clone();
+        for package in installed {
+            let entry = self.installed_entry(package);
+            if let Some(current) = entries
+                .iter_mut()
+                .find(|p| p.id == package.id && p.version == package.version)
+            {
+                *current = entry;
+            } else {
+                entries.push(entry);
+            }
+        }
+        entries
+            .iter()
+            .map(|entry| {
+                let mut available_versions: Vec<_> = entries
+                    .iter()
+                    .filter(|p| p.id == entry.id)
+                    .map(|p| p.version.clone())
+                    .collect();
+                available_versions.sort_by(|a, b| crate::versions::cmp_version_desc(a, b));
+                available_versions.dedup();
+                crate::model::PackageView {
+                    manifest: entry.clone(),
+                    install: installed
+                        .iter()
+                        .find(|p| p.id == entry.id && p.version == entry.version)
+                        .cloned(),
+                    available_versions,
+                    active: false,
+                }
+            })
+            .collect()
     }
 
     /// 把远程枚举到的版本合成为可安装条目：继承模板的 category/run/entry 结构，
@@ -122,14 +229,14 @@ impl Installer {
     ) -> crate::model::PackageManifestEntry {
         let mut e = template.clone();
         e.version = remote.version.clone();
+        e.display_name = e.display_name.replace(&template.version, &remote.version);
         e.url = remote.url.clone();
         e.sha256 = remote.sha256.clone();
-        if let Some(sz) = remote.size_bytes {
-            e.size_bytes = sz;
-        }
+        e.size_bytes = remote.size_bytes.unwrap_or(0);
         e.kind = remote.kind.clone();
         e.entry = remote.entry.clone();
         // 远程版本默认不带 mirrors（镜像策略仍在下载时按域名前缀应用）
+        e.mirrors.clear();
         e
     }
 
@@ -139,15 +246,26 @@ impl Installer {
         &self,
         key: &str,
         store: &Store,
-    ) -> Option<crate::model::PackageManifestEntry> {
+    ) -> Result<Option<crate::model::PackageManifestEntry>> {
         if let Some(hit) = self.find(key) {
-            return Some(hit);
+            return Ok(Some(hit));
         }
-        let (id, version) = key.split_once('@')?;
-        let template = self.template_for(id)?;
+        let Some((id, version)) = key.split_once('@') else {
+            return Ok(None);
+        };
+        let Some(template) = self.template_for(id) else {
+            return Ok(None);
+        };
         let cat = crate::versions::catalog(store, &template, false).await;
-        let remote = cat.remote.iter().find(|r| r.version == version)?;
-        Some(Self::entry_from_remote(&template, remote))
+        let Some(remote) = cat.remote.iter().find(|r| r.version == version) else {
+            return Ok(None);
+        };
+        let mut remote = remote.clone();
+        if id == "node" && remote.sha256.is_none() {
+            // 不因未列在清单中就跳过 Node 官方提供的完整性校验。
+            remote.sha256 = Some(crate::versions::node_sha256(version, &remote.url).await?);
+        }
+        Ok(Some(Self::entry_from_remote(&template, &remote)))
     }
 
     /// 镜像策略：official → [url] + mirrors；ghproxy → github 前缀加速；custom → 自定义前缀。
@@ -207,7 +325,7 @@ impl Installer {
         emit: &dyn Fn(crate::Event),
     ) -> Result<InstalledPackage> {
         // 先查清单内置版本；未命中但版本源能枚举到时，用远程版本合成条目
-        let entry = match self.resolve_entry(key, store).await {
+        let entry = match self.resolve_entry(key, store).await? {
             Some(e) => e,
             None => {
                 return Err(AppError::new(
@@ -329,10 +447,15 @@ impl Installer {
                 .to_string(),
             installed_at: crate::services::now_ms(),
         };
-        store.upsert_installed(&installed)?;
-
         // 默认配置
         self.ensure_default_configs(&entry, paths, store)?;
+        // 保存安装时的完整描述，使清单外版本在离线、重启和清单更新后仍可识别。
+        // 与运行时目录一同卸载，不需要新增数据库表或修改用户模块清单。
+        let snapshot = serde_json::to_vec_pretty(&entry)
+            .map_err(|e| AppError::internal("保存套件安装信息", e.to_string()))?;
+        std::fs::write(runtime_dir.join(".niceenv-package.json"), snapshot)
+            .map_err(|e| AppError::io("保存套件安装信息", e))?;
+        store.upsert_installed(&installed)?;
         emit(crate::Event::state(&task_id, "installed"));
         Ok(installed)
     }

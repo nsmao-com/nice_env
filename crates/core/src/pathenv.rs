@@ -13,7 +13,7 @@
 //!    macOS 写 `~/.zshrc` 托管块，与 hosts 同一套「标记块可整块回滚」的思路。
 
 use crate::error::{AppError, Result};
-use crate::model::{Manifest, PackageManifestEntry, PathEnvEntry, PathEnvStatus};
+use crate::model::{Manifest, PathEnvEntry, PathEnvStatus};
 use crate::paths::Paths;
 use crate::store::Store;
 
@@ -54,7 +54,12 @@ pub fn bin_dir_for(install_path: &str, entry: &str) -> Option<String> {
     } else {
         format!("{base}/{parent}")
     };
-    Some(joined)
+    // Windows 扩展路径不接受混合分隔符，否则真实目录会被误判为不存在。
+    Some(if cfg!(windows) && base.starts_with(r"\\?\") {
+        joined.replace('/', "\\")
+    } else {
+        joined
+    })
 }
 
 /// 扫描 bin 目录里可用的命令名（Windows 去掉 .exe/.bat/.cmd 扩展名）。
@@ -133,16 +138,14 @@ fn wants(sel: &Option<Vec<String>>, id: &str) -> bool {
     }
 }
 
-/// 清单里某 id 的模板条目（用于拿 entry 字段）
-fn entry_of(manifest: &Manifest, id: &str) -> Option<PackageManifestEntry> {
-    manifest.packages.iter().find(|p| p.id == id).cloned()
-}
-
 /// 计算当前「应该」注入的目录集合（不受总开关影响，供 UI 预览与实际写入共用）。
 ///
 /// 多版本包只取使用中版本：同一 id 装了两个版本时，如果不做选择，
 /// `php` 最终指向哪个版本取决于 PATH 顺序，行为不可预测。
 pub fn desired_dirs(store: &Store, manifest: &Manifest) -> Vec<String> {
+    let installer = crate::install::Installer {
+        manifest: manifest.clone(),
+    };
     let installed = store.list_installed().unwrap_or_default();
     let sel = selected_ids(store);
 
@@ -161,9 +164,7 @@ pub fn desired_dirs(store: &Store, manifest: &Manifest) -> Vec<String> {
         let Some(chosen) = crate::ops::installed_by_choice(store, &id) else {
             continue;
         };
-        let Some(entry) = entry_of(manifest, &id) else {
-            continue;
-        };
+        let entry = installer.installed_entry(&chosen);
         if let Some(dir) = bin_dir_for(&chosen.install_path, &entry.entry) {
             if std::path::Path::new(&dir).is_dir() {
                 dirs.push((id.clone(), dir));
@@ -177,6 +178,9 @@ pub fn desired_dirs(store: &Store, manifest: &Manifest) -> Vec<String> {
 
 /// 组装完整状态（不写盘），供前端展示
 pub fn status(store: &Store, manifest: &Manifest) -> PathEnvStatus {
+    let installer = crate::install::Installer {
+        manifest: manifest.clone(),
+    };
     let enabled = is_enabled(store);
     let sel = selected_ids(store);
     let applied = managed_dirs(store);
@@ -196,9 +200,7 @@ pub fn status(store: &Store, manifest: &Manifest) -> PathEnvStatus {
         let Some(chosen) = crate::ops::installed_by_choice(store, &id) else {
             continue;
         };
-        let Some(meta) = entry_of(manifest, &id) else {
-            continue;
-        };
+        let meta = installer.installed_entry(&chosen);
         let bin_dir = bin_dir_for(&chosen.install_path, &meta.entry);
         let exists = bin_dir
             .as_deref()

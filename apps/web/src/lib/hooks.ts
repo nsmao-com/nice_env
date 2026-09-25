@@ -2,9 +2,9 @@
 
 import * as React from "react";
 import { useEffect, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as api from "./api";
-import type { DownloadProgress } from "@nsb/schema";
+import type { DownloadProgress, VersionCatalog } from "@nsb/schema";
 import { normalizeError, type AppErrorShape } from "./backend";
 import { toast } from "sonner";
 import { useInstallTasks } from "./install-tasks";
@@ -47,29 +47,39 @@ export function usePackages() {
  * 后端带 6 小时缓存，这里 staleTime 设长一些避免重复请求；
  * 「刷新版本」用 refresh() 强制绕过缓存。
  */
-export function useVersionCatalogs() {
+export function useVersionCatalogs(packageIds: string[]) {
   const qc = useQueryClient();
-  const query = useQuery({
-    queryKey: ["version-catalogs"],
-    queryFn: () => api.versionCatalogs(false),
-    staleTime: 5 * 60_000,
-    initialData: [] as Awaited<ReturnType<typeof api.versionCatalogs>>,
-    initialDataUpdatedAt: 0,
-    retry: 0,
+  const ids = [...new Set(packageIds)].sort();
+  const queries = useQueries({
+    queries: ids.map((id) => ({
+      queryKey: ["version-catalogs", id],
+      queryFn: () => api.versionCatalog(id, false),
+      staleTime: 5 * 60_000,
+      retry: false,
+    })),
   });
-  const byId = React.useMemo(() => {
-    const m = new Map<string, (typeof query.data)[number]>();
-    for (const c of query.data) m.set(c.id, c);
-    return m;
-  }, [query.data]);
-  const refresh = React.useCallback(async () => {
-    await qc.fetchQuery({
-      queryKey: ["version-catalogs"],
-      queryFn: () => api.versionCatalogs(true),
-      staleTime: 0,
+  const byId = new Map<string, VersionCatalog & { loading: boolean }>();
+  queries.forEach((query, index) => {
+    const id = ids[index];
+    byId.set(id, {
+      id, remote: [], online: false,
+      ...query.data,
+      ...(query.error ? { online: false, error: normalizeError(query.error).message } : {}),
+      loading: query.isFetching,
     });
+  });
+  const refresh = React.useCallback(async (id: string) => {
+    try {
+      await qc.fetchQuery({
+        queryKey: ["version-catalogs", id],
+        queryFn: () => api.versionCatalog(id, true),
+        staleTime: 0,
+      });
+    } catch (error) {
+      toastError(error);
+    }
   }, [qc]);
-  return { ...query, byId, refresh };
+  return { byId, refresh };
 }
 
 export function useSites() {

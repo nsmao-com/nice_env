@@ -232,33 +232,8 @@ pub fn emit_hosts_denied(store: &store::Store, _paths: &paths::Paths) {
 impl CoreState {
     pub fn list_packages(&self) -> Result<Vec<model::PackageView>> {
         let installed = self.store.list_installed()?;
-        // 每个「id+版本」一条（含全部可选版本）；前端按 id 聚合成服务条
-        let views: Vec<model::PackageView> = self
-            .installer
-            .manifest
-            .packages
-            .iter()
-            .map(|m| {
-                let install = installed
-                    .iter()
-                    .find(|i| i.id == m.id && i.version == m.version)
-                    .cloned();
-                let available_versions = self
-                    .installer
-                    .manifest
-                    .packages
-                    .iter()
-                    .filter(|p| p.id == m.id)
-                    .map(|p| p.version.clone())
-                    .collect();
-                model::PackageView {
-                    manifest: m.clone(),
-                    install,
-                    available_versions,
-                    active: false,
-                }
-            })
-            .collect();
+        // 清单与安装记录取并集，清单外的已安装版本不能因上游目录变化而消失。
+        let mut views = self.installer.package_views(&installed);
         // 标记「使用中版本」：单实例服务（nginx/apache/mysql/redis/postgresql/mongodb/mihomo）
         // 由 activeXxxVersion 设置决定，缺省为最高版本
         let mut active_map: std::collections::HashMap<String, String> =
@@ -276,7 +251,6 @@ impl CoreState {
                 active_map.insert(id.to_string(), p.version);
             }
         }
-        let mut views = views;
         for v in views.iter_mut() {
             if let Some(av) = active_map.get(&v.manifest.id) {
                 v.active = v.manifest.version == *av;
@@ -523,6 +497,13 @@ impl CoreState {
             .installer
             .template_for(id)
             .ok_or_else(|| AppError::new("PACKAGE_NOT_FOUND", format!("清单里没有套件 {id}")))?;
+        if !install::Installer::is_platform_compatible(&template) {
+            return Ok(model::VersionCatalog {
+                id: id.to_string(),
+                error: Some("该套件暂未提供适用于当前系统和架构的版本".into()),
+                ..Default::default()
+            });
+        }
         Ok(versions::catalog(&self.store, &template, force).await)
     }
 
@@ -538,19 +519,24 @@ impl CoreState {
             .collect();
         ids.sort();
         ids.dedup();
-        let mut out = Vec::with_capacity(ids.len());
-        for id in ids {
-            match self.version_catalog(&id, force).await {
-                Ok(c) => out.push(c),
-                Err(e) => out.push(model::VersionCatalog {
-                    id: id.clone(),
-                    remote: vec![],
-                    online: false,
-                    cached_at: None,
-                    error: Some(e.message),
-                }),
-            }
-        }
+        use futures_util::{stream, StreamExt};
+        let mut out: Vec<_> = stream::iter(ids)
+            .map(|id| async move {
+                match self.version_catalog(&id, force).await {
+                    Ok(c) => c,
+                    Err(e) => model::VersionCatalog {
+                        id: id.clone(),
+                        remote: vec![],
+                        online: false,
+                        cached_at: None,
+                        error: Some(e.message),
+                    },
+                }
+            })
+            .buffer_unordered(6)
+            .collect()
+            .await;
+        out.sort_by(|a, b| a.id.cmp(&b.id));
         out
     }
 

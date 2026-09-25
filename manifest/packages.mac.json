@@ -1,6 +1,6 @@
 {
-  "revision": 6,
-  "updated": "2026-09-24",
+  "revision": 7,
+  "updated": "2026-09-25",
   "note": "macOS 清单（aarch64/x86_64；当前条目均为 arm64 构建，Intel Mac 的 x86_64 条目待补）。当前仅收录已在源头验证可达（HTTP 206/200）的二进制；PHP/Nginx/Redis 的 macOS 官方二进制不存在或需源码编译，候选源见 README「在 macOS 上构建」章节，待 mac 端验证后补入。",
   "packages": [
     {
@@ -63,8 +63,8 @@
         "kind": "github",
         "repo": "MetaCubeX/mihomo",
         "tagPrefix": "v",
-        "assetMatch": "mihomo-windows-amd64.*\\.zip$",
-        "entryTemplate": "mihomo-windows-amd64.exe",
+        "assetMatch": "^mihomo-darwin-arm64-v[\\d.]+\\.gz$",
+        "entryTemplate": "mihomo-darwin-arm64-v{version}",
         "maxVersions": 40
       }
     },
@@ -88,7 +88,7 @@
       "entry": "node-v22.14.0-darwin-arm64/bin/node",
       "versionSource": {
         "kind": "nodejs",
-        "entryTemplate": "node-v{version}-win-x64/node.exe",
+        "entryTemplate": "node-v{version}-darwin-arm64/bin/node",
         "maxVersions": 60
       }
     },
@@ -112,7 +112,7 @@
       "entry": "go/bin/go",
       "versionSource": {
         "kind": "go",
-        "entryTemplate": "go/bin/go.exe",
+        "entryTemplate": "go/bin/go",
         "maxVersions": 60
       }
     },
@@ -190,7 +190,7 @@
       "homepage": "https://nodejs.org",
       "versionSource": {
         "kind": "nodejs",
-        "entryTemplate": "node-v{version}-win-x64/node.exe",
+        "entryTemplate": "node-v{version}-darwin-arm64/bin/node",
         "maxVersions": 60
       }
     },
@@ -214,7 +214,7 @@
       "homepage": "https://nodejs.org",
       "versionSource": {
         "kind": "nodejs",
-        "entryTemplate": "node-v{version}-win-x64/node.exe",
+        "entryTemplate": "node-v{version}-darwin-arm64/bin/node",
         "maxVersions": 60
       }
     },
@@ -238,7 +238,7 @@
       "homepage": "https://go.dev",
       "versionSource": {
         "kind": "go",
-        "entryTemplate": "go/bin/go.exe",
+        "entryTemplate": "go/bin/go",
         "maxVersions": 60
       }
     },
@@ -306,9 +306,243 @@
         "kind": "github",
         "repo": "MetaCubeX/mihomo",
         "tagPrefix": "v",
-        "assetMatch": "mihomo-windows-amd64.*\\.zip$",
-        "entryTemplate": "mihomo-windows-amd64.exe",
+        "assetMatch": "^mihomo-darwin-arm64-v[\\d.]+\\.gz$",
+        "entryTemplate": "mihomo-darwin-arm64-v{version}",
         "maxVersions": 40
+      }
+    },
+    {
+      "id": "composer",
+      "version": "2.10.3",
+      "category": "tool",
+      "displayName": "Composer 2.10.3",
+      "description": "PHP 依赖管理器（php composer.phar）",
+      "homepage": "https://getcomposer.org",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "binary",
+      "url": "https://getcomposer.org/download/2.10.3/composer.phar",
+      "sizeBytes": 3642137,
+      "entry": "composer.phar",
+      "depends": [
+        "php"
+      ]
+    },
+    {
+      "id": "node",
+      "version": "26.10.0",
+      "category": "runtime",
+      "displayName": "Node.js 26.10.0",
+      "description": "Node.js 运行时（node/npm/npx）",
+      "homepage": "https://nodejs.org",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "targz",
+      "url": "https://nodejs.org/dist/v26.10.0/node-v26.10.0-darwin-arm64.tar.gz",
+      "sizeBytes": 58175384,
+      "entry": "node-v26.10.0-darwin-arm64/bin/node",
+      "versionSource": {
+        "kind": "nodejs",
+        "entryTemplate": "node-v{version}-darwin-arm64/bin/node",
+        "maxVersions": 60
+      },
+      "sha256": "751fdf7439f115d87ee2a8f3f18c065b6151852068e3e666ac60ac2996f75ac9"
+    },
+    {
+      "id": "node",
+      "version": "24.21.0",
+      "category": "runtime",
+      "displayName": "Node.js 24.21.0 LTS",
+      "description": "Node.js 运行时（node/npm/npx）",
+      "homepage": "https://nodejs.org",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "targz",
+      "url": "https://nodejs.org/dist/v24.21.0/node-v24.21.0-darwin-arm64.tar.gz",
+      "sizeBytes": 52909993,
+      "entry": "node-v24.21.0-darwin-arm64/bin/node",
+      "versionSource": {
+        "kind": "nodejs",
+        "entryTemplate": "node-v{version}-darwin-arm64/bin/node",
+        "maxVersions": 60
+      },
+      "sha256": "bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057"
+    },
+    {
+      "id": "go",
+      "version": "1.27.1",
+      "category": "runtime",
+      "displayName": "Go 1.27.1",
+      "description": "Go 工具链（go/gofmt）",
+      "homepage": "https://go.dev",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "targz",
+      "url": "https://go.dev/dl/go1.27.1.darwin-arm64.tar.gz",
+      "sizeBytes": 68100347,
+      "entry": "go/bin/go",
+      "versionSource": {
+        "kind": "go",
+        "entryTemplate": "go/bin/go",
+        "maxVersions": 60
+      },
+      "sha256": "ee215d57e0ec269c60cc9ceca68e6bda321ba9ee5afe24f4b0988703c2d87d12"
+    },
+    {
+      "id": "mihomo",
+      "version": "1.19.31",
+      "category": "tool",
+      "displayName": "mihomo (Clash 内核)",
+      "description": "代理内核：规则分流 / 全局 / 直连，节点测速与系统代理",
+      "homepage": "https://github.com/MetaCubeX/mihomo",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "targz",
+      "url": "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.31/mihomo-darwin-arm64-v1.19.31.gz",
+      "sizeBytes": 20701178,
+      "entry": "mihomo-darwin-arm64-v1.19.31",
+      "defaultPort": 17890,
+      "run": {
+        "args": [
+          "-d",
+          "{root}",
+          "-f",
+          "{etc}/config.yaml"
+        ],
+        "singleInstance": true
+      },
+      "versionSource": {
+        "kind": "github",
+        "repo": "MetaCubeX/mihomo",
+        "tagPrefix": "v",
+        "assetMatch": "^mihomo-darwin-arm64-v[\\d.]+\\.gz$",
+        "entryTemplate": "mihomo-darwin-arm64-v{version}",
+        "maxVersions": 40
+      },
+      "sha256": "d131f44b3deb2a8356f7ac75048ad67a10d53243323951c4f3cda7b672922963"
+    },
+    {
+      "id": "mongodb",
+      "version": "8.3.11",
+      "category": "database",
+      "displayName": "MongoDB 8.3.11",
+      "description": "文档数据库（官方 tgz 发行）",
+      "homepage": "https://www.mongodb.com",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "targz",
+      "url": "https://fastdl.mongodb.org/osx/mongodb-macos-arm64-8.3.11.tgz",
+      "sizeBytes": 0,
+      "entry": "mongodb-macos-arm64-8.3.11/bin/mongod",
+      "defaultPort": 28017,
+      "run": {
+        "args": [
+          "--dbpath",
+          "{data}",
+          "--port",
+          "{port}",
+          "--bind_ip",
+          "127.0.0.1"
+        ],
+        "singleInstance": true,
+        "dataDir": "mongodb"
+      },
+      "sha256": "b586c3972880fcdea90690a6d22c22cd260b0972de717ca710c0bc77c64b039e"
+    },
+    {
+      "id": "mysql",
+      "version": "26.7.0",
+      "category": "database",
+      "displayName": "MySQL 26.7.0",
+      "description": "关系型数据库（utf8mb4），数据保存在应用数据目录，独立于系统（Apple Silicon，官方 macOS 15 构建）",
+      "homepage": "https://mysql.com",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "targz",
+      "url": "https://cdn.mysql.com/Downloads/MySQL-26.7/mysql-26.7.0-macos15-arm64.tar.gz",
+      "sizeBytes": 0,
+      "entry": "mysql-26.7.0-macos15-arm64/bin/mysqld",
+      "defaultPort": 23306,
+      "run": {
+        "args": [],
+        "singleInstance": false,
+        "dataDir": "mysql"
+      }
+    },
+    {
+      "id": "mysql",
+      "version": "9.7.2",
+      "category": "database",
+      "displayName": "MySQL 9.7.2",
+      "description": "关系型数据库（utf8mb4），数据保存在应用数据目录，独立于系统（Apple Silicon，官方 macOS 15 构建）",
+      "homepage": "https://mysql.com",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "targz",
+      "url": "https://cdn.mysql.com/Downloads/MySQL-9.7/mysql-9.7.2-macos15-arm64.tar.gz",
+      "sizeBytes": 0,
+      "entry": "mysql-9.7.2-macos15-arm64/bin/mysqld",
+      "defaultPort": 23306,
+      "run": {
+        "args": [],
+        "singleInstance": false,
+        "dataDir": "mysql"
+      }
+    },
+    {
+      "id": "mysql",
+      "version": "8.4.11",
+      "category": "database",
+      "displayName": "MySQL 8.4.11",
+      "description": "关系型数据库（utf8mb4），数据保存在应用数据目录，独立于系统（Apple Silicon，官方 macOS 15 构建）",
+      "homepage": "https://mysql.com",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "targz",
+      "url": "https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-8.4.11-macos15-arm64.tar.gz",
+      "sizeBytes": 0,
+      "entry": "mysql-8.4.11-macos15-arm64/bin/mysqld",
+      "defaultPort": 23306,
+      "run": {
+        "args": [],
+        "singleInstance": false,
+        "dataDir": "mysql"
       }
     }
   ]

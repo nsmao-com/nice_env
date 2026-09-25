@@ -6,6 +6,7 @@ import { Check, ChevronDown, Download, Loader2, Power, RefreshCw, Trash2, WifiOf
 import type { PackageView, RemoteVersion } from "@nsb/schema";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/store";
+import { isTauri } from "@/lib/backend";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 
@@ -51,7 +52,7 @@ function summarise(items: VersionItem[], installedCount: number) {
   if (installed.length === 0) {
     // 预发布可能因版本号更高而排在前面（2.5.0-rc1 > 2.4.66），
     // 但默认展示不该给用户一个 RC —— 优先取最新的正式版，全无正式版才退到 RC
-    const headline = items.find((i) => !i.prerelease) ?? items[0];
+    const headline = items.find((i) => !i.prerelease && !i.incompatible) ?? items[0];
     return { text: headline?.version ?? "—", sub: null as string | null };
   }
   if (installed.length === 1) {
@@ -110,13 +111,14 @@ export function VersionPicker({ group, items, catalog, onRefresh, onPick, onUnin
   };
 
   // 最新正式版（用于「最新」徽标；排除预发布）
-  const latest = items.find((i) => !i.installed && !i.prerelease)?.version;
+  const latest = items.find((i) => !i.prerelease && !i.incompatible)?.version;
   const showRefreshHint = !!catalog?.error;
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <button
+          aria-label={`${group.displayName} ${headline.text} ${t("versions.available")}`}
           className={cn(
             "flex min-w-[6.5rem] items-center gap-2 rounded-full border px-3 py-1.5 text-[12px] transition-colors",
             installedCount > 0
@@ -148,6 +150,7 @@ export function VersionPicker({ group, items, catalog, onRefresh, onPick, onUnin
           <Tooltip>
             <TooltipTrigger asChild>
               <button
+                aria-label={t("versions.refresh")}
                 onClick={async () => {
                   setRefreshing(true);
                   try {
@@ -156,13 +159,13 @@ export function VersionPicker({ group, items, catalog, onRefresh, onPick, onUnin
                     setRefreshing(false);
                   }
                 }}
-                disabled={refreshing}
+                disabled={!isTauri || refreshing || catalog?.loading}
                 className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border text-faint transition-colors hover:border-border-strong hover:text-secondary disabled:opacity-50"
               >
                 <RefreshCw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
               </button>
             </TooltipTrigger>
-            <TooltipContent>{t("versions.refresh")}</TooltipContent>
+            <TooltipContent>{t(isTauri ? "versions.refresh" : "versions.preview")}</TooltipContent>
           </Tooltip>
         </div>
 
@@ -287,7 +290,11 @@ export function VersionPicker({ group, items, catalog, onRefresh, onPick, onUnin
         {/* 底部：数据来源 */}
         <div className="flex items-center justify-between border-t border-border px-2.5 py-1.5 text-[10px] text-faint">
           <span>
-            {catalog?.online
+            {!isTauri
+              ? t("versions.preview")
+              : catalog?.loading
+                ? t("versions.loading")
+                : catalog?.online
               ? t("versions.fromRemote")
               : catalog?.cachedAt
                 ? t("versions.fromCache")

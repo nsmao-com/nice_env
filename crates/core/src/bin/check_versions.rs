@@ -2,18 +2,50 @@
 //! 用法：cargo run -p nsb-core --bin check_versions [id...]
 //! 不带参数时测一组代表性源（github / nodejs / php / go / nginx / python）。
 
+use futures_util::{stream, StreamExt};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
     let base = PathBuf::from(".versions-home");
     std::fs::create_dir_all(&base).expect("创建 .versions-home");
-    std::env::set_var("NSB_SKIP_HOSTS", "1");
-    let state = nsb_core::CoreState::init(Some(base), Arc::new(|_| {})).expect("初始化");
+    // 只读发行源和独立缓存，不初始化服务管理、进程回收或自动备份。
+    let store = nsb_core::store::Store::open(base.join("versions.sqlite")).expect("版本缓存");
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let ids: Vec<String> = if args.is_empty() {
+    let manifest_arg = args.iter().position(|s| s == "--manifest");
+    let installer = if let Some(index) = manifest_arg {
+        let file = args.get(index + 1).expect("--manifest 后需要清单路径");
+        let raw = std::fs::read_to_string(file).expect("读取清单");
+        nsb_core::install::Installer {
+            manifest: nsb_core::install::parse_manifest_str(&raw).expect("清单格式"),
+        }
+    } else {
+        nsb_core::install::Installer::bundled()
+    };
+    let json = args.iter().any(|s| s == "--json");
+    let selected: Vec<String> = args
+        .iter()
+        .enumerate()
+        .filter(|(index, value)| {
+            !value.starts_with("--") && !manifest_arg.is_some_and(|m| *index == m + 1)
+        })
+        .map(|(_, value)| value.clone())
+        .collect();
+    let force = args.iter().any(|s| s == "--force");
+    let ids: Vec<String> = if !selected.is_empty() {
+        selected
+    } else if args.iter().any(|s| s == "--all") || json {
+        let mut ids: Vec<_> = installer
+            .manifest
+            .packages
+            .iter()
+            .map(|p| p.id.clone())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    } else if args.is_empty() {
         // 覆盖每一种版本源类型
         [
             "php",
@@ -31,17 +63,56 @@ async fn main() {
     } else {
         args
     };
+    if json {
+        let catalogs: Vec<_> = stream::iter(&ids)
+            .map(|id| {
+                let template = installer.template_for(id).expect("套件模板");
+                let store = &store;
+                async move { nsb_core::versions::catalog(store, &template, force).await }
+            })
+            .buffer_unordered(6)
+            .collect()
+            .await;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&catalogs).expect("目录 JSON")
+        );
+        return;
+    }
 
     let mut pass = 0usize;
     let mut fail = 0usize;
     for id in &ids {
         let started = std::time::Instant::now();
-        match state.version_catalog(id, false).await {
+        let Some(template) = installer.template_for(id) else {
+            eprintln!("未知套件 {id}");
+            fail += 1;
+            continue;
+        };
+        match Ok::<_, nsb_core::error::AppError>(
+            nsb_core::versions::catalog(&store, &template, force).await,
+        ) {
             Ok(cat) => {
                 let n = cat.remote.len();
                 if n == 0 {
-                    // 未声明版本源（static）不算失败
-                    println!("[SKIP] {id:<14} 无远程版本（未声明版本源）");
+                    if nsb_core::versions::source_for(&template).is_some_and(|s| s.kind != "static")
+                    {
+                        println!(
+                            "[FAIL] {id:<14} {}",
+                            cat.error.as_deref().unwrap_or("上游未返回版本")
+                        );
+                        fail += 1;
+                    } else {
+                        println!("[SKIP] {id:<14} 无远程版本（未声明版本源）");
+                    }
+                    continue;
+                }
+                if !cat.online {
+                    println!(
+                        "[FAIL] {id:<14} {}",
+                        cat.error.as_deref().unwrap_or("未取得在线目录")
+                    );
+                    fail += 1;
                     continue;
                 }
                 let with_sha = cat.remote.iter().filter(|v| v.sha256.is_some()).count();
@@ -52,7 +123,6 @@ async fn main() {
                     newest.version, oldest.version, started.elapsed().as_secs_f32()
                 );
                 // 抽查：最新版本必须能被「模板 + 远程版本」合成为可安装条目
-                let template = state.installer.template_for(id).expect("模板");
                 let synthesized =
                     nsb_core::install::Installer::entry_from_remote(&template, newest);
                 if synthesized.url != newest.url || synthesized.version != newest.version {
@@ -106,7 +176,10 @@ async fn main() {
     // 缓存验证：同一 id 第二次调用应命中缓存（明显更快，且不再打网络）
     if let Some(first) = ids.first() {
         let t = std::time::Instant::now();
-        let cached = state.version_catalog(first, false).await;
+        let template = installer.template_for(first).expect("套件模板");
+        let cached = Ok::<_, nsb_core::error::AppError>(
+            nsb_core::versions::catalog(&store, &template, false).await,
+        );
         let ms = t.elapsed().as_millis();
         match cached {
             Ok(c) if !c.remote.is_empty() && ms < 400 => {

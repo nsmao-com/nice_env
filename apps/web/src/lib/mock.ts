@@ -2,8 +2,9 @@
  * 浏览器 mock 后端：内存状态实现与 Rust 侧相同的命令面。
  * 仅用于 next dev 下的 UI 开发/演示；桌面端自动走真实 invoke。
  */
+import { PackageManifestEntry } from "@nsb/schema";
+import bundledManifest from "../../../../manifest/packages.win.json";
 import type {
-  RemoteVersion,
   VersionCatalog,
   ServiceStatus,
   Site,
@@ -171,8 +172,6 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 const services = new Map<string, ServiceStatus>();
 const sites = new Map<string, Site>();
 const packages = new Map<string, PackageView>();
-/** mock 远程版本目录：id → 上游枚举到的版本（浏览器开发用） */
-const mockVersionCatalogs = new Map<string, RemoteVersion[]>();
 
 /** 环境变量注入的 mock 状态（浏览器里不碰真实 PATH） */
 const mockPathEnv: { enabled: boolean; selected: string[] | null } = {
@@ -180,14 +179,6 @@ const mockPathEnv: { enabled: boolean; selected: string[] | null } = {
   selected: null,
 };
 
-/** mock 用的最小 run 描述：只需 singleInstance 供前端判定服务语义，
- *  其余字段按 schema 默认值补齐（真实清单由 Rust 侧完整声明）。 */
-const mockRun = (singleInstance: boolean): NonNullable<PackageView["run"]> => ({
-  args: [],
-  health: "tcp",
-  healthTimeoutSec: 15,
-  singleInstance,
-});
 const certs = new Map<string, CertRecord>();
 /* 证书自动化（ACME）：mock 一条样例，覆盖列表/编辑/签发的浏览器预览 */
 const certAutos = new Map<string, CertAutomation>();
@@ -451,173 +442,22 @@ function seed() {
     updatedAt: now() - 86400_000,
   });
 
-  const pkg = (
-    id: string,
-    version: string,
-    category: PackageView["category"],
-    displayName: string,
-    description: string,
-    extra: Partial<PackageView> = {}
-  ) => {
-    const base: PackageView = {
-      id,
-      version,
-      category,
-      displayName,
-      description,
-      os: ["windows", "macos"],
-      arch: ["x64", "arm64"],
-      kind: "archive",
-      url: `https://example.com/${id}-${version}.zip`,
-      sha256: "0".repeat(64),
-      sizeBytes: 25_000_000,
-      entry: `${id}/${id}`,
-      availableVersions: [],
-      active: false,
-      ...extra,
-    };
-    packages.set(`${id}@${version}`, base);
-  };
-
-  pkg("nginx", "1.28.0", "web-server", "Nginx 1.28", "最新稳定线", { sizeBytes: 2_110_315, defaultPort: 8080, run: mockRun(true) });
-  pkg("nginx", "1.27.5", "web-server", "Nginx 1.27", "主线版本", { sizeBytes: 2_110_044, defaultPort: 8080, run: mockRun(true) });
-  pkg("nginx", "1.24.0", "web-server", "Nginx 1.24", "旧稳定线（兼容老配置）", { sizeBytes: 1_759_722, defaultPort: 8080, run: mockRun(true) });
-  pkg("nginx", "1.26.3", "web-server", "Nginx", "高性能 HTTP 服务器与反向代理", {
-    install: { version: "1.26.3", installPath: "…/runtimes/nginx/1.26.3", configPath: "…/etc/nginx/1.26.3", installedAt: now() - 86400_000 * 12 },
-    sizeBytes: 1_700_000,
-    defaultPort: 8080,
-    run: mockRun(true),
-  });
-  pkg("apache", "2.4.66", "web-server", "Apache 2.4", "Apache HTTP Server，与 Nginx 并存，站点可自选承载", { sizeBytes: 11_527_838, defaultPort: 8180, run: mockRun(true) });
-  pkg("php", "8.3.33", "runtime", "PHP 8.3", "服务器端脚本语言", {
-    install: { version: "8.3.33", installPath: "…/runtimes/php/8.3.33", configPath: "…/etc/php/8.3.33", installedAt: now() - 86400_000 * 12 },
-    sizeBytes: 34_000_000,
-    run: mockRun(false),
-  });
-  pkg("php", "7.4.33", "runtime", "PHP 7.4", "旧项目兼容版本", {
-    install: { version: "7.4.33", installPath: "…/runtimes/php/7.4.33", configPath: "…/etc/php/7.4.33", installedAt: now() - 86400_000 * 40 },
-    sizeBytes: 24_000_000,
-    run: mockRun(false),
-  });
-  pkg("php", "8.5.10", "runtime", "PHP 8.5", "最新大版本", { sizeBytes: 36_000_000, run: mockRun(false) });
-  pkg("php", "8.4.25", "runtime", "PHP 8.4", "", { sizeBytes: 35_000_000, run: mockRun(false) });
-  pkg("php", "8.2.33", "runtime", "PHP 8.2", "", { sizeBytes: 33_500_000, run: mockRun(false) });
-  pkg("php", "8.1.34", "runtime", "PHP 8.1", "", { sizeBytes: 30_900_000, run: mockRun(false) });
-  pkg("php", "8.0.30", "runtime", "PHP 8.0", "老项目兼容", { sizeBytes: 26_877_638, run: mockRun(false) });
-  pkg("php", "7.3.33", "runtime", "PHP 7.3", "vc15 构建，老项目兼容", { sizeBytes: 25_760_881, run: mockRun(false) });
-  pkg("php", "7.2.34", "runtime", "PHP 7.2", "vc15 构建，老项目兼容", { sizeBytes: 26_265_301, run: mockRun(false) });
-  pkg("node", "22.14.0", "runtime", "Node.js 22 LTS", "JavaScript 运行时（node/npm/npx）", { sizeBytes: 34_900_000 });
-  pkg("node", "20.19.5", "runtime", "Node.js 20 LTS", "上一代 LTS", { sizeBytes: 29_893_678 });
-  pkg("node", "18.20.8", "runtime", "Node.js 18 LTS", "老项目兼容", { sizeBytes: 28_782_590 });
-  pkg("python", "3.12.9", "runtime", "Python 3.12", "嵌入式运行时，轻量", { sizeBytes: 11_100_000 });
-  pkg("python", "3.13.7", "runtime", "Python 3.13", "最新版", { sizeBytes: 10_922_561 });
-  pkg("python", "3.11.9", "runtime", "Python 3.11", "老项目兼容", { sizeBytes: 11_249_023 });
-  pkg("go", "1.24.1", "runtime", "Go 1.24", "Go 编译工具链", { sizeBytes: 87_200_000 });
-  pkg("go", "1.23.6", "runtime", "Go 1.23", "上一版工具链", { sizeBytes: 81_944_656 });
-  pkg("postgresql", "17.6", "database", "PostgreSQL 17", "最新大版本", { sizeBytes: 329_891_687, defaultPort: 25432, run: mockRun(true) });
-  pkg("postgresql", "16.9", "database", "PostgreSQL 16", "高级开源关系数据库，首次启动自动 initdb", { sizeBytes: 314_500_000, defaultPort: 25432, run: mockRun(true) });
-  pkg("mongodb", "8.0.4", "database", "MongoDB 8.0", "文档数据库", { sizeBytes: 775_800_000, defaultPort: 28017, run: mockRun(true) });
-  pkg("mongodb", "7.0.24", "database", "MongoDB 7.0", "上一代 LTS（老驱动兼容）", { sizeBytes: 628_810_191, defaultPort: 28017, run: mockRun(true) });
-  pkg("composer", "2.8.5", "tool", "Composer 2.8", "PHP 依赖管理器（php composer.phar）", { sizeBytes: 3_060_000 });
-  pkg("composer", "2.7.9", "tool", "Composer 2.7", "2.7 LTS 线", { sizeBytes: 3_018_138 });
-  pkg("mysql", "5.7.44", "database", "MySQL 5.7", "经典 5.7（老项目兼容）", { sizeBytes: 352_891_656, defaultPort: 23306, run: mockRun(false) });
-  pkg("mysql", "8.0.42", "database", "MySQL 8.0", "关系型数据库", {
-    install: { version: "8.0.42", installPath: "…/runtimes/mysql/8.0.42", configPath: "…/etc/mysql/8.0.42", installedAt: now() - 86400_000 * 12 },
-    availableVersions: ["8.0.42", "5.7.44"],
-    sizeBytes: 230_000_000,
-    defaultPort: 23306,
-    run: mockRun(false),
-  });
-  pkg("redis", "5.0.14", "cache", "Redis", "内存 KV 缓存", {
-    install: { version: "5.0.14", installPath: "…/runtimes/redis/5.0.14", configPath: "…/etc/redis/5.0.14", installedAt: now() - 86400_000 * 12 },
-    sizeBytes: 6_000_000,
-    defaultPort: 26379,
-    run: mockRun(true),
-  });
-  pkg("mihomo", "1.19.11", "tool", "mihomo 1.19", "Clash Meta 内核（最新）", { sizeBytes: 11_578_659, defaultPort: 17890, run: mockRun(true) });
-  pkg("mihomo", "1.18.10", "tool", "mihomo 1.18", "Clash Meta 内核（稳定旧版）", { sizeBytes: 10_679_111, defaultPort: 17890, run: mockRun(true) });
-  pkg("mihomo", "1.19.10", "tool", "mihomo (Clash 内核)", "代理内核：规则分流 / 系统代理 / 节点测速", {
-    sizeBytes: 12_000_000,
-    defaultPort: 17890,
-    run: mockRun(true),
-  });
-  pkg("mailpit", "1.21.8", "tool", "Mailpit", "本地邮件捕获（二期）", { sizeBytes: 14_000_000 });
-  pkg("adminer", "4.8.1", "tool", "Adminer", "单文件数据库管理器", { sizeBytes: 600_000 });
-
-  // 扩展目录：让 mock 覆盖全部类别（真实清单有 13 类，浏览器端要能复现
-  // 「分类页签很多」的布局场景，否则分段控件的溢出修复无法在 mock 下验证）
-  pkg("caddy", "2.11.4", "web-server", "Caddy", "自动 HTTPS 的现代 Web 服务器", { sizeBytes: 17_559_418, defaultPort: 80 , run: mockRun(true) });
-  pkg("frankenphp", "1.12.7", "web-server", "FrankenPHP", "自带 PHP 的应用服务器", { sizeBytes: 59_415_145, defaultPort: 80, run: mockRun(true) });
-  pkg("meilisearch", "1.53.2", "search", "Meilisearch", "轻量全文搜索引擎", { sizeBytes: 346_635_776, defaultPort: 7700, run: mockRun(true) });
-  pkg("zincsearch", "0.4.10", "search", "ZincSearch", "Go 实现的轻量搜索", { sizeBytes: 22_960_611, defaultPort: 4080, run: mockRun(true) });
-  pkg("minio", "2025-09-07", "object-storage", "MinIO", "S3 兼容对象存储", { sizeBytes: 113_115_136, defaultPort: 9000, run: mockRun(true) });
-  pkg("consul", "2.0.4", "service-mesh", "Consul", "服务发现与配置中心", { sizeBytes: 72_737_934, defaultPort: 8500, run: mockRun(true) });
-  pkg("etcd", "3.7.1", "service-mesh", "etcd", "分布式 KV 存储", { sizeBytes: 24_404_364, defaultPort: 2379, run: mockRun(true) });
-  pkg("temporal-cli", "1.9.1", "service-mesh", "Temporal CLI", "工作流引擎", { sizeBytes: 46_408_338, defaultPort: 7233, run: mockRun(true) });
-  pkg("cloudflared", "2026.9.1", "tunnel", "Cloudflare Tunnel", "把本机服务暴露到公网", { sizeBytes: 54_976_432, run: mockRun(true) });
-  pkg("coredns", "1.14.7", "dns", "CoreDNS", "可插拔 DNS 服务器", { sizeBytes: 23_421_098, defaultPort: 5353, run: mockRun(true) });
-  pkg("sftpgo", "2.7.6", "ftp", "SFTPGo", "SFTP / FTP / WebDAV 服务器", { sizeBytes: 60_263_734, defaultPort: 2022, run: mockRun(true) });
-  pkg("ollama", "0.34.2", "ai", "Ollama", "本地大模型运行时", { sizeBytes: 1_460_928_014, defaultPort: 11434, run: mockRun(true) });
-  pkg("memcached", "1.6.8", "cache", "Memcached", "内存对象缓存", { sizeBytes: 3_540_169, defaultPort: 11211, run: mockRun(true) });
-  pkg("qdrant", "1.19.1", "database", "Qdrant", "向量数据库", { sizeBytes: 29_671_153, defaultPort: 6333, run: mockRun(true) });
-  pkg("neo4j", "5.26.30", "database", "Neo4j", "图数据库", { sizeBytes: 162_637_544, defaultPort: 7474, run: mockRun(true) });
-  pkg("mariadb", "12.3.3", "database", "MariaDB", "MySQL 兼容数据库", { sizeBytes: 104_081_715, defaultPort: 3306, run: mockRun(false) });
-  pkg("bun", "1.4.2", "runtime", "Bun", "极快的 JS/TS 运行时", { sizeBytes: 39_807_510 });
-  pkg("deno", "2.9.7", "runtime", "Deno", "安全的 JS/TS 运行时", { sizeBytes: 42_630_221 });
-  pkg("ruby", "4.0.7", "runtime", "Ruby", "Ruby 运行时", { sizeBytes: 17_742_012 });
-  pkg("rust", "1.29.1", "runtime", "Rust (rustup)", "Rust 工具链引导器", { sizeBytes: 12_721_664 });
-  pkg("tomcat", "11.0.26", "web-server", "Tomcat 11", "Servlet 容器", { sizeBytes: 16_481_996, defaultPort: 8080, run: mockRun(true) });
-
-  // 远程版本目录（浏览器 mock）：从已播种的包派生「上游枚举结果」，
-  // 让版本下拉在有真实后端前也能展示分组/预发布/最新等形态。
-  for (const [id, base] of (() => {
-    const m = new Map<string, PackageView>();
-    for (const p of packages.values()) if (!m.has(p.id)) m.set(p.id, p);
-    return m;
-  })()) {
-    const known = Array.from(packages.values()).filter((p) => p.id === id);
-    // 用已知版本倒推几个更老的版本，模拟完整历史
-    const seeds = known.map((p) => p.version);
-    const extra: RemoteVersion[] = [];
-    const nums = (v: string) => v.split(/[.-]/).map((n) => parseInt(n, 10) || 0);
-    const newest = seeds.slice().sort((a, b) => {
-      const pa = nums(a), pb = nums(b);
-      for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-        const d = (pb[i] ?? 0) - (pa[i] ?? 0);
-        if (d !== 0) return d;
-      }
-      return 0;
-    })[0];
-    if (newest) {
-      const [maj, min, patch] = nums(newest);
-      // 生成 8 个「更老」的补丁版本，模拟上游还有更多历史
-      for (let i = 1; i <= 8; i++) {
-        const v = `${maj}.${min}.${Math.max(0, (patch ?? 0) - i)}`;
-        if (seeds.includes(v) || v.endsWith(".0") && i > 1) continue;
-        extra.push({
-          version: v,
-          url: `https://example.com/${id}-${v}.zip`,
-          sha256: "0".repeat(64),
-          sizeBytes: base.sizeBytes,
-          entry: base.entry.replace(newest, v),
-          kind: "archive",
-          prerelease: false,
-        });
-      }
-      // 追加一个预发布版本（用同一 base 版本的 -rc1，确保它排在正式版之后，
-      // 与真实 semver 一致：1.0.0-rc1 < 1.0.0）
-      extra.push({
-        version: `${maj}.${min}.${(patch ?? 0)}-rc1`,
-        url: `https://example.com/${id}-${maj}.${min}.${(patch ?? 0)}-rc1.zip`,
-        sha256: "0".repeat(64),
-        sizeBytes: base.sizeBytes,
-        entry: base.entry.replace(newest, `${maj}.${min}.${(patch ?? 0)}-rc1`),
-        kind: "archive",
-        prerelease: true,
-        note: "RC",
-      });
-    }
-    if (extra.length) mockVersionCatalogs.set(id, extra);
+  // 浏览器复用正式清单，不再维护另一份过期版本表或编造上游历史。
+  for (const raw of bundledManifest.packages) {
+    const entry = PackageManifestEntry.parse(raw);
+    const service = [...services.values()].find((s) => s.id.split("@")[0] === entry.id && s.version === entry.version);
+    const installed = !!service;
+    packages.set(`${entry.id}@${entry.version}`, {
+      ...entry,
+      availableVersions: bundledManifest.packages.filter((p) => p.id === entry.id).map((p) => p.version),
+      active: installed,
+      ...(installed ? { install: {
+        version: entry.version,
+        installPath: `…/runtimes/${entry.id}/${entry.version}`,
+        configPath: `…/etc/${entry.id}/${entry.version}`,
+        installedAt: now() - 86400_000 * 12,
+      } } : {}),
+    });
   }
 
   certs.set("ca", {
@@ -879,12 +719,11 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return Array.from(packages.values()) as T;
     case "version_catalog":
     case "version_catalogs": {
-      // 浏览器 mock：返回派生的远程版本，不访问网络
+      // 浏览器仅展示正式清单快照；实时上游查询由桌面端执行。
       const one = (id: string): VersionCatalog => ({
         id,
-        remote: mockVersionCatalogs.get(id) ?? [],
-        online: true,
-        cachedAt: now(),
+        remote: [],
+        online: false,
       });
       if (args && typeof args.id === "string") return one(args.id) as T;
       const ids = new Set(Array.from(packages.values()).map((p) => p.id));

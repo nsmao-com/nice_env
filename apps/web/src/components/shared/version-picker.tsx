@@ -140,7 +140,7 @@ export function VersionPicker({ group, items, catalog, onRefresh, onPick, onUnin
 
       <PopoverContent align="end" className="w-[22rem] p-0">
         {/* 搜索 + 刷新 */}
-        <div className="flex items-center gap-1.5 border-b border-border p-2">
+        <div className="flex items-center gap-1.5 p-2">
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -168,13 +168,17 @@ export function VersionPicker({ group, items, catalog, onRefresh, onPick, onUnin
             <TooltipContent>{t(isTauri ? "versions.refresh" : "versions.preview")}</TooltipContent>
           </Tooltip>
         </div>
+        <div role="separator" className="mx-3 border-t border-dashed border-separator" />
 
         {/* 远程状态提示 */}
         {showRefreshHint && (
-          <div className="flex items-start gap-1.5 border-b border-border bg-warning-soft/40 px-2.5 py-1.5 text-[10.5px] text-warning">
-            <WifiOff className="mt-px h-3 w-3 shrink-0" />
-            <span className="leading-snug">{catalog?.error}</span>
-          </div>
+          <>
+            <div className="flex items-start gap-1.5 bg-warning-soft/40 px-2.5 py-1.5 text-[10.5px] text-warning">
+              <WifiOff className="mt-px h-3 w-3 shrink-0" />
+              <span className="leading-snug">{catalog?.error}</span>
+            </div>
+            <div role="separator" className="mx-3 border-t border-dashed border-separator" />
+          </>
         )}
 
         {/* 版本列表 */}
@@ -288,7 +292,8 @@ export function VersionPicker({ group, items, catalog, onRefresh, onPick, onUnin
         </div>
 
         {/* 底部：数据来源 */}
-        <div className="flex items-center justify-between border-t border-border px-2.5 py-1.5 text-[10px] text-faint">
+        <div role="separator" className="mx-3 border-t border-dashed border-separator" />
+        <div className="flex items-center justify-between px-2.5 py-1.5 text-[10px] text-faint">
           <span>
             {!isTauri
               ? t("versions.preview")

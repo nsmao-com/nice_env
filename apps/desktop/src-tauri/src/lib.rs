@@ -98,7 +98,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(off_main_thread(tauri::generate_handler![
             // 套件
             list_packages, install_package, uninstall_package, cancel_download, set_active_version,
             pathenv_status, pathenv_set_enabled, pathenv_set_selected, pathenv_reapply,
@@ -167,9 +167,36 @@ pub fn run() {
             // 托盘面板（自绘小窗：数据 / 动作 / 尺寸与显隐）
             tray::tray_panel_state, tray::tray_stop_all, tray::tray_open_main,
             tray::tray_panel_resize, tray::tray_panel_hide,
-        ])
+        ]))
         .run(tauri::generate_context!())
         .expect("NiceEnv 启动失败");
+}
+
+/// 所有命令统一派发到阻塞线程池执行，不占用 UI 主线程。
+///
+/// Tauri 的同步命令（非 async fn）默认在主线程执行，而主线程同时也是 WebView 的
+/// UI 线程：命令里只要有进程调用、端口探测、磁盘枚举、网络请求，整个窗口就会卡住，
+/// 表现为切换菜单卡顿、点什么都没反应。这里一次性把派发挪出主线程：
+/// - 同步命令在阻塞线程池里执行（该线程池允许 reqwest::blocking / block_on）；
+/// - async 命令只是在这里把 future 交给 async runtime，行为与原来一致；
+/// - ACL 校验在调用本 handler 之前已由 Tauri 完成，不受影响。
+fn off_main_thread<F>(handler: F) -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static
+where
+    F: Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static,
+{
+    let handler = Arc::new(handler);
+    move |invoke| {
+        let handler = Arc::clone(&handler);
+        tauri::async_runtime::spawn_blocking(move || {
+            let resolver = invoke.resolver.clone();
+            let cmd = invoke.message.command().to_string();
+            // 已经对 Tauri 返回了 true，找不到命令时要自己 reject，否则前端 Promise 永远挂起
+            if !handler(invoke) {
+                resolver.reject(format!("Command {cmd} not found"));
+            }
+        });
+        true
+    }
 }
 
 /// 退出前收尾：停掉本应用拉起的服务，并清掉 pidfile
@@ -913,7 +940,8 @@ fn open_target(target: &str, folder: bool) -> Result<bool, String> {
         } else {
             vec!["/c".into(), "start".into(), "".into(), target.to_string()]
         };
-        std::process::Command::new(prog)
+        // 外层 cmd 只是个跳板，不隐藏会闪一下黑框；start 打开的目标程序不受影响
+        platform::command(prog)
             .args(&args)
             .spawn()
             .map(|_| true)
@@ -934,12 +962,13 @@ fn open_target(target: &str, folder: bool) -> Result<bool, String> {
 fn open_terminal(cwd: String) -> Result<bool, tauri::Error> {
     #[cfg(windows)]
     {
-        std::process::Command::new("cmd")
+        // 外层 cmd 隐藏；start 会给终端单独开新窗口，用户看到的仍是终端本身
+        platform::command("cmd")
             .args(["/c", "start", "", "wt", "-d"])
             .arg(&cwd)
             .spawn()
             .or_else(|_| {
-                std::process::Command::new("cmd")
+                platform::command("cmd")
                     .args(["/c", "start", "cmd", "/K", &format!("cd /d {cwd}")])
                     .spawn()
             })

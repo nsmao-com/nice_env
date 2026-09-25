@@ -387,7 +387,7 @@ fn start_mysql(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, vers
         if cfg!(windows) {
             init_args.push("--console".to_string());
         }
-        let out = std::process::Command::new(&mysqld)
+        let out = platform::command(&mysqld)
             .args(&init_args)
             .output()
             .map_err(|e| AppError::io("初始化 MySQL 数据目录", e))?;
@@ -436,7 +436,7 @@ fn start_mysql(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, vers
 fn set_root_password_via(paths: &Paths, version: &str, port: u16, old: &str, new: &str) -> Result<()> {
     let inst = paths.runtime_dir("mysql", version).join(mysql_root_name(version));
     let exe = inst.join("bin").join(exe_name("mysql"));
-    let out = std::process::Command::new(&exe)
+    let out = platform::command(&exe)
         .args([
             "-h", "127.0.0.1", "-P", &port.to_string(),
             "-u", "root", &format!("--password={old}"),
@@ -549,7 +549,7 @@ fn start_postgresql(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>,
         std::fs::create_dir_all(&datadir)?;
         // macOS 的 initdb 拒绝以 root 用户运行，且 -U 指定的是数据库超级用户；
         // 两端统一用 postgres（Windows 上 pg_ctl 也不认 root 以外的惯例名）
-        let out = std::process::Command::new(&initdb)
+        let out = platform::command(&initdb)
             .args([
                 "-D".to_string(),
                 datadir.to_string_lossy().to_string(),
@@ -672,7 +672,7 @@ pub fn stop_service(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>,
         match id {
             "nginx" => {
                 if let Ok((root, exe)) = nginx_exe(store) {
-                    let _ = std::process::Command::new(&exe)
+                    let _ = platform::command(&exe)
                         .args([
                             "-p".into(),
                             root.to_string_lossy().to_string(),
@@ -689,7 +689,7 @@ pub fn stop_service(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>,
             }
             "apache" => {
                 if let Ok((root, exe)) = apache_paths(store) {
-                    let _ = std::process::Command::new(&exe)
+                    let _ = platform::command(&exe)
                         .args([
                             "-d".into(),
                             root.to_string_lossy().to_string(),
@@ -708,7 +708,7 @@ pub fn stop_service(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>,
                 if let Ok((root, _)) = postgres_paths(store) {
                     let pg_ctl = root.join("bin").join(exe_name("pg_ctl"));
                     let version = installed_by_choice(store, "postgresql").map(|p| p.version).unwrap_or_default();
-                    let _ = std::process::Command::new(&pg_ctl)
+                    let _ = platform::command(&pg_ctl)
                         .args([
                             "-D".into(),
                             paths.postgres_data_dir(&version).to_string_lossy().to_string(),
@@ -733,7 +733,7 @@ pub fn stop_service(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>,
                 Ok(())
             }
             "redis" => {
-                let out = std::process::Command::new("redis-cli")
+                let out = platform::command("redis-cli")
                     .args(["-p", &redis_port.to_string(), "shutdown", "nosave"])
                     .output();
                 if out.map(|o| o.status.success()).unwrap_or(false) {
@@ -747,7 +747,7 @@ pub fn stop_service(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>,
                 if let Ok((basedir, _)) = mysql_paths(store, version) {
                     let admin = basedir.join("bin").join(exe_name("mysqladmin"));
                     let pass = store.get_setting("mysqlRootPassword").unwrap_or_else(|| "root".into());
-                    let _ = std::process::Command::new(&admin)
+                    let _ = platform::command(&admin)
                         .args([
                             "-h", "127.0.0.1", "-P", &mysql_port.to_string(),
                             "-u", "root", &format!("--password={pass}"), "shutdown",
@@ -819,7 +819,7 @@ fn terminate_group(manager: &Arc<ServiceManager>, id: &str) {
 pub fn reload_nginx(store: &Store, paths: &Paths) -> Result<()> {
     let (root, exe) = nginx_exe(store)?;
     configgen::validate_nginx(&exe, &paths.nginx_conf())?;
-    let out = std::process::Command::new(&exe)
+    let out = platform::command(&exe)
         .args([
             "-p".into(),
             root.to_string_lossy().to_string(),
@@ -900,7 +900,7 @@ pub fn rebuild_and_reload(store: &Store, paths: &Paths, manager: &Arc<ServiceMan
             }
             #[cfg(not(windows))]
             {
-                let out = std::process::Command::new(&exe)
+                let out = platform::command(&exe)
                     .args([
                         "-d".into(),
                         root.to_string_lossy().to_string(),
@@ -1091,7 +1091,7 @@ pub fn validate_configs(store: &Store, paths: &Paths) -> Vec<ConfigCheck> {
         if !conf.exists() {
             out.push(ConfigCheck { name: "Nginx".into(), ok: false, status: "fail".into(), detail: "nginx.conf 不存在（先启动一次生成）".into() });
         } else {
-            let o = std::process::Command::new(&exe)
+            let o = platform::command(&exe)
                 .args(["-p".into(), root.to_string_lossy().to_string(), "-t".into(), "-c".into(), conf.to_string_lossy().to_string()])
                 .output();
             match o {
@@ -1110,7 +1110,7 @@ pub fn validate_configs(store: &Store, paths: &Paths) -> Vec<ConfigCheck> {
         if !conf.exists() {
             out.push(ConfigCheck { name: "Apache".into(), ok: false, status: "fail".into(), detail: "httpd.conf 不存在".into() });
         } else {
-            let o = std::process::Command::new(&exe)
+            let o = platform::command(&exe)
                 .args(["-d".into(), root.to_string_lossy().to_string(), "-t".into(), "-f".into(), conf.to_string_lossy().to_string()])
                 .output();
             match o {
@@ -1136,7 +1136,7 @@ pub fn validate_configs(store: &Store, paths: &Paths) -> Vec<ConfigCheck> {
                 out.push(ConfigCheck { name: format!("PHP {}", p.version), ok: false, status: "fail".into(), detail: "php.ini 不存在".into() });
                 continue;
             }
-            let ok = std::process::Command::new(&exe)
+            let ok = platform::command(&exe)
                 .args(["-n", "-c"].iter().copied().chain(std::iter::once(ini.to_string_lossy().as_ref())))
                 .arg("-v")
                 .output()

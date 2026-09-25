@@ -520,7 +520,7 @@ pub fn write_mihomo_config(paths: &Paths, content: &str) -> Result<()> {
 
 /// 校验 nginx 配置语法：nginx -t
 pub fn validate_nginx(nginx_exe: &std::path::Path, conf: &std::path::Path) -> Result<()> {
-    let out = std::process::Command::new(nginx_exe)
+    let out = platform::command(nginx_exe)
         .arg("-t")
         .arg("-c")
         .arg(conf)
@@ -712,7 +712,7 @@ pub fn write_httpd_conf(paths: &Paths, apache_root: &std::path::Path, pools: &[(
 
 /// 校验 httpd 配置语法：httpd -t
 pub fn validate_httpd(httpd_exe: &std::path::Path, conf: &std::path::Path) -> Result<()> {
-    let out = std::process::Command::new(httpd_exe)
+    let out = platform::command(httpd_exe)
         .arg("-t")
         .arg("-f")
         .arg(conf)

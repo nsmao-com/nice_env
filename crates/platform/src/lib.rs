@@ -25,6 +25,26 @@ fn io_err(e: std::io::Error) -> PlatformError {
     PlatformError::Io(e.to_string())
 }
 
+/* ================= 子进程 ================= */
+
+/// Windows 下 CreateProcess 的 CREATE_NO_WINDOW
+#[cfg(windows)]
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// 创建一个不弹控制台窗口的子进程命令。
+///
+/// 桌面端是 GUI 进程，直接拉起控制台程序（php -m / nginx -t / mysqld --initialize /
+/// certutil / netstat / tar …）时 Windows 会给子进程新开一个黑框，表现为界面上
+/// 窗口频繁闪烁。所有后台探测、初始化、导入导出类调用都应走这里；
+/// 真的需要给用户看到窗口的（打开终端等）才直接用 `std::process::Command`。
+pub fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
+    #[allow(unused_mut)]
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
 /* ================= 进程树管理 ================= */
 
 /// 进程组句柄：Windows=Job Object(KILL_ON_JOB_CLOSE)，Unix=记录 pid 集合。

@@ -463,7 +463,7 @@ pub fn set_extension(
     let php_exe = paths.runtime_dir("php", version).join(crate::ops::exe_name("php"));
     let mut warnings = Vec::new();
     if php_exe.is_file() {
-        let out = std::process::Command::new(&php_exe)
+        let out = platform::command(&php_exe)
             .arg("-n")
             .arg("-c")
             .arg(&ini_path)

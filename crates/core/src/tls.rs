@@ -131,7 +131,7 @@ pub fn trust_ca(paths: &Paths) -> Result<()> {
     #[cfg(windows)]
     {
         // 先直接尝试（若已提权则成功）；失败则走 UAC 提权
-        if let Ok(o) = std::process::Command::new("certutil")
+        if let Ok(o) = platform::command("certutil")
             .args(["-addstore", "-f", "Root"])
             .arg(&ca)
             .output()
@@ -172,7 +172,7 @@ pub fn ca_trusted(_paths: &Paths) -> bool {
     #[cfg(windows)]
     {
         for cn in [CA_CN_NEW, CA_CN_LEGACY] {
-            let Ok(out) = std::process::Command::new("certutil")
+            let Ok(out) = platform::command("certutil")
                 .args(["-verify", "-store", "Root", cn])
                 .output()
             else {

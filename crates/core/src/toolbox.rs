@@ -45,7 +45,7 @@ pub fn ollama_models(
     installer: &crate::install::Installer,
 ) -> Result<Vec<OllamaModelRow>> {
     let exe = resolve_exe(store, paths, installer, "ollama")?;
-    let out = std::process::Command::new(exe)
+    let out = platform::command(exe)
         .arg("list")
         .output()
         .map_err(|e| AppError::io("查询模型列表", e))?;
@@ -82,7 +82,7 @@ pub fn ollama_delete(
     name: &str,
 ) -> Result<()> {
     let exe = resolve_exe(store, paths, installer, "ollama")?;
-    let out = std::process::Command::new(exe)
+    let out = platform::command(exe)
         .args(["rm", name])
         .output()
         .map_err(|e| AppError::io("删除模型", e))?;
@@ -104,7 +104,7 @@ pub fn ollama_pull(
     name: &str,
 ) -> Result<()> {
     let exe = resolve_exe(store, paths, installer, "ollama")?;
-    let mut child = std::process::Command::new(exe)
+    let mut child = platform::command(exe)
         .args(["pull", name])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -174,7 +174,7 @@ pub fn adminer_start(
         .unwrap_or_else(|| "adminer.php".to_string());
     let adm_dir = paths.runtime_dir("adminer", &adm.version);
 
-    let mut child = std::process::Command::new(php_exe)
+    let mut child = platform::command(php_exe)
         .args([
             "-S",
             &format!("127.0.0.1:{ADMINER_PORT}"),

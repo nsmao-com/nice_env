@@ -446,7 +446,7 @@ pub fn validate(
                     let tmp = paths.etc().join("nginx").join(".nsb-validate.conf");
                     std::fs::create_dir_all(paths.etc().join("nginx")).ok();
                     std::fs::write(&tmp, content).map_err(|e| AppError::io("写入临时校验文件", e))?;
-                    let out = std::process::Command::new(&exe)
+                    let out = platform::command(&exe)
                         .arg("-t")
                         .arg("-c")
                         .arg(&tmp)

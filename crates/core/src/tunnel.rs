@@ -45,7 +45,7 @@ pub fn start(exe: &Path, port: u16) -> Result<TunnelInfo> {
         }
     }
 
-    let mut child = std::process::Command::new(exe)
+    let mut child = platform::command(exe)
         .args([
             "tunnel",
             "--no-autoupdate",

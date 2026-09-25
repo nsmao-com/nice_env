@@ -368,9 +368,12 @@ fn append_to_log_file(manager: &ServiceManager, service_id: &str, line: &str) {
 /* ================= 健康检查 ================= */
 
 pub fn tcp_port_open(port: u16) -> bool {
+    // 只探本机回环：有监听时握手由内核完成，亚毫秒级。
+    // Windows 连一个没人监听的端口不会立刻失败（收到 RST 后还会重试 SYN，约 1~2s），
+    // 所以「端口空闲」的判定永远要等满超时——超时越长，启动服务 / 分配端口池越慢
     std::net::TcpStream::connect_timeout(
         &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-        Duration::from_millis(600),
+        Duration::from_millis(200),
     )
     .is_ok()
 }

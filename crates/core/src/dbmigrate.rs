@@ -8,7 +8,7 @@
 use crate::error::{AppError, Result};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 pub const SYSTEM_DATABASES: &[&str] = &[
     "information_schema",
@@ -71,7 +71,7 @@ pub fn list_source_databases(
     bin_dir: &Path,
     src: &SourceConn,
 ) -> Result<Vec<SourceDb>> {
-    let out = Command::new(mysql_bin(bin_dir, "mysql"))
+    let out = platform::command(mysql_bin(bin_dir, "mysql"))
         .args(src.client_args())
         .args(["-N", "-B", "-e", "SELECT schema_name, COALESCE(SUM(data_length+index_length),0) FROM information_schema.schemata LEFT JOIN information_schema.tables ON table_schema=schema_name GROUP BY schema_name ORDER BY schema_name;"])
         .envs(src.envs())
@@ -137,7 +137,7 @@ pub fn import_databases(
         }
         emit_state(safe.to_string(), "importing");
 
-        let mut dumper = Command::new(&dump)
+        let mut dumper = platform::command(&dump)
             .args(src.client_args())
             .args([
                 "--single-transaction",
@@ -154,7 +154,7 @@ pub fn import_databases(
             .map_err(|e| AppError::io("启动 mysqldump", e))?;
 
         let dump_stdout = dumper.stdout.take();
-        let mut importer = Command::new(&client)
+        let mut importer = platform::command(&client)
             .args(target.client_args())
             .envs(target.envs())
             .stdin(Stdio::piped())

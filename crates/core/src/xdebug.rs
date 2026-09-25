@@ -164,7 +164,7 @@ pub fn detect_build(paths: &Paths, version: &str) -> Result<PhpBuild> {
         )
         .with_hint("先到「套件 / 服务」安装该版本 PHP"));
     }
-    let out = std::process::Command::new(&exe)
+    let out = platform::command(&exe)
         .arg("-i")
         .output()
         .map_err(|e| AppError::io("运行 php -i", e))?;
@@ -257,7 +257,7 @@ fn probe_xdebug(paths: &Paths, version: &str) -> (bool, Option<String>) {
     if !exe.is_file() {
         return (false, None);
     }
-    let out = std::process::Command::new(&exe)
+    let out = platform::command(&exe)
         .arg("-n")
         .arg("-c")
         .arg(paths.php_ini(version))
@@ -419,7 +419,7 @@ pub fn verify(paths: &Paths, version: &str) -> (bool, Option<String>, Vec<String
     if !exe.is_file() {
         return (false, None, vec!["找不到 php 可执行文件".into()]);
     }
-    let out = std::process::Command::new(&exe)
+    let out = platform::command(&exe)
         .arg("-n")
         .arg("-c")
         .arg(&ini_path)

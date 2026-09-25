@@ -458,7 +458,7 @@ fn local_deploy(target: &DeployTarget, domains: &[String], cert_pem: &str, key_p
     let mut message = format!("已复制到本地（{cert_path} / {key_path}）");
     if let Some(script) = target.config.get("script").filter(|s| !s.trim().is_empty()) {
         // 部署后命令在本机执行；这是用户显式配置的动作
-        let out = std::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" })
+        let out = platform::command(if cfg!(windows) { "cmd" } else { "sh" })
             .args(if cfg!(windows) { ["/C", script] } else { ["-c", script] })
             .output()
             .map_err(|e| AppError::io("执行部署脚本失败", e))?;

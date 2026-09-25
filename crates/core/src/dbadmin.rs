@@ -22,7 +22,7 @@ impl MySqlClient {
     }
 
     fn run(&self, sql: &str) -> Result<String> {
-        let out = std::process::Command::new(&self.exe)
+        let out = platform::command(&self.exe)
             .args([
                 "-h",
                 "127.0.0.1",

@@ -5,8 +5,9 @@ import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as api from "./api";
 import type { DownloadProgress } from "@nsb/schema";
-import { listen, normalizeError, type AppErrorShape } from "./backend";
+import { normalizeError, type AppErrorShape } from "./backend";
 import { toast } from "sonner";
+import { useInstallTasks } from "./install-tasks";
 
 /* 服务状态轮询：2s，不阻塞。
    initialDataUpdatedAt: 0 让 react-query 立刻发起首次请求——否则 initialData 的空数组
@@ -182,17 +183,12 @@ export function useLogTail(id: string | null, intervalMs = 1500, lines = 500, en
   return { lines: data, error };
 }
 
-/* 下载进度事件（真实后端事件；浏览器下恒 null） */
-export function useDownloadProgress() {
-  const [progress, setProgress] = useState<Record<string, DownloadProgress>>({});
-  useEffect(() => {
-    let un: (() => void) | undefined;
-    listen<DownloadProgress>("download://progress", (p) => {
-      setProgress((prev) => ({ ...prev, [p.taskId]: p }));
-    }).then((u) => (un = u));
-    return () => un?.();
-  }, []);
-  return progress;
+/* 下载进度事件（真实后端事件；浏览器下恒 null）。
+   事件由 InstallTasksBridge 全局订阅一次写进 store，这里只读——
+   以前每个调用方各自 listen，套件页每一行都订阅一份，一个进度事件就让整页重渲染。
+   只关心某个套件时优先用 useInstallTasks + activeProgressFor 精确取值。 */
+export function useDownloadProgress(): Record<string, DownloadProgress> {
+  return useInstallTasks((s) => s.progress);
 }
 
 /* 统一错误 toast */

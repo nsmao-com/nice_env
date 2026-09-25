@@ -1180,6 +1180,8 @@ const dict = {
     "install.doneHint": "已安装到运行时可立即启用",
     "install.close": "完成",
     "install.keepOpen": "安装期间可以继续使用其它功能",
+    "install.runInBackground": "后台安装",
+    "install.background": "已转入后台安装，完成后会通知你",
     /* ---- 二次确认 ---- */
     "confirm.title": "确认操作",
     "confirm.deleteDb": "删除数据库",
@@ -2527,6 +2529,8 @@ const dict = {
     "install.doneHint": "Installed — you can start it right away",
     "install.close": "Done",
     "install.keepOpen": "You can keep using the app while it installs",
+    "install.runInBackground": "Run in background",
+    "install.background": "Installing in the background — you'll be notified when it's done",
     /* ---- Confirmations ---- */
     "confirm.title": "Confirm action",
     "confirm.deleteDb": "Delete database",

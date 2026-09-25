@@ -284,7 +284,7 @@ pub fn scan_app_ports(store: &Store, manager: &Arc<ServiceManager>) -> Result<Ve
 pub fn kill_pid(pid: u32) -> Result<bool> {
     #[cfg(windows)]
     {
-        let out = std::process::Command::new("taskkill")
+        let out = platform::command("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .output()
             .map_err(|e| crate::error::AppError::io("结束进程", e))?;
@@ -292,7 +292,7 @@ pub fn kill_pid(pid: u32) -> Result<bool> {
     }
     #[cfg(not(windows))]
     {
-        let out = std::process::Command::new("kill")
+        let out = platform::command("kill")
             .arg("-9")
             .arg(pid.to_string())
             .output()
@@ -304,12 +304,12 @@ pub fn kill_pid(pid: u32) -> Result<bool> {
 /// (port, pid) 监听列表
 fn platform_listeners() -> Result<Vec<(u16, u32)>> {
     let out = if cfg!(windows) {
-        std::process::Command::new("netstat")
+        platform::command("netstat")
             .args(["-ano", "-p", "tcp"])
             .output()
             .map_err(|e| crate::error::AppError::io("执行 netstat", e))?
     } else {
-        std::process::Command::new("lsof")
+        platform::command("lsof")
             .args(["-nP", "-iTCP", "-sTCP:LISTEN"])
             .output()
             .map_err(|e| crate::error::AppError::io("执行 lsof", e))?

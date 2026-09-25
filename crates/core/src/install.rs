@@ -508,7 +508,7 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<()> {    let file = std::f
 /// `.gz` 单文件（mihomo 等）tar 会失败，退回 gunzip 并落到清单声明的 entry 路径
 /// ——不能用下载缓存文件名推导（缓存名是 `{id}@{ver}.zip`，与真实文件名无关）。
 fn extract_targz(archive: &Path, dest: &Path, entry: &str) -> Result<()> {
-    let out = std::process::Command::new("tar")
+    let out = platform::command("tar")
         .arg("-xzf")
         .arg(archive)
         .arg("-C")
@@ -519,7 +519,7 @@ fn extract_targz(archive: &Path, dest: &Path, entry: &str) -> Result<()> {
         return Ok(());
     }
     // 单文件 .gz → gunzip 到 entry 指定的相对路径
-    let out = std::process::Command::new("gzip")
+    let out = platform::command("gzip")
         .arg("-dc")
         .arg(archive)
         .output()

@@ -14,7 +14,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use crate::error::{AppError, Result};
 use crate::model::{DbBackupFile, DbBackupProgress};
@@ -120,7 +120,7 @@ pub fn dump_databases(
     }
     let defaults = write_defaults_file(&conn.root_password)?;
 
-    let mut cmd = Command::new(&dump);
+    let mut cmd = platform::command(&dump);
     cmd.arg(format!("--defaults-extra-file={}", defaults.display()))
         .args(["-h", "127.0.0.1", "-P", &conn.port.to_string()])
         // --databases：把 CREATE DATABASE 一起写进去，还原时不用先建库
@@ -247,7 +247,7 @@ pub fn restore_from_file(
     let file = std::fs::File::open(sql_path).map_err(|e| AppError::io("打开备份文件", e))?;
     let total = file.metadata().ok().map(|m| m.len());
 
-    let mut child = Command::new(&mysql)
+    let mut child = platform::command(&mysql)
         .arg(format!("--defaults-extra-file={}", defaults.display()))
         .args(["-h", "127.0.0.1", "-P", &conn.port.to_string()])
         .arg("--default-character-set=utf8mb4")

@@ -33,7 +33,8 @@ import type { PackageView, PackageCategory, ServiceStatus } from "@nsb/schema";
 import { PACKAGE_CATEGORY_ORDER } from "@nsb/schema";
 import { cn, fmtBytes, fmtSpeed, fmtDuration, isPlatformCompatible } from "@/lib/utils";
 import { useUI, useT } from "@/lib/store";
-import { usePackages, useDownloadProgress, useInvalidate, toastError, useServices, useVersionCatalogs } from "@/lib/hooks";
+import { usePackages, useInvalidate, toastError, useServices, useVersionCatalogs } from "@/lib/hooks";
+import { useInstallTasks, activeProgressFor } from "@/lib/install-tasks";
 import * as api from "@/lib/api";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -459,7 +460,9 @@ function PackageRow({
 }) {
   const t = useT();
   const invalidate = useInvalidate();
-  const progress = useDownloadProgress();
+  // 只订阅本套件的下载进度：其它包的进度事件不会让这一行重渲染
+  const task = useInstallTasks((s) => activeProgressFor(s.progress, group.id));
+  const cancelInstall = useInstallTasks((s) => s.cancel);
   // PHP 扩展面板：挂在已安装且被选为「使用中」的那个版本上
   // （扩展的开关写进该版本的 php.ini，所以必须明确是哪一个版本）
   const [extVersion, setExtVersion] = React.useState<string | null>(null);
@@ -519,13 +522,8 @@ function PackageRow({
     return list;
   }, [group, catalog, runningServices]);
 
-  const task = group.versions
-    .map((v) => progress[`${group.id}@${v.version}`])
-    .find((p) => p && p.received < p.total);
   const pct = task && task.total > 0 ? (task.received / task.total) * 100 : 0;
-  const activeVersion = task
-    ? group.versions.find((v) => progress[`${group.id}@${v.version}`] === task)?.version
-    : null;
+  const activeVersion = task ? task.taskId.slice(group.id.length + 1) : null;
 
   const clickVersion = async (item: VersionItem) => {
     const { version, installed } = item;
@@ -580,8 +578,10 @@ function PackageRow({
     }
   };
 
+  // 不用 layout 动画：它每次渲染都要测量 DOM（强制回流），
+  // 几十行的列表跟着服务轮询 / 下载进度反复重渲染时会明显卡顿
   return (
-    <motion.div layout initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+    <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
       <Card className="flex flex-col gap-2.5 p-3.5 transition-colors hover:border-border-strong lg:flex-row lg:items-center">
         {/* 左：图标 + 名称/描述 */}
         <div className="flex min-w-0 flex-1 items-center gap-3">
@@ -670,13 +670,7 @@ function PackageRow({
               size="sm"
               variant="ghost"
               className="h-6 px-2 text-[10px] text-faint"
-              onClick={async () => {
-                try {
-                  await api.cancelDownload(`${group.id}@${activeVersion}`);
-                } catch (e) {
-                  toastError(e);
-                }
-              }}
+              onClick={() => void cancelInstall(task.taskId)}
             >
               {t("common.cancel")}
             </Button>

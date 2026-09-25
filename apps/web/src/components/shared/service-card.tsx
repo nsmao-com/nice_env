@@ -71,8 +71,10 @@ export function ServiceCard({ service }: { service: ServiceStatus }) {
     unknown: t("state.unknown"),
   };
 
+  // 不用 layout 动画：服务状态每 2s 轮询一次，每张卡片每次都会重渲染，
+  // layout 会在每次渲染时测量 DOM（强制回流），卡片一多就明显掉帧
   return (
-    <motion.div layout initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.98 }}>
+    <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.98 }}>
       <Card
         className={cn(
           "group flex flex-col gap-3 p-4 transition-[box-shadow,border-color,transform] duration-200 hover:-translate-y-0.5 hover:border-border-strong hover:shadow-[var(--shadow-raised)]",

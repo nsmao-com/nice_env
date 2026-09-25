@@ -16,10 +16,11 @@ import {
   ShieldCheck,
   X,
 } from "lucide-react";
-import type { DownloadProgress, PackageView, ServiceStatus } from "@nsb/schema";
+import type { PackageView, ServiceStatus } from "@nsb/schema";
 import { cn, fmtBytes, fmtSpeed, fmtDuration } from "@/lib/utils";
 import { useT } from "@/lib/store";
 import { toastError } from "@/lib/hooks";
+import { useInstallTasks } from "@/lib/install-tasks";
 import * as api from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
@@ -90,31 +91,21 @@ export function InstallDialog({
   startableAs?: string | null;
 }) {
   const t = useT();
-  const [stage, setStage] = React.useState<StageId>("download");
-  const [progress, setProgress] = React.useState<DownloadProgress | null>(null);
-  const [error, setError] = React.useState<string | null>(null);
-  const [busy, setBusy] = React.useState(false);
-  const [finished, setFinished] = React.useState(false);
   const startedRef = React.useRef<string | null>(null);
 
   const taskId = target ? `${target.id}@${target.version}` : null;
+  /* 安装本身是全局后台任务（见 lib/install-tasks），弹窗只负责展示，随时可关 */
+  const task = useInstallTasks((s) => (taskId ? s.tasks[taskId] : undefined));
+  const progress = useInstallTasks((s) => (taskId ? s.progress[taskId] : undefined)) ?? null;
+  const startTask = useInstallTasks((s) => s.start);
+  const cancelTask = useInstallTasks((s) => s.cancel);
 
-  /* 订阅后端下载/安装进度事件 */
-  React.useEffect(() => {
-    if (!target) return;
-    let un: (() => void) | undefined;
-    import("@/lib/backend").then(({ listen }) =>
-      listen<DownloadProgress>("download://progress", (p) => {
-        if (p.taskId !== taskId) return;
-        setProgress(p);
-        setStage(stageFromState(p.state));
-        if (p.state === "installed") setFinished(true);
-      }).then((u) => (un = u))
-    );
-    return () => un?.();
-  }, [target, taskId]);
+  const busy = task?.status === "running";
+  const finished = task?.status === "done";
+  const error = task?.status === "error" ? (task.error ?? t("install.failed")) : null;
+  const stage: StageId = finished ? "done" : progress ? stageFromState(progress.state) : "download";
 
-  /* 打开即开始安装 */
+  /* 打开即开始安装；同一版本已在后台安装时只是重新显示它的进度 */
   React.useEffect(() => {
     if (!target) {
       startedRef.current = null;
@@ -122,39 +113,32 @@ export function InstallDialog({
     }
     if (startedRef.current === taskId) return;
     startedRef.current = taskId;
-    setStage("download");
-    setProgress(null);
-    setError(null);
-    setFinished(false);
-    void runInstall(target);
-  }, [target, taskId]);
+    void startTask(target);
+  }, [target, taskId, startTask]);
 
-  const runInstall = async (tg: InstallTarget) => {
-    setBusy(true);
-    try {
-      await api.installPackage(`${tg.id}@${tg.version}`);
-      setFinished(true);
-      setStage("done");
-      toast.success(`${tg.displayName} ${tg.version} ${t("packages.installed")}`);
-      onDone?.();
-    } catch (e) {
-      const err = e as { message?: string; hint?: string };
-      setError(err?.message ? `${err.message}${err.hint ? ` — ${err.hint}` : ""}` : String(e));
-    } finally {
-      setBusy(false);
-    }
+  /* 页面级的完成回调（全局刷新由 InstallTasksBridge 负责，这里只在弹窗还开着时补调） */
+  const onDoneRef = React.useRef(onDone);
+  onDoneRef.current = onDone;
+  const prevStatusRef = React.useRef(task?.status);
+  React.useEffect(() => {
+    if (task?.status === "done" && prevStatusRef.current === "running") onDoneRef.current?.();
+    prevStatusRef.current = task?.status;
+  }, [task?.status]);
+
+  const retry = () => {
+    if (target) void startTask(target);
   };
 
   const cancel = async () => {
     if (!taskId) return;
-    try {
-      await api.cancelDownload(taskId);
-      toast.info(t("install.cancelled"));
-    } catch (e) {
-      toastError(e);
-    } finally {
-      onOpenChange(false);
-    }
+    await cancelTask(taskId);
+    onOpenChange(false);
+  };
+
+  /* 关闭弹窗不影响安装：进行中关掉就转入后台，装完会有通知 */
+  const close = (open: boolean) => {
+    if (!open && busy) toast.info(t("install.background"));
+    onOpenChange(open);
   };
 
   const startNow = async () => {
@@ -173,8 +157,8 @@ export function InstallDialog({
   const pct = progress && progress.total > 0 ? (progress.received / progress.total) * 100 : 0;
 
   return (
-    <Dialog open={target !== null} onOpenChange={(o) => (busy && !finished ? undefined : onOpenChange(o))}>
-      <DialogContent className="max-w-lg overflow-hidden p-0" hideClose={busy && !finished}>
+    <Dialog open={target !== null} onOpenChange={close}>
+      <DialogContent className="max-w-lg overflow-hidden p-0">
         {/* 头部 */}
         <div className="relative border-b border-border bg-card-2/30 px-6 py-5">
           <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/40 to-transparent" />
@@ -358,7 +342,7 @@ export function InstallDialog({
               <Button variant="ghost" onClick={() => onOpenChange(false)}>
                 {t("common.close")}
               </Button>
-              <Button onClick={() => target && runInstall(target)} disabled={busy}>
+              <Button onClick={retry} disabled={busy}>
                 {t("install.retry")}
               </Button>
             </>
@@ -375,10 +359,10 @@ export function InstallDialog({
             </>
           ) : (
             <>
-              <span className="text-[11px] text-faint">{t("install.keepOpen")}</span>
               <Button variant="ghost" onClick={cancel}>
                 <X className="h-3.5 w-3.5" /> {t("install.cancel")}
               </Button>
+              <Button onClick={() => close(false)}>{t("install.runInBackground")}</Button>
             </>
           )}
         </DialogFooter>

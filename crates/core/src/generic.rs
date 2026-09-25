@@ -414,7 +414,7 @@ pub fn graceful_stop(store: &Store, paths: &Paths, service_id: &str) {
         return;
     };
     let args: Vec<String> = stop_args.iter().map(|a| expand(a, &r)).collect();
-    let _ = std::process::Command::new(&r.bin).args(&args).output();
+    let _ = platform::command(&r.bin).args(&args).output();
     std::thread::sleep(Duration::from_millis(600));
 }
 
@@ -454,7 +454,7 @@ fn run_init_if_needed(r: &Resolved) -> Result<()> {
     };
 
     let args: Vec<String> = init_args.iter().map(|a| expand(a, r)).collect();
-    let out = std::process::Command::new(&init_exe)
+    let out = platform::command(&init_exe)
         .args(&args)
         .current_dir(&r.root)
         .output()

@@ -7,15 +7,30 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static HISTORY: Lazy<Mutex<Vec<StatsPoint>>> = Lazy::new(|| Mutex::new(Vec::new()));
 static SYS: Lazy<Mutex<sysinfo::System>> = Lazy::new(|| Mutex::new(sysinfo::System::new()));
+/// 上一次刷新 CPU 采样的时刻
+static LAST_CPU_REFRESH: Lazy<Mutex<Option<std::time::Instant>>> = Lazy::new(|| Mutex::new(None));
+/// 磁盘容量缓存：(采样时刻, 可用 GB, 总 GB)。枚举卷在 Windows 上可能很慢
+/// （网络盘 / 休眠的机械盘），而剩余空间几秒内几乎不变，没必要每次轮询都查。
+static DISK_CACHE: Lazy<Mutex<Option<(std::time::Instant, f64, f64)>>> = Lazy::new(|| Mutex::new(None));
+const DISK_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub fn get_system_stats() -> SystemStats {
     {
         let mut sys = SYS.lock();
         sys.refresh_memory();
-        sys.refresh_cpu_usage();
-        // CPU 使用率需要两轮采样间隔
-        std::thread::sleep(std::time::Duration::from_millis(120));
-        sys.refresh_cpu_usage();
+        // CPU 使用率是两次采样之间的差值。SYS 常驻、前端定时轮询，
+        // 上一次轮询就是天然的第一轮采样，只有首次调用才需要现场补一轮
+        let mut last = LAST_CPU_REFRESH.lock();
+        if sys.cpus().is_empty() {
+            sys.refresh_cpu_usage();
+            std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+            sys.refresh_cpu_usage();
+            *last = Some(std::time::Instant::now());
+        } else if last.map_or(true, |at| at.elapsed() >= sysinfo::MINIMUM_CPU_UPDATE_INTERVAL) {
+            // 多个页面各自轮询，两次调用可能挨得很近；间隔太短差值会失真，沿用上次结果
+            sys.refresh_cpu_usage();
+            *last = Some(std::time::Instant::now());
+        }
     }
     let sys = SYS.lock();
     let cpu = sys.global_cpu_usage();
@@ -51,6 +66,18 @@ pub fn get_system_stats() -> SystemStats {
 }
 
 fn disk_of_base() -> (f64, f64) {
+    let mut cache = DISK_CACHE.lock();
+    if let Some((at, free, total)) = *cache {
+        if at.elapsed() < DISK_CACHE_TTL {
+            return (free, total);
+        }
+    }
+    let (free, total) = query_disk_of_base();
+    *cache = Some((std::time::Instant::now(), free, total));
+    (free, total)
+}
+
+fn query_disk_of_base() -> (f64, f64) {
     use sysinfo::Disks;
     let disks = Disks::new_with_refreshed_list();
     let base = crate::paths::Paths::resolve(None);

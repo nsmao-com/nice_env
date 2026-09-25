@@ -310,7 +310,9 @@ pub fn run() {
 /// - 同步命令在阻塞线程池里执行（该线程池允许 reqwest::blocking / block_on）；
 /// - async 命令只是在这里把 future 交给 async runtime，行为与原来一致；
 /// - ACL 校验在调用本 handler 之前已由 Tauri 完成，不受影响。
-fn off_main_thread<F>(handler: F) -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static
+fn off_main_thread<F>(
+    handler: F,
+) -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static
 where
     F: Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static,
 {
@@ -1239,16 +1241,18 @@ fn open_target(target: &str, folder: bool) -> Result<bool, String> {
 fn open_terminal(cwd: String) -> Result<bool, tauri::Error> {
     #[cfg(windows)]
     {
-        // 外层 cmd 隐藏；start 会给终端单独开新窗口，用户看到的仍是终端本身
-        platform::command("cmd")
-            .args(["/c", "start", "", "wt", "-d"])
-            .arg(&cwd)
-            .spawn()
-            .or_else(|_| {
-                platform::command("cmd")
-                    .args(["/c", "start", "cmd", "/K", &format!("cd /d {cwd}")])
-                    .spawn()
-            })
+        // 外层 cmd 隐藏；start 会给终端单独开新窗口，用户看到的仍是终端本身。
+        // 必须先判断有没有 wt：`start wt` 找不到程序时外层 cmd 照样启动成功（只会弹一个
+        // 「找不到 wt」的系统对话框），靠 spawn 失败来回退永远走不到。
+        let mut cmd = platform::command("cmd");
+        // 新开的终端继承工作目录，不用再拼 `cd /d`（路径带空格 / 特殊字符也不会出错）
+        cmd.current_dir(&cwd);
+        if has_windows_terminal() {
+            cmd.args(["/c", "start", "", "wt", "-d"]).arg(&cwd);
+        } else {
+            cmd.args(["/c", "start", "", "cmd"]);
+        }
+        cmd.spawn()
             .map(|_| true)
             .map_err(|e| box_err(nsb_core::AppError::io("打开终端", e)))
     }
@@ -1260,6 +1264,25 @@ fn open_terminal(cwd: String) -> Result<bool, tauri::Error> {
             .map(|_| true)
             .map_err(|e| box_err(nsb_core::AppError::io("打开终端", e)))
     }
+}
+
+/// 是否装了 Windows Terminal。
+/// wt.exe 通常是 WindowsApps 下的「应用执行别名」（重分析点），跟随它取元数据会失败，
+/// 所以用 symlink_metadata 只看链接本身是否存在。
+#[cfg(windows)]
+fn has_windows_terminal() -> bool {
+    let mut dirs: Vec<std::path::PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        dirs.push(
+            std::path::PathBuf::from(local)
+                .join("Microsoft")
+                .join("WindowsApps"),
+        );
+    }
+    dirs.iter()
+        .any(|d| std::fs::symlink_metadata(d.join("wt.exe")).is_ok())
 }
 
 /* ================= 数据库 ================= */

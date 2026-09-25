@@ -193,6 +193,15 @@ impl ServiceManager {
     /* ---------- 状态聚合 ---------- */
 
     pub fn snapshot(&self, id: &str) -> Option<ServiceStatus> {
+        self.snapshot_with(id, crate::stats::processes_memory_mb)
+    }
+
+    /// `memory_of`：给定 pid 列表算内存（MB）。单个查询现场取；列表查询传入批量结果
+    fn snapshot_with(
+        &self,
+        id: &str,
+        memory_of: impl FnOnce(&[u32]) -> f64,
+    ) -> Option<ServiceStatus> {
         let e = self.entry(id)?;
         let state = e.state.lock().clone();
         let pids = e.pids.lock().clone();
@@ -216,7 +225,7 @@ impl ServiceManager {
                 .as_secs()
         });
         let memory_mb = if !pids.is_empty() {
-            Some(crate::stats::processes_memory_mb(&pids))
+            Some(memory_of(&pids))
         } else {
             None
         };
@@ -245,7 +254,19 @@ impl ServiceManager {
 
     pub fn list_status(&self) -> Vec<ServiceStatus> {
         let ids: Vec<String> = self.services.lock().keys().cloned().collect();
-        let mut out: Vec<ServiceStatus> = ids.iter().filter_map(|id| self.snapshot(id)).collect();
+        // 所有服务的 pid 一次性查内存：前端每 2s 轮询一次，逐个服务查会重复做全量进程枚举
+        let all_pids: Vec<u32> = ids
+            .iter()
+            .filter_map(|id| self.entry(id))
+            .flat_map(|e| e.pids.lock().clone())
+            .collect();
+        let memory = crate::stats::processes_memory_map(&all_pids);
+        let mut out: Vec<ServiceStatus> = ids
+            .iter()
+            .filter_map(|id| {
+                self.snapshot_with(id, |pids| pids.iter().filter_map(|p| memory.get(p)).sum())
+            })
+            .collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out
     }

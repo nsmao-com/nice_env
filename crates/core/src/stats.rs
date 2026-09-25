@@ -11,7 +11,8 @@ static SYS: Lazy<Mutex<sysinfo::System>> = Lazy::new(|| Mutex::new(sysinfo::Syst
 static LAST_CPU_REFRESH: Lazy<Mutex<Option<std::time::Instant>>> = Lazy::new(|| Mutex::new(None));
 /// 磁盘容量缓存：(采样时刻, 可用 GB, 总 GB)。枚举卷在 Windows 上可能很慢
 /// （网络盘 / 休眠的机械盘），而剩余空间几秒内几乎不变，没必要每次轮询都查。
-static DISK_CACHE: Lazy<Mutex<Option<(std::time::Instant, f64, f64)>>> = Lazy::new(|| Mutex::new(None));
+static DISK_CACHE: Lazy<Mutex<Option<(std::time::Instant, f64, f64)>>> =
+    Lazy::new(|| Mutex::new(None));
 const DISK_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub fn get_system_stats() -> SystemStats {
@@ -26,7 +27,7 @@ pub fn get_system_stats() -> SystemStats {
             std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
             sys.refresh_cpu_usage();
             *last = Some(std::time::Instant::now());
-        } else if last.map_or(true, |at| at.elapsed() >= sysinfo::MINIMUM_CPU_UPDATE_INTERVAL) {
+        } else if last.is_none_or(|at| at.elapsed() >= sysinfo::MINIMUM_CPU_UPDATE_INTERVAL) {
             // 多个页面各自轮询，两次调用可能挨得很近；间隔太短差值会失真，沿用上次结果
             sys.refresh_cpu_usage();
             *last = Some(std::time::Instant::now());
@@ -109,15 +110,28 @@ fn query_disk_of_base() -> (f64, f64) {
 
 /// 指定 pids 的内存占用（MB）
 pub fn processes_memory_mb(pids: &[u32]) -> f64 {
+    processes_memory_map(pids).values().sum()
+}
+
+/// 一次刷新批量取多个 pid 各自的内存占用（MB），查不到的 pid 不出现在结果里。
+///
+/// Windows 上 sysinfo 哪怕只刷新一个 pid，也要用 NtQuerySystemInformation 把全部
+/// 系统进程拉一遍；服务列表逐个服务查，同样的全量枚举会重复 N 次，所以批量查。
+pub fn processes_memory_map(pids: &[u32]) -> std::collections::HashMap<u32, f64> {
     use sysinfo::{Pid, ProcessesToUpdate, System};
+    let mut out = std::collections::HashMap::new();
+    if pids.is_empty() {
+        return out;
+    }
     let mut sys = System::new();
     let targets: Vec<Pid> = pids.iter().map(|p| Pid::from_u32(*p)).collect();
     sys.refresh_processes(ProcessesToUpdate::Some(&targets), true);
-    sys.processes()
-        .iter()
-        .filter(|(pid, _)| targets.contains(pid))
-        .map(|(_, p)| p.memory() as f64 / 1024.0 / 1024.0)
-        .sum()
+    for pid in &targets {
+        if let Some(p) = sys.process(*pid) {
+            out.insert(pid.as_u32(), p.memory() as f64 / 1024.0 / 1024.0);
+        }
+    }
+    out
 }
 
 fn now_sec() -> i64 {

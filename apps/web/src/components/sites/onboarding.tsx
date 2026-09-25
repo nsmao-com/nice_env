@@ -5,14 +5,13 @@ import { toast } from "sonner";
 import { motion, AnimatePresence } from "motion/react";
 import { Globe, Rocket, Database, Boxes, Check, ChevronRight, Sparkles } from "lucide-react";
 import { useUI, useT } from "@/lib/store";
-import { usePackages, useInvalidate, toastError } from "@/lib/hooks";
+import { usePackages, useInvalidate } from "@/lib/hooks";
+import { useInstallTasks, activeProgressFor } from "@/lib/install-tasks";
 import * as api from "@/lib/api";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { RingProgress } from "@/components/shared/ring-progress";
-import { cn, fmtSpeed } from "@/lib/utils";
-import type { DownloadProgress } from "@nsb/schema";
-import { listen } from "@/lib/backend";
+import { cn } from "@/lib/utils";
 
 const SCENES = [
   {
@@ -38,15 +37,54 @@ const SCENES = [
   },
 ] as const;
 
+/** 安装中的套件逐个显示状态。单独成组件：只有安装阶段挂载时才随下载进度重渲染 */
+function InstallingList({ ids }: { ids: string[] }) {
+  const t = useT();
+  const tasks = useInstallTasks((s) => s.tasks);
+  const progress = useInstallTasks((s) => s.progress);
+  return (
+    <div className="flex max-h-56 flex-col gap-2 overflow-y-auto rounded-xl bg-fill p-3 font-mono text-[11px]">
+      {ids.map((id) => {
+        const status = tasks[id]?.status;
+        const p = activeProgressFor(progress, id);
+        const pct = p && p.total > 0 ? Math.round((p.received / p.total) * 100) : null;
+        const label =
+          status === "done"
+            ? t("install.stage.done")
+            : status === "error"
+              ? t("install.failed")
+              : status === "running"
+                ? pct !== null
+                  ? `${pct}%`
+                  : t("ob.installingEach")
+                : t("ob.queued");
+        return (
+          <div key={id} className="flex items-center justify-between text-secondary">
+            <span>{id}</span>
+            <span
+              className={cn(
+                "tabular",
+                status === "done" ? "text-running" : status === "error" ? "text-error" : "text-faint"
+              )}
+            >
+              {label}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /** 首次启动引导：选场景 → 自动装套件 → 创建站点 */
 export function Onboarding() {
   const t = useT();
   const [open, setOpen] = React.useState(false);
   const [scene, setScene] = React.useState<string | null>(null);
   const [phase, setPhase] = React.useState<"pick" | "installing" | "done">("pick");
-  const [taskProgress, setTaskProgress] = React.useState<Record<string, DownloadProgress>>({});
   const [installErrors, setInstallErrors] = React.useState<string[]>([]);
   const setWizardOpen = useUI((s) => s.setWizardOpen);
+  const startTask = useInstallTasks((s) => s.start);
   const invalidate = useInvalidate();
 
   /* 首启才弹：未完成引导 且 还没装过任何套件；已有套件则静默标记完成，绝不打扰 */
@@ -72,14 +110,6 @@ export function Onboarding() {
     };
   }, []);
 
-  React.useEffect(() => {
-    let un: (() => void) | undefined;
-    listen<DownloadProgress>("download://progress", (p) => {
-      setTaskProgress((prev) => ({ ...prev, [p.taskId]: p }));
-    }).then((u) => (un = u));
-    return () => un?.();
-  }, []);
-
   const { data: packages } = usePackages();
 
   const installPkgId = (sceneId: string) => {
@@ -98,12 +128,14 @@ export function Onboarding() {
     setPhase("installing");
     const ids = installPkgId(scene!);
     const errors: string[] = [];
+    // 走全局安装任务：点「后台继续安装」关掉引导后照样装完，
+    // 失败会弹通知（以前只记在已关闭的弹窗里，用户永远看不到）
     for (const id of ids) {
-      try {
-        await api.installPackage(id);
-      } catch (e) {
-        errors.push(`${id}: ${String((e as Error).message ?? e)}`);
-      }
+      const displayName = packages.find((p) => p.id === id)?.displayName ?? id;
+      const ok = await startTask({ id, displayName }, { quiet: true });
+      // 被取消的任务没有 error，不算失败
+      const err = ok ? undefined : useInstallTasks.getState().tasks[id]?.error;
+      if (err) errors.push(`${id}: ${err}`);
     }
     setInstallErrors(errors);
     invalidate("packages", "services");
@@ -184,14 +216,7 @@ export function Onboarding() {
                 <h2 className="text-[15px] font-semibold">{t("onboarding.installing")}</h2>
                 <p className="text-xs text-faint">{t("ob.stepsHint")}</p>
               </div>
-              <div className="flex max-h-56 flex-col gap-2 overflow-y-auto rounded-xl bg-fill p-3 font-mono text-[11px]">
-                {ids.map((id) => (
-                  <div key={id} className="flex items-center justify-between text-secondary">
-                    <span>{id}</span>
-                    <span className="text-faint">{t("ob.installingEach")}</span>
-                  </div>
-                ))}
-              </div>
+              <InstallingList ids={ids} />
               <p className="text-center text-[11px] text-faint">{t("ob.bigFileHint")}</p>
               <div className="flex justify-center">
                 <Button variant="ghost" size="sm" onClick={() => finish(false)}>

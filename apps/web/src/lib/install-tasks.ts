@@ -19,10 +19,10 @@ import { useUI } from "./store";
 export type InstallStatus = "running" | "done" | "error";
 
 export interface InstallTask {
-  /** `${id}@${version}`，同时也是后端下载进度事件的 taskId */
+  /** `${id}@${version}`（与后端下载进度的 taskId 一致）；不指定版本时就是 id，由后端取最新版 */
   key: string;
   id: string;
-  version: string;
+  version?: string;
   displayName: string;
   status: InstallStatus;
   error?: string;
@@ -33,8 +33,12 @@ interface InstallTasksState {
   /** 下载 / 安装进度（按 taskId） */
   progress: Record<string, DownloadProgress>;
   setProgress: (p: DownloadProgress) => void;
-  /** 发起后台安装；已在进行中的同一版本直接复用。成功 resolve true，失败/取消 resolve false */
-  start: (target: { id: string; version: string; displayName: string }) => Promise<boolean>;
+  /** 发起后台安装；已在进行中的同一版本直接复用。成功 resolve true，失败/取消 resolve false。
+   *  quiet：不弹「安装完成」（调用方自己汇总提示）；失败提示始终会弹，免得转入后台后无人知晓 */
+  start: (
+    target: { id: string; version?: string; displayName: string },
+    opts?: { quiet?: boolean }
+  ) => Promise<boolean>;
   cancel: (key: string) => Promise<void>;
 }
 
@@ -52,8 +56,8 @@ export const useInstallTasks = create<InstallTasksState>()((set) => ({
 
   setProgress: (p) => set((s) => ({ progress: { ...s.progress, [p.taskId]: p } })),
 
-  start: (target) => {
-    const key = `${target.id}@${target.version}`;
+  start: (target, opts) => {
+    const key = target.version ? `${target.id}@${target.version}` : target.id;
     const running = inflight.get(key);
     if (running) return running;
 
@@ -71,13 +75,13 @@ export const useInstallTasks = create<InstallTasksState>()((set) => ({
       };
     });
 
-    const label = `${target.displayName} ${target.version}`;
+    const label = target.version ? `${target.displayName} ${target.version}` : target.displayName;
     const promise = api
       .installPackage(key)
       .then(
         () => {
           set((s) => ({ tasks: { ...s.tasks, [key]: { ...s.tasks[key], status: "done", error: undefined } } }));
-          toast.success(`${label} ${t("packages.installed")}`);
+          if (!opts?.quiet) toast.success(`${label} ${t("packages.installed")}`);
           return true;
         },
         (e: unknown) => {

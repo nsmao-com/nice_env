@@ -1,8 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { usePathname, useRouter } from "next/navigation";
-import { AnimatePresence, motion } from "motion/react";
+import { useRouter } from "next/navigation";
 import { useUI } from "@/lib/store";
 import { Sidebar } from "./sidebar";
 import { Topbar } from "./topbar";
@@ -19,7 +18,6 @@ import { UpdateDialog } from "@/components/shared/update-dialog";
 import * as api from "@/lib/api";
 
 function ShellFrame({ children }: { children: React.ReactNode }) {
-  const pathname = usePathname();
   const router = useRouter();
   const wizardOpen = useUI((s) => s.wizardOpen);
   const setWizardOpen = useUI((s) => s.setWizardOpen);
@@ -71,18 +69,10 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
       <div className="nsb-workspace relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-card">
         <Topbar />
         <main className="relative min-h-0 flex-1 overflow-y-auto">
-          <AnimatePresence mode="wait" initial={false}>
-            <motion.div
-              key={pathname}
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -4 }}
-              transition={{ duration: 0.18, ease: "easeOut" }}
-              className="mx-auto h-full w-full max-w-[1240px] px-3 py-4 sm:px-6 sm:py-6"
-            >
-              {children}
-            </motion.div>
-          </AnimatePresence>
+          {/* 路由内容由 Next 管理；避免退出动画保留旧树或让返回页面停留在透明状态。 */}
+          <div className="mx-auto h-full w-full max-w-[1240px] px-3 py-4 sm:px-6 sm:py-6">
+            {children}
+          </div>
         </main>
       </div>
       <CommandPalette />
@@ -171,18 +161,14 @@ export function PageHeader({
   return (
     <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
       <div className="min-w-0 flex-1 basis-[180px]">
-        <motion.h1
-          initial={{ opacity: 0, y: 6 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="flex items-center gap-2 text-[19px] font-semibold tracking-[-0.02em]"
-        >
+        <h1 className="flex items-center gap-2 text-[19px] font-semibold tracking-[-0.02em]">
           {/* 强调色小竖条：给标题一个视觉锚点，也随主题色变化（无光晕，Apple 克制） */}
           <span
             aria-hidden
             className="h-[18px] w-[3px] shrink-0 rounded-full bg-primary"
           />
           <span className="truncate">{title}</span>
-        </motion.h1>
+        </h1>
         {subtitle && <p className="mt-1.5 pl-[11px] text-[13px] text-muted">{subtitle}</p>}
       </div>
       {actions && <div className="flex max-w-full flex-wrap items-center gap-2">{actions}</div>}

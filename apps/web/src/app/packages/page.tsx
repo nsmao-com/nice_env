@@ -1,9 +1,9 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { motion, AnimatePresence } from "motion/react";
 import {
   Server,
   Boxes,
@@ -34,7 +34,7 @@ import type { PackageView, PackageCategory, ServiceStatus, BulkReport } from "@n
 import { PACKAGE_CATEGORY_ORDER } from "@nsb/schema";
 import { cn, fmtBytes, fmtSpeed, isPlatformCompatible } from "@/lib/utils";
 import { useUI, useT } from "@/lib/store";
-import { usePackages, useServices, useVersionCatalogs, serviceHasProcess } from "@/lib/hooks";
+import { usePackages, useServices, useSettings, useVersionCatalogs, serviceHasProcess } from "@/lib/hooks";
 import { normalizeError, type AppErrorShape } from "@/lib/backend";
 import { useInstallTasks, activeProgressFor } from "@/lib/install-tasks";
 import * as api from "@/lib/api";
@@ -42,6 +42,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { RingProgress } from "@/components/shared/ring-progress";
 import { VersionPicker, type VersionItem } from "@/components/shared/version-picker";
@@ -139,7 +140,14 @@ interface PackageGroup {
   }[];
 }
 
-function groupPackages(packages: PackageView[]): PackageGroup[] {
+type PackageFilter = "all" | "installed" | "running";
+
+function packageServices(group: PackageGroup, services: ServiceStatus[]) {
+  const ids = new Set(group.versions.filter((version) => version.installed).map((version) => version.serviceId));
+  return services.filter((service) => ids.has(service.id));
+}
+
+function groupPackages(packages: PackageView[], defaultTld?: string): PackageGroup[] {
   const map = new Map<string, PackageGroup>();
   for (const p of packages) {
     let g = map.get(p.id);
@@ -172,6 +180,7 @@ function groupPackages(packages: PackageView[]): PackageGroup[] {
     });
   }
   for (const g of map.values()) {
+    g.description = g.description.replaceAll("{tld}", defaultTld || "…");
     g.versions.sort((a, b) => cmpVersionDesc(a.version, b.version));
   }
   return [...map.values()];
@@ -186,6 +195,7 @@ export default function PackagesPage() {
   const [uninstallPathPending, setUninstallPathPending] = React.useState(false);
   const packageQuery = usePackages();
   const serviceQuery = useServices(2000);
+  const settings = useSettings();
   const packages = packageQuery.data;
   const services = serviceQuery.data;
   const queryClient = useQueryClient();
@@ -207,6 +217,8 @@ export default function PackagesPage() {
     refresh: refreshCatalogs,
   } = useVersionCatalogs(packages.map((p) => p.id));
   const [query, setQuery] = React.useState("");
+  const [packageFilter, setPackageFilter] = React.useState<PackageFilter>("all");
+  const [category, setCategory] = React.useState("all");
   const [uninstallTarget, setUninstallTarget] = React.useState<{ id: string; version: string; name: string } | null>(null);
   const [installTarget, setInstallTarget] = React.useState<InstallTarget | null>(null);
   const uninstallInstalling = !!uninstallTarget && Object.values(installTasks).some((task) =>
@@ -215,17 +227,21 @@ export default function PackagesPage() {
   );
   const actionsDisabled = !dataReady || bulkBusy || uninstalling;
 
-  const groups = React.useMemo(() => groupPackages(packages), [packages]);
+  const defaultTld = settings.error ? undefined : settings.data?.defaultTld;
+  const groups = React.useMemo(() => groupPackages(packages, defaultTld), [packages, defaultTld]);
+  const filterUnavailable = packageFilter === "running" && !statusKnown;
+  const hasFilters = !!query.trim() || packageFilter !== "all" || category !== "all";
+  const resetFilters = () => { setQuery(""); setPackageFilter("all"); setCategory("all"); };
   const filtered = React.useMemo(() => {
+    if (filterUnavailable) return [];
     const q = query.trim().toLowerCase();
-    if (!q) return groups;
-    return groups.filter(
-      (g) =>
-        g.displayName.toLowerCase().includes(q) ||
-        g.id.toLowerCase().includes(q) ||
-        g.description.toLowerCase().includes(q)
-    );
-  }, [groups, query]);
+    return groups.filter((g) => {
+      if (packageFilter === "installed" && !g.versions.some((version) => version.installed)) return false;
+      if (packageFilter === "running" && !packageServices(g, services).some((service) => service.state === "running")) return false;
+      return !q || g.displayName.toLowerCase().includes(q) || g.id.toLowerCase().includes(q)
+        || g.description.toLowerCase().includes(q) || g.versions.some((version) => version.version.toLowerCase().includes(q));
+    });
+  }, [groups, query, packageFilter, services, filterUnavailable]);
 
   const runningServices = React.useMemo(
     () => new Set(services.filter((s) => statusKnown && s.state === "running").map((s) => s.id)),
@@ -367,6 +383,11 @@ export default function PackagesPage() {
     </div>
   );
 
+  const empty = <div className="flex flex-col items-center gap-3 px-3 py-10 text-center text-[13px] text-muted">
+    <p role="status">{filterUnavailable ? t("packages.runningUnavailable") : t("packages.noMatches")}</p>
+    {hasFilters && <Button variant="secondary" size="sm" onClick={resetFilters}>{t("packages.resetFilters")}</Button>}
+  </div>;
+
   return (
     <div className="pb-8">
       <PageHeader
@@ -384,6 +405,15 @@ export default function PackagesPage() {
                 className="h-8 w-full rounded-lg border border-border bg-card pl-8 pr-3 text-[13px] outline-none transition-colors placeholder:text-faint focus:border-primary sm:w-52"
               />
             </div>
+            <Select value={packageFilter} onValueChange={(value) => setPackageFilter(value as PackageFilter)}>
+              <SelectTrigger aria-label={t("packages.filter")} className="h-8 w-full text-xs sm:w-36"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">{t("packages.filterAll")}</SelectItem>
+                <SelectItem value="installed">{t("versions.installed")}</SelectItem>
+                <SelectItem value="running">{t("state.running")}</SelectItem>
+              </SelectContent>
+            </Select>
+            {hasFilters && <Button variant="ghost" size="sm" onClick={resetFilters}>{t("packages.resetFilters")}</Button>}
             <Button variant="outline" size="sm" disabled={actionsDisabled} onClick={() => openBulk("start")}>
               <Play className="h-3.5 w-3.5" /> {t("packages.startAll")}
             </Button>
@@ -396,19 +426,19 @@ export default function PackagesPage() {
 
       {readStatus}
 
-      {packageQuery.dataUpdatedAt > 0 && <Tabs defaultValue="all">
+      {packageQuery.dataUpdatedAt > 0 && <Tabs value={category} onValueChange={setCategory}>
         {/* 第一行：大类（全部 + 分组）；小类在选中大类后出现在第二行 */}
         <TabsList className="max-w-full flex-wrap justify-start rounded-2xl">
           <TabsTrigger value="all">
             <LayoutGrid className="h-3.5 w-3.5" />
             {t("packages.cat.all")}
-            <span className="text-[10.5px] tabular text-faint">{filtered.length}</span>
+            <span className="text-[10.5px] tabular text-faint">{filterUnavailable ? "—" : filtered.length}</span>
           </TabsTrigger>
           {catGroups.map((g) => (
             <TabsTrigger key={g.id} value={g.id}>
               <g.icon className="h-3.5 w-3.5" />
               {t(`packages.group.${g.id}` as never)}
-              <span className="text-[10.5px] tabular text-faint">{groupCount(g.id)}</span>
+              <span className="text-[10.5px] tabular text-faint">{filterUnavailable ? "—" : groupCount(g.id)}</span>
             </TabsTrigger>
           ))}
         </TabsList>
@@ -422,7 +452,7 @@ export default function PackagesPage() {
             onRefresh={refreshCatalogs}
             onUninstallTarget={openUninstall}
             onInstall={(target) => setInstallTarget(target)}
-            empty={t("packages.noMatches")}
+            empty={empty}
             disabled={actionsDisabled}
             statusKnown={statusKnown}
           />
@@ -438,13 +468,13 @@ export default function PackagesPage() {
                   <TabsList className="mb-3 max-w-full flex-wrap justify-start rounded-2xl">
                     <TabsTrigger value="__all__">
                       {t("packages.cat.all")}
-                      <span className="text-[10.5px] tabular text-faint">{rows.length}</span>
+                      <span className="text-[10.5px] tabular text-faint">{filterUnavailable ? "—" : rows.length}</span>
                     </TabsTrigger>
                     {g.subs.map((s) => (
                       <TabsTrigger key={s.value} value={s.value}>
                         <s.icon className="h-3.5 w-3.5" />
                         {s.label}
-                        <span className="text-[10.5px] tabular text-faint">{catCount(s.value)}</span>
+                        <span className="text-[10.5px] tabular text-faint">{filterUnavailable ? "—" : catCount(s.value)}</span>
                       </TabsTrigger>
                     ))}
                   </TabsList>
@@ -457,7 +487,7 @@ export default function PackagesPage() {
                       onRefresh={refreshCatalogs}
                       onUninstallTarget={openUninstall}
                       onInstall={(target) => setInstallTarget(target)}
-                      empty={t("packages.noMatches")}
+                      empty={empty}
                       disabled={actionsDisabled}
                       statusKnown={statusKnown}
                     />
@@ -472,7 +502,7 @@ export default function PackagesPage() {
                         onRefresh={refreshCatalogs}
                         onUninstallTarget={openUninstall}
                         onInstall={(target) => setInstallTarget(target)}
-                        empty={t("packages.noMatches")}
+                        empty={empty}
                         disabled={actionsDisabled}
                         statusKnown={statusKnown}
                       />
@@ -488,7 +518,7 @@ export default function PackagesPage() {
                   onRefresh={refreshCatalogs}
                   onUninstallTarget={openUninstall}
                   onInstall={(target) => setInstallTarget(target)}
-                  empty={t("packages.noMatches")}
+                  empty={empty}
                   disabled={actionsDisabled}
                   statusKnown={statusKnown}
                 />
@@ -595,6 +625,7 @@ function PackageRow({
 
   const installedCount = group.versions.filter((v) => v.installed).length;
   const svc = group.isService;
+  const currentServices = packageServices(group, services);
   // 该包任一版本运行中 → 行首状态灯
   const anyRunning = group.versions.some((v) => (v.serviceId ? runningServices.has(v.serviceId) : false));
   // 已装版本之外还有更高正式版：同时检查内置与上游目录。
@@ -724,14 +755,13 @@ function PackageRow({
     }
   };
 
-  // 不用 layout 动画：它每次渲染都要测量 DOM（强制回流），
-  // 几十行的列表跟着服务轮询 / 下载进度反复重渲染时会明显卡顿
+  // 筛选立即卸载旧行，不能让退出动画保留过期的服务和安装操作。
   return (
-    <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+    <div>
       <Card className="flex flex-col gap-2.5 p-3.5 transition-colors hover:border-border-strong lg:flex-row lg:items-center">
         {/* 左：图标 + 名称/描述 */}
         <div className="flex min-w-0 flex-1 items-center gap-3">
-          <div className="relative">
+          <div className="relative shrink-0">
             <div
               className={cn(
                 "flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border",
@@ -747,9 +777,9 @@ function PackageRow({
               <span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-card bg-running" />
             )}
           </div>
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="truncate text-[13.5px] font-medium">{group.displayName}</span>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span className="break-words text-[13.5px] font-medium [overflow-wrap:anywhere]">{group.displayName}</span>
               {hasNewer && (
                 <span
                   className="rounded-full border border-info/40 px-1.5 py-px text-[9px] text-info"
@@ -764,10 +794,23 @@ function PackageRow({
                 </Badge>
               )}
             </div>
-            <p className="truncate text-[11.5px] text-faint">
-              {group.defaultPort != null ? `:${group.defaultPort} · ` : ""}
+            <p className="mt-1 break-words text-[11.5px] leading-relaxed text-faint [overflow-wrap:anywhere]">
               {group.description}
             </p>
+            {svc && installedCount > 0 ? (
+              <div className="mt-2 space-y-1 text-[11px]">
+                {!statusKnown || currentServices.length === 0 ? <p className="text-muted">{t("packages.statusUnknown")}</p>
+                  : currentServices.map((service) => <div key={service.id} className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <span className={cn(service.state === "error" ? "text-error" : service.state === "running" ? "text-running" : "text-muted")}>{t(`state.${service.state}`)}</span>
+                    {service.version && <span className="break-all font-mono text-secondary">{service.version}</span>}
+                    {service.port != null && <span className="font-mono text-muted">:{service.port}</span>}
+                    {service.pids.length > 0 && serviceHasProcess(service) && <span className="break-all font-mono text-faint">PID {service.pids.join(", ")}</span>}
+                    <Link href={`/logs?service=${encodeURIComponent(service.id)}`} aria-label={t("packages.viewLogs").replace("{name}", service.label)}
+                      className="rounded px-1 py-1 text-primary hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">{t("logs.title")}</Link>
+                    {service.lastError && service.state === "error" && <p className="w-full break-words text-error [overflow-wrap:anywhere]">{service.lastError.message}</p>}
+                  </div>)}
+              </div>
+            ) : group.defaultPort != null ? <p className="mt-1 text-[11px] text-muted">{t("packages.defaultPort")} :{group.defaultPort}</p> : null}
           </div>
         </div>
 
@@ -836,7 +879,7 @@ function PackageRow({
           onOpenChange={(v) => !v && setExtVersion(null)}
         />
       )}
-    </motion.div>
+    </div>
   );
 }
 
@@ -862,29 +905,27 @@ function PackageRows({
   onRefresh: (id: string) => Promise<void>;
   onUninstallTarget: (g: PackageGroup, version: string, trigger: HTMLButtonElement | null) => void;
   onInstall: (target: InstallTarget) => void;
-  empty: string;
+  empty: React.ReactNode;
 }) {
   return (
     <>
       <div className="flex flex-col gap-2.5">
-        <AnimatePresence initial={false}>
-          {list.map((g) => (
-            <PackageRow
-              key={g.id}
-              group={g}
-              disabled={disabled}
-              statusKnown={statusKnown}
-              services={services}
-              runningServices={runningServices}
-              catalog={catalogById.get(g.id)}
-              onRefresh={() => onRefresh(g.id)}
-              onUninstall={(v, trigger) => onUninstallTarget(g, v, trigger)}
-              onInstall={onInstall}
-            />
-          ))}
-        </AnimatePresence>
+        {list.map((g) => (
+          <PackageRow
+            key={g.id}
+            group={g}
+            disabled={disabled}
+            statusKnown={statusKnown}
+            services={services}
+            runningServices={runningServices}
+            catalog={catalogById.get(g.id)}
+            onRefresh={() => onRefresh(g.id)}
+            onUninstall={(v, trigger) => onUninstallTarget(g, v, trigger)}
+            onInstall={onInstall}
+          />
+        ))}
       </div>
-      {list.length === 0 && <p className="py-12 text-center text-[13px] text-faint">{empty}</p>}
+      {list.length === 0 && empty}
     </>
   );
 }

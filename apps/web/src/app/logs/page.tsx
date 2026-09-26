@@ -30,17 +30,18 @@ function LogsPageInner() {
   const { data: settings } = useSettings();
   const searchParams = useSearchParams();
   const wanted = searchParams.get("service");
-  const [selected, setSelected] = React.useState<string | null>(null);
+  const [selected, setSelected] = React.useState<string | null>(wanted);
   const [query, setQuery] = React.useState("");
 
   // 从 URL 预选（服务卡片上的「日志」按钮会带上 ?service=）
   React.useEffect(() => {
-    if (wanted && !selected) setSelected(wanted);
-  }, [wanted, selected]);
+    if (wanted) setSelected(wanted);
+  }, [wanted]);
 
   React.useEffect(() => {
-    if (!selected && services.length > 0) setSelected(services[0].id);
-  }, [services, selected]);
+    // 指定了目标服务时，默认项不能覆盖 URL；后续轮询也不重置手动选择。
+    if (!wanted && !selected && services.length > 0) setSelected(services[0].id);
+  }, [wanted, services, selected]);
 
   // 站点级访问日志已就位（nginx 每站点独立 access_log），可以按站点看流量了
   const siteItems = React.useMemo(
@@ -112,6 +113,7 @@ function LogsPageInner() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder={t("logs.filterServices")}
+            aria-label={t("logs.filterServices")}
             className="mb-2 h-7 w-full shrink-0 rounded-md border border-transparent bg-fill px-2.5 text-[11.5px] text-foreground transition-colors placeholder:text-faint focus:border-primary focus:outline-none"
           />
           <div className="min-h-0 flex-1 overflow-y-auto">
@@ -126,6 +128,7 @@ function LogsPageInner() {
               filtered.map((item) => (
                 <button
                   key={item.id}
+                  aria-pressed={selected === item.id}
                   onClick={() => setSelected(item.id)}
                   className={cn(
                     "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors",
@@ -152,6 +155,7 @@ function LogsPageInner() {
               filteredSites.map((item) => (
                 <button
                   key={item.id}
+                  aria-pressed={selected === item.id}
                   onClick={() => setSelected(item.id)}
                   className={cn(
                     "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors",

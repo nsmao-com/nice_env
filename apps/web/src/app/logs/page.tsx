@@ -105,9 +105,9 @@ function LogsPageInner() {
           </div>
         }
       />
-      <div className="grid min-h-0 flex-1 grid-cols-[240px_1fr] gap-4">
+      <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[auto_minmax(420px,1fr)] gap-3 md:grid-cols-[240px_minmax(0,1fr)] md:grid-rows-1 md:gap-4">
         {/* 左侧选择器 */}
-        <Card className="flex h-full min-h-0 flex-col p-2">
+        <Card className="flex h-full min-h-0 max-h-52 flex-col p-2 md:max-h-none">
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}

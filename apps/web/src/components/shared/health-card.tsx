@@ -15,6 +15,7 @@ import {
 import type { HealthReport } from "@nsb/schema";
 import { useT } from "@/lib/store";
 import * as api from "@/lib/api";
+import { normalizeError, type AppErrorShape } from "@/lib/backend";
 import { cn } from "@/lib/utils";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -31,14 +32,16 @@ export function HealthCard() {
   const router = useRouter();
   const [report, setReport] = React.useState<HealthReport | null>(null);
   const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState<AppErrorShape | null>(null);
   const [dismissed, setDismissed] = React.useState<Set<string>>(new Set());
 
   const load = React.useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     try {
       setReport(await api.healthCheck());
-    } catch {
-      /* 后端未就绪时不阻塞界面 */
+      setError(null);
+    } catch (e) {
+      setError(normalizeError(e));
     } finally {
       setLoading(false);
     }
@@ -86,18 +89,32 @@ export function HealthCard() {
         </Button>
       </CardHeader>
       <CardContent>
-        {loading && !report ? (
+        {error && !report ? (
+          <div role="alert" className="flex flex-wrap items-start gap-2 rounded-lg border border-error/25 bg-error-soft/40 px-3 py-2.5 text-xs text-error [overflow-wrap:anywhere]">
+            <div className="min-w-0 flex-1">
+              <p>{t("health.readFailed")}</p>
+              <p className="mt-0.5 text-[11px] text-error/75">{error.message}</p>
+              {error.hint && <p className="mt-0.5 text-[11px] text-error/75">{error.hint}</p>}
+            </div>
+            <Button size="sm" variant="secondary" disabled={loading} onClick={() => void load()}>
+              <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} /> {t("health.retry")}
+            </Button>
+          </div>
+        ) : loading && !report ? (
           <div className="space-y-1.5">
             {Array.from({ length: 3 }).map((_, i) => (
               <Skeleton key={i} className="h-10 w-full" />
             ))}
           </div>
-        ) : visible.length === 0 ? (
+        ) : (
+          <>
+            {error && report && <p role="alert" className="mb-2 rounded-lg bg-error-soft/40 px-2.5 py-2 text-[11px] text-error [overflow-wrap:anywhere]">{t("health.refreshFailed")}：{error.message}</p>}
+            {visible.length === 0 ? (
           <div className="flex items-center justify-center gap-2 py-5 text-[12.5px] text-running">
             <CheckCircle2 className="h-4 w-4" />
             {t("health.allOk")}
           </div>
-        ) : (
+            ) : (
           <div className="space-y-1.5">
             {visible.map((item) => {
               const Icon =
@@ -166,6 +183,8 @@ export function HealthCard() {
               </button>
             )}
           </div>
+            )}
+          </>
         )}
       </CardContent>
     </Card>

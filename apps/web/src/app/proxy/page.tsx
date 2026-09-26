@@ -24,6 +24,7 @@ import type { ProxyGroupView } from "@nsb/schema";
 import { cn, fmtBytes, fmtSpeed } from "@/lib/utils";
 import { useUI, useT } from "@/lib/store";
 import { toastError } from "@/lib/hooks";
+import { normalizeError } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -57,8 +58,12 @@ function useProxyState() {
   const [profiles, setProfiles] = React.useState<
     { id: string; name: string; url: string; active: boolean }[]
   >([]);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
+  const firstLoad = React.useRef(true);
 
   const refresh = React.useCallback(async () => {
+    if (firstLoad.current) setLoading(true);
     try {
       const s = await api.proxyStatus();
       setStatus(s);
@@ -71,8 +76,13 @@ function useProxyState() {
         setProfiles(p);
         setGroups([]);
       }
-    } catch {
-      /* ignore */
+      setError(null);
+    } catch (e) {
+      // 保留上一次有效状态，避免一次短暂错误把真实配置显示成空白。
+      setError(normalizeError(e).message);
+    } finally {
+      firstLoad.current = false;
+      setLoading(false);
     }
   }, []);
 
@@ -82,12 +92,12 @@ function useProxyState() {
     return () => clearInterval(id);
   }, [refresh]);
 
-  return { status, groups, profiles, refresh };
+  return { status, groups, profiles, refresh, loading, error };
 }
 
 export default function ProxyPage() {
   const t = useT();
-  const { status, groups, profiles, refresh } = useProxyState();
+  const { status, groups, profiles, refresh, loading, error } = useProxyState();
   const [importOpen, setImportOpen] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const [deleting, setDeleting] = React.useState<{ id: string; name: string } | null>(null);
@@ -140,6 +150,15 @@ export default function ProxyPage() {
     <div className="pb-8">
       <PageHeader title={t("proxy.title")} subtitle={t("proxy.subtitle")} />
 
+      {error && (
+        <div role="alert" className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-error/25 bg-error-soft/40 p-3 text-xs [overflow-wrap:anywhere]">
+          <span className="min-w-0 flex-1 text-error">{t("proxy.readFailed")}：{error}</span>
+          <Button size="sm" variant="secondary" disabled={loading} onClick={() => void refresh()}>
+            <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} /> {t("proxy.retry")}
+          </Button>
+        </div>
+      )}
+
       <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-2">
         {/* 内核控制 */}
         <Card className={cn(running && "breath border-running/25")}>
@@ -157,7 +176,7 @@ export default function ProxyPage() {
                 </CardDescription>
               </div>
             </div>
-            <Switch checked={running} onCheckedChange={toggleCore} disabled={busy} />
+            <Switch checked={running} onCheckedChange={toggleCore} disabled={busy || loading || !status} />
           </CardHeader>
           <CardContent>
             <div className="flex items-center gap-2">
@@ -167,9 +186,11 @@ export default function ProxyPage() {
                   <button
                     key={m}
                     onClick={() => setMode(m)}
+                    disabled={loading || !status}
                     className={cn(
                       "rounded-md px-2.5 py-1 text-[11.5px] font-medium transition-all",
-                      status?.mode === m ? "bg-surface text-foreground shadow-sm" : "text-faint hover:text-secondary"
+                      status?.mode === m ? "bg-surface text-foreground shadow-sm" : "text-faint hover:text-secondary",
+                      "disabled:cursor-not-allowed disabled:opacity-50"
                     )}
                   >
                     {t(`proxy.mode.${m}`)}
@@ -195,6 +216,7 @@ export default function ProxyPage() {
             <Switch
               checked={status?.systemProxyEnabled ?? false}
               onCheckedChange={toggleSystemProxy}
+              disabled={loading || !status}
             />
           </CardHeader>
           <CardContent>

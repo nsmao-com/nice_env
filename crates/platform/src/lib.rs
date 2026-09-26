@@ -760,25 +760,31 @@ pub fn connected_interfaces() -> Result<Vec<String>> {
         .creation_flags(0x0800_0000)
         .output()
         .map_err(|e| PlatformError::Io(format!("netsh 失败：{e}")))?;
+    if !out.status.success() {
+        return Err(PlatformError::Io(format!(
+            "读取网络接口失败：{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
     let text = String::from_utf8_lossy(&out.stdout);
     let mut names = Vec::new();
-    for line in text.lines().skip(3) {
-        // 列：Admin State State Type Interface Name
-        let mut parts = line.split_whitespace();
-        let _admin = parts.next();
-        let state = parts.next().unwrap_or("");
-        let _type_ = parts.next();
-        parts.next(); // loopback 标记列
-        if state.eq_ignore_ascii_case("connected") || state.eq_ignore_ascii_case("已连接") {
-            let rest: Vec<&str> = line.splitn(4, ' ').collect();
-            if let Some(name) = rest.last() {
-                let name = name.trim().to_string();
-                if !name.is_empty() {
-                    names.push(name);
-                }
+    for line in text.lines() {
+        // netsh 的列是：Admin State / State / Type / Interface Name。
+        // 接口名可以包含空格，所以前三列按空白切开后，剩余部分必须整体保留。
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 4 {
+            continue;
+        }
+        let state = parts[1];
+        if state.eq_ignore_ascii_case("connected") || state == "已连接" {
+            let name = parts[3..].join(" ");
+            if !name.is_empty() {
+                names.push(name);
             }
         }
     }
+    names.sort_unstable();
+    names.dedup();
     Ok(names)
 }
 
@@ -788,6 +794,12 @@ pub fn connected_interfaces() -> Result<Vec<String>> {
         .args(["-listallnetworkservices"])
         .output()
         .map_err(|e| PlatformError::Io(format!("networksetup 失败：{e}")))?;
+    if !out.status.success() {
+        return Err(PlatformError::Io(format!(
+            "读取网络服务失败：{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
     let text = String::from_utf8_lossy(&out.stdout);
     Ok(text
         .lines()
@@ -800,11 +812,18 @@ pub fn connected_interfaces() -> Result<Vec<String>> {
 /// 读取接口当前 DNS 服务器（原始文本，前端展示用）
 #[cfg(windows)]
 pub fn interface_dns_status(name: &str) -> Result<String> {
+    let name_arg = format!("name={name}");
     let out = std::process::Command::new("netsh")
-        .args(["interface", "ip", "show", "dns", "name=", name])
+        .args(["interface", "ip", "show", "dns", &name_arg])
         .creation_flags(0x0800_0000)
         .output()
         .map_err(|e| PlatformError::Io(format!("netsh 失败：{e}")))?;
+    if !out.status.success() {
+        return Err(PlatformError::Io(format!(
+            "读取接口 DNS 失败：{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
@@ -814,6 +833,12 @@ pub fn interface_dns_status(name: &str) -> Result<String> {
         .args(["-getdns", name])
         .output()
         .map_err(|e| PlatformError::Io(format!("networksetup 失败：{e}")))?;
+    if !out.status.success() {
+        return Err(PlatformError::Io(format!(
+            "读取接口 DNS 失败：{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
@@ -822,6 +847,7 @@ pub fn interface_dns_status(name: &str) -> Result<String> {
 pub fn set_dns_localhost_elevated(name: &str) -> Result<()> {
     #[cfg(windows)]
     {
+        let name_arg = format!("name={name}");
         run_elevated(
             "netsh",
             &[
@@ -829,8 +855,7 @@ pub fn set_dns_localhost_elevated(name: &str) -> Result<()> {
                 "ip",
                 "set",
                 "dns",
-                "name=".to_string().leak(),
-                name,
+                &name_arg,
                 "source=static",
                 "addr=127.0.0.1",
                 "register=primary",
@@ -847,6 +872,7 @@ pub fn set_dns_localhost_elevated(name: &str) -> Result<()> {
 pub fn restore_dns_elevated(name: &str) -> Result<()> {
     #[cfg(windows)]
     {
+        let name_arg = format!("name={name}");
         run_elevated(
             "netsh",
             &[
@@ -854,8 +880,7 @@ pub fn restore_dns_elevated(name: &str) -> Result<()> {
                 "ip",
                 "set",
                 "dns",
-                "name=".to_string().leak(),
-                name,
+                &name_arg,
                 "source=dhcp",
             ],
         )

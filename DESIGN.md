@@ -241,7 +241,7 @@ phpStudy 的日常开发场景，补齐缺漏功能、修复真实执行链路�
 | 套件与服务 | 已修复当前版本选择、停止态服务元数据、启停/切换/卸载互斥、固定版本依赖和进程回收；已用隔离 Nginx 实例验证 HTTP 200 与停止回收。下载器已补 HTTP Range/416/校验失败换源、可中断的网络等待，安装改为暂存发布和失败回滚；官方 Nginx 1.31.6 已实际下载、安装、执行版本检查并卸载。其余套件、完整桌面 IPC、跨进程安装互斥、终端 PATH、跨平台归档与配置生命周期仍需继续验收。 |
 | 数据库 | 已修复建号密码直接拼 SQL 的问题，在短连接中明确字面量转义模式，并提前校验建库参数；仍待核对已有账号密码不一致、多实例连接、客户端入口、导入导出、备份恢复，不能只凭页面或 mock 成功认定可用。 |
 | 配置编辑 | PHP 配置与扩展开关持久化已通过真实 FastCGI 验证；Nginx/Apache/MySQL/Redis 改为只同步托管项，保留用户参数。Nginx/Apache 已验证真实 HTTP、重建和端口变化后仍保留自定义响应头；Redis 已验证重启后的实际设置与稳定回落端口；MySQL 已用真实程序解析配置，未初始化数据库或执行完整启动。工具箱已支持按服务/版本预览并重置默认配置，统一备份列表与准确目标恢复；Nginx/Apache 重置和恢复后的原生校验通过。完整桌面 IPC、跨进程并发改写、跨平台和其他套件仍需验收。 |
-| 证书、代理与工具 | 待审查 CA 信任、ACME、证书部署、DNS、隧道、代理、端口、计划任务、配置备份与还原的完整链路。 |
+| 证书、代理与工具 | 已补 DNS 接管的真实网卡解析、退出码检查、状态刷新和失败重试；代理状态读取、环境体检、总览端口/证书异常与历史日志均补齐错误反馈和恢复入口。ACME 自动签发、证书部署、隧道、计划任务、配置备份与还原的完整链路仍需继续验收。 |
 | UI 与交互 | 已改善站点搜索筛选、结果为空/加载失败、操作防重复、草稿保留、固定保存区、通用弹窗左右留白和页头换行；创建向导新增实际阶段进度、持续错误提示、建库依赖/参数检查、运行类型与模板联动、可访问标签和安全随机密码。套件页已补窄屏适配、准确的版本状态，安装弹窗区分取消请求与后端确认、失败可重试、长错误换行和固定操作区；其余页面及深浅主题仍需逐页检查。 |
 | 发布 | 当前完善工作尚未提交或打 tag；用户要求发布时，必须同步版本号、推送发布提交与新 tag，并核对 Release 运行状态。 |
 
@@ -1114,3 +1114,21 @@ tag `v0.2.7`，保留全部历史 tag，不覆盖或移动旧 tag。
 `cargo test -p nsb-core --lib paths::tests::data_dir_copy_is_atomic_and_requires_an_empty_target
 --offline -j 1`（1 项）和 `git -c core.safecrlf=false diff --check`。未运行前端 dev/build，
 本轮没有数据库结构变更，未修改 update.sql；提交时必须创建新的 annotated tag `v0.2.8`。
+
+第二十三轮实施与验证：运行状态与窄屏反馈补齐。
+DNS 接管在 Windows 上正确保留带空格的网卡名，使用 `name=<interface>` 传参，并检查
+`netsh`/`networksetup` 退出码；工具页显示每个网卡的当前 DNS 配置，读取失败可重试，接管或恢复
+后会重新读取状态。代理页、环境体检卡和总览异常卡不再把状态读取失败显示成关闭、无异常或全部正常，
+均保留已有结果并明确标出错误和重试入口。服务日志在内存 ring 为空或应用重启后会从日志文件尾部
+读取，历史日志页可以继续查看已落盘内容。
+
+顶栏搜索框、日志服务选择和日志区域增加窄屏布局约束，320px 宽度下不再被固定双列或固定宽度
+撑破。版本同步升至 0.2.9，根 package、Web/桌面 package、共享 schema、工作区 Cargo、桌面
+Cargo、Tauri 配置、Cargo.lock 和浏览器版本展示均同步更新；保留 `v0.2.8`，发布时必须新增
+annotated tag `v0.2.9`。
+
+验证通过：`pnpm --filter @nsb/web check`、`cargo check -p nsb-core --locked --offline -j 1`、
+`cargo check -p niceservbay --locked --offline -j 1`、`cargo test -p platform --lib --locked --offline
+-j 1`（7 项）、`cargo test -p nsb-core --lib services::fallback_tests::tail_reads_persisted_log_after_process_restart
+--locked --offline -j 1`（1 项）和 `git -c core.safecrlf=false diff --check`。未运行前端 dev/build，
+未新增测试文件，本轮没有数据库变更，未修改 update.sql。

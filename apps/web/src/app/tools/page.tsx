@@ -16,6 +16,7 @@ import {
   Power,
   Trash2,
   Stethoscope,
+  RefreshCw,
 } from "lucide-react";
 import type { ListenerInfo, PortDiagnosis, PortScanEntry , HostsEntry } from "@nsb/schema";
 import { useUI, useT } from "@/lib/store";
@@ -1232,15 +1233,32 @@ function DnsTool() {
   /** 一键接管：把已连接网卡的 DNS 指向 127.0.0.1（触发 UAC） */
   const [interfaces, setInterfaces] = React.useState<string[]>([]);
   const [activeIf, setActiveIf] = React.useState<string | null>(null);
+  const [interfaceStatus, setInterfaceStatus] = React.useState<Record<string, string>>({});
+  const [interfacesError, setInterfacesError] = React.useState<string | null>(null);
+  const [interfacesLoading, setInterfacesLoading] = React.useState(false);
   const [takeoverBusy, setTakeoverBusy] = React.useState(false);
 
   const loadInterfaces = React.useCallback(async () => {
+    setInterfacesLoading(true);
+    setInterfacesError(null);
     try {
       const list = await api.dnsInterfaces();
       setInterfaces(list);
-      if (list.length > 0) setActiveIf((cur) => cur ?? list[0]);
-    } catch {
-      /* dev 模式 mock 未实现 */
+      setActiveIf((cur) => (cur && list.includes(cur) ? cur : list[0] ?? null));
+      const statuses = await Promise.all(list.map(async (name) => {
+        try {
+          return [name, await api.dnsStatusOf(name)] as const;
+        } catch (error) {
+          return [name, normalizeError(error).message] as const;
+        }
+      }));
+      setInterfaceStatus(Object.fromEntries(statuses));
+    } catch (error) {
+      setInterfacesError(normalizeError(error).message);
+      setInterfaces([]);
+      setInterfaceStatus({});
+    } finally {
+      setInterfacesLoading(false);
     }
   }, []);
 
@@ -1254,6 +1272,7 @@ function DnsTool() {
     try {
       await api.dnsTakeover(activeIf);
       toast.success(`${t("dns.takeoverDoneP1")} ${activeIf} ${t("dns.takeoverDoneP2")}`);
+      await loadInterfaces();
     } catch (e) {
       toastError(e);
     } finally {
@@ -1267,6 +1286,7 @@ function DnsTool() {
     try {
       await api.dnsRestore(activeIf);
       toast.success(t("dns.restoreDone"));
+      await loadInterfaces();
     } catch (e) {
       toastError(e);
     } finally {
@@ -1302,7 +1322,7 @@ function DnsTool() {
               <p className="text-[11.5px] font-medium text-secondary">{t("dns.takeoverTitle")}</p>
               <p className="mt-0.5 text-[10.5px] text-faint">{t("dns.takeoverHint")}</p>
             </div>
-            <div className="flex w-full shrink-0 flex-wrap gap-1.5 sm:w-auto">
+            <div className="flex w-full min-w-0 shrink-0 flex-wrap items-center gap-1.5 sm:w-auto">
               {interfaces.length > 1 && (
                 <Select
                   value={activeIf ?? ""}
@@ -1317,6 +1337,17 @@ function DnsTool() {
                   </SelectContent>
                 </Select>
               )}
+              {interfaces.length === 1 && <span className="max-w-40 truncate rounded-md bg-fill px-2 py-1 text-[11px] text-secondary" title={interfaces[0]}>{interfaces[0]}</span>}
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                aria-label={t("dns.refresh")}
+                title={t("dns.refresh")}
+                disabled={takeoverBusy || interfacesLoading}
+                onClick={() => void loadInterfaces()}
+              >
+                <RefreshCw className={cn("h-3.5 w-3.5", interfacesLoading && "animate-spin")} />
+              </Button>
               <Button size="sm" variant="secondary" disabled={takeoverBusy || !activeIf} onClick={takeover}>
                 {t("dns.takeover")}
               </Button>
@@ -1325,6 +1356,19 @@ function DnsTool() {
               </Button>
             </div>
           </div>
+          {interfacesError ? (
+            <div role="alert" className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-error">
+              <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{t("dns.readFailed")}：{interfacesError}</span>
+              <Button size="sm" variant="ghost" disabled={interfacesLoading} onClick={() => void loadInterfaces()}>{t("dns.refresh")}</Button>
+            </div>
+          ) : activeIf ? (
+            <div className="mt-2 rounded-md bg-card-2/50 px-2.5 py-2 text-[10.5px] text-faint">
+              <span className="font-medium text-secondary">{t("dns.interfaceStatus")}</span>
+              {interfacesLoading && !interfaceStatus[activeIf] ? <span className="ml-2">{t("dns.statusLoading")}</span> : (
+                <pre className="mt-1 max-h-20 overflow-auto whitespace-pre-wrap break-words font-mono leading-relaxed">{interfaceStatus[activeIf] || t("dns.statusUnknown")}</pre>
+              )}
+            </div>
+          ) : null}
         </div>
 
         <div className="rounded-lg border border-border bg-card-2/30 p-2.5 text-[11px] leading-relaxed text-muted">

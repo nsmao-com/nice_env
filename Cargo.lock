@@ -3268,7 +3268,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "niceservbay"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "nsb-core",
@@ -3318,7 +3318,7 @@ dependencies = [
 
 [[package]]
 name = "nsb-core"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -4095,7 +4095,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "platform"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "libc",
  "serde",

@@ -131,21 +131,36 @@ impl ServiceManager {
         match self.entry(id) {
             Some(e) => {
                 let ring = e.ring.lock();
-                ring.iter()
+                let live = ring
+                    .iter()
                     .rev()
                     .take(lines)
                     .cloned()
                     .collect::<Vec<_>>()
                     .into_iter()
                     .rev()
-                    .collect()
+                    .collect::<Vec<_>>();
+                drop(ring);
+
+                // 进程重启后 ring 为空，但日志文件仍保留上次会话内容；
+                // 读取文件最后几行，避免日志页在重启应用后误报「暂无日志」。
+                // ring 有内容时优先使用内存；若文件尾正好包含这段 ring，则返回更完整的文件尾。
+                if lines > live.len() || live.is_empty() {
+                    let persisted = read_log_tail(&e.log_file, lines);
+                    if !persisted.is_empty() {
+                        if live.is_empty() {
+                            return persisted;
+                        }
+                        if persisted.len() >= live.len()
+                            && persisted[persisted.len() - live.len()..] == live[..]
+                        {
+                            return persisted;
+                        }
+                    }
+                }
+                live
             }
-            None => {
-                // 未运行过：尝试读日志文件
-                let path = crate::paths::Paths::new(std::path::PathBuf::new()).service_log(id);
-                let _ = path;
-                Vec::new()
-            }
+            None => Vec::new(),
         }
     }
 
@@ -465,6 +480,24 @@ fn append_to_log_file(manager: &ServiceManager, service_id: &str, line: &str) {
     }
 }
 
+/// 只保留日志文件尾部，避免把历史日志完整载入内存。
+fn read_log_tail(path: &std::path::Path, lines: usize) -> Vec<String> {
+    if lines == 0 {
+        return Vec::new();
+    }
+    let Ok(file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let mut tail = VecDeque::with_capacity(lines.min(2048));
+    for line in BufReader::new(file).lines().map_while(std::result::Result::ok) {
+        if tail.len() == lines {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
+    tail.into_iter().collect()
+}
+
 /* ================= 健康检查 ================= */
 
 pub fn tcp_port_open(port: u16) -> bool {
@@ -737,6 +770,18 @@ mod fallback_tests {
         assert!(lines[1].contains("bind failed:"));
         assert!(lines[2].ends_with("next diagnostic"));
         assert!(std::fs::read_to_string(log).unwrap().contains("next diagnostic"));
+    }
+
+    #[test]
+    fn tail_reads_persisted_log_after_process_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("service.log");
+        std::fs::write(&log, "old line\nlatest line\n").unwrap();
+        let manager = ServiceManager::new();
+        manager.register("fixture", "Fixture", None, None, None, log);
+
+        assert_eq!(manager.tail("fixture", 1), vec!["latest line"]);
+        assert_eq!(manager.tail("fixture", 10), vec!["old line", "latest line"]);
     }
 
     #[test]

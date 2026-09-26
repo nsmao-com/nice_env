@@ -355,12 +355,44 @@ impl CoreState {
         crate::tunnel::start(&exe, port)
     }
 
+    pub fn tunnel_start_site(&self, id: &str) -> Result<model::TunnelInfo> {
+        let _sites = sites::SITE_CHANGES.lock();
+        let _operation = self.manager.lifecycle.lock();
+        let site = self
+            .store
+            .list_sites()?
+            .into_iter()
+            .find(|site| site.id == id)
+            .ok_or_else(|| AppError::new("SITE_NOT_FOUND", "站点不存在，请刷新列表"))?;
+        if sites::runtime_status(&self.paths, &site, &self.manager) != "running" {
+            return Err(AppError::new(
+                "TUNNEL_SITE_STOPPED",
+                "请先启动此站点及其依赖服务，再创建隧道",
+            ));
+        }
+        let port = self
+            .manager
+            .snapshot(&site.runtime.web_server)
+            .and_then(|s| s.port)
+            .ok_or_else(|| AppError::new(
+                "TUNNEL_SITE_PORT",
+                "无法确认站点当前的 HTTP 端口，请重启对应 Web 服务",
+            ))?;
+        let target = crate::tunnel::Target::site(&site, port)?;
+        let exe = toolbox::resolve_exe(&self.store, &self.paths, &self.installer, "cloudflared")?;
+        crate::tunnel::start_target(&exe, target)
+    }
+
     pub fn tunnel_list(&self) -> Vec<model::TunnelInfo> {
         crate::tunnel::list()
     }
 
     pub fn tunnel_stop(&self, id: &str) -> Result<()> {
         crate::tunnel::stop(id)
+    }
+
+    pub fn tunnel_remove(&self, id: &str) -> Result<()> {
+        crate::tunnel::remove(id)
     }
 
     pub fn ollama_models(&self) -> Result<Vec<toolbox::OllamaModelRow>> {

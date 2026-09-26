@@ -275,8 +275,10 @@ pub fn run() {
             cron_run_now,
             cron_stop,
             tunnel_start,
+            tunnel_start_site,
             tunnel_list,
             tunnel_stop,
+            tunnel_remove,
             ollama_models,
             ollama_delete,
             ollama_pull,
@@ -316,6 +318,7 @@ pub fn run() {
         .run(|_, event| {
             if matches!(event, tauri::RunEvent::Exit) {
                 nsb_core::cron::shutdown();
+                nsb_core::tunnel::shutdown();
             }
         });
 }
@@ -354,6 +357,7 @@ where
 /// 而那些 pid 可能已被系统分配给无关进程）
 fn stop_all_and_clear_pidfile(state: &CoreState) {
     nsb_core::cron::shutdown();
+    nsb_core::tunnel::shutdown();
     nsb_core::ops::stop_all(&state.store, &state.paths, &state.manager);
     let path = state.paths.data().join("run").join("pids.json");
     let _ = std::fs::remove_file(path);
@@ -1739,26 +1743,57 @@ fn cron_stop(
 }
 
 #[tauri::command]
-fn tunnel_start(
+async fn tunnel_start(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     port: u16,
 ) -> Result<nsb_core::model::TunnelInfo, tauri::Error> {
-    map_jh(state.tunnel_start(port))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.tunnel_start(port)))
+        .await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
-fn tunnel_list(
+async fn tunnel_start_site(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
-) -> Vec<nsb_core::model::TunnelInfo> {
-    state.tunnel_list()
+    id: String,
+) -> Result<nsb_core::model::TunnelInfo, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.tunnel_start_site(&id)))
+        .await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
-fn tunnel_stop(
+async fn tunnel_remove(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<bool, tauri::Error> {
-    map_jh(state.tunnel_stop(&id).map(|_| true))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.tunnel_remove(&id).map(|_| true)))
+        .await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn tunnel_list(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+) -> Result<Vec<nsb_core::model::TunnelInfo>, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || st.tunnel_list())
+        .await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))
+}
+
+#[tauri::command]
+async fn tunnel_stop(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    id: String,
+) -> Result<bool, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.tunnel_stop(&id).map(|_| true)))
+        .await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
@@ -1983,6 +2018,7 @@ fn restart_app(app: tauri::AppHandle) -> Result<bool, tauri::Error> {
         .spawn()
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))?;
     nsb_core::cron::shutdown();
+    nsb_core::tunnel::shutdown();
     app.exit(0);
     Ok(true)
 }

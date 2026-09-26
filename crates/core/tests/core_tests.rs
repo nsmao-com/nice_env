@@ -83,7 +83,7 @@ fn hosts_merge_keeps_lines_between_dangling_begin_and_real_block() {
 #[test]
 fn mihomo_adapt_overrides_ports() {
     let raw = "mixed-port: 7890\nport: 7891\nexternal-controller: 0.0.0.0:9090\nallow-lan: true\nproxies: []\nrules:\n  - MATCH,DIRECT\n";
-    let adapted = nsb_core::configgen::adapt_mihomo_profile(raw);
+    let adapted = nsb_core::configgen::adapt_mihomo_profile(raw, "rule").unwrap();
     assert!(adapted.contains(&format!(
         "mixed-port: {}",
         nsb_core::configgen::MIHOMO_MIXED_PORT

@@ -4,7 +4,7 @@
  */
 import { PackageManifestEntry, HostsEntry as HostsEntrySchema } from "@nsb/schema";
 import { normalizeError } from "./backend";
-import type { BackupPreview, ConfigResetPreview } from "./api";
+import type { BackupPreview, ConfigResetPreview, TunnelInfo } from "./api";
 import bundledManifest from "../../../../manifest/packages.win.json";
 import type {
   VersionCatalog,
@@ -59,7 +59,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.18";
+const MOCK_APP_VERSION = "0.2.19";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -227,7 +227,7 @@ const proxyProfiles = new Map<string, ProxyProfile>();
 const cronJobs = new Map<string, { id: string; name: string; command: string; intervalMin: number; enabled: boolean; createdAt: number; lastRunAt: number | null; lastExit: string | null; lastOutput: string | null }>();
 const mockRedisConnections = new Map<string, { username: string; password: string }>();
 let mockAdminer: import("./api").AdminerStatus | null = null;
-let mockTunnel: { id: string; port: number; url: string; startedAt: number; alive: boolean } | null = null;
+const mockTunnels = new Map<string, TunnelInfo>();
 const hostsManaged = new Map<string, string[]>();
 const mockTextFiles = new Map<string, string>();
 const mockDnsInterfaces = ["Ethernet", "Wi-Fi"];
@@ -1989,21 +1989,47 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       cronJobs.set(job.id, { ...job, lastExit: "cancelled", lastOutput: "（浏览器演示）模拟任务已停止，没有执行系统命令。" });
       return true as T;
     }
-    case "tunnel_start": {
-      mockTunnel = {
-        id: uid(),
-        port: args!.port as number,
-        url: `https://mock-${Math.floor(Math.random() * 9999)}.trycloudflare.com`,
-        startedAt: Date.now(),
-        alive: true,
-      };
-      return { ...mockTunnel } as T;
+    case "tunnel_start":
+    case "tunnel_start_site": {
+      const site = cmd === "tunnel_start_site" ? sites.get(args!.id as string) : undefined;
+      if (cmd === "tunnel_start_site" && (!site || site.status !== "running")) throw { code: "TUNNEL_SITE_STOPPED", message: "请先启动所选站点及依赖服务" };
+      const port = site ? ownPorts().find(([id, name]) => id === site.runtime.webServer && !name.includes("HTTPS"))?.[2] : Number(args!.port);
+      if (!port || !Number.isInteger(port) || port < 1 || port > 65535) throw { code: "TUNNEL_BAD_PORT", message: "本地 HTTP 端口必须为 1–65535" };
+      const target = `http://${site?.domains[0] ?? "127.0.0.1"}:${port}`;
+      const existing = [...mockTunnels.values()].find((row) => row.alive && row.target === target);
+      if (existing) return structuredClone(existing) as T;
+      if (mockTunnels.size >= 20) {
+        const ended = [...mockTunnels.values()].find((row) => !row.alive);
+        if (!ended) throw { code: "TUNNEL_LIMIT", message: "最多同时运行 20 条隧道" };
+        mockTunnels.delete(ended.id);
+      }
+      const info: TunnelInfo = { id: uid(), port, target, siteId: site?.id, url: null, startedAt: Date.now(), alive: true,
+        state: "starting", localReachable: true, logs: ["浏览器演示：没有启动 cloudflared 或创建真实公网隧道。"] };
+      mockTunnels.set(info.id, info);
+      return structuredClone(info) as T;
     }
-    case "tunnel_list":
-      return (mockTunnel ? [mockTunnel] : []) as T;
-    case "tunnel_stop":
-      mockTunnel = null;
+    case "tunnel_list": {
+      for (const row of mockTunnels.values()) {
+        if (row.state === "starting" && row.alive && Date.now() - row.startedAt >= 1500) {
+          row.state = "connected"; row.url = `https://preview-${row.id}.example.invalid`;
+          row.logs.push("模拟连接完成，示例地址不可访问。");
+        }
+      }
+      return structuredClone([...mockTunnels.values()]) as T;
+    }
+    case "tunnel_stop": {
+      const row = mockTunnels.get(args!.id as string);
+      if (!row) throw { code: "TUNNEL_NOT_FOUND", message: "隧道记录不存在，请刷新列表" };
+      row.alive = false; row.state = "stopped"; row.error = null;
       return true as T;
+    }
+    case "tunnel_remove": {
+      const row = mockTunnels.get(args!.id as string);
+      if (!row) throw { code: "TUNNEL_NOT_FOUND", message: "隧道记录不存在，请刷新列表" };
+      if (row.alive) throw { code: "TUNNEL_RUNNING", message: "请先停止隧道，再移除记录" };
+      mockTunnels.delete(row.id);
+      return true as T;
+    }
     case "ollama_models":
       return [
         { name: "qwen2.5:0.5b", digest: "a8b0c5e2d110", size: "398 MB", modified: "2 hours ago" },

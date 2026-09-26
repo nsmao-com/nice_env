@@ -753,6 +753,12 @@ pub struct TunnelInfo {
     pub url: Option<String>,
     pub started_at: i64,
     pub alive: bool,
+    pub state: String,
+    pub target: String,
+    pub site_id: Option<String>,
+    pub error: Option<String>,
+    pub logs: Vec<String>,
+    pub local_reachable: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

@@ -426,12 +426,20 @@ export interface TunnelInfo {
   url?: string | null;
   startedAt: number;
   alive: boolean;
+  state: "starting" | "connected" | "reconnecting" | "failed" | "stopped";
+  target: string;
+  siteId?: string | null;
+  error?: string | null;
+  logs: string[];
+  localReachable?: boolean | null;
 }
 export const tunnelStart = (port: number) =>
   safe(invoke<TunnelInfo>("tunnel_start", { port }));
 export const tunnelList = () => safe(invoke<TunnelInfo[]>("tunnel_list"));
 export const tunnelStop = (id: string) =>
   safe(invoke<boolean>("tunnel_stop", { id }));
+export const tunnelStartSite = (id: string) => safe(invoke<TunnelInfo>("tunnel_start_site", { id }));
+export const tunnelRemove = (id: string) => safe(invoke<boolean>("tunnel_remove", { id }));
 
 export interface OllamaModelRow {
   name: string;

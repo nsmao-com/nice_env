@@ -18,7 +18,7 @@ import {
 import type { CronJob, TunnelInfo, OllamaModelRow } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem, SelectSeparator } from "@/components/ui/select";
 import { isTauri, normalizeError } from "@/lib/backend";
 import { useT } from "@/lib/store";
 import { useAdminer, toastError } from "@/lib/hooks";
@@ -234,113 +234,110 @@ export function CronTool() {
 
 export function TunnelTool() {
   const t = useT();
+  const client = useQueryClient();
+  const query = useQuery({ queryKey: ["tunnels"], queryFn: api.tunnelList, refetchInterval: 2500, retry: false });
+  const sites = useQuery({ queryKey: ["tunnel-sites"], queryFn: api.listSites, refetchInterval: 5000, retry: false });
+  const [target, setTarget] = React.useState("");
   const [port, setPort] = React.useState("8080");
-  const [tunnels, setTunnels] = React.useState<TunnelInfo[]>([]);
-  const [busy, setBusy] = React.useState(false);
-  const [loadError, setLoadError] = React.useState<string | null>(null);
-
-  const load = React.useCallback(async () => {
+  const [starting, setStarting] = React.useState(false);
+  const startGuard = React.useRef(false);
+  const [startError, setStartError] = React.useState<string | null>(null);
+  const [working, setWorking] = React.useState<string[]>([]);
+  const actions = React.useRef(new Set<string>());
+  const [expanded, setExpanded] = React.useState<string | null>(null);
+  const targetId = React.useId();
+  const selectedSite = sites.data?.find((site) => `site:${site.id}` === target);
+  const validTarget = target === "custom" || (!!selectedSite && selectedSite.status === "running" && !sites.error);
+  const refresh = () => query.refetch();
+  const start = async (retry?: TunnelInfo) => {
+    if (startGuard.current) return;
+    const siteId = retry ? retry.siteId : selectedSite?.id;
+    const localPort = retry?.port ?? Number(port);
+    if (!retry && !validTarget) return;
+    if (!siteId && (!Number.isInteger(localPort) || localPort < 1 || localPort > 65535)) {
+      setStartError(t("tools.tunnel.badPort")); return;
+    }
+    startGuard.current = true; setStarting(true); setStartError(null);
     try {
-      setTunnels(await api.tunnelList());
-      setLoadError(null);
-    } catch (error) {
-      setLoadError(normalizeError(error).message);
-    }
-  }, []);
-
-  React.useEffect(() => {
-    void load();
-    const id = setInterval(load, 2500);
-    return () => clearInterval(id);
-  }, [load]);
-
-  const start = async () => {
-    const p = Number(port);
-    if (!p || p < 1 || p > 65535) {
-      toast.error(t("tools.tunnel.badPort"));
-      return;
-    }
-    setBusy(true);
-    try {
-      await api.tunnelStart(p);
-      toast.info(t("tools.tunnel.starting"));
-      await load();
-    } catch (e) {
-      toastError(e);
-    } finally {
-      setBusy(false);
-    }
+      const info = siteId ? await api.tunnelStartSite(siteId) : await api.tunnelStart(localPort);
+      await client.cancelQueries({ queryKey: ["tunnels"] });
+      client.setQueryData<TunnelInfo[]>(["tunnels"], (old) => [...(old ?? []).filter((row) => row.id !== info.id), info]);
+      if (info.state === "failed") { setExpanded(info.id); toast.error(info.error || t("tools.tunnel.failed")); }
+      else toast.message(t(info.state === "connected" ? "tools.tunnel.connected" : "tools.tunnel.starting"));
+      await refresh();
+    } catch (e) { setStartError(normalizeError(e).message); if (retry) toastError(e); }
+    finally { startGuard.current = false; setStarting(false); }
+  };
+  const act = async (id: string, action: () => Promise<unknown>) => {
+    if (actions.current.has(id)) return;
+    actions.current.add(id); setWorking([...actions.current]);
+    try { await action(); } catch (e) { toastError(e); }
+    finally { await refresh(); actions.current.delete(id); setWorking([...actions.current]); }
   };
 
   return (
     <ToolCard icon={Globe2} title={t("tools.tunnel.title")} hint={t("tools.tunnel.hint")}>
-      <div className="flex flex-col gap-2">
-        {loadError && (
-          <div className="flex flex-wrap items-center gap-2 rounded-md border border-error/25 bg-error-soft/40 px-3 py-2 text-[11px] text-error" role="alert">
-            <span className="min-w-0 flex-1 break-words">{loadError}</span>
-            <Button size="sm" variant="secondary" onClick={() => void load()}>{t("install.retry")}</Button>
-          </div>
-        )}
-        <div className="flex gap-1.5">
-          <Input
-            value={port}
-            onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))}
-            className="h-8 w-24 text-center font-mono text-[12px]"
-            placeholder="8080"
-          />
-          <Button size="sm" className="h-8" onClick={() => void start()} disabled={busy}>
-            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Globe2 className="h-3.5 w-3.5" />}
-            {t("tools.tunnel.start")}
+      <div className="flex min-w-0 flex-col gap-3">
+        {!isTauri && <p className="rounded-lg bg-info-soft p-3 text-xs text-info">{t("tools.tunnel.preview")}</p>}
+        <form className="flex min-w-0 flex-col gap-2" onSubmit={(event) => { event.preventDefault(); void start(); }}>
+          <label id={targetId} className="text-xs text-muted">{t("tools.tunnel.target")}</label>
+          <Select value={target} onValueChange={(value) => { setTarget(value); setStartError(null); }} disabled={starting}>
+            <SelectTrigger className="min-w-0 text-xs" aria-labelledby={targetId}><SelectValue placeholder={t("tools.tunnel.choose")} /></SelectTrigger>
+            <SelectContent>
+              {(sites.data ?? []).map((site) => <SelectItem key={site.id} value={`site:${site.id}`} disabled={site.status !== "running" || !!sites.error} className="text-xs [&>span:last-child]:min-w-0 [&>span:last-child]:break-all">
+                {site.name} · {site.domains[0]}{site.status !== "running" ? ` · ${t("tools.tunnel.siteStopped")}` : ""}
+              </SelectItem>)}
+              {!!sites.data?.length && <SelectSeparator />}
+              <SelectItem value="custom" className="text-xs">{t("tools.tunnel.custom")}</SelectItem>
+            </SelectContent>
+          </Select>
+          {sites.isPending && <p role="status" className="text-[11px] text-faint">{t("tools.tunnel.loadingSites")}</p>}
+          {sites.error && <div role="alert" className="flex flex-wrap items-center gap-2 text-xs text-error">
+            <span className="min-w-0 flex-1 break-words">{t("tools.tunnel.sitesFailed")} · {normalizeError(sites.error).message}</span>
+            <Button type="button" size="sm" variant="secondary" disabled={sites.isFetching} onClick={() => void sites.refetch()}>{t("install.retry")}</Button>
+          </div>}
+          {target === "custom" && <label className="space-y-1.5 text-xs text-muted">{t("tools.tunnel.port")}
+            <Input type="number" min={1} max={65535} step={1} required value={port} disabled={starting} onChange={(event) => setPort(event.target.value)} className="font-mono text-xs" />
+          </label>}
+          <p className="text-[11px] leading-relaxed text-faint">{t("tools.tunnel.targetHint")}</p>
+          {startError && <p role="alert" className="break-words text-xs text-error">{startError}</p>}
+          <Button type="submit" size="sm" className="self-start" disabled={starting || query.isPending || !!query.error || !validTarget}>
+            {starting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Globe2 className="h-3.5 w-3.5" />}{t("tools.tunnel.start")}
           </Button>
-        </div>
-        {!loadError && tunnels.length === 0 ? (
-          <p className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-[11px] text-faint">
-            {t("tools.tunnel.none")}
-          </p>
-        ) : (
-          tunnels.map((tn) => (
-            <div key={tn.id} className="rounded-lg border border-border/60 px-3 py-2">
-              <div className="flex items-center gap-2">
-                <Badge variant="info">:{tn.port}</Badge>
-                {tn.url ? (
-                  <>
-                    <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-running">{tn.url}</span>
-                    <CopyButton text={tn.url} />
-                    <Button
-                      size="icon-sm"
-                      variant="ghost"
-                      className="text-faint hover:text-secondary"
-                      title={t("common.open")}
-                      onClick={() => void api.openInBrowser(tn.url!).catch(() => undefined)}
-                    >
-                      <ExternalLink className="h-3.5 w-3.5" />
-                    </Button>
-                  </>
-                ) : (
-                  <span className="flex flex-1 items-center gap-1.5 text-[11px] text-warn">
-                    <Loader2 className="h-3 w-3 animate-spin" /> {t("tools.tunnel.pending")}
-                  </span>
-                )}
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="shrink-0 text-error hover:text-error"
-                  onClick={async () => {
-                    try {
-                      await api.tunnelStop(tn.id);
-                      await load();
-                    } catch (e) {
-                      toastError(e);
-                    }
-                  }}
-                >
-                  {t("tools.tunnel.stop")}
-                </Button>
-              </div>
-            </div>
-          ))
-        )}
-        <p className="text-[10px] text-faint">{t("tools.tunnel.hint2")}</p>
+        </form>
+        {query.error && <div role="alert" className="flex flex-wrap items-center gap-2 rounded-lg bg-error-soft p-3 text-xs text-error">
+          <span className="min-w-0 flex-1 break-words">{t("tools.tunnel.readFailed")} · {normalizeError(query.error).message}</span>
+          <Button size="sm" variant="secondary" disabled={query.isFetching} onClick={() => void refresh()}>{t("install.retry")}</Button>
+        </div>}
+        {query.isPending ? <p role="status" className="py-4 text-center text-xs text-faint">{t("common.loading")}</p>
+          : !query.error && !query.data?.length ? <p className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-xs text-faint">{t("tools.tunnel.none")}</p> : null}
+        {(query.data ?? []).map((tn) => <section key={tn.id} aria-label={tn.target} className="min-w-0 rounded-lg border border-border/60 p-3">
+          <p className="break-all font-mono text-xs">{tn.target}</p>
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+            <Badge role="status" variant={tn.state === "connected" ? "running" : tn.state === "failed" ? "error" : "info"}>{t(`tools.tunnel.${tn.state}`)}</Badge>
+            <time className="text-faint" title={new Date(tn.startedAt).toLocaleString()}>{relTime(tn.startedAt)}</time>
+          </div>
+          {tn.alive && tn.localReachable === false && <p role="status" className="mt-2 text-xs text-warn">{t("tools.tunnel.localDown")}</p>}
+          {tn.error && <p role="alert" className="mt-2 break-words text-xs text-error">{tn.error}</p>}
+          {tn.url ? <p className="mt-2 break-all font-mono text-[11px] text-secondary">{tn.url}</p>
+            : tn.alive && <p className="mt-2 text-[11px] text-faint">{t("tools.tunnel.pending")}</p>}
+          <div className="mt-2 flex flex-wrap items-center gap-1 border-t border-dashed border-border pt-2">
+            {tn.url && <>
+              <CopyButton text={tn.url} />
+              <Button size="sm" variant="ghost" disabled={!isTauri || !!query.error || tn.state !== "connected" || !tn.localReachable}
+                onClick={() => void api.openInBrowser(tn.url!).catch(toastError)}><ExternalLink className="h-3.5 w-3.5" />{t("common.open")}</Button>
+            </>}
+            <Button size="sm" variant="ghost" aria-expanded={expanded === tn.id} onClick={() => setExpanded(expanded === tn.id ? null : tn.id)}>{t("tools.tunnel.output")}</Button>
+            {tn.alive ? <Button size="sm" variant="secondary" disabled={working.includes(tn.id)} onClick={() => void act(tn.id, () => api.tunnelStop(tn.id))}>
+              {working.includes(tn.id) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />}{t("tools.tunnel.stop")}
+            </Button> : <>
+              <Button size="sm" variant="secondary" disabled={starting || working.includes(tn.id) || !!query.error} onClick={() => void start(tn)}>{t("tools.tunnel.restart")}</Button>
+              <Button size="icon-sm" variant="ghost" className="ml-auto text-faint hover:text-error" aria-label={`${t("tools.tunnel.remove")} · ${tn.target}`} disabled={working.includes(tn.id) || !!query.error} onClick={() => void act(tn.id, () => api.tunnelRemove(tn.id))}><Trash2 className="h-3.5 w-3.5" /></Button>
+            </>}
+          </div>
+          {expanded === tn.id && <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-card-2/50 p-3 font-mono text-[11px] leading-relaxed text-secondary">{tn.logs.join("\n") || t("tools.tunnel.noOutput")}</pre>}
+        </section>)}
+        <p className="text-[11px] leading-relaxed text-faint">{t("tools.tunnel.hint2")}</p>
       </div>
     </ToolCard>
   );

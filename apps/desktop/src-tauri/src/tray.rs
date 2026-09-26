@@ -194,7 +194,11 @@ fn tooltip_text(state: &Arc<CoreState>) -> String {
         .iter()
         .filter(|s| s.state == ServiceState::Running)
         .count();
-    if running == 0 {
+    let active = services.iter().filter(|s| !s.pids.is_empty()
+        || matches!(s.state, ServiceState::Starting | ServiceState::Stopping)).count();
+    if running == 0 && active > 0 {
+        format!("NiceEnv — {active} 个服务仍有进程或正在切换状态")
+    } else if running == 0 {
         "NiceEnv — 本地开发环境（全部已停止）".into()
     } else {
         format!("NiceEnv — {running}/{} 个服务运行中", services.len())
@@ -215,7 +219,7 @@ pub fn panel_state_json<R: Runtime>(
         .count();
     let active = services
         .iter()
-        .filter(|s| matches!(s.state, ServiceState::Running | ServiceState::Starting))
+        .filter(|s| !s.pids.is_empty() || matches!(s.state, ServiceState::Starting | ServiceState::Stopping))
         .count();
 
     let mut sorted = services.clone();
@@ -227,15 +231,17 @@ pub fn panel_state_json<R: Runtime>(
                 "id": s.id,
                 "label": short_label(&s.id, &s.label),
                 "state": state_tag(&s.state),
+                "pids": s.pids,
                 "group": group_of(&s.id),
                 "port": s.port,
             })
         })
         .collect();
 
+    let mut read_errors = Vec::new();
     let stacks_json: Vec<serde_json::Value> = state
         .list_stacks()
-        .unwrap_or_default()
+        .unwrap_or_else(|error| { read_errors.push(format!("读取服务栈：{}", error.message)); Vec::new() })
         .into_iter()
         .take(4)
         .map(|st| {
@@ -246,7 +252,7 @@ pub fn panel_state_json<R: Runtime>(
 
     let ports = nsb_core::services::PortsProfile::from_settings(&state.store);
     let sites_json: Vec<serde_json::Value> = nsb_core::sites::list(&state.store)
-        .unwrap_or_default()
+        .unwrap_or_else(|error| { read_errors.push(format!("读取站点：{}", error.message)); Vec::new() })
         .into_iter()
         .take(6)
         .map(|s| {
@@ -269,6 +275,7 @@ pub fn panel_state_json<R: Runtime>(
 
     serde_json::json!({
         "version": app.package_info().version.to_string(),
+        "readErrors": read_errors,
         "appearance": state.store.get_setting("appearance").unwrap_or_else(|| "light".into()),
         "running": running,
         "active": active,
@@ -459,18 +466,17 @@ pub fn tray_panel_state(
     panel_state_json(&app, state.inner())
 }
 
-/// 一键停止全部服务（后台执行，完成后 tray://state 自动刷新面板与角标）
+/// 返回真实逐项报告；失败的进程继续保留在 PID 文件中。
 #[tauri::command]
-pub fn tray_stop_all(app: tauri::AppHandle, state: State<'_, Arc<CoreState>>) -> bool {
+pub async fn tray_stop_all(
+    app: tauri::AppHandle, state: State<'_, Arc<CoreState>>,
+) -> Result<nsb_core::bulk::BulkReport, tauri::Error> {
     let st = state.inner().clone();
-    let app2 = app.clone();
-    std::thread::spawn(move || {
-        nsb_core::ops::stop_all(&st.store, &st.paths, &st.manager);
-        let path = st.paths.data().join("run").join("pids.json");
-        let _ = std::fs::remove_file(path);
-        refresh(&app2);
-    });
-    true
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        crate::map_jh(st.stop_all_services())
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?;
+    refresh(&app);
+    result
 }
 
 /// 打开主窗口；path → 路由跳转，action → 让前端开「检查更新 / 关于」弹窗。

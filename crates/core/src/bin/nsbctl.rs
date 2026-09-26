@@ -60,8 +60,8 @@ fn main() -> ExitCode {
         "start" => one_service(&state, pos.first().copied(), |s, id| s.start_service(id)),
         "stop" => one_service(&state, pos.first().copied(), |s, id| s.stop_service(id)),
         "restart" => one_service(&state, pos.first().copied(), |s, id| s.restart_service(id)),
-        "start-all" => stack(&state, true),
-        "stop-all" => stack(&state, false),
+        "start-all" => stack(&state, true, json),
+        "stop-all" => stack(&state, false, json),
         "open" => cmd_open(&state, pos.first().copied()),
         "logs" => cmd_logs(&state, pos.first().copied(), pos.get(1).copied()),
         "diagnose" => cmd_diagnose(pos.first().copied()),
@@ -189,41 +189,30 @@ fn cmd_packages(state: &std::sync::Arc<nsb_core::CoreState>, json: bool) -> Exit
     ExitCode::SUCCESS
 }
 
-fn stack(state: &std::sync::Arc<nsb_core::CoreState>, start: bool) -> ExitCode {
-    // 与托盘「启动常用栈」一致：nginx 优先、php 次之、数据库随后
+fn stack(state: &std::sync::Arc<nsb_core::CoreState>, start: bool, json: bool) -> ExitCode {
+    // 与桌面批量操作一致：启动先库后 Web，停止反向，错误不能忽略。
     let mut ids: Vec<String> = state
         .service_status_list()
         .iter()
         .map(|s| s.id.clone())
         .collect();
-    ids.sort_by_key(|id| match () {
-        _ if id == "nginx" || id == "apache" => 0,
-        _ if id.starts_with("php@") => 1,
-        _ if id.starts_with("mysql@") => 2,
-        _ if id == "postgresql" || id == "mongodb" => 3,
-        _ => 4,
-    });
-    let mut fail = 0;
-    for id in &ids {
-        let r = if start {
-            state.start_service(id)
-        } else {
-            state.stop_service(id)
-        };
-        match r {
-            Ok(()) => println!("{} {id}", if start { "started" } else { "stopped" }),
-            Err(e) => {
-                // 停止时「本来就没在跑」不算失败
-                if !start && e.code == "STOP_FAILED" {
-                    println!("skip {id}");
-                } else {
-                    eprintln!("fail {id}: {}", e.message);
-                    fail += 1;
-                }
-            }
+    ids.sort();
+    let result = if start { state.bulk_start(&ids) } else { state.stop_all_services() };
+    let report = match result {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("{}: {}", error.code, error.message);
+            return ExitCode::FAILURE;
         }
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+    } else {
+        for id in &report.succeeded { println!("{} {id}", if start { "started" } else { "stopped" }); }
+        for id in &report.already { println!("already {id}"); }
+        for item in &report.failed { eprintln!("fail {}: {}", item.service_id, item.error.message); }
     }
-    if fail > 0 {
+    if !report.failed.is_empty() {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS

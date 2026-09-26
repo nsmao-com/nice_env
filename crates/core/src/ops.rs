@@ -332,8 +332,11 @@ pub fn start_service(
             }
             Ok(())
         }
-        Err(err) => {
-            terminate_group(manager, id);
+        Err(mut err) => {
+            if let Err(cleanup) = terminate_group(manager, id) {
+                err.detail = Some(format!("{}\n启动失败后的进程清理未完成：{}",
+                    err.detail.as_deref().unwrap_or_default(), cleanup.message));
+            }
             manager.set_error(id, err.clone());
             Err(err)
         }
@@ -919,10 +922,10 @@ pub fn stop_service(
     if manager.snapshot(id).is_none() {
         return Ok(());
     }
-    if let Some(e) = manager.snapshot(id) {
-        if e.state == ServiceState::Stopped && !manager.is_busy(id) {
-            return Ok(());
-        }
+    if !manager.is_busy(id) {
+        // Error/Unknown 但已无进程时也属于已停止，不再发送无目标的停机命令。
+        manager.set_state(id, ServiceState::Stopped);
+        return Ok(());
     }
     manager.set_state(id, ServiceState::Stopping);
     let ports = PortsProfile::from_settings(store);
@@ -946,7 +949,7 @@ pub fn stop_service(
                         .output();
                     std::thread::sleep(Duration::from_millis(800));
                 }
-                terminate_group(manager, id);
+                terminate_group(manager, id)?;
                 Ok(())
             }
             "apache" => {
@@ -963,7 +966,7 @@ pub fn stop_service(
                         .output();
                     std::thread::sleep(Duration::from_millis(800));
                 }
-                terminate_group(manager, id);
+                terminate_group(manager, id)?;
                 Ok(())
             }
             "postgresql" => {
@@ -991,12 +994,12 @@ pub fn stop_service(
                         std::thread::sleep(Duration::from_millis(500));
                     }
                 }
-                terminate_group(manager, id);
+                terminate_group(manager, id)?;
                 Ok(())
             }
             "mongodb" => {
                 // mongod 对 SIGTERM/强杀均靠 journaling 恢复，直接终止组
-                terminate_group(manager, id);
+                terminate_group(manager, id)?;
                 Ok(())
             }
             "redis" => {
@@ -1012,7 +1015,7 @@ pub fn stop_service(
                         return Err(AppError::new("REDIS_SHUTDOWN_TIMEOUT", "Redis 仍在运行，未强制结束进程，请检查保存进度和日志"));
                     }
                 }
-                terminate_group(manager, id);
+                terminate_group(manager, id)?;
                 Ok(())
             }
             s if s.starts_with("mysql@") => {
@@ -1033,13 +1036,13 @@ pub fn stop_service(
                         std::thread::sleep(Duration::from_millis(500));
                     }
                 }
-                terminate_group(manager, id);
+                terminate_group(manager, id)?;
                 Ok(())
             }
             _ => {
                 // 清单驱动的通用服务：先试清单声明的优雅停止命令，再终止进程组
                 crate::generic::graceful_stop(store, paths, id);
-                terminate_group(manager, id);
+                terminate_group(manager, id)?;
                 Ok(())
             }
         }
@@ -1087,11 +1090,11 @@ pub fn stop_service(
     result
 }
 
-fn terminate_group(manager: &Arc<ServiceManager>, id: &str) {
+fn terminate_group(manager: &Arc<ServiceManager>, id: &str) -> Result<()> {
     if let Some(e) = manager.services.lock().get(id).cloned() {
         let mut group = e.group.lock();
         if let Some(g) = group.as_mut() {
-            let _ = g.terminate(true);
+            g.terminate(true)?;
         }
         *group = None;
         let alive: Vec<_> = e
@@ -1102,9 +1105,10 @@ fn terminate_group(manager: &Arc<ServiceManager>, id: &str) {
             .filter(|pid| platform::process_alive(*pid))
             .collect();
         if !alive.is_empty() {
-            let _ = platform::ProcessGroup::from_pids(alive).terminate(true);
+            platform::ProcessGroup::from_pids(alive).terminate(true)?;
         }
     }
+    Ok(())
 }
 
 /* ================= nginx 重载 ================= */
@@ -2716,6 +2720,12 @@ mod validate_tests {
             assert_eq!(other.stop_service("missing").unwrap_err().code, "SERVICE_BUSY");
             assert_eq!(other.restart_service("missing").unwrap_err().code, "SERVICE_BUSY");
             assert_eq!(other.start_service_with_port_policy("missing", |_| panic!("must not free ports")).unwrap_err().code, "SERVICE_BUSY");
+            assert_eq!(other.bulk_start(&[]).unwrap_err().code, "SERVICE_BUSY");
+            assert_eq!(other.bulk_stop(&[]).unwrap_err().code, "SERVICE_BUSY");
+            assert_eq!(other.bulk_restart(&[]).unwrap_err().code, "SERVICE_BUSY");
+            assert_eq!(other.start_stack("missing").unwrap_err().code, "SERVICE_BUSY");
+            assert_eq!(other.stop_stack("missing").unwrap_err().code, "SERVICE_BUSY");
+            assert_eq!(other.stop_all_services().unwrap_err().code, "SERVICE_BUSY");
         }).join().unwrap();
     }
 
@@ -2737,6 +2747,14 @@ mod validate_tests {
         assert_eq!(snapshot.last_error.unwrap().code, "REDIS_VERSION_UNKNOWN");
         assert!(state.watchdog_tick().is_empty());
         assert_eq!(state.watchdog_status().watched[0].attempts, 0);
+        let report = state.bulk_restart(&["redis".into(), "missing".into(), "redis".into()]).unwrap();
+        assert_eq!(report.failed.len(), 2);
+        assert!(report.succeeded.is_empty() && report.already.is_empty());
+        assert!(report.failed.iter().any(|f| f.service_id == "redis" && f.error.message.contains("停止阶段失败")));
+        let stopped = state.stop_all_services().unwrap();
+        assert_eq!(stopped.failed[0].service_id, "redis");
+        let pidfile: serde_json::Value = serde_json::from_slice(&std::fs::read(state.paths.data().join("run/pids.json")).unwrap()).unwrap();
+        assert_eq!(pidfile["services"][0]["pids"][0], std::process::id());
     }
 
     #[test]
@@ -2755,6 +2773,14 @@ mod validate_tests {
         let cfg = crate::watchdog::WatchdogConfig { enabled: true, ..Default::default() };
         assert!(!state.watchdog.should_restart("nginx", &cfg));
         assert!(state.paths.data().join("run/pids.json").exists());
+        // 已无进程的 Error 也应被主动停止抑制，批量重启失败不能重新启用看门狗。
+        state.watchdog.note_started("nginx");
+        let stopped = state.bulk_stop(&["nginx".into()]).unwrap();
+        assert_eq!(stopped.already, ["nginx"]);
+        assert!(!state.watchdog.should_restart("nginx", &cfg));
+        let restarted = state.bulk_restart(&["nginx".into()]).unwrap();
+        assert!(restarted.failed[0].error.message.contains("重新启动失败"));
+        assert!(!state.watchdog.should_restart("nginx", &cfg));
     }
 
     #[test]
@@ -2836,6 +2862,37 @@ powershell.exe -NoProfile -NonInteractive -Command "$listener = [System.Net.Sock
         let outcome = state.close_port_checked(port, &scan.listeners).unwrap();
         assert!(outcome.port_free);
         assert!(!state.watchdog.should_restart("fixture-b", &cfg));
+
+        // 同一真实临时实例覆盖整栈、批量和托盘全部停止所用的核心入口。
+        let stack = state.save_stack(crate::model::StackInput {
+            id: None, name: "Lifecycle fixture".into(), description: String::new(),
+            items: vec![crate::model::StackItem { service_id: "fixture-b".into(), label: None, order: 0 }],
+        }).unwrap();
+        assert_eq!(state.start_stack(&stack.id).unwrap().started, ["fixture-b"]);
+        let stack_pid = state.manager.snapshot("fixture-b").unwrap().pids;
+        assert_eq!(state.start_stack(&stack.id).unwrap().already_running, ["fixture-b"]);
+        assert_eq!(state.manager.snapshot("fixture-b").unwrap().pids, stack_pid);
+        assert!(state.watchdog.should_restart("fixture-b", &cfg));
+        assert_eq!(state.stop_stack(&stack.id).unwrap().started, ["fixture-b"]);
+        assert!(!state.watchdog.should_restart("fixture-b", &cfg));
+        let report = state.bulk_start(&["fixture-b".into(), "missing".into(), "fixture-b".into()]).unwrap();
+        assert_eq!(report.succeeded, ["fixture-b"], "{report:?}");
+        assert_eq!(report.failed[0].service_id, "missing");
+        assert!(state.watchdog.should_restart("fixture-b", &cfg));
+        let before = state.manager.snapshot("fixture-b").unwrap().pids;
+        let report = state.bulk_restart(&["fixture-b".into()]).unwrap();
+        assert_eq!(report.succeeded, ["fixture-b"], "{report:?}");
+        assert_ne!(state.manager.snapshot("fixture-b").unwrap().pids, before);
+        assert!(before.iter().all(|pid| !platform::process_alive(*pid)));
+        assert!(state.watchdog.should_restart("fixture-b", &cfg));
+        let listeners = state.scan_port_range(port, port).unwrap().listeners;
+        assert!(!listeners.is_empty());
+        assert_eq!(state.stop_all_services().unwrap().succeeded, ["fixture-b"]);
+        assert!(!state.watchdog.should_restart("fixture-b", &cfg));
+        assert!(listeners.iter().all(|listener| !platform::process_alive(listener.pid)));
+        assert!(state.scan_port_range(port, port).unwrap().listeners.is_empty());
+        // 与真正启动的预检一致，验证端口可重新绑定，避免连接探针额外制造临时连接。
+        assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
     }
 
 }

@@ -918,11 +918,48 @@ impl CoreState {
 
     /// 一键启动整栈；单项失败不阻断其它项，结果逐项回报
     pub fn start_stack(&self, id: &str) -> Result<model::StackStartReport> {
-        stacks::start(&self.store, &self.paths, &self.manager, id)
+        stacks::start_with(&self.store, &self.paths, &self.manager, id, |sid| self.start_service(sid))
     }
 
     pub fn stop_stack(&self, id: &str) -> Result<model::StackStartReport> {
-        stacks::stop(&self.store, &self.paths, &self.manager, id)
+        stacks::stop_with(&self.store, &self.paths, &self.manager, id, |sid| self.stop_service(sid))
+    }
+
+    pub fn bulk_start(&self, ids: &[String]) -> Result<bulk::BulkReport> {
+        bulk::start_many_with(&self.paths, &self.manager, ids, |id| self.start_service(id))
+    }
+
+    pub fn bulk_stop(&self, ids: &[String]) -> Result<bulk::BulkReport> {
+        bulk::stop_many_with(&self.paths, &self.manager, ids, |id| self.stop_service(id))
+    }
+
+    pub fn bulk_restart(&self, ids: &[String]) -> Result<bulk::BulkReport> {
+        bulk::restart_many_with(&self.paths, &self.manager, ids,
+            |id| self.start_service(id), |id| self.stop_service(id))
+    }
+
+    /// 全部停止包含独立管理台；任何失败都保留结果及剩余 PID。
+    pub fn stop_all_services(&self) -> Result<bulk::BulkReport> {
+        let _operation = self.manager.lifecycle.try_lock()
+            .ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后停止全部服务"))?;
+        let mut ids = self.manager.list_status().into_iter().map(|s| s.id).collect::<Vec<_>>();
+        ids.sort();
+        // 先停管理台，避免关闭数据库时仍有来自管理台的新请求。
+        let has_adminer = self.manager.adminer.lock().is_some();
+        let adminer_result = has_adminer.then(|| toolbox::adminer_stop(&self.manager));
+        let mut report = self.bulk_stop(&ids)?;
+        if let Some(adminer_result) = adminer_result {
+            let id = "adminer-console".to_string();
+            report.order.insert(0, id.clone());
+            match adminer_result {
+                Ok(()) => report.succeeded.push(id),
+                Err(error) => report.failed.push(bulk::BulkFailure {
+                    service_id: id, error: model::AppErrorInfo::from(error),
+                }),
+            }
+        }
+        ops::save_pidfile(&self.paths, &self.manager);
+        Ok(report)
     }
 
     /// 占用了某端口的进程：本应用服务则优雅停止，外部进程则直接结束

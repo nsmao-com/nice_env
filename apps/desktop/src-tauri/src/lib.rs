@@ -3024,7 +3024,7 @@ async fn bulk_start(
 ) -> Result<nsb_core::bulk::BulkReport, tauri::Error> {
     let st = state.inner().clone();
     let report = tauri::async_runtime::spawn_blocking(move || {
-        map_jh(nsb_core::bulk::start_many(&st.store, &st.paths, &st.manager, &ids))
+        map_jh(st.bulk_start(&ids))
     }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))??;
     crate::tray::refresh(&app);
     Ok(report)
@@ -3038,7 +3038,7 @@ async fn bulk_stop(
 ) -> Result<nsb_core::bulk::BulkReport, tauri::Error> {
     let st = state.inner().clone();
     let report = tauri::async_runtime::spawn_blocking(move || {
-        map_jh(nsb_core::bulk::stop_many(&st.store, &st.paths, &st.manager, &ids))
+        map_jh(st.bulk_stop(&ids))
     }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))??;
     crate::tray::refresh(&app);
     Ok(report)
@@ -3052,7 +3052,7 @@ async fn bulk_restart(
 ) -> Result<nsb_core::bulk::BulkReport, tauri::Error> {
     let st = state.inner().clone();
     let report = tauri::async_runtime::spawn_blocking(move || {
-        map_jh(nsb_core::bulk::restart_many(&st.store, &st.paths, &st.manager, &ids))
+        map_jh(st.bulk_restart(&ids))
     }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))??;
     crate::tray::refresh(&app);
     Ok(report)

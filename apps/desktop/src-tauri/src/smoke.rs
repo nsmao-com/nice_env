@@ -841,7 +841,7 @@ echo implode("\n", $out);
     /* ---------- 17. 批量服务操作（按依赖分层） ---------- */
     {
         let ids = vec!["nginx".to_string(), "php@8.3.33".to_string()];
-        match nsb_core::bulk::start_many(&state.store, &state.paths, &state.manager, &ids) {
+        match state.bulk_start(&ids) {
             Ok(rep) => {
                 let order_ok = rep
                     .order
@@ -853,7 +853,7 @@ echo implode("\n", $out);
                     "批量启动按依赖分层",
                     format!("顺序 {:?}；成功 {} 个", rep.order, rep.succeeded.len()),
                 );
-                match nsb_core::bulk::stop_many(&state.store, &state.paths, &state.manager, &ids) {
+                match state.bulk_stop(&ids) {
                     Ok(sr) => {
                         assert_(
                             sr.failed.is_empty(),

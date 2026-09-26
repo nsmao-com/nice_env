@@ -61,7 +61,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.27";
+const MOCK_APP_VERSION = "0.2.28";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -731,11 +731,20 @@ let serviceActionInProgress = false;
 
 /** 演示启停也保持操作互斥和重启的停止/启动顺序。 */
 async function runServiceAction(action: "start_service" | "stop_service" | "restart_service", id: string) {
+  return withServiceOperation(() => performServiceAction(action, id));
+}
+
+async function withServiceOperation<T>(operation: () => Promise<T>): Promise<T> {
   if (serviceActionInProgress) throw { code: "SERVICE_BUSY", message: "服务正在操作，请稍后重试" };
+  serviceActionInProgress = true;
+  try { return await operation(); }
+  finally { serviceActionInProgress = false; }
+}
+
+async function performServiceAction(action: "start_service" | "stop_service" | "restart_service", id: string) {
   const service = services.get(id);
   if (!service) throw { code: "UNKNOWN_SERVICE", message: `服务 ${id} 未注册或已卸载` };
   if (["starting", "stopping"].includes(service.state)) throw { code: "SERVICE_BUSY", message: "服务正在切换状态，请稍后重试" };
-  serviceActionInProgress = true;
   let stopping = true;
   try {
     if (action !== "start_service" && (service.state !== "stopped" || service.pids.length)) {
@@ -765,7 +774,7 @@ async function runServiceAction(action: "start_service" | "stop_service" | "rest
     if (action === "restart_service") error.message = `${stopping ? "重启中止，停止阶段失败" : "服务已停止，但重新启动失败"}：${error.message}`;
     service.state = "error"; service.lastError = error;
     throw error;
-  } finally { serviceActionInProgress = false; }
+  }
 }
 
 export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -829,8 +838,9 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "start_stack":
     case "stop_stack": {
+      return withServiceOperation(async () => {
       const stack = stacks.get(args!.id as string);
-      if (!stack) throw new Error("找不到服务栈");
+      if (!stack) throw { code: "STACK_NOT_FOUND", message: "找不到服务栈" };
       const starting = cmd === "start_stack";
       const report: StackStartReport = {
         stackId: stack.id,
@@ -851,7 +861,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         }
         if (seen.has(found.id)) continue;
         seen.add(found.id);
-        if (starting && ["starting", "stopping"].includes(found.state)) {
+        if (["starting", "stopping"].includes(found.state)) {
           report.failed.push({ serviceId: found.id, error: { code: "SERVICE_BUSY", message: `服务 ${found.id} 正在切换状态，请稍后重试` } });
           continue;
         }
@@ -860,15 +870,18 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           continue;
         }
         if (!starting && !found.pids.length && !["running", "starting", "stopping"].includes(found.state)) {
+          found.state = "stopped";
           report.alreadyRunning.push(found.id);
           continue;
         }
         try {
-          await mockInvoke(starting ? "start_service" : "stop_service", { id: found.id });
+          await performServiceAction(starting ? "start_service" : "stop_service", found.id);
           report.started.push(found.id);
         } catch (error) { report.failed.push({ serviceId: found.id, error: normalizeError(error) }); }
       }
+      if (starting && !seen.size) throw { code: "STACK_EMPTY", message: `「${stack.name}」里没有可启动的服务，请先安装所需套件` };
       return report as T;
+      });
     }
     case "scan_port_range": {
       const from = Math.min(Number(args?.from), Number(args?.to));
@@ -1287,6 +1300,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "bulk_start":
     case "bulk_stop":
     case "bulk_restart": {
+      return withServiceOperation(async () => {
       const ids = [...new Set(args!.ids as string[])];
       const action = cmd.slice(5) as "start" | "stop" | "restart";
       const tier = (id: string) => {
@@ -1301,12 +1315,12 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const execute = async (id: string, operation: "start" | "stop") => {
         const service = services.get(id);
         if (!service) throw { code: "UNKNOWN_SERVICE", message: `服务 ${id} 未注册或已卸载` };
-        if (operation === "start" && ["starting", "stopping"].includes(service.state)) {
+        if (["starting", "stopping"].includes(service.state)) {
           throw { code: "SERVICE_BUSY", message: `服务 ${id} 正在切换状态，请稍后重试` };
         }
         const already = operation === "start" ? service.state === "running"
           : !service.pids.length && !["running", "starting", "stopping"].includes(service.state);
-        if (!already) await mockInvoke(operation === "start" ? "start_service" : "stop_service", { id });
+        await performServiceAction(operation === "start" ? "start_service" : "stop_service", id);
         return already;
       };
       if (action === "restart") {
@@ -1323,6 +1337,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         } catch (error) { report.failed.push({ serviceId: id, error: normalizeError(error) }); }
       }
       return report as T;
+      });
     }
     case "bulk_summary": {
       const ids = args!.ids as string[];

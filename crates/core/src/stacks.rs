@@ -314,7 +314,15 @@ pub fn start(
     manager: &Arc<ServiceManager>,
     id: &str,
 ) -> Result<StackStartReport> {
-    let _operation = manager.lifecycle.lock();
+    start_with(store, paths, manager, id, |sid| crate::ops::start_service(store, paths, manager, sid))
+}
+
+pub(crate) fn start_with(
+    store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, id: &str,
+    mut start: impl FnMut(&str) -> Result<()>,
+) -> Result<StackStartReport> {
+    let _operation = manager.lifecycle.try_lock()
+        .ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后启动服务栈"))?;
     // 预设只在「首次列出」时写入；启动路径也要保证它存在，
     // 否则全新环境下点托盘的预设栈会报「找不到服务栈」
     ensure_presets(store)?;
@@ -353,11 +361,8 @@ pub fn start(
             .snapshot(&item.service_id)
             .map(|s| s.state == ServiceState::Running)
             .unwrap_or(false);
-        if running {
-            report.already_running.push(item.service_id);
-            continue;
-        }
-        match crate::ops::start_service(store, paths, manager, &item.service_id) {
+        match start(&item.service_id) {
+            Ok(()) if running => report.already_running.push(item.service_id),
             Ok(()) => report.started.push(item.service_id),
             Err(e) => report.failed.push(StackItemFailure {
                 service_id: item.service_id,
@@ -376,7 +381,15 @@ pub fn stop(
     manager: &Arc<ServiceManager>,
     id: &str,
 ) -> Result<StackStartReport> {
-    let _operation = manager.lifecycle.lock();
+    stop_with(store, paths, manager, id, |sid| crate::ops::stop_service(store, paths, manager, sid))
+}
+
+pub(crate) fn stop_with(
+    store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, id: &str,
+    mut stop: impl FnMut(&str) -> Result<()>,
+) -> Result<StackStartReport> {
+    let _operation = manager.lifecycle.try_lock()
+        .ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后停止服务栈"))?;
     ensure_presets(store)?;
     let stack = store
         .get_stack(id)?
@@ -394,11 +407,16 @@ pub fn stop(
     };
     for item in items {
         // 认证停机失败后可以处于 Error 且仍持有进程，继续尝试真实停机。
-        if !manager.is_busy(&item.service_id) {
-            report.already_running.push(item.service_id);
+        if manager.snapshot(&item.service_id).is_some_and(|s| matches!(s.state, ServiceState::Starting | ServiceState::Stopping)) {
+            report.failed.push(StackItemFailure {
+                service_id: item.service_id.clone(),
+                error: AppErrorInfo::from(AppError::new("SERVICE_BUSY", "服务正在切换状态，请稍后重试")),
+            });
             continue;
         }
-        match crate::ops::stop_service(store, paths, manager, &item.service_id) {
+        let stopped = !manager.is_busy(&item.service_id);
+        match stop(&item.service_id) {
+            Ok(()) if stopped => report.already_running.push(item.service_id),
             Ok(()) => report.started.push(item.service_id),
             Err(e) => report.failed.push(StackItemFailure {
                 service_id: item.service_id,

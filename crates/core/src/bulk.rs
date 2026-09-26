@@ -93,7 +93,17 @@ pub fn start_many(
     manager: &Arc<ServiceManager>,
     ids: &[String],
 ) -> Result<BulkReport> {
-    let _operation = manager.lifecycle.lock();
+    start_many_with(paths, manager, ids, |id| crate::ops::start_service(store, paths, manager, id))
+}
+
+pub(crate) fn start_many_with(
+    paths: &Paths,
+    manager: &Arc<ServiceManager>,
+    ids: &[String],
+    mut start: impl FnMut(&str) -> Result<()>,
+) -> Result<BulkReport> {
+    let _operation = manager.lifecycle.try_lock()
+        .ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后批量启动"))?;
     let order = order_for_start(ids);
     let mut report = BulkReport {
         action: "start".into(),
@@ -114,11 +124,8 @@ pub fn start_many(
             .snapshot(&id)
             .map(|s| s.state == ServiceState::Running)
             .unwrap_or(false);
-        if running {
-            report.already.push(id);
-            continue;
-        }
-        match crate::ops::start_service(store, paths, manager, &id) {
+        match start(&id) {
+            Ok(()) if running => report.already.push(id),
             Ok(()) => report.succeeded.push(id),
             Err(e) => report.failed.push(BulkFailure {
                 service_id: id,
@@ -137,7 +144,17 @@ pub fn stop_many(
     manager: &Arc<ServiceManager>,
     ids: &[String],
 ) -> Result<BulkReport> {
-    let _operation = manager.lifecycle.lock();
+    stop_many_with(paths, manager, ids, |id| crate::ops::stop_service(store, paths, manager, id))
+}
+
+pub(crate) fn stop_many_with(
+    paths: &Paths,
+    manager: &Arc<ServiceManager>,
+    ids: &[String],
+    mut stop: impl FnMut(&str) -> Result<()>,
+) -> Result<BulkReport> {
+    let _operation = manager.lifecycle.try_lock()
+        .ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后批量停止"))?;
     let order = order_for_stop(ids);
     let mut report = BulkReport {
         action: "stop".into(),
@@ -157,11 +174,16 @@ pub fn stop_many(
             continue;
         }
         // Error 仍可能保留活跃 PID（例如认证停机失败），不能报告“已停止”。
-        if !manager.is_busy(&id) {
-            report.already.push(id);
+        if manager.snapshot(&id).is_some_and(|s| matches!(s.state, ServiceState::Starting | ServiceState::Stopping)) {
+            report.failed.push(BulkFailure {
+                service_id: id.clone(),
+                error: AppErrorInfo::from(AppError::new("SERVICE_BUSY", format!("服务 {id} 正在切换状态，请稍后重试"))),
+            });
             continue;
         }
-        match crate::ops::stop_service(store, paths, manager, &id) {
+        let stopped = !manager.is_busy(&id);
+        match stop(&id) {
+            Ok(()) if stopped => report.already.push(id),
             Ok(()) => report.succeeded.push(id),
             Err(e) => report.failed.push(BulkFailure {
                 service_id: id,
@@ -183,13 +205,35 @@ pub fn restart_many(
     manager: &Arc<ServiceManager>,
     ids: &[String],
 ) -> Result<BulkReport> {
-    let _operation = manager.lifecycle.lock();
-    let stop_report = stop_many(store, paths, manager, ids)?;
+    restart_many_with(paths, manager, ids,
+        |id| crate::ops::start_service(store, paths, manager, id),
+        |id| crate::ops::stop_service(store, paths, manager, id))
+}
+
+pub(crate) fn restart_many_with(
+    paths: &Paths,
+    manager: &Arc<ServiceManager>,
+    ids: &[String],
+    mut start: impl FnMut(&str) -> Result<()>,
+    mut stop: impl FnMut(&str) -> Result<()>,
+) -> Result<BulkReport> {
+    let _operation = manager.lifecycle.try_lock()
+        .ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后批量重启"))?;
+    let phase_error = |id: &str, mut error: AppError, phase: &str| {
+        error.message = format!("{phase}：{}", error.message);
+        manager.set_error(id, error.clone());
+        error
+    };
+    let stop_report = stop_many_with(paths, manager, ids, |id| {
+        stop(id).map_err(|e| phase_error(id, e, "重启中止，停止阶段失败"))
+    })?;
     // 停止失败的服务不进入启动阶段，每个服务只归入一种最终结果。
     let eligible: Vec<String> = order_for_start(ids).into_iter()
         .filter(|id| !stop_report.failed.iter().any(|f| &f.service_id == id))
         .collect();
-    let start_report = start_many(store, paths, manager, &eligible)?;
+    let start_report = start_many_with(paths, manager, &eligible, |id| {
+        start(id).map_err(|e| phase_error(id, e, "服务已停止，但重新启动失败"))
+    })?;
     let mut report = BulkReport {
         action: "restart".into(),
         succeeded: start_report.succeeded,
@@ -233,6 +277,28 @@ pub fn summarize(manager: &Arc<ServiceManager>, ids: &[String]) -> BulkSelection
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restart_finishes_stop_phase_and_excludes_failed_stops() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().to_path_buf());
+        let manager = Arc::new(ServiceManager::new());
+        for id in ["nginx", "mysql@fixture"] {
+            manager.register(id, id, None, None, None, paths.service_log(id));
+        }
+        let events = std::cell::RefCell::new(Vec::new());
+        let report = restart_many_with(&paths, &manager, &["mysql@fixture".into(), "nginx".into()],
+            |id| { events.borrow_mut().push(format!("start:{id}")); Ok(()) },
+            |id| {
+                events.borrow_mut().push(format!("stop:{id}"));
+                if id.starts_with("mysql") { Err(AppError::new("STOP_FAILED", "fixture stop failure")) } else { Ok(()) }
+            }).unwrap();
+        assert_eq!(events.into_inner(), ["stop:nginx", "stop:mysql@fixture", "start:nginx"]);
+        assert_eq!(report.succeeded, ["nginx"]);
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].service_id, "mysql@fixture");
+        assert!(report.failed[0].error.message.contains("停止阶段失败"));
+    }
 
     #[test]
     fn tiers_classify_by_base_id() {

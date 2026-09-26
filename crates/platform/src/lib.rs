@@ -571,6 +571,7 @@ mod windows_job {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        JobObjectBasicAccountingInformation, QueryInformationJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
         SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
@@ -642,9 +643,24 @@ mod windows_job {
     pub fn terminate_job(job: &JobObject) -> std::io::Result<()> {
         unsafe {
             if TerminateJobObject(job.0, 0) == 0 {
-                Err(std::io::Error::last_os_error())
-            } else {
-                Ok(())
+                return Err(std::io::Error::last_os_error());
+            }
+            // TerminateJobObject 像 TerminateProcess 一样发起异步退出；
+            // 必须等整个 Job 清空，不能只等 cmd 等父进程，否则子进程仍可能占端口。
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = std::mem::zeroed();
+                if QueryInformationJobObject(job.0, JobObjectBasicAccountingInformation,
+                    &mut info as *mut _ as *mut core::ffi::c_void,
+                    std::mem::size_of_val(&info) as u32, std::ptr::null_mut()) == 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if info.ActiveProcesses == 0 { return Ok(()); }
+                if std::time::Instant::now() >= deadline {
+                    return Err(std::io::Error::new(std::io::ErrorKind::TimedOut,
+                        format!("等待服务进程组退出超时，仍有 {} 个进程", info.ActiveProcesses)));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
             }
         }
     }

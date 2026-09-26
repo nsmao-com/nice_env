@@ -26,7 +26,7 @@
     --txt-2: #8a919e;
     --txt-3: #c3c9d1;
     --hover: #f4f5f8;
-    --line: #f0f1f4;
+    --line: #d5dbe3;
     --chip: #f4f5f8;
     --green: #22c55e;
     --amber: #f59e0b;
@@ -40,7 +40,7 @@
     --txt-2: #9aa0ab;
     --txt-3: #5b616b;
     --hover: #33363e;
-    --line: #33363e;
+    --line: #4c5360;
     --chip: #33363e;
     --shadow: 0 24px 64px -12px rgba(0, 0, 0, .55), 0 6px 18px rgba(0, 0, 0, .35);
   }
@@ -79,16 +79,17 @@
   .logo {
     flex: none; width: 42px; height: 42px; border-radius: 12px;
     display: grid; place-items: center;
-    background: linear-gradient(135deg, #6366f1, #22d3ee);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .28), 0 4px 10px -2px rgba(99, 102, 241, .45);
+    background: #277b69;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .20);
   }
   .logo svg { width: 23px; height: 23px; color: #fff; }
   .head-name { font-size: 16px; font-weight: 600; letter-spacing: .2px; line-height: 1.25; }
-  .head-sub { font-size: 12px; color: var(--txt-2); margin-top: 1px; white-space: nowrap; }
+  .head-sub { font-size: 12px; color: var(--txt-2); margin-top: 1px; overflow-wrap: anywhere; }
+  .head > div:nth-child(2) { min-width: 0; }
   .head-status {
     margin-left: auto; flex: none;
     display: flex; align-items: center; gap: 6px;
-    font-size: 12px; color: var(--txt-2);
+    font-size: 12px; color: var(--txt-2); max-width: 46%;
     padding: 4px 10px; border-radius: 999px; background: var(--chip);
   }
   .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--txt-3); }
@@ -107,7 +108,7 @@
   .qa:active { transform: scale(.96); }
   .qa svg { width: 22px; height: 22px; color: #404651; }
   [data-theme="dark"] .qa svg { color: #c7ccd4; }
-  .qa .cap { font-size: 11.5px; color: var(--txt-2); }
+  .qa .cap { font-size: 11.5px; color: var(--txt-2); padding: 0; letter-spacing: 0; white-space: nowrap; }
   .qa[disabled] { cursor: default; }
   .qa[disabled]:hover { background: none; }
   .qa[disabled]:active { transform: none; }
@@ -119,6 +120,7 @@
   /* ---- 列表卡 ---- */
   .cap { font-size: 11px; color: var(--txt-2); padding: 11px 14px 5px; letter-spacing: .4px; }
   .row {
+    appearance: none; width: 100%; border: 0; background: none; color: inherit; font: inherit; text-align: left;
     display: flex; align-items: center; gap: 11px;
     height: 42px; padding: 0 14px; font-size: 13.5px;
   }
@@ -132,11 +134,23 @@
   .rlabel { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .rmeta { flex: none; font-size: 11.5px; color: var(--txt-2); font-family: ui-monospace, Consolas, monospace; }
   .chev { flex: none; width: 15px; height: 15px; color: var(--txt-3); }
-  .sep { height: 1px; background: var(--line); margin: 4px 12px; }
+  .sep { height: 0; border-top: 1px dashed var(--line); margin: 6px 14px; }
   .row.danger { color: var(--red); }
   .row.danger .ric { color: var(--red); }
   .row.danger.click:hover { background: rgba(229, 72, 77, .08); }
   .empty { padding: 4px 14px 13px; font-size: 12px; color: var(--txt-3); }
+  button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--green); outline-offset: -3px; }
+  .feedback { padding: 12px 14px; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+  .feedback[hidden], .load-error[hidden] { display: none; }
+  .feedback p { margin: 4px 0; color: var(--txt-2); }
+  .feedback ul { max-height: 180px; overflow: auto; padding-left: 18px; margin: 6px 0; user-select: text; }
+  .feedback .error { color: var(--red); }
+  .feedback-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .small-button { border: 1px solid var(--line); background: var(--chip); color: var(--txt); border-radius: 7px; padding: 6px 9px; font: inherit; cursor: pointer; }
+  .small-button:disabled { opacity: .5; cursor: default; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  @media (max-width: 340px) { .head { gap: 8px; padding: 12px; } .head-status { font-size: 11px; padding: 4px 7px; } .logo { width: 34px; height: 34px; } }
+  @media (prefers-reduced-motion: reduce) { .dot.busy, .qa.busy svg { animation: none; } .qa:active { transform: none; } }
 
   @keyframes spin { to { transform: rotate(360deg); } }
   @keyframes pulse { 50% { opacity: .35; } }
@@ -145,7 +159,7 @@
 <body>
 <main class="panel" id="panel">
   <div class="wrap" id="wrap">
-    <header class="card head" id="headCard">
+    <header class="card head" id="headCard" role="button" tabindex="0" aria-label="打开 NiceEnv 主窗口">
       <div class="logo" id="logoBox"></div>
       <div>
         <div class="head-name">NiceEnv</div>
@@ -155,6 +169,8 @@
     </header>
 
     <section class="card quick" id="quickCard"></section>
+    <section class="card feedback load-error" id="loadError" role="alert" hidden></section>
+    <section class="card feedback" id="feedback" role="status" aria-live="polite" tabindex="-1" hidden></section>
     <section class="card" id="envCard"></section>
     <section class="card" id="navCard"></section>
   </div>
@@ -199,255 +215,230 @@ const GROUP_ICONS = [ICONS.globe, ICONS.code, ICONS.db, ICONS.layers, ICONS.term
 
 /* ================= 渲染 ================= */
 
-let S = null;                 // tray_panel_state 的最新快照
-const busy = new Set();       // 进行中的操作 key（行内转圈、防重复点击）
+let S = null;
+const busy = new Set();
+let result = null;
+let actionError = "";
+let loadError = "";
+let stateRevision = 0;
+const hasProcess = (s) => !!s.pids?.length || ["running", "starting", "stopping"].includes(s.state);
+const transitioning = (s) => ["starting", "stopping"].includes(s.state);
+const startTargets = () => (S?.services || []).filter((s) => !hasProcess(s)).map((s) => s.id);
+const nameOf = (id) => (S?.services || []).find((s) => s.id === id)?.label || (id === "adminer-console" ? "数据库管理台" : id);
+const errorText = (e) => {
+  if (typeof e === "string") { try { return errorText(JSON.parse(e)); } catch { return e; } }
+  return [e?.message || "操作失败，请重试", e?.hint].filter(Boolean).join("；");
+};
+const stateText = (s) => ({running:"运行中", stopped:"已停止", starting:"正在启动", stopping:"正在停止", error:hasProcess(s) ? "发生错误，仍有进程" : "发生错误", unknown:"状态未知"}[s.state] || "状态未知");
 
 function theme() {
-  const a = S && S.appearance;
-  if (a === "dark" || a === "light") return a;
-  return matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  const a = S?.appearance;
+  return a === "dark" || a === "light" ? a : matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function renderFeedback() {
+  $("loadError").hidden = !loadError;
+  $("loadError").innerHTML = loadError ? `<strong>状态读取失败</strong><p>${esc(loadError)}</p><button class="small-button" id="retryLoad">重新读取</button>` : "";
+  if ($("retryLoad")) $("retryLoad").onclick = () => void refreshState();
+  const panel = $("feedback");
+  panel.hidden = !result && !actionError && !busy.size;
+  panel.innerHTML = `${busy.size ? '<strong>正在处理服务，请稍候…</strong>' : ""}
+    ${actionError ? `<p class="error">${esc(actionError)}</p>` : ""}
+    ${result ? `<strong>${esc(result.title)}</strong><p>${esc(result.summary)}</p>
+      ${result.failed.length ? `<ul aria-label="失败服务">${result.failed.map((f) => `<li>${esc(nameOf(f.serviceId))}：${esc(errorText(f.error))}</li>`).join("")}</ul>` : ""}
+      ${result.skipped.length ? `<p>未安装或不可用：${result.skipped.map((id) => esc(nameOf(id))).join("、")}</p>` : ""}
+      <div class="feedback-actions">${result.retry ? `<button class="small-button" id="retryAction" ${busy.size || loadError ? "disabled" : ""}>${esc(result.retry.label)}</button>` : ""}
+      ${result.failed.length ? '<button class="small-button" data-key="nav:/logs">查看日志</button>' : ""}
+      ${result.skipped.length ? '<button class="small-button" data-key="nav:/packages">安装套件</button>' : ""}</div>` : ""}`;
+  if ($("retryAction")) $("retryAction").onclick = () => { const retry = result.retry; void runServiceOperation(retry.key, retry.command, retry.args); };
 }
 
 function render() {
-  if (!S) return;
+  const focusedId = document.activeElement?.id;
+  const focusedKey = document.activeElement?.dataset?.key;
   document.documentElement.dataset.theme = theme();
-
-  /* ---- 抬头 ---- */
-  $("headSub").textContent = `v${S.version ?? "0.0.0"}`;
-  const dot = $("headDot"), st = $("headStatus");
-  if (S.total === 0) {
-    dot.className = "dot"; st.textContent = "尚未安装服务";
-  } else if (S.running > 0) {
-    dot.className = "dot running"; st.textContent = `${S.running}/${S.total} 个服务运行中`;
-  } else {
-    dot.className = "dot"; st.textContent = `全部已停止（共 ${S.total} 个服务）`;
-  }
-
-  /* ---- 快捷宫格 ---- */
-  const startable = (S.services || []).filter((s) => s.state !== "running" && s.state !== "starting").map((s) => s.id);
-  const stoppable = (S.services || []).filter((s) => s.state === "running" || s.state === "starting");
-  const qa = (id, icon, cap, on, busyKey) =>
-    `<button class="qa${busy.has(busyKey) ? " busy" : ""}" id="${id}"${on ? "" : " disabled"}>
-       ${icon}<span class="cap">${cap}</span>
-     </button>`;
+  renderFeedback();
+  if (!S) { requestAnimationFrame(syncHeight); return; }
+  $("headSub").textContent = TAURI ? `v${S.version}` : "浏览器演示 · 不操作本机服务";
+  const all = S.services || [];
+  const active = all.filter(hasProcess).length;
+  const running = all.filter((s) => s.state === "running").length;
+  const errors = all.filter((s) => s.state === "error" || s.state === "unknown").length;
+  $("headDot").className = `dot ${loadError || errors ? "error" : running ? "running" : active ? "busy" : ""}`;
+  $("headStatus").textContent = loadError ? "状态待确认" : !all.length ? "尚未安装服务"
+    : errors ? `${running} 个运行 · ${errors} 个需检查` : running ? `${running}/${all.length} 个运行中`
+    : active ? `${active} 个仍有进程或正在切换` : `全部已停止（${all.length}）`;
+  const locked = busy.size > 0 || !!loadError;
+  const qa = (id, icon, cap, on, busyKey) => `<button type="button" class="qa${busy.has(busyKey) ? " busy" : ""}" id="${id}"${on ? "" : " disabled"}>${icon}<span class="cap">${cap}</span></button>`;
   $("quickCard").innerHTML =
-    qa("qaStart", ICONS.play, "启动全部", startable.length > 0 && !busy.has("start-all"), "start-all") +
-    qa("qaStop", ICONS.stop, "停止全部", stoppable.length > 0 && !busy.has("stop-all"), "stop-all") +
-    qa("qaWindow", ICONS.window, "主窗口", true, "") +
-    qa("qaUpdate", ICONS.refresh, "检查更新", true, "");
-
-  /* ---- 环境卡：服务栈 / 服务 / 站点 ---- */
+    qa("qaStart", ICONS.play, "启动全部", startTargets().length > 0 && !locked, "start-all") +
+    qa("qaStop", ICONS.stop, "停止全部", !locked, "stop-all") +
+    qa("qaWindow", ICONS.window, "主窗口", true, "") + qa("qaUpdate", ICONS.refresh, "检查更新", true, "");
   let env = "";
-
-  if ((S.stacks || []).length > 0) {
-    env += `<div class="cap">服务栈</div>`;
-    env += S.stacks.map((k) => {
-      const key = "stack:" + k.id;
-      const done = k.total > 0 && k.running >= k.total;
-      return row({
-        key, icon: ICONS.play, label: k.name,
-        meta: k.total > 0 ? `${k.running}/${k.total} 运行中` : "",
-        disabled: done || busy.has(key),
-      });
-    }).join("");
+  if (S.stacks?.length) {
+    env += '<div class="cap">服务栈</div>';
+    env += S.stacks.map((k) => row({key:"stack:" + k.id, icon:ICONS.play, label:k.name,
+      meta:`${k.running}/${k.total} 运行中`, disabled:locked, dot:busy.has("stack:" + k.id) ? "busy" : k.total > 0 && k.running === k.total ? "running" : ""})).join("");
   }
-
-  if ((S.services || []).length > 0) {
-    if (env) env += `<div class="sep"></div>`;
-    env += `<div class="cap">服务 · ${S.services.length}</div>`;
-    let lastGroup = -1;
-    for (const s of S.services) {
-      if (lastGroup >= 0 && s.group !== lastGroup) env += `<div class="sep"></div>`;
-      lastGroup = s.group;
-      const key = "svc:" + s.id;
-      const b = s.state === "starting" || s.state === "stopping" || busy.has(key);
-      env += row({
-        key,
-        icon: GROUP_ICONS[s.group] || ICONS.terminal,
-        label: s.label,
-        meta: s.port ? `:${s.port}` : "",
-        dot: b ? "busy" : s.state === "running" ? "running" : s.state === "error" ? "error" : "",
-        disabled: false,
-      });
+  if (all.length) {
+    if (env) env += '<div class="sep"></div>';
+    env += `<div class="cap">服务 · ${all.length}</div>`;
+    let group = -1;
+    for (const s of all) {
+      if (group >= 0 && group !== s.group) env += '<div class="sep"></div>';
+      group = s.group;
+      env += row({key:"svc:" + s.id, icon:GROUP_ICONS[s.group] || ICONS.terminal, label:s.label,
+        meta:s.port ? `:${s.port}` : "", disabled:locked || transitioning(s),
+        title:`${s.label} · ${stateText(s)}；${hasProcess(s) ? "停止" : "启动"}服务`,
+        dot:transitioning(s) || busy.has("svc:" + s.id) ? "busy" : s.state === "running" ? "running" : s.state === "error" ? "error" : ""});
     }
-  } else if ((S.stacks || []).length === 0) {
-    env += `<div class="empty">尚未安装任何服务，先到「套件 / 服务」安装。</div>`;
+  } else { env += '<div class="empty">尚未安装服务，请到「套件 / 服务」安装。</div>'; }
+  if (S.sites?.length) {
+    env += '<div class="sep"></div><div class="cap">站点</div>';
+    env += S.sites.map((site) => row({key:"site:" + site.id, icon:ICONS.globe, label:site.name, meta:site.https ? "HTTPS" : "HTTP", chev:true})).join("");
   }
-
-  if ((S.sites || []).length > 0) {
-    env += `<div class="sep"></div><div class="cap">站点 · ${S.sites.length}</div>`;
-    env += S.sites.map((t) => row({
-      key: "site:" + t.id, icon: ICONS.globe, label: t.name,
-      meta: t.url.replace(/^https?:\/\//, ""), chev: true,
-    })).join("");
-  }
-  $("envCard").innerHTML = env || `<div class="empty">加载中…</div>`;
-
-  /* ---- 导航 + 应用卡 ---- */
-  const nav = (path, icon, label) => row({ key: "nav:" + path, icon, label, chev: true });
-  $("navCard").innerHTML =
-    nav("/", ICONS.grid, "总览") +
-    nav("/packages", ICONS.pkg, "套件 / 服务") +
-    nav("/stacks", ICONS.layers, "服务栈") +
-    nav("/sites", ICONS.globe, "站点") +
-    nav("/logs", ICONS.file, "日志") +
-    `<div class="sep"></div>` +
-    row({ key: "act:datadir", icon: ICONS.folder, label: "打开数据目录" }) +
-    row({ key: "act:about", icon: ICONS.info, label: "关于 NiceEnv" }) +
-    row({ key: "act:quit", icon: ICONS.power, label: "退出 NiceEnv", danger: true });
-
+  $("envCard").innerHTML = env;
+  const nav = (path, icon, label) => row({key:"nav:" + path, icon, label, chev:true});
+  $("navCard").innerHTML = nav("/", ICONS.grid, "总览") + nav("/packages", ICONS.pkg, "套件 / 服务") +
+    nav("/stacks", ICONS.layers, "服务栈") + nav("/sites", ICONS.globe, "站点") + nav("/logs", ICONS.file, "日志") +
+    '<div class="sep"></div>' + row({key:"act:datadir", icon:ICONS.folder, label:"打开数据目录"}) +
+    row({key:"act:about", icon:ICONS.info, label:"关于 NiceEnv"}) + row({key:"act:quit", icon:ICONS.power, label:"退出 NiceEnv", danger:true, disabled:busy.size > 0});
   bind();
+  const focusTarget = focusedId ? $(focusedId) : focusedKey ? [...document.querySelectorAll('[data-key]')].find((el) => el.dataset.key === focusedKey) : null;
+  if (focusTarget && !focusTarget.disabled) focusTarget.focus({preventScroll:true});
   requestAnimationFrame(syncHeight);
 }
 
 function row(o) {
-  const cls = ["row", o.disabled ? "disabled" : o.danger ? "danger click" : o.key ? "click" : ""].filter(Boolean).join(" ");
-  const dot = o.dot ? `<span class="dot ${o.dot}"></span>` : "";
-  const chev = o.chev ? `<span class="chev">${ICONS.chev}</span>` : "";
-  return `<div class="${cls}" data-key="${esc(o.key || "")}">
-    <span class="ric">${o.icon}</span>
-    <span class="rlabel">${esc(o.label)}</span>
-    ${o.meta ? `<span class="rmeta">${esc(o.meta)}</span>` : ""}
-    ${dot}${chev}
-  </div>`;
+  return `<button type="button" class="row ${o.disabled ? "disabled" : "click"}${o.danger ? " danger" : ""}" data-key="${esc(o.key)}" ${o.disabled ? "disabled" : ""} ${o.title ? `aria-label="${esc(o.title)}" title="${esc(o.title)}"` : ""}>
+    <span class="ric" aria-hidden="true">${o.icon}</span><span class="rlabel">${esc(o.label)}</span>
+    ${o.meta ? `<span class="rmeta">${esc(o.meta)}</span>` : ""}${o.dot ? `<span class="dot ${o.dot}" aria-hidden="true"></span>` : ""}
+    ${o.chev ? `<span class="chev" aria-hidden="true">${ICONS.chev}</span>` : ""}</button>`;
+}
+function bind() {
+  $("headCard").onclick = () => void act("main");
+  $("headCard").onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); void act("main"); } };
+  $("qaStart").onclick = () => void act("start-all");
+  $("qaStop").onclick = () => void act("stop-all");
+  $("qaWindow").onclick = () => void act("main");
+  $("qaUpdate").onclick = () => void act("check-update");
+  for (const el of document.querySelectorAll("[data-key]")) el.onclick = () => void act(el.dataset.key);
 }
 
-/* ================= 交互 ================= */
-
-function bind() {
-  $("headCard").onclick = () => act("main");
-  $("qaStart").onclick = () => act("start-all");
-  $("qaStop").onclick = () => act("stop-all");
-  $("qaWindow").onclick = () => act("main");
-  $("qaUpdate").onclick = () => act("check-update");
-  for (const el of document.querySelectorAll("[data-key]")) {
-    const key = el.dataset.key;
-    if (!key) continue;
-    el.onclick = () => act(key);
+async function runServiceOperation(key, command, args) {
+  if (busy.size || loadError) return;
+  busy.add(key); actionError = ""; render();
+  try {
+    const report = TAURI ? await inv(command, args) : await previewCommand(command, args);
+    const stop = command.includes("stop");
+    const succeeded = report.succeeded || report.started || [];
+    const already = report.already || report.alreadyRunning || [];
+    const failed = report.failed || [];
+    const skipped = report.skipped || [];
+    const single = command === "start_service" || command === "stop_service";
+    result = {
+      title: single ? `${nameOf(args.id)}已${stop ? "停止" : "启动"}` : failed.length || skipped.length ? "部分服务未完成" : `服务${stop ? "停止" : "启动"}操作完成`,
+      summary: single ? (TAURI ? "已读取实际操作结果。" : "演示状态已更新，本机服务未改变。") : `成功 ${succeeded.length} · 已在目标状态 ${already.length} · 失败 ${failed.length}`,
+      failed, skipped, retry: failed.length ? command === "tray_stop_all"
+        ? {key, command, args, label:"再次停止全部"}
+        : {key:"retry-action", command:stop ? "bulk_stop" : "bulk_start", args:{ids:failed.map((f) => f.serviceId)}, label:"重试失败项"} : null,
+    };
+  } catch (error) {
+    actionError = errorText(error);
+    // 请求失败不代表所有项目未执行，保留上一份报告并重新读取实际状态。
+  } finally {
+    busy.delete(key);
+    await refreshState(); render();
+    $("feedback").focus({preventScroll:true});
   }
 }
 
 async function act(key) {
-  if (key === "main") return TAURI ? inv("tray_open_main", { path: null, action: null }) : mock("打开主窗口");
-  if (key === "check-update") return TAURI ? inv("tray_open_main", { path: null, action: "check-update" }) : mock("检查更新");
-
-  if (key === "start-all") {
-    const ids = (S?.services || []).filter((s) => s.state !== "running" && s.state !== "starting").map((s) => s.id);
-    if (!ids.length) return;
-    busy.add("start-all"); render();
-    if (TAURI) { try { await inv("bulk_start", { ids }); } catch (e) { console.error(e); } await refreshState(); }
-    else { await mock("启动全部"); S.services.forEach((s) => (s.state = "running")); await refreshState(); }
-    busy.delete("start-all"); render();
-    return;
-  }
-  if (key === "stop-all") {
-    busy.add("stop-all"); render();
-    if (TAURI) inv("tray_stop_all", {});
-    else { await mock("停止全部"); S.services.forEach((s) => (s.state = "stopped")); await refreshState(); }
-    return; // 完成后由 tray://state 事件刷新并清掉 busy
-  }
-
+  if (key === "start-all") { const ids = startTargets(); if (ids.length) return runServiceOperation(key, "bulk_start", {ids}); return; }
+  if (key === "stop-all") return runServiceOperation(key, "tray_stop_all", {});
   if (key.startsWith("svc:")) {
-    const id = key.slice(4);
-    const s = (S?.services || []).find((x) => x.id === id);
-    if (!s || busy.has(key)) return;
-    const target = s.state === "running" || s.state === "starting" ? "stop_service" : "start_service";
-    busy.add(key); render();
-    if (TAURI) { try { await inv(target, { id }); } catch (e) { console.error(e); } }
-    else { await mock(target); s.state = target === "start_service" ? "running" : "stopped"; }
-    busy.delete(key); await refreshState();
+    const service = S?.services.find((s) => s.id === key.slice(4));
+    if (service && !transitioning(service)) return runServiceOperation(key, hasProcess(service) ? "stop_service" : "start_service", {id:service.id});
     return;
   }
-  if (key.startsWith("stack:")) {
-    const id = key.slice(6);
-    if (busy.has(key)) return;
-    busy.add(key); render();
-    if (TAURI) { try { await inv("start_stack", { id }); } catch (e) { console.error(e); } await refreshState(); }
-    else { await mock("启动服务栈"); await refreshState(); }
-    busy.delete(key); render();
-    return;
-  }
-  if (key.startsWith("site:")) {
-    const t = (S?.sites || []).find((x) => "site:" + x.id === key);
-    if (TAURI) inv("open_in_browser", { url: t.url });
-    else mock("打开 " + t.url);
-    return;
-  }
-  if (key.startsWith("nav:")) {
-    const path = key.slice(4);
-    if (TAURI) inv("tray_open_main", { path, action: null });
-    else mock("跳转 " + path);
-    return;
-  }
-  if (key === "act:datadir") {
-    if (TAURI) inv("open_in_folder", { path: S.dataDir });
-    else mock("打开数据目录 " + S.dataDir);
-    return;
-  }
-  if (key === "act:about") {
-    if (TAURI) inv("tray_open_main", { path: null, action: "about" });
-    else mock("关于");
-    return;
-  }
-  if (key === "act:quit") {
-    if (TAURI) inv("quit_app", {});
-    else mock("退出");
-    return;
-  }
+  if (key.startsWith("stack:")) return runServiceOperation(key, "start_stack", {id:key.slice(6)});
+  if (key === "act:quit" && busy.size) return;
+  try {
+    let command, args;
+    if (key === "main" || key === "check-update" || key === "act:about") {
+      command = "tray_open_main"; args = {path:null, action:key === "main" ? null : key === "check-update" ? "check-update" : "about"};
+    } else if (key.startsWith("nav:")) { command = "tray_open_main"; args = {path:key.slice(4), action:null}; }
+    else if (key.startsWith("site:")) { const site = S?.sites.find((s) => s.id === key.slice(5)); if (!site) return; command = "open_in_browser"; args = {url:site.url}; }
+    else if (key === "act:datadir") { command = "open_in_folder"; args = {path:S.dataDir}; }
+    else if (key === "act:quit") { command = "quit_app"; args = {}; }
+    else return;
+    if (TAURI) await inv(command, args);
+    else { actionError = "浏览器演示仅展示服务操作；此操作请在 NiceEnv 桌面端执行。"; render(); }
+  } catch (error) { actionError = errorText(error); render(); $("feedback").focus(); }
 }
 
 async function refreshState() {
-  if (!TAURI) { // mock：S 已就地改过，重算汇总字段后重渲染
-    S.running = (S.services || []).filter((s) => s.state === "running").length;
-    render();
-    return;
-  }
-  try { S = await inv("tray_panel_state", {}); render(); } catch (e) { console.error(e); }
+  const revision = ++stateRevision;
+  try {
+    if (TAURI) {
+      const snapshot = await inv("tray_panel_state", {});
+      if (revision !== stateRevision) return;
+      S = snapshot;
+    }
+    else {
+      S.running = S.services.filter((s) => s.state === "running").length;
+      S.stacks.forEach((stack) => { stack.running = stack.items.filter((id) => S.services.some((s) => s.id === id && s.state === "running")).length; });
+    }
+    loadError = (S.readErrors || []).join("；");
+  } catch (error) { if (revision === stateRevision) loadError = errorText(error); }
+  render();
 }
-
-/* 高度自适应：内容多高窗口就多高（上限 680，超了在面板内滚动） */
 function syncHeight() {
-  if (!TAURI) return;
-  const h = Math.ceil($("wrap").getBoundingClientRect().height) + 16;
-  inv("tray_panel_resize", { height: h }).catch(() => {});
+  if (TAURI) inv("tray_panel_resize", {height:Math.ceil($("wrap").getBoundingClientRect().height) + 16}).catch(() => {});
 }
 
-/* ================= 启动 ================= */
+// 预览只操作当前演示数据，也逐项返回缺失或失败，不声称修改了本机服务。
+async function previewCommand(command, args) {
+  const stop = command.includes("stop");
+  const single = command.endsWith("_service");
+  const stack = command === "start_stack" ? S.stacks.find((s) => s.id === args.id) : null;
+  if (command === "start_stack" && !stack) throw {message:"找不到服务栈"};
+  const ids = [...new Set(single ? [args.id] : stack ? stack.items : args.ids || S.services.map((s) => s.id))];
+  const report = {succeeded:[], already:[], failed:[], skipped:[]};
+  for (const id of ids) {
+    const service = S.services.find((s) => s.id === id);
+    if (!service) { if (stack) report.skipped.push(id); else report.failed.push({serviceId:id, error:{message:"服务未注册或已卸载"}}); continue; }
+    if (transitioning(service)) { report.failed.push({serviceId:id, error:{message:"服务正在切换状态"}}); continue; }
+    if (stop ? !hasProcess(service) : service.state === "running") { if (stop) service.state = "stopped"; report.already.push(id); continue; }
+    if (!stop && hasProcess(service)) { report.failed.push({serviceId:id, error:{message:"仍有进程，请先停止服务"}}); continue; }
+    service.state = stop ? "stopping" : "starting"; render();
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    service.state = stop ? "stopped" : "running";
+    service.pids = stop ? [] : [Math.floor(Math.random() * 40000) + 1000];
+    report.succeeded.push(id);
+  }
+  if (single && report.failed.length) throw report.failed[0].error;
+  return report;
+}
 
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && TAURI) inv("tray_panel_hide", {});
-});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && TAURI) inv("tray_panel_hide", {}).catch(() => {}); });
 document.addEventListener("contextmenu", (e) => e.preventDefault());
-
 $("logoBox").innerHTML = ICONS.logo;
-
 if (TAURI) {
   refreshState();
-  window.__TAURI__.event.listen("tray://state", (e) => {
-    S = e.payload;
-    busy.clear();
-    render();
-  });
+  window.__TAURI__.event.listen("tray://state", (e) => { stateRevision++; S = e.payload; loadError = (S.readErrors || []).join("；"); render(); })
+    .catch((error) => { loadError = `无法订阅状态变化：${errorText(error)}`; render(); });
 } else {
-  /* ---- 浏览器 mock 预览（#demo=quiet | busy | dark） ---- */
   const q = new URLSearchParams(location.hash.replace(/^#\??/, ""));
-  const svc = (id, label, state, group, port) => ({ id, label, state, group, port });
-  S = {
-    version: "0.1.0",
-    appearance: q.get("demo") === "dark" ? "dark" : "light",
-    running: q.get("demo") === "busy" ? 5 : 0,
-    total: q.get("demo") === "busy" ? 6 : 1,
-    dataDir: "D:\\ServBay\\data",
-    services: q.get("demo") === "busy"
-      ? [svc("nginx", "Nginx", "running", 0, 80), svc("apache", "Apache", "stopped", 0, 8080),
-         svc("php@8.3", "PHP 8.3", "running", 1, null), svc("node", "Node.js", "running", 1, null),
-         svc("mysql@8.4", "MySQL 8.4", "running", 2, 3306), svc("redis", "Redis", "error", 3, 6379)]
+  const active = q.get("demo") === "busy";
+  const svc = (id, label, state, group, port) => ({id, label, state, group, port, pids:state === "running" ? [1000 + group] : []});
+  S = { appearance:q.get("demo") === "dark" ? "dark" : "light", dataDir:"演示数据目录",
+    services:active ? [svc("nginx", "Nginx", "running", 0, 80), svc("apache", "Apache", "stopped", 0, 8080),
+      svc("php@8.3", "PHP 8.3", "running", 1, null), svc("mysql@8.4", "MySQL 8.4", "running", 2, 3306), svc("redis", "Redis", "error", 3, 6379)]
       : [svc("nginx", "Nginx", "stopped", 0, 80)],
-    stacks: [{ id: "web", name: "Web 开发栈", running: q.get("demo") === "busy" ? 2 : 0, total: 3 }],
-    sites: [{ id: "demo", name: "我的博客", url: "https://blog.test", https: true }],
-  };
-  render();
-  window.mock = (msg) => { console.log("[mock]", msg); return new Promise((r) => setTimeout(r, 300)); };
+    stacks:[{id:"web", name:"Web 开发栈", running:active ? 3 : 0, total:3, items:["mysql@8.4", "php@8.3", "nginx"]}],
+    sites:[{id:"demo", name:"我的博客", url:"https://blog.test", https:true}] };
+  refreshState();
 }
 </script>
 </body>

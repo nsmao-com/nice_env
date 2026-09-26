@@ -1178,32 +1178,34 @@ async fn redis_save_connection(state: State<'_, std::sync::Arc<nsb_core::CoreSta
 
 /// 已连接的网络接口（供 DNS 接管选择）
 #[tauri::command]
-fn dns_interfaces() -> Result<Vec<String>, tauri::Error> {
-    platform::connected_interfaces()
-        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))
+async fn dns_interfaces() -> Result<Vec<String>, tauri::Error> {
+    tauri::async_runtime::spawn_blocking(|| platform::connected_interfaces()
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
-/// 指定接口当前 DNS 状态（原始文本）
+/// 指定接口当前 DNS 状态与接管前备份。
 #[tauri::command]
-fn dns_status_of(name: String) -> Result<String, tauri::Error> {
-    platform::interface_dns_status(&name)
-        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))
+async fn dns_status_of(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, name: String) -> Result<nsb_core::dns::InterfaceStatus, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::dns::interface_status(&st.store, &name))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /// 提权把接口 DNS 指向 127.0.0.1（本地域名解析接管；触发 UAC）
 #[tauri::command]
-fn dns_takeover(name: String) -> Result<bool, tauri::Error> {
-    platform::set_dns_localhost_elevated(&name)
-        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))?;
-    Ok(true)
+async fn dns_takeover(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, name: String) -> Result<bool, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::dns::takeover(&st.store, &st.manager, &name).map(|_| true))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
-/// 恢复接口 DNS 为自动获取（触发 UAC）
+/// 恢复接管前 DNS；无备份的旧接口可由用户明确选择自动获取。
 #[tauri::command]
-fn dns_restore(name: String) -> Result<bool, tauri::Error> {
-    platform::restore_dns_elevated(&name)
-        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))?;
-    Ok(true)
+async fn dns_restore(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, name: String, automatic: Option<bool>) -> Result<bool, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::dns::restore(&st.store, &name, automatic.unwrap_or(false)).map(|_| true))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /// 列出源 MySQL 实例（FlyEnv/phpStudy/ServBay/XAMPP 等）上的用户数据库
@@ -1916,10 +1918,11 @@ fn set_setting(
     key: String,
     value: serde_json::Value,
 ) -> Result<bool, tauri::Error> {
-    let val = match value {
+    let mut val = match value {
         serde_json::Value::String(s) => s,
         other => other.to_string(),
     };
+    if key == "defaultTld" { val = nsb_core::dns::normalize_tld(&val).map_err(box_err)?; }
     state.store.set_setting(&key, &val).map_err(box_err)?;
     // autostart 需要真正落到操作系统（注册表 Run / LaunchAgent），不能只存一个布尔值
     if key == "autostart" {

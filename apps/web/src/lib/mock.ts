@@ -59,7 +59,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.13";
+const MOCK_APP_VERSION = "0.2.14";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -231,7 +231,10 @@ let mockTunnel: { id: string; port: number; url: string; startedAt: number; aliv
 const hostsManaged = new Map<string, string[]>();
 const mockTextFiles = new Map<string, string>();
 const mockDnsInterfaces = ["Ethernet", "Wi-Fi"];
-const mockDnsStatus = new Map(mockDnsInterfaces.map((name) => [name, "自动获取"]));
+const mockDnsStatus = new Map<string, import("./api").DnsInterfaceStatus>(mockDnsInterfaces.map((name) => [name, {
+  current: { interfaceId: name, automatic: name !== "Ethernet", servers: name === "Ethernet" ? ["9.9.9.9", "1.1.1.1"] : [] },
+  backup: null, local: false,
+}]));
 const activeDownloads = new Set<string>();
 const cancelledDownloads = new Set<string>();
 const settings: AppSettings = {
@@ -669,6 +672,11 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "stop_service": {
       const id = args!.id as string;
       const s = services.get(id);
+      if (id === "coredns") {
+        mockDnsStatus.forEach((status) => {
+          if (status.backup) { status.current = status.backup; status.backup = null; status.local = false; }
+        });
+      }
       if (s) {
         s.state = "stopping";
         await delay(500);
@@ -1058,18 +1066,29 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "dns_status_of": {
       const name = args?.name as string | undefined;
       if (!name || !mockDnsStatus.has(name)) throw { code: "DNS_INTERFACE_NOT_FOUND", message: "找不到网络接口" };
-      return mockDnsStatus.get(name)! as T;
+      return structuredClone(mockDnsStatus.get(name)!) as T;
     }
     case "dns_takeover": {
       const name = args?.name as string | undefined;
       if (!name || !mockDnsStatus.has(name)) throw { code: "DNS_INTERFACE_NOT_FOUND", message: "找不到网络接口" };
-      mockDnsStatus.set(name, "127.0.0.1（NiceEnv）");
+      const service = services.get("coredns");
+      if (service?.state !== "running" || service.port !== 53) throw { code: "DNS_NOT_READY", message: "接管前请先让 CoreDNS 在 53 端口运行" };
+      const status = mockDnsStatus.get(name)!;
+      if (status.local && status.backup) return true as T;
+      if (status.backup || status.local) throw { code: "DNS_BACKUP_EXISTS", message: "请先恢复并核对原配置" };
+      status.backup = structuredClone(status.current);
+      status.current = { interfaceId: name, automatic: false, servers: ["127.0.0.1"] };
+      status.local = true;
       return true as T;
     }
     case "dns_restore": {
       const name = args?.name as string | undefined;
       if (!name || !mockDnsStatus.has(name)) throw { code: "DNS_INTERFACE_NOT_FOUND", message: "找不到网络接口" };
-      mockDnsStatus.set(name, "自动获取");
+      const status = mockDnsStatus.get(name)!;
+      if (!status.backup && !args?.automatic) throw { code: "DNS_NO_BACKUP", message: "没有接管前配置记录" };
+      status.current = status.backup ?? { interfaceId: name, automatic: true, servers: [] };
+      status.backup = null;
+      status.local = false;
       return true as T;
     }
     case "log_export": {

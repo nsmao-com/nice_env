@@ -549,6 +549,8 @@ export const migrateImport = (
 
 /* ===== DNS 一键接管（本地域名解析配套） ===== */
 export const dnsInterfaces = () => safe(invoke<string[]>("dns_interfaces"));
-export const dnsStatusOf = (name: string) => safe(invoke<string>("dns_status_of", { name }));
+export interface DnsConfiguration { interfaceId: string; automatic: boolean; servers: string[] }
+export interface DnsInterfaceStatus { current: DnsConfiguration; backup: DnsConfiguration | null; local: boolean }
+export const dnsStatusOf = (name: string) => safe(invoke<DnsInterfaceStatus>("dns_status_of", { name }));
 export const dnsTakeover = (name: string) => safe(invoke<boolean>("dns_takeover", { name }));
-export const dnsRestore = (name: string) => safe(invoke<boolean>("dns_restore", { name }));
+export const dnsRestore = (name: string, automatic = false) => safe(invoke<boolean>("dns_restore", { name, automatic }));

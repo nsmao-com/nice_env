@@ -50,8 +50,8 @@ pub fn export_to(store: &Store, path: &std::path::Path) -> Result<usize> {
         format: "niceservbay/backup-v1".into(),
         app_version: env!("CARGO_PKG_VERSION").into(),
         exported_at: crate::services::now_ms(),
-        // 本机 Redis 连接凭据只用于本机验证，不随配置迁移。
-        settings: store.all_settings()?.into_iter().filter(|(key, _)| !key.starts_with("redisConnection@")).collect(),
+        // 本机 Redis 连接凭据和 DNS 恢复记录不随配置迁移。
+        settings: store.all_settings()?.into_iter().filter(|(key, _)| !key.starts_with("redisConnection@") && !key.starts_with("dnsBackup.")).collect(),
         packages: store
             .list_installed()?
             .into_iter()
@@ -99,7 +99,7 @@ pub fn import_from(
 
     // ---- 设置（逐项覆盖） ----
     for (k, v) in &bundle.settings {
-        if k.starts_with("redisConnection@") { continue; }
+        if k.starts_with("redisConnection@") || k.starts_with("dnsBackup.") { continue; }
         store.set_setting(k, v)?;
         report.settings += 1;
     }
@@ -219,22 +219,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn redis_connection_credentials_stay_local() {
+    fn redis_credentials_and_dns_recovery_records_stay_local() {
         let temp = tempfile::tempdir().unwrap();
         let paths = Paths::new(temp.path().join("runtime")); paths.ensure_dirs().unwrap();
         let store = Store::open(paths.db()).unwrap();
         let key = crate::stats::RedisCredentials::key("8.0.0");
         store.set_setting(&key, "local-secret").unwrap();
+        store.set_setting("dnsBackup.Wi-Fi", "local-dns-backup").unwrap();
         store.set_setting("language", "en").unwrap();
         let file = temp.path().join("config.json");
         export_to(&store, &file).unwrap();
         let raw = std::fs::read_to_string(&file).unwrap();
         assert!(!raw.contains("local-secret"));
+        assert!(!raw.contains("local-dns-backup"));
         let mut bundle: ExportBundle = serde_json::from_str(&raw).unwrap();
         bundle.settings.push((key.clone(), "foreign-secret".into()));
+        bundle.settings.push(("dnsBackup.Wi-Fi".into(), "foreign-dns-backup".into()));
         std::fs::write(&file, serde_json::to_vec(&bundle).unwrap()).unwrap();
         import_from(&file, &paths, &store, &Arc::new(ServiceManager::new())).unwrap();
         assert_eq!(store.get_setting(&key).as_deref(), Some("local-secret"));
+        assert_eq!(store.get_setting("dnsBackup.Wi-Fi").as_deref(), Some("local-dns-backup"));
         assert_eq!(store.get_setting("language").as_deref(), Some("en"));
     }
 

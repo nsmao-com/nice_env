@@ -458,14 +458,11 @@ pub fn run_elevated(program: &str, args: &[&str]) -> Result<()> {
         use std::os::windows::process::CommandExt;
         // ShellExecuteW runas（0x0802 请求管理员）。
         // 参数各自用引号包住，避免含空格路径被拆成多个参数
-        let quoted_args: Vec<String> = args
-            .iter()
-            .map(|a| format!("\"{}\"", a.replace('"', "\\\"")))
-            .collect();
+        let quoted_args = windows_argument_line(args);
         let cmd = format!(
-            "Start-Process -FilePath '{}' -ArgumentList '{}' -Verb RunAs -Wait",
+            "$ErrorActionPreference='Stop'; try {{ $child = Start-Process -FilePath '{}' -ArgumentList '{}' -Verb RunAs -WindowStyle Hidden -Wait -PassThru; if ($child.ExitCode -ne 0) {{ throw ('提权程序退出码：' + $child.ExitCode) }} }} catch {{ [Console]::Error.WriteLine($_.Exception.Message); exit 1 }}",
             program.replace('\'', "''"),
-            quoted_args.join(",").replace('\'', "''")
+            quoted_args.replace('\'', "''")
         );
         let out = std::process::Command::new("powershell")
             .args(["-NoProfile", "-Command", &cmd])
@@ -509,6 +506,23 @@ pub fn run_elevated(program: &str, args: &[&str]) -> Result<()> {
         }
         Ok(())
     }
+}
+
+#[cfg(any(windows, test))]
+fn windows_argument_line(args: &[&str]) -> String {
+    args.iter().map(|arg| {
+        let mut out = String::from("\"");
+        let mut slashes = 0;
+        for ch in arg.chars() {
+            if ch == '\\' { slashes += 1; continue; }
+            out.push_str(&"\\".repeat(if ch == '"' { slashes * 2 + 1 } else { slashes }));
+            out.push(ch);
+            slashes = 0;
+        }
+        out.push_str(&"\\".repeat(slashes * 2));
+        out.push('"');
+        out
+    }).collect::<Vec<_>>().join(" ")
 }
 
 /// POSIX 单引号转义：'`it`s`' → '\'' 包裹，可安全嵌入 shell 命令
@@ -757,142 +771,139 @@ mod sysproxy_win {
 
 /* ================= 系统 DNS 接管（本地域名解析配套） ================= */
 
-/// 枚举已连接的网络接口名（Windows: netsh；macOS: networksetup）。
-/// 用于让用户/调用方选择要把 DNS 指向本地解析器的网卡。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DnsConfiguration {
+    pub interface_id: String,
+    pub automatic: bool,
+    pub servers: Vec<String>,
+}
+
+impl DnsConfiguration {
+    pub fn is_local(&self) -> bool {
+        !self.automatic && self.servers == ["127.0.0.1"]
+    }
+
+    pub fn matches(&self, other: &Self) -> bool {
+        self.interface_id == other.interface_id && self.automatic == other.automatic
+            && (self.automatic || self.servers == other.servers)
+    }
+}
+
+#[cfg(windows)]
+fn powershell_json(script: &str) -> Result<serde_json::Value> {
+    let script = format!("$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); {script}");
+    let out = command("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]).output().map_err(io_err)?;
+    if !out.status.success() {
+        return Err(PlatformError::Io(format!("读取网络配置失败：{}", String::from_utf8_lossy(&out.stderr).trim())));
+    }
+    serde_json::from_slice(&out.stdout).map_err(|e| PlatformError::Io(format!("网络配置返回格式无效：{e}")))
+}
+
 #[cfg(windows)]
 pub fn connected_interfaces() -> Result<Vec<String>> {
-    let out = std::process::Command::new("netsh")
-        .args(["interface", "show", "interface"])
-        .creation_flags(0x0800_0000)
-        .output()
-        .map_err(|e| PlatformError::Io(format!("netsh 失败：{e}")))?;
-    if !out.status.success() {
-        return Err(PlatformError::Io(format!(
-            "读取网络接口失败：{}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
+    let value = powershell_json("ConvertTo-Json -Compress -InputObject @(Get-NetAdapter -IncludeHidden | Where-Object { $_.Status -eq 'Up' } | Select-Object -ExpandProperty Name | Sort-Object -Unique)")?;
+    serde_json::from_value(value).map_err(|e| PlatformError::Io(format!("网络接口格式无效：{e}")))
+}
+
+#[cfg(not(windows))]
+pub fn connected_interfaces() -> Result<Vec<String>> {
+    let out = command("networksetup").arg("-listallnetworkservices").output().map_err(io_err)?;
+    if !out.status.success() { return Err(PlatformError::Io(String::from_utf8_lossy(&out.stderr).into())); }
+    Ok(String::from_utf8_lossy(&out.stdout).lines().skip(1).map(str::trim)
+        .filter(|name| !name.is_empty() && !name.starts_with('*')).map(str::to_owned).collect())
+}
+
+/// Windows 只接管 IPv4，保留接口原有 IPv6 DNS；macOS networksetup 读取完整静态服务器列表。
+pub fn dns_configuration(name: &str) -> Result<DnsConfiguration> {
+    if name.trim().is_empty() || name.chars().any(char::is_control) {
+        return Err(PlatformError::Io("网络接口名称无效".into()));
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut names = Vec::new();
-    for line in text.lines() {
-        // netsh 的列是：Admin State / State / Type / Interface Name。
-        // 接口名可以包含空格，所以前三列按空白切开后，剩余部分必须整体保留。
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 4 {
-            continue;
-        }
-        let state = parts[1];
-        if state.eq_ignore_ascii_case("connected") || state == "已连接" {
-            let name = parts[3..].join(" ");
-            if !name.is_empty() {
-                names.push(name);
+    #[cfg(windows)]
+    {
+        let escaped = name.replace('\'', "''");
+        let value = powershell_json(&format!(
+            "$adapter = @(Get-NetAdapter -IncludeHidden | Where-Object {{ $_.Name -eq '{escaped}' }}); if ($adapter.Count -ne 1) {{ throw '网络接口不存在或名称不唯一' }};              $id = ([guid]$adapter[0].InterfaceGuid).ToString('B');              $registry = Get-ItemProperty -LiteralPath ('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\' + $id);              $static = [string]$registry.NameServer;              $servers = @((Get-DnsClientServerAddress -InterfaceIndex $adapter[0].ifIndex -AddressFamily IPv4).ServerAddresses);              @{{ interfaceId=$id; automatic=[string]::IsNullOrWhiteSpace($static); servers=$servers }} | ConvertTo-Json -Compress"
+        ))?;
+        serde_json::from_value(value).map_err(|e| PlatformError::Io(format!("DNS 配置格式无效：{e}")))
+    }
+    #[cfg(not(windows))]
+    {
+        let out = command("networksetup").args(["-getdnsservers", name]).output().map_err(io_err)?;
+        if !out.status.success() { return Err(PlatformError::Io(String::from_utf8_lossy(&out.stderr).into())); }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let automatic = text.trim().starts_with("There aren't any DNS Servers set on ");
+        let servers = if automatic { Vec::new() } else {
+            text.lines().map(|line| line.trim().parse::<std::net::IpAddr>()
+                .map(|ip| ip.to_string()).map_err(|_| PlatformError::Io("无法识别当前 DNS 配置，未修改网络设置".into())))
+                .collect::<Result<Vec<_>>>()?
+        };
+        if !automatic && servers.is_empty() { return Err(PlatformError::Io("DNS 配置为空，无法确定自动获取状态".into())); }
+        Ok(DnsConfiguration { interface_id: name.into(), automatic, servers })
+    }
+}
+
+pub fn set_dns_configuration_elevated(name: &str, config: &DnsConfiguration) -> Result<()> {
+    let current = dns_configuration(name)?;
+    if current.interface_id != config.interface_id {
+        return Err(PlatformError::Io("网络接口已变化，不能把旧配置写入其它接口".into()));
+    }
+    if !config.automatic && config.servers.is_empty() {
+        return Err(PlatformError::Io("静态 DNS 至少需要一个服务器地址".into()));
+    }
+    for server in &config.servers {
+        let ip = server.parse::<std::net::IpAddr>().map_err(|_| PlatformError::Io("DNS 服务器地址无效".into()))?;
+        if cfg!(windows) && !ip.is_ipv4() { return Err(PlatformError::Io("此接口操作仅支持 IPv4 DNS，IPv6 配置保持不变".into())); }
+    }
+    #[cfg(windows)]
+    {
+        let name_arg = format!("name={name}").replace('\'', "''");
+        let script = if config.automatic {
+            format!("& netsh interface ipv4 set dnsservers '{name_arg}' source=dhcp; exit $LASTEXITCODE")
+        } else {
+            let mut script = format!("& netsh interface ipv4 set dnsservers '{name_arg}' source=static address={} validate=no; if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}; ", config.servers[0]);
+            for (index, server) in config.servers.iter().enumerate().skip(1) {
+                script.push_str(&format!("& netsh interface ipv4 add dnsservers '{name_arg}' address={server} index={} validate=no; if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}; ", index + 1));
             }
-        }
-    }
-    names.sort_unstable();
-    names.dedup();
-    Ok(names)
-}
-
-#[cfg(not(windows))]
-pub fn connected_interfaces() -> Result<Vec<String>> {
-    let out = std::process::Command::new("networksetup")
-        .args(["-listallnetworkservices"])
-        .output()
-        .map_err(|e| PlatformError::Io(format!("networksetup 失败：{e}")))?;
-    if !out.status.success() {
-        return Err(PlatformError::Io(format!(
-            "读取网络服务失败：{}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    Ok(text
-        .lines()
-        .skip(1)
-        .map(|l| l.trim().trim_start_matches('*').to_string())
-        .filter(|l| !l.is_empty())
-        .collect())
-}
-
-/// 读取接口当前 DNS 服务器（原始文本，前端展示用）
-#[cfg(windows)]
-pub fn interface_dns_status(name: &str) -> Result<String> {
-    let name_arg = format!("name={name}");
-    let out = std::process::Command::new("netsh")
-        .args(["interface", "ip", "show", "dns", &name_arg])
-        .creation_flags(0x0800_0000)
-        .output()
-        .map_err(|e| PlatformError::Io(format!("netsh 失败：{e}")))?;
-    if !out.status.success() {
-        return Err(PlatformError::Io(format!(
-            "读取接口 DNS 失败：{}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
-}
-
-#[cfg(not(windows))]
-pub fn interface_dns_status(name: &str) -> Result<String> {
-    let out = std::process::Command::new("networksetup")
-        .args(["-getdns", name])
-        .output()
-        .map_err(|e| PlatformError::Io(format!("networksetup 失败：{e}")))?;
-    if !out.status.success() {
-        return Err(PlatformError::Io(format!(
-            "读取接口 DNS 失败：{}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
-}
-
-/// 提权把接口 DNS 设为 127.0.0.1（本地解析器接管）。
-/// Windows: netsh set dns（单个主 DNS 即可）；macOS: networksetup -setdnsservers。
-pub fn set_dns_localhost_elevated(name: &str) -> Result<()> {
-    #[cfg(windows)]
-    {
-        let name_arg = format!("name={name}");
-        run_elevated(
-            "netsh",
-            &[
-                "interface",
-                "ip",
-                "set",
-                "dns",
-                &name_arg,
-                "source=static",
-                "addr=127.0.0.1",
-                "register=primary",
-            ],
-        )
+            script.push_str("exit 0");
+            script
+        };
+        run_elevated("powershell", &["-NoProfile", "-NonInteractive", "-Command", &script])?;
     }
     #[cfg(not(windows))]
     {
-        run_elevated("networksetup", &["-setdnsservers", name, "127.0.0.1"])
+        let mut args = vec!["-setdnsservers", name];
+        if config.automatic { args.push("empty"); } else { args.extend(config.servers.iter().map(String::as_str)); }
+        run_elevated("networksetup", &args)?;
     }
+    let after = dns_configuration(name)?;
+    if !config.matches(&after) {
+        return Err(PlatformError::Io("设置命令已退出，但 DNS 配置未达到目标状态；请刷新核对后重试".into()));
+    }
+    Ok(())
 }
 
-/// 恢复为自动获取（DHCP 下发）的 DNS
-pub fn restore_dns_elevated(name: &str) -> Result<()> {
-    #[cfg(windows)]
-    {
-        let name_arg = format!("name={name}");
-        run_elevated(
-            "netsh",
-            &[
-                "interface",
-                "ip",
-                "set",
-                "dns",
-                &name_arg,
-                "source=dhcp",
-            ],
-        )
+#[cfg(test)]
+mod dns_tests {
+    use super::*;
+
+    #[test]
+    fn elevated_arguments_preserve_spaces_quotes_and_trailing_slashes() {
+        assert_eq!(windows_argument_line(&["interface", "name=Wi-Fi 2", "a\"b", "C:\\dir\\", ""]),
+            "\"interface\" \"name=Wi-Fi 2\" \"a\\\"b\" \"C:\\dir\\\\\" \"\"");
     }
-    #[cfg(not(windows))]
-    {
-        run_elevated("networksetup", &["-setdnsservers", name, "empty"])
+
+    #[test]
+    fn restored_dns_compares_static_order_but_not_dhcp_assigned_addresses() {
+        let mut original = DnsConfiguration { interface_id: "adapter".into(), automatic: false, servers: vec!["9.9.9.9".into(), "1.1.1.1".into()] };
+        let mut current = original.clone();
+        current.servers.reverse();
+        assert!(!original.matches(&current));
+        original.automatic = true;
+        current.automatic = true;
+        assert!(original.matches(&current));
+        current.interface_id = "replacement".into();
+        assert!(!original.matches(&current));
+        assert!(!current.is_local());
     }
 }

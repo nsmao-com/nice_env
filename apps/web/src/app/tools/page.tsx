@@ -1183,185 +1183,139 @@ function ResetConfigDialog({ onClose }: { onClose: () => void }) {
 /* ============ 本地域名解析（CoreDNS） ============ */
 function DnsTool() {
   const t = useT();
-  const invalidate = useInvalidate();
-  const { data: services = [] } = useServices(3000);
-  const dns = services.find((sv) => sv.id.startsWith("coredns"));
-  const [busy, setBusy] = React.useState(false);
+  const services = useServices(3000);
+  const settings = useSettings();
+  const dns = services.data.find((service) => service.id === "coredns");
   const running = dns?.state === "running";
-  const port = dns?.port ?? 53;
-
-  const toggle = async (next: boolean) => {
-    if (!dns) {
-      toast.info(t("dns.notInstalled"));
-      return;
-    }
+  const port = dns?.port;
+  const tld = settings.data?.defaultTld || "test";
+  const [activeIf, setActiveIf] = React.useState("");
+  const interfaces = useQuery({ queryKey: ["dns-interfaces"], queryFn: api.dnsInterfaces, retry: false });
+  const selected = activeIf && interfaces.data?.includes(activeIf) ? activeIf : interfaces.data?.[0] ?? "";
+  const status = useQuery({ queryKey: ["dns-interface", selected], queryFn: () => api.dnsStatusOf(selected), enabled: !!selected, retry: false });
+  const [busy, setBusy] = React.useState(false);
+  const action = React.useRef(false);
+  const [error, setError] = React.useState<AppErrorShape | null>(null);
+  const [confirm, setConfirm] = React.useState<"takeover" | "restore" | null>(null);
+  const serviceReady = services.dataUpdatedAt > 0 && !services.error;
+  const interfaceReady = !!selected && status.isSuccess && !status.error && !interfaces.error;
+  const changing = dns?.state === "starting" || dns?.state === "stopping";
+  const canTakeover = serviceReady && running && port === 53 && interfaceReady && !settings.error
+    && !status.data?.local && !status.data?.backup;
+  const canRestore = interfaceReady && !!(status.data?.backup || status.data?.local);
+  const formatConfig = (config: api.DnsConfiguration) =>
+    `${config.automatic ? t("dns.automatic") : t("dns.static")} ${config.servers.join(", ")}`.trim();
+  const refresh = async () => {
+    await interfaces.refetch();
+    if (selected) await status.refetch();
+  };
+  const run = async (operation: () => Promise<void>) => {
+    if (action.current) return;
+    action.current = true;
     setBusy(true);
-    try {
-      if (next) await api.startService(dns.id);
-      else await api.stopService(dns.id);
-      invalidate("services");
-    } catch (e) {
-      toastError(e);
-    } finally {
+    setError(null);
+    try { await operation(); }
+    catch (e) { setError(normalizeError(e)); }
+    finally {
+      await Promise.all([services.refetch(), selected ? status.refetch() : Promise.resolve()]);
+      action.current = false;
       setBusy(false);
     }
   };
-
-  /** 一键接管：把已连接网卡的 DNS 指向 127.0.0.1（触发 UAC） */
-  const [interfaces, setInterfaces] = React.useState<string[]>([]);
-  const [activeIf, setActiveIf] = React.useState<string | null>(null);
-  const [interfaceStatus, setInterfaceStatus] = React.useState<Record<string, string>>({});
-  const [interfacesError, setInterfacesError] = React.useState<string | null>(null);
-  const [interfacesLoading, setInterfacesLoading] = React.useState(false);
-  const [takeoverBusy, setTakeoverBusy] = React.useState(false);
-
-  const loadInterfaces = React.useCallback(async () => {
-    setInterfacesLoading(true);
-    setInterfacesError(null);
-    try {
-      const list = await api.dnsInterfaces();
-      setInterfaces(list);
-      setActiveIf((cur) => (cur && list.includes(cur) ? cur : list[0] ?? null));
-      const statuses = await Promise.all(list.map(async (name) => {
-        try {
-          return [name, await api.dnsStatusOf(name)] as const;
-        } catch (error) {
-          return [name, normalizeError(error).message] as const;
-        }
-      }));
-      setInterfaceStatus(Object.fromEntries(statuses));
-    } catch (error) {
-      setInterfacesError(normalizeError(error).message);
-      setInterfaces([]);
-      setInterfaceStatus({});
-    } finally {
-      setInterfacesLoading(false);
-    }
-  }, []);
-
-  React.useEffect(() => {
-    loadInterfaces();
-  }, [loadInterfaces]);
-
-  const takeover = async () => {
-    if (!activeIf) return;
-    setTakeoverBusy(true);
-    try {
-      await api.dnsTakeover(activeIf);
-      toast.success(`${t("dns.takeoverDoneP1")} ${activeIf} ${t("dns.takeoverDoneP2")}`);
-      await loadInterfaces();
-    } catch (e) {
-      toastError(e);
-    } finally {
-      setTakeoverBusy(false);
-    }
-  };
-
-  const restore = async () => {
-    if (!activeIf) return;
-    setTakeoverBusy(true);
-    try {
-      await api.dnsRestore(activeIf);
+  const toggle = () => run(async () => {
+    if (!dns || !serviceReady) return;
+    if (running) await api.stopService(dns.id);
+    else await api.startService(dns.id);
+  });
+  const changeInterface = () => run(async () => {
+    if (!interfaceReady || !confirm) return;
+    if (confirm === "takeover") {
+      if (!canTakeover) return;
+      await api.dnsTakeover(selected);
+      toast.success(`${t("dns.takeoverDoneP1")} ${selected} ${t("dns.takeoverDoneP2")}`);
+    } else {
+      await api.dnsRestore(selected, !status.data?.backup);
       toast.success(t("dns.restoreDone"));
-      await loadInterfaces();
-    } catch (e) {
-      toastError(e);
-    } finally {
-      setTakeoverBusy(false);
     }
-  };
+    setConfirm(null);
+  });
+  const errorBox = error && <div role="alert" className="space-y-1 rounded-lg bg-error-soft p-3 text-xs text-error [overflow-wrap:anywhere]">
+    <p>{error.message}</p>{error.hint && <p>{error.hint}</p>}
+  </div>;
+  const stateLabel = !serviceReady ? t("dns.stateUnknown") : !dns ? t("dns.notInstalled")
+    : running ? t("dns.running") : dns.state === "error" ? t("state.error")
+    : changing ? t(dns.state === "starting" ? "state.starting" : "state.stopping") : t("dns.stopped");
 
   return (
-    <ToolCard icon={Radar} title={t("dns.title")} hint={t("dns.hint")}>
-      <div className="flex flex-col gap-3">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <p className="text-[12.5px] font-medium">
-              {running ? t("dns.running") : t("dns.stopped")}
-              <span className="ml-2 font-mono text-[11px] text-faint">:{port}</span>
+    <ToolCard icon={Radar} title={t("dns.title")} hint={t("dns.hint").replace("{tld}", tld)}>
+      <div className="flex min-w-0 flex-col gap-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0 flex-1 basis-44">
+            <p role="status" className="text-[12.5px] font-medium">{stateLabel}
+              {port != null && <span className="ml-2 font-mono text-[11px] text-faint">:{port}</span>}
             </p>
-            <p className="mt-0.5 text-[10.5px] text-faint">{t("dns.stateHint")}</p>
+            <p className="mt-1 text-[11px] leading-relaxed text-muted">{t("dns.stateHint")}</p>
           </div>
-          <Button
-            variant={running ? "secondary" : "secondary"}
-            size="sm"
-            disabled={busy || !dns}
-            onClick={() => toggle(!running)}
-          >
-            {running ? t("dns.stop") : t("dns.start")}
-          </Button>
+          {dns ? <Button variant="secondary" size="sm" disabled={busy || changing || !serviceReady} onClick={toggle}>
+            {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}{running ? t("dns.stop") : t("dns.start")}
+          </Button> : serviceReady && <a href="/packages" className="rounded-md px-2 py-1.5 text-xs text-primary hover:underline">{t("dns.install")}</a>}
+          {services.error && <Button size="sm" variant="ghost" onClick={() => void services.refetch()} disabled={services.isFetching}>{t("bulk.retry")}</Button>}
         </div>
-
-        {/* 一键接管（UAC） */}
-        <div className="rounded-lg border border-border bg-card-2/30 p-2.5">
-          <div className="flex flex-col items-start justify-between gap-2 sm:flex-row sm:items-center">
-            <div className="min-w-0">
-              <p className="text-[11.5px] font-medium text-secondary">{t("dns.takeoverTitle")}</p>
-              <p className="mt-0.5 text-[10.5px] text-faint">{t("dns.takeoverHint")}</p>
-            </div>
-            <div className="flex w-full min-w-0 shrink-0 flex-wrap items-center gap-1.5 sm:w-auto">
-              {interfaces.length > 1 && (
-                <Select
-                  value={activeIf ?? ""}
-                  onValueChange={setActiveIf}
-                  disabled={takeoverBusy}
-                >
-                  <SelectTrigger aria-label={t("dns.interface")} className="h-7 max-w-32 px-2 text-[11px]">
-                    <SelectValue placeholder={t("dns.interface")} />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {interfaces.map((n) => <SelectItem key={n} value={n}>{n}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-              )}
-              {interfaces.length === 1 && <span className="max-w-40 truncate rounded-md bg-fill px-2 py-1 text-[11px] text-secondary" title={interfaces[0]}>{interfaces[0]}</span>}
-              <Button
-                size="icon-sm"
-                variant="ghost"
-                aria-label={t("dns.refresh")}
-                title={t("dns.refresh")}
-                disabled={takeoverBusy || interfacesLoading}
-                onClick={() => void loadInterfaces()}
-              >
-                <RefreshCw className={cn("h-3.5 w-3.5", interfacesLoading && "animate-spin")} />
-              </Button>
-              <Button size="sm" variant="secondary" disabled={takeoverBusy || !activeIf} onClick={takeover}>
-                {t("dns.takeover")}
-              </Button>
-              <Button size="sm" variant="ghost" disabled={takeoverBusy || !activeIf} onClick={restore}>
-                {t("dns.restore")}
-              </Button>
-            </div>
+        {(services.error || settings.error) && <p role="alert" className="break-words text-xs text-error">{normalizeError(services.error ?? settings.error).message}</p>}
+        {dns?.lastError && <p role="alert" className="break-words text-xs text-error">{dns.lastError.message}</p>}
+        {!confirm && errorBox}
+        <div className="space-y-3 border-y border-dashed border-separator py-3">
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium">{t("dns.takeoverTitle")}</p>
+            <p className="text-[11px] leading-relaxed text-muted">{t("dns.takeoverHint")}</p>
           </div>
-          {interfacesError ? (
-            <div role="alert" className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-error">
-              <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{t("dns.readFailed")}：{interfacesError}</span>
-              <Button size="sm" variant="ghost" disabled={interfacesLoading} onClick={() => void loadInterfaces()}>{t("dns.refresh")}</Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="min-w-0 flex-1 basis-40">
+              <Label htmlFor="dns-interface">{t("dns.interface")}</Label>
+              <Select value={selected} onValueChange={(name) => { setActiveIf(name); setError(null); }} disabled={busy || !!confirm || interfaces.isFetching}>
+                <SelectTrigger id="dns-interface" className="mt-1 w-full min-w-0"><SelectValue placeholder={t("dns.interface")} /></SelectTrigger>
+                <SelectContent>{interfaces.data?.map((name) => <SelectItem key={name} value={name}>{name}</SelectItem>)}</SelectContent>
+              </Select>
             </div>
-          ) : activeIf ? (
-            <div className="mt-2 rounded-md bg-card-2/50 px-2.5 py-2 text-[10.5px] text-faint">
-              <span className="font-medium text-secondary">{t("dns.interfaceStatus")}</span>
-              {interfacesLoading && !interfaceStatus[activeIf] ? <span className="ml-2">{t("dns.statusLoading")}</span> : (
-                <pre className="mt-1 max-h-20 overflow-auto whitespace-pre-wrap break-words font-mono leading-relaxed">{interfaceStatus[activeIf] || t("dns.statusUnknown")}</pre>
-              )}
-            </div>
-          ) : null}
+            <Button size="sm" variant="ghost" disabled={busy || !!confirm || interfaces.isFetching || status.isFetching} onClick={() => void refresh()}>{t("dns.refresh")}</Button>
+          </div>
+          {interfaces.error ? <p role="alert" className="break-words text-xs text-error">{t("dns.readFailed")}: {normalizeError(interfaces.error).message}</p>
+            : interfaces.isPending ? <p role="status" className="text-xs text-muted">{t("dns.statusLoading")}</p>
+            : !interfaces.data?.length ? <p className="text-xs text-muted">{t("dns.noInterfaces")}</p> : null}
+          {selected && <div className="space-y-1.5 rounded-lg bg-fill p-3 text-xs">
+            <p className="text-muted">{t("dns.interfaceStatus")}</p>
+            {status.error ? <p role="alert" className="break-words text-error">{normalizeError(status.error).message}</p>
+              : status.isPending ? <p role="status">{t("dns.statusLoading")}</p>
+              : status.data && <>
+                <p className="break-all font-mono">{formatConfig(status.data.current)}</p>
+                {status.data.backup && <><p className="pt-1 text-muted">{t("dns.original")}</p><p className="break-all font-mono">{formatConfig(status.data.backup)}</p></>}
+                {status.data.local && !status.data.backup && <p className="text-muted">{t("dns.legacy")}</p>}
+              </>}
+          </div>}
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="secondary" disabled={busy || !canTakeover || !!confirm} onClick={() => { setError(null); setConfirm("takeover"); }}>{t("dns.takeover")}</Button>
+            <Button size="sm" variant="ghost" disabled={busy || !canRestore || !!confirm} onClick={() => { setError(null); setConfirm("restore"); }}>
+              {status.data?.backup ? t("dns.restore") : t("dns.restoreAutomatic")}
+            </Button>
+          </div>
+          {!running || port !== 53 ? <p className="text-[11px] leading-relaxed text-muted">{t("dns.requireReady")}</p> : null}
         </div>
-
-        <div className="rounded-lg border border-border bg-card-2/30 p-2.5 text-[11px] leading-relaxed text-muted">
-          <p className="font-medium text-secondary">{t("dns.setupTitle")}</p>
-          <ol className="mt-1 list-decimal space-y-0.5 pl-4">
-            <li>{t("dns.setupStep1")}</li>
-            <li>
-              {t("dns.setupStep2")}
-              <code className="ml-1 rounded bg-card px-1 py-px font-mono text-[10.5px]">
-                nslookup anything.test 127.0.0.1
-              </code>
-            </li>
-          </ol>
-          <p className="mt-1.5 text-[10.5px] text-faint">{t("dns.setupNote")}</p>
+        <div className="space-y-1.5 text-[11px] leading-relaxed text-muted">
+          <p className="font-medium text-secondary">{t("dns.setupStep2")}</p>
+          <code className="block break-all rounded-lg bg-fill p-2 font-mono">nslookup -port={port ?? 53} niceenv-check.{tld} 127.0.0.1</code>
+          <p>{t("dns.stopHint")}</p>
         </div>
       </div>
+      <ConfirmDialog open={!!confirm} onOpenChange={(open) => { if (!open && !action.current) setConfirm(null); }}
+        title={`${confirm === "takeover" ? t("dns.takeover") : t("dns.restore")} · ${selected}`}
+        description={confirm === "takeover" ? t("dns.confirmTakeover") : status.data?.backup ? t("dns.confirmRestore") : t("dns.confirmAutomatic")}
+        confirmText={confirm === "takeover" ? t("dns.takeover") : t("dns.restore")} loading={busy}
+        confirmDisabled={confirm === "takeover" ? !canTakeover : !canRestore} onConfirm={changeInterface}>
+        {status.data && <div className="rounded-lg bg-fill p-3 text-xs [overflow-wrap:anywhere]">
+          {confirm === "takeover" ? "127.0.0.1" : status.data.backup ? formatConfig(status.data.backup) : t("dns.automatic")}
+        </div>}
+        {errorBox}
+      </ConfirmDialog>
     </ToolCard>
   );
 }

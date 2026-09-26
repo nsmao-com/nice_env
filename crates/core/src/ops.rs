@@ -897,6 +897,7 @@ pub fn stop_service(
     id: &str,
 ) -> Result<()> {
     let _operation = manager.lifecycle.lock();
+    if id == "coredns" { crate::dns::restore_before_stop(store)?; }
     if manager.snapshot(id).is_none() {
         return Ok(());
     }

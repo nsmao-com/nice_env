@@ -301,7 +301,7 @@ pub fn start(
     ports: &PortsProfile,
 ) -> Result<()> {
     let _ = ports;
-    let r = resolve(store, paths, service_id)?;
+    let mut r = resolve(store, paths, service_id)?;
 
     // 前置依赖提示（不阻断：用户可能用系统里已有的运行时）
     for dep in &r.spec.requires {
@@ -326,9 +326,9 @@ pub fn start(
     // 且通配解析模板含 {{ .Name }} 占位符，不能走通用模板渲染
     if r.entry.id == "coredns" {
         let tld = store
-            .get_setting("defaultTld")
+            .get_setting_checked("defaultTld")?
             .unwrap_or_else(|| "test".into());
-        crate::dns::write_corefile(paths, &tld, &[]).map_err(AppError::from)?;
+        crate::dns::write_corefile(paths, &r.etc.join("Corefile"), &tld, &[])?;
     }
 
     // 启动前自建的数据子目录（如 Temurin/Qdrant 的 storage、RabbitMQ 的 mnesia）
@@ -346,7 +346,12 @@ pub fn start(
             None => port,
         };
         precheck_port(port, &r.entry.display_name)?;
+        if r.entry.id == "coredns" {
+            std::net::UdpSocket::bind(("127.0.0.1", port))
+                .map_err(|e| AppError::port_conflict(port, Some("UDP 端口不可用")).with_detail(e.to_string()))?;
+        }
         store.set_port_assign(&r.service_id, port)?;
+        r.port = Some(port);
     }
 
     let args: Vec<String> = r.spec.args.iter().map(|a| expand(a, &r)).collect();
@@ -388,15 +393,25 @@ pub fn start(
     spawn_tracked(manager, &r.service_id, &spec)?;
 
     let timeout = Duration::from_secs(r.spec.health_timeout_sec.max(3));
-    let healthy = match r.spec.health.as_str() {
+    let healthy = if r.entry.id == "coredns" {
+        let tld = store.get_setting_checked("defaultTld")?.unwrap_or_else(|| "test".into());
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if crate::dns::probe(r.port.unwrap_or(53), &tld).is_ok()
+                && manager.snapshot(&r.service_id).is_some_and(|s| s.pids.iter().any(|&pid| platform::process_alive(pid))) { break true; }
+            if std::time::Instant::now() >= deadline { break false; }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    } else { match r.spec.health.as_str() {
         "none" => true,
         "process" => wait_pids_alive(manager, &r.service_id, timeout),
         _ => match r.port {
             Some(port) => wait_healthy(port, timeout),
             None => wait_pids_alive(manager, &r.service_id, timeout),
         },
-    };
+    }};
     if !healthy {
+        if r.entry.id == "coredns" { crate::ops::stop_service(store, paths, manager, &r.service_id)?; }
         return Err(AppError::new(
             "SERVICE_START_TIMEOUT",
             format!(

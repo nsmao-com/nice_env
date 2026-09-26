@@ -345,13 +345,8 @@ fn start_nginx(
         precheck_port(ports.https, "Nginx (HTTPS)")?;
     }
 
-    // 主配置：包含所有 php 池（运行中的才写 upstream）
-    let pools: Vec<(String, u16)> = store
-        .all_port_assigns()
-        .into_iter()
-        .filter(|(sid, _)| sid.starts_with("php@"))
-        .map(|(sid, base)| (sid.trim_start_matches("php@").to_string(), base))
-        .collect();
+    // 主配置只包含运行中的 PHP 池；仅安装但未启动的版本不能生成指向空端口的 upstream。
+    let pools = running_php_pools(store, manager);
     configgen::write_nginx_conf(paths, &root, &pools, ports.http, ports.https)?;
     configgen::validate_nginx(&exe, &paths.nginx_conf())?;
 
@@ -383,7 +378,7 @@ fn start_php(
     paths: &Paths,
     manager: &Arc<ServiceManager>,
     version: &str,
-    _ports: &PortsProfile,
+    ports: &PortsProfile,
 ) -> Result<()> {
     let service_id = format!("php@{version}");
     let exe = php_exe(store, version)?;
@@ -424,13 +419,46 @@ fn start_php(
         )
         .with_hint("查看日志；常见原因是 php.ini 扩展加载失败或缺少 VC 运行库"));
     }
-    // nginx 运行中则热加载新 upstream
+    // PHP 池启动后重建并加载正在运行的 Web 服务配置，确保新版本立即可被站点使用。
+    // 不能只 reload 旧配置：旧配置里还没有刚分配的 PHP upstream。
+    let mut pools = running_php_pools(store, manager);
+    if !pools.iter().any(|(ver, _)| ver == version) {
+        pools.push((version.to_string(), base));
+    }
     if manager
         .snapshot("nginx")
         .map(|s| s.state == ServiceState::Running)
         .unwrap_or(false)
     {
-        let _ = reload_nginx(store, paths);
+        let (root, exe) = nginx_exe(store)?;
+        configgen::write_nginx_conf(paths, &root, &pools, ports.http, ports.https)?;
+        configgen::validate_nginx(&exe, &paths.nginx_conf())?;
+        reload_nginx(store, paths).map_err(|error| {
+            AppError::new(
+                "PHP_NGINX_RELOAD_FAILED",
+                format!("PHP {version} 已启动，但 Nginx 未能加载新的 PHP 池配置"),
+            )
+            .with_hint("本次 PHP 启动已回滚；修复 Nginx 配置后重试")
+            .with_detail(error.to_string())
+        })?;
+    }
+    if manager
+        .snapshot("apache")
+        .map(|s| s.state == ServiceState::Running)
+        .unwrap_or(false)
+    {
+        let (root, exe) = apache_paths(store)?;
+        configgen::write_httpd_conf(paths, &root, &pools, ports.apache_http, ports.apache_https)?;
+        configgen::validate_httpd(&exe, &paths.apache_conf())?;
+        reload_apache(&root, &exe, paths, manager.started_port_or("apache", ports.apache_http))
+            .map_err(|error| {
+                AppError::new(
+                    "PHP_APACHE_RELOAD_FAILED",
+                    format!("PHP {version} 已启动，但 Apache 未能加载新的 PHP 池配置"),
+                )
+                .with_hint("本次 PHP 启动已回滚；修复 Apache 配置后重试")
+                .with_detail(error.to_string())
+            })?;
     }
     Ok(())
 }
@@ -1083,6 +1111,28 @@ pub fn reload_nginx(store: &Store, paths: &Paths) -> Result<()> {
     Ok(())
 }
 
+fn reload_apache(root: &Path, exe: &Path, paths: &Paths, port: u16) -> Result<()> {
+    let out = platform::command(exe)
+        .args([
+            "-d".into(),
+            root.to_string_lossy().to_string(),
+            "-f".into(),
+            paths.apache_conf().to_string_lossy().to_string(),
+            "-k".into(),
+            "restart".into(),
+        ])
+        .output()
+        .map_err(|e| AppError::io("重载 Apache", e))?;
+    if !out.status.success() {
+        return Err(AppError::new("APACHE_RELOAD_FAILED", "Apache 重载失败")
+            .with_detail(String::from_utf8_lossy(&out.stderr).to_string()));
+    }
+    if !wait_healthy(port, Duration::from_secs(12)) {
+        return Err(AppError::new("APACHE_RELOAD_TIMEOUT", "Apache 重载后端口未恢复"));
+    }
+    Ok(())
+}
+
 /// 重建主配置并重载（站点/池变化后）。
 /// Windows 上 nginx -s reload 存在已知信号语义差异（新增 server 块可能不生效），
 /// 因此 Windows 采用「快速重启」（stop→start，亚秒级）；类 Unix 用热 reload。
@@ -1094,12 +1144,7 @@ pub fn rebuild_and_reload(
 ) -> Result<()> {
     let _operation = manager.lifecycle.lock();
     let ports = PortsProfile::from_settings(store);
-    let pools: Vec<(String, u16)> = store
-        .all_port_assigns()
-        .into_iter()
-        .filter(|(sid, _)| sid.starts_with("php@"))
-        .map(|(sid, base)| (sid.trim_start_matches("php@").to_string(), base))
-        .collect();
+    let pools = running_php_pools(store, manager);
 
     // ---- nginx ----
     if nginx_exe(store).is_ok() {
@@ -1158,7 +1203,7 @@ pub fn rebuild_and_reload(
             // 的同步重启路径（含端口释放等待与健康检查），保证加载的是最新配置。
             #[cfg(windows)]
             {
-                stop_service(store, paths, manager, "apache").ok();
+                stop_service(store, paths, manager, "apache")?;
                 std::thread::sleep(Duration::from_millis(300));
                 start_service(store, paths, manager, "apache")?;
             }

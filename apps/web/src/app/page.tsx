@@ -47,12 +47,20 @@ import { HealthCard } from "@/components/shared/health-card";
 export default function DashboardPage() {
   const t = useT();
   const setWizardOpen = useUI((s) => s.setWizardOpen);
-  const { data: services } = useServices();
-  const { data: sites } = useSites();
+  const servicesQuery = useServices();
+  const sitesQuery = useSites();
+  const stacksQuery = useStacks();
+  const services = servicesQuery.data;
+  const sites = sitesQuery.data;
   const { data: stats } = useSystemStats(2000);
 
   const [confirmStopAll, setConfirmStopAll] = React.useState(false);
-  const { data: stacks } = useStacks();
+  const stacks = stacksQuery.data;
+  const dashboardReady = servicesQuery.dataUpdatedAt > 0 && sitesQuery.dataUpdatedAt > 0 && stacksQuery.dataUpdatedAt > 0;
+  const dashboardError = servicesQuery.error || sitesQuery.error || stacksQuery.error;
+  const retryDashboard = () => {
+    void Promise.all([servicesQuery.refetch(), sitesQuery.refetch(), stacksQuery.refetch()]);
+  };
   const runningCount = services.filter((s) => s.state === "running").length;
   const activeServices = services.filter(serviceHasProcess);
   const anyRunning = activeServices.length > 0;
@@ -90,7 +98,7 @@ export default function DashboardPage() {
                 <Square className="h-3.5 w-3.5" /> {t("dash.stopAll")}
               </Button>
             ) : null}
-            <Button onClick={startStack} disabled={stackBusy} title={t("dash.quickStartHint")}>
+            <Button onClick={startStack} disabled={stackBusy || !dashboardReady} title={t("dash.quickStartHint")}>
               <Rocket className="h-3.5 w-3.5" />{" "}
               {stacks[0] ? `${t("dash.startStack")}「${stacks[0].name}」` : t("dash.quickStart")}
             </Button>
@@ -108,7 +116,24 @@ export default function DashboardPage() {
         <HealthCard />
       </section>
 
-      {services.length === 0 && sites.length === 0 ? (
+      {!dashboardReady ? (
+        <div
+          role={dashboardError ? "alert" : "status"}
+          className="flex min-h-[280px] flex-col items-center justify-center gap-3 rounded-2xl border border-border bg-card px-4 py-10 text-center"
+        >
+          <div className="max-w-md space-y-1.5">
+            <p className={dashboardError ? "text-sm text-error" : "text-sm text-muted"}>
+              {dashboardError ? t("dashboard.readFailed") : t("common.loading")}
+            </p>
+            {dashboardError && <p className="text-xs text-faint">{t("dashboard.readFailedHint")}</p>}
+          </div>
+          {dashboardError && (
+            <Button variant="secondary" size="sm" disabled={servicesQuery.isFetching || sitesQuery.isFetching || stacksQuery.isFetching} onClick={retryDashboard}>
+              {t("install.retry")}
+            </Button>
+          )}
+        </div>
+      ) : services.length === 0 && sites.length === 0 ? (
         /* 首次进入：漂亮空状态 */
         <EmptyState
           icon={Globe}

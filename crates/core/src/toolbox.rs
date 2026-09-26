@@ -4,7 +4,6 @@ use crate::error::{AppError, Result};
 use crate::paths::Paths;
 use crate::store::Store;
 use serde::Serialize;
-use std::io::{BufRead, BufReader};
 
 /// 解析已安装包的主程序完整路径
 pub fn resolve_exe(
@@ -93,31 +92,42 @@ pub fn ollama_delete(
     Ok(())
 }
 
-/// 后台拉取模型：`ollama pull` 自带进度输出，这里丢进独立线程排水管，
-/// 主进程立即返回；拉取结果用「刷新列表」确认。
+/// 拉取模型并等待 Ollama 返回结果。
+///
+/// 调用方在桌面端通过 blocking worker 执行，因此不会阻塞 Tauri UI 线程；
+/// 只有命令真正退出成功才向前端返回成功，避免后台进程失败后仍显示成功提示。
 pub fn ollama_pull(
     store: &Store,
     paths: &Paths,
     installer: &crate::install::Installer,
     name: &str,
 ) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::new("OLLAMA_MODEL_REQUIRED", "请输入模型名称"));
+    }
     let exe = resolve_exe(store, paths, installer, "ollama")?;
-    let mut child = platform::command(exe)
+    let out = platform::command(exe)
         .args(["pull", name])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| AppError::io("启动模型拉取", e))?;
-    // 排水管：不读的话子进程写满管道缓冲会卡死
-    if let Some(so) = child.stdout.take() {
-        std::thread::spawn(move || for _ in BufReader::new(so).lines() {});
+        .output()
+        .map_err(|e| AppError::io("拉取 Ollama 模型", e))?;
+    if !out.status.success() {
+        let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let detail = if detail.is_empty() {
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        } else {
+            detail
+        };
+        return Err(AppError::new(
+            "OLLAMA_PULL_FAILED",
+            if detail.is_empty() {
+                "Ollama 模型拉取失败".to_string()
+            } else {
+                format!("Ollama 模型拉取失败：{detail}")
+            },
+        )
+        .with_hint("确认 Ollama 服务已启动、模型名称正确并且网络可用"));
     }
-    if let Some(se) = child.stderr.take() {
-        std::thread::spawn(move || for _ in BufReader::new(se).lines() {});
-    }
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
     Ok(())
 }
 

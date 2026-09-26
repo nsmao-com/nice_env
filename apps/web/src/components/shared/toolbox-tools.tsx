@@ -409,6 +409,22 @@ export function OllamaTool() {
     load().catch(() => undefined);
   }, [load]);
 
+  const pull = async () => {
+    const name = pullName.trim();
+    if (!name || pulling != null) return;
+    setPulling(name);
+    try {
+      await api.ollamaPull(name);
+      toast.success(t("tools.ollama.pullStarted").replace("{name}", name));
+      setPullName("");
+      await load();
+    } catch (err) {
+      toastError(err);
+    } finally {
+      setPulling(null);
+    }
+  };
+
   return (
     <ToolCard icon={Bot} title={t("tools.ollama.title")} hint={t("tools.ollama.hint")}>
       <div className="flex flex-col gap-2">
@@ -422,18 +438,7 @@ export function OllamaTool() {
           <Input
             value={pullName}
             onChange={(e) => setPullName(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && pullName.trim() && void (async () => {
-              try {
-                setPulling(pullName.trim());
-                await api.ollamaPull(pullName.trim());
-                toast.info(t("tools.ollama.pullStarted").replace("{name}", pullName.trim()));
-                setPullName("");
-              } catch (err) {
-                toastError(err);
-              } finally {
-                setPulling(null);
-              }
-            })()}
+            onKeyDown={(e) => e.key === "Enter" && void pull()}
             placeholder={t("tools.ollama.pullPh")}
             className="h-8 flex-1 font-mono text-[11.5px]"
           />
@@ -441,18 +446,7 @@ export function OllamaTool() {
             size="sm"
             className="h-8"
             disabled={!pullName.trim() || pulling != null}
-            onClick={async () => {
-              try {
-                setPulling(pullName.trim());
-                await api.ollamaPull(pullName.trim());
-                toast.info(t("tools.ollama.pullStarted").replace("{name}", pullName.trim()));
-                setPullName("");
-              } catch (err) {
-                toastError(err);
-              } finally {
-                setPulling(null);
-              }
-            }}
+            onClick={() => void pull()}
           >
             {pulling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
             {t("tools.ollama.pull")}

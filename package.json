@@ -1,7 +1,7 @@
 {
   "name": "niceservbay",
   "private": true,
-  "version": "0.2.10",
+  "version": "0.2.11",
   "description": "NiceEnv — one-stop local dev environment manager (Tauri 2 + Next.js)",
   "scripts": {
     "dev": "pnpm --filter @nsb/web dev",

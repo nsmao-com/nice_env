@@ -1146,3 +1146,10 @@ tag `v0.2.10`，不覆盖或移动旧 tag。验证通过：`pnpm --filter @nsb/w
 --locked --offline -j 1`、`cargo check -p niceservbay --locked --offline -j 1`、`cargo test -p platform
 --lib --locked --offline -j 1`（7 项）和 `git -c core.safecrlf=false diff --check`。未运行前端 dev/build，
 未新增测试文件，本轮没有数据库变更，未修改 update.sql。
+
+第二十五轮实施与验证：启动链路真实结果与总览初始状态修复。
+总览页在服务、站点和服务栈首次读取完成前显示加载状态，读取失败时保留错误提示和重试入口，快捷启动在状态未准备好前不可点击。PHP 版本启动后会按当前运行中的 PHP 池重建并校验 Nginx/Apache 配置；Web 服务重载失败会返回明确错误，Windows Apache 重启不再吞掉停止失败。Ollama 模型拉取等待真实命令退出，只有成功退出才显示完成，失败会展示命令输出摘要和重试建议；Tauri 端把阻塞拉取放入 blocking worker，避免冻结 UI。
+
+版本同步升至 0.2.11，根 package、Web/桌面 package、共享 schema、工作区 Cargo、桌面 Cargo、Tauri 配置、Cargo.lock、浏览器版本展示和回退值均同步更新。保留 `v0.2.10` 及全部历史 tag，发布时创建新的 annotated tag `v0.2.11`，不覆盖或移动旧 tag。
+
+验证通过：`pnpm --filter @nsb/web check`、`cargo check -p nsb-core --locked --offline -j 1`、`cargo check -p niceservbay --locked --offline -j 1` 和 `git -c core.safecrlf=false diff --check`。未运行前端 dev/build，未新增测试文件，本轮没有数据库变更，未修改 update.sql。

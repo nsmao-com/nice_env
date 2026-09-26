@@ -1766,11 +1766,14 @@ fn ollama_delete(
 }
 
 #[tauri::command]
-fn ollama_pull(
+async fn ollama_pull(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     name: String,
 ) -> Result<bool, tauri::Error> {
-    map_jh(state.ollama_pull(&name).map(|_| true))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.ollama_pull(&name).map(|_| true)))
+        .await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))?
 }
 
 /// Adminer 的启动检查与进程回收运行在工作线程。

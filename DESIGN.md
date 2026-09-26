@@ -1153,3 +1153,12 @@ tag `v0.2.10`，不覆盖或移动旧 tag。验证通过：`pnpm --filter @nsb/w
 版本同步升至 0.2.11，根 package、Web/桌面 package、共享 schema、工作区 Cargo、桌面 Cargo、Tauri 配置、Cargo.lock、浏览器版本展示和回退值均同步更新。保留 `v0.2.10` 及全部历史 tag，发布时创建新的 annotated tag `v0.2.11`，不覆盖或移动旧 tag。
 
 验证通过：`pnpm --filter @nsb/web check`、`cargo check -p nsb-core --locked --offline -j 1`、`cargo check -p niceservbay --locked --offline -j 1` 和 `git -c core.safecrlf=false diff --check`。未运行前端 dev/build，未新增测试文件，本轮没有数据库变更，未修改 update.sql。
+
+第二十六轮实施与验证：站点删除失败恢复与详情布局。
+站点删除不再忽略配置、证书或 hosts 操作失败。后端先把配置和允许清理的本地主域名证书移动到数据目录内的暂存区，待站点记录、hosts 和 Web 配置生效后再清理；中途失败时尝试恢复文件与记录，无法完全恢复则保留暂存副本并报告恢复路径。导入、ACME、别名对应和仍被其它站点或自动化引用的证书保留；取消 hosts 清理会把域名保存为手动托管条目，后续重建仍保留。项目文件和业务数据库不受删除影响。暂存清理失败明确提示站点已经删除，避免误导重复操作。
+
+详情页在删除期间锁定确认选项和关闭操作，失败保留选项并展示错误详情，同时刷新相关状态；证书来源移到 HTTPS 配置旁，读取失败提供重试，下拉分隔线沿用左右各 8px 留白和虚线。页脚按钮允许换行。代理停止使用后端已有的完整关闭流程，移除前端吞掉系统代理关闭错误的重复调用。浏览器 mock 同步删除选项和证书保护规则。
+
+版本同步升至 0.2.12，发布约定明确必须创建并推送新的 annotated tag `v0.2.12`，保留所有历史 tag。同步根及工作区 package、Cargo、Tauri、Cargo.lock 中项目版本与界面版本展示。
+
+验证通过：`pnpm --filter @nsb/web check`、`cargo check -p niceservbay --locked --offline -j 1`、`cargo test -p nsb-core --lib sites::scaffold_tests --locked --offline -j 1`（17 项通过、3 项忽略，包含 4 项删除回归检查）及 diff 空白检查。利用已有预览服务检查 1280×800、390×844、320×740 的详情、证书选择和删除确认布局，并确认取消清理选项后浏览器 mock 的 hosts 与证书保留。浏览器验证仅代表界面和 mock；真实系统 hosts 权限失败及运行中的 Nginx/Apache 重载仍需隔离环境验收。不启动新的服务，不执行前端 dev/build，不新增测试文件；本轮没有数据库结构变更，未修改 update.sql。整体功能完善工作仍在进行。

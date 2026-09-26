@@ -8,7 +8,7 @@ import { ExternalLink, FolderOpen, RefreshCw, Trash2, ScrollText } from "lucide-
 import type { Site, RewritePreset } from "@nsb/schema";
 import { useT } from "@/lib/store";
 import { cmpVersionDesc } from "@/lib/utils";
-import { isTauri } from "@/lib/backend";
+import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { usePackages, useInvalidate, toastError, siteUrl, usePorts } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import {
@@ -25,7 +25,7 @@ import { Switch } from "@/components/ui/switch";
 import { EnvEditor } from "./env-editor";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ConfirmDialog } from "@/components/shared/misc";
 
 const REWRITE_OPTIONS: { value: RewritePreset; label?: string; labelKey?: string }[] = [
@@ -58,6 +58,8 @@ export function SiteDetailSheet({
   const { data: packages } = usePackages();
   const [saving, setSaving] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
+  const deletingRef = React.useRef(false);
+  const [deleteError, setDeleteError] = React.useState<AppErrorShape | null>(null);
   const [reloading, setReloading] = React.useState(false);
   const [formError, setFormError] = React.useState("");
   const [discardOpen, setDiscardOpen] = React.useState(false);
@@ -75,6 +77,7 @@ export function SiteDetailSheet({
     setDomainsInput(site?.domains.join(", ") ?? "");
     setFormError("");
     setDeleteOpen(false);
+    setDeleteError(null);
     setDiscardOpen(false);
   }, [site?.id]);
 
@@ -94,7 +97,7 @@ export function SiteDetailSheet({
   );
   const busy = saving || deleting || reloading;
   const requestClose = () => {
-    if (busy) return;
+    if (busy || deletingRef.current) return;
     if (dirty) setDiscardOpen(true);
     else onClose();
   };
@@ -122,17 +125,22 @@ export function SiteDetailSheet({
   };
 
   const doDelete = async () => {
-    if (deleting) return;
+    if (busy || deletingRef.current) return;
+    deletingRef.current = true;
     setDeleting(true);
+    setDeleteError(null);
     try {
       await api.deleteSite(site.id, { hosts: delHosts, certs: delCerts });
       toast.success(`${t("detail.deletedP1")} ${site.name} ${t("detail.deletedP2")}`);
       setDeleteOpen(false);
       onClose();
-      invalidate("sites", "hosts", "certs");
     } catch (e) {
+      setDeleteError(normalizeError(e));
+      // 部分恢复失败或暂存清理失败时，刷新列表可能使详情关闭，通知仍需保留。
       toastError(e, t("detail.deleteFailed"));
     } finally {
+      invalidate("sites", "hosts", "certs", "services");
+      deletingRef.current = false;
       setDeleting(false);
     }
   };
@@ -299,9 +307,39 @@ export function SiteDetailSheet({
               aria-label="HTTPS"
               checked={draft.https}
               onCheckedChange={(https) => setDraft({ ...draft, https })}
-              disabled={saving}
+              disabled={busy}
             />
           </div>
+
+          {(draft.https || draft.runtime.importedCertId) && (
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="site-edit-cert">{t("sites.detail.certSource")}</Label>
+              <Select
+                value={draft.runtime.importedCertId ?? "local"}
+                disabled={busy || importedCerts.isLoading}
+                onValueChange={(value) => setDraft({ ...draft, runtime: { ...draft.runtime, importedCertId: value === "local" ? undefined : value } })}
+              >
+                <SelectTrigger id="site-edit-cert"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="local">{t("sites.detail.localCert")}</SelectItem>
+                  {!!importedCerts.data?.length && <SelectSeparator />}
+                  {importedCerts.data?.map((cert) => (
+                    <SelectItem key={cert.id} value={cert.id} disabled={!cert.usable}>
+                      {cert.subject}{cert.usable ? ` · ${cert.daysLeft}d` : ` · ${t("sites.detail.certInvalid")}`}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {importedCerts.error && <div role="alert" className="flex flex-wrap items-center gap-2 text-[11px] text-error">
+                <span>{t("tls.readFailed")}</span>
+                <Button size="sm" variant="ghost" disabled={busy || importedCerts.isFetching} onClick={() => void importedCerts.refetch()}>{t("bulk.retry")}</Button>
+              </div>}
+              {draft.runtime.importedCertId && importedCerts.isSuccess && !importedCerts.data?.some((cert) => cert.id === draft.runtime.importedCertId) && (
+                <p className="text-[11px] text-error">{t("sites.detail.certMissing")}</p>
+              )}
+              <p className="text-[11px] text-faint">{t("sites.detail.certSourceHint")}</p>
+            </div>
+          )}
 
           {/* 伪静态 */}
           <div className="flex flex-col gap-1.5">
@@ -332,12 +370,12 @@ export function SiteDetailSheet({
 
           {/* 删除 */}
           <div className="border-t border-dashed border-separator pt-4">
-            <Button variant="ghost" disabled={busy} onClick={() => setDeleteOpen(true)} className="text-destructive">
+            <Button variant="ghost" disabled={busy} onClick={() => { setDeleteError(null); setDeleteOpen(true); }} className="text-destructive">
               <Trash2 className="h-3.5 w-3.5" /> {t("common.delete")}
             </Button>
             <ConfirmDialog
               open={deleteOpen}
-              onOpenChange={setDeleteOpen}
+              onOpenChange={(open) => { if (!deletingRef.current) setDeleteOpen(open); }}
               title={`${t("detail.deleteTitleP1")} ${site.name}`}
               description={t("sites.deleteConfirm")}
               confirmText={t("detail.confirmDelete")}
@@ -348,52 +386,32 @@ export function SiteDetailSheet({
               <div className="flex flex-col gap-3 rounded-xl bg-fill p-3.5 text-[12.5px]">
                 <label className="flex cursor-pointer items-center justify-between gap-3">
                   <span>{t("sites.detail.hostsRecord")}</span>
-                  <Switch checked={delHosts} onCheckedChange={setDelHosts} />
+                  <Switch checked={delHosts} disabled={deleting} onCheckedChange={setDelHosts} />
                 </label>
                 <label className="flex cursor-pointer items-center justify-between gap-3">
                   <span>{t("sites.detail.cert")}</span>
-                  <Switch checked={delCerts} onCheckedChange={setDelCerts} />
+                  <Switch checked={delCerts} disabled={deleting} onCheckedChange={setDelCerts} />
                 </label>
+                <p className="text-[11px] leading-relaxed text-muted">{t("sites.detail.deleteCertHint")}</p>
               </div>
+              {deleteError && <div role="alert" className="space-y-2 rounded-lg bg-error-soft p-3 text-xs text-error [overflow-wrap:anywhere]">
+                <p>{deleteError.message}</p>
+                {deleteError.hint && <p>{deleteError.hint}</p>}
+                {deleteError.detail && <details><summary className="cursor-pointer">{t("sites.detail.deleteErrorDetail")}</summary><p className="mt-2 whitespace-pre-wrap font-mono">{deleteError.detail}</p></details>}
+              </div>}
             </ConfirmDialog>
 
           </div>
         </div>
         <div className="mx-5 shrink-0 border-t border-dashed border-separator py-4 sm:mx-6">
           {formError && <p role="alert" className="mb-3 text-sm text-error">{formError}</p>}
-          <div className="flex items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <span className="text-xs text-muted">{dirty ? t("detail.unsaved") : t("detail.saved")}</span>
             <div className="flex gap-2">
               <Button variant="ghost" onClick={requestClose} disabled={busy}>{t("common.cancel")}</Button>
               <Button onClick={save} disabled={busy || !dirty}>{saving ? t("detail.saveBusy") : t("common.save")}</Button>
             </div>
           </div>
-
-          {(draft.https || draft.runtime.importedCertId) && (
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="site-edit-cert">{t("sites.detail.certSource")}</Label>
-              <Select
-                value={draft.runtime.importedCertId ?? "local"}
-                disabled={busy || importedCerts.isLoading}
-                onValueChange={(value) => setDraft({ ...draft, runtime: { ...draft.runtime, importedCertId: value === "local" ? undefined : value } })}
-              >
-                <SelectTrigger id="site-edit-cert"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="local">{t("sites.detail.localCert")}</SelectItem>
-                  {importedCerts.data?.map((cert) => (
-                    <SelectItem key={cert.id} value={cert.id} disabled={!cert.usable}>
-                      {cert.subject}{cert.usable ? ` · ${cert.daysLeft}d` : ` · ${t("sites.detail.certInvalid")}`}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {importedCerts.error && <p className="text-[11px] text-error">{t("tls.readFailed")}</p>}
-              {draft.runtime.importedCertId && !importedCerts.data?.some((cert) => cert.id === draft.runtime.importedCertId) && (
-                <p className="text-[11px] text-error">{t("sites.detail.certMissing")}</p>
-              )}
-              <p className="text-[11px] text-faint">{t("sites.detail.certSourceHint")}</p>
-            </div>
-          )}
         </div>
         <ConfirmDialog open={discardOpen} onOpenChange={setDiscardOpen} title={t("detail.discardTitle")}
           description={t("detail.discardHint")} confirmText={t("detail.discard")} onConfirm={onClose} />

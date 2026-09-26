@@ -110,7 +110,8 @@ export default function ProxyPage() {
     try {
       if (next) await api.proxyStart();
       else {
-        if (status?.systemProxyEnabled) await api.proxySetSystem(false).catch(() => undefined);
+        // 后端 proxy_stop 会先真实关闭系统代理，再停止 mihomo；不要在前端吞掉关闭失败，
+        // 否则用户会看到“内核已停止”，但系统代理仍可能指向已失效的本地端口。
         await api.proxyStop();
       }
       toast.success(next ? t("proxy.coreStarted") : t("proxy.coreStopped"));

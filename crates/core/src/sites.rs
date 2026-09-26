@@ -632,36 +632,143 @@ pub fn delete(
     manager: &Arc<ServiceManager>,
 ) -> Result<()> {
     let _change = SITE_CHANGES.lock();
+    let _operation = manager.lifecycle.lock();
+    let _files = crate::tls::CERT_FILES.lock();
     let site = get(store, id)?;
-    let _ = std::fs::remove_file(paths.nginx_sites_dir().join(format!("{}.conf", site.id)));
-    let _ = std::fs::remove_file(paths.apache_sites_dir().join(format!("{}.conf", site.id)));
-    let _ = std::fs::remove_file(
-        paths
-            .nginx_sites_dir()
-            .join(format!("{}.conf.disabled", site.id)),
-    );
-    let _ = std::fs::remove_file(
-        paths
-            .apache_sites_dir()
-            .join(format!("{}.conf.disabled", site.id)),
-    );
-    if remove_certs {
-        for d in &site.domains {
-            let stem = d.replace('*', "_wildcard");
-            let _ = std::fs::remove_file(paths.certs().join("sites").join(format!("{stem}.crt")));
-            let _ = std::fs::remove_file(paths.certs().join("sites").join(format!("{stem}.key")));
+    let mut files = Vec::new();
+    for server in ["nginx", "apache"] {
+        for suffix in ["conf", "conf.disabled"] {
+            files.push(crate::paths::checked_data_path(
+                &paths.base, &format!("etc/{server}/sites/{}.{suffix}", site.id),
+            )?);
         }
-        for c in store.list_certs()? {
-            if site.domains.contains(&c.subject) {
-                let _ = store.delete_cert(&c.id);
+    }
+    // 只清理此站点主域名对应的本地签发证书。导入证书、ACME 证书和其它站点
+    // 使用的证书保留；别名不能成为删除另一个证书的依据。
+    let certificate = if remove_certs && site.runtime.imported_cert_id.is_none() {
+        let certs = store.list_certs()?;
+        let all_sites = store.list_sites()?;
+        let automations = store.list_cert_automations()?;
+        certs.iter().find(|cert| {
+            cert.kind == "site"
+                && site.domains.first() == Some(&cert.subject)
+                && !all_sites.iter().any(|other| other.id != site.id
+                    && other.runtime.imported_cert_id.is_none()
+                    && other.domains.first() == Some(&cert.subject))
+                && !automations.iter().any(|a| a.domains.first() == Some(&cert.subject))
+        }).cloned()
+    } else {
+        None
+    };
+    if let Some(cert) = &certificate {
+        let primary = crate::tls::normalize_domains(&[cert.subject.clone()])?.remove(0);
+        let stem = primary.replace('*', "_wildcard").replace(':', "_");
+        for extension in ["crt", "key"] {
+            files.push(crate::paths::checked_data_path(
+                &paths.base, &format!("certs/sites/{stem}.{extension}"),
+            )?);
+        }
+    }
+    let previous_hosts = crate::hosts::extra_entries(store);
+    let running: Vec<_> = ["nginx", "apache"].into_iter().filter(|server|
+        manager.snapshot(server).is_some_and(|s| s.state == ServiceState::Running)
+    ).collect();
+    // 先移动到同一数据目录的暂存区，保留文件内容和权限。全部生效后才真正删除，
+    // 恢复失败时保留暂存文件，不能让 TempDir::drop 把仅存的副本清掉。
+    let backup = crate::paths::checked_data_path(&paths.base, "backup")?;
+    let staging = tempfile::Builder::new().prefix("site-delete-").tempdir_in(backup)?;
+    let mut moved = Vec::new();
+    let mut record_removed = false;
+    let mut cert_removed = false;
+    let mut hosts_changed = false;
+    let mut web_changed = false;
+    let result: Result<()> = (|| {
+        for (index, source) in files.iter().enumerate() {
+            match std::fs::symlink_metadata(source) {
+                Ok(meta) if meta.is_file() => {
+                    let target = staging.path().join(index.to_string());
+                    std::fs::rename(source, &target)
+                        .map_err(|e| AppError::io(&format!("暂存待删除文件 {}", source.display()), e))?;
+                    moved.push((source.clone(), target));
+                }
+                Ok(_) => return Err(AppError::new("SITE_FILE_INVALID", "站点配置或证书路径不是普通文件，未删除")),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
             }
         }
+        if let Some(cert) = &certificate {
+            store.delete_cert(&cert.id)?;
+            cert_removed = true;
+        }
+        store.delete_site(id)?;
+        record_removed = true;
+        if remove_hosts {
+            hosts_changed = true;
+            crate::hosts::apply(store, paths, None)?;
+        } else {
+            // 保留为手动托管条目，避免下次重建 hosts 时又被移除。
+            let mut retained = previous_hosts.clone();
+            for domain in site.domains.iter().filter(|domain| !domain.starts_with("*.")) {
+                if !retained.iter().any(|(_, host)| host == domain) {
+                    retained.push(("127.0.0.1".into(), domain.clone()));
+                }
+            }
+            crate::hosts::set_extra_entries(store, &retained)?;
+            hosts_changed = true;
+        }
+        web_changed = true;
+        crate::ops::rebuild_and_reload(store, paths, manager)?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let mut failures = Vec::new();
+        for (source, temporary) in moved.iter().rev() {
+            // 不覆盖删除过程中由外部程序新建的同名文件。
+            let restored = match std::fs::symlink_metadata(source) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::rename(temporary, source),
+                Err(e) => Err(e),
+                Ok(_) => Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "原路径已被占用")),
+            };
+            if let Err(e) = restored { failures.push(format!("{}：{e}", source.display())); }
+        }
+        if record_removed {
+            if let Err(e) = store.save_site(&site) { failures.push(format!("恢复站点记录：{e}")); }
+        }
+        if cert_removed {
+            if let Some(cert) = &certificate {
+                if let Err(e) = store.save_cert(cert) { failures.push(format!("恢复证书记录：{e}")); }
+            }
+        }
+        if hosts_changed {
+            if remove_hosts {
+                if let Err(e) = crate::hosts::apply(store, paths, None) { failures.push(format!("恢复 hosts：{e}")); }
+            } else if let Err(e) = crate::hosts::set_extra_entries(store, &previous_hosts) {
+                failures.push(format!("恢复 hosts 选项：{e}"));
+            }
+        }
+        if web_changed && failures.is_empty() {
+            if let Err(e) = crate::ops::rebuild_and_reload(store, paths, manager) {
+                failures.push(format!("恢复 Web 配置：{e}"));
+            }
+            for server in running {
+                if let Err(e) = crate::ops::start_service(store, paths, manager, server) {
+                    failures.push(format!("恢复 {server}：{e}"));
+                }
+            }
+        }
+        if !failures.is_empty() {
+            let recovery = staging.keep();
+            return Err(AppError::new("SITE_DELETE_ROLLBACK_FAILED", "删除未完成，部分站点状态未能恢复")
+                .with_hint(format!("请勿删除恢复目录 {}；查看错误详情后恢复原配置。", recovery.display()))
+                .with_detail(format!("{}；{}；文件映射：{moved:?}", error.message, failures.join("；"))));
+        }
+        let hint = error.hint.clone().unwrap_or_default();
+        return Err(error.with_hint(format!("删除未完成，原站点配置已恢复。{hint}")));
     }
-    store.delete_site(id)?;
-    if remove_hosts {
-        let _ = crate::hosts::apply(store, paths, None);
-    }
-    crate::ops::rebuild_and_reload(store, paths, manager)?;
+    let staging_path = staging.path().to_path_buf();
+    staging.close().map_err(|e| AppError::new("SITE_DELETE_CLEANUP_FAILED", "站点已删除，但暂存文件清理失败")
+        .with_hint(format!("无需再次删除站点。请检查并清理暂存目录 {}。", staging_path.display()))
+        .with_detail(e.to_string()))?;
     Ok(())
 }
 
@@ -2332,6 +2439,111 @@ mod scaffold_tests {
         };
         store.save_site(&site).unwrap();
         site
+    }
+
+    #[test]
+    fn delete_site_preserves_project_alias_certificate_and_retained_hosts() {
+        let temp = Tmp::new("delete-site");
+        let paths = Paths::new(temp.0.clone());
+        paths.ensure_dirs().unwrap();
+        let store = Store::open(paths.db()).unwrap();
+        let mut site = saved_site(&paths, &store);
+        site.domains.push("alias.test".into());
+        store.save_site(&site).unwrap();
+        let cert = crate::tls::issue_site_cert(&paths, &store, &site.domains).unwrap();
+        let alias = crate::tls::issue_site_cert(&paths, &store, &["alias.test".into()]).unwrap();
+        let project = paths.base.join("index.php");
+        std::fs::write(&project, "project stays").unwrap();
+        write_site_conf_state(&paths, &store, &site, false).unwrap();
+        delete(&site.id, false, true, &paths, &store, &Arc::new(ServiceManager::new())).unwrap();
+        assert!(store.list_sites().unwrap().is_empty());
+        assert!(!paths.nginx_sites_dir().join(format!("{}.conf.disabled", site.id)).exists());
+        assert_eq!(std::fs::read_to_string(project).unwrap(), "project stays");
+        assert!(!std::path::Path::new(&cert.cert_path).exists());
+        assert!(!std::path::Path::new(cert.key_path.as_ref().unwrap()).exists());
+        assert!(std::path::Path::new(&alias.cert_path).is_file());
+        assert_eq!(store.list_certs().unwrap().len(), 1);
+        let retained = crate::hosts::managed_entries(&store);
+        assert!(site.domains.iter().all(|domain| retained.contains(&("127.0.0.1".into(), domain.clone()))));
+    }
+
+    #[test]
+    fn delete_site_restores_moved_config_on_file_failure() {
+        let temp = Tmp::new("delete-file-failure");
+        let paths = Paths::new(temp.0.clone());
+        paths.ensure_dirs().unwrap();
+        let store = Store::open(paths.db()).unwrap();
+        let site = saved_site(&paths, &store);
+        let config = paths.nginx_sites_dir().join(format!("{}.conf", site.id));
+        std::fs::write(&config, "original config").unwrap();
+        // 第一个文件已经移动后，后续配置路径不是普通文件，必须恢复已移动的文件。
+        std::fs::create_dir(paths.apache_sites_dir().join(format!("{}.conf", site.id))).unwrap();
+        let error = delete(&site.id, false, false, &paths, &store, &Arc::new(ServiceManager::new())).unwrap_err();
+        assert_eq!(error.code, "SITE_FILE_INVALID");
+        assert_eq!(std::fs::read_to_string(config).unwrap(), "original config");
+        assert_eq!(get(&store, &site.id).unwrap().domains, site.domains);
+        assert!(crate::hosts::extra_entries(&store).is_empty());
+    }
+
+    #[test]
+    fn delete_site_restores_records_certificates_and_hosts_after_config_failure() {
+        let temp = Tmp::new("delete-config-failure");
+        let paths = Paths::new(temp.0.clone());
+        paths.ensure_dirs().unwrap();
+        let store = Store::open(paths.db()).unwrap();
+        let site = saved_site(&paths, &store);
+        let cert = crate::tls::issue_site_cert(&paths, &store, &site.domains).unwrap();
+        let original_cert = std::fs::read(&cert.cert_path).unwrap();
+        write_site_conf_state(&paths, &store, &site, false).unwrap();
+        let runtime = paths.runtime_dir("nginx", "1.0");
+        let root = runtime.join("nginx-1.0");
+        std::fs::create_dir_all(&root).unwrap();
+        // 只让入口解析命中；服务未注册，不会执行此文件或启动任何服务。
+        std::fs::write(root.join(if cfg!(windows) { "nginx.exe" } else { "nginx" }), b"fixture").unwrap();
+        store.upsert_installed(&crate::model::InstalledPackage {
+            id: "nginx".into(), version: "1.0".into(), category: "web-server".into(),
+            install_path: runtime.to_string_lossy().into(), config_path: String::new(), installed_at: 1,
+        }).unwrap();
+        std::fs::create_dir(paths.nginx_conf()).unwrap();
+        let error = delete(&site.id, false, true, &paths, &store, &Arc::new(ServiceManager::new())).unwrap_err();
+        assert_eq!(error.code, "SITE_DELETE_ROLLBACK_FAILED");
+        assert!(error.detail.unwrap().contains("恢复 Web 配置"));
+        assert_eq!(get(&store, &site.id).unwrap().domains, site.domains);
+        assert!(paths.nginx_sites_dir().join(format!("{}.conf.disabled", site.id)).is_file());
+        assert_eq!(std::fs::read(&cert.cert_path).unwrap(), original_cert);
+        assert!(store.list_certs().unwrap().iter().any(|c| c.id == cert.id));
+        assert!(crate::hosts::extra_entries(&store).is_empty());
+    }
+
+    #[test]
+    fn delete_site_keeps_imported_acme_and_shared_local_certificates() {
+        for mode in ["imported", "acme", "shared"] {
+            let temp = Tmp::new(&format!("delete-keeps-{mode}"));
+            let paths = Paths::new(temp.0.clone());
+            paths.ensure_dirs().unwrap();
+            let store = Store::open(paths.db()).unwrap();
+            let mut site = saved_site(&paths, &store);
+            let mut cert = crate::tls::issue_site_cert(&paths, &store, &site.domains).unwrap();
+            match mode {
+                "imported" => {
+                    site.runtime.imported_cert_id = Some("external".into());
+                    store.save_site(&site).unwrap();
+                }
+                "acme" => {
+                    store.delete_cert(&cert.id).unwrap();
+                    cert.kind = "acme".into();
+                    store.save_cert(&cert).unwrap();
+                }
+                _ => {
+                    let mut other = site.clone();
+                    other.id = "other-site".into();
+                    store.save_site(&other).unwrap();
+                }
+            }
+            delete(&site.id, false, true, &paths, &store, &Arc::new(ServiceManager::new())).unwrap();
+            assert!(std::path::Path::new(&cert.cert_path).is_file(), "{mode}");
+            assert!(store.list_certs().unwrap().iter().any(|c| c.id == cert.id), "{mode}");
+        }
     }
 
     #[test]

@@ -59,7 +59,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.11";
+const MOCK_APP_VERSION = "0.2.12";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -985,7 +985,20 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "delete_site": {
       const id = args!.id as string;
       const s = sites.get(id);
-      s?.domains.forEach((d) => hostsManaged.delete(d));
+      if (!s) throw { code: "SITE_NOT_FOUND", message: "站点不存在" };
+      const others = Array.from(sites.values()).filter((site) => site.id !== id);
+      if (args?.hosts !== false) {
+        s.domains.forEach((domain) => {
+          if (!others.some((site) => site.domains.includes(domain))) hostsManaged.delete(domain);
+        });
+      }
+      if (args?.certs !== false && !s.runtime.importedCertId) {
+        const cert = Array.from(certs.values()).find((cert) => cert.kind === "site" && cert.subject === s.domains[0]);
+        if (cert && !others.some((site) => !site.runtime.importedCertId && site.domains[0] === cert.subject)
+          && !Array.from(certAutos.values()).some((automation) => automation.domains[0] === cert.subject)) {
+          certs.delete(cert.id);
+        }
+      }
       sites.delete(id);
       return true as T;
     }

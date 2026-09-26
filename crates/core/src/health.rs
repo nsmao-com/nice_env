@@ -387,15 +387,15 @@ fn check_sites(r: &mut HealthReport, sites: &[Site], installed: &[InstalledPacka
 }
 
 #[derive(Debug)]
-struct PortTarget {
-    service_id: String,
-    label: String,
-    port: u16,
-    running: bool,
-    pids: Vec<u32>,
+pub(crate) struct PortTarget {
+    pub(crate) service_id: String,
+    pub(crate) label: String,
+    pub(crate) port: u16,
+    pub(crate) running: bool,
+    pub(crate) pids: Vec<u32>,
 }
 
-fn port_targets(
+pub(crate) fn port_targets(
     store: &crate::store::Store,
     services: &[ServiceStatus],
 ) -> Result<Vec<PortTarget>> {
@@ -447,13 +447,13 @@ fn port_targets(
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum Ownership {
+pub(crate) enum Ownership {
     Own,
     Other,
     Unknown,
 }
 
-fn ownership(mut pid: u32, roots: &[u32], parents: &HashMap<u32, (u32, String)>) -> Ownership {
+pub(crate) fn ownership(mut pid: u32, roots: &[u32], parents: &HashMap<u32, (u32, String)>) -> Ownership {
     let mut visited = HashSet::new();
     for _ in 0..128 {
         if pid != 0 && roots.contains(&pid) {

@@ -28,7 +28,7 @@ export function ServiceRow({ service }: { service: ServiceStatus }) {
   const error = service.state === "error";
   const conflict =
     service.lastError?.code === "PORT_IN_USE" && service.lastError.port != null
-      ? { port: service.lastError.port, holder: service.lastError.holder }
+      ? { port: service.lastError.port, pid: service.lastError.pid, holder: service.lastError.holder }
       : null;
 
   const toggle = async (next: boolean) => {
@@ -129,7 +129,7 @@ export function ServiceRow({ service }: { service: ServiceStatus }) {
             onClick={async () => {
               setBusy(true);
               try {
-                await api.closePort(conflict.port);
+                await api.resolvePortConflict(conflict.port, conflict.pid);
                 await api.startService(service.id);
               } catch (e) {
                 toastError(e);

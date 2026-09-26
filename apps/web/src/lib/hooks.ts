@@ -228,12 +228,14 @@ export function toastPortConflict(
               resolving = true;
               const pending = toast.loading(`正在释放端口 ${port}…`);
               try {
-                await api.closePort(port);
+                await api.resolvePortConflict(port, err.pid);
                 toast.success(`端口 ${port} 已释放`, { id: pending });
                 await opts.onResolved?.();
               } catch (e2) {
                 toast.dismiss(pending);
                 toastError(e2, "端口处理或重试失败");
+              } finally {
+                resolving = false;
               }
             },
           }

@@ -725,8 +725,10 @@ pub struct PortScanEntry {
     pub cmdline: Option<String>,
     /// 该服务当前是否处于运行态
     pub running: bool,
-    /// 结论：free（空闲）/ self（自己的服务）/ conflict（被他人占用）
+    /// free / self / conflict / missing（运行但无监听）/ unknown（归属未确认）
     pub verdict: String,
+    pub detail: String,
+    pub listener_count: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -868,9 +870,17 @@ pub struct ListenerInfo {
     /// 属于本应用时对应的服务 id
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_id: Option<String>,
+    /// 用于操作前核对 PID 是否已经被另一个进程复用。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_started_at: Option<u64>,
+    /// self / external / unknown；无法确认归属时不能结束进程。
+    pub ownership: String,
+    pub can_close: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub close_reason: Option<String>,
 }
 
-/// 端口范围内的扫描结果（含每个端口一条，空闲端口 pid=0 不返回）
+/// 端口范围内的扫描结果（每个不同的端口和 PID 一条，未监听端口不返回）
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct PortRangeScan {

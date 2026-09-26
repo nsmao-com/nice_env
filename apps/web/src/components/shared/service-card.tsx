@@ -31,7 +31,7 @@ export function ServiceCard({ service }: { service: ServiceStatus }) {
   /** 端口冲突时后端会带上端口与占用 pid：卡片上直接给「结束占用并重试」 */
   const conflict =
     service.lastError?.code === "PORT_IN_USE" && service.lastError.port != null
-      ? { port: service.lastError.port, holder: service.lastError.holder }
+      ? { port: service.lastError.port, pid: service.lastError.pid, holder: service.lastError.holder }
       : null;
 
   const toggle = async (next: boolean) => {
@@ -203,7 +203,7 @@ export function ServiceCard({ service }: { service: ServiceStatus }) {
                 onClick={async () => {
                   setBusy(true);
                   try {
-                    await api.closePort(conflict.port);
+                    await api.resolvePortConflict(conflict.port, conflict.pid);
                     toast.success(`${t("tools.portFreed")} :${conflict.port}`);
                     // 端点已经释放，直接把服务拉起来
                     await api.startService(service.id);

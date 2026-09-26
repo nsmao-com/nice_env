@@ -6,6 +6,7 @@ import type {
   PortDiagnosis,
   PortScanEntry,
   PortRangeScan,
+  ListenerInfo,
   ClosePortOutcome,
   Stack,
   StackInput,
@@ -183,9 +184,17 @@ export const scanPorts = () => safe(invoke<PortScanEntry[]>("scan_ports"));
 export const scanPortRange = (from: number, to: number) =>
   safe(invoke<PortRangeScan>("scan_port_range", { from, to }));
 /** 结束占用某端口的进程：本应用服务走优雅停止，外部进程直接结束 */
-export const closePort = (port: number) =>
-  safe(invoke<ClosePortOutcome>("close_port", { port }));
-export const killPid = (pid: number) => safe(invoke<boolean>("kill_pid", { pid }));
+export const closePort = (port: number, expected: ListenerInfo[]) =>
+  safe(invoke<ClosePortOutcome>("close_port", { port, expected }));
+/** 启动冲突恢复也必须重新核对原占用者，并在确认无监听之后才能重试启动。 */
+export async function resolvePortConflict(port: number, pid?: number) {
+  const scan = await scanPortRange(port, port);
+  const targets = scan.listeners.filter((row) => row.pid === pid);
+  if (scan.listeners.length && !targets.length) throw { code: "PORT_TARGET_CHANGED", message: "端口占用者已变化或未记录，请到工具箱重新确认" };
+  const outcome = await closePort(port, targets);
+  if (!outcome.portFree || outcome.errors.length) throw { code: "PORT_NOT_FREED", message: outcome.errors.join("；") || `端口 ${port} 仍有监听者，请到工具箱检查` };
+  return outcome;
+}
 
 /* 备份（配置变更前自动生成的 .bak） */
 export interface BackupFile {

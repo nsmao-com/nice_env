@@ -456,6 +456,10 @@ export const ListenerInfo = z.object({
   cmdline: z.string().optional(),
   ownedBySelf: z.boolean().default(false),
   serviceId: z.string().optional(),
+  processStartedAt: z.number().optional(),
+  ownership: z.enum(["self", "external", "unknown"]),
+  canClose: z.boolean(),
+  closeReason: z.string().optional(),
 });
 export type ListenerInfo = z.infer<typeof ListenerInfo>;
 
@@ -474,6 +478,9 @@ export const ClosePortOutcome = z.object({
   graceful: z.boolean(),
   serviceId: z.string().optional(),
   killedPids: z.array(z.number()).default([]),
+  portFree: z.boolean(),
+  remaining: z.array(ListenerInfo),
+  errors: z.array(z.string()),
 });
 export type ClosePortOutcome = z.infer<typeof ClosePortOutcome>;
 
@@ -539,7 +546,9 @@ export const PortScanEntry = z.object({
   cmdline: z.string().optional(),
   running: z.boolean(),
   /** free（空闲）/ self（自己的服务在跑）/ conflict（被他人占用） */
-  verdict: z.enum(["free", "self", "conflict"]),
+  verdict: z.enum(["free", "self", "conflict", "missing", "unknown"]),
+  detail: z.string(),
+  listenerCount: z.number(),
 });
 export type PortScanEntry = z.infer<typeof PortScanEntry>;
 

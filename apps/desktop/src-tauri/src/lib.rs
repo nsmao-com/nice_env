@@ -228,7 +228,6 @@ pub fn run() {
             scan_ports,
             scan_port_range,
             close_port,
-            kill_pid,
             get_system_stats,
             list_backups,
             preview_backup,
@@ -619,7 +618,7 @@ fn free_ports_for(state: &std::sync::Arc<nsb_core::CoreState>, service_id: &str)
     let mut freed = Vec::new();
     for port in ports_of_service(state, service_id) {
         if nsb_core::services::tcp_port_open(port) {
-            if state.close_port(port).is_ok() {
+            if state.close_port(port).is_ok_and(|outcome| outcome.port_free && outcome.errors.is_empty()) {
                 freed.push(port);
             }
         }
@@ -1078,29 +1077,31 @@ async fn tail_logs(
 }
 
 #[tauri::command]
-fn diagnose_port(port: u16) -> Result<nsb_core::model::PortDiagnosis, tauri::Error> {
-    map_jh(nsb_core::ports::diagnose_port(port))
+async fn diagnose_port(port: u16) -> Result<nsb_core::model::PortDiagnosis, tauri::Error> {
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::ports::diagnose_port(port)))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /// 全量端口体检：本应用所有待绑定端口 vs 实际占用者
 #[tauri::command]
-fn scan_ports(
+async fn scan_ports(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<Vec<nsb_core::model::PortScanEntry>, tauri::Error> {
-    map_jh(nsb_core::ports::scan_app_ports(
-        &state.store,
-        &state.manager,
-    ))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::ports::scan_app_ports(&st.store, &st.manager)))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /// 端口区间扫描（工具箱）：from == to 即单端口查询，返回占用者与归属
 #[tauri::command]
-fn scan_port_range(
+async fn scan_port_range(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     from: u16,
     to: u16,
 ) -> Result<nsb_core::model::PortRangeScan, tauri::Error> {
-    map_jh(state.scan_port_range(from, to))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.scan_port_range(from, to)))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /// 结束占用某端口的进程：本应用服务走优雅停止，外部进程直接 kill。
@@ -1110,9 +1111,10 @@ async fn close_port(
     app: tauri::AppHandle,
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     port: u16,
+    expected: Vec<nsb_core::model::ListenerInfo>,
 ) -> Result<nsb_core::ports::ClosePortOutcome, tauri::Error> {
     let st = state.inner().clone();
-    let outcome = tauri::async_runtime::spawn_blocking(move || map_jh(st.close_port(port)))
+    let outcome = tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::ports::close_port_checked(&st.store, &st.paths, &st.manager, port, &expected)))
         .await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))??;
     crate::tray::refresh(&app);
@@ -1159,11 +1161,6 @@ async fn restore_backup(
     })
     .await
     .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
-}
-
-#[tauri::command]
-fn kill_pid(pid: u32) -> Result<bool, tauri::Error> {
-    map_jh(nsb_core::ports::kill_pid(pid))
 }
 
 #[tauri::command]

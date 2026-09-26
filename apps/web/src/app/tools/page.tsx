@@ -18,7 +18,7 @@ import {
   Stethoscope,
   RefreshCw,
 } from "lucide-react";
-import type { ListenerInfo, PortDiagnosis, PortScanEntry , HostsEntry, ConfigFileInfo } from "@nsb/schema";
+import type { ListenerInfo, PortRangeScan, ClosePortOutcome, HostsEntry, ConfigFileInfo } from "@nsb/schema";
 import { HostsEntry as HostsEntrySchema } from "@nsb/schema";
 import { useUI, useT } from "@/lib/store";
 import { useHosts, useInvalidate, toastError, useSettings, useSites, useServices, copyText } from "@/lib/hooks";
@@ -50,6 +50,8 @@ const COMMON_PORTS = [80, 443, 8080, 8443, 3306, 23306, 6379, 26379, 9000, 5432]
 
 export default function ToolsPage() {
   const t = useT();
+  const [portRequest, setPortRequest] = React.useState<{ port: number; at: number } | null>(null);
+  const inspectPort = (port: number) => { setPortRequest({ port, at: Date.now() }); document.getElementById("nsb-tool-ports")?.scrollIntoView({ block: "start", behavior: "smooth" }); };
   const pendingTool = useUI((st) => st.pendingTool);
   const consumeTool = useUI((st) => st.consumeTool);
 
@@ -69,10 +71,10 @@ export default function ToolsPage() {
     <div className="pb-8">
       <PageHeaderInline title={t("tools.title")} subtitle={t("tools.subtitle")} />
       <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
-        <PortLookupTool />
+        <div id="nsb-tool-ports" className="min-w-0 scroll-mt-6"><PortLookupTool request={portRequest} /></div>
         <DnsTool />
         <HostsTool />
-        <PortTool />
+        <PortTool onInspect={inspectPort} />
         <div id="nsb-tool-pathenv" className="min-w-0 scroll-mt-6"><PathEnvCard /></div>
         <TerminalInjectTool />
         <RewriteTemplates />
@@ -359,416 +361,150 @@ function HostsTool() {
 
 
 /* ============ 端口查询 / 结束进程 ============ */
-function PortLookupTool() {
+function PortLookupTool({ request }: { request: { port: number; at: number } | null }) {
   const t = useT();
+  const qc = useQueryClient();
+  const [mode, setMode] = React.useState<"single" | "range">("single");
   const [port, setPort] = React.useState("");
   const [range, setRange] = React.useState({ from: "", to: "" });
-  const [busy, setBusy] = React.useState(false);
-  const [rows, setRows] = React.useState<ListenerInfo[]>([]);
-  const [scanned, setScanned] = React.useState<string>("");
+  const [report, setReport] = React.useState<PortRangeScan | null>(null);
+  const [inputError, setInputError] = React.useState("");
+  const [outcome, setOutcome] = React.useState<ClosePortOutcome | null>(null);
   const [confirmTarget, setConfirmTarget] = React.useState<ListenerInfo | null>(null);
-  const invalidate = useInvalidate();
+  const action = React.useRef(false);
+  const inputRef = React.useRef<HTMLInputElement>(null);
+  const closeTrigger = React.useRef<HTMLButtonElement | null>(null);
+  const scanButtonRef = React.useRef<HTMLButtonElement>(null);
   const { data: settings } = useSettings();
-  const confirmKill = settings?.confirmKill ?? true;
-
-  const scan = React.useCallback(
-    async (from: number, to: number) => {
-      setBusy(true);
-      try {
-        const r = await api.scanPortRange(from, to);
-        setRows(r.listeners);
-        setScanned(from === to ? `:${from}` : `${from}–${to}`);
-      } catch (e) {
-        toastError(e);
-      } finally {
-        setBusy(false);
-      }
+  const busy = useIsMutating({ mutationKey: ["ports"] }) > 0;
+  const scan = useMutation({
+    mutationKey: ["ports", "lookup"], networkMode: "always",
+    mutationFn: ({ from, to }: { from: number; to: number }) => api.scanPortRange(from, to),
+    onSuccess: (data) => { setReport(data); setOutcome(null); close.reset(); },
+    onSettled: () => { action.current = false; },
+  });
+  const close = useMutation({
+    mutationKey: ["ports", "close"], networkMode: "always",
+    mutationFn: (row: ListenerInfo) => api.closePort(row.port, [row]),
+    onSuccess: (data) => {
+      setOutcome(data); setConfirmTarget(null);
+      setReport((previous) => previous ? { ...previous, listeners: [...previous.listeners.filter((row) => row.port !== data.port), ...data.remaining].sort((a, b) => a.port - b.port || a.pid - b.pid) } : previous);
     },
-    []
-  );
-
-  /** 结束占用者：本应用服务会被优雅停止，外部进程直接被结束 */
-  const closePort = async (row: ListenerInfo) => {
-    setBusy(true);
-    try {
-      const outcome = await api.closePort(row.port);
-      if (outcome.graceful) {
-        toast.success(`${t("tools.portFreedService")} ${outcome.serviceId ?? row.serviceId ?? ""}`.trim());
-      } else {
-        toast.success(
-          `${t("tools.killedP1")} ${row.processName ?? "PID " + row.pid} ${t("tools.killedP2")}`,
-          { description: `:${row.port} ${t("tools.portFreed")}` }
-        );
-      }
-      invalidate("services");
-      setConfirmTarget(null);
-      // 重新扫一遍确认端口真的空出来了
-      const r = await api.scanPortRange(row.port, row.port);
-      setRows((prev) => [...prev.filter((p) => p.port !== row.port), ...r.listeners]);
-    } catch (e) {
-      toastError(e);
-    } finally {
-      setBusy(false);
+    onSettled: () => { action.current = false; void qc.invalidateQueries({ queryKey: ["services"] }); void qc.invalidateQueries({ queryKey: ["ports", "app"] }); },
+  });
+  const runScan = (fromText: string, toText = fromText) => {
+    if (action.current || busy) return;
+    const from = Number(fromText); const to = Number(toText);
+    if (![fromText, toText].every((text) => /^\d+$/.test(text)) || ![from, to].every((n) => Number.isInteger(n) && n >= 1 && n <= 65535)) {
+      setInputError(t("tools.portValid")); return;
     }
+    setInputError(""); action.current = true;
+    scan.mutate({ from: Math.min(from, to), to: Math.max(from, to) });
   };
-
-  const doKill = (row: ListenerInfo) => {
-    if (!confirmKill) {
-      void closePort(row);
-      return;
-    }
-    setConfirmTarget(row);
+  const requested = React.useRef(request);
+  React.useEffect(() => {
+    if (!request || request === requested.current || busy) return;
+    requested.current = request;
+    setMode("single"); setPort(String(request.port)); setInputError("");
+    action.current = true; scan.mutate({ from: request.port, to: request.port });
+    inputRef.current?.focus({ preventScroll: true });
+  }, [request, busy, scan.mutate]);
+  const doClose = (row: ListenerInfo) => {
+    if (busy || action.current || !row.canClose) return;
+    action.current = true; close.mutate(row);
   };
-
-  return (
-    <>
-      <ToolCard icon={Power} title={t("tools.portLookup")} hint={t("tools.portLookupHint")}>
-        <div className="flex flex-col gap-3">
-          <div className="flex flex-wrap items-end gap-2">
-            <div className="flex flex-1 flex-col gap-1">
-              <label className="text-[10.5px] text-faint">{t("tools.portSingle")}</label>
-              <Input
-                value={port}
-                onChange={(e) => setPort(e.target.value.replace(/[^\d]/g, ""))}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && port) scan(Number(port), Number(port));
-                }}
-                placeholder="3000"
-                className="h-8 w-28 font-mono text-[12px]"
-              />
+  const error = scan.error || close.error;
+  const details = error ? normalizeError(error) : null;
+  const hasFailure = !!details;
+  const submit = () => mode === "single" ? runScan(port) : runScan(range.from, range.to || range.from);
+  return <>
+    <ToolCard icon={Power} title={t("tools.portLookup")} hint={t("tools.portLookupHint")}>
+      <div className="min-w-0 space-y-3" aria-busy={busy}>
+        <p className="text-[11px] leading-relaxed text-muted">{t("tools.portTcpScope")}</p>
+        {!isTauri && <p className="rounded-md bg-warn/10 p-2 text-[11px] text-warn">{t("tools.portDemo")}</p>}
+        <Tabs value={mode} onValueChange={(value) => setMode(value as "single" | "range")}>
+          <TabsList><TabsTrigger value="single">{t("tools.portSingle")}</TabsTrigger><TabsTrigger value="range">{t("tools.portRange")}</TabsTrigger></TabsList>
+        </Tabs>
+        <form className="flex min-w-0 flex-wrap items-end gap-2" onSubmit={(event) => { event.preventDefault(); submit(); }}>
+          {mode === "single" ? <div className="min-w-0 flex-1 space-y-1">
+            <Label htmlFor="port-lookup-single">{t("tools.portSingle")}</Label>
+            <Input id="port-lookup-single" ref={inputRef} inputMode="numeric" value={port} onChange={(e) => setPort(e.target.value)} placeholder="3000" className="font-mono" aria-invalid={!!inputError} aria-describedby={inputError ? "port-input-error" : undefined} />
+          </div> : <div className="flex min-w-0 flex-1 gap-2">
+            <div className="min-w-0 flex-1 space-y-1"><Label htmlFor="port-range-from">{t("tools.portFrom")}</Label><Input id="port-range-from" inputMode="numeric" value={range.from} onChange={(e) => setRange({ ...range, from: e.target.value })} placeholder="8000" className="font-mono" /></div>
+            <div className="min-w-0 flex-1 space-y-1"><Label htmlFor="port-range-to">{t("tools.portTo")}</Label><Input id="port-range-to" inputMode="numeric" value={range.to} onChange={(e) => setRange({ ...range, to: e.target.value })} placeholder="8100" className="font-mono" /></div>
+          </div>}
+          <Button ref={scanButtonRef} type="submit" variant="secondary" disabled={busy}>{scan.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" /> : <Search className="h-3.5 w-3.5" />}{t("tools.scan")}</Button>
+        </form>
+        {inputError && <p id="port-input-error" role="alert" className="text-xs text-error">{inputError}</p>}
+        <div className="flex flex-wrap gap-1">{COMMON_PORTS.map((value) => <button key={value} type="button" disabled={busy} onClick={() => { setMode("single"); setPort(String(value)); runScan(String(value)); }} className="min-h-8 rounded-md bg-fill px-2 font-mono text-[11px] text-muted hover:text-foreground disabled:opacity-50">{value}</button>)}</div>
+        {details && <div role="alert" className="space-y-1 rounded-lg border border-error/30 p-3 text-xs text-error [overflow-wrap:anywhere]"><p>{details.message}</p>{details.hint && <p>{details.hint}</p>}{report && <p>{t("tools.portPrevious")}</p>}<Button variant="ghost" size="sm" disabled={busy} onClick={() => report ? runScan(String(report.from), String(report.to)) : submit()}>{t("tools.refresh")}</Button></div>}
+        {outcome && <div role="status" className={cn("rounded-lg border p-3 text-xs [overflow-wrap:anywhere]", outcome.portFree && !outcome.errors.length ? "border-success/30 text-success" : "border-warn/30 text-warn")}>
+          <p>{outcome.portFree ? t("tools.portFreed") : t("tools.portStillBusy")} · :{outcome.port}</p>
+          <p className="mt-1">{t("tools.portProcessed").replace("{count}", String(outcome.killedPids.length)).replace("{remaining}", String(outcome.remaining.length))}</p>
+          <p className="mt-1">{t("tools.portOutcomeScope")}</p>
+          {outcome.errors.map((message, index) => <p className="mt-1" key={index}>{message}</p>)}
+        </div>}
+        {scan.isPending && <p role="status" className="text-xs text-muted">{t("tools.scanning")}{report ? ` · ${t("tools.portPrevious")}` : ""}</p>}
+        <div className="max-h-80 overflow-y-auto rounded-lg bg-fill px-3">
+          {!report ? <p className="py-5 text-center text-xs text-muted">{t(scan.isPending ? "tools.scanning" : "tools.portLookupIdle")}</p> : report.listeners.length === 0 ? <p className="py-5 text-center text-xs text-muted">{t("tools.portLookupEmpty")}</p> : report.listeners.map((row) => <div key={`${row.port}-${row.pid}`} className="space-y-2 border-b border-dashed border-border py-3 last:border-0">
+            <div className="flex min-w-0 flex-col items-start gap-2 sm:flex-row sm:justify-between">
+              <div className="min-w-0 flex-1 [overflow-wrap:anywhere]"><p className="text-xs font-medium"><code>:{row.port}</code> · {row.processName || t("tools.unknown")}</p><p className="mt-1 text-[11px] text-muted">PID {row.pid} · {t(`tools.portOwner.${row.ownership}`)}{row.serviceId ? ` · ${row.serviceId}` : ""}</p></div>
+              <Button size="sm" variant="ghost" className="h-auto min-h-8 whitespace-normal text-error" disabled={busy || hasFailure || !row.canClose} onClick={(event) => { closeTrigger.current = event.currentTarget; close.reset(); if (settings?.confirmKill === false) doClose(row); else setConfirmTarget(row); }}>{row.ownedBySelf ? t("tools.stopService") : t("tools.endProcess")}</Button>
             </div>
-            <div className="flex flex-1 flex-col gap-1">
-              <label className="text-[10.5px] text-faint">{t("tools.portRange")}</label>
-              <div className="flex items-center gap-1">
-                <Input
-                  value={range.from}
-                  onChange={(e) => setRange({ ...range, from: e.target.value.replace(/[^\d]/g, "") })}
-                  placeholder="8000"
-                  className="h-8 w-20 font-mono text-[12px]"
-                />
-                <span className="text-faint">–</span>
-                <Input
-                  value={range.to}
-                  onChange={(e) => setRange({ ...range, to: e.target.value.replace(/[^\d]/g, "") })}
-                  placeholder="8100"
-                  className="h-8 w-20 font-mono text-[12px]"
-                />
-              </div>
-            </div>
-            <Button
-              variant="secondary"
-              size="sm"
-              className="h-8"
-              disabled={busy}
-              onClick={() => {
-                if (port) {
-                  scan(Number(port), Number(port));
-                  return;
-                }
-                const from = Number(range.from);
-                const to = Number(range.to) || from;
-                if (!from) {
-                  toast.error(t("tools.portInputHint"));
-                  return;
-                }
-                scan(Math.min(from, to), Math.max(from, to));
-              }}
-            >
-              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
-              {t("tools.scan")}
-            </Button>
-          </div>
-
-          {/* 常用端口快捷入口 */}
-          <div className="flex flex-wrap gap-1">
-            {COMMON_PORTS.map((p) => (
-              <button
-                key={p}
-                type="button"
-                onClick={() => {
-                  setPort(String(p));
-                  scan(p, p);
-                }}
-                className="rounded-md bg-fill px-1.5 py-0.5 font-mono text-[10.5px] text-faint transition-colors hover:border-border-strong hover:text-secondary"
-              >
-                {p}
-              </button>
-            ))}
-          </div>
-
-          <div className="max-h-64 overflow-y-auto rounded-md bg-fill">
-            {rows.length === 0 ? (
-              <p className="px-3 py-5 text-center text-[11px] text-faint">
-                {busy ? t("tools.scanning") : scanned ? t("tools.portLookupEmpty") : t("tools.portLookupIdle")}
-              </p>
-            ) : (
-              rows.map((r) => (
-                <div
-                  key={`${r.port}-${r.pid}`}
-                  className="flex items-center gap-2 border-b border-border/60 px-3 py-2 last:border-0"
-                >
-                  <span className={cn("h-2 w-2 shrink-0 rounded-full", r.ownedBySelf ? "bg-success" : "bg-error")} />
-                  <code className="w-16 shrink-0 font-mono text-[11.5px]">:{r.port}</code>
-                  <span className="min-w-0 flex-1 truncate text-[11.5px]">
-                    <b className={r.ownedBySelf ? "text-secondary" : "text-error"}>
-                      {r.processName ?? t("tools.unknown")}
-                    </b>
-                    <span className="text-faint"> (PID {r.pid})</span>
-                    {r.ownedBySelf && r.serviceId && (
-                      <span className="text-success"> · {t("tools.portSelf")} {r.serviceId}</span>
-                    )}
-                    {r.cmdline && <span className="mt-0.5 block truncate text-[10.5px] text-faint">{r.cmdline}</span>}
-                  </span>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="shrink-0 text-error hover:text-error"
-                    disabled={busy}
-                    onClick={() => doKill(r)}
-                  >
-                    {r.ownedBySelf ? t("tools.stopService") : t("tools.endProcess")}
-                  </Button>
-                </div>
-              ))
-            )}
-          </div>
-          {scanned && rows.length > 0 && (
-            <p className="text-[10.5px] text-faint">
-              {scanned} · {rows.length} {t("tools.listeners")}
-            </p>
-          )}
+            {row.cmdline && <details className="text-[11px] text-muted"><summary className="cursor-pointer">{t("tools.portCommand")}</summary><pre className="mt-1 whitespace-pre-wrap font-mono [overflow-wrap:anywhere]">{row.cmdline}</pre></details>}
+            {row.closeReason && <p className="text-[11px] text-warn [overflow-wrap:anywhere]">{row.closeReason}</p>}
+          </div>)}
         </div>
-      </ToolCard>
-
-      <ConfirmDialog
-        open={confirmTarget !== null}
-        onOpenChange={(open) => !open && setConfirmTarget(null)}
-        title={
-          confirmTarget?.ownedBySelf
-            ? `${t("tools.stopService")} · ${confirmTarget.serviceId ?? ""}`
-            : `${t("tools.endProcess")} · ${confirmTarget?.processName ?? ""}`
-        }
-        description={
-          confirmTarget?.ownedBySelf
-            ? t("tools.stopServiceConfirm")
-            : t("tools.killConfirm")
-        }
-        danger={!confirmTarget?.ownedBySelf}
-        loading={busy}
-        confirmText={confirmTarget?.ownedBySelf ? t("common.stop") : t("tools.endProcess")}
-        onConfirm={() => confirmTarget && closePort(confirmTarget)}
-      />
-    </>
-  );
+        {report && <p className="text-[10.5px] leading-relaxed text-muted">:{report.from}{report.to !== report.from ? `–${report.to}` : ""} · {report.listeners.length} {t("tools.listeners")} · <time dateTime={new Date(report.scannedAt).toISOString()}>{new Date(report.scannedAt).toLocaleString()}</time></p>}
+      </div>
+    </ToolCard>
+    <ConfirmDialog open={!!confirmTarget} onCloseAutoFocus={(event) => { event.preventDefault(); (closeTrigger.current?.isConnected ? closeTrigger.current : scanButtonRef.current)?.focus(); }} onOpenChange={(open) => { if (!open && !close.isPending) setConfirmTarget(null); }} title={confirmTarget?.ownedBySelf ? t("tools.stopService") : t("tools.endProcess")} description={confirmTarget?.ownedBySelf ? t("tools.stopServiceConfirm") : t("tools.killConfirm")} danger={!confirmTarget?.ownedBySelf} loading={close.isPending} confirmDisabled={busy && !close.isPending} confirmText={confirmTarget?.ownedBySelf ? t("common.stop") : t("tools.endProcess")} onConfirm={() => { if (confirmTarget) doClose(confirmTarget); }}>
+      {confirmTarget && <p className="text-xs [overflow-wrap:anywhere]">:{confirmTarget.port} · {confirmTarget.processName || t("tools.unknown")} · PID {confirmTarget.pid}{confirmTarget.serviceId ? ` · ${confirmTarget.serviceId}` : ""}</p>}
+      {close.error && <p role="alert" className="mt-2 text-xs text-error [overflow-wrap:anywhere]">{normalizeError(close.error).message}</p>}
+    </ConfirmDialog>
+  </>;
 }
 
 /* ============ 端口体检 ============ */
-function PortTool() {
+function PortTool({ onInspect }: { onInspect: (port: number) => void }) {
   const t = useT();
   const [custom, setCustom] = React.useState("");
-  const [scanning, setScanning] = React.useState(false);
-  const [appRows, setAppRows] = React.useState<PortScanEntry[]>([]);
-  const [results, setResults] = React.useState<PortDiagnosis[]>([]);
-  const [killTarget, setKillTarget] = React.useState<{ pid: number; name?: string } | null>(null);
-  const [killing, setKilling] = React.useState(false);
-  const killAfter = React.useRef<(() => void) | null>(null);
-  const invalidate = useInvalidate();
-  const { data: settings } = useSettings();
-  const confirmKill = settings?.confirmKill ?? true;
-
-  /** 体检本应用需要的全部端口（一次后端调用，含占用者与结论） */
-  const scanApp = React.useCallback(async () => {
-    setScanning(true);
-    try {
-      setAppRows(await api.scanPorts());
-    } catch (e) {
-      toastError(e);
-    } finally {
-      setScanning(false);
-    }
-  }, []);
-
-  /** 额外扫用户指定/常见端口 */
-  const scanCustom = async () => {
-    setScanning(true);
-    const ports = [
-      ...COMMON_PORTS,
-      ...custom.split(/[,，\s]+/).map(Number).filter((n) => n > 0 && n < 65536),
-    ];
-    const unique = [...new Set(ports)];
-    const found: PortDiagnosis[] = [];
-    for (const p of unique) {
-      try {
-        const d = await api.diagnosePort(p);
-        if (d.inUse) found.push(d);
-      } catch {
-        /* ignore */
-      }
-    }
-    setResults(found);
-    setScanning(false);
+  const [inputError, setInputError] = React.useState("");
+  const [customReport, setCustomReport] = React.useState<{ ports: number[]; result: PortRangeScan } | null>(null);
+  const action = React.useRef(false);
+  const busy = useIsMutating({ mutationKey: ["ports"] }) > 0;
+  const app = useQuery({ queryKey: ["ports", "app"], queryFn: api.scanPorts, retry: false, networkMode: "always", refetchOnWindowFocus: false });
+  const scan = useMutation({ mutationKey: ["ports", "custom"], networkMode: "always", mutationFn: async (ports: number[]) => {
+    const result = await api.scanPortRange(Math.min(...ports), Math.max(...ports));
+    return { ports, result: { ...result, listeners: result.listeners.filter((row) => ports.includes(row.port)) } };
+  }, onSuccess: setCustomReport, onSettled: () => { action.current = false; } });
+  const scanCustom = () => {
+    if (action.current || busy) return;
+    const values = custom.trim() ? custom.trim().split(/[,，\s]+/) : [];
+    if (values.some((value) => !/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 65535) || values.length > 32) { setInputError(t("tools.portCustomValid")); return; }
+    setInputError(""); action.current = true;
+    scan.mutate([...new Set([...COMMON_PORTS, ...values.map(Number)])]);
   };
-
-  React.useEffect(() => {
-    scanApp();
-  }, [scanApp]);
-
-  /** 确认框点「结束进程」后执行 */
-  const execKill = async () => {
-    if (!killTarget) return;
-    setKilling(true);
-    try {
-      await api.killPid(killTarget.pid);
-      toast.success(`${t("tools.killedP1")} ${killTarget.name ?? killTarget.pid} ${t("tools.killedP2")}`);
-      invalidate("services");
-      killAfter.current?.();
-    } catch (e) {
-      toastError(e);
-    } finally {
-      setKilling(false);
-      setKillTarget(null);
-    }
-  };
-
-  /** 结束占用进程：开了「结束进程前二次确认」就弹确认框，关了直接执行 */
-  const doKill = (pid: number, name?: string, after?: () => void) => {
-    if (!confirmKill) {
-      setKilling(true);
-      api
-        .killPid(pid)
-        .then(() => {
-          toast.success(`${t("tools.killedP1")} ${name ?? pid} ${t("tools.killedP2")}`);
-          invalidate("services");
-          after?.();
-        })
-        .catch(toastError)
-        .finally(() => setKilling(false));
-      return;
-    }
-    killAfter.current = after ?? null;
-    setKillTarget({ pid, name });
-  };
-
-  const conflicts = appRows.filter((r) => r.verdict === "conflict");
-
-  return (
-    <ToolCard icon={Radar} title={t("tools.ports")} hint={t("tools.portsTitle")}>
-      <div className="flex flex-col gap-3">
-        {/* 一键体检：本应用端口 vs 占用者 */}
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-[11.5px] text-muted">{t("tools.portCheckApp")}</span>
-          <Button variant="secondary" size="sm" onClick={scanApp} disabled={scanning}>
-            {scanning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-            {t("tools.portCheckRun")}
-          </Button>
-        </div>
-        {conflicts.length > 0 && (
-          <p className="rounded-md border border-error/30 bg-error/10 px-2.5 py-1.5 text-[11px] text-error">
-            {conflicts.length} {t("tools.portConflictsP2")}
-          </p>
-        )}
-        <div className="max-h-56 overflow-y-auto rounded-md bg-fill">
-          {appRows.length === 0 ? (
-            <p className="px-3 py-4 text-center text-[11px] text-faint">
-              {scanning ? t("tools.scanning") : t("tools.portsEmpty")}
-            </p>
-          ) : (
-            appRows.map((r) => (
-              <div
-                key={`${r.serviceId}-${r.port}-${r.label}`}
-                className="flex items-center gap-2 border-b border-border/60 px-3 py-2 last:border-0"
-              >
-                {r.verdict === "conflict" ? (
-                  <XCircle className="h-3.5 w-3.5 shrink-0 text-error" />
-                ) : (
-                  <span
-                    className={cn(
-                      "h-2 w-2 shrink-0 rounded-full",
-                      r.verdict === "self" ? "bg-success" : "bg-faint/40"
-                    )}
-                  />
-                )}
-                <code className="w-14 shrink-0 font-mono text-[11.5px]">:{r.port}</code>
-                <span className="flex-1 truncate text-[11.5px]">
-                  <span className="text-faint">{r.label}</span>
-                  {r.verdict === "conflict" && (
-                    <>
-                      {" — "}
-                      {t("tools.who")} <b className="text-error">{r.processName ?? t("tools.unknown")}</b>
-                      {r.pid ? <span className="text-faint"> (PID {r.pid})</span> : null}
-                    </>
-                  )}
-                  {r.verdict === "self" && <span className="text-success"> · {t("tools.portSelf")}</span>}
-                  {r.verdict === "free" && <span className="text-faint"> · {t("tools.portFree")}</span>}
-                </span>
-                {r.verdict === "conflict" && r.pid && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="text-error hover:text-error"
-                    onClick={() => doKill(r.pid!, r.processName, scanApp)}
-                  >
-                    {t("tools.kill")}
-                  </Button>
-                )}
-              </div>
-            ))
-          )}
-        </div>
-
-        {/* 任意端口自查 */}
-        <div className="flex gap-2 border-t border-border/60 pt-3">
-          <Input
-            value={custom}
-            onChange={(e) => setCustom(e.target.value)}
-            placeholder={t("tools.portsPlaceholder")}
-            className="font-mono"
-          />
-          <Button variant="secondary" onClick={scanCustom} disabled={scanning}>
-            {t("tools.scan")}
-          </Button>
-        </div>
-        {results.length > 0 && (
-          <div className="max-h-40 overflow-y-auto rounded-md bg-fill">
-            {results.map((r) => (
-              <div key={r.port} className="flex items-center gap-2 border-b border-border/60 px-3 py-2 last:border-0">
-                <XCircle className="h-3.5 w-3.5 text-error" />
-                <code className="w-14 shrink-0 font-mono text-[11.5px]">:{r.port}</code>
-                <span className="flex-1 truncate text-[11.5px]">
-                  {t("tools.who")} <b className="text-error">{r.processName ?? t("tools.unknown")}</b>
-                  {r.pid ? <span className="text-faint"> (PID {r.pid})</span> : null}
-                </span>
-                {r.pid && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="text-error hover:text-error"
-                    onClick={() => doKill(r.pid!, r.processName, scanCustom)}
-                  >
-                    {t("tools.kill")}
-                  </Button>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* 结束进程二次确认（可在设置里关掉） */}
-      <ConfirmDialog
-        open={killTarget !== null}
-        onOpenChange={(o) => !o && setKillTarget(null)}
-        title={t("confirm.killProcess")}
-        description={t("confirm.killProcessDesc")
-          .replace("{name}", killTarget?.name ?? t("tools.unknown"))
-          .replace("{pid}", String(killTarget?.pid ?? ""))}
-        confirmText={t("tools.endProcess")}
-        danger
-        loading={killing}
-        onConfirm={execKill}
-      />
-    </ToolCard>
-  );
+  return <ToolCard icon={Radar} title={t("tools.ports")} hint={t("tools.portsTitle")}>
+    <div className="min-w-0 space-y-3">
+      <p className="text-[11px] leading-relaxed text-muted">{t("tools.portAppScope")}</p>
+      {!isTauri && <p className="text-[11px] text-warn">{t("tools.portDemo")}</p>}
+      <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs text-muted">{t("tools.portCheckApp")}</span><Button variant="secondary" size="sm" disabled={busy || app.isFetching} onClick={() => void app.refetch({ cancelRefetch: false })}>{app.isFetching && <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />}{t("tools.portCheckRun")}</Button></div>
+      {app.error && <div role="alert" className="rounded-lg border border-error/30 p-3 text-xs text-error [overflow-wrap:anywhere]">{normalizeError(app.error).message}{app.data && <p className="mt-1">{t("tools.portPrevious")}</p>}</div>}
+      {app.isPending && <p role="status" className="text-xs text-muted">{t("tools.scanning")}</p>}
+      {app.data && <div className="max-h-72 overflow-y-auto rounded-lg bg-fill px-3">{app.data.length === 0 ? <p className="py-4 text-xs text-muted">{t("tools.portNoServices")}</p> : app.data.map((row) => <div key={`${row.serviceId}-${row.port}-${row.label}`} className="space-y-1 border-b border-dashed border-border py-3 last:border-0">
+        <div className="flex min-w-0 flex-col items-start gap-2 sm:flex-row sm:justify-between"><div className="min-w-0 flex-1 text-xs [overflow-wrap:anywhere]"><p><code>:{row.port}</code> · {row.label}</p><p className={cn("mt-1", row.verdict === "self" ? "text-success" : ["conflict", "missing", "unknown"].includes(row.verdict) ? "text-warn" : "text-muted")}>{t(`tools.portVerdict.${row.verdict}`)}{row.listenerCount ? ` · ${row.listenerCount} ${t("tools.listeners")}` : ""}</p></div><Button size="sm" variant="ghost" disabled={busy || app.isFetching} className="h-auto min-h-8 whitespace-normal" onClick={() => onInspect(row.port)}>{t("tools.portInspect")}</Button></div>
+        <p className="text-[10.5px] leading-relaxed text-muted [overflow-wrap:anywhere]">{row.detail}</p>
+      </div>)}</div>}
+      {app.dataUpdatedAt > 0 && <p className="text-[10.5px] text-muted">{t("svc.diag.checkedAt")} {new Date(app.dataUpdatedAt).toLocaleString()}</p>}
+      <div className="mx-1 border-t border-dashed border-border" />
+      <form className="space-y-2" onSubmit={(event) => { event.preventDefault(); scanCustom(); }}><Label htmlFor="ports-custom">{t("tools.portCustom")}</Label><div className="flex min-w-0 flex-wrap gap-2"><Input id="ports-custom" className="min-w-0 flex-1 basis-36 font-mono" value={custom} onChange={(event) => setCustom(event.target.value)} placeholder="3000, 5173" /><Button variant="secondary" disabled={busy} type="submit">{t("tools.scan")}</Button></div></form>
+      {inputError && <p role="alert" className="text-xs text-error">{inputError}</p>}
+      {scan.error && <div role="alert" className="text-xs text-error [overflow-wrap:anywhere]">{normalizeError(scan.error).message}{customReport && <p>{t("tools.portPrevious")}</p>}</div>}
+      {scan.isPending && <p role="status" className="text-xs text-muted">{t("tools.scanning")}</p>}
+      {customReport && <div className="rounded-lg bg-fill px-3 text-xs"><p className="py-3 text-[11px] text-muted [overflow-wrap:anywhere]">{t("tools.portScanned")} {customReport.ports.join(", ")} · {new Date(customReport.result.scannedAt).toLocaleTimeString()}</p>{customReport.result.listeners.length === 0 ? <p className="pb-3 text-muted">{t("tools.portLookupEmpty")}</p> : customReport.result.listeners.map((row) => <div key={`${row.port}-${row.pid}`} className="flex min-w-0 flex-wrap items-center justify-between gap-2 border-t border-dashed border-border py-2"><span className="min-w-0 flex-1 [overflow-wrap:anywhere]">:{row.port} · {row.processName || t("tools.unknown")} · PID {row.pid}</span><Button variant="ghost" size="sm" disabled={busy} onClick={() => onInspect(row.port)}>{t("tools.portInspect")}</Button></div>)}</div>}
+    </div>
+  </ToolCard>;
 }
 
 /* ============ 终端注入 ============ */

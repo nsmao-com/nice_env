@@ -15,6 +15,7 @@ import type {
   PortDiagnosis,
   PortScanEntry,
   PortRangeScan,
+  ListenerInfo,
   ClosePortOutcome,
   Stack,
   StackInput,
@@ -60,7 +61,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.25";
+const MOCK_APP_VERSION = "0.2.26";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -860,40 +861,33 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return report as T;
     }
     case "scan_port_range": {
-      const from = args!.from as number;
-      const to = args!.to as number;
-      const listeners = ownPorts()
-        .filter(([, , port]) => port >= from && port <= to)
-        .filter(([serviceId]) => services.get(serviceId)?.state === "running")
-        .map(([serviceId, label, port]) => ({
-          port,
-          pid: 4528,
-          processName: "NiceEnv (demo)",
-          cmdline: `${label} — 浏览器演示数据，非真实进程`,
-          ownedBySelf: true,
-          serviceId,
-        }));
-      return { from, to, listeners, scannedAt: now() } as PortRangeScan as T;
+      const from = Math.min(Number(args?.from), Number(args?.to));
+      const to = Math.max(Number(args?.from), Number(args?.to));
+      if (![from, to].every((port) => Number.isInteger(port) && port >= 1 && port <= 65535)) throw { code: "BAD_PORT", message: "端口必须为 1 到 65535 的整数" };
+      const listeners: ListenerInfo[] = [];
+      for (const [index, service] of [...services.values()].entries()) {
+        if (service.state !== "running" || service.port == null || service.port < from || service.port > to) continue;
+        listeners.push({ port: service.port, pid: service.pids[0] ?? 5000 + index,
+          processName: service.label, cmdline: `${service.id} — 浏览器演示数据，非真实进程`,
+          ownedBySelf: true, serviceId: service.id, ownership: "self", processStartedAt: 1, canClose: true });
+      }
+      return { from, to, listeners, scannedAt: Date.now() } as PortRangeScan as T;
     }
     case "close_port": {
-      const port = args!.port as number;
-      // 演示模式：把占用该端口的演示服务停掉，让「结束占用」有可见效果
-      const row = ownPorts().find(([, , p]) => p === port);
-      let serviceId: string | undefined;
-      if (row) {
-        const [sid] = row;
-        const found = services.get(sid);
-        if (found?.state === "running") {
-          await mockInvoke("stop_service", { id: sid });
-          serviceId = sid;
-        }
+      const port = Number(args?.port);
+      const expected = args?.expected as ListenerInfo[];
+      if (!Array.isArray(expected)) throw { code: "BAD_PORT_TARGETS", message: "请先扫描并选择监听者" };
+      const before = await mockInvoke<PortRangeScan>("scan_port_range", { from: port, to: port });
+      const selected: ListenerInfo[] = [];
+      for (const target of expected) {
+        const current = before.listeners.find((row) => row.pid === target.pid);
+        if (!current) continue;
+        if (target.port !== port || current.processStartedAt !== target.processStartedAt || current.serviceId !== target.serviceId || current.ownership !== target.ownership) throw { code: "PORT_TARGET_CHANGED", message: "监听者已变化，请重新扫描" };
+        selected.push(current);
       }
-      return {
-        port,
-        graceful: Boolean(serviceId),
-        serviceId,
-        killedPids: [4528],
-      } as ClosePortOutcome as T;
+      for (const serviceId of new Set(selected.map((row) => row.serviceId))) await mockInvoke("stop_service", { id: serviceId });
+      const remaining = (await mockInvoke<PortRangeScan>("scan_port_range", { from: port, to: port })).listeners;
+      return { port, graceful: selected.length > 0, serviceId: selected[0]?.serviceId, killedPids: selected.map((row) => row.pid), portFree: remaining.length === 0, remaining, errors: [] } as ClosePortOutcome as T;
     }
     case "terminal_environment":
     case "pathenv_status":
@@ -1527,35 +1521,19 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return logLinesFor(id).slice(-count).map((line) => ({ line })) as LogLine[] as T;
     }
     case "diagnose_port": {
-      // 浏览器演示模式：不编造「被某某软件占用」的假结论，
-      // 只声明这些端口在演示里是「本应用自己的服务在用」
-      const port = args!.port as number;
-      const own = [8080, 8443, 8180, 8444, 23306, 25432, 28017, 26379, 17890, 19090];
-      if (own.includes(port)) {
-        return {
-          port,
-          inUse: true,
-          pid: 4528,
-          processName: "NiceEnv (demo)",
-          cmdline: "浏览器演示数据，非真实进程",
-        } as PortDiagnosis as T;
-      }
-      return { port, inUse: false } as PortDiagnosis as T;
+      const port = Number(args?.port);
+      const result = await mockInvoke<PortRangeScan>("scan_port_range", { from: port, to: port });
+      const row = result.listeners[0];
+      return { port, inUse: !!row, pid: row?.pid, processName: row?.processName, cmdline: row?.cmdline } as PortDiagnosis as T;
     }
     case "scan_ports": {
       const rows: PortScanEntry[] = [];
-      for (const [serviceId, label, port] of ownPorts()) {
-        const running = services.get(serviceId)?.state === "running";
-        rows.push({
-          serviceId,
-          label,
-          port,
-          ownedBySelf: running,
-          pid: running ? 4528 : undefined,
-          processName: running ? "NiceEnv (demo)" : undefined,
-          running,
-          verdict: running ? "self" : "free",
-        });
+      for (const service of services.values()) {
+        if (service.port == null) continue;
+        const running = service.state === "running";
+        rows.push({ serviceId: service.id, label: service.label, port: service.port, ownedBySelf: running,
+          pid: running ? service.pids[0] : undefined, processName: running ? service.label : undefined,
+          running, verdict: running ? "self" : "free", detail: "浏览器演示服务状态，未读取本机 TCP 监听表", listenerCount: running ? 1 : 0 });
       }
       return rows as T;
     }
@@ -1598,8 +1576,6 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return true as T;
     case "reissue_site_certs":
       return [] as T;
-    case "kill_pid":
-      return true as T;
     case "get_system_stats": {
       const last = statsHistory[statsHistory.length - 1];
       const point = {

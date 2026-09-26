@@ -396,15 +396,15 @@ impl CoreState {
     }
 
     pub fn ollama_models(&self) -> Result<Vec<toolbox::OllamaModelRow>> {
-        toolbox::ollama_models(&self.store, &self.paths, &self.installer)
+        toolbox::ollama_models(self.manager.clone())
     }
 
     pub fn ollama_delete(&self, name: &str) -> Result<()> {
-        toolbox::ollama_delete(&self.store, &self.paths, &self.installer, name)
+        toolbox::ollama_delete(self.manager.clone(), name)
     }
 
-    pub fn ollama_pull(&self, name: &str) -> Result<()> {
-        toolbox::ollama_pull(&self.store, &self.paths, &self.installer, name)
+    pub fn ollama_pull(&self, name: &str) -> Result<toolbox::OllamaPullStatus> {
+        toolbox::ollama_pull(self.manager.clone(), name)
     }
 
     pub fn adminer_start(&self) -> Result<toolbox::AdminerStatus> {

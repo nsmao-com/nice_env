@@ -282,6 +282,8 @@ pub fn run() {
             ollama_models,
             ollama_delete,
             ollama_pull,
+            ollama_pull_status,
+            ollama_cancel_pull,
             adminer_start,
             adminer_status,
             adminer_stop,
@@ -319,6 +321,7 @@ pub fn run() {
             if matches!(event, tauri::RunEvent::Exit) {
                 nsb_core::cron::shutdown();
                 nsb_core::tunnel::shutdown();
+                nsb_core::toolbox::ollama_shutdown();
             }
         });
 }
@@ -358,6 +361,7 @@ where
 fn stop_all_and_clear_pidfile(state: &CoreState) {
     nsb_core::cron::shutdown();
     nsb_core::tunnel::shutdown();
+    nsb_core::toolbox::ollama_shutdown();
     nsb_core::ops::stop_all(&state.store, &state.paths, &state.manager);
     let path = state.paths.data().join("run").join("pids.json");
     let _ = std::fs::remove_file(path);
@@ -1807,22 +1811,35 @@ async fn ollama_models(
 }
 
 #[tauri::command]
-fn ollama_delete(
+async fn ollama_delete(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     name: String,
 ) -> Result<bool, tauri::Error> {
-    map_jh(state.ollama_delete(&name).map(|_| true))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.ollama_delete(&name).map(|_| true)))
+        .await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
 async fn ollama_pull(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     name: String,
-) -> Result<bool, tauri::Error> {
+) -> Result<nsb_core::toolbox::OllamaPullStatus, tauri::Error> {
     let st = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || map_jh(st.ollama_pull(&name).map(|_| true)))
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.ollama_pull(&name)))
         .await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))?
+}
+
+#[tauri::command]
+fn ollama_pull_status() -> Option<nsb_core::toolbox::OllamaPullStatus> {
+    nsb_core::toolbox::ollama_pull_status()
+}
+
+#[tauri::command]
+fn ollama_cancel_pull(id: String) -> Result<bool, tauri::Error> {
+    map_jh(nsb_core::toolbox::ollama_cancel_pull(&id).map(|_| true))
 }
 
 /// Adminer 的启动检查与进程回收运行在工作线程。
@@ -2019,6 +2036,7 @@ fn restart_app(app: tauri::AppHandle) -> Result<bool, tauri::Error> {
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))?;
     nsb_core::cron::shutdown();
     nsb_core::tunnel::shutdown();
+    nsb_core::toolbox::ollama_shutdown();
     app.exit(0);
     Ok(true)
 }

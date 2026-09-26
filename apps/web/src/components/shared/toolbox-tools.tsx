@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { toast } from "sonner";
 import {
   CalendarClock,
@@ -15,8 +16,8 @@ import {
   Pencil,
   Square,
 } from "lucide-react";
-import type { CronJob, TunnelInfo, OllamaModelRow } from "@/lib/api";
-import { cn } from "@/lib/utils";
+import type { CronJob, TunnelInfo, OllamaPullStatus } from "@/lib/api";
+import { cn, fmtBytes } from "@/lib/utils";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem, SelectSeparator } from "@/components/ui/select";
 import { isTauri, normalizeError } from "@/lib/backend";
@@ -347,126 +348,136 @@ export function TunnelTool() {
 
 export function OllamaTool() {
   const t = useT();
-  const [models, setModels] = React.useState<OllamaModelRow[]>([]);
+  const client = useQueryClient();
+  const models = useQuery({ queryKey: ["ollama-models"], queryFn: api.ollamaModels, refetchInterval: 5000, retry: false });
+  const task = useQuery({ queryKey: ["ollama-pull"], queryFn: api.ollamaPullStatus, refetchInterval: 1000, retry: false });
+  const job = task.data;
+  const active = job?.state === "pulling" || job?.state === "cancelling";
   const [pullName, setPullName] = React.useState("");
-  const [pulling, setPulling] = React.useState<string | null>(null);
-  const [loading, setLoading] = React.useState(false);
+  const [preset, setPreset] = React.useState("custom");
+  const [search, setSearch] = React.useState("");
   const [deleting, setDeleting] = React.useState<string | null>(null);
-  const [loadError, setLoadError] = React.useState<string | null>(null);
-
-  const load = React.useCallback(async () => {
-    setLoading(true);
-    try {
-      setModels(await api.ollamaModels());
-      setLoadError(null);
-    } catch (e) {
-      setModels([]);
-      setLoadError(normalizeError(e).message);
-      throw e;
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
+  const [action, setAction] = React.useState<string | null>(null);
+  const guard = React.useRef(false);
+  const [pullError, setPullError] = React.useState<string | null>(null);
+  const inputId = React.useId();
+  const presets = ["qwen3:0.6b", "gemma3:1b", "llama3.2:1b"];
+  const rows = (models.data ?? []).filter((m) => m.name.toLowerCase().includes(search.trim().toLowerCase()));
+  const locked = !!action || active || !!task.error || task.isPending;
+  const refresh = () => Promise.all([models.refetch(), task.refetch()]);
   React.useEffect(() => {
-    load().catch(() => undefined);
-  }, [load]);
-
-  const pull = async () => {
-    const name = pullName.trim();
-    if (!name || pulling != null) return;
-    setPulling(name);
+    if (job?.endedAt) void client.invalidateQueries({ queryKey: ["ollama-models"] });
+  }, [job?.id, job?.endedAt, client]);
+  const pull = async (name = pullName) => {
+    if (guard.current || active) return;
+    guard.current = true; setAction("pull"); setPullError(null);
     try {
-      await api.ollamaPull(name);
-      toast.success(t("tools.ollama.pullStarted").replace("{name}", name));
-      setPullName("");
-      await load();
-    } catch (err) {
-      toastError(err);
-    } finally {
-      setPulling(null);
-    }
+      const next = await api.ollamaPull(name.trim());
+      await client.cancelQueries({ queryKey: ["ollama-pull"] });
+      client.setQueryData<OllamaPullStatus>(["ollama-pull"], next);
+      if (next.state === "failed") setPullError(next.error || t("tools.ollama.failed"));
+    } catch (error) { setPullError(normalizeError(error).message); toastError(error); }
+    finally { guard.current = false; setAction(null); }
   };
+  const cancel = async () => {
+    if (!job || guard.current) return;
+    guard.current = true; setAction("cancel");
+    try { await api.ollamaCancelPull(job.id); await task.refetch(); }
+    catch (error) { toastError(error); }
+    finally { guard.current = false; setAction(null); }
+  };
+  const remove = async () => {
+    if (!deleting || guard.current) return;
+    guard.current = true; setAction("delete");
+    try {
+      await api.ollamaDelete(deleting);
+      setDeleting(null); toast.success(t("tools.ollama.deleted")); await models.refetch();
+    } catch (error) { toastError(error); }
+    finally { guard.current = false; setAction(null); }
+  };
+  const phase = (value: string) => {
+    if (value === "pulling manifest") return t("tools.ollama.manifest");
+    if (value.startsWith("pulling ")) return t("tools.ollama.downloading");
+    if (value.startsWith("verifying")) return t("tools.ollama.verifying");
+    if (value.startsWith("writing") || value.startsWith("removing")) return t("tools.ollama.saving");
+    if (value === "checking local model") return t("tools.ollama.checking");
+    return value;
+  };
+  const percent = job?.total && job.completed != null ? Math.min(100, Math.round(job.completed / job.total * 100)) : undefined;
 
-  return (
-    <ToolCard icon={Bot} title={t("tools.ollama.title")} hint={t("tools.ollama.hint")}>
-      <div className="flex flex-col gap-2">
-        {loadError && (
-          <div className="flex flex-wrap items-center gap-2 rounded-md border border-error/25 bg-error-soft/40 px-3 py-2 text-[11px] text-error" role="alert">
-            <span className="min-w-0 flex-1 break-words">{loadError}</span>
-            <Button size="sm" variant="secondary" onClick={() => void load().catch(() => undefined)}>{t("install.retry")}</Button>
-          </div>
-        )}
-        <div className="flex gap-1.5">
-          <Input
-            value={pullName}
-            onChange={(e) => setPullName(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && void pull()}
-            placeholder={t("tools.ollama.pullPh")}
-            className="h-8 flex-1 font-mono text-[11.5px]"
-          />
-          <Button
-            size="sm"
-            className="h-8"
-            disabled={!pullName.trim() || pulling != null}
-            onClick={() => void pull()}
-          >
-            {pulling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-            {t("tools.ollama.pull")}
-          </Button>
-          <Button size="sm" variant="ghost" className="h-8" onClick={() => void load().catch(() => undefined)}>
-            <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
-          </Button>
-        </div>
-
-        {!loadError && models.length === 0 ? (
-          <p className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-[11px] text-faint">
-            {t("tools.ollama.none")}
-          </p>
-        ) : (
-          models.map((m) => (
-            <div key={m.name} className="flex items-center gap-2.5 rounded-lg border border-border/60 px-3 py-2">
-              <div className="min-w-0 flex-1">
-                <p className="truncate font-mono text-[12px] font-medium">{m.name}</p>
-                <p className="text-[10px] text-faint">
-                  {m.size} · {t("tools.ollama.modified")} {m.modified}
-                </p>
-              </div>
-              <Button
-                size="icon-sm"
-                variant="ghost"
-                className="text-faint hover:text-error"
-                onClick={() => setDeleting(m.name)}
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </Button>
-            </div>
-          ))
-        )}
+  return <ToolCard icon={Bot} title={t("tools.ollama.title")} hint={t("tools.ollama.hint")}>
+    <div className="flex min-w-0 flex-col gap-3">
+      {!isTauri && <p className="rounded-lg bg-info-soft p-3 text-xs text-info">{t("tools.ollama.preview")}</p>}
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" variant="secondary" asChild><Link href="/packages">{t("tools.ollama.manageService")}</Link></Button>
+        <Button size="sm" variant="ghost" onClick={() => void api.openInBrowser("https://ollama.com/library").catch(toastError)}><ExternalLink className="h-3.5 w-3.5" />{t("tools.ollama.library")}</Button>
+        <Button size="icon-sm" variant="ghost" className="ml-auto" aria-label={t("tools.ollama.refresh")} disabled={models.isFetching || task.isFetching} onClick={() => void refresh()}><RefreshCw className={cn("h-3.5 w-3.5", models.isFetching && "animate-spin")} /></Button>
       </div>
-
-      <ConfirmDialog
-        open={deleting !== null}
-        onOpenChange={(o) => !o && setDeleting(null)}
-        title={`${t("tools.ollama.delete")} ${deleting ?? ""}`}
-        description={t("tools.ollama.deleteHint")}
-        confirmText={t("common.delete")}
-        danger
-        onConfirm={async () => {
-          if (!deleting) return;
-          try {
-            await api.ollamaDelete(deleting);
-            toast.success(`${deleting} ${t("common.deleted")}`);
-            await load().catch(() => undefined);
-          } catch (e) {
-            toastError(e);
-          } finally {
-            setDeleting(null);
-          }
-        }}
-      />
-    </ToolCard>
-  );
+      {models.error && <div role="alert" className="flex flex-wrap items-center gap-2 rounded-lg bg-error-soft p-3 text-xs text-error">
+        <span className="min-w-0 flex-1 break-words">{t("tools.ollama.readFailed")} · {normalizeError(models.error).message}</span>
+        <Button size="sm" variant="secondary" disabled={models.isFetching} onClick={() => void models.refetch()}>{t("install.retry")}</Button>
+      </div>}
+      {task.error && <div role="alert" className="flex flex-wrap items-center gap-2 rounded-lg bg-error-soft p-3 text-xs text-error">
+        <span className="min-w-0 flex-1 break-words">{t("tools.ollama.taskFailed")} · {normalizeError(task.error).message}</span>
+        <Button size="sm" variant="secondary" disabled={task.isFetching} onClick={() => void task.refetch()}>{t("install.retry")}</Button>
+      </div>}
+      <form className="flex min-w-0 flex-col gap-2" onSubmit={(event) => { event.preventDefault(); void pull(); }}>
+        <p id={`${inputId}-presets`} className="text-xs text-muted">{t("tools.ollama.presets")}</p>
+        <Select value={preset} disabled={locked} onValueChange={(value) => { setPreset(value); setPullError(null); if (value !== "custom") setPullName(value); }}>
+          <SelectTrigger className="min-w-0 text-xs" aria-labelledby={`${inputId}-presets`}><SelectValue /></SelectTrigger>
+          <SelectContent>{presets.map((name) => <SelectItem key={name} value={name} className="text-xs">{name}</SelectItem>)}<SelectSeparator /><SelectItem value="custom">{t("tools.ollama.custom")}</SelectItem></SelectContent>
+        </Select>
+        <label htmlFor={inputId} className="text-xs text-muted">{t("tools.ollama.nameLabel")}</label>
+        <Input id={inputId} value={pullName} maxLength={255} disabled={locked} onChange={(event) => { setPullName(event.target.value); setPreset("custom"); }} placeholder={t("tools.ollama.pullPh")} className="min-w-0 font-mono text-xs" required />
+        {pullError && <p role="alert" className="break-words text-xs text-error">{pullError}</p>}
+        <Button type="submit" size="sm" className="self-start" disabled={locked || !!models.error || models.isPending || !pullName.trim()}>
+          {action === "pull" && <Loader2 className="h-3.5 w-3.5 animate-spin" />}{t("tools.ollama.pull")}
+        </Button>
+      </form>
+      {job && <section aria-label={t("tools.ollama.task")} className="min-w-0 rounded-lg border border-border/60 p-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="min-w-0 flex-1 basis-40 break-all font-mono text-xs">{job.name}</p>
+          <Badge role="status" variant={job.state === "succeeded" ? "running" : job.state === "failed" ? "error" : "info"}>{t(`tools.ollama.${job.state}`)}</Badge>
+        </div>
+        {active && <>
+          <p className="mt-2 break-words text-[11px] text-muted">{phase(job.phase)}</p>
+          {job.total != null && job.total > 0 && <div className="mt-2 space-y-1">
+            <progress className="h-2 w-full accent-primary" aria-label={t("tools.ollama.layerProgress")} max={job.total} value={job.completed ?? undefined} />
+            <p className="text-[11px] text-faint">{t("tools.ollama.layerProgress")} · {job.completed == null ? "—" : fmtBytes(job.completed)} / {fmtBytes(job.total)}{percent == null ? "" : ` · ${percent}%`}</p>
+          </div>}
+        </>}
+        {job.error && <p role="alert" className="mt-2 break-words text-xs text-error">{job.error}</p>}
+        <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-dashed border-border pt-2">
+          {active ? <Button size="sm" variant="secondary" disabled={!!action || job.state === "cancelling"} onClick={() => void cancel()}><Square className="h-3.5 w-3.5" />{t("tools.ollama.cancelPull")}</Button>
+            : job.state !== "succeeded" && <Button size="sm" variant="secondary" disabled={locked || !!models.error} onClick={() => void pull(job.name)}>{t("install.retry")}</Button>}
+          <span className="min-w-0 break-words text-[11px] text-faint">{new Date(job.endedAt ?? job.startedAt).toLocaleString()}</span>
+        </div>
+      </section>}
+      <details className="text-[11px] leading-relaxed text-faint">
+        <summary className="cursor-pointer rounded focus-visible:outline focus-visible:outline-primary">{t("tools.ollama.instructions")}</summary>
+        <p className="mt-2">{t("tools.ollama.pullHint")}</p>
+      </details>
+      <div className="flex flex-col gap-2 border-t border-dashed border-border pt-3">
+        <p className="text-xs font-medium">{t("tools.ollama.localModels")}{models.data ? ` · ${models.data.length}` : ""}</p>
+        {!!models.data?.length && <Input value={search} aria-label={t("tools.ollama.search")} placeholder={t("tools.ollama.search")} onChange={(e) => setSearch(e.target.value)} className="text-xs" />}
+        {models.isPending ? <p role="status" className="py-3 text-center text-xs text-faint">{t("common.loading")}</p>
+          : !models.error && rows.length === 0 ? <p className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-xs text-faint">{t(models.data?.length ? "tools.ollama.noMatch" : "tools.ollama.none")}</p> : null}
+        {rows.map((m) => <div key={m.name} className="min-w-0 rounded-lg border border-border/60 p-3">
+          <p className="break-all font-mono text-xs font-medium">{m.name}</p>
+          <p className="mt-1 break-words text-[11px] text-muted">{[fmtBytes(m.size), m.parameters, m.quantization].filter(Boolean).join(" · ")}</p>
+          <p className="mt-1 break-words text-[10px] text-faint">{t("tools.ollama.modified")} {Number.isNaN(Date.parse(m.modified)) ? m.modified : new Date(m.modified).toLocaleString()}</p>
+          <div className="mt-2 flex flex-wrap items-center gap-1 border-t border-dashed border-border pt-2">
+            <CopyButton text={m.name} />
+            <Button size="sm" variant="ghost" className="px-2" disabled={locked || !!models.error} onClick={() => void pull(m.name)}><RefreshCw className="h-3.5 w-3.5" />{t("tools.ollama.update")}</Button>
+            <Button size="icon-sm" variant="ghost" className="ml-auto text-faint hover:text-error" disabled={locked || !!models.error} aria-label={`${t("tools.ollama.delete")} · ${m.name}`} onClick={() => setDeleting(m.name)}><Trash2 className="h-3.5 w-3.5" /></Button>
+          </div>
+        </div>)}
+      </div>
+    </div>
+    <ConfirmDialog open={deleting !== null} loading={action === "delete"} confirmDisabled={active || !!task.error || !!models.error}
+      onOpenChange={(open) => { if (!open && action !== "delete") setDeleting(null); }}
+      title={`${t("tools.ollama.delete")} · ${deleting ?? ""}`} description={t("tools.ollama.deleteHint")} confirmText={t("common.delete")} danger onConfirm={() => void remove()} />
+  </ToolCard>;
 }
 
 /* ================= Adminer 数据库管理台 ================= */

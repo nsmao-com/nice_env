@@ -444,15 +444,31 @@ export const tunnelRemove = (id: string) => safe(invoke<boolean>("tunnel_remove"
 export interface OllamaModelRow {
   name: string;
   digest: string;
-  size: string;
+  size: number;
   modified: string;
+  parameters: string;
+  quantization: string;
+}
+export interface OllamaPullStatus {
+  id: string;
+  name: string;
+  state: "pulling" | "cancelling" | "succeeded" | "failed" | "cancelled";
+  phase: string;
+  digest?: string | null;
+  completed?: number | null;
+  total?: number | null;
+  error?: string | null;
+  startedAt: number;
+  endedAt?: number | null;
 }
 export const ollamaModels = () =>
   safe(invoke<OllamaModelRow[]>("ollama_models"));
 export const ollamaDelete = (name: string) =>
   safe(invoke<boolean>("ollama_delete", { name }));
 export const ollamaPull = (name: string) =>
-  safe(invoke<boolean>("ollama_pull", { name }));
+  safe(invoke<OllamaPullStatus>("ollama_pull", { name }));
+export const ollamaPullStatus = () => safe(invoke<OllamaPullStatus | null>("ollama_pull_status"));
+export const ollamaCancelPull = (id: string) => safe(invoke<boolean>("ollama_cancel_pull", { id }));
 
 export interface AdminerStatus { port: number; file: string; url: string; phpVersion: string; adminerVersion: string }
 export const adminerStart = () => safe(invoke<AdminerStatus>("adminer_start"));

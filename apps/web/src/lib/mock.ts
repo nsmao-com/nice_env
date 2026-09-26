@@ -4,7 +4,7 @@
  */
 import { PackageManifestEntry, HostsEntry as HostsEntrySchema } from "@nsb/schema";
 import { normalizeError } from "./backend";
-import type { BackupPreview, ConfigResetPreview, TunnelInfo } from "./api";
+import type { BackupPreview, ConfigResetPreview, TunnelInfo, OllamaModelRow, OllamaPullStatus } from "./api";
 import bundledManifest from "../../../../manifest/packages.win.json";
 import type {
   VersionCatalog,
@@ -59,7 +59,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.19";
+const MOCK_APP_VERSION = "0.2.20";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -228,6 +228,25 @@ const cronJobs = new Map<string, { id: string; name: string; command: string; in
 const mockRedisConnections = new Map<string, { username: string; password: string }>();
 let mockAdminer: import("./api").AdminerStatus | null = null;
 const mockTunnels = new Map<string, TunnelInfo>();
+const mockOllamaModels = new Map<string, OllamaModelRow>([
+  ["qwen2.5:0.5b", { name: "qwen2.5:0.5b", digest: "preview-qwen", size: 398_000_000, modified: "2026-09-26T00:00:00Z", parameters: "0.5B", quantization: "Q4_K_M" }],
+  ["llama3.2:3b", { name: "llama3.2:3b", digest: "preview-llama", size: 2_000_000_000, modified: "2026-09-26T00:00:00Z", parameters: "3B", quantization: "Q4_K_M" }],
+]);
+let mockOllamaPull: OllamaPullStatus | null = null;
+function updateMockOllamaPull() {
+  const job = mockOllamaPull;
+  if (!job || job.state !== "pulling") return;
+  const elapsed = Date.now() - job.startedAt;
+  if (elapsed < 1000) return;
+  job.phase = "pulling preview-file"; job.digest = "preview-file"; job.total = 100_000_000;
+  job.completed = Math.min(job.total, Math.round((elapsed - 1000) / 5000 * job.total));
+  if (elapsed >= 6000) {
+    job.state = "succeeded"; job.phase = "success"; job.endedAt = Date.now();
+    const name = job.name.split("/").at(-1)?.includes(":") ? job.name : `${job.name}:latest`;
+    mockOllamaModels.set(name, { name, digest: "preview-download", size: job.total, modified: new Date().toISOString(), parameters: "", quantization: "" });
+  }
+}
+
 const hostsManaged = new Map<string, string[]>();
 const mockTextFiles = new Map<string, string>();
 const mockDnsInterfaces = ["Ethernet", "Wi-Fi"];
@@ -2031,13 +2050,40 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return true as T;
     }
     case "ollama_models":
-      return [
-        { name: "qwen2.5:0.5b", digest: "a8b0c5e2d110", size: "398 MB", modified: "2 hours ago" },
-        { name: "llama3.2:3b", digest: "de729584469e", size: "2.0 GB", modified: "3 days ago" },
-      ] as T;
-    case "ollama_delete":
-    case "ollama_pull":
+      updateMockOllamaPull();
+      return structuredClone([...mockOllamaModels.values()]) as T;
+    case "ollama_delete": {
+      updateMockOllamaPull();
+      if (mockOllamaPull?.state === "pulling") throw { code: "OLLAMA_BUSY", message: "请先等待当前拉取完成或取消" };
+      if (!mockOllamaModels.delete(args!.name as string)) throw { code: "OLLAMA_MODEL_NOT_FOUND", message: "模型已不存在，请刷新" };
       return true as T;
+    }
+    case "ollama_pull": {
+      updateMockOllamaPull();
+      if (mockOllamaPull?.state === "pulling") throw { code: "OLLAMA_BUSY", message: "已有模型正在拉取" };
+      const name = String(args!.name ?? "").trim();
+      const parts = name.split("/");
+      const word = (value: string) => /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(value);
+      const valid = !!name && name.length <= 255 && parts.every((part, index) => {
+        const colon = part.indexOf(":");
+        if (colon < 0) return word(part);
+        const left = part.slice(0, colon), right = part.slice(colon + 1);
+        return word(left) && (index === parts.length - 1 ? word(right)
+          : index === 0 && /^\d+$/.test(right) && Number(right) > 0 && Number(right) <= 65535);
+      });
+      if (!valid) throw { code: "OLLAMA_MODEL_INVALID", message: "模型名格式无效，例如 qwen3:0.6b" };
+      mockOllamaPull = { id: uid(), name, state: "pulling", phase: "pulling manifest", startedAt: Date.now() };
+      return structuredClone(mockOllamaPull) as T;
+    }
+    case "ollama_pull_status":
+      updateMockOllamaPull();
+      return structuredClone(mockOllamaPull) as T;
+    case "ollama_cancel_pull": {
+      updateMockOllamaPull();
+      if (!mockOllamaPull || mockOllamaPull.id !== args!.id) throw { code: "OLLAMA_PULL_NOT_FOUND", message: "拉取任务已变更，请刷新" };
+      if (mockOllamaPull.state === "pulling") { mockOllamaPull.state = "cancelled"; mockOllamaPull.endedAt = Date.now(); }
+      return true as T;
+    }
     case "redis_connection": {
       const version = args!.version as string;
       const credentials = mockRedisConnections.get(version);

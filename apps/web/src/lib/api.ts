@@ -417,6 +417,8 @@ export const cronSetEnabled = (id: string, enabled: boolean) =>
   safe(invoke<boolean>("cron_set_enabled", { id, enabled }));
 export const cronRunNow = (id: string) =>
   safe(invoke<CronJob>("cron_run_now", { id }));
+export const cronStop = (id: string) =>
+  safe(invoke<boolean>("cron_stop", { id }));
 
 export interface TunnelInfo {
   id: string;

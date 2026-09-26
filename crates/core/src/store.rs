@@ -7,6 +7,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::path::PathBuf;
 
 pub struct Store {
+    pub(crate) path: PathBuf,
     conn: parking_lot::Mutex<Connection>,
 }
 
@@ -77,6 +78,7 @@ impl Store {
         // 轻量迁移：旧库补列（已存在则报错被忽略）
         let _ = conn.execute("ALTER TABLE sites ADD COLUMN php_overrides TEXT", []);
         Ok(Self {
+            path: path.canonicalize()?,
             conn: parking_lot::Mutex::new(conn),
         })
     }
@@ -404,77 +406,139 @@ impl Store {
 
     pub fn list_cron_jobs(&self) -> Result<Vec<crate::cron::CronJob>> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT id,name,command,interval_min,enabled,created_at,last_run_at,last_exit,last_output
-             FROM cron_jobs ORDER BY created_at DESC",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(crate::cron::CronJob {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                command: r.get(2)?,
-                interval_min: r.get(3)?,
-                enabled: r.get::<_, i64>(4)? != 0,
-                created_at: r.get(5)?,
-                last_run_at: r.get(6)?,
-                last_exit: r.get(7)?,
-                last_output: r.get(8)?,
-            })
-        })?;
-        Ok(rows.flatten().collect())
+        let mut stmt = conn.prepare("SELECT id,name,command,interval_min,enabled,created_at,last_run_at,last_exit,last_output FROM cron_jobs ORDER BY created_at DESC")?;
+        let rows = stmt.query_map([], Self::cron_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn cron_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<crate::cron::CronJob> {
+        Ok(crate::cron::CronJob {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            command: r.get(2)?,
+            interval_min: r.get(3)?,
+            enabled: r.get::<_, i64>(4)? != 0,
+            created_at: r.get(5)?,
+            last_run_at: r.get(6)?,
+            last_exit: r.get(7)?,
+            last_output: r.get(8)?,
+        })
     }
 
     pub fn get_cron_job(&self, id: &str) -> Result<Option<crate::cron::CronJob>> {
-        Ok(self.list_cron_jobs()?.into_iter().find(|j| j.id == id))
+        Ok(self.conn.lock().query_row(
+            "SELECT id,name,command,interval_min,enabled,created_at,last_run_at,last_exit,last_output FROM cron_jobs WHERE id=?1",
+            params![id], Self::cron_row,
+        ).optional()?)
     }
 
-    /// 新建/改名改命令改周期（不动 enabled 与上次运行信息）
-    pub fn upsert_cron_job(&self, job: &crate::cron::CronJob) -> Result<()> {
+    /// 新建或编辑定义；执行中的任务不允许修改，历史结果只由执行器写入。
+    pub fn save_cron_job(&self, job: &crate::cron::CronJob, create: bool) -> Result<()> {
+        crate::cron::validate_job(job)?;
         let conn = self.conn.lock();
-        conn.execute(
-            "INSERT INTO cron_jobs(id,name,command,interval_min,enabled,created_at)
-             VALUES(?1,?2,?3,?4,?5,?6)
-             ON CONFLICT(id) DO UPDATE SET name=?2, command=?3, interval_min=?4",
-            params![
-                job.id,
-                job.name,
-                job.command,
-                job.interval_min,
-                job.enabled as i32,
-                job.created_at
-            ],
-        )?;
+        let changed = if create {
+            conn.execute("INSERT INTO cron_jobs(id,name,command,interval_min,enabled,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
+                params![job.id, job.name, job.command, job.interval_min, job.enabled as i32, job.created_at])?
+        } else {
+            conn.execute("UPDATE cron_jobs SET name=?2,command=?3,interval_min=?4 WHERE id=?1 AND last_exit IS NOT 'running'",
+                params![job.id, job.name, job.command, job.interval_min])?
+        };
+        if changed == 0 {
+            return Err(AppError::new(
+                "CRON_NOT_EDITABLE",
+                "任务不存在或正在运行，请刷新列表或停止后再编辑",
+            ));
+        }
         Ok(())
     }
 
     pub fn delete_cron_job(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock();
-        conn.execute("DELETE FROM cron_jobs WHERE id=?1", params![id])?;
+        let changed = conn.execute(
+            "DELETE FROM cron_jobs WHERE id=?1 AND last_exit IS NOT 'running'",
+            params![id],
+        )?;
+        if changed == 0 {
+            return Err(AppError::new(
+                "CRON_NOT_REMOVABLE",
+                "任务不存在或仍在运行，请刷新列表或先停止任务",
+            ));
+        }
         Ok(())
     }
 
     pub fn set_cron_enabled(&self, id: &str, enabled: bool) -> Result<()> {
         let conn = self.conn.lock();
-        conn.execute(
+        let changed = conn.execute(
             "UPDATE cron_jobs SET enabled=?2 WHERE id=?1",
             params![id, enabled as i32],
         )?;
+        if changed == 0 {
+            return Err(AppError::new(
+                "CRON_NOT_FOUND",
+                "计划任务不存在，请刷新列表",
+            ));
+        }
         Ok(())
     }
 
-    /// 记录一次运行：开始时 last_output 传 None 保留旧输出，结束传实际输出
-    pub fn mark_cron_run(
+    /// 在同一写事务内读定义、复核到期条件并占用任务，阻止手动/自动/跨连接重复执行。
+    pub(crate) fn claim_cron_run(
         &self,
         id: &str,
-        last_run_at: i64,
-        last_exit: &str,
-        last_output: Option<&str>,
+        manual: bool,
+        now: i64,
+    ) -> Result<Option<crate::cron::CronJob>> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut job = tx.query_row(
+            "SELECT id,name,command,interval_min,enabled,created_at,last_run_at,last_exit,last_output FROM cron_jobs WHERE id=?1",
+            params![id], Self::cron_row,
+        ).optional()?.ok_or_else(|| AppError::new("CRON_NOT_FOUND", "计划任务不存在，请刷新列表"))?;
+        crate::cron::validate_job(&job)?;
+        if job.last_exit.as_deref() == Some(crate::cron::RUNNING) {
+            return Err(AppError::new(
+                "CRON_BUSY",
+                "该计划任务正在运行，请等待或停止当前任务",
+            ));
+        }
+        if !manual && (!job.enabled || !crate::cron::is_due(&job, now)) {
+            return Ok(None);
+        }
+        tx.execute("UPDATE cron_jobs SET last_run_at=?2, last_exit='running', last_output=NULL WHERE id=?1", params![id, now])?;
+        tx.commit()?;
+        job.last_run_at = Some(now);
+        job.last_exit = Some(crate::cron::RUNNING.into());
+        job.last_output = None;
+        Ok(Some(job))
+    }
+
+    pub(crate) fn finish_cron_run(
+        &self,
+        id: &str,
+        started: i64,
+        exit: &str,
+        output: &str,
     ) -> Result<()> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "UPDATE cron_jobs SET last_run_at=?2, last_exit=?3,
-             last_output=COALESCE(?4, last_output) WHERE id=?1",
-            params![id, last_run_at, last_exit, last_output],
+        let changed = self.conn.lock().execute(
+            "UPDATE cron_jobs SET last_exit=?3,last_output=?4 WHERE id=?1 AND last_run_at=?2 AND last_exit='running'",
+            params![id, started, exit, output],
+        )?;
+        if changed == 0 {
+            return Err(AppError::new(
+                "CRON_RESULT_CHANGED",
+                "任务结果已变化，未覆盖其它执行结果",
+            ));
+        }
+        Ok(())
+    }
+
+    /// 仅在执行锁确认无人持有后恢复；暂停自动调度，避免不确定的上次命令被重复执行。
+    pub(crate) fn recover_cron_run(&self, id: &str, started: Option<i64>) -> Result<()> {
+        self.conn.lock().execute(
+            "UPDATE cron_jobs SET last_exit='interrupted', enabled=0, last_output=?3
+             WHERE id=?1 AND last_run_at IS ?2 AND last_exit='running'",
+            params![id, started, "上次执行因应用退出或异常而中断，无法确认是否完成。自动调度已暂停，请检查命令影响后重新启用。"],
         )?;
         Ok(())
     }

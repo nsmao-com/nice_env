@@ -45,6 +45,39 @@ pub fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
     cmd
 }
 
+/// 外部命令优先按 UTF-8 读取；Windows 传统 shell 输出使用系统 OEM 代码页。
+pub fn decode_command_output(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => return text.to_string(),
+        // 截断发生在 UTF-8 尾字符中间时，保留其余有效文本。
+        Err(e) if e.error_len().is_none() => return String::from_utf8_lossy(bytes).into_owned(),
+        Err(_) => {}
+    }
+    #[cfg(windows)]
+    if let Ok(length) = i32::try_from(bytes.len()) {
+        use windows_sys::Win32::Globalization::{MultiByteToWideChar, CP_OEMCP};
+        unsafe {
+            let needed =
+                MultiByteToWideChar(CP_OEMCP, 0, bytes.as_ptr(), length, std::ptr::null_mut(), 0);
+            if needed > 0 {
+                let mut units = vec![0u16; needed as usize];
+                let written = MultiByteToWideChar(
+                    CP_OEMCP,
+                    0,
+                    bytes.as_ptr(),
+                    length,
+                    units.as_mut_ptr(),
+                    needed,
+                );
+                if written > 0 {
+                    return String::from_utf16_lossy(&units[..written as usize]);
+                }
+            }
+        }
+    }
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
 /* ================= 进程树管理 ================= */
 
 /// 进程组句柄：Windows=Job Object(KILL_ON_JOB_CLOSE)，Unix=记录 pid 集合。

@@ -25,6 +25,8 @@ pub fn run() {
             let state = CoreState::init(None, emit).map_err(|e| {
                 Box::new(std::io::Error::other(format!("{e}"))) as Box<dyn std::error::Error>
             })?;
+            // 仅桌面应用启动计划任务；CLI/MCP 的只读调用不应触发用户命令。
+            nsb_core::cron::spawn_scheduler(state.paths.clone())?;
             app.manage(state);
 
             /* ---------- 证书自动化调度：启动 30s 后先补一轮，之后每小时检查到期 ---------- */
@@ -271,6 +273,7 @@ pub fn run() {
             cron_delete,
             cron_set_enabled,
             cron_run_now,
+            cron_stop,
             tunnel_start,
             tunnel_list,
             tunnel_stop,
@@ -308,8 +311,13 @@ pub fn run() {
             tray::tray_panel_resize,
             tray::tray_panel_hide,
         ]))
-        .run(tauri::generate_context!())
-        .expect("NiceEnv 启动失败");
+        .build(tauri::generate_context!())
+        .expect("NiceEnv 启动失败")
+        .run(|_, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                nsb_core::cron::shutdown();
+            }
+        });
 }
 
 /// 所有命令统一派发到阻塞线程池执行，不占用 UI 主线程。
@@ -345,6 +353,7 @@ where
 /// （清掉是必要的——否则下次启动会把「已经正常停掉的」pid 当成残留再去 kill 一遍，
 /// 而那些 pid 可能已被系统分配给无关进程）
 fn stop_all_and_clear_pidfile(state: &CoreState) {
+    nsb_core::cron::shutdown();
     nsb_core::ops::stop_all(&state.store, &state.paths, &state.manager);
     let path = state.paths.data().join("run").join("pids.json");
     let _ = std::fs::remove_file(path);
@@ -1722,6 +1731,14 @@ async fn cron_run_now(
 }
 
 #[tauri::command]
+fn cron_stop(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    id: String,
+) -> Result<bool, tauri::Error> {
+    map_jh(state.cron_stop(&id).map(|_| true))
+}
+
+#[tauri::command]
 fn tunnel_start(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     port: u16,
@@ -1965,6 +1982,7 @@ fn restart_app(app: tauri::AppHandle) -> Result<bool, tauri::Error> {
         .args(args)
         .spawn()
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))?;
+    nsb_core::cron::shutdown();
     app.exit(0);
     Ok(true)
 }

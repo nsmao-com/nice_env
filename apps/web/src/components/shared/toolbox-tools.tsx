@@ -12,10 +12,14 @@ import {
   RefreshCw,
   Loader2,
   ExternalLink,
+  Pencil,
+  Square,
 } from "lucide-react";
 import type { CronJob, TunnelInfo, OllamaModelRow } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { normalizeError } from "@/lib/backend";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
+import { isTauri, normalizeError } from "@/lib/backend";
 import { useT } from "@/lib/store";
 import { useAdminer, toastError } from "@/lib/hooks";
 import * as api from "@/lib/api";
@@ -44,8 +48,8 @@ function ToolCard({
   children: React.ReactNode;
 }) {
   return (
-    <Card>
-      <CardHeader className="flex-row items-start gap-3">
+    <Card className="min-w-0">
+      <CardHeader className="flex-row items-start gap-3 px-3 sm:px-5">
         <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-fill">
           <Icon className="h-4 w-4 shrink-0 text-primary" strokeWidth={1.8} />
         </div>
@@ -54,7 +58,7 @@ function ToolCard({
           <CardDescription className="mt-0.5 line-clamp-2 text-[11px] leading-relaxed">{hint}</CardDescription>
         </div>
       </CardHeader>
-      <CardContent>{children}</CardContent>
+      <CardContent className="px-3 sm:px-5">{children}</CardContent>
     </Card>
   );
 }
@@ -72,194 +76,156 @@ function relTime(ts?: number | null): string {
 
 export function CronTool() {
   const t = useT();
-  const [jobs, setJobs] = React.useState<api.CronJob[]>([]);
+  const client = useQueryClient();
+  const query = useQuery({ queryKey: ["cron-jobs"], queryFn: api.cronJobs, refetchInterval: 2000, retry: false });
+  const jobs = query.data ?? [];
+  const [editing, setEditing] = React.useState<CronJob | null>(null);
   const [name, setName] = React.useState("");
   const [command, setCommand] = React.useState("");
   const [intervalMin, setIntervalMin] = React.useState("30");
-  const [busy, setBusy] = React.useState(false);
+  const [preset, setPreset] = React.useState("30");
+  const [saving, setSaving] = React.useState(false);
+  const saveGuard = React.useRef(false);
+  const [saveError, setSaveError] = React.useState<string | null>(null);
   const [expanded, setExpanded] = React.useState<string | null>(null);
-  const [loadError, setLoadError] = React.useState<string | null>(null);
-
-  const load = React.useCallback(async () => {
-    try {
-      setJobs(await api.cronJobs());
-      setLoadError(null);
-    } catch (e) {
-      setLoadError(normalizeError(e).message);
-    }
-  }, []);
-
-  React.useEffect(() => {
-    void load();
-  }, [load]);
-
-  const add = async () => {
-    if (!name.trim() || !command.trim()) return;
-    setBusy(true);
-    try {
-      await api.cronSave({
-        id: "",
-        name: name.trim(),
-        command: command.trim(),
-        intervalMin: Math.max(1, Number(intervalMin) || 30),
-        enabled: true,
-        createdAt: Date.now(),
-      });
-      setName("");
-      setCommand("");
-      await load();
-    } catch (e) {
-      toastError(e);
-    } finally {
-      setBusy(false);
+  const [deleting, setDeleting] = React.useState<CronJob | null>(null);
+  const [working, setWorking] = React.useState<Record<string, string>>({});
+  const actions = React.useRef(new Set<string>());
+  const [runRequests, setRunRequests] = React.useState<string[]>([]);
+  const runs = React.useRef(new Set<string>());
+  const form = React.useRef<HTMLFormElement>(null);
+  const nameId = React.useId();
+  const presets = [1, 5, 15, 30, 60, 1440];
+  const refresh = () => query.refetch();
+  const reset = () => { setEditing(null); setName(""); setCommand(""); setSaveError(null); };
+  const edit = (job: CronJob) => {
+    setEditing(job); setName(job.name); setCommand(job.command); setIntervalMin(String(job.intervalMin));
+    setPreset(presets.includes(job.intervalMin) ? String(job.intervalMin) : "custom"); setSaveError(null);
+    form.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+    form.current?.querySelector<HTMLInputElement>("input")?.focus({ preventScroll: true });
+  };
+  const act = async (id: string, kind: string, action: () => Promise<unknown>) => {
+    if (actions.current.has(id)) return;
+    actions.current.add(id); setWorking((old) => ({ ...old, [id]: kind }));
+    try { await action(); } catch (e) { toastError(e); }
+    finally {
+      await refresh(); actions.current.delete(id);
+      setWorking((old) => { const next = { ...old }; delete next[id]; return next; });
     }
   };
-
-  const runNow = async (id: string) => {
-    setBusy(true);
-    try {
-      await api.cronRunNow(id);
-      toast.success(t("tools.cron.ranNow"));
-      await load();
-    } catch (e) {
-      toastError(e);
-    } finally {
-      setBusy(false);
+  const save = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (saveGuard.current) return;
+    const minutes = Number(intervalMin);
+    if (!name.trim() || !command.trim() || !Number.isInteger(minutes) || minutes < 1 || minutes > 525600) {
+      setSaveError(t("tools.cron.invalid")); return;
     }
+    saveGuard.current = true; setSaving(true); setSaveError(null);
+    try {
+      await api.cronSave({ id: editing?.id ?? "", name: name.trim(), command: command.trim(), intervalMin: minutes,
+        enabled: editing?.enabled ?? true, createdAt: editing?.createdAt ?? Date.now() });
+      reset(); toast.success(t("tools.cron.saved")); await refresh();
+    } catch (e) { setSaveError(normalizeError(e).message); }
+    finally { saveGuard.current = false; setSaving(false); }
+  };
+  const runNow = async (id: string) => {
+    if (runs.current.has(id) || actions.current.has(id)) return;
+    runs.current.add(id); setRunRequests([...runs.current]);
+    try {
+      const result = await api.cronRunNow(id);
+      client.setQueryData<CronJob[]>(["cron-jobs"], (old) => old?.map((job) => job.id === id ? result : job));
+      if (result.lastExit === "exit 0") toast.success(t("tools.cron.ranNow"));
+      else if (result.lastExit === "cancelled") toast.message(t("tools.cron.cancelled"));
+      else { toast.error(t("tools.cron.failed")); setExpanded(id); }
+    } catch (e) { toastError(e); }
+    finally { runs.current.delete(id); setRunRequests([...runs.current]); await refresh(); }
+  };
+  const status = (job: CronJob) => {
+    if (job.lastExit === "running" || runRequests.includes(job.id)) return t("tools.cron.running");
+    if (!job.lastExit) return t("tools.cron.neverRun");
+    if (job.lastExit === "exit 0") return t("tools.cron.success");
+    if (job.lastExit === "cancelled") return t("tools.cron.cancelled");
+    if (job.lastExit === "interrupted") return t("tools.cron.interrupted");
+    if (job.lastExit === "timeout") return t("tools.cron.timeout");
+    return `${t("tools.cron.failed")} · ${job.lastExit}`;
   };
 
   return (
     <ToolCard icon={CalendarClock} title={t("tools.cron.title")} hint={t("tools.cron.hint")}>
-      <div className="flex flex-col gap-2">
-        {loadError && (
-          <div className="flex flex-wrap items-center gap-2 rounded-md border border-error/25 bg-error-soft/40 px-3 py-2 text-[11px] text-error" role="alert">
-            <span className="min-w-0 flex-1 break-words">{loadError}</span>
-            <Button size="sm" variant="secondary" onClick={() => void load()}>{t("install.retry")}</Button>
-          </div>
-        )}
-        {!loadError && jobs.length === 0 && (
-          <p className="rounded-md border border-dashed border-border px-3 py-4 text-center text-[11px] text-faint">
-            {t("tools.cron.empty")}
-          </p>
-        )}
-        {jobs.map((j) => (
-          <div key={j.id} className="rounded-lg border border-border/60 px-3 py-2">
-            <div className="flex items-center gap-2">
-              <Switch
-                checked={j.enabled}
-                onCheckedChange={async (v) => {
-                  try {
-                    await api.cronSetEnabled(j.id, v);
-                    await load();
-                  } catch (e) {
-                    toastError(e);
-                  }
-                }}
-              />
+      <div className="flex min-w-0 flex-col gap-3">
+        {!isTauri && <p className="rounded-lg bg-info-soft p-3 text-xs text-info">{t("tools.cron.preview")}</p>}
+        {query.error && <div role="alert" className="flex flex-wrap items-center gap-2 rounded-lg bg-error-soft p-3 text-xs text-error">
+          <span className="min-w-0 flex-1 break-words">{t("tools.cron.readFailed")} · {normalizeError(query.error).message}</span>
+          <Button size="sm" variant="secondary" disabled={query.isFetching} onClick={() => void refresh()}>{t("install.retry")}</Button>
+        </div>}
+        {query.isPending ? <p role="status" className="py-4 text-center text-xs text-faint">{t("common.loading")}</p>
+          : !query.error && jobs.length === 0 ? <p className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-xs text-faint">{t("tools.cron.empty")}</p> : null}
+        {jobs.map((job) => {
+          const running = job.lastExit === "running" || runRequests.includes(job.id);
+          const pending = !!working[job.id] || (saving && editing?.id === job.id);
+          const locked = pending || !!query.error;
+          const next = (job.lastRunAt ?? job.createdAt) + job.intervalMin * 60000;
+          return <div key={job.id} className="min-w-0 rounded-lg border border-border/60 p-3">
+            <div className="flex min-w-0 items-start gap-2">
+              <Switch className="mt-1 shrink-0" checked={job.enabled} disabled={locked} aria-label={`${t("tools.cron.schedule")} · ${job.name}`}
+                onCheckedChange={(enabled) => void act(job.id, "toggle", () => api.cronSetEnabled(job.id, enabled))} />
               <div className="min-w-0 flex-1">
-                <p className="truncate text-[12.5px] font-medium">{j.name}</p>
-                <p className="truncate font-mono text-[10.5px] text-faint">{j.command}</p>
+                <p className="break-words text-[12.5px] font-medium">{job.name}</p>
+                <p className="mt-1 break-all font-mono text-[11px] text-faint">{job.command}</p>
               </div>
-              <Badge variant="info" className="shrink-0">
-                {t("tools.cron.every").replace("{n}", String(j.intervalMin))}
-              </Badge>
-              <span
-                className={cn(
-                  "shrink-0 text-[10px]",
-                  j.lastExit === "running"
-                    ? "text-warn"
-                    : j.lastExit == null
-                      ? "text-faint"
-                      : j.lastExit === "exit 0"
-                        ? "text-running"
-                        : "text-error"
-                )}
-                title={j.lastExit ?? ""}
-              >
-                {j.lastExit === "running"
-                  ? t("tools.cron.running")
-                  : j.lastExit == null
-                    ? "—"
-                    : `${t("tools.cron.last")} ${relTime(j.lastRunAt)} · ${j.lastExit}`}
-              </span>
-              <Button
-                size="icon-sm"
-                variant="ghost"
-                className="shrink-0 text-faint hover:text-secondary"
-                title={t("tools.cron.runNow")}
-                disabled={busy || j.lastExit === "running"}
-                onClick={() => void runNow(j.id)}
-              >
-                {j.lastExit === "running" ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Play className="h-3.5 w-3.5" />
-                )}
-              </Button>
-              <Button
-                size="icon-sm"
-                variant="ghost"
-                className="shrink-0 text-faint hover:text-secondary"
-                onClick={() => setExpanded(expanded === j.id ? null : j.id)}
-              >
-                <span className="text-[10px]">{t("tools.cron.log")}</span>
-              </Button>
-              <Button
-                size="icon-sm"
-                variant="ghost"
-                className="shrink-0 text-faint hover:text-error"
-                onClick={async () => {
-                  try {
-                    await api.cronDelete(j.id);
-                    await load();
-                  } catch (e) {
-                    toastError(e);
-                  }
-                }}
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </Button>
             </div>
-            {expanded === j.id && (
-              <pre className="mt-2 max-h-40 overflow-auto rounded-md bg-card-2/50 p-2 font-mono text-[10.5px] leading-relaxed text-secondary">
-                {j.lastOutput || t("tools.cron.noOutput")}
-              </pre>
-            )}
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+              <Badge variant="info">{t("tools.cron.every").replace("{n}", String(job.intervalMin))}</Badge>
+              <span role="status" className={cn("break-words", running ? "text-warn" : job.lastExit === "exit 0" ? "text-running" : job.lastExit ? "text-error" : "text-faint")}>{status(job)}</span>
+              {job.lastRunAt && <time title={new Date(job.lastRunAt).toLocaleString()} className="text-faint">{t("tools.cron.last")} {relTime(job.lastRunAt)}</time>}
+            </div>
+            <p className="mt-1 break-words text-[10.5px] text-faint">
+              {!job.enabled ? t("tools.cron.paused") : running ? t("tools.cron.runningHint") : `${t("tools.cron.next")} ${next <= Date.now() ? t("tools.cron.due") : new Date(next).toLocaleString()}`}
+            </p>
+            <div className="mt-2 flex flex-wrap items-center gap-1 border-t border-dashed border-border pt-2">
+              {running ? <Button size="sm" variant="secondary" disabled={pending} aria-label={`${t("common.stop")} · ${job.name}`}
+                onClick={() => void act(job.id, "stop", async () => { await api.cronStop(job.id); toast.message(t("tools.cron.stopRequested")); })}>
+                {working[job.id] === "stop" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />} {t("common.stop")}
+              </Button> : <Button size="sm" variant="secondary" disabled={locked} aria-label={`${t("tools.cron.runNow")} · ${job.name}`} onClick={() => void runNow(job.id)}><Play className="h-3.5 w-3.5" />{t("tools.cron.runNow")}</Button>}
+              <Button size="sm" variant="ghost" disabled={locked || running || saving} aria-label={`${t("tools.cron.edit")} · ${job.name}`} onClick={() => edit(job)}><Pencil className="h-3.5 w-3.5" />{t("tools.cron.edit")}</Button>
+              <Button size="sm" variant="ghost" aria-label={`${t("tools.cron.log")} · ${job.name}`} aria-expanded={expanded === job.id} onClick={() => setExpanded(expanded === job.id ? null : job.id)}>{t("tools.cron.log")}</Button>
+              <Button size="icon-sm" variant="ghost" className="ml-auto text-faint hover:text-error" disabled={locked || running || saving} aria-label={`${t("common.delete")} · ${job.name}`} onClick={() => setDeleting(job)}><Trash2 className="h-3.5 w-3.5" /></Button>
+            </div>
+            {expanded === job.id && <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-card-2/50 p-3 font-mono text-[11px] leading-relaxed text-secondary">{running ? t("tools.cron.outputPending") : job.lastOutput || t("tools.cron.noOutput")}</pre>}
+          </div>;
+        })}
+        <form ref={form} onSubmit={save} className="flex flex-col gap-3 rounded-lg border border-dashed border-border p-3">
+          <p className="break-words text-xs font-medium">{editing ? `${t("tools.cron.edit")} · ${editing.name}` : t("tools.cron.new")}</p>
+          <label htmlFor={nameId} className="space-y-1.5 text-xs text-muted">{t("tools.cron.nameLabel")}
+            <Input id={nameId} value={name} disabled={saving} maxLength={128} onChange={(e) => setName(e.target.value)} placeholder={t("tools.cron.namePh")} required />
+          </label>
+          <label className="space-y-1.5 text-xs text-muted">{t("tools.cron.commandLabel")}
+            <Input value={command} disabled={saving} maxLength={8192} onChange={(e) => setCommand(e.target.value)} placeholder={t("tools.cron.cmdPh")} className="font-mono text-xs" required />
+          </label>
+          <div className="space-y-1.5 text-xs text-muted">
+            <p id={`${nameId}-interval`}>{t("tools.cron.interval")}</p>
+            <div className="flex flex-wrap gap-2">
+              <Select value={preset} disabled={saving} onValueChange={(value) => { setPreset(value); if (value !== "custom") setIntervalMin(value); }}>
+                <SelectTrigger className="min-w-0 flex-1 basis-32" aria-labelledby={`${nameId}-interval`}><SelectValue /></SelectTrigger>
+                <SelectContent>{presets.map((minutes) => <SelectItem key={minutes} value={String(minutes)}>{t("tools.cron.every").replace("{n}", String(minutes))}</SelectItem>)}<SelectItem value="custom">{t("tools.cron.custom")}</SelectItem></SelectContent>
+              </Select>
+              {preset === "custom" && <Input type="number" className="min-w-0 flex-1 basis-24" value={intervalMin} min={1} max={525600} step={1} disabled={saving} aria-label={t("tools.cron.customMinutes")} onChange={(e) => setIntervalMin(e.target.value)} required />}
+            </div>
           </div>
-        ))}
-
-        {/* 新建 */}
-        <div className="flex flex-col gap-1.5 rounded-lg border border-dashed border-border p-2.5">
-          <div className="flex gap-1.5">
-            <Input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder={t("tools.cron.namePh")}
-              className="h-7 flex-1 text-[11.5px]"
-            />
-            <Input
-              value={intervalMin}
-              onChange={(e) => setIntervalMin(e.target.value.replace(/\D/g, ""))}
-              className="h-7 w-16 text-center font-mono text-[11.5px]"
-              title={t("tools.cron.interval")}
-            />
-            <span className="self-center text-[10px] text-faint">{t("tools.cron.minUnit")}</span>
-          </div>
-          <div className="flex gap-1.5">
-            <Input
-              value={command}
-              onChange={(e) => setCommand(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && void add()}
-              placeholder={t("tools.cron.cmdPh")}
-              className="h-7 flex-1 font-mono text-[11px]"
-            />
-            <Button size="sm" onClick={() => void add()} disabled={busy || !name.trim() || !command.trim()}>
-              {t("common.add")}
+          <p className="text-[11px] leading-relaxed text-faint">{t("tools.cron.hint2")}</p>
+          {saveError && <p role="alert" className="break-words text-xs text-error">{saveError}</p>}
+          <div className="flex flex-wrap justify-end gap-2">
+            {editing && <Button type="button" variant="ghost" disabled={saving} onClick={reset}>{t("common.cancel")}</Button>}
+            <Button type="submit" disabled={saving || !!query.error || (editing !== null && (runs.current.has(editing.id) || jobs.some((j) => j.id === editing.id && j.lastExit === "running")))}>
+              {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}{editing ? t("common.save") : t("common.add")}
             </Button>
           </div>
-          <p className="text-[10px] text-faint">{t("tools.cron.hint2")}</p>
-        </div>
+        </form>
       </div>
+      <ConfirmDialog open={deleting !== null} loading={!!deleting && working[deleting.id] === "delete"}
+        onOpenChange={(open) => { if (!open && (!deleting || !actions.current.has(deleting.id))) setDeleting(null); }}
+        title={`${t("common.delete")} · ${deleting?.name ?? ""}`} description={t("tools.cron.deleteHint")} danger confirmText={t("common.delete")}
+        onConfirm={async () => { if (!deleting) return; const target = deleting; await act(target.id, "delete", async () => { await api.cronDelete(target.id); setDeleting(null); if (editing?.id === target.id) reset(); }); }} />
     </ToolCard>
   );
 }

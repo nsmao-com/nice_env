@@ -207,8 +207,6 @@ impl CoreState {
         }
         // 自动备份调度（off/daily/weekly；线程内自己判断档位）
         backup_job::spawn_scheduler(state.paths.clone());
-        // 计划任务调度（应用级 cron，应用退出即停）
-        crate::cron::spawn_scheduler(state.paths.clone());
         Ok(state)
     }
 
@@ -323,16 +321,17 @@ impl CoreState {
     }
 
     pub fn cron_save(&self, mut job: crate::cron::CronJob) -> Result<()> {
-        if job.id.trim().is_empty() {
+        job.name = job.name.trim().to_string();
+        job.command = job.command.trim().to_string();
+        let create = job.id.trim().is_empty();
+        if create {
             job.id = crate::cron::new_id();
+            job.created_at = crate::services::now_ms();
+        } else if self.store.get_cron_job(&job.id)?.is_none() {
+            return Err(AppError::new("CRON_NOT_FOUND", "待编辑任务不存在，请刷新列表"));
         }
-        if job.command.trim().is_empty() {
-            return Err(AppError::new("CRON_BAD_JOB", "命令不能为空"));
-        }
-        if job.interval_min <= 0 {
-            job.interval_min = 5;
-        }
-        self.store.upsert_cron_job(&job)
+        crate::cron::validate_job(&job)?;
+        self.store.save_cron_job(&job, create)
     }
 
     pub fn cron_delete(&self, id: &str) -> Result<()> {
@@ -345,6 +344,10 @@ impl CoreState {
 
     pub fn cron_run_now(&self, id: &str) -> Result<crate::cron::CronJob> {
         crate::cron::run_job(&self.store, id, true)
+    }
+
+    pub fn cron_stop(&self, id: &str) -> Result<()> {
+        crate::cron::stop_job(&self.store, id)
     }
 
     pub fn tunnel_start(&self, port: u16) -> Result<model::TunnelInfo> {

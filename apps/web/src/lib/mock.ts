@@ -59,7 +59,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.17";
+const MOCK_APP_VERSION = "0.2.18";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -1943,30 +1943,51 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return true as T;
     }
     case "cron_jobs":
-      return Array.from(cronJobs.values()) as T;
+      return structuredClone([...cronJobs.values()]) as T;
     case "cron_save": {
-      const j = args!.job as { id: string; name: string; command: string; intervalMin: number; enabled: boolean; createdAt: number };
-      const id = j.id || `cron-${Date.now()}`;
-      cronJobs.set(id, { ...j, id, lastRunAt: null, lastExit: null, lastOutput: null });
+      const job = args!.job as import("./api").CronJob;
+      const name = job.name.trim(); const command = job.command.trim();
+      if (!name || [...name].length > 128 || /[\x00-\x1f\x7f]/.test(name) || !command || new TextEncoder().encode(command).length > 8192 || command.includes("\0") || !Number.isInteger(job.intervalMin) || job.intervalMin < 1 || job.intervalMin > 525600) {
+        throw { code: "CRON_BAD_JOB", message: "请检查任务名称、命令和执行周期" };
+      }
+      const old = job.id ? cronJobs.get(job.id) : undefined;
+      if (job.id && !old) throw { code: "CRON_NOT_FOUND", message: "待编辑任务不存在" };
+      if (old?.lastExit === "running") throw { code: "CRON_BUSY", message: "任务正在运行，请停止后再编辑" };
+      const id = job.id || `cron-${uid()}`;
+      cronJobs.set(id, old ? { ...old, name, command, intervalMin: job.intervalMin }
+        : { ...job, id, name, command, createdAt: Date.now(), lastRunAt: null, lastExit: null, lastOutput: null });
       return true as T;
     }
-    case "cron_delete":
-      cronJobs.delete(args!.id as string);
+    case "cron_delete": {
+      const job = cronJobs.get(args!.id as string);
+      if (!job || job.lastExit === "running") throw { code: "CRON_NOT_REMOVABLE", message: "任务不存在或仍在运行" };
+      cronJobs.delete(job.id);
       return true as T;
+    }
     case "cron_set_enabled": {
-      const c = cronJobs.get(args!.id as string);
-      if (c) c.enabled = args!.enabled as boolean;
+      const job = cronJobs.get(args!.id as string);
+      if (!job) throw { code: "CRON_NOT_FOUND", message: "计划任务不存在" };
+      cronJobs.set(job.id, { ...job, enabled: args!.enabled as boolean });
       return true as T;
     }
     case "cron_run_now": {
-      const c = cronJobs.get(args!.id as string);
-      if (c) {
-        c.lastRunAt = Date.now();
-        c.lastExit = "exit 0";
-        c.lastOutput = "（mock）任务已执行";
-        return { ...c } as T;
+      const job = cronJobs.get(args!.id as string);
+      if (!job) throw { code: "CRON_NOT_FOUND", message: "计划任务不存在" };
+      if (job.lastExit === "running") throw { code: "CRON_BUSY", message: "计划任务正在运行" };
+      cronJobs.set(job.id, { ...job, lastRunAt: Date.now(), lastExit: "running", lastOutput: null });
+      await delay(1800);
+      const current = cronJobs.get(job.id)!;
+      if (current.lastExit === "running") {
+        const exit = /^exit(?:\s+\/b)?\s+(-?\d+)$/i.exec(job.command.trim())?.[1] ?? "0";
+        cronJobs.set(job.id, { ...current, lastExit: `exit ${exit}`, lastOutput: "（浏览器演示）仅模拟任务结果，没有执行系统命令。" });
       }
-      throw new Error("cron job not found");
+      return { ...cronJobs.get(job.id)! } as T;
+    }
+    case "cron_stop": {
+      const job = cronJobs.get(args!.id as string);
+      if (!job || job.lastExit !== "running") throw { code: "CRON_NOT_RUNNING", message: "计划任务已结束或未运行" };
+      cronJobs.set(job.id, { ...job, lastExit: "cancelled", lastOutput: "（浏览器演示）模拟任务已停止，没有执行系统命令。" });
+      return true as T;
     }
     case "tunnel_start": {
       mockTunnel = {

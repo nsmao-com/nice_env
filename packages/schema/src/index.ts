@@ -241,6 +241,17 @@ export const PathEnvStatus = z.object({
 });
 export type PathEnvStatus = z.infer<typeof PathEnvStatus>;
 
+/** 当前终端的一次性 PATH 脚本；不修改系统配置。 */
+export const TerminalEnvironment = z.object({
+  shell: z.enum(["powershell", "posix"]),
+  cwd: z.string(),
+  script: z.string(),
+  entries: z.array(PathEnvEntry.pick({ id: true, label: true, version: true, binDir: true })),
+  warnings: z.array(z.string()),
+});
+export type TerminalEnvironment = z.infer<typeof TerminalEnvironment>;
+
+
 /* ============ 服务 / Services ============ */
 
 export const ServiceState = z.enum([

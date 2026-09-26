@@ -406,6 +406,25 @@ pub struct PathEnvEntry {
     pub commands: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalEnvironment {
+    pub shell: String,
+    pub cwd: String,
+    pub script: String,
+    pub entries: Vec<TerminalEnvironmentEntry>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalEnvironmentEntry {
+    pub id: String,
+    pub label: String,
+    pub version: String,
+    pub bin_dir: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct PackageView {

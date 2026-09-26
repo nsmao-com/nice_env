@@ -42,6 +42,7 @@ import type {
   CreateSiteInput,
   VersionCatalog,
   PathEnvStatus,
+  TerminalEnvironment,
   UpdateCheckResult,
   CertAutomation,
   CertMonitor,
@@ -476,6 +477,7 @@ export const adminerStatus = () => safe(invoke<AdminerStatus | null>("adminer_st
 export const adminerStop = () => safe(invoke<boolean>("adminer_stop"));
 
 /* 环境变量注入（PATH） */
+export const terminalEnvironment = () => safe(invoke<TerminalEnvironment>("terminal_environment"));
 export const pathenvStatus = () => safe(invoke<PathEnvStatus>("pathenv_status"));
 export const pathenvSetEnabled = (enabled: boolean) =>
   safe(invoke<PathEnvStatus>("pathenv_set_enabled", { enabled }));

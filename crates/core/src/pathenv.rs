@@ -27,11 +27,226 @@ const SELECTED_KEY: &str = "pathEnvSelected";
 const VERSIONS_KEY: &str = "pathEnvVersions";
 
 fn chosen_version(store: &Store, id: &str) -> Option<crate::model::InstalledPackage> {
-    let versions = store.get_setting_or::<std::collections::BTreeMap<String, String>>(VERSIONS_KEY);
+    let installed = store.list_installed().ok()?;
+    let versions = read_selection(store, VERSIONS_KEY).ok()?;
+    chosen_from(store, &installed, &versions, id)
+        .ok()
+        .flatten()
+        .cloned()
+}
+
+fn read_selection<T: serde::de::DeserializeOwned + Default>(store: &Store, key: &str) -> Result<T> {
+    match store.get_setting_checked(key)? {
+        Some(value) => serde_json::from_str(&value)
+            .map_err(|error| AppError::internal("读取 PATH 版本选择", error.to_string())),
+        None => Ok(T::default()),
+    }
+}
+
+fn chosen_from<'a>(
+    store: &Store,
+    installed: &'a [crate::model::InstalledPackage],
+    versions: &std::collections::BTreeMap<String, String>,
+    id: &str,
+) -> Result<Option<&'a crate::model::InstalledPackage>> {
     match versions.get(id) {
         // 已选版本卸载后不擅自换成其它版本，sync 会清除原有托管路径。
-        Some(version) => store.find_installed(id, Some(version)),
-        None => crate::ops::installed_by_choice(store, id),
+        Some(version) => Ok(installed
+            .iter()
+            .find(|p| p.id == id && p.version == *version)),
+        None => {
+            let active = store.get_setting_checked(&format!("active{id}Version"))?;
+            Ok(installed
+                .iter()
+                .find(|p| p.id == id && Some(&p.version) == active.as_ref())
+                .or_else(|| {
+                    installed
+                        .iter()
+                        .filter(|p| p.id == id)
+                        .min_by(|a, b| crate::versions::cmp_version_desc(&a.version, &b.version))
+                }))
+        }
+    }
+}
+
+/// 当前终端使用的只读快照；总开关关闭也可生成脚本，不修改持久 PATH 或版本设置。
+pub fn terminal_environment(
+    store: &Store,
+    paths: &Paths,
+    manifest: &Manifest,
+) -> Result<crate::model::TerminalEnvironment> {
+    let installed = store.list_installed()?;
+    let versions =
+        read_selection::<std::collections::BTreeMap<String, String>>(store, VERSIONS_KEY)?;
+    let selected = read_selection::<Option<Vec<String>>>(store, SELECTED_KEY)?;
+    let installer = crate::install::Installer {
+        manifest: manifest.clone(),
+    };
+    let ids: std::collections::BTreeSet<_> = installed
+        .iter()
+        .map(|p| p.id.as_str())
+        .chain(versions.keys().map(String::as_str))
+        .collect();
+    let mut entries = Vec::new();
+    let mut warnings = Vec::new();
+    for id in ids {
+        if !wants(&selected, id) {
+            continue;
+        }
+        let Some(package) = chosen_from(store, &installed, &versions, id)? else {
+            warnings.push(format!("{id}：所选 PATH 版本已卸载，请重新选择版本"));
+            continue;
+        };
+        let meta = installer.installed_entry(package);
+        if is_non_executable_entry(&meta.entry) {
+            continue;
+        }
+        let check = (|| -> std::result::Result<String, String> {
+            let dir = bin_dir_for(&package.install_path, &meta.entry)
+                .ok_or_else(|| "无法确定安装入口，请重新安装该版本".to_string())?;
+            let relative = meta.entry.replace('\\', "/");
+            if relative
+                .split('/')
+                .any(|part| part == ".." || part.contains(':'))
+                || std::path::Path::new(&relative).is_absolute()
+            {
+                return Err("安装入口必须位于安装目录内".into());
+            }
+            if !std::path::Path::new(&package.install_path).is_absolute() {
+                return Err("安装目录不是绝对路径，请重新安装该版本".into());
+            }
+            let root = std::path::Path::new(&package.install_path)
+                .canonicalize()
+                .map_err(|error| format!("无法读取安装目录：{error}"))?;
+            let executable = root
+                .join(relative)
+                .canonicalize()
+                .map_err(|error| format!("无法读取入口文件：{error}"))?;
+            if !executable.starts_with(&root) || !executable.is_file() {
+                return Err("入口文件不可用或指向安装目录外".into());
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if executable
+                    .metadata()
+                    .map_err(|e| e.to_string())?
+                    .permissions()
+                    .mode()
+                    & 0o111
+                    == 0
+                {
+                    return Err("入口文件没有执行权限".into());
+                }
+            }
+            validate_terminal_dir(&dir, cfg!(windows)).map_err(|e| e.message)?;
+            Ok(dir)
+        })();
+        match check {
+            Ok(bin_dir) => entries.push(crate::model::TerminalEnvironmentEntry {
+                id: id.into(),
+                label: meta.display_name,
+                version: package.version.clone(),
+                bin_dir,
+            }),
+            Err(reason) => warnings.push(format!(
+                "{} {}：{reason}",
+                meta.display_name, package.version
+            )),
+        }
+    }
+    let dirs = entries
+        .iter()
+        .map(|entry| entry.bin_dir.clone())
+        .collect::<Vec<_>>();
+    Ok(crate::model::TerminalEnvironment {
+        shell: if cfg!(windows) { "powershell" } else { "posix" }.into(),
+        cwd: paths.base.to_string_lossy().into_owned(),
+        script: render_terminal_script(&dirs, cfg!(windows))?,
+        entries,
+        warnings,
+    })
+}
+
+fn validate_terminal_dir(dir: &str, windows: bool) -> Result<()> {
+    if dir.is_empty()
+        || dir.chars().any(char::is_control)
+        || dir.contains(if windows { ';' } else { ':' })
+    {
+        return Err(AppError::new(
+            "TERMINAL_PATH_INVALID",
+            "目录含 PATH 分隔符或控制字符，无法安全加入 PATH",
+        ));
+    }
+    Ok(())
+}
+
+/// 只改变运行脚本的终端进程环境；重复粘贴不会累加所选目录，其余 PATH 项保持原样。
+fn render_terminal_script(dirs: &[String], windows: bool) -> Result<String> {
+    for dir in dirs {
+        validate_terminal_dir(dir, windows)?;
+    }
+    if dirs.is_empty() {
+        return Ok(String::new());
+    }
+    if windows {
+        let quoted = dirs
+            .iter()
+            .map(|dir| {
+                let mut literal = String::from("'");
+                for ch in dir.chars() {
+                    literal.push(ch);
+                    // PowerShell 也将弯引号识别为单引号。
+                    if matches!(ch, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
+                        literal.push(ch);
+                    }
+                }
+                literal.push('\'');
+                literal
+            })
+            .collect::<Vec<_>>()
+            .join(",\n    ");
+        Ok(format!(
+            r#"& {{
+  $nsbDirs = @(
+    {quoted}
+  )
+  $nsbKeys = @($nsbDirs | ForEach-Object {{ $_.Replace('/', '\').TrimEnd('\') }})
+  $nsbRest = @()
+  if ($env:PATH) {{
+    $nsbRest = @($env:PATH.Split(';') | Where-Object {{
+      $nsbKeys -notcontains $_.Replace('/', '\').TrimEnd('\')
+    }})
+  }}
+  $env:PATH = (@($nsbDirs) + $nsbRest) -join ';'
+}}"#
+        ))
+    } else {
+        let quote = |text: &str| format!("'{}'", text.replace('\'', "'\"'\"'"));
+        let joined = quote(&dirs.join(":"));
+        let choices = dirs.iter().map(|d| quote(d)).collect::<Vec<_>>().join("|");
+        Ok(format!(
+            r#"PATH="$(
+  nsb_result={joined}
+  nsb_rest=${{PATH-}}
+  if [ -n "$nsb_rest" ]; then
+    while :; do
+      nsb_item=${{nsb_rest%%:*}}
+      case "$nsb_item" in
+        {choices}) ;;
+        *) nsb_result=$nsb_result:$nsb_item ;;
+      esac
+      case "$nsb_rest" in
+        *:*) nsb_rest=${{nsb_rest#*:}} ;;
+        *) break ;;
+      esac
+    done
+  fi
+  printf '%s.' "$nsb_result"
+)"
+PATH=${{PATH%.}}
+export PATH"#
+        ))
     }
 }
 
@@ -368,6 +583,9 @@ pub fn apply(store: &Store, paths: &Paths, manifest: &Manifest) -> Result<PathEn
     } else {
         Vec::new()
     };
+    for dir in &desired {
+        validate_terminal_dir(dir, cfg!(windows))?;
+    }
 
     #[cfg(windows)]
     {
@@ -523,6 +741,217 @@ mod tests {
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn terminal_fixture() -> (tempfile::TempDir, Store, Paths, Manifest) {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().to_path_buf());
+        let store = Store::open(paths.db()).unwrap();
+        let mut manifest = crate::install::Installer::bundled().manifest;
+        let mut template = manifest.packages[0].clone();
+        template.id = "terminal-fixture".into();
+        template.entry = if cfg!(windows) {
+            "nested/bin/tool.exe"
+        } else {
+            "nested/bin/tool"
+        }
+        .into();
+        manifest.packages.clear();
+        for version in ["1.0.0", "2.0.0"] {
+            let mut entry = template.clone();
+            entry.version = version.into();
+            let root = paths.base.join(format!("custom-{version}"));
+            let executable = root.join(&entry.entry);
+            std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+            std::fs::write(&executable, "fixture").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            }
+            store
+                .upsert_installed(&crate::model::InstalledPackage {
+                    id: entry.id.clone(),
+                    version: version.into(),
+                    category: "runtime".into(),
+                    install_path: root.to_string_lossy().into_owned(),
+                    config_path: String::new(),
+                    installed_at: 0,
+                })
+                .unwrap();
+            manifest.packages.push(entry);
+        }
+        (temp, store, paths, manifest)
+    }
+
+    #[test]
+    fn terminal_uses_selected_version_and_real_nested_entry_without_writes() {
+        let (_temp, store, paths, manifest) = terminal_fixture();
+        store.set_setting(ENABLED_KEY, "0").unwrap();
+        store
+            .set_setting("activeterminal-fixtureVersion", "2.0.0")
+            .unwrap();
+        store
+            .set_setting(VERSIONS_KEY, r#"{"terminal-fixture":"1.0.0"}"#)
+            .unwrap();
+        let result = terminal_environment(&store, &paths, &manifest).unwrap();
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.entries[0].version, "1.0.0");
+        assert!(result.entries[0]
+            .bin_dir
+            .replace('\\', "/")
+            .ends_with("custom-1.0.0/nested/bin"));
+        assert!(result.warnings.is_empty());
+        assert!(!is_enabled(&store));
+        assert_eq!(
+            store
+                .get_setting("activeterminal-fixtureVersion")
+                .as_deref(),
+            Some("2.0.0")
+        );
+        assert!(store.get_setting(DIRS_KEY).is_none());
+    }
+
+    #[test]
+    fn terminal_does_not_substitute_uninstalled_or_broken_selected_version() {
+        let (_temp, store, paths, mut manifest) = terminal_fixture();
+        store
+            .set_setting(VERSIONS_KEY, r#"{"terminal-fixture":"3.0.0"}"#)
+            .unwrap();
+        let missing = terminal_environment(&store, &paths, &manifest).unwrap();
+        assert!(missing.entries.is_empty());
+        assert!(missing.script.is_empty());
+        assert_eq!(missing.warnings.len(), 1);
+        store
+            .set_setting(VERSIONS_KEY, r#"{"terminal-fixture":"2.0.0"}"#)
+            .unwrap();
+        manifest.packages[1].entry = "../outside/tool".into();
+        let unsafe_entry = terminal_environment(&store, &paths, &manifest).unwrap();
+        assert!(unsafe_entry.entries.is_empty());
+        assert_eq!(unsafe_entry.warnings.len(), 1);
+        manifest.packages[1].entry = "missing/tool".into();
+        assert_eq!(
+            terminal_environment(&store, &paths, &manifest)
+                .unwrap()
+                .warnings
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn terminal_respects_empty_selection_and_reports_corrupt_settings() {
+        let (_temp, store, paths, manifest) = terminal_fixture();
+        assert_eq!(
+            terminal_environment(&store, &paths, &manifest)
+                .unwrap()
+                .entries[0]
+                .version,
+            "2.0.0"
+        );
+        store.set_setting(SELECTED_KEY, "[]").unwrap();
+        assert!(terminal_environment(&store, &paths, &manifest)
+            .unwrap()
+            .entries
+            .is_empty());
+        store.set_setting(SELECTED_KEY, "broken").unwrap();
+        assert!(terminal_environment(&store, &paths, &manifest).is_err());
+    }
+
+    #[test]
+    fn terminal_rejects_path_separators_and_control_characters() {
+        for (dir, windows) in [
+            ("C:/bad;path", true),
+            ("/bad:path", false),
+            ("/bad\npath", false),
+        ] {
+            assert!(render_terminal_script(&v(&[dir]), windows).is_err());
+        }
+        assert!(render_terminal_script(&[], true).unwrap().is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn terminal_powershell_is_literal_idempotent_and_preserves_other_entries() {
+        use base64::Engine;
+        let dirs = v(&[
+            "C:/Nice Env/O'Brien/$nsbInjection`&()‘’‚‛/bin",
+            "D:/second/bin",
+        ]);
+        let script = render_terminal_script(&dirs, true).unwrap();
+        let program = format!("$nsbInjection = 'EXPANDED'\n{script}\n{script}\nif (Get-Variable nsbDirs -ErrorAction SilentlyContinue) {{ throw 'scope leak' }}\n[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($env:PATH))");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(
+            program
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        );
+        let powershell = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let output = platform::command(powershell)
+            .args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &encoded])
+            .env("PATH", "C:/Other;;d:/SECOND/bin/;C:/Other;")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let actual = base64::engine::general_purpose::STANDARD
+            .decode(String::from_utf8_lossy(&output.stdout).trim())
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(actual).unwrap(),
+            format!("{};{};C:/Other;;C:/Other;", dirs[0], dirs[1])
+        );
+    }
+
+    #[test]
+    fn terminal_posix_is_literal_idempotent_and_preserves_other_entries() {
+        // Windows 上用已有 Git Bash；无该工具的平台仍执行纯函数与 PowerShell 回归。
+        #[cfg(windows)]
+        let shell = std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+            .filter(|dir| dir.join("git.exe").is_file())
+            .flat_map(|dir| {
+                dir.ancestors()
+                    .take(3)
+                    .map(|parent| parent.join("bin/bash.exe"))
+                    .collect::<Vec<_>>()
+            })
+            .find(|path| path.is_file())
+            .unwrap_or_default();
+        #[cfg(not(windows))]
+        let shell = std::path::PathBuf::from("/bin/sh");
+        if !shell.is_file() {
+            return;
+        }
+        let dirs = v(&["/Nice Env/O'Brien/$nsbInjection`&()\\/bin", "/second/bin"]);
+        let script = render_terminal_script(&dirs, false).unwrap();
+        let program = format!("PATH='/other::/second/bin:/other:'\nnsbInjection=EXPANDED\n{script}\n{script}\n[ -z \"${{nsb_result+x}}\" ] || exit 2\nprintf '%s' \"$PATH\"");
+        // /bin/sh 不认识 Bash 启动参数。
+        #[cfg(not(windows))]
+        let output = platform::command("/bin/sh")
+            .args(["-c", &program])
+            .output()
+            .unwrap();
+        #[cfg(windows)]
+        let output = platform::command(shell)
+            .args(["--noprofile", "--norc", "-c", &program])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("{}:{}:/other::/other:", dirs[0], dirs[1])
+        );
     }
 
     #[test]

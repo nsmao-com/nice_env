@@ -59,7 +59,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.20";
+const MOCK_APP_VERSION = "0.2.21";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -888,6 +888,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         killedPids: [4528],
       } as ClosePortOutcome as T;
     }
+    case "terminal_environment":
     case "pathenv_status":
     case "pathenv_set_enabled":
     case "pathenv_set_selected":
@@ -921,7 +922,8 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       }
       const entries = installed
         .map((p) => {
-          const binDir = `…/runtimes/${p.id}/${p.version}`;
+          const parent = p.entry.replace(/\\/g, "/").split("/").slice(0, -1).join("/");
+          const binDir = `${p.install!.installPath.replace(/[\\/]$/, "")}${parent ? `/${parent}` : ""}`;
           const selected =
             (mockPathEnv.selected === null || mockPathEnv.selected.includes(p.id)) && pathVersion(p.id) === p.version;
           return {
@@ -935,6 +937,33 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
             commands: [p.id],
           };
         });
+      if (cmd === "terminal_environment") {
+        const chosen = entries.filter((entry) => entry.selected).sort((a, b) => a.id.localeCompare(b.id));
+        const quoted = chosen.map((entry) => `'${entry.binDir.replace(/['‘’‚‛]/g, (quote) => quote + quote)}'`).join(",\n    ");
+        return {
+          shell: "powershell",
+          cwd: "…",
+          script: chosen.length ? `# Browser demo paths — generate the actual script in the desktop app.
+& {
+  $nsbDirs = @(
+    ${quoted}
+  )
+  $nsbKeys = @($nsbDirs | ForEach-Object { $_.Replace('/', '\\').TrimEnd('\\') })
+  $nsbRest = @()
+  if ($env:PATH) {
+    $nsbRest = @($env:PATH.Split(';') | Where-Object {
+      $nsbKeys -notcontains $_.Replace('/', '\\').TrimEnd('\\')
+    })
+  }
+  $env:PATH = (@($nsbDirs) + $nsbRest) -join ';'
+}` : "",
+          entries: chosen.map(({ id, label, version, binDir }) => ({ id, label, version, binDir })),
+          warnings: Object.entries(mockPathEnv.versions)
+            .filter(([id, version]) => (mockPathEnv.selected === null || mockPathEnv.selected.includes(id))
+              && !installed.some((p) => p.id === id && p.version === version))
+            .map(([id]) => `${id}：所选 PATH 版本已卸载，请重新选择版本`),
+        } as T;
+      }
       const managedDirs = mockPathEnv.enabled
         ? entries.filter((e) => e.selected).map((e) => e.binDir)
         : [];
@@ -2195,8 +2224,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "open_in_folder":
       return true as T;
     case "open_terminal":
-      // 浏览器预览无法创建本机终端，但返回成功让按钮状态和桌面端保持一致。
-      return true as T;
+      throw { code: "DESKTOP_ONLY", message: "浏览器无法打开本机终端，请使用桌面端" };
     case "refresh_remote_manifest":
       return { revision: 2, packages: 160, path: "C:\\Users\\Demo\\AppData\\Local\\NiceEnv\\etc\\manifest.json", takesEffect: "restart" } as T;
     case "reset_remote_manifest":

@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { toast } from "sonner";
 import { Check, Copy, Hash, AlignLeft, WrapText, Sparkles } from "lucide-react";
 import { useTheme } from "next-themes";
 import { cn } from "@/lib/utils";
@@ -314,19 +315,19 @@ export function CodeBlock({
       setCopied(true);
       setTimeout(() => setCopied(false), 1400);
     } catch {
-      /* 剪贴板不可用：静默 */
+      toast.error(t("sites.copyFailed"));
     }
   };
 
   return (
     <div
-      className={cn("nsb-code group/code overflow-hidden rounded-xl border border-border", className)}
+      className={cn("nsb-code group/code min-w-0 overflow-hidden rounded-xl border border-border", className)}
       style={paletteVars}
     >
       {/* 工具条 */}
-      <div className="flex items-center gap-2 border-b border-[color-mix(in_srgb,var(--code-fg)_9%,transparent)] bg-[color-mix(in_srgb,var(--code-fg)_4%,transparent)] px-2.5 py-1.5">
+      <div className="flex flex-wrap items-center gap-2 border-b border-[color-mix(in_srgb,var(--code-fg)_9%,transparent)] bg-[color-mix(in_srgb,var(--code-fg)_4%,transparent)] px-2.5 py-1.5">
         {title ? (
-          <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-[color-mix(in_srgb,var(--code-fg)_72%,transparent)]">
+          <span className="min-w-0 flex-1 basis-24 truncate text-[11px] font-medium text-[color-mix(in_srgb,var(--code-fg)_72%,transparent)]">
             {title}
           </span>
         ) : (
@@ -400,6 +401,7 @@ export function CodeBlock({
             <TooltipTrigger asChild>
               <button
                 type="button"
+                aria-label={copied ? t("common.copied") : t("code.copy")}
                 onClick={copy}
                 className="flex h-6 w-6 items-center justify-center rounded-md text-[color-mix(in_srgb,var(--code-fg)_45%,transparent)] transition-colors hover:bg-[color-mix(in_srgb,var(--code-fg)_8%,transparent)] hover:text-[color-mix(in_srgb,var(--code-fg)_72%,transparent)]"
               >

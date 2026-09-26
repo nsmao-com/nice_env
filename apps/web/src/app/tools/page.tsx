@@ -73,7 +73,7 @@ export default function ToolsPage() {
         <DnsTool />
         <HostsTool />
         <PortTool />
-        <PathEnvCard />
+        <div id="nsb-tool-pathenv" className="min-w-0 scroll-mt-6"><PathEnvCard /></div>
         <TerminalInjectTool />
         <RewriteTemplates />
         <div id="nsb-tool-config">
@@ -119,8 +119,8 @@ function ToolCard({
   children: React.ReactNode;
 }) {
   return (
-    <Card>
-      <CardHeader className="flex-row items-start gap-3">
+    <Card className="min-w-0">
+      <CardHeader className="flex-row flex-wrap items-start gap-3 p-3 sm:p-5">
         <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-fill">
           <Icon className="h-4 w-4 shrink-0 text-primary" strokeWidth={1.8} />
         </div>
@@ -128,9 +128,9 @@ function ToolCard({
           <CardTitle className="text-[13px]">{title}</CardTitle>
           <CardDescription className="mt-0.5 line-clamp-2 text-[11px] leading-relaxed">{hint}</CardDescription>
         </div>
-        {action && <div className="shrink-0">{action}</div>}
+        {action && <div className="flex min-w-0 flex-wrap gap-2">{action}</div>}
       </CardHeader>
-      <CardContent>{children}</CardContent>
+      <CardContent className="min-w-0 p-3 pt-0 sm:p-5 sm:pt-0">{children}</CardContent>
     </Card>
   );
 }
@@ -774,59 +774,75 @@ function PortTool() {
 /* ============ 终端注入 ============ */
 function TerminalInjectTool() {
   const t = useT();
-  const [script, setScript] = React.useState("");
-  React.useEffect(() => {
-    // 路径与版本都从后端取；shell 语法按平台切换（PowerShell / zsh·bash）
-    Promise.all([
-      api.getDataDir().catch(() => ""),
-      api.listPackages().catch(() => []),
-    ])
-      .then(([dataDir, packages]) => {
-        const installed = packages.filter((p) => p.install);
-        const php = installed.find((p) => p.id === "php");
-        const mysql = installed.find((p) => p.id === "mysql");
-        if (!dataDir) return;
-        const isWin = /Win/i.test(navigator.userAgent);
-        const rt = `${dataDir}/runtimes`;
-        const sep = isWin ? "\\" : "/";
-        const join = (...parts: string[]) => parts.join(sep);
-        const lines = installed.map((p) => {
-          const bin = join(rt, p.id, p.version);
-          const withBin =
-            p.id === "mysql" || p.id === "postgresql"
-              ? join(bin, p.id === "mysql" ? "bin" : "bin")
-              : bin;
-          return isWin
-            ? `$env:PATH = "${withBin};$env:PATH"`
-            : `export PATH="${withBin}:$PATH"`;
-        });
-        if (lines.length === 0) {
-          setScript(`# ${t("tools.termInjectNone")}`);
-          return;
-        }
-        const checks = [php ? "php -v" : "", mysql ? "mysql --version" : ""].filter(Boolean).join("; ");
-        const header = isWin
-          ? `# ${t("tools.termInjectPsHeader")}`
-          : `# ${t("tools.termInjectShHeader")}`;
-        setScript([header, ...lines, checks].filter(Boolean).join("\n"));
-      })
-      .catch(() => undefined);
-  }, []);
+  const environment = useQuery({
+    queryKey: ["pathenv", "terminal"],
+    queryFn: api.terminalEnvironment,
+    staleTime: 5_000,
+    refetchInterval: 15_000,
+    retry: false,
+  });
+  const [opening, setOpening] = React.useState(false);
+  const openingRef = React.useRef(false);
+  const data = environment.data;
+  const error = environment.error ? normalizeError(environment.error) : null;
+  const open = async () => {
+    if (!data || openingRef.current) return;
+    openingRef.current = true;
+    setOpening(true);
+    try {
+      await api.openTerminal(data.cwd);
+    } catch (error) {
+      toastError(error);
+    } finally {
+      openingRef.current = false;
+      setOpening(false);
+    }
+  };
   return (
-    <ToolCard icon={SquareTerminal} title={t("tools.termInject")} hint={t("tools.termInjectHint")}>
-      <div className="flex flex-col gap-2">
-        <CodeBlock code={script} lang="shell" maxHeight={176} compact />
-        <div className="flex gap-2">
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => api.openTerminal(".").catch(toastError)}
-          >
-            {t("dashboard.openTerminal")}
-          </Button>
+    <div id="nsb-tool-terminal" className="min-w-0">
+      <ToolCard icon={SquareTerminal} title={t("tools.termInject")} hint={t("tools.termInjectHint")}>
+        <div className="flex min-w-0 flex-col gap-3" aria-busy={environment.isFetching}>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="secondary" size="sm" disabled={environment.isFetching} onClick={() => void environment.refetch()}>
+              <RefreshCw className={cn("h-3.5 w-3.5", environment.isFetching && "animate-spin")} />
+              {t("tools.refresh")}
+            </Button>
+            <Button variant="ghost" size="sm" className="h-auto whitespace-normal text-left" onClick={() => {
+              document.getElementById("nsb-tool-pathenv")?.scrollIntoView({ behavior: "smooth", block: "center" });
+            }}>{t("tools.termInjectVersions")}</Button>
+          </div>
+          {environment.isPending && <p role="status" className="text-[12px] text-muted">{t("common.loading")}</p>}
+          {error && <div role="alert" className="break-words rounded-lg border border-error/30 bg-error/5 p-3 text-[12px] text-error">
+            <p>{error.message}</p>
+            {error.hint && <p className="mt-1">{error.hint}</p>}
+            <Button variant="outline" size="sm" className="mt-2" disabled={environment.isFetching} onClick={() => void environment.refetch()}>{t("sites.retry")}</Button>
+          </div>}
+          {data && !error && <>
+            <p className="text-[11px] leading-relaxed text-muted">{t("tools.termInjectScope")}</p>
+            {!isTauri && <p className="rounded-lg bg-warn/10 p-2 text-[11px] leading-relaxed text-warn">{t("tools.termInjectDemo")}</p>}
+            {data.warnings.length > 0 && <div role="status" className="rounded-lg border border-warn/30 p-2.5 text-[11px] text-warn">
+              <p className="font-medium">{t("tools.termInjectSkipped")}</p>
+              <ul className="mt-1 list-disc space-y-1 pl-4 [overflow-wrap:anywhere]">{data.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>
+            </div>}
+            {data.entries.length > 0 ? <>
+              <div className="max-h-40 space-y-2 overflow-auto rounded-lg border border-border p-2.5">
+                {data.entries.map((entry) => <div key={entry.id} className="min-w-0">
+                  <p className="flex flex-wrap items-center gap-x-2 text-[12px]"><span className="font-medium">{entry.label}</span><span className="font-mono text-[11px] text-muted">{entry.version}</span></p>
+                  <p className="mt-0.5 break-all font-mono text-[10.5px] text-faint">{entry.binDir}</p>
+                </div>)}
+              </div>
+              <CodeBlock code={data.script} lang="shell" title={data.shell === "powershell" ? "PowerShell" : "Bash / Zsh"} maxHeight={240} compact />
+            </> : <p className="rounded-lg bg-fill p-3 text-[12px] leading-relaxed text-muted">{t("tools.termInjectNone")}</p>}
+            <div className="flex flex-wrap gap-2">
+              <Button variant="secondary" size="sm" className="h-auto whitespace-normal py-2 text-left" disabled={opening || !isTauri} onClick={() => void open()}>
+                {opening && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                {data.shell === "powershell" ? t("tools.termInjectOpenPs") : t("dashboard.openTerminal")}
+              </Button>
+            </div>
+          </>}
         </div>
-      </div>
-    </ToolCard>
+      </ToolCard>
+    </div>
   );
 }
 

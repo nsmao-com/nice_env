@@ -115,6 +115,9 @@ pub fn read_profile(path: &std::path::Path) -> Result<String> {
 /// 纯逻辑在 `merge_profile_content`，这里只负责落盘。
 #[cfg(not(windows))]
 pub fn write_profile_managed_block(path: &std::path::Path, dirs: &[String]) -> Result<()> {
+    if dirs.iter().any(|dir| dir.is_empty() || dir.contains(':') || dir.chars().any(char::is_control)) {
+        return Err(crate::PlatformError::Io("PATH 目录包含分隔符或控制字符".into()));
+    }
     let original = read_profile(path)?;
     let merged = merge_profile_content(&original, dirs);
     if merged == original {
@@ -131,22 +134,12 @@ pub fn write_profile_managed_block(path: &std::path::Path, dirs: &[String]) -> R
 /// 无法单测，而 macOS 的 profile 逻辑恰恰是最需要测的（本机 CI 在 Windows）。
 pub fn merge_profile_content(original: &str, dirs: &[String]) -> String {
     let mut out = String::new();
-    let mut in_block = false;
-    for line in original.lines() {
-        let t = line.trim();
-        if t == PATH_BEGIN || t == PATH_BEGIN_LEGACY {
-            in_block = true;
-            continue;
-        }
-        if t == PATH_END || t == PATH_END_LEGACY {
-            in_block = false;
-            continue;
-        }
-        if !in_block {
-            out.push_str(line);
-            out.push('\n');
-        }
+    let mut cursor = 0;
+    for (start, end) in profile_blocks(original) {
+        out.push_str(&original[cursor..start]);
+        cursor = end;
     }
+    out.push_str(&original[cursor..]);
     if dirs.is_empty() {
         return out;
     }
@@ -157,13 +150,61 @@ pub fn merge_profile_content(original: &str, dirs: &[String]) -> String {
     out
 }
 
+/// 只识别完整、同名的标记对。遇到嵌套 BEGIN 从最近一个开始配对，孤立标记原样保留。
+fn profile_blocks(content: &str) -> Vec<(usize, usize)> {
+    let mut blocks = Vec::new();
+    let mut begin = None;
+    let mut offset = 0;
+    for line in content.split_inclusive('\n') {
+        let marker = line.trim();
+        match marker {
+            PATH_BEGIN | PATH_BEGIN_LEGACY => begin = Some((offset, marker == PATH_BEGIN_LEGACY)),
+            PATH_END | PATH_END_LEGACY => {
+                if let Some((start, legacy)) = begin {
+                    if legacy == (marker == PATH_END_LEGACY) {
+                        blocks.push((start, offset + line.len()));
+                        begin = None;
+                    }
+                }
+            }
+            _ => {}
+        }
+        offset += line.len();
+    }
+    blocks
+}
+
+fn escape_profile_dir(dir: &str) -> String {
+    let mut escaped = String::new();
+    for ch in dir.chars() {
+        if matches!(ch, '\\' | '"' | '$' | '`') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
+fn unescape_profile_dir(dir: &str) -> String {
+    let mut result = String::new();
+    let mut chars = dir.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && chars.peek().is_some_and(|next| matches!(next, '\\' | '"' | '$' | '`')) {
+            result.push(chars.next().unwrap());
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
 fn render_profile_block(dirs: &[String]) -> String {
     let mut s = String::from(PATH_BEGIN);
     s.push('\n');
     // 逐条前置：靠后的条目最终排在更前面，所以倒序输出，
     // 保证 dirs[0] 在 PATH 中排最前（与 Windows 侧的「前置」语义一致）
     for d in dirs.iter().rev() {
-        s.push_str(&format!("export PATH=\"{d}:$PATH\"\n"));
+        s.push_str(&format!("export PATH=\"{}:$PATH\"\n", escape_profile_dir(d)));
     }
     s.push_str(PATH_END);
     s.push('\n');
@@ -176,23 +217,12 @@ fn render_profile_block(dirs: &[String]) -> String {
 /// 是倒序写入的，读回来必须反转才能还原同一个优先级序列。
 /// 同样是纯函数，跨平台可测。
 pub fn parse_profile_managed_dirs(content: &str) -> Vec<String> {
-    let mut in_block = false;
     let mut file_order = Vec::new();
-    for line in content.lines() {
-        let t = line.trim();
-        if t == PATH_BEGIN || t == PATH_BEGIN_LEGACY {
-            in_block = true;
-            continue;
-        }
-        if t == PATH_END || t == PATH_END_LEGACY {
-            in_block = false;
-            continue;
-        }
-        if in_block {
-            if let Some(rest) = t.strip_prefix("export PATH=\"") {
-                if let Some(dir) = rest.split(":$PATH").next() {
-                    file_order.push(dir.to_string());
-                }
+    for (start, end) in profile_blocks(content) {
+        for line in content[start..end].lines() {
+            if let Some(dir) = line.trim().strip_prefix("export PATH=\"")
+                .and_then(|rest| rest.strip_suffix(":$PATH\"")) {
+                file_order.push(unescape_profile_dir(dir));
             }
         }
     }
@@ -357,6 +387,38 @@ mod tests {
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn incomplete_markers_never_consume_user_content_or_change_line_endings() {
+        let original = format!("export KEEP=1\r\n{PATH_BEGIN}\r\nexport USER_VALUE=2\r\n# no final newline");
+        assert_eq!(merge_profile_content(&original, &[]), original);
+        assert!(parse_profile_managed_dirs(&original).is_empty());
+        let orphan_end = format!("{PATH_END}\r\nkeep without final newline");
+        assert_eq!(merge_profile_content(&orphan_end, &[]), orphan_end);
+        let nested = format!("{original}\n{}", render_profile_block(&s(&["/new/bin"])));
+        assert_eq!(merge_profile_content(&nested, &[]), format!("{original}\n"));
+    }
+
+    #[test]
+    fn complete_blocks_preserve_surrounding_bytes_and_legacy_markers() {
+        let original = format!("keep\r\n{PATH_BEGIN_LEGACY}\r\nexport PATH=\"/old:$PATH\"\r\n{PATH_END_LEGACY}\r\nlast");
+        assert_eq!(merge_profile_content(&original, &[]), "keep\r\nlast");
+        assert_eq!(parse_profile_managed_dirs(&original), s(&["/old"]));
+        let mismatch = format!("{PATH_BEGIN}\nexport KEEP=1\n{PATH_END_LEGACY}\n");
+        assert_eq!(merge_profile_content(&mismatch, &[]), mismatch);
+    }
+
+    #[test]
+    fn profile_paths_escape_shell_expansions_and_roundtrip() {
+        let dirs = s(&[r#"/a $HOME/`echo unsafe`/"quoted"/back\slash"#]);
+        let block = render_profile_block(&dirs);
+        assert!(block.contains(r"\$HOME"));
+        assert!(block.contains(r"\`echo unsafe\`"));
+        assert!(block.contains(r#"\"quoted\""#));
+        assert_eq!(parse_profile_managed_dirs(&block), dirs);
+        let orphan = format!("{PATH_BEGIN}\nexport PATH=\"/unowned:$PATH\"\n");
+        assert!(parse_profile_managed_dirs(&orphan).is_empty());
     }
 
     #[test]

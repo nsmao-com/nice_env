@@ -430,6 +430,11 @@ impl CoreState {
         pathenv::status(&self.store, &self.installer.manifest)
     }
 
+    pub fn terminal_environment(&self) -> Result<model::TerminalEnvironment> {
+        let _operation = self.manager.lifecycle.lock();
+        pathenv::terminal_environment(&self.store, &self.paths, &self.installer.manifest)
+    }
+
     /// 开/关总开关
     pub fn pathenv_set_enabled(&self, enabled: bool) -> Result<model::PathEnvStatus> {
         let _operation = self.manager.lifecycle.lock();

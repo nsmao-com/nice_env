@@ -108,6 +108,7 @@ pub fn run() {
             cancel_download,
             set_active_version,
             pathenv_status,
+            terminal_environment,
             pathenv_set_enabled,
             pathenv_set_selected,
             pathenv_set_version,
@@ -447,6 +448,16 @@ fn pathenv_status(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> nsb_core::model::PathEnvStatus {
     state.pathenv_status()
+}
+
+#[tauri::command]
+async fn terminal_environment(
+    state: State<'_, std::sync::Arc<CoreState>>,
+) -> Result<nsb_core::model::TerminalEnvironment, tauri::Error> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(state.terminal_environment()))
+        .await
+        .map_err(|e| box_err(nsb_core::AppError::internal("读取终端环境", e.to_string())))?
 }
 
 #[tauri::command]
@@ -1346,51 +1357,76 @@ fn open_target(target: &str, folder: bool) -> Result<bool, String> {
 }
 
 #[tauri::command]
-fn open_terminal(cwd: String) -> Result<bool, tauri::Error> {
-    #[cfg(windows)]
-    {
-        // 外层 cmd 隐藏；start 会给终端单独开新窗口，用户看到的仍是终端本身。
-        // 必须先判断有没有 wt：`start wt` 找不到程序时外层 cmd 照样启动成功（只会弹一个
-        // 「找不到 wt」的系统对话框），靠 spawn 失败来回退永远走不到。
-        let mut cmd = platform::command("cmd");
-        // 新开的终端继承工作目录，不用再拼 `cd /d`（路径带空格 / 特殊字符也不会出错）
-        cmd.current_dir(&cwd);
-        if has_windows_terminal() {
-            cmd.args(["/c", "start", "", "wt", "-d"]).arg(&cwd);
-        } else {
-            cmd.args(["/c", "start", "", "cmd"]);
+async fn open_terminal(cwd: String) -> Result<bool, tauri::Error> {
+    tauri::async_runtime::spawn_blocking(move || -> nsb_core::error::Result<bool> {
+        if cwd.trim().is_empty() {
+            return Err(nsb_core::AppError::new(
+                "TERMINAL_DIRECTORY_INVALID",
+                "请选择终端工作目录",
+            ));
         }
-        cmd.spawn()
-            .map(|_| true)
-            .map_err(|e| box_err(nsb_core::AppError::io("打开终端", e)))
-    }
-    #[cfg(not(windows))]
-    {
-        std::process::Command::new("open")
-            .args(["-a", "Terminal", &cwd])
-            .spawn()
-            .map(|_| true)
-            .map_err(|e| box_err(nsb_core::AppError::io("打开终端", e)))
-    }
-}
-
-/// 是否装了 Windows Terminal。
-/// wt.exe 通常是 WindowsApps 下的「应用执行别名」（重分析点），跟随它取元数据会失败，
-/// 所以用 symlink_metadata 只看链接本身是否存在。
-#[cfg(windows)]
-fn has_windows_terminal() -> bool {
-    let mut dirs: Vec<std::path::PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        dirs.push(
-            std::path::PathBuf::from(local)
-                .join("Microsoft")
-                .join("WindowsApps"),
-        );
-    }
-    dirs.iter()
-        .any(|d| std::fs::symlink_metadata(d.join("wt.exe")).is_ok())
+        let directory = std::path::Path::new(&cwd)
+            .canonicalize()
+            .map_err(|e| nsb_core::AppError::io("读取终端工作目录", e))?;
+        if !directory.is_dir() {
+            return Err(nsb_core::AppError::new(
+                "TERMINAL_DIRECTORY_INVALID",
+                "终端工作目录不是文件夹",
+            ));
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let system_root = std::env::var_os("SystemRoot").ok_or_else(|| {
+                nsb_core::AppError::new("TERMINAL_UNAVAILABLE", "无法确定系统 PowerShell 位置")
+            })?;
+            let powershell = std::path::PathBuf::from(system_root)
+                .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+            // 用户明确点击打开终端：创建可见的独立控制台。cwd 只传给进程 API，不经 shell 解释。
+            let mut child = std::process::Command::new(powershell)
+                .args(["-NoLogo", "-NoProfile", "-NoExit"])
+                .current_dir(&directory)
+                .creation_flags(0x0000_0010) // CREATE_NEW_CONSOLE
+                .spawn()
+                .map_err(|e| nsb_core::AppError::io("打开 PowerShell", e))?;
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|e| nsb_core::AppError::io("检查 PowerShell", e))?
+            {
+                return Err(nsb_core::AppError::new(
+                    "TERMINAL_EXITED",
+                    format!("PowerShell 提前退出：{status}"),
+                ));
+            }
+            Ok(true)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let status = std::process::Command::new("/usr/bin/open")
+                .args(["-a", "Terminal"])
+                .arg(&directory)
+                .status()
+                .map_err(|e| nsb_core::AppError::io("打开终端", e))?;
+            if !status.success() {
+                return Err(nsb_core::AppError::new(
+                    "TERMINAL_OPEN_FAILED",
+                    format!("系统终端打开失败：{status}"),
+                ));
+            }
+            Ok(true)
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
+        {
+            Err(nsb_core::AppError::new(
+                "TERMINAL_UNSUPPORTED",
+                "此平台请手动打开 Bash / Zsh 并粘贴脚本",
+            ))
+        }
+    })
+    .await
+    .map_err(|e| box_err(nsb_core::AppError::internal("打开终端", e.to_string())))?
+    .map_err(box_err)
 }
 
 /* ================= 数据库 ================= */

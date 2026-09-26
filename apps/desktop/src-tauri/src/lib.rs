@@ -3058,14 +3058,13 @@ async fn diagnostics_save(
 
 /// 汇总各项检查（端口/证书/hosts/站点/服务/扩展）成一个按严重程度排序的清单
 #[tauri::command]
-fn health_check(
+async fn health_check(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<nsb_core::health::HealthReport, tauri::Error> {
-    map_jh(nsb_core::health::check(
-        &state.paths,
-        &state.store,
-        &state.manager,
-    ))
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(nsb_core::health::check(&state.paths, &state.store, &state.manager))
+    }).await.map_err(|error| tauri::Error::Anyhow(anyhow::anyhow!("{error}")))?
 }
 
 /* ================= 批量服务操作 ================= */

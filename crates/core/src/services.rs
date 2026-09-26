@@ -642,6 +642,23 @@ impl PortsProfile {
         p
     }
 
+    /// 诊断不能把设置读取失败或非法端口当成默认值。
+    pub(crate) fn from_settings_checked(store: &Store) -> Result<Self> {
+        let mut profile = match store.get_setting_checked("portProfile")?.as_deref() {
+            Some("safe") => Self::safe(),
+            None | Some("standard") => Self::standard(),
+            Some(_) => return Err(AppError::new("BAD_PORT_PROFILE", "端口方案无效，请在设置中重新选择")),
+        };
+        for key in Self::keys() {
+            if let Some(value) = store.get_setting_checked(&format!("portOverride.{key}"))? {
+                let port = value.parse::<u16>().ok().filter(|port| *port > 0)
+                    .ok_or_else(|| AppError::new("BAD_PORT", format!("{key} 端口必须在 1–65535 范围内")))?;
+                profile.apply(key, port);
+            }
+        }
+        Ok(profile)
+    }
+
     /// 单独覆盖某一项（key 与 portOverrides 设置一致）
     fn apply(&mut self, key: &str, port: u16) {
         match key {

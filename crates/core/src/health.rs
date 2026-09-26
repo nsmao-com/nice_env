@@ -1,58 +1,64 @@
-//! 环境体检：把散落各处的检查项汇总成一个「现在到底有没有问题」的结论。
-//!
-//! R1–R9 各自做了自己的检查（扩展加载、证书有效期、端口占用、配置语法…），
-//! 但它们分散在不同页面，用户不会主动去逐个点。
-//! 这个模块把它们聚合起来，给出**按严重程度排序**的一张清单，
-//! 并明确「哪些能一键修、哪些只能人工处理」。
-//!
-//! 特意不做成「全绿就放心」的假安全感：检查失败的项会带着原始错误一起展示。
+//! 环境体检：报告已发现的问题与实际完成的检查范围。
+//! 不修改系统配置，不把采集失败、未检查或用户隐藏的提示视为正常。
 
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::io::Write;
+use std::path::Path;
 
-use crate::error::Result;
+use crate::error::{AppError, Result};
+use crate::model::{InstalledPackage, ServiceState, ServiceStatus, Site, SiteKind};
 use crate::paths::Paths;
 
-/// 检查项严重程度
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Severity {
-    /// 不影响使用，但值得知道
     Info,
-    /// 建议处理，会逐渐变严重
     Warn,
-    /// 现在就是坏的
     Error,
 }
 
-/// 一条体检结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckItem {
-    /// 稳定 id，前端可据此定位/跳转
     pub id: String,
     pub severity: Severity,
-    /// 一句话结论
     pub title: String,
-    /// 细节（为什么、影响是什么）
     pub detail: String,
-    /// 建议动作
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
-    /// 前端可跳转的页面（路由）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route: Option<String>,
 }
 
-/// 体检报告
+/// checked 仅表示完成检查；是否有问题由 items 给出。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CheckState {
+    Checked,
+    Unavailable,
+    Skipped,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckCoverage {
+    pub id: String,
+    pub label: String,
+    pub state: CheckState,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthReport {
     pub items: Vec<CheckItem>,
+    pub checks: Vec<CheckCoverage>,
     pub errors: usize,
     pub warnings: usize,
     pub infos: usize,
-    /// 一句话总览
     pub summary: String,
+    /// Unix 秒；报告是此时的快照，不是持续监控。
     pub checked_at: i64,
 }
 
@@ -65,406 +71,1155 @@ impl HealthReport {
         }
         self.items.push(item);
     }
+
+    fn issue(
+        &mut self,
+        id: &str,
+        severity: Severity,
+        title: impl Into<String>,
+        detail: impl Into<String>,
+        action: &str,
+        route: &str,
+    ) {
+        self.push(CheckItem {
+            id: id.into(),
+            severity,
+            title: title.into(),
+            detail: detail.into(),
+            action: Some(action.into()),
+            route: Some(route.into()),
+        });
+    }
+
+    fn coverage(&mut self, id: &str, label: &str, state: CheckState, detail: impl Into<String>) {
+        self.checks.push(CheckCoverage {
+            id: id.into(),
+            label: label.into(),
+            state,
+            detail: detail.into(),
+        });
+    }
+
+    fn unavailable(&mut self, id: &str, label: &str, error: AppError, route: &str) {
+        self.issue(
+            &format!("{id}-read-failed"),
+            Severity::Warn,
+            format!("未完成{label}检查"),
+            &error.message,
+            error
+                .hint
+                .as_deref()
+                .unwrap_or("检查相关设置与读取权限后重新体检"),
+            route,
+        );
+        self.coverage(id, label, CheckState::Unavailable, error.message);
+    }
+
+    fn finish(&mut self, empty: bool) {
+        self.items.sort_by_key(|item| match item.severity {
+            Severity::Error => 0,
+            Severity::Warn => 1,
+            Severity::Info => 2,
+        });
+        let incomplete = self
+            .checks
+            .iter()
+            .filter(|check| check.state == CheckState::Unavailable)
+            .count();
+        self.summary = if self.errors > 0 {
+            format!(
+                "发现 {} 个需要处理的问题{}",
+                self.errors,
+                if incomplete > 0 {
+                    format!("，{incomplete} 项检查未完成")
+                } else {
+                    String::new()
+                }
+            )
+        } else if incomplete > 0 {
+            format!("{incomplete} 项检查未完成，请查看原因")
+        } else if self.warnings > 0 {
+            format!("{} 项建议处理", self.warnings)
+        } else if empty {
+            "尚未配置环境".into()
+        } else {
+            "已检查范围内未发现问题".into()
+        };
+        self.checked_at = chrono::Utc::now().timestamp();
+    }
 }
 
-/// 跑一遍全部检查
 pub fn check(
     paths: &Paths,
     store: &crate::store::Store,
     manager: &std::sync::Arc<crate::services::ServiceManager>,
 ) -> Result<HealthReport> {
-    let mut r = HealthReport {
-        items: Vec::new(),
-        errors: 0,
-        warnings: 0,
-        infos: 0,
-        summary: String::new(),
-        checked_at: chrono::Local::now().timestamp(),
-    };
-
-    // ---- 1) 是否装过任何套件 ----
-    let installed = store.list_installed().unwrap_or_default();
+    // 启停或切换期间不采集混合状态；重复体检也不排队阻塞服务操作。
+    let _operation = manager
+        .lifecycle
+        .try_lock()
+        .ok_or_else(|| AppError::new("HEALTH_BUSY", "正在体检或调整服务，请稍后重新检查"))?;
+    let installed = store.list_installed()?;
+    let sites = store.list_sites()?;
+    let services = manager.list_status();
+    let mut r = HealthReport::default();
     if installed.is_empty() {
-        r.push(CheckItem {
-            id: "no-packages".into(),
-            severity: Severity::Info,
-            title: "还没有安装任何套件".into(),
-            detail: "本地环境是空的，先装 Web 服务器与运行时才能建站".into(),
-            action: Some("到「套件 / 服务」安装 Nginx + PHP + MySQL".into()),
-            route: Some("/packages".into()),
-        });
+        r.issue(
+            "no-packages",
+            Severity::Info,
+            "还没有安装任何套件",
+            "先安装所需的 Web 服务器与运行时，再创建站点",
+            "到「套件 / 服务」选择套件",
+            "/packages",
+        );
     }
+    for package in &installed {
+        if !Path::new(&package.install_path).is_dir() {
+            r.issue(
+                &format!("install-missing-{}-{}", package.id, package.version),
+                Severity::Error,
+                format!("{} {} 安装目录缺失或无法访问", package.id, package.version),
+                &package.install_path,
+                "检查目录权限或重新安装该版本",
+                "/packages",
+            );
+        }
+    }
+    r.coverage(
+        "packages",
+        "安装记录与目录",
+        CheckState::Checked,
+        format!(
+            "{} 个安装记录；检查目录存在性，不验证全部文件完整性",
+            installed.len()
+        ),
+    );
 
-    // ---- 2) 端口占用（只报被外部程序占的，本应用自己在跑不算问题）----
-    let profile = crate::services::PortsProfile::from_settings(store);
-    let running: Vec<String> = manager
-        .list_status()
-        .into_iter()
-        .filter(|s| matches!(s.state, crate::model::ServiceState::Running))
-        .map(|s| s.id)
-        .collect();
-
-    let ports: [(&str, u16, &str); 8] = [
-        ("HTTP", profile.http, "nginx"),
-        ("HTTPS", profile.https, "nginx"),
-        ("MySQL", profile.mysql, "mysql"),
-        ("Redis", profile.redis, "redis"),
-        ("Apache HTTP", profile.apache_http, "apache"),
-        ("Apache HTTPS", profile.apache_https, "apache"),
-        ("PostgreSQL", profile.postgres, "postgresql"),
-        ("MongoDB", profile.mongodb, "mongodb"),
-    ];
-    let mut conflicts: Vec<String> = Vec::new();
-    for (label, port, owner) in ports {
-        // 该服务的版本装了没有？没装就不用管它的端口
-        let installed_owner = installed.iter().any(|p| p.id == owner);
-        if !installed_owner {
-            continue;
-        }
-        if let Ok(d) = crate::ports::diagnose_port(port) {
-            if d.in_use {
-                let holder = d.process_name.clone().unwrap_or_default();
-                let is_self = holder.to_ascii_lowercase().contains(owner);
-                if !is_self {
-                    conflicts.push(format!(
-                        "{label} 端口 {port} 被 {holder}(pid {}) 占用",
-                        d.pid.unwrap_or(0)
-                    ));
-                }
-            }
-        }
+    check_ports(&mut r, store, &services);
+    check_sites(&mut r, &sites, &installed);
+    match crate::certs::report(paths, store) {
+        Ok(certs) => check_certs(&mut r, paths, &sites, &certs),
+        Err(error) => r.unavailable("certificates", "证书", error, "/tls"),
     }
-    if !conflicts.is_empty() {
-        r.push(CheckItem {
-            id: "port-conflict".into(),
-            severity: Severity::Error,
-            title: format!("{} 个端口被其它程序占用", conflicts.len()),
-            detail: conflicts.join("；"),
-            action: Some("到「工具箱 → 端口」结束占用者，或在「设置 → 端口」改用其它端口".into()),
-            route: Some("/tools".into()),
-        });
-    }
-
-    // ---- 3) 站点引用了未安装的运行时 ----
-    let sites = crate::sites::list(store).unwrap_or_default();
-    let mut broken_sites: Vec<String> = Vec::new();
-    for s in &sites {
-        let need = match s.runtime.kind {
-            crate::model::SiteKind::Php => {
-                // 站点指定的 PHP 版本必须真的装了
-                match s.runtime.php_version.as_deref() {
-                    Some(v) => !installed.iter().any(|p| p.id == "php" && p.version == v),
-                    None => !installed.iter().any(|p| p.id == "php"),
-                }
-            }
-            crate::model::SiteKind::Static => false,
-            _ => false,
-        };
-        // 文档根目录不存在 —— 站点一定 404
-        let root_missing = !std::path::Path::new(&s.root_dir).is_dir();
-        if need || root_missing {
-            let why = if root_missing {
-                format!("目录不存在：{}", s.root_dir)
-            } else {
-                format!(
-                    "需要的 PHP 版本未安装：{}",
-                    s.runtime.php_version.clone().unwrap_or_default()
-                )
-            };
-            broken_sites.push(format!("{}（{why}）", s.name));
-        }
-    }
-    if !broken_sites.is_empty() {
-        r.push(CheckItem {
-            id: "broken-sites".into(),
-            severity: Severity::Error,
-            title: format!("{} 个站点配置有问题", broken_sites.len()),
-            detail: broken_sites.join("；"),
-            action: Some("到「站点」修正路径，或到「套件 / 服务」补装对应版本".into()),
-            route: Some("/sites".into()),
-        });
-    }
-
-    // ---- 4) 证书 ----
-    if let Ok(cert) = crate::certs::report(paths, store) {
-        if cert.expired > 0 {
-            r.push(CheckItem {
-                id: "cert-expired".into(),
-                severity: Severity::Error,
-                title: format!("{} 张证书已过期", cert.expired),
-                detail: "过期证书会让 HTTPS 站点直接打不开".into(),
-                action: Some("到「证书与域名」重新签发".into()),
-                route: Some("/tls".into()),
-            });
-        } else if cert.critical > 0 {
-            r.push(CheckItem {
-                id: "cert-critical".into(),
-                severity: Severity::Warn,
-                title: format!("{} 张证书 7 天内到期", cert.critical),
-                detail: "到期后 HTTPS 站点会立即不可用".into(),
-                action: Some("尽快到「证书与域名」重新签发".into()),
-                route: Some("/tls".into()),
-            });
-        } else if cert.warning > 0 {
-            r.push(CheckItem {
-                id: "cert-warn".into(),
-                severity: Severity::Info,
-                title: format!("{} 张证书 30 天内到期", cert.warning),
-                detail: "还有时间，但建议早点处理".into(),
-                action: None,
-                route: Some("/tls".into()),
-            });
-        }
-        if !cert.ca_trusted && !sites.is_empty() {
-            r.push(CheckItem {
-                id: "ca-untrusted".into(),
-                severity: Severity::Warn,
-                title: "根 CA 未被系统信任".into(),
-                detail: "所有 HTTPS 站点在浏览器里都会显示「不安全」".into(),
-                action: Some("到「证书与域名」点一次「信任根证书」".into()),
-                route: Some("/tls".into()),
-            });
-        }
-        // 证书文件丢失
-        let lost: Vec<String> = cert
-            .certs
-            .iter()
-            .filter(|c| !c.file_present)
-            .map(|c| c.subject.clone())
+    let hosts = crate::hosts::managed_entries(store).and_then(|wanted| {
+        let actual: HashSet<_> = crate::hosts::read_all()?
+            .into_iter()
+            .filter(|entry| entry.managed)
+            .map(|entry| (entry.ip, entry.domain))
             .collect();
-        if !lost.is_empty() {
-            r.push(CheckItem {
-                id: "cert-file-missing".into(),
-                severity: Severity::Error,
-                title: format!("{} 张证书的文件已丢失", lost.len()),
-                detail: lost.join(", "),
-                action: Some("重新签发这些证书".into()),
-                route: Some("/tls".into()),
-            });
+        let wanted: HashSet<_> = wanted.into_iter().collect();
+        Ok((
+            wanted.difference(&actual).count(),
+            actual.difference(&wanted).count(),
+        ))
+    });
+    match hosts {
+        Ok((missing, unexpected)) => {
+            if missing > 0 || unexpected > 0 {
+                r.issue(
+                    "hosts-drift",
+                    Severity::Warn,
+                    "hosts 托管记录与预期不一致",
+                    format!(
+                        "缺少 {missing} 条映射，多出 {unexpected} 条映射，请核对域名与 IP 地址"
+                    ),
+                    "到「工具箱 → 重建 hosts」同步",
+                    "/tools",
+                );
+            }
+            r.coverage(
+                "hosts",
+                "hosts 托管映射",
+                CheckState::Checked,
+                "只比对托管记录；未测试系统 DNS 解析或浏览器访问",
+            );
+        }
+        Err(error) => r.unavailable("hosts", "hosts 托管映射", error, "/tools"),
+    }
+    check_services(&mut r, &services, &installed);
+    match probe_data_dir(&paths.base) {
+        Ok(()) => r.coverage(
+            "data-directory",
+            "数据目录可写性",
+            CheckState::Checked,
+            "已创建、写入并清理唯一临时文件；未检查所有子目录",
+        ),
+        Err(error) => {
+            r.issue(
+                "data-dir-readonly",
+                Severity::Error,
+                "数据目录写入或清理失败",
+                error.to_string(),
+                "检查磁盘空间与目录权限",
+                "/settings",
+            );
+            r.coverage(
+                "data-directory",
+                "数据目录可写性",
+                CheckState::Checked,
+                "写入探测发现问题，详见上方提示",
+            );
         }
     }
-
-    // ---- 5) hosts 托管记录是否与站点一致 ----
-    let hosts_check = crate::hosts::managed_entries(store).and_then(|wanted| {
-        let actual = crate::hosts::read_all()?.into_iter().filter(|e| e.managed)
-            .map(|e| (e.ip, e.domain)).collect::<std::collections::HashSet<_>>();
-        let wanted: std::collections::HashSet<_> = wanted.into_iter().collect();
-        let missing = wanted.difference(&actual).count();
-        let unexpected = actual.difference(&wanted).count();
-        Ok((missing, unexpected))
-    });
-    match hosts_check {
-        Ok((0, 0)) => {}
-        Ok((missing, unexpected)) => r.push(CheckItem {
-            id: "hosts-drift".into(),
-            severity: Severity::Warn,
-            title: "hosts 里的托管记录与站点列表不一致".into(),
-            detail: format!("缺少 {missing} 条预期映射，多出 {unexpected} 条映射 —— 请核对域名与 IP 地址"),
-            action: Some("到「工具箱 → 重建 hosts」一键同步".into()),
-            route: Some("/tools".into()),
-        }),
-        Err(error) => r.push(CheckItem {
-            id: "hosts-read-failed".into(), severity: Severity::Warn,
-            title: "无法检查 hosts 记录".into(), detail: error.message,
-            action: Some("检查 hosts 文件和应用设置的读取权限后重试".into()),
-            route: Some("/tools".into()),
-        }),
-    }
-
-    // ---- 6) 服务错误状态 ----
-    let failed: Vec<String> = manager
-        .list_status()
-        .into_iter()
-        .filter(|s| matches!(s.state, crate::model::ServiceState::Error))
-        .map(|s| {
-            let why = s
-                .last_error
-                .as_ref()
-                .map(|e| e.message.clone())
-                .unwrap_or_else(|| "未知错误".into());
-            format!("{}（{why}）", s.id)
-        })
+    let php: Vec<_> = installed
+        .iter()
+        .filter(|package| package.id == "php")
         .collect();
-    if !failed.is_empty() {
-        r.push(CheckItem {
-            id: "service-error".into(),
-            severity: Severity::Error,
-            title: format!("{} 个服务处于错误状态", failed.len()),
-            detail: failed.join("；"),
-            action: Some("到「日志」看具体报错".into()),
-            route: Some("/logs".into()),
-        });
+    if php.is_empty() {
+        r.coverage(
+            "php-extensions",
+            "PHP 扩展",
+            CheckState::Skipped,
+            "未安装 PHP，无需检查扩展",
+        );
     }
-
-    // ---- 7) 数据目录可写 ----
-    let probe = paths.base.join(".health-probe");
-    if std::fs::write(&probe, b"ok").is_err() {
-        r.push(CheckItem {
-            id: "data-dir-readonly".into(),
-            severity: Severity::Error,
-            title: "数据目录不可写".into(),
-            detail: format!("{}", paths.base.to_string_lossy()),
-            action: Some("移到可写位置，或用环境变量 NSB_HOME 指定".into()),
-            route: Some("/settings".into()),
-        });
-    } else {
-        let _ = std::fs::remove_file(&probe);
+    for package in php {
+        let id = format!("php-extensions-{}", package.version);
+        let label = format!("PHP {} 扩展", package.version);
+        let root = paths.runtime_dir("php", &package.version);
+        let scan = if !root.join(crate::ops::exe_name("php")).is_file()
+            || !paths.php_ini(&package.version).is_file()
+        {
+            Err(AppError::new(
+                "PHP_SCAN_UNAVAILABLE",
+                "PHP 可执行文件或 php.ini 缺失，无法完整检查扩展",
+            )
+            .with_hint("修复当前 PHP 安装后重试"))
+        } else {
+            crate::phpext::scan_available(paths, &package.version)
+        };
+        match scan {
+            Ok(extensions) => {
+                check_extensions(&mut r, &package.version, &root.join("ext"), &extensions);
+                r.coverage(&id, &label, CheckState::Checked, "已检查内置模块、启用配置、扩展文件和已知依赖；未验证扩展在业务进程中的实际加载");
+            }
+            Err(error) => r.unavailable(&id, &label, error, "/packages"),
+        }
     }
+    r.coverage("application-probes", "配置语法与业务连通性", CheckState::Skipped,
+        "本次未运行原生配置校验，也未测试 HTTP、数据库登录或 UDP；配置问题可到「工具箱 → 修复向导」检查");
+    r.finish(installed.is_empty());
+    Ok(r)
+}
 
-    // ---- 8) PHP 扩展加载失败（装了但加载不了）----
-    for p in installed.iter().filter(|p| p.id == "php") {
-        if let Ok(exts) = crate::phpext::scan_available(paths, &p.version) {
-            // 已启用但缺依赖的扩展
-            let broken: Vec<String> = exts
-                .iter()
-                .filter(|e| e.enabled && !e.missing_deps.is_empty())
-                .map(|e| format!("{} 缺少 {}", e.label, e.missing_deps.join("/")))
-                .collect();
-            if !broken.is_empty() {
-                r.push(CheckItem {
-                    id: format!("php-ext-deps-{}", p.version),
-                    severity: Severity::Warn,
-                    title: format!("PHP {} 有 {} 个扩展缺依赖", p.version, broken.len()),
-                    detail: broken.join("；"),
-                    action: Some("到「套件 / 服务 → PHP 扩展」补齐依赖".into()),
-                    route: Some("/packages".into()),
+fn probe_data_dir(base: &Path) -> std::io::Result<()> {
+    let mut file = tempfile::Builder::new()
+        .prefix(".health-probe-")
+        .tempfile_in(base)?;
+    let write = file
+        .write_all(b"NiceEnv health probe")
+        .and_then(|()| file.flush());
+    // 即使写入失败也显式清理；不能覆盖用户已有的 .health-probe 文件。
+    let close = file.close();
+    match (write, close) {
+        (Err(write), Err(close)) => Err(std::io::Error::new(
+            write.kind(),
+            format!("{write}；清理探针失败：{close}"),
+        )),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        _ => Ok(()),
+    }
+}
+
+fn check_sites(r: &mut HealthReport, sites: &[Site], installed: &[InstalledPackage]) {
+    for site in sites {
+        let mut reasons = Vec::new();
+        if !Path::new(&site.root_dir).is_absolute() || !Path::new(&site.root_dir).is_dir() {
+            reasons.push(format!(
+                "根目录不存在、无法访问或不是绝对路径：{}",
+                site.root_dir
+            ));
+        }
+        let web = site.runtime.web_server.as_str();
+        if !matches!(web, "nginx" | "apache") {
+            reasons.push(format!("不支持的 Web 服务器：{web}"));
+        } else if !installed.iter().any(|package| package.id == web) {
+            reasons.push(format!("未安装 {web}"));
+        }
+        if site.domains.is_empty() {
+            reasons.push("未配置域名".into());
+        }
+        if site.runtime.kind == SiteKind::Php {
+            match site
+                .runtime
+                .php_version
+                .as_deref()
+                .filter(|version| !version.is_empty())
+            {
+                Some(version)
+                    if installed
+                        .iter()
+                        .any(|package| package.id == "php" && package.version == version) => {}
+                Some(version) => reasons.push(format!("未安装指定 PHP {version}")),
+                None => reasons.push("未指定 PHP 版本".into()),
+            }
+        } else if site.runtime.kind != SiteKind::Static {
+            if let Err(error) =
+                crate::sites::proxy_url(site.runtime.proxy_target.as_deref().unwrap_or_default())
+            {
+                reasons.push(error.message);
+            }
+        }
+        if !reasons.is_empty() {
+            r.issue(
+                &format!("broken-site-{}", site.id),
+                Severity::Error,
+                format!("站点「{}」配置有问题", site.name),
+                reasons.join("；"),
+                "到「站点」修正配置，或安装所需套件",
+                "/sites",
+            );
+        }
+    }
+    r.coverage(
+        "sites",
+        "站点依赖与路径",
+        if sites.is_empty() {
+            CheckState::Skipped
+        } else {
+            CheckState::Checked
+        },
+        format!(
+            "{} 个站点；检查 Web 服务器、PHP 版本、根目录与代理地址格式，不请求站点",
+            sites.len()
+        ),
+    );
+}
+
+#[derive(Debug)]
+struct PortTarget {
+    service_id: String,
+    label: String,
+    port: u16,
+    running: bool,
+    pids: Vec<u32>,
+}
+
+fn port_targets(
+    store: &crate::store::Store,
+    services: &[ServiceStatus],
+) -> Result<Vec<PortTarget>> {
+    let profile = crate::services::PortsProfile::from_settings_checked(store)?;
+    let mut targets = Vec::new();
+    for service in services {
+        let running = service.state == ServiceState::Running;
+        let active = !service.pids.is_empty();
+        let package = service.id.split('@').next().unwrap_or(&service.id);
+        // 运行服务优先取实际启动端口；停止服务才使用当前方案或历史分配。
+        let port = if active {
+            service.port
+        } else {
+            match package {
+                "nginx" => Some(profile.http),
+                "apache" => Some(profile.apache_http),
+                "mysql" => Some(profile.mysql),
+                "redis" => Some(profile.redis),
+                "postgresql" => Some(profile.postgres),
+                "mongodb" => Some(profile.mongodb),
+                "php" => store.get_port_assign_checked(&service.id)?,
+                _ => store.get_port_assign_checked(&service.id)?.or(service.port),
+            }
+        };
+        if let Some(base) = port {
+            let count = if package == "php" {
+                crate::configgen::PHP_POOL_WORKERS
+            } else {
+                1
+            };
+            for offset in 0..count {
+                let port = base
+                    .checked_add(offset)
+                    .filter(|port| *port > 0)
+                    .ok_or_else(|| {
+                        AppError::new("BAD_PORT", format!("服务 {} 的端口范围无效", service.id))
+                    })?;
+                targets.push(PortTarget {
+                    service_id: service.id.clone(),
+                    label: service.label.clone(),
+                    port,
+                    running,
+                    pids: service.pids.clone(),
                 });
             }
         }
     }
+    Ok(targets)
+}
 
-    // ---- 排序：error → warn → info ----
-    r.items.sort_by_key(|i| match i.severity {
-        Severity::Error => 0,
-        Severity::Warn => 1,
-        Severity::Info => 2,
-    });
+#[derive(Debug, PartialEq, Eq)]
+enum Ownership {
+    Own,
+    Other,
+    Unknown,
+}
 
-    r.summary = if installed.is_empty() {
-        // 空环境优先提示尚未配置；根 CA 等运行期资源尚未创建不应遮住主结论。
-        "尚未配置环境".to_string()
-    } else if r.errors > 0 {
-        format!("发现 {} 个需要处理的问题", r.errors)
-    } else if r.warnings > 0 {
-        format!("{} 项建议处理，当前可用", r.warnings)
-    } else if !installed.is_empty() {
-        "环境正常".to_string()
-    } else {
-        "尚未配置环境".to_string()
-    };
+fn ownership(mut pid: u32, roots: &[u32], parents: &HashMap<u32, (u32, String)>) -> Ownership {
+    let mut visited = HashSet::new();
+    for _ in 0..128 {
+        if pid != 0 && roots.contains(&pid) {
+            return Ownership::Own;
+        }
+        if pid == 0 {
+            return Ownership::Other;
+        }
+        if !visited.insert(pid) {
+            return Ownership::Unknown;
+        }
+        match parents.get(&pid) {
+            Some((parent, _)) => pid = *parent,
+            None => return Ownership::Unknown,
+        }
+    }
+    Ownership::Unknown
+}
 
-    let _ = running;
-    Ok(r)
+fn analyze_ports(
+    r: &mut HealthReport,
+    targets: &[PortTarget],
+    listeners: &[(u16, u32)],
+    parents: &HashMap<u32, (u32, String)>,
+) -> bool {
+    let mut complete = true;
+    for target in targets {
+        let owners: HashSet<_> = listeners
+            .iter()
+            .filter(|(port, _)| *port == target.port)
+            .map(|(_, pid)| *pid)
+            .collect();
+        if target.running && owners.is_empty() {
+            r.issue(
+                &format!("port-not-listening-{}-{}", target.service_id, target.port),
+                Severity::Error,
+                format!("{} 的端口 {} 未监听", target.label, target.port),
+                "服务显示运行中，但未发现该 TCP 监听；进程可能刚退出或配置已改变",
+                "到「套件 / 服务」检查状态和日志后重试",
+                "/packages",
+            );
+        }
+        let mut external = Vec::new();
+        let mut unknown = Vec::new();
+        for pid in owners {
+            match ownership(pid, &target.pids, parents) {
+                Ownership::Own => {}
+                Ownership::Other => external.push(format!(
+                    "{}（PID {pid}）",
+                    parents
+                        .get(&pid)
+                        .map(|(_, name)| name.as_str())
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or("其他进程")
+                )),
+                Ownership::Unknown => unknown.push(pid.to_string()),
+            }
+        }
+        external.sort();
+        unknown.sort();
+        if !external.is_empty() {
+            r.issue(
+                &format!("port-conflict-{}-{}", target.service_id, target.port),
+                if target.running {
+                    Severity::Error
+                } else {
+                    Severity::Warn
+                },
+                format!("{} 的端口 {} 被其他进程占用", target.label, target.port),
+                format!(
+                    "{}。{}",
+                    external.join("、"),
+                    if target.running {
+                        "监听者不属于该服务的受管进程树"
+                    } else {
+                        "这是停止服务的计划端口；启动时可能需要切换端口"
+                    }
+                ),
+                "到「工具箱 → 端口」确认占用者，或修改端口设置",
+                "/tools",
+            );
+        }
+        if !unknown.is_empty() {
+            complete = false;
+            r.issue(
+                &format!("port-owner-unknown-{}-{}", target.service_id, target.port),
+                Severity::Warn,
+                format!("无法确认 {} 端口 {} 的归属", target.label, target.port),
+                format!(
+                    "PID {} 的进程信息不完整，可能受权限限制或进程已退出",
+                    unknown.join("、")
+                ),
+                "稍后重新检查；必要时核对进程权限",
+                "/tools",
+            );
+        }
+    }
+    complete
+}
+
+fn check_ports(r: &mut HealthReport, store: &crate::store::Store, services: &[ServiceStatus]) {
+    let scan = (|| {
+        let targets = port_targets(store, services)?;
+        if targets.is_empty() {
+            return Ok((targets, Vec::new(), HashMap::new()));
+        }
+        let listeners = crate::ports::listeners()?;
+        let mut system = sysinfo::System::new();
+        system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        let parents = system
+            .processes()
+            .iter()
+            .map(|(pid, process)| {
+                (
+                    pid.as_u32(),
+                    (
+                        process.parent().map(|pid| pid.as_u32()).unwrap_or(0),
+                        process.name().to_string_lossy().into_owned(),
+                    ),
+                )
+            })
+            .collect();
+        Ok((targets, listeners, parents))
+    })();
+    match scan {
+        Ok((targets, listeners, parents)) => {
+            let complete = analyze_ports(r, &targets, &listeners, &parents);
+            r.coverage("ports", "TCP 端口与进程归属", if targets.is_empty() { CheckState::Skipped } else if complete { CheckState::Checked } else { CheckState::Unavailable },
+                format!("检查 {} 个已注册服务主端口及 PHP 池端口；使用实际运行端口或停止服务计划端口。未覆盖 HTTPS 等附加监听和 UDP", targets.len()));
+        }
+        Err(error) => r.unavailable("ports", "TCP 端口与进程归属", error, "/tools"),
+    }
+}
+
+fn check_services(
+    r: &mut HealthReport,
+    services: &[ServiceStatus],
+    installed: &[InstalledPackage],
+) {
+    let mut incomplete = false;
+    for service in services {
+        if service.state == ServiceState::Error {
+            r.issue(
+                &format!("service-error-{}", service.id),
+                Severity::Error,
+                format!("{} 处于错误状态", service.label),
+                service
+                    .last_error
+                    .as_ref()
+                    .map(|error| error.message.as_str())
+                    .unwrap_or("没有可用的错误详情，请查看日志"),
+                "到「日志」查看具体报错",
+                "/logs",
+            );
+        } else if matches!(
+            service.state,
+            ServiceState::Unknown | ServiceState::Starting | ServiceState::Stopping
+        ) {
+            incomplete = true;
+            r.issue(
+                &format!("service-pending-{}", service.id),
+                Severity::Warn,
+                format!("{} 状态尚未确定", service.label),
+                "服务状态未知或正在切换，本次无法判断其稳定状态",
+                "等待服务操作结束后重新检查",
+                "/packages",
+            );
+        }
+        let missing: Vec<_> = service
+            .requires
+            .iter()
+            .filter(|dependency| {
+                !installed.iter().any(|package| {
+                    package.id == **dependency
+                        || format!("{}@{}", package.id, package.version) == **dependency
+                })
+            })
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            r.issue(
+                &format!("service-deps-{}", service.id),
+                Severity::Error,
+                format!("{} 缺少依赖", service.label),
+                missing.join("、"),
+                "安装所需套件后重试",
+                "/packages",
+            );
+        }
+    }
+    for package in installed.iter().filter(|package| {
+        matches!(
+            package.id.as_str(),
+            "nginx" | "apache" | "php" | "mysql" | "redis" | "postgresql" | "mongodb" | "mihomo"
+        )
+    }) {
+        let id = if matches!(package.id.as_str(), "php" | "mysql") {
+            format!("{}@{}", package.id, package.version)
+        } else {
+            package.id.clone()
+        };
+        if !services.iter().any(|service| service.id == id) {
+            incomplete = true;
+            if !r
+                .items
+                .iter()
+                .any(|item| item.id == format!("service-unregistered-{id}"))
+            {
+                r.issue(
+                    &format!("service-unregistered-{id}"),
+                    Severity::Warn,
+                    format!("服务 {id} 尚未注册"),
+                    "安装记录存在，但没有服务状态和端口快照",
+                    "检查安装状态并重新打开应用",
+                    "/packages",
+                );
+            }
+        }
+    }
+    r.coverage(
+        "services",
+        "受管服务状态",
+        if incomplete {
+            CheckState::Unavailable
+        } else {
+            CheckState::Checked
+        },
+        format!(
+            "{} 个已注册服务；已停止不视为故障，运行状态不代表业务请求成功",
+            services.len()
+        ),
+    );
+}
+
+fn check_certs(
+    r: &mut HealthReport,
+    paths: &Paths,
+    sites: &[Site],
+    report: &crate::certs::CertReport,
+) {
+    let local_https = sites
+        .iter()
+        .any(|site| site.https && site.runtime.imported_cert_id.is_none());
+    let mut count = 0;
+    for cert in &report.certs {
+        // 空环境尚未创建 CA 是无需检查；有任一 CA 文件或本地 HTTPS 引用则不能隐藏损坏。
+        if cert.kind == "ca"
+            && !local_https
+            && !paths.certs().join("ca.crt").exists()
+            && !paths.certs().join("ca.key").exists()
+        {
+            continue;
+        }
+        count += 1;
+        let issue = if !cert.file_present {
+            Some((Severity::Error, "证书或私钥文件缺失"))
+        } else {
+            match cert.status.as_str() {
+                "invalid" => Some((Severity::Error, "证书无效")),
+                "expired" => Some((Severity::Error, "证书已过期")),
+                "critical" => Some((Severity::Warn, "证书 7 天内到期")),
+                "warn" => Some((Severity::Warn, "证书 30 天内到期")),
+                _ => None,
+            }
+        };
+        if let Some((severity, title)) = issue {
+            r.issue(
+                &format!("certificate-{}", cert.id),
+                severity,
+                format!("{title}：{}", cert.subject),
+                &cert.advice,
+                "到「证书与域名」检查并修复这张证书",
+                "/tls",
+            );
+        }
+    }
+    for site in sites.iter().filter(|site| site.https) {
+        let found =
+            report
+                .certs
+                .iter()
+                .any(|cert| match site.runtime.imported_cert_id.as_deref() {
+                    Some(id) => cert.kind == "imported" && cert.id == id,
+                    None => {
+                        cert.kind != "ca"
+                            && cert.kind != "imported"
+                            && site.domains.first().is_some_and(|domain| {
+                                cert.id.eq_ignore_ascii_case(&format!("cert-{domain}"))
+                                    || cert.subject.eq_ignore_ascii_case(domain)
+                            })
+                    }
+                });
+        if !found {
+            r.issue(
+                &format!("site-cert-missing-{}", site.id),
+                Severity::Error,
+                format!("站点「{}」缺少关联证书", site.name),
+                "HTTPS 已开启，但没有找到所选证书或本地签发记录",
+                "检查站点证书选择，或重新签发证书",
+                "/sites",
+            );
+        }
+    }
+    if local_https && !report.ca_trusted {
+        r.issue(
+            "ca-untrusted",
+            Severity::Warn,
+            "尚未确认本地根 CA 受系统信任",
+            "使用本地签发证书的 HTTPS 站点可能出现浏览器信任提示；导入证书不使用此结论",
+            "到「证书与域名」检查根证书信任状态",
+            "/tls",
+        );
+    }
+    r.coverage(
+        "certificates",
+        "证书文件与有效性",
+        if count == 0 && !local_https && !sites.iter().any(|site| site.https) {
+            CheckState::Skipped
+        } else {
+            CheckState::Checked
+        },
+        format!("检查 {count} 张证书的文件、有效期、密钥匹配及站点域名覆盖；未执行浏览器 TLS 握手"),
+    );
+}
+
+fn check_extensions(
+    r: &mut HealthReport,
+    version: &str,
+    ext_dir: &Path,
+    extensions: &[crate::model::PhpExtension],
+) {
+    for extension in extensions
+        .iter()
+        .filter(|extension| extension.enabled && !extension.builtin)
+    {
+        let mut reasons = Vec::new();
+        if !ext_dir.join(&extension.dll).is_file() {
+            reasons.push(format!("扩展文件缺失：{}", extension.dll));
+        }
+        if !extension.missing_deps.is_empty() {
+            reasons.push(format!("缺少依赖：{}", extension.missing_deps.join("、")));
+        }
+        if !reasons.is_empty() {
+            r.issue(
+                &format!("php-ext-{version}-{}", extension.name),
+                Severity::Warn,
+                format!("PHP {version} 的 {} 无法完整加载", extension.label),
+                reasons.join("；"),
+                "到 PHP 扩展面板补齐依赖或关闭失效项",
+                "/packages",
+            );
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    fn fixture() -> (
+        tempfile::TempDir,
+        Paths,
+        crate::store::Store,
+        Arc<crate::services::ServiceManager>,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().to_path_buf());
+        let store = crate::store::Store::open(paths.db()).unwrap();
+        (
+            temp,
+            paths,
+            store,
+            Arc::new(crate::services::ServiceManager::new()),
+        )
+    }
+
+    fn service(id: &str, port: u16, pids: &[u32], state: &str) -> ServiceStatus {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "label": id, "state": state, "pids": pids, "port": port,
+            "version": "1", "requires": [], "missingRequires": []
+        }))
+        .unwrap()
+    }
+
+    fn target(running: bool) -> PortTarget {
+        PortTarget {
+            service_id: "nginx".into(),
+            label: "Nginx".into(),
+            port: 8080,
+            running,
+            pids: vec![10],
+        }
+    }
+
+    fn site(root: &Path) -> Site {
+        serde_json::from_value(serde_json::json!({
+            "id": "site-a", "name": "site-a", "domains": ["app.test"], "rootDir": root,
+            "runtime": { "kind": "php", "webServer": "apache", "phpVersion": "8.3.1" },
+            "https": false, "rewrite": "none", "db": null, "createdAt": 1, "updatedAt": 1
+        }))
+        .unwrap()
+    }
 
     #[test]
-    fn report_counts_by_severity() {
-        let mut r = HealthReport {
-            items: Vec::new(),
-            errors: 0,
-            warnings: 0,
-            infos: 0,
-            summary: String::new(),
+    fn report_counts_by_severity_and_prioritizes_errors_over_empty() {
+        let mut r = HealthReport::default();
+        r.issue("i", Severity::Info, "info", "", "", "/packages");
+        r.issue("w", Severity::Warn, "warning", "", "", "/packages");
+        r.issue("e", Severity::Error, "error", "", "", "/packages");
+        r.coverage("a", "unavailable", CheckState::Unavailable, "failed");
+        r.finish(true);
+        assert_eq!((r.errors, r.warnings, r.infos), (1, 1, 1));
+        assert_eq!(r.items[0].severity, Severity::Error);
+        assert!(r.summary.contains("需要处理") && r.summary.contains("未完成"));
+    }
+
+    #[test]
+    fn summary_distinguishes_unavailable_empty_and_checked_scope() {
+        let mut r = HealthReport::default();
+        r.finish(true);
+        assert_eq!(r.summary, "尚未配置环境");
+        r.finish(false);
+        assert_eq!(r.summary, "已检查范围内未发现问题");
+        r.unavailable("ports", "端口", AppError::new("READ", "读取失败"), "/tools");
+        r.finish(true);
+        assert!(r.summary.contains("未完成"));
+    }
+
+    #[test]
+    fn report_serializes_coverage_and_timestamp() {
+        let mut r = HealthReport::default();
+        r.coverage("ports", "端口", CheckState::Unavailable, "读取失败");
+        r.finish(false);
+        let value = serde_json::to_value(&r).unwrap();
+        assert_eq!(value["checks"][0]["state"], "unavailable");
+        assert!(value["checkedAt"].as_i64().unwrap() > 0);
+        assert_eq!(serde_json::to_string(&Severity::Warn).unwrap(), "\"warn\"");
+    }
+
+    #[test]
+    fn check_runs_on_empty_env_without_reporting_uninitialized_ca_as_broken() {
+        let (_temp, paths, store, manager) = fixture();
+        let r = check(&paths, &store, &manager).unwrap();
+        assert!(r.items.iter().any(|item| item.id == "no-packages"));
+        assert!(!r.items.iter().any(|item| item.id == "certificate-ca"));
+        assert!(
+            r.checks
+                .iter()
+                .any(|check| check.id == "certificates" && check.state == CheckState::Skipped)
+        );
+    }
+
+    #[test]
+    fn data_dir_probe_preserves_existing_file_and_cleans_unique_file() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".health-probe"), "user data").unwrap();
+        probe_data_dir(temp.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join(".health-probe")).unwrap(),
+            "user data"
+        );
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+        assert!(probe_data_dir(&temp.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn same_named_external_process_is_not_owned_and_children_are_owned() {
+        let parents = HashMap::from([
+            (10, (0, "nginx".into())),
+            (11, (10, "nginx".into())),
+            (20, (0, "nginx".into())),
+        ]);
+        assert_eq!(ownership(11, &[10], &parents), Ownership::Own);
+        assert_eq!(ownership(20, &[10], &parents), Ownership::Other);
+        let mut r = HealthReport::default();
+        assert!(analyze_ports(
+            &mut r,
+            &[target(true)],
+            &[(8080, 11), (8080, 20), (8080, 20)],
+            &parents
+        ));
+        assert_eq!(r.errors, 1);
+        assert!(r.items[0].detail.contains("PID 20"));
+        assert!(!r.items[0].detail.contains("PID 11"));
+    }
+
+    #[test]
+    fn another_managed_service_does_not_own_this_service_port() {
+        let parents = HashMap::from([(30, (0, "mysql".into()))]);
+        let mut r = HealthReport::default();
+        analyze_ports(&mut r, &[target(false)], &[(8080, 30)], &parents);
+        assert_eq!((r.errors, r.warnings), (0, 1));
+        assert!(r.items[0].detail.contains("停止服务"));
+    }
+
+    #[test]
+    fn incomplete_process_tree_cannot_be_called_healthy() {
+        let parents = HashMap::from([(40, (41, "nginx".into())), (41, (40, "nginx".into()))]);
+        assert_eq!(ownership(40, &[10], &parents), Ownership::Unknown);
+        let mut r = HealthReport::default();
+        assert!(!analyze_ports(
+            &mut r,
+            &[target(true)],
+            &[(8080, 99)],
+            &parents
+        ));
+        assert_eq!(r.warnings, 1);
+        assert!(r.items[0].id.starts_with("port-owner-unknown"));
+    }
+
+    #[test]
+    fn running_without_listener_is_error_but_stopped_without_listener_is_expected() {
+        let mut r = HealthReport::default();
+        analyze_ports(&mut r, &[target(true)], &[], &HashMap::new());
+        assert_eq!(r.errors, 1);
+        let mut stopped = HealthReport::default();
+        analyze_ports(&mut stopped, &[target(false)], &[], &HashMap::new());
+        assert!(stopped.items.is_empty());
+    }
+
+    #[test]
+    fn port_targets_use_actual_running_version_and_configured_stopped_ports() {
+        let (_temp, _paths, store, _manager) = fixture();
+        store.set_port_override("mysql", Some(3309)).unwrap();
+        let targets = port_targets(
+            &store,
+            &[
+                service("mysql@8.4", 3407, &[10], "running"),
+                service("mysql@8.0", 3306, &[], "stopped"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            (targets[0].service_id.as_str(), targets[0].port),
+            ("mysql@8.4", 3407)
+        );
+        assert_eq!(
+            (targets[1].service_id.as_str(), targets[1].port),
+            ("mysql@8.0", 3309)
+        );
+    }
+
+    #[test]
+    fn invalid_port_settings_are_reported_as_unavailable() {
+        let (_temp, paths, store, manager) = fixture();
+        store.set_setting("portOverride.http", "0").unwrap();
+        let r = check(&paths, &store, &manager).unwrap();
+        assert!(r.items.iter().any(|item| item.id == "ports-read-failed"));
+        assert!(r.summary.contains("未完成"));
+        store.set_setting("portOverride.http", "70000").unwrap();
+        assert!(port_targets(&store, &[]).is_err());
+    }
+
+    #[test]
+    fn php_pool_range_overflow_is_rejected() {
+        let (_temp, _paths, store, _manager) = fixture();
+        store.set_port_assign("php@8.3", 65535).unwrap();
+        assert!(port_targets(&store, &[service("php@8.3", 9100, &[], "stopped")]).is_err());
+    }
+
+    #[test]
+    fn database_read_failure_does_not_become_empty_environment() {
+        let (_temp, paths, store, manager) = fixture();
+        rusqlite::Connection::open(paths.db())
+            .unwrap()
+            .execute("DROP TABLE installed", [])
+            .unwrap();
+        assert!(check(&paths, &store, &manager).is_err());
+    }
+
+    #[test]
+    fn damaged_site_runtime_is_not_replaced_with_static_site() {
+        let (_temp, paths, store, manager) = fixture();
+        store.save_site(&site(&paths.base)).unwrap();
+        rusqlite::Connection::open(paths.db())
+            .unwrap()
+            .execute("UPDATE sites SET runtime='not-json'", [])
+            .unwrap();
+        assert!(check(&paths, &store, &manager).is_err());
+    }
+
+    #[test]
+    fn site_reports_missing_root_web_server_and_exact_php_version_together() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut r = HealthReport::default();
+        check_sites(&mut r, &[site(&temp.path().join("missing"))], &[]);
+        let detail = &r.items[0].detail;
+        assert!(
+            detail.contains("根目录") && detail.contains("apache") && detail.contains("PHP 8.3.1")
+        );
+    }
+
+    #[test]
+    fn invalid_expired_and_expiring_certificates_are_all_reported_separately() {
+        let (_temp, paths, _store, _manager) = fixture();
+        let cert = |id: &str, status: &str| crate::certs::CertHealth {
+            id: id.into(),
+            kind: "imported".into(),
+            subject: id.into(),
+            sans: vec![],
+            not_after: 1,
+            days_left: 1,
+            status: status.into(),
+            file_present: true,
+            used_by_sites: vec![],
+            missing_sans: vec![],
+            advice: status.into(),
+        };
+        let report = crate::certs::CertReport {
+            certs: vec![
+                cert("invalid", "invalid"),
+                cert("expired", "expired"),
+                cert("soon", "critical"),
+            ],
+            expired: 1,
+            critical: 2,
+            warning: 0,
+            ca_trusted: false,
             checked_at: 0,
         };
-        r.push(CheckItem {
-            id: "a".into(),
-            severity: Severity::Error,
-            title: "e".into(),
-            detail: String::new(),
-            action: None,
-            route: None,
-        });
-        r.push(CheckItem {
-            id: "b".into(),
-            severity: Severity::Warn,
-            title: "w".into(),
-            detail: String::new(),
-            action: None,
-            route: None,
-        });
-        r.push(CheckItem {
-            id: "c".into(),
-            severity: Severity::Info,
-            title: "i".into(),
-            detail: String::new(),
-            action: None,
-            route: None,
-        });
-        assert_eq!((r.errors, r.warnings, r.infos), (1, 1, 1));
+        let mut r = HealthReport::default();
+        check_certs(&mut r, &paths, &[], &report);
+        assert_eq!((r.errors, r.warnings), (2, 1));
+        assert!(r.items.iter().any(|item| item.title.contains("证书无效")));
+        assert_eq!(
+            r.items
+                .iter()
+                .filter(|item| item.title.contains("7 天内到期"))
+                .count(),
+            1
+        );
+        let mut imported = site(&paths.base);
+        imported.https = true;
+        imported.runtime.imported_cert_id = Some("soon".into());
+        let mut r = HealthReport::default();
+        check_certs(&mut r, &paths, &[imported], &report);
+        assert!(!r.items.iter().any(|item| item.id == "ca-untrusted"));
     }
 
     #[test]
-    fn severity_serializes_kebab_case() {
-        let j = serde_json::to_string(&Severity::Warn).unwrap();
-        assert_eq!(j, "\"warn\"");
-        let j = serde_json::to_string(&Severity::Error).unwrap();
-        assert_eq!(j, "\"error\"");
-        let j = serde_json::to_string(&Severity::Info).unwrap();
-        assert_eq!(j, "\"info\"");
-    }
-
-    #[test]
-    fn check_runs_on_empty_env_without_panicking() {
-        let t = std::env::temp_dir().join(format!("nsb-health-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&t);
-        std::fs::create_dir_all(&t).unwrap();
-        let paths = Paths::new(t.clone());
-        let store = crate::store::Store::open(t.join("h.sqlite")).unwrap();
-        let manager = std::sync::Arc::new(crate::services::ServiceManager::new());
+    fn certificate_read_failure_keeps_other_checks_and_marks_incomplete() {
+        let (_temp, paths, store, manager) = fixture();
+        rusqlite::Connection::open(paths.db())
+            .unwrap()
+            .execute("DROP TABLE certs", [])
+            .unwrap();
         let r = check(&paths, &store, &manager).unwrap();
-        // 空环境下至少应提示「还没装套件」
-        assert!(r.items.iter().any(|i| i.id == "no-packages"));
-        assert!(r.summary.contains("尚未配置"));
-        let _ = std::fs::remove_dir_all(&t);
+        assert!(
+            r.items
+                .iter()
+                .any(|item| item.id == "certificates-read-failed")
+        );
+        assert!(r.checks.iter().any(|check| check.id == "data-directory"));
     }
 
     #[test]
-    fn items_are_sorted_errors_first() {
-        let t = std::env::temp_dir().join(format!("nsb-health2-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&t);
-        std::fs::create_dir_all(&t).unwrap();
-        let paths = Paths::new(t.clone());
-        let store = crate::store::Store::open(t.join("h.sqlite")).unwrap();
-        let manager = std::sync::Arc::new(crate::services::ServiceManager::new());
+    fn missing_local_certificate_is_not_masked_by_duplicate_site_name() {
+        let (_temp, paths, _store, _manager) = fixture();
+        let mut site = site(&paths.base);
+        site.https = true;
+        let report = crate::certs::CertReport {
+            certs: vec![crate::certs::CertHealth {
+                id: "cert-other.test".into(),
+                kind: "site".into(),
+                subject: "other.test".into(),
+                sans: vec!["other.test".into()],
+                not_after: 1,
+                days_left: 90,
+                status: "ok".into(),
+                file_present: true,
+                used_by_sites: vec![site.name.clone()],
+                missing_sans: vec![],
+                advice: String::new(),
+            }],
+            expired: 0,
+            critical: 0,
+            warning: 0,
+            ca_trusted: true,
+            checked_at: 0,
+        };
+        let mut r = HealthReport::default();
+        check_certs(&mut r, &paths, &[site], &report);
+        assert!(
+            r.items
+                .iter()
+                .any(|item| item.id == "site-cert-missing-site-a")
+        );
+    }
+
+    #[test]
+    fn php_missing_enabled_library_and_dependencies_are_visible() {
+        let temp = tempfile::tempdir().unwrap();
+        let ext = crate::model::PhpExtension {
+            name: "pdo_mysql".into(),
+            label: "PDO MySQL".into(),
+            group: "db".into(),
+            hint: String::new(),
+            enabled: true,
+            zend: false,
+            builtin: false,
+            dll: "missing.dll".into(),
+            missing_deps: vec!["pdo".into()],
+        };
+        let mut r = HealthReport::default();
+        check_extensions(&mut r, "8.3", temp.path(), &[ext]);
+        assert_eq!(r.warnings, 1);
+        assert!(r.items[0].detail.contains("文件缺失") && r.items[0].detail.contains("pdo"));
+    }
+
+    #[test]
+    fn missing_php_binary_is_an_incomplete_scan() {
+        let (_temp, paths, store, manager) = fixture();
+        store
+            .upsert_installed(&InstalledPackage {
+                id: "php".into(),
+                version: "8.3".into(),
+                category: "runtime".into(),
+                install_path: paths.base.to_string_lossy().into_owned(),
+                config_path: String::new(),
+                installed_at: 1,
+            })
+            .unwrap();
         let r = check(&paths, &store, &manager).unwrap();
-        let mut seen_lower = false;
-        for i in &r.items {
-            let rank = match i.severity {
-                Severity::Error => 0,
-                Severity::Warn => 1,
-                Severity::Info => 2,
-            };
-            if rank > 0 {
-                seen_lower = true;
-            } else if seen_lower {
-                panic!(
-                    "error 应排在最前，实际顺序：{:?}",
-                    r.items
-                        .iter()
-                        .map(|x| format!("{:?}", x.severity))
-                        .collect::<Vec<_>>()
-                );
-            }
-        }
-        let _ = std::fs::remove_dir_all(&t);
+        assert!(
+            r.items
+                .iter()
+                .any(|item| item.id == "php-extensions-8.3-read-failed")
+        );
     }
 
     #[test]
-    fn data_dir_probe_cleans_up_after_itself() {
-        let t = std::env::temp_dir().join(format!("nsb-health3-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&t);
-        std::fs::create_dir_all(&t).unwrap();
-        let paths = Paths::new(t.clone());
-        let store = crate::store::Store::open(t.join("h.sqlite")).unwrap();
-        let manager = std::sync::Arc::new(crate::services::ServiceManager::new());
-        let _ = check(&paths, &store, &manager).unwrap();
-        // 探针文件不该留在数据目录里
-        assert!(!t.join(".health-probe").exists(), "探测文件应被清理");
-        let _ = std::fs::remove_dir_all(&t);
+    fn php_probe_execution_failure_is_not_an_empty_extension_list() {
+        let (_temp, paths, store, manager) = fixture();
+        let root = paths.runtime_dir("php", "8.3");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(paths.etc_dir("php", "8.3")).unwrap();
+        // 非可执行文件：验证执行错误路径，不启动实际 PHP 或长期服务。
+        std::fs::write(root.join(crate::ops::exe_name("php")), "invalid executable").unwrap();
+        std::fs::write(paths.php_ini("8.3"), "extension=pdo_mysql").unwrap();
+        store
+            .upsert_installed(&InstalledPackage {
+                id: "php".into(),
+                version: "8.3".into(),
+                category: "runtime".into(),
+                install_path: root.to_string_lossy().into_owned(),
+                config_path: String::new(),
+                installed_at: 1,
+            })
+            .unwrap();
+        let r = check(&paths, &store, &manager).unwrap();
+        assert!(r.checks.iter().any(
+            |check| check.id == "php-extensions-8.3" && check.state == CheckState::Unavailable
+        ));
+        assert!(r.summary.contains("未完成"));
+    }
+
+    #[test]
+    fn lifecycle_busy_returns_retryable_error_without_waiting() {
+        let (_temp, paths, store, manager) = fixture();
+        let lock = manager.lifecycle.lock();
+        let other = Arc::clone(&manager);
+        let error = std::thread::spawn(move || check(&paths, &store, &other).unwrap_err())
+            .join()
+            .unwrap();
+        assert_eq!(error.code, "HEALTH_BUSY");
+        drop(lock);
     }
 }

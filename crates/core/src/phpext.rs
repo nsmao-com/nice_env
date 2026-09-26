@@ -436,10 +436,7 @@ pub fn scan_available(paths: &Paths, version: &str) -> Result<Vec<PhpExtension>>
         for entry in
             std::fs::read_dir(&ext_dir).map_err(|e| AppError::io("读取 PHP ext 目录", e))?
         {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
+            let entry = entry.map_err(|error| AppError::io("读取 PHP 扩展文件信息", error))?;
             let file_name = entry.file_name().to_string_lossy().to_string();
             if let Some(n) = ext_name_from_file(&file_name) {
                 if entry.path().is_file() {

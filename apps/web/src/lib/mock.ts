@@ -59,7 +59,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.23";
+const MOCK_APP_VERSION = "0.2.24";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -1334,28 +1334,40 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       } as BulkSelectionSummary as T;
     }
     case "health_check": {
-      const inst: unknown[] = [];
-      const items: { id: string; severity: string; title: string; detail: string; action?: string; route?: string }[] = [];
-      if (inst.length === 0) {
-        items.push({ id: "no-packages", severity: "info", title: "还没有安装任何套件", detail: "本地环境是空的，先装 Web 服务器与运行时才能建站", action: "到「套件 / 服务」安装 Nginx + PHP + MySQL", route: "/packages" });
+      const installed = Array.from(packages.values()).filter((pkg) => pkg.install);
+      const snapshotServices = Array.from(services.values());
+      const snapshotSites = Array.from(sites.values());
+      const items: HealthReport["items"] = [];
+      if (installed.length === 0) items.push({ id: "no-packages", severity: "info", title: "还没有安装任何套件", detail: "当前浏览器演示环境没有已安装套件", action: "到「套件 / 服务」选择套件", route: "/packages" });
+      for (const site of snapshotSites) {
+        const reasons: string[] = [];
+        const web = site.runtime.webServer || "nginx";
+        if (!installed.some((pkg) => pkg.id === web)) reasons.push(`未安装 ${web}`);
+        if (site.runtime.kind === "php" && !installed.some((pkg) => pkg.id === "php" && pkg.version === site.runtime.phpVersion)) reasons.push(`未安装指定 PHP ${site.runtime.phpVersion || "（未指定）"}`);
+        if (!site.rootDir.trim()) reasons.push("未配置根目录");
+        if (reasons.length) items.push({ id: `broken-site-${site.id}`, severity: "error", title: `站点「${site.name}」配置有问题`, detail: reasons.join("；"), action: "修正站点配置或安装所需套件", route: "/sites" });
       }
-      items.push({ id: "cert-warn", severity: "warn", title: "1 张证书 30 天内到期", detail: "还有时间，但建议早点处理", route: "/tls" });
-      items.push({ id: "hosts-drift", severity: "warn", title: "hosts 里的托管记录与站点列表不一致", detail: "应有 3 条，实际 2 条 —— 域名可能解析不到本机", action: "到「工具箱 → 重建 hosts」一键同步", route: "/tools" });
-      items.push({ id: "broken-sites", severity: "error", title: "1 个站点配置有问题", detail: "legacy-admin（目录不存在：D:/code/legacy-admin）", action: "到「站点」修正路径，或到「套件 / 服务」补装对应版本", route: "/sites" });
-      const errors = items.filter((i) => i.severity === "error").length;
-      const warnings = items.filter((i) => i.severity === "warn").length;
-      const infos = items.filter((i) => i.severity === "info").length;
+      for (const service of snapshotServices) {
+        if (service.state === "error") items.push({ id: `service-error-${service.id}`, severity: "error", title: `${service.label} 处于错误状态`, detail: service.lastError?.message || "没有错误详情，请查看日志", route: "/logs" });
+        else if (["unknown", "starting", "stopping"].includes(service.state)) items.push({ id: `service-pending-${service.id}`, severity: "warn", title: `${service.label} 状态尚未确定`, detail: "请等待服务操作结束后重新检查", route: "/packages" });
+      }
+      items.push({ id: "browser-local-checks", severity: "info", title: "浏览器预览未执行本机检查", detail: "这里按当前演示套件、服务和站点生成结果；真实端口、目录、证书、hosts 与 PHP 扩展请在桌面端检查。" });
+      const errors = items.filter((item) => item.severity === "error").length;
+      const warnings = items.filter((item) => item.severity === "warn").length;
+      const infos = items.filter((item) => item.severity === "info").length;
+      const rank = (item: HealthReport["items"][number]) => item.severity === "error" ? 0 : item.severity === "warn" ? 1 : 2;
       return {
-        items: items.sort((a, b) => {
-          const rank = (x: { severity: string }) => (x.severity === "error" ? 0 : x.severity === "warn" ? 1 : 2);
-          return rank(a) - rank(b);
-        }),
-        errors,
-        warnings,
-        infos,
-        summary: errors > 0 ? `发现 ${errors} 个需要处理的问题` : warnings > 0 ? `${warnings} 项建议处理，当前可用` : "环境正常",
+        items: items.sort((a, b) => rank(a) - rank(b)), errors, warnings, infos,
+        summary: errors > 0 ? `演示环境发现 ${errors} 个问题；本机检查未执行` : "演示状态已检查；本机检查未执行",
         checkedAt: Math.floor(Date.now() / 1000),
-      } as HealthReport as T;
+        checks: [
+          { id: "demo-packages", label: "演示安装记录", state: "checked", detail: `${installed.length} 个已安装套件；未访问本机目录` },
+          { id: "demo-sites", label: "演示站点依赖", state: "checked", detail: `${snapshotSites.length} 个站点；比对所选 Web 服务器与 PHP 版本` },
+          { id: "demo-services", label: "演示服务状态", state: snapshotServices.some((service) => ["unknown", "starting", "stopping"].includes(service.state)) ? "unavailable" : "checked", detail: `${snapshotServices.length} 个服务；状态仅来自浏览器内存` },
+          { id: "local-checks", label: "本机环境", state: "unavailable", detail: "需要桌面端检查真实端口、进程、证书、目录、hosts 和扩展" },
+          { id: "application-probes", label: "配置语法与业务连通性", state: "skipped", detail: "未运行原生配置校验、HTTP、数据库或 UDP 连通性检查" },
+        ],
+      } satisfies HealthReport as T;
     }
     case "diagnostics_build": {
       const snapshotServices = Array.from(services.values());

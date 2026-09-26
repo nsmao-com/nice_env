@@ -6,6 +6,13 @@ use crate::model::*;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::PathBuf;
 
+// 损坏的持久化站点不能被悄悄转换成默认静态站点。
+fn decode_site_json<T: serde::de::DeserializeOwned>(column: usize, value: &str) -> rusqlite::Result<T> {
+    serde_json::from_str(value).map_err(|error| rusqlite::Error::FromSqlConversionFailure(
+        column, rusqlite::types::Type::Text, Box::new(error),
+    ))
+}
+
 pub struct Store {
     pub(crate) path: PathBuf,
     conn: parking_lot::Mutex<Connection>,
@@ -256,25 +263,17 @@ impl Store {
             let runtime: String = r.get(4)?;
             let rewrite: String = r.get(6)?;
             let db: Option<String> = r.get(7)?;
-            let php_overrides: Option<String> = r.get(8).ok().flatten();
+            let php_overrides: Option<String> = r.get(8)?;
             Ok(Site {
                 id: r.get(0)?,
                 name: r.get(1)?,
-                domains: serde_json::from_str(&domains).unwrap_or_default(),
+                domains: decode_site_json(2, &domains)?,
                 root_dir: r.get(3)?,
-                runtime: serde_json::from_str(&runtime).unwrap_or(SiteRuntime {
-                    imported_cert_id: None,
-                    web_server: "nginx".into(),
-                    kind: SiteKind::Static,
-                    php_version: None,
-                    proxy_target: None,
-                    command: None,
-                    cwd: None,
-                }),
+                runtime: decode_site_json(4, &runtime)?,
                 https: r.get::<_, i32>(5)? != 0,
-                rewrite: serde_json::from_str(&rewrite).unwrap_or_default(),
-                db: db.and_then(|d| serde_json::from_str(&d).ok()),
-                php_overrides: php_overrides.and_then(|o| serde_json::from_str(&o).ok()),
+                rewrite: decode_site_json(6, &rewrite)?,
+                db: db.as_deref().map(|value| decode_site_json(7, value)).transpose()?,
+                php_overrides: php_overrides.as_deref().map(|value| decode_site_json(8, value)).transpose()?,
                 status: "running".into(),
                 created_at: r.get(9)?,
                 updated_at: r.get(10)?,
@@ -567,16 +566,20 @@ impl Store {
     /* ---------- 端口分配（php-cgi 池） ---------- */
 
     pub fn get_port_assign(&self, service_id: &str) -> Option<u16> {
+        self.get_port_assign_checked(service_id).ok().flatten()
+    }
+
+    pub(crate) fn get_port_assign_checked(&self, service_id: &str) -> Result<Option<u16>> {
         let conn = self.conn.lock();
-        conn.query_row(
+        let value = conn.query_row(
             "SELECT base_port FROM port_assign WHERE service_id=?1",
             params![service_id],
             |r| r.get::<_, i64>(0),
         )
-        .optional()
-        .ok()
-        .flatten()
-        .map(|v| v as u16)
+        .optional()?;
+        value.map(|value| u16::try_from(value).ok().filter(|port| *port > 0)
+            .ok_or_else(|| AppError::new("BAD_PORT", format!("服务 {service_id} 的分配端口无效"))))
+            .transpose()
     }
 
     pub fn set_port_assign(&self, service_id: &str, base_port: u16) -> Result<()> {

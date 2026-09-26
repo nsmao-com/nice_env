@@ -703,8 +703,18 @@ export const HealthItem = z.object({
 });
 export type HealthItem = z.infer<typeof HealthItem>;
 
+export const HealthCheckCoverage = z.object({
+  id: z.string(),
+  label: z.string(),
+  /** checked 仅表示完成检查，问题另见 items。 */
+  state: z.enum(["checked", "unavailable", "skipped"]),
+  detail: z.string(),
+});
+export type HealthCheckCoverage = z.infer<typeof HealthCheckCoverage>;
+
 export const HealthReport = z.object({
   items: z.array(HealthItem),
+  checks: z.array(HealthCheckCoverage).default([]),
   errors: z.number(),
   warnings: z.number(),
   infos: z.number(),

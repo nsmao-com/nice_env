@@ -39,7 +39,7 @@ import {
   UI_FONT_OPTIONS,
   type AppSettings,
 } from "@nsb/schema";
-import { cn } from "@/lib/utils";
+import { cn, fmtBytes } from "@/lib/utils";
 import { useUI, useT } from "@/lib/store";
 import { toastError, useStacks } from "@/lib/hooks";
 import * as api from "@/lib/api";
@@ -188,6 +188,8 @@ export default function SettingsPage() {
   const [updateOpen, setUpdateOpen] = React.useState(false);
   const [active, setActive] = React.useState<string>("appearance");
   const [importConfirm, setImportConfirm] = React.useState<string | null>(null);
+  const [migrationTarget, setMigrationTarget] = React.useState<string | null>(null);
+  const [migrating, setMigrating] = React.useState(false);
   const [localFonts, setLocalFonts] = React.useState<string[]>([]);
   const { data: stacks } = useStacks();
 
@@ -335,6 +337,51 @@ export default function SettingsPage() {
       toast.success(value === null ? t("settings.ports.resetDone") : t("settings.ports.saved"));
     } catch (e) {
       toastError(e);
+    }
+  };
+
+  const chooseDataDirMigration = async () => {
+    if (!isTauri) {
+      toast.info(t("settings.migrate.desktopOnly"));
+      return;
+    }
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({
+        title: t("settings.migrate.chooseTitle"),
+        directory: true,
+        multiple: false,
+      });
+      if (!selected || typeof selected !== "string") return;
+      const normalize = (value: string) => value.replace(/[\\/]+$/, "").toLowerCase();
+      if (normalize(selected) === normalize(dataDir)) {
+        toast.info(t("settings.migrate.same"));
+        return;
+      }
+      setMigrationTarget(selected);
+    } catch (error) {
+      toastError(error);
+    }
+  };
+
+  const migrateDataDir = async () => {
+    if (!migrationTarget || migrating) return;
+    setMigrating(true);
+    try {
+      const result = await api.migrateDataDir(migrationTarget);
+      toast.success(t("settings.migrate.done"), {
+        description: t("settings.migrate.summary")
+          .replace("{files}", String(result.files))
+          .replace("{size}", fmtBytes(result.bytes)),
+        duration: 8000,
+      });
+      setMigrationTarget(null);
+      // migrate_data_dir 已将目标路径传给子进程；重启后所有服务、SQLite 和运行时从新目录打开。
+      await api.restartApp();
+    } catch (error) {
+      toastError(error, t("settings.migrate.failed"));
+    } finally {
+      setMigrating(false);
     }
   };
 
@@ -985,24 +1032,19 @@ export default function SettingsPage() {
                 </CardHeader>
                 <CardContent className="flex flex-col gap-3">
                   <p className="text-[11.5px] text-faint">{t("settings.dataDirHint")}</p>
-                  <div className="flex items-center gap-2">
-                    <code className="flex-1 truncate rounded-lg bg-card-2/50 px-3 py-2 font-mono text-[12px] text-secondary">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                    <code className="min-w-0 flex-1 break-all rounded-lg bg-card-2/50 px-3 py-2 font-mono text-[12px] text-secondary">
                       {dataDir || t("settings.dataDirUnknown")}
                     </code>
-                    <CopyButton text={dataDir} />
-                    <Button variant="secondary" onClick={() => api.openInFolder(dataDir || ".").catch(toastError)}>
-                      {t("common.open")}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      onClick={() =>
-                        toast.info(t("settings.migrateToastTitle"), {
-                          description: t("settings.migrateToastDesc"),
-                        })
-                      }
-                    >
-                      {t("settings.migrate")}
-                    </Button>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <CopyButton text={dataDir} />
+                      <Button variant="secondary" onClick={() => api.openInFolder(dataDir || ".").catch(toastError)}>
+                        {t("common.open")}
+                      </Button>
+                      <Button variant="outline" disabled={migrating} onClick={() => void chooseDataDirMigration()}>
+                        {t("settings.migrate")}
+                      </Button>
+                    </div>
                   </div>
                 </CardContent>
               </Card>
@@ -1133,7 +1175,7 @@ export default function SettingsPage() {
                     <div className="flex flex-col">
                       <span className="text-[12.5px] text-secondary">
                         {t("settings.currentVersion")}{" "}
-                        <code className="font-mono text-foreground">v{appVersion || "0.2.7"}</code>
+                        <code className="font-mono text-foreground">v{appVersion || "0.2.8"}</code>
                       </span>
                       <span className="text-[10.5px] text-faint">{t("settings.manifestHint")}</span>
                     </div>
@@ -1207,7 +1249,7 @@ export default function SettingsPage() {
                   <div className="flex flex-col gap-0.5">
                     <span className="text-[12.5px] text-secondary">{t("about.desc")}</span>
                     <span className="text-[10.5px] text-faint">
-                      {t("settings.currentVersion")} v{appVersion || "0.2.7"}
+                      {t("settings.currentVersion")} v{appVersion || "0.2.8"}
                     </span>
                   </div>
                   <div className="flex gap-2">
@@ -1227,6 +1269,20 @@ export default function SettingsPage() {
       </div>
 
       <UpdateDialog open={updateOpen} onOpenChange={setUpdateOpen} />
+
+      <ConfirmDialog
+        open={migrationTarget !== null}
+        onOpenChange={(open) => !migrating && !open && setMigrationTarget(null)}
+        title={t("settings.migrate.confirmTitle")}
+        description={t("settings.migrate.confirmDesc")}
+        confirmText={t("settings.migrate.confirmButton")}
+        loading={migrating}
+        onConfirm={() => void migrateDataDir()}
+      >
+        <div className="rounded-lg border border-border bg-fill px-3 py-2 font-mono text-[11px] leading-relaxed text-secondary [overflow-wrap:anywhere]">
+          {migrationTarget}
+        </div>
+      </ConfirmDialog>
 
       <ConfirmDialog
         open={importConfirm !== null}

@@ -191,6 +191,185 @@ impl Paths {
     }
 }
 
+/// 数据目录迁移结果。迁移成功后桌面端会重启应用，让新进程从目标目录打开数据库和运行时。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataDirMigration {
+    pub path: String,
+    pub files: u64,
+    pub bytes: u64,
+}
+
+/// 将整个 NiceEnv 数据目录复制到一个新的空目录。
+///
+/// 复制使用同父目录的临时目录，完成后再一次性改名，避免目标目录只复制了一半就被下次启动
+/// 选中。拒绝把目标放进源目录，也拒绝跟随软链接/目录联接，避免迁移时越出用户明确选择的范围。
+pub fn copy_data_dir(
+    source: &Path,
+    requested_target: &Path,
+) -> crate::error::Result<DataDirMigration> {
+    if let Ok(metadata) = std::fs::symlink_metadata(source) {
+        if linked(&metadata) {
+            return Err(crate::error::AppError::new(
+                "DATA_DIR_INVALID",
+                "当前数据目录是软链接或目录联接，无法安全迁移",
+            ));
+        }
+    }
+    let source = std::fs::canonicalize(source)
+        .map_err(|e| crate::error::AppError::io("读取当前数据目录", e))?;
+    if !source.is_dir() {
+        return Err(crate::error::AppError::new(
+            "DATA_DIR_INVALID",
+            "当前数据目录不是文件夹",
+        ));
+    }
+
+    let requested_target = if requested_target.is_absolute() {
+        requested_target.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| crate::error::AppError::io("解析目标数据目录", e))?
+            .join(requested_target)
+    };
+    let name = requested_target
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| crate::error::AppError::new("DATA_DIR_INVALID", "请选择一个具体的数据目录"))?;
+    let parent = requested_target
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| crate::error::AppError::new("DATA_DIR_INVALID", "目标数据目录路径无效"))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| crate::error::AppError::io("创建目标数据目录的父目录", e))?;
+    let parent = std::fs::canonicalize(parent)
+        .map_err(|e| crate::error::AppError::io("解析目标数据目录的父目录", e))?;
+    let target = parent.join(name);
+
+    if let Ok(metadata) = std::fs::symlink_metadata(&target) {
+        if linked(&metadata) {
+            return Err(crate::error::AppError::new(
+                "DATA_DIR_INVALID",
+                "目标目录不能是软链接或目录联接",
+            ));
+        }
+    }
+
+    let source_text = source.to_string_lossy();
+    let target_text = target.to_string_lossy();
+    let same_path = if cfg!(windows) {
+        source_text.eq_ignore_ascii_case(&target_text)
+    } else {
+        source_text == target_text
+    };
+    if same_path || target.starts_with(&source) {
+        return Err(crate::error::AppError::new(
+            "DATA_DIR_INVALID",
+            "目标目录不能与当前目录相同，也不能放在当前目录里面",
+        ));
+    }
+    if target.exists() {
+        if !target.is_dir() {
+            return Err(crate::error::AppError::new(
+                "DATA_DIR_NOT_EMPTY",
+                "目标路径已经是一个文件",
+            ));
+        }
+        let mut entries = std::fs::read_dir(&target)
+            .map_err(|e| crate::error::AppError::io("检查目标数据目录", e))?;
+        let has_entry = entries
+            .next()
+            .transpose()
+            .map_err(|e| crate::error::AppError::io("检查目标数据目录", e))?
+            .is_some();
+        if has_entry {
+            return Err(crate::error::AppError::new(
+                "DATA_DIR_NOT_EMPTY",
+                "目标数据目录必须为空",
+            ));
+        }
+    }
+
+    let staging = parent.join(format!(
+        ".{}-migrating-{}",
+        name.to_string_lossy(),
+        crate::services::now_ms()
+    ));
+    if staging.exists() {
+        return Err(crate::error::AppError::new(
+            "DATA_DIR_BUSY",
+            "目标目录正在进行另一次迁移，请稍后重试",
+        ));
+    }
+    std::fs::create_dir(&staging)
+        .map_err(|e| crate::error::AppError::io("创建迁移暂存目录", e))?;
+
+    let mut stats = (0_u64, 0_u64);
+    let copy_result = copy_tree(&source, &staging, &mut stats);
+    if let Err(error) = copy_result {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(crate::error::AppError::io("复制数据目录", error));
+    }
+    if let Err(error) = validate_migrated_root(&staging) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    if target.exists() {
+        if let Err(error) = std::fs::remove_dir(&target) {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(crate::error::AppError::io("替换空目标数据目录", error));
+        }
+    }
+    if let Err(error) = std::fs::rename(&staging, &target) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(crate::error::AppError::io("提交新的数据目录", error));
+    }
+    Ok(DataDirMigration {
+        path: target.to_string_lossy().to_string(),
+        files: stats.0,
+        bytes: stats.1,
+    })
+}
+
+fn copy_tree(source: &Path, target: &Path, stats: &mut (u64, u64)) -> io::Result<()> {
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = target.join(entry.file_name());
+        let metadata = std::fs::symlink_metadata(&from)?;
+        if linked(&metadata) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("数据目录包含不支持迁移的链接：{}", from.display()),
+            ));
+        }
+        if metadata.is_dir() {
+            std::fs::create_dir(&to)?;
+            copy_tree(&from, &to, stats)?;
+        } else if metadata.is_file() {
+            std::fs::copy(&from, &to)?;
+            stats.0 = stats.0.saturating_add(1);
+            stats.1 = stats.1.saturating_add(metadata.len());
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("数据目录包含不支持迁移的文件：{}", from.display()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_migrated_root(root: &Path) -> crate::error::Result<()> {
+    if !root.join("nsb.sqlite").is_file() {
+        return Err(crate::error::AppError::new(
+            "DATA_DIR_INVALID",
+            "迁移源缺少 NiceEnv 数据库，未切换目录",
+        ));
+    }
+    Ok(())
+}
+
 /// 写文件前把旧内容备份到 {base}/backup/
 pub fn write_with_backup(path: &Path, content: &str, backup_dir: &Path) -> std::io::Result<()> {
     write_with_backup_expected(path, content, backup_dir, None)
@@ -629,6 +808,27 @@ mod tests {
         let paths = Paths::new(temp.path().join("app data"));
         paths.ensure_dirs().unwrap();
         (temp, paths)
+    }
+
+    #[test]
+    fn data_dir_copy_is_atomic_and_requires_an_empty_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let paths = Paths::new(source.clone());
+        paths.ensure_dirs().unwrap();
+        std::fs::write(paths.db(), b"sqlite-fixture").unwrap();
+        std::fs::write(paths.etc().join("marker.ini"), b"preserve me").unwrap();
+        let target = temp.path().join("target");
+
+        let result = copy_data_dir(&source, &target).unwrap();
+        assert_eq!(result.files, 2);
+        assert_eq!(std::fs::read(target.join("nsb.sqlite")).unwrap(), b"sqlite-fixture");
+        assert_eq!(std::fs::read(target.join("etc/marker.ini")).unwrap(), b"preserve me");
+
+        std::fs::write(target.join("keep.txt"), b"do not overwrite").unwrap();
+        let error = copy_data_dir(&source, &target).unwrap_err();
+        assert_eq!(error.code, "DATA_DIR_NOT_EMPTY");
+        assert_eq!(std::fs::read(target.join("keep.txt")).unwrap(), b"do not overwrite");
     }
 
     #[test]

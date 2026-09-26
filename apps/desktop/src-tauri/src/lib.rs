@@ -293,6 +293,8 @@ pub fn run() {
             import_config,
             import_config_text,
             get_data_dir,
+            migrate_data_dir,
+            restart_app,
             quit_app,
             // 应用更新（在线下载 + 就地安装）
             download_update,
@@ -1888,6 +1890,37 @@ fn get_app_version() -> String {
 #[tauri::command]
 fn get_data_dir(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> String {
     state.paths.base.to_string_lossy().to_string()
+}
+
+/// 复制完整数据目录后让新进程从目标目录启动。目标路径通过 NSB_HOME 传给子进程，
+/// 不依赖用户额外改环境变量；若重启失败，旧进程仍会返回明确错误而不会假装已切换。
+#[tauri::command]
+async fn migrate_data_dir(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    path: String,
+) -> Result<nsb_core::paths::DataDirMigration, tauri::Error> {
+    let st = state.inner().clone();
+    let target = std::path::PathBuf::from(path);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        map_jh(st.migrate_data_dir(&target))
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))??;
+    std::env::set_var("NSB_HOME", &result.path);
+    Ok(result)
+}
+
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) -> Result<bool, tauri::Error> {
+    let executable = std::env::current_exe()
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))?;
+    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    std::process::Command::new(executable)
+        .args(args)
+        .spawn()
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))?;
+    app.exit(0);
+    Ok(true)
 }
 
 /* ================= 配置导入/导出 ================= */

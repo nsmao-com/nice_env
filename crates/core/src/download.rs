@@ -121,6 +121,11 @@ impl Downloader {
         })
     }
 
+    /// 数据目录迁移前检查是否仍有安装/卸载任务在读写下载缓存或运行时目录。
+    pub fn has_tasks(&self) -> bool {
+        !self.tasks.lock().is_empty()
+    }
+
     /// true 表示已接收取消；提交阶段或已结束的任务返回 false。
     pub fn cancel(&self, task_id: &str) -> bool {
         let tasks = self.tasks.lock();

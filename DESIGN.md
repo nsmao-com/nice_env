@@ -1099,3 +1099,18 @@ package、共享 schema、工作区 Cargo、桌面 Cargo、Tauri 配置、Cargo.
 `pnpm --filter @nsb/web check` 和 `git -c core.safecrlf=false diff --check`。未运行前端 dev/build，
 未新增测试文件，本轮没有数据库变更，未修改 update.sql。提交和 push 时必须创建新的 annotated
 tag `v0.2.7`，保留全部历史 tag，不覆盖或移动旧 tag。
+
+第二十二轮实施与验证：数据目录迁移从占位提示变为可用闭环。
+设置页的“迁移数据目录”现在使用桌面目录选择器，迁移前展示目标路径和影响范围，窄屏下路径与
+操作按钮自动换行。后端拒绝当前目录、嵌套目录、软链接/目录联接、非空目标和重复迁移；确认后
+检查安装/卸载任务，停止所有 NiceEnv 受管服务，先执行 SQLite WAL checkpoint，再把运行时、配置、
+数据库、证书、日志、下载缓存和备份复制到同父目录的暂存目录，校验 `nsb.sqlite` 后原子改名提交。
+复制失败会清理暂存目录而保留源目录，目标通过 `NSB_HOME` 传给新进程，桌面端随后自动重启；浏览器
+预览明确提示该操作需要桌面版，不再把 toast 当作迁移成功。新增的路径测试覆盖完整复制、文件计数、
+非空目标保护和源文件不被覆盖。
+
+应用版本同步升至 0.2.8，保留 `v0.2.7` 不动。验证通过：`pnpm --filter @nsb/web check`、
+`cargo check -p nsb-core --offline -j 1`、`cargo check -p niceservbay --offline -j 1`、
+`cargo test -p nsb-core --lib paths::tests::data_dir_copy_is_atomic_and_requires_an_empty_target
+--offline -j 1`（1 项）和 `git -c core.safecrlf=false diff --check`。未运行前端 dev/build，
+本轮没有数据库结构变更，未修改 update.sql；提交时必须创建新的 annotated tag `v0.2.8`。

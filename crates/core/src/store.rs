@@ -105,6 +105,13 @@ impl Store {
         Ok(())
     }
 
+    /// 在复制数据目录前把 WAL 合并回主数据库，避免迁移时遗漏最近写入。
+    pub fn checkpoint(&self) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    }
+
     /// 便捷：读取 JSON 序列化设置，缺失时用默认
     pub fn get_setting_or<T: serde::de::DeserializeOwned + Default>(&self, key: &str) -> T {
         match self.get_setting(key) {

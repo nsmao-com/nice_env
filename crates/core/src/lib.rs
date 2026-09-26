@@ -697,6 +697,42 @@ impl CoreState {
         r
     }
 
+    /// 将运行时、配置、服务数据、证书和本地数据库迁移到新目录。
+    /// 迁移期间必须没有安装任务；受管服务会先全部优雅停止，桌面端随后重启进程。
+    pub fn migrate_data_dir(&self, target: &std::path::Path) -> Result<paths::DataDirMigration> {
+        let _operation = self.manager.lifecycle.lock();
+        if self.downloader.has_tasks() {
+            return Err(AppError::new(
+                "PACKAGE_BUSY",
+                "当前仍有套件安装或卸载任务，请等待完成后再迁移",
+            ));
+        }
+        ops::stop_all(&self.store, &self.paths, &self.manager);
+        let active = self
+            .manager
+            .list_status()
+            .into_iter()
+            .filter(|status| {
+                matches!(
+                    status.state,
+                    model::ServiceState::Running
+                        | model::ServiceState::Starting
+                        | model::ServiceState::Stopping
+                )
+            })
+            .map(|status| status.label)
+            .collect::<Vec<_>>();
+        if !active.is_empty() {
+            return Err(AppError::new(
+                "SERVICES_BUSY",
+                format!("仍有服务未停止：{}", active.join("、")),
+            )
+            .with_hint("请先在套件页停止服务，确认没有安装任务后再重试"));
+        }
+        self.store.checkpoint()?;
+        paths::copy_data_dir(&self.paths.base, target)
+    }
+
     pub fn tail_logs(&self, id: &str, lines: usize) -> Vec<model::LogLine> {
         // 站点日志：id 形如 "site:{siteId}"，读站点专属 access 日志
         // （站点 conf 现在带 per-site access_log，日志页才能按站点看流量）

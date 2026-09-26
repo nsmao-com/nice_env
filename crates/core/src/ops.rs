@@ -1274,6 +1274,11 @@ pub fn stop_all(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>) {
 /// 把当前托管的 pid 落盘（{data}/run/pids.json）。
 /// 崩溃/被强杀时不会走到 stop_all，只能在下次启动时靠这份记录找回残留进程。
 pub fn save_pidfile(paths: &Paths, manager: &Arc<ServiceManager>) {
+    let _ = save_pidfile_checked(paths, manager);
+}
+
+/// 退出或迁移前必须确认恢复记录写入成功，不能把写入失败当作已完成收尾。
+pub fn save_pidfile_checked(paths: &Paths, manager: &Arc<ServiceManager>) -> Result<()> {
     // 注意：必须先把 id 列表拷出来再逐个取，不能写成
     // `for id in manager.services.lock().keys()` —— 那样整个循环都持有该锁，
     // 循环体里再取同一个 Mutex 就是自死锁（parking_lot 不可重入）
@@ -1292,7 +1297,7 @@ pub fn save_pidfile(paths: &Paths, manager: &Arc<ServiceManager>) {
         entries.push(("adminer-console".into(), vec![pid]));
     }
     let dir = paths.data().join("run");
-    let _ = std::fs::create_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| AppError::io("创建进程记录目录", e))?;
     let json = serde_json::json!({
         "appPid": std::process::id(),
         "savedAt": crate::services::now_ms(),
@@ -1301,7 +1306,14 @@ pub fn save_pidfile(paths: &Paths, manager: &Arc<ServiceManager>) {
             serde_json::json!({"id": k, "pids": v, "port": port})
         }).collect::<Vec<_>>(),
     });
-    let _ = std::fs::write(dir.join("pids.json"), json.to_string());
+    let mut pending = tempfile::NamedTempFile::new_in(&dir)
+        .map_err(|e| AppError::io("创建进程记录暂存文件", e))?;
+    use std::io::Write;
+    pending.write_all(json.to_string().as_bytes()).and_then(|_| pending.flush())
+        .map_err(|e| AppError::io("写入进程记录", e))?;
+    pending.persist(dir.join("pids.json"))
+        .map_err(|e| AppError::io("保存进程记录", e.error))?;
+    Ok(())
 }
 
 /// 启动时对上次会话残留的处置：**能收养就收养，收养不了才清杀**。
@@ -2726,6 +2738,7 @@ mod validate_tests {
             assert_eq!(other.start_stack("missing").unwrap_err().code, "SERVICE_BUSY");
             assert_eq!(other.stop_stack("missing").unwrap_err().code, "SERVICE_BUSY");
             assert_eq!(other.stop_all_services().unwrap_err().code, "SERVICE_BUSY");
+            assert_eq!(other.with_stopped_services(|| -> Result<()> { panic!("must not transition"); }).unwrap_err().code, "SERVICE_BUSY");
         }).join().unwrap();
     }
 
@@ -2755,6 +2768,11 @@ mod validate_tests {
         assert_eq!(stopped.failed[0].service_id, "redis");
         let pidfile: serde_json::Value = serde_json::from_slice(&std::fs::read(state.paths.data().join("run/pids.json")).unwrap()).unwrap();
         assert_eq!(pidfile["services"][0]["pids"][0], std::process::id());
+        assert_eq!(state.with_stopped_services(|| -> Result<()> { panic!("must not exit or launch installer"); }).unwrap_err().code, "SERVICES_STOP_FAILED");
+        let target = temp.path().join("must-not-copy");
+        assert_eq!(state.migrate_data_dir(&target).unwrap_err().code, "SERVICES_STOP_FAILED");
+        assert!(!target.exists());
+        assert!(state.paths.data().join("run/pids.json").is_file());
     }
 
     #[test]
@@ -2893,6 +2911,32 @@ powershell.exe -NoProfile -NonInteractive -Command "$listener = [System.Net.Sock
         assert!(state.scan_port_range(port, port).unwrap().listeners.is_empty());
         // 与真正启动的预检一致，验证端口可重新绑定，避免连接探针额外制造临时连接。
         assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
+        state.start_service("fixture-b").unwrap();
+        let process = state.manager.snapshot("fixture-b").unwrap().pids;
+        let error = state.with_stopped_services(|| -> Result<()> {
+            assert!(process.iter().all(|pid| !platform::process_alive(*pid)));
+            assert!(state.manager.snapshot("fixture-b").unwrap().pids.is_empty());
+            Err(AppError::new("LAUNCH_FAILED", "isolated launch failure"))
+        }).unwrap_err();
+        assert_eq!(error.code, "LAUNCH_FAILED");
+        // 后续动作失败不会留下生命周期锁，可重新操作服务。
+        state.start_service("fixture-b").unwrap();
+        state.stop_service("fixture-b").unwrap();
+    }
+
+    #[test]
+    fn service_lifecycle_transition_blocks_tasks_and_pidfile_write_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = isolated_state(Paths::new(temp.path().to_path_buf()));
+        let task = state.downloader.begin_task("isolated-install").unwrap();
+        assert_eq!(state.with_stopped_services(|| -> Result<()> { panic!("must not interrupt install"); }).unwrap_err().code, "PACKAGE_BUSY");
+        drop(task);
+        let run = state.paths.data().join("run");
+        std::fs::create_dir_all(run.join("pids.json")).unwrap();
+        let marker = run.join("pids.json/keep.txt");
+        std::fs::write(&marker, "preserve").unwrap();
+        assert_eq!(state.with_stopped_services(|| -> Result<()> { panic!("must not ignore persistence failure"); }).unwrap_err().code, "IO_ERROR");
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "preserve");
     }
 
 }

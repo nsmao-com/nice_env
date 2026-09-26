@@ -835,20 +835,39 @@ impl CoreState {
     /// 将运行时、配置、服务数据、证书和本地数据库迁移到新目录。
     /// 迁移期间必须没有安装任务；受管服务会先全部优雅停止，桌面端随后重启进程。
     pub fn migrate_data_dir(&self, target: &std::path::Path) -> Result<paths::DataDirMigration> {
-        let _operation = self.manager.lifecycle.lock();
+        self.with_stopped_services(|| {
+            self.store.checkpoint()?;
+            paths::copy_data_dir(&self.paths.base, target)
+        })
+    }
+
+    /// 退出、重启、更新及迁移的共同前置条件；只有完整停机后才执行后续动作。
+    /// 生命周期锁贯穿检查与后续动作，失败保留原应用和恢复记录。
+    pub fn with_stopped_services<T>(&self, next: impl FnOnce() -> Result<T>) -> Result<T> {
+        let _operation = self.manager.lifecycle.try_lock()
+            .ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请完成后再退出、重启或迁移"))?;
         if self.downloader.has_tasks() {
             return Err(AppError::new(
                 "PACKAGE_BUSY",
-                "当前仍有套件安装或卸载任务，请等待完成后再迁移",
+                "当前仍有套件安装或卸载任务，请等待完成后再退出、重启或迁移",
             ));
         }
-        ops::stop_all(&self.store, &self.paths, &self.manager);
+        let report = self.stop_all_services()?;
+        ops::save_pidfile_checked(&self.paths, &self.manager)?;
+        if !report.failed.is_empty() {
+            let failures = report.failed.iter()
+                .map(|item| format!("{}：{}", item.service_id, item.error.message)).collect::<Vec<_>>();
+            return Err(AppError::new("SERVICES_STOP_FAILED",
+                format!("未能停止全部服务，操作已中止。{}", failures.join("；")))
+                .with_hint("应用保持打开，已停止的服务不会自动恢复；请查看服务日志，处理失败项后重试")
+                .with_detail(serde_json::to_string(&report).unwrap_or_default()));
+        }
         let active = self
             .manager
             .list_status()
             .into_iter()
             .filter(|status| {
-                matches!(
+                !status.pids.is_empty() || matches!(
                     status.state,
                     model::ServiceState::Running
                         | model::ServiceState::Starting
@@ -864,8 +883,7 @@ impl CoreState {
             )
             .with_hint("请先在套件页停止服务，确认没有安装任务后再重试"));
         }
-        self.store.checkpoint()?;
-        paths::copy_data_dir(&self.paths.base, target)
+        next()
     }
 
     pub fn tail_logs(&self, id: &str, lines: usize) -> Vec<model::LogLine> {

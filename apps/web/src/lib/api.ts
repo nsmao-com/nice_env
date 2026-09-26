@@ -515,7 +515,7 @@ export interface DataDirMigration {
 }
 export const migrateDataDir = (path: string) =>
   safe(invoke<DataDirMigration>("migrate_data_dir", { path }));
-export const restartApp = () => safe(invoke<boolean>("restart_app"));
+export const restartApp = (dataDir?: string) => safe(invoke<boolean>("restart_app", { dataDir: dataDir ?? null }));
 export const checkUpdates = () => safe(invoke<UpdateCheckResult>("check_updates"));
 
 /** 拉取远端套件清单（设置项 manifestUrl）并落盘为快照；下次启动生效 */

@@ -190,6 +190,11 @@ export default function SettingsPage() {
   const [importConfirm, setImportConfirm] = React.useState<string | null>(null);
   const [migrationTarget, setMigrationTarget] = React.useState<string | null>(null);
   const [migrating, setMigrating] = React.useState(false);
+  const migrationBusy = React.useRef(false);
+  const [migrationResult, setMigrationResult] = React.useState<api.DataDirMigration | null>(null);
+  const [migrationError, setMigrationError] = React.useState<string | null>(null);
+  const migrationErrorRef = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => { if (migrationError) migrationErrorRef.current?.focus(); }, [migrationError]);
   const [localFonts, setLocalFonts] = React.useState<string[]>([]);
   const { data: stacks } = useStacks();
 
@@ -359,28 +364,32 @@ export default function SettingsPage() {
         return;
       }
       setMigrationTarget(selected);
+      setMigrationResult(null);
+      setMigrationError(null);
     } catch (error) {
       toastError(error);
     }
   };
 
   const migrateDataDir = async () => {
-    if (!migrationTarget || migrating) return;
+    if (!migrationTarget || migrationBusy.current) return;
+    migrationBusy.current = true;
     setMigrating(true);
+    setMigrationError(null);
+    let copied = migrationResult;
     try {
-      const result = await api.migrateDataDir(migrationTarget);
-      toast.success(t("settings.migrate.done"), {
-        description: t("settings.migrate.summary")
-          .replace("{files}", String(result.files))
-          .replace("{size}", fmtBytes(result.bytes)),
-        duration: 8000,
-      });
+      if (!copied) {
+        copied = await api.migrateDataDir(migrationTarget);
+        setMigrationResult(copied);
+      }
+      // 复制成功而重启失败时保留结果，重试只启动新进程，不再复制到非空目录。
+      await api.restartApp(copied.path);
       setMigrationTarget(null);
-      // migrate_data_dir 已将目标路径传给子进程；重启后所有服务、SQLite 和运行时从新目录打开。
-      await api.restartApp();
     } catch (error) {
-      toastError(error, t("settings.migrate.failed"));
+      const message = normalizeError(error);
+      setMigrationError([copied ? t("settings.migrate.restartFailed") : t("settings.migrate.failed"), message.message, message.hint].filter(Boolean).join("\n"));
     } finally {
+      migrationBusy.current = false;
       setMigrating(false);
     }
   };
@@ -1184,7 +1193,7 @@ export default function SettingsPage() {
                     <div className="flex flex-col">
                       <span className="text-[12.5px] text-secondary">
                         {t("settings.currentVersion")}{" "}
-                        <code className="font-mono text-foreground">v{appVersion || "0.2.28"}</code>
+                        <code className="font-mono text-foreground">v{appVersion || "0.2.29"}</code>
                       </span>
                       <span className="text-[10.5px] text-faint">{t("settings.manifestHint")}</span>
                     </div>
@@ -1258,7 +1267,7 @@ export default function SettingsPage() {
                   <div className="flex flex-col gap-0.5">
                     <span className="text-[12.5px] text-secondary">{t("about.desc")}</span>
                     <span className="text-[10.5px] text-faint">
-                      {t("settings.currentVersion")} v{appVersion || "0.2.28"}
+                      {t("settings.currentVersion")} v{appVersion || "0.2.29"}
                     </span>
                   </div>
                   <div className="flex gap-2">
@@ -1284,13 +1293,15 @@ export default function SettingsPage() {
         onOpenChange={(open) => !migrating && !open && setMigrationTarget(null)}
         title={t("settings.migrate.confirmTitle")}
         description={t("settings.migrate.confirmDesc")}
-        confirmText={t("settings.migrate.confirmButton")}
+        confirmText={t(migrationResult ? "settings.migrate.retryRestart" : "settings.migrate.confirmButton")}
         loading={migrating}
         onConfirm={() => void migrateDataDir()}
       >
         <div className="rounded-lg border border-border bg-fill px-3 py-2 font-mono text-[11px] leading-relaxed text-secondary [overflow-wrap:anywhere]">
           {migrationTarget}
         </div>
+        {migrationResult && <p className="text-xs text-muted">{t("settings.migrate.copyReady")}</p>}
+        {migrationError && <div ref={migrationErrorRef} tabIndex={-1} role="alert" className="rounded-lg border border-error/30 bg-error-soft p-3 text-xs text-error whitespace-pre-wrap [overflow-wrap:anywhere]">{migrationError}</div>}
       </ConfirmDialog>
 
       <ConfirmDialog

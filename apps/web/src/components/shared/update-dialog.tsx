@@ -21,7 +21,7 @@ import { cn, fmtBytes, fmtSpeed, fmtDuration } from "@/lib/utils";
 import { useT } from "@/lib/store";
 import { toastError } from "@/lib/hooks";
 import * as api from "@/lib/api";
-import { isTauri, listen } from "@/lib/backend";
+import { isTauri, listen, normalizeError } from "@/lib/backend";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -60,10 +60,15 @@ export function UpdateDialog({
   const [dl, setDl] = React.useState<DownloadUpdateResult | null>(null);
   const [progress, setProgress] = React.useState<UpdateProgress | null>(null);
   const [manifestState, setManifestState] = React.useState<"idle" | "applying" | "applied">("idle");
+  const installBusy = React.useRef(false);
+  const [installError, setInstallError] = React.useState<string | null>(null);
+  const installErrorRef = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => { if (installError) installErrorRef.current?.focus(); }, [installError]);
 
   const check = React.useCallback(
     async (silent = false) => {
       setPhase("checking");
+      setInstallError(null);
       setError(null);
       setProgress(null);
       setDl(null);
@@ -131,14 +136,19 @@ export function UpdateDialog({
   };
 
   const install = async () => {
-    if (!dl) return;
+    if (!dl || installBusy.current) return;
+    installBusy.current = true;
+    setInstallError(null);
     setPhase("installing");
     try {
       await api.installUpdate(dl.path);
       // 安装器已拉起、应用即将退出：这里不必再改状态
     } catch (e) {
       setPhase("downloaded");
-      toastError(e, t("update.installFailed"));
+      const error = normalizeError(e);
+      setInstallError([error.message, error.hint].filter(Boolean).join("\n"));
+    } finally {
+      installBusy.current = false;
     }
   };
 
@@ -146,10 +156,10 @@ export function UpdateDialog({
   const pct = progress && progress.total > 0 ? (progress.received / progress.total) * 100 : 0;
 
   return (
-    <Dialog open={open} onOpenChange={(o) => (phase === "downloading" ? undefined : onOpenChange(o))}>
-      <DialogContent className="max-w-xl overflow-hidden p-0" hideClose={phase === "downloading"}>
+    <Dialog open={open} onOpenChange={(o) => (["downloading", "installing"].includes(phase) ? undefined : onOpenChange(o))}>
+      <DialogContent className="flex max-h-[90dvh] max-w-xl flex-col gap-0 overflow-hidden p-0" hideClose={["downloading", "installing"].includes(phase)}>
         {/* 头部：图标 + 标题 + 版本 */}
-        <div className="relative border-b border-border bg-card-2/30 px-6 py-5">
+        <div className="relative shrink-0 bg-card-2/30 px-4 py-5 sm:px-6 after:absolute after:inset-x-4 after:bottom-0 after:border-b after:border-dashed after:border-border sm:after:inset-x-6">
           <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/40 to-transparent" />
           <div className="flex items-start gap-4">
             <div
@@ -211,7 +221,8 @@ export function UpdateDialog({
         </div>
 
         {/* 主体 */}
-        <div className="max-h-[52vh] overflow-y-auto px-6 py-5">
+        <div className="min-h-0 overflow-y-auto px-4 py-5 sm:px-6 [overflow-wrap:anywhere]">
+          {installError && <div ref={installErrorRef} tabIndex={-1} role="alert" className="mb-4 rounded-lg border border-error/30 bg-error-soft p-3 text-xs text-error whitespace-pre-wrap [overflow-wrap:anywhere]">{installError}</div>}
           {phase === "checking" && (
             <div className="flex flex-col gap-2">
               {[0, 1, 2].map((i) => (
@@ -289,7 +300,7 @@ export function UpdateDialog({
               {/* 更新说明 */}
               {rel?.body ? (
                 <div className="overflow-hidden rounded-xl bg-fill">
-                  <div className="border-b border-border px-3 py-1.5 text-[11px] font-medium text-secondary">
+                  <div className="relative px-3 py-1.5 text-[11px] font-medium text-secondary after:absolute after:inset-x-3 after:bottom-0 after:border-b after:border-dashed after:border-border">
                     {t("update.changelog")}
                   </div>
                   <div className="max-h-44 overflow-y-auto px-3 py-2">
@@ -352,7 +363,7 @@ export function UpdateDialog({
         </div>
 
         {/* 底部动作 */}
-        <DialogFooter className="border-t border-border bg-card-2/20 px-6 py-3.5">
+        <DialogFooter className="relative shrink-0 flex-wrap bg-card-2/20 px-4 py-3.5 sm:px-6 before:absolute before:inset-x-4 before:top-0 before:border-t before:border-dashed before:border-border sm:before:inset-x-6">
           {phase === "available" && (
             <>
               <Button variant="ghost" onClick={() => api.openInBrowser(result?.releaseUrl ?? "").catch(toastError)}>

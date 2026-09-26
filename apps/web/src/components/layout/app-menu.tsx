@@ -79,10 +79,14 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
   const { isMac, minimize, close } = useDesktopWindow();
   const [aboutOpen, setAboutOpen] = React.useState(false);
   const [checking, setChecking] = React.useState(false);
-  const [version, setVersion] = React.useState("0.2.28");
+  const [version, setVersion] = React.useState("0.2.29");
   const [updateOpen, setUpdateOpen] = React.useState(false);
   const [confirm, setConfirm] = React.useState<null | "stopAll" | "quit">(null);
   const [busy, setBusy] = React.useState(false);
+  const quitBusy = React.useRef(false);
+  const [quitError, setQuitError] = React.useState<string | null>(null);
+  const quitErrorRef = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => { if (quitError) quitErrorRef.current?.focus(); }, [quitError]);
 
   React.useEffect(() => {
     api.getAppVersion().then(setVersion).catch(() => undefined);
@@ -240,7 +244,7 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
             className="text-error focus:text-error"
             onSelect={() => {
               // 退出会停掉所有服务：先确认，避免误点导致站点全下线
-              if (isTauri) setConfirm("quit");
+              if (isTauri) { setQuitError(null); setConfirm("quit"); }
               else close();
             }}
           >
@@ -267,23 +271,31 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
 
       <ConfirmDialog
         open={confirm === "quit"}
-        onOpenChange={(o) => !o && setConfirm(null)}
+        onOpenChange={(o) => !busy && !o && setConfirm(null)}
         title={t("confirm.quit")}
         description={t("confirm.quitDesc")}
         confirmText={t("appmenu.quit")}
         danger
+        loading={busy}
         onConfirm={async () => {
+          if (quitBusy.current) return;
+          quitBusy.current = true;
+          setQuitError(null);
           setBusy(true);
           try {
             await api.quitApp();
-          } catch (e) {
-            toastError(e);
-          } finally {
-            setBusy(false);
             setConfirm(null);
+          } catch (e) {
+            const error = normalizeError(e);
+            setQuitError([error.message, error.hint].filter(Boolean).join("\n"));
+          } finally {
+            quitBusy.current = false;
+            setBusy(false);
           }
         }}
-      />
+      >
+        {quitError && <div ref={quitErrorRef} tabIndex={-1} role="alert" className="rounded-lg border border-error/30 bg-error-soft p-3 text-xs text-error whitespace-pre-wrap [overflow-wrap:anywhere]">{quitError}</div>}
+      </ConfirmDialog>
 
       <Dialog open={aboutOpen} onOpenChange={setAboutOpen}>
         <DialogContent className="max-w-sm">

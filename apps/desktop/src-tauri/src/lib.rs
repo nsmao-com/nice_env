@@ -6,8 +6,30 @@ pub mod tray;
 
 use nsb_core::{AppError, CoreState, Event, EventSink};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_autostart::MacosLauncher;
+use tauri_plugin_dialog::DialogExt;
+
+// 0=空闲，1=正在准备，2=已提交退出。失败时 Drop 恢复，避免重复退出或重启。
+static APP_TRANSITION: AtomicU8 = AtomicU8::new(0);
+struct AppTransition { committed: bool }
+impl AppTransition {
+    fn begin() -> nsb_core::error::Result<Self> {
+        APP_TRANSITION.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| AppError::new("APP_BUSY", "应用正在退出、重启或迁移，请稍候"))?;
+        Ok(Self { committed: false })
+    }
+    fn commit(&mut self) {
+        self.committed = true;
+        APP_TRANSITION.store(2, Ordering::Release);
+    }
+}
+impl Drop for AppTransition {
+    fn drop(&mut self) {
+        if !self.committed { APP_TRANSITION.store(0, Ordering::Release); }
+    }
+}
 
 pub fn run() {
     tauri::Builder::default()
@@ -93,7 +115,8 @@ pub fn run() {
                             let _ = w.hide();
                         }
                     } else {
-                        stop_all_and_clear_pidfile(&state);
+                        api.prevent_close();
+                        request_app_exit(handle_for_close.clone());
                     }
                 }
             });
@@ -318,7 +341,13 @@ pub fn run() {
         ]))
         .build(tauri::generate_context!())
         .expect("NiceEnv 启动失败")
-        .run(|_, event| {
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = &event {
+                if APP_TRANSITION.load(Ordering::Acquire) != 2 {
+                    api.prevent_exit();
+                    request_app_exit(app.clone());
+                }
+            }
             if matches!(event, tauri::RunEvent::Exit) {
                 nsb_core::cron::shutdown();
                 nsb_core::tunnel::shutdown();
@@ -347,6 +376,12 @@ where
         tauri::async_runtime::spawn_blocking(move || {
             let resolver = invoke.resolver.clone();
             let cmd = invoke.message.command().to_string();
+            if APP_TRANSITION.load(Ordering::Acquire) != 0 && !matches!(cmd.as_str(),
+                "list_service_status" | "tray_panel_state" | "tray_panel_resize" | "tray_panel_hide"
+                | "get_app_version" | "get_data_dir") {
+                resolver.reject(serde_json::to_string(&AppError::new("APP_BUSY", "应用正在退出、重启或迁移，请稍候")).unwrap_or_default());
+                return;
+            }
             // 已经对 Tauri 返回了 true，找不到命令时要自己 reject，否则前端 Promise 永远挂起
             if !handler(invoke) {
                 resolver.reject(format!("Command {cmd} not found"));
@@ -356,16 +391,29 @@ where
     }
 }
 
-/// 退出前收尾：停掉本应用拉起的服务，并清掉 pidfile
-/// （清掉是必要的——否则下次启动会把「已经正常停掉的」pid 当成残留再去 kill 一遍，
-/// 而那些 pid 可能已被系统分配给无关进程）
-fn stop_all_and_clear_pidfile(state: &CoreState) {
+/// 受管服务已经停止后，关闭辅助任务；PID 文件保留为核对后的空记录。
+fn shutdown_auxiliary_tasks() {
     nsb_core::cron::shutdown();
     nsb_core::tunnel::shutdown();
     nsb_core::toolbox::ollama_shutdown();
-    nsb_core::ops::stop_all(&state.store, &state.paths, &state.manager);
-    let path = state.paths.data().join("run").join("pids.json");
-    let _ = std::fs::remove_file(path);
+}
+
+/// 系统关闭和菜单退出走同一受控流程；不能在 UI 线程等待数据库停机。
+fn request_app_exit(app: tauri::AppHandle) {
+    let Ok(transition) = AppTransition::begin() else { return; };
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(error) = exit_after_stop(app.clone(), transition) {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+            let raw = error.to_string();
+            let message = serde_json::from_str::<AppError>(&raw).map(|error|
+                format!("{}\n{}", error.message, error.hint.unwrap_or_default())).unwrap_or(raw);
+            app.dialog().message(message).title("未能退出 NiceEnv")
+                .kind(tauri_plugin_dialog::MessageDialogKind::Error).show(|_| {});
+        }
+    });
 }
 
 /* ================= 错误转换 ================= */
@@ -1977,13 +2025,14 @@ fn get_data_dir(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> String
     state.paths.base.to_string_lossy().to_string()
 }
 
-/// 复制完整数据目录后让新进程从目标目录启动。目标路径通过 NSB_HOME 传给子进程，
-/// 不依赖用户额外改环境变量；若重启失败，旧进程仍会返回明确错误而不会假装已切换。
+/// 停止受管服务并复制完整数据目录，当前进程仍使用原目录。
+/// 前端收到复制结果后，再通过 restart_app 将目标路径传给新进程。
 #[tauri::command]
 async fn migrate_data_dir(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     path: String,
 ) -> Result<nsb_core::paths::DataDirMigration, tauri::Error> {
+    let _transition = map_jh(AppTransition::begin())?;
     let st = state.inner().clone();
     let target = std::path::PathBuf::from(path);
     let result = tauri::async_runtime::spawn_blocking(move || {
@@ -1991,24 +2040,32 @@ async fn migrate_data_dir(
     })
     .await
     .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))??;
-    std::env::set_var("NSB_HOME", &result.path);
     Ok(result)
 }
 
 #[tauri::command]
-fn restart_app(app: tauri::AppHandle) -> Result<bool, tauri::Error> {
+fn restart_app(app: tauri::AppHandle, state: State<'_, Arc<CoreState>>, data_dir: Option<String>) -> Result<bool, tauri::Error> {
+    let mut transition = map_jh(AppTransition::begin())?;
     let executable = std::env::current_exe()
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))?;
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
-    std::process::Command::new(executable)
-        .args(args)
-        .spawn()
-        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))?;
-    nsb_core::cron::shutdown();
-    nsb_core::tunnel::shutdown();
-    nsb_core::toolbox::ollama_shutdown();
-    app.exit(0);
-    Ok(true)
+    if let Some(path) = &data_dir {
+        if !std::path::Path::new(path).is_absolute() || !std::path::Path::new(path).join("nsb.sqlite").is_file() {
+            return Err(box_err(AppError::new("DATA_DIR_INVALID", "新的数据目录缺少 NiceEnv 数据库，未重启")));
+        }
+    }
+    map_jh(state.with_stopped_services(|| {
+        let mut command = platform::command(executable);
+        command.args(args);
+        // 只让新进程使用已复制目录，重启失败时当前应用仍保持原目录与环境。
+        if let Some(path) = data_dir { command.env("NSB_HOME", path); }
+        command.spawn()
+            .map_err(|e| AppError::io("启动新的 NiceEnv 进程", e))?;
+        shutdown_auxiliary_tasks();
+        transition.commit();
+        app.exit(0);
+        Ok(true)
+    }))
 }
 
 /* ================= 配置导入/导出 ================= */
@@ -2396,11 +2453,19 @@ fn check_updates(
 }
 
 #[tauri::command]
-fn quit_app(app: tauri::AppHandle) -> bool {
+fn quit_app(app: tauri::AppHandle) -> Result<bool, tauri::Error> {
+    let transition = map_jh(AppTransition::begin())?;
+    exit_after_stop(app, transition)
+}
+
+fn exit_after_stop(app: tauri::AppHandle, mut transition: AppTransition) -> Result<bool, tauri::Error> {
     let state = app.state::<Arc<CoreState>>();
-    stop_all_and_clear_pidfile(&state);
-    app.exit(0);
-    true
+    map_jh(state.with_stopped_services(|| {
+        shutdown_auxiliary_tasks();
+        transition.commit();
+        app.exit(0);
+        Ok(true)
+    }))
 }
 
 /* ================= 应用更新：在线下载 + 就地安装 ================= */
@@ -2529,6 +2594,7 @@ async fn download_update(
 /// - macOS：挂载 dmg 并把 .app 拷到 /Applications（需要用户授权），完成后退出。
 #[tauri::command]
 fn install_update(app: tauri::AppHandle, path: String) -> Result<bool, tauri::Error> {
+    let mut transition = map_jh(AppTransition::begin())?;
     let p = std::path::Path::new(&path);
     if !p.exists() {
         return Err(box_err(nsb_core::AppError::new(
@@ -2536,25 +2602,28 @@ fn install_update(app: tauri::AppHandle, path: String) -> Result<bool, tauri::Er
             "更新包不存在，请重新下载",
         )));
     }
-    #[cfg(windows)]
-    {
-        std::process::Command::new(p)
-            .spawn()
-            .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("启动安装器失败：{e}")))?;
-    }
-    #[cfg(not(windows))]
-    {
-        // 打开 dmg，用户把 .app 拖进 Applications（比脚本替换更安全）
-        std::process::Command::new("open")
-            .arg(p)
-            .spawn()
-            .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("打开 dmg 失败：{e}")))?;
-    }
-    // 安装器需要独占替换可执行文件：先收尾再退出
     let state = app.state::<Arc<CoreState>>();
-    stop_all_and_clear_pidfile(&state);
-    app.exit(0);
-    Ok(true)
+    map_jh(state.with_stopped_services(|| {
+        #[cfg(windows)]
+        {
+            std::process::Command::new(p)
+                .spawn()
+                .map_err(|e| AppError::io("启动安装器", e))?;
+        }
+        #[cfg(not(windows))]
+        {
+            // 打开 dmg，用户把 .app 拖进 Applications（比脚本替换更安全）
+            std::process::Command::new("open")
+                .arg(p)
+                .spawn()
+                .map_err(|e| AppError::io("打开 dmg", e))?;
+        }
+        // 安装器需要独占替换可执行文件：先收尾再退出
+        shutdown_auxiliary_tasks();
+        transition.commit();
+        app.exit(0);
+        Ok(true)
+    }))
 }
 
 /// 打开更新包所在目录（下载完想让用户自己看一眼时用）

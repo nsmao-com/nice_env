@@ -840,6 +840,9 @@ impl CoreState {
 
     /// 某版本 PHP 的扩展面板：磁盘上有什么 + php.ini 里开了什么
     pub fn php_extensions(&self, version: &str) -> Result<model::PhpExtensionView> {
+        self.store
+            .find_installed("php", Some(version))
+            .ok_or_else(|| AppError::not_installed("PHP"))?;
         let extensions = phpext::scan_available(&self.paths, version)?;
         let toggles =
             phpext::INI_TOGGLES

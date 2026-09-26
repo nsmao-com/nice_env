@@ -1,6 +1,6 @@
 {
-  "revision": 39,
-  "updated": "2026-09-25",
+  "revision": 40,
+  "updated": "2026-09-26",
   "packages": [
     {
       "id": "nginx",
@@ -4736,7 +4736,7 @@
       ],
       "kind": "archive",
       "url": "https://services.gradle.org/distributions/gradle-9.8.0-bin.zip",
-      "sizeBytes": 0,
+      "sizeBytes": 151611662,
       "entry": "gradle-9.8.0/bin/gradle.bat",
       "homepage": "https://gradle.org",
       "depends": [
@@ -4843,7 +4843,7 @@
       ],
       "kind": "archive",
       "url": "https://dist.neo4j.org/neo4j-community-2026.09.0-windows.zip",
-      "sizeBytes": 0,
+      "sizeBytes": 274827729,
       "entry": "neo4j-community-2026.09.0/bin/neo4j.bat",
       "homepage": "https://neo4j.com",
       "defaultPort": 7474,
@@ -4974,7 +4974,7 @@
       ],
       "kind": "archive",
       "url": "https://archive.mariadb.org/mariadb-13.0.2/winx64-packages/mariadb-13.0.2-winx64.zip",
-      "sizeBytes": 0,
+      "sizeBytes": 104263573,
       "entry": "mariadb-13.0.2-winx64/bin/mysqld.exe",
       "homepage": "https://mariadb.org",
       "defaultPort": 3306,
@@ -5040,7 +5040,7 @@
       ],
       "kind": "archive",
       "url": "https://sbp.enterprisedb.com/getfile.jsp?fileid=1260566",
-      "sizeBytes": 0,
+      "sizeBytes": 382815572,
       "entry": "pgsql/bin/pg_ctl.exe",
       "homepage": "https://www.postgresql.org",
       "defaultPort": 25432,
@@ -5098,7 +5098,7 @@
       ],
       "kind": "archive",
       "url": "https://downloads.php.net/~windows/releases/php-8.4.26-Win32-vs17-x64.zip",
-      "sizeBytes": 0,
+      "sizeBytes": 35138257,
       "entry": "php-cgi.exe",
       "defaultPort": 9101,
       "run": {
@@ -5126,7 +5126,7 @@
       ],
       "kind": "archive",
       "url": "https://downloads.php.net/~windows/releases/php-8.3.35-Win32-vs16-x64.zip",
-      "sizeBytes": 0,
+      "sizeBytes": 34024606,
       "entry": "php-cgi.exe",
       "defaultPort": 9101,
       "run": {
@@ -5154,7 +5154,7 @@
       ],
       "kind": "archive",
       "url": "https://downloads.php.net/~windows/releases/php-8.2.34-Win32-vs16-x64.zip",
-      "sizeBytes": 0,
+      "sizeBytes": 33585038,
       "entry": "php-cgi.exe",
       "defaultPort": 9101,
       "run": {
@@ -5260,7 +5260,7 @@
       ],
       "kind": "archive",
       "url": "https://cdn.mysql.com/Downloads/MySQL-26.7/mysql-26.7.0-winx64.zip",
-      "sizeBytes": 0,
+      "sizeBytes": 346094875,
       "entry": "mysql-26.7.0-winx64/bin/mysqld.exe",
       "defaultPort": 23306,
       "run": {
@@ -5284,7 +5284,7 @@
       ],
       "kind": "archive",
       "url": "https://cdn.mysql.com/Downloads/MySQL-9.7/mysql-9.7.2-winx64.zip",
-      "sizeBytes": 0,
+      "sizeBytes": 342737674,
       "entry": "mysql-9.7.2-winx64/bin/mysqld.exe",
       "defaultPort": 23306,
       "run": {
@@ -5308,7 +5308,7 @@
       ],
       "kind": "archive",
       "url": "https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-8.4.11-winx64.zip",
-      "sizeBytes": 0,
+      "sizeBytes": 281191914,
       "entry": "mysql-8.4.11-winx64/bin/mysqld.exe",
       "defaultPort": 23306,
       "run": {

@@ -571,7 +571,7 @@ export const PhpExtension = z.object({
   enabled: z.boolean(),
   /** 需要 zend_extension= 加载（Xdebug / OPcache） */
   zend: z.boolean(),
-  /** PHP 内置扩展，禁用可能弄坏运行时 */
+  /** 当前运行时实测的内置模块，不能通过 php.ini 单独禁用 */
   builtin: z.boolean(),
   dll: z.string(),
   /** 已启用但缺依赖的扩展名 */

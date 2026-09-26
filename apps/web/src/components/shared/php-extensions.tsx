@@ -21,6 +21,7 @@ import type { PhpExtension, PhpExtensionView, XdebugStatus } from "@nsb/schema";
 import { useT } from "@/lib/store";
 import { useInvalidate, toastError } from "@/lib/hooks";
 import * as api from "@/lib/api";
+import { normalizeError } from "@/lib/backend";
 import { cn } from "@/lib/utils";
 import {
   Dialog,
@@ -40,9 +41,8 @@ import { Skeleton } from "@/components/ui/misc";
  *
  * 对标 ServBay / FlyEnv / phpStudy 的扩展管理：勾选即启用，改完立刻生效。
  * 三件容易被忽略但很关键的事，这里都做了：
- * 1. **按真实磁盘扫描**——列出来的一定是 ext/ 目录里存在的 DLL，不会给一个
- *    永远装不上的名字；
- * 2. **改完实测**——用 `php -n -c <ini> -m` 跑一遍，加载失败把 PHP 的原始
+ * 1. **按真实运行时扫描**——结合 ext/ 目录和 PHP 内置模块，识别可启用的扩展；
+ * 2. **改完实测**——用 `php -c <ini> -m` 跑一遍，加载失败把 PHP 的原始
  *    告警直接摊给用户看，而不是让他对着一个「已启用」的假状态；
  * 3. **顺带重启**——PHP 正在运行时自动重启 php-cgi，否则勾了没反应。
  */
@@ -84,16 +84,21 @@ export function PhpExtensionsDialog({
   const invalidate = useInvalidate();
   const [view, setView] = React.useState<PhpExtensionView | null>(null);
   const [loading, setLoading] = React.useState(false);
+  const [loadError, setLoadError] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState<string | null>(null);
+  const busyRef = React.useRef(false);
+  const [repairFeedback, setRepairFeedback] = React.useState<string | null>(null);
   const [query, setQuery] = React.useState("");
   const [onlyEnabled, setOnlyEnabled] = React.useState(false);
 
   const load = React.useCallback(async () => {
     if (!version) return;
     setLoading(true);
+    setLoadError(null);
     try {
       setView(await api.phpExtensions(version));
     } catch (e) {
+      setLoadError(normalizeError(e).message);
       toastError(e);
     } finally {
       setLoading(false);
@@ -104,12 +109,15 @@ export function PhpExtensionsDialog({
     if (open && version) {
       setQuery("");
       setOnlyEnabled(false);
+      setRepairFeedback(null);
       void load();
     }
   }, [open, version, load]);
 
   const toggle = async (ext: PhpExtension, next: boolean) => {
-    if (!version) return;
+    if (!version || busyRef.current || ext.builtin) return;
+    busyRef.current = true;
+    setRepairFeedback(null);
     setBusy(ext.name);
     try {
       const r = await api.setPhpExtension(version, ext.name, next);
@@ -136,17 +144,20 @@ export function PhpExtensionsDialog({
       } else {
         toast.success(`${ext.label} ${next ? t("phpext.enabledToast") : t("phpext.disabledToast")}`);
       }
-      void load();
+      await load();
       invalidate("services");
     } catch (e) {
       toastError(e);
     } finally {
+      busyRef.current = false;
       setBusy(null);
     }
   };
 
   const toggleIni = async (key: string, next: boolean) => {
-    if (!version) return;
+    if (!version || busyRef.current) return;
+    busyRef.current = true;
+    setBusy(`ini:${key}`);
     setView((v) =>
       v ? { ...v, toggles: v.toggles.map((x) => (x.key === key ? { ...x, value: next } : x)) } : v
     );
@@ -159,6 +170,9 @@ export function PhpExtensionsDialog({
         v ? { ...v, toggles: v.toggles.map((x) => (x.key === key ? { ...x, value: !next } : x)) } : v
       );
       toastError(e);
+    } finally {
+      busyRef.current = false;
+      setBusy(null);
     }
   };
 
@@ -201,8 +215,46 @@ export function PhpExtensionsDialog({
   const totalCount = view?.extensions.length ?? 0;
   const depsIssue = view?.extensions.filter((e) => e.enabled && e.missingDeps.length > 0) ?? [];
 
+  const repairDependencies = async () => {
+    if (!version || busyRef.current || !depsIssue.length) return;
+    busyRef.current = true;
+    setBusy("dependencies");
+    setRepairFeedback(null);
+    const issues: string[] = [];
+    let needsRestart = false;
+    try {
+      for (const ext of depsIssue) {
+        try {
+          // 后端识别内置模块，并按加载顺序启用该扩展需要的动态依赖。
+          const result = await api.setPhpExtension(version, ext.name, true);
+          issues.push(...result.warnings.map((warning) => `${ext.label}: ${warning}`));
+          needsRestart ||= result.needsRestart;
+        } catch (error) {
+          const detail = normalizeError(error);
+          issues.push(`${ext.label}: ${detail.message}${detail.hint ? `\n${detail.hint}` : ""}`);
+        }
+      }
+      const refreshed = await api.phpExtensions(version);
+      setView(refreshed);
+      const remaining = refreshed.extensions.filter((e) => e.enabled && e.missingDeps.length > 0);
+      if (issues.length || remaining.length) {
+        setRepairFeedback(issues.join("\n") || remaining.map((e) => `${e.label}: ${e.missingDeps.join(", ")}`).join("\n"));
+        toast.warning(t("phpext.repairIncomplete"));
+      } else {
+        toast.success(t("phpext.repairDone"), { description: needsRestart ? t("phpext.needsRestart") : undefined });
+      }
+      invalidate("services");
+    } catch (error) {
+      setRepairFeedback(normalizeError(error).message);
+      toastError(error);
+    } finally {
+      busyRef.current = false;
+      setBusy(null);
+    }
+  };
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(next) => { if (!busyRef.current) onOpenChange(next); }}>
       <DialogContent className="flex max-h-[85vh] max-w-3xl flex-col gap-0 overflow-hidden p-0">
         <DialogHeader className="shrink-0 border-b border-border px-5 py-4">
           <div className="flex items-center gap-3">
@@ -226,7 +278,8 @@ export function PhpExtensionsDialog({
               variant="ghost"
               className="shrink-0"
               onClick={() => void load()}
-              disabled={loading}
+              disabled={loading || busy !== null}
+              aria-label={t("phpext.recheck")}
             >
               <RotateCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
             </Button>
@@ -255,11 +308,12 @@ export function PhpExtensionsDialog({
         </DialogHeader>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          {loadError && <p role="alert" className="mb-4 rounded-lg bg-error-soft p-3 text-xs text-error">{loadError}</p>}
           {/* 依赖缺失提示：比让用户去猜「为什么 redis 装上没用」友好得多 */}
           {depsIssue.length > 0 && (
             <div className="mb-4 flex items-start gap-2.5 rounded-xl border border-warn/25 bg-warn-soft p-3">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warn" strokeWidth={2} />
-              <div className="text-[12px] leading-relaxed">
+              <div className="min-w-0 flex-1 text-[12px] leading-relaxed">
                 <div className="font-medium">{t("phpext.depsTitle")}</div>
                 <ul className="mt-1 space-y-0.5 text-muted">
                   {depsIssue.slice(0, 4).map((e) => (
@@ -269,7 +323,19 @@ export function PhpExtensionsDialog({
                     </li>
                   ))}
                 </ul>
+                <p className="mt-2 text-muted">{t("phpext.repairHint")}</p>
+                <Button size="sm" variant="secondary" className="mt-2" disabled={loading || busy !== null || !!loadError} onClick={() => void repairDependencies()}>
+                  {busy === "dependencies" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                  {busy === "dependencies" ? t("phpext.repairing") : t("phpext.repair")}
+                </Button>
               </div>
+            </div>
+          )}
+
+          {repairFeedback && (
+            <div role="alert" className="mb-4 rounded-lg border border-warn/25 bg-warn-soft p-3 text-xs">
+              <p className="font-medium">{t("phpext.repairIncomplete")}</p>
+              <p className="mt-1 whitespace-pre-wrap break-words text-muted">{repairFeedback}</p>
             </div>
           )}
 
@@ -299,6 +365,7 @@ export function PhpExtensionsDialog({
                         key={e.name}
                         ext={e}
                         busy={busy === e.name}
+                        disabled={busy !== null || loading || !!loadError}
                         onToggle={(next) => void toggle(e, next)}
                       />
                     ))}
@@ -335,6 +402,7 @@ export function PhpExtensionsDialog({
                     </div>
                     <Switch
                       checked={tg.value}
+                      disabled={busy !== null}
                       onCheckedChange={(v) => void toggleIni(tg.key, v)}
                       aria-label={tg.label}
                     />
@@ -522,10 +590,12 @@ function XdebugCard({ version, onChanged }: { version: string; onChanged: () => 
 function ExtRow({
   ext,
   busy,
+  disabled,
   onToggle,
 }: {
   ext: PhpExtension;
   busy: boolean;
+  disabled: boolean;
   onToggle: (next: boolean) => void;
 }) {
   const t = useT();
@@ -566,7 +636,7 @@ function ExtRow({
       {busy ? (
         <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />
       ) : (
-        <Switch checked={ext.enabled} onCheckedChange={onToggle} aria-label={ext.label} />
+        <Switch checked={ext.enabled} disabled={disabled || ext.builtin} onCheckedChange={onToggle} aria-label={ext.label} title={ext.builtin ? t("phpext.builtinHint") : undefined} />
       )}
     </div>
   );
@@ -592,7 +662,7 @@ export function PhpQuickSetupButton({
       const v = await api.phpExtensions(version);
       // 只补「PHP 自带但没开」的常见扩展，不碰用户额外下载的
       const wanted = ["curl", "fileinfo", "gd", "mbstring", "mysqli", "openssl", "pdo_mysql", "sockets", "zip", "intl"];
-      const todo = v.extensions.filter((e) => wanted.includes(e.name) && !e.enabled);
+      const todo = v.extensions.filter((e) => !e.builtin && wanted.includes(e.name) && (!e.enabled || e.missingDeps.length > 0));
       if (todo.length === 0) {
         toast.info(t("phpext.alreadyComplete"));
         return;

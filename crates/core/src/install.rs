@@ -1824,6 +1824,15 @@ mod find_latest_tests {
         // 显式指定版本不受影响
         assert_eq!(inst.find("neo4j@5.25.1").unwrap().version, "5.25.1");
     }
+
+    #[test]
+    fn bundled_nginx_prefers_the_latest_manifest_version() {
+        let inst = Installer::bundled();
+        let nginx = inst.find("nginx").expect("清单应包含 Nginx");
+        assert_eq!(nginx.version, "1.31.6");
+        assert_eq!(nginx.size_bytes, 2_797_070);
+        assert!(nginx.sha256.as_deref().is_some_and(|sha| sha.len() == 64));
+    }
 }
 
 #[cfg(test)]

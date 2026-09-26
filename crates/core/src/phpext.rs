@@ -146,17 +146,33 @@ fn meta_for(name: &str) -> Option<Meta> {
 /// 只接受 PHP 模块列表中的行；启动告警不能被当作扩展名。
 fn module_names(output: &str) -> BTreeSet<String> {
     let mut in_modules = false;
-    output.lines().filter_map(|line| {
-        let name = line.trim().to_ascii_lowercase();
-        if name == "[php modules]" || name == "[zend modules]" {
-            in_modules = true;
-            return None;
-        }
-        if !in_modules || name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ' ' || c == '-') {
-            return None;
-        }
-        Some(if name == "zend opcache" { "opcache".into() } else { name })
-    }).collect()
+    output
+        .lines()
+        .filter_map(|line| {
+            let name = line.trim().to_ascii_lowercase();
+            if name == "[php modules]" || name == "[zend modules]" {
+                in_modules = true;
+                return None;
+            }
+            if name.starts_with('[') && name.ends_with(']') {
+                in_modules = false;
+                return None;
+            }
+            if !in_modules
+                || name.is_empty()
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ' ' || c == '-')
+            {
+                return None;
+            }
+            Some(if name == "zend opcache" {
+                "opcache".into()
+            } else {
+                name
+            })
+        })
+        .collect()
 }
 
 fn builtin_modules(paths: &Paths, version: &str) -> Result<BTreeSet<String>> {
@@ -167,12 +183,18 @@ fn builtin_modules(paths: &Paths, version: &str) -> Result<BTreeSet<String>> {
         return Ok(BTreeSet::new());
     }
     let (ok, output) = crate::cfgeditor::run_validator(
-        platform::command(&exe).current_dir(&root).arg("-n").arg("-m")
+        platform::command(&exe)
+            .current_dir(&root)
+            .arg("-n")
+            .arg("-m"),
     )?;
     let modules = module_names(&output);
     if !ok || modules.is_empty() {
-        return Err(AppError::new("PHP_MODULE_PROBE_FAILED", "无法读取 PHP 内置扩展，请检查该版本 PHP 是否能正常运行")
-            .with_detail(output));
+        return Err(AppError::new(
+            "PHP_MODULE_PROBE_FAILED",
+            "无法读取 PHP 内置扩展，请检查该版本 PHP 是否能正常运行",
+        )
+        .with_detail(output));
     }
     Ok(modules)
 }
@@ -398,26 +420,33 @@ pub fn scan_available(paths: &Paths, version: &str) -> Result<Vec<PhpExtension>>
     let builtins = builtin_modules(paths, version)?;
     let ini_path = paths.php_ini(version);
     let state = if ini_path.is_file() {
-        IniExtState::parse(&std::fs::read_to_string(&ini_path).map_err(|e| AppError::io("读取 php.ini", e))?)
+        IniExtState::parse(
+            &std::fs::read_to_string(&ini_path).map_err(|e| AppError::io("读取 php.ini", e))?,
+        )
     } else {
         IniExtState::default()
     };
 
     let mut names = builtins.clone();
+    // 保留 php.ini 中出现过的旧条目，让用户可以在面板里关闭失效配置，
+    // 而不是只能手工编辑文件清理「Unable to load dynamic library」告警。
+    names.extend(state.enabled.iter().cloned());
+    names.extend(state.disabled.iter().cloned());
     if ext_dir.is_dir() {
-    for entry in std::fs::read_dir(&ext_dir).map_err(|e| AppError::io("读取 PHP ext 目录", e))?
-    {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let file_name = entry.file_name().to_string_lossy().to_string();
-        if let Some(n) = ext_name_from_file(&file_name) {
-            if entry.path().is_file() {
-                names.insert(n);
+        for entry in
+            std::fs::read_dir(&ext_dir).map_err(|e| AppError::io("读取 PHP ext 目录", e))?
+        {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            if let Some(n) = ext_name_from_file(&file_name) {
+                if entry.path().is_file() {
+                    names.insert(n);
+                }
             }
         }
-    }
     }
 
     let mut out = Vec::with_capacity(names.len());
@@ -430,12 +459,16 @@ pub fn scan_available(paths: &Paths, version: &str) -> Result<Vec<PhpExtension>>
             .filter(|(k, _)| k.eq_ignore_ascii_case(&name))
             .flat_map(|(_, ds)| ds.iter().map(|s| s.to_string()))
             .collect();
-        // 只报「当前没启用」的缺失依赖，已启用的不啰嗦
+        // 同时检查配置状态和实际文件：php.ini 里残留一行不代表 DLL 仍在。
         let missing: Vec<String> = deps
             .iter()
-            .filter(|d| !state.enabled.contains(*d) && !builtins.contains(*d))
+            .filter(|d| {
+                !builtins.contains(*d)
+                    && (!state.enabled.contains(*d) || !ext_dir.join(dll_name(d)).is_file())
+            })
             .cloned()
             .collect();
+        let file_present = builtin || ext_dir.join(dll_name(&name)).is_file();
         out.push(PhpExtension {
             name: name.clone(),
             label: meta
@@ -446,14 +479,29 @@ pub fn scan_available(paths: &Paths, version: &str) -> Result<Vec<PhpExtension>>
                 .as_ref()
                 .map(|m| m.group.to_string())
                 .unwrap_or_else(|| "other".to_string()),
-            hint: meta
-                .as_ref()
-                .map(|m| m.hint.to_string())
-                .unwrap_or_else(|| "第三方扩展".to_string()),
+            hint: if !builtin && state.enabled.contains(&name) && !file_present {
+                "php.ini 已启用，但 ext 目录中找不到对应文件；请关闭此项或修复当前 PHP 安装"
+                    .to_string()
+            } else {
+                meta.as_ref()
+                    .map(|m| m.hint.to_string())
+                    .unwrap_or_else(|| {
+                        if builtin {
+                            "PHP 内置模块，无需额外配置"
+                        } else {
+                            "第三方扩展"
+                        }
+                        .to_string()
+                    })
+            },
             enabled,
             zend: is_zend(&name),
             builtin,
-            dll: if builtin { String::new() } else { dll_name(&name) },
+            dll: if builtin {
+                String::new()
+            } else {
+                dll_name(&name)
+            },
             missing_deps: missing,
         });
     }
@@ -465,7 +513,11 @@ pub fn scan_available(paths: &Paths, version: &str) -> Result<Vec<PhpExtension>>
 /// 流程：补齐依赖、改 ini（自动备份）→ 用 `php -c <ini> -m` 实测 →
 /// 若目标扩展没出现在模块列表里，把 stderr 原样带回。
 pub fn set_extension(paths: &Paths, version: &str, ext: &str, enable: bool) -> Result<Vec<String>> {
-    if ext.is_empty() || !ext.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+    if ext.is_empty()
+        || !ext
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
         return Err(AppError::new("BAD_PHP_EXTENSION", "扩展名称无效"));
     }
     let name = ext.to_ascii_lowercase();
@@ -481,14 +533,60 @@ pub fn set_extension(paths: &Paths, version: &str, ext: &str, enable: bool) -> R
         std::fs::read_to_string(&ini_path).map_err(|e| AppError::io("读取 php.ini", e))?;
     let state = IniExtState::parse(&content);
     let builtins = builtin_modules(paths, version)?;
+    let ext_file = paths
+        .runtime_dir("php", version)
+        .join("ext")
+        .join(dll_name(ext));
+    let known = builtins.contains(ext)
+        || ext_file.is_file()
+        || state.enabled.contains(ext)
+        || state.disabled.contains(ext);
+    if !known {
+        return Err(AppError::new(
+            "PHP_EXTENSION_NOT_FOUND",
+            format!("当前 PHP 版本没有找到扩展 {ext}"),
+        )
+        .with_hint("请确认扩展文件位于该版本 PHP 的 ext 目录中"));
+    }
     if builtins.contains(ext) {
-        return if enable { Ok(Vec::new()) } else {
-            Err(AppError::new("PHP_EXTENSION_BUILTIN", format!("{ext} 已内置于 PHP，不能通过 php.ini 禁用")))
+        return if enable {
+            Ok(Vec::new())
+        } else {
+            Err(AppError::new(
+                "PHP_EXTENSION_BUILTIN",
+                format!("{ext} 已内置于 PHP，不能通过 php.ini 禁用"),
+            ))
         };
+    }
+    if !enable {
+        let dependents: Vec<String> = EXT_DEPS
+            .iter()
+            .filter_map(|(dependent, deps)| {
+                (state.enabled.contains(*dependent)
+                    && deps
+                        .iter()
+                        .any(|dependency| dependency.eq_ignore_ascii_case(ext)))
+                .then(|| (*dependent).to_string())
+            })
+            .collect();
+        if !dependents.is_empty() {
+            return Err(AppError::new(
+                "PHP_EXTENSION_IN_USE",
+                format!("不能禁用 {ext}：仍被 {} 使用", dependents.join("、")),
+            )
+            .with_hint("请先禁用依赖它的扩展，避免 PHP 启动后出现加载告警"));
+        }
     }
     let next = if enable {
         let mut order = Vec::new();
-        collect_dependencies(paths, version, ext, &builtins, &mut BTreeSet::new(), &mut order)?;
+        collect_dependencies(
+            paths,
+            version,
+            ext,
+            &builtins,
+            &mut BTreeSet::new(),
+            &mut order,
+        )?;
         let mut next = content.clone();
         for dependency in &order {
             next = IniExtState::parse(&next).with_enabled(dependency);
@@ -501,14 +599,19 @@ pub fn set_extension(paths: &Paths, version: &str, ext: &str, enable: bool) -> R
             if let Some(parsed) = parse_ext_line(line) {
                 if !parsed.commented && order.contains(&parsed.ext) {
                     insertion.get_or_insert(lines.len());
-                    directives.entry(parsed.ext).or_insert_with(|| line.to_string());
+                    directives
+                        .entry(parsed.ext)
+                        .or_insert_with(|| line.to_string());
                     continue;
                 }
             }
             lines.push(line.to_string());
         }
         let index = insertion.unwrap_or(lines.len());
-        lines.splice(index..index, order.iter().filter_map(|name| directives.remove(name)));
+        lines.splice(
+            index..index,
+            order.iter().filter_map(|name| directives.remove(name)),
+        );
         format!("{}\n", lines.join("\n"))
     } else {
         state.with_disabled(ext)
@@ -524,18 +627,17 @@ pub fn set_extension(paths: &Paths, version: &str, ext: &str, enable: bool) -> R
         .join(crate::ops::exe_name("php"));
     let mut warnings = Vec::new();
     if php_exe.is_file() {
-        let out = crate::cfgeditor::run_validator(platform::command(&php_exe)
-            .current_dir(paths.runtime_dir("php", version))
-            .env("PHP_INI_SCAN_DIR", "")
-            .arg("-c")
-            .arg(&ini_path)
-            .arg("-m"));
+        let out = crate::cfgeditor::run_validator(
+            platform::command(&php_exe)
+                .current_dir(paths.runtime_dir("php", version))
+                .env("PHP_INI_SCAN_DIR", "")
+                .arg("-c")
+                .arg(&ini_path)
+                .arg("-m"),
+        );
         match out {
             Ok((ok, output)) => {
-                for line in output.lines()
-                    .map(|l| l.trim())
-                    .filter(|l| !l.is_empty())
-                {
+                for line in output.lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
                     let low = line.to_ascii_lowercase();
                     if low.contains("warning")
                         || low.contains("unable to load")
@@ -576,7 +678,12 @@ fn collect_dependencies(
     if builtins.contains(ext) || !visited.insert(ext.to_string()) {
         return Ok(());
     }
-    if !paths.runtime_dir("php", version).join("ext").join(dll_name(ext)).is_file() {
+    if !paths
+        .runtime_dir("php", version)
+        .join("ext")
+        .join(dll_name(ext))
+        .is_file()
+    {
         return Err(AppError::new("PHP_EXTENSION_FILE_MISSING", format!("缺少扩展文件 {}，无法自动启用 {ext}", dll_name(ext)))
             .with_hint("请修复或重新安装当前 PHP 版本，或安装与该版本、架构及 TS/NTS 匹配的扩展；未更改 php.ini"));
     }

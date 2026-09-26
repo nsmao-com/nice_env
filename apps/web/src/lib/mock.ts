@@ -59,8 +59,8 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.6";
-const MOCK_NEXT_VERSION = "0.2.7";
+const MOCK_APP_VERSION = "0.2.7";
+const MOCK_NEXT_VERSION = "0.2.8";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
 function ownPorts(): [string, string, number][] {
@@ -109,8 +109,8 @@ function mockPhpExtSeed(): PhpExtension[] {
   return [
     mk("core", "Core", "基础", "PHP 核心，不可禁用", true, { builtin: true }),
     mk("standard", "Standard", "基础", "标准库函数集", true, { builtin: true }),
-    mk("pdo", "PDO", "数据库", "PDO 抽象层（其它 pdo_* 的前置）", true),
-    mk("mysqlnd", "MySQLnd", "数据库", "MySQL 原生驱动", true),
+    mk("pdo", "PDO", "数据库", "PDO 抽象层（其它 pdo_* 的前置）", true, { builtin: true, dll: "" }),
+    mk("mysqlnd", "MySQLnd", "数据库", "MySQL 原生驱动", true, { builtin: true, dll: "" }),
     mk("pdo_mysql", "PDO MySQL", "数据库", "PDO 连 MySQL —— Laravel 等框架默认走这条", true),
     mk("mysqli", "MySQLi", "数据库", "MySQL 原生扩展（WordPress 用它）", true),
     mk("curl", "cURL", "网络", "HTTP 客户端，调第三方接口必备", true),
@@ -123,21 +123,29 @@ function mockPhpExtSeed(): PhpExtension[] {
     mk("intl", "Intl", "文本", "国际化（ICU）—— 时间/货币/多语言格式化", true),
     mk("opcache", "OPcache", "性能", "字节码缓存 —— 生产环境必开", true, { zend: true }),
     mk("xdebug", "Xdebug", "调试", "断点调试 / 性能剖析（配合 IDE）", false, { zend: true }),
-    mk("redis", "Redis", "缓存", "Redis 客户端（连接本地 Redis / 队列）", false, {
-      missingDeps: ["igbinary"],
-    }),
+    mk("redis", "Redis", "缓存", "Redis 客户端（连接本地 Redis / 队列）", false),
     mk("igbinary", "igbinary", "缓存", "更紧凑的序列化，Redis/Session 可选", false),
   ];
 }
 
 const mockPhpExtState = new Map<string, PhpExtension[]>();
+const mockPhpExtDependencies: Record<string, string[]> = {
+  mysqli: ["mysqlnd"],
+  pdo_mysql: ["pdo", "mysqlnd"],
+  pdo_sqlite: ["pdo"],
+  pdo_pgsql: ["pdo"],
+};
 
 function mockPhpExtensions(version: string): PhpExtensionView {
   if (!mockPhpExtState.has(version)) mockPhpExtState.set(version, mockPhpExtSeed());
+  const extensions = mockPhpExtState.get(version)!;
   return {
     version,
     iniPath: `C:\\NiceEnv\\etc\\php\\${version}\\php.ini`,
-    extensions: mockPhpExtState.get(version)!,
+    extensions: extensions.map((e) => ({
+      ...e,
+      missingDeps: (mockPhpExtDependencies[e.name] ?? []).filter((name) => !extensions.some((dependency) => dependency.name === name && dependency.enabled)),
+    })),
     toggles: mockPhpToggleState.get(version) ?? mockPhpToggleSeed(),
   };
 }
@@ -1654,7 +1662,23 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const enabled = args!.enabled as boolean;
       const exts = mockPhpExtState.get(version) ?? mockPhpExtSeed();
       const target = exts.find((e) => e.name === name);
-      if (target) target.enabled = enabled;
+      if (!target) throw { code: "PHP_EXTENSION_FILE_MISSING", message: `缺少扩展文件：${name}` };
+      if (target.builtin && !enabled) throw { code: "PHP_EXTENSION_BUILTIN", message: `${name} 是内置模块，不能单独禁用` };
+      if (!enabled) {
+        const dependents = Object.entries(mockPhpExtDependencies)
+          .filter(([dependent, dependencies]) => target.enabled && dependencies.includes(name) && exts.some((e) => e.name === dependent && e.enabled))
+          .map(([dependent]) => dependent);
+        if (dependents.length > 0) {
+          throw { code: "PHP_EXTENSION_IN_USE", message: `不能禁用 ${name}：仍被 ${dependents.join("、")} 使用` };
+        }
+      }
+      const dependencies = (mockPhpExtDependencies[name] ?? []).map((dependency) => {
+        const found = exts.find((e) => e.name === dependency);
+        if (!found && enabled) throw { code: "PHP_EXTENSION_FILE_MISSING", message: `缺少扩展文件：${dependency}` };
+        return found;
+      });
+      if (enabled) dependencies.forEach((e) => { if (e) e.enabled = true; });
+      target.enabled = enabled;
       mockPhpExtState.set(version, exts);
       return {
         name,

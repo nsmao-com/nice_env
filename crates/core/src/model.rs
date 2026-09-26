@@ -874,7 +874,7 @@ pub struct PhpExtension {
     pub enabled: bool,
     /// 需要 zend_extension= 加载（Xdebug / OPcache 等）
     pub zend: bool,
-    /// PHP 内置扩展：禁用可能弄坏运行时，前端据此给出提示
+    /// 当前运行时实测的内置模块，无需 ini 配置且不能单独禁用
     pub builtin: bool,
     /// 对应文件名，方便用户自己核对
     pub dll: String,

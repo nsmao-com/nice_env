@@ -1077,3 +1077,25 @@ scrollWidth 与 clientWidth 均为 320px，无横向溢出。
 忽略）以及 `git -c core.safecrlf=false diff --check`。未运行前端 dev/build，未新增测试文件，
 本轮没有数据库变更，未修改 update.sql。发布提交完成后必须创建并推送新的 annotated tag
 `v0.2.6`，保留已存在的 `v0.2.5` 不动。
+
+第二十一轮实施与验证：PHP 扩展真实状态与上游版本清单补齐。
+PHP 扩展面板现在区分 PHP 运行时内置模块与 ext 目录中的可加载文件，内置模块显示说明并禁止
+单独关闭；扩展切换、php.ini 快捷开关和依赖修复使用统一忙碌锁，避免并发点击互相覆盖。后端
+通过真实 `php -n -m` 识别内置模块，扫描 Windows DLL/Unix SO，解析 ini 状态，按依赖顺序写入，
+写入前备份并用 `php -c <ini> -m` 验证；启用后在 PHP 服务运行时自动重启，缺失文件、内置模块、
+仍被其它扩展使用的依赖都会返回可理解的错误。浏览器 mock 与真实依赖关系、错误保护和内置模块
+状态保持一致，扩展面板补充重新检测、依赖一键修复、部分失败明细和加载失败提示。
+
+Windows 套件清单修订为 40，Nginx 保留历史版本并把 `1.31.6` 作为无版本查询的最新可安装版本，
+补齐 Gradle、Neo4j、MariaDB、PostgreSQL、PHP 和 MySQL 条目的真实大小；新增安装测试锁定 Nginx
+版本、大小和 SHA-256 字段，避免后续清单回退。应用版本同步升至 0.2.7，根 package、Web/桌面
+package、共享 schema、工作区 Cargo、桌面 Cargo、Tauri 配置、Cargo.lock、浏览器版本展示和下
+一版本演示值均同步更新。
+
+验证通过：`cargo test -p nsb-core --lib bundled_nginx_prefers_the_latest_manifest_version
+--locked --offline -j 1`（1 项）、`cargo test -p nsb-core --lib phpext::tests --locked
+--offline -j 1`（17 项）、`cargo test -p nsb-core --test feature_integration php_extension
+--locked --offline -j 1`（2 项）、`cargo check -p niceservbay --offline -j 1`、
+`pnpm --filter @nsb/web check` 和 `git -c core.safecrlf=false diff --check`。未运行前端 dev/build，
+未新增测试文件，本轮没有数据库变更，未修改 update.sql。提交和 push 时必须创建新的 annotated
+tag `v0.2.7`，保留全部历史 tag，不覆盖或移动旧 tag。

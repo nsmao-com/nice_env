@@ -43,6 +43,7 @@ import type {
   EnvFileView,
   DiagnosticsBundle,
   HealthReport,
+  ServiceDiagnosticReport,
   BulkReport,
   BulkSelectionSummary,
   SiteBulkReport,
@@ -59,7 +60,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.24";
+const MOCK_APP_VERSION = "0.2.25";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -1332,6 +1333,24 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         canStop: running > 0,
         canStart: ids.length > running,
       } as BulkSelectionSummary as T;
+    }
+    case "diagnose_service": {
+      const service = services.get(args!.id as string);
+      if (!service) throw { code: "UNKNOWN_SERVICE", message: "该服务已卸载或未注册，请刷新服务列表" };
+      const snapshot = structuredClone(service);
+      const stateLabel = { running: "运行中", stopped: "已停止", starting: "正在启动", stopping: "正在停止", error: "发生错误", unknown: "未知" }[snapshot.state];
+      const lines = logLinesFor(snapshot.id).slice(-300);
+      return {
+        service: snapshot, checkedAt: Math.floor(Date.now() / 1000),
+        checks: [
+          { id: "status", state: snapshot.state === "error" ? "error" : ["unknown", "starting", "stopping"].includes(snapshot.state) ? "unavailable" : "info", method: "demo",
+            detail: snapshot.state === "error" ? snapshot.lastError?.message || "演示服务处于错误状态" : `当前演示状态：${stateLabel}；未读取本机进程`, lines: [] },
+          { id: "port", state: "unavailable", method: "demo", detail: "浏览器不能读取本机端口与进程归属，请在桌面端重新诊断", lines: [] },
+          { id: "config", state: "unavailable", method: "demo", detail: "浏览器未读取本机配置或执行原生校验，请在桌面端重新诊断", lines: [] },
+          { id: "logs", state: "info", method: "demo", detail: lines.length ? `当前演示日志有 ${lines.length} 行，以下仅展示演示内容；未读取本机日志` : "当前没有演示日志记录；未读取本机日志", lines: lines.slice(-3).map((line) => line.slice(0, 500)) },
+        ],
+        warnings: ["浏览器预览使用当前演示服务状态，本机诊断需要在桌面端执行。"],
+      } satisfies ServiceDiagnosticReport as T;
     }
     case "health_check": {
       const installed = Array.from(packages.values()).filter((pkg) => pkg.install);

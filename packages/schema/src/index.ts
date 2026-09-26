@@ -723,6 +723,23 @@ export const HealthReport = z.object({
 });
 export type HealthReport = z.infer<typeof HealthReport>;
 
+export const ServiceCheck = z.object({
+  id: z.enum(["status", "port", "config", "logs"]),
+  state: z.enum(["ok", "info", "warning", "error", "unavailable", "skipped"]),
+  method: z.enum(["process", "tcp", "native", "readability", "log-keywords", "none", "demo"]),
+  detail: z.string(),
+  lines: z.array(z.string()),
+});
+export type ServiceCheck = z.infer<typeof ServiceCheck>;
+
+export const ServiceDiagnosticReport = z.object({
+  service: ServiceStatus,
+  checks: z.array(ServiceCheck),
+  checkedAt: z.number(),
+  warnings: z.array(z.string()),
+});
+export type ServiceDiagnosticReport = z.infer<typeof ServiceDiagnosticReport>;
+
 /* ============ 诊断包 ============ */
 
 export const DiagnosticsBundle = z.object({

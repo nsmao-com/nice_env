@@ -598,10 +598,573 @@ pub fn save_to_file(paths: &Paths, bundle: &DiagnosticsBundle) -> Result<String>
     Ok(path.to_string_lossy().into())
 }
 
+/// 单服务诊断与环境体检共用端口归属和现有原生配置检查；不由前端拼接过期状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ServiceCheckState {
+    Ok,
+    Info,
+    Warning,
+    Error,
+    Unavailable,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceCheck {
+    pub id: String,
+    pub state: ServiceCheckState,
+    pub detail: String,
+    /// process / tcp / native / readability / log-keywords / none / demo
+    pub method: String,
+    pub lines: Vec<String>,
+}
+
+impl ServiceCheck {
+    fn new(id: &str, state: ServiceCheckState, method: &str, detail: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            state,
+            method: method.into(),
+            detail: detail.into(),
+            lines: Vec::new(),
+        }
+    }
+    fn failed(id: &str, error: AppError) -> Self {
+        Self::new(
+            id,
+            ServiceCheckState::Unavailable,
+            "none",
+            [Some(error.message), error.hint, error.detail]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceDiagnosticReport {
+    pub service: crate::model::ServiceStatus,
+    pub checks: Vec<ServiceCheck>,
+    pub checked_at: i64,
+    pub warnings: Vec<String>,
+}
+
+pub fn diagnose_service(
+    paths: &Paths,
+    store: &crate::store::Store,
+    manager: &std::sync::Arc<crate::services::ServiceManager>,
+    id: &str,
+) -> Result<ServiceDiagnosticReport> {
+    let _operation = manager.lifecycle.try_lock().ok_or_else(|| {
+        AppError::new(
+            "SERVICE_DIAGNOSTICS_BUSY",
+            "正在调整服务或采集诊断，请稍后重试",
+        )
+    })?;
+    // 仅接受已注册服务，调用方不能指定任意日志或配置路径。
+    let mut service = manager
+        .snapshot(id)
+        .ok_or_else(|| AppError::new("UNKNOWN_SERVICE", "该服务已卸载或未注册，请刷新服务列表"))?;
+    let installed = store.list_installed()?;
+    service.missing_requires = service
+        .requires
+        .iter()
+        .filter(|dependency| {
+            !installed.iter().any(|package| {
+                package.id == **dependency
+                    || format!("{}@{}", package.id, package.version) == **dependency
+            })
+        })
+        .cloned()
+        .collect();
+    let mut checks = vec![service_state_check(&service)];
+    let mut ports = crate::health::HealthReport::default();
+    crate::health::check_ports(&mut ports, store, std::slice::from_ref(&service));
+    checks.push(service_port_check(ports));
+    checks.push(
+        match crate::ops::validate_service_config(store, paths, &service) {
+            Ok(Some(check)) => service_config_check(check),
+            Ok(None) => ServiceCheck::new(
+                "config",
+                ServiceCheckState::Skipped,
+                "none",
+                "尚未提供此服务的配置检查器；未检查不代表配置正常",
+            ),
+            Err(error) => ServiceCheck::failed("config", error),
+        },
+    );
+    checks.push(match manager.tail_checked(id, 300) {
+        Ok(lines) => service_log_check(&lines),
+        Err(error) => ServiceCheck::failed("logs", error),
+    });
+    let mut warnings = vec!["结果是采集时的快照；未测试 HTTP 请求、数据库登录、HTTPS 附加监听或 UDP，不能据此确认业务可用。".into()];
+    let latest = manager.snapshot(id);
+    if latest
+        .as_ref()
+        .is_none_or(|latest| service_changed(&service, latest))
+    {
+        checks[0].state = ServiceCheckState::Unavailable;
+        checks[0]
+            .detail
+            .push_str("\n诊断期间服务状态、版本或进程发生变化，请重新诊断后再判断。");
+        warnings.push("诊断期间服务发生变化，这份结果可能已过期。".into());
+    }
+    // 复用诊断报告的常见凭据隐藏。先处理整段，再限制展示长度，避免切断多行秘密边界。
+    for check in &mut checks {
+        check.detail = diagnostic_excerpt(&redact_text(&check.detail).0, 8000);
+    }
+    Ok(ServiceDiagnosticReport {
+        service,
+        checks,
+        checked_at: chrono::Utc::now().timestamp(),
+        warnings,
+    })
+}
+
+fn service_changed(
+    before: &crate::model::ServiceStatus,
+    after: &crate::model::ServiceStatus,
+) -> bool {
+    before.id != after.id
+        || before.version != after.version
+        || before.state != after.state
+        || before.port != after.port
+        || before
+            .pids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            != after.pids.iter().copied().collect()
+}
+
+fn service_state_check(service: &crate::model::ServiceStatus) -> ServiceCheck {
+    use crate::model::ServiceState;
+    let (state, detail) = match service.state {
+        ServiceState::Running => (
+            ServiceCheckState::Ok,
+            format!(
+                "受管进程运行中，PID {}；进程存在不代表业务请求成功",
+                service
+                    .pids
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join("、")
+            ),
+        ),
+        ServiceState::Stopped => (
+            ServiceCheckState::Info,
+            "服务已停止；停止状态本身不视为故障".into(),
+        ),
+        ServiceState::Error => (
+            ServiceCheckState::Error,
+            service
+                .last_error
+                .as_ref()
+                .map(|error| {
+                    [
+                        Some(error.message.clone()),
+                        error.hint.clone(),
+                        error.detail.clone(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                })
+                .unwrap_or_else(|| "服务处于错误状态，但没有记录具体原因，请查看日志".into()),
+        ),
+        _ => (
+            ServiceCheckState::Unavailable,
+            "服务状态未知或正在切换，稍后重新诊断".into(),
+        ),
+    };
+    let mut check = ServiceCheck::new("status", state, "process", detail);
+    if !service.missing_requires.is_empty() {
+        check.state = ServiceCheckState::Error;
+        check.detail.push_str(&format!(
+            "\n缺少依赖：{}",
+            service.missing_requires.join("、")
+        ));
+    }
+    check
+}
+
+fn service_port_check(report: crate::health::HealthReport) -> ServiceCheck {
+    let incomplete = report
+        .checks
+        .iter()
+        .any(|scope| scope.state == crate::health::CheckState::Unavailable);
+    let skipped = report
+        .checks
+        .iter()
+        .all(|scope| scope.state == crate::health::CheckState::Skipped);
+    let state = if report.errors > 0 {
+        ServiceCheckState::Error
+    } else if incomplete {
+        ServiceCheckState::Unavailable
+    } else if report.warnings > 0 {
+        ServiceCheckState::Warning
+    } else if skipped {
+        ServiceCheckState::Skipped
+    } else {
+        ServiceCheckState::Ok
+    };
+    let detail = report
+        .items
+        .iter()
+        .map(|item| format!("{}：{}", item.title, item.detail))
+        .chain(report.checks.iter().map(|scope| scope.detail.clone()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    ServiceCheck::new(
+        "port",
+        state,
+        "tcp",
+        if skipped {
+            format!("没有已记录的 TCP 主端口或尚未分配端口，本次未检查监听情况。\n{detail}")
+        } else {
+            detail
+        },
+    )
+}
+
+fn service_config_check(check: crate::ops::ConfigCheck) -> ServiceCheck {
+    let state = match check.status.as_str() {
+        "fail" => ServiceCheckState::Error,
+        "warning" => ServiceCheckState::Warning,
+        "skipped" => ServiceCheckState::Skipped,
+        "ok" if check.method == "native" => ServiceCheckState::Ok,
+        "ok" => ServiceCheckState::Info,
+        _ => ServiceCheckState::Unavailable,
+    };
+    ServiceCheck::new(
+        "config",
+        state,
+        &check.method,
+        format!(
+            "{}\n{}\n{}",
+            check.name,
+            check.path.as_deref().unwrap_or("未定位配置文件"),
+            check.detail
+        ),
+    )
+}
+
+fn diagnostic_excerpt(text: &str, limit: usize) -> String {
+    let mut chars = text.chars();
+    let mut excerpt: String = chars.by_ref().take(limit).collect();
+    if chars.next().is_some() {
+        excerpt.push_str("…（已截断）");
+    }
+    excerpt
+}
+
+fn service_log_check(lines: &[String]) -> ServiceCheck {
+    if lines.is_empty() {
+        return ServiceCheck::new(
+            "logs",
+            ServiceCheckState::Info,
+            "log-keywords",
+            "暂无可读取的日志记录，无法据此判断服务是否正常",
+        );
+    }
+    static KEYWORDS: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"(?i)\b(error|fatal|panic|emerg|critical|exception|uncaught|traceback|failed|failure|refused|denied|segfault)\b|错误|失败").expect("fixed log keywords")
+    });
+    let raw = lines.join("\n");
+    let (redacted, _) = redact_text(&raw);
+    // 隐藏凭据可能会隐藏整行；匹配原文、展示脱敏行，不能让脱敏抹掉故障线索。
+    let hits: Vec<_> = raw
+        .lines()
+        .zip(redacted.lines())
+        .filter(|(source, _)| KEYWORDS.is_match(source))
+        .map(|(_, safe)| safe)
+        .collect();
+    let mut check = ServiceCheck::new(
+        "logs",
+        if hits.is_empty() {
+            ServiceCheckState::Info
+        } else {
+            ServiceCheckState::Warning
+        },
+        "log-keywords",
+        if hits.is_empty() {
+            format!(
+                "最近 {} 行日志未匹配异常关键词；这不能排除未记录的错误",
+                lines.len()
+            )
+        } else {
+            format!(
+                "最近 {} 行中有 {} 行命中异常关键词；以下显示最近最多 5 行，可能包含历史问题或普通描述，请结合时间和完整日志判断",
+                lines.len(),
+                hits.len()
+            )
+        },
+    );
+    check.lines = hits
+        .into_iter()
+        .rev()
+        .take(5)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|line| diagnostic_excerpt(line, 500))
+        .collect();
+    check
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path as StdPath;
+
+    fn service_fixture() -> (
+        tempfile::TempDir,
+        Paths,
+        crate::store::Store,
+        std::sync::Arc<crate::services::ServiceManager>,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().to_path_buf());
+        paths.ensure_dirs().unwrap();
+        let store = crate::store::Store::open(paths.db()).unwrap();
+        let manager = std::sync::Arc::new(crate::services::ServiceManager::new());
+        manager.register(
+            "fixture",
+            "Fixture",
+            Some("1".into()),
+            None,
+            None,
+            paths.service_log("fixture"),
+        );
+        (temp, paths, store, manager)
+    }
+
+    #[test]
+    fn service_diagnosis_stopped_missing_logs_and_unsupported_config_are_not_green() {
+        let (_temp, paths, store, manager) = service_fixture();
+        let report = diagnose_service(&paths, &store, &manager, "fixture").unwrap();
+        assert_eq!(report.service.state, crate::model::ServiceState::Stopped);
+        assert_eq!(
+            report
+                .checks
+                .iter()
+                .find(|c| c.id == "status")
+                .unwrap()
+                .state,
+            ServiceCheckState::Info
+        );
+        assert_eq!(
+            report.checks.iter().find(|c| c.id == "logs").unwrap().state,
+            ServiceCheckState::Info
+        );
+        assert_eq!(
+            report
+                .checks
+                .iter()
+                .find(|c| c.id == "config")
+                .unwrap()
+                .state,
+            ServiceCheckState::Skipped
+        );
+        assert_eq!(
+            report.checks.iter().find(|c| c.id == "port").unwrap().state,
+            ServiceCheckState::Skipped
+        );
+        assert!(report.checked_at > 0);
+        assert!(!report.warnings.is_empty());
+    }
+
+    #[test]
+    fn service_diagnosis_rejects_missing_services_and_store_read_failure() {
+        let (_temp, paths, store, manager) = service_fixture();
+        assert_eq!(
+            diagnose_service(&paths, &store, &manager, "../outside")
+                .unwrap_err()
+                .code,
+            "UNKNOWN_SERVICE"
+        );
+        rusqlite::Connection::open(paths.db())
+            .unwrap()
+            .execute("DROP TABLE installed", [])
+            .unwrap();
+        assert!(diagnose_service(&paths, &store, &manager, "fixture").is_err());
+    }
+
+    #[test]
+    fn service_diagnosis_preserves_config_and_log_read_failures() {
+        let (_temp, paths, store, manager) = service_fixture();
+        manager.register(
+            "mysql@8.4",
+            "MySQL",
+            Some("8.4".into()),
+            None,
+            None,
+            paths.base.clone(),
+        );
+        store
+            .upsert_installed(&crate::model::InstalledPackage {
+                id: "mysql".into(),
+                version: "8.4".into(),
+                category: "database".into(),
+                install_path: paths.base.to_string_lossy().into(),
+                config_path: String::new(),
+                installed_at: 0,
+            })
+            .unwrap();
+        let report = diagnose_service(&paths, &store, &manager, "mysql@8.4").unwrap();
+        assert_eq!(
+            report
+                .checks
+                .iter()
+                .find(|c| c.id == "config")
+                .unwrap()
+                .state,
+            ServiceCheckState::Error
+        );
+        assert_eq!(
+            report.checks.iter().find(|c| c.id == "logs").unwrap().state,
+            ServiceCheckState::Unavailable
+        );
+        assert_eq!(
+            report
+                .checks
+                .iter()
+                .find(|c| c.id == "status")
+                .unwrap()
+                .state,
+            ServiceCheckState::Info
+        );
+    }
+
+    #[test]
+    fn service_diagnosis_retains_current_error_and_masks_credentials_in_details() {
+        let (_temp, paths, store, manager) = service_fixture();
+        manager.set_error(
+            "fixture",
+            AppError::new("BROKEN", "failed: password=private-secret").with_hint("check logs"),
+        );
+        let report = diagnose_service(&paths, &store, &manager, "fixture").unwrap();
+        let status = report.checks.iter().find(|c| c.id == "status").unwrap();
+        assert_eq!(status.state, ServiceCheckState::Error);
+        assert!(status.detail.contains("check logs"));
+        assert!(!status.detail.contains("private-secret"));
+    }
+
+    #[test]
+    fn service_diagnosis_no_keyword_match_is_only_a_log_observation() {
+        assert_eq!(service_log_check(&[]).state, ServiceCheckState::Info);
+        let clean = service_log_check(&["service ready".into()]);
+        assert_eq!(clean.state, ServiceCheckState::Info);
+        assert!(clean.detail.contains("不能排除"));
+        let lines = (0..9)
+            .map(|index| format!("[error] {index} {}", "界".repeat(900)))
+            .collect::<Vec<_>>();
+        let report = service_log_check(&lines);
+        assert_eq!(report.state, ServiceCheckState::Warning);
+        assert_eq!(report.lines.len(), 5);
+        assert!(report.lines[0].starts_with("[error] 4"));
+        assert!(
+            report
+                .lines
+                .iter()
+                .all(|line| line.chars().count() < 530 && !line.contains("top-secret"))
+        );
+        assert!(report.detail.contains("历史问题"));
+        let secret = service_log_check(&["[error] password=top-secret".into()]);
+        assert_eq!(secret.state, ServiceCheckState::Warning);
+        assert_eq!(secret.lines.len(), 1);
+        assert!(!secret.lines[0].contains("top-secret"));
+    }
+
+    #[test]
+    fn service_diagnosis_preserves_native_warnings_and_readability_scope() {
+        let mut check = crate::ops::ConfigCheck {
+            kind: "php-ini@8.4".into(),
+            name: "PHP 8.4".into(),
+            path: None,
+            method: "native".into(),
+            ok: true,
+            status: "warning".into(),
+            detail: "deprecated setting".into(),
+            checked_at: 0,
+        };
+        assert_eq!(
+            service_config_check(check.clone()).state,
+            ServiceCheckState::Warning
+        );
+        check.status = "ok".into();
+        check.method = "readability".into();
+        assert_eq!(service_config_check(check).state, ServiceCheckState::Info);
+    }
+
+    #[test]
+    fn service_diagnosis_uses_live_snapshot_and_real_listener() {
+        let (_temp, paths, store, manager) = service_fixture();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        manager.register(
+            "fixture",
+            "Fixture",
+            Some("2".into()),
+            None,
+            Some(port),
+            paths.service_log("fixture"),
+        );
+        manager
+            .services
+            .lock()
+            .get("fixture")
+            .unwrap()
+            .pids
+            .lock()
+            .push(std::process::id());
+        manager.set_state("fixture", crate::model::ServiceState::Running);
+        let report = diagnose_service(&paths, &store, &manager, "fixture").unwrap();
+        assert_eq!(report.service.version.as_deref(), Some("2"));
+        assert_eq!(report.service.port, Some(port));
+        let check = report.checks.iter().find(|c| c.id == "port").unwrap();
+        assert_eq!(check.state, ServiceCheckState::Ok, "{}", check.detail);
+        assert!(check.detail.contains(&port.to_string()));
+    }
+
+    #[test]
+    fn service_diagnosis_busy_does_not_queue_behind_service_operation() {
+        let (_temp, paths, store, manager) = service_fixture();
+        let lock = manager.lifecycle.lock();
+        let other = manager.clone();
+        let error = std::thread::spawn(move || {
+            diagnose_service(&paths, &store, &other, "fixture").unwrap_err()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(error.code, "SERVICE_DIAGNOSTICS_BUSY");
+        drop(lock);
+    }
+
+    #[test]
+    fn service_diagnosis_change_detection_ignores_memory_and_uptime_but_tracks_identity() {
+        let (_temp, _paths, _store, manager) = service_fixture();
+        let snapshot = manager.snapshot("fixture").unwrap();
+        let mut later = snapshot.clone();
+        later.uptime_sec = Some(5);
+        later.memory_mb = Some(8.0);
+        assert!(!service_changed(&snapshot, &later));
+        later.port = Some(9999);
+        assert!(service_changed(&snapshot, &later));
+        later = snapshot.clone();
+        later.version = Some("2".into());
+        assert!(service_changed(&snapshot, &later));
+        later = snapshot.clone();
+        later.pids = vec![10];
+        assert!(service_changed(&snapshot, &later));
+    }
 
     #[test]
     fn redact_short_values_fully_masked() {

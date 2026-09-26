@@ -30,6 +30,7 @@ import type {
   EnvFileView,
   DiagnosticsBundle,
   HealthReport,
+  ServiceDiagnosticReport,
   BulkReport,
   BulkSelectionSummary,
   SiteBulkReport,
@@ -53,6 +54,8 @@ import { invoke, safe } from "./backend";
 /* 服务 */
 export const listServiceStatus = () =>
   safe(invoke<ServiceStatus[]>("list_service_status"));
+export const diagnoseService = (id: string) =>
+  safe(invoke<ServiceDiagnosticReport>("diagnose_service", { id }));
 export const startService = (id: string) =>
   safe(invoke<boolean>("start_service", { id }));
 export const stopService = (id: string) =>

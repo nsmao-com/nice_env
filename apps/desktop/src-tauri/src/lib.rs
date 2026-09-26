@@ -176,6 +176,7 @@ pub fn run() {
             bulk_summary,
             // 环境体检
             health_check,
+            diagnose_service,
             // 诊断包
             diagnostics_build,
             diagnostics_save,
@@ -3068,6 +3069,17 @@ async fn health_check(
 }
 
 /* ================= 批量服务操作 ================= */
+
+#[tauri::command]
+async fn diagnose_service(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    id: String,
+) -> Result<nsb_core::diagnostics::ServiceDiagnosticReport, tauri::Error> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(nsb_core::diagnostics::diagnose_service(&state.paths, &state.store, &state.manager, &id))
+    }).await.map_err(|error| box_err(nsb_core::AppError::internal("诊断服务", error.to_string())))?
+}
 
 /// 批量启动：按依赖分层排序（数据层 → 运行时 → Web 服务器），逐项回报
 #[tauri::command]

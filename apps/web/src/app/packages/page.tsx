@@ -29,6 +29,7 @@ import {
   UploadCloud,
   FolderArchive,
   HardDrive,
+  Stethoscope,
 } from "lucide-react";
 import type { PackageView, PackageCategory, ServiceStatus, BulkReport } from "@nsb/schema";
 import { PACKAGE_CATEGORY_ORDER } from "@nsb/schema";
@@ -51,6 +52,7 @@ import { ConfirmDialog } from "@/components/shared/misc";
 import { BulkResult } from "@/components/shared/bulk-actions";
 import { InstallDialog, type InstallTarget } from "@/components/shared/install-dialog";
 import { ServiceIcon } from "@/components/shared/service-icon";
+import { ServiceDiagnostics } from "@/components/shared/service-diagnostics";
 import { PageHeader } from "@/components/layout/app-shell";
 import { cmpVersionDesc, isPrerelease } from "@/lib/utils";
 
@@ -622,6 +624,7 @@ function PackageRow({
   // PHP 扩展面板：挂在已安装且被选为「使用中」的那个版本上
   // （扩展的开关写进该版本的 php.ini，所以必须明确是哪一个版本）
   const [extVersion, setExtVersion] = React.useState<string | null>(null);
+  const [diagnosticService, setDiagnosticService] = React.useState<ServiceStatus | null>(null);
 
   const installedCount = group.versions.filter((v) => v.installed).length;
   const svc = group.isService;
@@ -807,6 +810,9 @@ function PackageRow({
                     {service.pids.length > 0 && serviceHasProcess(service) && <span className="break-all font-mono text-faint">PID {service.pids.join(", ")}</span>}
                     <Link href={`/logs?service=${encodeURIComponent(service.id)}`} aria-label={t("packages.viewLogs").replace("{name}", service.label)}
                       className="rounded px-1 py-1 text-primary hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">{t("logs.title")}</Link>
+                    <button type="button" aria-label={t("svc.diag.title").replace("{name}", `${service.label}${service.version ? ` ${service.version}` : ""}`)}
+                      className="inline-flex min-h-8 items-center gap-1 rounded px-1 py-1 text-primary hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                      onClick={() => setDiagnosticService(service)}><Stethoscope className="h-3 w-3 shrink-0" />{t("svc.diagnose")}</button>
                     {service.lastError && service.state === "error" && <p className="w-full break-words text-error [overflow-wrap:anywhere]">{service.lastError.message}</p>}
                   </div>)}
               </div>
@@ -879,6 +885,7 @@ function PackageRow({
           onOpenChange={(v) => !v && setExtVersion(null)}
         />
       )}
+      {diagnosticService && <ServiceDiagnostics service={diagnosticService} open onOpenChange={(open) => { if (!open) setDiagnosticService(null); }} />}
     </div>
   );
 }

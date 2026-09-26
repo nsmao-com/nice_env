@@ -92,6 +92,10 @@ fn php_exe(store: &Store, version: &str) -> Result<PathBuf> {
 pub(crate) fn nginx_exe(store: &Store) -> Result<(PathBuf, PathBuf)> {
     let inst =
         installed_by_choice(store, "nginx").ok_or_else(|| AppError::not_installed("Nginx"))?;
+    nginx_exe_for(&inst)
+}
+
+fn nginx_exe_for(inst: &crate::model::InstalledPackage) -> Result<(PathBuf, PathBuf)> {
     let root = PathBuf::from(&inst.install_path).join(format!("nginx-{}", inst.version));
     let exe_name = if cfg!(windows) { "nginx.exe" } else { "nginx" };
     let exe = root.join(exe_name);
@@ -203,6 +207,10 @@ pub(crate) fn mihomo_paths(store: &Store) -> Result<(PathBuf, PathBuf)> {
 pub(crate) fn apache_paths(store: &Store) -> Result<(PathBuf, PathBuf)> {
     let inst =
         installed_by_choice(store, "apache").ok_or_else(|| AppError::not_installed("Apache"))?;
+    apache_paths_for(&inst)
+}
+
+fn apache_paths_for(inst: &crate::model::InstalledPackage) -> Result<(PathBuf, PathBuf)> {
     let root = PathBuf::from(&inst.install_path).join("Apache24");
     let exe = root.join("bin").join(exe_name("httpd"));
     if !exe.exists() {
@@ -1422,6 +1430,24 @@ pub fn validate_configs(
     paths: &Paths,
     only: Option<&[String]>,
 ) -> Result<Vec<ConfigCheck>> {
+    validate_configs_selected(store, paths, only, None)
+}
+
+/// 单服务诊断必须使用当前服务快照的版本，不能转而验证另一个默认版本。
+pub(crate) fn validate_service_config(
+    store: &Store,
+    paths: &Paths,
+    service: &crate::model::ServiceStatus,
+) -> Result<Option<ConfigCheck>> {
+    Ok(validate_configs_selected(store, paths, None, Some(service))?.into_iter().next())
+}
+
+fn validate_configs_selected(
+    store: &Store,
+    paths: &Paths,
+    only: Option<&[String]>,
+    service: Option<&crate::model::ServiceStatus>,
+) -> Result<Vec<ConfigCheck>> {
     use std::io::Read;
     let installed = store.list_installed()?;
     let mut checks = Vec::new();
@@ -1433,9 +1459,18 @@ pub fn validate_configs(
         ("mysql", "mysql-ini", "MySQL"),
         ("redis", "redis-conf", "Redis"),
     ] {
+        if service.is_some_and(|service| service.id.split('@').next() != Some(id)) {
+            continue;
+        }
         let mut packages = installed.iter().filter(|p| p.id == id).collect::<Vec<_>>();
         packages.sort_by(|a, b| crate::versions::cmp_version_desc(&a.version, &b.version));
-        if matches!(id, "nginx" | "apache") && !packages.is_empty() {
+        if let Some(service) = service {
+            let version = service.version.as_deref().or_else(|| service.id.split_once('@').map(|(_, version)| version))
+                .filter(|version| !version.is_empty())
+                .ok_or_else(|| AppError::new("SERVICE_VERSION_UNKNOWN", "无法确认当前服务版本，未执行配置校验"))?;
+            packages.retain(|package| package.version == version);
+            if packages.is_empty() { return Err(AppError::not_installed(&format!("{id} {version}"))); }
+        } else if matches!(id, "nginx" | "apache") && !packages.is_empty() {
             let active = store.get_setting_checked(&format!("active{id}Version"))?;
             let selected = packages
                 .iter()
@@ -1559,9 +1594,9 @@ pub fn validate_configs(
                 );
             }
             let (root, exe) = if package.id == "nginx" {
-                nginx_exe(store)?
+                nginx_exe_for(package)?
             } else {
-                apache_paths(store)?
+                apache_paths_for(package)?
             };
             let mut command = platform::command(exe);
             command.current_dir(&root).arg("-t");
@@ -2586,6 +2621,15 @@ mod validate_tests {
         assert_eq!(report.len(), 1);
         assert_eq!(report[0].status, "ok", "{:?}", report[0]);
         assert!(report[0].name.contains(&version));
+        state.manager.register("nginx", "Nginx", Some(version.clone()), None, None, state.paths.service_log("nginx"));
+        // 默认选择已变化，但单服务诊断必须继续验证快照对应的原生程序。
+        state.store.set_setting("activenginxVersion", "99.0.0").unwrap();
+        let service_report = crate::diagnostics::diagnose_service(&state.paths, &state.store, &state.manager, "nginx").unwrap();
+        let config = service_report.checks.iter().find(|check| check.id == "config").unwrap();
+        assert_eq!(config.state, crate::diagnostics::ServiceCheckState::Ok, "{}", config.detail);
+        assert_eq!(config.method, "native");
+        assert!(config.detail.contains(&version));
+        state.store.set_setting("activenginxVersion", &version).unwrap();
         let bad = "events {}\nunknown_directive yes;\n";
         std::fs::write(&conf, bad).unwrap();
         let failed = state.validate_configs(Some(&["nginx-main".into()])).unwrap();
@@ -2625,6 +2669,11 @@ mod validate_tests {
         let failed = check();
         assert_eq!(failed.status, "fail");
         assert!(failed.detail.to_lowercase().contains("unable to load"));
+        state.manager.register("php@8.4.26", "PHP", Some("8.4.26".into()), None, None, state.paths.service_log("php"));
+        let service_report = crate::diagnostics::diagnose_service(&state.paths, &state.store, &state.manager, "php@8.4.26").unwrap();
+        let config = service_report.checks.iter().find(|check| check.id == "config").unwrap();
+        assert_eq!(config.state, crate::diagnostics::ServiceCheckState::Error);
+        assert!(config.detail.to_lowercase().contains("unable to load"));
         let user_script = temp.path().join("prepend.php");
         let sentinel = temp.path().join("must-not-exist");
         std::fs::write(&user_script, format!("<?php file_put_contents('{}', 'executed');", sentinel.to_string_lossy().replace('\\', "/"))).unwrap();

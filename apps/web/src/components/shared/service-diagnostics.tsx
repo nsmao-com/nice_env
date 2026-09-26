@@ -1,293 +1,101 @@
 "use client";
 
-import * as React from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
-import {
-  AlertTriangle,
-  CheckCircle2,
-  Loader2,
-  MinusCircle,
-  RotateCw,
-  ScrollText,
-  Stethoscope,
-  XCircle,
-} from "lucide-react";
-import type { ServiceStatus } from "@nsb/schema";
-import { cn, fmtUptime } from "@/lib/utils";
+import { AlertTriangle, CheckCircle2, Info, Loader2, MinusCircle, RotateCw, ScrollText, Stethoscope, Wrench, XCircle } from "lucide-react";
+import type { ServiceCheck, ServiceStatus } from "@nsb/schema";
+import { cn } from "@/lib/utils";
 import { useT } from "@/lib/store";
+import { normalizeError } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Skeleton } from "@/components/ui/misc";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
-/* ============================================================
-   服务诊断：把已有的后端能力（端口诊断 / 配置校验 / 日志扫描）
-   编排成一张体检单，帮用户回答「这个服务为什么起不来 / 不正常」。
-   纯前端编排，不新增 Rust 命令；单项失败只影响该项，不中断整体。
-   ============================================================ */
-
-type CheckState = "pending" | "running" | "ok" | "warn" | "error" | "skip";
-
-interface CheckItem {
-  id: string;
-  title: string;
-  state: CheckState;
-  detail?: string;
-  /** 日志扫描命中时展示的原文行 */
-  lines?: string[];
-}
-
-/** 按诊断对象的实际版本读取配置，避免落到另一个当前启用版本。 */
-function configKindFor(service: ServiceStatus): string | null {
-  const [id, instanceVersion] = service.id.split("@");
-  const version = service.version || instanceVersion;
-  if (id === "nginx") return "nginx-main";
-  if (id === "apache") return "apache-conf";
-  const kind = id === "php" ? "php-ini" : id === "mysql" ? "mysql-ini" : id === "redis" ? "redis-conf" : null;
-  if (kind) return version ? `${kind}@${version}` : kind;
-  return null;
-}
-
-/** 日志里值得上报的关键词 —— 只做提示，不下结论 */
-const LOG_ERROR_RE =
-  /\b(error|fatal|panic|emerg|critical|exception|uncaught|traceback|failed|failure|refused|denied|segfault)\b/i;
-
-function shortErr(e: unknown): string {
-  return String(e).slice(0, 140);
-}
-
-export function ServiceDiagnostics({
-  service,
-  open,
-  onOpenChange,
-}: {
-  service: ServiceStatus;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
+/** 每个服务独立缓存；关闭或切换对象不会把旧请求的结果写到另一个服务。 */
+export function ServiceDiagnostics({ service, open, onOpenChange }: {
+  service: ServiceStatus; open: boolean; onOpenChange: (open: boolean) => void;
 }) {
   const t = useT();
   const router = useRouter();
-  const [items, setItems] = React.useState<CheckItem[]>([]);
-  const [running, setRunning] = React.useState(false);
+  const query = useQuery({
+    queryKey: ["service-diagnostics", service.id],
+    queryFn: () => api.diagnoseService(service.id),
+    enabled: open, retry: false, networkMode: "always",
+    staleTime: 0, refetchOnWindowFocus: false, refetchOnReconnect: false,
+  });
+  const report = query.data;
+  const error = query.error ? normalizeError(query.error) : null;
+  const running = query.isFetching;
+  const navigate = (route: string) => { onOpenChange(false); router.push(route); };
 
-  const patch = React.useCallback((id: string, p: Partial<CheckItem>) => {
-    setItems((s) => s.map((it) => (it.id === id ? { ...it, ...p } : it)));
-  }, []);
-
-  const run = React.useCallback(async () => {
-    setRunning(true);
-
-    const stateLabel: Record<string, string> = {
-      running: t("state.running"),
-      stopped: t("state.stopped"),
-      error: t("state.error"),
-      starting: t("state.starting"),
-      stopping: t("state.stopping"),
-      unknown: t("state.unknown"),
-    };
-
-    setItems([
-      { id: "status", title: t("svc.diag.check.status"), state: "running" },
-      { id: "port", title: t("svc.diag.check.port"), state: "running" },
-      { id: "config", title: t("svc.diag.check.config"), state: "running" },
-      { id: "logs", title: t("svc.diag.check.logs"), state: "running" },
-    ]);
-
-    /* ---- 1. 服务状态（同步来自卡片数据）---- */
-    const stateDetail =
-      service.state === "running"
-        ? [
-            stateLabel[service.state],
-            service.uptimeSec != null ? fmtUptime(service.uptimeSec) : null,
-            service.memoryMb != null ? `${service.memoryMb.toFixed(0)} MB` : null,
-            service.version ? `v${service.version}` : null,
-          ]
-            .filter(Boolean)
-            .join(" · ")
-        : service.state === "error" && service.lastError
-          ? service.lastError.message
-          : stateLabel[service.state] ?? service.state;
-    patch("status", {
-      state: service.state === "running" ? "ok" : service.state === "error" ? "error" : "warn",
-      detail: stateDetail,
-    });
-
-    const jobs: Promise<void>[] = [];
-
-    /* ---- 2. 端口监听 ---- */
-    if (service.port == null) {
-      patch("port", { state: "skip", detail: t("svc.diag.noPort") });
-    } else {
-      jobs.push(
-        api
-          .diagnosePort(service.port)
-          .then((d) => {
-            if (!d.inUse) {
-              patch(
-                "port",
-                service.state === "running"
-                  ? { state: "warn", detail: t("svc.diag.portSilent") }
-                  : { state: "ok", detail: t("svc.diag.portFree").replace("{port}", String(service.port)) }
-              );
-            } else if (service.state === "running") {
-              patch("port", {
-                state: "ok",
-                detail: `${t("svc.diag.portListening")} · ${d.processName ?? "?"} (pid ${d.pid ?? "?"})`,
-              });
-            } else {
-              patch("port", {
-                state: "error",
-                detail: `${t("svc.diag.portConflict")} :${service.port} · ${d.processName ?? "?"} (pid ${d.pid ?? "?"})`,
-              });
-            }
-          })
-          .catch((e) => patch("port", { state: "error", detail: shortErr(e) }))
-      );
-    }
-
-    /* ---- 3. 配置文件校验（没装对应套件 → 跳过，不算失败）---- */
-    const kind = configKindFor(service);
-    if (!kind) {
-      patch("config", { state: "skip", detail: t("svc.diag.noConfig") });
-    } else {
-      jobs.push(
-        (async () => {
-          try {
-            const content = await api.configRead(kind);
-            const v = await api.configValidate(kind, content);
-            if (v.ok) {
-              patch("config", { state: "ok", detail: t("svc.diag.configOk") });
-            } else {
-              const hasErr = v.issues.some((i) => i.severity === "error");
-              patch("config", {
-                state: hasErr ? "error" : "warn",
-                detail:
-                  t("svc.diag.configIssues").replace("{n}", String(v.issues.length)) +
-                  (v.issues[0] ? ` · ${v.issues[0].message}` : ""),
-              });
-            }
-          } catch (e) {
-            patch("config", { state: "skip", detail: shortErr(e) });
-          }
-        })()
-      );
-    }
-
-    /* ---- 4. 日志异常扫描 ---- */
-    if (!service.logFile) {
-      patch("logs", { state: "skip", detail: t("svc.diag.noLogFile") });
-    } else {
-      jobs.push(
-        api
-          .tailLogs(service.id, 300)
-          .then((rows) => {
-            const hits = rows.filter((r) => LOG_ERROR_RE.test(r.line));
-            if (hits.length === 0) {
-              patch("logs", { state: "ok", detail: t("svc.diag.logsClean").replace("{n}", String(rows.length)) });
-            } else {
-              patch("logs", {
-                state: "warn",
-                detail: t("svc.diag.logsIssues").replace("{n}", String(hits.length)),
-                lines: hits.slice(-3).map((r) => r.line.slice(0, 200)),
-              });
-            }
-          })
-          .catch((e) => patch("logs", { state: "skip", detail: shortErr(e) }))
-      );
-    }
-
-    await Promise.all(jobs);
-    setRunning(false);
-  }, [service, t, patch]);
-
-  // 只在打开时跑一次；状态轮询带来的 service 引用变化不重跑
-  React.useEffect(() => {
-    if (open) void run();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg gap-0 overflow-hidden p-0">
-        <DialogHeader className="border-b border-border px-5 py-3.5">
-          <DialogTitle className="flex items-center gap-2 text-[14px]">
-            <Stethoscope className="h-4 w-4 text-primary" strokeWidth={1.8} />
-            {t("svc.diag.title").replace("{name}", service.label)}
-          </DialogTitle>
-          <DialogDescription className="text-[11px]">{t("svc.diag.subtitle")}</DialogDescription>
-        </DialogHeader>
-
-        <div className="flex max-h-[55vh] flex-col gap-1.5 overflow-y-auto px-5 py-4">
-          {items.map((it) => (
-            <CheckRow key={it.id} item={it} />
-          ))}
-        </div>
-
-        <div className="flex items-center justify-between border-t border-border px-5 py-3">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 text-[11.5px] text-faint hover:text-foreground"
-            disabled={!service.logFile}
-            onClick={() => router.push(`/logs?service=${encodeURIComponent(service.id)}`)}
-          >
-            <ScrollText className="h-3.5 w-3.5" />
-            {t("svc.diag.viewLogs")}
+  return <Dialog open={open} onOpenChange={onOpenChange}>
+    <DialogContent className="flex max-h-[calc(100dvh-2rem)] max-w-xl flex-col gap-0 overflow-hidden p-0">
+      <DialogHeader className="shrink-0 px-4 py-4 pr-12 sm:px-5 sm:pr-12">
+        <DialogTitle className="flex min-w-0 items-start gap-2 text-[14px] leading-relaxed [overflow-wrap:anywhere]">
+          <Stethoscope className="mt-0.5 h-4 w-4 shrink-0 text-primary" strokeWidth={1.8} />
+          <span className="min-w-0">{t("svc.diag.title").replace("{name}", report?.service.label ?? service.label)}</span>
+        </DialogTitle>
+        <DialogDescription className="text-[11px] leading-relaxed">{t("svc.diag.subtitle")}</DialogDescription>
+      </DialogHeader>
+      <div className="mx-4 shrink-0 border-t border-dashed border-border sm:mx-5" />
+      <div role="region" aria-label={t("svc.diag.results")} tabIndex={0} className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5 [overflow-wrap:anywhere] focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring">
+        {error && <div role="alert" className="rounded-lg border border-error/25 bg-error-soft/40 px-3 py-2.5 text-xs text-error">
+          <p className="font-medium">{t(report ? "svc.diag.refreshFailed" : "svc.diag.failed")}</p>
+          <p className="mt-1 text-[11px] leading-relaxed">{error.message}</p>
+          {error.hint && <p className="mt-1 text-[11px]">{error.hint}</p>}
+        </div>}
+        {running && <p role="status" className="flex items-start gap-2 text-[11px] leading-relaxed text-muted">
+          <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin motion-reduce:animate-none" />
+          {t(report ? "svc.diag.refreshing" : "svc.diag.collecting")}
+        </p>}
+        {!report && running && <div className="space-y-2" aria-hidden="true">{[0, 1, 2, 3].map((id) => <Skeleton key={id} className="h-16 w-full" />)}</div>}
+        {report && <>
+          <div className="space-y-1 text-[11px] leading-relaxed text-muted">
+            <p className="font-mono text-secondary">{report.service.version ? `${report.service.id.split("@")[0]} · v${report.service.version}` : report.service.id}{report.service.port != null ? ` · :${report.service.port}` : ""}</p>
+            <p>{t("svc.diag.checkedAt")} <time dateTime={new Date(report.checkedAt * 1000).toISOString()}>{new Date(report.checkedAt * 1000).toLocaleString()}</time></p>
+          </div>
+          <div className="space-y-2">{report.checks.map((item) => <CheckRow key={item.id} item={item} />)}</div>
+          {report.warnings.length > 0 && <div className="space-y-1 rounded-lg bg-card-2/40 px-3 py-2.5 text-[11px] leading-relaxed text-muted">
+            {report.warnings.map((warning, index) => <p key={index}>{warning}</p>)}
+          </div>}
+        </>}
+      </div>
+      <div className="mx-4 shrink-0 border-t border-dashed border-border sm:mx-5" />
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-3 sm:px-5">
+        <div className="flex flex-wrap gap-1">
+          <Button variant="ghost" size="sm" className="min-h-9 h-auto whitespace-normal text-[11.5px]" disabled={!report?.service.logFile}
+            onClick={() => navigate(`/logs?service=${encodeURIComponent(service.id)}`)}>
+            <ScrollText className="h-3.5 w-3.5 shrink-0" />{t("svc.diag.viewLogs")}
           </Button>
-          <Button size="sm" variant="secondary" className="h-7" disabled={running} onClick={() => void run()}>
-            <RotateCw className={cn("h-3.5 w-3.5", running && "animate-spin")} />
-            {t("svc.diag.rerun")}
+          <Button variant="ghost" size="sm" className="min-h-9 h-auto whitespace-normal text-[11.5px]" onClick={() => navigate("/tools#nsb-tool-repair")}>
+            <Wrench className="h-3.5 w-3.5 shrink-0" />{t("svc.diag.repair")}
           </Button>
         </div>
-      </DialogContent>
-    </Dialog>
-  );
+        <Button size="sm" variant="secondary" className="min-h-9 h-auto whitespace-normal" disabled={running} onClick={() => void query.refetch({ cancelRefetch: false })}>
+          <RotateCw className={cn("h-3.5 w-3.5 shrink-0", running && "animate-spin motion-reduce:animate-none")} />{t("svc.diag.rerun")}
+        </Button>
+      </div>
+    </DialogContent>
+  </Dialog>;
 }
 
-function CheckRow({ item }: { item: CheckItem }) {
-  const stateMark: Record<CheckState, React.ReactNode> = {
-    pending: <MinusCircle className="h-3.5 w-3.5 shrink-0 text-faint/60" />,
-    running: <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />,
-    ok: <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-running" />,
-    warn: <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-warn" />,
-    error: <XCircle className="h-3.5 w-3.5 shrink-0 text-error" />,
-    skip: <MinusCircle className="h-3.5 w-3.5 shrink-0 text-faint" />,
-  };
-  return (
-    <div
-      className={cn(
-        "rounded-lg border px-2.5 py-2",
-        item.state === "error" && "border-error/25 bg-error-soft",
-        item.state === "warn" && "border-warn/25 bg-warn-soft",
-        item.state !== "error" && item.state !== "warn" && "border-border/60"
-      )}
-    >
-      <div className="flex items-start gap-2">
-        <span className="mt-0.5">{stateMark[item.state]}</span>
-        <div className="min-w-0 flex-1">
-          <p className="text-[12px] font-medium">{item.title}</p>
-          {item.detail && (
-            <p
-              className={cn(
-                "mt-0.5 break-all text-[11px] leading-relaxed",
-                item.state === "error" ? "text-error" : item.state === "warn" ? "text-warn" : "text-faint"
-              )}
-            >
-              {item.detail}
-            </p>
-          )}
-          {item.lines && item.lines.length > 0 && (
-            <pre className="mt-1.5 max-h-28 overflow-auto rounded-md bg-card-2/50 p-2 font-mono text-[10.5px] leading-relaxed text-secondary">
-              {item.lines.join("\n")}
-            </pre>
-          )}
+function CheckRow({ item }: { item: ServiceCheck }) {
+  const t = useT();
+  const Icon = item.state === "ok" ? CheckCircle2 : item.state === "error" ? XCircle : item.state === "warning" || item.state === "unavailable" ? AlertTriangle : item.state === "skipped" ? MinusCircle : Info;
+  const color = item.state === "error" ? "text-error" : item.state === "warning" || item.state === "unavailable" ? "text-warn" : item.state === "ok" ? "text-running" : "text-muted";
+  return <div className={cn("min-w-0 rounded-lg border px-3 py-2.5", item.state === "error" ? "border-error/25 bg-error-soft/40" : item.state === "warning" || item.state === "unavailable" ? "border-warn/25 bg-warn-soft/40" : "border-border/60")}>
+    <div className="flex items-start gap-2">
+      <Icon className={cn("mt-0.5 h-3.5 w-3.5 shrink-0", color)} />
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
+          <p className="text-[12px] font-medium">{t(`svc.diag.check.${item.id}`)}</p>
+          <span className={cn("text-[11px]", color)}>{t(`svc.diag.state.${item.state}`)}</span>
         </div>
+        <p className="mt-1 text-[10.5px] text-muted">{t(`svc.diag.method.${item.method}`)}</p>
+        <p className="mt-1 whitespace-pre-wrap text-[11px] leading-relaxed text-secondary">{item.detail}</p>
+        {item.lines.length > 0 && <pre className="mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap rounded-md bg-card-2/50 p-2 font-mono text-[10.5px] leading-relaxed text-secondary [overflow-wrap:anywhere]">{item.lines.join("\n")}</pre>}
       </div>
     </div>
-  );
+  </div>;
 }

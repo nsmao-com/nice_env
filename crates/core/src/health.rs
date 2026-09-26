@@ -554,7 +554,7 @@ fn analyze_ports(
     complete
 }
 
-fn check_ports(r: &mut HealthReport, store: &crate::store::Store, services: &[ServiceStatus]) {
+pub(crate) fn check_ports(r: &mut HealthReport, store: &crate::store::Store, services: &[ServiceStatus]) {
     let scan = (|| {
         let targets = port_targets(store, services)?;
         if targets.is_empty() {
@@ -582,7 +582,8 @@ fn check_ports(r: &mut HealthReport, store: &crate::store::Store, services: &[Se
         Ok((targets, listeners, parents)) => {
             let complete = analyze_ports(r, &targets, &listeners, &parents);
             r.coverage("ports", "TCP 端口与进程归属", if targets.is_empty() { CheckState::Skipped } else if complete { CheckState::Checked } else { CheckState::Unavailable },
-                format!("检查 {} 个已注册服务主端口及 PHP 池端口；使用实际运行端口或停止服务计划端口。未覆盖 HTTPS 等附加监听和 UDP", targets.len()));
+                format!("检查 {} 个已注册服务主端口及 PHP 池端口；使用实际运行端口或停止服务计划端口。未覆盖 HTTPS 等附加监听和 UDP。\n检查目标：{}", targets.len(),
+                    targets.iter().map(|target| format!("{} :{}", target.service_id, target.port)).collect::<Vec<_>>().join("、")));
         }
         Err(error) => r.unavailable("ports", "TCP 端口与进程归属", error, "/tools"),
     }

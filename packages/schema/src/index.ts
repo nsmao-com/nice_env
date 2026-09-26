@@ -533,8 +533,12 @@ export const PortScanEntry = z.object({
 export type PortScanEntry = z.infer<typeof PortScanEntry>;
 
 export const HostsEntry = z.object({
-  ip: z.string(),
-  domain: z.string(),
+  ip: z.string().trim().pipe(z.union([z.ipv4(), z.ipv6()])),
+  domain: z.string().trim().toLowerCase().transform((domain) => domain.replace(/\.$/, ""))
+    .refine((domain) => domain.length > 0 && domain.length <= 253
+      && !z.ipv4().safeParse(domain).success
+      && domain.split(".").every((label) => label.length > 0 && label.length <= 63
+        && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label))),
   managed: z.boolean(),
 });
 export type HostsEntry = z.infer<typeof HostsEntry>;

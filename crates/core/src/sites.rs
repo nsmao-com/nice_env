@@ -634,6 +634,7 @@ pub fn delete(
     let _change = SITE_CHANGES.lock();
     let _operation = manager.lifecycle.lock();
     let _files = crate::tls::CERT_FILES.lock();
+    let _hosts = crate::hosts::HOSTS_CHANGES.lock();
     let site = get(store, id)?;
     let mut files = Vec::new();
     for server in ["nginx", "apache"] {
@@ -669,7 +670,7 @@ pub fn delete(
             )?);
         }
     }
-    let previous_hosts = crate::hosts::extra_entries(store);
+    let previous_hosts = crate::hosts::extra_entries(store)?;
     let running: Vec<_> = ["nginx", "apache"].into_iter().filter(|server|
         manager.snapshot(server).is_some_and(|s| s.state == ServiceState::Running)
     ).collect();
@@ -708,7 +709,7 @@ pub fn delete(
         } else {
             // 保留为手动托管条目，避免下次重建 hosts 时又被移除。
             let mut retained = previous_hosts.clone();
-            for domain in site.domains.iter().filter(|domain| !domain.starts_with("*.")) {
+            for domain in site.domains.iter().filter(|domain| !domain.starts_with("*.") && domain.parse::<std::net::IpAddr>().is_err()) {
                 if !retained.iter().any(|(_, host)| host == domain) {
                     retained.push(("127.0.0.1".into(), domain.clone()));
                 }
@@ -2463,7 +2464,7 @@ mod scaffold_tests {
         assert!(!std::path::Path::new(cert.key_path.as_ref().unwrap()).exists());
         assert!(std::path::Path::new(&alias.cert_path).is_file());
         assert_eq!(store.list_certs().unwrap().len(), 1);
-        let retained = crate::hosts::managed_entries(&store);
+        let retained = crate::hosts::managed_entries(&store).unwrap();
         assert!(site.domains.iter().all(|domain| retained.contains(&("127.0.0.1".into(), domain.clone()))));
     }
 
@@ -2482,7 +2483,7 @@ mod scaffold_tests {
         assert_eq!(error.code, "SITE_FILE_INVALID");
         assert_eq!(std::fs::read_to_string(config).unwrap(), "original config");
         assert_eq!(get(&store, &site.id).unwrap().domains, site.domains);
-        assert!(crate::hosts::extra_entries(&store).is_empty());
+        assert!(crate::hosts::extra_entries(&store).unwrap().is_empty());
     }
 
     #[test]
@@ -2512,7 +2513,7 @@ mod scaffold_tests {
         assert!(paths.nginx_sites_dir().join(format!("{}.conf.disabled", site.id)).is_file());
         assert_eq!(std::fs::read(&cert.cert_path).unwrap(), original_cert);
         assert!(store.list_certs().unwrap().iter().any(|c| c.id == cert.id));
-        assert!(crate::hosts::extra_entries(&store).is_empty());
+        assert!(crate::hosts::extra_entries(&store).unwrap().is_empty());
     }
 
     #[test]

@@ -101,8 +101,8 @@ export const stopSite = (id: string) => safe(invoke<boolean>("stop_site", { id }
 
 /* hosts / 证书 */
 export const readHosts = () => safe(invoke<HostsEntry[]>("read_hosts"));
-export const applyHosts = (entries: HostsEntry[]) =>
-  safe(invoke<boolean>("apply_hosts", { entries }));
+export const applyHosts = (entries: HostsEntry[], expectedEntries?: HostsEntry[]) =>
+  safe(invoke<boolean>("apply_hosts", { entries, expectedEntries }));
 export const listCerts = () => safe(invoke<CertRecord[]>("list_certs"));
 export const issueCert = (domain: string, sans: string[] = []) =>
   safe(invoke<CertRecord>("issue_cert", { domain, sans }));

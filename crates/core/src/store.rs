@@ -84,15 +84,18 @@ impl Store {
     /* ---------- settings ---------- */
 
     pub fn get_setting(&self, key: &str) -> Option<String> {
+        self.get_setting_checked(key).ok().flatten()
+    }
+
+    /// 写入前读取旧设置时，必须区分「没有设置」与读取失败。
+    pub fn get_setting_checked(&self, key: &str) -> Result<Option<String>> {
         let conn = self.conn.lock();
-        conn.query_row(
+        Ok(conn.query_row(
             "SELECT value FROM settings WHERE key=?1",
             params![key],
             |r| r.get(0),
         )
-        .optional()
-        .ok()
-        .flatten()
+        .optional()?)
     }
 
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {

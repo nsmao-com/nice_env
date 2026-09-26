@@ -403,7 +403,7 @@ fn hosts_extra_entries_persist_and_merge() {
     std::env::set_var("NSB_SKIP_HOSTS", "1");
     nsb_core::hosts::apply(&store, &paths, Some(entries)).unwrap();
 
-    let extras = nsb_core::hosts::extra_entries(&store);
+    let extras = nsb_core::hosts::extra_entries(&store).unwrap();
     assert_eq!(extras.len(), 2, "自定义条目必须被持久化");
     assert!(
         extras
@@ -413,13 +413,13 @@ fn hosts_extra_entries_persist_and_merge() {
     );
 
     // 托管条目 = 自定义条目（此时没有站点）
-    let merged = nsb_core::hosts::managed_entries(&store);
+    let merged = nsb_core::hosts::managed_entries(&store).unwrap();
     assert_eq!(merged.len(), 2);
 
     // 重建（修复向导）不应清空自定义条目
     nsb_core::hosts::rebuild(&store, &paths).unwrap();
     assert_eq!(
-        nsb_core::hosts::extra_entries(&store).len(),
+        nsb_core::hosts::extra_entries(&store).unwrap().len(),
         2,
         "重建不得丢失自定义条目"
     );

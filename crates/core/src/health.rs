@@ -245,20 +245,30 @@ pub fn check(
     }
 
     // ---- 5) hosts 托管记录是否与站点一致 ----
-    let wanted = crate::hosts::managed_entries(store).len();
-    // read_all 已按标记块标好 managed，用它比自己去数行更可靠
-    let actual = crate::hosts::read_all()
-        .map(|v| v.iter().filter(|e| e.managed).count())
-        .unwrap_or(0);
-    if wanted != actual {
-        r.push(CheckItem {
+    let hosts_check = crate::hosts::managed_entries(store).and_then(|wanted| {
+        let actual = crate::hosts::read_all()?.into_iter().filter(|e| e.managed)
+            .map(|e| (e.ip, e.domain)).collect::<std::collections::HashSet<_>>();
+        let wanted: std::collections::HashSet<_> = wanted.into_iter().collect();
+        let missing = wanted.difference(&actual).count();
+        let unexpected = actual.difference(&wanted).count();
+        Ok((missing, unexpected))
+    });
+    match hosts_check {
+        Ok((0, 0)) => {}
+        Ok((missing, unexpected)) => r.push(CheckItem {
             id: "hosts-drift".into(),
             severity: Severity::Warn,
             title: "hosts 里的托管记录与站点列表不一致".into(),
-            detail: format!("应有 {wanted} 条，实际 {actual} 条 —— 域名可能解析不到本机"),
+            detail: format!("缺少 {missing} 条预期映射，多出 {unexpected} 条映射 —— 请核对域名与 IP 地址"),
             action: Some("到「工具箱 → 重建 hosts」一键同步".into()),
             route: Some("/tools".into()),
-        });
+        }),
+        Err(error) => r.push(CheckItem {
+            id: "hosts-read-failed".into(), severity: Severity::Warn,
+            title: "无法检查 hosts 记录".into(), detail: error.message,
+            action: Some("检查 hosts 文件和应用设置的读取权限后重试".into()),
+            route: Some("/tools".into()),
+        }),
     }
 
     // ---- 6) 服务错误状态 ----

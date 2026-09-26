@@ -2,7 +2,7 @@
  * 浏览器 mock 后端：内存状态实现与 Rust 侧相同的命令面。
  * 仅用于 next dev 下的 UI 开发/演示；桌面端自动走真实 invoke。
  */
-import { PackageManifestEntry } from "@nsb/schema";
+import { PackageManifestEntry, HostsEntry as HostsEntrySchema } from "@nsb/schema";
 import { normalizeError } from "./backend";
 import type { BackupPreview, ConfigResetPreview } from "./api";
 import bundledManifest from "../../../../manifest/packages.win.json";
@@ -59,7 +59,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.12";
+const MOCK_APP_VERSION = "0.2.13";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -228,7 +228,7 @@ const cronJobs = new Map<string, { id: string; name: string; command: string; in
 const mockRedisConnections = new Map<string, { username: string; password: string }>();
 let mockAdminer: import("./api").AdminerStatus | null = null;
 let mockTunnel: { id: string; port: number; url: string; startedAt: number; alive: boolean } | null = null;
-const hostsManaged = new Map<string, string>();
+const hostsManaged = new Map<string, string[]>();
 const mockTextFiles = new Map<string, string>();
 const mockDnsInterfaces = ["Ethernet", "Wi-Fi"];
 const mockDnsStatus = new Map(mockDnsInterfaces.map((name) => [name, "自动获取"]));
@@ -519,9 +519,9 @@ function seed() {
   dbUsers.set("u2", { username: "root", host: "localhost", grants: "ALL PRIVILEGES" });
 
   proxyProfiles.set("p1", { id: "p1", name: "默认 DIRECT", url: "builtin://direct", active: true, addedAt: now() - 86400_000 });
-  hostsManaged.set("shop.test", "127.0.0.1");
-  hostsManaged.set("admin.test", "127.0.0.1");
-  hostsManaged.set("api.test", "127.0.0.1");
+  hostsManaged.set("shop.test", ["127.0.0.1"]);
+  hostsManaged.set("admin.test", ["127.0.0.1"]);
+  hostsManaged.set("api.test", ["127.0.0.1"]);
 
   serviceLogLines.set(
     "nginx",
@@ -973,7 +973,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         updatedAt: now(),
       });
       if (input.createDb) databases.set(input.createDb.database, { name: input.createDb.database, tables: 0, sizeKb: 0 });
-      input.domains.forEach((d) => hostsManaged.set(d, "127.0.0.1"));
+      input.domains.filter((d) => !d.startsWith("*.")).forEach((d) => hostsManaged.set(d, ["127.0.0.1"]));
       return sites.get(id) as T;
     }
     case "update_site": {
@@ -1010,15 +1010,29 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "read_hosts": {
       const list: HostsEntry[] = [];
-      hostsManaged.forEach((ip, domain) => list.push({ ip, domain, managed: true }));
+      hostsManaged.forEach((ips, domain) => ips.forEach((ip) => list.push({ ip, domain, managed: true })));
       return list as T;
     }
     case "apply_hosts": {
       const entries = (args?.entries as HostsEntry[] | undefined) ?? [];
-      hostsManaged.clear();
-      for (const entry of entries) {
-        if (entry.domain.trim() && entry.ip.trim()) hostsManaged.set(entry.domain.trim(), entry.ip.trim());
+      const expected = args?.expectedEntries as HostsEntry[] | undefined;
+      const current = Array.from(hostsManaged, ([domain, ips]) => ips.map((ip) => ({ ip, domain, managed: true }))).flat();
+      const snapshot = (list: HostsEntry[]) => JSON.stringify(list.map((e) => JSON.stringify([e.ip, e.domain, e.managed])).sort());
+      if (expected && snapshot(expected) !== snapshot(current)) throw { code: "HOSTS_CHANGED", message: "hosts 内容已变化，请刷新并核对后重试" };
+      const siteDomains = new Set(Array.from(sites.values()).flatMap((site) => site.domains.filter((d) => !d.startsWith("*."))));
+      const next = new Map<string, string[]>();
+      for (const entry of entries.filter((entry) => entry.managed)) {
+        const result = HostsEntrySchema.safeParse(entry);
+        if (!result.success) throw { code: "HOSTS_INVALID", message: "请填写有效的 IPv4/IPv6 地址与主机名" };
+        const { ip, domain } = result.data;
+        if (siteDomains.has(domain) && ip !== "127.0.0.1") throw { code: "HOSTS_SITE_MANAGED", message: `${domain} 由站点自动维护，请到站点设置修改` };
+        const ips = next.get(domain) ?? [];
+        if (!ips.includes(ip)) ips.push(ip);
+        next.set(domain, ips);
       }
+      siteDomains.forEach((domain) => next.set(domain, ["127.0.0.1"]));
+      hostsManaged.clear();
+      next.forEach((ips, domain) => hostsManaged.set(domain, ips));
       return true as T;
     }
     case "read_text_file": {
@@ -1027,7 +1041,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const saved = mockTextFiles.get(path);
       if (saved !== undefined) return saved as T;
       if (/hosts(?:\.txt)?$/i.test(path)) {
-        return Array.from(hostsManaged, ([domain, ip]) => `${ip}\t${domain}`).join("\n") as T;
+        return Array.from(hostsManaged, ([domain, ips]) => ips.map((ip) => `${ip}\t${domain}`)).flat().join("\n") as T;
       }
       throw { code: "FILE_NOT_FOUND", message: "演示环境中找不到该文件" };
     }

@@ -1162,3 +1162,12 @@ tag `v0.2.10`，不覆盖或移动旧 tag。验证通过：`pnpm --filter @nsb/w
 版本同步升至 0.2.12，发布约定明确必须创建并推送新的 annotated tag `v0.2.12`，保留所有历史 tag。同步根及工作区 package、Cargo、Tauri、Cargo.lock 中项目版本与界面版本展示。
 
 验证通过：`pnpm --filter @nsb/web check`、`cargo check -p niceservbay --locked --offline -j 1`、`cargo test -p nsb-core --lib sites::scaffold_tests --locked --offline -j 1`（17 项通过、3 项忽略，包含 4 项删除回归检查）及 diff 空白检查。利用已有预览服务检查 1280×800、390×844、320×740 的详情、证书选择和删除确认布局，并确认取消清理选项后浏览器 mock 的 hosts 与证书保留。浏览器验证仅代表界面和 mock；真实系统 hosts 权限失败及运行中的 Nginx/Apache 重载仍需隔离环境验收。不启动新的服务，不执行前端 dev/build，不新增测试文件；本轮没有数据库结构变更，未修改 update.sql。整体功能完善工作仍在进行。
+
+第二十七轮实施与验证：hosts 编辑与失败一致性。
+对照 ServBay 官方 hosts / DNS 管理说明（https://support.servbay.com/basic-usage/dns/manage-local-hosts-file 、https://support.servbay.com/basic-usage/dns/manage-local-dns-service），补齐手动映射编辑，并区分站点、手动和只读系统条目。新增、编辑、删除、文本保存与文件导入共用操作锁；读取失败会保留已有列表并阻止写入，错误显示在当前操作区域。文本和导入支持同一行多个主机名、IPv6、行尾注释与双栈映射，格式错误明确标出行号并阻止整次写入，不再默默跳过。清空手动映射需要确认；站点记录会按站点配置重建，不能从编辑器改写站点 IP。导出仅包含可重新导入的手动条目，浏览器预览可生成真实下载文件。
+
+后端校验所有托管 IP 和主机名，防止换行、协议、端口、路径和通配符进入 hosts。读取设置和站点失败不再当成空列表。系统写入失败时恢复应用内旧记录，恢复失败单独报告；编辑器提交读取快照，拒绝已发生变化的 hosts 内容，文本草稿保留最初快照，避免后台刷新后覆盖其它修改。hosts 操作串行处理，桌面命令放入 blocking worker，避免等待文件或站点删除操作时阻塞界面。环境体检比较具体 IP/域名映射，条目数相同但内容错误也会提示，读取失败明确标记无法检查。站点删除流程适配严格读取，并跳过无需 hosts 映射的 IP 字面量。
+
+界面将 hosts 工具栏移入卡片内容区，按钮换行，表单增加固定标签与窄屏单列布局，长主机名和 IPv6 地址可换行，条目分隔线使用左右留白虚线。使用已有预览服务完成新增、编辑、删除、错误草稿保留、多别名、IPv6 双栈、取消清空及确认清空的交互检查，并检查 1280×800、390×844、320×740 布局；浏览器导出文件已核对只含手动映射，控制台无错误。
+
+版本同步升至 0.2.13，提交时必须创建并推送新的 annotated tag `v0.2.13`。验证通过：`pnpm --filter @nsb/web check`、`cargo check -p niceservbay --locked --offline -j 1`、`cargo test -p nsb-core --lib hosts::tests --locked --offline -j 1`（5 项）、`cargo test -p nsb-core --lib sites::scaffold_tests::delete_site --locked --offline -j 1`（4 项）、`cargo test -p nsb-core --test core_tests hosts_ --locked --offline -j 1`（6 项）及 diff 空白检查。未运行前端 dev/build，未新增测试文件，没有数据库结构变更，未修改 update.sql。测试未改动真实系统 hosts；权限失败采用注入写入错误验证应用记录恢复，系统文件写入与桌面文件选择交互仍需隔离环境验收。上一版 v0.2.12 已核对 Windows / macOS 双架构构建成功且安装包已发布。整体目标仍在进行，解析记录暂停/恢复与 DNS 配置完整性等后续项目尚未验收。

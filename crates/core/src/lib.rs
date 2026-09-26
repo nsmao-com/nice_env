@@ -220,7 +220,7 @@ impl CoreState {
 
 /// hosts 写入失败的提示事件（带当前应写条目数）
 pub fn emit_hosts_denied(store: &store::Store, _paths: &paths::Paths) {
-    let n = hosts::managed_entries(store).len();
+    let n = hosts::managed_entries(store).map(|entries| entries.len());
     let e = Event::HostsDenied;
     let _ = n;
     // desktop 侧 listen 后 toast 提示

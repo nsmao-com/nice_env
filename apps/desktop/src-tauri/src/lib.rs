@@ -804,16 +804,21 @@ async fn stop_site(
 /* ================= hosts / 证书 ================= */
 
 #[tauri::command]
-fn read_hosts() -> Result<Vec<nsb_core::model::HostsEntry>, tauri::Error> {
-    map_jh(nsb_core::hosts::read_all())
+async fn read_hosts() -> Result<Vec<nsb_core::model::HostsEntry>, tauri::Error> {
+    tauri::async_runtime::spawn_blocking(|| map_jh(nsb_core::hosts::read_all()))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
-fn apply_hosts(
+async fn apply_hosts(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     entries: Vec<nsb_core::model::HostsEntry>,
+    expected_entries: Option<Vec<nsb_core::model::HostsEntry>>,
 ) -> Result<bool, tauri::Error> {
-    map_jh(nsb_core::hosts::apply(&state.store, &state.paths, Some(entries)).map(|_| true))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(nsb_core::hosts::apply_checked(&st.store, &st.paths, Some(entries), expected_entries.as_deref()).map(|_| true))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 // ---- 证书自动化：签发耗时（ACME 全流程 1–2 分钟），手动签发放后台线程，前端轮询列表 ----
@@ -1012,10 +1017,12 @@ async fn trust_ca(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> Resu
 
 /// 按当前站点重建 hosts 托管块（保留用户手动条目）
 #[tauri::command]
-fn rebuild_hosts(
+async fn rebuild_hosts(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<bool, tauri::Error> {
-    map_jh(nsb_core::hosts::rebuild(&state.store, &state.paths).map(|_| true))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::hosts::rebuild(&st.store, &st.paths).map(|_| true)))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /// 补齐缺失/过期的站点证书，返回重新签发的域名

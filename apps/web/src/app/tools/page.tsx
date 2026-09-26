@@ -19,14 +19,16 @@ import {
   RefreshCw,
 } from "lucide-react";
 import type { ListenerInfo, PortDiagnosis, PortScanEntry , HostsEntry } from "@nsb/schema";
+import { HostsEntry as HostsEntrySchema } from "@nsb/schema";
 import { useUI, useT } from "@/lib/store";
 import { useHosts, useInvalidate, toastError, useSettings, useSites, useServices } from "@/lib/hooks";
 import * as api from "@/lib/api";
-import { normalizeError } from "@/lib/backend";
+import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { cn } from "@/lib/utils";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
@@ -138,244 +140,219 @@ function ToolCard({
 function HostsTool() {
   const t = useT();
   const paletteVars = useCodePalette();
-  const { data: entries } = useHosts();
-  const { data: sites } = useSites();
-  const invalidate = useInvalidate();
+  const hosts = useHosts();
+  const siteQuery = useSites();
+  const entries = hosts.data;
   const [newDomain, setNewDomain] = React.useState("");
   const [newIp, setNewIp] = React.useState("127.0.0.1");
+  const [editing, setEditing] = React.useState<HostsEntry | null>(null);
+  const [deleteTarget, setDeleteTarget] = React.useState<HostsEntry | null>(null);
+  const [clearOpen, setClearOpen] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
-  /** list = 逐条管理；text = 整段文本编辑（从 hosts 文件粘贴也行） */
+  const action = React.useRef(false);
+  const [error, setError] = React.useState<AppErrorShape | null>(null);
   const [mode, setMode] = React.useState<"list" | "text">("list");
   const [textDraft, setTextDraft] = React.useState("");
-
-  /** 站点域名由站点配置自动重建，删不掉；其余托管条目（用户手动加的）可以删 */
+  const [textBaseline, setTextBaseline] = React.useState("");
+  const textSnapshot = React.useRef<HostsEntry[]>([]);
+  const formRef = React.useRef<HTMLDivElement>(null);
+  const errorRef = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => { if (error) errorRef.current?.focus(); }, [error]);
+  const ready = hosts.dataUpdatedAt > 0 && siteQuery.dataUpdatedAt > 0 && !hosts.error && !siteQuery.error;
+  const disabled = busy || !ready;
   const siteDomains = React.useMemo(
-    () => new Set(sites.flatMap((s) => s.domains)),
-    [sites]
+    () => new Set(siteQuery.data.flatMap((site) => site.domains.map((domain) => domain.toLowerCase().replace(/\.$/, "")))),
+    [siteQuery.data]
   );
-  const removable = (e: { domain: string; managed: boolean }) => e.managed && !siteDomains.has(e.domain);
+  const editable = (entry: HostsEntry) => entry.managed && !siteDomains.has(entry.domain);
+  const manual = entries.filter(editable);
+  const sameEntry = (a: HostsEntry, b: HostsEntry) => a.domain === b.domain && a.ip === b.ip && a.managed === b.managed;
+  const reportError = (e: unknown) => { setError(normalizeError(e)); };
 
-  const apply = async (next: HostsEntry[]) => {
+  const validate = (ip: string, domain: string): HostsEntry => {
+    const result = HostsEntrySchema.safeParse({ ip, domain, managed: true });
+    if (!result.success) throw { code: "HOSTS_INVALID", message: t("tools.hostsInvalid") };
+    if (siteDomains.has(result.data.domain)) throw { code: "HOSTS_SITE_MANAGED", message: t("tools.hostsSiteHint") };
+    return result.data;
+  };
+  const parseText = (text: string): HostsEntry[] => {
+    const parsed: HostsEntry[] = [];
+    const seen = new Set<string>();
+    for (const [index, raw] of text.split(/\r?\n/).entries()) {
+      const line = raw.split("#")[0].trim();
+      if (!line) continue;
+      try {
+        const [ip, ...domains] = line.split(/\s+/);
+        if (!domains.length) throw { code: "HOSTS_INVALID", message: t("tools.hostsInvalid") };
+        for (const domain of domains) {
+          const entry = validate(ip, domain);
+          const key = `${entry.ip}|${entry.domain}`;
+          if (!seen.has(key)) { seen.add(key); parsed.push(entry); }
+        }
+      } catch (e) {
+        throw { ...normalizeError(e), message: `${t("tools.hostsLine")} ${index + 1}: ${normalizeError(e).message}` };
+      }
+    }
+    return parsed;
+  };
+  const resetForm = () => { setEditing(null); setNewDomain(""); setNewIp("127.0.0.1"); };
+  const run = async (operation: () => Promise<void>) => {
+    if (action.current || !ready) return;
+    action.current = true;
     setBusy(true);
-    try {
-      await api.applyHosts(next);
-      invalidate("hosts");
-    } catch (e) {
-      toastError(e, t("tools.hostsWriteFailed"));
-      throw e;
-    } finally {
-      setBusy(false);
+    setError(null);
+    try { await operation(); }
+    catch (e) {
+      const failure = normalizeError(e);
+      reportError(failure.code === "HOSTS_CHANGED" && mode === "text" ? { ...failure, hint: t("tools.hostsTextChanged") } : failure);
     }
+    finally { action.current = false; setBusy(false); }
   };
-
-  const remove = async (target: { ip: string; domain: string }) => {
-    try {
-      await apply(entries.filter((e) => !(e.domain === target.domain && e.ip === target.ip)));
-      toast.success(t("tools.hostsDeleted"));
-    } catch {
-      /* toastError 已弹 */
-    }
+  const apply = async (next: HostsEntry[], expected = entries) => {
+    await api.applyHosts(next, expected);
+    const refreshed = await hosts.refetch();
+    if (refreshed.error) throw { code: "HOSTS_REFRESH_FAILED", message: t("tools.hostsSavedReadFailed"), hint: normalizeError(refreshed.error).message };
   };
-
-  const add = async () => {
-    const domain = newDomain.trim();
-    if (!domain) return;
-    try {
-      await apply([...entries, { ip: newIp.trim() || "127.0.0.1", domain, managed: true }]);
-      toast.success(`${t("tools.hostsUpdatedP1")}${domain}`);
-      setNewDomain("");
-    } catch {
-      /* 已弹 */
-    }
-  };
-
-  /* ---- 文本模式 ---- */
+  const saveEntry = () => run(async () => {
+    const entry = validate(newIp, newDomain);
+    const others = manual.filter((value) => !editing || !sameEntry(value, editing));
+    if (editing && !manual.some((value) => sameEntry(value, editing))) throw { code: "HOSTS_CHANGED", message: t("tools.hostsChanged") };
+    if (others.some((value) => sameEntry(value, entry))) throw { code: "HOSTS_DUPLICATE", message: t("tools.hostsDuplicate") };
+    await apply([...others, entry]);
+    resetForm();
+    toast.success(`${t("tools.hostsUpdatedP1")}${entry.domain}`);
+  });
+  const remove = () => run(async () => {
+    if (!deleteTarget) return;
+    await apply(manual.filter((entry) => !sameEntry(entry, deleteTarget)));
+    if (editing && sameEntry(editing, deleteTarget)) resetForm();
+    setDeleteTarget(null);
+    toast.success(t("tools.hostsDeleted"));
+  });
   const openText = () => {
-    // 只编辑托管段；系统自有条目不属于本工具的管理范围
-    const managed = entries
-      .filter((e) => e.managed)
-      .map((e) => `${e.ip} ${e.domain}`)
-      .join("\n");
-    setTextDraft(managed);
+    if (disabled) return;
+    const content = manual.map((entry) => `${entry.ip} ${entry.domain}`).join("\n");
+    setTextDraft(content);
+    setTextBaseline(content);
+    textSnapshot.current = entries;
+    setError(null);
     setMode("text");
   };
-
-  const applyText = async () => {
-    const parsed: HostsEntry[] = [];
-    for (const raw of textDraft.split("\n")) {
-      const line = raw.trim();
-      if (!line || line.startsWith("#")) continue;
-      const parts = line.split(/\s+/);
-      if (parts.length < 2) continue;
-      const ip = parts[0];
-      const domain = parts[1];
-      if (!/^[\d.:a-fA-F]+$/.test(ip)) continue; // IPv4/IPv6 字面量
-      parsed.push({ ip, domain, managed: true });
-    }
-    // 非托管的系统条目原样保留
-    const system = entries.filter((e) => !e.managed);
-    try {
-      await apply([...system, ...parsed]);
-      toast.success(`${t("tools.hostsUpdatedP1")}${parsed.length}`);
-      setMode("list");
-    } catch {
-      /* 已弹 */
-    }
-  };
-
-  /* ---- 文件导入 ---- */
-  const importFile = async () => {
-    try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
-      const path = await open({
-        multiple: false,
-        filters: [{ name: "hosts", extensions: ["hosts", "txt", "conf"] }],
-      });
-      if (!path || typeof path !== "string") return;
-      const raw = await api.readTextFile(path);
-      const parsed: HostsEntry[] = [];
-      for (const rawLine of raw.split(/\r?\n/)) {
-        const line = rawLine.trim();
-        if (!line || line.startsWith("#")) continue;
-        const parts = line.split(/\s+/);
-        if (parts.length < 2) continue;
-        const ip = parts[0];
-        const domain = parts[1];
-        if (!/^[\d.:a-fA-F]+$/.test(ip)) continue;
-        // 同域名只保留一条（后行覆盖前行）
-        const idx = parsed.findIndex((e) => e.domain === domain);
-        if (idx >= 0) parsed[idx] = { ip, domain, managed: true };
-        else parsed.push({ ip, domain, managed: true });
-      }
-      if (parsed.length === 0) {
-        toast.info(t("tools.hostsImportEmpty"));
-        return;
-      }
-      // 与现有托管条目按域名合并：文件里的覆盖同名域
-      const merged = [
-        ...entries.filter((e) => e.managed && !parsed.some((np) => np.domain === e.domain)),
-        ...parsed,
-      ];
-      await apply(merged);
-      toast.success(`${t("tools.hostsImportedP1")} ${parsed.length} ${t("tools.hostsImportedP2")}`);
-    } catch (e) {
-      toastError(e, t("tools.hostsWriteFailed"));
-    }
-  };
-
-  const exportFile = async () => {
-    try {
+  const applyText = (confirmed = false) => run(async () => {
+    const parsed = parseText(textDraft);
+    if (!parsed.length && manual.length && !confirmed) { setClearOpen(true); return; }
+    await apply(parsed, textSnapshot.current);
+    setClearOpen(false);
+    setMode("list");
+    resetForm();
+    toast.success(`${t("tools.hostsUpdatedP1")}${parsed.length}`);
+  });
+  const importFile = () => run(async () => {
+    if (!isTauri) { toast.info(t("tools.hostsDesktopOnly")); return; }
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const path = await open({ multiple: false, filters: [{ name: "hosts", extensions: ["hosts", "txt", "conf"] }] });
+    if (!path || typeof path !== "string") return;
+    const parsed = parseText(await api.readTextFile(path));
+    if (!parsed.length) { toast.info(t("tools.hostsImportEmpty")); return; }
+    const domains = new Set(parsed.map((entry) => entry.domain));
+    await apply([...manual.filter((entry) => !domains.has(entry.domain)), ...parsed]);
+    resetForm();
+    toast.success(`${t("tools.hostsImportedP1")} ${parsed.length} ${t("tools.hostsImportedP2")}`);
+  });
+  const exportFile = () => run(async () => {
+    const body = manual.map((entry) => `${entry.ip}\t${entry.domain}`).join("\n");
+    if (!isTauri) {
+      const url = URL.createObjectURL(new Blob([body], { type: "text/plain;charset=utf-8" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "hosts-nsb.txt";
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } else {
       const { save } = await import("@tauri-apps/plugin-dialog");
-      const path = await save({
-        defaultPath: "hosts-nsb.txt",
-        filters: [{ name: "hosts", extensions: ["txt", "hosts"] }],
-      });
+      const path = await save({ defaultPath: "hosts-nsb.txt", filters: [{ name: "hosts", extensions: ["txt", "hosts"] }] });
       if (!path || typeof path !== "string") return;
-      const body = entries
-        .filter((e) => e.managed)
-        .map((e) => `${e.ip}\t${e.domain}`)
-        .join("\n");
       await api.writeTextFile(path, body);
-      toast.success(t("tools.hostsExported"));
-    } catch (e) {
-      toastError(e, t("tools.hostsWriteFailed"));
     }
-  };
+    toast.success(t("tools.hostsExported"));
+  });
+  const errorBox = error && <div ref={errorRef} tabIndex={-1} role="alert" className="space-y-1 rounded-lg bg-error-soft p-3 text-xs text-error [overflow-wrap:anywhere]">
+    <p>{error.message}</p>{error.hint && <p>{error.hint}</p>}
+  </div>;
 
   return (
-    <ToolCard
-      icon={FilePenLine}
-      title={t("tools.hosts")}
-      hint={t("tools.hostsHint")}
-      action={
-        <div className="flex shrink-0 items-center gap-1">
-          <Button size="sm" variant="ghost" onClick={importFile} title={t("tools.hostsImport")}>
-            {t("tools.hostsImport")}
-          </Button>
-          <Button size="sm" variant="ghost" onClick={exportFile} title={t("tools.hostsExport")}>
-            {t("tools.hostsExport")}
-          </Button>
-          <Tabs value={mode} onValueChange={(v) => (v === "text" ? openText() : setMode("list"))}>
+    <ToolCard icon={FilePenLine} title={t("tools.hosts")} hint={t("tools.hostsHint")}>
+      <div className="flex min-w-0 flex-col gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap gap-1">
+            <Button size="sm" variant="ghost" disabled={disabled || mode === "text"} onClick={importFile}>{t("tools.hostsImport")}</Button>
+            <Button size="sm" variant="ghost" disabled={disabled || mode === "text"} onClick={exportFile}>{t("tools.hostsExport")}</Button>
+            <Button size="sm" variant="ghost" disabled={busy || hosts.isFetching || siteQuery.isFetching}
+              onClick={() => { void hosts.refetch(); void siteQuery.refetch(); }}>{t("tools.refresh")}</Button>
+          </div>
+          <Tabs value={mode} onValueChange={(value) => { if (value === "text") openText(); else setMode("list"); }}>
             <TabsList>
-              <TabsTrigger value="list">{t("tools.hostsModeList")}</TabsTrigger>
-              <TabsTrigger value="text">{t("tools.hostsModeText")}</TabsTrigger>
+              <TabsTrigger value="list" disabled={busy || (mode === "text" && textDraft !== textBaseline)}>{t("tools.hostsModeList")}</TabsTrigger>
+              <TabsTrigger value="text" disabled={disabled}>{t("tools.hostsModeText")}</TabsTrigger>
             </TabsList>
           </Tabs>
         </div>
-      }
-    >
-      {mode === "list" ? (
-        <div className="flex flex-col gap-3">
-          {/* 行距放宽：py-2.5 + 悬停高亮，条目多时不再挤成一坨 */}
-          <div className="max-h-56 overflow-y-auto rounded-lg border border-border bg-card-2/30">
-            {entries.length === 0 ? (
-              <p className="px-3 py-5 text-center text-[11px] text-faint">{t("tools.hostsEmpty")}</p>
-            ) : (
-              entries.map((e) => (
-                <div
-                  key={`${e.ip}|${e.domain}`}
-                  className="flex items-center gap-3 border-b border-border/50 px-3.5 py-2.5 last:border-0 hover:bg-card-2/40"
-                >
-                  <code className="w-28 shrink-0 font-mono text-[12px] text-faint">{e.ip}</code>
-                  <code className="min-w-0 flex-1 truncate font-mono text-[12px]">{e.domain}</code>
-                  {e.managed && <Badge variant="default">{t("tools.managed")}</Badge>}
-                  {removable(e) && (
-                    <Button
-                      size="icon-sm"
-                      variant="ghost"
-                      disabled={busy}
-                      title={t("common.delete")}
-                      className="text-faint hover:text-error"
-                      onClick={() => remove(e)}
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </Button>
-                  )}
-                </div>
-              ))
-            )}
+        {(hosts.error || siteQuery.error) && <div role="alert" className="text-xs text-error [overflow-wrap:anywhere]">
+          {t("tools.hostsReadFailed")} {normalizeError(hosts.error ?? siteQuery.error).message}
+        </div>}
+        {!ready && !hosts.error && !siteQuery.error && <p role="status" className="text-xs text-muted">{t("common.loading")}</p>}
+        {!deleteTarget && !clearOpen && errorBox}
+        {mode === "list" ? <>
+          <div className="max-h-64 overflow-y-auto rounded-lg bg-fill/50" aria-busy={hosts.isFetching}>
+            {ready && entries.length === 0 && <p className="px-3 py-5 text-center text-xs text-faint">{t("tools.hostsEmpty")}</p>}
+            {entries.map((entry, index) => <div key={`${entry.ip}|${entry.domain}|${entry.managed}|${index}`}
+              className="mx-3 flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-dashed border-separator py-3 last:border-0">
+              <div className="min-w-0 flex-1 basis-36 space-y-1">
+                <p className="break-all font-mono text-xs">{entry.domain}</p>
+                <p className="break-all font-mono text-[11px] text-muted">{entry.ip}</p>
+              </div>
+              <Badge variant={editable(entry) ? "default" : "muted"}>{siteDomains.has(entry.domain) && entry.managed ? t("tools.hostsSite") : entry.managed ? t("tools.hostsManual") : t("tools.hostsSystem")}</Badge>
+              {editable(entry) && <div className="flex shrink-0 gap-1">
+                <Button size="icon-sm" variant="ghost" disabled={disabled} aria-label={`${t("tools.hostsEdit")} ${entry.domain}`}
+                  onClick={() => { setEditing(entry); setNewDomain(entry.domain); setNewIp(entry.ip); setError(null); formRef.current?.querySelector("input")?.focus(); }}>
+                  <FilePenLine className="h-3.5 w-3.5" />
+                </Button>
+                <Button size="icon-sm" variant="ghost" disabled={disabled} aria-label={`${t("common.delete")} ${entry.domain}`} className="text-faint hover:text-error"
+                  onClick={() => { setError(null); setDeleteTarget(entry); }}><Trash2 className="h-3.5 w-3.5" /></Button>
+              </div>}
+            </div>)}
           </div>
-          <div className="flex gap-2">
-            <Input
-              value={newIp}
-              onChange={(e) => setNewIp(e.target.value)}
-              className="w-28 font-mono"
-              placeholder="127.0.0.1"
-            />
-            <Input
-              value={newDomain}
-              onChange={(e) => setNewDomain(e.target.value)}
-              className="flex-1 font-mono"
-              placeholder="newsite.test"
-              onKeyDown={(e) => e.key === "Enter" && add()}
-            />
-            <Button variant="secondary" disabled={busy || !newDomain} onClick={add}>
-              {t("tools.add")}
-            </Button>
+          <p className="text-[11px] leading-relaxed text-muted">{t("tools.hostsSiteHint")}</p>
+          <div ref={formRef} className="grid min-w-0 gap-2 sm:grid-cols-2">
+            <div className="min-w-0 space-y-1.5"><Label htmlFor="hosts-ip">{t("tools.hostsIp")}</Label>
+              <Input id="hosts-ip" value={newIp} disabled={disabled} onChange={(e) => setNewIp(e.target.value)} className="min-w-0 font-mono" placeholder="127.0.0.1 / ::1" /></div>
+            <div className="min-w-0 space-y-1.5"><Label htmlFor="hosts-domain">{t("tools.hostsDomain")}</Label>
+              <Input id="hosts-domain" value={newDomain} disabled={disabled} onChange={(e) => setNewDomain(e.target.value)} className="min-w-0 font-mono" placeholder="newsite.test"
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void saveEntry(); } }} /></div>
+            <div className="flex flex-wrap gap-2 sm:col-span-2">
+              <Button variant="secondary" disabled={disabled || !newDomain.trim() || !newIp.trim()} onClick={saveEntry}>{editing ? t("common.save") : t("tools.add")}</Button>
+              {editing && <Button variant="ghost" disabled={busy} onClick={resetForm}>{t("common.cancel")}</Button>}
+            </div>
           </div>
-        </div>
-      ) : (
-        <div className="flex flex-col gap-2">
-          <p className="text-[10.5px] text-faint">{t("tools.hostsTextHint")}</p>
-          <textarea
-            value={textDraft}
-            onChange={(e) => setTextDraft(e.target.value)}
-            rows={10}
-            spellCheck={false}
-            style={paletteVars}
-            className="nsb-code w-full rounded-lg border border-border p-3 font-mono text-[11.5px] leading-relaxed outline-none focus:border-border-strong"
-            placeholder={"127.0.0.1  newsite.test\n10.0.0.9  nas.test"}
-          />
-          <div className="flex gap-2">
-            <Button variant="secondary" size="sm" disabled={busy} onClick={applyText}>
-              {t("tools.hostsApplyText")}
-            </Button>
-            <Button variant="ghost" size="sm" onClick={() => setMode("list")}>
-              {t("common.cancel")}
-            </Button>
+        </> : <>
+          <Label htmlFor="hosts-text">{t("tools.hostsModeText")}</Label>
+          <p className="text-[11px] leading-relaxed text-muted">{t("tools.hostsTextHint")}</p>
+          <textarea id="hosts-text" value={textDraft} disabled={busy} onChange={(e) => setTextDraft(e.target.value)}
+            rows={8} spellCheck={false} style={paletteVars}
+            className="nsb-code w-full min-w-0 rounded-lg border border-border p-3 font-mono text-[11.5px] leading-relaxed outline-none focus:border-border-strong"
+            placeholder={"127.0.0.1 newsite.test alias.test\n::1 ipv6.test"} />
+          <div className="flex flex-wrap gap-2">
+            <Button variant="secondary" size="sm" disabled={disabled} onClick={() => applyText()}>{t("tools.hostsApplyText")}</Button>
+            <Button variant="ghost" size="sm" disabled={busy} onClick={() => { setMode("list"); setError(null); }}>{t("common.cancel")}</Button>
           </div>
-        </div>
-      )}
+        </>}
+      </div>
+      <ConfirmDialog open={!!deleteTarget} onOpenChange={(open) => { if (!open && !action.current) setDeleteTarget(null); }}
+        title={`${t("common.delete")} ${deleteTarget?.domain ?? ""}`} description={t("tools.hostsDeleteHint")}
+        confirmText={t("common.delete")} danger loading={busy} confirmDisabled={!ready} onConfirm={remove}>{errorBox}</ConfirmDialog>
+      <ConfirmDialog open={clearOpen} onOpenChange={(open) => { if (!action.current) setClearOpen(open); }}
+        title={t("tools.hostsClearTitle")} description={t("tools.hostsClearHint")} confirmText={t("common.delete")}
+        danger loading={busy} confirmDisabled={!ready} onConfirm={() => applyText(true)}>{errorBox}</ConfirmDialog>
     </ToolCard>
   );
 }

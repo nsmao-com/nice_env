@@ -2,11 +2,12 @@
 
 import * as React from "react";
 import { toast } from "sonner";
-import { ScrollText } from "lucide-react";
+import { Loader2, ScrollText } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/store";
 import { useSearchParams } from "next/navigation";
-import { useServices, useSettings, useSites } from "@/lib/hooks";
+import { toastError, useServices, useSettings, useSites } from "@/lib/hooks";
+import { isTauri } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -25,13 +26,17 @@ export default function LogsPage() {
 
 function LogsPageInner() {
   const t = useT();
-  const { data: services, error: servicesError } = useServices(4000);
-  const { data: sites } = useSites();
+  const servicesQuery = useServices(4000);
+  const { data: services, error: servicesError } = servicesQuery;
+  const sitesQuery = useSites();
+  const { data: sites, error: sitesError } = sitesQuery;
   const { data: settings } = useSettings();
   const searchParams = useSearchParams();
   const wanted = searchParams.get("service");
   const [selected, setSelected] = React.useState<string | null>(wanted);
   const [query, setQuery] = React.useState("");
+  const [exporting, setExporting] = React.useState(false);
+  const exportBusy = React.useRef(false);
 
   // 从 URL 预选（服务卡片上的「日志」按钮会带上 ?service=）
   React.useEffect(() => {
@@ -43,7 +48,7 @@ function LogsPageInner() {
     if (!wanted && !selected && services.length > 0) setSelected(services[0].id);
   }, [wanted, services, selected]);
 
-  // 站点级访问日志已就位（nginx 每站点独立 access_log），可以按站点看流量了
+  // Nginx / Apache 均按站点读取访问日志。
   const siteItems = React.useMemo(
     () =>
       sites.map((s) => ({
@@ -69,46 +74,60 @@ function LogsPageInner() {
   }, [siteItems, query]);
 
   const runningCount = services.filter((s) => s.state === "running").length;
+  const selectedLabel = services.find((s) => s.id === selected)?.label
+    ?? siteItems.find((s) => s.id === selected)?.label ?? selected;
+  const exportFullLog = async () => {
+    if (!selected || exportBusy.current) return;
+    const source = selected;
+    const label = selectedLabel;
+    exportBusy.current = true;
+    setExporting(true);
+    try {
+      const name = `${source.replace(/[^a-zA-Z0-9._-]/g, "_")}-${new Date().toISOString().slice(0, 10)}.log`;
+      let path: string | null = name;
+      if (isTauri) {
+        const { save } = await import("@tauri-apps/plugin-dialog");
+        path = await save({ defaultPath: name, filters: [{ name: "Log", extensions: ["log", "txt"] }] });
+      }
+      if (!path) return;
+      const bytes = await api.exportLog(source, path);
+      toast.success(t(isTauri ? "logs.exported" : "log.downloadStarted"), {
+        description: `${label} · ${bytes.toLocaleString()} B · ${path}`,
+      });
+    } catch (e) {
+      toastError(e);
+    } finally {
+      exportBusy.current = false;
+      setExporting(false);
+    }
+  };
 
   return (
-    <div className="flex h-full flex-col pb-4">
+    <div className="flex min-h-full flex-col pb-4">
       <PageHeader
         title={t("logs.title")}
         subtitle={t("logs.subtitle")}
         actions={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="text-[11.5px] text-faint">
-              {runningCount}/{services.length} {t("logs.runningCount")}
+              {servicesError ? t("logs.servicesFailed") : !servicesQuery.dataUpdatedAt ? t("common.loading") : `${runningCount}/${services.length} ${t("logs.runningCount")}`}
             </span>
             {/* 导出当前选中服务的完整日志文件 */}
             <Button
               variant="ghost"
               size="sm"
-              disabled={!selected || selected.startsWith("site:")}
-              onClick={async () => {
-                if (!selected) return;
-                try {
-                  const { save } = await import("@tauri-apps/plugin-dialog");
-                  const path = await save({
-                    defaultPath: `${selected}-${new Date().toISOString().slice(0, 10)}.log`,
-                    filters: [{ name: "Log", extensions: ["log", "txt"] }],
-                  });
-                  if (!path) return;
-                  await api.exportLog(selected, path);
-                  toast.success(t("logs.exported"));
-                } catch (e) {
-                  toast.error(typeof e === "string" ? e : (e as Error).message);
-                }
-              }}
+              disabled={!selected || exporting}
+              onClick={() => void exportFullLog()}
             >
+              {exporting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
               {t("logs.export")}
             </Button>
           </div>
         }
       />
-      <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[auto_minmax(420px,1fr)] gap-3 md:grid-cols-[240px_minmax(0,1fr)] md:grid-rows-1 md:gap-4">
+      <div className="grid flex-1 grid-cols-1 items-start gap-3 md:grid-cols-[240px_minmax(0,1fr)] md:items-stretch md:gap-4">
         {/* 左侧选择器 */}
-        <Card className="flex h-full min-h-0 max-h-52 flex-col p-2 md:max-h-none">
+        <Card className="flex h-60 min-h-0 flex-col p-2 md:h-full">
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -121,7 +140,12 @@ function LogsPageInner() {
               {t("logs.services")}
             </p>
             {servicesError ? (
-              <p className="px-2 py-1 text-[11px] text-error/80">{t("logs.servicesFailed")}</p>
+              <div role="alert" className="px-2 py-1 text-[11px] text-error/80">
+                <p>{t("logs.servicesFailed")}</p>
+                <Button size="sm" variant="ghost" disabled={servicesQuery.isFetching} onClick={() => void servicesQuery.refetch()}>{t("log.refresh")}</Button>
+              </div>
+            ) : !servicesQuery.dataUpdatedAt ? (
+              <p className="px-2 py-1 text-[11px] text-faint">{t("common.loading")}</p>
             ) : filtered.length === 0 ? (
               <p className="px-2 py-1 text-[11px] text-faint/50">{t("logs.none")}</p>
             ) : (
@@ -149,7 +173,14 @@ function LogsPageInner() {
             <p className="mt-2 px-2 py-1 text-[10.5px] font-medium uppercase tracking-wider text-faint/70">
               {t("logs.sites")}
             </p>
-            {filteredSites.length === 0 ? (
+            {sitesError ? (
+              <div role="alert" className="px-2 py-1 text-[11px] text-error/80">
+                <p>{t("logs.sitesFailed")}</p>
+                <Button size="sm" variant="ghost" disabled={sitesQuery.isFetching} onClick={() => void sitesQuery.refetch()}>{t("log.refresh")}</Button>
+              </div>
+            ) : !sitesQuery.dataUpdatedAt ? (
+              <p className="px-2 py-1 text-[11px] text-faint">{t("common.loading")}</p>
+            ) : filteredSites.length === 0 ? (
               <p className="px-2 py-1 text-[11px] text-faint/50">{t("logs.none")}</p>
             ) : (
               filteredSites.map((item) => (
@@ -173,19 +204,18 @@ function LogsPageInner() {
         </Card>
 
         {/* 日志面板 */}
-        <Card className="flex h-full min-h-0 flex-col p-4">
+        <Card className="flex h-full min-h-0 min-w-0 flex-col p-3 sm:p-4">
           {selected ? (
             <>
               <div className="mb-2 flex items-center gap-2 text-[12px] text-faint">
-                <ScrollText className="h-3.5 w-3.5" />
-                <span className="font-mono">{selected}</span>
-                <span>· {t("logs.autoRefresh")}</span>
+                <ScrollText className="h-3.5 w-3.5 shrink-0" />
+                <span className="min-w-0 break-all">{selectedLabel}</span>
               </div>
               <LogPane
                 serviceId={selected}
                 className="min-h-0 flex-1"
                 height={520}
-                emptyHint={t("logs.emptyHint")}
+                emptyHint={t(selected.startsWith("site:") ? "logs.siteEmptyHint" : "logs.emptyHint")}
                 tailLines={settings?.logTailLines ?? 500}
                 defaultAutoRefresh={settings?.logAutoRefresh ?? true}
               />

@@ -59,7 +59,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.15";
+const MOCK_APP_VERSION = "0.2.16";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -326,6 +326,31 @@ function seedStacks() {
 seedStacks();
 
 const serviceLogLines = new Map<string, string[]>();
+
+function logLinesFor(id: string): string[] {
+  if (id.startsWith("site:")) {
+    if (!sites.has(id.slice(5))) throw { code: "SITE_NOT_FOUND", message: "站点不存在" };
+  } else if (!services.has(id)) {
+    throw { code: "UNKNOWN_SERVICE", message: "服务未注册或已卸载" };
+  }
+  return serviceLogLines.get(id) ?? [];
+}
+
+/** 浏览器预览导出真实下载文件，只包含当前演示数据。 */
+function downloadLog(content: string, suggestedName: string): string {
+  const stem = suggestedName.replace(/\.log$/i, "").replace(/[^a-zA-Z0-9._-]/g, "_").replace(/^[._]+|[._]+$/g, "");
+  const name = `${stem || "log"}.log`;
+  const url = URL.createObjectURL(new Blob([content], { type: "text/plain;charset=utf-8" }));
+  try {
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    link.click();
+  } finally {
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  return name;
+}
 const statsHistory: { t: number; cpu: number; mem: number }[] = [];
 for (let i = 0; i < 60; i++) {
   statsHistory.push({
@@ -529,14 +554,15 @@ function seed() {
   serviceLogLines.set(
     "nginx",
     [
-      "2026-09-18 10:02:11 [notice] nginx/1.26.3 (win64) started",
+      `2026-09-18 10:02:11 [notice] nginx/${services.get("nginx")?.version ?? "unknown"} (win64) started`,
       "2026-09-18 10:02:11 [notice] config file …/etc/nginx/nginx.conf loaded",
       "2026-09-18 10:15:42 [info] 127.0.0.1 GET /index.php 200 12ms",
       "2026-09-18 10:16:03 [error] 43#0: *1181 upstream timed out (110: Connection timed out) while reading response header",
       "2026-09-18 10:16:05 [info] 127.0.0.1 GET /api/health 200 3ms",
     ]
   );
-  serviceLogLines.set("mysql@8.0", [
+  const mysqlService = Array.from(services.values()).find((s) => s.id === "mysql" || s.id.startsWith("mysql@"));
+  if (mysqlService) serviceLogLines.set(mysqlService.id, [
     "2026-09-18 10:02:14 [System] [MY-010931] [Server] … starting as process 10600",
     "2026-09-18 10:02:16 [System] [MY-013602] [Server] Channel mysqlx configured",
     "2026-09-18 10:02:16 [System] [MY-010931] ready for connections. Port: 23306",
@@ -1093,19 +1119,20 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "log_export": {
       const sid = args!.serviceId as string;
-      // 后端会强制 .log 后缀并清洗文件名，mock 也照做，避免演示时出现假路径
-      const raw = (args!.suggestedName as string | null) ?? `${sid}-20260921-210000`;
-      const base = raw.replace(/\.log$/, "");
-      return `C:\\NiceEnv\\logs\\export\\${base}.log` as T;
+      logLinesFor(sid);
+      const content = args!.content as string;
+      if (!content.trim()) throw { code: "EMPTY_LOG", message: "没有可导出的日志内容" };
+      return downloadLog(content, (args!.suggestedName as string | null) ?? `${sid}-${Date.now()}`) as T;
     }
     case "export_log": {
       const id = args?.id as string | undefined;
       const dest = args?.dest as string | undefined;
-      const lines = id ? serviceLogLines.get(id) : undefined;
       if (!id || !dest) throw { code: "BAD_EXPORT", message: "缺少日志服务或目标路径" };
-      if (!lines?.length) throw { code: "LOG_EMPTY", message: "该服务还没有日志文件（先启动一次）" };
+      const lines = logLinesFor(id);
+      if (!lines.length) throw { code: "LOG_EMPTY", message: "尚未生成日志文件", hint: "请先启动服务或访问该站点" };
       const content = `${lines.join("\n")}\n`;
       mockTextFiles.set(dest, content);
+      downloadLog(content, dest);
       return new TextEncoder().encode(content).byteLength as T;
     }
     case "tool_mirrors":
@@ -1411,7 +1438,8 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "tail_logs": {
       const id = args!.id as string;
-      return (serviceLogLines.get(id) ?? []).map((line) => ({ line })) as LogLine[] as T;
+      const count = Math.max(1, Math.min(Number(args?.lines) || 200, 20000));
+      return logLinesFor(id).slice(-count).map((line) => ({ line })) as LogLine[] as T;
     }
     case "diagnose_port": {
       // 浏览器演示模式：不编造「被某某软件占用」的假结论，

@@ -8,6 +8,7 @@
 //! （同一秒内连续导出两次），自动加序号而不是静默覆盖。
 
 use std::path::{Path, PathBuf};
+use std::io::{Read, Write};
 
 use crate::error::{AppError, Result};
 use crate::paths::Paths;
@@ -78,20 +79,49 @@ pub fn write_log_file(
         None => default_name(service_id),
     };
 
-    // 同名不覆盖：加 -2 / -3 序号
-    let mut target = dir.join(&name);
-    if target.exists() {
-        let stem = name.trim_end_matches(".log").to_string();
-        for i in 2..1000 {
-            target = dir.join(format!("{stem}-{i}.log"));
-            if !target.exists() {
-                break;
-            }
+    // 在同一目录先写完，再原子发布；并发导出也不能覆盖已存在的文件。
+    let mut temp = tempfile::NamedTempFile::new_in(&dir).map_err(|e| AppError::io("创建日志文件", e))?;
+    temp.write_all(content.as_bytes()).map_err(|e| AppError::io("写入日志文件", e))?;
+    temp.as_file().sync_all().map_err(|e| AppError::io("保存日志文件", e))?;
+    let stem = name.trim_end_matches(".log");
+    for i in 1..=999 {
+        let target = dir.join(if i == 1 { name.clone() } else { format!("{stem}-{i}.log") });
+        match temp.persist_noclobber(&target) {
+            Ok(_) => return Ok(target.to_string_lossy().to_string()),
+            Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => temp = e.file,
+            Err(e) => return Err(AppError::io("保存日志文件", e.error)),
         }
     }
+    Err(AppError::new("LOG_NAME_EXHAUSTED", "同名日志导出过多，请使用其他文件名或稍后重试"))
+}
 
-    std::fs::write(&target, content).map_err(|e| AppError::io("写入日志文件", e))?;
-    Ok(target.to_string_lossy().to_string())
+/// 完整日志以开始导出时的文件长度为准。先写临时文件再替换目标，失败保留旧文件。
+/// 即使目标是源文件的硬链接，也只替换该链接，不通过链接截断源文件。
+pub fn copy_log_file(source: &Path, dest: &Path) -> Result<u64> {
+    let source_path = source.canonicalize().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            AppError::new("LOG_EMPTY", "尚未生成日志文件").with_hint("请先启动服务或访问该站点")
+        } else { AppError::io("读取日志路径失败", e) }
+    })?;
+    if dest.canonicalize().is_ok_and(|p| p == source_path) {
+        return Err(AppError::new("SAME_LOG_FILE", "导出位置不能是原日志文件，请另选文件名"));
+    }
+    let source_file = std::fs::File::open(&source_path).map_err(|e| AppError::io("读取日志失败", e))?;
+    let metadata = source_file.metadata().map_err(|e| AppError::io("读取日志属性失败", e))?;
+    if !metadata.is_file() {
+        return Err(AppError::new("BAD_LOG_FILE", "日志路径不是普通文件"));
+    }
+    let parent = dest.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|e| AppError::io("创建导出目录失败", e))?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| AppError::io("创建导出文件失败", e))?;
+    let bytes = std::io::copy(&mut source_file.take(metadata.len()), &mut temp)
+        .map_err(|e| AppError::io("复制日志失败", e))?;
+    if bytes != metadata.len() {
+        return Err(AppError::new("LOG_CHANGED", "导出期间日志已被轮转或清空，请重试"));
+    }
+    temp.as_file().sync_all().map_err(|e| AppError::io("保存日志失败", e))?;
+    temp.persist(dest).map_err(|e| AppError::io("保存日志失败", e.error))?;
+    Ok(bytes)
 }
 
 /// 列出已导出的日志（按时间倒序，供界面显示「最近导出」）
@@ -284,5 +314,60 @@ mod tests {
         assert!(n.ends_with(".log"));
         assert!(!n.contains(' '));
         assert!(n.starts_with("log-"), "{n}");
+    }
+
+    #[test]
+    fn concurrent_exports_never_overwrite_each_other() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().to_owned());
+        let handles: Vec<_> = (0..12).map(|i| {
+            let paths = paths.clone();
+            std::thread::spawn(move || {
+                let text = format!("log {i}");
+                let file = write_log_file(&paths, "nginx", &text, Some("same")).unwrap();
+                (file, text)
+            })
+        }).collect();
+        let files: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        for (path, text) in &files {
+            assert_eq!(&std::fs::read_to_string(path).unwrap(), text);
+        }
+        let unique: std::collections::HashSet<_> = files.iter().map(|(p, _)| p).collect();
+        assert_eq!(unique.len(), 12);
+    }
+
+    #[test]
+    fn exhausted_names_return_error_and_preserve_last_export() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().to_owned());
+        let dir = export_dir(&paths);
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 1..=999 {
+            let name = if i == 1 { "same.log".into() } else { format!("same-{i}.log") };
+            std::fs::write(dir.join(name), "original").unwrap();
+        }
+        assert_eq!(write_log_file(&paths, "nginx", "new", Some("same")).unwrap_err().code, "LOG_NAME_EXHAUSTED");
+        assert_eq!(std::fs::read_to_string(dir.join("same-999.log")).unwrap(), "original");
+        assert_eq!(std::fs::read_dir(dir).unwrap().count(), 999);
+    }
+
+    #[test]
+    fn full_log_export_preserves_source_and_existing_destination_on_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.log");
+        let dest = temp.path().join("copy.log");
+        let text = b"old\r\nnew \xff\n";
+        std::fs::write(&source, text).unwrap();
+        assert_eq!(copy_log_file(&source, &source).unwrap_err().code, "SAME_LOG_FILE");
+        std::fs::hard_link(&source, &dest).unwrap();
+        assert_eq!(copy_log_file(&source, &dest).unwrap(), text.len() as u64);
+        assert_eq!(std::fs::read(&source).unwrap(), text);
+        assert_eq!(std::fs::read(&dest).unwrap(), text);
+        std::fs::write(&dest, "keep").unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), text, "导出后目标不能仍是源文件的硬链接");
+        assert_eq!(copy_log_file(&temp.path().join("missing.log"), &dest).unwrap_err().code, "LOG_EMPTY");
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "keep");
+        assert!(copy_log_file(&source, temp.path()).is_err());
+        assert_eq!(std::fs::read(&source).unwrap(), text);
     }
 }

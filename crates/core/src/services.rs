@@ -128,6 +128,17 @@ impl ServiceManager {
     }
 
     pub fn tail(&self, id: &str, lines: usize) -> Vec<String> {
+        self.tail_checked(id, lines).unwrap_or_default()
+    }
+
+    pub fn log_path(&self, id: &str) -> Result<PathBuf> {
+        self.entry(id).map(|e| e.log_file.clone()).ok_or_else(|| {
+            AppError::new("UNKNOWN_SERVICE", format!("服务 {id} 未注册或已卸载"))
+        })
+    }
+
+    pub fn tail_checked(&self, id: &str, lines: usize) -> Result<Vec<String>> {
+        let lines = lines.clamp(1, 20_000);
         match self.entry(id) {
             Some(e) => {
                 let ring = e.ring.lock();
@@ -145,22 +156,22 @@ impl ServiceManager {
                 // 进程重启后 ring 为空，但日志文件仍保留上次会话内容；
                 // 读取文件最后几行，避免日志页在重启应用后误报「暂无日志」。
                 // ring 有内容时优先使用内存；若文件尾正好包含这段 ring，则返回更完整的文件尾。
-                if lines > live.len() || live.is_empty() {
-                    let persisted = read_log_tail(&e.log_file, lines);
+                {
+                    let persisted = read_log_tail(&e.log_file, lines)?;
                     if !persisted.is_empty() {
                         if live.is_empty() {
-                            return persisted;
+                            return Ok(persisted);
                         }
                         if persisted.len() >= live.len()
                             && persisted[persisted.len() - live.len()..] == live[..]
                         {
-                            return persisted;
+                            return Ok(persisted);
                         }
                     }
                 }
-                live
+                Ok(live)
             }
-            None => Vec::new(),
+            None => Err(AppError::new("UNKNOWN_SERVICE", format!("服务 {id} 未注册或已卸载"))),
         }
     }
 
@@ -480,22 +491,52 @@ fn append_to_log_file(manager: &ServiceManager, service_id: &str, line: &str) {
     }
 }
 
-/// 只保留日志文件尾部，避免把历史日志完整载入内存。
-fn read_log_tail(path: &std::path::Path, lines: usize) -> Vec<String> {
-    if lines == 0 {
-        return Vec::new();
-    }
-    let Ok(file) = std::fs::File::open(path) else {
-        return Vec::new();
+/// 从文件末尾分块读取；文件缺失视为空日志，其余 I/O 错误向上传递。
+pub(crate) fn read_log_tail(path: &std::path::Path, lines: usize) -> Result<Vec<String>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let lines = lines.clamp(1, 20_000);
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(AppError::io("读取日志失败", e)),
     };
-    let mut tail = VecDeque::with_capacity(lines.min(2048));
-    for line in BufReader::new(file).lines().map_while(std::result::Result::ok) {
-        if tail.len() == lines {
-            tail.pop_front();
-        }
-        tail.push_back(line);
+    let metadata = file.metadata().map_err(|e| AppError::io("读取日志属性失败", e))?;
+    if !metadata.is_file() {
+        return Err(AppError::new("BAD_LOG_FILE", "日志路径不是普通文件"));
     }
-    tail.into_iter().collect()
+    let mut position = metadata.len();
+    let mut chunks = Vec::new();
+    let mut bytes = 0;
+    let mut newlines = 0;
+    const MAX_BYTES: usize = 8 * 1024 * 1024;
+    while position > 0 && newlines <= lines && bytes < MAX_BYTES {
+        let size = position.min(64 * 1024).min((MAX_BYTES - bytes) as u64) as usize;
+        position -= size as u64;
+        file.seek(SeekFrom::Start(position)).map_err(|e| AppError::io("定位日志尾部失败", e))?;
+        let mut chunk = vec![0; size];
+        file.read_exact(&mut chunk).map_err(|e| AppError::io("读取日志失败，请重试", e))?;
+        newlines += chunk.iter().filter(|&&b| b == b'\n').count();
+        bytes += size;
+        chunks.push(chunk);
+    }
+    if position > 0 && newlines <= lines {
+        return Err(AppError::new("LOG_TAIL_TOO_LARGE", "日志行过长，本次读取超过 8 MB")
+            .with_hint("请减少设置中的日志行数，或导出完整日志查看"));
+    }
+    let mut content = Vec::with_capacity(bytes);
+    for chunk in chunks.into_iter().rev() {
+        content.extend(chunk);
+    }
+    if position > 0 {
+        if let Some(end) = content.iter().position(|&b| b == b'\n') {
+            content.drain(..=end);
+        }
+    }
+    // 原生日志可能含非 UTF-8 字节；替换坏字节，保留后续诊断行。
+    let decoded = String::from_utf8_lossy(&content);
+    let mut tail = decoded.lines().rev().take(lines).map(str::to_owned).collect::<Vec<_>>();
+    tail.reverse();
+    Ok(tail)
 }
 
 /* ================= 健康检查 ================= */
@@ -755,6 +796,38 @@ pub fn fallback_port_for(store: &Store, key: &str, desired: u16, avoid: &[u16]) 
 #[cfg(test)]
 mod fallback_tests {
     use super::*;
+
+    #[test]
+    fn checked_log_tail_handles_blocks_encoding_and_io_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("native.log");
+        let mut content = vec![b'x'; 130_000];
+        content.extend_from_slice(b"\r\nold\r\ninvalid \xff\r\nlast");
+        std::fs::write(&path, &content).unwrap();
+        let tail = read_log_tail(&path, 3).unwrap();
+        assert_eq!(tail, vec!["old", "invalid �", "last"]);
+        assert!(read_log_tail(&temp.path().join("missing.log"), 10).unwrap().is_empty());
+        assert!(read_log_tail(temp.path(), 10).is_err());
+        let manager = ServiceManager::new();
+        assert_eq!(manager.tail_checked("../outside", 10).unwrap_err().code, "UNKNOWN_SERVICE");
+        manager.register("fixture", "Fixture", None, None, None, temp.path().to_owned());
+        assert!(manager.tail_checked("fixture", 10).is_err());
+        std::fs::write(&path, vec![b'x'; 8 * 1024 * 1024 + 1]).unwrap();
+        assert_eq!(read_log_tail(&path, 1).unwrap_err().code, "LOG_TAIL_TOO_LARGE");
+    }
+
+    #[test]
+    fn checked_log_tail_clamps_requests_and_preserves_empty_lines() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("tail.log");
+        for text in ["a\r\n\r\nb\r\n", "a\n\nb", "a\n\nb\n"] {
+            std::fs::write(&path, text).unwrap();
+            assert_eq!(read_log_tail(&path, 2).unwrap(), vec!["", "b"]);
+            assert_eq!(read_log_tail(&path, 0).unwrap(), vec!["b"]);
+        }
+        std::fs::write(&path, "a\n".repeat(20_100)).unwrap();
+        assert_eq!(read_log_tail(&path, usize::MAX).unwrap().len(), 20_000);
+    }
 
     #[test]
     fn native_log_encoding_does_not_hide_later_lines() {

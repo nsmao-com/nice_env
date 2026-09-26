@@ -280,7 +280,14 @@ fn cmd_logs(
         return ExitCode::from(2);
     };
     let lines: usize = n.and_then(|s| s.parse().ok()).unwrap_or(50);
-    for l in state.tail_logs(id, lines) {
+    let logs = match state.tail_logs_checked(id, lines) {
+        Ok(logs) => logs,
+        Err(e) => {
+            eprintln!("nsbctl: {}", e.message);
+            return ExitCode::FAILURE;
+        }
+    };
+    for l in logs {
         println!("{}", l.line);
     }
     ExitCode::SUCCESS

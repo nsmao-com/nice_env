@@ -1038,12 +1038,14 @@ async fn reissue_site_certs(
 /* ================= 日志 / 诊断 / 统计 ================= */
 
 #[tauri::command]
-fn tail_logs(
+async fn tail_logs(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
     lines: Option<usize>,
-) -> Vec<nsb_core::model::LogLine> {
-    state.tail_logs(&id, lines.unwrap_or(200))
+) -> Result<Vec<nsb_core::model::LogLine>, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.tail_logs_checked(&id, lines.unwrap_or(200))))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
@@ -1260,31 +1262,18 @@ fn write_text_file(path: String, content: String) -> Result<bool, tauri::Error> 
     Ok(true)
 }
 
-/// 导出服务日志到用户指定路径（前端走保存对话框）。
-/// 源 = 该服务的 log 文件（ring 之外还有完整落盘）；不存在时报 LOG_EMPTY。
+/// 导出服务或站点的完整日志到用户指定路径（前端走保存对话框）。
 #[tauri::command]
-fn export_log(
+async fn export_log(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
     dest: String,
 ) -> Result<u64, tauri::Error> {
-    let src = {
-        let status = state.service_status_list().into_iter().find(|s| s.id == id);
-        status
-            .and_then(|s| s.log_file)
-            .map(std::path::PathBuf::from)
-            .filter(|p| p.is_file())
-            .ok_or_else(|| {
-                tauri::Error::Anyhow(anyhow::anyhow!("该服务还没有日志文件（先启动一次）"))
-            })?
-    };
-    let dest_path = std::path::PathBuf::from(&dest);
-    if let Some(parent) = dest_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("创建目标目录失败：{e}")))?;
-    }
-    std::fs::copy(&src, &dest_path)
-        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("复制日志失败：{e}")))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let src = map_jh(st.log_source_path(&id))?;
+        map_jh(nsb_core::logs_export::copy_log_file(&src, std::path::Path::new(&dest)))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /// 最近的服务状态变更（新→旧，最多 200 条）
@@ -3085,18 +3074,19 @@ fn m_setting_key(manager: &str) -> &'static str {
 /// 内容由前端传进来，而不是后端重新读一遍 —— 因为用户看到的是
 /// **过滤后**的视图，导出必须和他看到的一致，否则「我明明搜了 error 导出却是全量」。
 #[tauri::command]
-fn log_export(
+async fn log_export(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     service_id: String,
     content: String,
     suggested_name: Option<String>,
 ) -> Result<String, tauri::Error> {
-    map_jh(nsb_core::logs_export::write_log_file(
-        &state.paths,
-        &service_id,
-        &content,
-        suggested_name.as_deref(),
-    ))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(st.log_source_path(&service_id))?;
+        map_jh(nsb_core::logs_export::write_log_file(
+            &st.paths, &service_id, &content, suggested_name.as_deref(),
+        ))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /* ================= 批量站点操作 ================= */

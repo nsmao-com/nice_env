@@ -5,6 +5,7 @@ import { motion } from "motion/react";
 import { Check, Copy } from "lucide-react";
 import { useUI, useT } from "@/lib/store";
 import { cn } from "@/lib/utils";
+import { copyText } from "@/lib/hooks";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import {
@@ -36,15 +37,13 @@ export function CopyButton({
       onClick={async (e) => {
         e.preventDefault();
         e.stopPropagation();
-        try {
-          await navigator.clipboard.writeText(text);
-        } catch {
-          /* 剪贴板不可用时静默 */
+        if (await copyText(text)) {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1200);
         }
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1200);
       }}
       title={t("common.copyTitle")}
+      aria-label={t("common.copyTitle")}
     >
       {copied ? <Check className="h-3.5 w-3.5 text-running" /> : <Copy className="h-3.5 w-3.5" />}
     </Button>

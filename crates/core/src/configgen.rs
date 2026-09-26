@@ -1242,6 +1242,8 @@ pub fn render_httpd_vhost(
     ServerName {primary}
     ServerAlias {server_names}
     DocumentRoot "{root}"
+    CustomLog "${{NSB_ETC}}/logs/{id}.access.log" "%h %l %u %t \"%r\" %>s %b"
+    ErrorLog "${{NSB_ETC}}/logs/{id}.error.log"
     {ssl_lines}
 
     <FilesMatch "^\.">

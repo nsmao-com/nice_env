@@ -751,54 +751,33 @@ impl CoreState {
     }
 
     pub fn tail_logs(&self, id: &str, lines: usize) -> Vec<model::LogLine> {
-        // 站点日志：id 形如 "site:{siteId}"，读站点专属 access 日志
-        // （站点 conf 现在带 per-site access_log，日志页才能按站点看流量）
+        self.tail_logs_checked(id, lines).unwrap_or_default()
+    }
+
+    /// 只允许已注册服务或真实站点，不能把调用方的任意路径拼入日志目录。
+    pub fn log_source_path(&self, id: &str) -> Result<std::path::PathBuf> {
         if let Some(site_id) = id.strip_prefix("site:") {
-            let f = self
-                .paths
-                .logs()
-                .join("nginx")
-                .join(format!("{site_id}.access.log"));
-            if let Ok(content) = std::fs::read_to_string(&f) {
-                // Lines 不支持 double rev，先收进 Vec 再取末尾 lines 行
-                let all: Vec<&str> = content.lines().collect();
-                let start = all.len().saturating_sub(lines);
-                return all[start..]
-                    .iter()
-                    .map(|l| model::LogLine {
-                        ts: None,
-                        line: l.to_string(),
-                    })
-                    .collect();
+            if site_id.is_empty() || !site_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                return Err(AppError::new("BAD_SITE_ID", "站点标识无效，无法读取日志"));
             }
-            return Vec::new();
+            let site = sites::get(&self.store, site_id)?;
+            let dir = if site.runtime.web_server == "apache" {
+                self.paths.etc().join("apache").join("logs")
+            } else {
+                self.paths.logs().join("nginx")
+            };
+            return Ok(dir.join(format!("{site_id}.access.log")));
         }
-        let from_ring = self.manager.tail(id, lines);
-        let mapped: Vec<model::LogLine> = from_ring
-            .into_iter()
-            .map(|line| model::LogLine { ts: None, line })
-            .collect();
-        if !mapped.is_empty() {
-            return mapped;
-        }
-        // 未运行：从文件读
-        let path = self.paths.service_log(id);
-        if let Ok(content) = std::fs::read_to_string(path) {
-            let all: Vec<&str> = content.lines().collect();
-            return all
-                .into_iter()
-                .rev()
-                .take(lines)
-                .map(|l| model::LogLine {
-                    ts: None,
-                    line: l.to_string(),
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-        }
-        Vec::new()
+        self.manager.log_path(id)
+    }
+
+    pub fn tail_logs_checked(&self, id: &str, lines: usize) -> Result<Vec<model::LogLine>> {
+        let raw = if id.starts_with("site:") {
+            services::read_log_tail(&self.log_source_path(id)?, lines)?
+        } else {
+            self.manager.tail_checked(id, lines)?
+        };
+        Ok(raw.into_iter().map(|line| model::LogLine { ts: None, line }).collect())
     }
 
     /* ---------- 服务栈 ---------- */

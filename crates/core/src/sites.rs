@@ -2443,6 +2443,45 @@ mod scaffold_tests {
     }
 
     #[test]
+    fn site_log_sources_follow_web_server_and_reject_unknown_paths() {
+        let temp = Tmp::new("site-logs");
+        let paths = Paths::new(temp.0.clone());
+        paths.ensure_dirs().unwrap();
+        let store = Store::open(paths.db()).unwrap();
+        let mut site = saved_site(&paths, &store);
+        let state = crate::CoreState {
+            paths, store,
+            manager: Arc::new(ServiceManager::new()),
+            installer: crate::install::Installer::bundled(),
+            downloader: Arc::new(crate::download::Downloader::new()),
+            emit: Arc::new(|_| {}),
+            watchdog: Arc::new(crate::watchdog::Watchdog::new()),
+        };
+        let id = format!("site:{}", site.id);
+        let nginx = state.paths.logs().join("nginx").join(format!("{}.access.log", site.id));
+        assert_eq!(state.log_source_path(&id).unwrap(), nginx);
+        std::fs::create_dir_all(nginx.parent().unwrap()).unwrap();
+        std::fs::write(&nginx, "nginx request\n").unwrap();
+        assert_eq!(state.tail_logs_checked(&id, 5).unwrap()[0].line, "nginx request");
+        site.runtime.web_server = "apache".into();
+        state.store.save_site(&site).unwrap();
+        let apache = state.paths.etc().join("apache/logs").join(format!("{}.access.log", site.id));
+        assert_eq!(state.log_source_path(&id).unwrap(), apache);
+        assert!(state.tail_logs_checked(&id, 5).unwrap().is_empty());
+        std::fs::write(&apache, "apache request\n").unwrap();
+        assert_eq!(state.tail_logs_checked(&id, 5).unwrap()[0].line, "apache request");
+        let conf = configgen::render_httpd_vhost(&site, 8180, 8444, &state.paths.certs(), None);
+        assert!(conf.contains(&format!("CustomLog \"${{NSB_ETC}}/logs/{}.access.log\"", site.id)));
+        assert!(conf.contains(&format!("ErrorLog \"${{NSB_ETC}}/logs/{}.error.log\"", site.id)));
+        assert_eq!(state.log_source_path("site:../escape").unwrap_err().code, "BAD_SITE_ID");
+        assert_eq!(state.log_source_path("site:missing").unwrap_err().code, "SITE_NOT_FOUND");
+        assert_eq!(state.log_source_path("../escape").unwrap_err().code, "UNKNOWN_SERVICE");
+        let service_log = state.paths.logs().join("custom-service.log");
+        state.manager.register("fixture", "Fixture", None, None, None, service_log.clone());
+        assert_eq!(state.log_source_path("fixture").unwrap(), service_log);
+    }
+
+    #[test]
     fn delete_site_preserves_project_alias_certificate_and_retained_hosts() {
         let temp = Tmp::new("delete-site");
         let paths = Paths::new(temp.0.clone());

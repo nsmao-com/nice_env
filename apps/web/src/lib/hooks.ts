@@ -166,33 +166,25 @@ export function useDbUsers(version?: string, enabled = true) {
   return useQuery({ queryKey: ["db-users", version], queryFn: () => api.dbUsers(version), enabled, retry: false });
 }
 
-/* 日志 tail 轮询 */
+/* 日志按来源和行数隔离；暂停仅停止轮询，首次/切换/手动刷新仍可读取。 */
 export function useLogTail(id: string | null, intervalMs = 1500, lines = 500, enabled = true) {
-  const [data, setData] = useState<string[]>([]);
-  const [error, setError] = useState<AppErrorShape | null>(null);
-  useEffect(() => {
-    if (!id || !enabled) return;
-    let alive = true;
-    let timer: ReturnType<typeof setTimeout>;
-    const tick = async () => {
-      try {
-        const got = await api.tailLogs(id, lines);
-        if (alive) {
-          setData(got.map((l) => l.line));
-          setError(null);
-        }
-      } catch (e) {
-        if (alive) setError(normalizeError(e));
-      }
-      if (alive) timer = setTimeout(tick, intervalMs);
-    };
-    tick();
-    return () => {
-      alive = false;
-      clearTimeout(timer);
-    };
-  }, [id, intervalMs, lines, enabled]);
-  return { lines: data, error };
+  const query = useQuery({
+    queryKey: ["log-tail", id, lines],
+    queryFn: async () => (await api.tailLogs(id!, lines)).map((line) => line.line),
+    enabled: !!id,
+    refetchInterval: enabled ? intervalMs : false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: false,
+    gcTime: 0,
+  });
+  return {
+    lines: query.data ?? [],
+    error: query.error ? normalizeError(query.error) : null,
+    loading: !!id && query.isPending,
+    refreshing: query.isFetching,
+    refresh: query.refetch,
+  };
 }
 
 /* 下载进度事件（真实后端事件；浏览器下恒 null）。
@@ -369,8 +361,10 @@ export async function copyText(text: string) {
   try {
     await navigator.clipboard.writeText(text);
     toast.success("已复制");
+    return true;
   } catch {
-    toast.error("复制失败");
+    toast.error("复制失败，请检查剪贴板权限后重试");
+    return false;
   }
 }
 

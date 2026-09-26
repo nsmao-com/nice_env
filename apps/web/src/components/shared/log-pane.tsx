@@ -1,7 +1,6 @@
 "use client";
 
 import * as React from "react";
-import { motion } from "motion/react";
 import {
   AlertTriangle,
   ArrowDown,
@@ -15,12 +14,14 @@ import {
   X,
   Download,
   Loader2,
+  RefreshCw,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useT } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import * as api from "@/lib/api";
-import { toastError } from "@/lib/hooks";
+import { copyText, toastError } from "@/lib/hooks";
+import { isTauri } from "@/lib/backend";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useLogTail } from "@/lib/hooks";
@@ -29,11 +30,10 @@ import {
   LEVEL_STYLE,
   parseLogLine,
   tokenClass,
-  type LogLevel,
   type ParsedLogLine,
 } from "@/lib/log-highlight";
 
-type LevelFilter = "all" | "error" | "warn" | "info";
+type LevelFilter = "all" | "error" | "warn";
 
 /**
  * 日志面板：级别高亮 + 关键字搜索 + 级别过滤 + 自动滚动 + 一键复制。
@@ -57,9 +57,12 @@ export function LogPane({
   const t = useT();
   const paletteVars = useCodePalette();
   const [exporting, setExporting] = React.useState(false);
+  const exportBusy = React.useRef(false);
   const [paused, setPaused] = React.useState(!defaultAutoRefresh);
+  React.useEffect(() => setPaused(!defaultAutoRefresh), [defaultAutoRefresh]);
   const [visibleLines, setVisibleLines] = React.useState(tailLines);
-  const { lines, error } = useLogTail(serviceId, 1500, Math.max(visibleLines, tailLines), !paused);
+  const requestedLines = Math.min(20000, Math.max(1, visibleLines, tailLines));
+  const { lines, error, loading, refreshing, refresh } = useLogTail(serviceId, 1500, requestedLines, !paused);
   const [filter, setFilter] = React.useState<LevelFilter>("all");
   const [query, setQuery] = React.useState("");
   /** 命中关键字时高亮出来；不输入时不做二次渲染 */
@@ -79,7 +82,7 @@ export function LogPane({
     return parsed.filter((p) => {
       const raw = (p as ParsedLogLine & { raw: string }).raw.toLowerCase();
       if (filter === "error" && p.level !== "error") return false;
-      if (filter === "warn" && p.level !== "warn" && p.level !== "error") return false;
+      if (filter === "warn" && p.level !== "warn") return false;
       if (q && !raw.includes(q)) return false;
       return true;
     });
@@ -128,31 +131,28 @@ export function LogPane({
     return parts;
   };
 
-  /**
-   * 导出当前视图。
-   *
-   * 用 `joined` 而不是重新拼 filtered —— joined 就是渲染用的那份原始文本
-   * （无损，高亮只做着色不改内容），导出内容与屏幕上看到的逐字节一致。
-   */
+  /** 导出本次已加载的全部筛选结果，包含超过 3000 行渲染上限的匹配行。 */
   const doExport = async () => {
-    if (!serviceId || filtered.length === 0) return;
+    if (!serviceId || filtered.length === 0 || exportBusy.current) return;
+    exportBusy.current = true;
     setExporting(true);
     try {
       const text = joined.endsWith("\n") ? joined : joined + "\n";
       const path = await api.logExport(serviceId, text);
-      toast.success(t("log.exported"), { description: path });
+      toast.success(t(isTauri ? "log.exported" : "log.downloadStarted"), { description: path });
     } catch (e) {
       toastError(e);
     } finally {
       setExporting(false);
+      exportBusy.current = false;
     }
   };
 
   return (
-    <div className={cn("flex flex-col gap-2", className)}>
+    <div className={cn("flex min-w-0 flex-col gap-2", className)}>
       {/* 工具条：级别过滤 + 搜索 + 操作 */}
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-1">
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-wrap items-center gap-1">
           <FilterButton active={filter === "all"} onClick={() => setFilter("all")} label={t("log.allLevels")} count={counts.total} />
           <FilterButton
             active={filter === "error"}
@@ -170,29 +170,37 @@ export function LogPane({
             tone="warn"
           />
         </div>
-        <div className="flex items-center gap-1">
-          <div className="relative">
+        <div className="flex min-w-0 flex-wrap items-center gap-1">
+          <div className="relative min-w-0 basis-full sm:flex-1 sm:basis-44">
             <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-faint" />
             <Input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder={t("log.searchPlaceholder")}
-              className="h-7 w-44 pl-7 pr-6 text-[11.5px]"
+              aria-label={t("log.searchPlaceholder")}
+              className="h-8 w-full pl-7 pr-7 text-[11.5px]"
             />
             {query && (
               <button
                 type="button"
                 onClick={() => setQuery("")}
+                aria-label={t("log.clearSearch")}
                 className="absolute right-1.5 top-1/2 -translate-y-1/2 text-faint hover:text-secondary"
               >
                 <X className="h-3 w-3" />
               </button>
             )}
           </div>
+          <Button size="icon-sm" variant="ghost" title={t("log.refresh")} aria-label={t("log.refresh")}
+            disabled={!serviceId || refreshing} onClick={() => void refresh()}>
+            <RefreshCw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
+          </Button>
           <Button
             size="icon-sm"
             variant="ghost"
             title={paused ? t("log.resume") : t("log.pause")}
+            aria-label={paused ? t("log.resume") : t("log.pause")}
+            aria-pressed={paused}
             className={cn(paused && "text-warn")}
             onClick={() => setPaused((v) => !v)}
           >
@@ -202,6 +210,8 @@ export function LogPane({
             size="icon-sm"
             variant="ghost"
             title={t("log.autoScroll")}
+            aria-label={t("log.autoScroll")}
+            aria-pressed={autoScroll}
             className={cn(autoScroll && "text-primary")}
             onClick={() => setAutoScroll((v) => !v)}
           >
@@ -211,6 +221,8 @@ export function LogPane({
             size="icon-sm"
             variant="ghost"
             title={t("log.wrap")}
+            aria-label={t("log.wrap")}
+            aria-pressed={wrap}
             className={cn(wrap && "text-primary")}
             onClick={() => setWrap((v) => !v)}
           >
@@ -220,6 +232,8 @@ export function LogPane({
             size="icon-sm"
             variant="ghost"
             title={t("code.lineNumbers")}
+            aria-label={t("code.lineNumbers")}
+            aria-pressed={showLineNumbers}
             className={cn(showLineNumbers && "text-primary")}
             onClick={() => setShowLineNumbers((v) => !v)}
           >
@@ -229,7 +243,9 @@ export function LogPane({
             size="icon-sm"
             variant="ghost"
             title={t("log.copyAll")}
-            onClick={() => navigator.clipboard.writeText(joined)}
+            aria-label={t("log.copyAll")}
+            disabled={!joined}
+            onClick={() => void copyText(joined)}
           >
             <Copy className="h-3.5 w-3.5" />
           </Button>
@@ -239,7 +255,8 @@ export function LogPane({
             size="icon-sm"
             variant="ghost"
             title={t("log.export")}
-            disabled={filtered.length === 0}
+            aria-label={t("log.export")}
+            disabled={filtered.length === 0 || exporting}
             onClick={() => void doExport()}
           >
             {exporting ? (
@@ -252,37 +269,46 @@ export function LogPane({
       </div>
 
       {/* 统计条：过滤结果数 / 暂停提示 */}
-      <div className="flex items-center gap-2 text-[10.5px] text-faint">
+      <div className="flex flex-wrap items-center gap-2 break-all text-[10.5px] text-faint">
         <ScrollText className="h-3 w-3" />
         <span>
           {filtered.length}
           {filtered.length !== parsed.length ? ` / ${parsed.length}` : ""} {t("log.lineCount")}
         </span>
-        {paused && <span className="text-warn">· {t("log.pausedHint")}</span>}
+        <span className={cn(paused && "text-warn")}>· {t(paused ? "log.pausedHint" : "logs.autoRefresh")}</span>
         {query && <span className="text-primary/80">· “{query}”</span>}
       </div>
 
-      <motion.div
+      {error && (
+        <div role="alert" className="flex flex-wrap items-center gap-2 rounded-lg border border-error/20 bg-error/5 p-2 text-xs text-error">
+          <div className="min-w-0 flex-1 break-words">
+            {t("log.readFailed")}{error.message}
+            {error.hint && <p className="mt-1 text-muted">{error.hint}</p>}
+            {lines.length > 0 && <p className="mt-1 text-muted">{t("log.staleHint")}</p>}
+          </div>
+          <Button size="sm" variant="ghost" disabled={refreshing} onClick={() => void refresh()}>{t("log.refresh")}</Button>
+        </div>
+      )}
+
+      <div
         ref={boxRef}
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
+        role="region"
+        aria-label={t("logs.title")}
+        aria-busy={refreshing}
+        tabIndex={0}
         onScroll={(e) => {
           // 用户手动往回滚 → 停掉自动滚动，避免「看不到自己在读什么」
           const el = e.currentTarget;
           const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
           if (!atBottom && autoScroll) setAutoScroll(false);
         }}
-        className="nsb-code overflow-auto rounded-xl border border-border p-3 font-mono leading-relaxed [contain:content]"
+        className="nsb-code min-w-0 shrink-0 overflow-auto rounded-xl border border-border p-3 font-mono leading-relaxed [contain:content]"
         style={{ ...paletteVars, height, fontSize: "var(--code-font-size)" }}
       >
-        {error ? (
-          <p className="text-[color:var(--code-error)]">
-            {t("log.readFailed")}
-            {error.message}
-            {error.hint && <span className="block text-[color:var(--code-muted)]">{error.hint}</span>}
-          </p>
+        {loading ? (
+          <p role="status" className="text-[color:var(--code-muted)]">{t("common.loading")}</p>
         ) : filtered.length === 0 ? (
-          <p className="text-[color:var(--code-muted)]">{lines.length > 0 ? t("log.noMatch") : emptyHint}</p>
+          <p className="text-[color:var(--code-muted)]">{error ? t("log.retryHint") : lines.length > 0 ? t("log.noMatch") : emptyHint ?? t("log.empty")}</p>
         ) : (
           <>
             {filtered.length > 3000 && (
@@ -325,20 +351,22 @@ export function LogPane({
             })}
           </>
         )}
-      </motion.div>
+      </div>
 
       {/* 加载更多 */}
-      <div className="flex items-center justify-between text-[10.5px] text-faint">
-        <span>{t("log.tailHint")} {visibleLines}</span>
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[10.5px] text-faint">
+        <span>{t("log.tailHint")} {requestedLines}</span>
         <Button
           size="sm"
           variant="ghost"
           className="h-6 text-[10.5px]"
-          onClick={() => setVisibleLines((v) => Math.min(v + 1000, 20000))}
+          disabled={refreshing || requestedLines >= 20000 || !serviceId}
+          onClick={() => setVisibleLines(Math.min(requestedLines + 1000, 20000))}
         >
           {t("log.loadMore")}
         </Button>
       </div>
+      <p className="text-[10.5px] text-faint">{t("log.exportScope")}</p>
     </div>
   );
 }
@@ -369,6 +397,7 @@ function FilterButton({
         tone === "warn" && active && "text-warn"
       )}
       onClick={onClick}
+      aria-pressed={active}
     >
       {icon}
       {label}

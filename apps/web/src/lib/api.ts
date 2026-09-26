@@ -455,6 +455,8 @@ export const pathenvSetEnabled = (enabled: boolean) =>
   safe(invoke<PathEnvStatus>("pathenv_set_enabled", { enabled }));
 export const pathenvSetSelected = (ids: string[]) =>
   safe(invoke<PathEnvStatus>("pathenv_set_selected", { ids }));
+export const pathenvSetVersion = (id: string, version: string, selected: boolean) =>
+  safe(invoke<PathEnvStatus>("pathenv_set_version", { id, version, selected }));
 export const pathenvReapply = () => safe(invoke<PathEnvStatus>("pathenv_reapply"));
 
 /* 设置 */

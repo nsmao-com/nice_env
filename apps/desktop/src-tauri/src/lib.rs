@@ -108,6 +108,7 @@ pub fn run() {
             pathenv_status,
             pathenv_set_enabled,
             pathenv_set_selected,
+            pathenv_set_version,
             pathenv_reapply,
             version_catalog,
             version_catalogs,
@@ -452,6 +453,16 @@ fn pathenv_reapply(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<nsb_core::model::PathEnvStatus, tauri::Error> {
     map_jh(state.pathenv_reapply())
+}
+
+#[tauri::command]
+fn pathenv_set_version(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    id: String,
+    version: String,
+    selected: bool,
+) -> Result<nsb_core::model::PathEnvStatus, tauri::Error> {
+    map_jh(state.pathenv_set_version(&id, &version, selected))
 }
 
 /// 某包的完整版本目录（远程枚举 + 缓存）；force=true 忽略缓存
@@ -839,15 +850,14 @@ fn certauto_set_enabled(
 }
 
 #[tauri::command]
-fn certauto_issue(
+async fn certauto_issue(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
-) -> Result<bool, tauri::Error> {
+) -> Result<nsb_core::model::CertAutomation, tauri::Error> {
     let st = state.inner().clone();
-    std::thread::spawn(move || {
-        let _ = nsb_core::certauto::run_once(&st, &id);
-    });
-    Ok(true)
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::certauto::run_once(&st, &id)))
+        .await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
@@ -1485,13 +1495,13 @@ async fn db_root_password(
 #[tauri::command]
 fn proxy_status(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
-) -> nsb_core::model::serde_proxy::ProxyStatusInfo {
+) -> Result<nsb_core::model::serde_proxy::ProxyStatusInfo, tauri::Error> {
     let running = state
         .manager
         .snapshot("mihomo")
         .map(|s| s.state == nsb_core::model::ServiceState::Running)
         .unwrap_or(false);
-    let sys = nsb_core::proxy::system_proxy_state();
+    let sys = map_jh(platform::get_system_proxy().map_err(AppError::from))?;
     let mode = state
         .store
         .get_setting("proxyMode")
@@ -1501,14 +1511,14 @@ fn proxy_status(
     } else {
         None
     };
-    nsb_core::model::serde_proxy::ProxyStatusInfo {
+    Ok(nsb_core::model::serde_proxy::ProxyStatusInfo {
         running,
         mixed_port: nsb_core::configgen::MIHOMO_MIXED_PORT,
         controller_port: nsb_core::configgen::MIHOMO_CONTROLLER_PORT,
         mode,
         system_proxy_enabled: sys.enabled,
         version,
-    }
+    })
 }
 
 #[tauri::command]
@@ -1526,10 +1536,11 @@ async fn proxy_stop(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<bool, tauri::Error> {
     let st = state.inner().clone();
-    let sys = nsb_core::proxy::system_proxy_state();
+    let sys = map_jh(platform::get_system_proxy().map_err(AppError::from))?;
     tauri::async_runtime::spawn_blocking(move || {
         if sys.enabled {
-            let _ = nsb_core::proxy::system_proxy_off();
+            // 先恢复系统代理，再停内核；否则失败时会把系统留在一个不可用的代理地址上。
+            map_jh(nsb_core::proxy::system_proxy_off())?;
         }
         map_jh(st.stop_service("mihomo").map(|_| true))
     })
@@ -1538,7 +1549,24 @@ async fn proxy_stop(
 }
 
 #[tauri::command]
-fn proxy_set_system(enabled: bool) -> Result<bool, tauri::Error> {
+fn proxy_set_system(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    enabled: bool,
+) -> Result<bool, tauri::Error> {
+    if enabled {
+        let running = state
+            .manager
+            .snapshot("mihomo")
+            .map(|s| s.state == nsb_core::model::ServiceState::Running)
+            .unwrap_or(false);
+        if !running {
+            return map_jh(Err(nsb_core::error::AppError::new(
+                "PROXY_NOT_RUNNING",
+                "mihomo 尚未运行，不能开启系统代理",
+            )
+            .with_hint("先启动 mihomo，再开启系统代理")));
+        }
+    }
     let r = if enabled {
         nsb_core::proxy::system_proxy_on()
     } else {
@@ -1552,13 +1580,19 @@ fn proxy_set_mode(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     mode: String,
 ) -> Result<bool, tauri::Error> {
-    let rt = nsb_core::proxy::ProxyRuntime::new();
-    let client = reqwest::blocking::Client::new();
-    let _ = client
-        .patch(format!("{}/configs", rt.base_url))
-        .body(format!("{{\"mode\":\"{mode}\"}}"))
-        .header("Content-Type", "application/json")
-        .send();
+    let running = state
+        .manager
+        .snapshot("mihomo")
+        .map(|s| s.state == nsb_core::model::ServiceState::Running)
+        .unwrap_or(false);
+    if running {
+        map_jh(nsb_core::proxy::ProxyRuntime::new().set_mode(&mode))?;
+    } else if !matches!(mode.as_str(), "rule" | "global" | "direct") {
+        return map_jh(Err(nsb_core::error::AppError::new(
+            "BAD_PROXY_MODE",
+            "代理模式无效",
+        )));
+    }
     map_jh(state.store.set_setting("proxyMode", &mode).map(|_| true))
 }
 
@@ -1605,25 +1639,29 @@ async fn proxy_import(
 }
 
 #[tauri::command]
-fn proxy_activate_profile(
+async fn proxy_activate_profile(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<bool, tauri::Error> {
-    let running = state
-        .manager
-        .snapshot("mihomo")
-        .map(|s| s.state == nsb_core::model::ServiceState::Running)
-        .unwrap_or(false);
-    map_jh(nsb_core::proxy::activate_profile(
-        &state.paths,
-        &state.store,
-        &id,
-    ))?;
-    if running {
-        let _ = state.stop_service("mihomo");
-        let _ = state.start_service("mihomo");
-    }
-    Ok(true)
+    let st = state.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let running = st
+            .manager
+            .snapshot("mihomo")
+            .map(|s| s.state == nsb_core::model::ServiceState::Running)
+            .unwrap_or(false);
+        nsb_core::proxy::activate_profile(&st.paths, &st.store, &id)?;
+        if running {
+            st.stop_service("mihomo")
+                .map_err(|e| e.with_hint("订阅已切换，但 mihomo 停止失败；请查看日志后重试"))?;
+            st.start_service("mihomo")
+                .map_err(|e| e.with_hint("订阅已切换，但 mihomo 重启失败；请查看日志后重试"))?;
+        }
+        Ok(true)
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?;
+    map_jh(result)
 }
 
 #[tauri::command]
@@ -1676,11 +1714,14 @@ fn cron_set_enabled(
 }
 
 #[tauri::command]
-fn cron_run_now(
+async fn cron_run_now(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<nsb_core::cron::CronJob, tauri::Error> {
-    map_jh(state.cron_run_now(&id))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.cron_run_now(&id)))
+        .await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
@@ -1773,23 +1814,26 @@ async fn proxy_update_profile(
     id: String,
 ) -> Result<bool, tauri::Error> {
     let st = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        map_jh(tauri::async_runtime::block_on(async {
+    let result = tauri::async_runtime::spawn_blocking(move || -> nsb_core::error::Result<bool> {
+        let active = tauri::async_runtime::block_on(async {
             nsb_core::proxy::update_profile(&st.paths, &st.store, &id).await
-        }))?;
+        })?;
         let running = st
             .manager
             .snapshot("mihomo")
             .map(|s| s.state == nsb_core::model::ServiceState::Running)
             .unwrap_or(false);
-        if running {
-            let _ = st.stop_service("mihomo");
-            let _ = st.start_service("mihomo");
+        if active && running {
+            st.stop_service("mihomo")
+                .map_err(|e| e.with_hint("订阅已更新，但 mihomo 停止失败；请查看日志后重试"))?;
+            st.start_service("mihomo")
+                .map_err(|e| e.with_hint("订阅已更新，但 mihomo 重启失败；请查看日志后重试"))?;
         }
         Ok(true)
     })
     .await
-    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?;
+    map_jh(result)
 }
 
 #[tauri::command]

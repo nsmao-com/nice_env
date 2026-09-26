@@ -392,7 +392,7 @@ pub struct PathEnvStatus {
     pub drift: bool,
 }
 
-/// 单个已安装包在 PATH 注入里的呈现
+/// 单个已安装版本在 PATH 注入里的呈现，使用 id + version 标识。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PathEnvEntry {

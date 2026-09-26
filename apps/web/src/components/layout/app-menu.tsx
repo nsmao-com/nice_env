@@ -20,7 +20,7 @@ import {
 import { useUI, useT } from "@/lib/store";
 import { useServices, toastError } from "@/lib/hooks";
 import * as api from "@/lib/api";
-import { isTauri, listen } from "@/lib/backend";
+import { isTauri, listen, normalizeError } from "@/lib/backend";
 import { cn } from "@/lib/utils";
 import { ConfirmDialog } from "@/components/shared/misc";
 import { UpdateDialog } from "@/components/shared/update-dialog";
@@ -79,7 +79,7 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
   const { isMac, minimize, close } = useDesktopWindow();
   const [aboutOpen, setAboutOpen] = React.useState(false);
   const [checking, setChecking] = React.useState(false);
-  const [version, setVersion] = React.useState("0.2.9");
+  const [version, setVersion] = React.useState("0.2.10");
   const [updateOpen, setUpdateOpen] = React.useState(false);
   const [confirm, setConfirm] = React.useState<null | "stopAll" | "quit">(null);
   const [busy, setBusy] = React.useState(false);
@@ -109,14 +109,22 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
         return order(a.id) - order(b.id);
       })
       .map((s) => s.id);
+    if (ids.length === 0) {
+      toast.info(t("dashboard.noStackServices"));
+      return;
+    }
     toast.promise(
       (async () => {
+        const failures: string[] = [];
         for (const id of ids) {
           try {
             await api.startService(id);
-          } catch {
-            /* 未安装的跳过 */
+          } catch (error) {
+            failures.push(id + ": " + normalizeError(error).message);
           }
+        }
+        if (failures.length > 0) {
+          throw new Error(failures.join("；"));
         }
       })(),
       { loading: t("dashboard.startingStack"), success: t("dashboard.stackStarted"), error: t("cmd.startFail") }
@@ -127,12 +135,21 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
   const doStopAll = async () => {
     setBusy(true);
     try {
+      const failures: string[] = [];
       for (const s of services) {
         if (s.state === "running" || s.state === "starting") {
-          await api.stopService(s.id).catch(() => undefined);
+          try {
+            await api.stopService(s.id);
+          } catch (error) {
+            failures.push(s.label + ": " + normalizeError(error).message);
+          }
         }
       }
-      toast.success(t("dashboard.allStopped"));
+      if (failures.length > 0) {
+        toast.error(t("dashboard.stopFailed"), { description: failures.join("；") });
+      } else {
+        toast.success(t("dashboard.allStopped"));
+      }
       setConfirm(null);
     } finally {
       setBusy(false);

@@ -292,7 +292,7 @@ impl CoreState {
         })
     }
 
-    /// 切换「使用中版本」；顺带把 PATH 里的对应目录指到新版本
+    /// 切换「使用中版本」并同步 PATH；已单独选择的 PATH 版本保持不变
     pub fn set_active_version(&self, id: &str, version: &str) -> Result<()> {
         let _operation = self.manager.lifecycle.lock();
         if ops::installed_by_choice(&self.store, id).is_some_and(|p| p.version != version)
@@ -405,6 +405,23 @@ impl CoreState {
     pub fn pathenv_set_selected(&self, ids: Vec<String>) -> Result<model::PathEnvStatus> {
         let _operation = self.manager.lifecycle.lock();
         pathenv::set_selected(&self.store, &self.paths, &self.installer.manifest, &ids)
+    }
+
+    pub fn pathenv_set_version(
+        &self,
+        id: &str,
+        version: &str,
+        selected: bool,
+    ) -> Result<model::PathEnvStatus> {
+        let _operation = self.manager.lifecycle.lock();
+        pathenv::set_version(
+            &self.store,
+            &self.paths,
+            &self.installer.manifest,
+            id,
+            version,
+            selected,
+        )
     }
 
     /// 强制重新应用（修漂移：用户手动改过 PATH 或换了版本）

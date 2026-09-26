@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useIsMutating } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "motion/react";
 import { Check, ChevronDown, Download, Loader2, Pin, Power, RefreshCw, Trash2, WifiOff } from "lucide-react";
 import type { RemoteVersion } from "@nsb/schema";
@@ -9,6 +10,7 @@ import { useT } from "@/lib/store";
 import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
+import { PathEnvToggle } from "@/components/shared/path-env-toggle";
 
 /** 下拉里的一项：清单内置版本与远程版本合并后的统一视图 */
 export interface VersionItem {
@@ -76,6 +78,7 @@ function summarise(items: VersionItem[], countLabel: string) {
 
 export function VersionPicker({ group, items, catalog, disabled = false, statusKnown = true, onRefresh, onPick, onSetActive, onUninstall }: Props) {
   const t = useT();
+  const pathBusy = useIsMutating({ mutationKey: ["pathenv-change"] }) > 0;
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const [busy, setBusy] = React.useState<string | null>(null);
@@ -111,7 +114,7 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
   }, [filtered, t]);
 
   const pick = async (item: VersionItem, action: "pick" | "active" = "pick") => {
-    if (busyRef.current || disabled || item.installing) return;
+    if (busyRef.current || pathBusy || disabled || item.installing) return;
     if (item.incompatible && !item.installed) {
       return; // UI 已明确标注；真正拦截在后端（PLATFORM_UNSUPPORTED）
     }
@@ -135,7 +138,7 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
   const showRefreshHint = !!catalog?.error;
 
   return (
-    <Popover open={open} onOpenChange={(next) => { if (!busyRef.current) setOpen(next); }}>
+    <Popover open={open} onOpenChange={(next) => { if (!busyRef.current && !pathBusy) setOpen(next); }}>
       <PopoverTrigger asChild>
         <button
           ref={triggerRef}
@@ -239,7 +242,7 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
                   >
                     <button
                       onClick={() => pick(item)}
-                      disabled={disabled || busy !== null || item.installing || item.transitioning || (!!item.incompatible && !item.installed)
+                      disabled={disabled || pathBusy || busy !== null || item.installing || item.transitioning || (!!item.incompatible && !item.installed)
                         || (!group.isService && item.installed && item.active)}
                       title={item.incompatible && !item.installed ? t("versions.incompatible") : undefined}
                       className={cn(
@@ -315,7 +318,7 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
                     {item.installed && (
                       <button
                         aria-label={`${t("packages.uninstall")} ${item.version}`}
-                        disabled={disabled || busy !== null || item.installing}
+                        disabled={disabled || pathBusy || busy !== null || item.installing}
                         onClick={(e) => {
                           e.stopPropagation();
                           uninstallHandoff.current = true;
@@ -327,18 +330,19 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
                     )}
-                    {item.installed && group.multiInstance && (
-                      <div className="w-full px-2.5 pb-1.5">
-                        <button
+                    {item.installed && (
+                      <div className="flex w-full flex-wrap items-center gap-1.5 px-2.5 pb-2">
+                        <PathEnvToggle pkgId={group.id} version={item.version} disabled={disabled || busy !== null || !!item.installing} />
+                        {group.multiInstance && <button
                           type="button"
                           aria-label={`${t("versions.setDefault")} ${group.displayName} ${item.version}`}
-                          disabled={disabled || busy !== null || item.installing || item.active}
+                          disabled={disabled || pathBusy || busy !== null || item.installing || item.active}
                           onClick={() => void pick(item, "active")}
                           className="inline-flex min-h-7 items-center gap-1.5 rounded-md px-2 text-[11px] text-muted transition-colors hover:bg-fill hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary disabled:opacity-50"
                         >
                           {item.active ? <Check className="h-3 w-3" /> : <Pin className="h-3 w-3" />}
                           {t(item.active ? "versions.default" : "versions.setDefault")}
-                        </button>
+                        </button>}
                       </div>
                     )}
                   </motion.div>
@@ -355,8 +359,8 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
             <button type="button" disabled={disabled || busy !== null || items.find((i) => i.version === failure.item.version)?.installing} onClick={() => void pick(failure.item, failure.action)} className="mt-1.5 rounded-md border border-error/30 px-2 py-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">{t("bulk.retry")}</button>
           </div>
         )}
-        {group.multiInstance && installedCount > 0 && (
-          <p className="shrink-0 px-2.5 pb-2 text-[10px] leading-relaxed text-muted">{t("versions.defaultHint")}</p>
+        {installedCount > 0 && (
+          <p className="shrink-0 px-2.5 pb-2 text-[10px] leading-relaxed text-muted">{t("tools.pathEnvOnlyActive")}{group.multiInstance ? ` ${t("versions.defaultHint")}` : ""}</p>
         )}
 
         {/* 底部：数据来源 */}

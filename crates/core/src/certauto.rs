@@ -171,8 +171,13 @@ fn deploy_local(
         .iter()
         .any(|s| s.https && s.domains.iter().any(|d| d == &primary));
     if hit {
-        // 重载失败不回滚证书本身：文件已换新，下次重启/重载自然生效
-        let _ = crate::ops::rebuild_and_reload(&state.store, &state.paths, &state.manager);
+        // 证书文件已经落盘，但服务没有真正加载新证书时必须让调用方知道，
+        // 不能继续显示“本地部署完成”或把自动化记成成功。
+        crate::ops::rebuild_and_reload(&state.store, &state.paths, &state.manager).map_err(|e| {
+            AppError::new("CERT_RELOAD_FAILED", "证书已写入，但 HTTPS 服务重载失败")
+                .with_hint("检查服务日志和配置后手动重启 Web 服务；证书文件仍保留")
+                .with_detail(e.to_string())
+        })?;
     }
     Ok(record)
 }
@@ -347,6 +352,13 @@ pub fn run_once(state: &CoreState, id: &str) -> Result<CertAutomation> {
         .store
         .get_cert_automation(id)?
         .ok_or_else(|| AppError::new("NOT_FOUND", "自动化不存在"))?;
+    if a.state == "issuing" {
+        return Err(AppError::new(
+            "CERT_AUTO_BUSY",
+            "该证书自动化正在签发，请等待当前任务结束",
+        )
+        .with_hint("可在自动化记录中查看进度；完成或失败后再重试"));
+    }
     let mut log: Vec<String> = Vec::new();
     a.state = "issuing".into();
     a.last_error = String::new();

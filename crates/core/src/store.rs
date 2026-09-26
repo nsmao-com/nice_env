@@ -361,6 +361,22 @@ impl Store {
 
     pub fn delete_proxy_profile(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock();
+        let active: Option<i32> = conn
+            .query_row(
+                "SELECT active FROM proxy_profiles WHERE id=?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if active.is_none() {
+            return Err(AppError::new("PROFILE_NOT_FOUND", "代理订阅不存在"));
+        }
+        if active == Some(1) {
+            return Err(AppError::new(
+                "PROFILE_ACTIVE",
+                "当前订阅正在使用，请先切换到其它订阅",
+            ));
+        }
         conn.execute("DELETE FROM proxy_profiles WHERE id=?1", params![id])?;
         Ok(())
     }

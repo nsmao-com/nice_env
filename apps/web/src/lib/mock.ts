@@ -59,7 +59,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.9";
+const MOCK_APP_VERSION = "0.2.10";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -174,9 +174,10 @@ const sites = new Map<string, Site>();
 const packages = new Map<string, PackageView>();
 
 /** 环境变量注入的 mock 状态（浏览器里不碰真实 PATH） */
-const mockPathEnv: { enabled: boolean; selected: string[] | null } = {
+const mockPathEnv: { enabled: boolean; selected: string[] | null; versions: Record<string, string> } = {
   enabled: false,
   selected: null,
+  versions: {},
 };
 
 const certs = new Map<string, CertRecord>();
@@ -814,6 +815,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "pathenv_status":
     case "pathenv_set_enabled":
     case "pathenv_set_selected":
+    case "pathenv_set_version":
     case "pathenv_reapply": {
       // 浏览器 mock：用已装包派生一份状态，不碰真实 PATH
       if (cmd === "pathenv_set_enabled" && args && typeof args.enabled === "boolean") {
@@ -822,18 +824,30 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (cmd === "pathenv_set_selected" && args && Array.isArray(args.ids)) {
         mockPathEnv.selected = args.ids as string[];
       }
-      const installed = Array.from(packages.values()).filter((p) => p.install && p.active);
-      const seen = new Set<string>();
+      const installed = Array.from(packages.values()).filter((p) => p.install && p.entry && !/\.(phar|php|jar|txt|json|toml|yaml|yml|md|ini)$/i.test(p.entry));
+      const pathVersion = (id: string) => mockPathEnv.versions[id]
+        ?? installed.find((p) => p.id === id && p.active)?.version
+        ?? installed.find((p) => p.id === id)?.version;
+      if (cmd === "pathenv_set_version") {
+        const { id, version, selected } = args as { id: string; version: string; selected: boolean };
+        if (!installed.some((p) => p.id === id && p.version === version)) {
+          throw { code: "PATH_VERSION_UNAVAILABLE", message: "该版本尚未安装，或没有可加入环境变量的命令" };
+        }
+        if (selected || pathVersion(id) === version) {
+          const ids = mockPathEnv.enabled ? (mockPathEnv.selected ?? [...new Set(installed.map((p) => p.id))]) : [];
+          mockPathEnv.selected = ids.filter((value) => value !== id);
+          if (selected) {
+            mockPathEnv.versions[id] = version;
+            mockPathEnv.selected.push(id);
+            mockPathEnv.enabled = true;
+          }
+        }
+      }
       const entries = installed
-        .filter((p) => {
-          if (seen.has(p.id)) return false;
-          seen.add(p.id);
-          return true;
-        })
         .map((p) => {
           const binDir = `…/runtimes/${p.id}/${p.version}`;
           const selected =
-            mockPathEnv.selected === null || mockPathEnv.selected.includes(p.id);
+            (mockPathEnv.selected === null || mockPathEnv.selected.includes(p.id)) && pathVersion(p.id) === p.version;
           return {
             id: p.id,
             label: p.displayName,
@@ -1748,6 +1762,9 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return true as T;
     }
     case "proxy_set_system": {
+      if (args!.enabled && !proxyRunning) {
+        throw { code: "PROXY_NOT_RUNNING", message: "mihomo 尚未运行，不能开启系统代理" };
+      }
       systemProxyOn = args!.enabled as boolean;
       return true as T;
     }

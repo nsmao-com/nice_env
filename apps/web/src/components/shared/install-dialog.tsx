@@ -301,7 +301,7 @@ export function InstallDialog({
                 {/* 装完顺手把命令加进环境变量：就地一步，不再跑去找入口 */}
                 {target && (
                   <div className="ml-auto shrink-0">
-                    <PathEnvToggle pkgId={target.id} />
+                    <PathEnvToggle pkgId={target.id} version={target.version} />
                   </div>
                 )}
               </motion.div>

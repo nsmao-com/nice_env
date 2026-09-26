@@ -5,8 +5,8 @@
 //! 1. **只碰我们自己写进去的目录**。改动前先把上次写入的目录列表读出来
 //!    （`pathEnvDirs` 设置项），合并时精确移除这些条目，其余 PATH 原样保留。
 //!    绝不按「看起来像我们的路径」去猜着删——用户手写的路径必须毫发无伤。
-//! 2. **多版本只放一个**。同一 id 装了多个版本时，只把「使用中版本」的 bin 放进去
-//!    （复用 `ops::installed_by_choice`），否则 `php` 指向哪个版本全凭 PATH 顺序，不可控。
+//! 2. **多版本只放一个**。PATH 版本独立保存，不改变默认版本、服务进程或站点绑定。
+//!    旧设置尚未指定 PATH 版本时，沿用原有默认版本。
 //! 3. **纯函数负责合并**（`merge_win_path` / 平台层的 `merge_profile_content`），
 //!    写盘只在 platform 层发生，便于测试与审查。
 //! 4. Windows 写 HKCU（用户级，无需管理员），写完广播变更让新终端立刻生效；
@@ -23,6 +23,17 @@ const ENABLED_KEY: &str = "pathEnvEnabled";
 const DIRS_KEY: &str = "pathEnvDirs";
 /// 用户勾选要注入的包 id 列表，JSON 数组；缺省表示「全部」
 const SELECTED_KEY: &str = "pathEnvSelected";
+/// 每个套件单独选择的 PATH 版本；与 activeVersion 设置独立。
+const VERSIONS_KEY: &str = "pathEnvVersions";
+
+fn chosen_version(store: &Store, id: &str) -> Option<crate::model::InstalledPackage> {
+    let versions = store.get_setting_or::<std::collections::BTreeMap<String, String>>(VERSIONS_KEY);
+    match versions.get(id) {
+        // 已选版本卸载后不擅自换成其它版本，sync 会清除原有托管路径。
+        Some(version) => store.find_installed(id, Some(version)),
+        None => crate::ops::installed_by_choice(store, id),
+    }
+}
 
 /* ================= bin 目录推导 ================= */
 
@@ -140,7 +151,7 @@ fn wants(sel: &Option<Vec<String>>, id: &str) -> bool {
 
 /// 计算当前「应该」注入的目录集合（不受总开关影响，供 UI 预览与实际写入共用）。
 ///
-/// 多版本包只取使用中版本：同一 id 装了两个版本时，如果不做选择，
+/// 多版本包只取独立选择的 PATH 版本：同一 id 装了两个版本时，如果不做选择，
 /// `php` 最终指向哪个版本取决于 PATH 顺序，行为不可预测。
 pub fn desired_dirs(store: &Store, manifest: &Manifest) -> Vec<String> {
     let installer = crate::install::Installer {
@@ -149,7 +160,7 @@ pub fn desired_dirs(store: &Store, manifest: &Manifest) -> Vec<String> {
     let installed = store.list_installed().unwrap_or_default();
     let sel = selected_ids(store);
 
-    // 按 id 归并，只保留使用中版本
+    // 按 id 归并，每个套件只保留一个 PATH 版本。
     let mut by_id: Vec<String> = Vec::new();
     for p in &installed {
         if !by_id.contains(&p.id) {
@@ -161,7 +172,7 @@ pub fn desired_dirs(store: &Store, manifest: &Manifest) -> Vec<String> {
         if !wants(&sel, &id) {
             continue;
         }
-        let Some(chosen) = crate::ops::installed_by_choice(store, &id) else {
+        let Some(chosen) = chosen_version(store, &id) else {
             continue;
         };
         let entry = installer.installed_entry(&chosen);
@@ -186,22 +197,11 @@ pub fn status(store: &Store, manifest: &Manifest) -> PathEnvStatus {
     let applied = managed_dirs(store);
     let installed = store.list_installed().unwrap_or_default();
 
-    let mut ids: Vec<String> = Vec::new();
-    for p in &installed {
-        if !ids.contains(&p.id) {
-            ids.push(p.id.clone());
-        }
-    }
-    ids.sort();
-
     let current_path = read_current_path_entries(store);
     let mut entries = Vec::new();
-    for id in ids {
-        let Some(chosen) = crate::ops::installed_by_choice(store, &id) else {
-            continue;
-        };
-        let meta = installer.installed_entry(&chosen);
-        let bin_dir = bin_dir_for(&chosen.install_path, &meta.entry);
+    for package in &installed {
+        let meta = installer.installed_entry(package);
+        let bin_dir = bin_dir_for(&package.install_path, &meta.entry);
         let exists = bin_dir
             .as_deref()
             .map(|d| std::path::Path::new(d).is_dir())
@@ -223,12 +223,14 @@ pub fn status(store: &Store, manifest: &Manifest) -> PathEnvStatus {
             continue;
         }
         entries.push(PathEnvEntry {
-            id: id.clone(),
+            id: package.id.clone(),
             label: meta.display_name.clone(),
-            version: chosen.version.clone(),
+            version: package.version.clone(),
             bin_dir: bin_dir.unwrap_or_default(),
             exists,
-            selected: wants(&sel, &id),
+            selected: wants(&sel, &package.id)
+                && chosen_version(store, &package.id)
+                    .is_some_and(|chosen| chosen.version == package.version),
             in_path,
             commands,
         });
@@ -418,6 +420,92 @@ pub fn set_selected(
 ) -> Result<PathEnvStatus> {
     set_selected_ids(store, ids)?;
     apply(store, paths, manifest)
+}
+
+/// 从任一已安装版本直接加入/移出 PATH，整个操作由 CoreState 的生命周期锁串行执行。
+pub fn set_version(
+    store: &Store,
+    paths: &Paths,
+    manifest: &Manifest,
+    id: &str,
+    version: &str,
+    selected: bool,
+) -> Result<PathEnvStatus> {
+    let current = status(store, manifest);
+    let entry = current
+        .entries
+        .iter()
+        .find(|entry| entry.id == id && entry.version == version)
+        .ok_or_else(|| {
+            AppError::new(
+                "PATH_VERSION_UNAVAILABLE",
+                "该版本尚未安装，或没有可加入环境变量的命令",
+            )
+        })?;
+    if !selected && !entry.selected {
+        return Ok(current);
+    }
+    let previous_versions = store
+        .get_setting(VERSIONS_KEY)
+        .unwrap_or_else(|| "{}".into());
+    let previous_selected = store
+        .get_setting(SELECTED_KEY)
+        .unwrap_or_else(|| "null".into());
+    let previous_enabled = store.get_setting(ENABLED_KEY).unwrap_or_else(|| "0".into());
+    let mut versions =
+        store.get_setting_or::<std::collections::BTreeMap<String, String>>(VERSIONS_KEY);
+    let mut ids: Vec<String> = if current.enabled {
+        current
+            .entries
+            .iter()
+            .filter(|entry| entry.selected)
+            .map(|entry| entry.id.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    ids.retain(|value| value != id);
+    if selected {
+        versions.insert(id.to_string(), version.to_string());
+        ids.push(id.to_string());
+    }
+    let result = (|| {
+        store.set_setting_json(VERSIONS_KEY, &versions)?;
+        set_selected_ids(store, &ids)?;
+        if selected {
+            store.set_setting(ENABLED_KEY, "1")?;
+        }
+        apply(store, paths, manifest)
+    })();
+    match result {
+        Ok(status) => Ok(status),
+        Err(error) => {
+            // 注册表/配置文件写入失败时恢复选择，避免界面显示成已经切换成功。
+            let rollback = (|| -> Result<()> {
+                let mut cleanup = current.managed_dirs.clone();
+                cleanup.extend(desired_dirs(store, manifest).into_iter().filter(|dir| {
+                    !current
+                        .entries
+                        .iter()
+                        .any(|entry| entry.in_path && same_path(&entry.bin_dir, dir))
+                }));
+                store.set_setting_json(DIRS_KEY, &cleanup)?;
+                store.set_setting(VERSIONS_KEY, &previous_versions)?;
+                store.set_setting(SELECTED_KEY, &previous_selected)?;
+                store.set_setting(ENABLED_KEY, &previous_enabled)?;
+                apply(store, paths, manifest).map(|_| ())
+            })();
+            if let Err(rollback_error) = rollback {
+                return Err(AppError::new(
+                    "PATH_VERSION_UPDATE_FAILED",
+                    "环境变量更新失败，恢复原设置时也遇到问题",
+                )
+                .with_hint("请到工具箱的环境变量卡片重新应用 PATH")
+                .with_detail(format!("{}; {}", error.message, rollback_error.message)));
+            }
+            Err(error)
+        }
+    }
 }
 
 /// 安装/卸载/切换版本后自动同步（开关没开就只更新一次状态，不写盘）。

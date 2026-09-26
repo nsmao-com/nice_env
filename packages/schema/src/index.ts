@@ -210,7 +210,7 @@ export type PackageView = z.infer<typeof PackageView>;
 
 /* ============ 环境变量注入 / PathEnv ============ */
 
-/** 单个已安装包在 PATH 注入里的呈现 */
+/** 单个已安装版本在 PATH 注入里的呈现，使用 id + version 标识 */
 export const PathEnvEntry = z.object({
   id: z.string(),
   label: z.string(),

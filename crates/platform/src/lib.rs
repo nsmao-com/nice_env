@@ -358,6 +358,12 @@ pub fn get_system_proxy() -> Result<SystemProxyState> {
             .args(["-getwebproxy", &service])
             .output()
             .map_err(|e| PlatformError::Io(format!("执行 networksetup 失败：{e}")))?;
+        if !out.status.success() {
+            return Err(PlatformError::Io(format!(
+                "networksetup 读取代理失败：{}",
+                String::from_utf8_lossy(&out.stderr)
+            )));
+        }
         let text = String::from_utf8_lossy(&out.stdout).to_string();
         let enabled = text.lines().any(|l| l.trim() == "Enabled: Yes");
         let server = text

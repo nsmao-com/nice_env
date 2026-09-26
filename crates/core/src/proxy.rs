@@ -71,6 +71,30 @@ impl ProxyRuntime {
         Ok(())
     }
 
+    /// 修改运行中的 mihomo 模式。调用方只有在真正收到成功响应后才应持久化设置，
+    /// 否则页面会显示已经切换，但内核仍在使用旧模式。
+    pub fn set_mode(&self, mode: &str) -> Result<()> {
+        if !matches!(mode, "rule" | "global" | "direct") {
+            return Err(AppError::new("BAD_PROXY_MODE", "代理模式无效"));
+        }
+        let resp = self
+            .client
+            .patch(format!("{}/configs", self.base_url))
+            .json(&serde_json::json!({ "mode": mode }))
+            .send()
+            .map_err(|e| AppError::new("MODE_FAILED", format!("切换代理模式失败：{e}")))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let detail = resp.text().unwrap_or_default();
+            return Err(AppError::new(
+                "MODE_FAILED",
+                format!("切换代理模式失败（HTTP {status}）"),
+            )
+            .with_detail(detail));
+        }
+        Ok(())
+    }
+
     /// 节点延迟测试，返回毫秒；超时/失败返回 Err
     pub fn delay(&self, node: &str) -> Result<u32> {
         let url = format!(
@@ -164,7 +188,7 @@ pub async fn import_profile(name: &str, url: &str, paths: &Paths, store: &Store)
 }
 
 /// 重新拉取订阅并覆盖原文件（id 不变）；该订阅处于激活态时同步重写主配置。
-pub async fn update_profile(paths: &Paths, store: &Store, id: &str) -> Result<()> {
+pub async fn update_profile(paths: &Paths, store: &Store, id: &str) -> Result<bool> {
     let target = store
         .list_proxy_profiles()?
         .into_iter()
@@ -184,7 +208,7 @@ pub async fn update_profile(paths: &Paths, store: &Store, id: &str) -> Result<()
     if active {
         activate_profile(paths, store, id)?;
     }
-    Ok(())
+    Ok(active)
 }
 
 fn decode_subscription(bytes: &[u8]) -> String {

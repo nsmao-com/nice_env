@@ -31,7 +31,7 @@ import {
   Globe,
   Activity,
 } from "lucide-react";
-import { isTauri } from "@/lib/backend";
+import { isTauri, normalizeError } from "@/lib/backend";
 import {
   ACCENT_PRESETS,
   CODE_THEME_OPTIONS,
@@ -403,8 +403,17 @@ export default function SettingsPage() {
     setSettings(next);
     applyAppearance(next);
     setCodeDefaults({ lineNumbers: true, wrap: true, theme: "auto", bg: "" });
+    const failed: string[] = [];
     for (const [k, v] of Object.entries(defaults)) {
-      await api.setSetting(k, v).catch(() => undefined);
+      try {
+        await api.setSetting(k, v);
+      } catch (error) {
+        failed.push(`${k}: ${normalizeError(error).message}`);
+      }
+    }
+    if (failed.length > 0) {
+      toast.error(t("appearance.resetFailed"), { description: failed.join("\n") });
+      return;
     }
     toast.success(t("appearance.resetDone"));
   };
@@ -1175,7 +1184,7 @@ export default function SettingsPage() {
                     <div className="flex flex-col">
                       <span className="text-[12.5px] text-secondary">
                         {t("settings.currentVersion")}{" "}
-                        <code className="font-mono text-foreground">v{appVersion || "0.2.9"}</code>
+                        <code className="font-mono text-foreground">v{appVersion || "0.2.10"}</code>
                       </span>
                       <span className="text-[10.5px] text-faint">{t("settings.manifestHint")}</span>
                     </div>
@@ -1249,7 +1258,7 @@ export default function SettingsPage() {
                   <div className="flex flex-col gap-0.5">
                     <span className="text-[12.5px] text-secondary">{t("about.desc")}</span>
                     <span className="text-[10.5px] text-faint">
-                      {t("settings.currentVersion")} v{appVersion || "0.2.9"}
+                      {t("settings.currentVersion")} v{appVersion || "0.2.10"}
                     </span>
                   </div>
                   <div className="flex gap-2">

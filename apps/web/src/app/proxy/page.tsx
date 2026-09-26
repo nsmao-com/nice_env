@@ -297,12 +297,15 @@ export default function ProxyPage() {
                       </TooltipTrigger>
                       <TooltipContent>{t("proxy.updateSub")}</TooltipContent>
                     </Tooltip>
-                    <Button
-                      size="icon-sm"
-                      variant="ghost"
-                      className="text-faint hover:text-error"
-                      onClick={() => setDeleting({ id: p.id, name: p.name })}
-                    >
+                        <Button
+                          size="icon-sm"
+                          variant="ghost"
+                          className="text-faint hover:text-error"
+                          disabled={p.active}
+                          title={p.active ? t("proxy.cannotDeleteActive") : t("common.delete")}
+                          aria-label={t("common.delete")}
+                          onClick={() => setDeleting({ id: p.id, name: p.name })}
+                        >
                       <Trash2 className="h-3.5 w-3.5" />
                     </Button>
                   </motion.div>

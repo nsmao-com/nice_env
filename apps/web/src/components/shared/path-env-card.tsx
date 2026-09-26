@@ -1,11 +1,12 @@
 "use client";
 
 import * as React from "react";
+import { useIsMutating, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Terminal, RefreshCw, CheckCircle2, AlertTriangle, FolderX } from "lucide-react";
-import type { PathEnvEntry } from "@nsb/schema";
+import type { PathEnvEntry, PathEnvStatus } from "@nsb/schema";
 import { useT } from "@/lib/store";
-import { usePathEnv, useInvalidate, toastError } from "@/lib/hooks";
+import { usePathEnv, toastError } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
@@ -20,38 +21,43 @@ import { Switch } from "@/components/ui/switch";
  * 这个是真的写进系统 PATH（Windows 注册表 / macOS ~/.zshrc 托管块），
  * 新开的终端里 `php -v`、`mysql --version` 直接就能用。
  *
- * 界面刻意把「到底动了什么」摊开给用户看：每个包一行，显示注入的目录、
+ * 界面刻意把「到底动了什么」摊开给用户看：每个已安装版本一行，显示注入的目录、
  * 会暴露哪些命令、是否已在 PATH 里 —— PATH 是很敏感的系统设置，
  * 用户必须能一眼确认我们加了什么，而不是只给一个开关。
  */
 export function PathEnvCard() {
   const t = useT();
   const { data, isLoading } = usePathEnv();
-  const invalidate = useInvalidate();
+  const queryClient = useQueryClient();
   const [busy, setBusy] = React.useState(false);
+  const busyRef = React.useRef(false);
+  const pathBusy = useIsMutating({ mutationKey: ["pathenv-change"] }) > 0;
+  const mutation = useMutation({
+    mutationKey: ["pathenv-change"],
+    mutationFn: (fn: () => Promise<PathEnvStatus>) => fn(),
+    onSuccess: (result) => { queryClient.setQueryData(["pathenv"], result); },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["pathenv"] }),
+  });
 
-  const run = async (fn: () => Promise<unknown>, okMsg: string) => {
+  const run = async (fn: () => Promise<PathEnvStatus>, okMsg: string) => {
+    if (busyRef.current || queryClient.isMutating({ mutationKey: ["pathenv-change"] })) return;
+    busyRef.current = true;
     setBusy(true);
     try {
-      await fn();
-      invalidate("pathenv");
+      await mutation.mutateAsync(fn);
       toast.success(okMsg);
     } catch (e) {
       toastError(e);
     } finally {
       setBusy(false);
+      busyRef.current = false;
     }
   };
 
   const entries = data?.entries ?? [];
   const enabled = data?.enabled ?? false;
-  const selectedIds = entries.filter((e) => e.selected).map((e) => e.id);
-
-  const toggleEntry = (id: string, next: boolean) => {
-    const ids = next
-      ? Array.from(new Set([...selectedIds, id]))
-      : selectedIds.filter((x) => x !== id);
-    run(() => api.pathenvSetSelected(ids), t("tools.pathEnv") + " ✓");
+  const toggleEntry = (entry: PathEnvEntry, next: boolean) => {
+    run(() => api.pathenvSetVersion(entry.id, entry.version, next), `${entry.label} ${entry.version} · ${t("tools.pathEnv")} ✓`);
   };
 
   return (
@@ -70,7 +76,7 @@ export function PathEnvCard() {
           </Badge>
           <Switch
             checked={enabled}
-            disabled={busy || isLoading}
+            disabled={busy || pathBusy || isLoading}
             onCheckedChange={(v) =>
               run(
                 () => api.pathenvSetEnabled(v),
@@ -91,10 +97,10 @@ export function PathEnvCard() {
           <div className="flex flex-col gap-1.5">
             {entries.map((e) => (
               <PathEnvRow
-                key={e.id}
+                key={`${e.id}@${e.version}`}
                 entry={e}
-                disabled={busy || !enabled}
-                onToggle={(next) => toggleEntry(e.id, next)}
+                disabled={busy || pathBusy || !enabled}
+                onToggle={(next) => toggleEntry(e, next)}
               />
             ))}
           </div>
@@ -108,7 +114,7 @@ export function PathEnvCard() {
             <Button
               size="sm"
               variant="outline"
-              disabled={busy}
+              disabled={busy || pathBusy}
               onClick={() => run(() => api.pathenvReapply(), t("tools.pathEnvReapply"))}
             >
               <RefreshCw className={cn("h-3 w-3", busy && "animate-spin")} />
@@ -151,6 +157,7 @@ function PathEnvRow({
       <Switch
         checked={entry.selected}
         disabled={disabled}
+        aria-label={`${entry.label} ${entry.version} PATH`}
         onCheckedChange={onToggle}
         title={entry.selected ? t("tools.pathEnvUncheck") : t("tools.pathEnvCheck")}
       />

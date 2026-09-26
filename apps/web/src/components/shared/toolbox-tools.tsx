@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import type { CronJob, TunnelInfo, OllamaModelRow } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { normalizeError } from "@/lib/backend";
 import { useT } from "@/lib/store";
 import { useAdminer, toastError } from "@/lib/hooks";
 import * as api from "@/lib/api";
@@ -77,12 +78,14 @@ export function CronTool() {
   const [intervalMin, setIntervalMin] = React.useState("30");
   const [busy, setBusy] = React.useState(false);
   const [expanded, setExpanded] = React.useState<string | null>(null);
+  const [loadError, setLoadError] = React.useState<string | null>(null);
 
   const load = React.useCallback(async () => {
     try {
       setJobs(await api.cronJobs());
-    } catch {
-      /* ignore */
+      setLoadError(null);
+    } catch (e) {
+      setLoadError(normalizeError(e).message);
     }
   }, []);
 
@@ -128,6 +131,17 @@ export function CronTool() {
   return (
     <ToolCard icon={CalendarClock} title={t("tools.cron.title")} hint={t("tools.cron.hint")}>
       <div className="flex flex-col gap-2">
+        {loadError && (
+          <div className="flex flex-wrap items-center gap-2 rounded-md border border-error/25 bg-error-soft/40 px-3 py-2 text-[11px] text-error" role="alert">
+            <span className="min-w-0 flex-1 break-words">{loadError}</span>
+            <Button size="sm" variant="secondary" onClick={() => void load()}>{t("install.retry")}</Button>
+          </div>
+        )}
+        {!loadError && jobs.length === 0 && (
+          <p className="rounded-md border border-dashed border-border px-3 py-4 text-center text-[11px] text-faint">
+            {t("tools.cron.empty")}
+          </p>
+        )}
         {jobs.map((j) => (
           <div key={j.id} className="rounded-lg border border-border/60 px-3 py-2">
             <div className="flex items-center gap-2">
@@ -257,12 +271,14 @@ export function TunnelTool() {
   const [port, setPort] = React.useState("8080");
   const [tunnels, setTunnels] = React.useState<TunnelInfo[]>([]);
   const [busy, setBusy] = React.useState(false);
+  const [loadError, setLoadError] = React.useState<string | null>(null);
 
   const load = React.useCallback(async () => {
     try {
       setTunnels(await api.tunnelList());
-    } catch {
-      /* ignore */
+      setLoadError(null);
+    } catch (error) {
+      setLoadError(normalizeError(error).message);
     }
   }, []);
 
@@ -293,6 +309,12 @@ export function TunnelTool() {
   return (
     <ToolCard icon={Globe2} title={t("tools.tunnel.title")} hint={t("tools.tunnel.hint")}>
       <div className="flex flex-col gap-2">
+        {loadError && (
+          <div className="flex flex-wrap items-center gap-2 rounded-md border border-error/25 bg-error-soft/40 px-3 py-2 text-[11px] text-error" role="alert">
+            <span className="min-w-0 flex-1 break-words">{loadError}</span>
+            <Button size="sm" variant="secondary" onClick={() => void load()}>{t("install.retry")}</Button>
+          </div>
+        )}
         <div className="flex gap-1.5">
           <Input
             value={port}
@@ -305,7 +327,7 @@ export function TunnelTool() {
             {t("tools.tunnel.start")}
           </Button>
         </div>
-        {tunnels.length === 0 ? (
+        {!loadError && tunnels.length === 0 ? (
           <p className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-[11px] text-faint">
             {t("tools.tunnel.none")}
           </p>
@@ -367,13 +389,16 @@ export function OllamaTool() {
   const [pulling, setPulling] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [deleting, setDeleting] = React.useState<string | null>(null);
+  const [loadError, setLoadError] = React.useState<string | null>(null);
 
   const load = React.useCallback(async () => {
     setLoading(true);
     try {
       setModels(await api.ollamaModels());
+      setLoadError(null);
     } catch (e) {
       setModels([]);
+      setLoadError(normalizeError(e).message);
       throw e;
     } finally {
       setLoading(false);
@@ -387,6 +412,12 @@ export function OllamaTool() {
   return (
     <ToolCard icon={Bot} title={t("tools.ollama.title")} hint={t("tools.ollama.hint")}>
       <div className="flex flex-col gap-2">
+        {loadError && (
+          <div className="flex flex-wrap items-center gap-2 rounded-md border border-error/25 bg-error-soft/40 px-3 py-2 text-[11px] text-error" role="alert">
+            <span className="min-w-0 flex-1 break-words">{loadError}</span>
+            <Button size="sm" variant="secondary" onClick={() => void load().catch(() => undefined)}>{t("install.retry")}</Button>
+          </div>
+        )}
         <div className="flex gap-1.5">
           <Input
             value={pullName}
@@ -431,7 +462,7 @@ export function OllamaTool() {
           </Button>
         </div>
 
-        {models.length === 0 ? (
+        {!loadError && models.length === 0 ? (
           <p className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-[11px] text-faint">
             {t("tools.ollama.none")}
           </p>

@@ -21,6 +21,7 @@ import {
 import type { CertAutomation, CertRunRecord, DeployResult, DeployTarget } from "@nsb/schema";
 import { useT } from "@/lib/store";
 import { toastError } from "@/lib/hooks";
+import { normalizeError } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Card } from "@/components/ui/card";
@@ -160,7 +161,7 @@ function useCertAutos() {
 export function CertAutomationSection() {
   const t = useT();
   const invalidate = useInvalidateSafe();
-  const { data: autos = [] } = useCertAutos();
+  const { data: autos = [], error, isPending, refetch } = useCertAutos();
   const [creating, setCreating] = React.useState(false);
   const [editing, setEditing] = React.useState<CertAutomation | null>(null);
   const [removing, setRemoving] = React.useState<CertAutomation | null>(null);
@@ -172,8 +173,14 @@ export function CertAutomationSection() {
     setIssuingId(a.id);
     invalidate();
     try {
-      await api.certAutoIssue(a.id);
-      toast.success(t("certauto.issuedOk"), { description: a.domains.join(", ") });
+      const result = await api.certAutoIssue(a.id);
+      if (result.state === "ok") {
+        toast.success(t("certauto.issuedOk"), { description: result.domains.join(", ") });
+      } else {
+        toast.error(t("certauto.issueFailed"), {
+          description: result.lastError || t("certauto.issueFailedHint"),
+        });
+      }
     } catch (e) {
       toastError(e, t("certauto.issueFailed"));
     } finally {
@@ -191,7 +198,14 @@ export function CertAutomationSection() {
         </Button>
       </div>
 
-      {autos.length === 0 ? (
+      {error ? (
+        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-error/25 bg-error-soft/40 p-3 text-xs text-error" role="alert">
+          <span className="min-w-0 flex-1 break-words">{t("certauto.readFailed")}：{normalizeError(error).message}</span>
+          <Button size="sm" variant="secondary" onClick={() => void refetch()}>{t("install.retry")}</Button>
+        </div>
+      ) : isPending && autos.length === 0 ? (
+        <p className="py-8 text-center text-xs text-faint" role="status">{t("common.loading")}</p>
+      ) : autos.length === 0 ? (
         <EmptyState
           icon={Workflow}
           title={t("certauto.empty")}

@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useIsMutating, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Loader2, Terminal } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -17,14 +17,20 @@ import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip
  * 装完一个运行时，就地开一下就写进系统 PATH，不用再绕去别的页面找入口。
  * 总开关没开时只选择当前包再开启，避免把其它包一并加入 PATH。
  */
-export function PathEnvToggle({ pkgId, disabled = false }: { pkgId: string; disabled?: boolean }) {
+export function PathEnvToggle({ pkgId, version, disabled = false }: { pkgId: string; version: string; disabled?: boolean }) {
   const t = useT();
   const { data, isLoading } = usePathEnv();
   const queryClient = useQueryClient();
-  const [busy, setBusy] = React.useState(false);
   const busyRef = React.useRef(false);
+  const pending = useIsMutating({ mutationKey: ["pathenv-change"] }) > 0;
+  const mutation = useMutation({
+    mutationKey: ["pathenv-change"],
+    mutationFn: (selected: boolean) => api.pathenvSetVersion(pkgId, version, selected),
+    onSuccess: (result) => { queryClient.setQueryData(["pathenv"], result); },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["pathenv"] }),
+  });
 
-  const entry = data?.entries.find((e) => e.id === pkgId);
+  const entry = data?.entries.find((e) => e.id === pkgId && e.version === version);
   const selected = entry?.selected ?? false;
   const enabled = data?.enabled ?? false;
   const inPath = enabled && selected && !!entry?.inPath;
@@ -33,24 +39,17 @@ export function PathEnvToggle({ pkgId, disabled = false }: { pkgId: string; disa
   if (!isLoading && !entry) return null;
 
   const toggle = async () => {
-    if (disabled || busyRef.current || !entry) return;
+    if (disabled || busyRef.current || queryClient.isMutating({ mutationKey: ["pathenv-change"] }) || !entry) return;
     busyRef.current = true;
-    setBusy(true);
     try {
-      const ids = enabled ? (data?.entries ?? []).filter((e) => e.selected).map((e) => e.id) : [];
-      const next = inPath
-        ? ids.filter((x) => x !== pkgId)
-        : Array.from(new Set([...ids, pkgId]));
-      let result = await api.pathenvSetSelected(next);
-      if (!enabled) result = await api.pathenvSetEnabled(true);
-      queryClient.setQueryData(["pathenv"], result);
-      toast.success(inPath ? t("tools.pathEnvRemovedToast") : t("tools.pathEnvAddedToast"));
+      const result = await mutation.mutateAsync(!inPath);
+      toast.success(`${pkgId} ${version} · ${t(inPath ? "tools.pathEnvRemovedToast" : "tools.pathEnvAddedToast")}`, {
+        description: result.note,
+      });
     } catch (e) {
       toastError(e, t("tools.pathEnvFailed"));
     } finally {
-      await queryClient.invalidateQueries({ queryKey: ["pathenv"] });
       busyRef.current = false;
-      setBusy(false);
     }
   };
 
@@ -59,7 +58,7 @@ export function PathEnvToggle({ pkgId, disabled = false }: { pkgId: string; disa
       <TooltipTrigger asChild>
         <button
           type="button"
-          disabled={disabled || busy || isLoading}
+          disabled={disabled || pending || isLoading}
           aria-label={`${t(inPath ? "tools.pathEnvRemove" : "tools.pathEnvAdd")} ${pkgId} ${entry?.version ?? ""}`}
           aria-pressed={inPath}
           onClick={toggle}
@@ -70,8 +69,8 @@ export function PathEnvToggle({ pkgId, disabled = false }: { pkgId: string; disa
               : "border-border/70 bg-card-2/50 text-muted hover:border-border-strong hover:text-foreground"
           )}
         >
-          {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Terminal className="h-3 w-3" />}
-          PATH
+          {mutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Terminal className="h-3 w-3" />}
+          {t(inPath ? "tools.pathEnvInPath" : "tools.pathEnvAdd")}
         </button>
       </TooltipTrigger>
       <TooltipContent side="top" className="max-w-64">

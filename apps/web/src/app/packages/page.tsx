@@ -49,7 +49,6 @@ import { PhpExtensionsDialog, PhpExtBadge } from "@/components/shared/php-extens
 import { ConfirmDialog } from "@/components/shared/misc";
 import { BulkResult } from "@/components/shared/bulk-actions";
 import { InstallDialog, type InstallTarget } from "@/components/shared/install-dialog";
-import { PathEnvToggle } from "@/components/shared/path-env-toggle";
 import { ServiceIcon } from "@/components/shared/service-icon";
 import { PageHeader } from "@/components/layout/app-shell";
 import { cmpVersionDesc, isPrerelease } from "@/lib/utils";
@@ -776,9 +775,6 @@ function PackageRow({
         {group.id === "php" && phpActiveVersion && (
           <PhpExtBadge version={phpActiveVersion} onOpen={() => { if (!disabled) setExtVersion(phpActiveVersion); }} />
         )}
-
-        {/* 已装即可一键注入/移出系统 PATH —— 操作就地完成，不再绕去工具箱 */}
-        {installedCount > 0 && <PathEnvToggle pkgId={group.id} disabled={disabled} />}
 
         {/* 右：版本下拉（清单内置 + 远程枚举的完整版本历史） */}
         <VersionPicker

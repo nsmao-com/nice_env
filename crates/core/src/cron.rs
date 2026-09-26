@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 pub const RUNNING: &str = "running";
+const MAX_RUN_SECS: u64 = 30 * 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,8 +74,14 @@ pub fn run_job(store: &Store, id: &str, manual: bool) -> Result<CronJob> {
     let job = store
         .get_cron_job(id)?
         .ok_or_else(|| AppError::new("CRON_NOT_FOUND", format!("计划任务 {id} 不存在")))?;
-    if !manual && job.last_exit.as_deref() == Some(RUNNING) {
-        return Ok(job); // 上一次还没跑完，跳过本轮
+    if job.last_exit.as_deref() == Some(RUNNING) {
+        if manual {
+            return Err(AppError::new(
+                "CRON_BUSY",
+                "该计划任务正在运行，请等待当前任务结束",
+            ));
+        }
+        return Ok(job); // 调度轮次跳过正在运行的任务
     }
     let now = crate::services::now_ms();
     store.mark_cron_run(id, now, RUNNING, None)?;
@@ -85,24 +92,95 @@ pub fn run_job(store: &Store, id: &str, manual: bool) -> Result<CronJob> {
 }
 
 fn run_shell(command: &str) -> (String, String) {
-    #[cfg(windows)]
-    let out = platform::command("cmd").args(["/C", command]).output();
-    #[cfg(not(windows))]
-    let out = platform::command("sh").arg("-c").arg(command).output();
-    match out {
-        Ok(o) => {
-            let text = format!(
-                "stdout:\n{}\n\nstderr:\n{}",
-                String::from_utf8_lossy(&o.stdout),
-                String::from_utf8_lossy(&o.stderr)
-            );
-            (
-                format!("exit {}", o.status.code().unwrap_or(-1)),
-                truncate(&text, 8000),
-            )
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let spawn = {
+        #[cfg(windows)]
+        {
+            platform::command("cmd")
+                .args(["/C", command])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
         }
-        Err(e) => ("spawn failed".into(), truncate(&e.to_string(), 2000)),
+        #[cfg(not(windows))]
+        {
+            platform::command("sh")
+                .arg("-c")
+                .arg(command)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+        }
+    };
+    let mut child = match spawn {
+        Ok(child) => child,
+        Err(e) => return ("spawn failed".into(), truncate(&e.to_string(), 2000)),
+    };
+
+    let stdout = child.stdout.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            bytes
+        })
+    });
+    let stderr = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            bytes
+        })
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(MAX_RUN_SECS);
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Ok(None) => {
+                timed_out = true;
+                let _ = child.kill();
+                break child.wait().ok();
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let out = stdout
+        .and_then(|thread| thread.join().ok())
+        .unwrap_or_default();
+    let err = stderr
+        .and_then(|thread| thread.join().ok())
+        .unwrap_or_default();
+    let text = format!(
+        "stdout:\n{}\n\nstderr:\n{}",
+        String::from_utf8_lossy(&out),
+        String::from_utf8_lossy(&err)
+    );
+    if timed_out {
+        return (
+            "timeout".into(),
+            truncate(
+                &format!("{text}\n\n任务超过 {} 分钟，已终止", MAX_RUN_SECS / 60),
+                8000,
+            ),
+        );
     }
+    let Some(status) = status else {
+        return ("wait failed".into(), truncate(&text, 8000));
+    };
+    (
+        format!("exit {}", status.code().unwrap_or(-1)),
+        truncate(&text, 8000),
+    )
 }
 
 fn truncate(s: &str, max: usize) -> String {

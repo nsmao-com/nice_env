@@ -56,6 +56,14 @@ pub fn start(exe: &Path, port: u16) -> Result<TunnelInfo> {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| AppError::io("启动 cloudflared", e))?;
+    // cloudflared 可能因参数、端口或网络问题立即退出；不要把这种情况作为
+    // 已启动返回给前端，避免 UI 短暂显示一个永远拿不到地址的假隧道。
+    if let Ok(Some(status)) = child.try_wait() {
+        return Err(AppError::new(
+            "TUNNEL_EXITED",
+            format!("cloudflared 启动后立即退出（{status}）"),
+        ));
+    }
     let started_at = crate::services::now_ms();
     let id = format!("tunnel-{}", SEQ.fetch_add(1, Ordering::Relaxed));
 

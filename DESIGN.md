@@ -1132,3 +1132,17 @@ annotated tag `v0.2.9`。
 -j 1`（7 项）、`cargo test -p nsb-core --lib services::fallback_tests::tail_reads_persisted_log_after_process_restart
 --locked --offline -j 1`（1 项）和 `git -c core.safecrlf=false diff --check`。未运行前端 dev/build，
 未新增测试文件，本轮没有数据库变更，未修改 update.sql。
+
+第二十四轮实施与验证：真实执行失败状态、工具箱生命周期和发布版本规则收尾。
+ACME 自动签发等待真实 run_once 结果，DNS 验证、部署或 HTTPS reload 失败会返回明确错误；代理模式、
+系统代理和 mihomo 订阅启停检查真实响应，停止前先关闭系统代理，避免留下指向已停止端口的系统配置。
+计划任务执行移入 blocking worker，增加输出排水、30 分钟超时、kill 和失败状态，重复手动执行会被拒绝。
+顶栏常用栈批量启停收集逐项失败原因，设置页恢复默认外观会报告未保存项。隧道读取失败显示重试，
+cloudflared 启动后立即退出不再短暂显示为存活；Ollama 模型读取失败不再伪装成空列表。
+
+版本同步升至 0.2.10，更新根 package、Web/桌面 package、共享 schema、工作区 Cargo、桌面 Cargo、
+Tauri 配置、Cargo.lock 和浏览器版本回退值。保留 `v0.2.9` 及全部历史 tag，发布时创建新的 annotated
+tag `v0.2.10`，不覆盖或移动旧 tag。验证通过：`pnpm --filter @nsb/web check`、`cargo check -p nsb-core
+--locked --offline -j 1`、`cargo check -p niceservbay --locked --offline -j 1`、`cargo test -p platform
+--lib --locked --offline -j 1`（7 项）和 `git -c core.safecrlf=false diff --check`。未运行前端 dev/build，
+未新增测试文件，本轮没有数据库变更，未修改 update.sql。

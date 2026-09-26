@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   FilePenLine,
@@ -18,10 +18,10 @@ import {
   Stethoscope,
   RefreshCw,
 } from "lucide-react";
-import type { ListenerInfo, PortDiagnosis, PortScanEntry , HostsEntry } from "@nsb/schema";
+import type { ListenerInfo, PortDiagnosis, PortScanEntry , HostsEntry, ConfigFileInfo } from "@nsb/schema";
 import { HostsEntry as HostsEntrySchema } from "@nsb/schema";
 import { useUI, useT } from "@/lib/store";
-import { useHosts, useInvalidate, toastError, useSettings, useSites, useServices } from "@/lib/hooks";
+import { useHosts, useInvalidate, toastError, useSettings, useSites, useServices, copyText } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { cn } from "@/lib/utils";
@@ -37,7 +37,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { CopyButton, ConfirmDialog } from "@/components/shared/misc";
 import { CodeBlock, useCodePalette } from "@/components/shared/code-block";
 import { PathEnvCard } from "@/components/shared/path-env-card";
-import { ConfigEditor } from "@/components/shared/config-editor";
+import { ConfigEditor, ConfigEditDialog } from "@/components/shared/config-editor";
 import { DiagnosticsCard } from "@/components/shared/diagnostics-card";
 import {
   CronTool,
@@ -1025,106 +1025,144 @@ function formatBytes(n: number) {
 function RepairTool() {
   const t = useT();
   const invalidate = useInvalidate();
+  const queryClient = useQueryClient();
+  const checks = useQuery({ queryKey: ["config-checks"], queryFn: () => api.validateConfigs(), enabled: false, retry: false });
+  const files = useQuery({ queryKey: ["config-files"], queryFn: api.configList });
+  const checking = useIsMutating({ mutationKey: ["config-checks"] }) > 0;
+  const validation = useMutation({
+    mutationKey: ["config-checks"],
+    mutationFn: (only: string[] | undefined) => api.validateConfigs(only),
+    onSuccess: (result, only) => {
+      queryClient.setQueryData<api.ConfigCheck[]>(["config-checks"], (previous) => {
+        if (!only || !previous) return result;
+        const byKind = new Map(result.map((row) => [row.kind, row]));
+        return previous.map((row) => byKind.get(row.kind) ?? row);
+      });
+      void queryClient.invalidateQueries({ queryKey: ["config-files"] });
+    },
+  });
   const [busy, setBusy] = React.useState<string | null>(null);
   const action = React.useRef(false);
   const [resetOpen, setResetOpen] = React.useState(false);
+  const [resetKind, setResetKind] = React.useState<string | undefined>();
+  const [editing, setEditing] = React.useState<ConfigFileInfo | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const [issuesOnly, setIssuesOnly] = React.useState(false);
+  const reportRef = React.useRef<HTMLDivElement>(null);
+  const errorRef = React.useRef<HTMLParagraphElement>(null);
+  const locked = busy !== null || checking || resetOpen || !!editing;
+  const rows = checks.data ?? [];
+  const failures = rows.filter((row) => row.status === "fail");
+  const issues = rows.filter((row) => row.status === "fail" || row.status === "warning");
+  const visibleRows = issuesOnly ? issues : rows;
+  const statusLabel = (row: api.ConfigCheck) => t(row.status === "skipped" ? "tools.checkSkipped" : row.status === "fail" ? "tools.checkFailed" : row.status === "warning" ? "tools.checkWarning" : row.method === "readability" ? "tools.checkReadable" : "tools.checkPassed");
+  const reportText = rows.map((row) => `${row.name} · ${statusLabel(row)} · ${new Date(row.checkedAt).toLocaleString()}\n${row.path ?? ""}\n${row.detail}`).join("\n\n");
+  const run = async (id: string, fn: () => Promise<unknown>) => {
+    if (action.current || queryClient.isMutating({ mutationKey: ["config-checks"] }) || resetOpen || editing) return;
+    action.current = true;
+    setBusy(id);
+    setError(null);
+    try {
+      await fn();
+      if (id === "hosts" || id === "certs") invalidate("services", "hosts", "certs");
+      if (id === "validate") requestAnimationFrame(() => reportRef.current?.focus());
+    } catch (error) {
+      setError(normalizeError(error).message);
+      requestAnimationFrame(() => errorRef.current?.focus());
+    } finally {
+      action.current = false;
+      setBusy(null);
+    }
+  };
   const items = [
-    {
-      id: "configs",
-      label: t("tools.rebuildConf"),
-      desc: t("tools.rebuildConfHint"),
-      action: async () => {
-        setResetOpen(true);
-      },
-    },
-    {
-      id: "validate",
-      label: t("tools.validateConf"),
-      desc: t("tools.validateConfHint"),
-      action: async () => {
-        const checks = await api.validateConfigs();
-        const fails = checks.filter((c) => !c.ok);
-        if (fails.length > 0) {
-          throw new Error(fails.map((c) => `${c.name}: ${c.detail}`).join("；"));
-        }
-        toast.success(
-          `${t("tools.validateOkP1")} ${checks.filter((c) => c.status === "ok").length} ${t("tools.validateOkP2")}`
-        );
-      },
-    },
-    {
-      id: "hosts",
-      label: t("tools.rebuildHosts"),
-      desc: t("tools.rebuildHostsHint"),
-      action: async () => {
-        // 传 null 语义：让后端按「站点域名 + 用户自定义条目」重建，
-        // 而不是用空数组把用户手动条目清掉
-        await api.rebuildHosts();
-      },
-    },
-    {
-      id: "certs",
-      label: t("tools.rebuildCerts"),
-      desc: t("tools.rebuildCertsHint"),
-      action: async () => {
-        // 逐个站点补签缺失/过期证书；不再签发一张名字叫 rebuild-all 的假证书
-        await api.reissueSiteCerts();
-      },
-    },
+    { id: "configs", label: t("tools.rebuildConf"), desc: t("tools.rebuildConfHint"), action: async () => { setResetKind(undefined); setResetOpen(true); } },
+    { id: "validate", label: t("tools.validateConf"), desc: t("tools.validateConfHint"), action: () => validation.mutateAsync(undefined) },
+    { id: "hosts", label: t("tools.rebuildHosts"), desc: t("tools.rebuildHostsHint"), action: async () => {
+      // 后端保留用户手动条目，只同步站点域名。
+      await api.rebuildHosts();
+      toast.success(`${t("tools.rebuildHosts")} ${t("tools.wizardDoneP2")}`);
+    } },
+    { id: "certs", label: t("tools.rebuildCerts"), desc: t("tools.rebuildCertsHint"), action: async () => {
+      const issued = await api.reissueSiteCerts();
+      toast.success(issued.length ? t("tools.checkCertsRenewed").replace("{n}", String(issued.length)) : t("tools.checkCertsUnchanged"));
+    } },
   ];
   return (
-    <ToolCard icon={Wrench} title={t("tools.fixWizard")} hint={t("tools.wizardHint")}>
-      <div className="flex flex-col gap-2">
-        {error && <p role="alert" className="break-words text-xs text-error">{error}</p>}
-        {items.map((item) => (
-          <div key={item.id} className="flex items-center justify-between gap-3 rounded-md bg-fill p-3">
-            <div className="min-w-0">
-              <p className="text-[12px] font-medium">{item.label}</p>
-              <p className="text-[10.5px] text-faint">{item.desc}</p>
+    <div id="nsb-tool-repair" className="min-w-0">
+      <ToolCard icon={Wrench} title={t("tools.fixWizard")} hint={t("tools.wizardHint")}>
+        <div className="flex min-w-0 flex-col gap-3">
+          {error && <p ref={errorRef} tabIndex={-1} role="alert" className="break-words rounded-lg border border-error/30 p-3 text-xs text-error">{error}</p>}
+          {items.map((item) => (
+            <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-fill p-3">
+              <div className="min-w-0 flex-1 basis-40">
+                <p className="text-[12px] font-medium">{item.label}</p>
+                <p className="mt-0.5 text-[10.5px] leading-relaxed text-muted">{item.desc}</p>
+              </div>
+              <Button size="sm" variant="secondary" className="min-h-9 shrink-0" aria-label={`${item.label} · ${t("tools.run")}`} disabled={locked} onClick={() => void run(item.id, item.action)}>
+                {(busy === item.id || (item.id === "validate" && checking)) && <Loader2 className="h-3 w-3 animate-spin" />}
+                {t("tools.run")}
+              </Button>
             </div>
-            <Button
-              size="sm"
-              variant="secondary"
-              className="min-h-9 shrink-0"
-              disabled={busy !== null || resetOpen}
-              onClick={async () => {
-                if (action.current) return;
-                action.current = true;
-                setBusy(item.id);
-                setError(null);
-                try {
-                  await item.action();
-                  if (item.id !== "configs") {
-                    if (item.id !== "validate") toast.success(`${item.label} ${t("tools.wizardDoneP2")}`);
-                    invalidate("services", "hosts", "certs");
-                  }
-                } catch (e) {
-                  setError(normalizeError(e).message);
-                } finally {
-                  action.current = false;
-                  setBusy(null);
-                }
-              }}
-            >
-              {busy === item.id ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-              {t("tools.run")}
-            </Button>
-          </div>
-        ))}
-      </div>
-      {resetOpen && <ResetConfigDialog onClose={() => setResetOpen(false)} />}
-    </ToolCard>
+          ))}
+          {(checking || rows.length > 0) && <div ref={reportRef} tabIndex={-1} className="min-w-0 space-y-3 rounded-lg border border-border p-3 outline-none focus-visible:ring-2 focus-visible:ring-primary" aria-label={t("tools.checkReport")}>
+            <p className="text-[12px] font-medium">{t("tools.checkReport")}</p>
+            <p className="text-[11px] leading-relaxed text-muted">{t("tools.checkScope")}</p>
+            {!isTauri && <p className="text-[11px] text-warn">{t("tools.checkDemo")}</p>}
+            {checking && <p role="status" className="flex items-start gap-2 text-[11px] text-muted"><Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin" />{t("tools.checkRunning")}</p>}
+            {rows.length > 0 && <>
+              <div role="status" className="flex flex-wrap gap-x-3 gap-y-1 text-[11px]">
+                <span>{t("tools.checkPassed")} {rows.filter((row) => row.status === "ok" && row.method === "native").length}</span>
+                <span>{t("tools.checkReadable")} {rows.filter((row) => row.status === "ok" && row.method === "readability").length}</span>
+                <span className="text-warn">{t("tools.checkWarning")} {rows.filter((row) => row.status === "warning").length}</span>
+                <span className="text-error">{t("tools.checkFailed")} {failures.length}</span>
+                <span className="text-muted">{t("tools.checkSkipped")} {rows.filter((row) => row.status === "skipped").length}</span>
+              </div>
+              <p className="text-[10.5px] leading-relaxed text-muted">{t("tools.checkSnapshot")}</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button size="sm" variant={issuesOnly ? "secondary" : "ghost"} aria-pressed={issuesOnly} onClick={() => setIssuesOnly((value) => !value)}>{t("tools.checkIssuesOnly")}</Button>
+                <Button size="sm" variant="secondary" className="h-auto whitespace-normal py-2 text-left" disabled={locked || failures.length === 0} onClick={() => void run("validate", () => validation.mutateAsync(failures.map((row) => row.kind)))}>{t("tools.checkRetryFailed")}</Button>
+                <Button size="sm" variant="ghost" onClick={() => void copyText(reportText)}>{t("tools.checkCopy")}</Button>
+              </div>
+              <div className="max-h-[28rem] space-y-3 overflow-auto">
+                {visibleRows.length === 0 && <p className="py-2 text-[11px] text-muted">{t("tools.checkNoIssues")}</p>}
+                {visibleRows.map((row) => {
+                  const file = files.data?.find((file) => file.kind === row.kind);
+                  return <div key={row.kind} className="min-w-0 space-y-2 border-t border-dashed border-border pt-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="break-words text-[12px] font-medium">{row.name}</p>
+                      <Badge variant={row.status === "fail" ? "error" : row.status === "warning" ? "warn" : row.status === "ok" && row.method === "native" ? "running" : "muted"}>{statusLabel(row)}</Badge>
+                    </div>
+                    {row.path && <p className="break-all font-mono text-[10px] text-muted">{row.path}</p>}
+                    <p className="text-[10px] text-faint">{new Date(row.checkedAt).toLocaleString()}</p>
+                    <details open={row.status === "fail" || row.status === "warning"}>
+                      <summary className="cursor-pointer text-[11px] text-muted">{t("tools.checkDetails")}</summary>
+                      <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all text-[10.5px] leading-relaxed">{row.detail}</pre>
+                    </details>
+                    {row.method !== "none" && <div className="flex flex-wrap gap-2">
+                      <Button size="sm" variant="ghost" disabled={locked} onClick={() => void run("validate", () => validation.mutateAsync([row.kind]))}>{t("tools.checkAgain")}</Button>
+                      {file?.exists && <Button size="sm" variant="ghost" disabled={locked || !!files.error} onClick={() => setEditing(file)}>{t("tools.checkEdit")}</Button>}
+                      {file && !file.exists && file.resettable && <Button size="sm" variant="ghost" className="h-auto whitespace-normal py-2 text-left" disabled={locked || !!files.error} onClick={() => { setResetKind(file.kind); setResetOpen(true); }}>{t("tools.checkGenerate")}</Button>}
+                    </div>}
+                  </div>;
+                })}
+              </div>
+            </>}
+          </div>}
+        </div>
+        {resetOpen && <ResetConfigDialog initialKind={resetKind} onClose={() => setResetOpen(false)} />}
+        {editing && <ConfigEditDialog info={editing} onClose={() => setEditing(null)} onSaved={() => { void files.refetch(); }} />}
+      </ToolCard>
+    </div>
   );
 }
 
-function ResetConfigDialog({ onClose }: { onClose: () => void }) {
+function ResetConfigDialog({ onClose, initialKind }: { onClose: () => void; initialKind?: string }) {
   const t = useT();
   const invalidate = useInvalidate();
   const [opener] = React.useState(() => document.activeElement instanceof HTMLElement ? document.activeElement : null);
   const files = useQuery({ queryKey: ["config-files"], queryFn: api.configList });
   const targets = (files.data ?? []).filter((file) => file.resettable);
-  const [selected, setSelected] = React.useState("");
+  const [selected, setSelected] = React.useState(initialKind ?? "");
   const kind = targets.some((file) => file.kind === selected) ? selected : targets[0]?.kind ?? "";
   const preview = useQuery({ queryKey: ["config-reset-preview", kind], queryFn: () => api.configResetPreview(kind), enabled: !!kind, retry: false, staleTime: 0, gcTime: 0, refetchOnWindowFocus: false, refetchOnReconnect: false });
   const action = React.useRef(false);

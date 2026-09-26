@@ -4,7 +4,7 @@
  */
 import { PackageManifestEntry, HostsEntry as HostsEntrySchema } from "@nsb/schema";
 import { normalizeError } from "./backend";
-import type { BackupPreview, ConfigResetPreview, TunnelInfo, OllamaModelRow, OllamaPullStatus } from "./api";
+import type { ConfigCheck, BackupPreview, ConfigResetPreview, TunnelInfo, OllamaModelRow, OllamaPullStatus } from "./api";
 import bundledManifest from "../../../../manifest/packages.win.json";
 import type {
   VersionCatalog,
@@ -59,7 +59,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.21";
+const MOCK_APP_VERSION = "0.2.22";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -702,6 +702,8 @@ port=3306
 character-set-server=utf8mb4
 max_connections=200
 `;
+    case "redis-conf": return "bind 127.0.0.1\nport 6379\n";
+    case "apache-conf": return 'ServerName localhost\nListen 8080\n';
     default: throw { code: "BAD_KIND", message: "找不到对应配置" };
   }
 }
@@ -1571,13 +1573,14 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (!file) throw { code: "NOT_INSTALLED", message: "尚未安装支持重置配置的服务" };
       const current = currentConfigContent(file.kind);
       const content = defaultConfigContent(file.kind);
-      return { kind: file.kind, label: file.label, path: file.path, language: file.language, content, currentExists: true, changed: current !== content, usedByService: file.usedByService ?? null, revision: JSON.stringify([file.kind, file.path, current, content]) } as ConfigResetPreview as T;
+      return { kind: file.kind, label: file.label, path: file.path, language: file.language, content, currentExists: file.exists, changed: !file.exists || current !== content, usedByService: file.usedByService ?? null, revision: JSON.stringify([file.kind, file.path, file.exists, current, content]) } as ConfigResetPreview as T;
     }
     case "config_reset": {
       const preview = await mockInvoke<ConfigResetPreview>("config_reset_preview", args);
       if (preview.revision !== args!.revision) throw { code: "CONFIG_CONFLICT", message: "配置或服务设置已变化，请重新预览后重置" };
-      savePreviewConfig(preview.kind, preview.content);
-      return { ...preview, changed: false, revision: JSON.stringify([preview.kind, preview.path, preview.content, preview.content]) } as T;
+      if (preview.currentExists) savePreviewConfig(preview.kind, preview.content);
+      configPreviewContent.set(preview.kind, preview.content);
+      return { ...preview, currentExists: true, changed: false, revision: JSON.stringify([preview.kind, preview.path, true, preview.content, preview.content]) } as T;
     }
     case "rebuild_hosts":
       return true as T;
@@ -1603,13 +1606,34 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         history: statsHistory.slice(-60),
       } as SystemStats as T;
     }
-    case "config_list":
-      return [
-        { kind: "nginx-main", label: "Nginx 主配置", description: "自定义全局设置在重启后保留；端口、默认站点、PHP 连接池和站点入口由应用维护", path: "C:\\NiceEnv\\etc\\nginx\\nginx.conf", exists: true, sizeBytes: 4096, language: "nginx", validated: true, usedByService: "nginx", requiresPackage: "nginx" },
-        { kind: "php-ini@8.3.33", label: "php.ini · 8.3.33", description: "PHP 运行时设置。扩展开关建议走「PHP 扩展」面板，那里有主动校验", path: "C:\\NiceEnv\\etc\\php\\8.3.33\\php.ini", exists: true, sizeBytes: 2048, language: "ini", validated: false, usedByService: "php@8.3.33", requiresPackage: "php" },
-        { kind: "mysql-ini@8.0.46", label: "my.ini · 8.0.46", description: "自定义参数在重启后保留；运行目录和数据目录由应用维护，端口请在设置页修改", path: "C:\\NiceEnv\\etc\\mysql\\8.0.46\\my.ini", exists: true, sizeBytes: 1024, language: "ini", validated: false, usedByService: "mysql@8.0.46", requiresPackage: "mysql" },
-        { kind: "redis-conf", label: "redis.conf", description: "内存、持久化等设置在重启后保留；端口、数据目录和前台运行方式由应用维护", path: "C:\\NiceEnv\\etc\\redis\\redis.conf", exists: false, sizeBytes: 0, language: "conf", validated: false, usedByService: "redis", requiresPackage: "redis" },
-      ].map((file) => ({ ...file, resettable: file.exists })) as ConfigFileInfo[] as T;
+    case "config_list": {
+      const definitions = [
+        ["nginx", "nginx-main", "Nginx 主配置", "nginx.conf", "nginx"],
+        ["apache", "apache-conf", "Apache 主配置", "httpd.conf", "apache"],
+        ["php", "php-ini", "php.ini", "php.ini", "ini"],
+        ["mysql", "mysql-ini", "my.ini", "my.ini", "ini"],
+        ["redis", "redis-conf", "redis.conf", "redis.conf", "conf"],
+      ];
+      const installed = Array.from(packages.values()).filter((p) => p.install);
+      const files: ConfigFileInfo[] = [];
+      for (const [id, base, label, filename, language] of definitions) {
+        let versions = installed.filter((p) => p.id === id).sort((a, b) => cmpVersionDesc(a.version, b.version));
+        const shared = id === "nginx" || id === "apache";
+        if (shared && versions.length) versions = [versions.find((p) => p.active) ?? versions[0]];
+        for (const pkg of versions) {
+          const kind = shared ? base : `${base}@${pkg.version}`;
+          const exists = id !== "redis" || configPreviewContent.has(kind);
+          files.push({ kind, label: shared ? label : `${label} · ${pkg.version}`,
+            description: "浏览器演示配置；桌面端读取实际安装版本的配置文件",
+            path: `C:/NiceEnv/etc/${id}/${shared ? "" : `${pkg.version}/`}${filename}`,
+            exists, sizeBytes: exists ? new TextEncoder().encode(currentConfigContent(kind)).length : 0,
+            language, validated: shared, usedByService: shared ? id : `${id}@${pkg.version}`,
+            requiresPackage: id, resettable: true,
+          });
+        }
+      }
+      return files as T;
+    }
     case "config_read": {
       const key = args!.kind as string;
       return currentConfigContent(key) as T;
@@ -2187,26 +2211,26 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       } as T;
     }
     case "validate_configs": {
-      const installed = new Set(Array.from(packages.values()).filter((p) => p.install).map((p) => p.id));
-      const checks: { name: string; ok: boolean; status: "ok" | "fail" | "skipped"; detail: string }[] = [];
-      checks.push(installed.has("nginx")
-        ? { name: "Nginx", ok: true, status: "ok", detail: "syntax ok" }
-        : { name: "Nginx", ok: true, status: "skipped", detail: "未安装" });
-      checks.push(installed.has("apache")
-        ? { name: "Apache", ok: true, status: "ok", detail: "syntax ok" }
-        : { name: "Apache", ok: true, status: "skipped", detail: "未安装" });
-      const phpVersions = Array.from(packages.values())
-        .filter((p) => p.id === "php" && p.install)
-        .map((p) => p.version)
-        .sort(cmpVersionDesc);
-      if (!phpVersions.length) checks.push({ name: "PHP", ok: true, status: "skipped", detail: "未安装" });
-      else for (const version of phpVersions) checks.push({ name: `PHP ${version}`, ok: true, status: "ok", detail: "ini loads" });
-      if (installed.has("redis")) checks.push({ name: "Redis", ok: true, status: "ok", detail: "redis.conf 存在" });
-      if (installed.has("mysql")) {
-        const version = Array.from(packages.values()).find((p) => p.id === "mysql" && p.install)?.version;
-        checks.push({ name: `MySQL ${version ?? ""}`.trim(), ok: true, status: "ok", detail: "my.ini 存在" });
+      const files = await mockInvoke<ConfigFileInfo[]>("config_list");
+      const installed = Array.from(packages.values()).filter((p) => p.install);
+      const checks: ConfigCheck[] = [];
+      for (const [id, kind, label] of [["nginx", "nginx-main", "Nginx"], ["apache", "apache-conf", "Apache"], ["php", "php-ini", "PHP"], ["mysql", "mysql-ini", "MySQL"], ["redis", "redis-conf", "Redis"]]) {
+        const targets = files.filter((file) => file.requiresPackage === id);
+        if (!targets.length) checks.push({ kind, name: label, path: null, method: "none", ok: false, status: "skipped", detail: "未安装，未执行检查", checkedAt: now() });
+        for (const file of targets) {
+          const version = file.kind.split("@")[1] ?? (installed.find((p) => p.id === id && p.active) ?? installed.find((p) => p.id === id))?.version;
+          const method = id === "mysql" || id === "redis" ? "readability" : "native";
+          const result = file.exists ? await mockInvoke<ConfigValidation>("config_validate", { kind: file.kind, content: currentConfigContent(file.kind) }) : null;
+          const ok = file.exists && (method === "readability" || !!result?.ok);
+          checks.push({ kind: file.kind, name: `${label} ${version ?? ""}`.trim(), path: file.path, method, ok,
+            status: ok ? "ok" : "fail", checkedAt: now(),
+            detail: !file.exists ? "配置文件尚未生成，可在修复向导中生成默认配置" : method === "readability" ? "演示文件可读取；未执行原生语法校验或数据库连接" : result?.ok ? "浏览器演示检查通过；桌面端将执行原生校验" : result!.issues.map((issue) => `第 ${issue.line} 行：${issue.message}`).join("\n"),
+          });
+        }
       }
-      return checks as T;
+      const only = args?.only as string[] | null | undefined;
+      if (only && (!only.length || only.some((key) => !checks.some((check) => check.kind === key)))) throw { code: "CONFIG_CHECK_TARGET_CHANGED", message: "检查目标已变更，请重新执行完整体检" };
+      return (only ? checks.filter((check) => only.includes(check.kind)) : checks) as T;
     }
     case "get_app_version":
       return MOCK_APP_VERSION as T;

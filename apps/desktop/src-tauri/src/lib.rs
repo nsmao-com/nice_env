@@ -1170,16 +1170,15 @@ fn get_system_stats() -> nsb_core::model::SystemStats {
     nsb_core::stats::get_system_stats()
 }
 
-/// 配置只读体检：nginx -t / httpd -t / php ini 加载 / 配置文件存在性。
-/// 与「重写配置」不同：这里不改任何文件。
+/// 配置体检放入阻塞任务线程；不把文件可读当成原生语法通过。
 #[tauri::command]
-fn validate_configs(
+async fn validate_configs(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    only: Option<Vec<String>>,
 ) -> Result<Vec<nsb_core::ops::ConfigCheck>, tauri::Error> {
-    map_jh(Ok(nsb_core::ops::validate_configs(
-        &state.store,
-        &state.paths,
-    )))
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(state.validate_configs(only.as_deref())))
+        .await.map_err(|e| box_err(nsb_core::AppError::internal("检查配置", e.to_string())))?
 }
 
 /// Redis 运行统计（内存 / 键数 / 连接数 / 运行天数）

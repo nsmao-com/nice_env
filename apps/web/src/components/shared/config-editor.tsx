@@ -124,7 +124,7 @@ export function ConfigEditor() {
   );
 }
 
-function ConfigEditDialog({
+export function ConfigEditDialog({
   info,
   onClose,
   onSaved,

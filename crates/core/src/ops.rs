@@ -1391,209 +1391,310 @@ pub fn sweep_orphans(paths: &Paths, manager: &Arc<ServiceManager>) -> OrphanRepo
     report
 }
 
-/* ================= 配置体检（只读，不改任何文件） ================= */
+/* ================= 配置体检（不修改配置、不启动服务） ================= */
 
 #[derive(serde::Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigCheck {
+    pub kind: String,
     pub name: String,
+    pub path: Option<String>,
+    pub method: String, // native | readability | none
     pub ok: bool,
-    /// 未安装时为 skipped（前端显示灰）；失败时带 stderr 摘要
-    pub status: String, // ok | fail | skipped
+    pub status: String, // ok | warning | fail | skipped
     pub detail: String,
+    pub checked_at: i64,
 }
 
-/// 对已安装服务的配置做一次只读体检：
-/// nginx `-t` / httpd `-t` / php `-n -c ini -v` / 配置文件存在性。
-/// 修复向导的「重写配置」会改动文件；这里只看不动。
-pub fn validate_configs(store: &Store, paths: &Paths) -> Vec<ConfigCheck> {
-    let mut out = Vec::new();
-
-    // nginx
-    if let Ok((root, exe)) = nginx_exe(store) {
-        let conf = paths.nginx_conf();
-        if !conf.exists() {
-            out.push(ConfigCheck {
-                name: "Nginx".into(),
-                ok: false,
-                status: "fail".into(),
-                detail: "nginx.conf 不存在（先启动一次生成）".into(),
-            });
-        } else {
-            let o = platform::command(&exe)
-                .args([
-                    "-p".into(),
-                    root.to_string_lossy().to_string(),
-                    "-t".into(),
-                    "-c".into(),
-                    conf.to_string_lossy().to_string(),
-                ])
-                .output();
-            match o {
-                Ok(o) if o.status.success() => out.push(ConfigCheck {
-                    name: "Nginx".into(),
-                    ok: true,
-                    status: "ok".into(),
-                    detail: "syntax ok".into(),
-                }),
-                Ok(o) => out.push(ConfigCheck {
-                    name: "Nginx".into(),
-                    ok: false,
-                    status: "fail".into(),
-                    detail: String::from_utf8_lossy(&o.stderr)
-                        .lines()
-                        .take(3)
-                        .collect::<Vec<_>>()
-                        .join(" / "),
-                }),
-                Err(e) => out.push(ConfigCheck {
-                    name: "Nginx".into(),
-                    ok: false,
-                    status: "fail".into(),
-                    detail: e.to_string(),
-                }),
-            }
-        }
-    } else {
-        out.push(ConfigCheck {
-            name: "Nginx".into(),
-            ok: true,
-            status: "skipped".into(),
-            detail: "未安装".into(),
-        });
+impl ConfigCheck {
+    fn finish(&mut self, status: &str, detail: impl Into<String>) {
+        self.status = status.into();
+        self.ok = status == "ok" || status == "warning";
+        self.detail = detail.into();
+        self.checked_at = crate::services::now_ms();
     }
+}
 
-    // apache
-    if let Ok((root, exe)) = apache_paths(store) {
-        let conf = paths.apache_conf();
-        if !conf.exists() {
-            out.push(ConfigCheck {
-                name: "Apache".into(),
-                ok: false,
-                status: "fail".into(),
-                detail: "httpd.conf 不存在".into(),
-            });
-        } else {
-            let o = platform::command(&exe)
-                .args([
-                    "-d".into(),
-                    root.to_string_lossy().to_string(),
-                    "-t".into(),
-                    "-f".into(),
-                    conf.to_string_lossy().to_string(),
-                ])
-                .output();
-            match o {
-                Ok(o) if o.status.success() => out.push(ConfigCheck {
-                    name: "Apache".into(),
-                    ok: true,
-                    status: "ok".into(),
-                    detail: "syntax ok".into(),
-                }),
-                Ok(o) => out.push(ConfigCheck {
-                    name: "Apache".into(),
-                    ok: false,
-                    status: "fail".into(),
-                    detail: String::from_utf8_lossy(&o.stderr)
-                        .lines()
-                        .take(3)
-                        .collect::<Vec<_>>()
-                        .join(" / "),
-                }),
-                Err(e) => out.push(ConfigCheck {
-                    name: "Apache".into(),
-                    ok: false,
-                    status: "fail".into(),
-                    detail: e.to_string(),
-                }),
-            }
+/// 全量体检或重试指定配置；失败逐项报告，读取安装记录失败不能伪装成未安装。
+/// PHP/MySQL/Redis 按所有已安装版本检查；共享 Web 配置使用当前选中的运行版本。
+pub fn validate_configs(
+    store: &Store,
+    paths: &Paths,
+    only: Option<&[String]>,
+) -> Result<Vec<ConfigCheck>> {
+    use std::io::Read;
+    let installed = store.list_installed()?;
+    let mut checks = Vec::new();
+    let mut runtimes = Vec::new();
+    for (id, kind, label) in [
+        ("nginx", "nginx-main", "Nginx"),
+        ("apache", "apache-conf", "Apache"),
+        ("php", "php-ini", "PHP"),
+        ("mysql", "mysql-ini", "MySQL"),
+        ("redis", "redis-conf", "Redis"),
+    ] {
+        let mut packages = installed.iter().filter(|p| p.id == id).collect::<Vec<_>>();
+        packages.sort_by(|a, b| crate::versions::cmp_version_desc(&a.version, &b.version));
+        if matches!(id, "nginx" | "apache") && !packages.is_empty() {
+            let active = store.get_setting_checked(&format!("active{id}Version"))?;
+            let selected = packages
+                .iter()
+                .find(|p| Some(&p.version) == active.as_ref())
+                .copied()
+                .unwrap_or(packages[0]);
+            packages = vec![selected];
         }
-    } else {
-        out.push(ConfigCheck {
-            name: "Apache".into(),
-            ok: true,
-            status: "skipped".into(),
-            detail: "未安装".into(),
-        });
-    }
-
-    // php：每个已装版本 -n -c ini -v（能跑起来 = ini 没写坏）
-    if let Ok(list) = store.list_installed() {
-        let phps: Vec<_> = list.iter().filter(|p| p.id == "php").collect();
-        if phps.is_empty() {
-            out.push(ConfigCheck {
-                name: "PHP".into(),
-                ok: true,
+        if packages.is_empty() {
+            checks.push(ConfigCheck {
+                kind: kind.into(),
+                name: label.into(),
+                path: None,
+                method: "none".into(),
+                ok: false,
                 status: "skipped".into(),
-                detail: "未安装".into(),
+                detail: "未安装，未执行检查".into(),
+                checked_at: crate::services::now_ms(),
             });
+            runtimes.push(None);
         }
-        for p in phps {
-            let exe = PathBuf::from(&p.install_path).join(exe_name("php"));
-            let ini = paths.php_ini(&p.version);
-            if !ini.exists() {
-                out.push(ConfigCheck {
-                    name: format!("PHP {}", p.version),
-                    ok: false,
-                    status: "fail".into(),
-                    detail: "php.ini 不存在".into(),
-                });
-                continue;
-            }
-            let ok = platform::command(&exe)
-                .args(
-                    ["-n", "-c"]
-                        .iter()
-                        .copied()
-                        .chain(std::iter::once(ini.to_string_lossy().as_ref())),
-                )
-                .arg("-v")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            out.push(ConfigCheck {
-                name: format!("PHP {}", p.version),
-                ok,
-                status: if ok { "ok".into() } else { "fail".into() },
-                detail: if ok {
-                    "ini loads".into()
+        for package in packages {
+            let key = if matches!(id, "nginx" | "apache") {
+                kind.into()
+            } else {
+                format!("{kind}@{}", package.version)
+            };
+            let path = match id {
+                "nginx" => paths.nginx_conf(),
+                "apache" => paths.apache_conf(),
+                "php" => paths.php_ini(&package.version),
+                "mysql" => paths.mysql_ini(&package.version),
+                _ => paths.redis_conf(&package.version),
+            };
+            checks.push(ConfigCheck {
+                kind: key,
+                name: format!("{label} {}", package.version),
+                path: Some(path.to_string_lossy().into()),
+                method: if matches!(id, "mysql" | "redis") {
+                    "readability"
                 } else {
-                    "php.ini 加载失败（看日志页 PHP 输出）".into()
-                },
+                    "native"
+                }
+                .into(),
+                ok: false,
+                status: "fail".into(),
+                detail: String::new(),
+                checked_at: crate::services::now_ms(),
             });
+            runtimes.push(Some(package));
         }
     }
+    if let Some(keys) = only {
+        if keys.is_empty()
+            || keys.len() > 200
+            || keys
+                .iter()
+                .any(|key| !checks.iter().any(|row| row.kind == *key))
+        {
+            return Err(AppError::new(
+                "CONFIG_CHECK_TARGET_CHANGED",
+                "检查目标已变更或不存在，请重新执行完整体检",
+            ));
+        }
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let mut out = Vec::new();
+    for (mut check, package) in checks.into_iter().zip(runtimes) {
+        if only.is_some_and(|keys| !keys.contains(&check.kind)) {
+            continue;
+        }
+        let Some(package) = package else {
+            out.push(check);
+            continue;
+        };
+        if std::time::Instant::now() >= deadline {
+            check.finish(
+                "fail",
+                "本次体检已达到 60 秒时间上限，此项尚未检查，请单独重试",
+            );
+            out.push(check);
+            continue;
+        }
+        let result = (|| -> Result<(String, String)> {
+            let conf = PathBuf::from(check.path.as_ref().unwrap());
+            if !conf.is_file() {
+                return Err(AppError::new(
+                    "CONFIG_FILE_UNAVAILABLE",
+                    "配置文件不存在或不是普通文件；可在修复向导中生成默认配置",
+                ));
+            }
+            // 验证路径位于应用数据目录内，不读取通过目录链接跳到外部的配置。
+            let relative = conf
+                .strip_prefix(&paths.base)
+                .map_err(|_| AppError::new("BAD_CONFIG_PATH", "配置路径不在数据目录内"))?;
+            crate::paths::checked_data_path(&paths.base, &nginx_path(relative))?;
+            let mut file =
+                std::fs::File::open(&conf).map_err(|e| AppError::io("读取配置文件", e))?;
+            let mut first_byte = [0u8; 1];
+            let size = file
+                .read(&mut first_byte)
+                .map_err(|e| AppError::io("读取配置文件", e))?;
+            if check.method == "readability" {
+                return Ok((
+                    "ok".into(),
+                    if size == 0 {
+                        "配置文件为空且可读取；未执行服务原生语法校验，也未连接数据库".into()
+                    } else {
+                        "配置文件存在且可读取；未执行服务原生语法校验，也未连接数据库".into()
+                    },
+                ));
+            }
+            let timeout = deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .min(Duration::from_secs(15));
+            if package.id == "php" {
+                return check_php_ini(
+                    &PathBuf::from(&package.install_path).join(exe_name("php")),
+                    &conf,
+                    timeout,
+                );
+            }
+            let (root, exe) = if package.id == "nginx" {
+                nginx_exe(store)?
+            } else {
+                apache_paths(store)?
+            };
+            let mut command = platform::command(exe);
+            command.current_dir(&root).arg("-t");
+            if package.id == "nginx" {
+                command.arg("-p").arg(&root).arg("-c").arg(&conf);
+            } else {
+                command.arg("-d").arg(&root).arg("-f").arg(&conf);
+            }
+            let (ok, output) = crate::cfgeditor::run_validator_with_timeout(&mut command, timeout)?;
+            let status = if !ok {
+                "fail"
+            } else if native_check_has_warning(&output) {
+                "warning"
+            } else {
+                "ok"
+            };
+            Ok((
+                status.into(),
+                if output.trim().is_empty() {
+                    if ok {
+                        "原生配置校验通过"
+                    } else {
+                        "原生配置校验退出失败，但没有返回诊断内容"
+                    }
+                    .into()
+                } else {
+                    output.trim().into()
+                },
+            ))
+        })();
+        match result {
+            Ok((status, detail)) => check.finish(&status, detail),
+            Err(error) => check.finish(
+                "fail",
+                [Some(error.message), error.hint, error.detail]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+        }
+        out.push(check);
+    }
+    Ok(out)
+}
 
-    // redis / mysql 配置存在性
-    if let Some(p) = store.find_installed("redis", None) {
-        let conf = paths.redis_conf(&p.version);
-        let ok = conf.exists();
-        out.push(ConfigCheck {
-            name: "Redis".into(),
-            ok,
-            status: if ok { "ok".into() } else { "fail".into() },
-            detail: if ok {
-                "redis.conf 存在".into()
-            } else {
-                "redis.conf 不存在（先启动一次生成）".into()
-            },
-        });
+fn native_check_has_warning(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    ["[warn]", "warning", "deprecated", "notice", "ah00558"]
+        .iter()
+        .any(|word| lower.contains(word))
+}
+
+fn check_php_ini(exe: &Path, ini: &Path, timeout: Duration) -> Result<(String, String)> {
+    use base64::Engine;
+    // 显式加载目标 ini 并核对加载路径；不混用 -n。隔离额外扫描，不执行用户的 prepend / preload 脚本。
+    let scan = tempfile::tempdir()?;
+    let mut command = platform::command(exe);
+    command.current_dir(exe.parent().unwrap_or_else(|| Path::new(".")))
+        .env_remove("PHPRC").env("PHP_INI_SCAN_DIR", scan.path())
+        .arg("-c").arg(ini)
+        .args(["-d", "auto_prepend_file=", "-d", "auto_append_file=", "-d", "opcache.preload=", "-d", "opcache.enable_cli=0",
+            "-d", "log_errors=0", "-d", "display_errors=stderr", "-d", "display_startup_errors=1",
+            "-r", "echo \"\\nNSB_CONFIG_PROBE:\" . base64_encode((string)php_ini_loaded_file()) . \"\\n\";"]);
+    let (ok, output) = crate::cfgeditor::run_validator_with_timeout(&mut command, timeout)?;
+    let loaded = output
+        .lines()
+        .find_map(|line| line.strip_prefix("NSB_CONFIG_PROBE:"))
+        .and_then(|encoded| {
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded.trim())
+                .ok()
+        })
+        .and_then(|bytes| String::from_utf8(bytes).ok());
+    let same_file = loaded
+        .as_deref()
+        .and_then(|file| Path::new(file).canonicalize().ok())
+        .zip(ini.canonicalize().ok())
+        .is_some_and(|(loaded, expected)| loaded == expected);
+    let diagnostic = output
+        .lines()
+        .filter(|line| !line.starts_with("NSB_CONFIG_PROBE:"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+    let lower = diagnostic.to_ascii_lowercase();
+    if !ok
+        || !same_file
+        || [
+            "syntax error",
+            "parse error",
+            "fatal error",
+            "unable to load",
+            "failed loading",
+            "php startup:",
+        ]
+        .iter()
+        .any(|word| lower.contains(word))
+    {
+        return Ok((
+            "fail".into(),
+            format!(
+                "PHP 配置或扩展加载未通过{}{}",
+                if same_file {
+                    ""
+                } else {
+                    "：未能确认加载了所选 php.ini"
+                },
+                if diagnostic.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n{diagnostic}")
+                }
+            ),
+        ));
     }
-    if let Some(p) = store.find_installed("mysql", None) {
-        let ini = paths.mysql_ini(&p.version);
-        let ok = ini.exists();
-        out.push(ConfigCheck {
-            name: format!("MySQL {}", p.version),
-            ok,
-            status: if ok { "ok".into() } else { "fail".into() },
-            detail: if ok {
-                "my.ini 存在".into()
+    Ok((
+        if native_check_has_warning(&diagnostic) {
+            "warning"
+        } else {
+            "ok"
+        }
+        .into(),
+        format!(
+            "已确认 PHP CLI 实际加载所选 php.ini；Web 请求与站点覆盖配置需另行检查{}",
+            if diagnostic.is_empty() {
+                String::new()
             } else {
-                "my.ini 不存在（先启动一次生成）".into()
-            },
-        });
-    }
-    out
+                format!("\n{diagnostic}")
+            }
+        ),
+    ))
 }
 
 #[cfg(test)]
@@ -2435,16 +2536,115 @@ mod validate_tests {
     }
 
     #[test]
+    fn config_check_reports_broken_runtime_and_all_database_versions() {
+        let base = tempfile::tempdir().unwrap();
+        let state = isolated_state(Paths::new(base.path().to_path_buf()));
+        register_fixture(&state, "nginx", "1.28.0", &base.path().join("missing-nginx"));
+        std::fs::create_dir_all(state.paths.nginx_conf().parent().unwrap()).unwrap();
+        std::fs::write(state.paths.nginx_conf(), "events {}\nhttp {}\n").unwrap();
+        for (id, version) in [("mysql", "5.7.44"), ("mysql", "8.0.46"), ("redis", "5.0.14"), ("redis", "7.2.0")] {
+            register_fixture(&state, id, version, &base.path().join(format!("{id}-{version}")));
+            let config = if id == "mysql" { state.paths.mysql_ini(version) } else { state.paths.redis_conf(version) };
+            std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+            if version == "7.2.0" { std::fs::create_dir_all(config).unwrap(); }
+            else { std::fs::write(config, "unsupported_option\n").unwrap(); }
+        }
+        let report = state.validate_configs(None).unwrap();
+        let nginx = report.iter().find(|row| row.kind == "nginx-main").unwrap();
+        assert_eq!(nginx.status, "fail");
+        assert!(nginx.detail.contains("找不到"));
+        assert_eq!(report.iter().filter(|row| row.kind.starts_with("mysql-ini@")).count(), 2);
+        let mysql = report.iter().find(|row| row.kind == "mysql-ini@8.0.46").unwrap();
+        assert_eq!(mysql.method, "readability");
+        assert!(mysql.detail.contains("未执行服务原生语法校验"));
+        assert_eq!(report.iter().find(|row| row.kind == "redis-conf@7.2.0").unwrap().status, "fail");
+        let retry = state.validate_configs(Some(&["mysql-ini@5.7.44".into()])).unwrap();
+        assert_eq!(retry.len(), 1);
+        assert!(retry[0].path.as_deref().unwrap().contains("5.7.44"));
+        assert!(state.validate_configs(Some(&["mysql-ini@missing".into()])).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires NSB_NGINX_ROOT; native nginx -t against temporary configuration, no service"]
+    fn native_nginx_config_check_uses_active_runtime_and_returns_errors() {
+        let source = PathBuf::from(std::env::var("NSB_NGINX_ROOT").expect("NSB_NGINX_ROOT"));
+        let version = source.file_name().unwrap().to_string_lossy().strip_prefix("nginx-").unwrap().to_string();
+        let temp = tempfile::tempdir().unwrap();
+        let state = isolated_state(Paths::new(temp.path().join("checks with spaces")));
+        let install = state.paths.runtime_dir("nginx", &version);
+        let runtime = install.join(format!("nginx-{version}"));
+        std::fs::create_dir_all(runtime.join("logs")).unwrap();
+        std::fs::copy(source.join("nginx.exe"), runtime.join("nginx.exe")).unwrap();
+        register_fixture(&state, "nginx", &version, &install);
+        register_fixture(&state, "nginx", "99.0.0", &temp.path().join("broken-version"));
+        state.store.set_setting("activenginxVersion", &version).unwrap();
+        let conf = state.paths.nginx_conf();
+        std::fs::create_dir_all(conf.parent().unwrap()).unwrap();
+        std::fs::write(&conf, "events {}\nhttp {}\n").unwrap();
+        let report = state.validate_configs(Some(&["nginx-main".into()])).unwrap();
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].status, "ok", "{:?}", report[0]);
+        assert!(report[0].name.contains(&version));
+        let bad = "events {}\nunknown_directive yes;\n";
+        std::fs::write(&conf, bad).unwrap();
+        let failed = state.validate_configs(Some(&["nginx-main".into()])).unwrap();
+        assert_eq!(failed[0].status, "fail");
+        assert!(failed[0].detail.contains("unknown directive"));
+        assert_eq!(std::fs::read_to_string(conf).unwrap(), bad);
+    }
+
+    #[test]
+    fn config_check_reports_installed_record_read_errors() {
+        let base = tempfile::tempdir().unwrap();
+        let state = isolated_state(Paths::new(base.path().to_path_buf()));
+        // 仅破坏临时夹具数据库；验证读取失败不能返回一组「未安装」。
+        rusqlite::Connection::open(state.paths.db()).unwrap().execute_batch("DROP TABLE installed").unwrap();
+        assert!(state.validate_configs(None).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires NSB_PHP_ROOT; runs finite PHP CLI configuration checks, no service"]
+    fn native_php_config_check_detects_zero_exit_errors_and_missing_extensions() {
+        let php = PathBuf::from(std::env::var("NSB_PHP_ROOT").expect("NSB_PHP_ROOT"));
+        let temp = tempfile::tempdir().unwrap();
+        let state = isolated_state(Paths::new(temp.path().join("config with spaces")));
+        register_fixture(&state, "php", "8.4.26", &php);
+        let ini = state.paths.php_ini("8.4.26");
+        std::fs::create_dir_all(ini.parent().unwrap()).unwrap();
+        std::fs::write(&ini, "[PHP]\nmemory_limit=128M\n").unwrap();
+        let check = || state.validate_configs(Some(&["php-ini@8.4.26".into()])).unwrap().remove(0);
+        assert_eq!(check().status, "ok");
+        let bad = "[PHP]\nmemory_limit = \"unclosed\n";
+        std::fs::write(&ini, bad).unwrap();
+        let failed = check();
+        assert_eq!(failed.status, "fail");
+        assert!(failed.detail.contains("syntax error"));
+        assert_eq!(std::fs::read_to_string(&ini).unwrap(), bad);
+        std::fs::write(&ini, "[PHP]\nextension=niceenv_missing_extension_for_verification\n").unwrap();
+        let failed = check();
+        assert_eq!(failed.status, "fail");
+        assert!(failed.detail.to_lowercase().contains("unable to load"));
+        let user_script = temp.path().join("prepend.php");
+        let sentinel = temp.path().join("must-not-exist");
+        std::fs::write(&user_script, format!("<?php file_put_contents('{}', 'executed');", sentinel.to_string_lossy().replace('\\', "/"))).unwrap();
+        std::fs::write(&ini, format!("[PHP]\nauto_prepend_file=\"{}\"\n", user_script.to_string_lossy().replace('\\', "/"))).unwrap();
+        assert_eq!(check().status, "ok");
+        assert!(!sentinel.exists());
+        assert!(!state.paths.backup().exists() || std::fs::read_dir(state.paths.backup()).unwrap().next().is_none());
+    }
+
+    #[test]
     fn empty_install_reports_all_skipped() {
         let base = tempfile::tempdir().unwrap();
         let paths = Paths::new(base.path().to_path_buf());
         paths.ensure_dirs().unwrap();
         let store = Store::open(paths.db()).unwrap();
-        let checks = validate_configs(&store, &paths);
+        let checks = validate_configs(&store, &paths, None).unwrap();
         assert!(!checks.is_empty());
         // 什么都没装时体检不该有失败项
         assert!(
-            checks.iter().all(|c| c.ok),
+            checks.iter().all(|c| c.status == "skipped" && !c.ok),
             "未安装不应报 fail：{:?}",
             checks
         );

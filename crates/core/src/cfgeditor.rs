@@ -10,7 +10,7 @@
 //!
 //! 只暴露**白名单内**的配置文件，不做成任意文件读写接口。
 
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -786,11 +786,52 @@ pub fn parse_nginx_line_no(line: &str) -> Option<usize> {
 }
 
 pub(crate) fn run_validator(command: &mut std::process::Command) -> Result<(bool, String)> {
-    let mut output = tempfile::tempfile()?;
+    run_validator_with_timeout(command, std::time::Duration::from_secs(15))
+}
+
+/// 连续排空两路输出，每路只保留 64 KiB。超限即失败，不能把被截断的诊断当成完整校验。
+pub(crate) fn run_validator_with_timeout(
+    command: &mut std::process::Command,
+    timeout: std::time::Duration,
+) -> Result<(bool, String)> {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    const LIMIT: usize = 64 * 1024;
+    fn drain(
+        mut pipe: impl Read + Send + 'static,
+        exceeded: Arc<AtomicBool>,
+    ) -> std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let mut buffer = [0; 4096];
+            loop {
+                match pipe.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        let keep = count.min(LIMIT.saturating_sub(bytes.len()));
+                        bytes.extend_from_slice(&buffer[..keep]);
+                        if keep < count {
+                            exceeded.store(true, Ordering::Release);
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => {
+                        let _ = sender.send(Err(error));
+                        return;
+                    }
+                }
+            }
+            let _ = sender.send(Ok(bytes));
+        });
+        receiver
+    }
     command
         .stdin(std::process::Stdio::null())
-        .stdout(output.try_clone()?)
-        .stderr(output.try_clone()?);
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -802,40 +843,65 @@ pub(crate) fn run_validator(command: &mut std::process::Command) -> Result<(bool
     let mut child = command
         .spawn()
         .map_err(|e| AppError::io("运行配置校验器", e))?;
-    if let Err(e) = group.attach(child.id()) {
+    if let Err(error) = group.attach(child.id()) {
         let _ = child.kill();
         let _ = child.wait();
-        return Err(e.into());
+        return Err(error.into());
     }
-    let started = std::time::Instant::now();
+    let exceeded = Arc::new(AtomicBool::new(false));
+    let stdout = drain(child.stdout.take().unwrap(), exceeded.clone());
+    let stderr = drain(child.stderr.take().unwrap(), exceeded.clone());
+    let deadline = std::time::Instant::now() + timeout;
     let status = loop {
+        if exceeded.load(Ordering::Acquire) {
+            break Err(AppError::new(
+                "VALIDATION_OUTPUT_LIMIT",
+                "配置校验单路输出超过 64 KiB 上限，已停止校验进程；请检查配置和扩展错误",
+            ));
+        }
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
-            Ok(None) if started.elapsed() < std::time::Duration::from_secs(15) => {
-                std::thread::sleep(std::time::Duration::from_millis(40))
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(25))
             }
             Ok(None) => {
                 break Err(AppError::new(
                     "VALIDATION_TIMEOUT",
-                    "配置校验超时，已停止校验进程",
+                    "配置校验超时，已停止校验进程及其子进程",
                 ))
             }
-            Err(e) => break Err(AppError::io("等待配置校验器", e)),
+            Err(error) => break Err(AppError::io("等待配置校验器", error)),
         }
     };
+    // 校验主进程退出后也清理继承管道的子进程，防止读取输出一直等待。
+    let cleanup = group.terminate(true);
     if status.is_err() {
-        let _ = group.terminate(true);
         let _ = child.kill();
     }
     let _ = child.wait();
+    let read = |receiver: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>| -> Result<String> {
+        let bytes = receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .map_err(|_| {
+                AppError::new(
+                    "VALIDATION_OUTPUT_INCOMPLETE",
+                    "校验输出管道未关闭，未能完整读取结果",
+                )
+            })?
+            .map_err(|error| AppError::io("读取配置校验结果", error))?;
+        Ok(platform::decode_command_output(&bytes))
+    };
+    let captured = read(stdout).and_then(|out| read(stderr).map(|err| format!("{out}\n{err}")));
     let status = status?;
-    output.rewind()?;
-    let mut bytes = Vec::new();
-    output.take(128 * 1024).read_to_end(&mut bytes)?;
-    Ok((
-        status.success(),
-        String::from_utf8_lossy(&bytes).into_owned(),
-    ))
+    cleanup.map_err(AppError::from)?;
+    let output = captured?;
+    if exceeded.load(Ordering::Acquire) {
+        return Err(AppError::new(
+            "VALIDATION_OUTPUT_LIMIT",
+            "配置校验输出超过上限，无法确认完整校验结果",
+        ));
+    }
+    Ok((status.success(), output))
 }
 
 pub fn validate_selected(
@@ -1199,6 +1265,64 @@ pub fn rollback_config_selected(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn validator_fixture_command(windows: &str, unix: &str) -> std::process::Command {
+        #[cfg(windows)]
+        {
+            use base64::Engine;
+            let _ = unix;
+            let exe = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/WindowsPowerShell/v1.0/powershell.exe");
+            let encoded = base64::engine::general_purpose::STANDARD.encode(windows.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>());
+            let mut command = platform::command(exe);
+            command.args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &encoded]);
+            command
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = windows;
+            let mut command = platform::command("/bin/sh");
+            command.args(["-c", unix]);
+            command
+        }
+    }
+
+    #[test]
+    fn validator_captures_nonzero_exit_and_stderr() {
+        let mut command = validator_fixture_command("[Console]::Error.Write('native config failure'); exit 7", "printf 'native config failure' >&2; exit 7");
+        let (ok, output) = run_validator(&mut command).unwrap();
+        assert!(!ok);
+        assert!(output.contains("native config failure"));
+    }
+
+    #[test]
+    fn validator_timeout_and_output_limits_cannot_report_success() {
+        let started = std::time::Instant::now();
+        let mut command = validator_fixture_command("Start-Sleep -Seconds 20", "sleep 20");
+        let error = run_validator_with_timeout(&mut command, std::time::Duration::from_millis(180)).unwrap_err();
+        assert_eq!(error.code, "VALIDATION_TIMEOUT");
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+        let mut command = validator_fixture_command("[Console]::Out.Write(('x' * 70000))", "head -c 70000 /dev/zero");
+        assert_eq!(run_validator(&mut command).unwrap_err().code, "VALIDATION_OUTPUT_LIMIT");
+    }
+
+    #[test]
+    fn validator_cleans_descendants_when_main_process_exits() {
+        let mut command = validator_fixture_command(
+            "$child = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe') -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 20' -WindowStyle Hidden -PassThru; [Console]::Out.WriteLine('NSB_CHILD_PID=' + [string]$child.Id)",
+            "sleep 20 & printf 'NSB_CHILD_PID=%s\\n' $!",
+        );
+        let started = std::time::Instant::now();
+        let (ok, output) = run_validator(&mut command).unwrap();
+        assert!(ok, "{output}");
+        let pid = output.lines().find_map(|line| line.strip_prefix("NSB_CHILD_PID=")).unwrap_or_else(|| panic!("{output}")).trim().parse::<u32>().unwrap_or_else(|error| panic!("{error}: {output}"));
+        for _ in 0..20 {
+            if !platform::process_alive(pid) { break; }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(!platform::process_alive(pid));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
 
     #[test]
     fn unambiguous_legacy_root_backups_can_be_rolled_back_from_editor_history() {

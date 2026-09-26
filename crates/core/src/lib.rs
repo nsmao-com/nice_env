@@ -878,6 +878,13 @@ impl CoreState {
         paths::restore_backup_checked(&self.paths.base, name, Some(revision)).map_err(|error| AppError::io("恢复配置备份", error))
     }
 
+    pub fn validate_configs(&self, only: Option<&[String]>) -> Result<Vec<ops::ConfigCheck>> {
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| {
+            AppError::new("CONFIG_CHECK_BUSY", "其他服务或配置操作正在进行，请稍后重试体检")
+        })?;
+        ops::validate_configs(&self.store, &self.paths, only)
+    }
+
     pub fn validate_config(
         &self,
         kind: &str,

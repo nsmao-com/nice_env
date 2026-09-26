@@ -548,12 +548,16 @@ export const exportLog = (id: string, dest: string) =>
   safe(invoke<number>("export_log", { id, dest }));
 
 export interface ConfigCheck {
+  kind: string;
   name: string;
+  path: string | null;
+  method: "native" | "readability" | "none";
   ok: boolean;
-  status: "ok" | "fail" | "skipped";
+  status: "ok" | "warning" | "fail" | "skipped";
   detail: string;
+  checkedAt: number;
 }
-export const validateConfigs = () => safe(invoke<ConfigCheck[]>("validate_configs"));
+export const validateConfigs = (only?: string[]) => safe(invoke<ConfigCheck[]>("validate_configs", { only: only ?? null }));
 
 /* hosts 文件导入/导出用的纯文本读写 */
 export const readTextFile = (path: string) => safe(invoke<string>("read_text_file", { path }));

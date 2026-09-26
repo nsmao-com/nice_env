@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { toast } from "sonner";
+import Link from "next/link";
 import {
   CheckSquare,
   Loader2,
@@ -13,8 +13,9 @@ import {
 } from "lucide-react";
 import type { ServiceStatus, BulkReport } from "@nsb/schema";
 import { useT } from "@/lib/store";
-import { useInvalidate, toastError } from "@/lib/hooks";
+import { useInvalidate, serviceHasProcess } from "@/lib/hooks";
 import * as api from "@/lib/api";
+import { normalizeError, type AppErrorShape } from "@/lib/backend";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
@@ -42,19 +43,23 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
   const [picked, setPicked] = React.useState<Set<string>>(new Set());
   const [busy, setBusy] = React.useState<string | null>(null);
   const [report, setReport] = React.useState<BulkReport | null>(null);
+  const [error, setError] = React.useState<AppErrorShape | null>(null);
+  const busyRef = React.useRef(false);
+  const resultRef = React.useRef<HTMLDivElement>(null);
 
   const running = React.useMemo(
-    () => services.filter((s) => s.state === "running").map((s) => s.id),
+    () => services.filter(serviceHasProcess).map((s) => s.id),
     [services]
   );
   const stopped = React.useMemo(
-    () => services.filter((s) => s.state !== "running").map((s) => s.id),
+    () => services.filter((s) => !serviceHasProcess(s)).map((s) => s.id),
     [services]
   );
 
   React.useEffect(() => {
     if (!open) {
       setReport(null);
+      setError(null);
       setPicked(new Set());
     }
   }, [open]);
@@ -67,11 +72,11 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
       return n;
     });
 
-  const run = async (action: "start" | "stop" | "restart") => {
-    const ids = Array.from(picked);
-    if (ids.length === 0) return;
+  const run = async (action: "start" | "stop" | "restart", ids = Array.from(picked)) => {
+    if (ids.length === 0 || busyRef.current) return;
+    busyRef.current = true;
     setBusy(action);
-    setReport(null);
+    setError(null);
     try {
       const r =
         action === "start"
@@ -80,36 +85,18 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
             ? await api.bulkStop(ids)
             : await api.bulkRestart(ids);
       setReport(r);
-      invalidate("services");
-      // 结果摘要 toast：全成功就报数量，有失败就点名
-      if (r.failed.length === 0) {
-        toast.success(
-          t("bulk.done")
-            .replace("{n}", String(r.succeeded.length))
-            .replace("{action}", t(`bulk.${action}`))
-        );
-      } else {
-        toast.warning(
-          t("bulk.partial")
-            .replace("{ok}", String(r.succeeded.length))
-            .replace("{fail}", String(r.failed.length)),
-          {
-            description: r.failed
-              .slice(0, 3)
-              .map((f) => `${f.serviceId}: ${f.error.message}`)
-              .join("\n"),
-            duration: 10000,
-          }
-        );
-      }
     } catch (e) {
-      toastError(e);
+      setError(normalizeError(e));
     } finally {
+      busyRef.current = false;
       setBusy(null);
+      invalidate("services", "stacks");
     }
   };
 
-  const runReportLabel = (id: string) => services.find((s) => s.id === id)?.label ?? id;
+  React.useEffect(() => {
+    if (!busy && (report || error)) resultRef.current?.scrollIntoView({ block: "nearest" });
+  }, [busy, report, error]);
 
   // 与 service-card 保持同一套状态文案，避免两处叫法不一致
   const stateLabel: Record<string, string> = {
@@ -129,14 +116,15 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
         onClick={() => setOpen(true)}
         disabled={services.length === 0}
         title={t("bulk.title")}
+        aria-label={t("bulk.title")}
       >
         <ListChecks className="h-3.5 w-3.5" />
         <span className="hidden sm:inline">{t("bulk.title")}</span>
       </Button>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="flex max-h-[85vh] max-w-2xl flex-col gap-0 overflow-hidden p-0">
-          <DialogHeader className="shrink-0 border-b border-border px-5 py-4">
+      <Dialog open={open} onOpenChange={(next) => { if (!busyRef.current) setOpen(next); }}>
+        <DialogContent hideClose={busy !== null} aria-busy={busy !== null} className="flex max-h-[85dvh] max-w-2xl flex-col gap-0 overflow-hidden p-0">
+          <DialogHeader className="shrink-0 border-b border-border px-4 py-4 pr-10 sm:px-5">
             <div className="flex items-center gap-3">
               <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-primary/30 bg-primary-soft">
                 <CheckSquare className="h-[18px] w-[18px] text-primary" strokeWidth={1.8} />
@@ -150,7 +138,7 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
             </div>
           </DialogHeader>
 
-          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          <div className="min-h-0 flex-1 overflow-y-auto px-3 py-4 sm:px-5">
             <div className="space-y-1">
               {services.map((s) => (
                 <label
@@ -167,10 +155,12 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
                     className="h-3.5 w-3.5 shrink-0 accent-[var(--primary)]"
                     checked={picked.has(s.id)}
                     onChange={() => toggle(s.id)}
+                    disabled={busy !== null}
+                    aria-label={s.label}
                   />
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="truncate text-[12.5px] font-medium">{s.label}</span>
+                    <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
+                      <span className="min-w-0 basis-full truncate text-[12.5px] font-medium sm:basis-auto">{s.label}</span>
                       {s.version && (
                         <span className="shrink-0 font-mono text-[10.5px] text-faint">{s.version}</span>
                       )}
@@ -188,60 +178,25 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
               ))}
             </div>
 
-            {/* 执行结果：按依赖顺序列出，失败项带上原始错误 */}
-            {report && (
-              <div className="mt-4 rounded-xl border border-border/70 bg-card-2/30 p-3">
-                <div className="mb-2 flex items-center gap-2">
-                  <span className="text-[10px] font-semibold uppercase tracking-[0.09em] text-faint/70">
-                    {t("bulk.execOrder")}
-                  </span>
-                  <span className="h-px flex-1 bg-border/60" />
-                </div>
-                <ol className="space-y-0.5">
-                  {report.order.map((id, i) => {
-                    const ok = report.succeeded.includes(id);
-                    const skipped = report.already.includes(id);
-                    const fail = report.failed.find((f) => f.serviceId === id);
-                    return (
-                      <li key={id} className="flex items-start gap-2 text-[11.5px]">
-                        <span className="w-4 shrink-0 tabular text-faint">{i + 1}.</span>
-                        <span className="font-mono">{runReportLabel(id)}</span>
-                        <span
-                          className={cn(
-                            "ml-auto shrink-0",
-                            ok ? "text-running" : skipped ? "text-faint" : "text-error"
-                          )}
-                        >
-                          {ok
-                            ? t("bulk.rOk")
-                            : skipped
-                              ? t("bulk.rSkipped")
-                              : t("bulk.rFail")}
-                        </span>
-                        {fail && (
-                          <span className="w-full pl-6 text-[10.5px] text-error">
-                            {fail.error.message}
-                            {fail.error.hint && (
-                              <span className="text-muted"> — {fail.error.hint}</span>
-                            )}
-                          </span>
-                        )}
-                      </li>
-                    );
-                  })}
-                </ol>
-              </div>
-            )}
+            <div ref={resultRef}>
+              <BulkResult report={report} error={error} services={services} busy={busy !== null} />
+              {report && report.failed.length > 0 && (
+                <Button variant="secondary" size="sm" className="mt-2" disabled={busy !== null}
+                  onClick={() => void run(report.action as "start" | "stop" | "restart", report.failed.map((f) => f.serviceId))}>
+                  <RotateCw className="h-3.5 w-3.5" /> {t("bulk.retryFailed")}
+                </Button>
+              )}
+            </div>
           </div>
 
-          <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-border px-5 py-3">
+          <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-3 sm:px-5">
             <div className="flex flex-wrap items-center gap-1.5">
               <Button
                 variant="ghost"
                 size="sm"
                 className="h-7 text-[11.5px]"
                 onClick={() => setPicked(new Set(running))}
-                disabled={running.length === 0}
+                disabled={busy !== null || running.length === 0}
               >
                 {t("bulk.selectRunning")}
               </Button>
@@ -250,7 +205,7 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
                 size="sm"
                 className="h-7 text-[11.5px]"
                 onClick={() => setPicked(new Set(stopped))}
-                disabled={stopped.length === 0}
+                disabled={busy !== null || stopped.length === 0}
               >
                 {t("bulk.selectStopped")}
               </Button>
@@ -259,6 +214,7 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
                   variant="ghost"
                   size="sm"
                   className="h-7 text-[11.5px]"
+                  disabled={busy !== null}
                   onClick={() => setPicked(new Set())}
                 >
                   <X className="h-3 w-3" />
@@ -267,7 +223,7 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
               )}
             </div>
 
-            <div className="flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
               <Button
                 size="sm"
                 variant="secondary"
@@ -314,5 +270,55 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
         </DialogContent>
       </Dialog>
     </>
+  );
+}
+
+/** 所有批量入口使用相同的逐项结果，长错误换行且失败优先于成功标记。 */
+export function BulkResult({ report, error, services, busy = false }: {
+  report: BulkReport | null;
+  error?: AppErrorShape | null;
+  busy?: boolean;
+  services: ServiceStatus[];
+}) {
+  const t = useT();
+  return (
+    <div className="min-w-0 space-y-2 [overflow-wrap:anywhere]" aria-live="polite">
+      {error && <p role="alert" className="rounded-lg bg-error-soft p-3 text-xs text-error">{error.message}{error.hint && <span className="mt-1 block">{error.hint}</span>}</p>}
+      {report && (
+        <div className="mt-3 rounded-xl border border-border/70 bg-card-2/30 p-3">
+          <p className="text-xs font-medium">
+            {t("bulk.resultSummary").replace("{ok}", String(report.succeeded.length))
+              .replace("{already}", String(report.already.length)).replace("{fail}", String(report.failed.length))}
+          </p>
+          <p className="mt-1 text-[10.5px] text-faint">{t("bulk.execOrder")}</p>
+          {report.action === "restart" && <p className="mt-1 text-[11px] text-muted">{t("bulk.restartOrder")}</p>}
+          <ol className="mt-2 space-y-2">
+            {report.order.map((id, index) => {
+              const failure = report.failed.find((f) => f.serviceId === id);
+              const ok = !failure && report.succeeded.includes(id);
+              const already = !failure && report.already.includes(id);
+              return (
+                <li key={id} className="min-w-0 text-xs">
+                  <div className="flex items-start gap-2">
+                    <span className="shrink-0 text-faint">{index + 1}.</span>
+                    <span className="min-w-0 flex-1">{services.find((s) => s.id === id)?.label ?? id}</span>
+                    <span className={cn("shrink-0", failure ? "text-error" : ok ? "text-running" : "text-faint")}>
+                      {t(failure ? "bulk.rFail" : ok ? "bulk.rOk" : already ? "bulk.rSkipped" : "bulk.rUnknown")}
+                    </span>
+                  </div>
+                  {failure && (
+                    <div className="mt-1 pl-5 text-[11px] text-error">
+                      <p>{failure.error.message}</p>
+                      {failure.error.hint && <p className="mt-1 text-muted">{failure.error.hint}</p>}
+                      <Link aria-disabled={busy} tabIndex={busy ? -1 : undefined} onClick={(event) => { if (busy) event.preventDefault(); }} className="mt-1 inline-block text-primary underline underline-offset-2 aria-disabled:opacity-50" href={`/logs?service=${encodeURIComponent(id)}`}>{t("logs.title")}</Link>
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ol>
+        </div>
+      )}
+    </div>
   );
 }

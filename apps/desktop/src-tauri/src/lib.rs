@@ -151,6 +151,7 @@ pub fn run() {
             rebuild_hosts,
             list_certs,
             issue_cert,
+            delete_local_cert,
             reissue_site_certs,
             trust_ca,
             // 项目扫描
@@ -206,6 +207,8 @@ pub fn run() {
             config_save,
             config_backups,
             config_rollback,
+            config_reset_preview,
+            config_reset,
             // PHP 扩展
             php_extensions,
             set_php_extension,
@@ -223,6 +226,7 @@ pub fn run() {
             kill_pid,
             get_system_stats,
             list_backups,
+            preview_backup,
             restore_backup,
             // 打开外部
             open_in_browser,
@@ -237,6 +241,8 @@ pub fn run() {
             db_reset_root_password,
             db_root_password,
             redis_stats,
+            redis_connection,
+            redis_save_connection,
             // 数据库备份 / 还原
             db_backup_list,
             db_backup_dump,
@@ -271,6 +277,7 @@ pub fn run() {
             ollama_delete,
             ollama_pull,
             adminer_start,
+            adminer_status,
             adminer_stop,
             // 设置
             get_settings,
@@ -376,22 +383,40 @@ async fn install_package(
 }
 
 #[tauri::command]
-fn uninstall_package(
+async fn uninstall_package(
+    app: tauri::AppHandle,
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<bool, tauri::Error> {
-    map_jh(state.uninstall_package(&id).map(|_| true))
+    let st = state.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        map_jh(st.uninstall_package(&id).map(|_| true))
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?;
+    // 即使后续 PATH 清理失败，卸载及默认版本回落仍已生效。
+    crate::tray::refresh(&app);
+    result
 }
 
-/// 切换单实例服务的「使用中版本」（仅已装版本）
+/// 设置套件默认版本（仅已装版本）；多实例服务的运行状态独立保留。
 #[tauri::command]
-fn set_active_version(
+async fn set_active_version(
+    app: tauri::AppHandle,
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
     version: String,
 ) -> Result<bool, tauri::Error> {
     // 走门面而非直接 ops：切版本后要把 PATH 里的目录一并指过去
-    map_jh(state.set_active_version(&id, &version).map(|_| true))
+    let st = state.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        map_jh(st.set_active_version(&id, &version).map(|_| true))
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?;
+    // PATH 失败时默认版本仍可能已保存，托盘也应反映实际服务栈选择。
+    crate::tray::refresh(&app);
+    result
 }
 
 /* ================= 环境变量（PATH 注入） ================= */
@@ -465,8 +490,7 @@ fn cancel_download(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     task_id: String,
 ) -> Result<bool, tauri::Error> {
-    state.downloader.cancel(&task_id);
-    Ok(true)
+    Ok(state.downloader.cancel(&task_id))
 }
 
 /* ================= 服务 ================= */
@@ -664,21 +688,31 @@ fn list_sites(
     map_jh(nsb_core::sites::list_with_status(
         &state.paths,
         &state.store,
+        &state.manager,
     ))
 }
 
 #[tauri::command]
 async fn create_site(
+    app: tauri::AppHandle,
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     input: nsb_core::model::CreateSiteInput,
 ) -> Result<nsb_core::model::Site, tauri::Error> {
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        map_jh(nsb_core::sites::create(
+        map_jh(nsb_core::sites::create_with_progress(
             &input,
             &st.paths,
             &st.store,
             &st.manager,
+            &|stage, percent| {
+                let _ = app.emit(
+                    "site://create-progress",
+                    serde_json::json!({
+                        "rootDir": input.root_dir.trim(), "stage": stage, "percent": percent,
+                    }),
+                );
+            },
         ))
     })
     .await
@@ -815,10 +849,12 @@ fn certauto_issue(
 }
 
 #[tauri::command]
-fn list_certs(
+async fn list_certs(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<Vec<nsb_core::model::CertRecord>, tauri::Error> {
-    map_jh(nsb_core::tls::list_certs(&state.paths, &state.store))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::tls::list_certs(&st.paths, &st.store)))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
@@ -830,6 +866,7 @@ async fn cert_export_pem(
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(nsb_core::tls::export_pem_bundle(
+            &st.paths,
             &st.store,
             &cert_id,
             std::path::Path::new(&out_path),
@@ -849,6 +886,7 @@ async fn cert_export_jks(
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(nsb_core::tls::export_jks(
+            &st.paths,
             &st.store,
             &cert_id,
             &password,
@@ -868,6 +906,7 @@ async fn cert_export_der(
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(nsb_core::tls::export_der(
+            &st.paths,
             &st.store,
             &cert_id,
             std::path::Path::new(&out_path),
@@ -923,6 +962,7 @@ async fn cert_export_pfx(
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(nsb_core::tls::export_pfx(
+            &st.paths,
             &st.store,
             &cert_id,
             &password,
@@ -934,23 +974,28 @@ async fn cert_export_pfx(
 }
 
 #[tauri::command]
-fn issue_cert(
+async fn issue_cert(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     domain: String,
     sans: Vec<String>,
 ) -> Result<nsb_core::model::CertRecord, tauri::Error> {
-    let mut domains = vec![domain];
-    domains.extend(sans);
-    map_jh(nsb_core::tls::issue_site_cert(
-        &state.paths,
-        &state.store,
-        &domains,
-    ))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.issue_certificate(&domain, &sans)))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
-fn trust_ca(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> Result<bool, tauri::Error> {
-    map_jh(nsb_core::tls::trust_ca(&state.paths).map(|_| true))
+async fn delete_local_cert(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: String) -> Result<bool, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.delete_local_certificate(&id).map(|_| true)))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn trust_ca(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> Result<bool, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::tls::trust_ca(&st.paths).map(|_| true)))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /// 按当前站点重建 hosts 托管块（保留用户手动条目）
@@ -963,13 +1008,12 @@ fn rebuild_hosts(
 
 /// 补齐缺失/过期的站点证书，返回重新签发的域名
 #[tauri::command]
-fn reissue_site_certs(
+async fn reissue_site_certs(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<Vec<String>, tauri::Error> {
-    map_jh(nsb_core::tls::reissue_missing_site_certs(
-        &state.paths,
-        &state.store,
-    ))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.repair_site_certificates()))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /* ================= 日志 / 诊断 / 统计 ================= */
@@ -1027,24 +1071,44 @@ async fn close_port(
 
 /// 备份目录列表（配置变更前自动生成的 .bak）
 #[tauri::command]
-fn list_backups(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> Vec<serde_json::Value> {
-    nsb_core::paths::list_backups(&state.paths.base)
-        .into_iter()
-        .map(|(name, path, size, mtime)| {
-            serde_json::json!({ "name": name, "path": path, "sizeBytes": size, "modifiedAt": mtime })
-        })
-        .collect()
+async fn list_backups(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+) -> Result<Vec<nsb_core::paths::BackupFile>, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(nsb_core::paths::list_backup_files(&st.paths.base).map_err(Into::into))
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn preview_backup(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    name: String,
+) -> Result<nsb_core::paths::BackupPreview, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.preview_backup(&name)))
+        .await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /// 从备份恢复单个配置文件
 #[tauri::command]
-fn restore_backup(
+async fn restore_backup(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     name: String,
+    revision: String,
 ) -> Result<String, tauri::Error> {
-    let r = nsb_core::paths::restore_backup(&state.paths.base, &name)
-        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))?;
-    Ok(r.to_string_lossy().to_string())
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(
+            st.restore_backup(&name, &revision)
+                .map(|path| path.to_string_lossy().to_string()),
+        )
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
@@ -1071,11 +1135,26 @@ fn validate_configs(
 
 /// Redis 运行统计（内存 / 键数 / 连接数 / 运行天数）
 #[tauri::command]
-fn redis_stats(
+async fn redis_stats(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
-) -> nsb_core::stats::RedisStats {
-    let ports = nsb_core::services::PortsProfile::from_settings(&state.store);
-    state.redis_stats(ports.redis)
+) -> Result<nsb_core::stats::RedisStats, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.redis_stats())).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn redis_connection(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String) -> Result<nsb_core::stats::RedisConnectionInfo, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.redis_connection(&version))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn redis_save_connection(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, credentials: nsb_core::stats::RedisCredentials) -> Result<nsb_core::stats::RedisStats, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.save_redis_connection(&version, credentials))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /// 已连接的网络接口（供 DNS 接管选择）
@@ -1116,10 +1195,11 @@ async fn migrate_list_source(
     port: u16,
     user: String,
     password: String,
+    version: Option<String>,
 ) -> Result<Vec<nsb_core::dbmigrate::SourceDb>, tauri::Error> {
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        map_jh(st.migrate_list_source(host, port, user, password))
+        map_jh(st.migrate_list_source(host, port, user, password, version.as_deref()))
     })
     .await
     .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -1133,11 +1213,12 @@ async fn migrate_import(
     port: u16,
     user: String,
     password: String,
+    version: Option<String>,
     databases: Vec<String>,
 ) -> Result<nsb_core::dbmigrate::ImportReport, tauri::Error> {
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        map_jh(st.migrate_import(host, port, user, password, databases))
+        map_jh(st.migrate_import(host, port, user, password, databases, version.as_deref()))
     })
     .await
     .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -1287,115 +1368,114 @@ fn has_windows_terminal() -> bool {
 
 /* ================= 数据库 ================= */
 
-fn mysql_client_of(state: &CoreState) -> nsb_core::error::Result<nsb_core::dbadmin::MySqlClient> {
-    let version = state
-        .store
-        .find_installed("mysql", None)
-        .map(|p| p.version)
-        .ok_or_else(|| nsb_core::AppError::not_installed("MySQL"))?;
-    let ports = nsb_core::services::PortsProfile::from_settings(&state.store);
-    let pass = state
-        .store
-        .get_setting("mysqlRootPassword")
-        .unwrap_or_else(|| "root".into());
-    Ok(nsb_core::dbadmin::MySqlClient::from_state(
-        &state.paths,
-        &version,
-        ports.mysql,
-        pass,
-    ))
+async fn run_mysql<T, F>(
+    state: &std::sync::Arc<CoreState>,
+    version: Option<String>,
+    operation: F,
+) -> Result<T, tauri::Error>
+where
+    T: Send + 'static,
+    F: FnOnce(&CoreState, &str, &nsb_core::dbadmin::MySqlClient) -> nsb_core::error::Result<T>
+        + Send
+        + 'static,
+{
+    let st = state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(st.with_mysql(version.as_deref(), |version, client| {
+            operation(&st, version, client)
+        }))
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
-fn db_list(
-    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+async fn db_list(
+    state: State<'_, std::sync::Arc<CoreState>>,
+    version: Option<String>,
 ) -> Result<Vec<nsb_core::model::DatabaseInfo>, tauri::Error> {
-    map_jh(mysql_client_of(&state).and_then(|c| c.list_databases()))
+    run_mysql(&state, version, |_, _, client| client.list_databases()).await
 }
 
 #[tauri::command]
-fn db_create(
-    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+async fn db_create(
+    state: State<'_, std::sync::Arc<CoreState>>,
     name: String,
+    version: Option<String>,
 ) -> Result<bool, tauri::Error> {
-    map_jh(
-        mysql_client_of(&state)
-            .and_then(|c| c.create_database(&name))
-            .map(|_| true),
-    )
+    run_mysql(&state, version, move |_, _, client| {
+        client.create_database(&name).map(|_| true)
+    })
+    .await
 }
 
 #[tauri::command]
-fn db_drop(
-    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+async fn db_drop(
+    state: State<'_, std::sync::Arc<CoreState>>,
     name: String,
+    version: Option<String>,
 ) -> Result<bool, tauri::Error> {
-    map_jh(
-        mysql_client_of(&state)
-            .and_then(|c| c.drop_database(&name))
-            .map(|_| true),
-    )
+    run_mysql(&state, version, move |_, _, client| {
+        client.drop_database(&name).map(|_| true)
+    })
+    .await
 }
 
 #[tauri::command]
-fn db_users(
-    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+async fn db_users(
+    state: State<'_, std::sync::Arc<CoreState>>,
+    version: Option<String>,
 ) -> Result<Vec<nsb_core::model::DbUserInfo>, tauri::Error> {
-    map_jh(mysql_client_of(&state).and_then(|c| c.list_users()))
+    run_mysql(&state, version, |_, _, client| client.list_users()).await
 }
 
 #[tauri::command]
-fn db_create_user(
-    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+async fn db_create_user(
+    state: State<'_, std::sync::Arc<CoreState>>,
     username: String,
     password: String,
     database: String,
+    version: Option<String>,
 ) -> Result<bool, tauri::Error> {
-    map_jh(
-        mysql_client_of(&state)
-            .and_then(|c| c.create_user_grant(&username, &password, &database))
-            .map(|_| true),
-    )
+    run_mysql(&state, version, move |_, _, client| {
+        client
+            .create_user_grant(&username, &password, &database)
+            .map(|_| true)
+    })
+    .await
 }
 
 #[tauri::command]
-fn db_reset_root_password(
-    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+async fn db_reset_root_password(
+    state: State<'_, std::sync::Arc<CoreState>>,
     new_password: String,
+    version: Option<String>,
+    use_existing: Option<bool>,
 ) -> Result<bool, tauri::Error> {
-    let pass = if new_password.is_empty() {
-        format!("nsb_{}", rand_string(8))
-    } else {
-        new_password
-    };
-    let client = map_jh(mysql_client_of(&state))?;
-    map_jh(client.reset_root_password(&pass))?;
-    map_jh(
-        state
-            .store
-            .set_setting("mysqlRootPassword", &pass)
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(
+            st.set_mysql_password(
+                version.as_deref(),
+                &new_password,
+                use_existing.unwrap_or(false),
+            )
             .map(|_| true),
-    )?;
-    Ok(true)
+        )
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
-fn db_root_password(
-    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+async fn db_root_password(
+    state: State<'_, std::sync::Arc<CoreState>>,
+    version: Option<String>,
 ) -> Result<String, tauri::Error> {
-    Ok(state
-        .store
-        .get_setting("mysqlRootPassword")
-        .unwrap_or_else(|| "root".into()))
-}
-
-fn rand_string(n: usize) -> String {
-    use rand::Rng;
-    rand::thread_rng()
-        .sample_iter(&rand::distributions::Alphanumeric)
-        .take(n)
-        .map(char::from)
-        .collect()
+    run_mysql(&state, version, |_, _, client| {
+        Ok(client.root_password.clone())
+    })
+    .await
 }
 
 /* ================= 代理（Clash/mihomo） ================= */
@@ -1650,20 +1730,32 @@ fn ollama_pull(
     map_jh(state.ollama_pull(&name).map(|_| true))
 }
 
-/// 启动 Adminer 管理台，浏览器打开 http://127.0.0.1:{port}/{file}
+/// Adminer 的启动检查与进程回收运行在工作线程。
 #[tauri::command]
-fn adminer_start(
+async fn adminer_start(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
-) -> Result<serde_json::Value, tauri::Error> {
-    let (port, file) = map_jh(state.adminer_start())?;
-    Ok(serde_json::json!({ "port": port, "file": file }))
+) -> Result<nsb_core::toolbox::AdminerStatus, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.adminer_start())).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
-fn adminer_stop(
+async fn adminer_status(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+) -> Result<Option<nsb_core::toolbox::AdminerStatus>, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.adminer_status())).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn adminer_stop(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<bool, tauri::Error> {
-    map_jh(state.adminer_stop().map(|_| true))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.adminer_stop().map(|_| true))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
@@ -2430,29 +2522,23 @@ fn xdebug_toggle(
 /* ================= 数据库备份 / 还原 ================= */
 
 /// 复用既有连接信息（版本 / 端口 / root 密码）
-fn db_conn_of(state: &CoreState) -> nsb_core::error::Result<nsb_core::dbbackup::ConnInfo> {
-    let version = state
-        .store
-        .find_installed("mysql", None)
-        .map(|p| p.version)
-        .ok_or_else(|| nsb_core::AppError::not_installed("MySQL"))?;
-    let ports = nsb_core::services::PortsProfile::from_settings(&state.store);
-    let root_password = state
-        .store
-        .get_setting("mysqlRootPassword")
-        .unwrap_or_else(|| "root".into());
-    Ok(nsb_core::dbbackup::ConnInfo {
-        version,
-        port: ports.mysql,
-        root_password,
-    })
+fn db_conn_of(
+    version: &str,
+    client: &nsb_core::dbadmin::MySqlClient,
+) -> nsb_core::dbbackup::ConnInfo {
+    nsb_core::dbbackup::ConnInfo {
+        version: version.into(),
+        port: client.port,
+        root_password: client.root_password.clone(),
+        bin_dir: client.exe.parent().map(std::path::Path::to_path_buf),
+    }
 }
 
 #[tauri::command]
 fn db_backup_list(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
-) -> Vec<nsb_core::model::DbBackupFile> {
-    nsb_core::dbbackup::list_backups(&state.paths)
+) -> Result<Vec<nsb_core::model::DbBackupFile>, tauri::Error> {
+    map_jh(nsb_core::dbbackup::list_backups(&state.paths))
 }
 
 #[tauri::command]
@@ -2468,26 +2554,20 @@ async fn db_backup_dump(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     databases: Vec<String>,
     out_name: Option<String>,
+    version: Option<String>,
 ) -> Result<String, tauri::Error> {
-    let st = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let conn = db_conn_of(&st)?;
-        let dir = nsb_core::dbbackup::backup_dir(&st.paths);
+    run_mysql(&state, version, move |st, version, client| {
+        let conn = db_conn_of(version, client);
         let name = out_name
             .filter(|n| !n.trim().is_empty())
             .unwrap_or_else(|| nsb_core::dbbackup::default_dump_name(&databases));
-        let path = dir.join(name);
-        let emit = st.emit.clone();
-        let p = path.clone();
-        nsb_core::dbbackup::dump_databases(&st.paths, &conn, &databases, &path, &move |prog| {
-            emit(nsb_core::Event::DbBackup(prog));
-            let _ = &p;
+        let path = nsb_core::dbbackup::dump_path(&st.paths, version, &name)?;
+        nsb_core::dbbackup::dump_databases(&st.paths, &conn, &databases, &path, &|prog| {
+            (st.emit)(nsb_core::Event::DbBackup(prog))
         })?;
         Ok(path.to_string_lossy().to_string())
     })
     .await
-    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
-    .map_err(box_err)
 }
 
 /// 从 .sql 还原；默认先自动备份一份当前状态
@@ -2496,17 +2576,18 @@ async fn db_backup_restore(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     path: String,
     safety_backup: Option<bool>,
+    version: Option<String>,
+    database: Option<String>,
 ) -> Result<nsb_core::model::DbRestoreResult, tauri::Error> {
-    let st = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let conn = db_conn_of(&st)?;
-        let emit = st.emit.clone();
-        let safety = nsb_core::dbbackup::restore_from_file(
+    run_mysql(&state, version, move |st, version, client| {
+        let conn = db_conn_of(version, client);
+        let safety = nsb_core::dbbackup::restore_from_file_into(
             &st.paths,
             &conn,
             std::path::Path::new(&path),
+            database.as_deref(),
             safety_backup.unwrap_or(true),
-            &move |prog| emit(nsb_core::Event::DbBackup(prog)),
+            &|prog| (st.emit)(nsb_core::Event::DbBackup(prog)),
         )?;
         Ok(nsb_core::model::DbRestoreResult {
             ok: true,
@@ -2514,8 +2595,6 @@ async fn db_backup_restore(
         })
     })
     .await
-    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
-    .map_err(box_err)
 }
 
 #[tauri::command]
@@ -2579,112 +2658,151 @@ fn config_read(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     kind: String,
 ) -> Result<String, tauri::Error> {
-    let k = nsb_core::cfgeditor::ConfigKind::parse(&kind)
-        .ok_or_else(|| box_err(nsb_core::AppError::new("BAD_KIND", "未知的配置类型")))?;
-    map_jh(nsb_core::cfgeditor::read_config(
+    map_jh(nsb_core::cfgeditor::read_config_selected(
         &state.paths,
         &state.store,
-        k,
+        &kind,
     ))
 }
 
 /// 只校验不写入：前端可做实时校验
 #[tauri::command]
-fn config_validate(
+async fn config_validate(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     kind: String,
     content: String,
 ) -> Result<nsb_core::cfgeditor::ConfigValidation, tauri::Error> {
-    let k = nsb_core::cfgeditor::ConfigKind::parse(&kind)
-        .ok_or_else(|| box_err(nsb_core::AppError::new("BAD_KIND", "未知的配置类型")))?;
-    map_jh(nsb_core::cfgeditor::validate(
-        &state.paths,
-        &state.store,
-        k,
-        &content,
-    ))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.validate_config(&kind, &content)))
+        .await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /// 保存：默认校验不过就拒写；force=true 才允许跳过（带备份）
 #[tauri::command]
-fn config_save(
+async fn config_save(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     kind: String,
     content: String,
     force: Option<bool>,
+    expected_content: Option<String>,
 ) -> Result<nsb_core::cfgeditor::ConfigValidation, tauri::Error> {
-    let k = nsb_core::cfgeditor::ConfigKind::parse(&kind)
-        .ok_or_else(|| box_err(nsb_core::AppError::new("BAD_KIND", "未知的配置类型")))?;
-    map_jh(nsb_core::cfgeditor::save_config(
-        &state.paths,
-        &state.store,
-        k,
-        &content,
-        force.unwrap_or(false),
-    ))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(st.save_config(
+            &kind,
+            &content,
+            force.unwrap_or(false),
+            expected_content.as_deref(),
+        ))
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
 fn config_backups(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
-) -> Vec<nsb_core::cfgeditor::ConfigBackup> {
-    nsb_core::cfgeditor::list_config_backups(&state.paths)
+    kind: Option<String>,
+) -> Result<Vec<nsb_core::cfgeditor::ConfigBackup>, tauri::Error> {
+    map_jh(nsb_core::cfgeditor::list_config_backups_selected(
+        &state.paths,
+        &state.store,
+        kind.as_deref(),
+    ))
 }
 
 #[tauri::command]
-fn config_rollback(
+async fn config_rollback(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     name: String,
+    kind: Option<String>,
+    expected_content: Option<String>,
 ) -> Result<bool, tauri::Error> {
-    map_jh(nsb_core::cfgeditor::rollback_config(&state.paths, &state.store, &name).map(|_| true))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(
+            st.rollback_config(&name, kind.as_deref(), expected_content.as_deref())
+                .map(|_| true),
+        )
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn config_reset_preview(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    kind: String,
+) -> Result<nsb_core::cfgeditor::ConfigResetPreview, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.preview_config_reset(&kind)))
+        .await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn config_reset(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    kind: String,
+    revision: String,
+) -> Result<nsb_core::cfgeditor::ConfigResetPreview, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.reset_config(&kind, &revision)))
+        .await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /* ================= 证书体检 ================= */
 
 #[tauri::command]
-fn cert_health(
+async fn cert_health(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<nsb_core::certs::CertReport, tauri::Error> {
-    map_jh(nsb_core::certs::report(&state.paths, &state.store))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::certs::report(&st.paths, &st.store)))
+        .await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
-fn cert_import(
+async fn cert_import(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     cert_path: String,
     key_path: String,
 ) -> Result<nsb_core::certs::ImportedCert, tauri::Error> {
-    map_jh(nsb_core::certs::import_cert_pair(
-        &state.paths,
-        std::path::Path::new(&cert_path),
-        std::path::Path::new(&key_path),
-    ))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::certs::import_cert_pair(&st.paths, std::path::Path::new(&cert_path), std::path::Path::new(&key_path))))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
-fn cert_import_dir(
+async fn cert_import_dir(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     dir: String,
 ) -> Result<nsb_core::certs::DirImportResult, tauri::Error> {
-    map_jh(nsb_core::certs::import_cert_dir(
-        &state.paths,
-        std::path::Path::new(&dir),
-    ))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::certs::import_cert_dir(&st.paths, std::path::Path::new(&dir))))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
-fn cert_imported_list(
+async fn cert_imported_list(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
-) -> Vec<nsb_core::certs::ImportedCert> {
-    nsb_core::certs::list_imported(&state.paths)
+) -> Result<Vec<nsb_core::certs::ImportedCert>, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::certs::list_imported(&st.paths, &st.store)))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
-fn cert_imported_delete(
+async fn cert_imported_delete(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     cert_path: String,
 ) -> Result<bool, tauri::Error> {
-    map_jh(nsb_core::certs::delete_imported(&state.paths, &cert_path).map(|_| true))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::certs::delete_imported(&st.paths, &st.store, &cert_path).map(|_| true)))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /* ================= 站点 .env ================= */
@@ -2773,42 +2891,45 @@ fn health_check(
 
 /// 批量启动：按依赖分层排序（数据层 → 运行时 → Web 服务器），逐项回报
 #[tauri::command]
-fn bulk_start(
+async fn bulk_start(
+    app: tauri::AppHandle,
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     ids: Vec<String>,
 ) -> Result<nsb_core::bulk::BulkReport, tauri::Error> {
-    map_jh(nsb_core::bulk::start_many(
-        &state.store,
-        &state.paths,
-        &state.manager,
-        &ids,
-    ))
+    let st = state.inner().clone();
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        map_jh(nsb_core::bulk::start_many(&st.store, &st.paths, &st.manager, &ids))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))??;
+    crate::tray::refresh(&app);
+    Ok(report)
 }
 
 #[tauri::command]
-fn bulk_stop(
+async fn bulk_stop(
+    app: tauri::AppHandle,
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     ids: Vec<String>,
 ) -> Result<nsb_core::bulk::BulkReport, tauri::Error> {
-    map_jh(nsb_core::bulk::stop_many(
-        &state.store,
-        &state.paths,
-        &state.manager,
-        &ids,
-    ))
+    let st = state.inner().clone();
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        map_jh(nsb_core::bulk::stop_many(&st.store, &st.paths, &st.manager, &ids))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))??;
+    crate::tray::refresh(&app);
+    Ok(report)
 }
 
 #[tauri::command]
-fn bulk_restart(
+async fn bulk_restart(
+    app: tauri::AppHandle,
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     ids: Vec<String>,
 ) -> Result<nsb_core::bulk::BulkReport, tauri::Error> {
-    map_jh(nsb_core::bulk::restart_many(
-        &state.store,
-        &state.paths,
-        &state.manager,
-        &ids,
-    ))
+    let st = state.inner().clone();
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        map_jh(nsb_core::bulk::restart_many(&st.store, &st.paths, &st.manager, &ids))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))??;
+    crate::tray::refresh(&app);
+    Ok(report)
 }
 
 /// 选中集合的运行统计（前端据此决定按钮可点性）

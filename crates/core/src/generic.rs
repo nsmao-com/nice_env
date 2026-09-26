@@ -507,6 +507,7 @@ fn run_init_if_needed(r: &Resolved) -> Result<()> {
 
 /// 注册所有「清单声明 run」的已装服务（应用启动/安装后调用）
 pub fn register_services(paths: &Paths, store: &Store, manager: &Arc<ServiceManager>) {
+    let _operation = manager.lifecycle.lock();
     let Ok(installed) = store.list_installed() else {
         return;
     };

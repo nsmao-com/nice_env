@@ -159,25 +159,52 @@ fn cert_import_rejects_garbage_and_accepts_pem() {
     assert!(r.is_err());
     assert_eq!(r.unwrap_err().code, "NOT_A_CERT");
 
-    // 用真 CA 签一张，再导入它自己（验证 PEM 解析路径打通）
+    // 用真 CA 签一张站点证书，再导入它自己（验证 PEM、SAN 和密钥匹配路径打通）
     nsb_core::tls::ensure_ca(&e.paths).unwrap();
-    let ca_cert = e.paths.certs().join("ca.crt");
-    if ca_cert.is_file() {
-        // CA 私钥路径按实现约定找
-        let candidates = ["ca.key", "rootCA.key", "ca.key.pem"];
-        let found_key = candidates
-            .iter()
-            .map(|n| e.paths.certs().join(n))
-            .find(|p| p.is_file());
-        if let Some(k) = found_key {
-            let imp = nsb_core::certs::import_cert_pair(&e.paths, &ca_cert, &k);
-            assert!(imp.is_ok(), "应能导入真 PEM：{imp:?}");
-            let info = imp.unwrap();
-            assert!(info.not_after > 0, "应解析出有效期");
-            assert!(info.cert_path.ends_with(".crt"));
-            assert!(info.key_path.ends_with(".key"));
-        }
-    }
+    let issued = nsb_core::tls::issue_site_cert(&e.paths, &e.store, &["import.test".into()]).unwrap();
+    let imp = nsb_core::certs::import_cert_pair(&e.paths, std::path::Path::new(&issued.cert_path), std::path::Path::new(issued.key_path.as_ref().unwrap()));
+    assert!(imp.is_ok(), "应能导入真 PEM：{imp:?}");
+    let info = imp.unwrap();
+    assert!(info.usable && info.not_after > 0, "应解析出有效期和可用状态");
+    assert!(info.sans.contains(&"import.test".to_string()));
+}
+
+#[test]
+fn cert_import_rejects_mismatched_ca_and_uncovered_domains() {
+    let e = Env::new("certimp-validation");
+    nsb_core::tls::ensure_ca(&e.paths).unwrap();
+    let first = nsb_core::tls::issue_site_cert(&e.paths, &e.store, &["first.test".into()]).unwrap();
+    let second = nsb_core::tls::issue_site_cert(&e.paths, &e.store, &["second.test".into()]).unwrap();
+
+    let mismatched = nsb_core::certs::import_cert_pair(
+        &e.paths,
+        std::path::Path::new(&first.cert_path),
+        std::path::Path::new(second.key_path.as_ref().unwrap()),
+    )
+    .unwrap_err();
+    assert_eq!(mismatched.code, "CERT_KEY_MISMATCH");
+
+    let ca = nsb_core::certs::import_cert_pair(
+        &e.paths,
+        &e.paths.certs().join("ca.crt"),
+        &e.paths.certs().join("ca.key"),
+    )
+    .unwrap_err();
+    assert_eq!(ca.code, "CERT_IS_CA");
+
+    let imported = nsb_core::certs::import_cert_pair(
+        &e.paths,
+        std::path::Path::new(&first.cert_path),
+        std::path::Path::new(first.key_path.as_ref().unwrap()),
+    )
+    .unwrap();
+    let domain = nsb_core::certs::validate_imported_domains(
+        &e.paths,
+        &imported.id,
+        &["outside.test".into()],
+    )
+    .unwrap_err();
+    assert_eq!(domain.code, "CERT_DOMAIN_MISMATCH");
 }
 
 /* ================= 配置编辑器 ================= */

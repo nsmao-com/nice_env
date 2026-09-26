@@ -5,7 +5,7 @@ use crate::configgen;
 use crate::error::{AppError, Result};
 use crate::model::{AppErrorInfo, ServiceState, ServiceStatus};
 use crate::store::Store;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, ReentrantMutex};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -35,6 +35,9 @@ pub struct ServiceEntry {
 }
 
 pub struct ServiceManager {
+    /// 启停、版本切换和卸载共用；编排内部允许同线程重入。
+    pub(crate) lifecycle: ReentrantMutex<()>,
+    pub(crate) adminer: Mutex<Option<crate::toolbox::AdminerRuntime>>,
     pub services: Mutex<HashMap<String, Arc<ServiceEntry>>>,
     pub shutting_down: AtomicBool,
     /// 状态变更历史（新→旧，最多 200 条）：(ts ms, serviceId, 变更说明)
@@ -44,6 +47,8 @@ pub struct ServiceManager {
 impl ServiceManager {
     pub fn new() -> Self {
         Self {
+            lifecycle: ReentrantMutex::new(()),
+            adminer: Mutex::new(None),
             services: Mutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
             history: Mutex::new(VecDeque::new()),
@@ -63,8 +68,20 @@ impl ServiceManager {
         port: Option<u16>,
         log_file: PathBuf,
     ) {
+        let _operation = self.lifecycle.lock();
+        if self.is_busy(id) {
+            return; // 保留实际运行版本及进程句柄，不能被刚安装的新版本覆盖。
+        }
         let mut map = self.services.lock();
-        if !map.contains_key(id) {
+        let previous = map.get(id).cloned();
+        let unchanged = previous.as_ref().is_some_and(|e| {
+            e.label == label
+                && e.version == version
+                && e.category == category
+                && e.port == port
+                && e.log_file == log_file
+        });
+        if !unchanged {
             map.insert(
                 id.to_string(),
                 Arc::new(ServiceEntry {
@@ -76,7 +93,7 @@ impl ServiceManager {
                     started_at: Mutex::new(None),
                     last_error: Mutex::new(None),
                     group: Mutex::new(None),
-                    ring: Mutex::new(VecDeque::new()),
+                    ring: Mutex::new(previous.map(|e| e.ring.lock().clone()).unwrap_or_default()),
                     log_file,
                     port,
                     started_port: Mutex::new(None),
@@ -84,6 +101,20 @@ impl ServiceManager {
                 }),
             );
         }
+    }
+
+    /// Error 也可能仍有进程；切换或删除前必须检查实际 pid。
+    pub(crate) fn is_busy(&self, id: &str) -> bool {
+        self.entry(id).is_some_and(|e| {
+            matches!(
+                *e.state.lock(),
+                ServiceState::Starting | ServiceState::Stopping
+            ) || e
+                .pids
+                .lock()
+                .iter()
+                .any(|pid| platform::process_alive(*pid))
+        })
     }
 
     pub fn push_log(&self, id: &str, line: &str) {
@@ -203,21 +234,30 @@ impl ServiceManager {
         memory_of: impl FnOnce(&[u32]) -> f64,
     ) -> Option<ServiceStatus> {
         let e = self.entry(id)?;
-        let state = e.state.lock().clone();
-        let pids = e.pids.lock().clone();
+        let mut state = e.state.lock();
+        let mut pids = e.pids.lock().clone();
         // 真实进程校验：running 状态但进程全没了 → 回写 Stopped，
         // 否则 e.state 会永远停在 Running，stop_service 的短路判断与 UI 显示长期不一致
-        let effective = if state == ServiceState::Running && !pids.is_empty() {
+        let effective = if matches!(*state, ServiceState::Running | ServiceState::Error) {
             let alive = pids.iter().any(|p| platform::process_alive(*p));
             if alive {
-                ServiceState::Running
+                state.clone()
             } else {
-                *e.state.lock() = ServiceState::Stopped;
-                ServiceState::Stopped
+                if *state == ServiceState::Running {
+                    *state = ServiceState::Stopped;
+                    self.push_history(id, "Running → Stopped（进程已退出）".into());
+                }
+                e.pids.lock().clear();
+                pids.clear();
+                *e.started_at.lock() = None;
+                *e.started_port.lock() = None;
+                *e.group.lock() = None;
+                state.clone()
             }
         } else {
-            state
+            state.clone()
         };
+        drop(state);
         let uptime = e.started_at.lock().map(|t| {
             SystemTime::now()
                 .duration_since(t)
@@ -234,12 +274,13 @@ impl ServiceManager {
             .lock()
             .as_ref()
             .map(|err| AppErrorInfo::from(err.clone()));
+        let port = (*e.started_port.lock()).or(e.port);
         Some(ServiceStatus {
             id: id.to_string(),
             label: e.label.clone(),
             state: effective,
             pids,
-            port: e.port,
+            port,
             version: e.version.clone(),
             memory_mb,
             uptime_sec: uptime,
@@ -298,6 +339,13 @@ pub fn spawn_tracked(
     service_id: &str,
     spec: &SpawnSpec,
 ) -> Result<u32> {
+    let _operation = manager.lifecycle.lock();
+    let entry = manager.entry(service_id).ok_or_else(|| {
+        AppError::new(
+            "UNKNOWN_SERVICE",
+            format!("服务 {service_id} 未注册或已卸载"),
+        )
+    })?;
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args)
         .stdout(Stdio::piped())
@@ -329,7 +377,7 @@ pub fn spawn_tracked(
     let pid = child.id();
 
     // Job Object 归组（Windows 防孤儿）；CLI 分离模式用普通 Job
-    if let Some(entry) = manager.entry(service_id) {
+    let attached = (|| -> Result<()> {
         let mut group = entry.group.lock();
         if group.is_none() {
             *group = Some(
@@ -342,10 +390,16 @@ pub fn spawn_tracked(
             .unwrap()
             .attach(pid)
             .map_err(AppError::from)?;
+        Ok(())
+    })();
+    if let Err(err) = attached {
+        // spawn 已成功时不能直接返回错误，否则留下未托管进程。
+        let _ = platform::ProcessGroup::from_pids(vec![pid]).terminate(true);
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(err);
     }
-    if let Some(entry) = manager.entry(service_id) {
-        entry.pids.lock().push(pid);
-    }
+    entry.pids.lock().push(pid);
 
     // 日志线程：stdout + stderr → ring + 文件
     if let Some(out) = child.stdout.take() {
@@ -368,23 +422,31 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(
     service_id: &str,
     pipe: R,
     tag: &str,
-) {
+) -> std::thread::JoinHandle<()> {
     let sid = service_id.to_string();
     let tag = tag.to_string();
     std::thread::spawn(move || {
-        let reader = BufReader::new(pipe);
-        for line in reader.lines() {
-            match line {
-                Ok(l) if !l.trim().is_empty() => {
+        let mut reader = BufReader::new(pipe);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    // 原生程序可能输出系统编码；不能因一行不是 UTF-8 就中断整个日志流。
+                    let decoded = String::from_utf8_lossy(&line);
+                    let l = decoded.trim_end_matches(['\r', '\n']);
+                    if l.trim().is_empty() {
+                        continue;
+                    }
                     let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
                     let full = format!("[{ts}] [{tag}] {l}");
                     manager.push_log(&sid, &full);
                     append_to_log_file(&manager, &sid, &full);
                 }
-                _ => break,
             }
         }
-    });
+    })
 }
 
 fn append_to_log_file(manager: &ServiceManager, service_id: &str, line: &str) {
@@ -408,12 +470,17 @@ fn append_to_log_file(manager: &ServiceManager, service_id: &str, line: &str) {
 pub fn tcp_port_open(port: u16) -> bool {
     // 只探本机回环：有监听时握手由内核完成，亚毫秒级。
     // Windows 连一个没人监听的端口不会立刻失败（收到 RST 后还会重试 SYN，约 1~2s），
-    // 所以「端口空闲」的判定永远要等满超时——超时越长，启动服务 / 分配端口池越慢
+    // 这里只检查连通性；分配监听端口走绑定检查，避免额外的临时连接占用。
     std::net::TcpStream::connect_timeout(
         &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
         Duration::from_millis(200),
     )
     .is_ok()
+}
+
+/// 分配监听端口必须尝试绑定；已绑定但未监听的套接字、系统保留端口也可能不可用。
+fn tcp_port_bindable(port: u16) -> bool {
+    port != 0 && std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
 }
 
 pub fn wait_healthy(port: u16, timeout: Duration) -> bool {
@@ -533,10 +600,21 @@ impl PortsProfile {
 
 /// 端口预检：被占用即返回人话错误（含占用进程）
 pub fn precheck_port(port: u16, what: &str) -> Result<()> {
-    if !tcp_port_open(port) {
-        return Ok(());
+    if port == 0 {
+        return Err(AppError::new("BAD_PORT", "监听端口必须在 1–65535 范围内"));
     }
+    let bind_error = match std::net::TcpListener::bind(("127.0.0.1", port)) {
+        Ok(_) => return Ok(()),
+        Err(error) => error,
+    };
     let diag = crate::ports::diagnose_port(port)?;
+    if !diag.in_use {
+        let mut err = AppError::new("PORT_UNAVAILABLE", format!("端口 {port} 暂时无法绑定"))
+            .with_hint("端口可能已被其它套接字绑定或由系统保留；请稍后重试，或在设置中选择其它端口")
+            .with_detail(format!("启动 {what} 前端口预检失败：{bind_error}"));
+        err.port = Some(port);
+        return Err(err);
+    }
     let mut err = AppError::port_conflict(port, diag.process_name.as_deref())
         .with_detail(format!("启动 {what} 前端口预检失败"));
     if let Some(pid) = diag.pid {
@@ -554,14 +632,16 @@ pub fn allocate_php_pool(store: &Store, service_id: &str) -> Result<u16> {
         .all_port_assigns()
         .into_iter()
         .filter(|(sid, _)| sid != service_id)
-        .flat_map(|(_, b)| (b..b + configgen::PHP_POOL_WORKERS).collect::<Vec<_>>())
+        .flat_map(|(_, b)| (0..configgen::PHP_POOL_WORKERS).filter_map(move |offset| b.checked_add(offset)))
         .collect();
 
-    if let Some(p) = store.get_port_assign(service_id) {
+    if let Some(p) = store.get_port_assign(service_id)
+        .filter(|p| *p != 0 && p.checked_add(configgen::PHP_POOL_WORKERS).is_some())
+    {
         let range: Vec<u16> = (p..p + configgen::PHP_POOL_WORKERS).collect();
         let clash = range
             .iter()
-            .any(|port| used_by_others.contains(port) || tcp_port_open(*port));
+            .any(|port| used_by_others.contains(port) || !tcp_port_bindable(*port));
         if !clash {
             return Ok(p);
         }
@@ -573,7 +653,7 @@ pub fn allocate_php_pool(store: &Store, service_id: &str) -> Result<u16> {
         let range: Vec<u16> = (base..base + configgen::PHP_POOL_WORKERS).collect();
         let clash = range
             .iter()
-            .any(|p| used_by_others.contains(p) || tcp_port_open(*p));
+            .any(|p| used_by_others.contains(p) || !tcp_port_bindable(*p));
         if !clash {
             store.set_port_assign(service_id, base)?;
             return Ok(base);
@@ -597,11 +677,11 @@ pub fn now_ms() -> i64 {
 
 /// 在 desired 附近找一个空闲端口（desired+1 起，最多 tries 个）。
 /// avoid：同档位里其它服务已占用的端口（含本档刚回落过的），绝不撞车。
-/// 纯逻辑 + tcp 探测，测试可直接绑定真实 socket。
+/// 纯逻辑 + 本机绑定检查，不用主动连接制造额外的临时端口占用。
 pub fn find_free_port_near(desired: u16, avoid: &[u16], tries: u16) -> Option<u16> {
     for off in 1..=tries {
-        let cand = desired + off;
-        if avoid.contains(&cand) || tcp_port_open(cand) {
+        let cand = desired.checked_add(off)?;
+        if avoid.contains(&cand) || !tcp_port_bindable(cand) {
             continue;
         }
         return Some(cand);
@@ -620,7 +700,21 @@ pub fn fallback_port_for(store: &Store, key: &str, desired: u16, avoid: &[u16]) 
     if !enabled {
         return None;
     }
-    let found = find_free_port_near(desired, avoid, 32)?;
+    // 已保存的端口空闲时继续使用；否则每次重启都会无条件递增端口。
+    if !avoid.contains(&desired) && tcp_port_bindable(desired) {
+        return Some(desired);
+    }
+    let found = find_free_port_near(desired, avoid, 32).or_else(|| {
+        // 附近的端口可能全部被占用；开启自动回落时再让操作系统分配空闲端口。
+        for _ in 0..32 {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?;
+            let port = listener.local_addr().ok()?.port();
+            if !avoid.contains(&port) && port != desired {
+                return Some(port);
+            }
+        }
+        None
+    })?;
     store.set_port_override(key, Some(found)).ok()?;
     Some(found)
 }
@@ -630,20 +724,86 @@ mod fallback_tests {
     use super::*;
 
     #[test]
+    fn native_log_encoding_does_not_hide_later_lines() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = Arc::new(ServiceManager::new());
+        let log = temp.path().join("service.log");
+        manager.register("fixture", "Fixture", None, None, None, log.clone());
+        let raw = b"ready\r\n\r\nbind failed: \xff\xfe\r\nnext diagnostic\n";
+        spawn_log_reader(manager.clone(), "fixture", std::io::Cursor::new(raw), "OUT")
+            .join().unwrap();
+        let lines = manager.tail("fixture", 10);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1].contains("bind failed:"));
+        assert!(lines[2].ends_with("next diagnostic"));
+        assert!(std::fs::read_to_string(log).unwrap().contains("next diagnostic"));
+    }
+
+    #[test]
+    fn port_allocation_rejects_bound_sockets_and_invalid_ports() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let bound = tokio::net::TcpSocket::new_v4().unwrap();
+        bound.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let bound_port = bound.local_addr().unwrap().port();
+        assert!(!tcp_port_bindable(bound_port));
+        assert_eq!(find_free_port_near(bound_port - 1, &[], 1), None);
+        assert_eq!(precheck_port(bound_port, "Fixture").unwrap_err().code, "PORT_UNAVAILABLE");
+        assert_eq!(precheck_port(listener.local_addr().unwrap().port(), "Fixture").unwrap_err().code, "PORT_IN_USE");
+        assert!(!tcp_port_bindable(0));
+        assert_eq!(precheck_port(0, "Fixture").unwrap_err().code, "BAD_PORT");
+        assert_eq!(find_free_port_near(u16::MAX, &[], 32), None);
+        assert_eq!(find_free_port_near(u16::MAX - 1, &[u16::MAX], 32), None);
+    }
+
+    #[test]
+    fn exited_process_clears_status_and_allows_metadata_refresh() {
+        let manager = ServiceManager::new();
+        manager.register(
+            "fixture",
+            "Fixture",
+            Some("1.0.0".into()),
+            None,
+            Some(8000),
+            PathBuf::new(),
+        );
+        manager.adopt("fixture", &[], Some(9000));
+        let status = manager.snapshot("fixture").unwrap();
+        assert_eq!(status.state, ServiceState::Stopped);
+        assert!(status.pids.is_empty());
+        assert!(status.uptime_sec.is_none());
+        assert!(status.memory_mb.is_none());
+        assert_eq!(status.port, Some(8000));
+        manager.register(
+            "fixture",
+            "Updated",
+            Some("2.0.0".into()),
+            None,
+            Some(8001),
+            PathBuf::new(),
+        );
+        let updated = manager.snapshot("fixture").unwrap();
+        assert_eq!(updated.version.as_deref(), Some("2.0.0"));
+        assert_eq!(updated.port, Some(8001));
+        assert_eq!(updated.label, "Updated");
+    }
+
+    #[test]
     fn skips_taken_and_avoid_ports() {
         // 占住 desired+2
         let l1 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let taken = l1.local_addr().unwrap().port();
         let desired = taken - 2;
 
-        // desired 本身空闲（没人听）→ 应返回 desired+1？不：desired 空闲不属于本函数语义，
-        // 本函数从 desired+1 起找。这里 desired+1 = taken-1 空闲 → 命中
-        let got = find_free_port_near(desired, &[], 8);
-        assert_eq!(got, Some(desired + 1));
+        // 不假定临近端口空闲；并行用例或其它程序也可能正在使用它们。
+        let got = find_free_port_near(desired, &[], 256).unwrap();
+        assert_ne!(got, taken);
+        assert!(got > desired && got <= desired.saturating_add(256));
+        assert!(tcp_port_bindable(got));
 
-        // avoid 挡掉 desired+1、desired+2 → 返回 desired+3
-        let got = find_free_port_near(desired, &[desired + 1, desired + 2], 8);
-        assert_eq!(got, Some(desired + 3));
+        let avoid = [got, taken];
+        let next = find_free_port_near(desired, &avoid, 256).unwrap();
+        assert!(!avoid.contains(&next));
+        assert!(tcp_port_bindable(next));
     }
 
     #[test]
@@ -651,5 +811,35 @@ mod fallback_tests {
         // avoid 覆盖整个搜索窗 → None
         let avoid: Vec<u16> = (1..=64).map(|o| 40000u16 + o).collect();
         assert_eq!(find_free_port_near(40000, &avoid, 64), None);
+    }
+
+    #[test]
+    fn automatic_fallback_can_use_an_os_assigned_port_and_remains_stable() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("state.db")).unwrap();
+        store.set_setting("autoFallbackPort", "true").unwrap();
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let desired = occupied.local_addr().unwrap().port();
+        let avoid: Vec<_> = (1..=32).filter_map(|offset| desired.checked_add(offset)).collect();
+        let port = fallback_port_for(&store, "redis", desired, &avoid).unwrap();
+        assert_ne!(port, desired);
+        assert!(!avoid.contains(&port));
+        assert!(tcp_port_bindable(port));
+        assert_eq!(PortsProfile::from_settings(&store).redis, port);
+        assert_eq!(fallback_port_for(&store, "redis", port, &avoid), Some(port));
+        store.set_setting("autoFallbackPort", "false").unwrap();
+        assert_eq!(fallback_port_for(&store, "redis", desired, &avoid), None);
+    }
+
+    #[test]
+    fn invalid_saved_php_pool_does_not_overflow() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("state.db")).unwrap();
+        store.set_port_assign("php@broken", u16::MAX).unwrap();
+        store.set_port_assign("php@other", u16::MAX - 1).unwrap();
+        match allocate_php_pool(&store, "php@broken") {
+            Ok(base) => assert!((9100..=9196).contains(&base)),
+            Err(error) => assert_eq!(error.code, "NO_FREE_PORT"),
+        }
     }
 }

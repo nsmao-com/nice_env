@@ -13,6 +13,8 @@ import {
   HardDriveDownload,
 } from "lucide-react";
 import type { DbBackupFile, DbBackupProgress } from "@nsb/schema";
+import { useQuery } from "@tanstack/react-query";
+import { isTauri, normalizeError } from "@/lib/backend";
 import { useT } from "@/lib/store";
 import { useInvalidate, toastError } from "@/lib/hooks";
 import { listen } from "@/lib/backend";
@@ -21,6 +23,8 @@ import { cn } from "@/lib/utils";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ConfirmDialog } from "@/components/shared/misc";
 import {
   Dialog,
@@ -53,55 +57,47 @@ function fmtTime(sec: number): string {
  * 3. **只列本应用备份目录里的文件**——不做成「任意路径导入」，
  *    避免变成一个能读任意文件的接口（真要外部文件走导入按钮选）。
  */
-export function DbBackupCard() {
+export function DbBackupCard({ version, targetLabel, ready, databases: dbs, onLockChange }: {
+  version: string; targetLabel: string; ready: boolean; databases: string[]; onLockChange: (locked: boolean) => void;
+}) {
   const t = useT();
   const invalidate = useInvalidate();
-  const [files, setFiles] = React.useState<DbBackupFile[]>([]);
-  const [dir, setDir] = React.useState("");
-  const [dbs, setDbs] = React.useState<string[]>([]);
+  const query = useQuery({ queryKey: ["db-backups"], queryFn: api.dbBackupList, retry: false });
+  const directory = useQuery({ queryKey: ["db-backup-dir"], queryFn: api.dbBackupDir, retry: false });
+  const files = query.data ?? [];
+  const dir = directory.data ?? "";
+  const busyRef = React.useRef(false);
+  const restoreOpener = React.useRef<HTMLButtonElement | null>(null);
+  const [error, setError] = React.useState("");
   const [picked, setPicked] = React.useState<Set<string>>(new Set());
   const [busy, setBusy] = React.useState(false);
   const [progress, setProgress] = React.useState<DbBackupProgress | null>(null);
   const [dumpOpen, setDumpOpen] = React.useState(false);
-  const [confirmRestore, setConfirmRestore] = React.useState<DbBackupFile | null>(null);
+  const [confirmRestore, setConfirmRestore] = React.useState<Pick<DbBackupFile, "path" | "name"> | null>(null);
+  const [restoreDatabase, setRestoreDatabase] = React.useState("file");
   const [confirmDelete, setConfirmDelete] = React.useState<DbBackupFile | null>(null);
 
-  const systemDbs = React.useMemo(
-    () => new Set(["mysql", "sys", "information_schema", "performance_schema"]),
-    []
-  );
-
-  const load = React.useCallback(async () => {
-    try {
-      const [list, d, all] = await Promise.all([
-        api.dbBackupList(),
-        api.dbBackupDir(),
-        api.dbList().catch(() => []),
-      ]);
-      setFiles(list);
-      setDir(d);
-      setDbs(all.map((x) => x.name).filter((n) => !systemDbs.has(n)));
-    } catch {
-      /* 服务没跑时不必报错，列表留空即可 */
-    }
-  }, [systemDbs]);
+  const load = () => invalidate("db-backups");
+  React.useEffect(() => {
+    onLockChange(busy || dumpOpen || !!confirmRestore || !!confirmDelete);
+    return () => onLockChange(false);
+  }, [busy, dumpOpen, confirmRestore, confirmDelete, onLockChange]);
 
   React.useEffect(() => {
-    void load();
-  }, [load]);
-
-  // 进度事件：导出/还原是长任务，没有这个用户会以为卡死
-  React.useEffect(() => {
-    let un: (() => void) | undefined;
-    void listen<DbBackupProgress>("db://backup", (p) => {
-      setProgress(p);
-      if (p.state === "done") {
-        window.setTimeout(() => setProgress(null), 1200);
-      }
-    }).then((u) => (un = u));
-    return () => un?.();
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<DbBackupProgress>("db://backup", (progress) => {
+      if (busyRef.current) setProgress(progress);
+    }).then((stop) => { if (disposed) stop(); else unlisten = stop; }).catch(toastError);
+    return () => { disposed = true; unlisten?.(); };
   }, []);
 
+  const begin = () => {
+    if (busyRef.current) return false;
+    busyRef.current = true; setBusy(true); setError(""); setProgress(null); return true;
+  };
+  const end = () => { busyRef.current = false; setBusy(false); setProgress(null); };
+  const fail = (error: unknown, notify = false) => { setError(normalizeError(error).message); if (notify) toastError(error); };
   const toggle = (name: string) => {
     setPicked((s) => {
       const n = new Set(s);
@@ -112,47 +108,69 @@ export function DbBackupCard() {
   };
 
   const doDump = async () => {
-    if (picked.size === 0) return;
-    setBusy(true);
-    setDumpOpen(false);
+    if (!ready || picked.size === 0 || !begin()) return;
     try {
-      const path = await api.dbBackupDump(Array.from(picked));
+      const path = await api.dbBackupDump(Array.from(picked), undefined, version);
       toast.success(t("dbBackup.done"), { description: path.split(/[\\/]/).pop() });
+      setDumpOpen(false);
       setPicked(new Set());
       await load();
     } catch (e) {
-      toastError(e);
+      fail(e);
     } finally {
-      setBusy(false);
+      end();
     }
   };
 
-  const doRestore = async (f: DbBackupFile) => {
-    setBusy(true);
+  const pickSql = async () => {
+    if (!ready || !begin()) return;
+    let selected = false;
     try {
-      const r = await api.dbBackupRestore(f.path, true);
+      if (!isTauri) { toast.info(t("dbBackup.desktopOnly")); return; }
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const path = await open({ title: t("dbBackup.importSql"), multiple: false, directory: false, filters: [{ name: "SQL", extensions: ["sql"] }] });
+      if (typeof path === "string") {
+        selected = true;
+        setRestoreDatabase("");
+        setConfirmRestore({ path, name: path.split(/[\\/]/).pop() ?? path });
+      }
+    } catch (error) { fail(error, true); }
+    finally {
+      end();
+      if (!selected) requestAnimationFrame(() => restoreOpener.current?.focus());
+    }
+  };
+
+  const doRestore = async (f: Pick<DbBackupFile, "path" | "name">) => {
+    if (!ready || !restoreDatabase || (restoreDatabase !== "file" && !dbs.includes(restoreDatabase.slice(3))) || !begin()) return;
+    try {
+      const r = await api.dbBackupRestore(f.path, true, version, restoreDatabase === "file" ? undefined : restoreDatabase.slice(3));
       toast.success(t("dbBackup.restored"), {
         description: r.safetyBackup
           ? t("dbBackup.safetyAt").replace("{p}", r.safetyBackup.split(/[\\/]/).pop() ?? "")
           : undefined,
       });
-      invalidate("dbs");
+      setConfirmRestore(null);
+      invalidate("databases", "db-users");
       await load();
     } catch (e) {
-      toastError(e);
+      fail(e);
     } finally {
-      setBusy(false);
+      invalidate("databases", "db-users", "db-backups");
+      end();
     }
   };
 
   const doDelete = async (f: DbBackupFile) => {
+    if (!begin()) return;
     try {
       await api.dbBackupDelete(f.path);
       toast.success(t("dbBackup.deleted"));
+      setConfirmDelete(null);
       await load();
     } catch (e) {
-      toastError(e);
-    }
+      fail(e);
+    } finally { end(); }
   };
 
   const openDir = async () => {
@@ -171,18 +189,21 @@ export function DbBackupCard() {
   return (
     <>
       <Card>
-        <CardHeader className="flex-row items-center justify-between">
+        <CardHeader className="flex-row flex-wrap items-center justify-between gap-3">
           <div>
             <CardTitle className="flex items-center gap-2 text-[13px]">
               <DatabaseBackup className="h-3.5 w-3.5 text-primary" /> {t("dbBackup.title")}
             </CardTitle>
             <CardDescription className="mt-0.5">{t("dbBackup.subtitle")}</CardDescription>
           </div>
-          <div className="flex items-center gap-1.5">
-            <Button variant="ghost" size="sm" onClick={() => void openDir()} title={t("dbBackup.openDir")}>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Button variant="ghost" size="sm" onClick={() => void openDir()} disabled={!dir} aria-label={t("dbBackup.openDir")} title={t("dbBackup.openDir")}>
               <FolderOpen className="h-3.5 w-3.5" />
             </Button>
-            <Button size="sm" onClick={() => setDumpOpen(true)} disabled={busy || dbs.length === 0}>
+            <Button variant="secondary" size="sm" disabled={!ready || busy} onClick={(event) => { restoreOpener.current = event.currentTarget; void pickSql(); }}>
+              <Upload className="h-3.5 w-3.5" /> {t("dbBackup.importSql")}
+            </Button>
+            <Button size="sm" onClick={() => { setError(""); setPicked(new Set()); setDumpOpen(true); }} disabled={!ready || busy || dbs.length === 0}>
               <HardDriveDownload className="h-3.5 w-3.5" /> {t("dbBackup.new")}
             </Button>
           </div>
@@ -210,14 +231,14 @@ export function DbBackupCard() {
             </div>
           )}
 
-          {files.length === 0 ? (
+          {query.isPending ? <p role="status" className="py-6 text-sm text-muted">{t("db.loading")}</p> : query.isError ? <p role="alert" className="py-4 text-sm text-error">{t("dbBackup.loadFailed")} <Button variant="ghost" onClick={() => void query.refetch()}>{t("db.retry")}</Button></p> : files.length === 0 ? (
             <p className="py-6 text-center text-[12.5px] text-faint">{t("dbBackup.empty")}</p>
           ) : (
-            <div className="space-y-1.5">
-              {files.slice(0, 8).map((f) => (
+            <div className="max-h-80 space-y-1.5 overflow-y-auto">
+              {files.map((f) => (
                 <div
                   key={f.path}
-                  className="group flex items-center gap-2.5 rounded-lg border border-border/60 bg-card-2/25 px-2.5 py-2"
+                  className="group flex flex-wrap items-center gap-2.5 rounded-lg border border-border/60 bg-card-2/25 px-2.5 py-2"
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
@@ -228,13 +249,14 @@ export function DbBackupCard() {
                     </div>
                     <p className="text-[10.5px] text-faint">{fmtTime(f.createdAt)}</p>
                   </div>
-                  <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                  <div className="flex shrink-0 items-center gap-1">
                     <Button
                       variant="ghost"
                       size="sm"
                       className="h-7 px-2"
-                      onClick={() => setConfirmRestore(f)}
-                      disabled={busy}
+                      onClick={(event) => { restoreOpener.current = event.currentTarget; setError(""); setRestoreDatabase("file"); setConfirmRestore(f); }}
+                      disabled={busy || !ready}
+                      aria-label={`${t("dbBackup.restore")} ${f.name}`}
                       title={t("dbBackup.restore")}
                     >
                       <ArchiveRestore className="h-3.5 w-3.5" />
@@ -243,7 +265,8 @@ export function DbBackupCard() {
                       variant="ghost"
                       size="sm"
                       className="h-7 px-2 text-error hover:text-error"
-                      onClick={() => setConfirmDelete(f)}
+                      onClick={() => { setError(""); setConfirmDelete(f); }}
+                      aria-label={`${t("dbBackup.delete")} ${f.name}`}
                       disabled={busy}
                       title={t("dbBackup.delete")}
                     >
@@ -252,25 +275,21 @@ export function DbBackupCard() {
                   </div>
                 </div>
               ))}
-              {files.length > 8 && (
-                <p className="pt-1 text-center text-[11px] text-faint">
-                  {t("dbBackup.more").replace("{n}", String(files.length - 8))}
-                </p>
-              )}
+
             </div>
           )}
         </CardContent>
       </Card>
 
       {/* 选择要备份的库 */}
-      <Dialog open={dumpOpen} onOpenChange={setDumpOpen}>
-        <DialogContent className="max-w-md">
+      <Dialog open={dumpOpen} onOpenChange={(value) => !busy && setDumpOpen(value)}>
+        <DialogContent hideClose={busy} className="max-w-md max-h-[85dvh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-[15px]">
               <Download className="h-4 w-4 text-primary" /> {t("dbBackup.pickDbs")}
             </DialogTitle>
             <DialogDescription>
-              {t("dbBackup.pickHint")}
+              {targetLabel} · {t("dbBackup.pickHint")}
             </DialogDescription>
           </DialogHeader>
           <div className="max-h-72 space-y-1 overflow-y-auto">
@@ -285,27 +304,31 @@ export function DbBackupCard() {
                 <input
                   type="checkbox"
                   className="h-3.5 w-3.5 shrink-0 accent-[var(--primary)]"
+                  disabled={busy}
                   checked={picked.has(name)}
                   onChange={() => toggle(name)}
                 />
-                <span className="font-mono text-[12.5px]">{name}</span>
+                <span className="min-w-0 break-all font-mono text-[12.5px]">{name}</span>
               </label>
             ))}
             {dbs.length === 0 && (
               <p className="py-6 text-center text-[12.5px] text-faint">{t("dbBackup.noDbs")}</p>
             )}
           </div>
-          <div className="mt-1 flex items-center justify-between">
+          {error && <p role="alert" className="break-words text-sm text-error">{error}</p>}
+          {busy && <p role="status" className="text-sm text-muted">{progress?.message ?? t("confirm.busy")}{progress?.bytes ? ` · ${fmtBytes(progress.bytes)}` : ""}</p>}
+          <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
             <Button
               variant="ghost"
               size="sm"
+              disabled={busy}
               onClick={() =>
                 setPicked(picked.size === dbs.length ? new Set() : new Set(dbs))
               }
             >
               {picked.size === dbs.length ? t("common.cancel") : t("dbBackup.selectAll")}
             </Button>
-            <Button size="sm" onClick={() => void doDump()} disabled={picked.size === 0}>
+            <Button size="sm" onClick={() => void doDump()} disabled={busy || picked.size === 0 || !ready}>
               <Upload className="h-3.5 w-3.5" />
               <span className="ml-1.5">
                 {t("dbBackup.exportN").replace("{n}", String(picked.size))}
@@ -317,30 +340,42 @@ export function DbBackupCard() {
 
       <ConfirmDialog
         open={confirmRestore != null}
-        onOpenChange={(v) => !v && setConfirmRestore(null)}
-        title={t("dbBackup.restoreTitle")}
-        description={t("dbBackup.restoreDesc").replace("{n}", confirmRestore?.name ?? "")}
-        confirmText={t("dbBackup.restore")}
-        onConfirm={() => {
-          const f = confirmRestore;
-          setConfirmRestore(null);
-          if (f) void doRestore(f);
+        onCloseAutoFocus={(event) => {
+          if (restoreOpener.current?.isConnected) { event.preventDefault(); restoreOpener.current.focus(); }
         }}
-      />
+        onOpenChange={(v) => !v && !busy && setConfirmRestore(null)}
+        title={t("dbBackup.restoreTitle")}
+        description={`${targetLabel} · ${t("dbBackup.restoreDesc").replace("{n}", confirmRestore?.name ?? "")}`}
+        confirmText={t("dbBackup.restore")}
+        loading={busy}
+        confirmDisabled={!ready || !restoreDatabase || (restoreDatabase !== "file" && !dbs.includes(restoreDatabase.slice(3)))}
+        danger
+        onConfirm={() => { if (confirmRestore) void doRestore(confirmRestore); }}
+      >
+        <p className="text-sm text-muted">{t("dbBackup.targetHint")}</p>
+        <div className="space-y-1.5">
+          <Label htmlFor="restore-database">{t("dbBackup.defaultDatabase")}</Label>
+          <Select value={restoreDatabase} disabled={busy} onValueChange={setRestoreDatabase}>
+            <SelectTrigger id="restore-database"><SelectValue placeholder={t("dbBackup.chooseScope")} /></SelectTrigger>
+            <SelectContent><SelectItem value="file">{t("dbBackup.databaseFromFile")}</SelectItem>{dbs.map((db) => <SelectItem key={db} value={`db:${db}`}>{db}</SelectItem>)}</SelectContent>
+          </Select>
+        </div>
+        <p className="text-xs text-muted">{t("dbBackup.sqlScope")}</p>
+        <p className="break-all font-mono text-xs text-muted">{confirmRestore?.path}</p>
+        {error && <p role="alert" className="break-words text-sm text-error">{error}</p>}
+        {busy && <p role="status" className="text-sm text-muted">{progress?.message ?? t("confirm.busy")}</p>}
+      </ConfirmDialog>
 
       <ConfirmDialog
         open={confirmDelete != null}
-        onOpenChange={(v) => !v && setConfirmDelete(null)}
+        onOpenChange={(v) => !v && !busy && setConfirmDelete(null)}
         title={t("dbBackup.deleteTitle")}
         description={t("dbBackup.deleteDesc").replace("{n}", confirmDelete?.name ?? "")}
         confirmText={t("dbBackup.delete")}
         danger
-        onConfirm={() => {
-          const f = confirmDelete;
-          setConfirmDelete(null);
-          if (f) void doDelete(f);
-        }}
-      />
+        loading={busy}
+        onConfirm={() => { if (confirmDelete) void doDelete(confirmDelete); }}
+      >{error && <p role="alert" className="break-words text-sm text-error">{error}</p>}</ConfirmDialog>
     </>
   );
 }

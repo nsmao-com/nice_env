@@ -3,6 +3,8 @@
  * 仅用于 next dev 下的 UI 开发/演示；桌面端自动走真实 invoke。
  */
 import { PackageManifestEntry } from "@nsb/schema";
+import { normalizeError } from "./backend";
+import type { BackupPreview, ConfigResetPreview } from "./api";
 import bundledManifest from "../../../../manifest/packages.win.json";
 import type {
   VersionCatalog,
@@ -52,8 +54,13 @@ import type {
   CreateSiteInput,
 } from "@nsb/schema";
 import { emitLocal } from "./backend";
+import { cmpVersionDesc, resolveStackService } from "./utils";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
+const MOCK_APP_VERSION = "0.2.6";
+const MOCK_NEXT_VERSION = "0.2.7";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
 function ownPorts(): [string, string, number][] {
@@ -146,23 +153,8 @@ function mockPhpToggleSeed() {
 }
 
 /** 备份文件（mock）：预置两条，方便看列表样式 */
-const mockDbBackups = new Map<string, DbBackupFile>(
-  [
-    ["shop-20260921-113000.sql", 1024 * 512],
-    ["wordpress-20260920-220000.sql", 1024 * 180],
-  ].map(([name, size], i) => {
-    const path = `C:\NiceEnv\backup\db\${name}`;
-    return [
-      path,
-      {
-        name: name as string,
-        path,
-        sizeBytes: size as number,
-        createdAt: Math.floor((Date.now() - (i + 1) * 86400000) / 1000),
-      },
-    ] as const;
-  })
-);
+const mockDbBackups = new Map<string, DbBackupFile>();
+const mockBackupContents = new Map<string, DatabaseInfo[]>();
 
 const now = () => Date.now();
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -224,8 +216,15 @@ const databases = new Map<string, DatabaseInfo>();
 const dbUsers = new Map<string, DbUserInfo>();
 const proxyProfiles = new Map<string, ProxyProfile>();
 const cronJobs = new Map<string, { id: string; name: string; command: string; intervalMin: number; enabled: boolean; createdAt: number; lastRunAt: number | null; lastExit: string | null; lastOutput: string | null }>();
+const mockRedisConnections = new Map<string, { username: string; password: string }>();
+let mockAdminer: import("./api").AdminerStatus | null = null;
 let mockTunnel: { id: string; port: number; url: string; startedAt: number; alive: boolean } | null = null;
 const hostsManaged = new Map<string, string>();
+const mockTextFiles = new Map<string, string>();
+const mockDnsInterfaces = ["Ethernet", "Wi-Fi"];
+const mockDnsStatus = new Map(mockDnsInterfaces.map((name) => [name, "自动获取"]));
+const activeDownloads = new Set<string>();
+const cancelledDownloads = new Set<string>();
 const settings: AppSettings = {
   language: "zh",
   appearance: "light",
@@ -348,7 +347,7 @@ function seed() {
     logFile: "C:/…/logs/nginx/out.log",
   });
   mk({
-    id: "php@8.3",
+    id: "php@8.3.17",
     label: "PHP 8.3 (FPM)",
     state: "running",
     pids: [10500, 10501],
@@ -359,7 +358,7 @@ function seed() {
     category: "runtime",
   });
   mk({
-    id: "php@7.4",
+    id: "php@7.4.33",
     label: "PHP 7.4 (FPM)",
     state: "stopped",
     pids: [],
@@ -367,12 +366,12 @@ function seed() {
     category: "runtime",
   });
   mk({
-    id: "mysql@8.0",
+    id: "mysql@8.0.46",
     label: "MySQL 8.0",
     state: "running",
     pids: [10600],
     port: 23306,
-    version: "8.0.42",
+    version: "8.0.46",
     memoryMb: 412,
     uptimeSec: 4518,
     category: "database",
@@ -402,7 +401,7 @@ function seed() {
     name: "laravel-shop",
     domains: ["shop.test"],
     rootDir: "D:/code/laravel-shop/public",
-    runtime: { webServer: "nginx", kind: "php", phpVersion: "8.3" },
+    runtime: { webServer: "nginx", kind: "php", phpVersion: "8.3.17" },
     https: true,
     rewrite: "laravel",
     db: {
@@ -420,7 +419,7 @@ function seed() {
     name: "legacy-admin",
     domains: ["admin.test", "old.admin.test"],
     rootDir: "D:/code/legacy-admin",
-    runtime: { webServer: "nginx", kind: "php", phpVersion: "7.4" },
+    runtime: { webServer: "nginx", kind: "php", phpVersion: "7.4.33" },
     https: false,
     rewrite: "thinkphp",
     db: null,
@@ -458,6 +457,28 @@ function seed() {
         installedAt: now() - 86400_000 * 12,
       } } : {}),
     });
+  }
+
+  // 已注册的历史版本仍是已安装版本；不为它们编造下载地址或校验和。
+  for (const service of services.values()) {
+    if (!service.version) continue;
+    const id = service.id.split("@")[0];
+    const key = `${id}@${service.version}`;
+    if (packages.has(key)) continue;
+    const template = [...packages.values()].find((p) => p.id === id);
+    if (!template) continue;
+    packages.set(key, {
+      ...template, version: service.version, displayName: service.label, url: "", sha256: undefined,
+      sizeBytes: 0, mirrors: [], active: false, availableVersions: [],
+      install: { version: service.version, installPath: `…/runtimes/${id}/${service.version}`,
+        configPath: `…/etc/${id}/${service.version}`, installedAt: now() - 86400_000 },
+    });
+  }
+  for (const id of new Set([...packages.values()].map((p) => p.id))) {
+    const group = [...packages.values()].filter((p) => p.id === id);
+    const installed = group.filter((p) => p.install).sort((a, b) => cmpVersionDesc(a.version, b.version));
+    const active = installed[0];
+    for (const p of group) { p.active = p === active; p.availableVersions = group.map((p) => p.version).sort(cmpVersionDesc); }
   }
 
   certs.set("ca", {
@@ -511,17 +532,118 @@ function seed() {
 }
 seed();
 
+/** 预览也按运行描述注册服务；Node/Python 等纯运行时只选择版本。 */
+function refreshPackageSelection(id: string) {
+  const all = Array.from(packages.values()).filter((p) => p.id === id);
+  const installed = all.filter((p) => p.install).sort((a, b) => cmpVersionDesc(a.version, b.version));
+  const active = installed.find((p) => p.active) ?? installed[0];
+  for (const p of all) p.active = p === active;
+  const wanted = new Map(installed.filter((p) => p.run && (p.run.singleInstance === false || p === active))
+    .map((p) => [p.run?.singleInstance === false ? `${id}@${p.version}` : id, p]));
+  for (const sid of services.keys()) {
+    if (sid.split("@")[0] === id && !wanted.has(sid)) services.delete(sid);
+  }
+  for (const [sid, p] of wanted) {
+    const current = services.get(sid);
+    if (current && (current.state !== "stopped" || current.version === p.version)) continue;
+    services.set(sid, {
+      id: sid, label: p.displayName, state: "stopped", pids: [],
+      requires: p.run?.requires ?? [], missingRequires: [],
+      version: p.version, category: p.category, port: p.defaultPort,
+    });
+  }
+}
+
+type PreviewMySql = { databases: Map<string, DatabaseInfo>; users: Map<string, DbUserInfo>; password: string; savedPassword: string };
+const previewMySql = new Map<string, PreviewMySql>();
+const systemDatabase = (name: string) => ["mysql", "sys", "information_schema", "performance_schema"].includes(name.toLowerCase());
+function mysqlPreview(version?: string, requireAuth = true) {
+  const service = Array.from(services.values()).find((s) => (s.id === "mysql" || s.id.startsWith("mysql@")) && (!version || s.version === version));
+  if (!service || service.state !== "running") throw { code: "MYSQL_NOT_RUNNING", message: "请先启动所选 MySQL 实例" };
+  const key = service.version!;
+  let state = previewMySql.get(key);
+  if (!state) {
+    const password = `preview-${uid()}-${uid()}`;
+    state = { databases: key === "8.0.46" ? databases : new Map([["mysql", { name: "mysql", tables: 37, sizeKb: 2411 }]]), users: key === "8.0.46" ? dbUsers : new Map([["root@localhost", { username: "root", host: "localhost" }]]), password, savedPassword: password };
+    previewMySql.set(key, state);
+  }
+  if (requireAuth && state.password !== state.savedPassword) throw { code: "MYSQL_AUTH_REQUIRED", message: "请更新本机连接密码" };
+  return { service, state };
+}
+function previewBackup(version: string, data: DatabaseInfo[], label: string) {
+  const name = `mysql-${version}-${label}-${Date.now()}-${uid()}.sql`;
+  const path = `C:/NiceEnv/backup/db/${name}`;
+  const file = { name, path, sizeBytes: Math.max(256, data.reduce((sum, db) => sum + (db.sizeKb ?? 0) * 1024, 0)), createdAt: Math.floor(Date.now() / 1000) };
+  mockDbBackups.set(path, file); mockBackupContents.set(path, structuredClone(data));
+  return file;
+}
+const previewSource = [{ name: "legacy_app", tables: 5, sizeKb: 128 }, { name: "wordpress_import", tables: 12, sizeKb: 256 }];
+
 /* ---------- 命令实现 ---------- */
 
 let proxyRunning = false;
 let systemProxyOn = false;
 let proxyMode: "rule" | "global" | "direct" = "rule";
 
+const configPreviewContent = new Map<string, string>();
+const configPreviewHistory: (ConfigBackup & { content: string })[] = [];
+
+function defaultConfigContent(key: string): string {
+  switch (key.split("@")[0]) {
+    case "nginx-main": return `worker_processes  1;
+
+events {
+    worker_connections  1024;
+}
+
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+    sendfile      on;
+    keepalive_timeout  65;
+
+    include sites/*.conf;
+}
+`;
+    case "php-ini": return `[PHP]
+engine=On
+expose_php=Off
+memory_limit=256M
+error_reporting=E_ALL
+display_errors=On
+
+[Extensions]
+extension=curl
+extension=mbstring
+extension=pdo_mysql
+`;
+    case "mysql-ini": return `[mysqld]
+port=3306
+character-set-server=utf8mb4
+max_connections=200
+`;
+    default: throw { code: "BAD_KIND", message: "找不到对应配置" };
+  }
+}
+
+function currentConfigContent(kind: string) {
+  return configPreviewContent.get(kind) ?? defaultConfigContent(kind);
+}
+
+function savePreviewConfig(kind: string, content: string, expected?: string) {
+  const previous = currentConfigContent(kind);
+  if (expected !== undefined && expected !== previous) throw { code: "CONFIG_CONFLICT", message: "配置已被其他操作修改，当前草稿未覆盖文件" };
+  if (content === previous) return;
+  const name = `${kind}-${Date.now()}-${configPreviewHistory.length}.bak`;
+  configPreviewHistory.unshift({ name, path: `C:/NiceEnv/backup/config/${name}`, sizeBytes: new TextEncoder().encode(previous).length, createdAt: Math.floor(Date.now() / 1000), target: kind, content: previous });
+  configPreviewContent.set(kind, content);
+}
+
 export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   await delay(60 + Math.random() * 120);
   switch (cmd) {
     case "list_service_status":
-      return Array.from(services.values()) as T;
+      return structuredClone(Array.from(services.values())) as T;
     case "start_service": {
       const id = args!.id as string;
       const s = services.get(id);
@@ -564,11 +686,15 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const input = args!.input as StackInput;
       const id = input.id ?? `stack-${uid()}`;
       const prev = stacks.get(id);
+      if (!input.name.trim()) throw { code: "BAD_STACK", message: "栈名称不能为空" };
+      if (!input.items.length) throw { code: "BAD_STACK", message: "栈里至少要有一个服务" };
+      if (input.id && !prev) throw { code: "STACK_NOT_FOUND", message: "此服务栈已被删除，请关闭编辑器后刷新列表" };
+      if (prev?.builtin) throw { code: "STACK_BUILTIN", message: "内置预设不能直接修改" };
       const stack: Stack = {
         id,
-        name: input.name,
+        name: input.name.trim(),
         description: input.description ?? "",
-        items: [...input.items].sort((a, b) => a.order - b.order),
+        items: [...input.items].sort((a, b) => a.order - b.order).filter((item, index, all) => all.findIndex((other) => other.serviceId === item.serviceId) === index),
         builtin: false,
         createdAt: prev?.createdAt ?? now(),
         updatedAt: now(),
@@ -593,7 +719,8 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "delete_stack": {
       const s = stacks.get(args!.id as string);
-      if (s?.builtin) throw new Error("内置预设不能删除");
+      if (!s) throw { code: "STACK_NOT_FOUND", message: "找不到服务栈" };
+      if (s.builtin) throw { code: "STACK_BUILTIN", message: "内置预设不能删除" };
       stacks.delete(args!.id as string);
       return true as T;
     }
@@ -612,25 +739,31 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       // 演示模式：按启动顺序逐个改状态（停栈时逆序）
       const items = [...stack.items].sort((a, b) => a.order - b.order);
       const ordered = starting ? items : items.reverse();
+      const seen = new Set<string>();
       for (const item of ordered) {
-        const base = item.serviceId.split("@")[0];
-        const found =
-          services.get(item.serviceId) ??
-          Array.from(services.values()).find((s) => s.id.startsWith(`${base}@`));
+        const found = resolveStackService(item.serviceId, [...services.values()], [...packages.values()]);
         if (!found) {
           report.skipped.push(item.serviceId);
+          continue;
+        }
+        if (seen.has(found.id)) continue;
+        seen.add(found.id);
+        if (starting && ["starting", "stopping"].includes(found.state)) {
+          report.failed.push({ serviceId: found.id, error: { code: "SERVICE_BUSY", message: `服务 ${found.id} 正在切换状态，请稍后重试` } });
           continue;
         }
         if (starting && found.state === "running") {
           report.alreadyRunning.push(found.id);
           continue;
         }
-        if (!starting && found.state !== "running") {
+        if (!starting && !found.pids.length && !["running", "starting", "stopping"].includes(found.state)) {
           report.alreadyRunning.push(found.id);
           continue;
         }
-        await mockInvoke(starting ? "start_service" : "stop_service", { id: found.id });
-        report.started.push(found.id);
+        try {
+          await mockInvoke(starting ? "start_service" : "stop_service", { id: found.id });
+          report.started.push(found.id);
+        } catch (error) { report.failed.push({ serviceId: found.id, error: normalizeError(error) }); }
       }
       return report as T;
     }
@@ -681,7 +814,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (cmd === "pathenv_set_selected" && args && Array.isArray(args.ids)) {
         mockPathEnv.selected = args.ids as string[];
       }
-      const installed = Array.from(packages.values()).filter((p) => p.install);
+      const installed = Array.from(packages.values()).filter((p) => p.install && p.active);
       const seen = new Set<string>();
       const entries = installed
         .filter((p) => {
@@ -716,7 +849,26 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       } as T;
     }
     case "list_packages":
-      return Array.from(packages.values()) as T;
+      return structuredClone(Array.from(packages.values())) as T;
+    case "cancel_download": {
+      const taskId = args?.taskId as string | undefined;
+      if (!taskId || !activeDownloads.has(taskId)) return false as T;
+      cancelledDownloads.add(taskId);
+      return true as T;
+    }
+    case "set_active_version": {
+      const id = args!.id as string;
+      const version = args!.version as string;
+      const target = packages.get(`${id}@${version}`);
+      if (!target?.install) throw { code: "NOT_INSTALLED", message: `${id} ${version} 尚未安装` };
+      const current = services.get(id);
+      if (current && current.version !== version && current.state !== "stopped") {
+        throw { code: "SERVICE_BUSY", message: `${id} 正在运行或启停中，请先停止再切换版本` };
+      }
+      for (const p of packages.values()) if (p.id === id) p.active = p === target;
+      refreshPackageSelection(id);
+      return true as T;
+    }
     case "version_catalog":
     case "version_catalogs": {
       // 浏览器仅展示正式清单快照；实时上游查询由桌面端执行。
@@ -732,34 +884,50 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "install_package": {
       const key = args!.id as string;
       const p = packages.get(key);
-      if (p) {
+      if (!p) throw { code: "PACKAGE_NOT_FOUND", message: `找不到套件 ${key}` };
+      activeDownloads.add(key);
+      try {
+        // 给取消按钮留出与桌面端下载任务相同的可观察窗口。
+        await delay(280);
+        if (cancelledDownloads.delete(key)) throw { code: "CANCELLED", message: "安装已取消" };
         p.install = {
           version: p.version,
           installPath: `…/runtimes/${p.id}/${p.version}`,
           configPath: `…/etc/${p.id}/${p.version}`,
           installedAt: now(),
         };
-        const id = p.category === "runtime" ? `${p.id}@${p.version}` : p.id;
-        if (!services.has(id))
-          services.set(id, {
-            id,
-            label: `${p.displayName}`,
-            state: "stopped",
-            pids: [],
-            // 清单里的 requires 在 mock 里没有，给个空数组即可
-            requires: [],
-            missingRequires: [],
-            version: p.version,
-            category: p.category,
-            port: p.defaultPort,
-          });
+        refreshPackageSelection(p.id);
+        return true as T;
+      } finally {
+        activeDownloads.delete(key);
+        cancelledDownloads.delete(key);
       }
-      return true as T;
     }
     case "uninstall_package": {
       const key = args!.id as string;
       const p = packages.get(key);
-      if (p) p.install = undefined;
+      if (!p?.install) throw { code: "NOT_INSTALLED", message: `${key} 尚未安装` };
+      const installed = Array.from(packages.values()).filter((p) => p.install);
+      const hasAlternative = installed.some((other) => other.id === p.id && other.version !== p.version);
+      const referencesTarget = (dep: string) => dep.includes("@") ? dep === key : dep === p.id && !hasAlternative;
+      const usedBy = [
+        ...Array.from(sites.values()).filter((site) =>
+          (p.id === "php" && site.runtime.kind === "php" && site.runtime.phpVersion === p.version)
+          || ((site.runtime.webServer ?? "nginx") === p.id && !hasAlternative)
+          || (p.id === "mysql" && site.db?.enabled
+            && (site.db.version != null ? site.db.version === p.version : !hasAlternative))
+        ).map((site) => site.name),
+        ...Array.from(stacks.values()).filter((stack) => !stack.builtin
+          && stack.items.some((item) => referencesTarget(item.serviceId))).map((stack) => stack.name),
+        ...installed.filter((other) => other !== p && [...(other.requires ?? []), ...(other.depends ?? []), ...(other.run?.requires ?? [])]
+          .some(referencesTarget)).map((other) => other.displayName),
+      ];
+      if (usedBy.length > 0) throw { code: "PACKAGE_IN_USE", message: `无法卸载 ${key}：仍被 ${usedBy.join("、")} 使用` };
+      const sid = p.run?.singleInstance === false ? `${p.id}@${p.version}` : p.id;
+      if (services.get(sid)?.version === p.version) services.delete(sid);
+      p.install = undefined;
+      p.active = false;
+      refreshPackageSelection(p.id);
       return true as T;
     }
     case "list_sites":
@@ -810,14 +978,67 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       hostsManaged.forEach((ip, domain) => list.push({ ip, domain, managed: true }));
       return list as T;
     }
-    case "apply_hosts":
+    case "apply_hosts": {
+      const entries = (args?.entries as HostsEntry[] | undefined) ?? [];
+      hostsManaged.clear();
+      for (const entry of entries) {
+        if (entry.domain.trim() && entry.ip.trim()) hostsManaged.set(entry.domain.trim(), entry.ip.trim());
+      }
       return true as T;
+    }
+    case "read_text_file": {
+      const path = args?.path as string | undefined;
+      if (!path) throw { code: "BAD_PATH", message: "文件路径不能为空" };
+      const saved = mockTextFiles.get(path);
+      if (saved !== undefined) return saved as T;
+      if (/hosts(?:\.txt)?$/i.test(path)) {
+        return Array.from(hostsManaged, ([domain, ip]) => `${ip}\t${domain}`).join("\n") as T;
+      }
+      throw { code: "FILE_NOT_FOUND", message: "演示环境中找不到该文件" };
+    }
+    case "write_text_file": {
+      const path = args?.path as string | undefined;
+      const content = args?.content as string | undefined;
+      if (!path) throw { code: "BAD_PATH", message: "文件路径不能为空" };
+      if (typeof content !== "string") throw { code: "BAD_CONTENT", message: "文件内容无效" };
+      mockTextFiles.set(path, content);
+      return true as T;
+    }
+    case "dns_interfaces":
+      return [...mockDnsInterfaces] as T;
+    case "dns_status_of": {
+      const name = args?.name as string | undefined;
+      if (!name || !mockDnsStatus.has(name)) throw { code: "DNS_INTERFACE_NOT_FOUND", message: "找不到网络接口" };
+      return mockDnsStatus.get(name)! as T;
+    }
+    case "dns_takeover": {
+      const name = args?.name as string | undefined;
+      if (!name || !mockDnsStatus.has(name)) throw { code: "DNS_INTERFACE_NOT_FOUND", message: "找不到网络接口" };
+      mockDnsStatus.set(name, "127.0.0.1（NiceEnv）");
+      return true as T;
+    }
+    case "dns_restore": {
+      const name = args?.name as string | undefined;
+      if (!name || !mockDnsStatus.has(name)) throw { code: "DNS_INTERFACE_NOT_FOUND", message: "找不到网络接口" };
+      mockDnsStatus.set(name, "自动获取");
+      return true as T;
+    }
     case "log_export": {
       const sid = args!.serviceId as string;
       // 后端会强制 .log 后缀并清洗文件名，mock 也照做，避免演示时出现假路径
       const raw = (args!.suggestedName as string | null) ?? `${sid}-20260921-210000`;
       const base = raw.replace(/\.log$/, "");
       return `C:\\NiceEnv\\logs\\export\\${base}.log` as T;
+    }
+    case "export_log": {
+      const id = args?.id as string | undefined;
+      const dest = args?.dest as string | undefined;
+      const lines = id ? serviceLogLines.get(id) : undefined;
+      if (!id || !dest) throw { code: "BAD_EXPORT", message: "缺少日志服务或目标路径" };
+      if (!lines?.length) throw { code: "LOG_EMPTY", message: "该服务还没有日志文件（先启动一次）" };
+      const content = `${lines.join("\n")}\n`;
+      mockTextFiles.set(dest, content);
+      return new TextEncoder().encode(content).byteLength as T;
     }
     case "tool_mirrors":
       return [
@@ -889,24 +1110,42 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "bulk_start":
     case "bulk_stop":
     case "bulk_restart": {
-      const ids = args!.ids as string[];
-      const action = (args?.action as string) ?? "start";
-      // mock：按依赖分层排序，让 UI 的顺序展示是真的
+      const ids = [...new Set(args!.ids as string[])];
+      const action = cmd.slice(5) as "start" | "stop" | "restart";
       const tier = (id: string) => {
         const base = id.split("@")[0];
-        if (["mysql", "redis", "postgresql", "mongodb", "memcached"].includes(base)) return 0;
-        if (["php", "node", "python", "go", "java"].includes(base)) return 1;
-        if (["nginx", "apache", "caddy", "mihomo"].includes(base)) return 2;
+        if (["mysql", "mariadb", "redis", "postgresql", "mongodb", "memcached", "qdrant", "neo4j", "rabbitmq", "elasticsearch", "meilisearch", "zincsearch", "minio", "rustfs", "consul", "etcd", "r-nacos", "temporal"].includes(base)) return 0;
+        if (["php", "node", "python", "go", "java", "dotnet", "bun", "deno", "ruby", "rust", "zig", "flutter", "perl", "erlang", "ollama"].includes(base)) return 1;
+        if (["nginx", "apache", "caddy", "frankenphp", "tomcat", "roadrunner", "mihomo"].includes(base)) return 2;
         return 3;
       };
-      const order = [...ids].sort((a, b) => tier(a) - tier(b));
-      return {
-        action,
-        succeeded: order,
-        already: [],
-        failed: [],
-        order,
-      } as BulkReport as T;
+      const order = [...ids].sort((a, b) => action === "stop" ? tier(b) - tier(a) : tier(a) - tier(b));
+      const report: BulkReport = { action, succeeded: [], already: [], failed: [], order };
+      const execute = async (id: string, operation: "start" | "stop") => {
+        const service = services.get(id);
+        if (!service) throw { code: "UNKNOWN_SERVICE", message: `服务 ${id} 未注册或已卸载` };
+        if (operation === "start" && ["starting", "stopping"].includes(service.state)) {
+          throw { code: "SERVICE_BUSY", message: `服务 ${id} 正在切换状态，请稍后重试` };
+        }
+        const already = operation === "start" ? service.state === "running"
+          : !service.pids.length && !["running", "starting", "stopping"].includes(service.state);
+        if (!already) await mockInvoke(operation === "start" ? "start_service" : "stop_service", { id });
+        return already;
+      };
+      if (action === "restart") {
+        for (const id of [...ids].sort((a, b) => tier(b) - tier(a))) {
+          try { await execute(id, "stop"); }
+          catch (error) { report.failed.push({ serviceId: id, error: normalizeError(error) }); }
+        }
+      }
+      for (const id of order) {
+        if (report.failed.some((f) => f.serviceId === id)) continue;
+        try {
+          const already = await execute(id, action === "stop" ? "stop" : "start");
+          (already ? report.already : report.succeeded).push(id);
+        } catch (error) { report.failed.push({ serviceId: id, error: normalizeError(error) }); }
+      }
+      return report as T;
     }
     case "bulk_summary": {
       const ids = args!.ids as string[];
@@ -951,7 +1190,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const md = [
         "# NiceEnv 诊断报告",
         "",
-        "- 应用版本：0.1.0",
+        `- 应用版本：${MOCK_APP_VERSION}`,
         `- 生成时间：${new Date().toLocaleString()}`,
         "- 操作系统：windows x86_64",
         "- 数据目录：C:\NiceEnv",
@@ -1035,38 +1274,67 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         checkedAt: now,
       } as CertReport as T;
     }
-    case "cert_import_dir":
+    case "cert_import_dir": {
+      const now = Math.floor(Date.now() / 1000);
       return {
         imported: [
-          { certPath: "D:\mock\a.crt", keyPath: "D:\mock\a.key", subject: "a.example.com",
-            sans: ["a.example.com"], notBefore: Date.now() - 86400_000 * 30, notAfter: Date.now() + 86400_000 * 60, daysLeft: 60 },
+          { id: "a-example", usable: true, usedBySites: [], certPath: "D:/mock/a.crt", keyPath: "D:/mock/a.key", subject: "a.example.com",
+            sans: ["a.example.com"], notBefore: now - 86400 * 30, notAfter: now + 86400 * 60, daysLeft: 60 },
         ],
         skipped: ["b.crt：找不到同名私钥"],
       } as T;
+    }
     case "cert_imported_list":
       return [
-        { certPath: "C:\NiceEnv\certs\imported\corp-wildcard.crt", keyPath: "C:\NiceEnv\certs\imported\corp-wildcard.key", subject: "*.corp.internal", sans: ["*.corp.internal", "corp.internal"], notBefore: 1700000000, notAfter: 1800000000, daysLeft: 210 },
+        { id: "corp-wildcard", usable: true, usedBySites: [], certPath: "C:\NiceEnv\certs\imported\corp-wildcard.crt", keyPath: "C:\NiceEnv\certs\imported\corp-wildcard.key", subject: "*.corp.internal", sans: ["*.corp.internal", "corp.internal"], notBefore: 1700000000, notAfter: 1800000000, daysLeft: 210 },
       ] as ImportedCert[] as T;
     case "cert_import":
-      return { certPath: "x", keyPath: "y", subject: "imported", sans: [], notBefore: 0, notAfter: 0, daysLeft: 365 } as ImportedCert as T;
+      return { id: "imported", usable: true, usedBySites: [], certPath: "D:/mock/imported.crt", keyPath: "D:/mock/imported.key", subject: "imported", sans: [], notBefore: 0, notAfter: 0, daysLeft: 365 } as ImportedCert as T;
     case "cert_imported_delete":
       return true as T;
     case "list_certs":
-      return Array.from(certs.values()) as T;
+      return structuredClone(Array.from(certs.values())) as T;
     case "issue_cert": {
-      const domain = args!.domain as string;
-      const id = uid();
+      const domain = (args!.domain as string).trim().toLowerCase().replace(/\.+$/, "");
+      const domains = [...new Set([domain, ...((args!.sans as string[]) ?? [])].map(d => d.trim().toLowerCase().replace(/\.+$/, "")))];
+      for (const value of domains) {
+        const hostname = value.replace(/^\*\./, "");
+        let ip = false;
+        try { ip = value.includes(":") && new URL(`http://[${value}]`).hostname.startsWith("["); } catch { /* 继续校验域名 */ }
+        if (!ip && (hostname.length > 253 || (hostname !== "localhost" && !hostname.includes("."))
+          || (value.startsWith("*.") && (hostname === "localhost" || /^[\d.]+$/.test(hostname)))
+          || (/^[\d.]+$/.test(hostname) && (hostname.split(".").length !== 4 || hostname.split(".").some(label => !/^(0|[1-9]\d{0,2})$/.test(label) || Number(label) > 255)))
+          || hostname.split(".").some(label => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label)))) {
+          throw { code: "BAD_DOMAINS", message: `域名或 IP 地址格式不正确：${value}`, hint: "不要包含协议、端口或路径。" };
+        }
+      }
+      for (const site of sites.values()) {
+        if (site.https && site.domains[0] === domain) {
+          for (const name of site.domains) if (!domains.includes(name)) domains.push(name);
+        }
+      }
+      const id = [...certs.values()].find(c => c.kind === "site" && c.subject === domain)?.id ?? `cert-${domain}`;
       certs.set(id, {
         id,
         kind: "site",
         subject: domain,
-        sans: args!.sans ? (args!.sans as string[]) : [domain],
+        sans: domains,
         notBefore: now(),
         notAfter: now() + 86400_000 * 30,
-        certPath: `…/certs/sites/${domain}.crt`,
-        keyPath: `…/certs/sites/${domain}.key`,
+        certPath: `…/certs/sites/${domain.replace(/\*/g, "_wildcard").replace(/:/g, "_")}.crt`,
+        keyPath: `…/certs/sites/${domain.replace(/\*/g, "_wildcard").replace(/:/g, "_")}.key`,
       });
       return certs.get(id) as T;
+    }
+    case "delete_local_cert": {
+      const id = args!.id as string;
+      const cert = certs.get(id);
+      if (!cert) throw { code: "NOT_FOUND", message: "证书不存在" };
+      if (cert.kind !== "site") throw { code: "CERT_DELETE_UNSUPPORTED", message: "这里只能删除本地签发的站点证书" };
+      const usedBy = [...sites.values()].filter(site => site.https && site.domains[0] === cert.subject);
+      if (usedBy.length) throw { code: "CERT_IN_USE", message: `证书仍被站点 ${usedBy.map(s => s.name).join("、")} 使用`, hint: "先关闭相关站点的 HTTPS 或更换主域名，再重试。" };
+      certs.delete(id);
+      return true as T;
     }
     case "trust_ca": {
       const ca = certs.get("ca");
@@ -1110,10 +1378,40 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       }
       return rows as T;
     }
-    case "list_backups":
-      return [] as T;
-    case "restore_backup":
-      return "demo" as T;
+    case "list_backups": {
+      const files = await mockInvoke<ConfigFileInfo[]>("config_list");
+      return configPreviewHistory.map((backup) => {
+        const file = files.find((file) => file.kind === backup.target);
+        return { name: `config/${backup.name}`, path: backup.path, sizeBytes: backup.sizeBytes, modifiedAt: backup.createdAt * 1000, targetPath: file?.path.replaceAll("\\", "/").split("NiceEnv/")[1] ?? null, restorable: !!file, reason: file ? null : "找不到对应配置" };
+      }) as T;
+    }
+    case "preview_backup": {
+      const backup = configPreviewHistory.find((backup) => `config/${backup.name}` === args!.name);
+      const file = (await mockInvoke<ConfigFileInfo[]>("config_list")).find((file) => file.kind === backup?.target);
+      if (!backup || !file) throw { code: "NOT_FOUND", message: "找不到对应备份或配置" };
+      const current = currentConfigContent(file.kind);
+      return { name: args!.name, targetPath: file.path, targetRelative: file.path.replaceAll("\\", "/").split("NiceEnv/")[1], currentExists: true, revision: JSON.stringify([args!.name, file.path, backup.content, current]) } as BackupPreview as T;
+    }
+    case "restore_backup": {
+      const preview = await mockInvoke<BackupPreview>("preview_backup", args);
+      if (preview.revision !== args!.revision) throw { code: "CONFIG_CONFLICT", message: "配置或备份已变化，请重新预览后恢复" };
+      const backup = configPreviewHistory.find((backup) => `config/${backup.name}` === args!.name)!;
+      savePreviewConfig(backup.target!, backup.content);
+      return preview.targetPath as T;
+    }
+    case "config_reset_preview": {
+      const file = (await mockInvoke<ConfigFileInfo[]>("config_list")).find((file) => file.kind === args!.kind && file.resettable);
+      if (!file) throw { code: "NOT_INSTALLED", message: "尚未安装支持重置配置的服务" };
+      const current = currentConfigContent(file.kind);
+      const content = defaultConfigContent(file.kind);
+      return { kind: file.kind, label: file.label, path: file.path, language: file.language, content, currentExists: true, changed: current !== content, usedByService: file.usedByService ?? null, revision: JSON.stringify([file.kind, file.path, current, content]) } as ConfigResetPreview as T;
+    }
+    case "config_reset": {
+      const preview = await mockInvoke<ConfigResetPreview>("config_reset_preview", args);
+      if (preview.revision !== args!.revision) throw { code: "CONFIG_CONFLICT", message: "配置或服务设置已变化，请重新预览后重置" };
+      savePreviewConfig(preview.kind, preview.content);
+      return { ...preview, changed: false, revision: JSON.stringify([preview.kind, preview.path, preview.content, preview.content]) } as T;
+    }
     case "rebuild_hosts":
       return true as T;
     case "reissue_site_certs":
@@ -1140,52 +1438,18 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "config_list":
       return [
-        { kind: "nginx-main", label: "Nginx 主配置", description: "站点 vhost 是自动生成的；这里改全局项（worker、日志、gzip 等）", path: "C:\\NiceEnv\\etc\\nginx\\nginx.conf", exists: true, sizeBytes: 4096, language: "nginx", validated: true, usedByService: "nginx", requiresPackage: "nginx" },
-        { kind: "php-ini", label: "php.ini", description: "PHP 运行时设置。扩展开关建议走「PHP 扩展」面板，那里有主动校验", path: "C:\\NiceEnv\\etc\\php\\8.3.33\\php.ini", exists: true, sizeBytes: 2048, language: "ini", validated: false, usedByService: "php", requiresPackage: "php" },
-        { kind: "mysql-ini", label: "my.ini", description: "MySQL 服务配置（端口、缓冲池、字符集）", path: "C:\\NiceEnv\\etc\\mysql\\8.0.46\\my.ini", exists: true, sizeBytes: 1024, language: "ini", validated: false, usedByService: "mysql", requiresPackage: "mysql" },
-        { kind: "redis-conf", label: "redis.conf", description: "Redis 配置（端口、持久化、内存上限）", path: "C:\\NiceEnv\\etc\\redis\\redis.conf", exists: false, sizeBytes: 0, language: "conf", validated: false, usedByService: "redis", requiresPackage: "redis" },
-      ] as ConfigFileInfo[] as T;
+        { kind: "nginx-main", label: "Nginx 主配置", description: "自定义全局设置在重启后保留；端口、默认站点、PHP 连接池和站点入口由应用维护", path: "C:\\NiceEnv\\etc\\nginx\\nginx.conf", exists: true, sizeBytes: 4096, language: "nginx", validated: true, usedByService: "nginx", requiresPackage: "nginx" },
+        { kind: "php-ini@8.3.33", label: "php.ini · 8.3.33", description: "PHP 运行时设置。扩展开关建议走「PHP 扩展」面板，那里有主动校验", path: "C:\\NiceEnv\\etc\\php\\8.3.33\\php.ini", exists: true, sizeBytes: 2048, language: "ini", validated: false, usedByService: "php@8.3.33", requiresPackage: "php" },
+        { kind: "mysql-ini@8.0.46", label: "my.ini · 8.0.46", description: "自定义参数在重启后保留；运行目录和数据目录由应用维护，端口请在设置页修改", path: "C:\\NiceEnv\\etc\\mysql\\8.0.46\\my.ini", exists: true, sizeBytes: 1024, language: "ini", validated: false, usedByService: "mysql@8.0.46", requiresPackage: "mysql" },
+        { kind: "redis-conf", label: "redis.conf", description: "内存、持久化等设置在重启后保留；端口、数据目录和前台运行方式由应用维护", path: "C:\\NiceEnv\\etc\\redis\\redis.conf", exists: false, sizeBytes: 0, language: "conf", validated: false, usedByService: "redis", requiresPackage: "redis" },
+      ].map((file) => ({ ...file, resettable: file.exists })) as ConfigFileInfo[] as T;
     case "config_read": {
-      const kind = args!.kind as string;
-      if (kind === "nginx-main") {
-        return `worker_processes  1;
-
-events {
-    worker_connections  1024;
-}
-
-http {
-    include       mime.types;
-    default_type  application/octet-stream;
-    sendfile      on;
-    keepalive_timeout  65;
-
-    include sites/*.conf;
-}
-` as T;
-      }
-      if (kind === "php-ini") {
-        return `[PHP]
-engine=On
-expose_php=Off
-memory_limit=256M
-error_reporting=E_ALL
-display_errors=On
-
-[Extensions]
-extension=curl
-extension=mbstring
-extension=pdo_mysql
-` as T;
-      }
-      return `[mysqld]
-port=3306
-character-set-server=utf8mb4
-max_connections=200
-` as T;
+      const key = args!.kind as string;
+      return currentConfigContent(key) as T;
     }
     case "config_validate": {
       const content = args!.content as string;
+      const kind = (args!.kind as string).split("@")[0];
       // 只做一个够用的示意：括号配平 + 结尾分号
       const issues: { line: number; severity: string; message: string }[] = [];
       const lines = content.split("\n");
@@ -1193,6 +1457,13 @@ max_connections=200
       lines.forEach((raw, i) => {
         const t = raw.split("#")[0].trim();
         if (!t) return;
+        if (kind !== "nginx-main") {
+          if (t.startsWith(";") || t.startsWith("[")) return;
+          if (["php-ini", "mysql-ini"].includes(kind) && !t.includes("=")) {
+            issues.push({ line: i + 1, severity: "error", message: "配置项需要使用 key=value 格式" });
+          }
+          return;
+        }
         depth += (t.match(/\{/g) || []).length - (t.match(/\}/g) || []).length;
         const last = t[t.length - 1];
         if (![";", "{", "}"].includes(last)) {
@@ -1208,14 +1479,21 @@ max_connections=200
         issues,
       } as ConfigValidation as T;
     }
-    case "config_save":
-      return { ok: true, messages: [], issues: [] } as ConfigValidation as T;
+    case "config_save": {
+      const kind = args!.kind as string;
+      const validation = await mockInvoke<ConfigValidation>("config_validate", args);
+      if (!validation.ok && !args!.force) throw { code: "CONFIG_INVALID", message: "配置校验未通过，未写入" };
+      savePreviewConfig(kind, args!.content as string, args!.expectedContent as string | undefined);
+      return validation as T;
+    }
     case "config_backups":
-      return [
-        { name: "nginx.conf.20260921-203045.bak", path: "C:\\NiceEnv\\backup\\config\\nginx.conf.20260921-203045.bak", sizeBytes: 4010, createdAt: Math.floor(Date.now() / 1000) - 3600 },
-      ] as ConfigBackup[] as T;
-    case "config_rollback":
+      return configPreviewHistory.filter((b) => !args?.kind || b.target === args.kind).map(({ content: _content, ...b }) => b) as T;
+    case "config_rollback": {
+      const backup = configPreviewHistory.find((b) => b.name === args!.name);
+      if (!backup || (args!.kind && args!.kind !== backup.target)) throw { code: "BACKUP_TARGET_MISMATCH", message: "该历史版本不属于当前配置" };
+      await mockInvoke("config_save", { kind: backup.target, content: backup.content, force: true, expectedContent: args!.expectedContent });
       return true as T;
+    }
     case "scan_projects": {
       const root = args!.root as string;
       return [
@@ -1283,26 +1561,50 @@ max_connections=200
     case "watchdog_reset":
       return true as T;
     case "db_backup_list":
-      return Array.from(mockDbBackups.values()).sort((a, b) => b.createdAt - a.createdAt) as T;
-    case "db_backup_dir":
-      return `C:\NiceEnv\backup\db` as T;
+      return structuredClone(Array.from(mockDbBackups.values()).sort((a, b) => b.createdAt - a.createdAt)) as T;
+    case "db_backup_dir": return "C:/NiceEnv/backup/db" as T;
     case "db_backup_dump": {
-      const dbs = args!.databases as string[];
-      const name = (args!.outName as string | null) ?? `${dbs[0] ?? "db"}-${Date.now()}.sql`;
-      const f: DbBackupFile = {
-        name,
-        path: `C:\NiceEnv\backup\db\${name}`,
-        sizeBytes: 1024 * (40 + Math.floor(Math.random() * 400)),
-        createdAt: Math.floor(Date.now() / 1000),
-      };
-      mockDbBackups.set(f.path, f);
-      return f.path as T;
+      const { service, state } = mysqlPreview(args?.version as string | undefined);
+      const names = args!.databases as string[];
+      if (!names.length || names.some((name) => systemDatabase(name) || !state.databases.has(name))) throw { code: "BAD_DATABASE", message: "请选择有效的业务数据库" };
+      emitLocal("db://backup", { database: names.join(", "), bytes: 0, state: "running" });
+      await delay(600);
+      return previewBackup(service.version!, names.map((name) => state.databases.get(name)!), names.length === 1 ? names[0] : `${names.length}dbs`).path as T;
     }
-    case "db_backup_restore":
-      return { ok: true } as DbRestoreResult as T;
-    case "db_backup_delete":
-      mockDbBackups.delete(args!.path as string);
-      return true as T;
+    case "db_backup_restore": {
+      const { state, service } = mysqlPreview(args?.version as string | undefined);
+      const database = args?.database as string | undefined;
+      if (database !== undefined && (systemDatabase(database) || !state.databases.has(database))) throw { code: "RESTORE_DATABASE_INVALID", message: "请选择当前实例中已存在的业务数据库" };
+      const content = mockBackupContents.get(args!.path as string);
+      if (!content) throw { code: "FILE_NOT_FOUND", message: "找不到有效的 SQL 备份" };
+      const before = [...state.databases.values()].filter((db) => !systemDatabase(db.name));
+      const safety = args?.safetyBackup && before.length ? previewBackup(service.version!, before, "pre-restore") : undefined;
+      emitLocal("db://backup", { database: args!.path, bytes: 0, state: "running", message: "正在执行 SQL" });
+      await delay(700);
+      for (const db of content) state.databases.set(db.name, structuredClone(db));
+      return { ok: true, safetyBackup: safety?.path } as DbRestoreResult as T;
+    }
+    case "db_backup_delete": {
+      const path = args!.path as string;
+      if (!mockDbBackups.delete(path)) throw { code: "FILE_NOT_FOUND", message: "备份文件已不存在" };
+      mockBackupContents.delete(path); return true as T;
+    }
+    case "migrate_list_source": {
+      mysqlPreview(args?.version as string | undefined);
+      if (!args?.host || !args.user || !Number.isInteger(args.port) || Number(args.port) < 1 || Number(args.port) > 65535) throw { code: "BAD_CONNECTION", message: "请检查来源地址、端口和账号" };
+      return structuredClone(previewSource) as T;
+    }
+    case "migrate_import": {
+      const { state, service } = mysqlPreview(args?.version as string | undefined);
+      if (["localhost", "127.0.0.1"].includes(args!.host as string) && args!.port === service.port) throw { code: "SAME_MYSQL_INSTANCE", message: "源和目标是同一个实例" };
+      const names = args!.databases as string[];
+      if (!names.length || names.some((name) => !previewSource.some((db) => db.name === name))) throw { code: "BAD_DATABASE", message: "请重新检测源数据库" };
+      const before = [...state.databases.values()].filter((db) => !systemDatabase(db.name));
+      if (before.length) previewBackup(service.version!, before, "pre-import");
+      await delay(800);
+      for (const db of previewSource.filter((db) => names.includes(db.name))) state.databases.set(db.name, structuredClone(db));
+      return { imported: names, failed: [] } as T;
+    }
     case "xdebug_status": {
       const version = args!.version as string;
       const exts = mockPhpExtState.get(version) ?? mockPhpExtSeed();
@@ -1371,16 +1673,38 @@ max_connections=200
       mockPhpToggleState.set(version, toggles);
       return true as T;
     }
-    case "db_list":
-      return Array.from(databases.values()) as T;
+    case "db_list": return structuredClone([...mysqlPreview(args?.version as string | undefined).state.databases.values()]) as T;
     case "db_create": {
-      databases.set(args!.name as string, { name: args!.name as string, tables: 0, sizeKb: 0 });
+      const { state } = mysqlPreview(args?.version as string | undefined);
+      const name = args!.name as string;
+      if (!/^[A-Za-z0-9_]{1,64}$/.test(name)) throw { code: "BAD_IDENTIFIER", message: "数据库名只能包含字母、数字和下划线" };
+      if (!state.databases.has(name)) state.databases.set(name, { name, tables: 0, sizeKb: 0 });
       return true as T;
     }
-    case "db_users":
-      return Array.from(dbUsers.values()) as T;
-    case "db_reset_root_password":
+    case "db_drop": {
+      const { state } = mysqlPreview(args?.version as string | undefined);
+      const name = args!.name as string;
+      if (systemDatabase(name)) throw { code: "SYSTEM_DATABASE", message: "不能删除系统数据库" };
+      state.databases.delete(name); return true as T;
+    }
+    case "db_users": return structuredClone([...mysqlPreview(args?.version as string | undefined).state.users.values()]) as T;
+    case "db_create_user": {
+      const { state } = mysqlPreview(args?.version as string | undefined);
+      const username = args!.username as string; const database = args!.database as string;
+      if (!/^[A-Za-z0-9_]{1,32}$/.test(username) || username.toLowerCase() === "root" || !args?.password || !state.databases.has(database) || systemDatabase(database)) throw { code: "BAD_IDENTIFIER", message: "请检查账号、密码和授权数据库" };
+      if ([...state.users.values()].some((user) => user.username === username && ["localhost", "127.0.0.1"].includes(user.host))) throw { code: "DB_USER_EXISTS", message: "同名本地账号已存在，未修改密码或权限" };
+      for (const host of ["localhost", "127.0.0.1"]) state.users.set(`${username}@${host}`, { username, host, grants: `ALL ON ${database}.*` });
       return true as T;
+    }
+    case "db_root_password": return mysqlPreview(args?.version as string | undefined).state.savedPassword as T;
+    case "db_reset_root_password": {
+      const { state } = mysqlPreview(args?.version as string | undefined, !args?.useExisting);
+      const password = args!.newPassword as string;
+      if (!password || /[\x00-\x1f\x7f]/.test(password)) throw { code: "BAD_PASSWORD", message: "密码不能为空或包含控制字符" };
+      if (args?.useExisting && password !== state.password) throw { code: "MYSQL_AUTH_REQUIRED", message: "密码验证失败，本机记录未修改" };
+      if (!args?.useExisting) state.password = password;
+      state.savedPassword = password; return true as T;
+    }
     case "proxy_status":
       return {
         running: proxyRunning,
@@ -1409,6 +1733,21 @@ max_connections=200
     }
     case "proxy_profiles":
       return Array.from(proxyProfiles.values()) as T;
+    case "proxy_activate_profile": {
+      const id = args?.id as string | undefined;
+      const profile = id ? proxyProfiles.get(id) : undefined;
+      if (!profile) throw { code: "PROFILE_NOT_FOUND", message: "找不到代理订阅" };
+      for (const item of proxyProfiles.values()) item.active = item.id === id;
+      return true as T;
+    }
+    case "proxy_delete_profile": {
+      const id = args?.id as string | undefined;
+      const profile = id ? proxyProfiles.get(id) : undefined;
+      if (!profile) throw { code: "PROFILE_NOT_FOUND", message: "找不到代理订阅" };
+      if (profile.active) throw { code: "PROFILE_ACTIVE", message: "当前订阅正在使用，请先切换到其它订阅" };
+      proxyProfiles.delete(id!);
+      return true as T;
+    }
     case "proxy_import": {
       const p: ProxyProfile = {
         id: uid(),
@@ -1518,9 +1857,31 @@ max_connections=200
     case "ollama_delete":
     case "ollama_pull":
       return true as T;
+    case "redis_connection": {
+      const version = args!.version as string;
+      const credentials = mockRedisConnections.get(version);
+      return { version, username: credentials?.username ?? "", hasPassword: !!credentials?.password } as T;
+    }
+    case "redis_save_connection": {
+      const service = services.get("redis");
+      const version = args!.version as string;
+      if (service?.state !== "running" || service.version !== version) throw { code: "REDIS_INSTANCE_CHANGED", message: "运行中的 Redis 版本已变化，请重新打开连接设置" };
+      const credentials = args!.credentials as { username: string; password: string };
+      // 预览实例为无认证模式，不能把任意输入的密码视为验证成功。
+      if (credentials.username || credentials.password) throw { code: "REDIS_AUTH_FAILED", message: "网页预览中的 Redis 无需认证，请选择无认证连接；真实凭据请在桌面应用中验证。" };
+      mockRedisConnections.set(version, { ...credentials });
+      return await mockInvoke<T>("redis_stats");
+    }
+    case "redis_stats": {
+      const service = services.get("redis");
+      if (service?.state !== "running") throw { code: "REDIS_NOT_RUNNING", message: "请先启动 Redis 实例" };
+      return { reachable: true, port: service.port, usedMemoryHuman: "1.5M", keys: 0, uptimeDays: 0, connectedClients: 1 } as T;
+    }
+    case "adminer_status": return mockAdminer as T;
     case "adminer_start":
-      return { port: 8991, file: "adminer-6.1.0-en.php" } as T;
+      throw { code: "DESKTOP_ONLY", message: "请在桌面应用中启动数据库管理台；网页预览不能启动本机 PHP 服务。" };
     case "adminer_stop":
+      mockAdminer = null;
       return true as T;
     case "get_settings":
       return { ...settings } as T;
@@ -1569,8 +1930,30 @@ max_connections=200
         missingPackages: [],
       } as T;
     }
+    case "validate_configs": {
+      const installed = new Set(Array.from(packages.values()).filter((p) => p.install).map((p) => p.id));
+      const checks: { name: string; ok: boolean; status: "ok" | "fail" | "skipped"; detail: string }[] = [];
+      checks.push(installed.has("nginx")
+        ? { name: "Nginx", ok: true, status: "ok", detail: "syntax ok" }
+        : { name: "Nginx", ok: true, status: "skipped", detail: "未安装" });
+      checks.push(installed.has("apache")
+        ? { name: "Apache", ok: true, status: "ok", detail: "syntax ok" }
+        : { name: "Apache", ok: true, status: "skipped", detail: "未安装" });
+      const phpVersions = Array.from(packages.values())
+        .filter((p) => p.id === "php" && p.install)
+        .map((p) => p.version)
+        .sort(cmpVersionDesc);
+      if (!phpVersions.length) checks.push({ name: "PHP", ok: true, status: "skipped", detail: "未安装" });
+      else for (const version of phpVersions) checks.push({ name: `PHP ${version}`, ok: true, status: "ok", detail: "ini loads" });
+      if (installed.has("redis")) checks.push({ name: "Redis", ok: true, status: "ok", detail: "redis.conf 存在" });
+      if (installed.has("mysql")) {
+        const version = Array.from(packages.values()).find((p) => p.id === "mysql" && p.install)?.version;
+        checks.push({ name: `MySQL ${version ?? ""}`.trim(), ok: true, status: "ok", detail: "my.ini 存在" });
+      }
+      return checks as T;
+    }
     case "get_app_version":
-      return "0.1.0" as T;
+      return MOCK_APP_VERSION as T;
     case "get_data_dir":
       return "C:\\Users\\Demo\\AppData\\Local\\NiceEnv" as T;
     case "open_in_browser": {
@@ -1580,6 +1963,9 @@ max_connections=200
     }
     case "open_in_folder":
       return true as T;
+    case "open_terminal":
+      // 浏览器预览无法创建本机终端，但返回成功让按钮状态和桌面端保持一致。
+      return true as T;
     case "refresh_remote_manifest":
       return { revision: 2, packages: 160, path: "C:\\Users\\Demo\\AppData\\Local\\NiceEnv\\etc\\manifest.json", takesEffect: "restart" } as T;
     case "reset_remote_manifest":
@@ -1587,20 +1973,20 @@ max_connections=200
     case "check_updates":
       // 演示模式：报告一个可用新版，方便在浏览器里走通「检查更新 → 弹窗 → 下载」流程
       return {
-        appVersion: "0.1.0",
-        latestVersion: "0.2.0",
+        appVersion: MOCK_APP_VERSION,
+        latestVersion: MOCK_NEXT_VERSION,
         releaseUrl: "https://github.com/nsmao-com/nice_env/releases",
         manifestRevision: 1,
         // 同时演示「套件清单有更新 → 应用新清单」
         manifestUpdate: true,
         appUpdate: true,
         release: {
-          tag: "v0.2.0",
-          htmlUrl: "https://github.com/nsmao-com/nice_env/releases/tag/v0.2.0",
+          tag: `v${MOCK_NEXT_VERSION}`,
+          htmlUrl: `https://github.com/nsmao-com/nice_env/releases/tag/v${MOCK_NEXT_VERSION}`,
           body: "## 更新内容\n\n- 设置页新增主题色与字体自定义\n- 代码块支持行号 / 高亮 / 复制\n- 托盘菜单重新设计\n- 修复若干问题",
           publishedAt: new Date(now() - 86400_000).toISOString(),
-          assetName: "NiceEnv_0.2.0_x64-setup.exe",
-          assetUrl: "https://github.com/nsmao-com/nice_env/releases/download/v0.2.0/NiceEnv_0.2.0_x64-setup.exe",
+          assetName: `NiceEnv_${MOCK_NEXT_VERSION}_x64-setup.exe`,
+          assetUrl: `https://github.com/nsmao-com/nice_env/releases/download/v${MOCK_NEXT_VERSION}/NiceEnv_${MOCK_NEXT_VERSION}_x64-setup.exe`,
           assetSize: 8_400_000,
         },
       } as T;
@@ -1619,8 +2005,8 @@ max_connections=200
         });
       }
       return {
-        path: "C:\\Users\\demo\\AppData\\Roaming\\NiceEnv\\updates\\NiceEnv_0.2.0_x64-setup.exe",
-        fileName: "NiceEnv_0.2.0_x64-setup.exe",
+        path: `C:\\Users\\demo\\AppData\\Roaming\\NiceEnv\\updates\\NiceEnv_${MOCK_NEXT_VERSION}_x64-setup.exe`,
+        fileName: `NiceEnv_${MOCK_NEXT_VERSION}_x64-setup.exe`,
         sizeBytes: total,
       } as T;
     }

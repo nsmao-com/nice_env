@@ -19,7 +19,7 @@ import {
 import type { PackageView, ServiceStatus } from "@nsb/schema";
 import { cn, fmtBytes, fmtSpeed, fmtDuration } from "@/lib/utils";
 import { useT } from "@/lib/store";
-import { toastError } from "@/lib/hooks";
+import { toastError, useInvalidate } from "@/lib/hooks";
 import { useInstallTasks } from "@/lib/install-tasks";
 import * as api from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -28,7 +28,6 @@ import {
   DialogContent,
   DialogDescription,
   DialogFooter,
-  DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
 import { RingProgress } from "@/components/shared/ring-progress";
@@ -91,6 +90,8 @@ export function InstallDialog({
   startableAs?: string | null;
 }) {
   const t = useT();
+  const invalidate = useInvalidate();
+  const [starting, setStarting] = React.useState(false);
   const startedRef = React.useRef<string | null>(null);
 
   const taskId = target ? `${target.id}@${target.version}` : null;
@@ -102,6 +103,8 @@ export function InstallDialog({
 
   const busy = task?.status === "running";
   const finished = task?.status === "done";
+  const cancelled = task?.status === "cancelled";
+  const cancelling = busy && !!task?.cancelRequested;
   const error = task?.status === "error" ? (task.error ?? t("install.failed")) : null;
   const stage: StageId = finished ? "done" : progress ? stageFromState(progress.state) : "download";
 
@@ -132,35 +135,41 @@ export function InstallDialog({
   const cancel = async () => {
     if (!taskId) return;
     await cancelTask(taskId);
-    onOpenChange(false);
   };
 
   /* 关闭弹窗不影响安装：进行中关掉就转入后台，装完会有通知 */
   const close = (open: boolean) => {
+    if (!open && starting) return;
     if (!open && busy) toast.info(t("install.background"));
     onOpenChange(open);
   };
 
   const startNow = async () => {
-    if (!startableAs) return;
+    if (!startableAs || starting) return;
+    setStarting(true);
     try {
+      if (target && startableAs === target.id) {
+        await api.setActiveVersion(target.id, target.version);
+      }
       await api.startService(startableAs);
       toast.success(t("common.running"));
+      onOpenChange(false);
     } catch (e) {
       toastError(e);
     } finally {
-      onOpenChange(false);
+      setStarting(false);
+      invalidate("services", "packages", "pathenv");
     }
   };
 
   const stageIndex = STAGES.findIndex((s) => s.id === stage);
-  const pct = progress && progress.total > 0 ? (progress.received / progress.total) * 100 : 0;
+  const pct = progress && progress.total > 0 ? Math.min(100, (progress.received / progress.total) * 100) : 0;
 
   return (
     <Dialog open={target !== null} onOpenChange={close}>
-      <DialogContent className="max-w-lg overflow-hidden p-0">
+      <DialogContent hideClose={starting} className="flex max-h-[calc(100dvh-24px)] max-w-lg flex-col gap-0 overflow-hidden p-0">
         {/* 头部 */}
-        <div className="relative border-b border-border bg-card-2/30 px-6 py-5">
+        <div className="relative shrink-0 border-b border-border bg-card-2/30 py-5 pl-4 pr-12 sm:pl-6">
           <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/40 to-transparent" />
           <div className="flex items-start gap-4">
             <div
@@ -178,22 +187,22 @@ export function InstallDialog({
               )}
             </div>
             <div className="min-w-0 flex-1">
-              <DialogTitle className="text-[15px]">
-                {error
+              <DialogTitle className="text-[15px] leading-snug [overflow-wrap:anywhere]">
+                {cancelled ? t("install.cancelled") : error
                   ? t("install.failed")
                   : finished
                     ? t("install.stage.done")
                     : `${t("install.title")} · ${target?.displayName ?? ""}`}
               </DialogTitle>
               <DialogDescription className="mt-1 flex flex-wrap items-center gap-x-2 text-[12px]">
-                <span className="font-mono">v{target?.version}</span>
+                <span className="font-mono [overflow-wrap:anywhere]">v{target?.version}</span>
                 {target?.sizeBytes ? (
                   <>
                     <span className="text-faint">·</span>
                     <span>{fmtBytes(target.sizeBytes)}</span>
                   </>
                 ) : null}
-                {!finished && !error && (
+                {!finished && !error && !cancelled && (
                   <>
                     <span className="text-faint">·</span>
                     <span className="text-faint">{t("install.keepOpen")}</span>
@@ -204,12 +213,12 @@ export function InstallDialog({
           </div>
         </div>
 
-        <div className="px-6 py-5">
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6">
           {/* 阶段时间线 */}
           <div className="mb-5 flex items-center gap-1.5">
             {STAGES.map((s, i) => {
               const done = finished || i < stageIndex;
-              const active = !finished && i === stageIndex && !error;
+              const active = !finished && !cancelled && i === stageIndex && !error;
               return (
                 <React.Fragment key={s.id}>
                   <div className="flex min-w-0 flex-1 flex-col items-center gap-1.5">
@@ -233,7 +242,7 @@ export function InstallDialog({
                     </div>
                     <span
                       className={cn(
-                        "truncate text-center text-[10px] leading-tight",
+                        "min-h-[2.5em] max-w-full text-center text-[10px] leading-tight text-balance",
                         done || active ? "text-secondary" : "text-faint"
                       )}
                     >
@@ -241,7 +250,7 @@ export function InstallDialog({
                     </span>
                   </div>
                   {i < STAGES.length - 1 && (
-                    <div className="mb-4 h-px min-w-3 flex-1 bg-border">
+                    <div className="mb-8 h-px w-3 shrink-0 bg-border">
                       <motion.div
                         className="h-full bg-running/60"
                         initial={false}
@@ -257,17 +266,23 @@ export function InstallDialog({
 
           {/* 下载进度 */}
           <AnimatePresence mode="wait">
-            {error ? (
+            {cancelled ? (
+              <motion.div key="cancelled" initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                className="rounded-xl border border-border bg-fill p-3.5 text-[12px] text-secondary" role="status">
+                {t("install.cancelledHint")}
+              </motion.div>
+            ) : error ? (
               <motion.div
                 key="error"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 className="flex flex-col gap-2 rounded-xl border border-error/30 bg-error/10 p-3.5"
+                role="alert"
               >
                 <div className="flex items-center gap-2 text-[12.5px] font-medium text-error">
                   <AlertTriangle className="h-3.5 w-3.5" /> {t("install.failed")}
                 </div>
-                <p className="text-[11.5px] leading-relaxed text-secondary">{error}</p>
+                <p className="whitespace-pre-wrap text-[11.5px] leading-relaxed text-secondary [overflow-wrap:anywhere]">{error}</p>
               </motion.div>
             ) : finished ? (
               <motion.div
@@ -308,8 +323,8 @@ export function InstallDialog({
                   </span>
                 </RingProgress>
                 <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-                  <span className="text-[12.5px] font-medium text-secondary">
-                    {t(STAGES[Math.max(0, stageIndex)]?.labelKey ?? "install.stage.download")}
+                  <span className="text-[12.5px] font-medium text-secondary" role="status">
+                    {cancelling ? t("install.cancelling") : t(STAGES[Math.max(0, stageIndex)]?.labelKey ?? "install.stage.download")}
                   </span>
                   {stage === "download" && progress ? (
                     <>
@@ -336,10 +351,10 @@ export function InstallDialog({
           </AnimatePresence>
         </div>
 
-        <DialogFooter className="border-t border-border bg-card-2/20 px-6 py-3.5">
-          {error ? (
+        <DialogFooter className="shrink-0 border-t border-border bg-card-2/20 px-4 py-3.5 sm:px-6">
+          {error || cancelled ? (
             <>
-              <Button variant="ghost" onClick={() => onOpenChange(false)}>
+              <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={starting}>
                 {t("common.close")}
               </Button>
               <Button onClick={retry} disabled={busy}>
@@ -348,19 +363,19 @@ export function InstallDialog({
             </>
           ) : finished ? (
             <>
-              <Button variant="ghost" onClick={() => onOpenChange(false)}>
+              <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={starting}>
                 {t("install.close")}
               </Button>
               {startableAs && (
-                <Button onClick={startNow}>
-                  {t("common.start")} <ArrowRight className="h-3.5 w-3.5" />
+                <Button onClick={startNow} disabled={starting}>
+                  {starting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowRight className="h-3.5 w-3.5" />} {t(starting ? "packages.starting" : "common.start")}
                 </Button>
               )}
             </>
           ) : (
             <>
-              <Button variant="ghost" onClick={cancel}>
-                <X className="h-3.5 w-3.5" /> {t("install.cancel")}
+              <Button variant="ghost" onClick={cancel} disabled={cancelling || stage === "config"}>
+                {cancelling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />} {t(cancelling ? "install.cancelling" : "install.cancel")}
               </Button>
               <Button onClick={() => close(false)}>{t("install.runInBackground")}</Button>
             </>

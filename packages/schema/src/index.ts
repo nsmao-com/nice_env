@@ -169,6 +169,8 @@ export const PackageManifestEntry = z.object({
   entry: z.string(),
   defaultPort: z.number().optional(),
   depends: z.array(z.string()).optional(),
+  /** 纯运行时的前置依赖，与后端清单 requires 保持一致。 */
+  requires: z.array(z.string()).optional(),
   /** 声明后该包注册为可启停服务（清单驱动的通用启停路径） */
   run: ServiceRunSpec.optional(),
   /** 声明后可从上游枚举该包的历史版本（含最新） */
@@ -184,6 +186,7 @@ export const InstallState = z.enum([
   "extracting",
   "configuring",
   "installed",
+  "cancelled",
   "error",
 ]);
 export type InstallState = z.infer<typeof InstallState>;
@@ -311,6 +314,7 @@ export const RewritePreset = z.enum([
 export type RewritePreset = z.infer<typeof RewritePreset>;
 
 export const SiteRuntime = z.object({
+  importedCertId: z.string().optional(),
   webServer: z.enum(["nginx", "apache"]).default("nginx"),
   kind: SiteKind,
   phpVersion: z.string().optional(),
@@ -324,7 +328,9 @@ export const SiteDbBinding = z.object({
   enabled: z.boolean(),
   database: z.string(),
   username: z.string(),
-  password: z.string(),
+  password: z.string().optional(),
+  version: z.string().optional(),
+  port: z.number().int().min(1).max(65535).optional(),
 });
 export type SiteDbBinding = z.infer<typeof SiteDbBinding>;
 
@@ -376,6 +382,13 @@ export const CreateSiteInput = z.object({
     .default("none"),
 });
 export type CreateSiteInput = z.infer<typeof CreateSiteInput>;
+
+export const SiteCreateProgress = z.object({
+  rootDir: z.string(),
+  stage: z.enum(["preparing", "downloading", "extracting", "installing", "initializing", "validating", "building", "database", "configuring", "starting"]),
+  percent: z.number().min(0).max(100).nullable(),
+});
+export type SiteCreateProgress = z.infer<typeof SiteCreateProgress>;
 
 /* ============ 服务栈（用户自定义的一整套服务 + 一键启动） ============ */
 
@@ -764,6 +777,10 @@ export const CertReport = z.object({
 export type CertReport = z.infer<typeof CertReport>;
 
 export const ImportedCert = z.object({
+  id: z.string(),
+  usable: z.boolean(),
+  problem: z.string().optional(),
+  usedBySites: z.array(z.string()).default([]),
   certPath: z.string(),
   keyPath: z.string(),
   subject: z.string(),
@@ -788,6 +805,7 @@ export const ConfigFileInfo = z.object({
   validated: z.boolean(),
   usedByService: z.string().nullable().optional(),
   requiresPackage: z.string().nullable().optional(),
+  resettable: z.boolean().optional(),
 });
 export type ConfigFileInfo = z.infer<typeof ConfigFileInfo>;
 
@@ -812,6 +830,7 @@ export const ConfigBackup = z.object({
   path: z.string(),
   sizeBytes: z.number(),
   createdAt: z.number(),
+  target: z.string().nullable().optional(),
 });
 export type ConfigBackup = z.infer<typeof ConfigBackup>;
 

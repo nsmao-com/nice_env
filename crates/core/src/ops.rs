@@ -6,7 +6,7 @@ use crate::model::ServiceState;
 use crate::paths::{nginx_path, Paths};
 use crate::services::*;
 use crate::store::Store;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,6 +14,7 @@ use std::time::Duration;
 /// 只有「守护进程型」套件注册为服务；node/python/go/composer 等纯运行时不注册。
 /// 内置编排的服务（nginx/mysql 等）走这里；其余清单声明 `run` 的包走 `generic::register_services`。
 pub fn register_services(paths: &Paths, store: &Store, manager: &Arc<ServiceManager>) {
+    let _operation = manager.lifecycle.lock();
     let Ok(installed) = store.list_installed() else {
         return;
     };
@@ -30,6 +31,12 @@ pub fn register_services(paths: &Paths, store: &Store, manager: &Arc<ServiceMana
     ];
     for p in installed {
         if !SERVICE_IDS.contains(&p.id.as_str()) {
+            continue;
+        }
+        if p.id != "php"
+            && p.id != "mysql"
+            && installed_by_choice(store, &p.id).is_none_or(|active| active.version != p.version)
+        {
             continue;
         }
         let service_id = if p.id == "php" || p.id == "mysql" {
@@ -82,10 +89,9 @@ fn php_exe(store: &Store, version: &str) -> Result<PathBuf> {
     Ok(exe)
 }
 
-fn nginx_exe(store: &Store) -> Result<(PathBuf, PathBuf)> {
-    let inst = store
-        .find_installed("nginx", None)
-        .ok_or_else(|| AppError::not_installed("Nginx"))?;
+pub(crate) fn nginx_exe(store: &Store) -> Result<(PathBuf, PathBuf)> {
+    let inst =
+        installed_by_choice(store, "nginx").ok_or_else(|| AppError::not_installed("Nginx"))?;
     let root = PathBuf::from(&inst.install_path).join(format!("nginx-{}", inst.version));
     let exe_name = if cfg!(windows) { "nginx.exe" } else { "nginx" };
     let exe = root.join(exe_name);
@@ -113,7 +119,7 @@ pub fn installed_by_choice(store: &Store, id: &str) -> Option<crate::model::Inst
         .into_iter()
         .filter(|p| p.id == id)
         .collect::<Vec<_>>();
-    list.sort_by(|a, b| b.version.cmp(&a.version));
+    list.sort_by(|a, b| crate::versions::cmp_version_desc(&a.version, &b.version));
     list.into_iter().next()
 }
 
@@ -151,7 +157,6 @@ pub fn mysql_root_name(version: &str) -> String {
 pub fn mysql_paths(store: &Store, version: &str) -> Result<(PathBuf, PathBuf)> {
     let inst = store
         .find_installed("mysql", Some(version))
-        .or_else(|| installed_by_choice(store, "mysql"))
         .ok_or_else(|| AppError::not_installed("MySQL"))?;
     let basedir = PathBuf::from(&inst.install_path).join(mysql_root_name(version));
     let mysqld = basedir.join("bin").join(exe_name("mysqld"));
@@ -195,7 +200,7 @@ fn mihomo_paths(store: &Store) -> Result<(PathBuf, PathBuf)> {
     Err(AppError::new("BROKEN_INSTALL", "找不到 mihomo 可执行文件"))
 }
 
-fn apache_paths(store: &Store) -> Result<(PathBuf, PathBuf)> {
+pub(crate) fn apache_paths(store: &Store) -> Result<(PathBuf, PathBuf)> {
     let inst =
         installed_by_choice(store, "apache").ok_or_else(|| AppError::not_installed("Apache"))?;
     let root = PathBuf::from(&inst.install_path).join("Apache24");
@@ -248,9 +253,26 @@ pub fn start_service(
     manager: &Arc<ServiceManager>,
     id: &str,
 ) -> Result<()> {
+    let _operation = manager.lifecycle.lock();
+    register_services(paths, store, manager);
+    crate::generic::register_services(paths, store, manager);
+    let status = manager
+        .snapshot(id)
+        .ok_or_else(|| AppError::new("UNKNOWN_SERVICE", format!("服务 {id} 未注册或已卸载")))?;
+    if status.state == ServiceState::Error && manager.is_busy(id) {
+        return Err(AppError::new(
+            "SERVICE_BUSY",
+            format!("{id} 仍有进程运行，请先停止后重试"),
+        ));
+    }
     if let Some(e) = manager.snapshot(id) {
         if e.state == ServiceState::Running || e.state == ServiceState::Starting {
             return Ok(());
+        }
+    }
+    if !id.contains('@') {
+        if let Some(version) = status.version {
+            set_active_version(store, id, &version)?;
         }
     }
     let ports = PortsProfile::from_settings(store);
@@ -280,15 +302,16 @@ pub fn start_service(
     match result {
         Ok(()) => {
             manager.set_state(id, ServiceState::Running);
+            let effective_ports = PortsProfile::from_settings(store);
             // 记录本次实际绑定的端口，停机命令据此寻址（端口方案可能在运行期被改）
             let actual_port = match id {
                 "nginx" => Some(ports.http),
                 "apache" => Some(ports.apache_http),
-                "redis" => Some(ports.redis),
+                "redis" => Some(effective_ports.redis),
                 "postgresql" => Some(ports.postgres),
                 "mongodb" => Some(ports.mongodb),
                 "mihomo" => Some(configgen::MIHOMO_MIXED_PORT),
-                s if s.starts_with("mysql@") => Some(ports.mysql),
+                s if s.starts_with("mysql@") => Some(effective_ports.mysql),
                 s if s.starts_with("php@") => store.get_port_assign(s),
                 _ => None,
             };
@@ -301,6 +324,7 @@ pub fn start_service(
             Ok(())
         }
         Err(err) => {
+            terminate_group(manager, id);
             manager.set_error(id, err.clone());
             Err(err)
         }
@@ -420,50 +444,65 @@ fn start_mysql(
 ) -> Result<()> {
     let service_id = format!("mysql@{version}");
     let (basedir, mysqld) = mysql_paths(store, version)?;
-    // 端口被占 + 自动回落开启 → 换附近空闲端口（写入覆盖项；ini 每次启动重写，自动跟上）
+    // 自动回落只更新托管端口；用户的缓冲池、连接数、SQL 模式等设置保留。
     let mysql_port =
         crate::services::fallback_port_for(store, "mysql", ports.mysql, &[]).unwrap_or(ports.mysql);
-    // 每次启动前重写 ini（镜像策略/端口方案可能变化；写前自动备份）
+    // 仅同步 basedir/datadir/port，配置 include 中的同名项由启动参数最终约束。
     configgen::write_mysql_ini(paths, version, &basedir, mysql_port)?;
-    let datadir = paths.mysql_data_dir(version);
-    if !datadir.exists()
-        || std::fs::read_dir(&datadir)
-            .map(|mut d| d.next().is_none())
-            .unwrap_or(true)
-    {
-        // 首次初始化（insecure → 启动后设密）
-        std::fs::create_dir_all(&datadir)?;
-        let ini = paths.mysql_ini(version);
-        let mut init_args: Vec<String> = vec![
-            format!("--defaults-file={}", ini.to_string_lossy()),
-            "--initialize-insecure".to_string(),
-        ];
-        // --console 是 Windows 专属选项，macOS 上传入会以 unknown option 直接失败
+    let datadir = crate::paths::checked_data_path(&paths.base, &format!("data/mysql/{version}"))?;
+    let needs_init = match std::fs::read_dir(&datadir) {
+        Ok(mut entries) => match entries.next() {
+            None => true,
+            Some(entry) => {
+                entry?;
+                false
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => return Err(error.into()),
+    };
+    if needs_init {
+        let parent = datadir
+            .parent()
+            .ok_or_else(|| AppError::new("MYSQL_INIT_FAILED", "数据目录无效"))?;
+        std::fs::create_dir_all(parent)?;
+        let pending = tempfile::Builder::new()
+            .prefix(".mysql-init-")
+            .tempdir_in(parent)?;
+        let mut init_args = mysql_launch_args(paths, version, &basedir, mysql_port);
+        for arg in &mut init_args {
+            if arg.starts_with("--datadir=") {
+                *arg = format!("--datadir={}", pending.path().display());
+            }
+        }
+        init_args.push("--initialize-insecure".to_string());
         if cfg!(windows) {
             init_args.push("--console".to_string());
         }
-        let out = platform::command(&mysqld)
+        let mut output = tempfile::tempfile()?;
+        let mut command = platform::command(&mysqld);
+        command
             .args(&init_args)
-            .output()
-            .map_err(|e| AppError::io("初始化 MySQL 数据目录", e))?;
-        if !out.status.success() {
-            // 清理半初始化目录，避免下次误判为已初始化
-            let _ = std::fs::remove_dir_all(&datadir);
+            .stdin(std::process::Stdio::null())
+            .stdout(output.try_clone()?)
+            .stderr(output.try_clone()?);
+        let status = crate::dbadmin::wait_client(&mut command, Duration::from_secs(180), || {})?;
+        if !status.success() {
             return Err(
                 AppError::new("MYSQL_INIT_FAILED", "MySQL 数据目录初始化失败")
-                    .with_hint("检查磁盘空间；数据目录路径不要包含中文或空格")
-                    .with_detail(format!(
-                        "{}\n{}",
-                        String::from_utf8_lossy(&out.stdout),
-                        String::from_utf8_lossy(&out.stderr)
-                    )),
+                    .with_hint("检查磁盘空间和 MySQL 配置；现有数据目录未覆盖")
+                    .with_detail(crate::dbadmin::read_output(&mut output, 64 * 1024)?),
             );
         }
+        // 只删除空目录；用户在初始化期间写入的文件不得被清理。
+        if datadir.exists() {
+            std::fs::remove_dir(&datadir)?;
+        }
+        std::fs::rename(pending.path(), &datadir)?;
     }
 
     precheck_port(mysql_port, "MySQL")?;
-    let ini = paths.mysql_ini(version);
-    let mut mysql_args: Vec<String> = vec![format!("--defaults-file={}", ini.to_string_lossy())];
+    let mut mysql_args = mysql_launch_args(paths, version, &basedir, mysql_port);
     if cfg!(windows) {
         mysql_args.push("--console".to_string());
     }
@@ -475,56 +514,102 @@ fn start_mysql(
         detached: None,
     };
     spawn_tracked(manager, &service_id, &spec)?;
-    if !wait_healthy(ports.mysql, Duration::from_secs(30)) {
-        return Err(
-            AppError::new("MYSQL_START_TIMEOUT", "MySQL 启动超时（30s 内端口未就绪）")
-                .with_hint("首次启动需要初始化，可能较慢；持续失败请看日志页错误输出"),
+    let ready_timeout = if needs_init { 60 } else { 30 };
+    if !wait_healthy(mysql_port, Duration::from_secs(ready_timeout)) {
+        return Err(AppError::new(
+            "MYSQL_START_TIMEOUT",
+            format!("MySQL 启动超时（{ready_timeout}s 内端口未就绪）"),
+        )
+        .with_hint("请检查磁盘空间、配置与错误日志后重试")
+        .with_detail(manager.tail(&service_id, 40).join("\n")));
+    }
+
+    manager.set_started_port(&service_id, mysql_port);
+    store.set_setting(&crate::dbadmin::port_key(version), &mysql_port.to_string())?;
+    // 每个数据目录独立认证。兼容旧全局密码和过去部分设密失败留下的 root/空密码。
+    let mut candidates = Vec::new();
+    if let Some(value) = crate::dbadmin::saved_password(store, version) {
+        candidates.push(value);
+    }
+    candidates.push("root".to_string());
+    candidates.push(String::new());
+    candidates.dedup();
+    let mut authenticated = false;
+    let mut auth_error = None;
+    let auth_started = std::time::Instant::now();
+    loop {
+        for password in &candidates {
+            let client = crate::dbadmin::MySqlClient {
+                exe: basedir.join("bin").join(exe_name("mysql")),
+                port: mysql_port,
+                root_password: password.clone(),
+            };
+            if let Err(error) = client.verify_data_dir(&datadir) {
+                auth_error = Some(error);
+                continue;
+            }
+            if password.is_empty() {
+                use rand::Rng;
+                let secure: String = rand::thread_rng()
+                    .sample_iter(&rand::distributions::Alphanumeric)
+                    .take(24)
+                    .map(char::from)
+                    .collect();
+                // 先落地凭据；异常退出后再次启动可凭此恢复，不能生成后丢失。
+                store.set_setting(&crate::dbadmin::password_key(version), &secure)?;
+                client.reset_root_password(&secure)?;
+                crate::dbadmin::MySqlClient {
+                    root_password: secure,
+                    ..client
+                }
+                .verify_data_dir(&datadir)?;
+            } else {
+                store.set_setting(&crate::dbadmin::password_key(version), &password)?;
+            }
+            authenticated = true;
+            break;
+        }
+        if authenticated || !needs_init || auth_started.elapsed() >= Duration::from_secs(10) {
+            break;
+        }
+        if auth_error
+            .as_ref()
+            .is_some_and(|error| error.code == "MYSQL_INSTANCE_MISMATCH")
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    if !authenticated {
+        if needs_init {
+            return Err(auth_error.unwrap_or_else(|| {
+                AppError::new("MYSQL_AUTH_FAILED", "新实例初始化后无法认证，已停止服务")
+            }));
+        }
+        // 服务已经真实就绪；保留运行，以便用户在数据库页验证并更新本机连接凭据。
+        manager.push_log(
+            &service_id,
+            "MySQL 已启动，但保存的 root 凭据无法认证；请在数据库页更新连接密码。",
         );
     }
 
-    // 首次设置 root 密码（若未设置过）
-    if store.get_setting("mysqlRootPassword").is_none() {
-        let default_pass = "root";
-        let client =
-            crate::dbadmin::MySqlClient::from_state(paths, version, ports.mysql, String::new());
-        if client.ping().is_ok() {
-            // insecure 模式空密码可连，直接设置默认密码
-            if set_root_password_via(paths, version, ports.mysql, "", default_pass).is_ok() {
-                store.set_setting("mysqlRootPassword", default_pass)?;
-            }
-        }
-    }
     Ok(())
 }
 
-fn set_root_password_via(
-    paths: &Paths,
-    version: &str,
-    port: u16,
-    old: &str,
-    new: &str,
-) -> Result<()> {
-    let inst = paths
-        .runtime_dir("mysql", version)
-        .join(mysql_root_name(version));
-    let exe = inst.join("bin").join(exe_name("mysql"));
-    let out = platform::command(&exe)
-        .args([
-            "-h", "127.0.0.1", "-P", &port.to_string(),
-            "-u", "root", &format!("--password={old}"),
-            "-e", &format!(
-                "ALTER USER 'root'@'localhost' IDENTIFIED BY '{new}'; ALTER USER 'root'@'127.0.0.1' IDENTIFIED BY '{new}'; FLUSH PRIVILEGES;"
-            ),
-        ])
-        .output()
-        .map_err(|e| AppError::io("设置 root 密码", e))?;
-    if !out.status.success() {
-        return Err(
-            AppError::new("MYSQL_PASSWORD_FAILED", "MySQL root 密码设置失败")
-                .with_detail(String::from_utf8_lossy(&out.stderr).to_string()),
-        );
-    }
-    Ok(())
+fn mysql_launch_args(paths: &Paths, version: &str, basedir: &Path, port: u16) -> Vec<String> {
+    // --defaults-file 必须位于其他参数之前，后续参数覆盖 include 中过时的托管路径/端口。
+    vec![
+        format!(
+            "--defaults-file={}",
+            paths.mysql_ini(version).to_string_lossy()
+        ),
+        format!("--basedir={}", basedir.to_string_lossy()),
+        format!(
+            "--datadir={}",
+            paths.mysql_data_dir(version).to_string_lossy()
+        ),
+        format!("--port={port}"),
+    ]
 }
 
 fn start_redis(
@@ -542,10 +627,9 @@ fn start_redis(
         crate::services::fallback_port_for(store, "redis", ports.redis, &[]).unwrap_or(ports.redis);
     configgen::write_redis_conf(paths, &version, redis_port)?;
     precheck_port(redis_port, "Redis")?;
-    let conf = paths.redis_conf(&version);
     let spec = SpawnSpec {
         program: exe.clone(),
-        args: vec![conf.to_string_lossy().to_string()],
+        args: redis_launch_args(paths, &version, redis_port),
         cwd: Some(exe.parent().map(PathBuf::from).unwrap_or_default()),
         env: vec![],
         detached: None,
@@ -553,7 +637,8 @@ fn start_redis(
     spawn_tracked(manager, "redis", &spec)?;
     if !wait_healthy(redis_port, Duration::from_secs(10)) {
         return Err(AppError::new("REDIS_START_TIMEOUT", "Redis 启动超时")
-            .with_hint("查看日志页 redis 输出；通常是端口冲突"));
+            .with_hint("查看日志页 redis 输出，检查端口和配置")
+            .with_detail(manager.tail("redis", 30).join("\n")));
     }
     Ok(())
 }
@@ -585,6 +670,18 @@ fn start_mihomo(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>) -> 
             .with_hint("查看日志页 mihomo 输出；配置损坏时可在代理页删除订阅恢复内置配置"));
     }
     Ok(())
+}
+
+fn redis_launch_args(paths: &Paths, version: &str, port: u16) -> Vec<String> {
+    vec![
+        paths.redis_conf(version).to_string_lossy().to_string(),
+        "--port".into(),
+        port.to_string(),
+        "--dir".into(),
+        paths.redis_data_dir().to_string_lossy().to_string(),
+        "--daemonize".into(),
+        "no".into(),
+    ]
 }
 
 fn start_apache(
@@ -771,8 +868,12 @@ pub fn stop_service(
     manager: &Arc<ServiceManager>,
     id: &str,
 ) -> Result<()> {
+    let _operation = manager.lifecycle.lock();
+    if manager.snapshot(id).is_none() {
+        return Ok(());
+    }
     if let Some(e) = manager.snapshot(id) {
-        if e.state == ServiceState::Stopped {
+        if e.state == ServiceState::Stopped && !manager.is_busy(id) {
             return Ok(());
         }
     }
@@ -852,11 +953,17 @@ pub fn stop_service(
                 Ok(())
             }
             "redis" => {
-                let out = platform::command("redis-cli")
-                    .args(["-p", &redis_port.to_string(), "shutdown", "nosave"])
-                    .output();
-                if out.map(|o| o.status.success()).unwrap_or(false) {
-                    std::thread::sleep(Duration::from_millis(600));
+                if let Some(service) = manager.snapshot(id) {
+                    let version = service.version.as_deref().ok_or_else(|| AppError::new("REDIS_VERSION_UNKNOWN", "无法确认 Redis 版本，未发送停机命令"))?;
+                    let credentials = crate::stats::RedisCredentials::load(store, version)?;
+                    crate::stats::redis_shutdown(redis_port, &credentials, &service.pids)?;
+                    for _ in 0..100 {
+                        if service.pids.iter().all(|pid| !platform::process_alive(*pid)) { break; }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    if service.pids.iter().any(|pid| platform::process_alive(*pid)) {
+                        return Err(AppError::new("REDIS_SHUTDOWN_TIMEOUT", "Redis 仍在运行，未强制结束进程，请检查保存进度和日志"));
+                    }
                 }
                 terminate_group(manager, id);
                 Ok(())
@@ -865,21 +972,12 @@ pub fn stop_service(
                 let version = s.trim_start_matches("mysql@");
                 if let Ok((basedir, _)) = mysql_paths(store, version) {
                     let admin = basedir.join("bin").join(exe_name("mysqladmin"));
-                    let pass = store
-                        .get_setting("mysqlRootPassword")
-                        .unwrap_or_else(|| "root".into());
-                    let _ = platform::command(&admin)
-                        .args([
-                            "-h",
-                            "127.0.0.1",
-                            "-P",
-                            &mysql_port.to_string(),
-                            "-u",
-                            "root",
-                            &format!("--password={pass}"),
-                            "shutdown",
-                        ])
-                        .output();
+                    let pass = crate::dbadmin::saved_password(store, version).unwrap_or_default();
+                    if let Ok((_private, mut command)) = crate::dbadmin::client_command(&admin, "127.0.0.1", mysql_port, "root", &pass) {
+                        command.args(["--connect-timeout=5", "shutdown"]).stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+                        let _ = crate::dbadmin::wait_client(&mut command, Duration::from_secs(10), || {});
+                    }
                     // 优雅关闭最多等 10s
                     for _ in 0..20 {
                         if !tcp_port_open(mysql_port) {
@@ -926,6 +1024,10 @@ pub fn stop_service(
         manager.set_state(id, ServiceState::Stopped);
     } else {
         // 进程仍在：不要谎报 Stopped，否则后续 stop 会被短路掉再也杀不掉
+        if let Err(error) = &result {
+            manager.set_error(id, error.clone());
+            return Err(error.clone());
+        }
         let err = AppError::new(
             "STOP_FAILED",
             format!("{id} 仍有 {} 个进程未退出", survivors.len()),
@@ -945,6 +1047,16 @@ fn terminate_group(manager: &Arc<ServiceManager>, id: &str) {
             let _ = g.terminate(true);
         }
         *group = None;
+        let alive: Vec<_> = e
+            .pids
+            .lock()
+            .iter()
+            .copied()
+            .filter(|pid| platform::process_alive(*pid))
+            .collect();
+        if !alive.is_empty() {
+            let _ = platform::ProcessGroup::from_pids(alive).terminate(true);
+        }
     }
 }
 
@@ -980,6 +1092,7 @@ pub fn rebuild_and_reload(
     paths: &Paths,
     manager: &Arc<ServiceManager>,
 ) -> Result<()> {
+    let _operation = manager.lifecycle.lock();
     let ports = PortsProfile::from_settings(store);
     let pools: Vec<(String, u16)> = store
         .all_port_assigns()
@@ -1000,7 +1113,7 @@ pub fn rebuild_and_reload(
             configgen::validate_nginx(&exe, &paths.nginx_conf())?;
             #[cfg(windows)]
             {
-                stop_service(store, paths, manager, "nginx").ok();
+                stop_service(store, paths, manager, "nginx")?;
                 std::thread::sleep(Duration::from_millis(300));
                 start_service(store, paths, manager, "nginx")?;
             }
@@ -1074,6 +1187,7 @@ pub fn rebuild_and_reload(
 
 /// 停全部（托盘退出时用）
 pub fn stop_all(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>) {
+    let _ = crate::toolbox::adminer_stop(manager);
     if let Ok(list) = store.list_installed() {
         for p in list {
             let sid = if p.id == "php" || p.id == "mysql" {
@@ -1104,6 +1218,10 @@ pub fn save_pidfile(paths: &Paths, manager: &Arc<ServiceManager>) {
                 entries.push((id, pids));
             }
         }
+    }
+    // 管理台独立于套件服务列表；异常退出后仍由既有归属校验清理其残留进程。
+    if let Some(pid) = crate::toolbox::adminer_pid(manager) {
+        entries.push(("adminer-console".into(), vec![pid]));
     }
     let dir = paths.data().join("run");
     let _ = std::fs::create_dir_all(&dir);
@@ -1426,6 +1544,840 @@ pub fn validate_configs(store: &Store, paths: &Paths) -> Vec<ConfigCheck> {
 #[cfg(test)]
 mod validate_tests {
     use super::*;
+
+    fn isolated_state(paths: Paths) -> crate::CoreState {
+        paths.ensure_dirs().unwrap();
+        crate::CoreState {
+            store: Store::open(paths.db()).unwrap(),
+            paths,
+            manager: Arc::new(ServiceManager::new()),
+            installer: crate::install::Installer::bundled(),
+            downloader: Arc::new(crate::download::Downloader::new()),
+            emit: Arc::new(|_| {}),
+            watchdog: Arc::new(crate::watchdog::Watchdog::new()),
+        }
+    }
+
+    fn register_fixture(state: &crate::CoreState, id: &str, version: &str, runtime: &Path) {
+        state
+            .store
+            .upsert_installed(&crate::model::InstalledPackage {
+                id: id.into(),
+                version: version.into(),
+                category: "runtime".into(),
+                install_path: runtime.to_string_lossy().into(),
+                config_path: String::new(),
+                installed_at: 0,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires NSB_PHP_ROOT and NSB_ADMINER_FILE; starts isolated PHP on ephemeral ports"]
+    fn real_adminer_entry_readiness_state_and_cleanup() {
+        use crate::toolbox;
+        let php = PathBuf::from(std::env::var("NSB_PHP_ROOT").expect("NSB_PHP_ROOT"));
+        let adminer = PathBuf::from(std::env::var("NSB_ADMINER_FILE").expect("NSB_ADMINER_FILE"));
+        let temp = tempfile::tempdir().unwrap();
+        let state = isolated_state(Paths::new(temp.path().join("adminer with spaces")));
+        assert_eq!(toolbox::adminer_start_on_port(&state.store, &state.paths, &state.installer, &state.manager, 0).unwrap_err().code, "NOT_INSTALLED");
+        register_fixture(&state, "php", "8.4.26", &php);
+        let root = state.paths.runtime_dir("adminer", "6.1.0");
+        let entry = root.join("console folder/adminer entry.php");
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::fs::copy(&adminer, &entry).unwrap();
+        let mut manifest = state.installer.find("adminer@6.1.0").unwrap();
+        manifest.entry = "console folder/adminer entry.php".into();
+        std::fs::write(root.join(".niceenv-package.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        register_fixture(&state, "adminer", "6.1.0", &root);
+        state.store.set_setting("activeadminerVersion", "6.1.0").unwrap();
+        let ini = state.paths.php_ini("8.4.26");
+        std::fs::create_dir_all(ini.parent().unwrap()).unwrap();
+        std::fs::write(&ini, format!("extension_dir=\"{}\"\nextension=mysqli\nsession.save_path=\"{}\"\n", php.join("ext").to_string_lossy().replace('\\', "/"), temp.path().to_string_lossy().replace('\\', "/"))).unwrap();
+        let start = || toolbox::adminer_start_on_port(&state.store, &state.paths, &state.installer, &state.manager, 0).unwrap();
+        let status = start();
+        let pid = crate::ports::diagnose_port(status.port).unwrap().pid.unwrap();
+        assert!(status.url.contains("adminer%20entry.php"), "{}", status.url);
+        assert_eq!(status.php_version, "8.4.26");
+        assert_eq!(state.adminer_status().unwrap().unwrap().url, status.url);
+        assert_eq!(start().url, status.url);
+        assert_eq!(crate::ports::diagnose_port(status.port).unwrap().pid, Some(pid));
+        save_pidfile(&state.paths, &state.manager);
+        let recorded: serde_json::Value = serde_json::from_slice(&std::fs::read(state.paths.data().join("run/pids.json")).unwrap()).unwrap();
+        assert!(recorded["services"].as_array().unwrap().iter().any(|s| s["id"] == "adminer-console" && s["pids"][0] == pid));
+        register_fixture(&state, "adminer", "99.0.0", &state.paths.runtime_dir("adminer", "99.0.0"));
+        state.store.set_setting("activeadminerVersion", "99.0.0").unwrap();
+        assert_eq!(start().adminer_version, "6.1.0");
+        assert_eq!(state.uninstall_package("php@8.4.26").unwrap_err().code, "PACKAGE_IN_USE");
+        assert_eq!(state.uninstall_package("adminer@6.1.0").unwrap_err().code, "PACKAGE_IN_USE");
+        stop_all(&state.store, &state.paths, &state.manager);
+        assert!(state.adminer_status().unwrap().is_none());
+        assert!(!platform::process_alive(pid));
+        assert!(!tcp_port_open(status.port));
+        state.adminer_stop().unwrap();
+        state.store.set_setting("activeadminerVersion", "6.1.0").unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        assert_eq!(toolbox::adminer_start_on_port(&state.store, &state.paths, &state.installer, &state.manager, listener.local_addr().unwrap().port()).unwrap_err().code, "PORT_IN_USE");
+        assert!(state.adminer_status().unwrap().is_none());
+        drop(listener);
+        std::fs::write(&entry, "<?php syntax error").unwrap();
+        assert_eq!(toolbox::adminer_start_on_port(&state.store, &state.paths, &state.installer, &state.manager, 0).unwrap_err().code, "ADMINER_START_FAILED");
+        assert!(state.adminer_status().unwrap().is_none());
+        std::fs::remove_file(&entry).unwrap();
+        assert_eq!(toolbox::adminer_start_on_port(&state.store, &state.paths, &state.installer, &state.manager, 0).unwrap_err().code, "ADMINER_ENTRY_MISSING");
+    }
+
+    #[test]
+    #[ignore = "requires NSB_MYSQL_ROOT; uses two temporary isolated data directories and ephemeral ports"]
+    fn real_mysql_auth_backup_restore_and_import() {
+        use crate::{dbadmin, dbbackup, dbmigrate};
+        let root = PathBuf::from(std::env::var("NSB_MYSQL_ROOT").expect("NSB_MYSQL_ROOT"));
+        let temp = tempfile::tempdir().unwrap();
+        let source = isolated_state(Paths::new(temp.path().join("source with spaces")));
+        let target = isolated_state(Paths::new(temp.path().join("target with spaces")));
+        struct StopOnDrop<'a>(&'a crate::CoreState);
+        impl Drop for StopOnDrop<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.stop_service("mysql@8.0.46");
+            }
+        }
+        let _source_cleanup = StopOnDrop(&source);
+        let _target_cleanup = StopOnDrop(&target);
+        for state in [&source, &target] {
+            register_fixture(state, "mysql", "8.0.46", root.parent().unwrap());
+            let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            state
+                .store
+                .set_port_override("mysql", Some(port.local_addr().unwrap().port()))
+                .unwrap();
+            drop(port);
+            state.start_service("mysql@8.0.46").unwrap_or_else(|error| {
+                panic!(
+                    "{error:?}\n{}",
+                    state.manager.tail("mysql@8.0.46", 40).join("\n")
+                )
+            });
+        }
+        let (_, mut client) = dbadmin::selected_client(&source, Some("8.0.46")).unwrap();
+        let initial = dbadmin::saved_password(&source.store, "8.0.46").unwrap();
+        assert_eq!(initial.len(), 24);
+        assert_eq!(
+            dbadmin::saved_port(&source.store, "8.0.46"),
+            Some(client.port)
+        );
+        assert_ne!(
+            initial,
+            dbadmin::saved_password(&target.store, "8.0.46").unwrap()
+        );
+        // --initialize-insecure creates only root@localhost. Setting its password must still succeed.
+        assert!(client
+            .list_users()
+            .unwrap()
+            .iter()
+            .any(|u| u.username == "root" && u.host == "localhost"));
+        assert!(client
+            .verify_data_dir(&target.paths.mysql_data_dir("8.0.46"))
+            .is_err());
+        source
+            .store
+            .set_port_override("mysql", Some(client.port.saturating_sub(1)))
+            .unwrap();
+        assert_eq!(
+            dbadmin::selected_client(&source, Some("8.0.46"))
+                .unwrap()
+                .1
+                .port,
+            client.port
+        );
+        source
+            .store
+            .set_port_override("mysql", Some(client.port))
+            .unwrap();
+        let special = "quote' slash\\ dollar$ # semi; 中文";
+        source
+            .set_mysql_password(Some("8.0.46"), special, false)
+            .unwrap();
+        client.root_password = special.into();
+        client.ping().unwrap();
+        source
+            .store
+            .set_setting(&dbadmin::password_key("8.0.46"), "incorrect")
+            .unwrap();
+        assert!(dbadmin::selected_client(&source, Some("8.0.46")).is_err());
+        source
+            .set_mysql_password(Some("8.0.46"), special, true)
+            .unwrap();
+        source.stop_service("mysql@8.0.46").unwrap();
+        source.start_service("mysql@8.0.46").unwrap();
+        client = dbadmin::selected_client(&source, Some("8.0.46")).unwrap().1;
+        assert_eq!(client.root_password, special);
+        assert!(client.drop_database("mysql").is_err());
+        client.create_database("niceenv_fixture").unwrap();
+        client
+            .create_user_grant("fixture_user", special, "niceenv_fixture")
+            .unwrap();
+        assert!(client
+            .create_user_grant("fixture_user", "different", "niceenv_fixture")
+            .is_err());
+        dbadmin::query_client(
+            &client.exe,
+            "127.0.0.1",
+            client.port,
+            "fixture_user",
+            special,
+            "USE niceenv_fixture; SELECT 1;",
+        )
+        .unwrap();
+        assert!(client
+            .run("SHOW TABLES FROM niceenv_fixture;")
+            .unwrap()
+            .trim()
+            .is_empty());
+        client.run("CREATE TABLE niceenv_fixture.sample (id INT PRIMARY KEY, value VARCHAR(80)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;").unwrap();
+        assert!(client
+            .run("SHOW CREATE TABLE niceenv_fixture.sample;")
+            .unwrap()
+            .contains("utf8mb4"));
+        client
+            .run("INSERT INTO niceenv_fixture.sample VALUES (1, 'original');")
+            .unwrap();
+        let conn = dbbackup::ConnInfo {
+            version: "8.0.46".into(),
+            port: client.port,
+            root_password: special.into(),
+            bin_dir: Some(root.join("bin")),
+        };
+        let backup = dbbackup::dump_path(&source.paths, "8.0.46", "fixture.sql").unwrap();
+        dbbackup::dump_databases(
+            &source.paths,
+            &conn,
+            &["niceenv_fixture".into()],
+            &backup,
+            &|_| {},
+        )
+        .unwrap();
+        let bytes = std::fs::read(&backup).unwrap();
+        assert!(dbbackup::dump_databases(
+            &source.paths,
+            &conn,
+            &["niceenv_fixture".into()],
+            &backup,
+            &|_| {}
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&backup).unwrap(), bytes);
+        client
+            .run("UPDATE niceenv_fixture.sample SET value='changed';")
+            .unwrap();
+        let safety = dbbackup::restore_from_file(&source.paths, &conn, &backup, true, &|_| {})
+            .unwrap()
+            .unwrap();
+        assert!(safety.is_file());
+        assert_eq!(
+            client
+                .run("SELECT value FROM niceenv_fixture.sample;")
+                .unwrap()
+                .trim(),
+            "original"
+        );
+        // An external table-only dump can target an existing database without rewriting SQL.
+        client.create_database("chosen_restore").unwrap();
+        let external = temp.path().join("external plain SQL.sql");
+        std::fs::write(&external, "CREATE TABLE restored (id INT PRIMARY KEY); INSERT INTO restored VALUES (42);").unwrap();
+        for invalid in ["mysql", "missing_database"] {
+            assert_eq!(dbbackup::restore_from_file_into(&source.paths, &conn, &external, Some(invalid), true, &|_| {}).unwrap_err().code, "RESTORE_DATABASE_INVALID");
+        }
+        assert!(client.run("SHOW TABLES FROM chosen_restore;").unwrap().trim().is_empty());
+        let safety = dbbackup::restore_from_file_into(&source.paths, &conn, &external, Some("chosen_restore"), true, &|_| {}).unwrap().unwrap();
+        assert!(safety.is_file());
+        assert_eq!(client.run("SELECT id FROM chosen_restore.restored;").unwrap().trim(), "42");
+        assert!(client.run("SHOW TABLES FROM niceenv_fixture LIKE 'restored';").unwrap().trim().is_empty());
+        std::fs::write(&external, "USE niceenv_fixture; INSERT INTO sample VALUES (99, 'explicit database');").unwrap();
+        dbbackup::restore_from_file_into(&source.paths, &conn, &external, Some("chosen_restore"), true, &|_| {}).unwrap();
+        assert_eq!(client.run("SELECT value FROM niceenv_fixture.sample WHERE id=99;").unwrap().trim(), "explicit database");
+        client.run("DELETE FROM niceenv_fixture.sample WHERE id=99;").unwrap();
+        // A failing safety export must not execute even the first SQL statement of the requested restore.
+        let blocked = isolated_state(Paths::new(temp.path().join("blocked backup")));
+        std::fs::write(blocked.paths.backup().join("db"), "not a directory").unwrap();
+        client
+            .run("UPDATE niceenv_fixture.sample SET value='must remain';")
+            .unwrap();
+        assert!(
+            dbbackup::restore_from_file(&blocked.paths, &conn, &backup, true, &|_| {}).is_err()
+        );
+        assert_eq!(
+            client
+                .run("SELECT value FROM niceenv_fixture.sample;")
+                .unwrap()
+                .trim(),
+            "must remain"
+        );
+        let (_, target_client) = dbadmin::selected_client(&target, Some("8.0.46")).unwrap();
+        let target_conn = dbbackup::ConnInfo {
+            version: "8.0.46".into(),
+            port: target_client.port,
+            root_password: target_client.root_password.clone(),
+            bin_dir: Some(root.join("bin")),
+        };
+        let src = dbmigrate::SourceConn {
+            host: "127.0.0.1".into(),
+            port: client.port,
+            user: "root".into(),
+            password: special.into(),
+        };
+        let report = dbmigrate::import_databases(
+            &target.paths,
+            &src,
+            &["niceenv_fixture".into()],
+            &target_conn,
+            |_, _| {},
+        )
+        .unwrap();
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(
+            target_client
+                .run("SELECT value FROM niceenv_fixture.sample;")
+                .unwrap()
+                .trim(),
+            "must remain"
+        );
+        assert!(dbmigrate::import_databases(
+            &source.paths,
+            &src,
+            &["niceenv_fixture".into()],
+            &conn,
+            |_, _| {}
+        )
+        .is_err());
+        let (private, command) =
+            dbadmin::client_command(&client.exe, "127.0.0.1", client.port, "root", special)
+                .unwrap();
+        assert!(!command
+            .get_args()
+            .any(|arg| arg.to_string_lossy().contains(special)));
+        let path = private.path().to_path_buf();
+        drop((command, private));
+        assert!(!path.exists());
+        for state in [&source, &target] {
+            let pids = state.manager.snapshot("mysql@8.0.46").unwrap().pids;
+            state.stop_service("mysql@8.0.46").unwrap();
+            assert!(pids.into_iter().all(|pid| !platform::process_alive(pid)));
+        }
+    }
+
+    fn http_response(port: u16) -> String {
+        use std::io::{Read, Write};
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    }
+
+    #[test]
+    #[ignore = "requires NSB_APACHE_ROOT; starts an isolated Apache with temporary configuration"]
+    fn real_apache_custom_config_survives_rebuild_and_port_changes() {
+        let root = PathBuf::from(std::env::var("NSB_APACHE_ROOT").expect("NSB_APACHE_ROOT"));
+        let temp = tempfile::tempdir().unwrap();
+        let state = isolated_state(Paths::new(temp.path().join("apache with spaces")));
+        register_fixture(&state, "apache", "2.4.66", root.parent().unwrap());
+        let http = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let https = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = http.local_addr().unwrap().port();
+        state
+            .store
+            .set_port_override("apacheHttp", Some(port))
+            .unwrap();
+        state
+            .store
+            .set_port_override("apacheHttps", Some(https.local_addr().unwrap().port()))
+            .unwrap();
+        drop((http, https));
+        state.start_service("apache").unwrap();
+        std::fs::write(
+            state.paths.etc().join("apache/htdocs/index.html"),
+            "isolated apache",
+        )
+        .unwrap();
+        let original = std::fs::read_to_string(state.paths.apache_conf()).unwrap();
+        let customized =
+            format!("{original}\nTimeout 123\nHeader always set X-NiceEnv-Custom \"persisted\"\n");
+        state
+            .save_config("apache-conf", &customized, false, Some(&original))
+            .unwrap();
+        rebuild_and_reload(&state.store, &state.paths, &state.manager).unwrap();
+        let response = http_response(port);
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(
+            response
+                .to_ascii_lowercase()
+                .contains("x-niceenv-custom: persisted"),
+            "{response}"
+        );
+        state.stop_service("apache").unwrap();
+        let new_http = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let new_port = new_http.local_addr().unwrap().port();
+        state
+            .store
+            .set_port_override("apacheHttp", Some(new_port))
+            .unwrap();
+        drop(new_http);
+        state.start_service("apache").unwrap();
+        let response = http_response(new_port);
+        assert!(response.contains("isolated apache"), "{response}");
+        assert!(response
+            .to_ascii_lowercase()
+            .contains("x-niceenv-custom: persisted"));
+        assert!(std::fs::read_to_string(state.paths.apache_conf())
+            .unwrap()
+            .contains("Timeout 123"));
+        let pids = state.manager.snapshot("apache").unwrap().pids;
+        state.stop_service("apache").unwrap();
+        assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));
+        println!("Apache: native validation and HTTP confirmed custom header across rebuild and port change; owned processes stopped");
+    }
+
+    #[test]
+    #[ignore = "requires NSB_REDIS_ROOT; starts only an isolated Redis on ephemeral ports"]
+    fn real_redis_keeps_settings_and_records_stable_fallback_port() {
+        let source = PathBuf::from(std::env::var("NSB_REDIS_ROOT").expect("NSB_REDIS_ROOT"));
+        let temp = tempfile::tempdir().unwrap();
+        let state = isolated_state(Paths::new(temp.path().join("redis with spaces")));
+        let root = state.paths.runtime_dir("redis", "5.0.14");
+        std::fs::create_dir_all(&root).unwrap();
+        for file in ["redis-server.exe", "redis-cli.exe", "EventLog.dll"] {
+            std::fs::copy(source.join(file), root.join(file)).unwrap();
+        }
+        register_fixture(&state, "redis", "5.0.14", &root);
+        struct StopRedisOnDrop<'a>(&'a crate::CoreState);
+        impl Drop for StopRedisOnDrop<'_> {
+            fn drop(&mut self) {
+                if self.0.stop_service("redis").is_err() {
+                    if let Some(service) = self.0.manager.snapshot("redis") {
+                        let _ = platform::ProcessGroup::from_pids(service.pids).terminate(true);
+                    }
+                }
+            }
+        }
+        let _cleanup = StopRedisOnDrop(&state);
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let desired = occupied.local_addr().unwrap().port();
+        state
+            .store
+            .set_port_override("redis", Some(desired))
+            .unwrap();
+        state.store.set_setting("autoFallbackPort", "true").unwrap();
+        configgen::write_redis_conf(&state.paths, "5.0.14", desired).unwrap();
+        let config = state.paths.redis_conf("5.0.14");
+        let customized = std::fs::read_to_string(&config)
+            .unwrap()
+            .replace("maxmemory 256mb", "maxmemory 64mb")
+            .replace(
+                "maxmemory-policy allkeys-lru",
+                "maxmemory-policy noeviction",
+            )
+            .replace("databases 16", "databases 32")
+            .replace("save \"\"", "save 3600 1");
+        std::fs::write(&config, &customized).unwrap();
+        state.start_service("redis").unwrap();
+        let port = PortsProfile::from_settings(&state.store).redis;
+        assert_ne!(port, desired);
+        assert_eq!(state.manager.snapshot("redis").unwrap().port, Some(port));
+        let query = |key: &str| {
+            let output = platform::command(&root.join("redis-cli.exe"))
+                .args([
+                    "-h",
+                    "127.0.0.1",
+                    "-p",
+                    &port.to_string(),
+                    "--raw",
+                    "CONFIG",
+                    "GET",
+                    key,
+                ])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .replace("\r\n", "\n")
+        };
+        assert_eq!(query("maxmemory"), "maxmemory\n67108864");
+        assert_eq!(query("maxmemory-policy"), "maxmemory-policy\nnoeviction");
+        assert_eq!(query("databases"), "databases\n32");
+        let initial = state.redis_stats().unwrap();
+        assert_eq!(initial.port, port);
+        assert_eq!(initial.keys, Some(0));
+        state.store.set_port_override("redis", Some(desired)).unwrap();
+        assert_eq!(state.redis_stats().unwrap().port, port);
+        state.store.set_port_override("redis", Some(port)).unwrap();
+        for database in [0, 2] {
+            let out = platform::command(root.join("redis-cli.exe"))
+                .args(["-p", &port.to_string(), "-n", &database.to_string(), "SET", "isolated-fixture", "1"])
+                .output().unwrap();
+            assert!(out.status.success());
+        }
+        assert_eq!(state.redis_stats().unwrap().keys, Some(2));
+        let set_password = |password: &str| {
+            use std::io::{Read, Write};
+            let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let command = format!("*4\r\n$6\r\nCONFIG\r\n$3\r\nSET\r\n$11\r\nrequirepass\r\n${}\r\n{}\r\n", password.len(), password);
+            stream.write_all(command.as_bytes()).unwrap();
+            let mut response = [0; 5]; stream.read_exact(&mut response).unwrap();
+            assert_eq!(&response, b"+OK\r\n");
+            stream
+        };
+        drop(set_password("isolated-fixture-password"));
+        assert_eq!(state.redis_stats().unwrap_err().code, "REDIS_AUTH_REQUIRED");
+        assert_eq!(state.stop_service("redis").unwrap_err().code, "REDIS_AUTH_REQUIRED");
+        assert!(state.manager.snapshot("redis").unwrap().pids.iter().any(|pid| platform::process_alive(*pid)));
+        let running_pids = state.manager.snapshot("redis").unwrap().pids;
+        let ids = vec!["redis".into(), "redis".into()];
+        let stopped = crate::bulk::stop_many(&state.store, &state.paths, &state.manager, &ids).unwrap();
+        assert_eq!(stopped.order, vec!["redis"]);
+        assert_eq!(stopped.failed.len(), 1);
+        assert_eq!(stopped.failed[0].error.code, "REDIS_AUTH_REQUIRED");
+        assert!(stopped.succeeded.is_empty() && stopped.already.is_empty());
+        let restarted = crate::bulk::restart_many(&state.store, &state.paths, &state.manager, &ids).unwrap();
+        assert_eq!(restarted.failed.len(), 1);
+        assert_eq!(restarted.failed[0].error.code, "REDIS_AUTH_REQUIRED");
+        assert!(restarted.succeeded.is_empty() && restarted.already.is_empty());
+        let stopped_stack = state.stop_stack("builtin-data").unwrap();
+        assert_eq!(stopped_stack.failed.len(), 1);
+        assert_eq!(stopped_stack.failed[0].service_id, "redis");
+        assert!(stopped_stack.started.is_empty() && stopped_stack.already_running.is_empty());
+        assert_eq!(state.manager.snapshot("redis").unwrap().pids, running_pids);
+        let credentials = |password: &str| crate::stats::RedisCredentials { username: String::new(), password: password.into() };
+        assert_eq!(state.save_redis_connection("5.0.14", credentials("wrong")).unwrap_err().code, "REDIS_AUTH_FAILED");
+        assert!(state.store.get_setting(&crate::stats::RedisCredentials::key("5.0.14")).is_none());
+        state.save_redis_connection("5.0.14", credentials("isolated-fixture-password")).unwrap();
+        assert_eq!(state.redis_stats().unwrap().keys, Some(2));
+        assert_eq!(state.save_redis_connection("5.0.14", credentials("wrong")).unwrap_err().code, "REDIS_AUTH_FAILED");
+        assert_eq!(crate::stats::RedisCredentials::load(&state.store, "5.0.14").unwrap().password, "isolated-fixture-password");
+        assert!(crate::stats::RedisCredentials::load(&state.store, "7.0.0").unwrap().password.is_empty());
+        assert_eq!(state.save_redis_connection("7.0.0", credentials("isolated-fixture-password")).unwrap_err().code, "REDIS_INSTANCE_CHANGED");
+        let info = state.redis_connection("5.0.14").unwrap();
+        assert!(info.has_password);
+        assert!(!serde_json::to_string(&info).unwrap().contains("isolated-fixture-password"));
+        let exported = temp.path().join("config-backup.json");
+        crate::transfer::export_to(&state.store, &exported).unwrap();
+        assert!(!std::fs::read_to_string(&exported).unwrap().contains("redisConnection@"));
+        let persisted = std::fs::read_to_string(&config).unwrap();
+        state.stop_service("redis").unwrap();
+        assert!(state.paths.redis_data_dir().join("dump.rdb").is_file());
+        state.start_service("redis").unwrap();
+        // requirepass was a runtime-only change: restarted server is unauthenticated again.
+        assert_eq!(state.redis_stats().unwrap_err().code, "REDIS_AUTH_FAILED");
+        state.save_redis_connection("5.0.14", crate::stats::RedisCredentials::default()).unwrap();
+        assert_eq!(state.redis_stats().unwrap().keys, Some(2));
+        assert!(!state.redis_connection("5.0.14").unwrap().has_password);
+        assert_eq!(state.manager.snapshot("redis").unwrap().port, Some(port));
+        assert_eq!(PortsProfile::from_settings(&state.store).redis, port);
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), persisted);
+        assert_eq!(query("maxmemory"), "maxmemory\n67108864");
+        let pids = state.manager.snapshot("redis").unwrap().pids;
+        state.stop_service("redis").unwrap();
+        assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));
+        assert_eq!(occupied.local_addr().unwrap().port(), desired);
+        println!("Redis: CONFIG GET confirmed memory/policy/databases across restarts; fallback port stable and recorded; owned processes stopped");
+    }
+
+    #[test]
+    #[ignore = "requires NSB_MYSQL_ROOT; runs mysqld --verbose --help only, without initializing a database"]
+    fn real_mysql_option_parser_keeps_tuning_and_applies_owned_launch_options() {
+        let root = PathBuf::from(std::env::var("NSB_MYSQL_ROOT").expect("NSB_MYSQL_ROOT"));
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().join("mysql with spaces"));
+        paths.ensure_dirs().unwrap();
+        configgen::write_mysql_ini(&paths, "8.0.46", &root, 23306).unwrap();
+        let file = paths.mysql_ini("8.0.46");
+        let extra = temp.path().join("extra.ini");
+        std::fs::write(
+            &extra,
+            "[mysqld]\nport=1\ndatadir=C:/unused-config-fixture\n",
+        )
+        .unwrap();
+        let custom = std::fs::read_to_string(&file)
+            .unwrap()
+            .replace("max_connections=200", "max_connections=321")
+            .replace(
+                "innodb_buffer_pool_size=256M",
+                "innodb_buffer_pool_size=32M",
+            );
+        std::fs::write(
+            &file,
+            format!("{custom}\n!include {}\n", nginx_path(&extra)),
+        )
+        .unwrap();
+        configgen::write_mysql_ini(&paths, "8.0.46", &root, 23307).unwrap();
+        let mut args = mysql_launch_args(&paths, "8.0.46", &root, 23307);
+        args.extend(["--verbose".into(), "--help".into()]);
+        let output = platform::command(&root.join("bin/mysqld.exe"))
+            .current_dir(&root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let help = String::from_utf8_lossy(&output.stdout);
+        for (option, expected) in [
+            ("max-connections", "321"),
+            ("innodb-buffer-pool-size", "33554432"),
+            ("port", "23307"),
+        ] {
+            assert!(
+                help.lines()
+                    .any(|line| line.split_whitespace().collect::<Vec<_>>() == [option, expected]),
+                "missing {option}={expected}"
+            );
+        }
+        let datadir = help
+            .lines()
+            .find(|line| line.split_whitespace().next() == Some("datadir"))
+            .unwrap();
+        assert!(datadir
+            .replace('\\', "/")
+            .contains(&nginx_path(&paths.mysql_data_dir("8.0.46"))));
+        assert!(!paths.mysql_data_dir("8.0.46").exists());
+        println!("MySQL: actual option parser confirmed tuning and command-line port/datadir precedence; no server or database initialization");
+    }
+
+    #[test]
+    #[ignore = "requires NSB_NGINX_ROOT; starts only a copied Nginx on isolated ephemeral ports"]
+    fn selected_nginx_version_survives_install_and_uninstall_of_other_versions() {
+        use crate::model::InstalledPackage;
+        use std::io::{Read, Write};
+        let source = PathBuf::from(std::env::var("NSB_NGINX_ROOT").expect("NSB_NGINX_ROOT"));
+        let version = source
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .strip_prefix("nginx-")
+            .expect("nginx-version directory")
+            .to_string();
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().to_path_buf());
+        paths.ensure_dirs().unwrap();
+        let store = Store::open(paths.db()).unwrap();
+        let manager = Arc::new(ServiceManager::new());
+        let state = crate::CoreState {
+            paths,
+            store,
+            manager,
+            installer: crate::install::Installer::bundled(),
+            downloader: Arc::new(crate::download::Downloader::new()),
+            emit: Arc::new(|_| {}),
+            watchdog: Arc::new(crate::watchdog::Watchdog::new()),
+        };
+        struct StopOnDrop<'a>(&'a crate::CoreState);
+        impl Drop for StopOnDrop<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.stop_service("nginx");
+            }
+        }
+        let _cleanup = StopOnDrop(&state);
+        for ver in [&version, "1.0.0"] {
+            let runtime = state.paths.runtime_dir("nginx", ver);
+            std::fs::create_dir_all(&runtime).unwrap();
+            state
+                .store
+                .upsert_installed(&InstalledPackage {
+                    id: "nginx".into(),
+                    version: ver.into(),
+                    category: "web-server".into(),
+                    install_path: runtime.to_string_lossy().into(),
+                    config_path: String::new(),
+                    installed_at: 0,
+                })
+                .unwrap();
+        }
+        let root = state
+            .paths
+            .runtime_dir("nginx", &version)
+            .join(format!("nginx-{version}"));
+        std::fs::create_dir_all(root.join("conf")).unwrap();
+        std::fs::create_dir_all(root.join("logs")).unwrap();
+        std::fs::copy(source.join(exe_name("nginx")), root.join(exe_name("nginx"))).unwrap();
+        std::fs::copy(source.join("conf/mime.types"), root.join("conf/mime.types")).unwrap();
+        let http = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let https = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = http.local_addr().unwrap().port();
+        let https_port = https.local_addr().unwrap().port();
+        state.store.set_port_override("http", Some(port)).unwrap();
+        state
+            .store
+            .set_port_override("https", Some(https_port))
+            .unwrap();
+        let planned = PortsProfile::from_settings(&state.store);
+        assert_eq!((planned.http, planned.https), (port, https_port));
+        state.set_active_version("nginx", &version).unwrap();
+        drop(http);
+        drop(https);
+        state.start_service("nginx").unwrap();
+        let before = state.manager.snapshot("nginx").unwrap();
+        assert_eq!(before.version.as_deref(), Some(version.as_str()));
+        assert_eq!(before.port, Some(port));
+        assert_eq!(
+            state.set_active_version("nginx", "1.0.0").unwrap_err().code,
+            "SERVICE_BUSY"
+        );
+        state.uninstall_package("nginx@1.0.0").unwrap();
+        assert_eq!(state.manager.snapshot("nginx").unwrap().pids, before.pids);
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(before.pids.iter().all(|pid| platform::process_alive(*pid)));
+
+        let newer = state.paths.runtime_dir("nginx", "99.0.0");
+        std::fs::create_dir_all(&newer).unwrap();
+        state
+            .store
+            .upsert_installed(&InstalledPackage {
+                id: "nginx".into(),
+                version: "99.0.0".into(),
+                category: "web-server".into(),
+                install_path: newer.to_string_lossy().into(),
+                config_path: String::new(),
+                installed_at: 0,
+            })
+            .unwrap();
+        register_services(&state.paths, &state.store, &state.manager);
+        assert_eq!(
+            installed_by_choice(&state.store, "nginx").unwrap().version,
+            version
+        );
+        assert_eq!(
+            state.manager.snapshot("nginx").unwrap().version.as_deref(),
+            Some(version.as_str())
+        );
+        let original = std::fs::read_to_string(state.paths.nginx_conf()).unwrap();
+        let custom = original.replace("gzip on;", "gzip off;").replace(
+            "http {",
+            "http {\n    add_header X-NiceEnv-Custom persisted always;",
+        );
+        state
+            .save_config("nginx-main", &custom, false, Some(&original))
+            .unwrap();
+        state.store.set_port_assign("php@8.4.26", 9110).unwrap();
+        rebuild_and_reload(&state.store, &state.paths, &state.manager).unwrap();
+        assert!(http_response(port)
+            .to_ascii_lowercase()
+            .contains("x-niceenv-custom: persisted"));
+        assert!(std::fs::read_to_string(state.paths.nginx_conf())
+            .unwrap()
+            .contains("nsb_php_8_4_26"));
+        state.stop_service("nginx").unwrap();
+        let next = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let next_port = next.local_addr().unwrap().port();
+        state
+            .store
+            .set_port_override("http", Some(next_port))
+            .unwrap();
+        drop(next);
+        state.start_service("nginx").unwrap();
+        assert!(http_response(next_port)
+            .to_ascii_lowercase()
+            .contains("x-niceenv-custom: persisted"));
+        assert!(std::fs::read_to_string(state.paths.nginx_conf())
+            .unwrap()
+            .contains("gzip off;"));
+        let last_pids = state.manager.snapshot("nginx").unwrap().pids;
+        state.stop_service("nginx").unwrap();
+        let stopped = state.manager.snapshot("nginx").unwrap();
+        assert_eq!(stopped.state, ServiceState::Stopped);
+        assert!(stopped.pids.is_empty());
+        assert!(stopped.uptime_sec.is_none());
+        assert!(before.pids.iter().all(|pid| !platform::process_alive(*pid)));
+        assert!(last_pids.iter().all(|pid| !platform::process_alive(*pid)));
+        println!("selected Nginx {version}: real HTTP confirmed custom header across rebuild, pool and port changes; stopped cleanly");
+    }
+
+    #[test]
+    fn default_version_keeps_live_instances_and_site_bindings() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = isolated_state(Paths::new(temp.path().to_path_buf()));
+        assert!(!crate::pathenv::is_enabled(&state.store));
+        let site: crate::model::Site = serde_json::from_value(serde_json::json!({
+            "id": "pinned-site", "name": "Pinned PHP", "domains": ["pinned.test"],
+            "rootDir": temp.path().to_string_lossy(),
+            "runtime": { "kind": "php", "phpVersion": "8.3.17" },
+            "https": false, "rewrite": "none", "db": null,
+            "createdAt": 1, "updatedAt": 1
+        })).unwrap();
+        state.store.save_site(&site).unwrap();
+        let original_site = serde_json::to_value(state.store.list_sites().unwrap()).unwrap();
+        for (id, versions) in [("php", ["7.4.33", "8.3.17"]), ("mysql", ["5.7.44", "8.0.46"])] {
+            for version in versions {
+                let runtime = state.paths.runtime_dir(id, version);
+                register_fixture(&state, id, version, &runtime);
+                let installed = state.store.find_installed(id, Some(version)).unwrap();
+                let entry = state.installer.installed_entry(&installed);
+                let executable = runtime.join(&entry.entry);
+                std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+            }
+        }
+        register_services(&state.paths, &state.store, &state.manager);
+        // 仅借用当前测试 PID 验证存活；本用例不执行任何启停操作。
+        for (id, old, latest) in [("php", "7.4.33", "8.3.17"), ("mysql", "5.7.44", "8.0.46")] {
+            let sid = format!("{id}@{latest}");
+            state.manager.adopt(&sid, &[std::process::id()], None);
+            state.set_active_version(id, old).unwrap();
+            assert_eq!(installed_by_choice(&state.store, id).unwrap().version, old);
+            let active = state.list_packages().unwrap().into_iter()
+                .filter(|p| p.manifest.id == id && p.active)
+                .map(|p| p.manifest.version).collect::<Vec<_>>();
+            assert_eq!(active, vec![old]);
+            let old_install = state.store.find_installed(id, Some(old)).unwrap();
+            let old_meta = state.installer.installed_entry(&old_install);
+            let selected_dir = crate::pathenv::bin_dir_for(&old_install.install_path, &old_meta.entry).unwrap();
+            assert!(crate::pathenv::desired_dirs(&state.store, &state.installer.manifest).contains(&selected_dir));
+            let running = state.manager.snapshot(&sid).unwrap();
+            assert_eq!(running.state, ServiceState::Running);
+            assert_eq!(running.pids, vec![std::process::id()]);
+            assert_eq!(state.manager.snapshot(&format!("{id}@{old}")).unwrap().state, ServiceState::Stopped);
+            assert_eq!(state.set_active_version(id, "0.0.0").unwrap_err().code, "NOT_INSTALLED");
+            assert_eq!(installed_by_choice(&state.store, id).unwrap().version, old);
+        }
+        assert_eq!(serde_json::to_value(state.store.list_sites().unwrap()).unwrap(), original_site);
+        let reopened = Store::open(state.paths.db()).unwrap();
+        assert_eq!(installed_by_choice(&reopened, "php").unwrap().version, "7.4.33");
+        assert_eq!(installed_by_choice(&reopened, "mysql").unwrap().version, "5.7.44");
+        assert!(!crate::pathenv::is_enabled(&reopened));
+        assert!(reopened.get_setting("pathEnvDirs").is_none());
+    }
+
+    #[test]
+    fn default_version_rejects_busy_single_instance_without_changing_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = isolated_state(Paths::new(temp.path().to_path_buf()));
+        for version in ["1.26.3", "1.28.0"] {
+            register_fixture(&state, "nginx", version, &state.paths.runtime_dir("nginx", version));
+        }
+        state.set_active_version("nginx", "1.26.3").unwrap();
+        state.manager.adopt("nginx", &[std::process::id()], Some(18080));
+        assert_eq!(state.set_active_version("nginx", "1.28.0").unwrap_err().code, "SERVICE_BUSY");
+        assert_eq!(installed_by_choice(&state.store, "nginx").unwrap().version, "1.26.3");
+        assert_eq!(state.manager.snapshot("nginx").unwrap().pids, vec![std::process::id()]);
+        // 对已经选中的版本重试不会重启服务，也不会破坏现有 PID。
+        state.set_active_version("nginx", "1.26.3").unwrap();
+        assert_eq!(state.manager.snapshot("nginx").unwrap().version.as_deref(), Some("1.26.3"));
+    }
 
     #[test]
     fn empty_install_reports_all_skipped() {

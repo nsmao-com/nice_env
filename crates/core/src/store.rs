@@ -210,7 +210,15 @@ impl Store {
                 serde_json::to_string(&s.runtime).unwrap(),
                 s.https as i32,
                 serde_json::to_string(&s.rewrite).unwrap(),
-                s.db.as_ref().map(|d| serde_json::to_string(d).unwrap()),
+                // IPC 响应隐藏密码，本机持久化仍需保留凭据供 .env 补全和重启后使用。
+                s.db.as_ref().map(|d| serde_json::json!({
+                    "enabled": d.enabled,
+                    "database": d.database,
+                    "username": d.username,
+                    "password": d.password,
+                    "version": d.version,
+                    "port": d.port,
+                }).to_string()),
                 s.php_overrides.as_ref().map(|o| serde_json::to_string(o).unwrap()),
                 s.created_at,
                 s.updated_at
@@ -243,6 +251,7 @@ impl Store {
                 domains: serde_json::from_str(&domains).unwrap_or_default(),
                 root_dir: r.get(3)?,
                 runtime: serde_json::from_str(&runtime).unwrap_or(SiteRuntime {
+                    imported_cert_id: None,
                     web_server: "nginx".into(),
                     kind: SiteKind::Static,
                     php_version: None,

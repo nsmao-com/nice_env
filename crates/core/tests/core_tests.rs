@@ -115,6 +115,7 @@ fn site_conf_php_has_fastcgi_upstream() {
         domains: vec!["x.test".into()],
         root_dir: "D:/code/x".into(),
         runtime: nsb_core::model::SiteRuntime {
+            imported_cert_id: None,
             web_server: "nginx".into(),
             kind: nsb_core::model::SiteKind::Php,
             php_version: Some("8.3.33".into()),
@@ -157,6 +158,7 @@ fn site_conf_proxy_has_websocket_headers() {
         domains: vec!["p.test".into()],
         root_dir: "D:/code/p".into(),
         runtime: nsb_core::model::SiteRuntime {
+            imported_cert_id: None,
             web_server: "nginx".into(),
             kind: nsb_core::model::SiteKind::ReverseProxy,
             php_version: None,
@@ -221,8 +223,9 @@ async fn downloader_resume_and_checksum() {
                 None => ("200 OK", payload_clone.clone()),
             };
             let headers = format!(
-                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
-                body.len()
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\n{}Accept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                body.len(),
+                range.map(|off| format!("Content-Range: bytes {off}-{}/{}\r\n", payload_clone.len() - 1, payload_clone.len())).unwrap_or_default()
             );
             let _ = s.write_all(headers.as_bytes());
             let _ = s.write_all(&body);
@@ -775,6 +778,7 @@ fn user_ini_written_for_php_sites_only() {
             .to_string_lossy()
             .to_string(),
         runtime: nsb_core::model::SiteRuntime {
+            imported_cert_id: None,
             web_server: "nginx".into(),
             kind,
             php_version: Some("8.3".into()),
@@ -891,6 +895,7 @@ fn site_conf_contains_per_site_access_log() {
         domains: vec!["log.test".into()],
         root_dir: "D:/code/logtest".into(),
         runtime: nsb_core::model::SiteRuntime {
+            imported_cert_id: None,
             web_server: "nginx".into(),
             kind: nsb_core::model::SiteKind::Php,
             php_version: Some("8.3.33".into()),

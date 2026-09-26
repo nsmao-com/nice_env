@@ -14,7 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{AppError, Result};
 use crate::model::{AppErrorInfo, ServiceState};
 use crate::paths::Paths;
 use crate::services::ServiceManager;
@@ -68,6 +68,8 @@ pub fn tier_of(service_id: &str) -> u8 {
 /// 按「先上游后前端」排序（启动顺序）
 pub fn order_for_start(ids: &[String]) -> Vec<String> {
     let mut v: Vec<String> = ids.to_vec();
+    let mut seen = std::collections::HashSet::new();
+    v.retain(|id| seen.insert(id.clone()));
     // 稳定排序：同层级保持用户选择的相对顺序，避免界面上的勾选顺序被莫名打乱
     v.sort_by_key(|id| tier_of(id));
     v
@@ -76,20 +78,22 @@ pub fn order_for_start(ids: &[String]) -> Vec<String> {
 /// 按「先前端后上游」排序（停止顺序）
 pub fn order_for_stop(ids: &[String]) -> Vec<String> {
     let mut v: Vec<String> = ids.to_vec();
+    let mut seen = std::collections::HashSet::new();
+    v.retain(|id| seen.insert(id.clone()));
     v.sort_by_key(|id| std::cmp::Reverse(tier_of(id)));
     v
 }
 
 /// 批量启动
 ///
-/// `skip_already_running` 为 true 时不重复启动已在跑的服务，
-/// 只把它们列进 `already`（默认行为，避免 restinterface 引起的短暂中断）。
+/// 已运行的服务列进 `already`，过渡状态不能当作启动完成。
 pub fn start_many(
     store: &crate::store::Store,
     paths: &Paths,
     manager: &Arc<ServiceManager>,
     ids: &[String],
 ) -> Result<BulkReport> {
+    let _operation = manager.lifecycle.lock();
     let order = order_for_start(ids);
     let mut report = BulkReport {
         action: "start".into(),
@@ -99,9 +103,16 @@ pub fn start_many(
         order: order.clone(),
     };
     for id in order {
+        if manager.snapshot(&id).is_some_and(|s| matches!(s.state, ServiceState::Starting | ServiceState::Stopping)) {
+            report.failed.push(BulkFailure {
+                service_id: id.clone(),
+                error: AppErrorInfo::from(AppError::new("SERVICE_BUSY", format!("服务 {id} 正在切换状态，请稍后重试"))),
+            });
+            continue;
+        }
         let running = manager
             .snapshot(&id)
-            .map(|s| matches!(s.state, ServiceState::Running | ServiceState::Starting))
+            .map(|s| s.state == ServiceState::Running)
             .unwrap_or(false);
         if running {
             report.already.push(id);
@@ -126,6 +137,7 @@ pub fn stop_many(
     manager: &Arc<ServiceManager>,
     ids: &[String],
 ) -> Result<BulkReport> {
+    let _operation = manager.lifecycle.lock();
     let order = order_for_stop(ids);
     let mut report = BulkReport {
         action: "stop".into(),
@@ -135,11 +147,17 @@ pub fn stop_many(
         order: order.clone(),
     };
     for id in order {
-        let running = manager
-            .snapshot(&id)
-            .map(|s| matches!(s.state, ServiceState::Running | ServiceState::Starting))
-            .unwrap_or(false);
-        if !running {
+        if manager.snapshot(&id).is_none() {
+            report.failed.push(BulkFailure {
+                service_id: id.clone(),
+                error: AppErrorInfo::from(AppError::new(
+                    "UNKNOWN_SERVICE", format!("服务 {id} 未注册或已卸载"),
+                )),
+            });
+            continue;
+        }
+        // Error 仍可能保留活跃 PID（例如认证停机失败），不能报告“已停止”。
+        if !manager.is_busy(&id) {
             report.already.push(id);
             continue;
         }
@@ -165,15 +183,19 @@ pub fn restart_many(
     manager: &Arc<ServiceManager>,
     ids: &[String],
 ) -> Result<BulkReport> {
+    let _operation = manager.lifecycle.lock();
     let stop_report = stop_many(store, paths, manager, ids)?;
-    let start_report = start_many(store, paths, manager, ids)?;
-    // 合并成一个报告：动作叫 restart，失败项取两阶段的并集
+    // 停止失败的服务不进入启动阶段，每个服务只归入一种最终结果。
+    let eligible: Vec<String> = order_for_start(ids).into_iter()
+        .filter(|id| !stop_report.failed.iter().any(|f| &f.service_id == id))
+        .collect();
+    let start_report = start_many(store, paths, manager, &eligible)?;
     let mut report = BulkReport {
         action: "restart".into(),
         succeeded: start_report.succeeded,
         already: start_report.already,
         failed: start_report.failed,
-        order: start_report.order,
+        order: order_for_start(ids),
     };
     report.failed.extend(stop_report.failed);
     Ok(report)
@@ -195,11 +217,7 @@ pub struct BulkSelectionSummary {
 pub fn summarize(manager: &Arc<ServiceManager>, ids: &[String]) -> BulkSelectionSummary {
     let mut running = 0;
     for id in ids {
-        if manager
-            .snapshot(id)
-            .map(|s| matches!(s.state, ServiceState::Running | ServiceState::Starting))
-            .unwrap_or(false)
-        {
+        if manager.is_busy(id) {
             running += 1;
         }
     }
@@ -298,6 +316,31 @@ mod tests {
         assert!(o.is_empty());
         let o = order_for_stop(&[]);
         assert!(o.is_empty());
+    }
+
+    #[test]
+    fn reports_deduplicate_and_do_not_hide_missing_or_transitioning_services() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().join("bulk"));
+        paths.ensure_dirs().unwrap();
+        let store = crate::store::Store::open(temp.path().join("fixture.sqlite")).unwrap();
+        let manager = Arc::new(ServiceManager::new());
+        manager.register("fixture", "Fixture", None, None, None, paths.service_log("fixture"));
+        let ids = vec!["missing".into(), "fixture".into(), "missing".into()];
+        let stopped = stop_many(&store, &paths, &manager, &ids).unwrap();
+        assert_eq!(stopped.order, vec!["missing", "fixture"]);
+        assert_eq!(stopped.already, vec!["fixture"]);
+        assert_eq!(stopped.failed.len(), 1);
+        assert_eq!(stopped.failed[0].error.code, "UNKNOWN_SERVICE");
+        let restarted = restart_many(&store, &paths, &manager, &["missing".into(), "missing".into()]).unwrap();
+        assert_eq!(restarted.failed.len(), 1);
+        assert!(restarted.succeeded.is_empty() && restarted.already.is_empty());
+        for state in [ServiceState::Starting, ServiceState::Stopping] {
+            manager.set_state("fixture", state);
+            let started = start_many(&store, &paths, &manager, &["fixture".into()]).unwrap();
+            assert_eq!(started.failed[0].error.code, "SERVICE_BUSY");
+            assert!(started.succeeded.is_empty() && started.already.is_empty());
+        }
     }
 
     #[test]

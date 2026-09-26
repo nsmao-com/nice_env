@@ -292,6 +292,7 @@ pub fn run() {
         domains: vec!["smoke83.nsb.test".into()],
         root_dir: site_root.to_string_lossy().to_string(),
         runtime: nsb_core::model::SiteRuntime {
+            imported_cert_id: None,
             web_server: "nginx".into(),
             kind: nsb_core::model::SiteKind::Php,
             php_version: Some("8.3.33".into()),
@@ -401,6 +402,7 @@ echo implode("\n", $out);
         domains: vec!["smoke74.nsb.test".into()],
         root_dir: site2_root.to_string_lossy().to_string(),
         runtime: nsb_core::model::SiteRuntime {
+            imported_cert_id: None,
             web_server: "nginx".into(),
             kind: nsb_core::model::SiteKind::Php,
             php_version: Some("7.4.33".into()),
@@ -459,6 +461,7 @@ echo implode("\n", $out);
             .to_string_lossy()
             .to_string(),
         runtime: nsb_core::model::SiteRuntime {
+            imported_cert_id: None,
             web_server: "nginx".into(),
             kind: nsb_core::model::SiteKind::ReverseProxy,
             php_version: None,

@@ -8,7 +8,10 @@
 //! {base}/backup/                    配置修改前的自动备份
 //! {base}/nsb.sqlite                 站点/套件/证书/设置
 
-use std::path::{Path, PathBuf};
+use std::io::{self, Write};
+use std::path::{Component, Path, PathBuf};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug)]
 pub struct Paths {
@@ -190,20 +193,80 @@ impl Paths {
 
 /// 写文件前把旧内容备份到 {base}/backup/
 pub fn write_with_backup(path: &Path, content: &str, backup_dir: &Path) -> std::io::Result<()> {
-    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        if path.exists() {
-            let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
-            let bak = backup_dir.join(format!("{name}.{ts}.bak"));
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::copy(path, bak);
-        }
+    write_with_backup_expected(path, content, backup_dir, None)
+}
+
+fn write_with_backup_expected(
+    path: &Path,
+    content: &str,
+    backup_dir: &Path,
+    expected: Option<Option<&[u8]>>,
+) -> io::Result<()> {
+    let base = backup_dir
+        .parent()
+        .ok_or_else(|| backup_error("备份目录无效"))?;
+    let relative = path
+        .strip_prefix(base)
+        .map_err(|_| backup_error("配置不在应用数据目录内"))?;
+    let relative = nginx_path(relative);
+    let target = checked_data_path(base, &relative)?;
+    let previous = read_optional(&target)?;
+    if expected.is_some_and(|bytes| previous.as_deref() != bytes) {
+        return Err(backup_error("配置已变化，请重新预览后恢复"));
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    if previous.as_deref() == Some(content.as_bytes()) {
+        return Ok(());
     }
-    std::fs::write(path, content)
+    let parent = target
+        .parent()
+        .ok_or_else(|| backup_error("配置目录无效"))?;
+    std::fs::create_dir_all(parent)?;
+    let mut pending = tempfile::NamedTempFile::new_in(parent)?;
+    pending.write_all(content.as_bytes())?;
+    pending.as_file().sync_all()?;
+    if let Ok(metadata) = std::fs::metadata(&target) {
+        pending.as_file().set_permissions(metadata.permissions())?;
+    }
+    if let Some(previous) = &previous {
+        let directory = checked_data_path(base, "backup/files")?;
+        std::fs::create_dir_all(&directory)?;
+        let pending_backup = tempfile::Builder::new()
+            .prefix(".pending-")
+            .tempdir_in(&directory)?;
+        let payload = pending_backup.path().join("content.bak");
+        let mut file = std::fs::File::create(&payload)?;
+        file.write_all(&previous)?;
+        file.sync_all()?;
+        drop(file);
+        let metadata = BackupMetadata {
+            version: 1,
+            target: relative.clone(),
+            sha256: hex::encode(Sha256::digest(previous)),
+        };
+        let mut file = std::fs::File::create(pending_backup.path().join("metadata.json"))?;
+        file.write_all(&serde_json::to_vec(&metadata).map_err(io::Error::other)?)?;
+        file.sync_all()?;
+        drop(file);
+        let suffix = pending_backup
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .replace(".pending-", "");
+        let name = format!(
+            "cfg-{}-{suffix}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        std::fs::rename(pending_backup.path(), directory.join(name))?;
+    }
+    checked_data_path(base, &relative)?;
+    if read_optional(&target)? != previous {
+        return Err(backup_error(
+            "配置在写入前已变化，未覆盖当前文件，请重新预览",
+        ));
+    }
+    pending.persist(&target).map_err(|e| e.error)?;
+    Ok(())
 }
 
 /// Windows 路径转 nginx 正斜杠形式
@@ -213,83 +276,547 @@ pub fn nginx_path(p: &Path) -> String {
 
 /// 列出备份目录里的备份文件（新→旧）。返回 (文件名, 完整路径, 字节数, 修改时间 ms)
 pub fn list_backups(base: &Path) -> Vec<(String, String, u64, i64)> {
-    let dir = base.join("backup");
-    let mut out: Vec<(String, String, u64, i64)> = Vec::new();
-    let Ok(rd) = std::fs::read_dir(&dir) else {
-        return out;
-    };
-    for e in rd.filter_map(|e| e.ok()) {
-        let p = e.path();
-        if !p.is_file() {
-            continue;
-        }
-        let Some(name) = p.file_name().map(|n| n.to_string_lossy().to_string()) else {
-            continue;
-        };
-        let meta = e.metadata().ok();
-        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-        let mtime = meta
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        out.push((name, p.to_string_lossy().to_string(), size, mtime));
-    }
-    out.sort_by(|a, b| b.3.cmp(&a.3));
-    out
+    list_backup_files(base)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|file| (file.name, file.path, file.size_bytes, file.modified_at))
+        .collect()
 }
 
-/// 从备份文件恢复。备份名形如 `{原文件名}.{时间戳}.bak`。
-/// 恢复目标在当前配置树（etc/）里按文件名查找，避免被诱导写到任意路径。
+/// 从已记录准确目标的备份恢复；兼容目标唯一且无版本歧义的旧备份。
 pub fn restore_backup(base: &Path, backup_name: &str) -> std::io::Result<PathBuf> {
-    let src = base.join("backup").join(backup_name);
-    if !src.is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "备份文件不存在",
+    restore_backup_checked(base, backup_name, None)
+}
+
+fn backup_error(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+fn linked(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return true;
+        }
+    }
+    metadata.file_type().is_symlink()
+}
+
+/// 相对路径必须由普通组件构成；拒绝盘符、ADS、尾点、软链接和目录联接。
+pub(crate) fn checked_data_path(base: &Path, relative: &str) -> io::Result<PathBuf> {
+    if relative.is_empty() || relative.contains(['\\', ':', '\0', '<', '>', '"', '|', '?', '*']) {
+        return Err(backup_error("配置路径无效"));
+    }
+    let mut result = base.to_path_buf();
+    for part in relative.split('/') {
+        let device = part.split('.').next().unwrap_or("").to_ascii_uppercase();
+        let numbered_device = device
+            .strip_prefix("COM")
+            .or_else(|| device.strip_prefix("LPT"))
+            .is_some_and(|suffix| {
+                matches!(
+                    suffix,
+                    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                )
+            });
+        if part.is_empty()
+            || part == "."
+            || part == ".."
+            || part.ends_with(['.', ' '])
+            || part.chars().any(|c| c.is_control())
+            || ["CON", "PRN", "AUX", "NUL"].contains(&device.as_str())
+            || numbered_device
+            || Path::new(part)
+                .components()
+                .any(|c| !matches!(c, Component::Normal(_)))
+        {
+            return Err(backup_error("配置路径无效"));
+        }
+        result.push(part);
+        match std::fs::symlink_metadata(&result) {
+            Ok(metadata) if linked(&metadata) => {
+                return Err(backup_error("配置路径包含软链接或目录联接，无法自动恢复"))
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(result)
+}
+
+fn read_optional(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct BackupMetadata {
+    version: u8,
+    target: String,
+    sha256: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupFile {
+    pub name: String,
+    pub path: String,
+    pub size_bytes: u64,
+    pub modified_at: i64,
+    pub target_path: Option<String>,
+    pub restorable: bool,
+    pub reason: Option<String>,
+    #[serde(skip)]
+    sort_time: u128,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupPreview {
+    pub name: String,
+    pub target_path: String,
+    pub target_relative: String,
+    pub current_exists: bool,
+    pub revision: String,
+}
+
+fn legacy_target(base: &Path, name: &str) -> io::Result<String> {
+    let original = name
+        .strip_suffix(".bak")
+        .and_then(|s| s.rsplit_once('.').map(|(name, _)| name))
+        .ok_or_else(|| backup_error("旧备份文件名无法解析"))?;
+    if ["php.ini", "my.ini", "redis.conf"].contains(&original) {
+        return Err(backup_error(
+            "旧备份没有记录所属版本，请打开备份目录确认，不能自动恢复",
         ));
     }
-    // foo.conf.20260101-120000.bak → foo.conf
-    let orig = backup_name
-        .strip_suffix(".bak")
-        .and_then(|s| s.rsplit_once('.').map(|(a, _)| a))
-        .ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "备份文件名无法解析")
-        })?;
-
-    // 在 etc/ 下递归查找目标配置文件
-    let etc = base.join("etc");
-    let mut target: Option<PathBuf> = None;
-    let mut stack = vec![etc.clone()];
-    while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else {
-            continue;
+    let etc = checked_data_path(base, "etc")?;
+    let mut stack = vec![etc];
+    let mut found = Vec::new();
+    while let Some(directory) = stack.pop() {
+        let entries = match std::fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
         };
-        for e in rd.filter_map(|e| e.ok()) {
-            let p = e.path();
-            if p.is_dir() {
-                stack.push(p);
-            } else if p
-                .file_name()
-                .map(|n| n.to_string_lossy() == orig)
-                .unwrap_or(false)
-            {
-                target = Some(p);
-                break;
+        for entry in entries {
+            let entry = entry?;
+            let metadata = std::fs::symlink_metadata(entry.path())?;
+            if linked(&metadata) {
+                continue;
+            }
+            if metadata.is_dir() {
+                stack.push(entry.path());
+            } else if metadata.is_file() && entry.file_name().to_string_lossy() == original {
+                found.push(nginx_path(
+                    entry
+                        .path()
+                        .strip_prefix(base)
+                        .map_err(|_| backup_error("配置路径无效"))?,
+                ));
             }
         }
-        if target.is_some() {
-            break;
+    }
+    match found.len() {
+        1 => Ok(found.remove(0)),
+        0 => Err(backup_error(
+            "找不到旧备份对应的配置文件，请打开备份目录确认",
+        )),
+        _ => Err(backup_error(
+            "存在多个同名配置，旧备份无法确定目标，不能自动恢复",
+        )),
+    }
+}
+
+fn backup_source(base: &Path, name: &str) -> io::Result<(PathBuf, String, Option<String>)> {
+    let parts: Vec<_> = name.split('/').collect();
+    if parts.len() == 2 && parts[0] == "files" && parts[1].starts_with("cfg-") {
+        let directory = checked_data_path(base, &format!("backup/{name}"))?;
+        let meta = checked_data_path(base, &format!("backup/{name}/metadata.json"))?;
+        if std::fs::metadata(&meta)?.len() > 65536 {
+            return Err(backup_error("备份元信息过大"));
+        }
+        let metadata: BackupMetadata =
+            serde_json::from_slice(&std::fs::read(meta)?).map_err(io::Error::other)?;
+        if metadata.version != 1 {
+            return Err(backup_error("暂不支持此备份格式"));
+        }
+        checked_data_path(base, &metadata.target)?;
+        let file = directory.join("content.bak");
+        checked_data_path(base, &format!("backup/{name}/content.bak"))?;
+        return Ok((file, metadata.target, Some(metadata.sha256)));
+    }
+    if parts.len() == 2 && parts[0] == "config" && parts[1].ends_with(".bak") {
+        let source = checked_data_path(base, &format!("backup/{name}"))?;
+        let target = crate::cfgeditor::backup_relative_target(parts[1])
+            .ok_or_else(|| backup_error("旧备份没有准确的版本信息，不能自动恢复"))?;
+        return Ok((source, target, None));
+    }
+    if parts.len() == 1 && name.ends_with(".bak") {
+        let source = checked_data_path(base, &format!("backup/{name}"))?;
+        return Ok((source, legacy_target(base, name)?, None));
+    }
+    Err(backup_error("备份标识无效"))
+}
+
+pub fn list_backup_files(base: &Path) -> io::Result<Vec<BackupFile>> {
+    let mut output = Vec::new();
+    for area in ["", "config", "files"] {
+        let directory = checked_data_path(
+            base,
+            &if area.is_empty() {
+                "backup".into()
+            } else {
+                format!("backup/{area}")
+            },
+        )?;
+        let entries = match std::fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let metadata = std::fs::symlink_metadata(entry.path())?;
+            if linked(&metadata) {
+                continue;
+            }
+            let filename = entry.file_name().to_string_lossy().to_string();
+            if area == "files" {
+                if !metadata.is_dir() || !filename.starts_with("cfg-") {
+                    continue;
+                }
+            } else if !metadata.is_file() || !filename.ends_with(".bak") {
+                continue;
+            }
+            let name = if area.is_empty() {
+                filename
+            } else {
+                format!("{area}/{filename}")
+            };
+            let path = if area == "files" {
+                entry.path().join("content.bak")
+            } else {
+                entry.path()
+            };
+            if std::fs::symlink_metadata(&path).is_ok_and(|meta| linked(&meta)) {
+                continue;
+            }
+            let (metadata, payload_error) = match std::fs::metadata(&path) {
+                Ok(meta) if meta.is_file() => (meta, None),
+                Ok(_) => (metadata, Some("备份内容不是普通文件".to_string())),
+                Err(error) => (metadata, Some(format!("无法读取备份内容：{error}"))),
+            };
+            let (target_path, reason) = match backup_source(base, &name) {
+                Ok((_, relative, _)) if relative.starts_with("etc/") => {
+                    match checked_data_path(base, &relative) {
+                        Ok(_) => (Some(relative), None),
+                        Err(error) => (Some(relative), Some(error.to_string())),
+                    }
+                }
+                Ok((_, relative, _)) => (
+                    Some(relative),
+                    Some("此备份不是服务配置，请在对应功能页处理".into()),
+                ),
+                Err(error) => (None, Some(error.to_string())),
+            };
+            let size_bytes = if payload_error.is_some() {
+                0
+            } else {
+                metadata.len()
+            };
+            let reason = payload_error.or(reason);
+            output.push(BackupFile {
+                name,
+                path: path.to_string_lossy().into(),
+                size_bytes,
+                modified_at: metadata
+                    .modified()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+                target_path,
+                restorable: reason.is_none(),
+                reason,
+                sort_time: metadata
+                    .modified()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos(),
+            });
         }
     }
-    let target = target.ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("找不到 {orig} 对应的当前配置文件，无法恢复"),
-        )
-    })?;
-    // 恢复前把当前版本再备份一次，保证可回退
-    let content = std::fs::read_to_string(&src)?;
-    write_with_backup(&target, &content, &base.join("backup"))?;
+    output.sort_by(|a, b| {
+        b.sort_time
+            .cmp(&a.sort_time)
+            .then_with(|| b.name.cmp(&a.name))
+    });
+    Ok(output)
+}
+
+fn read_backup_snapshot(
+    base: &Path,
+    name: &str,
+) -> io::Result<(BackupPreview, Vec<u8>, Option<Vec<u8>>)> {
+    let (source, relative, expected_hash) = backup_source(base, name)?;
+    if !relative.starts_with("etc/") {
+        return Err(backup_error("只能从此入口恢复服务配置"));
+    }
+    let target = checked_data_path(base, &relative)?;
+    let content = std::fs::read(source)?;
+    let digest = hex::encode(Sha256::digest(&content));
+    if expected_hash.is_some_and(|hash| hash != digest) {
+        return Err(backup_error("备份内容校验失败，原配置未改动"));
+    }
+    let current = read_optional(&target)?;
+    let revision = hex::encode(Sha256::digest(
+        serde_json::to_vec(&(
+            name,
+            &relative,
+            &digest,
+            current.as_ref().map(|v| hex::encode(Sha256::digest(v))),
+        ))
+        .map_err(io::Error::other)?,
+    ));
+    Ok((
+        BackupPreview {
+            name: name.into(),
+            target_path: target.to_string_lossy().into(),
+            target_relative: relative,
+            current_exists: current.is_some(),
+            revision,
+        },
+        content,
+        current,
+    ))
+}
+
+pub fn preview_backup(base: &Path, name: &str) -> io::Result<BackupPreview> {
+    read_backup_snapshot(base, name).map(|(preview, _, _)| preview)
+}
+
+pub fn restore_backup_checked(
+    base: &Path,
+    name: &str,
+    expected_revision: Option<&str>,
+) -> io::Result<PathBuf> {
+    let (preview, content, current) = read_backup_snapshot(base, name)?;
+    if expected_revision.is_some_and(|revision| preview.revision != revision) {
+        return Err(backup_error("配置或备份已变化，请重新预览后恢复"));
+    }
+    let content = String::from_utf8(content).map_err(io::Error::other)?;
+    let target = checked_data_path(base, &preview.target_relative)?;
+    write_with_backup_expected(
+        &target,
+        &content,
+        &base.join("backup"),
+        Some(current.as_deref()),
+    )?;
     Ok(target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture() -> (tempfile::TempDir, Paths) {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().join("app data"));
+        paths.ensure_dirs().unwrap();
+        (temp, paths)
+    }
+
+    #[test]
+    fn exact_targets_survive_missing_files_and_rapid_writes_keep_every_backup() {
+        let (_temp, paths) = fixture();
+        let target = paths.php_ini("8.2.0");
+        write_with_backup(&target, "original", &paths.backup()).unwrap();
+        write_with_backup(&paths.php_ini("8.4.0"), "other version", &paths.backup()).unwrap();
+        for value in 0..8 {
+            write_with_backup(&target, &value.to_string(), &paths.backup()).unwrap();
+        }
+        write_with_backup(&target, "7", &paths.backup()).unwrap();
+        let history = list_backup_files(&paths.base).unwrap();
+        assert_eq!(history.len(), 8);
+        let names: std::collections::HashSet<_> = history.iter().map(|b| &b.name).collect();
+        assert_eq!(names.len(), 8);
+        assert!(history
+            .iter()
+            .all(|b| b.target_path.as_deref() == Some("etc/php/8.2.0/php.ini") && b.restorable));
+        let original = history
+            .iter()
+            .find(|b| std::fs::read_to_string(&b.path).unwrap() == "original")
+            .unwrap();
+        std::fs::remove_file(&target).unwrap();
+        let preview = preview_backup(&paths.base, &original.name).unwrap();
+        assert!(!preview.current_exists);
+        assert_eq!(
+            restore_backup_checked(&paths.base, &original.name, Some(&preview.revision)).unwrap(),
+            target
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+        assert_eq!(
+            std::fs::read_to_string(paths.php_ini("8.4.0")).unwrap(),
+            "other version"
+        );
+    }
+
+    #[test]
+    fn restore_conflicts_tampering_and_backup_failures_preserve_current_content() {
+        let (_temp, paths) = fixture();
+        let target = paths.nginx_conf();
+        write_with_backup(&target, "v1", &paths.backup()).unwrap();
+        write_with_backup(&target, "v2", &paths.backup()).unwrap();
+        let backup = list_backup_files(&paths.base).unwrap().remove(0);
+        let preview = preview_backup(&paths.base, &backup.name).unwrap();
+        std::fs::write(&target, "external").unwrap();
+        assert!(
+            restore_backup_checked(&paths.base, &backup.name, Some(&preview.revision)).is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "external");
+        std::fs::write(&backup.path, "tampered").unwrap();
+        assert!(preview_backup(&paths.base, &backup.name).is_err());
+        assert!(restore_backup(&paths.base, &backup.name).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "external");
+
+        let (_temp2, other) = fixture();
+        write_with_backup(&other.nginx_conf(), "keep", &other.backup()).unwrap();
+        std::fs::write(other.backup().join("files"), "blocked directory").unwrap();
+        assert!(write_with_backup(&other.nginx_conf(), "lost", &other.backup()).is_err());
+        assert_eq!(std::fs::read_to_string(other.nginx_conf()).unwrap(), "keep");
+        assert!(list_backup_files(&other.base).is_err());
+    }
+
+    #[test]
+    fn malformed_bundles_are_disabled_without_hiding_valid_history() {
+        let (_temp, paths) = fixture();
+        write_with_backup(&paths.nginx_conf(), "v1", &paths.backup()).unwrap();
+        write_with_backup(&paths.nginx_conf(), "v2", &paths.backup()).unwrap();
+        std::fs::create_dir_all(paths.backup().join("files/cfg-incomplete")).unwrap();
+        std::fs::create_dir_all(paths.backup().join("files/.pending-unpublished")).unwrap();
+        let history = list_backup_files(&paths.base).unwrap();
+        assert_eq!(history.len(), 2);
+        assert!(history
+            .iter()
+            .any(|b| b.name == "files/cfg-incomplete" && !b.restorable && b.reason.is_some()));
+        assert_eq!(history.iter().filter(|b| b.restorable).count(), 1);
+    }
+
+    #[test]
+    fn legacy_ambiguity_non_config_backups_and_unsafe_paths_cannot_be_restored() {
+        let (_temp, paths) = fixture();
+        write_with_backup(&paths.php_ini("8.4.0"), "keep", &paths.backup()).unwrap();
+        std::fs::write(paths.backup().join("php.ini.20260101.bak"), "old").unwrap();
+        write_with_backup(&paths.nginx_conf(), "nginx", &paths.backup()).unwrap();
+        std::fs::write(paths.etc().join("nginx.conf"), "duplicate").unwrap();
+        std::fs::write(paths.backup().join("nginx.conf.20260101.bak"), "old").unwrap();
+        write_with_backup(&paths.certs().join("secret.key"), "key1", &paths.backup()).unwrap();
+        write_with_backup(&paths.certs().join("secret.key"), "key2", &paths.backup()).unwrap();
+        for backup in list_backup_files(&paths.base).unwrap() {
+            assert!(!backup.restorable, "{}", backup.name);
+            assert!(restore_backup(&paths.base, &backup.name).is_err());
+        }
+        for path in [
+            "../escape",
+            "etc/../escape",
+            "etc//file",
+            "etc/./file",
+            "/etc/file",
+            "C:/file",
+            "etc/a:stream",
+            "etc/a.",
+            "etc/a ",
+            "etc/NUL.ini",
+            "etc/COM1/x",
+            "etc/LPT²/x",
+            "etc/a?b",
+            "etc\\file",
+        ] {
+            assert!(checked_data_path(&paths.base, path).is_err(), "{path}");
+        }
+        for name in [
+            "../secret.bak",
+            "config/../../secret.bak",
+            "files/cfg-a/../b",
+            "C:/file.bak",
+        ] {
+            assert!(restore_backup(&paths.base, name).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn altered_metadata_cannot_write_outside_the_config_tree() {
+        let (_temp, paths) = fixture();
+        write_with_backup(&paths.nginx_conf(), "v1", &paths.backup()).unwrap();
+        write_with_backup(&paths.nginx_conf(), "v2", &paths.backup()).unwrap();
+        let backup = list_backup_files(&paths.base).unwrap().remove(0);
+        let metadata = paths.backup().join(&backup.name).join("metadata.json");
+        for target in [
+            "../escape",
+            "etc/../secret",
+            "etc/file:stream",
+            "certs/root.key",
+        ] {
+            std::fs::write(
+                &metadata,
+                serde_json::to_vec(&BackupMetadata {
+                    version: 1,
+                    target: target.into(),
+                    sha256: hex::encode(Sha256::digest(b"v1")),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(
+                restore_backup(&paths.base, &backup.name).is_err(),
+                "{target}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(paths.nginx_conf()).unwrap(), "v2");
+        assert!(!paths.base.parent().unwrap().join("escape").exists());
+    }
+
+    #[test]
+    fn directory_links_cannot_redirect_restores_or_backup_writes() {
+        let (temp, paths) = fixture();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("file"), "keep outside").unwrap();
+        let link = paths.etc().join("linked");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let result = std::process::Command::new("cmd.exe")
+                .args(["/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(&outside)
+                .creation_flags(0x08000000)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert!(checked_data_path(&paths.base, "etc/linked/file").is_err());
+        assert!(write_with_backup(&link.join("file"), "lost", &paths.backup()).is_err());
+        std::fs::write(paths.backup().join("file.20260101.bak"), "lost").unwrap();
+        assert!(restore_backup(&paths.base, "file.20260101.bak").is_err());
+        assert_eq!(
+            std::fs::read_to_string(outside.join("file")).unwrap(),
+            "keep outside"
+        );
+        #[cfg(windows)]
+        std::fs::remove_dir(&link).unwrap();
+        #[cfg(unix)]
+        std::fs::remove_file(&link).unwrap();
+    }
 }

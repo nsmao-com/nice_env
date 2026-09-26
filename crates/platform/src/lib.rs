@@ -55,6 +55,15 @@ pub struct ProcessGroup {
 }
 
 impl ProcessGroup {
+    /// 恢复已确认属于本应用的 pid；没有 Job 句柄时按 pid 终止进程树。
+    pub fn from_pids(pids: Vec<u32>) -> Self {
+        Self {
+            #[cfg(windows)]
+            job: None,
+            pids,
+        }
+    }
+
     /// 创建进程组（尚未包含任何进程）。
     /// `detached=true`：Windows 上用不带 KILL_ON_JOB_CLOSE 的 Job——
     /// 进程树仍可被整体终止（stop 正常工作），但创建者退出时服务继续存活

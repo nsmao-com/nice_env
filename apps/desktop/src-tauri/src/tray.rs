@@ -239,7 +239,7 @@ pub fn panel_state_json<R: Runtime>(
         .into_iter()
         .take(4)
         .map(|st| {
-            let (r, t) = nsb_core::stacks::status_of(&state.manager, &st);
+            let (r, t) = nsb_core::stacks::status_of(&state.store, &state.manager, &st);
             serde_json::json!({ "id": st.id, "name": st.name, "running": r, "total": t })
         })
         .collect();

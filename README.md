@@ -362,21 +362,24 @@ PHP 已启用但缺依赖的扩展。
 
 ## 站点模板
 
-新建站点时可选 9 种模板，每个都把入口写在**该框架实际要求的位置**：
+新建站点时可选 9 种模板，框架项目会安装实际依赖，并把文档根设到对应的公开目录：
 
 | 模板 | 入口位置 | 说明 |
 |------|---------|------|
-| Laravel / Symfony | `public/index.php` | 伪静态自动配好 |
-| ThinkPHP 6+ | `public/index.php` | 附下一步说明 |
-| WordPress | 根目录 `index.php` | 附 `wp-config-sample.php` |
-| CodeIgniter 4 | `public/index.php` | |
-| Next.js 静态导出 | `out/index.html` | 文档根指向 `out/` |
+| Laravel / Symfony | `public/index.php` | Composer 安装官方项目，初始化应用密钥与首页 |
+| ThinkPHP | `public/index.php` | Composer 安装官方项目，初始化服务发现与本地首页 |
+| WordPress | 根目录 `index.php` | 下载完整官方程序，可生成数据库连接配置 |
+| CodeIgniter 4 | `public/index.php` | Composer 安装官方项目，初始化站点地址 |
+| Next.js 静态导出 | `src/app/` → `out/index.html` | 官方生成器创建 TypeScript 项目，通过 pnpm 安装依赖后静态导出 |
 | 前端 SPA | `index.html` | 伪静态设为 fallback，深链可用 |
 | 静态站 / 空白 PHP | 根目录 | 给了一个像样的落地页 |
 
-占位入口都做成**可运行**的：真项目还没放进去时，访问站点能看到
-「下一步该执行 `composer install` / `npm run build`」的明确指引，
-而不是 404 让人以为站点没建好。选模板会自动带上对应的伪静态规则。
+PHP 框架使用选中的 PHP CLI 与 Composer。Next.js 使用当前启用的 Node.js（20.9+），
+独立准备 pnpm，不需要全局安装包管理器。新框架项目在临时目录内完成安装与检查后才
+写入目标空目录；错误会保留详细原因，已有项目文件不会被覆盖。
+选择「使用现有目录」时不补写占位入口，选模板会自动带上对应的伪静态规则。
+Next.js 静态路由支持 HTML 文件与目录索引，不存在的路径返回 404；SPA 则使用首页回退。
+开发验收状态与尚未验证的链路见 `DESIGN.md` 第 5 节。
 
 ## 命令面板
 

@@ -47,7 +47,16 @@ const NAV = [
 ];
 
 export function Sidebar() {
-  const collapsed = useUI((s) => s.sidebarCollapsed);
+  const preferredCollapsed = useUI((s) => s.sidebarCollapsed);
+  const [narrow, setNarrow] = React.useState(false);
+  React.useEffect(() => {
+    const media = window.matchMedia("(max-width: 767px)");
+    const update = () => setNarrow(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  const collapsed = narrow || preferredCollapsed;
   const toggle = useUI((s) => s.toggleSidebar);
   const t = useT();
   const pathname = usePathname();
@@ -87,6 +96,8 @@ export function Sidebar() {
               const body = (
                 <Link
                   href={item.href}
+                  aria-label={label}
+                  aria-current={active ? "page" : undefined}
                   className={cn(
                     "group relative flex h-9 items-center gap-2.5 rounded-full px-2.5 text-[13px] font-medium transition-colors active:scale-[0.98]",
                     active
@@ -132,6 +143,8 @@ export function Sidebar() {
           <TooltipTrigger asChild>
             <Link
               href="/settings"
+              aria-label={t("nav.settings")}
+              aria-current={pathname === "/settings" ? "page" : undefined}
               className={cn(
                 "flex h-9 flex-1 items-center gap-2.5 rounded-full px-2.5 text-[13px] font-medium transition-colors",
                 pathname === "/settings"
@@ -146,18 +159,19 @@ export function Sidebar() {
           </TooltipTrigger>
           {collapsed && <TooltipContent side="right">{t("nav.settings")}</TooltipContent>}
         </Tooltip>
-        <Tooltip>
+        {!narrow && <Tooltip>
           <TooltipTrigger asChild>
             <button
               type="button"
               onClick={toggle}
+              aria-label={t("palette.collapse")}
               className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-faint transition-colors hover:bg-fill hover:text-secondary"
             >
               {collapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
             </button>
           </TooltipTrigger>
           <TooltipContent side="right">{t("palette.collapse")}</TooltipContent>
-        </Tooltip>
+        </Tooltip>}
       </div>
     </motion.aside>
   );

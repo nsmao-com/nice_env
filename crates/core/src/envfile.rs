@@ -64,6 +64,8 @@ pub fn is_secret_key(key: &str) -> bool {
     // 明确列出常见后缀/前缀，而不是模糊包含匹配，避免把 APP_KEY_ALGO 之类误判
     k.contains("PASSWORD")
         || k.contains("PASSWD")
+        || k.ends_with("_PASS")
+        || k == "DATABASE_URL"
         || k.contains("SECRET")
         || k.contains("_KEY")
         || k.ends_with("KEY")
@@ -81,11 +83,7 @@ pub fn needs_quoting(value: &str) -> bool {
     if value.is_empty() {
         return false;
     }
-    value.contains(' ')
-        || value.contains('#')
-        || value.contains('\t')
-        || value.starts_with('"')
-        || value.starts_with('\'')
+    value.chars().any(|c| c.is_whitespace() || matches!(c, '#' | '"' | '\'' | '\\' | '$'))
         // 前后有空白也会被吃掉
         || value.trim() != value
 }
@@ -95,11 +93,137 @@ fn unquote(v: &str) -> String {
     let t = v.trim();
     if t.len() >= 2 {
         let b = t.as_bytes();
-        if (b[0] == b'"' && b[t.len() - 1] == b'"') || (b[0] == b'\'' && b[t.len() - 1] == b'\'') {
+        if b[0] == b'\'' && b[t.len() - 1] == b'\'' {
             return t[1..t.len() - 1].to_string();
+        }
+        if b[0] == b'"' && b[t.len() - 1] == b'"' {
+            let mut value = String::new();
+            let mut chars = t[1..t.len() - 1].chars();
+            while let Some(c) = chars.next() {
+                if c != '\\' {
+                    value.push(c);
+                    continue;
+                }
+                match chars.next() {
+                    Some('n') => value.push('\n'),
+                    Some('r') => value.push('\r'),
+                    Some('t') => value.push('\t'),
+                    Some(c @ ('\\' | '"' | '$')) => value.push(c),
+                    Some(c) => {
+                        value.push('\\');
+                        value.push(c);
+                    }
+                    None => value.push('\\'),
+                }
+            }
+            return value;
         }
     }
     t.to_string()
+}
+
+fn quote_env_value(value: &str) -> String {
+    if !needs_quoting(value) {
+        return value.to_string();
+    }
+    // 密码中的 $ 必须保持字面值，不能被 PHP dotenv 当作变量展开。
+    format!(
+        "\"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('$', "\\$")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('\t', "\\t")
+    )
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum EnvSyntax {
+    Dotenv,
+    ThinkPhp,
+    CodeIgniter,
+}
+
+fn project_syntax(root: &Path) -> EnvSyntax {
+    if root.join("think").is_file() {
+        EnvSyntax::ThinkPhp
+    } else if root.join("spark").is_file() {
+        EnvSyntax::CodeIgniter
+    } else {
+        EnvSyntax::Dotenv
+    }
+}
+
+fn quote_project_value(value: &str, syntax: EnvSyntax) -> String {
+    if !needs_quoting(value) {
+        return value.to_string();
+    }
+    match syntax {
+        // ThinkPHP 通过 INI_SCANNER_RAW 读取，双引号内的反斜杠和 $ 都是原值。
+        EnvSyntax::ThinkPhp => format!("\"{value}\""),
+        EnvSyntax::CodeIgniter => {
+            format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+        }
+        EnvSyntax::Dotenv => quote_env_value(value),
+    }
+}
+
+pub(crate) fn apply_project_env_changes(
+    root: &Path,
+    original: &str,
+    changes: &[(String, String)],
+) -> Result<String> {
+    let syntax = project_syntax(root);
+    for (key, value) in changes {
+        if key.is_empty()
+            || !key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+        {
+            return Err(AppError::new(
+                "BAD_ENV_KEY",
+                "环境变量名只允许字母、数字、下划线和点",
+            ));
+        }
+        if syntax != EnvSyntax::Dotenv && value.contains(['\n', '\r']) {
+            return Err(AppError::new(
+                "BAD_ENV_VALUE",
+                "此框架的环境变量不能包含换行",
+            ));
+        }
+        if is_secret_key(key)
+            && matches!(
+                value.to_ascii_lowercase().as_str(),
+                "true"
+                    | "false"
+                    | "on"
+                    | "off"
+                    | "null"
+                    | "empty"
+                    | "(true)"
+                    | "(false)"
+                    | "(null)"
+                    | "(empty)"
+            )
+        {
+            return Err(
+                AppError::new("BAD_ENV_VALUE", "框架会把此密码或密钥识别为布尔值或空值")
+                    .with_hint("请使用包含更多字符的值，数据库密码可点击重新生成"),
+            );
+        }
+        if syntax == EnvSyntax::CodeIgniter && is_secret_key(key) && value.contains("${") {
+            return Err(AppError::new(
+                "BAD_ENV_VALUE",
+                "CodeIgniter 会展开密码中的 ${…} 环境变量表达式",
+            )
+            .with_hint("请使用不包含这种表达式的密码，或点击重新生成"));
+        }
+    }
+    Ok(apply_env_changes_using(original, changes, &|value| {
+        quote_project_value(value, syntax)
+    }))
 }
 
 /// 解析 .env 内容。
@@ -107,6 +231,10 @@ fn unquote(v: &str) -> String {
 /// 只处理 `KEY=VALUE` 与 `# 注释`；`export KEY=VALUE` 也认。
 /// 保留注释行的原样（通过 line 与 commented 标记），保存时不丢用户注释。
 pub fn parse_env(content: &str) -> Vec<EnvEntry> {
+    parse_env_using(content, EnvSyntax::Dotenv)
+}
+
+fn parse_env_using(content: &str, syntax: EnvSyntax) -> Vec<EnvEntry> {
     let mut out = Vec::new();
     for (i, raw) in content.lines().enumerate() {
         let line_no = i + 1;
@@ -130,7 +258,21 @@ pub fn parse_env(content: &str) -> Vec<EnvEntry> {
         let raw_value = v.trim();
         let quoted = (raw_value.starts_with('"') && raw_value.ends_with('"'))
             || (raw_value.starts_with('\'') && raw_value.ends_with('\''));
-        let value = unquote(raw_value);
+        let value = match syntax {
+            EnvSyntax::ThinkPhp
+                if raw_value.len() >= 2
+                    && raw_value.starts_with('"')
+                    && raw_value.ends_with('"') =>
+            {
+                raw_value[1..raw_value.len() - 1].to_string()
+            }
+            EnvSyntax::ThinkPhp => raw_value.to_string(),
+            EnvSyntax::CodeIgniter if raw_value.len() >= 2 && quoted => raw_value
+                [1..raw_value.len() - 1]
+                .replace(&format!("\\{}", &raw_value[..1]), &raw_value[..1])
+                .replace("\\\\", "\\"),
+            _ => unquote(raw_value),
+        };
         out.push(EnvEntry {
             secret: is_secret_key(&key),
             // 已加引号的就没问题
@@ -149,6 +291,14 @@ pub fn parse_env(content: &str) -> Vec<EnvEntry> {
 /// 之所以不「整份重写」：用户 .env 里常有分组注释和空行，
 /// 整份重写会把这些结构抹掉，下次打开就不认识了。
 pub fn apply_env_changes(original: &str, changes: &[(String, String)]) -> String {
+    apply_env_changes_using(original, changes, &quote_env_value)
+}
+
+fn apply_env_changes_using(
+    original: &str,
+    changes: &[(String, String)],
+    quote: &dyn Fn(&str) -> String,
+) -> String {
     let mut remaining: Vec<(String, String)> = changes.to_vec();
     let mut out: Vec<String> = Vec::new();
 
@@ -169,11 +319,7 @@ pub fn apply_env_changes(original: &str, changes: &[(String, String)]) -> String
                 if let Some(pos) = remaining.iter().position(|(ck, _)| ck == key) {
                     let (_, v) = remaining.remove(pos);
                     // 需要引号则加上；否则保持裸值
-                    let val = if needs_quoting(&v) {
-                        format!("\"{}\"", v.replace('"', "\\\""))
-                    } else {
-                        v
-                    };
+                    let val = quote(&v);
                     out.push(format!("{key}={val}"));
                     continue;
                 }
@@ -189,11 +335,7 @@ pub fn apply_env_changes(original: &str, changes: &[(String, String)]) -> String
             out.push(String::new());
         }
         for (k, v) in remaining {
-            let val = if needs_quoting(&v) {
-                format!("\"{}\"", v.replace('"', "\\\""))
-            } else {
-                v
-            };
+            let val = quote(&v);
             out.push(format!("{k}={val}"));
         }
     }
@@ -215,9 +357,97 @@ pub fn db_env_vars(hint: &DbHint) -> Vec<(String, String)> {
     ]
 }
 
+pub(crate) fn project_db_env_vars(root: &Path, hint: &DbHint) -> Result<Vec<(String, String)>> {
+    match project_syntax(root) {
+        EnvSyntax::ThinkPhp => Ok(vec![
+            ("DB_TYPE".into(), "mysql".into()),
+            ("DB_HOST".into(), "127.0.0.1".into()),
+            ("DB_PORT".into(), hint.port.to_string()),
+            ("DB_NAME".into(), hint.database.clone()),
+            ("DB_USER".into(), hint.username.clone()),
+            ("DB_PASS".into(), hint.password.clone()),
+            ("DB_CHARSET".into(), "utf8mb4".into()),
+        ]),
+        EnvSyntax::CodeIgniter => Ok(vec![
+            ("database.default.hostname".into(), "127.0.0.1".into()),
+            ("database.default.port".into(), hint.port.to_string()),
+            ("database.default.database".into(), hint.database.clone()),
+            ("database.default.username".into(), hint.username.clone()),
+            ("database.default.password".into(), hint.password.clone()),
+            ("database.default.DBDriver".into(), "MySQLi".into()),
+        ]),
+        EnvSyntax::Dotenv
+            if root.join("bin/console").is_file() && root.join("config/bundles.php").is_file() =>
+        {
+            let existing = std::fs::read_to_string(root.join(".env"))
+                .ok()
+                .and_then(|s| {
+                    parse_env(&s)
+                        .into_iter()
+                        .find(|e| !e.commented && e.key == "DATABASE_URL")
+                })
+                .and_then(|e| reqwest::Url::parse(&e.value).ok())
+                .filter(|url| url.scheme() == "mysql");
+            if hint.password.is_empty()
+                && existing.as_ref().and_then(|url| url.password()).is_none()
+            {
+                return Err(AppError::new(
+                    "NO_DB_PASSWORD",
+                    "当前未保存数据库密码，无法生成完整连接地址",
+                )
+                .with_hint("请保留现有连接配置，或先补充数据库凭据"));
+            }
+            let mut url = existing.unwrap_or(
+                reqwest::Url::parse("mysql://127.0.0.1")
+                    .map_err(|e| AppError::internal("生成数据库连接地址", e.to_string()))?,
+            );
+            url.set_host(Some("127.0.0.1"))
+                .map_err(|e| AppError::internal("设置数据库地址", e.to_string()))?;
+            url.set_port(Some(hint.port))
+                .map_err(|_| AppError::new("BAD_PORT", "数据库端口无效"))?;
+            url.set_username(&hint.username)
+                .map_err(|_| AppError::new("BAD_USER", "数据库用户名无效"))?;
+            if !hint.password.is_empty() {
+                url.set_password(Some(&hint.password))
+                    .map_err(|_| AppError::new("BAD_PASSWORD", "数据库密码无效"))?;
+            }
+            url.set_path(&hint.database);
+            if url.query().is_none() {
+                url.set_query(Some("charset=utf8mb4"));
+            }
+            Ok(vec![("DATABASE_URL".into(), url.to_string())])
+        }
+        _ => Ok(db_env_vars(hint)),
+    }
+}
+
 /// .env 文件路径（站点根目录下）
 pub fn env_path(root: &Path) -> PathBuf {
     root.join(".env")
+}
+
+/// public/out 是对外目录，框架环境文件位于包含项目清单的上一级目录。
+fn project_root(web_root: &Path) -> PathBuf {
+    if matches!(
+        web_root.file_name().and_then(|name| name.to_str()),
+        Some("public" | "out" | "dist" | "build")
+    ) {
+        if let Some(parent) = web_root.parent() {
+            if [
+                "composer.json",
+                "package.json",
+                "artisan",
+                ".env",
+                ".env.example",
+            ]
+            .iter()
+            .any(|name| parent.join(name).is_file())
+            {
+                return parent.to_path_buf();
+            }
+        }
+    }
+    web_root.to_path_buf()
 }
 
 /// 探测站点目录下的 .env 变体
@@ -244,7 +474,7 @@ pub fn read_env(paths: &Paths, store: &crate::store::Store, site_id: &str) -> Re
         .into_iter()
         .find(|s| s.id == site_id)
         .ok_or_else(|| AppError::new("SITE_NOT_FOUND", "找不到该站点"))?;
-    let root = PathBuf::from(&site.root_dir);
+    let root = project_root(Path::new(&site.root_dir));
     let path = env_path(&root);
     let exists = path.is_file();
     let content = if exists {
@@ -259,7 +489,8 @@ pub fn read_env(paths: &Paths, store: &crate::store::Store, site_id: &str) -> Re
         database: d.database.clone(),
         username: d.username.clone(),
         password: d.password.clone(),
-        port: 3306,
+        port: d.version.as_deref().and_then(|version| crate::dbadmin::saved_port(store, version))
+            .or(d.port).unwrap_or_else(|| crate::services::PortsProfile::from_settings(store).mysql),
     });
 
     Ok(EnvFileView {
@@ -267,7 +498,7 @@ pub fn read_env(paths: &Paths, store: &crate::store::Store, site_id: &str) -> Re
         site_name: site.name.clone(),
         path: path.to_string_lossy().to_string(),
         exists,
-        entries: parse_env(&content),
+        entries: parse_env_using(&content, project_syntax(&root)),
         db_hint,
         variants: env_variants(&root),
     })
@@ -284,7 +515,7 @@ pub fn save_env(
         .into_iter()
         .find(|s| s.id == site_id)
         .ok_or_else(|| AppError::new("SITE_NOT_FOUND", "找不到该站点"))?;
-    let root = PathBuf::from(&site.root_dir);
+    let root = project_root(Path::new(&site.root_dir));
     if !root.is_dir() {
         return Err(AppError::new("ROOT_MISSING", "站点根目录不存在")
             .with_hint("站点目录可能被移动或删除，请到站点详情里修正路径"));
@@ -295,11 +526,11 @@ pub fn save_env(
     } else {
         String::new()
     };
-    let next = apply_env_changes(&original, changes);
+    let next = apply_project_env_changes(&root, &original, changes)?;
     // 就地备份：.env 不进全局备份目录，放在项目旁边更直观
     if path.is_file() {
         let bak = root.join(".env.nsb-backup");
-        let _ = std::fs::write(&bak, &original);
+        std::fs::write(&bak, &original).map_err(|e| AppError::io("备份 .env", e))?;
     }
     std::fs::write(&path, next).map_err(|e| AppError::io("写入 .env", e))?;
     Ok(())
@@ -316,7 +547,19 @@ pub fn apply_db_vars(
         AppError::new("NO_DB_BINDING", "该站点没有绑定数据库")
             .with_hint("先到站点详情里为它创建/绑定一个数据库")
     })?;
-    let vars = db_env_vars(&hint);
+    let root = Path::new(&view.path)
+        .parent()
+        .ok_or_else(|| AppError::new("ROOT_MISSING", "项目目录无效"))?;
+    let mut vars = project_db_env_vars(root, &hint)?;
+    // 老版本未持久化密码：补全其它字段，不能用未知的空密码覆盖项目现有凭据。
+    if hint.password.is_empty() {
+        vars.retain(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                "DB_PASSWORD" | "DB_PASS" | "database.default.password"
+            )
+        });
+    }
     save_env(_paths, store, site_id, &vars)?;
     Ok(vars.into_iter().map(|(k, _)| k).collect())
 }
@@ -447,6 +690,20 @@ mod tests {
     fn apply_escapes_inner_quotes() {
         let out = apply_env_changes("", &[("K".into(), "say \"hi\" now".into())]);
         assert!(out.contains(r#"K="say \"hi\" now""#), "{out}");
+        for value in [
+            "literal${HOME}",
+            "one\\two",
+            "quote'and\"double",
+            "line\nnext\rtab\tend",
+            "密码 $secret # suffix",
+        ] {
+            let rendered = apply_env_changes("", &[("PASSWORD".into(), value.into())]);
+            assert_eq!(parse_env(&rendered)[0].value, value);
+            assert_eq!(
+                apply_env_changes(&rendered, &[("PASSWORD".into(), value.into())]),
+                rendered
+            );
+        }
     }
 
     #[test]
@@ -524,6 +781,38 @@ mod tests {
         // 站点不存在
         assert!(save_env(&paths, &store, "nope", &[]).is_err());
         let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn project_env_is_outside_public_and_unknown_password_is_preserved() {
+        let temp = tempfile::tempdir().unwrap();
+        let public = temp.path().join("public");
+        std::fs::create_dir_all(&public).unwrap();
+        std::fs::write(temp.path().join("composer.json"), "{}").unwrap();
+        assert_eq!(project_root(&public), temp.path());
+        let paths = Paths::new(temp.path().join("app-data"));
+        let store = crate::store::Store::open(paths.db()).unwrap();
+        store.set_setting("portProfile", "safe").unwrap();
+        let site: crate::model::Site = serde_json::from_value(serde_json::json!({
+            "id":"env-site", "name":"Environment", "domains":["env.test"],
+            "rootDir":public, "runtime":{"webServer":"nginx","kind":"php","phpVersion":"8.3.33"},
+            "https":false, "rewrite":"laravel",
+            "db":{"enabled":true,"database":"app","username":"app_user"},
+            "createdAt":1, "updatedAt":1
+        }))
+        .unwrap();
+        store.save_site(&site).unwrap();
+        std::fs::write(
+            temp.path().join(".env"),
+            "DB_PASSWORD=keep-existing\nDB_PORT=3306\n",
+        )
+        .unwrap();
+        apply_db_vars(&paths, &store, &site.id).unwrap();
+        let content = std::fs::read_to_string(temp.path().join(".env")).unwrap();
+        assert!(content.contains("DB_PASSWORD=keep-existing"));
+        assert!(content.contains("DB_PORT=23306"));
+        assert!(!public.join(".env").exists());
+        assert!(temp.path().join(".env.nsb-backup").is_file());
     }
 
     #[test]

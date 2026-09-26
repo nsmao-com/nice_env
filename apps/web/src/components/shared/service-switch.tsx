@@ -10,12 +10,14 @@ import { cn } from "@/lib/utils";
  * 不用原生 Switch —— 需要自定义动画。
  */
 export function ServiceSwitch({
+  label,
   checked,
   onCheckedChange,
   disabled,
   busy,
   className,
 }: {
+  label: string;
   checked: boolean;
   onCheckedChange: (next: boolean) => void;
   disabled?: boolean;
@@ -26,8 +28,11 @@ export function ServiceSwitch({
 
   return (
     <button
+      type="button"
       role="switch"
+      aria-label={label}
       aria-checked={checked}
+      aria-busy={busy || undefined}
       disabled={disabled || busy}
       onClick={(e) => {
         e.preventDefault();

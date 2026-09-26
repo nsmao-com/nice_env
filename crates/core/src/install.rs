@@ -324,8 +324,51 @@ impl Installer {
         downloader: &Arc<Downloader>,
         emit: &dyn Fn(crate::Event),
     ) -> Result<InstalledPackage> {
+        let task_id = self
+            .find(key)
+            .map(|entry| format!("{}@{}", entry.id, entry.version))
+            .unwrap_or_else(|| key.to_string());
+        let task = downloader.begin_task(&task_id)?;
+        let result = self
+            .install_task(key, paths, store, downloader, &task, emit)
+            .await;
+        if let Err(err) = &result {
+            emit(crate::Event::DownloadProgress(
+                crate::model::DownloadProgress {
+                    task_id,
+                    received: 0,
+                    total: 0,
+                    speed_bps: 0,
+                    eta_sec: 0.0,
+                    state: if err.code == "CANCELLED" {
+                        "cancelled"
+                    } else {
+                        "error"
+                    }
+                    .into(),
+                    error: Some(err.message.clone()),
+                },
+            ));
+        }
+        result
+    }
+
+    async fn install_task(
+        &self,
+        key: &str,
+        paths: &Paths,
+        store: &Store,
+        downloader: &Arc<Downloader>,
+        task: &crate::download::DownloadTask,
+        emit: &dyn Fn(crate::Event),
+    ) -> Result<InstalledPackage> {
         // 先查清单内置版本；未命中但版本源能枚举到时，用远程版本合成条目
-        let entry = match self.resolve_entry(key, store).await? {
+        let resolved = tokio::select! {
+            biased;
+            _ = task.cancelled() => return Err(AppError::new("CANCELLED", "安装已取消")),
+            result = self.resolve_entry(key, store) => result?,
+        };
+        let entry = match resolved {
             Some(e) => e,
             None => {
                 return Err(AppError::new(
@@ -361,14 +404,27 @@ impl Installer {
 
         // 已装则幂等返回
         if let Some(p) = store.find_installed(&entry.id, Some(&version)) {
+            let metadata = self.installed_entry(&p);
+            if !Path::new(&p.install_path)
+                .join(entry_relative_path(&metadata.entry))
+                .is_file()
+            {
+                return Err(AppError::new(
+                    "BROKEN_INSTALL",
+                    format!("{} {} 的主程序已丢失", entry.display_name, version),
+                )
+                .with_hint("停止该服务，卸载此版本后重新安装"));
+            }
+            task.begin_commit()?;
+            emit(crate::Event::state(&task_id, "installed"));
             return Ok(p);
         }
 
         emit(crate::Event::state(&task_id, "downloading"));
         let urls = self.candidate_urls(&entry, store);
         let archive = downloader
-            .download(
-                &task_id,
+            .download_with_task(
+                task,
                 &urls,
                 entry.sha256.as_deref().unwrap_or("0"),
                 entry.size_bytes,
@@ -377,21 +433,40 @@ impl Installer {
             )
             .await?;
 
+        task.check_cancelled()?;
         emit(crate::Event::state(&task_id, "extracting"));
         let runtime_dir = paths.runtime_dir(&entry.id, &version);
-        std::fs::create_dir_all(&runtime_dir)?;
+        let parent = runtime_dir
+            .parent()
+            .ok_or_else(|| AppError::new("INVALID_PACKAGE_KEY", "安装目录无效"))?;
+        std::fs::create_dir_all(parent)?;
+        let staging = tempfile::Builder::new()
+            .prefix(".install-")
+            .tempdir_in(parent)
+            .map_err(|e| AppError::io("创建安装暂存目录", e))?;
+        let prepared = staging.path().join("package");
+        std::fs::create_dir(&prepared)?;
         match entry.kind.as_str() {
-            "archive" => extract_zip(&archive, &runtime_dir)?,
+            "archive" => extract_zip_checked(&archive, &prepared, &|| task.check_cancelled())?,
             // tar.gz / gz：用系统 tar（macOS 自带 bsdtar；Windows 10+ 亦内置）
-            "targz" => extract_targz(&archive, &runtime_dir, &entry.entry)?,
+            "targz" => extract_targz(&archive, &prepared, &entry.entry, &entry.url, task)?,
             // 单文件（composer.phar 等）：直接落盘
             "binary" => {
-                let dest = runtime_dir.join(entry_relative_path(&entry.entry));
+                let dest = prepared.join(entry_relative_path(&entry.entry));
                 if let Some(parent) = dest.parent() {
                     std::fs::create_dir_all(parent)
                         .map_err(|e| AppError::io("创建单文件包目录", e))?;
                 }
-                std::fs::copy(&archive, &dest).map_err(|e| AppError::io("写入单文件包", e))?;
+                copy_checked(
+                    &mut std::fs::File::open(&archive)?,
+                    &mut std::fs::File::create(&dest)?,
+                    &|| task.check_cancelled(),
+                )?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
+                }
             }
             other => {
                 return Err(AppError::new(
@@ -405,11 +480,11 @@ impl Installer {
         // （mihomo-windows-amd64-v1.19.31.exe）、单文件 gz 解出的内名不可控。
         // entry 声明的路径不存在时按「精确文件名 → 包内唯一文件」容错定位并搬移。
         let entry_rel = entry_relative_path(&entry.entry);
-        let entry_path = match settle_entry_file(&runtime_dir, &entry_rel) {
+        let entry_path = match settle_entry_file(&prepared, &entry_rel) {
             Some(p) => p,
             None => {
                 // 列出解压产物顶层内容，方便排障（清单与包内容不一致时一眼能看出差在哪）
-                let listing = std::fs::read_dir(&runtime_dir)
+                let listing = std::fs::read_dir(&prepared)
                     .map(|rd| {
                         rd.flatten()
                             .map(|e| e.file_name().to_string_lossy().to_string())
@@ -421,7 +496,7 @@ impl Installer {
                     "ENTRY_MISSING",
                     format!("解压后找不到主程序 {}", entry.entry),
                 )
-                .with_hint("清单声明的入口与压缩包实际内容不一致；已保留解压产物，可反馈补清单")
+                .with_hint("清单声明的入口与压缩包不一致；下载缓存已保留，请检查清单后重试")
                 .with_detail(format!(
                     "期望路径：{}；解压目录内容：{}",
                     runtime_dir.join(&entry_rel).display(),
@@ -433,7 +508,10 @@ impl Installer {
                 )));
             }
         };
-        let _ = entry_path;
+        if !entry_path.is_file() || std::fs::metadata(&entry_path)?.len() == 0 {
+            return Err(AppError::new("ENTRY_MISSING", "套件主程序不是有效文件"));
+        }
+        task.check_cancelled()?;
 
         emit(crate::Event::state(&task_id, "configuring"));
         let installed = InstalledPackage {
@@ -447,15 +525,71 @@ impl Installer {
                 .to_string(),
             installed_at: crate::services::now_ms(),
         };
-        // 默认配置
-        self.ensure_default_configs(&entry, paths, store)?;
         // 保存安装时的完整描述，使清单外版本在离线、重启和清单更新后仍可识别。
         // 与运行时目录一同卸载，不需要新增数据库表或修改用户模块清单。
         let snapshot = serde_json::to_vec_pretty(&entry)
             .map_err(|e| AppError::internal("保存套件安装信息", e.to_string()))?;
-        std::fs::write(runtime_dir.join(".niceenv-package.json"), snapshot)
+        std::fs::write(prepared.join(".niceenv-package.json"), snapshot)
             .map_err(|e| AppError::io("保存套件安装信息", e))?;
-        store.upsert_installed(&installed)?;
+        // 所有下载/解压都已完成，再原子发布；取消与提交之间不能出现竞态。
+        task.begin_commit()?;
+        let previous = if runtime_dir.exists() {
+            // 老版本失败残留或用户放入的文件也保留，不能直接递归覆盖。
+            let backup = tempfile::Builder::new()
+                .prefix(&format!("runtime-{}-{}-", entry.id, version))
+                .tempdir_in(paths.backup())
+                .map_err(|e| AppError::io("备份旧运行时", e))?;
+            let location = backup.path().join("previous");
+            std::fs::rename(&runtime_dir, &location)
+                .map_err(|e| AppError::io("备份旧运行时", e))?;
+            let _ = backup.keep();
+            Some(location)
+        } else {
+            None
+        };
+        let config = default_config_path(&entry, paths);
+        let had_config = config.as_ref().is_some_and(|path| path.exists());
+        let mut published = false;
+        let commit = (|| -> Result<()> {
+            std::fs::rename(&prepared, &runtime_dir)
+                .map_err(|e| AppError::io("发布套件运行时", e))?;
+            published = true;
+            self.ensure_default_configs(&entry, paths, store)?;
+            store.upsert_installed(&installed)?;
+            Ok(())
+        })();
+        if let Err(err) = commit {
+            let rollback = (|| -> Result<()> {
+                if published {
+                    std::fs::rename(&runtime_dir, &prepared)
+                        .map_err(|e| AppError::io("回收失败安装", e))?;
+                }
+                if let Some(previous) = &previous {
+                    std::fs::rename(previous, &runtime_dir)
+                        .map_err(|e| AppError::io("恢复旧运行时", e))?;
+                    if let Some(parent) = previous.parent() {
+                        let _ = std::fs::remove_dir(parent);
+                    }
+                }
+                if !had_config {
+                    if let Some(path) = &config {
+                        if path.is_file() {
+                            std::fs::remove_file(path)?;
+                        }
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(rollback_err) = rollback {
+                return Err(AppError::new(
+                    "INSTALL_ROLLBACK_FAILED",
+                    "安装失败，原有文件已保留但未能自动恢复",
+                )
+                .with_hint("关闭占用安装目录的程序后重试；不要删除备份目录")
+                .with_detail(format!("{err}; {rollback_err}; backup={previous:?}")));
+            }
+            return Err(err);
+        }
         emit(crate::Event::state(&task_id, "installed"));
         Ok(installed)
     }
@@ -466,6 +600,10 @@ impl Installer {
         paths: &Paths,
         store: &Store,
     ) -> Result<()> {
+        // 安装新版本不能覆盖已保存的 PHP 设置或正在使用的 Apache 共用配置。
+        if default_config_path(entry, paths).is_some_and(|path| path.is_file()) {
+            return Ok(());
+        }
         match entry.id.as_str() {
             "php" => crate::configgen::write_php_ini(paths, &entry.version)?,
             "redis" => crate::configgen::write_redis_conf(
@@ -521,32 +659,145 @@ impl Installer {
         paths: &Paths,
         store: &Store,
         manager: &Arc<crate::services::ServiceManager>,
-    ) -> Result<()> {
-        let (id, version) = match key.split_once('@') {
-            Some((i, v)) => (i.to_string(), v.to_string()),
-            None => {
-                let inst = store
-                    .find_installed(key, None)
-                    .ok_or_else(|| AppError::not_installed(key))?;
-                (inst.id, inst.version)
+    ) -> Result<Option<String>> {
+        let _operation = manager.lifecycle.lock();
+        let installed = match key.split_once('@') {
+            Some((id, version)) => {
+                ensure_safe_key(id, version)?;
+                store.find_installed(id, Some(version))
             }
-        };
+            None => crate::ops::installed_by_choice(store, key),
+        }
+        .ok_or_else(|| AppError::not_installed(key))?;
+        let id = &installed.id;
+        let version = &installed.version;
         // 下面会 remove_dir_all(runtimes/{id}/{version})，先挡住 `x@../..` 这类 key
-        ensure_safe_key(&id, &version)?;
-        // 停服务（忽略未运行错误）
+        ensure_safe_key(id, version)?;
+        if let Some(console) = crate::toolbox::adminer_status(manager)? {
+            if (id == "php" && *version == console.php_version)
+                || (id == "adminer" && *version == console.adminer_version) {
+                return Err(AppError::new("PACKAGE_IN_USE", "该版本正在运行数据库管理台，请先在工具箱停止 Adminer"));
+            }
+        }
+        self.check_uninstall_references(store, &installed)?;
+        let entry = self.installed_entry(&installed);
         let service_id = if id == "php" || id == "mysql" {
-            format!("{id}@{version}")
+            Some(format!("{id}@{version}"))
+        } else if crate::generic::is_builtin(id) || entry.run.is_some() {
+            Some(crate::generic::service_id_of(&entry))
         } else {
-            id.clone()
+            None
         };
-        let _ = crate::ops::stop_service(store, paths, manager, &service_id);
+        // 单实例的另一个版本可能正在运行，只有版本吻合才能停止和移除注册。
+        let stopped_service = service_id.filter(|sid| {
+            manager
+                .snapshot(sid)
+                .is_some_and(|s| s.version.as_deref() == Some(version.as_str()))
+        });
+        if let Some(sid) = &stopped_service {
+            crate::ops::stop_service(store, paths, manager, sid)?;
+        }
 
-        let runtime_dir = paths.runtime_dir(&id, &version);
+        let runtime_dir = paths.runtime_dir(id, version);
         if runtime_dir.exists() {
             std::fs::remove_dir_all(&runtime_dir).map_err(|e| AppError::io("删除运行时目录", e))?;
         }
-        store.remove_installed(&id, &version)?;
+        store.remove_installed(id, version)?;
+        if let Some(sid) = &stopped_service {
+            manager.services.lock().remove(sid);
+        }
+        if store.get_setting(&format!("active{id}Version")).as_deref() == Some(version) {
+            let fallback = crate::ops::installed_by_choice(store, id)
+                .map(|p| p.version)
+                .unwrap_or_default();
+            store.set_setting(&format!("active{id}Version"), &fallback)?;
+        }
+        crate::ops::register_services(paths, store, manager);
+        crate::generic::register_services(paths, store, manager);
+        crate::ops::save_pidfile(paths, manager);
+        Ok(stopped_service)
+    }
+
+    /// 固定版本引用始终保护；无版本引用仅在卸载最后一个可用版本时阻止。
+    fn check_uninstall_references(&self, store: &Store, target: &InstalledPackage) -> Result<()> {
+        let installed = store.list_installed()?;
+        let has_alternative = installed
+            .iter()
+            .any(|p| p.id == target.id && p.version != target.version);
+        let references_target = |key: &str| match key.split_once('@') {
+            Some((id, version)) => id == target.id && version == target.version,
+            None => key == target.id && !has_alternative,
+        };
+        let mut users = Vec::new();
+        for site in store.list_sites()? {
+            let php_ref = target.id == "php"
+                && site.runtime.kind == crate::model::SiteKind::Php
+                && site.runtime.php_version.as_deref() == Some(target.version.as_str());
+            let web_ref = site.runtime.web_server == target.id && !has_alternative;
+            let db_ref = target.id == "mysql"
+                && site.db.as_ref().is_some_and(|db| {
+                    db.enabled
+                        && db.version.as_deref().map_or(!has_alternative, |version| {
+                            version == target.version.as_str()
+                        })
+                });
+            if php_ref || web_ref || db_ref {
+                users.push(format!("站点「{}」", site.name));
+            }
+        }
+        for stack in store.list_stacks()? {
+            // 内置栈是安装建议，不是用户配置的硬依赖。
+            if !stack.builtin
+                && stack
+                    .items
+                    .iter()
+                    .any(|item| references_target(&item.service_id))
+            {
+                users.push(format!("服务栈「{}」", stack.name));
+            }
+        }
+        for package in installed
+            .iter()
+            .filter(|p| p.id != target.id || p.version != target.version)
+        {
+            let entry = self.installed_entry(package);
+            let required = entry
+                .requires
+                .iter()
+                .chain(entry.depends.iter())
+                .chain(entry.run.iter().flat_map(|run| run.requires.iter()));
+            if required.into_iter().any(|dep| references_target(dep)) {
+                users.push(format!("套件 {} {}", entry.display_name, package.version));
+            }
+        }
+        if !users.is_empty() {
+            return Err(AppError::new(
+                "PACKAGE_IN_USE",
+                format!(
+                    "无法卸载 {} {}：仍被 {} 使用",
+                    target.id,
+                    target.version,
+                    users.join("、")
+                ),
+            )
+            .with_hint("先修改相关站点或服务栈的版本绑定，或卸载依赖它的套件后重试"));
+        }
         Ok(())
+    }
+}
+
+/// 默认配置只在首次安装时创建；保留已有配置用于重装和多版本共存。
+fn default_config_path(
+    entry: &crate::model::PackageManifestEntry,
+    paths: &Paths,
+) -> Option<std::path::PathBuf> {
+    match entry.id.as_str() {
+        "php" => Some(paths.php_ini(&entry.version)),
+        "redis" => Some(paths.redis_conf(&entry.version)),
+        "mysql" => Some(paths.mysql_ini(&entry.version)),
+        "mihomo" => Some(paths.mihomo_config()),
+        "apache" => Some(paths.apache_conf()),
+        _ => None,
     }
 }
 
@@ -683,11 +934,16 @@ fn ensure_safe_key(id: &str, version: &str) -> Result<()> {
     }
 }
 
-fn extract_zip(archive: &Path, dest: &Path) -> Result<()> {
+pub(crate) fn extract_zip(archive: &Path, dest: &Path) -> Result<()> {
+    extract_zip_checked(archive, dest, &|| Ok(()))
+}
+
+fn extract_zip_checked(archive: &Path, dest: &Path, check: &dyn Fn() -> Result<()>) -> Result<()> {
     let file = std::fs::File::open(archive).map_err(|e| AppError::io("打开压缩包", e))?;
     let mut zip =
         zip::ZipArchive::new(file).map_err(|e| AppError::internal("读取压缩包", e.to_string()))?;
     for i in 0..zip.len() {
+        check()?;
         let mut entry = zip
             .by_index(i)
             .map_err(|e| AppError::internal("读取压缩条目", e.to_string()))?;
@@ -705,46 +961,127 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<()> {
             std::fs::create_dir_all(parent)?;
         }
         let mut out = std::fs::File::create(&out_path).map_err(|e| AppError::io("创建文件", e))?;
-        std::io::copy(&mut entry, &mut out).map_err(|e| AppError::io("解压写入", e))?;
+        copy_checked(&mut entry, &mut out, check)?;
+        #[cfg(unix)]
+        if let Some(mode) = entry.unix_mode() {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(mode & 0o777))?;
+        }
     }
     Ok(())
 }
 
 /// tar.gz 解压：调用系统 tar（macOS bsdtar / Windows 10+ 内置）。
-/// `.gz` 单文件（mihomo 等）tar 会失败，退回 gunzip 并落到清单声明的 entry 路径
-/// ——不能用下载缓存文件名推导（缓存名是 `{id}@{ver}.zip`，与真实文件名无关）。
-fn extract_targz(archive: &Path, dest: &Path, entry: &str) -> Result<()> {
-    let out = platform::command("tar")
-        .arg("-xzf")
-        .arg(archive)
-        .arg("-C")
-        .arg(dest)
-        .output()
-        .map_err(|e| AppError::io("执行 tar 解压", e))?;
-    if out.status.success() {
+/// `.gz` 单文件（mihomo 等）按源 URL 识别，落到清单声明的 entry 路径。
+/// 缓存名没有原始扩展名；tar 包失败不能退回 gunzip，否则会把整个 tar 误当主程序。
+fn extract_targz(
+    archive: &Path,
+    dest: &Path,
+    entry: &str,
+    source_url: &str,
+    task: &crate::download::DownloadTask,
+) -> Result<()> {
+    let single_gzip = reqwest::Url::parse(source_url).ok().is_some_and(|url| {
+        let path = url.path().to_ascii_lowercase();
+        path.ends_with(".gz") && !path.ends_with(".tar.gz")
+    });
+    if !single_gzip {
+        let mut tar = platform::command("tar");
+        tar.arg("-xzf").arg(archive).arg("-C").arg(dest);
+        tar.stdout(std::process::Stdio::null());
+        let (status, stderr) = run_extractor(&mut tar, task)?;
+        if !status.success() {
+            return Err(AppError::new("EXTRACT_FAILED", "tar.gz 解压失败").with_detail(stderr));
+        }
         return Ok(());
     }
     // 单文件 .gz → gunzip 到 entry 指定的相对路径
-    let out = platform::command("gzip")
-        .arg("-dc")
-        .arg(archive)
-        .output()
-        .map_err(|e| AppError::io("执行 gzip 解压", e))?;
-    if !out.status.success() {
-        return Err(AppError::new("EXTRACT_FAILED", "tar.gz 解压失败")
-            .with_detail(String::from_utf8_lossy(&out.stderr).to_string()));
-    }
     let target = dest.join(entry_relative_path(entry));
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|e| AppError::io("创建解压目录", e))?;
     }
-    std::fs::write(&target, out.stdout).map_err(|e| AppError::io("写入解压文件", e))?;
+    let mut gzip = platform::command("gzip");
+    gzip.arg("-dc")
+        .arg(archive)
+        .stdout(std::fs::File::create(&target)?);
+    let (status, stderr) = run_extractor(&mut gzip, task)?;
+    if !status.success() {
+        return Err(AppError::new("EXTRACT_FAILED", "gzip 解压失败").with_detail(stderr));
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755));
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))?;
     }
     Ok(())
+}
+
+fn copy_checked(
+    input: &mut impl std::io::Read,
+    output: &mut impl std::io::Write,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        check()?;
+        let n = input
+            .read(&mut buffer)
+            .map_err(|e| AppError::io("读取套件内容", e))?;
+        if n == 0 {
+            return Ok(());
+        }
+        output
+            .write_all(&buffer[..n])
+            .map_err(|e| AppError::io("写入套件内容", e))?;
+    }
+}
+
+fn run_extractor(
+    command: &mut std::process::Command,
+    task: &crate::download::DownloadTask,
+) -> Result<(std::process::ExitStatus, String)> {
+    use std::io::{Read, Seek};
+    task.check_cancelled()?;
+    let mut stderr = tempfile::tempfile()?;
+    command
+        .stdin(std::process::Stdio::null())
+        .stderr(stderr.try_clone()?);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(platform::spawn_pre_exec);
+        }
+    }
+    let mut group = platform::ProcessGroup::new()?;
+    let mut child = command
+        .spawn()
+        .map_err(|e| AppError::io("启动套件解压程序", e))?;
+    if let Err(err) = group.attach(child.id()) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(err.into());
+    }
+    let result = loop {
+        if let Err(err) = task.check_cancelled() {
+            break Err(err);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(err) => break Err(AppError::io("等待套件解压程序", err)),
+        }
+    };
+    if result.is_err() {
+        let _ = group.terminate(true);
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    let status = result?;
+    stderr.rewind()?;
+    let mut detail = String::new();
+    stderr.take(16 * 1024).read_to_string(&mut detail)?;
+    Ok((status, detail))
 }
 
 /* ================= 平台兼容性 ================= */
@@ -846,6 +1183,514 @@ mod settle_entry_tests {
 mod tests {
     use super::*;
     use crate::model::PackageManifestEntry;
+
+    fn fixture() -> (tempfile::TempDir, crate::CoreState) {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().to_path_buf());
+        paths.ensure_dirs().unwrap();
+        let store = Store::open(paths.db()).unwrap();
+        // 不运行 CoreState::init 的系统修复/计划任务；所有记录与文件限定在临时目录。
+        let state = crate::CoreState {
+            paths,
+            store,
+            manager: Arc::new(crate::services::ServiceManager::new()),
+            installer: Installer::bundled(),
+            downloader: Arc::new(crate::download::Downloader::new()),
+            emit: Arc::new(|_| {}),
+            watchdog: Arc::new(crate::watchdog::Watchdog::new()),
+        };
+        (temp, state)
+    }
+
+    fn install_fixture(state: &crate::CoreState, id: &str, version: &str) -> InstalledPackage {
+        let path = state.paths.runtime_dir(id, version);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("keep.txt"), "owned fixture").unwrap();
+        let installed = InstalledPackage {
+            id: id.into(),
+            version: version.into(),
+            category: "runtime".into(),
+            install_path: path.to_string_lossy().into(),
+            config_path: String::new(),
+            installed_at: 0,
+        };
+        state.store.upsert_installed(&installed).unwrap();
+        installed
+    }
+
+    fn cached_package(state: &mut crate::CoreState, id: &str, kind: &str, bytes: &[u8]) -> String {
+        let mut entry = entry_with(vec![], vec![]);
+        entry.id = id.into();
+        entry.kind = kind.into();
+        entry.entry = "program.bin".into();
+        let key = format!("{id}@{}", entry.version);
+        let cache = state.paths.downloads().join(format!("{key}.pkg"));
+        std::fs::write(&cache, bytes).unwrap();
+        entry.sha256 = Some(crate::download::sha256_file(&cache).unwrap());
+        entry.size_bytes = bytes.len() as u64;
+        state.installer.manifest.packages.push(entry);
+        key
+    }
+
+    #[tokio::test]
+    async fn install_publishes_complete_runtime_and_preserves_previous_files() {
+        let (_temp, mut state) = fixture();
+        let key = cached_package(&mut state, "fixture", "binary", b"owned package bytes");
+        let runtime = state.paths.runtime_dir("fixture", "1.0.0");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::write(runtime.join("previous.txt"), "preserve me").unwrap();
+        let installed = state.install_package(&key).await.unwrap();
+        assert_eq!(
+            std::fs::read(runtime.join("program.bin")).unwrap(),
+            b"owned package bytes"
+        );
+        assert!(runtime.join(".niceenv-package.json").is_file());
+        assert_eq!(
+            state
+                .store
+                .find_installed("fixture", Some("1.0.0"))
+                .unwrap()
+                .install_path,
+            installed.install_path
+        );
+        let backups: Vec<_> = std::fs::read_dir(state.paths.backup())
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(backups[0].path().join("previous/previous.txt")).unwrap(),
+            "preserve me"
+        );
+        // 幂等请求也须确认主程序仍存在。
+        std::fs::remove_file(runtime.join("program.bin")).unwrap();
+        assert_eq!(
+            state.install_package(&key).await.unwrap_err().code,
+            "BROKEN_INSTALL"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_or_cancelled_extraction_leaves_no_partial_install() {
+        let (_temp, mut state) = fixture();
+        let key = cached_package(&mut state, "broken", "archive", b"not a zip archive");
+        let runtime = state.paths.runtime_dir("broken", "1.0.0");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::write(runtime.join("previous.txt"), "original").unwrap();
+        assert!(state.install_package(&key).await.is_err());
+        assert!(state
+            .store
+            .find_installed("broken", Some("1.0.0"))
+            .is_none());
+        assert_eq!(
+            std::fs::read_to_string(runtime.join("previous.txt")).unwrap(),
+            "original"
+        );
+        assert!(!std::fs::read_dir(runtime.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().starts_with(".install-")));
+
+        let key = cached_package(
+            &mut state,
+            "cancelled",
+            "binary",
+            b"cancel before publishing",
+        );
+        let result = state
+            .installer
+            .install(
+                &key,
+                &state.paths,
+                &state.store,
+                &state.downloader,
+                &|event| {
+                    if let crate::Event::DownloadProgress(progress) = event {
+                        if progress.state == "extracting" {
+                            assert!(state.downloader.cancel(&progress.task_id));
+                        }
+                    }
+                },
+            )
+            .await;
+        assert_eq!(result.unwrap_err().code, "CANCELLED");
+        assert!(!state.paths.runtime_dir("cancelled", "1.0.0").exists());
+        assert!(state
+            .store
+            .find_installed("cancelled", Some("1.0.0"))
+            .is_none());
+        assert!(
+            state.install_package(&key).await.is_ok(),
+            "取消后任务锁应释放，缓存可复用"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_failure_restores_runtime_and_install_preserves_existing_configs() {
+        let (_temp, mut state) = fixture();
+        let key = cached_package(&mut state, "php", "binary", b"fixture php bytes");
+        let runtime = state.paths.runtime_dir("php", "1.0.0");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::write(runtime.join("original.txt"), "original").unwrap();
+        let config = state.paths.php_ini("1.0.0");
+        std::fs::create_dir_all(&config).unwrap(); // 配置目标为目录，强制真实文件系统错误。
+        assert!(state.install_package(&key).await.is_err());
+        assert_eq!(
+            std::fs::read_to_string(runtime.join("original.txt")).unwrap(),
+            "original"
+        );
+        assert!(!runtime.join("program.bin").exists());
+        assert!(state.store.find_installed("php", Some("1.0.0")).is_none());
+        std::fs::remove_dir(&config).unwrap();
+        std::fs::write(&config, "memory_limit=321M\n; user configuration").unwrap();
+        state.install_package(&key).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(config).unwrap(),
+            "memory_limit=321M\n; user configuration"
+        );
+
+        let key = cached_package(&mut state, "apache", "binary", b"fixture apache bytes");
+        let config = state.paths.apache_conf();
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "existing running Apache configuration").unwrap();
+        state.install_package(&key).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(config).unwrap(),
+            "existing running Apache configuration"
+        );
+    }
+
+    #[test]
+    fn uninstall_cannot_race_install_of_same_version() {
+        let (_temp, state) = fixture();
+        let installed = install_fixture(&state, "fixture", "1.0.0");
+        let task = state.downloader.begin_task("fixture@1.0.0").unwrap();
+        assert_eq!(
+            state.uninstall_package("fixture@1.0.0").unwrap_err().code,
+            "PACKAGE_BUSY"
+        );
+        assert!(Path::new(&installed.install_path).exists());
+        drop(task);
+        state.uninstall_package("fixture@1.0.0").unwrap();
+    }
+
+    #[tokio::test]
+    async fn tar_install_publishes_files_and_rejects_broken_archive_without_gzip_fallback() {
+        let (temp, mut state) = fixture();
+        let source = temp.path().join("tar-source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("program.bin"), b"owned tar payload").unwrap();
+        let archive = temp.path().join("fixture.tar.gz");
+        let output = platform::command("tar")
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&source)
+            .arg("program.bin")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let key = cached_package(
+            &mut state,
+            "tar-good",
+            "targz",
+            &std::fs::read(&archive).unwrap(),
+        );
+        state.installer.manifest.packages.last_mut().unwrap().url =
+            "https://example.invalid/fixture.tar.gz".into();
+        let installed = state.install_package(&key).await.unwrap();
+        assert_eq!(
+            std::fs::read(Path::new(&installed.install_path).join("program.bin")).unwrap(),
+            b"owned tar payload"
+        );
+
+        let key = cached_package(&mut state, "tar-bad", "targz", b"damaged archive");
+        state.installer.manifest.packages.last_mut().unwrap().url =
+            "https://example.invalid/fixture.tar.gz".into();
+        let err = state.install_package(&key).await.unwrap_err();
+        assert_eq!(err.code, "EXTRACT_FAILED", "{err}");
+        assert!(!state.paths.runtime_dir("tar-bad", "1.0.0").exists());
+        assert!(state
+            .store
+            .find_installed("tar-bad", Some("1.0.0"))
+            .is_none());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "downloads official Nginx into a temporary directory; validates -v without starting a service"]
+    async fn official_nginx_install_checks_real_binary_and_uninstalls_cleanly() {
+        let (_temp, state) = fixture();
+        let entry = state.installer.template_for("nginx").unwrap();
+        let key = format!("nginx@{}", entry.version);
+        let installed = state.install_package(&key).await.unwrap();
+        let program = Path::new(&installed.install_path).join(entry_relative_path(&entry.entry));
+        let output = platform::command(&program).arg("-v").output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let banner = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            banner.contains(&format!("nginx/{}", entry.version)),
+            "{banner}"
+        );
+        assert_eq!(
+            state.install_package(&key).await.unwrap().installed_at,
+            installed.installed_at
+        );
+        state.uninstall_package(&key).unwrap();
+        assert!(!Path::new(&installed.install_path).exists());
+        assert!(state
+            .store
+            .find_installed("nginx", Some(&entry.version))
+            .is_none());
+        println!(
+            "official download → staged install → {} → idempotent repeat → uninstall passed",
+            banner.trim()
+        );
+    }
+
+    #[test]
+    fn switching_updates_service_metadata_and_runtime_selection() {
+        let (_temp, state) = fixture();
+        for (id, version) in [
+            ("nginx", "1.9.0"),
+            ("nginx", "1.31.0"),
+            ("node", "9.99.0"),
+            ("node", "24.21.0"),
+            ("caddy", "2.10.0"),
+            ("caddy", "2.11.0"),
+        ] {
+            install_fixture(&state, id, version);
+        }
+        crate::ops::register_services(&state.paths, &state.store, &state.manager);
+        assert_eq!(
+            state.manager.snapshot("nginx").unwrap().version.as_deref(),
+            Some("1.31.0")
+        );
+        state.set_active_version("nginx", "1.9.0").unwrap();
+        assert_eq!(
+            state.manager.snapshot("nginx").unwrap().version.as_deref(),
+            Some("1.9.0")
+        );
+        state
+            .manager
+            .set_state("nginx", crate::model::ServiceState::Starting);
+        assert_eq!(
+            state
+                .set_active_version("nginx", "1.31.0")
+                .unwrap_err()
+                .code,
+            "SERVICE_BUSY"
+        );
+        assert_eq!(
+            crate::ops::installed_by_choice(&state.store, "nginx")
+                .unwrap()
+                .version,
+            "1.9.0"
+        );
+        state.set_active_version("node", "9.99.0").unwrap();
+        state.set_active_version("caddy", "2.10.0").unwrap();
+        assert_eq!(
+            state.manager.snapshot("caddy").unwrap().version.as_deref(),
+            Some("2.10.0")
+        );
+        let packages = state.list_packages().unwrap();
+        assert!(packages
+            .iter()
+            .any(|p| p.manifest.id == "node" && p.manifest.version == "9.99.0" && p.active));
+        assert!(!packages
+            .iter()
+            .any(|p| p.manifest.id == "node" && p.manifest.version == "24.21.0" && p.active));
+        assert!(state.manager.snapshot("node").is_none());
+    }
+
+    #[test]
+    fn uninstall_checks_records_dependencies_and_refreshes_fallback() {
+        let (_temp, state) = fixture();
+        let old = install_fixture(&state, "nginx", "1.28.1");
+        install_fixture(&state, "nginx", "1.31.0");
+        state.set_active_version("nginx", "1.31.0").unwrap();
+        let missing = state.paths.runtime_dir("nginx", "1.0.0");
+        std::fs::create_dir_all(&missing).unwrap();
+        assert_eq!(
+            state.uninstall_package("nginx@1.0.0").unwrap_err().code,
+            "NOT_INSTALLED"
+        );
+        assert!(missing.exists());
+        state.watchdog.note_started("nginx");
+        state.uninstall_package("nginx@1.31.0").unwrap();
+        assert_eq!(
+            state.manager.snapshot("nginx").unwrap().version.as_deref(),
+            Some("1.28.1")
+        );
+        assert_eq!(
+            state.store.get_setting("activenginxVersion").as_deref(),
+            Some("1.28.1")
+        );
+        assert!(Path::new(&old.install_path).exists());
+        assert!(state
+            .watchdog
+            .status(&state.watchdog_config())
+            .watched
+            .is_empty());
+        state.uninstall_package("nginx@1.28.1").unwrap();
+        assert!(state.manager.snapshot("nginx").is_none());
+
+        let php = install_fixture(&state, "php", "8.4.0");
+        install_fixture(&state, "composer", "2.8.0");
+        assert_eq!(
+            state.uninstall_package("php@8.4.0").unwrap_err().code,
+            "PACKAGE_IN_USE"
+        );
+        assert!(Path::new(&php.install_path).exists());
+        install_fixture(&state, "php", "8.3.0");
+        state.uninstall_package("php@8.4.0").unwrap();
+    }
+
+    #[test]
+    fn uninstall_preserves_site_and_fixed_stack_versions() {
+        let (_temp, state) = fixture();
+        let php = install_fixture(&state, "php", "8.4.0");
+        install_fixture(&state, "php", "8.3.0");
+        let site: crate::model::Site = serde_json::from_value(serde_json::json!({
+            "id":"fixture", "name":"Fixture site", "domains":["fixture.test"],
+            "rootDir":state.paths.base, "runtime":{"kind":"php","phpVersion":"8.4.0"},
+            "https":false, "rewrite":"none", "status":"stopped", "createdAt":0,"updatedAt":0
+        }))
+        .unwrap();
+        state.store.save_site(&site).unwrap();
+        let err = state.uninstall_package("php@8.4.0").unwrap_err();
+        assert_eq!(err.code, "PACKAGE_IN_USE");
+        assert!(err.message.contains("Fixture site"));
+        assert!(Path::new(&php.install_path).exists());
+        state.store.delete_site(&site.id).unwrap();
+        let stack: crate::model::Stack = serde_json::from_value(serde_json::json!({
+            "id":"fixture", "name":"Fixed stack", "items":[{"serviceId":"php@8.4.0"}],
+            "createdAt":0,"updatedAt":0
+        }))
+        .unwrap();
+        state.store.save_stack(&stack).unwrap();
+        assert_eq!(
+            state.uninstall_package("php@8.4.0").unwrap_err().code,
+            "PACKAGE_IN_USE"
+        );
+        state.store.delete_stack(&stack.id).unwrap();
+        state.uninstall_package("php@8.4.0").unwrap();
+        assert!(state.manager.snapshot("php@8.4.0").is_none());
+    }
+
+    #[test]
+    fn uninstall_respects_site_mysql_version_bindings() {
+        let (_temp, state) = fixture();
+        let mysql = install_fixture(&state, "mysql", "8.4.0");
+        install_fixture(&state, "mysql", "8.0.40");
+        let mut site: crate::model::Site = serde_json::from_value(serde_json::json!({
+            "id":"mysql-site", "name":"MySQL fixture", "domains":["mysql.test"],
+            "rootDir":state.paths.base, "runtime":{"kind":"static"},
+            "db":{"enabled":true,"database":"fixture","username":"fixture","version":"8.4.0"},
+            "https":false, "rewrite":"none", "status":"stopped", "createdAt":0,"updatedAt":0
+        }))
+        .unwrap();
+        state.store.save_site(&site).unwrap();
+        assert_eq!(
+            state.uninstall_package("mysql@8.4.0").unwrap_err().code,
+            "PACKAGE_IN_USE"
+        );
+        assert!(Path::new(&mysql.install_path).exists());
+        assert!(state
+            .store
+            .list_installed()
+            .unwrap()
+            .iter()
+            .any(|p| p.id == "mysql" && p.version == "8.4.0"));
+        state.uninstall_package("mysql@8.0.40").unwrap();
+
+        // 跟随默认版本允许保留一个候选，但最后一个版本仍受保护。
+        install_fixture(&state, "mysql", "8.0.40");
+        site.db.as_mut().unwrap().version = None;
+        state.store.save_site(&site).unwrap();
+        state.uninstall_package("mysql@8.0.40").unwrap();
+        assert_eq!(
+            state.uninstall_package("mysql@8.4.0").unwrap_err().code,
+            "PACKAGE_IN_USE"
+        );
+
+        // 关闭数据库绑定后不再阻止卸载。
+        site.db.as_mut().unwrap().version = Some("8.4.0".into());
+        site.db.as_mut().unwrap().enabled = false;
+        state.store.save_site(&site).unwrap();
+        state.uninstall_package("mysql@8.4.0").unwrap();
+        assert!(!Path::new(&mysql.install_path).exists());
+    }
+
+    #[test]
+    fn uninstall_inactive_version_keeps_running_process_and_stops_adopted_process() {
+        let (_temp, state) = fixture();
+        install_fixture(&state, "caddy", "2.10.0");
+        install_fixture(&state, "caddy", "2.11.0");
+        state.set_active_version("caddy", "2.11.0").unwrap();
+        // 真正的短暂自有子进程；用 Drop 兜底清理，断言失败也不留残余进程。
+        struct ChildGuard(std::process::Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut command = if cfg!(windows) {
+            let mut command = platform::command("powershell.exe");
+            command.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 30",
+            ]);
+            command
+        } else {
+            let mut command = platform::command("sleep");
+            command.arg("30");
+            command
+        };
+        let child = ChildGuard(command.spawn().unwrap());
+        let pid = child.0.id();
+        state.manager.adopt("caddy", &[pid], Some(32123));
+        state.watchdog.note_started("caddy");
+        assert_eq!(
+            state
+                .set_active_version("caddy", "2.10.0")
+                .unwrap_err()
+                .code,
+            "SERVICE_BUSY"
+        );
+        state.uninstall_package("caddy@2.10.0").unwrap();
+        let running = state.manager.snapshot("caddy").unwrap();
+        assert_eq!(running.version.as_deref(), Some("2.11.0"));
+        assert_eq!(running.port, Some(32123));
+        assert!(platform::process_alive(pid));
+        assert_eq!(
+            state
+                .watchdog
+                .status(&state.watchdog_config())
+                .watched
+                .len(),
+            1
+        );
+        state.uninstall_package("caddy@2.11.0").unwrap();
+        assert!(!platform::process_alive(pid));
+        assert!(state.manager.snapshot("caddy").is_none());
+        assert!(state
+            .watchdog
+            .status(&state.watchdog_config())
+            .watched
+            .is_empty());
+    }
 
     fn entry_with(os: Vec<&str>, arch: Vec<&str>) -> PackageManifestEntry {
         serde_json::from_value(serde_json::json!({

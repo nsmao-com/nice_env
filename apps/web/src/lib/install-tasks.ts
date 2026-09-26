@@ -16,7 +16,7 @@ import { useUI } from "./store";
      各处按 taskId 精确取值，进度刷新只重渲染相关的那一行。
    ============================================================ */
 
-export type InstallStatus = "running" | "done" | "error";
+export type InstallStatus = "running" | "done" | "error" | "cancelled";
 
 export interface InstallTask {
   /** `${id}@${version}`（与后端下载进度的 taskId 一致）；不指定版本时就是 id，由后端取最新版 */
@@ -26,6 +26,7 @@ export interface InstallTask {
   displayName: string;
   status: InstallStatus;
   error?: string;
+  cancelRequested?: boolean;
 }
 
 interface InstallTasksState {
@@ -39,18 +40,16 @@ interface InstallTasksState {
     target: { id: string; version?: string; displayName: string },
     opts?: { quiet?: boolean }
   ) => Promise<boolean>;
-  cancel: (key: string) => Promise<void>;
+  cancel: (key: string) => Promise<boolean>;
 }
 
 /** 进行中任务的 Promise（去重用，不进 state，避免无意义的重渲染） */
 const inflight = new Map<string, Promise<boolean>>();
-/** 用户主动取消的任务：失败回调里据此区分「取消」与「出错」 */
-const cancelled = new Set<string>();
 
 /** store 外取文案（toast 可能在弹窗/页面卸载后才触发，拿不到 useT） */
 const t = (key: TKey) => useUI.getState().t(key);
 
-export const useInstallTasks = create<InstallTasksState>()((set) => ({
+export const useInstallTasks = create<InstallTasksState>()((set, get) => ({
   tasks: {},
   progress: {},
 
@@ -61,7 +60,6 @@ export const useInstallTasks = create<InstallTasksState>()((set) => ({
     const running = inflight.get(key);
     if (running) return running;
 
-    cancelled.delete(key);
     set((s) => {
       // 清掉上一次（失败/已完成）残留的进度，免得重装时一上来就显示「已完成」
       const progress = { ...s.progress };
@@ -80,44 +78,55 @@ export const useInstallTasks = create<InstallTasksState>()((set) => ({
       .installPackage(key)
       .then(
         () => {
-          set((s) => ({ tasks: { ...s.tasks, [key]: { ...s.tasks[key], status: "done", error: undefined } } }));
+          set((s) => ({ tasks: { ...s.tasks, [key]: { ...s.tasks[key], status: "done", cancelRequested: false, error: undefined } } }));
           if (!opts?.quiet) toast.success(`${label} ${t("packages.installed")}`);
           return true;
         },
         (e: unknown) => {
-          if (cancelled.has(key)) {
-            // 取消不是失败：直接移除任务，界面回到未安装状态
-            set((s) => {
-              const tasks = { ...s.tasks };
-              delete tasks[key];
-              return { tasks };
-            });
+          const err = normalizeError(e);
+          if (err.code === "CANCELLED") {
+            // 以后端确认结果为准；点击取消本身不能冒充任务已停止。
+            set((s) => ({ tasks: { ...s.tasks, [key]: { ...s.tasks[key], status: "cancelled", cancelRequested: false } } }));
+            toast.info(`${label} ${t("install.cancelled")}`);
             return false;
           }
-          const err = normalizeError(e);
           const message = err.message ? `${err.message}${err.hint ? ` — ${err.hint}` : ""}` : String(e);
-          set((s) => ({ tasks: { ...s.tasks, [key]: { ...s.tasks[key], status: "error", error: message } } }));
-          toast.error(`${label} ${t("install.failed")}`, { description: message });
+          set((s) => ({ tasks: { ...s.tasks, [key]: { ...s.tasks[key], status: "error", cancelRequested: false, error: message } } }));
+          toast.error(`${label} ${t("install.failed")}`, {
+            description: message,
+            classNames: { description: "line-clamp-2 [overflow-wrap:anywhere]" },
+          });
           return false;
         }
       )
       .finally(() => {
         inflight.delete(key);
-        cancelled.delete(key);
+        set((s) => ({ progress: Object.fromEntries(Object.entries(s.progress).filter(([id]) =>
+          id !== key && (!!target.version || !id.startsWith(`${target.id}@`))
+        )) }));
       });
     inflight.set(key, promise);
     return promise;
   },
 
   cancel: async (key) => {
-    // 非本 store 发起的下载（如新手引导）也照样取消，只是没有任务状态要收尾
-    if (inflight.has(key)) cancelled.add(key);
+    if (get().tasks[key]?.cancelRequested) return false;
+    const markRequested = (requested: boolean) => set((s) => s.tasks[key]?.status === "running"
+      ? { tasks: { ...s.tasks, [key]: { ...s.tasks[key], cancelRequested: requested } } } : s);
+    markRequested(true);
     try {
-      await api.cancelDownload(key);
-      toast.info(t("install.cancelled"));
+      const accepted = await api.cancelDownload(key);
+      if (!accepted) {
+        markRequested(false);
+        if (get().tasks[key]?.status === "running") toast.info(t("install.cannotCancel"));
+      } else if (!get().tasks[key]) {
+        toast.info(t("install.cancelling"));
+      }
+      return accepted;
     } catch (e) {
-      cancelled.delete(key);
+      markRequested(false);
       toast.error(normalizeError(e).message || t("install.failed"));
+      return false;
     }
   },
 }));
@@ -126,7 +135,7 @@ export const useInstallTasks = create<InstallTasksState>()((set) => ({
 export function activeProgressFor(progress: Record<string, DownloadProgress>, pkgId: string) {
   const prefix = `${pkgId}@`;
   for (const p of Object.values(progress)) {
-    if (p.taskId.startsWith(prefix) && p.received < p.total) return p;
+    if (p.taskId.startsWith(prefix) && ["downloading", "downloaded", "verifying", "extracting", "configuring"].includes(p.state)) return p;
   }
   return undefined;
 }

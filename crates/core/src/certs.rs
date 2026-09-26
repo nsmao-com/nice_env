@@ -1,11 +1,6 @@
 //! 证书健康检查与自定义证书导入。
 //!
-//! 自签证书不会过期（我们签 10 年），但两件事会真的咬人：
-//! 1. **用户导入的证书**（公司内网 CA、通配符证书）有真实有效期，
-//!    过期当天站点直接打不开，而浏览器给的提示往往看不出是过期；
-//! 2. **证书与站点配置对不上**：域名改了但证书没重新签，SAN 里没有新域名。
-//!
-//! 这里把两件事都查出来，并给出「还剩几天 / 该怎么办」。
+//! 检查真实证书的有效期、私钥匹配和站点 SAN 覆盖，安全导入及管理自定义证书。
 
 use std::path::{Path, PathBuf};
 
@@ -71,85 +66,83 @@ pub fn status_for(days_left: i64) -> &'static str {
     }
 }
 
-/// 生成体检报告
+/// 按磁盘文件体检，不使用数据库缓存的有效期，也不在体检时生成/覆盖证书。
 pub fn report(paths: &Paths, store: &crate::store::Store) -> Result<CertReport> {
-    let certs = crate::tls::list_certs(paths, store)?;
-    let sites = crate::sites::list(store).unwrap_or_default();
-    let now = chrono::Local::now().timestamp();
-    let day = 86_400i64;
-
-    let mut out: Vec<CertHealth> = Vec::with_capacity(certs.len());
+    let _files = crate::tls::CERT_FILES.lock();
+    let sites = store.list_sites()?;
+    let mut certs = store.list_certs()?;
+    certs.retain(|c| c.kind != "ca");
+    certs.insert(0, crate::model::CertRecord {
+        id: "ca".into(), kind: "ca".into(), subject: "NiceEnv Local Root CA".into(), sans: vec![],
+        not_before: 0, not_after: 0, cert_path: paths.certs().join("ca.crt").to_string_lossy().into(),
+        key_path: Some(paths.certs().join("ca.key").to_string_lossy().into()), trusted: None,
+    });
+    let now = chrono::Utc::now().timestamp();
+    let mut out = Vec::new();
     for c in certs {
-        let days_left = (c.not_after - now).div_euclid(day);
-        let status = status_for(days_left).to_string();
-        let file_present = Path::new(&c.cert_path).is_file();
-
-        // 哪些站点在用这张证书（按域名交集判断）
-        let used_by: Vec<String> = sites
-            .iter()
-            .filter(|s| s.domains.iter().any(|d| c.sans.iter().any(|san| san == d)))
-            .map(|s| s.name.clone())
-            .collect();
-
-        // 站点当前域名里，证书没覆盖的
-        let mut missing: Vec<String> = Vec::new();
-        if c.kind == "site" {
-            for s in &sites {
-                if used_by.contains(&s.name) {
-                    for d in &s.domains {
-                        if !c.sans.iter().any(|san| san == d) && !missing.contains(d) {
-                            missing.push(d.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        let advice = if !file_present {
-            "证书文件已丢失，请到「证书」页重新签发".to_string()
-        } else if status == "expired" {
-            if c.kind == "ca" {
-                "根 CA 已过期，需要重建 CA 并重新签发所有站点证书".to_string()
-            } else {
-                "已过期：到站点详情里重新签发证书即可".to_string()
-            }
-        } else if status == "critical" || status == "warn" {
-            format!("还有 {days_left} 天到期，建议尽快重新签发")
+        let users: Vec<_> = sites.iter().filter(|s| s.https && s.runtime.imported_cert_id.is_none()
+            && s.domains.first().is_some_and(|domain| domain.eq_ignore_ascii_case(&c.subject))).collect();
+        let mut subject = c.subject;
+        let mut sans = c.sans;
+        let mut not_after = c.not_after / 1000;
+        let mut not_before = c.not_before / 1000;
+        let checked: Result<()> = (|| {
+            let pem = read_pem(Path::new(&c.cert_path))?;
+            let info = parse_pem_info(&pem).ok_or_else(|| AppError::new("CERT_PARSE_FAILED", "证书内容损坏，无法解析"))?;
+            subject = info.0; sans = info.1; not_before = info.2; not_after = info.3;
+            let key = c.key_path.as_deref().ok_or_else(|| AppError::new("NOT_A_KEY", "没有匹配的私钥文件"))?;
+            check_pair(&pem, &read_pem(Path::new(key))?)
+        })();
+        let file_present = Path::new(&c.cert_path).is_file()
+            && c.key_path.as_deref().is_some_and(|key| Path::new(key).is_file());
+        let missing: Vec<_> = users.iter().flat_map(|s| &s.domains)
+            .filter(|domain| !covers_domain(&sans, domain)).cloned().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+        let days_left = (not_after - now).div_euclid(86_400);
+        let repair = if c.kind == "ca" { "请恢复匹配的根 CA 证书与私钥；过期根 CA 需要重新配置。" }
+            else if c.kind == "acme" { "请在自动签发页续签并重新部署。" }
+            else { "请重新签发本地证书。" };
+        let (status, advice) = if let Err(error) = checked {
+            ("invalid".into(), format!("{}。{repair}", error.message))
+        } else if not_before > now {
+            ("invalid".into(), format!("证书尚未生效。{repair}"))
+        } else if not_after <= now {
+            ("expired".into(), format!("证书已过期。{repair}"))
         } else if !missing.is_empty() {
-            format!("证书未覆盖域名 {}，需重新签发", missing.join("、"))
+            ("invalid".into(), format!("证书未覆盖域名 {}。{repair}", missing.join("、")))
         } else {
-            String::new()
+            let status = if c.kind == "site" && days_left > CRIT_DAYS { "ok" } else { status_for(days_left) };
+            let advice = if status == "ok" { String::new() } else { format!("还有 {days_left} 天到期。{repair}") };
+            (status.into(), advice)
         };
-
         out.push(CertHealth {
-            id: c.id,
-            kind: c.kind,
-            subject: c.subject,
-            sans: c.sans,
-            not_after: c.not_after,
-            days_left,
-            status,
-            file_present,
-            used_by_sites: used_by,
-            missing_sans: missing,
-            advice,
+            id: c.id, kind: c.kind, subject, sans, not_after, days_left, status, file_present,
+            used_by_sites: users.iter().map(|s| s.name.clone()).collect(), missing_sans: missing, advice,
         });
     }
-
-    // 最紧急的排前面，方便一眼看到要先处理谁
-    out.sort_by_key(|c| c.days_left);
-
-    let expired = out.iter().filter(|c| c.status == "expired").count();
-    let critical = out.iter().filter(|c| c.status == "critical").count();
-    let warning = out.iter().filter(|c| c.status == "warn").count();
-
+    for cert in list_imported(paths, store)? {
+        let missing: Vec<_> = sites.iter().filter(|s| s.https && s.runtime.imported_cert_id.as_deref() == Some(&cert.id))
+            .flat_map(|s| &s.domains).filter(|d| !covers_domain(&cert.sans, d)).cloned()
+            .collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+        let status = if cert.not_after > 0 && cert.not_after <= now { "expired" }
+            else if !cert.usable || !missing.is_empty() { "invalid" } else { status_for(cert.days_left) };
+        let advice = cert.problem.clone().unwrap_or_else(|| {
+            if !missing.is_empty() { format!("所选证书未覆盖域名 {}", missing.join("、")) }
+            else if status != "ok" { format!("还有 {} 天到期，请导入续签证书并更新站点的证书选择。", cert.days_left) }
+            else { String::new() }
+        });
+        out.push(CertHealth {
+            id: cert.id, kind: "imported".into(), subject: cert.subject, sans: cert.sans,
+            not_after: cert.not_after, days_left: cert.days_left, status: status.into(),
+            file_present: Path::new(&cert.cert_path).is_file() && Path::new(&cert.key_path).is_file(),
+            used_by_sites: cert.used_by_sites, missing_sans: missing, advice,
+        });
+    }
+    out.sort_by_key(|c| (c.advice.is_empty(), c.days_left));
     Ok(CertReport {
-        certs: out,
-        expired,
-        critical,
-        warning,
-        ca_trusted: crate::tls::ca_trusted(paths),
-        checked_at: now,
+        expired: out.iter().filter(|c| c.status == "expired").count(),
+        critical: out.iter().filter(|c| c.status == "critical" || c.status == "invalid").count(),
+        warning: out.iter().filter(|c| c.status == "warn").count(),
+        ca_trusted: crate::tls::ca_trusted(paths), checked_at: now, certs: out,
     })
 }
 
@@ -159,6 +152,12 @@ pub fn report(paths: &Paths, store: &crate::store::Store) -> Result<CertReport> 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportedCert {
+    pub id: String,
+    pub usable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+    #[serde(default)]
+    pub used_by_sites: Vec<String>,
     /// 落地后的证书路径
     pub cert_path: String,
     pub key_path: String,
@@ -169,261 +168,326 @@ pub struct ImportedCert {
     pub days_left: i64,
 }
 
-/// 浅解析 PEM 证书，取出 subject / SAN / 有效期。
-///
-/// 这里**不引入 X.509 解析库**：本应用生成证书用的是 rcgen，但没有解析需求；
-/// 为了一个「显示证书信息」的功能拉进来一个几百 KB 的依赖不划算。
-/// 所以做法是从 PEM 里取出 DER，再按 ASN.1 结构把 CN 与 SAN 里的
-/// 可见字符串抠出来——足够满足「让用户确认导入的是哪张证书」。
+/// 使用已有 X.509 解析器读取第一张证书；有效期统一为 Unix 秒。
 pub fn parse_pem_info(pem: &str) -> Option<(String, Vec<String>, i64, i64)> {
-    let der = pem_to_der(pem)?;
-    let text = extract_ascii_strings(&der);
-    // 有效期：取两个看起来像日期的字符串（UTCTime/GeneralizedTime）
-    let dates = extract_dates(&der);
-    let (nb, na) = (
-        dates.first().copied().unwrap_or(0),
-        dates.get(1).copied().unwrap_or(0),
-    );
-    // CN 优先，其次取第一个像域名的字符串
-    let subject = text
-        .iter()
-        .find(|s| s.contains('.') && !s.contains(' ') && looks_like_host(s))
-        .cloned()
-        .unwrap_or_else(|| "unknown".to_string());
-    let sans: Vec<String> = text
-        .iter()
-        .filter(|s| looks_like_host(s) && s.contains('.'))
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    Some((subject, sans, nb, na))
+    let chain = parse_chain(pem).ok()?;
+    cert_info(chain.first()?.as_ref()).ok()
 }
 
-fn pem_to_der(pem: &str) -> Option<Vec<u8>> {
-    let begin = pem.find("-----BEGIN CERTIFICATE-----")?;
-    let after = &pem[begin + "-----BEGIN CERTIFICATE-----".len()..];
-    let end = after.find("-----END CERTIFICATE-----")?;
-    let b64: String = after[..end]
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect();
-    base64_decode(&b64)
-}
-
-/// 极简 base64 解码（避免为一个功能引入依赖）
+// 保留旧的纯函数 API，现有源码测试仍覆盖它们；实际导入路径全部使用上面的 X.509 解析。
+#[cfg(test)]
 fn base64_decode(s: &str) -> Option<Vec<u8>> {
-    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = Vec::with_capacity(s.len() * 3 / 4);
-    let mut buf: u32 = 0;
-    let mut bits = 0u32;
-    for ch in s.bytes() {
-        if ch == b'=' {
-            break;
-        }
-        let v = T.iter().position(|c| *c == ch)? as u32;
-        buf = (buf << 6) | v;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buf >> bits) as u8);
-        }
-    }
-    Some(out)
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.decode(s).ok()
 }
-
-/// 从 DER 里抠出可见的 ASCII 串（长度 ≥4）
-fn extract_ascii_strings(der: &[u8]) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    for &b in der {
-        if (0x20..0x7f).contains(&b) {
-            cur.push(b as char);
-        } else {
-            if cur.len() >= 4 {
-                out.push(cur.clone());
-            }
-            cur.clear();
-        }
-    }
-    if cur.len() >= 4 {
-        out.push(cur);
-    }
-    out
-}
-
-fn looks_like_host(s: &str) -> bool {
-    // 只保留「字母数字.-*」组成的串，且不含常见噪声词
-    !s.is_empty()
-        && s.len() <= 253
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '*' | '_'))
-        && !s.chars().all(|c| c.is_ascii_digit())
-}
-
-/// 从 DER 里找 UTCTime(YYMMDDHHMMSSZ) / GeneralizedTime(YYYYMMDDHHMMSSZ)
-fn extract_dates(der: &[u8]) -> Vec<i64> {
-    let mut out = Vec::new();
-    let mut i = 0usize;
-    while i < der.len() {
-        // UTCTime: tag 0x17, GeneralizedTime: tag 0x18
-        if der[i] == 0x17 || der[i] == 0x18 {
-            let generalized = der[i] == 0x18;
-            let need = if generalized { 15 } else { 13 };
-            if i + 2 + need <= der.len() && der[i + 1] as usize == need {
-                let s: String = der[i + 2..i + 2 + need]
-                    .iter()
-                    .take_while(|b| b.is_ascii_digit() || **b == b'Z')
-                    .map(|b| *b as char)
-                    .collect();
-                if let Some(ts) = parse_asn1_time(&s, generalized) {
-                    out.push(ts);
-                }
-                i += 2 + need;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    out.sort_unstable();
-    out.dedup();
-    out
-}
-
-/// ASN.1 时间 → Unix 秒
-pub fn parse_asn1_time(s: &str, generalized: bool) -> Option<i64> {
+#[cfg(test)]
+fn parse_asn1_time(s: &str, generalized: bool) -> Option<i64> {
     let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
-    let (y, rest) = if generalized {
-        if digits.len() < 14 {
-            return None;
-        }
+    let (year, rest) = if generalized {
+        if digits.len() < 14 { return None; }
         (digits[0..4].parse::<i32>().ok()?, &digits[4..])
     } else {
-        if digits.len() < 12 {
-            return None;
-        }
-        let yy: i32 = digits[0..2].parse().ok()?;
-        // UTCTime：50-99 是 19xx，00-49 是 20xx
+        if digits.len() < 12 { return None; }
+        let yy = digits[0..2].parse::<i32>().ok()?;
         (if yy >= 50 { 1900 + yy } else { 2000 + yy }, &digits[2..])
     };
-    let mo: u32 = rest.get(0..2)?.parse().ok()?;
-    let d: u32 = rest.get(2..4)?.parse().ok()?;
-    let h: u32 = rest.get(4..6)?.parse().ok()?;
-    let mi: u32 = rest.get(6..8)?.parse().ok()?;
-    let se: u32 = rest.get(8..10)?.parse().ok()?;
-    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || se > 60 {
-        return None;
+    let month = rest.get(0..2)?.parse::<u32>().ok()?;
+    let day = rest.get(2..4)?.parse::<u32>().ok()?;
+    let hour = rest.get(4..6)?.parse::<u32>().ok()?;
+    let minute = rest.get(6..8)?.parse::<u32>().ok()?;
+    let second = rest.get(8..10)?.parse::<u32>().ok()?;
+    chrono::NaiveDate::from_ymd_opt(year, month, day)?.and_hms_opt(hour, minute, second)?.and_utc().timestamp().into()
+}
+#[cfg(test)]
+fn extract_ascii_strings(der: &[u8]) -> Vec<String> {
+    let mut out = Vec::new(); let mut current = String::new();
+    for byte in der.iter().copied().chain(std::iter::once(0)) {
+        if (0x20..0x7f).contains(&byte) { current.push(byte as char); }
+        else { if current.len() >= 4 { out.push(std::mem::take(&mut current)); } else { current.clear(); } }
     }
-    chrono::NaiveDate::from_ymd_opt(y, mo, d)?
-        .and_hms_opt(h, mi, se)?
-        .and_utc()
-        .timestamp()
-        .into()
+    out
+}
+#[cfg(test)]
+fn looks_like_host(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 253 && value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '*' | '_')) && !value.chars().all(|c| c.is_ascii_digit())
+}
+#[cfg(test)]
+fn pem_to_der(pem: &str) -> Option<Vec<u8>> {
+    let body = pem.split("-----BEGIN CERTIFICATE-----").nth(1)?.split("-----END CERTIFICATE-----").next()?;
+    base64_decode(&body.chars().filter(|c| !c.is_whitespace()).collect::<String>())
 }
 
-/// 导入一对证书文件到本应用（复制而非移动，不动用户的原始文件）
-pub fn import_cert_pair(paths: &Paths, cert_src: &Path, key_src: &Path) -> Result<ImportedCert> {
-    let cert_pem =
-        std::fs::read_to_string(cert_src).map_err(|e| AppError::io("读取证书文件", e))?;
-    if !cert_pem.contains("BEGIN CERTIFICATE") {
-        return Err(AppError::new("NOT_A_CERT", "这个文件里没有 PEM 格式的证书")
-            .with_hint("请选择 .crt / .pem 证书文件（不是 .key 私钥，也不是 .pfx 二进制格式）"));
+fn parse_chain(pem: &str) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    use rustls::pki_types::pem::PemObject;
+    let chain = rustls::pki_types::CertificateDer::pem_slice_iter(pem.as_bytes())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| AppError::new("CERT_PARSE_FAILED", format!("证书 PEM 无法解析：{e}")))?;
+    if chain.is_empty() { return Err(AppError::new("NOT_A_CERT", "这个文件里没有 PEM 格式的证书")); }
+    for cert in &chain {
+        x509_parser::parse_x509_certificate(cert.as_ref())
+            .map_err(|e| AppError::new("CERT_PARSE_FAILED", format!("证书内容无法解析：{e}")))?;
     }
-    let key_pem = std::fs::read_to_string(key_src).map_err(|e| AppError::io("读取私钥文件", e))?;
-    if !key_pem.contains("PRIVATE KEY") {
-        return Err(AppError::new("NOT_A_KEY", "这个文件里没有 PEM 格式的私钥")
-            .with_hint("请选择 .key 私钥文件；若只有 .pfx，需要先转换成 pem"));
+    Ok(chain)
+}
+
+fn cert_info(der: &[u8]) -> Result<(String, Vec<String>, i64, i64)> {
+    use x509_parser::extensions::GeneralName;
+    let (_, cert) = x509_parser::parse_x509_certificate(der)
+        .map_err(|e| AppError::new("CERT_PARSE_FAILED", format!("证书内容无法解析：{e}")))?;
+    let mut sans = Vec::new();
+    let extension = cert.subject_alternative_name()
+        .map_err(|e| AppError::new("CERT_PARSE_FAILED", format!("SAN 无法解析：{e}")))?;
+    if let Some(extension) = extension {
+        for name in &extension.value.general_names {
+            let name = match name {
+                GeneralName::DNSName(name) => Some(name.to_ascii_lowercase()),
+                GeneralName::IPAddress(bytes) if bytes.len() == 4 =>
+                    Some(std::net::Ipv4Addr::from(<[u8; 4]>::try_from(*bytes).unwrap()).to_string()),
+                GeneralName::IPAddress(bytes) if bytes.len() == 16 =>
+                    Some(std::net::Ipv6Addr::from(<[u8; 16]>::try_from(*bytes).unwrap()).to_string()),
+                _ => None,
+            };
+            if let Some(name) = name { if !sans.contains(&name) { sans.push(name); } }
+        }
     }
-    let (subject, sans, not_before, not_after) = parse_pem_info(&cert_pem)
-        .ok_or_else(|| AppError::new("CERT_PARSE_FAILED", "无法解析这张证书"))?;
+    let subject = cert.subject().iter_common_name().next().and_then(|cn| cn.as_str().ok())
+        .map(str::to_string).or_else(|| sans.first().cloned()).unwrap_or_else(|| cert.subject().to_string());
+    Ok((subject, sans, cert.validity().not_before.timestamp(), cert.validity().not_after.timestamp()))
+}
 
-    let dir = paths.certs().join("imported");
-    std::fs::create_dir_all(&dir).map_err(|e| AppError::io("创建证书目录", e))?;
-    // 用证书主体 + 时间戳命名，避免同名互相覆盖
-    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-    let safe_subject: String = subject
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let base = format!("{safe_subject}-{stamp}");
-    let cert_dst = dir.join(format!("{base}.crt"));
-    let key_dst = dir.join(format!("{base}.key"));
-    std::fs::write(&cert_dst, &cert_pem).map_err(|e| AppError::io("写入证书", e))?;
-    // 私钥文件权限收紧（Windows 上 ACL 由上层处理，至少不要放到世界可读的临时目录）
-    std::fs::write(&key_dst, &key_pem).map_err(|e| AppError::io("写入私钥", e))?;
+fn check_pair(cert_pem: &str, key_pem: &str) -> Result<()> {
+    use rustls::pki_types::pem::PemObject;
+    let chain = parse_chain(cert_pem)?;
+    let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(key_pem.as_bytes())
+        .map_err(|_| AppError::new("NOT_A_KEY", "无法解析私钥，请选择未加密的 PEM 私钥（PKCS#1、PKCS#8 或 SEC1）"))?;
+    let certified = rustls::sign::CertifiedKey::from_der(chain, key, &rustls::crypto::ring::default_provider())
+        .map_err(|_| AppError::new("CERT_KEY_MISMATCH", "证书与私钥不匹配，或私钥算法不受支持"))?;
+    certified.keys_match().map_err(|_| AppError::new("CERT_KEY_MISMATCH", "证书与私钥不匹配"))
+}
 
-    let now = chrono::Local::now().timestamp();
-    Ok(ImportedCert {
-        cert_path: cert_dst.to_string_lossy().to_string(),
-        key_path: key_dst.to_string_lossy().to_string(),
-        subject,
-        sans,
-        not_before,
-        not_after,
-        days_left: (not_after - now).div_euclid(86_400),
+fn read_pem(path: &Path) -> Result<String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|e| AppError::io("读取证书或私钥文件", e))?;
+    if !file.metadata()?.is_file() { return Err(AppError::new("CERT_FILE", "请选择证书文件，不能选择目录")); }
+    let mut text = String::new();
+    file.take(4 * 1024 * 1024 + 1).read_to_string(&mut text)
+        .map_err(|e| AppError::io("读取 PEM 文件", e))?;
+    if text.len() > 4 * 1024 * 1024 { return Err(AppError::new("CERT_FILE_SIZE", "证书或私钥文件超过 4 MiB")); }
+    Ok(text)
+}
+
+fn read_managed_pem(path: &Path) -> Result<String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|e| AppError::io("读取托管证书文件", e))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(AppError::new("CERT_FILE", "托管证书文件必须是普通文件，不能是软链接或目录"));
+    }
+    read_pem(path)
+}
+
+fn check_server_leaf(pem: &str) -> Result<()> {
+    let chain = parse_chain(pem)?;
+    let (_, leaf) = x509_parser::parse_x509_certificate(chain[0].as_ref())
+        .map_err(|e| AppError::new("CERT_PARSE_FAILED", e.to_string()))?;
+    if leaf.is_ca() { return Err(AppError::new("CERT_IS_CA", "请选择站点证书；根证书和中间 CA 不能作为站点证书导入")); }
+    let eku = leaf.extended_key_usage().map_err(|e| AppError::new("CERT_PARSE_FAILED", e.to_string()))?;
+    if eku.is_some_and(|eku| !eku.value.server_auth && !eku.value.any) {
+        return Err(AppError::new("CERT_USAGE", "这张证书不允许用于 HTTPS 服务器"));
+    }
+    Ok(())
+}
+
+pub fn valid_imported_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 200 && id != "." && id != ".."
+        && id.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-' | b'_'))
+}
+
+pub fn imported_paths(paths: &Paths, id: &str) -> Result<(PathBuf, PathBuf)> {
+    if !valid_imported_id(id) { return Err(AppError::new("BAD_CERT_ID", "导入证书标识无效，请重新选择证书")); }
+    Ok((
+        crate::paths::checked_data_path(&paths.base, &format!("certs/imported/{id}.crt"))?,
+        crate::paths::checked_data_path(&paths.base, &format!("certs/imported/{id}.key"))?,
+    ))
+}
+
+/// DNS 通配符只覆盖一个标签；IP 与显式通配符站点要求精确 SAN。
+pub fn covers_domain(sans: &[String], domain: &str) -> bool {
+    let domain = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+    sans.iter().any(|san| {
+        if san.eq_ignore_ascii_case(&domain) { return true; }
+        if domain.parse::<std::net::IpAddr>().is_ok() || domain.starts_with("*.") { return false; }
+        san.strip_prefix("*.").is_some_and(|suffix|
+            domain.split_once('.').is_some_and(|(label, rest)| !label.is_empty() && rest.eq_ignore_ascii_case(suffix))
+        )
     })
 }
 
-/// 已导入的证书列表
-pub fn list_imported(paths: &Paths) -> Vec<ImportedCert> {
-    let dir = paths.certs().join("imported");
-    let mut out = Vec::new();
-    let rd = match std::fs::read_dir(&dir) {
-        Ok(r) => r,
-        Err(_) => return out,
+fn imported_entry(paths: &Paths, id: &str) -> ImportedCert {
+    let mut entry = ImportedCert {
+        id: id.into(), cert_path: paths.certs().join("imported").join(format!("{id}.crt")).to_string_lossy().into(),
+        key_path: paths.certs().join("imported").join(format!("{id}.key")).to_string_lossy().into(),
+        subject: id.into(), sans: vec![], not_before: 0, not_after: 0, days_left: 0,
+        usable: false, problem: None, used_by_sites: vec![],
     };
-    for e in rd.flatten() {
-        let p = e.path();
-        if p.extension().and_then(|s| s.to_str()) != Some("crt") {
-            continue;
-        }
-        let pem = match std::fs::read_to_string(&p) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let key = p.with_extension("key");
-        if let Some((subject, sans, nb, na)) = parse_pem_info(&pem) {
-            let now = chrono::Local::now().timestamp();
-            out.push(ImportedCert {
-                cert_path: p.to_string_lossy().to_string(),
-                key_path: key.to_string_lossy().to_string(),
-                subject,
-                sans,
-                not_before: nb,
-                not_after: na,
-                days_left: (na - now).div_euclid(86_400),
-            });
-        }
+    let checked: Result<()> = (|| {
+        let (cert, key) = imported_paths(paths, id)?;
+        let cert_pem = read_managed_pem(&cert)?;
+        let (subject, sans, nb, na) = parse_pem_info(&cert_pem)
+            .ok_or_else(|| AppError::new("CERT_PARSE_FAILED", "无法解析证书内容"))?;
+        entry.subject = subject;
+        entry.sans = sans;
+        entry.not_before = nb;
+        entry.not_after = na;
+        let now = chrono::Utc::now().timestamp();
+        entry.days_left = (na - now).div_euclid(86_400);
+        check_server_leaf(&cert_pem)?;
+        check_pair(&cert_pem, &read_managed_pem(&key)?)?;
+        if nb > now { return Err(AppError::new("CERT_NOT_YET_VALID", "证书尚未生效")); }
+        if na <= now { return Err(AppError::new("CERT_EXPIRED", "证书已过期，请导入续签后的证书")); }
+        if entry.sans.is_empty() { return Err(AppError::new("CERT_NO_SAN", "证书没有 DNS 或 IP SAN，不能用于站点 HTTPS")); }
+        Ok(())
+    })();
+    match checked {
+        Ok(()) => entry.usable = true,
+        Err(error) => entry.problem = Some(error.message),
     }
-    out.sort_by_key(|c| c.days_left);
-    out
+    entry
 }
 
-/// 删除一个已导入的证书（只允许删导入目录里的）
-pub fn delete_imported(paths: &Paths, cert_path: &str) -> Result<()> {
-    let dir = paths.certs().join("imported");
-    let target = PathBuf::from(cert_path);
-    let canon_dir = dir
-        .canonicalize()
-        .map_err(|e| AppError::io("定位导入目录", e))?;
-    let canon = target
-        .canonicalize()
-        .map_err(|e| AppError::io("定位证书", e))?;
-    if !canon.starts_with(&canon_dir) {
-        return Err(AppError::new("FORBIDDEN", "只能删除导入目录内的证书"));
+/// 复制而非移动源文件。先验证密钥，两个临时文件写好后才发布；同名导入不覆盖旧证书。
+pub fn import_cert_pair(paths: &Paths, cert_src: &Path, key_src: &Path) -> Result<ImportedCert> {
+    use std::io::Write;
+    let _files = crate::tls::CERT_FILES.lock();
+    let cert_pem = read_pem(cert_src)?;
+    if !cert_pem.contains("BEGIN CERTIFICATE") {
+        return Err(AppError::new("NOT_A_CERT", "这个文件里没有 PEM 格式的证书")
+            .with_hint("请选择 .crt / .pem 证书文件，而不是私钥或二进制 PFX。"));
     }
-    std::fs::remove_file(&canon).map_err(|e| AppError::io("删除证书", e))?;
-    // 同名私钥一并删掉，避免留下孤儿私钥
-    let key = canon.with_extension("key");
-    if key.is_file() {
-        let _ = std::fs::remove_file(key);
+    let key_pem = read_pem(key_src)?;
+    if !key_pem.contains("PRIVATE KEY") {
+        return Err(AppError::new("NOT_A_KEY", "这个文件里没有 PEM 格式的私钥")
+            .with_hint("请选择 .key 私钥文件；若只有 .pfx，需要先转换成 PEM。"));
     }
+    check_pair(&cert_pem, &key_pem)?;
+    check_server_leaf(&cert_pem)?;
+    let dir = crate::paths::checked_data_path(&paths.base, "certs/imported")?;
+    std::fs::create_dir_all(&dir)?;
+    let id = format!("cert-{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>());
+    let (cert_dst, key_dst) = imported_paths(paths, &id)?;
+    let mut cert = tempfile::NamedTempFile::new_in(&dir)?;
+    let mut key = tempfile::NamedTempFile::new_in(&dir)?;
+    cert.write_all(cert_pem.as_bytes())?;
+    key.write_all(key_pem.as_bytes())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        key.as_file().set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    cert.as_file().sync_all()?;
+    key.as_file().sync_all()?;
+    cert.persist_noclobber(&cert_dst).map_err(|e| AppError::io("保存导入证书", e.error))?;
+    if let Err(error) = key.persist_noclobber(&key_dst) {
+        std::fs::remove_file(&cert_dst).map_err(|e| AppError::io("私钥保存失败，清理未完成的证书失败", e))?;
+        return Err(AppError::io("保存导入私钥", error.error));
+    }
+    Ok(imported_entry(paths, &id))
+}
+
+/// 目录读取错误如实返回；损坏证书与孤立私钥保留在列表并标明原因，便于清理。
+pub fn list_imported(paths: &Paths, store: &crate::store::Store) -> Result<Vec<ImportedCert>> {
+    let _files = crate::tls::CERT_FILES.lock();
+    let dir = crate::paths::checked_data_path(&paths.base, "certs/imported")?;
+    let read = match std::fs::read_dir(&dir) {
+        Ok(read) => read,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(error) => return Err(AppError::io("读取导入证书目录", error)),
+    };
+    let mut ids = std::collections::BTreeSet::new();
+    for entry in read {
+        let entry = entry?;
+        if entry.file_type()?.is_symlink() { continue; }
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()).is_some_and(|e| e == "crt" || e == "key") {
+            if let Some(id) = path.file_stem().and_then(|s| s.to_str()) { ids.insert(id.to_string()); }
+        }
+    }
+    let sites = store.list_sites()?;
+    let mut out: Vec<_> = ids.into_iter().map(|id| {
+        let mut entry = imported_entry(paths, &id);
+        entry.used_by_sites = sites.iter().filter(|s| s.runtime.imported_cert_id.as_deref() == Some(&id))
+            .map(|s| s.name.clone()).collect();
+        entry
+    }).collect();
+    out.sort_by_key(|c| (c.usable, c.days_left));
+    Ok(out)
+}
+
+pub fn validate_site_certificate(paths: &Paths, site: &crate::model::Site) -> Result<()> {
+    if !site.https { return Ok(()); }
+    let Some(id) = &site.runtime.imported_cert_id else { return Ok(()) };
+    validate_imported_domains(paths, id, &site.domains)
+}
+
+pub fn validate_imported_domains(paths: &Paths, id: &str, domains: &[String]) -> Result<()> {
+    let _files = crate::tls::CERT_FILES.lock();
+    let cert = imported_entry(paths, id);
+    if !cert.usable {
+        return Err(AppError::new("CERT_UNUSABLE", cert.problem.unwrap_or_else(|| "证书不可用".into()))
+            .with_hint("请重新导入有效证书，或改为使用本地根 CA 签发。"));
+    }
+    let missing: Vec<_> = domains.iter().filter(|d| !covers_domain(&cert.sans, d)).cloned().collect();
+    if !missing.is_empty() {
+        return Err(AppError::new("CERT_DOMAIN_MISMATCH", format!("所选证书未覆盖域名：{}", missing.join("、")))
+            .with_hint("请选择覆盖所有站点域名的证书，或修改站点域名。"));
+    }
+    Ok(())
+}
+
+/// 保留目录边界与站点引用保护；两份文件先暂存，移动失败时恢复。
+pub fn delete_imported(paths: &Paths, store: &crate::store::Store, cert_path: &str) -> Result<()> {
+    let _sites = crate::sites::SITE_CHANGES.lock();
+    let _files = crate::tls::CERT_FILES.lock();
+    let target = std::path::absolute(cert_path)?;
+    let id = target.file_stem().and_then(|s| s.to_str())
+        .ok_or_else(|| AppError::new("BAD_CERT_ID", "证书路径无效"))?;
+    let (cert, key) = imported_paths(paths, id)?;
+    if target.extension().and_then(|e| e.to_str()) != Some("crt")
+        || target.parent().map(std::fs::canonicalize).transpose()? != cert.parent().map(std::fs::canonicalize).transpose()?
+    { return Err(AppError::new("FORBIDDEN", "只能删除导入目录内的证书")); }
+    let used_by: Vec<_> = store.list_sites()?.into_iter()
+        .filter(|site| site.runtime.imported_cert_id.as_deref() == Some(id)).map(|site| site.name).collect();
+    if !used_by.is_empty() {
+        return Err(AppError::new("CERT_IN_USE", format!("证书仍被站点 {} 选择使用", used_by.join("、")))
+            .with_hint("请先到站点设置更换证书，再删除。关闭 HTTPS 不会解除已保存的证书选择。"));
+    }
+    let staging = tempfile::tempdir_in(paths.certs())?;
+    let mut moved = Vec::new();
+    let result: Result<()> = (|| {
+        for (index, source) in [cert, key].iter().enumerate() {
+            match std::fs::symlink_metadata(source) {
+                Ok(meta) if meta.is_file() => {
+                    let dest = staging.path().join(index.to_string());
+                    std::fs::rename(source, &dest)?;
+                    moved.push((source.clone(), dest));
+                }
+                Ok(_) => return Err(AppError::new("CERT_FILE", "证书路径不是普通文件，未删除")),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        for (source, dest) in moved.iter().rev() {
+            if let Err(restore) = std::fs::rename(dest, source) {
+                let recovery = staging.keep();
+                return Err(AppError::new("CERT_ROLLBACK_FAILED", "删除失败，部分证书文件需要恢复")
+                    .with_hint(format!("恢复目录：{}", recovery.display()))
+                    .with_detail(format!("{}；{restore}", error.message)));
+            }
+        }
+        return Err(error);
+    }
+    staging.close().map_err(|e| AppError::io("证书已移出列表，但暂存文件清理失败", e))?;
     Ok(())
 }
 
@@ -443,145 +507,78 @@ pub struct DirImportResult {
     pub skipped: Vec<String>,
 }
 
-/// 纯配对逻辑：同一目录下的证书文件与同名 .key 配成对。
-/// 规则（对齐 certd 的输出习惯 fullchain.pem/cert.pem + private.pem/privkey.pem）：
-/// - `x.crt` / `x.pem` 配 `x.key`
-/// - `fullchain/cert/certificate` 类证书名配 `private/privkey/key` 类私钥名（常见命名族）
-/// - 私钥文件永远不当证书用；`chain`/`ca`/`issuer` 只当链的一部分，不单独导入
+/// 同一目录内配对；完整链优先，同一私钥不重复导入 leaf 与 fullchain。
 pub fn pair_cert_files(names: &[String]) -> Vec<(String, String)> {
-    let stem = |n: &str| -> (String, Option<String>) {
-        match n.rsplit_once('.') {
-            Some((s, e)) => (s.to_string(), Some(e.to_ascii_lowercase())),
-            None => (n.to_string(), None),
-        }
-    };
-    let keyish = |stem: &str| {
-        ["private", "privkey", "privatekey"]
-            .iter()
-            .any(|c| stem.to_ascii_lowercase().contains(c))
-    };
-    let is_key = |n: &str| {
-        let (s, ext) = stem(n);
-        ext.as_deref() == Some("key") || (ext.as_deref() == Some("pem") && keyish(&s))
-    };
-    let is_cert = |n: &str| {
-        let (s, ext) = stem(n);
-        let cert_name = ["fullchain", "cert", "certificate", "server", "domain"]
-            .iter()
-            .any(|c| s.eq_ignore_ascii_case(c));
-        // fullchain 是「完整证书链（leaf 在前）」，仍按证书导入；
-        // 只排除纯中间链命名（chain/ca/issuer/…）
-        let fullchain = s.to_ascii_lowercase().contains("fullchain");
-        let chain_only = !fullchain
-            && ["chain", "ca.", ".ca", "issuer", "intermediate", "root"]
-                .iter()
-                .any(|c| s.to_ascii_lowercase().contains(c));
-        let looks_key = keyish(&s);
-        ext.as_deref() == Some("crt")
-            || (ext.as_deref() == Some("pem") && !chain_only && !looks_key)
-            || (ext.is_none() && cert_name)
-            || (ext.as_deref() == Some("pem") && cert_name && !chain_only && !looks_key)
-    };
-    let mut keys: Vec<(String, String)> = Vec::new(); // (stem_lower, filename)
-    for n in names {
-        if is_key(n) {
-            let (s, _) = stem(n);
-            keys.push((s.to_ascii_lowercase(), n.clone()));
-        }
+    fn stem(name: &str) -> String {
+        Path::new(name).file_stem().unwrap_or_default().to_string_lossy().to_ascii_lowercase()
     }
-    let family_key = |cert_stem: &str, keys: &[(String, String)]| -> Option<String> {
-        let cs = cert_stem.to_ascii_lowercase();
-        // 同名优先；fullchain/cert 族配 private/privkey 族
-        if let Some((_, k)) = keys.iter().find(|(ks, _)| *ks == cs) {
-            return Some(k.clone());
-        }
-        let cert_family = cs.contains("fullchain")
-            || cs.contains("cert")
-            || cs.contains("server")
-            || cs.contains("domain");
-        if cert_family {
-            for cand in ["private", "privkey", "key", "privatekey"] {
-                if let Some((_, k)) = keys.iter().find(|(ks, _)| ks.contains(cand)) {
-                    return Some(k.clone());
-                }
-            }
-        }
-        None
-    };
+    fn extension(name: &str) -> String {
+        Path::new(name).extension().unwrap_or_default().to_string_lossy().to_ascii_lowercase()
+    }
+    let key_name = |name: &str| matches!(stem(name).as_str(), "key" | "private" | "privkey" | "privatekey");
+    let is_key = |name: &str| extension(name) == "key" || (key_name(name) && matches!(extension(name).as_str(), "" | "pem"));
+    let is_cert = |name: &str| !is_key(name)
+        && !matches!(stem(name).as_str(), "ca" | "chain" | "issuer" | "intermediate" | "root")
+        && (matches!(extension(name).as_str(), "crt" | "cer" | "pem")
+            || matches!(name.to_ascii_lowercase().as_str(), "fullchain" | "cert" | "certificate"));
+    let mut certificates: Vec<_> = names.iter().filter(|name| is_cert(name)).collect();
+    certificates.sort_by_key(|name| (!stem(name).contains("fullchain"), name.to_ascii_lowercase()));
+    let mut keys: Vec<_> = names.iter().filter(|name| is_key(name)).collect();
+    keys.sort();
+    let mut used = std::collections::BTreeSet::new();
     let mut pairs = Vec::new();
-    let mut used_keys: Vec<String> = Vec::new();
-    for n in names {
-        if is_cert(n) {
-            let (s, _) = stem(n);
-            if let Some(k) = family_key(&s, &keys) {
-                if !used_keys.contains(&k) {
-                    used_keys.push(k.clone());
-                    pairs.push((n.clone(), k));
-                }
-            }
+    for cert in certificates {
+        let exact = keys.iter().find(|key| stem(key) == stem(cert));
+        let family = matches!(stem(cert).as_str(), "fullchain" | "cert" | "certificate" | "server" | "domain");
+        let key = exact.or_else(|| family.then(|| keys.iter().find(|key| key_name(key))).flatten());
+        if let Some(key) = key {
+            if used.insert((*key).clone()) { pairs.push((cert.clone(), (*key).clone())); }
         }
     }
     pairs
 }
 
-/// 扫描目录（含一层子目录），把所有「证书 + 私钥」对导入。
-/// 单个失败（解析不了 / 缺私钥）记进 skipped 继续，不阻断其它。
+/// 扫描目录和一层子目录，在各自目录内配对，保留完整链和来源相对路径。
 pub fn import_cert_dir(paths: &Paths, dir: &Path) -> Result<DirImportResult> {
     let mut out = DirImportResult::default();
-    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    let mut files = Vec::new();
     collect_files(dir, 0, &mut files)?;
-    let names: Vec<String> = files
-        .iter()
-        .map(|f| {
-            f.file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default()
-        })
-        .collect();
-    let pairs = pair_cert_files(&names);
-    for (cert_name, key_name) in pairs.iter() {
-        let cert_path = files.iter().find(|f| {
-            f.file_name()
-                .map(|n| n.to_string_lossy() == cert_name.as_str())
-                .unwrap_or(false)
-        });
-        let key_path = files.iter().find(|f| {
-            f.file_name()
-                .map(|n| n.to_string_lossy() == key_name.as_str())
-                .unwrap_or(false)
-        });
-        if let (Some(c), Some(k)) = (cert_path, key_path) {
-            match import_cert_pair(paths, c, k) {
-                Ok(ic) => out.imported.push(ic),
-                Err(e) => out.skipped.push(format!("{cert_name}：{}", e)),
-            }
+    let mut groups = std::collections::BTreeMap::<PathBuf, Vec<String>>::new();
+    for file in files {
+        if let (Some(parent), Some(name)) = (file.parent(), file.file_name().and_then(|n| n.to_str())) {
+            groups.entry(parent.to_path_buf()).or_default().push(name.to_string());
         }
     }
-    // 报告没配上的证书文件（只有私钥的不报，避免噪音）
-    let paired_certs: Vec<String> = pairs.iter().map(|(c, _)| c.clone()).collect();
-    for n in &names {
-        let (s, ext) = match n.rsplit_once('.') {
-            Some((s, e)) => (s.to_string(), Some(e.to_ascii_lowercase())),
-            None => (n.clone(), None),
-        };
-        let _ = s;
-        if ext.as_deref() == Some("crt") && !paired_certs.contains(n) {
-            out.skipped.push(format!("{n}：找不到同名私钥"));
+    for (parent, names) in groups {
+        let pairs = pair_cert_files(&names);
+        for (cert, key) in &pairs {
+            let source = parent.join(cert);
+            let label = source.strip_prefix(dir).unwrap_or(&source).display().to_string();
+            match import_cert_pair(paths, &source, &parent.join(key)) {
+                Ok(imported) => out.imported.push(imported),
+                Err(error) => out.skipped.push(format!("{label}：{}", error.message)),
+            }
+        }
+        for name in &names {
+            if pairs.iter().any(|(cert, key)| name == cert || name == key) { continue; }
+            let ext = Path::new(name).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+            if matches!(ext.as_str(), "crt" | "cer" | "pem" | "key") || matches!(name.as_str(), "cert" | "key") {
+                let source = parent.join(name);
+                out.skipped.push(format!("{}：未配对或属于独立链文件", source.strip_prefix(dir).unwrap_or(&source).display()));
+            }
         }
     }
     Ok(out)
 }
 
-/// 收集目录文件（最多两层：certd 输出目录常见 `{域名}/cert|key` 一层子目录）
-fn collect_files(dir: &Path, depth: u8, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
-    let read = std::fs::read_dir(dir).map_err(|e| AppError::io("读取目录", e))?;
-    for entry in read.flatten() {
-        let path = entry.path();
-        if path.is_file() {
-            out.push(path);
-        } else if depth < 1 && path.is_dir() {
-            collect_files(&path, depth + 1, out)?;
-        }
+fn collect_files(dir: &Path, depth: u8, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir).map_err(|e| AppError::io("读取证书目录", e))? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_symlink() { continue; }
+        if kind.is_file() { out.push(entry.path()); }
+        else if depth < 1 && kind.is_dir() { collect_files(&entry.path(), depth + 1, out)?; }
+        if out.len() > 2000 { return Err(AppError::new("CERT_SCAN_LIMIT", "目录内文件超过 2000 个，请选择更具体的证书目录")); }
     }
     Ok(())
 }
@@ -755,7 +752,8 @@ mod tests {
     #[test]
     fn list_imported_empty_when_dir_missing() {
         let paths = Paths::new(std::env::temp_dir().join("nsb-imp-none"));
-        assert!(list_imported(&paths).is_empty());
+        let store = crate::store::Store::open(paths.base.join("certs-test.sqlite")).unwrap();
+        assert!(list_imported(&paths, &store).unwrap().is_empty());
     }
 
     #[test]
@@ -763,10 +761,11 @@ mod tests {
         let t = std::env::temp_dir().join(format!("nsb-imp3-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&t);
         let paths = Paths::new(t.clone());
+        let store = crate::store::Store::open(t.join("certs-test.sqlite")).unwrap();
         std::fs::create_dir_all(paths.certs().join("imported")).unwrap();
         let outside = t.join("secret.crt");
         std::fs::write(&outside, "x").unwrap();
-        assert!(delete_imported(&paths, &outside.to_string_lossy()).is_err());
+        assert!(delete_imported(&paths, &store, &outside.to_string_lossy()).is_err());
         let _ = std::fs::remove_dir_all(&t);
     }
 

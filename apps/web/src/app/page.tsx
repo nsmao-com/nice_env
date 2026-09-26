@@ -2,7 +2,6 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { toast } from "sonner";
 import { motion, AnimatePresence } from "motion/react";
 import {
   Rocket,
@@ -25,9 +24,9 @@ import {
   useServices,
   useSites,
   useSystemStats,
-  useInvalidate,
   toastError,
-  toastPortConflict,
+  useQuickServiceActions,
+  serviceHasProcess,
   siteUrl,
   usePorts,
   useStacks,
@@ -38,7 +37,7 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ServiceCard } from "@/components/shared/service-card";
 import { ServiceRow } from "@/components/shared/service-row";
-import { BulkActions } from "@/components/shared/bulk-actions";
+import { BulkActions, BulkResult } from "@/components/shared/bulk-actions";
 import { StatusLight } from "@/components/shared/status-light";
 import { CopyButton, EmptyState, SectionHeader, Sparkline, ConfirmDialog } from "@/components/shared/misc";
 import { PageHeader } from "@/components/layout/app-shell";
@@ -50,77 +49,19 @@ export default function DashboardPage() {
   const { data: services } = useServices();
   const { data: sites } = useSites();
   const { data: stats } = useSystemStats(2000);
-  const invalidate = useInvalidate();
 
-  const [stackBusy, setStackBusy] = React.useState(false);
   const [confirmStopAll, setConfirmStopAll] = React.useState(false);
   const { data: stacks } = useStacks();
   const runningCount = services.filter((s) => s.state === "running").length;
-  const anyRunning = runningCount > 0;
+  const activeServices = services.filter(serviceHasProcess);
+  const anyRunning = activeServices.length > 0;
+  const quick = useQuickServiceActions(services, stacks);
+  const stackBusy = quick.busy;
 
-  /** 一键启动：优先用「用户保存的服务栈」（第一个 = 最常用的），没有则回落到内置 LNMP 顺序 */
-  const startStack = async () => {
-    setStackBusy(true);
-    const chosen = stacks[0];
-    if (chosen) {
-      try {
-        const report = await api.startStack(chosen.id);
-        const failed = report.failed.length;
-        if (failed > 0) {
-          toast.warning(t("dashboard.stackPartial"), {
-            description: report.failed.map((f) => `${f.serviceId}: ${f.error.message}`).join("\n"),
-            duration: 9000,
-          });
-        } else {
-          toast.success(t("dashboard.stackStarted"), {
-            description: `${chosen.name} · ${report.started.length + report.alreadyRunning.length} ${t("stack.rptStarted")}`,
-          });
-        }
-      } catch (e) {
-        if (!toastPortConflict(e, { onResolved: () => void startStack() })) toastError(e);
-      } finally {
-        setStackBusy(false);
-        invalidate("services", "stacks");
-      }
-      return;
-    }
-    // 还没有自定义栈：按内置顺序把已装服务起起来
-    const ids = services
-      .filter((s) => s.id === "nginx" || s.id === "redis" || s.id.startsWith("php@") || s.id.startsWith("mysql@"))
-      .sort((a, b) => {
-        const order = (id: string) => (id === "nginx" ? 3 : id.startsWith("php@") ? 2 : id.startsWith("mysql@") ? 1 : 0);
-        return order(a.id) - order(b.id);
-      })
-      .map((s) => s.id);
-    toast.promise(
-      (async () => {
-        for (const id of ids) {
-          try {
-            await api.startService(id);
-          } catch {
-            /* 单个失败继续，卡片上会看到状态 */
-          }
-        }
-        invalidate("services");
-      })(),
-      { loading: t("dashboard.startingStack"), success: t("dashboard.stackStarted"), error: t("dashboard.someFailed") }
-    ).unwrap().finally(() => setStackBusy(false));
-  };
-
+  const startStack = () => quick.start();
   const stopAll = async () => {
-    setStackBusy(true);
-    try {
-      for (const s of services) {
-        if (s.state === "running" || s.state === "starting") {
-          await api.stopService(s.id).catch(() => undefined);
-        }
-      }
-      toast.success(t("dashboard.allStopped"));
-      setConfirmStopAll(false);
-    } finally {
-      setStackBusy(false);
-      invalidate("services");
-    }
+    const report = await quick.stop(quick.stopReport?.failed.map((f) => f.serviceId));
+    if (report && !report.failed.length) setConfirmStopAll(false);
   };
 
   const view = useUI((st) => st.serviceView);
@@ -141,7 +82,7 @@ export default function DashboardPage() {
             {anyRunning ? (
               <Button
                 variant="secondary"
-                onClick={() => setConfirmStopAll(true)}
+                onClick={() => { quick.prepareStop(); setConfirmStopAll(true); }}
                 disabled={stackBusy}
                 title={t("dash.stopAllHint")}
               >
@@ -186,8 +127,9 @@ export default function DashboardPage() {
             <SectionHeader
               title={t("dash.health")}
               hint={`${runningCount}/${services.length} ${t("dash.runningCount")}`}
+              className="flex-col items-start sm:flex-row sm:items-center [&>div]:min-w-0 [&>div]:max-w-full"
               actions={
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   {/* 卡片 / 列表切换（Apple 分段控件） */}
                   <Tabs
                     value={view}
@@ -274,7 +216,7 @@ export default function DashboardPage() {
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                   <AnimatePresence>
                     {recentSites.map((site) => {
-                      const url = siteUrl(site, ports.http, ports.https);
+                      const url = siteUrl(site, ports);
                       return (
                         <motion.div key={site.id} layout initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.97 }}>
                           <Card className="group p-4 transition-colors hover:border-border-strong">
@@ -362,17 +304,19 @@ export default function DashboardPage() {
 
       <ConfirmDialog
         open={confirmStopAll}
-        onOpenChange={setConfirmStopAll}
+        onOpenChange={(open) => { if (!stackBusy) setConfirmStopAll(open); }}
         title={t("confirm.stopAll")}
-        description={t("confirm.stopAllDesc").replace(
+        description={t(quick.stopReport?.failed.length ? "bulk.retryStopHint" : "confirm.stopAllDesc").replace(
           "{count}",
-          String(services.filter((s) => s.state === "running" || s.state === "starting").length)
+          String(quick.stopTargetCount)
         )}
-        confirmText={t("dash.stopAll")}
+        confirmText={t(quick.stopReport?.failed.length ? "bulk.retryFailed" : "dash.stopAll")}
         danger
         loading={stackBusy}
         onConfirm={stopAll}
-      />
+      >
+        <BulkResult report={quick.stopReport} error={quick.stopError} services={services} busy={quick.busy} />
+      </ConfirmDialog>
     </div>
   );
 }

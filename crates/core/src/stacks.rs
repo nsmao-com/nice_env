@@ -86,7 +86,9 @@ pub fn save(store: &Store, input: StackInput) -> Result<Stack> {
     }
     let now = crate::services::now_ms();
     let existing = match &input.id {
-        Some(id) => store.get_stack(id)?,
+        Some(id) => Some(store.get_stack(id)?.ok_or_else(|| {
+            AppError::new("STACK_NOT_FOUND", "此服务栈已被删除，请关闭编辑器后刷新列表")
+        })?),
         None => None,
     };
     let stack = match existing {
@@ -102,7 +104,7 @@ pub fn save(store: &Store, input: StackInput) -> Result<Stack> {
             s
         }
         None => Stack {
-            id: input.id.unwrap_or_else(|| format!("stack-{now}")),
+            id: format!("stack-{now}-{:016x}", rand::random::<u64>()),
             name: name.to_string(),
             description: input.description,
             items: normalized_items(input.items),
@@ -122,7 +124,7 @@ pub fn duplicate(store: &Store, id: &str, name: Option<String>) -> Result<Stack>
         .ok_or_else(|| AppError::new("STACK_NOT_FOUND", format!("找不到服务栈 {id}")))?;
     let now = crate::services::now_ms();
     let stack = Stack {
-        id: format!("stack-{now}"),
+        id: format!("stack-{now}-{:016x}", rand::random::<u64>()),
         name: name.unwrap_or_else(|| format!("{} 副本", src.name)),
         description: src.description,
         items: src.items,
@@ -168,14 +170,16 @@ fn resolve_items(
     let known: Vec<String> = manager.list_status().into_iter().map(|s| s.id).collect();
     let mut runnable = Vec::new();
     let mut skipped = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for item in normalized_items(stack.items.clone()) {
         let sid = resolve_service_id(store, &known, &item.service_id);
         match sid {
-            Some(sid) => runnable.push(StackItem {
+            Some(sid) if seen.insert(sid.clone()) => runnable.push(StackItem {
                 service_id: sid,
                 label: item.label,
                 order: item.order,
             }),
+            Some(_) => {},
             None => skipped.push(item.service_id),
         }
     }
@@ -187,17 +191,120 @@ fn resolve_service_id(store: &Store, known: &[String], wanted: &str) -> Option<S
     if known.iter().any(|k| k == wanted) {
         return Some(wanted.to_string());
     }
-    // php / mysql 有版本后缀：跟随「使用中版本」
-    let base = wanted.split('@').next().unwrap_or(wanted);
-    if base == "php" || base == "mysql" {
-        if let Some(inst) = crate::ops::installed_by_choice(store, base) {
-            let sid = format!("{}@{}", base, inst.version);
-            if known.iter().any(|k| k == &sid) {
-                return Some(sid);
-            }
+    // 显式固定的版本不存在时必须报告缺失，不能悄悄换成另一个版本。
+    if wanted.contains('@') {
+        return None;
+    }
+    // 所有按版本注册的服务都跟随已选择版本，不能取 HashMap 中的第一项。
+    if let Some(inst) = crate::ops::installed_by_choice(store, wanted) {
+        let sid = format!("{}@{}", wanted, inst.version);
+        if known.iter().any(|k| k == &sid) {
+            return Some(sid);
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_fixed_version_does_not_start_or_count_another_version() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("fixture.sqlite")).unwrap();
+        store
+            .upsert_installed(&crate::model::InstalledPackage {
+                id: "php".into(),
+                version: "8.4.0".into(),
+                category: "runtime".into(),
+                install_path: String::new(),
+                config_path: String::new(),
+                installed_at: 0,
+            })
+            .unwrap();
+        let known = vec!["php@8.4.0".to_string()];
+        assert_eq!(
+            resolve_service_id(&store, &known, "php"),
+            Some("php@8.4.0".into())
+        );
+        assert_eq!(resolve_service_id(&store, &known, "php@8.3.0"), None);
+        let manager = Arc::new(ServiceManager::new());
+        manager.register(
+            "php@8.4.0",
+            "PHP",
+            Some("8.4.0".into()),
+            None,
+            None,
+            Default::default(),
+        );
+        let stack: Stack = serde_json::from_value(serde_json::json!({
+            "id":"fixture","name":"Fixed PHP","items":[{"serviceId":"php@8.3.0"}],
+            "createdAt":0,"updatedAt":0
+        }))
+        .unwrap();
+        let (items, skipped) = resolve_items(&store, &manager, &stack);
+        assert!(items.is_empty());
+        assert_eq!(skipped, ["php@8.3.0"]);
+        assert_eq!(status_of(&store, &manager, &stack), (0, 1));
+        let mut aliases = stack;
+        aliases.items = serde_json::from_value(serde_json::json!([
+            {"serviceId":"php"}, {"serviceId":"php@8.4.0"}, {"serviceId":"php"}
+        ])).unwrap();
+        let (items, skipped) = resolve_items(&store, &manager, &aliases);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].service_id, "php@8.4.0");
+        assert!(skipped.is_empty());
+    }
+
+    #[test]
+    fn selected_version_and_missing_items_control_summary() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("fixture.sqlite")).unwrap();
+        let manager = Arc::new(ServiceManager::new());
+        for version in ["8.3.17", "8.4.26"] {
+            store.upsert_installed(&crate::model::InstalledPackage {
+                id: "php".into(), version: version.into(), category: "runtime".into(),
+                install_path: String::new(), config_path: String::new(), installed_at: 0,
+            }).unwrap();
+            manager.register(&format!("php@{version}"), "PHP", Some(version.into()), None, None, Default::default());
+        }
+        // 仅状态解析：借用当前测试 PID 判断存活，不启动或结束任何进程。
+        manager.adopt("php@8.3.17", &[std::process::id()], None);
+        let mut stack: Stack = serde_json::from_value(serde_json::json!({
+            "id":"versions","name":"Versions","items":[{"serviceId":"php"}],"createdAt":0,"updatedAt":0
+        })).unwrap();
+        assert_eq!(resolve_items(&store, &manager, &stack).0[0].service_id, "php@8.4.26");
+        assert_eq!(status_of(&store, &manager, &stack), (0, 1));
+        store.set_setting("activephpVersion", "8.3.17").unwrap();
+        assert_eq!(resolve_items(&store, &manager, &stack).0[0].service_id, "php@8.3.17");
+        assert_eq!(status_of(&store, &manager, &stack), (1, 1));
+        stack.items.extend([
+            StackItem { service_id: "php@8.3.17".into(), label: None, order: 10 },
+            StackItem { service_id: "php@missing".into(), label: None, order: 20 },
+        ]);
+        assert_eq!(status_of(&store, &manager, &stack), (1, 2));
+    }
+
+    #[test]
+    fn saving_keeps_version_rules_and_does_not_recreate_deleted_stacks() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("fixture.sqlite")).unwrap();
+        ensure_presets(&store).unwrap();
+        let input = || StackInput {
+            id: None, name: "Versions".into(), description: String::new(),
+            items: vec![StackItem { service_id: "php".into(), label: None, order: 10 },
+                StackItem { service_id: "php@8.3.17".into(), label: None, order: 20 }],
+        };
+        let original = save(&store, input()).unwrap();
+        for _ in 0..32 { duplicate(&store, &original.id, None).unwrap(); }
+        assert_eq!(store.list_stacks().unwrap().len(), 36);
+        assert_eq!(store.get_stack(&original.id).unwrap().unwrap().items[1].service_id, "php@8.3.17");
+        delete(&store, &original.id).unwrap();
+        let mut stale = input(); stale.id = Some(original.id.clone());
+        assert_eq!(save(&store, stale).unwrap_err().code, "STACK_NOT_FOUND");
+        assert!(store.get_stack(&original.id).unwrap().is_none());
+    }
 }
 
 /// 一键启动：逐项串行（服务之间有依赖顺序），单项失败不阻断后续。
@@ -207,6 +314,7 @@ pub fn start(
     manager: &Arc<ServiceManager>,
     id: &str,
 ) -> Result<StackStartReport> {
+    let _operation = manager.lifecycle.lock();
     // 预设只在「首次列出」时写入；启动路径也要保证它存在，
     // 否则全新环境下点托盘的预设栈会报「找不到服务栈」
     ensure_presets(store)?;
@@ -234,9 +342,16 @@ pub fn start(
     };
 
     for item in items {
+        if manager.snapshot(&item.service_id).is_some_and(|s| matches!(s.state, ServiceState::Starting | ServiceState::Stopping)) {
+            report.failed.push(StackItemFailure {
+                service_id: item.service_id.clone(),
+                error: AppErrorInfo::from(AppError::new("SERVICE_BUSY", format!("服务 {} 正在切换状态，请稍后重试", item.service_id))),
+            });
+            continue;
+        }
         let running = manager
             .snapshot(&item.service_id)
-            .map(|s| s.state == ServiceState::Running || s.state == ServiceState::Starting)
+            .map(|s| s.state == ServiceState::Running)
             .unwrap_or(false);
         if running {
             report.already_running.push(item.service_id);
@@ -261,6 +376,7 @@ pub fn stop(
     manager: &Arc<ServiceManager>,
     id: &str,
 ) -> Result<StackStartReport> {
+    let _operation = manager.lifecycle.lock();
     ensure_presets(store)?;
     let stack = store
         .get_stack(id)?
@@ -277,11 +393,8 @@ pub fn stop(
         failed: Vec::new(),
     };
     for item in items {
-        let running = manager
-            .snapshot(&item.service_id)
-            .map(|s| s.state == ServiceState::Running || s.state == ServiceState::Starting)
-            .unwrap_or(false);
-        if !running {
+        // 认证停机失败后可以处于 Error 且仍持有进程，继续尝试真实停机。
+        if !manager.is_busy(&item.service_id) {
             report.already_running.push(item.service_id);
             continue;
         }
@@ -298,35 +411,11 @@ pub fn stop(
 }
 
 /// 栈的运行态摘要：运行中 / 共几项（前端列表与托盘菜单显示用）
-pub fn status_of(manager: &Arc<ServiceManager>, stack: &Stack) -> (usize, usize) {
-    let known: Vec<String> = manager.list_status().into_iter().map(|s| s.id).collect();
-    let mut total = 0;
-    let mut running = 0;
-    for item in normalized_items(stack.items.clone()) {
-        // 状态统计不查 store：直接按 id 前缀在已知服务里找
-        let sid = if known.iter().any(|k| k == &item.service_id) {
-            Some(item.service_id.clone())
-        } else {
-            let base = item
-                .service_id
-                .split('@')
-                .next()
-                .unwrap_or(&item.service_id);
-            known
-                .iter()
-                .find(|k| k.starts_with(&format!("{base}@")))
-                .cloned()
-        };
-        if let Some(sid) = sid {
-            total += 1;
-            if manager
-                .snapshot(&sid)
-                .map(|s| s.state == ServiceState::Running)
-                .unwrap_or(false)
-            {
-                running += 1;
-            }
-        }
-    }
+pub fn status_of(store: &Store, manager: &Arc<ServiceManager>, stack: &Stack) -> (usize, usize) {
+    let (items, skipped) = resolve_items(store, manager, stack);
+    let total = items.len() + skipped.len();
+    let running = items.iter().filter(|item| {
+        manager.snapshot(&item.service_id).is_some_and(|s| s.state == ServiceState::Running)
+    }).count();
     (running, total)
 }

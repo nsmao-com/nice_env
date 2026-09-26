@@ -234,19 +234,11 @@ impl CoreState {
         let installed = self.store.list_installed()?;
         // 清单与安装记录取并集，清单外的已安装版本不能因上游目录变化而消失。
         let mut views = self.installer.package_views(&installed);
-        // 标记「使用中版本」：单实例服务（nginx/apache/mysql/redis/postgresql/mongodb/mihomo）
-        // 由 activeXxxVersion 设置决定，缺省为最高版本
+        // 所有套件（包括纯运行时和清单扩展服务）都按实际选择标记使用中版本。
         let mut active_map: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
-        for id in [
-            "nginx",
-            "apache",
-            "mysql",
-            "redis",
-            "postgresql",
-            "mongodb",
-            "mihomo",
-        ] {
+        let ids: std::collections::HashSet<_> = installed.iter().map(|p| p.id.as_str()).collect();
+        for id in ids {
             if let Some(p) = ops::installed_by_choice(&self.store, id) {
                 active_map.insert(id.to_string(), p.version);
             }
@@ -274,21 +266,54 @@ impl CoreState {
     }
 
     pub fn uninstall_package(&self, key: &str) -> Result<()> {
-        let r = self
-            .installer
-            .uninstall(key, &self.paths, &self.store, &self.manager);
-        // 卸载后目录已不存在，必须把托管条目摘掉，否则 PATH 里留死路径
-        if r.is_ok() {
-            let _ = pathenv::sync(&self.store, &self.paths, &self.installer.manifest);
+        let _operation = self.manager.lifecycle.lock();
+        let task_id = match key.split_once('@') {
+            Some(_) => key.to_string(),
+            None => ops::installed_by_choice(&self.store, key)
+                .map(|p| format!("{}@{}", p.id, p.version))
+                .ok_or_else(|| AppError::not_installed(key))?,
+        };
+        let operation = self.downloader.begin_task(&task_id)?;
+        operation.begin_commit()?;
+        let stopped_service =
+            self.installer
+                .uninstall(key, &self.paths, &self.store, &self.manager)?;
+        if let Some(sid) = stopped_service {
+            self.watchdog.forget(&sid);
         }
-        r
+        // 卸载后目录已不存在，必须把托管条目摘掉，否则 PATH 里留死路径
+        pathenv::sync(&self.store, &self.paths, &self.installer.manifest).map_err(|error| {
+            AppError::new(
+                "UNINSTALL_PATH_SYNC_FAILED",
+                format!("{task_id} 已卸载，但 PATH 清理失败"),
+            )
+            .with_hint("无需再次卸载。请重试 PATH 清理，或到「工具箱 → 环境变量」重新应用 PATH；完成后新开终端。")
+            .with_detail(format!("{}: {}", error.code, error.message))
+        })
     }
 
     /// 切换「使用中版本」；顺带把 PATH 里的对应目录指到新版本
     pub fn set_active_version(&self, id: &str, version: &str) -> Result<()> {
+        let _operation = self.manager.lifecycle.lock();
+        if ops::installed_by_choice(&self.store, id).is_some_and(|p| p.version != version)
+            && self.manager.is_busy(id)
+        {
+            return Err(AppError::new(
+                "SERVICE_BUSY",
+                format!("{id} 正在运行或启停中，请先停止再切换版本"),
+            ));
+        }
         ops::set_active_version(&self.store, id, version)?;
-        let _ = pathenv::sync(&self.store, &self.paths, &self.installer.manifest);
-        Ok(())
+        ops::register_services(&self.paths, &self.store, &self.manager);
+        generic::register_services(&self.paths, &self.store, &self.manager);
+        pathenv::sync(&self.store, &self.paths, &self.installer.manifest).map_err(|error| {
+            AppError::new(
+                "ACTIVE_VERSION_PATH_SYNC_FAILED",
+                format!("{id} 默认版本已设为 {version}，但 PATH 同步失败"),
+            )
+            .with_hint("可重试本次操作，或到「工具箱 → 环境变量」重新应用 PATH；完成后新开终端。")
+            .with_detail(format!("{}: {}", error.code, error.message))
+        })
     }
 
     /* ---------- 工具箱扩展（计划任务 / 快速隧道 / Ollama / Adminer） ---------- */
@@ -347,12 +372,20 @@ impl CoreState {
         toolbox::ollama_pull(&self.store, &self.paths, &self.installer, name)
     }
 
-    pub fn adminer_start(&self) -> Result<(u16, String)> {
-        toolbox::adminer_start(&self.store, &self.paths, &self.installer)
+    pub fn adminer_start(&self) -> Result<toolbox::AdminerStatus> {
+        let status = toolbox::adminer_start(&self.store, &self.paths, &self.installer, &self.manager)?;
+        ops::save_pidfile(&self.paths, &self.manager);
+        Ok(status)
+    }
+
+    pub fn adminer_status(&self) -> Result<Option<toolbox::AdminerStatus>> {
+        toolbox::adminer_status(&self.manager)
     }
 
     pub fn adminer_stop(&self) -> Result<()> {
-        toolbox::adminer_stop()
+        toolbox::adminer_stop(&self.manager)?;
+        ops::save_pidfile(&self.paths, &self.manager);
+        Ok(())
     }
 
     /* ---------- 环境变量（PATH 注入） ---------- */
@@ -364,16 +397,19 @@ impl CoreState {
 
     /// 开/关总开关
     pub fn pathenv_set_enabled(&self, enabled: bool) -> Result<model::PathEnvStatus> {
+        let _operation = self.manager.lifecycle.lock();
         pathenv::set_enabled(&self.store, &self.paths, &self.installer.manifest, enabled)
     }
 
     /// 设置要注入 PATH 的包集合
     pub fn pathenv_set_selected(&self, ids: Vec<String>) -> Result<model::PathEnvStatus> {
+        let _operation = self.manager.lifecycle.lock();
         pathenv::set_selected(&self.store, &self.paths, &self.installer.manifest, &ids)
     }
 
     /// 强制重新应用（修漂移：用户手动改过 PATH 或换了版本）
     pub fn pathenv_reapply(&self) -> Result<model::PathEnvStatus> {
+        let _operation = self.manager.lifecycle.lock();
         pathenv::apply(&self.store, &self.paths, &self.installer.manifest)
     }
 
@@ -382,14 +418,73 @@ impl CoreState {
     /// 依赖来自清单的 `run.requires`，在这里补齐而不是塞进 ServiceManager：
     /// - manager 只关心进程，不该知道清单；
     /// - 判断「依赖是否已安装」需要 store，而 manager 拿不到 store。
+    pub fn with_mysql<T>(
+        &self,
+        version: Option<&str>,
+        operation: impl FnOnce(&str, &dbadmin::MySqlClient) -> Result<T>,
+    ) -> Result<T> {
+        let _operation = self.manager.lifecycle.lock();
+        let (version, client) = dbadmin::selected_client(self, version)?;
+        operation(&version, &client)
+    }
+
+    /// use_existing 只更新本机连接凭据；false 同时修改实例中现有的本地 root 账号。
+    pub fn set_mysql_password(
+        &self,
+        version: Option<&str>,
+        password: &str,
+        use_existing: bool,
+    ) -> Result<()> {
+        let _operation = self.manager.lifecycle.lock();
+        if password.is_empty() || password.chars().any(char::is_control) {
+            return Err(AppError::new("BAD_PASSWORD", "密码不能为空或包含控制字符"));
+        }
+        let (version, client) = dbadmin::authenticated_client(
+            self,
+            version,
+            use_existing.then(|| password.to_string()),
+        )?;
+        let key = dbadmin::password_key(&version);
+        self.store.set_setting(&key, password)?;
+        if !use_existing {
+            let new_client = dbadmin::MySqlClient {
+                exe: client.exe.clone(),
+                port: client.port,
+                root_password: password.into(),
+            };
+            if let Err(error) = client.reset_root_password(password) {
+                // 网络中断可能发生在 ALTER 已成功后，先验证新凭据再决定回退本机记录。
+                if new_client
+                    .verify_data_dir(&self.paths.mysql_data_dir(&version))
+                    .is_ok()
+                {
+                    return Ok(());
+                }
+                if client
+                    .verify_data_dir(&self.paths.mysql_data_dir(&version))
+                    .is_ok()
+                {
+                    self.store.set_setting(&key, &client.root_password)?;
+                }
+                return Err(error.with_hint(
+                    "请确认实例是否仍在运行；若连接中断，请用当前实例密码更新本机连接记录",
+                ));
+            }
+            new_client.verify_data_dir(&self.paths.mysql_data_dir(&version))?;
+        }
+        Ok(())
+    }
+
     pub fn migrate_list_source(
         &self,
         host: String,
         port: u16,
         user: String,
         password: String,
+        version: Option<&str>,
     ) -> Result<Vec<dbmigrate::SourceDb>> {
-        let bin = self.installed_mysql_bin_dir()?;
+        let _operation = self.manager.lifecycle.lock();
+        let bin = self.installed_mysql_bin_dir(version)?;
         dbmigrate::list_source_databases(
             &bin,
             &dbmigrate::SourceConn {
@@ -408,47 +503,85 @@ impl CoreState {
         user: String,
         password: String,
         databases: Vec<String>,
+        version: Option<&str>,
     ) -> Result<dbmigrate::ImportReport> {
-        let bin = self.installed_mysql_bin_dir()?;
         let src = dbmigrate::SourceConn {
             host,
             port,
             user,
             password,
         };
-        let ports = crate::services::PortsProfile::from_settings(&self.store);
-        let pass = self
-            .store
-            .get_setting("mysqlRootPassword")
-            .unwrap_or_else(|| "root".into());
-        let target = dbmigrate::SourceConn {
-            host: "127.0.0.1".into(),
-            port: ports.mysql,
-            user: "root".into(),
-            password: pass,
-        };
-        let emit = Arc::clone(&self.emit);
-        dbmigrate::import_databases(&bin, &src, &databases, &target, move |_db, st| {
-            (emit)(crate::Event::progress("db-import", 0, 0, 0, 0.0, st));
+        self.with_mysql(version, |version, client| {
+            let target = dbbackup::ConnInfo {
+                version: version.into(),
+                port: client.port,
+                root_password: client.root_password.clone(),
+                bin_dir: client.exe.parent().map(std::path::Path::to_path_buf),
+            };
+            dbmigrate::import_databases(&self.paths, &src, &databases, &target, |db, status| {
+                (self.emit)(crate::Event::progress(
+                    "db-import",
+                    0,
+                    0,
+                    0,
+                    0.0,
+                    &format!("{db}: {status}"),
+                ));
+            })
         })
     }
 
-    /// 本应用安装的 mysql 客户端目录（mysqldump/mysql 都在这）
-    fn installed_mysql_bin_dir(&self) -> Result<std::path::PathBuf> {
-        let v = self
-            .store
-            .find_installed("mysql", None)
-            .map(|p| p.version)
-            .ok_or_else(|| crate::error::AppError::not_installed("MySQL"))?;
-        let basedir = self
-            .paths
-            .runtime_dir("mysql", &v)
-            .join(crate::ops::mysql_root_name(&v));
-        Ok(basedir.join("bin"))
+    /// 使用所选安装的真实路径，避免客户端版本与目标实例不一致。
+    fn installed_mysql_bin_dir(&self, version: Option<&str>) -> Result<std::path::PathBuf> {
+        let package = match version {
+            Some(version) => self.store.find_installed("mysql", Some(version)),
+            None => crate::ops::installed_by_choice(&self.store, "mysql"),
+        }
+        .ok_or_else(|| AppError::not_installed("MySQL"))?;
+        Ok(std::path::Path::new(&package.install_path)
+            .join(crate::ops::mysql_root_name(&package.version))
+            .join("bin"))
     }
 
-    pub fn redis_stats(&self, port: u16) -> stats::RedisStats {
-        stats::redis_stats(port)
+    fn running_redis(&self, version: Option<&str>) -> Result<model::ServiceStatus> {
+        let service = self.manager.snapshot("redis")
+            .filter(|s| matches!(s.state, model::ServiceState::Running | model::ServiceState::Error) && s.pids.iter().any(|pid| platform::process_alive(*pid)))
+            .ok_or_else(|| AppError::new("REDIS_NOT_RUNNING", "请先启动 Redis 实例"))?;
+        if version.is_some_and(|v| service.version.as_deref() != Some(v)) {
+            return Err(AppError::new("REDIS_INSTANCE_CHANGED", "运行中的 Redis 版本已变化，请重新打开连接设置"));
+        }
+        Ok(service)
+    }
+
+    fn verify_redis(&self, service: &model::ServiceStatus, credentials: &stats::RedisCredentials) -> Result<stats::RedisStats> {
+        let port = service.port.ok_or_else(|| AppError::new("REDIS_PORT_UNKNOWN", "无法确认 Redis 实际端口，请重新启动该实例"))?;
+        let stats = stats::redis_stats_authenticated(port, credentials, Some(&service.pids))?;
+        if !service.pids.contains(&stats.process_id) {
+            return Err(AppError::new("REDIS_INSTANCE_MISMATCH", "该端口的 Redis 不属于当前托管实例，未显示其统计数据"));
+        }
+        Ok(stats)
+    }
+
+    pub fn redis_stats(&self) -> Result<stats::RedisStats> {
+        let _operation = self.manager.lifecycle.lock();
+        let service = self.running_redis(None)?;
+        let version = service.version.as_deref().ok_or_else(|| AppError::new("REDIS_VERSION_UNKNOWN", "无法确认 Redis 运行版本"))?;
+        self.verify_redis(&service, &stats::RedisCredentials::load(&self.store, version)?)
+    }
+
+    pub fn redis_connection(&self, version: &str) -> Result<stats::RedisConnectionInfo> {
+        self.store.find_installed("redis", Some(version)).ok_or_else(|| AppError::not_installed("Redis"))?;
+        let credentials = stats::RedisCredentials::load(&self.store, version)?;
+        Ok(stats::RedisConnectionInfo { version: version.into(), username: credentials.username, has_password: !credentials.password.is_empty() })
+    }
+
+    pub fn save_redis_connection(&self, version: &str, credentials: stats::RedisCredentials) -> Result<stats::RedisStats> {
+        let _operation = self.manager.lifecycle.lock();
+        let service = self.running_redis(Some(version))?;
+        let stats = self.verify_redis(&service, &credentials)?;
+        self.store.set_setting_json(&stats::RedisCredentials::key(version), &credentials)?;
+        self.manager.set_state("redis", model::ServiceState::Running);
+        Ok(stats)
     }
 
     pub fn service_history(&self, n: usize) -> Vec<(i64, String, String)> {
@@ -541,6 +674,7 @@ impl CoreState {
     }
 
     pub fn start_service(&self, id: &str) -> Result<()> {
+        let _operation = self.manager.lifecycle.lock();
         let r = ops::start_service(&self.store, &self.paths, &self.manager, id);
         // 记录托管 pid：崩溃后下次启动靠它找回残留进程
         ops::save_pidfile(&self.paths, &self.manager);
@@ -552,6 +686,7 @@ impl CoreState {
     }
 
     pub fn stop_service(&self, id: &str) -> Result<()> {
+        let _operation = self.manager.lifecycle.lock();
         let r = ops::stop_service(&self.store, &self.paths, &self.manager, id);
         ops::save_pidfile(&self.paths, &self.manager);
         // 用户主动停止 → 标记，看门狗不得再拉起它（否则点了停止又被拉起来，
@@ -650,6 +785,57 @@ impl CoreState {
         ports::scan_port_range(&self.manager, from, to)
     }
 
+    /* ---------- 配置编辑 ---------- */
+    pub fn preview_config_reset(&self, kind: &str) -> Result<cfgeditor::ConfigResetPreview> {
+        let _operation = self.manager.lifecycle.lock();
+        cfgeditor::preview_config_reset(&self.paths, &self.store, kind)
+    }
+
+    pub fn reset_config(&self, kind: &str, revision: &str) -> Result<cfgeditor::ConfigResetPreview> {
+        let _operation = self.manager.lifecycle.lock();
+        cfgeditor::reset_config(&self.paths, &self.store, kind, revision)
+    }
+
+    pub fn preview_backup(&self, name: &str) -> Result<paths::BackupPreview> {
+        let _operation = self.manager.lifecycle.lock();
+        paths::preview_backup(&self.paths.base, name).map_err(|error| AppError::io("预览配置备份", error))
+    }
+
+    pub fn restore_backup(&self, name: &str, revision: &str) -> Result<std::path::PathBuf> {
+        let _operation = self.manager.lifecycle.lock();
+        paths::restore_backup_checked(&self.paths.base, name, Some(revision)).map_err(|error| AppError::io("恢复配置备份", error))
+    }
+
+    pub fn validate_config(
+        &self,
+        kind: &str,
+        content: &str,
+    ) -> Result<cfgeditor::ConfigValidation> {
+        let _operation = self.manager.lifecycle.lock();
+        cfgeditor::validate_selected(&self.paths, &self.store, kind, content)
+    }
+
+    pub fn save_config(
+        &self,
+        kind: &str,
+        content: &str,
+        force: bool,
+        expected: Option<&str>,
+    ) -> Result<cfgeditor::ConfigValidation> {
+        let _operation = self.manager.lifecycle.lock();
+        cfgeditor::save_config_selected(&self.paths, &self.store, kind, content, force, expected)
+    }
+
+    pub fn rollback_config(
+        &self,
+        name: &str,
+        kind: Option<&str>,
+        expected: Option<&str>,
+    ) -> Result<()> {
+        let _operation = self.manager.lifecycle.lock();
+        cfgeditor::rollback_config_selected(&self.paths, &self.store, name, kind, expected)
+    }
+
     /* ---------- PHP 扩展 ---------- */
 
     /// 某版本 PHP 的扩展面板：磁盘上有什么 + php.ini 里开了什么
@@ -688,6 +874,10 @@ impl CoreState {
         ext: &str,
         enable: bool,
     ) -> Result<model::PhpExtensionChange> {
+        let _operation = self.manager.lifecycle.lock();
+        self.store
+            .find_installed("php", Some(version))
+            .ok_or_else(|| AppError::not_installed("PHP"))?;
         let mut warnings = phpext::set_extension(&self.paths, version, ext, enable)?;
         let service_id = format!("php@{version}");
         let running = self
@@ -715,12 +905,16 @@ impl CoreState {
 
     /// php.ini 快捷开关（display_errors / log_errors / opcache.enable）
     pub fn set_php_ini_toggle(&self, version: &str, key: &str, value: bool) -> Result<()> {
+        let _operation = self.manager.lifecycle.lock();
+        self.store
+            .find_installed("php", Some(version))
+            .ok_or_else(|| AppError::not_installed("PHP"))?;
         // 找到该键的声明方式（On/Off 还是 1/0）
         let numeric = phpext::INI_TOGGLES
             .iter()
             .find(|t| t.key == key)
             .map(|t| t.numeric)
-            .unwrap_or(false);
+            .ok_or_else(|| AppError::new("BAD_PHP_SETTING", "未知的 PHP 开关设置"))?;
         let v = match (numeric, value) {
             (true, true) => "1",
             (true, false) => "0",
@@ -901,6 +1095,7 @@ impl CoreState {
     /// 返回本轮实际尝试过的 (服务 id, 是否成功)。调用方（desktop 的背景线程）
     /// 自己决定多久跑一次；间隔由 `WatchdogConfig::interval_sec` 提供。
     pub fn watchdog_tick(&self) -> Vec<(String, bool)> {
+        let _operation = self.manager.lifecycle.lock();
         let cfg = self.watchdog_config();
         if !cfg.enabled {
             return Vec::new();

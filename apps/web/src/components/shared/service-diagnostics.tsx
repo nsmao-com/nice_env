@@ -42,14 +42,14 @@ interface CheckItem {
   lines?: string[];
 }
 
-/** 服务 id（php-8.3 / nginx / mysql …）→ 配置编辑器的校验 kind */
-function configKindFor(serviceId: string): string | null {
-  const id = serviceId.toLowerCase();
-  if (id.includes("nginx")) return "nginx-main";
-  if (id.includes("apache")) return "apache-conf";
-  if (id.includes("php")) return "php-ini";
-  if (id.includes("maria") || id.includes("mysql")) return "mysql-ini";
-  if (id.includes("redis")) return "redis-conf";
+/** 按诊断对象的实际版本读取配置，避免落到另一个当前启用版本。 */
+function configKindFor(service: ServiceStatus): string | null {
+  const [id, instanceVersion] = service.id.split("@");
+  const version = service.version || instanceVersion;
+  if (id === "nginx") return "nginx-main";
+  if (id === "apache") return "apache-conf";
+  const kind = id === "php" ? "php-ini" : id === "mysql" ? "mysql-ini" : id === "redis" ? "redis-conf" : null;
+  if (kind) return version ? `${kind}@${version}` : kind;
   return null;
 }
 
@@ -151,7 +151,7 @@ export function ServiceDiagnostics({
     }
 
     /* ---- 3. 配置文件校验（没装对应套件 → 跳过，不算失败）---- */
-    const kind = configKindFor(service.id);
+    const kind = configKindFor(service);
     if (!kind) {
       patch("config", { state: "skip", detail: t("svc.diag.noConfig") });
     } else {

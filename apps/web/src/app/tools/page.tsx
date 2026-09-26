@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   FilePenLine,
@@ -20,6 +21,7 @@ import type { ListenerInfo, PortDiagnosis, PortScanEntry , HostsEntry } from "@n
 import { useUI, useT } from "@/lib/store";
 import { useHosts, useInvalidate, toastError, useSettings, useSites, useServices } from "@/lib/hooks";
 import * as api from "@/lib/api";
+import { normalizeError } from "@/lib/backend";
 import { cn } from "@/lib/utils";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -27,8 +29,10 @@ import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { CopyButton, ConfirmDialog } from "@/components/shared/misc";
-import { CodeBlock } from "@/components/shared/code-block";
+import { CodeBlock, useCodePalette } from "@/components/shared/code-block";
 import { PathEnvCard } from "@/components/shared/path-env-card";
 import { ConfigEditor } from "@/components/shared/config-editor";
 import { DiagnosticsCard } from "@/components/shared/diagnostics-card";
@@ -132,6 +136,7 @@ function ToolCard({
 
 function HostsTool() {
   const t = useT();
+  const paletteVars = useCodePalette();
   const { data: entries } = useHosts();
   const { data: sites } = useSites();
   const invalidate = useInvalidate();
@@ -356,7 +361,8 @@ function HostsTool() {
             onChange={(e) => setTextDraft(e.target.value)}
             rows={10}
             spellCheck={false}
-            className="w-full rounded-lg border border-border bg-[#0A0C0F] p-3 font-mono text-[11.5px] leading-relaxed text-secondary outline-none focus:border-border-strong"
+            style={paletteVars}
+            className="nsb-code w-full rounded-lg border border-border p-3 font-mono text-[11.5px] leading-relaxed outline-none focus:border-border-strong"
             placeholder={"127.0.0.1  newsite.test\n10.0.0.9  nas.test"}
           />
           <div className="flex gap-2">
@@ -908,67 +914,46 @@ function RewriteTemplates() {
 /* ============ 备份 ============ */
 function BackupTool() {
   const t = useT();
-  const [busy, setBusy] = React.useState(false);
-  const [restoring, setRestoring] = React.useState<string | null>(null);
-  const [backups, setBackups] = React.useState<api.BackupFile[]>([]);
-  const [dataDir, setDataDir] = React.useState("");
+  const backups = useQuery({ queryKey: ["backups"], queryFn: api.listBackups });
+  const [search, setSearch] = React.useState("");
   const [restoreTarget, setRestoreTarget] = React.useState<string | null>(null);
-
-  const load = React.useCallback(async () => {
-    setBusy(true);
-    try {
-      const [list, dir] = await Promise.all([
-        api.listBackups().catch(() => [] as api.BackupFile[]),
-        api.getDataDir().catch(() => ""),
-      ]);
-      setBackups(list);
-      setDataDir(dir);
-    } finally {
-      setBusy(false);
-    }
-  }, []);
-
-  React.useEffect(() => {
-    load();
-  }, [load]);
+  const filtered = (backups.data ?? []).filter((backup) =>
+    `${backup.targetPath ?? ""} ${backup.name}`.toLowerCase().includes(search.trim().toLowerCase())
+  );
 
   return (
     <ToolCard icon={DatabaseBackup} title={t("tools.backup")} hint={t("tools.backupHint")}>
       <div className="flex flex-col gap-3">
-        <div className="max-h-44 overflow-y-auto rounded-md bg-fill">
-          {backups.length === 0 ? (
+        <Input aria-label={t("tools.backupSearch")} placeholder={t("tools.backupSearch")} value={search} onChange={(e) => setSearch(e.target.value)} />
+        {backups.error && <p role="alert" className="break-words text-xs text-error">{normalizeError(backups.error).message}</p>}
+        <div className="max-h-72 overflow-y-auto rounded-md bg-fill" aria-busy={backups.isFetching}>
+          {filtered.length === 0 ? backups.error ? null : (
             <p className="px-3 py-4 text-center text-[11px] text-faint">
-              {busy ? t("common.loading") : t("tools.noBackups")}
+              {backups.isPending ? t("common.loading") : search.trim() ? t("tools.noBackupMatches") : t("tools.noBackups")}
             </p>
           ) : (
-            backups.map((b) => (
-              <div key={b.name} className="flex items-center gap-2 border-b border-border/60 px-3 py-2 last:border-0">
-                <code className="flex-1 truncate font-mono text-[11.5px]">{b.name}</code>
-                <span className="shrink-0 text-[10.5px] text-faint">{formatBytes(b.sizeBytes)}</span>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={restoring === b.name}
-                  onClick={() => setRestoreTarget(b.name)}
-                >
-                  {restoring === b.name ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-                  {t("tools.restore")}
-                </Button>
+            filtered.map((b) => (
+              <div key={b.name} className="flex items-start gap-2 border-b border-border/60 px-3 py-3 last:border-0">
+                <div className="min-w-0 flex-1 space-y-1">
+                  <p className="break-all font-mono text-[11.5px]">{b.targetPath ?? b.name}</p>
+                  <p className="text-[10.5px] text-faint">{new Date(b.modifiedAt).toLocaleString()} · {formatBytes(b.sizeBytes)}</p>
+                  {b.targetPath && <p className="break-all text-[10px] text-faint">{b.name}</p>}
+                  {b.reason && <p className="break-words text-[11px] text-muted">{b.reason}</p>}
+                </div>
+                <Button size="sm" variant="ghost" className="min-h-9 shrink-0" disabled={!b.restorable || !!backups.error} onClick={() => setRestoreTarget(b.name)}>{t("tools.restore")}</Button>
               </div>
             ))
           )}
         </div>
-        <div className="flex gap-2">
-          <Button variant="secondary" size="sm" onClick={load} disabled={busy}>
-            {t("tools.refresh")}
+        <div className="flex flex-wrap gap-2">
+          <Button variant="secondary" size="sm" onClick={() => void backups.refetch()} disabled={backups.isFetching}>
+            {backups.error ? t("install.retry") : t("tools.refresh")}
           </Button>
           <Button
             variant="secondary"
             size="sm"
             onClick={() => {
-              if (!dataDir) return;
-              api
-                .openInFolder(`${dataDir}/backup`)
+              api.getDataDir().then((dir) => api.openInFolder(`${dir}/backup`))
                 .then(() => toast.success(t("tools.backupOpened")))
                 .catch(toastError);
             }}
@@ -978,30 +963,61 @@ function BackupTool() {
         </div>
       </div>
 
-      <ConfirmDialog
-        open={restoreTarget !== null}
-        onOpenChange={(o) => !o && setRestoreTarget(null)}
-        title={t("confirm.restoreBackup")}
-        description={`${t("confirm.restoreBackupDesc")}\n\n${restoreTarget ?? ""}`}
-        confirmText={t("tools.restore")}
-        danger
-        loading={restoring !== null}
-        onConfirm={async () => {
-          if (!restoreTarget) return;
-          setRestoring(restoreTarget);
-          try {
-            await api.restoreBackup(restoreTarget);
-            toast.success(t("tools.restored"));
-            load();
-          } catch (e) {
-            toastError(e);
-          } finally {
-            setRestoring(null);
-            setRestoreTarget(null);
-          }
-        }}
-      />
+      {restoreTarget && <BackupRestoreDialog name={restoreTarget} onClose={() => setRestoreTarget(null)} />}
     </ToolCard>
+  );
+}
+
+function BackupRestoreDialog({ name, onClose }: { name: string; onClose: () => void }) {
+  const t = useT();
+  const invalidate = useInvalidate();
+  const [opener] = React.useState(() => document.activeElement instanceof HTMLElement ? document.activeElement : null);
+  const preview = useQuery({ queryKey: ["backup-preview", name], queryFn: () => api.previewBackup(name), retry: false, staleTime: 0, gcTime: 0, refetchOnWindowFocus: false, refetchOnReconnect: false });
+  const action = React.useRef(false);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const restore = async () => {
+    if (action.current || !preview.data || preview.isFetching || preview.error || error) return;
+    action.current = true;
+    setBusy(true);
+    try {
+      await api.restoreBackup(name, preview.data.revision);
+      invalidate("backups", "config-files");
+      toast.success(t("tools.restored"), { description: t("tools.backupRestoreHint") });
+      onClose();
+    } catch (e) {
+      setError(normalizeError(e).message);
+    } finally {
+      action.current = false;
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open && !action.current) onClose(); }}>
+      <DialogContent hideClose={busy} onCloseAutoFocus={(e) => { e.preventDefault(); requestAnimationFrame(() => opener?.focus()); }} className="flex max-h-[calc(100dvh-1.5rem)] flex-col overflow-hidden p-4 sm:p-6">
+        <DialogHeader className="shrink-0 pr-7">
+          <DialogTitle>{t("confirm.restoreBackup")}</DialogTitle>
+          <DialogDescription>{t("tools.backupRestoreHint")}</DialogDescription>
+        </DialogHeader>
+        <div className="min-h-0 space-y-3 overflow-y-auto text-xs">
+          <p className="break-all font-mono text-faint">{name}</p>
+          {preview.isFetching ? <p role="status">{t("common.loading")}</p> : preview.data && (
+            <div className="space-y-1 rounded-lg bg-fill p-3"><p className="text-muted">{t("tools.backupTarget")}</p><p className="break-all font-mono">{preview.data.targetPath}</p></div>
+          )}
+          {(error || preview.error) && (
+            <div className="space-y-2"><p role="alert" className="break-words text-error">{error ?? normalizeError(preview.error).message}</p>
+              <Button size="sm" variant="secondary" disabled={busy || preview.isFetching} onClick={async () => { const result = await preview.refetch(); if (!result.error) setError(null); }}>{t("tools.retryPreview")}</Button>
+            </div>
+          )}
+        </div>
+        <DialogFooter className="shrink-0">
+          <Button variant="secondary" disabled={busy} onClick={onClose}>{t("common.cancel")}</Button>
+          <Button variant="destructive" disabled={busy || preview.isFetching || !preview.data || !!preview.error || !!error} onClick={restore}>
+            {busy && <Loader2 className="h-4 w-4 animate-spin" />}{t("tools.restore")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -1016,13 +1032,16 @@ function RepairTool() {
   const t = useT();
   const invalidate = useInvalidate();
   const [busy, setBusy] = React.useState<string | null>(null);
+  const action = React.useRef(false);
+  const [resetOpen, setResetOpen] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
   const items = [
     {
       id: "configs",
       label: t("tools.rebuildConf"),
       desc: t("tools.rebuildConfHint"),
       action: async () => {
-        await api.restartService("nginx");
+        setResetOpen(true);
       },
     },
     {
@@ -1063,25 +1082,33 @@ function RepairTool() {
   return (
     <ToolCard icon={Wrench} title={t("tools.fixWizard")} hint={t("tools.wizardHint")}>
       <div className="flex flex-col gap-2">
+        {error && <p role="alert" className="break-words text-xs text-error">{error}</p>}
         {items.map((item) => (
           <div key={item.id} className="flex items-center justify-between gap-3 rounded-md bg-fill p-3">
-            <div>
+            <div className="min-w-0">
               <p className="text-[12px] font-medium">{item.label}</p>
               <p className="text-[10.5px] text-faint">{item.desc}</p>
             </div>
             <Button
               size="sm"
               variant="secondary"
-              disabled={busy === item.id}
+              className="min-h-9 shrink-0"
+              disabled={busy !== null || resetOpen}
               onClick={async () => {
+                if (action.current) return;
+                action.current = true;
                 setBusy(item.id);
+                setError(null);
                 try {
                   await item.action();
-                  toast.success(`${item.label} ${t("tools.wizardDoneP2")}`);
-                  invalidate("services", "hosts", "certs");
+                  if (item.id !== "configs") {
+                    if (item.id !== "validate") toast.success(`${item.label} ${t("tools.wizardDoneP2")}`);
+                    invalidate("services", "hosts", "certs");
+                  }
                 } catch (e) {
-                  toastError(e);
+                  setError(normalizeError(e).message);
                 } finally {
+                  action.current = false;
                   setBusy(null);
                 }
               }}
@@ -1092,7 +1119,85 @@ function RepairTool() {
           </div>
         ))}
       </div>
+      {resetOpen && <ResetConfigDialog onClose={() => setResetOpen(false)} />}
     </ToolCard>
+  );
+}
+
+function ResetConfigDialog({ onClose }: { onClose: () => void }) {
+  const t = useT();
+  const invalidate = useInvalidate();
+  const [opener] = React.useState(() => document.activeElement instanceof HTMLElement ? document.activeElement : null);
+  const files = useQuery({ queryKey: ["config-files"], queryFn: api.configList });
+  const targets = (files.data ?? []).filter((file) => file.resettable);
+  const [selected, setSelected] = React.useState("");
+  const kind = targets.some((file) => file.kind === selected) ? selected : targets[0]?.kind ?? "";
+  const preview = useQuery({ queryKey: ["config-reset-preview", kind], queryFn: () => api.configResetPreview(kind), enabled: !!kind, retry: false, staleTime: 0, gcTime: 0, refetchOnWindowFocus: false, refetchOnReconnect: false });
+  const action = React.useRef(false);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const reset = async () => {
+    if (action.current || !preview.data?.changed || preview.isFetching || preview.error || error || files.error) return;
+    action.current = true;
+    setBusy(true);
+    try {
+      const result = await api.configReset(kind, preview.data.revision);
+      invalidate("backups", "config-files");
+      toast.success(t("tools.resetDone"), { description: result.usedByService ? t("cfgeditor.restartHint").replace("{s}", result.usedByService) : undefined });
+      onClose();
+    } catch (e) {
+      setError(normalizeError(e).message);
+    } finally {
+      action.current = false;
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open && !action.current) onClose(); }}>
+      <DialogContent hideClose={busy} onCloseAutoFocus={(e) => { e.preventDefault(); requestAnimationFrame(() => opener?.focus()); }} className="flex max-h-[calc(100dvh-1.5rem)] max-w-2xl flex-col overflow-hidden p-4 sm:p-6">
+        <DialogHeader className="shrink-0 pr-7">
+          <DialogTitle>{t("tools.rebuildConf")}</DialogTitle>
+          <DialogDescription>{t("tools.configResetDesc")}</DialogDescription>
+        </DialogHeader>
+        <div className="min-h-0 space-y-4 overflow-y-auto text-xs">
+          {files.isPending ? <p role="status">{t("common.loading")}</p> : files.error ? (
+            <div className="space-y-2"><p role="alert" className="break-words text-error">{normalizeError(files.error).message}</p><Button variant="secondary" size="sm" onClick={() => void files.refetch()} disabled={files.isFetching}>{t("install.retry")}</Button></div>
+          ) : targets.length === 0 ? <p className="text-muted">{t("tools.noResetTargets")}</p> : (
+            <>
+              <div className="space-y-2">
+                <label htmlFor="reset-config-target" className="font-medium">{t("tools.configTarget")}</label>
+                <Select value={kind} onValueChange={(value) => { setSelected(value); setError(null); }} disabled={busy}>
+                  <SelectTrigger id="reset-config-target" className="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>{targets.map((file) => <SelectItem key={file.kind} value={file.kind}>{file.label}</SelectItem>)}</SelectContent>
+                </Select>
+              </div>
+              {preview.isFetching ? <p role="status">{t("common.loading")}</p> : preview.data && (
+                <>
+                  <p className="break-all rounded-lg bg-fill p-3 font-mono text-muted">{preview.data.path}</p>
+                  {!preview.data.changed && <p role="status" className="text-success">{t("tools.configAlreadyDefault")}</p>}
+                  <details className="min-w-0 rounded-lg border border-border p-3">
+                    <summary className="cursor-pointer rounded-sm font-medium focus-visible:outline focus-visible:outline-2">{t("tools.defaultPreview")}</summary>
+                    <div className="mt-3 min-w-0 overflow-hidden">
+                      <CodeBlock code={preview.data.content} lang={preview.data.language === "ini" ? "ini" : preview.data.language === "nginx" ? "nginx" : "plain"} compact maxHeight={240} />
+                    </div>
+                  </details>
+                </>
+              )}
+              {(error || preview.error) && <div className="space-y-2">
+                <p role="alert" className="break-words text-error">{error ?? normalizeError(preview.error).message}</p>
+                <Button variant="secondary" size="sm" disabled={busy || preview.isFetching} onClick={async () => { const result = await preview.refetch(); if (!result.error) setError(null); }}>{t("tools.retryPreview")}</Button>
+              </div>}
+            </>
+          )}
+        </div>
+        <DialogFooter className="shrink-0">
+          <Button variant="secondary" disabled={busy} onClick={onClose}>{t("common.cancel")}</Button>
+          <Button variant="destructive" disabled={busy || !kind || !preview.data?.changed || preview.isFetching || !!preview.error || !!files.error || !!error} onClick={reset}>
+            {busy && <Loader2 className="h-4 w-4 animate-spin" />}{t("tools.rebuildConf")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -1192,24 +1297,25 @@ function DnsTool() {
 
         {/* 一键接管（UAC） */}
         <div className="rounded-lg border border-border bg-card-2/30 p-2.5">
-          <div className="flex items-center justify-between gap-2">
+          <div className="flex flex-col items-start justify-between gap-2 sm:flex-row sm:items-center">
             <div className="min-w-0">
               <p className="text-[11.5px] font-medium text-secondary">{t("dns.takeoverTitle")}</p>
               <p className="mt-0.5 text-[10.5px] text-faint">{t("dns.takeoverHint")}</p>
             </div>
-            <div className="flex shrink-0 gap-1.5">
+            <div className="flex w-full shrink-0 flex-wrap gap-1.5 sm:w-auto">
               {interfaces.length > 1 && (
-                <select
+                <Select
                   value={activeIf ?? ""}
-                  onChange={(e) => setActiveIf(e.target.value)}
-                  className="h-7 max-w-32 rounded-md border border-border bg-card px-1.5 text-[11px] outline-none"
+                  onValueChange={setActiveIf}
+                  disabled={takeoverBusy}
                 >
-                  {interfaces.map((n) => (
-                    <option key={n} value={n}>
-                      {n}
-                    </option>
-                  ))}
-                </select>
+                  <SelectTrigger aria-label={t("dns.interface")} className="h-7 max-w-32 px-2 text-[11px]">
+                    <SelectValue placeholder={t("dns.interface")} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {interfaces.map((n) => <SelectItem key={n} value={n}>{n}</SelectItem>)}
+                  </SelectContent>
+                </Select>
               )}
               <Button size="sm" variant="secondary" disabled={takeoverBusy || !activeIf} onClick={takeover}>
                 {t("dns.takeover")}

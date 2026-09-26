@@ -47,7 +47,12 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
   ({ className, variant, size, asChild = false, title, ...props }, ref) => {
     const Comp = asChild ? Slot : "button";
     const btn = (
-      <Comp ref={ref} className={cn(buttonVariants({ variant, size, className }))} {...props} />
+      <Comp
+        ref={ref}
+        className={cn(buttonVariants({ variant, size, className }))}
+        {...props}
+        aria-label={props["aria-label"] ?? (size === "icon" || size === "icon-sm" ? title : undefined)}
+      />
     );
     /* title 不落到原生 DOM，改为应用统一的 Tooltip */
     if (!title) return btn;

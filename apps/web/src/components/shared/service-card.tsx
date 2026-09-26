@@ -41,7 +41,7 @@ export function ServiceCard({ service }: { service: ServiceStatus }) {
       else await api.stopService(service.id);
     } catch (e) {
       // 端口冲突：给带动作按钮的提示，用户点一下就能收掉占用者
-      if (!toastPortConflict(e, { onResolved: () => invalidate("services") })) toastError(e);
+      if (!toastPortConflict(e, { onResolved: () => toggle(next) })) toastError(e);
     } finally {
       setBusy(false);
       invalidate("services");
@@ -55,7 +55,7 @@ export function ServiceCard({ service }: { service: ServiceStatus }) {
       await api.restartService(service.id);
       toast.success(`${service.label} · ${t("common.running")}`);
     } catch (e) {
-      if (!toastPortConflict(e, { onResolved: () => invalidate("services") })) toastError(e);
+      if (!toastPortConflict(e, { onResolved: restart })) toastError(e);
     } finally {
       setBusy(false);
       invalidate("services");
@@ -108,6 +108,7 @@ export function ServiceCard({ service }: { service: ServiceStatus }) {
             </div>
           </div>
           <ServiceSwitch
+            label={service.label}
             checked={running}
             busy={busy || service.state === "starting" || service.state === "stopping"}
             disabled={service.state === "starting" || service.state === "stopping"}

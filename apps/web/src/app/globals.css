@@ -482,6 +482,7 @@
   /* 代码块语义 token：颜色由 CodeBlock 按设置的主题/背景写成 CSS 变量 */
   .nsb-code {
     background: var(--code-bg);
+    color: var(--code-fg);
   }
   .nsb-code .ck-comment {
     color: var(--code-comment);

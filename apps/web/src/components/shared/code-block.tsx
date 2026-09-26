@@ -200,6 +200,27 @@ function resolveCodePalette(themeId: string, customBg: string, resolvedDark: boo
   return { colors, bg };
 }
 
+/** 代码、日志和纯文本编辑器共用背景与前景，独立于界面明暗。 */
+export function useCodePalette(): React.CSSProperties {
+  const { resolvedTheme } = useTheme();
+  const settings = useUI((s) => s.codeDefaults);
+  const { colors, bg } = resolveCodePalette(settings.theme, settings.bg, resolvedTheme === "dark");
+  const dark = bgLuminance(bg) < 0.5;
+  return {
+    "--code-bg": bg,
+    "--code-fg": colors.fg,
+    "--code-comment": colors.comment,
+    "--code-muted": `color-mix(in srgb, ${colors.fg} 72%, ${bg})`,
+    "--code-key": colors.key,
+    "--code-keyword": colors.keyword,
+    "--code-string": colors.string,
+    "--code-number": colors.number,
+    "--code-variable": colors.variable,
+    "--code-error": dark ? "#FF8589" : "#B4232B",
+    "--code-warn": dark ? "#F6BE73" : "#945100",
+  } as React.CSSProperties;
+}
+
 /* ---------- 格式化 ---------- */
 
 /**
@@ -268,7 +289,7 @@ export function CodeBlock({
   compact?: boolean;
 }) {
   const t = useT();
-  const { resolvedTheme } = useTheme();
+  const paletteVars = useCodePalette();
   const settingsDefaults = useUI((s) => s.codeDefaults);
   const [copied, setCopied] = React.useState(false);
   const [showNum, setShowNum] = React.useState(showLineNumbers ?? settingsDefaults.lineNumbers);
@@ -286,23 +307,6 @@ export function CodeBlock({
   const active = formatted ? formatCode(code, lang) : code;
   const lines = React.useMemo(() => active.split("\n"), [active]);
   const tokenized = React.useMemo(() => lines.map((l) => tokenize(l, lang)), [lines, lang]);
-
-  // 主题解析放渲染期：设置或明暗切换立刻生效，无需 effect
-  const { colors, bg } = resolveCodePalette(
-    settingsDefaults.theme,
-    settingsDefaults.bg,
-    resolvedTheme === "dark"
-  );
-  const paletteVars = {
-    "--code-bg": bg,
-    "--code-fg": colors.fg,
-    "--code-comment": colors.comment,
-    "--code-key": colors.key,
-    "--code-keyword": colors.keyword,
-    "--code-string": colors.string,
-    "--code-number": colors.number,
-    "--code-variable": colors.variable,
-  } as React.CSSProperties;
 
   const copy = async () => {
     try {

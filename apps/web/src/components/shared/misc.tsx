@@ -99,6 +99,8 @@ export function ConfirmDialog({
   confirmText,
   danger,
   loading,
+  confirmDisabled,
+  onCloseAutoFocus,
   onConfirm,
   children,
 }: {
@@ -109,23 +111,27 @@ export function ConfirmDialog({
   confirmText?: string;
   danger?: boolean;
   loading?: boolean;
+  confirmDisabled?: boolean;
+  onCloseAutoFocus?: React.ComponentProps<typeof DialogContent>["onCloseAutoFocus"];
   onConfirm: () => void;
   children?: React.ReactNode;
 }) {
   const t = useT();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-          {description && <DialogDescription>{description}</DialogDescription>}
-        </DialogHeader>
-        {children}
-        <DialogFooter>
+      <DialogContent hideClose={loading} onCloseAutoFocus={onCloseAutoFocus} className="flex max-w-md max-h-[85dvh] flex-col overflow-hidden">
+        <div className="min-h-0 min-w-0 space-y-4 overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="pr-6 leading-snug [overflow-wrap:anywhere]">{title}</DialogTitle>
+            {description && <DialogDescription className="[overflow-wrap:anywhere]">{description}</DialogDescription>}
+          </DialogHeader>
+          {children}
+        </div>
+        <DialogFooter className="shrink-0 flex-wrap">
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={loading}>
             {t("common.cancel")}
           </Button>
-          <Button variant={danger ? "destructive" : "default"} onClick={onConfirm} disabled={loading}>
+          <Button variant={danger ? "destructive" : "default"} onClick={onConfirm} disabled={loading || confirmDisabled}>
             {loading ? t("confirm.busy") : confirmText}
           </Button>
         </DialogFooter>

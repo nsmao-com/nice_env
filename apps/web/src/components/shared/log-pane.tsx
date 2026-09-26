@@ -24,6 +24,7 @@ import { toastError } from "@/lib/hooks";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useLogTail } from "@/lib/hooks";
+import { useCodePalette } from "@/components/shared/code-block";
 import {
   LEVEL_STYLE,
   parseLogLine,
@@ -54,6 +55,7 @@ export function LogPane({
   defaultAutoRefresh?: boolean;
 }) {
   const t = useT();
+  const paletteVars = useCodePalette();
   const [exporting, setExporting] = React.useState(false);
   const [paused, setPaused] = React.useState(!defaultAutoRefresh);
   const [visibleLines, setVisibleLines] = React.useState(tailLines);
@@ -115,7 +117,7 @@ export function LogPane({
     while (k >= 0) {
       if (k > i) parts.push(text.slice(i, k));
       parts.push(
-        <mark key={`${k}-${i}`} className="rounded-[3px] bg-primary/30 px-0.5 text-foreground">
+        <mark key={`${k}-${i}`} className="rounded-[3px] bg-[color-mix(in_srgb,var(--code-key)_22%,var(--code-bg))] text-[color:var(--code-fg)]">
           {text.slice(k, k + q.length)}
         </mark>
       );
@@ -270,21 +272,21 @@ export function LogPane({
           const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
           if (!atBottom && autoScroll) setAutoScroll(false);
         }}
-        className="overflow-y-auto rounded-xl border border-border bg-[#0A0C0F] p-3 font-mono leading-relaxed [contain:content]"
-        style={{ height, fontSize: "var(--code-font-size)" }}
+        className="nsb-code overflow-auto rounded-xl border border-border p-3 font-mono leading-relaxed [contain:content]"
+        style={{ ...paletteVars, height, fontSize: "var(--code-font-size)" }}
       >
         {error ? (
-          <p className="text-error">
+          <p className="text-[color:var(--code-error)]">
             {t("log.readFailed")}
             {error.message}
-            {error.hint && <span className="block text-faint">{error.hint}</span>}
+            {error.hint && <span className="block text-[color:var(--code-muted)]">{error.hint}</span>}
           </p>
         ) : filtered.length === 0 ? (
-          <p className="text-faint">{lines.length > 0 ? t("log.noMatch") : emptyHint}</p>
+          <p className="text-[color:var(--code-muted)]">{lines.length > 0 ? t("log.noMatch") : emptyHint}</p>
         ) : (
           <>
             {filtered.length > 3000 && (
-              <p className="mb-1 text-faint">{t("log.truncated")}</p>
+              <p className="mb-1 text-[color:var(--code-muted)]">{t("log.truncated")}</p>
             )}
             {filtered.slice(-3000).map((p, i) => {
               const style = LEVEL_STYLE[p.level];
@@ -299,15 +301,15 @@ export function LogPane({
                   )}
                 >
                   {showLineNumbers && (
-                    <span className="w-8 shrink-0 select-none text-right text-white/20 tabular">{lineNo}</span>
+                    <span className="w-8 shrink-0 select-none text-right text-[color:var(--code-muted)] tabular">{lineNo}</span>
                   )}
                   {/* 级别色条：左侧 2px，扫一眼就能看出哪几行是错误 */}
                   <span
                     className={cn(
                       "mt-[3px] h-[13px] w-[2px] shrink-0 rounded-full",
-                      p.level === "error" && "bg-error",
-                      p.level === "warn" && "bg-warn",
-                      p.level === "notice" && "bg-info",
+                      p.level === "error" && "bg-[var(--code-error)]",
+                      p.level === "warn" && "bg-[var(--code-warn)]",
+                      p.level === "notice" && "bg-[var(--code-key)]",
                       (p.level === "info" || p.level === "none") && "bg-transparent"
                     )}
                   />

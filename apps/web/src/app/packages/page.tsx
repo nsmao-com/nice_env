@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -29,11 +30,12 @@ import {
   FolderArchive,
   HardDrive,
 } from "lucide-react";
-import type { PackageView, PackageCategory, ServiceStatus } from "@nsb/schema";
+import type { PackageView, PackageCategory, ServiceStatus, BulkReport } from "@nsb/schema";
 import { PACKAGE_CATEGORY_ORDER } from "@nsb/schema";
-import { cn, fmtBytes, fmtSpeed, fmtDuration, isPlatformCompatible } from "@/lib/utils";
+import { cn, fmtBytes, fmtSpeed, isPlatformCompatible } from "@/lib/utils";
 import { useUI, useT } from "@/lib/store";
-import { usePackages, useInvalidate, toastError, useServices, useVersionCatalogs } from "@/lib/hooks";
+import { usePackages, useServices, useVersionCatalogs, serviceHasProcess } from "@/lib/hooks";
+import { normalizeError, type AppErrorShape } from "@/lib/backend";
 import { useInstallTasks, activeProgressFor } from "@/lib/install-tasks";
 import * as api from "@/lib/api";
 import { Card } from "@/components/ui/card";
@@ -45,6 +47,7 @@ import { RingProgress } from "@/components/shared/ring-progress";
 import { VersionPicker, type VersionItem } from "@/components/shared/version-picker";
 import { PhpExtensionsDialog, PhpExtBadge } from "@/components/shared/php-extensions";
 import { ConfirmDialog } from "@/components/shared/misc";
+import { BulkResult } from "@/components/shared/bulk-actions";
 import { InstallDialog, type InstallTarget } from "@/components/shared/install-dialog";
 import { PathEnvToggle } from "@/components/shared/path-env-toggle";
 import { ServiceIcon } from "@/components/shared/service-icon";
@@ -177,9 +180,29 @@ function groupPackages(packages: PackageView[]): PackageGroup[] {
 
 export default function PackagesPage() {
   const t = useT();
-  const { data: packages = [] } = usePackages();
-  const { data: services = [], refetch: refetchServices } = useServices(2000);
-  const invalidate = useInvalidate();
+  const [uninstalling, setUninstalling] = React.useState(false);
+  const uninstallRef = React.useRef(false);
+  const uninstallOpener = React.useRef<HTMLButtonElement | null>(null);
+  const [uninstallError, setUninstallError] = React.useState<AppErrorShape | null>(null);
+  const [uninstallPathPending, setUninstallPathPending] = React.useState(false);
+  const packageQuery = usePackages();
+  const serviceQuery = useServices(2000);
+  const packages = packageQuery.data;
+  const services = serviceQuery.data;
+  const queryClient = useQueryClient();
+  const refreshState = (includeCatalogs = false) => Promise.all(
+    ["packages", "services", "pathenv", "stacks", "databases", "db-users", ...(includeCatalogs ? ["version-catalogs"] : [])].map(
+      (key) => queryClient.invalidateQueries({ queryKey: [key] })
+    )
+  );
+  const statusKnown = serviceQuery.dataUpdatedAt > 0 && !serviceQuery.error;
+  const dataReady = packageQuery.dataUpdatedAt > 0 && !packageQuery.error && statusKnown;
+  const [bulkTarget, setBulkTarget] = React.useState<{ action: "start" | "stop"; ids: string[] } | null>(null);
+  const [bulkBusy, setBulkBusy] = React.useState(false);
+  const bulkRef = React.useRef(false);
+  const [bulkReport, setBulkReport] = React.useState<BulkReport | null>(null);
+  const [bulkError, setBulkError] = React.useState<AppErrorShape | null>(null);
+  const installTasks = useInstallTasks((s) => s.tasks);
   const {
     byId: catalogById,
     refresh: refreshCatalogs,
@@ -187,6 +210,11 @@ export default function PackagesPage() {
   const [query, setQuery] = React.useState("");
   const [uninstallTarget, setUninstallTarget] = React.useState<{ id: string; version: string; name: string } | null>(null);
   const [installTarget, setInstallTarget] = React.useState<InstallTarget | null>(null);
+  const uninstallInstalling = !!uninstallTarget && Object.values(installTasks).some((task) =>
+    task.status === "running" && task.id === uninstallTarget.id
+    && (!task.version || task.version === uninstallTarget.version)
+  );
+  const actionsDisabled = !dataReady || bulkBusy || uninstalling;
 
   const groups = React.useMemo(() => groupPackages(packages), [packages]);
   const filtered = React.useMemo(() => {
@@ -201,8 +229,8 @@ export default function PackagesPage() {
   }, [groups, query]);
 
   const runningServices = React.useMemo(
-    () => new Set(services.filter((s) => s.state === "running").map((s) => s.id)),
-    [services]
+    () => new Set(services.filter((s) => statusKnown && s.state === "running").map((s) => s.id)),
+    [services, statusKnown]
   );
 
   /** 大类（第一行胶囊）→ 小类（选中大类后出现的第二行胶囊）。
@@ -243,47 +271,102 @@ export default function PackagesPage() {
     return grp ? filtered.filter((g) => grp.subs.some((s) => s.value === g.category)).length : 0;
   };
 
-  const startAll = async () => {
-    const targets = groups
+  const openBulk = (action: "start" | "stop") => {
+    if (!dataReady || bulkRef.current || uninstallRef.current) return;
+    const installedIds = new Set(groups
       .filter((g) => g.isService)
-      .flatMap((g) => g.versions.filter((v) => v.installed).map((v) => ({ g, v })))
-      .map(({ g, v }) => (g.multiInstance ? v.serviceId : g.id))
-      .filter((x): x is string => !!x)
-      .filter((sid) => !runningServices.has(sid));
-    if (targets.length === 0) {
-      toast.info(t("packages.nothingToStart"));
+      .flatMap((g) => g.versions.filter((v) => v.installed).map((v) => v.serviceId))
+      .filter((id): id is string => !!id));
+    const ids = action === "start"
+      ? [...installedIds].filter((id) => !runningServices.has(id))
+      : services.filter((s) => installedIds.has(s.id) && serviceHasProcess(s)).map((s) => s.id);
+    if (ids.length === 0) {
+      toast.info(t(action === "start" ? "packages.nothingToStart" : "packages.nothingToStop"));
       return;
     }
-    toast.info(`${t("packages.startingAll")} (${targets.length})`);
-    let ok = 0;
-    for (const sid of targets) {
-      try {
-        await api.startService(sid);
-        ok += 1;
-      } catch (e) {
-        toastError(e);
-      }
-    }
-    refetchServices();
-    toast.success(`${t("packages.startAllDone")} (${ok}/${targets.length})`);
+    setBulkReport(null);
+    setBulkError(null);
+    setBulkTarget({ action, ids });
   };
 
-  const stopAll = async () => {
-    const targets = services.filter((s) => s.state === "running").map((s) => s.id);
-    if (targets.length === 0) {
-      toast.info(t("packages.nothingToStop"));
-      return;
-    }
-    for (const sid of targets) {
-      try {
-        await api.stopService(sid);
-      } catch (e) {
-        toastError(e);
+  const runBulk = async () => {
+    if (!bulkTarget || bulkRef.current || !dataReady) return;
+    const ids = bulkReport ? bulkReport.failed.map((item) => item.serviceId) : bulkTarget.ids;
+    if (ids.length === 0) return;
+    bulkRef.current = true;
+    setBulkBusy(true);
+    setBulkError(null);
+    try {
+      const result = await (bulkTarget.action === "start" ? api.bulkStart(ids) : api.bulkStop(ids));
+      setBulkReport((previous) => previous ? {
+        ...result,
+        order: previous.order,
+        succeeded: [...new Set([...previous.succeeded, ...result.succeeded])],
+        already: [...new Set([...previous.already, ...result.already])],
+      } : result);
+      if (result.failed.length === 0) {
+        toast.success(t("bulk.done").replace("{action}", t(bulkTarget.action === "start" ? "bulk.start" : "bulk.stop"))
+          .replace("{n}", String(bulkTarget.ids.length)));
+        setBulkTarget(null);
       }
+    } catch (error) {
+      setBulkError(normalizeError(error));
+    } finally {
+      await refreshState();
+      bulkRef.current = false;
+      setBulkBusy(false);
     }
-    refetchServices();
-    toast.success(t("packages.stopAllDone"));
   };
+
+  const openUninstall = (group: PackageGroup, version: string, trigger: HTMLButtonElement | null) => {
+    if (actionsDisabled) return;
+    uninstallOpener.current = trigger;
+    setUninstallError(null);
+    setUninstallPathPending(false);
+    setUninstallTarget({ id: group.id, version, name: group.displayName });
+  };
+
+  const uninstall = async () => {
+    if (!uninstallTarget || uninstallRef.current || (!uninstallPathPending && (!dataReady || uninstallInstalling))) return;
+    uninstallRef.current = true;
+    setUninstalling(true);
+    setUninstallError(null);
+    try {
+      if (uninstallPathPending) {
+        const result = await api.pathenvReapply();
+        queryClient.setQueryData(["pathenv"], result);
+        toast.success(t("packages.pathCleaned"));
+      } else {
+        await api.uninstallPackage(`${uninstallTarget.id}@${uninstallTarget.version}`);
+        toast.success(`${uninstallTarget.name} ${uninstallTarget.version} ${t("packages.uninstalled")}`);
+      }
+      setUninstallTarget(null);
+    } catch (error) {
+      const normalized = normalizeError(error);
+      if (normalized.code === "UNINSTALL_PATH_SYNC_FAILED") setUninstallPathPending(true);
+      setUninstallError(normalized);
+    } finally {
+      await refreshState(true);
+      uninstallRef.current = false;
+      setUninstalling(false);
+    }
+  };
+
+  const readStatus = !dataReady && (
+    <div role={packageQuery.error || serviceQuery.error ? "alert" : "status"} className="mb-4 flex flex-col items-start gap-3 rounded-xl border border-border bg-card p-3 text-xs leading-relaxed [overflow-wrap:anywhere] sm:flex-row sm:items-center">
+      <div className="min-w-0 flex-1 space-y-1">
+        {packageQuery.error && <p className="text-error">{t("packages.readFailed")}</p>}
+        {serviceQuery.error && <p className="text-error">{t("packages.servicesReadFailed")}</p>}
+        {!packageQuery.error && !serviceQuery.error && <p className="text-muted">{t("common.loading")}</p>}
+      </div>
+      {(packageQuery.error || serviceQuery.error) && (
+        <Button size="sm" variant="secondary" disabled={packageQuery.isFetching || serviceQuery.isFetching || bulkBusy || uninstalling}
+          onClick={() => void Promise.all([packageQuery.refetch(), serviceQuery.refetch()])}>
+          {t("packages.reload")}
+        </Button>
+      )}
+    </div>
+  );
 
   return (
     <div className="pb-8">
@@ -291,29 +374,32 @@ export default function PackagesPage() {
         title={t("packages.title")}
         subtitle={t("packages.subtitle")}
         actions={
-          <div className="flex items-center gap-2">
-            <div className="relative">
+          <div className="flex max-w-full flex-wrap items-center gap-2">
+            <div className="relative w-full sm:w-auto">
               <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-faint" />
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder={t("packages.search")}
-                className="h-8 w-52 rounded-lg border border-border bg-card pl-8 pr-3 text-[13px] outline-none transition-colors placeholder:text-faint focus:border-primary"
+                aria-label={t("packages.search")}
+                className="h-8 w-full rounded-lg border border-border bg-card pl-8 pr-3 text-[13px] outline-none transition-colors placeholder:text-faint focus:border-primary sm:w-52"
               />
             </div>
-            <Button variant="outline" size="sm" onClick={startAll}>
+            <Button variant="outline" size="sm" disabled={actionsDisabled} onClick={() => openBulk("start")}>
               <Play className="h-3.5 w-3.5" /> {t("packages.startAll")}
             </Button>
-            <Button variant="outline" size="sm" onClick={stopAll}>
+            <Button variant="outline" size="sm" disabled={actionsDisabled} onClick={() => openBulk("stop")}>
               <Square className="h-3 w-3" /> {t("packages.stopAll")}
             </Button>
           </div>
         }
       />
 
-      <Tabs defaultValue="all">
+      {readStatus}
+
+      {packageQuery.dataUpdatedAt > 0 && <Tabs defaultValue="all">
         {/* 第一行：大类（全部 + 分组）；小类在选中大类后出现在第二行 */}
-        <TabsList>
+        <TabsList className="max-w-full flex-wrap justify-start rounded-2xl">
           <TabsTrigger value="all">
             <LayoutGrid className="h-3.5 w-3.5" />
             {t("packages.cat.all")}
@@ -335,9 +421,11 @@ export default function PackagesPage() {
             runningServices={runningServices}
             catalogById={catalogById}
             onRefresh={refreshCatalogs}
-            onUninstallTarget={(g, v) => setUninstallTarget({ id: g.id, version: v, name: g.displayName })}
+            onUninstallTarget={openUninstall}
             onInstall={(target) => setInstallTarget(target)}
             empty={t("packages.noMatches")}
+            disabled={actionsDisabled}
+            statusKnown={statusKnown}
           />
         </TabsContent>
 
@@ -348,7 +436,7 @@ export default function PackagesPage() {
               {g.subs.length > 1 ? (
                 // 小类行：嵌套一层 Tabs，默认「全部」，各小类独立过滤
                 <Tabs defaultValue="__all__">
-                  <TabsList className="mb-3">
+                  <TabsList className="mb-3 max-w-full flex-wrap justify-start rounded-2xl">
                     <TabsTrigger value="__all__">
                       {t("packages.cat.all")}
                       <span className="text-[10.5px] tabular text-faint">{rows.length}</span>
@@ -368,9 +456,11 @@ export default function PackagesPage() {
                       runningServices={runningServices}
                       catalogById={catalogById}
                       onRefresh={refreshCatalogs}
-                      onUninstallTarget={(grp, v) => setUninstallTarget({ id: grp.id, version: v, name: grp.displayName })}
+                      onUninstallTarget={openUninstall}
                       onInstall={(target) => setInstallTarget(target)}
                       empty={t("packages.noMatches")}
+                      disabled={actionsDisabled}
+                      statusKnown={statusKnown}
                     />
                   </TabsContent>
                   {g.subs.map((s) => (
@@ -381,9 +471,11 @@ export default function PackagesPage() {
                         runningServices={runningServices}
                         catalogById={catalogById}
                         onRefresh={refreshCatalogs}
-                        onUninstallTarget={(grp, v) => setUninstallTarget({ id: grp.id, version: v, name: grp.displayName })}
+                        onUninstallTarget={openUninstall}
                         onInstall={(target) => setInstallTarget(target)}
                         empty={t("packages.noMatches")}
+                        disabled={actionsDisabled}
+                        statusKnown={statusKnown}
                       />
                     </TabsContent>
                   ))}
@@ -395,41 +487,67 @@ export default function PackagesPage() {
                   runningServices={runningServices}
                   catalogById={catalogById}
                   onRefresh={refreshCatalogs}
-                  onUninstallTarget={(grp, v) => setUninstallTarget({ id: grp.id, version: v, name: grp.displayName })}
+                  onUninstallTarget={openUninstall}
                   onInstall={(target) => setInstallTarget(target)}
                   empty={t("packages.noMatches")}
+                  disabled={actionsDisabled}
+                  statusKnown={statusKnown}
                 />
               )}
             </TabsContent>
           );
         })}
-      </Tabs>
+      </Tabs>}
+
+      <ConfirmDialog
+        open={!!bulkTarget}
+        onOpenChange={(open) => { if (!open && !bulkRef.current) setBulkTarget(null); }}
+        title={t(bulkTarget?.action === "stop" ? "packages.stopAll" : "packages.startAll")}
+        description={t(bulkTarget?.action === "stop" ? "packages.bulkStopConfirm" : "packages.bulkStartConfirm")
+          .replace("{count}", String(bulkTarget?.ids.length ?? 0))}
+        confirmText={t(bulkReport?.failed.length ? "bulk.retryFailed" : bulkTarget?.action === "stop" ? "bulk.stop" : "bulk.start")}
+        danger={bulkTarget?.action === "stop"}
+        loading={bulkBusy}
+        confirmDisabled={!dataReady}
+        onConfirm={() => void runBulk()}
+      >
+        {!bulkReport && <ul className="space-y-1 text-xs text-muted [overflow-wrap:anywhere]">
+          {bulkTarget?.ids.map((id) => <li key={id}>{services.find((s) => s.id === id)?.label ?? id} <span className="font-mono text-faint">{id}</span></li>)}
+        </ul>}
+        {readStatus}
+        <BulkResult report={bulkReport} error={bulkError} services={services} busy={bulkBusy} />
+      </ConfirmDialog>
 
       <ConfirmDialog
         open={!!uninstallTarget}
-        onOpenChange={(o) => !o && setUninstallTarget(null)}
-        title={`${t("packages.uninstall")} ${uninstallTarget?.name ?? ""} ${uninstallTarget?.version ?? ""}`}
-        description={t("packages.uninstallConfirm")}
-        confirmText={t("packages.uninstall")}
-        danger
-        onConfirm={async () => {
-          if (!uninstallTarget) return;
-          try {
-            await api.uninstallPackage(`${uninstallTarget.id}@${uninstallTarget.version}`);
-            toast.success(`${uninstallTarget.name} ${uninstallTarget.version} ${t("packages.uninstalled")}`);
-          } catch (e) {
-            toastError(e);
-          } finally {
-            setUninstallTarget(null);
+        onOpenChange={(o) => !o && !uninstallRef.current && setUninstallTarget(null)}
+        onCloseAutoFocus={(event) => {
+          if (uninstallOpener.current?.isConnected) {
+            event.preventDefault();
+            uninstallOpener.current.focus();
           }
         }}
-      />
+        title={`${t("packages.uninstall")} ${uninstallTarget?.name ?? ""} ${uninstallTarget?.version ?? ""}`}
+        description={t(uninstallPathPending ? "packages.uninstalledPathPending" : "packages.uninstallConfirm")}
+        confirmText={t(uninstallPathPending ? "packages.retryPathCleanup" : "packages.uninstall")}
+        danger={!uninstallPathPending}
+        loading={uninstalling}
+        confirmDisabled={!uninstallPathPending && (!dataReady || uninstallInstalling)}
+        onConfirm={() => void uninstall()}
+      >
+        {uninstallInstalling && !uninstallPathPending && <p role="status" className="text-xs text-muted">{t("packages.installing")}</p>}
+        {!uninstallPathPending && readStatus}
+        {uninstallError && <div role="alert" className="rounded-lg bg-error-soft p-3 text-xs text-error [overflow-wrap:anywhere]">
+          <p>{uninstallError.message}</p>
+          {uninstallError.hint && <p className="mt-1">{uninstallError.hint}</p>}
+        </div>}
+      </ConfirmDialog>
 
       {/* 安装走向导弹窗：阶段时间线 + 真实进度 + 完成后可直接启动 */}
       <InstallDialog
         target={installTarget}
         onOpenChange={(o) => !o && setInstallTarget(null)}
-        onDone={() => invalidate("packages", "services", "version-catalogs", "pathenv")}
+        onDone={() => { void refreshState(true); }}
         startableAs={
           installTarget
             ? (() => {
@@ -447,6 +565,8 @@ export default function PackagesPage() {
 /* ============ 服务条：一包一行，版本下拉点选安装/切换/启停 ============ */
 function PackageRow({
   group,
+  disabled,
+  statusKnown,
   services,
   runningServices,
   catalog,
@@ -455,18 +575,21 @@ function PackageRow({
   onInstall,
 }: {
   group: PackageGroup;
+  disabled: boolean;
+  statusKnown: boolean;
   services: ServiceStatus[];
   runningServices: Set<string>;
   catalog?: ReturnType<typeof useVersionCatalogs>["byId"] extends Map<string, infer Catalog> ? Catalog : never;
   onRefresh: () => Promise<void> | void;
-  onUninstall: (version: string) => void;
+  onUninstall: (version: string, trigger: HTMLButtonElement | null) => void;
   onInstall: (target: InstallTarget) => void;
 }) {
   const t = useT();
-  const invalidate = useInvalidate();
+  const queryClient = useQueryClient();
   // 只订阅本套件的下载进度：其它包的进度事件不会让这一行重渲染
   const task = useInstallTasks((s) => activeProgressFor(s.progress, group.id));
   const cancelInstall = useInstallTasks((s) => s.cancel);
+  const installTasks = useInstallTasks((s) => s.tasks);
   // PHP 扩展面板：挂在已安装且被选为「使用中」的那个版本上
   // （扩展的开关写进该版本的 php.ini，所以必须明确是哪一个版本）
   const [extVersion, setExtVersion] = React.useState<string | null>(null);
@@ -501,8 +624,15 @@ function PackageRow({
       list.push({
         version: v.version,
         installed: v.installed,
+        installing: Object.values(installTasks).some((task) => task.status === "running"
+          && task.id === group.id && (!task.version || task.version === v.version)),
         active: v.active,
-        running: v.serviceId ? runningServices.has(v.serviceId) : false,
+        running: v.installed && services.some((s) => s.id === v.serviceId
+          && s.version === v.version && s.state === "running"),
+        canStop: v.installed && services.some((s) => s.id === v.serviceId
+          && s.version === v.version && serviceHasProcess(s)),
+        transitioning: v.installed && services.some((s) => s.id === v.serviceId
+          && ["starting", "stopping"].includes(s.state)),
         sizeBytes: v.sizeBytes,
         incompatible: v.incompatible,
         prerelease: isPrerelease(v.version),
@@ -514,6 +644,8 @@ function PackageRow({
       list.push({
         version: r.version,
         installed: false,
+        installing: Object.values(installTasks).some((task) => task.status === "running"
+          && task.id === group.id && (!task.version || task.version === r.version)),
         active: false,
         running: false,
         remote: r,
@@ -525,16 +657,45 @@ function PackageRow({
     // 版本降序：统一走 cmpVersionDesc（处理 v 前缀与预发布）
     list.sort((a, b) => cmpVersionDesc(a.version, b.version));
     return list;
-  }, [group, catalog, runningServices]);
+  }, [group, catalog, services, installTasks]);
 
-  const pct = task && task.total > 0 ? (task.received / task.total) * 100 : 0;
+  const pct = task && task.total > 0 ? Math.min(100, (task.received / task.total) * 100) : 0;
+  const downloading = task?.state === "downloading";
+  const cancelling = useInstallTasks((s) => task ? !!s.tasks[task.taskId]?.cancelRequested : false);
+  const stageLabel = task?.state === "extracting" ? t("install.stage.extract")
+    : task?.state === "configuring" ? t("install.stage.config")
+    : task?.state === "downloaded" || task?.state === "verifying" ? t("install.stage.verify")
+    : t("install.stage.download");
   const activeVersion = task ? task.taskId.slice(group.id.length + 1) : null;
 
+  const setDefaultVersion = async (item: VersionItem) => {
+    if (disabled || item.installing) return;
+    try {
+      await api.setActiveVersion(group.id, item.version);
+      toast.success(`${group.displayName} ${t(group.multiInstance || !group.isService ? "versions.defaultSaved" : "packages.switchedTo")} ${item.version}`);
+    } finally {
+      // PATH 同步失败时版本选择可能已保存，必须重新读取实际结果。
+      await Promise.all(["packages", "services", "stacks", "pathenv", "databases", "db-users"].map(
+        (key) => queryClient.invalidateQueries({ queryKey: [key] })
+      ));
+    }
+  };
+
   const clickVersion = async (item: VersionItem) => {
+    if (disabled || item.installing) return;
     const { version, installed } = item;
     const v = group.versions.find((x) => x.version === version);
     const sid = v?.serviceId ?? null;
     const isSingle = !group.multiInstance;
+    const current = services.find((service) => service.id === sid);
+    // 选择默认版本不触发多实例服务启停；单实例切换仍要求先停止。
+    if (installed && (!sid || (isSingle && !v?.active))) {
+      if (sid && current && serviceHasProcess(current)) {
+        throw { code: "SERVICE_BUSY", message: `${group.displayName} ${t("packages.switchRunning")}` };
+      }
+      if (!item.active) await setDefaultVersion(item);
+      return;
+    }
     try {
       if (!installed) {
         // 安装走向导弹窗（阶段时间线 + 实时进度 + 完成后可直接启动）
@@ -547,16 +708,8 @@ function PackageRow({
         });
         return;
       }
-      if (sid && isSingle) {
-        // 单实例服务：选未使用版本 = 切换；选使用中版本 = 启停
-        if (!v?.active) {
-          if (runningServices.has(sid)) {
-            toast.warning(`${group.displayName} ${t("packages.switchRunning")}`);
-            return;
-          }
-          await api.setActiveVersion(group.id, version);
-          toast.success(`${group.displayName} ${t("packages.switchedTo")} ${version}`);
-        } else if (runningServices.has(sid)) {
+      if (sid) {
+        if (current && serviceHasProcess(current)) {
           await api.stopService(sid);
           toast.success(`${group.displayName} ${version} ${t("common.stopped")}`);
         } else {
@@ -564,22 +717,11 @@ function PackageRow({
           await api.startService(sid);
           toast.success(`${group.displayName} ${version} ${t("common.running")}`);
         }
-      } else if (sid) {
-        if (runningServices.has(sid)) {
-          await api.stopService(sid);
-          toast.success(`${group.displayName} ${version} ${t("common.stopped")}`);
-        } else {
-          toast.info(`${t("packages.starting")} ${group.displayName} ${version}`);
-          await api.startService(sid);
-          toast.success(`${group.displayName} ${version} ${t("common.running")}`);
-        }
-      } else {
-        toast.info(t("packages.runtimeNoService"));
       }
-    } catch (e) {
-      toastError(e);
     } finally {
-      invalidate("packages", "services");
+      await Promise.all(["packages", "services", "pathenv"].map(
+        (key) => queryClient.invalidateQueries({ queryKey: [key] })
+      ));
     }
   };
 
@@ -632,16 +774,18 @@ function PackageRow({
 
         {/* PHP：扩展面板入口。放在版本下拉左边，和「选版本」是同一类操作 */}
         {group.id === "php" && phpActiveVersion && (
-          <PhpExtBadge version={phpActiveVersion} onOpen={() => setExtVersion(phpActiveVersion)} />
+          <PhpExtBadge version={phpActiveVersion} onOpen={() => { if (!disabled) setExtVersion(phpActiveVersion); }} />
         )}
 
         {/* 已装即可一键注入/移出系统 PATH —— 操作就地完成，不再绕去工具箱 */}
-        {installedCount > 0 && <PathEnvToggle pkgId={group.id} />}
+        {installedCount > 0 && <PathEnvToggle pkgId={group.id} disabled={disabled} />}
 
         {/* 右：版本下拉（清单内置 + 远程枚举的完整版本历史） */}
         <VersionPicker
-          group={{ id: group.id, displayName: group.displayName, multiInstance: group.multiInstance }}
+          group={{ id: group.id, displayName: group.displayName, multiInstance: group.multiInstance, isService: svc }}
           items={items}
+          disabled={disabled}
+          statusKnown={statusKnown}
           catalog={
             catalog
               ? {
@@ -654,21 +798,22 @@ function PackageRow({
           }
           onRefresh={onRefresh}
           onPick={clickVersion}
+          onSetActive={setDefaultVersion}
           onUninstall={onUninstall}
         />
 
         {/* 下载进度（仅一条激活） */}
         {task && (
           <div className="flex w-full items-center gap-3 rounded-xl border border-info/25 bg-info-soft p-2 lg:w-72">
-            <RingProgress value={pct} size={38} strokeWidth={4}>
-              <span className="text-[9px] font-semibold tabular text-info">{pct.toFixed(0)}%</span>
+            <RingProgress value={pct} size={38} strokeWidth={4} indeterminate={!downloading || task.total === 0}>
+              <span className="text-[9px] font-semibold tabular text-info">{downloading && task.total > 0 ? `${pct.toFixed(0)}%` : "…"}</span>
             </RingProgress>
             <div className="flex min-w-0 flex-1 flex-col gap-0.5 text-[10px]">
               <span className="truncate font-mono text-info">
-                {activeVersion} · {fmtBytes(task.received)}/{fmtBytes(task.total)}
+                {activeVersion} · {cancelling ? t("install.cancelling") : stageLabel}
               </span>
               <span className="tabular text-faint">
-                {fmtSpeed(task.speedBps)} · {t("packages.eta")} {fmtDuration(task.etaSec)}
+                {downloading ? `${fmtBytes(task.received)}${task.total > 0 ? ` / ${fmtBytes(task.total)}` : ""} · ${fmtSpeed(task.speedBps)}` : t("install.keepOpen")}
               </span>
             </div>
             <Button
@@ -676,6 +821,7 @@ function PackageRow({
               variant="ghost"
               className="h-6 px-2 text-[10px] text-faint"
               onClick={() => void cancelInstall(task.taskId)}
+              disabled={cancelling || task.state === "configuring"}
             >
               {t("common.cancel")}
             </Button>
@@ -701,6 +847,8 @@ function PackageRow({
 /** 包组列表（大类/小类/全部 共用的渲染块） */
 function PackageRows({
   list,
+  disabled,
+  statusKnown,
   services,
   runningServices,
   catalogById,
@@ -710,11 +858,13 @@ function PackageRows({
   empty,
 }: {
   list: PackageGroup[];
+  disabled: boolean;
+  statusKnown: boolean;
   services: ServiceStatus[];
   runningServices: Set<string>;
   catalogById: ReturnType<typeof useVersionCatalogs>["byId"];
   onRefresh: (id: string) => Promise<void>;
-  onUninstallTarget: (g: PackageGroup, version: string) => void;
+  onUninstallTarget: (g: PackageGroup, version: string, trigger: HTMLButtonElement | null) => void;
   onInstall: (target: InstallTarget) => void;
   empty: string;
 }) {
@@ -726,11 +876,13 @@ function PackageRows({
             <PackageRow
               key={g.id}
               group={g}
+              disabled={disabled}
+              statusKnown={statusKnown}
               services={services}
               runningServices={runningServices}
               catalog={catalogById.get(g.id)}
               onRefresh={() => onRefresh(g.id)}
-              onUninstall={(v) => onUninstallTarget(g, v)}
+              onUninstall={(v, trigger) => onUninstallTarget(g, v, trigger)}
               onInstall={onInstall}
             />
           ))}

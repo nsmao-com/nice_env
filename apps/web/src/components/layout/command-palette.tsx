@@ -28,9 +28,10 @@ import {
 } from "lucide-react";
 import { CommandDialog, CommandGroup, CommandInput, CommandItem, CommandList, CommandEmpty } from "@/components/ui/command";
 import { useUI, useT } from "@/lib/store";
-import { useServices, useSites, useStacks, toastError, toastPortConflict, usePorts, siteUrl } from "@/lib/hooks";
+import { useServices, useSites, useStacks, toastError, useQuickServiceActions, usePorts, siteUrl } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import { StatusLight } from "@/components/shared/status-light";
+import { BulkResult } from "@/components/shared/bulk-actions";
 import { ConfirmDialog } from "@/components/shared/misc";
 
 const PAGES: { href: string; icon: typeof LayoutDashboard; labelKey: string }[] = [
@@ -57,7 +58,8 @@ export function CommandPalette() {
   const { data: stacks } = useStacks();
   const ports = usePorts();
   const [confirmStopAll, setConfirmStopAll] = React.useState(false);
-  const [busy, setBusy] = React.useState(false);
+  const quick = useQuickServiceActions(services, stacks);
+  const busy = quick.busy;
 
   React.useEffect(() => {
     const down = (e: KeyboardEvent) => {
@@ -75,67 +77,15 @@ export function CommandPalette() {
     Promise.resolve(fn()).catch((e) => toastError(e));
   };
 
-  const startStack = async () => {
-    // 有保存的服务栈就直接用它（第一个 = 最常用的那个）
-    const chosen = stacks[0];
-    if (chosen) {
-      try {
-        const report = await api.startStack(chosen.id);
-        if (report.failed.length > 0) {
-          toast.warning(t("dashboard.stackPartial"), {
-            description: report.failed.map((f) => `${f.serviceId}: ${f.error.message}`).join("\n"),
-            duration: 9000,
-          });
-        } else {
-          toast.success(t("dashboard.stackStarted"), { description: chosen.name });
-        }
-      } catch (e) {
-        if (!toastPortConflict(e, { onResolved: () => void startStack() })) toastError(e);
-      }
-      return;
-    }
-    const ids = services
-      .filter((s) => s.id === "nginx" || s.id === "redis" || s.id.startsWith("php@") || s.id.startsWith("mysql@"))
-      .sort((a, b) => {
-        const order = (id: string) => (id === "nginx" ? 3 : id.startsWith("php@") ? 2 : id.startsWith("mysql@") ? 1 : 0);
-        return order(a.id) - order(b.id);
-      })
-      .map((s) => s.id);
-    toast.promise(
-      (async () => {
-        for (const id of ids) {
-          try {
-            await api.startService(id);
-          } catch {
-            /* 未安装的跳过 */
-          }
-        }
-      })(),
-      { loading: t("dashboard.startingStack"), success: t("dashboard.stackStarted"), error: t("cmd.startFail") }
-    );
-  };
-
-  const stopAll = async () => {
+  const startStack = () => quick.start();
+  const stopAll = () => {
+    quick.prepareStop();
     setOpen(false);
     setConfirmStopAll(true);
   };
-
-  /** 确认后真正执行 */
   const doStopAll = async () => {
-    setBusy(true);
-    try {
-      for (const s of services) {
-        if (s.state === "running" || s.state === "starting") {
-          await api.stopService(s.id).catch(() => undefined);
-        }
-      }
-      toast.success(t("dashboard.allStopped"));
-      setConfirmStopAll(false);
-    } catch (e) {
-      toastError(e);
-    } finally {
-      setBusy(false);
-    }
+    const report = await quick.stop(quick.stopReport?.failed.map((f) => f.serviceId));
+    if (report && !report.failed.length) setConfirmStopAll(false);
   };
 
   return (
@@ -149,7 +99,7 @@ export function CommandPalette() {
           <CommandItem onSelect={() => run(() => setWizardOpen(true))}>
             <Plus /> {t("cmd.newSite")}
           </CommandItem>
-          <CommandItem onSelect={() => run(startStack)}>
+          <CommandItem disabled={busy} onSelect={() => run(startStack)}>
             <Rocket /> {t("cmd.quickStart")}
           </CommandItem>
           {/* 扫描项目：手上已有一堆项目目录时最快的一条路 */}
@@ -194,7 +144,7 @@ export function CommandPalette() {
           >
             <FileCog /> {t("cmd.configEditor")}
           </CommandItem>
-          <CommandItem onSelect={() => run(stopAll)}>
+          <CommandItem disabled={busy} onSelect={() => run(stopAll)}>
             <Square /> {t("cmd.stopAll")}
           </CommandItem>
         </CommandGroup>
@@ -213,19 +163,8 @@ export function CommandPalette() {
               <CommandItem
                 key={s.id}
                 value={`stack ${s.name}`}
-                onSelect={() =>
-                  run(async () => {
-                    const report = await api.startStack(s.id);
-                    if (report.failed.length > 0) {
-                      toast.warning(t("dashboard.stackPartial"), {
-                        description: report.failed.map((f) => `${f.serviceId}: ${f.error.message}`).join("\n"),
-                        duration: 9000,
-                      });
-                    } else {
-                      toast.success(t("dashboard.stackStarted"), { description: s.name });
-                    }
-                  })
-                }
+                disabled={busy}
+                onSelect={() => run(() => quick.start(s))}
               >
                 <Layers />
                 <span className="flex-1 truncate">{s.name}</span>
@@ -240,7 +179,7 @@ export function CommandPalette() {
         {sites.length > 0 && (
           <CommandGroup heading={t("cmd.sites")}>
             {sites.slice(0, 8).map((s) => {
-              const url = siteUrl(s, ports.http, ports.https);
+              const url = siteUrl(s, ports);
               return (
                 <CommandItem
                   key={s.id}
@@ -302,17 +241,19 @@ export function CommandPalette() {
 
     <ConfirmDialog
       open={confirmStopAll}
-      onOpenChange={setConfirmStopAll}
+      onOpenChange={(open) => { if (!busy) setConfirmStopAll(open); }}
       title={t("confirm.stopAll")}
-      description={t("confirm.stopAllDesc").replace(
+      description={t(quick.stopReport?.failed.length ? "bulk.retryStopHint" : "confirm.stopAllDesc").replace(
         "{count}",
-        String(services.filter((s) => s.state === "running" || s.state === "starting").length)
+        String(quick.stopTargetCount)
       )}
-      confirmText={t("dash.stopAll")}
+      confirmText={t(quick.stopReport?.failed.length ? "bulk.retryFailed" : "dash.stopAll")}
       danger
       loading={busy}
       onConfirm={doStopAll}
-    />
+    >
+      <BulkResult report={quick.stopReport} error={quick.stopError} services={services} busy={quick.busy} />
+    </ConfirmDialog>
     </>
   );
 }

@@ -4,10 +4,11 @@ import * as React from "react";
 import { useEffect, useRef, useState } from "react";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as api from "./api";
-import type { DownloadProgress, VersionCatalog } from "@nsb/schema";
+import type { DownloadProgress, VersionCatalog, Site, ServiceStatus, Stack, StackStartReport, BulkReport } from "@nsb/schema";
 import { normalizeError, type AppErrorShape } from "./backend";
 import { toast } from "sonner";
 import { useInstallTasks } from "./install-tasks";
+import { useT } from "./store";
 
 /* 服务状态轮询：2s，不阻塞。
    initialDataUpdatedAt: 0 让 react-query 立刻发起首次请求——否则 initialData 的空数组
@@ -86,6 +87,7 @@ export function useSites() {
   return useQuery({
     queryKey: ["sites"],
     queryFn: api.listSites,
+    refetchInterval: 4000,
     initialDataUpdatedAt: 0,
     initialData: [],
   });
@@ -156,12 +158,12 @@ export function useSettings() {
   });
 }
 
-export function useDatabases() {
-  return useQuery({ queryKey: ["databases"], queryFn: api.dbList, initialDataUpdatedAt: 0, initialData: [] });
+export function useDatabases(version?: string, enabled = true) {
+  return useQuery({ queryKey: ["databases", version], queryFn: () => api.dbList(version), enabled, retry: false });
 }
 
-export function useDbUsers() {
-  return useQuery({ queryKey: ["db-users"], queryFn: api.dbUsers, initialDataUpdatedAt: 0, initialData: [] });
+export function useDbUsers(version?: string, enabled = true) {
+  return useQuery({ queryKey: ["db-users", version], queryFn: () => api.dbUsers(version), enabled, retry: false });
 }
 
 /* 日志 tail 轮询 */
@@ -216,25 +218,30 @@ export function toastError(e: unknown, fallback = "操作失败") {
  */
 export function toastPortConflict(
   e: unknown,
-  opts: { onResolved?: () => void; retryLabel?: string } = {}
+  opts: { onResolved?: () => void | Promise<void>; retryLabel?: string } = {}
 ): boolean {
   const err = normalizeError(e) as AppErrorShape & { port?: number; pid?: number; holder?: string };
-  if (err.code !== "PORT_IN_USE" && !err.port) return false;
+  if (err.code !== "PORT_IN_USE") return false;
   const port = err.port;
+  let resolving = false;
   toast.error(err.message || "端口被占用", {
     description: err.hint,
     duration: 12000,
     action:
       port != null
         ? {
-            label: opts.retryLabel ?? "结束占用并重试",
+            label: opts.retryLabel ?? (opts.onResolved ? "结束占用并重试" : "结束占用进程"),
             onClick: async () => {
+              if (resolving) return;
+              resolving = true;
+              const pending = toast.loading(`正在释放端口 ${port}…`);
               try {
                 await api.closePort(port);
-                toast.success(`端口 ${port} 已释放`);
-                opts.onResolved?.();
+                toast.success(`端口 ${port} 已释放`, { id: pending });
+                await opts.onResolved?.();
               } catch (e2) {
-                toastError(e2, "结束占用进程失败");
+                toast.dismiss(pending);
+                toastError(e2, "端口处理或重试失败");
               }
             },
           }
@@ -249,6 +256,97 @@ export function useInvalidate() {
     keys.forEach((k) => qc.invalidateQueries({ queryKey: [k] }));
 }
 
+/** 停机失败可能仍有 PID，Error 不能直接当作已停止。 */
+export function serviceHasProcess(service: ServiceStatus) {
+  return service.pids.length > 0 || ["running", "starting", "stopping"].includes(service.state);
+}
+
+/** 服务栈入口共用报告，缺失套件不能被全成功提示掩盖。 */
+export function toastStackReport(
+  t: ReturnType<typeof useT>, report: StackStartReport, action: "start" | "stop",
+  retry?: () => Promise<void>
+) {
+  const details = [
+    t("bulk.resultSummary").replace("{ok}", String(report.started.length))
+      .replace("{already}", String(report.alreadyRunning.length)).replace("{fail}", String(report.failed.length)),
+    ...report.failed.map((f) => `${f.serviceId}: ${f.error.message}`),
+    report.skipped.length ? `${t("bulk.unavailable")}: ${report.skipped.join(", ")}` : "",
+  ].filter(Boolean).join("\n");
+  if (!report.failed.length && !report.skipped.length) {
+    toast.success(t(action === "start" ? "stack.startedOk" : "stack.stoppedOk"), { description: details });
+    return;
+  }
+  toast.warning(t("bulk.incomplete"), {
+    description: details, duration: 12000,
+    action: retry ? { label: t("bulk.retry"), onClick: () => void retry() } : undefined,
+  });
+  const conflict = action === "start" && report.failed.find((f) => f.error.code === "PORT_IN_USE");
+  if (conflict) toastPortConflict(conflict.error, { onResolved: retry });
+}
+
+/** 总览和命令面板共享启停流程，保留真实报告并在失败后刷新状态。 */
+export function useQuickServiceActions(services: ServiceStatus[], stacks: Stack[]) {
+  const t = useT();
+  const invalidate = useInvalidate();
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const [stopReport, setStopReport] = useState<BulkReport | null>(null);
+  const [stopError, setStopError] = useState<AppErrorShape | null>(null);
+  const [stopTargets, setStopTargets] = useState<string[]>([]);
+  const prepareStop = () => {
+    setStopReport(null); setStopError(null);
+    setStopTargets(services.filter(serviceHasProcess).map((s) => s.id));
+  };
+
+  const start = async (stack: Stack | undefined = stacks[0]) => {
+    // 固定本次目标；通知稍后重试时不能误用新选择的栈或服务列表。
+    const ids = services.filter((s) => ["nginx", "redis", "php", "mysql"].includes(s.id.split("@")[0])).map((s) => s.id);
+    const execute = async () => {
+      if (busyRef.current) return;
+      if (!stack && !ids.length) { toast.error(t("bulk.noServices")); return; }
+      busyRef.current = true; setBusy(true);
+      const pending = toast.loading(t("dashboard.startingStack"));
+      try {
+        if (stack) {
+          const report = await api.startStack(stack.id);
+          toast.dismiss(pending);
+          toastStackReport(t, report, "start", execute);
+        } else {
+          const report = await api.bulkStart(ids);
+          toast.dismiss(pending);
+          toastStackReport(t, {
+            stackId: "", started: report.succeeded, alreadyRunning: report.already,
+            failed: report.failed, skipped: [],
+          }, "start", execute);
+        }
+      } catch (error) {
+        toast.dismiss(pending);
+        if (!toastPortConflict(error, { onResolved: execute })) toastError(error);
+      } finally {
+        busyRef.current = false; setBusy(false); invalidate("services", "stacks");
+      }
+    };
+    await execute();
+  };
+
+  const stop = async (ids = stopTargets) => {
+    if (busyRef.current) return null;
+    busyRef.current = true; setBusy(true); setStopError(null);
+    try {
+      const report = await api.bulkStop(ids);
+      setStopReport(report);
+      if (!report.failed.length) toast.success(t("bulk.done").replace("{action}", t("bulk.stop")).replace("{n}", String(report.succeeded.length + report.already.length)));
+      return report;
+    } catch (error) {
+      setStopError(normalizeError(error));
+      return null;
+    } finally {
+      busyRef.current = false; setBusy(false); invalidate("services", "stacks");
+    }
+  };
+  return { busy, start, stop, stopReport, stopError, prepareStop, stopTargetCount: stopReport?.failed.length ?? stopTargets.length };
+}
+
 /* 端口方案 → 期望端口 */
 export function expectedPorts(profile: "safe" | "standard") {
   return profile === "safe"
@@ -257,8 +355,10 @@ export function expectedPorts(profile: "safe" | "standard") {
 }
 
 /* 站点 URL 拼装 */
-export function siteUrl(site: { domains: string[]; https: boolean }, httpPort: number, httpsPort: number) {
-  const domain = site.domains[0] ?? "localhost";
+export function siteUrl(site: Pick<Site, "domains" | "https" | "runtime">, ports: ReturnType<typeof expectedPorts>) {
+  const domain = (site.domains.find((domain) => !domain.startsWith("*.")) ?? site.domains[0] ?? "localhost").replace(/^\*\./, "www.");
+  const httpPort = site.runtime.webServer === "apache" ? ports.apacheHttp : ports.http;
+  const httpsPort = site.runtime.webServer === "apache" ? ports.apacheHttps : ports.https;
   const standard = site.https ? httpsPort === 443 : httpPort === 80;
   const port = site.https ? httpsPort : httpPort;
   return `${site.https ? "https" : "http"}://${domain}${standard ? "" : `:${port}`}`;
@@ -283,4 +383,27 @@ export function useInterval(fn: () => void, ms: number | null) {
     const id = setInterval(() => ref.current(), ms);
     return () => clearInterval(id);
   }, [ms]);
+}
+
+/** 数据库页与工具箱共享真实管理台状态，换页后仍能打开或停止原进程。 */
+export function useAdminer() {
+  const qc = useQueryClient();
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const query = useQuery({ queryKey: ["adminer"], queryFn: api.adminerStatus, refetchInterval: 5000, retry: false });
+  const run = async (action: "open" | "stop") => {
+    if (busyRef.current) return;
+    busyRef.current = true; setBusy(true);
+    try {
+      if (action === "stop") {
+        await api.adminerStop(); qc.setQueryData(["adminer"], null);
+      } else {
+        const status = await api.adminerStart();
+        qc.setQueryData(["adminer"], status);
+        await api.openInBrowser(status.url);
+      }
+    } catch (error) { toastError(error); }
+    finally { busyRef.current = false; setBusy(false); void qc.invalidateQueries({ queryKey: ["adminer"] }); }
+  };
+  return { query, busy, open: () => run("open"), stop: () => run("stop") };
 }

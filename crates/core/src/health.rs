@@ -330,7 +330,10 @@ pub fn check(
         Severity::Info => 2,
     });
 
-    r.summary = if r.errors > 0 {
+    r.summary = if installed.is_empty() {
+        // 空环境优先提示尚未配置；根 CA 等运行期资源尚未创建不应遮住主结论。
+        "尚未配置环境".to_string()
+    } else if r.errors > 0 {
         format!("发现 {} 个需要处理的问题", r.errors)
     } else if r.warnings > 0 {
         format!("{} 项建议处理，当前可用", r.warnings)

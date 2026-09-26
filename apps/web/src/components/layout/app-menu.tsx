@@ -79,7 +79,7 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
   const { isMac, minimize, close } = useDesktopWindow();
   const [aboutOpen, setAboutOpen] = React.useState(false);
   const [checking, setChecking] = React.useState(false);
-  const [version, setVersion] = React.useState("0.1.0");
+  const [version, setVersion] = React.useState("0.2.6");
   const [updateOpen, setUpdateOpen] = React.useState(false);
   const [confirm, setConfirm] = React.useState<null | "stopAll" | "quit">(null);
   const [busy, setBusy] = React.useState(false);

@@ -20,9 +20,7 @@ import {
 /**
  * 批量启停站点。
  *
- * 后端刻意做成「先写完全部 vhost，最后只 reload 一次」——
- * 逐个调单站点接口会让 nginx 被反复重建配置并 reload N 次，
- * 站点一多就很明显，而且中途失败会留下半套配置。
+ * 启动逐项校验依赖与结果；停止统一重载配置。失败项保留，便于修复后重试。
  */
 export function SiteBulkActions({ sites }: { sites: Site[] }) {
   const t = useT();
@@ -54,11 +52,11 @@ export function SiteBulkActions({ sites }: { sites: Site[] }) {
 
   const run = async (action: "start" | "stop") => {
     const ids = Array.from(picked);
-    if (ids.length === 0) return;
+    if (ids.length === 0 || busy) return;
     setBusy(true);
     try {
       const r = action === "start" ? await api.sitesStartMany(ids) : await api.sitesStopMany(ids);
-      invalidate("sites");
+      invalidate("sites", "services", "hosts");
       if (r.failed.length === 0) {
         toast.success(
           t("siteBulk.done")
@@ -96,7 +94,7 @@ export function SiteBulkActions({ sites }: { sites: Site[] }) {
         <span className="hidden sm:inline">{t("siteBulk.title")}</span>
       </Button>
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={(value) => !busy && setOpen(value)}>
         <DialogContent className="flex max-h-[80vh] max-w-xl flex-col gap-0 overflow-hidden p-0">
           <DialogHeader className="shrink-0 border-b border-border px-5 py-4">
             <DialogTitle className="text-[15px]">{t("siteBulk.title")}</DialogTitle>

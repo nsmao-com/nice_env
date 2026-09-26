@@ -24,6 +24,10 @@ pub fn managed_entries(store: &Store) -> Vec<(String, String)> {
     if let Ok(sites) = store.list_sites() {
         for site in sites {
             for d in &site.domains {
+                // hosts 不支持通配符，交给本地 DNS 解析，不能写入无效记录。
+                if d.starts_with("*.") {
+                    continue;
+                }
                 out.push(("127.0.0.1".to_string(), d.clone()));
             }
         }

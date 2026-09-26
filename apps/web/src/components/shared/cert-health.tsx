@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   ShieldCheck,
@@ -18,6 +19,7 @@ import {
 import type { CertReport, ImportedCert } from "@nsb/schema";
 import { useT } from "@/lib/store";
 import { toastError } from "@/lib/hooks";
+import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
@@ -28,39 +30,30 @@ import { ConfirmDialog } from "@/components/shared/misc";
 /**
  * 证书体检。
  *
- * 自签证书不会过期，但「用户导入的证书」有真实有效期，过期当天站点直接打不开，
+ * 本地签发和用户导入的证书都有有效期，过期后站点连接会被浏览器拦截，
  * 浏览器给的原因往往看不出是证书过期。这里把剩余天数、文件是否还在、
  * 站点域名有没有被 SAN 覆盖一次列出来。
  */
 export function CertHealthCard() {
   const t = useT();
-  const [report, setReport] = React.useState<CertReport | null>(null);
-  const [imported, setImported] = React.useState<ImportedCert[]>([]);
-  const [loading, setLoading] = React.useState(false);
+  const reportQuery = useQuery({ queryKey: ["cert-health"], queryFn: api.certHealth });
+  const importedQuery = useQuery({ queryKey: ["cert-imported"], queryFn: api.certImportedList });
+  const report = reportQuery.data;
+  const imported = importedQuery.data ?? [];
+  const loading = reportQuery.isFetching || importedQuery.isFetching;
+  const readError = reportQuery.error || importedQuery.error;
   const [busy, setBusy] = React.useState(false);
+  const busyRef = React.useRef(false);
+  const [error, setError] = React.useState<AppErrorShape | null>(null);
   const [confirmDel, setConfirmDel] = React.useState<ImportedCert | null>(null);
 
-  const load = React.useCallback(async () => {
-    setLoading(true);
-    try {
-      const [r, im] = await Promise.all([
-        api.certHealth(),
-        api.certImportedList().catch(() => []),
-      ]);
-      setReport(r);
-      setImported(im);
-    } catch {
-      /* 无证书时不报错 */
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  React.useEffect(() => {
-    void load();
-  }, [load]);
+  const load = () => Promise.all([reportQuery.refetch(), importedQuery.refetch()]);
 
   const doImport = async () => {
+    if (busyRef.current) return;
+    if (!isTauri) { toast.info(t("tls.desktopOnly")); return; }
+    busyRef.current = true;
+    setBusy(true);
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const certPath = await open({
@@ -75,7 +68,6 @@ export function CertHealthCard() {
         filters: [{ name: "Private key", extensions: ["key", "pem"] }],
       });
       if (typeof keyPath !== "string") return;
-      setBusy(true);
       const r = await api.certImport(certPath, keyPath);
       toast.success(t("cert.imported"), {
         description: `${r.subject} · ${t("cert.daysLeft").replace("{n}", String(r.daysLeft))}`,
@@ -84,17 +76,26 @@ export function CertHealthCard() {
     } catch (e) {
       toastError(e);
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   };
 
   const doDelete = async (c: ImportedCert) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    setError(null);
     try {
       await api.certImportedDelete(c.certPath);
       toast.success(t("cert.deleted"));
+      setConfirmDel(null);
       await load();
     } catch (e) {
-      toastError(e);
+      setError(normalizeError(e));
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
     }
   };
 
@@ -104,7 +105,7 @@ export function CertHealthCard() {
   return (
     <>
       <Card>
-        <CardHeader className="flex-row items-center gap-3">
+        <CardHeader className="flex-row flex-wrap items-center gap-3">
           <div className="flex h-9 w-9 items-center justify-center rounded-md bg-fill">
             <ShieldCheck className="h-4 w-4 text-primary" strokeWidth={1.8} />
           </div>
@@ -113,12 +114,12 @@ export function CertHealthCard() {
             <CardDescription className="text-[11px]">
               {loading
                 ? t("common.loading")
-                : report
+                : readError ? t("tls.readFailed") : report
                   ? `${healthy} ${t("cert.healthy")} · ${issues.length} ${t("cert.needAttention")}`
                   : t("cert.subtitle")}
             </CardDescription>
           </div>
-          <Button size="sm" variant="ghost" className="h-8" onClick={() => void load()} disabled={loading}>
+          <Button size="sm" variant="ghost" className="h-8" aria-label={t("bulk.retry")} onClick={() => void load()} disabled={loading || busy}>
             <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
           </Button>
           <Button size="sm" variant="secondary" className="h-8" onClick={() => void doImport()} disabled={busy}>
@@ -127,6 +128,7 @@ export function CertHealthCard() {
           </Button>
         </CardHeader>
         <CardContent>
+          {readError && <p role="alert" className="mb-3 rounded-lg bg-error-soft p-3 text-xs text-error [overflow-wrap:anywhere]">{t("tls.readFailed")} {normalizeError(readError).message}</p>}
           {/* 需要处理的问题，排最前 */}
           {issues.length > 0 && (
             <div className="mb-3 space-y-1.5">
@@ -137,7 +139,7 @@ export function CertHealthCard() {
           )}
 
           {/* 健康的折叠成一行摘要，不占地方 */}
-          {issues.length === 0 && report && report.certs.length > 0 && (
+          {!readError && issues.length === 0 && report && report.certs.length > 0 && (
             <p className="py-3 text-center text-[12px] text-running">{t("cert.allGood")}</p>
           )}
 
@@ -165,7 +167,7 @@ export function CertHealthCard() {
                   >
                     <FileKey2 className="h-3.5 w-3.5 shrink-0 text-faint" />
                     <div className="min-w-0 flex-1">
-                      <span className="truncate font-mono text-[11.5px]">{c.subject}</span>
+                      <span className="block truncate font-mono text-[11.5px]">{c.subject}</span>
                       <p className="truncate text-[10.5px] text-faint">
                         {c.sans.slice(0, 3).join(", ")}
                         {c.sans.length > 3 ? ` +${c.sans.length - 3}` : ""}
@@ -175,7 +177,9 @@ export function CertHealthCard() {
                       variant="outline"
                       className={cn(
                         "shrink-0 text-[9.5px]",
-                        c.daysLeft < 0
+                        !c.usable
+                          ? "text-error"
+                          : c.daysLeft < 0
                           ? "text-error"
                           : c.daysLeft <= 7
                             ? "text-error"
@@ -184,15 +188,20 @@ export function CertHealthCard() {
                               : ""
                       )}
                     >
-                      {c.daysLeft < 0
+                      {!c.usable
+                        ? (c.problem ?? t("cert.invalid"))
+                        : c.daysLeft < 0
                         ? t("cert.expired")
                         : t("cert.daysLeft").replace("{n}", String(c.daysLeft))}
                     </Badge>
+                    {!c.usable && c.problem && <p className="mt-1 text-[10.5px] text-error [overflow-wrap:anywhere]">{c.problem}</p>}
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="h-7 shrink-0 px-2 text-error opacity-0 transition-opacity group-hover:opacity-100"
-                      onClick={() => setConfirmDel(c)}
+                      className="h-7 shrink-0 px-2 text-error"
+                      disabled={busy || !!readError}
+                      onClick={() => { setError(null); setConfirmDel(c); }}
+                      aria-label={`${t("cert.delete")} ${c.subject}`}
                       title={t("cert.delete")}
                     >
                       <Trash2 className="h-3.5 w-3.5" />
@@ -207,17 +216,17 @@ export function CertHealthCard() {
 
       <ConfirmDialog
         open={confirmDel != null}
-        onOpenChange={(v) => !v && setConfirmDel(null)}
+        onOpenChange={(v) => !v && !busyRef.current && setConfirmDel(null)}
         title={t("cert.deleteTitle")}
         description={t("cert.deleteDesc").replace("{n}", confirmDel?.subject ?? "")}
         confirmText={t("cert.delete")}
         danger
+        loading={busy}
         onConfirm={() => {
           const c = confirmDel;
-          setConfirmDel(null);
           if (c) void doDelete(c);
         }}
-      />
+      >{error && <p role="alert" className="text-xs text-error [overflow-wrap:anywhere]">{error.message}{error.hint && <span className="mt-1 block">{error.hint}</span>}</p>}</ConfirmDialog>
     </>
   );
 }

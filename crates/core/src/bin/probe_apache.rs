@@ -56,6 +56,7 @@ fn main() {
             .to_string_lossy()
             .to_string(),
         runtime: nsb_core::model::SiteRuntime {
+            imported_cert_id: None,
             web_server: "apache".into(),
             kind: nsb_core::model::SiteKind::Php,
             php_version: Some("8.5.10".into()),

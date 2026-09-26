@@ -37,7 +37,7 @@ export function ServiceRow({ service }: { service: ServiceStatus }) {
       if (next) await api.startService(service.id);
       else await api.stopService(service.id);
     } catch (e) {
-      if (!toastPortConflict(e, { onResolved: () => invalidate("services") })) toastError(e);
+      if (!toastPortConflict(e, { onResolved: () => toggle(next) })) toastError(e);
     } finally {
       setBusy(false);
       invalidate("services");
@@ -51,7 +51,7 @@ export function ServiceRow({ service }: { service: ServiceStatus }) {
       await api.restartService(service.id);
       toast.success(`${service.label} · ${t("common.running")}`);
     } catch (e) {
-      if (!toastPortConflict(e, { onResolved: () => invalidate("services") })) toastError(e);
+      if (!toastPortConflict(e, { onResolved: restart })) toastError(e);
     } finally {
       setBusy(false);
       invalidate("services");
@@ -74,7 +74,7 @@ export function ServiceRow({ service }: { service: ServiceStatus }) {
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0 }}
       className={cn(
-        "group/item flex items-center gap-3 rounded-lg border px-3 py-2 transition-colors",
+        "group/item grid grid-cols-[7px_16px_minmax(0,1fr)] items-center gap-2 rounded-lg border px-3 py-2 transition-colors sm:flex sm:gap-3",
         error
           ? "border-error/30 bg-error-soft/40"
           : running
@@ -113,65 +113,70 @@ export function ServiceRow({ service }: { service: ServiceStatus }) {
         </span>
       )}
 
-      <span className={cn("shrink-0 text-[11px]", error ? "text-error" : "text-faint")}>
-        {stateLabel[service.state]}
-      </span>
+      <div className="col-span-3 flex flex-wrap items-center gap-2 sm:contents">
+        <span className={cn("shrink-0 text-[11px]", error ? "text-error" : "text-faint")}>
+          {stateLabel[service.state]}
+        </span>
 
-      {/* 端口冲突：一行内直接给「结束占用并重试」 */}
-      {conflict && (
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-6 shrink-0 gap-1 px-1.5 text-[11px] text-error hover:text-error"
-          disabled={busy}
-          title={conflict.holder ? `被 ${conflict.holder} 占用` : undefined}
-          onClick={async () => {
-            setBusy(true);
-            try {
-              await api.closePort(conflict.port);
-              await api.startService(service.id);
-            } catch (e) {
-              toastError(e);
-            } finally {
-              setBusy(false);
-              invalidate("services");
-            }
-          }}
-        >
-          <ShieldAlert className="h-3 w-3" />:{conflict.port}
-        </Button>
-      )}
-
-      {service.logFile && (
-        <>
+        {/* 端口冲突：一行内直接给「结束占用并重试」 */}
+        {conflict && (
           <Button
+            size="sm"
             variant="ghost"
-            size="icon-sm"
-            className="shrink-0 text-faint opacity-0 transition-opacity hover:text-secondary group-hover/item:opacity-100"
-            title={t("common.restart")}
-            disabled={busy || service.state === "starting" || service.state === "stopping"}
-            onClick={restart}
+            className="h-6 shrink-0 gap-1 px-1.5 text-[11px] text-error hover:text-error"
+            disabled={busy}
+            title={conflict.holder ? `被 ${conflict.holder} 占用` : undefined}
+            onClick={async () => {
+              setBusy(true);
+              try {
+                await api.closePort(conflict.port);
+                await api.startService(service.id);
+              } catch (e) {
+                toastError(e);
+              } finally {
+                setBusy(false);
+                invalidate("services");
+              }
+            }}
           >
-            <RotateCw className="h-3.5 w-3.5" />
+            <ShieldAlert className="h-3 w-3" />:{conflict.port}
           </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="shrink-0 text-faint opacity-0 transition-opacity hover:text-secondary group-hover/item:opacity-100"
-            title={t("logs.title")}
-            onClick={() => router.push(`/logs?service=${encodeURIComponent(service.id)}`)}
-          >
-            <ScrollText className="h-3.5 w-3.5" />
-          </Button>
-        </>
-      )}
+        )}
 
-      <ServiceSwitch
-        checked={running}
-        busy={busy || service.state === "starting" || service.state === "stopping"}
-        disabled={service.state === "starting" || service.state === "stopping"}
-        onCheckedChange={toggle}
-      />
+        {service.logFile && (
+          <>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="shrink-0 text-faint opacity-100 transition-opacity hover:text-secondary sm:opacity-0 sm:group-hover/item:opacity-100 focus-visible:opacity-100"
+              title={t("common.restart")}
+              disabled={busy || service.state === "starting" || service.state === "stopping"}
+              onClick={restart}
+            >
+              <RotateCw className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="shrink-0 text-faint opacity-100 transition-opacity hover:text-secondary sm:opacity-0 sm:group-hover/item:opacity-100 focus-visible:opacity-100"
+              title={t("logs.title")}
+              onClick={() => router.push(`/logs?service=${encodeURIComponent(service.id)}`)}
+            >
+              <ScrollText className="h-3.5 w-3.5" />
+            </Button>
+          </>
+        )}
+
+        <div className="ml-auto flex shrink-0 sm:ml-0">
+          <ServiceSwitch
+            label={service.label}
+            checked={running}
+            busy={busy || service.state === "starting" || service.state === "stopping"}
+            disabled={service.state === "starting" || service.state === "stopping"}
+            onCheckedChange={toggle}
+          />
+        </div>
+      </div>
     </motion.div>
   );
 }

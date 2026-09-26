@@ -1,7 +1,3 @@
-"use client";
-
-import * as React from "react";
-
 /* ============================================================
    日志高亮：把一行原始日志拆成带语义的片段，供 UI 上色。
    纯函数、无依赖，便于单测；所有服务（nginx/mysql/php/redis/…）
@@ -49,11 +45,26 @@ const LEVEL_PATTERNS: { re: RegExp; level: LogLevel }[] = [
   { re: /\[\s*info(rmation)?\s*\]|\binfo\b/i, level: "info" },
 ];
 
-/** 从整行文本判定级别（最严重者优先，但 notice/info/debug 不会被 error 覆盖） */
+// 服务管理器的 OUT/ERR 标记表示输出流，不代表服务自身的日志级别。
+const STREAM_PREFIX = /^\[\d{4}-\d{2}-\d{2}[^\]]*\]\s+\[(OUT|ERR)\]\s*/;
+const EXPLICIT_LEVEL = /\[\s*(fatal|critical|crit|panic|error|err|severe|warning|warn|notice|debug|trace|info|information|system)\s*\]|\blevel\s*[=:]\s*["']?(fatal|critical|crit|panic|error|err|severe|warning|warn|notice|debug|trace|info|information)\b/i;
+
+/** 优先使用服务明确声明的级别，避免正文中的 error 或 stderr 前缀误报。 */
 export function detectLevel(line: string): LogLevel {
-  for (const p of LEVEL_PATTERNS) {
-    if (p.re.test(line)) return p.level;
+  const stream = STREAM_PREFIX.exec(line);
+  const payload = stream ? line.slice(stream[0].length) : line;
+  const explicit = EXPLICIT_LEVEL.exec(payload);
+  if (explicit) {
+    const value = (explicit[1] ?? explicit[2]).toLowerCase();
+    if (value === "system" || value === "information") return "info";
+    for (const p of LEVEL_PATTERNS) {
+      if (p.re.test(value)) return p.level;
+    }
   }
+  for (const p of LEVEL_PATTERNS) {
+    if (p.re.test(payload)) return p.level;
+  }
+  if (stream?.[1] === "ERR") return "error";
   return "none";
 }
 
@@ -69,6 +80,7 @@ export function detectLevel(line: string): LogLevel {
  */
 export function tokenizeLog(line: string): LogToken[] {
   const tokens: LogToken[] = [];
+  const streamPrefixLength = STREAM_PREFIX.exec(line)?.[0].length ?? 0;
   const atom = new RegExp(
     [
       // 1 时间戳（方括号包住的 / 裸露的 / 只有时分秒）
@@ -82,7 +94,7 @@ export function tokenizeLog(line: string): LogToken[] {
       // 5 IPv4
       String.raw`(\b\d{1,3}(?:\.\d{1,3}){3}\b)`,
       // 6 HTTP 方法 / 大写级别词
-      String.raw`(\b[A-Z]{3,7}\b)`,
+      String.raw`(\b(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|CONNECT|TRACE|INFO|WARN|WARNING|ERROR|ERR|FATAL|DEBUG|NOTICE)\b)`,
       // 7 :端口
       String.raw`(:\d{2,5}\b)`,
       // 8 路径
@@ -123,6 +135,13 @@ export function tokenizeLog(line: string): LogToken[] {
                       : "pid";
 
     const token: LogToken = { kind, text: raw };
+    if (kind === "level") {
+      if (m.index < streamPrefixLength) {
+        token.kind = "key";
+      } else {
+        token.level = detectLevel(raw);
+      }
+    }
     if (kind === "httpMethod") {
       const lv = detectLevel(raw);
       if (lv !== "none") {
@@ -164,8 +183,7 @@ function bracketKind(raw: string): LogToken["kind"] {
 /** 完整解析一行：token 化 + 级别 + 状态码 + 时间戳抽取 */
 export function parseLogLine(line: string): ParsedLogLine {
   const tokens = tokenizeLog(line);
-  const levelToken = tokens.find((t) => t.kind === "level");
-  const level = levelToken?.level ?? detectLevel(line);
+  const level = detectLevel(line);
   const ts = tokens.find((t) => t.kind === "timestamp")?.text.replace(/^\[|\]$/g, "");
 
   let httpStatus: number | undefined;
@@ -178,47 +196,47 @@ export function parseLogLine(line: string): ParsedLogLine {
   return { tokens, level, httpStatus, timestamp: ts };
 }
 
-/* ---------- 级别配色（跟随主题 token，暗色下也够亮） ---------- */
+/* ---------- 级别配色（与代码背景使用同一套变量） ---------- */
 
 export const LEVEL_STYLE: Record<LogLevel, { text: string; badge: string; label: string }> = {
-  error: { text: "text-error", badge: "bg-error/15 text-error border-error/30", label: "ERROR" },
-  warn: { text: "text-warn", badge: "bg-warn/15 text-warn border-warn/30", label: "WARN" },
-  notice: { text: "text-info", badge: "bg-info/15 text-info border-info/30", label: "NOTICE" },
-  info: { text: "text-secondary", badge: "bg-card-2 text-secondary border-border", label: "INFO" },
-  debug: { text: "text-faint", badge: "bg-card-2 text-faint border-border", label: "DEBUG" },
-  trace: { text: "text-faint/70", badge: "bg-card-2 text-faint/70 border-border", label: "TRACE" },
-  none: { text: "text-secondary/90", badge: "bg-card-2 text-faint border-border", label: "" },
+  error: { text: "text-[color:var(--code-error)]", badge: "bg-error/15 text-error border-error/30", label: "ERROR" },
+  warn: { text: "text-[color:var(--code-warn)]", badge: "bg-warn/15 text-warn border-warn/30", label: "WARN" },
+  notice: { text: "text-[color:var(--code-key)]", badge: "bg-info/15 text-info border-info/30", label: "NOTICE" },
+  info: { text: "text-[color:var(--code-fg)]", badge: "bg-card-2 text-secondary border-border", label: "INFO" },
+  debug: { text: "text-[color:var(--code-muted)]", badge: "bg-card-2 text-faint border-border", label: "DEBUG" },
+  trace: { text: "text-[color:var(--code-muted)]", badge: "bg-card-2 text-faint/70 border-border", label: "TRACE" },
+  none: { text: "text-[color:var(--code-fg)]", badge: "bg-card-2 text-faint border-border", label: "" },
 };
 
 /** token → class（时间戳弱化、级别加重、状态码按 2xx/3xx/4xx/5xx 分色） */
 export function tokenClass(t: LogToken): string {
   switch (t.kind) {
     case "timestamp":
-      return "text-faint/70";
+      return "text-[color:var(--code-muted)]";
     case "level":
       return LEVEL_STYLE[t.level ?? "none"].text + " font-medium";
     case "httpStatus": {
       const n = Number(t.text);
-      if (n >= 500) return "text-error font-semibold";
-      if (n >= 400) return "text-warn font-medium";
-      if (n >= 300) return "text-info";
-      return "text-running";
+      if (n >= 500) return "text-[color:var(--code-error)] font-semibold";
+      if (n >= 400) return "text-[color:var(--code-warn)] font-medium";
+      if (n >= 300) return "text-[color:var(--code-key)]";
+      return "text-[color:var(--code-string)]";
     }
     case "httpMethod":
-      return "text-primary/90 font-medium";
+      return "text-[color:var(--code-keyword)] font-medium";
     case "path":
-      return "text-info/90";
+      return "text-[color:var(--code-key)]";
     case "ip":
-      return "text-primary/70";
+      return "text-[color:var(--code-variable)]";
     case "duration":
-      return "text-warn/80";
+      return "text-[color:var(--code-number)]";
     case "string":
-      return "text-running/85";
+      return "text-[color:var(--code-string)]";
     case "key":
-      return "text-secondary";
+      return "text-[color:var(--code-muted)]";
     case "pid":
-      return "text-faint";
+      return "text-[color:var(--code-muted)]";
     default:
-      return "text-secondary/80";
+      return "text-[color:var(--code-fg)]";
   }
 }

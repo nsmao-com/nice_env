@@ -9,11 +9,9 @@
 //!   用户自己丢进去的扩展、以及不同 PHP 版本扩展集合的差异都能正确反映。
 //! - **状态来源是 php.ini**：`extension=` / `zend_extension=` 行决定启用与否。
 //!   禁用时不删行而是注释掉（`;extension=...`），保留用户原本的顺序与上下文。
-//! - **依赖提示**：部分扩展互相依赖（如 `pdo_mysql` 需要 `pdo`，`mysqli` 需要
-//!   `mysqlnd`）。启用被依赖项缺失时给出提示，而不是让用户对着一句
-//!   "Unable to load dynamic library" 发呆。
+//! - **依赖修复**：通过 `php -n -m` 识别内置模块，启用动态扩展时按依赖顺序补齐配置。
 //! - **改前备份 + 写后校验**：复用 configgen 的 write_with_backup，并用
-//!   `php -n -c <ini> -m` 实测扩展是否真的加载成功——加载失败时把 PHP 的原始
+//!   `php -c <ini> -m` 实测扩展是否真的加载成功——加载失败时把 PHP 的原始
 //!   告警回报给用户，而不是假装成功。
 
 use std::collections::BTreeSet;
@@ -30,12 +28,10 @@ const ZEND_EXTENSIONS: &[&str] = &["xdebug", "opcache", "ioncube_loader_win", "u
 /// 扩展 → 它依赖的其它扩展（同名形式，均需已启用）。
 /// 只收录「缺了必然报错且不好排查」的组合，不做完整依赖图求解。
 const EXT_DEPS: &[(&str, &[&str])] = &[
-    ("pdo_mysql", &["pdo"]),
+    ("pdo_mysql", &["pdo", "mysqlnd"]),
     ("pdo_sqlite", &["pdo"]),
     ("pdo_pgsql", &["pdo"]),
     ("mysqli", &["mysqlnd"]),
-    ("pdo_mysql", &["mysqlnd"]),
-    ("gd", &["gd"]), // 8.x 起 GD 自带，7.x 的 gd2 见下
 ];
 
 /// 展示名与分类：让面板不是一串裸文件名。
@@ -147,27 +143,38 @@ fn meta_for(name: &str) -> Option<Meta> {
     }
 }
 
-/// PHP 自带的、通常不该手动禁用的核心扩展（禁用会把 PHP 弄坏）。
-/// 只用于前端提示，不做强制拦截——真有用户想关 wepi 也不会被挡。
-fn is_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "core"
-            | "standard"
-            | "spl"
-            | "pcre"
-            | "date"
-            | "json"
-            | "hash"
-            | "reflection"
-            | "filter"
-            | "ctype"
-            | "tokenizer"
-            | "zlib"
-            | "session"
-            | "iconv"
-            | "phar"
-    )
+/// 只接受 PHP 模块列表中的行；启动告警不能被当作扩展名。
+fn module_names(output: &str) -> BTreeSet<String> {
+    let mut in_modules = false;
+    output.lines().filter_map(|line| {
+        let name = line.trim().to_ascii_lowercase();
+        if name == "[php modules]" || name == "[zend modules]" {
+            in_modules = true;
+            return None;
+        }
+        if !in_modules || name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ' ' || c == '-') {
+            return None;
+        }
+        Some(if name == "zend opcache" { "opcache".into() } else { name })
+    }).collect()
+}
+
+fn builtin_modules(paths: &Paths, version: &str) -> Result<BTreeSet<String>> {
+    let root = paths.runtime_dir("php", version);
+    let exe = root.join(crate::ops::exe_name("php"));
+    // 允许离线扫描尚未完整安装的目录，但不能凭版本号假定模块已内置。
+    if !exe.is_file() {
+        return Ok(BTreeSet::new());
+    }
+    let (ok, output) = crate::cfgeditor::run_validator(
+        platform::command(&exe).current_dir(&root).arg("-n").arg("-m")
+    )?;
+    let modules = module_names(&output);
+    if !ok || modules.is_empty() {
+        return Err(AppError::new("PHP_MODULE_PROBE_FAILED", "无法读取 PHP 内置扩展，请检查该版本 PHP 是否能正常运行")
+            .with_detail(output));
+    }
+    Ok(modules)
 }
 
 /// 把 `php_curl.dll` / `php_xdebug.dll` / `redis.so` → `curl` / `xdebug` / `redis`
@@ -183,7 +190,7 @@ fn ext_name_from_file(file_name: &str) -> Option<String> {
     if name.is_empty() {
         None
     } else {
-        Some(name.to_string())
+        Some(name.to_ascii_lowercase())
     }
 }
 
@@ -256,7 +263,7 @@ pub fn parse_ext_line(line: &str) -> Option<IniExtLine> {
         None
     } else {
         Some(IniExtLine {
-            ext,
+            ext: ext.to_ascii_lowercase(),
             zend,
             commented,
         })
@@ -388,17 +395,16 @@ fn find_section_end(lines: &[String], section: &str) -> Option<usize> {
 /// 扫描该 PHP 版本 `ext/` 目录下真实存在的扩展 DLL。
 pub fn scan_available(paths: &Paths, version: &str) -> Result<Vec<PhpExtension>> {
     let ext_dir = paths.runtime_dir("php", version).join("ext");
-    if !ext_dir.is_dir() {
-        return Ok(Vec::new());
-    }
+    let builtins = builtin_modules(paths, version)?;
     let ini_path = paths.php_ini(version);
     let state = if ini_path.is_file() {
-        IniExtState::parse(&std::fs::read_to_string(&ini_path).unwrap_or_default())
+        IniExtState::parse(&std::fs::read_to_string(&ini_path).map_err(|e| AppError::io("读取 php.ini", e))?)
     } else {
         IniExtState::default()
     };
 
-    let mut names: BTreeSet<String> = BTreeSet::new();
+    let mut names = builtins.clone();
+    if ext_dir.is_dir() {
     for entry in std::fs::read_dir(&ext_dir).map_err(|e| AppError::io("读取 PHP ext 目录", e))?
     {
         let entry = match entry {
@@ -407,13 +413,17 @@ pub fn scan_available(paths: &Paths, version: &str) -> Result<Vec<PhpExtension>>
         };
         let file_name = entry.file_name().to_string_lossy().to_string();
         if let Some(n) = ext_name_from_file(&file_name) {
-            names.insert(n);
+            if entry.path().is_file() {
+                names.insert(n);
+            }
         }
+    }
     }
 
     let mut out = Vec::with_capacity(names.len());
     for name in names {
-        let enabled = state.enabled.contains(&name);
+        let builtin = builtins.contains(&name);
+        let enabled = builtin || state.enabled.contains(&name);
         let meta = meta_for(&name);
         let deps: Vec<String> = EXT_DEPS
             .iter()
@@ -423,7 +433,7 @@ pub fn scan_available(paths: &Paths, version: &str) -> Result<Vec<PhpExtension>>
         // 只报「当前没启用」的缺失依赖，已启用的不啰嗦
         let missing: Vec<String> = deps
             .iter()
-            .filter(|d| !state.enabled.contains(*d))
+            .filter(|d| !state.enabled.contains(*d) && !builtins.contains(*d))
             .cloned()
             .collect();
         out.push(PhpExtension {
@@ -442,8 +452,8 @@ pub fn scan_available(paths: &Paths, version: &str) -> Result<Vec<PhpExtension>>
                 .unwrap_or_else(|| "第三方扩展".to_string()),
             enabled,
             zend: is_zend(&name),
-            builtin: is_builtin(&name),
-            dll: dll_name(&name),
+            builtin,
+            dll: if builtin { String::new() } else { dll_name(&name) },
             missing_deps: missing,
         });
     }
@@ -452,9 +462,14 @@ pub fn scan_available(paths: &Paths, version: &str) -> Result<Vec<PhpExtension>>
 
 /// 启用 / 禁用某个扩展，并返回 PHP 实测的加载告警（成功了就是空）。
 ///
-/// 流程：改 ini（自动备份）→ 用 `php -n -c <ini> -m` 实测 →
+/// 流程：补齐依赖、改 ini（自动备份）→ 用 `php -c <ini> -m` 实测 →
 /// 若目标扩展没出现在模块列表里，把 stderr 原样带回。
 pub fn set_extension(paths: &Paths, version: &str, ext: &str, enable: bool) -> Result<Vec<String>> {
+    if ext.is_empty() || !ext.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return Err(AppError::new("BAD_PHP_EXTENSION", "扩展名称无效"));
+    }
+    let name = ext.to_ascii_lowercase();
+    let ext = name.as_str();
     let ini_path = paths.php_ini(version);
     if !ini_path.is_file() {
         return Err(
@@ -465,13 +480,43 @@ pub fn set_extension(paths: &Paths, version: &str, ext: &str, enable: bool) -> R
     let content =
         std::fs::read_to_string(&ini_path).map_err(|e| AppError::io("读取 php.ini", e))?;
     let state = IniExtState::parse(&content);
+    let builtins = builtin_modules(paths, version)?;
+    if builtins.contains(ext) {
+        return if enable { Ok(Vec::new()) } else {
+            Err(AppError::new("PHP_EXTENSION_BUILTIN", format!("{ext} 已内置于 PHP，不能通过 php.ini 禁用")))
+        };
+    }
     let next = if enable {
-        state.with_enabled(ext)
+        let mut order = Vec::new();
+        collect_dependencies(paths, version, ext, &builtins, &mut BTreeSet::new(), &mut order)?;
+        let mut next = content.clone();
+        for dependency in &order {
+            next = IniExtState::parse(&next).with_enabled(dependency);
+        }
+        // PDO 等动态依赖必须在驱动之前加载；只移动本次涉及的扩展行。
+        let mut lines = Vec::new();
+        let mut directives = std::collections::BTreeMap::new();
+        let mut insertion = None;
+        for line in next.lines() {
+            if let Some(parsed) = parse_ext_line(line) {
+                if !parsed.commented && order.contains(&parsed.ext) {
+                    insertion.get_or_insert(lines.len());
+                    directives.entry(parsed.ext).or_insert_with(|| line.to_string());
+                    continue;
+                }
+            }
+            lines.push(line.to_string());
+        }
+        let index = insertion.unwrap_or(lines.len());
+        lines.splice(index..index, order.iter().filter_map(|name| directives.remove(name)));
+        format!("{}\n", lines.join("\n"))
     } else {
         state.with_disabled(ext)
     };
-    write_with_backup(&ini_path, &next, &paths.backup())
-        .map_err(|e| AppError::io("写入 php.ini", e))?;
+    if next != content {
+        write_with_backup(&ini_path, &next, &paths.backup())
+            .map_err(|e| AppError::io("写入 php.ini", e))?;
+    }
 
     // 实测：能加载才算真的成功，否则把 PHP 的原始告警回给前端
     let php_exe = paths
@@ -479,19 +524,15 @@ pub fn set_extension(paths: &Paths, version: &str, ext: &str, enable: bool) -> R
         .join(crate::ops::exe_name("php"));
     let mut warnings = Vec::new();
     if php_exe.is_file() {
-        let out = platform::command(&php_exe)
-            .arg("-n")
+        let out = crate::cfgeditor::run_validator(platform::command(&php_exe)
+            .current_dir(paths.runtime_dir("php", version))
+            .env("PHP_INI_SCAN_DIR", "")
             .arg("-c")
             .arg(&ini_path)
-            .arg("-m")
-            .output();
+            .arg("-m"));
         match out {
-            Ok(o) => {
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                for line in stderr
-                    .lines()
-                    .chain(stdout.lines())
+            Ok((ok, output)) => {
+                for line in output.lines()
                     .map(|l| l.trim())
                     .filter(|l| !l.is_empty())
                 {
@@ -504,7 +545,7 @@ pub fn set_extension(paths: &Paths, version: &str, ext: &str, enable: bool) -> R
                     }
                 }
                 if enable {
-                    let loaded = stdout.lines().any(|l| l.trim().eq_ignore_ascii_case(ext));
+                    let loaded = module_names(&output).contains(ext);
                     if !loaded && warnings.is_empty() {
                         warnings.push(format!(
                             "PHP 未报告 {ext} 已加载；若扩展名与 DLL 不匹配，请确认 ext 目录下存在 {}",
@@ -512,11 +553,40 @@ pub fn set_extension(paths: &Paths, version: &str, ext: &str, enable: bool) -> R
                         ));
                     }
                 }
+                if !ok && warnings.is_empty() {
+                    warnings.push(format!("PHP 扩展校验未成功退出：{output}"));
+                }
             }
             Err(e) => warnings.push(format!("无法运行 php -m 校验：{e}")),
         }
+    } else {
+        warnings.push("PHP 可执行文件不存在，无法校验扩展是否加载成功".into());
     }
     Ok(warnings)
+}
+
+fn collect_dependencies(
+    paths: &Paths,
+    version: &str,
+    ext: &str,
+    builtins: &BTreeSet<String>,
+    visited: &mut BTreeSet<String>,
+    order: &mut Vec<String>,
+) -> Result<()> {
+    if builtins.contains(ext) || !visited.insert(ext.to_string()) {
+        return Ok(());
+    }
+    if !paths.runtime_dir("php", version).join("ext").join(dll_name(ext)).is_file() {
+        return Err(AppError::new("PHP_EXTENSION_FILE_MISSING", format!("缺少扩展文件 {}，无法自动启用 {ext}", dll_name(ext)))
+            .with_hint("请修复或重新安装当前 PHP 版本，或安装与该版本、架构及 TS/NTS 匹配的扩展；未更改 php.ini"));
+    }
+    for (_, deps) in EXT_DEPS.iter().filter(|(name, _)| *name == ext) {
+        for dependency in *deps {
+            collect_dependencies(paths, version, dependency, builtins, visited, order)?;
+        }
+    }
+    order.push(ext.to_string());
+    Ok(())
 }
 
 /// php.ini 中与实际扩展加载无关、但常被调整的几项。

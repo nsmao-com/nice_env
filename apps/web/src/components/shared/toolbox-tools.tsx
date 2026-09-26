@@ -16,7 +16,7 @@ import {
 import type { CronJob, TunnelInfo, OllamaModelRow } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/store";
-import { toastError } from "@/lib/hooks";
+import { useAdminer, toastError } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -485,62 +485,25 @@ export function OllamaTool() {
 
 export function AdminerTool() {
   const t = useT();
-  const [running, setRunning] = React.useState(false);
-  const [busy, setBusy] = React.useState(false);
-
-  const start = async () => {
-    setBusy(true);
-    try {
-      const r = await api.adminerStart();
-      setRunning(true);
-      const url = `http://127.0.0.1:${r.port}/${r.file}`;
-      await api.openInBrowser(url).catch(() => undefined);
-      toast.success(`${t("tools.adminer.started")} · ${url}`);
-    } catch (e) {
-      toastError(e);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const stop = async () => {
-    setBusy(true);
-    try {
-      await api.adminerStop();
-      setRunning(false);
-      toast.success(t("tools.adminer.stopped"));
-    } catch (e) {
-      toastError(e);
-    } finally {
-      setBusy(false);
-    }
-  };
-
+  const { query, busy, open, stop } = useAdminer();
+  const running = query.data;
   return (
     <ToolCard icon={Database} title={t("tools.adminer.title")} hint={t("tools.adminer.hint")}>
-      <div className="flex items-center gap-3">
-        <p className="flex-1 text-[11.5px] leading-relaxed text-muted">
-          {running ? (
-            <span className="font-mono text-running">http://127.0.0.1:8991</span>
-          ) : (
-            t("tools.adminer.idle")
-          )}
-        </p>
-        {running ? (
-          <>
-            <Button size="sm" variant="secondary" onClick={() => void api.openInBrowser("http://127.0.0.1:8991").catch(() => undefined)}>
-              <ExternalLink className="h-3.5 w-3.5" /> {t("common.open")}
-            </Button>
-            <Button size="sm" variant="ghost" className="text-error hover:text-error" disabled={busy} onClick={() => void stop()}>
-              {t("common.stop")}
-            </Button>
-          </>
-        ) : (
-          <Button size="sm" disabled={busy} onClick={() => void start()}>
-            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-            {t("tools.adminer.start")}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="min-w-0 flex-1 basis-52 text-[11.5px] leading-relaxed text-muted">
+          {query.isPending ? <p role="status">{t("common.loading")}</p> : query.isError ?
+            <p role="alert">{t("tools.adminer.statusFailed")} <Button variant="ghost" size="sm" onClick={() => void query.refetch()}>{t("db.retry")}</Button></p> : running ? <>
+              <p className="break-all font-mono text-running">{running.url}</p>
+              <p>Adminer {running.adminerVersion} · PHP {running.phpVersion}</p>
+            </> : <p>{t("tools.adminer.idle")}</p>}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant={running ? "secondary" : "default"} disabled={busy || query.isPending} onClick={() => void open()}>
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ExternalLink className="h-3.5 w-3.5" />}
+            {running ? t("common.open") : t("tools.adminer.start")}
           </Button>
-        )}
+          {(running || query.isError) && <Button size="sm" variant="ghost" className="text-error hover:text-error" disabled={busy} onClick={() => void stop()}>{t("common.stop")}</Button>}
+        </div>
       </div>
     </ToolCard>
   );

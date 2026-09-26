@@ -2,11 +2,9 @@
 //! MySQL/MariaDB 实例里的库，导入到 NiceEnv 托管的实例。
 //!
 //! 实现：用本应用安装的 `mysql` / `mysqldump` 客户端二进制
-//! （`mysqldump --single-transaction` 流式管道到 `mysql`，不落中间文件）。
-//! 密码经 `MYSQL_PWD` 环境变量传递，不进命令行（防泄漏到进程列表）。
+//! 先完整导出、再保护性备份、最后恢复。密码经私有 defaults-file 传递。
 
 use crate::error::{AppError, Result};
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -35,26 +33,10 @@ pub struct SourceConn {
     pub password: String,
 }
 
-impl SourceConn {
-    fn client_args(&self) -> Vec<String> {
-        vec![
-            "-h".into(),
-            self.host.clone(),
-            "-P".into(),
-            self.port.to_string(),
-            "-u".into(),
-            self.user.clone(),
-        ]
-    }
-    fn envs(&self) -> Vec<(String, String)> {
-        vec![("MYSQL_PWD".into(), self.password.clone())]
-    }
-}
-
 /// 过滤系统库，只留用户库
 pub fn filter_user_databases(all: &[String]) -> Vec<String> {
     all.iter()
-        .filter(|n| !SYSTEM_DATABASES.contains(&n.as_str()))
+        .filter(|n| !crate::dbbackup::is_system_db(n))
         .filter(|n| !n.is_empty())
         .cloned()
         .collect()
@@ -64,160 +46,153 @@ fn mysql_bin(bin_dir: &Path, name: &str) -> PathBuf {
     bin_dir.join(crate::ops::exe_name(name))
 }
 
-/// 列出源实例上的用户数据库（含大致大小）
+/// 列出源实例上的用户数据库，库名用 HEX 避免制表符等字符破坏响应格式。
 pub fn list_source_databases(bin_dir: &Path, src: &SourceConn) -> Result<Vec<SourceDb>> {
-    let out = platform::command(mysql_bin(bin_dir, "mysql"))
-        .args(src.client_args())
-        .args(["-N", "-B", "-e", "SELECT schema_name, COALESCE(SUM(data_length+index_length),0) FROM information_schema.schemata LEFT JOIN information_schema.tables ON table_schema=schema_name GROUP BY schema_name ORDER BY schema_name;"])
-        .envs(src.envs())
-        .output()
-        .map_err(|e| AppError::io("启动 mysql 客户端", e))?;
-    if !out.status.success() {
-        return Err(AppError::new(
-            "SOURCE_CONNECT_FAILED",
-            format!(
-                "连不上源数据库：{}",
-                String::from_utf8_lossy(&out.stderr)
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-            ),
-        )
-        .with_hint("确认源环境（FlyEnv/phpStudy/ServBay）正在运行，host/port/账号密码正确"));
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut list = Vec::new();
-    for line in text.lines() {
-        let mut it = line.split('\t');
-        let name = it.next().unwrap_or("").trim().to_string();
-        if name.is_empty() {
-            continue;
-        }
-        let size_kb = it
-            .next()
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .map(|b| b / 1024);
-        list.push(SourceDb { name, size_kb });
-    }
-    Ok(list
-        .into_iter()
-        .filter(|db| !SYSTEM_DATABASES.contains(&db.name.as_str()))
-        .collect())
+    let out = source_query(bin_dir, src, "SELECT HEX(schema_name), COALESCE(SUM(data_length+index_length),0) FROM information_schema.schemata LEFT JOIN information_schema.tables ON table_schema=schema_name GROUP BY schema_name ORDER BY schema_name;")?;
+    out.lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let bad = || AppError::new("MYSQL_RESPONSE", "源数据库列表响应不完整，请重试");
+            let mut parts = line.split('\t');
+            let name =
+                String::from_utf8(hex::decode(parts.next().ok_or_else(bad)?).map_err(|_| bad())?)
+                    .map_err(|_| bad())?;
+            let bytes = parts
+                .next()
+                .ok_or_else(bad)?
+                .parse::<u64>()
+                .map_err(|_| bad())?;
+            Ok(SourceDb {
+                name,
+                size_kb: Some(bytes / 1024),
+            })
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|dbs| {
+            dbs.into_iter()
+                .filter(|db| !crate::dbbackup::is_system_db(&db.name))
+                .collect()
+        })
 }
 
-/// 导入指定库：逐库 mysqldump | mysql 流式管道。
-/// `emit_state` 会在每个库开始/结束时回调（前端进度用）。
+fn source_query(bin_dir: &Path, src: &SourceConn, sql: &str) -> Result<String> {
+    crate::dbadmin::query_client(
+        &mysql_bin(bin_dir, "mysql"),
+        &src.host,
+        src.port,
+        &src.user,
+        &src.password,
+        sql,
+    )
+    .map_err(|error| error.with_hint("确认源环境正在运行，地址、端口、账号及密码正确"))
+}
+
+/// 先完整导出到私有临时文件，再保护性备份并还原到明确的目标实例。
+/// 导出失败绝不启动导入；还原失败明确保留部分执行的可能性和保护备份位置。
 pub fn import_databases(
-    bin_dir: &Path,
+    paths: &crate::paths::Paths,
     src: &SourceConn,
     databases: &[String],
-    target: &SourceConn,
+    target: &crate::dbbackup::ConnInfo,
     mut emit_state: impl FnMut(String, &str),
 ) -> Result<ImportReport> {
     let mut report = ImportReport::default();
     if databases.is_empty() {
-        return Ok(report); // 没选库就不用碰客户端，也不该要求已安装
+        return Ok(report);
     }
-
-    let dump = mysql_bin(bin_dir, "mysqldump");
-    let client = mysql_bin(bin_dir, "mysql");
-    if !dump.is_file() || !client.is_file() {
-        return Err(AppError::not_installed("MySQL")
-            .with_hint("导入用的是本应用安装的 mysqldump/mysql 客户端，先在套件页装 MySQL"));
+    let bin_dir = target.bin_dir.clone().unwrap_or_else(|| {
+        paths
+            .runtime_dir("mysql", &target.version)
+            .join(crate::ops::mysql_root_name(&target.version))
+            .join("bin")
+    });
+    let dump = mysql_bin(&bin_dir, "mysqldump");
+    if !dump.is_file() {
+        return Err(AppError::new(
+            "MYSQL_TOOL_MISSING",
+            "找不到 mysqldump，请检查所选 MySQL 安装",
+        ));
     }
-
+    let source_dbs = list_source_databases(&bin_dir, src)?;
+    if databases.iter().any(|db| {
+        db.is_empty()
+            || db.starts_with('-')
+            || db.chars().any(char::is_control)
+            || crate::dbbackup::is_system_db(db)
+            || !source_dbs.iter().any(|item| &item.name == db)
+    }) {
+        return Err(AppError::new(
+            "BAD_DATABASE",
+            "所选源数据库无效或已不存在，请重新检测",
+        ));
+    }
+    let identity = "SELECT HEX(CONCAT(@@hostname, CHAR(0), @@datadir, CHAR(0), @@port));";
+    let source_id = source_query(&bin_dir, src, identity)?;
+    let client = crate::dbadmin::MySqlClient {
+        exe: mysql_bin(&bin_dir, "mysql"),
+        port: target.port,
+        root_password: target.root_password.clone(),
+    };
+    if source_id.trim() == client.run(identity)?.trim() {
+        return Err(AppError::new(
+            "SAME_MYSQL_INSTANCE",
+            "源和目标是同一个 MySQL 实例，请选择其他来源",
+        ));
+    }
+    let pending = tempfile::Builder::new()
+        .prefix("niceenv-import-")
+        .suffix(".sql")
+        .tempfile()?;
+    let mut error = tempfile::tempfile()?;
+    let (_private, mut command) =
+        crate::dbadmin::client_command(&dump, &src.host, src.port, &src.user, &src.password)?;
+    crate::dbbackup::dump_options(&mut command, &target.version);
+    command
+        .args(databases)
+        .stdin(Stdio::null())
+        .stdout(pending.as_file().try_clone()?)
+        .stderr(error.try_clone()?);
     for db in databases {
-        let safe = db.trim();
-        // 库名进命令行参数，防注入：只允许常见库名字符
-        if safe.is_empty()
-            || !safe
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '$'))
-        {
-            report.failed.push((db.clone(), "库名不合法".into()));
-            continue;
-        }
-        emit_state(safe.to_string(), "importing");
-
-        let mut dumper = platform::command(&dump)
-            .args(src.client_args())
-            .args([
-                "--single-transaction",
-                "--routines",
-                "--events",
-                "--no-tablespaces",
-                "--default-character-set=utf8mb4",
-                safe,
-            ])
-            .envs(src.envs())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| AppError::io("启动 mysqldump", e))?;
-
-        let dump_stdout = dumper.stdout.take();
-        let mut importer = platform::command(&client)
-            .args(target.client_args())
-            .envs(target.envs())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| AppError::io("启动 mysql 导入端", e))?;
-        let importer_stdin = importer.stdin.take();
-
-        // 泵：dump stdout → importer stdin（独立线程，避免双方管道死锁）
-        let pump = std::thread::spawn(move || {
-            let Some(mut reader) = dump_stdout else {
-                return;
-            };
-            let Some(mut writer) = importer_stdin else {
-                return;
-            };
-            let mut buf = [0u8; 65536];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if writer.write_all(&buf[..n]).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            let _ = writer.flush();
-        });
-        let _ = pump.join();
-
-        // stdout 已被泵线程接管，只收 stderr；wait 拿退出码
-        let mut dumper_err = String::new();
-        if let Some(mut e) = dumper.stderr.take() {
-            use std::io::Read as _;
-            let _ = e.read_to_string(&mut dumper_err);
-        }
-        let mut importer_err = String::new();
-        if let Some(mut e) = importer.stderr.take() {
-            use std::io::Read as _;
-            let _ = e.read_to_string(&mut importer_err);
-        }
-        let dump_ok = dumper.wait().map(|s| s.success()).unwrap_or(false);
-        let import_ok = importer.wait().map(|s| s.success()).unwrap_or(false);
-
-        if dump_ok && import_ok {
-            report.imported.push(safe.to_string());
-            emit_state(safe.to_string(), "imported");
+        emit_state(db.clone(), "exporting");
+    }
+    let status =
+        crate::dbadmin::wait_client(&mut command, std::time::Duration::from_secs(1800), || {})?;
+    if !status.success() || pending.as_file().metadata()?.len() == 0 {
+        let detail = crate::dbadmin::read_output(&mut error, 64 * 1024)?;
+        let detail = if src.password.is_empty() {
+            detail
         } else {
-            let msg = if !dumper_err.is_empty() {
-                dumper_err
-            } else {
-                importer_err
-            };
-            report.failed.push((
-                safe.to_string(),
-                msg.lines().next().unwrap_or("").to_string(),
-            ));
-            emit_state(safe.to_string(), "failed");
+            detail.replace(&src.password, "***")
+        };
+        return Err(
+            AppError::new("SOURCE_DUMP_FAILED", "源数据库导出失败，目标数据库未改动")
+                .with_detail(detail),
+        );
+    }
+    pending.as_file().sync_all()?;
+    for db in databases {
+        emit_state(db.clone(), "importing");
+    }
+    match crate::dbbackup::restore_from_file(paths, target, pending.path(), true, &|_| {}) {
+        Ok(_) => {
+            report.imported = databases.to_vec();
+            for db in databases {
+                emit_state(db.clone(), "imported");
+            }
+        }
+        Err(error) => {
+            let message = format!(
+                "{}{}",
+                error.message,
+                error
+                    .hint
+                    .map(|hint| format!("；{hint}"))
+                    .unwrap_or_default()
+            );
+            for db in databases {
+                report.failed.push((db.clone(), message.clone()));
+                emit_state(db.clone(), "failed");
+            }
         }
     }
     Ok(report)
@@ -249,7 +224,19 @@ mod tests {
             user: "root".into(),
             password: "s3cret".into(),
         };
-        let args = src.client_args().join(" ");
+        let (_private, command) = crate::dbadmin::client_command(
+            Path::new("mysql"),
+            &src.host,
+            src.port,
+            &src.user,
+            &src.password,
+        )
+        .unwrap();
+        let args = command
+            .get_args()
+            .map(|s| s.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(!args.contains("s3cret"), "密码不得进命令行参数");
         assert!(args.contains("127.0.0.1"));
     }
@@ -257,7 +244,13 @@ mod tests {
     #[test]
     fn empty_database_list_is_noop_report() {
         // 不需要真实服务器：空列表直接返回空报告
-        let bin = Path::new(".");
+        let paths = crate::paths::Paths::new(std::env::temp_dir().join("niceenv-empty-import"));
+        let target = crate::dbbackup::ConnInfo {
+            version: "8.0.46".into(),
+            port: 0,
+            root_password: String::new(),
+            bin_dir: None,
+        };
         let src = SourceConn {
             host: "".into(),
             port: 0,
@@ -265,7 +258,7 @@ mod tests {
             password: "".into(),
         };
         let mut states = Vec::new();
-        let r = import_databases(bin, &src, &[], &src, |db, st| {
+        let r = import_databases(&paths, &src, &[], &target, |db, st| {
             states.push((db, st.to_string()))
         })
         .unwrap();

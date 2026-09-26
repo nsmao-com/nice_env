@@ -107,6 +107,7 @@ export const listCerts = () => safe(invoke<CertRecord[]>("list_certs"));
 export const issueCert = (domain: string, sans: string[] = []) =>
   safe(invoke<CertRecord>("issue_cert", { domain, sans }));
 export const trustCa = () => safe(invoke<boolean>("trust_ca"));
+export const deleteLocalCert = (id: string) => safe(invoke<boolean>("delete_local_cert", { id }));
 /** 按当前站点重建 hosts（保留用户手动条目） */
 export const rebuildHosts = () => safe(invoke<boolean>("rebuild_hosts"));
 /** 补齐缺失/过期的站点证书，返回重新签发的域名 */
@@ -148,6 +149,10 @@ export const certExportPem = (certId: string, outPath: string) =>
   safe(invoke<string>("cert_export_pem", { certId, outPath }));
 /** 从文件夹批量导入证书（certd 输出目录 / 任意一堆 crt+key） */
 export interface ImportedCertSummary {
+  id: string;
+  usable: boolean;
+  problem?: string;
+  usedBySites: string[];
   certPath: string;
   keyPath: string;
   subject: string;
@@ -184,9 +189,33 @@ export interface BackupFile {
   path: string;
   sizeBytes: number;
   modifiedAt: number;
+  targetPath: string | null;
+  restorable: boolean;
+  reason: string | null;
+}
+export interface BackupPreview {
+  name: string;
+  targetPath: string;
+  targetRelative: string;
+  currentExists: boolean;
+  revision: string;
+}
+export interface ConfigResetPreview {
+  kind: string;
+  label: string;
+  path: string;
+  content: string;
+  language: string;
+  currentExists: boolean;
+  changed: boolean;
+  revision: string;
+  usedByService: string | null;
 }
 export const listBackups = () => safe(invoke<BackupFile[]>("list_backups"));
-export const restoreBackup = (name: string) => safe(invoke<string>("restore_backup", { name }));
+export const previewBackup = (name: string) => safe(invoke<BackupPreview>("preview_backup", { name }));
+export const restoreBackup = (name: string, revision: string) => safe(invoke<string>("restore_backup", { name, revision }));
+export const configResetPreview = (kind: string) => safe(invoke<ConfigResetPreview>("config_reset_preview", { kind }));
+export const configReset = (kind: string, revision: string) => safe(invoke<ConfigResetPreview>("config_reset", { kind, revision }));
 export const getSystemStats = () => safe(invoke<SystemStats>("get_system_stats"));
 
 /* 打开外部 */
@@ -198,22 +227,27 @@ export const openTerminal = (cwd: string) =>
   safe(invoke<boolean>("open_terminal", { cwd }));
 
 /* 数据库 */
-export const dbList = () => safe(invoke<DatabaseInfo[]>("db_list"));
-export const dbCreate = (name: string) => safe(invoke<boolean>("db_create", { name }));
-export const dbDrop = (name: string) => safe(invoke<boolean>("db_drop", { name }));
-export const dbUsers = () => safe(invoke<DbUserInfo[]>("db_users"));
-export const dbCreateUser = (username: string, password: string, database: string) =>
-  safe(invoke<boolean>("db_create_user", { username, password, database }));
-export const dbResetRootPassword = (newPassword: string) =>
-  safe(invoke<boolean>("db_reset_root_password", { newPassword }));
-export const dbRootPassword = () => safe(invoke<string>("db_root_password"));
+export const dbList = (version?: string) => safe(invoke<DatabaseInfo[]>("db_list", { version }));
+export const dbCreate = (name: string, version?: string) => safe(invoke<boolean>("db_create", { name, version }));
+export const dbDrop = (name: string, version?: string) => safe(invoke<boolean>("db_drop", { name, version }));
+export const dbUsers = (version?: string) => safe(invoke<DbUserInfo[]>("db_users", { version }));
+export const dbCreateUser = (username: string, password: string, database: string, version?: string) =>
+  safe(invoke<boolean>("db_create_user", { username, password, database, version }));
+export const dbResetRootPassword = (newPassword: string, version?: string, useExisting = false) =>
+  safe(invoke<boolean>("db_reset_root_password", { newPassword, version, useExisting }));
+export const dbRootPassword = (version?: string) => safe(invoke<string>("db_root_password", { version }));
 export interface RedisStats {
   reachable: boolean;
+  port: number;
   usedMemoryHuman?: string;
   keys?: number;
   uptimeDays?: number;
   connectedClients?: number;
 }
+export interface RedisConnectionInfo { version: string; username: string; hasPassword: boolean }
+export const redisConnection = (version: string) => safe(invoke<RedisConnectionInfo>("redis_connection", { version }));
+export const redisSaveConnection = (version: string, credentials: { username: string; password: string }) =>
+  safe(invoke<RedisStats>("redis_save_connection", { version, credentials }));
 export const redisStats = () => safe(invoke<RedisStats>("redis_stats"));
 
 /* PHP 扩展 */
@@ -239,10 +273,10 @@ export const xdebugToggle = (version: string, enabled: boolean, mode: string, po
 /* 数据库备份 / 还原 */
 export const dbBackupList = () => safe(invoke<DbBackupFile[]>("db_backup_list"));
 export const dbBackupDir = () => safe(invoke<string>("db_backup_dir"));
-export const dbBackupDump = (databases: string[], outName?: string) =>
-  safe(invoke<string>("db_backup_dump", { databases, outName: outName ?? null }));
-export const dbBackupRestore = (path: string, safetyBackup = true) =>
-  safe(invoke<DbRestoreResult>("db_backup_restore", { path, safetyBackup }));
+export const dbBackupDump = (databases: string[], outName?: string, version?: string) =>
+  safe(invoke<string>("db_backup_dump", { databases, outName: outName ?? null, version }));
+export const dbBackupRestore = (path: string, safetyBackup = true, version?: string, database?: string) =>
+  safe(invoke<DbRestoreResult>("db_backup_restore", { path, safetyBackup, version, database }));
 export const dbBackupDelete = (path: string) =>
   safe(invoke<boolean>("db_backup_delete", { path }));
 
@@ -261,11 +295,11 @@ export const configList = () => safe(invoke<ConfigFileInfo[]>("config_list"));
 export const configRead = (kind: string) => safe(invoke<string>("config_read", { kind }));
 export const configValidate = (kind: string, content: string) =>
   safe(invoke<ConfigValidation>("config_validate", { kind, content }));
-export const configSave = (kind: string, content: string, force = false) =>
-  safe(invoke<ConfigValidation>("config_save", { kind, content, force }));
-export const configBackups = () => safe(invoke<ConfigBackup[]>("config_backups"));
-export const configRollback = (name: string) =>
-  safe(invoke<boolean>("config_rollback", { name }));
+export const configSave = (kind: string, content: string, force = false, expectedContent?: string) =>
+  safe(invoke<ConfigValidation>("config_save", { kind, content, force, expectedContent }));
+export const configBackups = (kind?: string) => safe(invoke<ConfigBackup[]>("config_backups", { kind }));
+export const configRollback = (name: string, kind?: string, expectedContent?: string) =>
+  safe(invoke<boolean>("config_rollback", { name, kind, expectedContent }));
 
 /* 证书体检 */
 export const certHealth = () => safe(invoke<CertReport>("cert_health"));
@@ -410,8 +444,9 @@ export const ollamaDelete = (name: string) =>
 export const ollamaPull = (name: string) =>
   safe(invoke<boolean>("ollama_pull", { name }));
 
-export const adminerStart = () =>
-  safe(invoke<{ port: number; file: string }>("adminer_start"));
+export interface AdminerStatus { port: number; file: string; url: string; phpVersion: string; adminerVersion: string }
+export const adminerStart = () => safe(invoke<AdminerStatus>("adminer_start"));
+export const adminerStatus = () => safe(invoke<AdminerStatus | null>("adminer_status"));
 export const adminerStop = () => safe(invoke<boolean>("adminer_stop"));
 
 /* 环境变量注入（PATH） */
@@ -496,11 +531,11 @@ export interface ImportReport {
   imported: string[];
   failed: [string, string][];
 }
-export const migrateListSource = (host: string, port: number, user: string, password: string) =>
-  safe(invoke<SourceDb[]>("migrate_list_source", { host, port, user, password }));
+export const migrateListSource = (host: string, port: number, user: string, password: string, version?: string) =>
+  safe(invoke<SourceDb[]>("migrate_list_source", { host, port, user, password, version }));
 export const migrateImport = (
-  host: string, port: number, user: string, password: string, databases: string[]
-) => safe(invoke<ImportReport>("migrate_import", { host, port, user, password, databases }));
+  host: string, port: number, user: string, password: string, databases: string[], version?: string
+) => safe(invoke<ImportReport>("migrate_import", { host, port, user, password, databases, version }));
 
 /* ===== DNS 一键接管（本地域名解析配套） ===== */
 export const dnsInterfaces = () => safe(invoke<string[]>("dns_interfaces"));

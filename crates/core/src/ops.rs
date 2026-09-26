@@ -267,14 +267,15 @@ pub fn start_service(
     let status = manager
         .snapshot(id)
         .ok_or_else(|| AppError::new("UNKNOWN_SERVICE", format!("服务 {id} 未注册或已卸载")))?;
-    if status.state == ServiceState::Error && manager.is_busy(id) {
+    if matches!(status.state, ServiceState::Starting | ServiceState::Stopping)
+        || (status.state == ServiceState::Error && manager.is_busy(id)) {
         return Err(AppError::new(
             "SERVICE_BUSY",
             format!("{id} 仍有进程运行，请先停止后重试"),
         ));
     }
     if let Some(e) = manager.snapshot(id) {
-        if e.state == ServiceState::Running || e.state == ServiceState::Starting {
+        if e.state == ServiceState::Running {
             return Ok(());
         }
     }
@@ -2699,4 +2700,142 @@ mod validate_tests {
         );
         assert!(checks.iter().any(|c| c.status == "skipped"));
     }
+    #[test]
+    fn service_lifecycle_rejects_unknown_and_concurrent_operations() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = Arc::new(isolated_state(Paths::new(temp.path().to_path_buf())));
+        assert_eq!(state.restart_service("coredns").unwrap_err().code, "UNKNOWN_SERVICE");
+        assert_eq!(state.stop_service("missing").unwrap_err().code, "UNKNOWN_SERVICE");
+        let mut freed = Vec::new();
+        assert_eq!(state.start_service_with_port_policy("missing", |p| freed.push(p)).unwrap_err().code, "UNKNOWN_SERVICE");
+        assert!(freed.is_empty());
+        let _lock = state.manager.lifecycle.lock();
+        let other = state.clone();
+        std::thread::spawn(move || {
+            assert_eq!(other.start_service("missing").unwrap_err().code, "SERVICE_BUSY");
+            assert_eq!(other.stop_service("missing").unwrap_err().code, "SERVICE_BUSY");
+            assert_eq!(other.restart_service("missing").unwrap_err().code, "SERVICE_BUSY");
+            assert_eq!(other.start_service_with_port_policy("missing", |_| panic!("must not free ports")).unwrap_err().code, "SERVICE_BUSY");
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn service_lifecycle_failed_stop_never_starts_and_watchdog_ignores_survivors() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = isolated_state(Paths::new(temp.path().to_path_buf()));
+        state.manager.register("redis", "Redis", None, None, None, state.paths.service_log("redis"));
+        // 缺少版本会在发送停机请求前失败；使用本测试 PID 证明它仍在，不执行结束命令。
+        state.manager.adopt("redis", &[std::process::id()], None);
+        state.watchdog.note_started("redis");
+        state.store.set_setting("watchdogEnabled", "true").unwrap();
+        let error = state.restart_service("redis").unwrap_err();
+        assert_eq!(error.code, "REDIS_VERSION_UNKNOWN");
+        assert!(error.message.contains("停止阶段失败"));
+        let snapshot = state.manager.snapshot("redis").unwrap();
+        assert_eq!(snapshot.state, ServiceState::Error);
+        assert_eq!(snapshot.pids, [std::process::id()]);
+        assert_eq!(snapshot.last_error.unwrap().code, "REDIS_VERSION_UNKNOWN");
+        assert!(state.watchdog_tick().is_empty());
+        assert_eq!(state.watchdog_status().watched[0].attempts, 0);
+    }
+
+    #[test]
+    fn service_lifecycle_reports_start_failure_after_successful_stop() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = isolated_state(Paths::new(temp.path().to_path_buf()));
+        register_fixture(&state, "nginx", "1", &temp.path().join("missing-runtime"));
+        register_services(&state.paths, &state.store, &state.manager);
+        state.watchdog.note_started("nginx");
+        let error = state.restart_service("nginx").unwrap_err();
+        assert!(error.message.contains("服务已停止，但重新启动失败"));
+        assert_ne!(error.code, "UNKNOWN_SERVICE");
+        let snapshot = state.manager.snapshot("nginx").unwrap();
+        assert_eq!(snapshot.state, ServiceState::Error);
+        assert!(snapshot.pids.is_empty());
+        let cfg = crate::watchdog::WatchdogConfig { enabled: true, ..Default::default() };
+        assert!(!state.watchdog.should_restart("nginx", &cfg));
+        assert!(state.paths.data().join("run/pids.json").exists());
+    }
+
+    #[test]
+    fn service_lifecycle_running_start_is_idempotent_and_transitions_are_busy() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = isolated_state(Paths::new(temp.path().to_path_buf()));
+        state.manager.register("fixture", "Fixture", None, None, None, state.paths.service_log("fixture"));
+        state.manager.adopt("fixture", &[std::process::id()], None);
+        state.start_service_with_port_policy("fixture", |_| panic!("must not free ports")).unwrap();
+        assert_eq!(state.manager.snapshot("fixture").unwrap().pids, [std::process::id()]);
+        for status in [ServiceState::Starting, ServiceState::Stopping] {
+            state.manager.set_state("fixture", status.clone());
+            assert_eq!(state.start_service("fixture").unwrap_err().code, "SERVICE_BUSY");
+            assert_eq!(state.restart_service("fixture").unwrap_err().code, "SERVICE_BUSY");
+            assert_eq!(state.manager.snapshot("fixture").unwrap().state, status);
+        }
+    }
+
+    #[test]
+    fn service_lifecycle_port_policy_preserves_protected_and_disabled_conflicts() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = isolated_state(Paths::new(temp.path().to_path_buf()));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let root = temp.path().join("runtime");
+        let nginx = root.join("nginx-1"); std::fs::create_dir_all(&nginx).unwrap();
+        std::fs::write(nginx.join(exe_name("nginx")), b"not executed; precheck must fail first").unwrap();
+        register_fixture(&state, "nginx", "1", &root);
+        state.store.set_port_override("http", Some(port)).unwrap();
+        state.store.set_setting("autoClosePortOnStart", "false").unwrap();
+        let error = state.start_service_with_port_policy("nginx", |_| panic!("must not free ports")).unwrap_err();
+        assert_eq!(error.code, "PORT_IN_USE");
+        assert_eq!(error.port, Some(port));
+        state.store.set_setting("autoClosePortOnStart", "true").unwrap();
+        assert_eq!(state.start_service_with_port_policy("nginx", |_| panic!("must not free ports")).unwrap_err().code, "PORT_TARGET_PROTECTED");
+        assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn service_lifecycle_real_restart_and_port_policy_update_watchdog_and_pids() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = isolated_state(Paths::new(temp.path().to_path_buf()));
+        let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = reservation.local_addr().unwrap().port(); drop(reservation);
+        for id in ["fixture-a", "fixture-b"] {
+            let runtime = state.paths.runtime_dir(id, "1"); std::fs::create_dir_all(&runtime).unwrap();
+            let script = r#"@echo off
+powershell.exe -NoProfile -NonInteractive -Command "$listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, {PORT}); try { $listener.Start(); Start-Sleep -Seconds 30 } finally { $listener.Stop() }"
+"#.replace("{PORT}", &port.to_string());
+            std::fs::write(runtime.join("fixture.cmd"), script).unwrap();
+            let manifest = serde_json::json!({"id":id,"version":"1","category":"tool","displayName":id,"description":"finite isolated fixture","os":["windows"],"arch":["x64"],"kind":"archive","url":"","sizeBytes":0,"entry":"fixture.cmd","defaultPort":port,"run":{"args":[],"health":"tcp","healthTimeoutSec":5}});
+            std::fs::write(runtime.join(".niceenv-package.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+            register_fixture(&state, id, "1", &runtime);
+        }
+        struct Cleanup<'a>(&'a crate::CoreState);
+        impl Drop for Cleanup<'_> { fn drop(&mut self) { for id in ["fixture-a", "fixture-b"] { let _ = self.0.stop_service(id); } } }
+        let _cleanup = Cleanup(&state);
+        state.store.set_setting("autoClosePortOnStart", "true").unwrap();
+        state.store.set_setting("autoFallbackPort", "false").unwrap();
+        state.start_service("fixture-a").unwrap();
+        let cfg = crate::watchdog::WatchdogConfig { enabled: true, ..Default::default() };
+        assert!(state.watchdog.should_restart("fixture-a", &cfg));
+        let mut freed = Vec::new();
+        state.start_service_with_port_policy("fixture-b", |p| freed.push(p)).unwrap();
+        assert_eq!(freed, [port]);
+        assert_eq!(state.manager.snapshot("fixture-a").unwrap().state, ServiceState::Stopped);
+        assert!(!state.watchdog.should_restart("fixture-a", &cfg));
+        let before = state.manager.snapshot("fixture-b").unwrap().pids;
+        state.restart_service("fixture-b").unwrap();
+        let after = state.manager.snapshot("fixture-b").unwrap();
+        assert_eq!(after.state, ServiceState::Running);
+        assert_ne!(before, after.pids);
+        assert!(before.iter().all(|pid| !platform::process_alive(*pid)));
+        assert!(state.watchdog.should_restart("fixture-b", &cfg));
+        let recorded: serde_json::Value = serde_json::from_slice(&std::fs::read(state.paths.data().join("run/pids.json")).unwrap()).unwrap();
+        assert!(recorded["services"].as_array().unwrap().iter().any(|row| row["id"] == "fixture-b" && row["pids"][0] == after.pids[0]));
+        let scan = state.scan_port_range(port, port).unwrap();
+        let outcome = state.close_port_checked(port, &scan.listeners).unwrap();
+        assert!(outcome.port_free);
+        assert!(!state.watchdog.should_restart("fixture-b", &cfg));
+    }
+
 }

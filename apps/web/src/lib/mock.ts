@@ -61,7 +61,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.26";
+const MOCK_APP_VERSION = "0.2.27";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -727,46 +727,56 @@ function savePreviewConfig(kind: string, content: string, expected?: string) {
   configPreviewContent.set(kind, content);
 }
 
+let serviceActionInProgress = false;
+
+/** 演示启停也保持操作互斥和重启的停止/启动顺序。 */
+async function runServiceAction(action: "start_service" | "stop_service" | "restart_service", id: string) {
+  if (serviceActionInProgress) throw { code: "SERVICE_BUSY", message: "服务正在操作，请稍后重试" };
+  const service = services.get(id);
+  if (!service) throw { code: "UNKNOWN_SERVICE", message: `服务 ${id} 未注册或已卸载` };
+  if (["starting", "stopping"].includes(service.state)) throw { code: "SERVICE_BUSY", message: "服务正在切换状态，请稍后重试" };
+  serviceActionInProgress = true;
+  let stopping = true;
+  try {
+    if (action !== "start_service" && (service.state !== "stopped" || service.pids.length)) {
+      if (id === "coredns") mockDnsStatus.forEach((status) => {
+        if (status.backup) { status.current = status.backup; status.backup = null; status.local = false; }
+      });
+      service.state = "stopping";
+      await delay(500);
+      service.state = "stopped";
+      service.pids = [];
+      if (id === "mihomo") proxyRunning = false;
+    }
+    stopping = false;
+    if (action !== "stop_service" && service.state !== "running") {
+      if (service.state === "error" && service.pids.length) throw { code: "SERVICE_BUSY", message: "服务仍有进程，请先停止后重试" };
+      service.state = "starting";
+      service.lastError = undefined;
+      await delay(700);
+      service.state = "running";
+      service.pids = [Math.floor(Math.random() * 40000) + 1000];
+      service.uptimeSec = 0;
+      if (id === "mihomo") proxyRunning = true;
+    }
+    return true;
+  } catch (failure) {
+    const error = normalizeError(failure);
+    if (action === "restart_service") error.message = `${stopping ? "重启中止，停止阶段失败" : "服务已停止，但重新启动失败"}：${error.message}`;
+    service.state = "error"; service.lastError = error;
+    throw error;
+  } finally { serviceActionInProgress = false; }
+}
+
 export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   await delay(60 + Math.random() * 120);
   switch (cmd) {
     case "list_service_status":
       return structuredClone(Array.from(services.values())) as T;
-    case "start_service": {
-      const id = args!.id as string;
-      const s = services.get(id);
-      if (s) {
-        s.state = "starting";
-        await delay(700);
-        s.state = "running";
-        s.pids = [Math.floor(Math.random() * 40000) + 1000];
-        s.uptimeSec = 0;
-        if (id === "mihomo") proxyRunning = true;
-      }
-      return true as T;
-    }
-    case "stop_service": {
-      const id = args!.id as string;
-      const s = services.get(id);
-      if (id === "coredns") {
-        mockDnsStatus.forEach((status) => {
-          if (status.backup) { status.current = status.backup; status.backup = null; status.local = false; }
-        });
-      }
-      if (s) {
-        s.state = "stopping";
-        await delay(500);
-        s.state = "stopped";
-        s.pids = [];
-        if (id === "mihomo") proxyRunning = false;
-      }
-      return true as T;
-    }
-    case "restart_service": {
-      await mockInvoke("stop_service", args);
-      await mockInvoke("start_service", args);
-      return true as T;
-    }
+    case "start_service":
+    case "stop_service":
+    case "restart_service":
+      return await runServiceAction(cmd, String(args?.id ?? "")) as T;
 
     /* ---------- 服务栈 ---------- */
     case "list_stacks": {

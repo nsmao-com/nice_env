@@ -550,30 +550,16 @@ async fn start_service(
     id: String,
 ) -> Result<bool, tauri::Error> {
     let st = state.inner().clone();
-    // 端口被占：默认先把占用人收掉再启动（设置里可关掉这个行为）。
-    // 收掉了哪些端口要如实告诉用户——悄悄结束别人的进程是不可接受的。
-    if st
-        .store
-        .get_setting("autoClosePortOnStart")
-        .map(|v| v != "false")
-        .unwrap_or(true)
-    {
-        let st2 = st.clone();
-        let sid = id.clone();
-        let freed = tauri::async_runtime::spawn_blocking(move || free_ports_for(&st2, &sid))
-            .await
-            .unwrap_or_default();
-        if !freed.is_empty() {
-            let _ = app.emit(
-                "ports://auto-freed",
-                serde_json::json!({ "serviceId": id, "freed": freed }),
-            );
-        }
+    let service_id = id.clone();
+    let (result, freed) = tauri::async_runtime::spawn_blocking(move || {
+        let mut freed = Vec::new();
+        let result = st.start_service_with_port_policy(&id, |port| freed.push(port));
+        (result, freed)
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?;
+    if !freed.is_empty() {
+        let _ = app.emit("ports://auto-freed", serde_json::json!({ "serviceId": service_id, "freed": freed }));
     }
-    let r =
-        tauri::async_runtime::spawn_blocking(move || map_jh(st.start_service(&id).map(|_| true)))
-            .await
-            .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?;
+    let r = map_jh(result.map(|_| true));
     crate::tray::refresh(&app);
     r
 }
@@ -600,60 +586,11 @@ async fn restart_service(
     id: String,
 ) -> Result<bool, tauri::Error> {
     let st = state.inner().clone();
-    let r = tauri::async_runtime::spawn_blocking(move || {
-        st.stop_service(&id).ok();
-        map_jh(st.start_service(&id).map(|_| true))
-    })
+    let r = tauri::async_runtime::spawn_blocking(move || map_jh(st.restart_service(&id).map(|_| true)))
     .await
     .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?;
     crate::tray::refresh(&app);
     r
-}
-
-/// 启动服务前，把这个服务需要绑定的端口上的占用者收掉。
-/// - 占用者是本应用自己的服务 → 走优雅停止（MySQL 干净关库）
-/// - 是外部进程 → 直接结束（用户已在设置里确认过这个默认行为）
-/// 任何失败都静默忽略：真正的启动错误会在随后的 start_service 里如实报出来。
-fn free_ports_for(state: &std::sync::Arc<nsb_core::CoreState>, service_id: &str) -> Vec<u16> {
-    let mut freed = Vec::new();
-    for port in ports_of_service(state, service_id) {
-        if nsb_core::services::tcp_port_open(port) {
-            if state.close_port(port).is_ok_and(|outcome| outcome.port_free && outcome.errors.is_empty()) {
-                freed.push(port);
-            }
-        }
-    }
-    freed
-}
-
-/// 某服务启动时会绑定的端口（与 ops 里各 start_* 的 precheck 对齐）
-fn ports_of_service(state: &std::sync::Arc<nsb_core::CoreState>, service_id: &str) -> Vec<u16> {
-    let p = nsb_core::services::PortsProfile::from_settings(&state.store);
-    match service_id {
-        "nginx" => vec![p.http, p.https],
-        "apache" => vec![p.apache_http, p.apache_https],
-        "redis" => vec![p.redis],
-        "postgresql" => vec![p.postgres],
-        "mongodb" => vec![p.mongodb],
-        "mihomo" => vec![
-            nsb_core::configgen::MIHOMO_MIXED_PORT,
-            nsb_core::configgen::MIHOMO_CONTROLLER_PORT,
-        ],
-        s if s.starts_with("mysql@") => vec![p.mysql],
-        s if s.starts_with("php@") => state
-            .store
-            .get_port_assign(s)
-            .map(|base| {
-                (0..nsb_core::configgen::PHP_POOL_WORKERS)
-                    .map(|i| base + i)
-                    .collect()
-            })
-            .unwrap_or_default(),
-        // 清单驱动的通用服务：按当前分配表/清单推导
-        other => nsb_core::generic::planned_port(&state.store, other)
-            .into_iter()
-            .collect(),
-    }
 }
 
 /* ================= 服务栈 ================= */
@@ -1114,7 +1051,7 @@ async fn close_port(
     expected: Vec<nsb_core::model::ListenerInfo>,
 ) -> Result<nsb_core::ports::ClosePortOutcome, tauri::Error> {
     let st = state.inner().clone();
-    let outcome = tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::ports::close_port_checked(&st.store, &st.paths, &st.manager, port, &expected)))
+    let outcome = tauri::async_runtime::spawn_blocking(move || map_jh(st.close_port_checked(port, &expected)))
         .await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))??;
     crate::tray::refresh(&app);

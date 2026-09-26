@@ -59,10 +59,7 @@ fn main() -> ExitCode {
         "packages" => cmd_packages(&state, json),
         "start" => one_service(&state, pos.first().copied(), |s, id| s.start_service(id)),
         "stop" => one_service(&state, pos.first().copied(), |s, id| s.stop_service(id)),
-        "restart" => one_service(&state, pos.first().copied(), |s, id| {
-            s.stop_service(id).ok();
-            s.start_service(id)
-        }),
+        "restart" => one_service(&state, pos.first().copied(), |s, id| s.restart_service(id)),
         "start-all" => stack(&state, true),
         "stop-all" => stack(&state, false),
         "open" => cmd_open(&state, pos.first().copied()),

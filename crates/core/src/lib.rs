@@ -731,8 +731,13 @@ impl CoreState {
     }
 
     pub fn start_service(&self, id: &str) -> Result<()> {
-        let _operation = self.manager.lifecycle.lock();
-        let r = ops::start_service(&self.store, &self.paths, &self.manager, id);
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后启动"))?;
+        let mut r = ops::start_service(&self.store, &self.paths, &self.manager, id);
+        if r.is_ok() && !self.manager.snapshot(id).is_some_and(|status| status.state == model::ServiceState::Running && !status.pids.is_empty()) {
+            let error = AppError::new("SERVICE_START_EXITED", format!("{id} 启动后进程已退出，请检查日志"));
+            self.manager.set_error(id, error.clone());
+            r = Err(error);
+        }
         // 记录托管 pid：崩溃后下次启动靠它找回残留进程
         ops::save_pidfile(&self.paths, &self.manager);
         // 只有真的起来了才算「用户希望它运行」，失败时不该纳入看门狗监控
@@ -743,7 +748,8 @@ impl CoreState {
     }
 
     pub fn stop_service(&self, id: &str) -> Result<()> {
-        let _operation = self.manager.lifecycle.lock();
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后停止"))?;
+        self.manager.snapshot(id).ok_or_else(|| AppError::new("UNKNOWN_SERVICE", format!("服务 {id} 未注册或已卸载")))?;
         let r = ops::stop_service(&self.store, &self.paths, &self.manager, id);
         ops::save_pidfile(&self.paths, &self.manager);
         // 用户主动停止 → 标记，看门狗不得再拉起它（否则点了停止又被拉起来，
@@ -752,6 +758,78 @@ impl CoreState {
             self.watchdog.note_user_stopped(id);
         }
         r
+    }
+
+    /// 一次用户重启是不可交错的停止与启动；失败阶段保留原错误码和诊断字段。
+    pub fn restart_service(&self, id: &str) -> Result<()> {
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重启"))?;
+        let before = self.manager.snapshot(id).ok_or_else(|| AppError::new("UNKNOWN_SERVICE", format!("服务 {id} 未注册或已卸载")))?;
+        if matches!(before.state, model::ServiceState::Starting | model::ServiceState::Stopping) {
+            return Err(AppError::new("SERVICE_BUSY", "服务正在切换状态，请稍后重启"));
+        }
+        self.stop_service(id).map_err(|mut error| {
+            error.message = format!("重启中止，停止阶段失败：{}", error.message);
+            self.manager.set_error(id, error.clone());
+            error
+        })?;
+        self.start_service(id).map_err(|mut error| {
+            error.message = format!("服务已停止，但重新启动失败：{}", error.message);
+            self.manager.set_error(id, error.clone());
+            error
+        })
+    }
+
+    /// 桌面启动策略：只处理启动实际报告的 TCP 冲突，不预先结束一组计划端口。
+    /// 回调保留已完成的端口处理，即使后续启动失败也可向用户报告。
+    pub fn start_service_with_port_policy(
+        &self,
+        id: &str,
+        mut on_freed: impl FnMut(u16),
+    ) -> Result<()> {
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| {
+            AppError::new("SERVICE_BUSY", "服务正在操作，请稍后启动")
+        })?;
+        let mut handled = std::collections::HashSet::new();
+        let result = (|| loop {
+            let error = match self.start_service(id) {
+                Ok(()) => return Ok(()),
+                Err(error) => error,
+            };
+            if error.code != "PORT_IN_USE" {
+                return Err(error);
+            }
+            let enabled = match self.store.get_setting_checked("autoClosePortOnStart")?.as_deref() {
+                None | Some("true") => true,
+                Some("false") => false,
+                Some(_) => return Err(AppError::new("BAD_SETTING", "自动释放端口设置无效，请在设置中重新选择")),
+            };
+            let (Some(port), Some(pid)) = (error.port, error.pid) else {
+                return Err(error);
+            };
+            if !enabled || handled.len() >= 32 || !handled.insert((port, pid)) {
+                return Err(error);
+            }
+            let current = self.scan_port_range(port, port)?;
+            let targets = current.listeners.into_iter()
+                .filter(|row| row.pid == pid)
+                .collect::<Vec<_>>();
+            // 扫描时旧进程已经退出，也只复查结果；不能改为结束另一个新占用者。
+            let outcome = self.close_port_checked(port, &targets)?;
+            if !outcome.port_free || !outcome.errors.is_empty() {
+                return Err(AppError::new("PORT_AUTO_CLOSE_FAILED", format!("端口 {port} 未确认释放，启动已中止"))
+                    .with_hint("到工具箱重新查看监听者后重试")
+                    .with_detail(outcome.errors.join("；")));
+            }
+            if !outcome.killed_pids.is_empty() {
+                on_freed(port);
+            }
+        })();
+        if let Err(error) = &result {
+            if self.manager.snapshot(id).is_some_and(|status| status.state == model::ServiceState::Error) {
+                self.manager.set_error(id, error.clone());
+            }
+        }
+        result
     }
 
     /// 将运行时、配置、服务数据、证书和本地数据库迁移到新目录。
@@ -849,7 +927,20 @@ impl CoreState {
 
     /// 占用了某端口的进程：本应用服务则优雅停止，外部进程则直接结束
     pub fn close_port(&self, port: u16) -> Result<ports::ClosePortOutcome> {
-        ports::close_port(&self.store, &self.paths, &self.manager, port)
+        let expected = self.scan_port_range(port, port)?.listeners;
+        self.close_port_checked(port, &expected)
+    }
+
+    /// 从端口工具主动停止受管服务，同样要告知看门狗，避免刚停就被自动拉起。
+    pub fn close_port_checked(&self, port: u16, expected: &[model::ListenerInfo]) -> Result<ports::ClosePortOutcome> {
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重试"))?;
+        let result = ports::close_port_checked(&self.store, &self.paths, &self.manager, port, expected);
+        for id in expected.iter().filter_map(|row| row.service_id.as_deref()) {
+            if self.manager.snapshot(id).is_some_and(|status| status.state == model::ServiceState::Stopped && status.pids.is_empty()) {
+                self.watchdog.note_user_stopped(id);
+            }
+        }
+        result
     }
 
     /// 端口区间扫描（工具箱；单端口传 from == to）
@@ -970,9 +1061,7 @@ impl CoreState {
         let mut restarted = false;
         if running {
             // 重启失败不该掩盖「配置已改成功」这个事实，忽略错误但记在告警里
-            match ops::stop_service(&self.store, &self.paths, &self.manager, &service_id).and_then(
-                |_| ops::start_service(&self.store, &self.paths, &self.manager, &service_id),
-            ) {
+            match self.restart_service(&service_id) {
                 Ok(_) => restarted = true,
                 Err(e) => warnings.push(format!("PHP {version} 重启失败：{}", e.message)),
             }
@@ -1117,8 +1206,7 @@ impl CoreState {
         if !running {
             return;
         }
-        let r = ops::stop_service(&self.store, &self.paths, &self.manager, &service_id)
-            .and_then(|_| ops::start_service(&self.store, &self.paths, &self.manager, &service_id));
+        let r = self.restart_service(&service_id);
         if let Err(e) = r {
             warnings.push(format!("PHP {version} 重启失败：{}", e.message));
         }
@@ -1185,10 +1273,7 @@ impl CoreState {
         let statuses = self.manager.list_status();
         let mut acted = Vec::new();
         for st in statuses {
-            if matches!(
-                st.state,
-                model::ServiceState::Running | model::ServiceState::Starting
-            ) {
+            if self.manager.is_busy(&st.id) {
                 continue;
             }
             if !self.watchdog.should_restart(&st.id, &cfg) {

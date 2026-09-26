@@ -853,48 +853,49 @@ rules:
     )
 }
 
-/// 激活订阅：把订阅 YAML 的端口/控制端口等强制替换为我们的托管值
-pub fn adapt_mihomo_profile(raw: &str) -> String {
-    let overrides: &[(&str, String)] = &[
-        ("mixed-port:", MIHOMO_MIXED_PORT.to_string()),
-        ("port:", "0".to_string()),
-        ("socks-port:", "0".to_string()),
-        (
-            "external-controller:",
-            format!("127.0.0.1:{MIHOMO_CONTROLLER_PORT}"),
-        ),
-        ("secret:", r#""""#.to_string()),
-        ("allow-lan:", "false".to_string()),
-        ("external-ui:", "".to_string()),
-    ];
-    let mut seen: Vec<String> = Vec::new();
-    let mut out = String::new();
-    for line in raw.lines() {
-        let trimmed = line.trim_start();
-        let mut replaced = line.to_string();
-        if !trimmed.starts_with('#') {
-            for (key, val) in overrides {
-                if trimmed.starts_with(key) {
-                    seen.push(key.to_string());
-                    if val.is_empty() {
-                        replaced = format!("# {line}");
-                    } else {
-                        let indent = &line[..line.len() - trimmed.len()];
-                        replaced = format!("{indent}{key} {val}");
-                    }
-                    break;
-                }
-            }
-        }
-        out.push_str(&replaced);
-        out.push('\n');
+/// 只修改 YAML 根映射的托管字段，保留节点、provider 和锚点中的远端参数。
+pub fn adapt_mihomo_profile(raw: &str, mode: &str) -> Result<String> {
+    use yaml_serde::Value;
+    if !matches!(mode, "rule" | "global" | "direct") {
+        return Err(AppError::new("BAD_PROXY_MODE", "代理模式无效"));
     }
-    for (key, val) in overrides {
-        if !seen.iter().any(|s| s == key) && !val.is_empty() {
-            out.push_str(&format!("{key} {val}\n"));
+    let yaml_error = |e: yaml_serde::Error| {
+        // YAML 报错可能带订阅密码或节点内容，只给出位置。
+        let position = e.location().map(|p| format!("（第 {} 行，第 {} 列）", p.line(), p.column())).unwrap_or_default();
+        AppError::new("NOT_A_CLASH_CONFIG", format!("订阅 YAML 格式无效{position}"))
+            .with_hint("请使用 Clash / mihomo YAML 订阅，并检查格式或联系订阅提供方")
+    };
+    let mut value: Value = yaml_serde::from_str(raw).map_err(yaml_error)?;
+    value.apply_merge().map_err(yaml_error)?;
+    let root = value.as_mapping_mut().ok_or_else(|| AppError::new("NOT_A_CLASH_CONFIG", "订阅必须是 Clash YAML 配置"))?;
+    for key in ["proxies", "proxy-groups", "rules"] {
+        if root.get(Value::from(key)).is_some_and(|v| !v.is_sequence()) {
+            return Err(AppError::new("NOT_A_CLASH_CONFIG", format!("订阅字段 {key} 必须是列表")));
         }
     }
-    out
+    if root.get(Value::from("proxy-providers")).is_some_and(|v| !v.is_mapping()) {
+        return Err(AppError::new("NOT_A_CLASH_CONFIG", "订阅字段 proxy-providers 必须是映射"));
+    }
+    let has_nodes = root.get(Value::from("proxies")).is_some_and(Value::is_sequence);
+    let has_providers = root.get(Value::from("proxy-providers")).is_some_and(Value::is_mapping);
+    let has_rules = root.get(Value::from("rules")).is_some_and(Value::is_sequence);
+    if !has_nodes && !has_providers && !has_rules {
+        return Err(AppError::new("NOT_A_CLASH_CONFIG", "订阅未包含有效节点、节点提供者或规则")
+            .with_hint("裸节点链接、网页和 base64 节点列表不能直接作为 Clash 配置"));
+    }
+    for (key, val) in [
+        ("mixed-port", Value::from(MIHOMO_MIXED_PORT)),
+        ("port", Value::from(0)),
+        ("socks-port", Value::from(0)),
+        ("external-controller", Value::from(format!("127.0.0.1:{MIHOMO_CONTROLLER_PORT}"))),
+        ("secret", Value::from("")),
+        ("allow-lan", Value::from(false)),
+        ("mode", Value::from(mode)),
+    ] {
+        root.insert(Value::from(key), val);
+    }
+    root.remove(Value::from("external-ui"));
+    yaml_serde::to_string(&value).map_err(yaml_error)
 }
 
 /* ================= 统一生成入口（修复向导也用） ================= */
@@ -1358,6 +1359,54 @@ pub fn adminer_path(paths: &Paths) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod managed_config_tests {
     use super::*;
+
+    #[test]
+    fn mihomo_adaptation_preserves_nested_ports_and_yaml_merges() {
+        let raw = r#"
+defaults: &defaults
+  type: ss
+  port: 443
+  cipher: aes-128-gcm
+  password: fixture-only
+proxies:
+  - <<: *defaults
+    name: quoted-node
+    server: example.test
+  - {name: inline-node, type: socks5, server: 127.0.0.1, port: 9091}
+proxy-providers:
+  local: {type: file, path: local.yaml, health-check: {enable: false, port: 1234}}
+proxy-groups: []
+mixed-port: 8888
+'port': 8889
+mode: global
+external-controller: 0.0.0.0:9090
+secret: fixture-secret
+"#;
+        let adapted = adapt_mihomo_profile(raw, "direct").unwrap();
+        let value: yaml_serde::Value = yaml_serde::from_str(&adapted).unwrap();
+        assert_eq!(value["mixed-port"].as_u64(), Some(MIHOMO_MIXED_PORT as u64));
+        assert_eq!(value["port"].as_u64(), Some(0));
+        assert_eq!(value["proxies"][0]["port"].as_u64(), Some(443));
+        assert_eq!(value["proxies"][1]["port"].as_u64(), Some(9091));
+        assert_eq!(value["proxy-providers"]["local"]["health-check"]["port"].as_u64(), Some(1234));
+        assert_eq!(value["mode"].as_str(), Some("direct"));
+        assert_eq!(value["external-controller"].as_str(), Some("127.0.0.1:19090"));
+        assert_eq!(value["secret"].as_str(), Some(""));
+        assert_eq!(value["proxies"][0]["password"].as_str(), Some("fixture-only"));
+    }
+
+    #[test]
+    fn mihomo_adaptation_accepts_provider_and_json_configs_and_rejects_invalid_yaml() {
+        for raw in [r#"{"proxies":[],"rules":["MATCH,DIRECT"]}"#, "proxy-providers: {}\nproxy-groups: []", "rules: [MATCH,DIRECT]"] {
+            assert!(adapt_mihomo_profile(raw, "rule").is_ok(), "{raw}");
+        }
+        for raw in ["<html>proxies</html>", "proxies: [", "proxies: {}\nrules: []", "proxies: []\nproxies: []", "---\nproxies: []\n---\nrules: []"] {
+            assert!(adapt_mihomo_profile(raw, "rule").is_err(), "{raw}");
+        }
+        let error = adapt_mihomo_profile("password: fixture-secret\nproxies: [", "rule").unwrap_err();
+        assert!(!error.message.contains("fixture-secret"));
+        assert_eq!(adapt_mihomo_profile("proxies: []", "bad").unwrap_err().code, "BAD_PROXY_MODE");
+    }
 
     fn fixture() -> (tempfile::TempDir, Paths) {
         let temp = tempfile::tempdir().unwrap();

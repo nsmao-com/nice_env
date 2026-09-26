@@ -59,7 +59,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.16";
+const MOCK_APP_VERSION = "0.2.17";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -618,6 +618,29 @@ function previewBackup(version: string, data: DatabaseInfo[], label: string) {
 const previewSource = [{ name: "legacy_app", tables: 5, sizeKb: 128 }, { name: "wordpress_import", tables: 12, sizeKb: 256 }];
 
 /* ---------- 命令实现 ---------- */
+
+const proxyGroups: ProxyGroupView[] = [
+  {
+    name: "PROXY",
+    type: "Selector",
+    now: "🇭🇰 香港 01",
+    nodes: [
+      { name: "🇭🇰 香港 01", type: "Shadowsocks", alive: true, history: [86, 92, 88] },
+      { name: "🇭🇰 香港 02", type: "Vmess", alive: true, history: [120, 115, 130] },
+      { name: "🇯🇵 日本 01", type: "Trojan", alive: true, history: [156, 149] },
+      { name: "🇺🇸 美国 01", type: "Shadowsocks", alive: false, history: [] },
+    ],
+  },
+  {
+    name: "AUTO",
+    type: "URLTest",
+    now: "🇭🇰 香港 01",
+    nodes: [
+      { name: "🇭🇰 香港 01", type: "Shadowsocks", alive: true, history: [86] },
+      { name: "🇯🇵 日本 01", type: "Trojan", alive: true, history: [156] },
+    ],
+  },
+];
 
 let proxyRunning = false;
 let systemProxyOn = false;
@@ -1843,6 +1866,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return true as T;
     }
     case "proxy_set_mode": {
+      if (!["rule", "global", "direct"].includes(String(args?.mode))) throw { code: "BAD_PROXY_MODE", message: "代理模式无效" };
       proxyMode = args!.mode as "rule" | "global" | "direct";
       return true as T;
     }
@@ -1864,10 +1888,17 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return true as T;
     }
     case "proxy_import": {
+      const name = String(args?.name ?? "").trim();
+      const url = String(args?.url ?? "").trim();
+      if (!name || [...name].length > 128 || /[\x00-\x1f\x7f]/.test(name)) throw { code: "BAD_PROFILE_NAME", message: "订阅名称无效" };
+      try {
+        const parsed = new URL(url);
+        if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || url.length > 8192) throw new Error();
+      } catch { throw { code: "BAD_SUBSCRIPTION_URL", message: "请输入完整的 HTTP 或 HTTPS 订阅地址" }; }
       const p: ProxyProfile = {
         id: uid(),
-        name: args!.name as string,
-        url: args!.url as string,
+        name,
+        url,
         active: false,
         addedAt: now(),
       };
@@ -1875,30 +1906,16 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return p as T;
     }
     case "proxy_nodes":
-      return [
-        {
-          name: "PROXY",
-          type: "Selector",
-          now: "🇭🇰 香港 01",
-          nodes: [
-            { name: "🇭🇰 香港 01", type: "Shadowsocks", alive: true, history: [86, 92, 88] },
-            { name: "🇭🇰 香港 02", type: "Vmess", alive: true, history: [120, 115, 130] },
-            { name: "🇯🇵 日本 01", type: "Trojan", alive: true, history: [156, 149] },
-            { name: "🇺🇸 美国 01", type: "Shadowsocks", alive: false, history: [] },
-          ],
-        },
-        {
-          name: "AUTO",
-          type: "URLTest",
-          now: "🇭🇰 香港 01",
-          nodes: [
-            { name: "🇭🇰 香港 01", type: "Shadowsocks", alive: true, history: [86] },
-            { name: "🇯🇵 日本 01", type: "Trojan", alive: true, history: [156] },
-          ],
-        },
-      ] as ProxyGroupView[] as T;
-    case "proxy_select_node":
+      return structuredClone(proxyGroups) as T;
+    case "proxy_select_node": {
+      if (!proxyRunning) throw { code: "PROXY_NOT_RUNNING", message: "mihomo 尚未运行" };
+      const group = proxyGroups.find((item) => item.name === args?.group);
+      if (!group || group.type !== "Selector" || !group.nodes.some((node) => node.name === args?.node)) {
+        throw { code: "SELECT_FAILED", message: "只能选择手动策略组中的有效节点" };
+      }
+      group.now = args!.node as string;
       return true as T;
+    }
     case "proxy_delay_test": {
       await delay(800);
       return Math.floor(60 + Math.random() * 220) as T;
@@ -1920,7 +1937,9 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "proxy_update_profile": {
       const pid = args!.id as string;
       const old = proxyProfiles.get(pid);
-      if (old) proxyProfiles.set(pid, { ...old });
+      if (!old) throw { code: "PROFILE_NOT_FOUND", message: "找不到代理订阅" };
+      if (old.url.startsWith("builtin:")) throw { code: "BAD_SUBSCRIPTION_URL", message: "内置配置无需下载更新" };
+      proxyProfiles.set(pid, { ...old });
       return true as T;
     }
     case "cron_jobs":

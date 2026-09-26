@@ -3046,6 +3046,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "libyaml-rs"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e126dda6f34391ab7b444f9922055facc83c07a910da3eb16f1e4d9c45dc777"
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3268,7 +3274,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "niceservbay"
-version = "0.2.16"
+version = "0.2.17"
 dependencies = [
  "anyhow",
  "nsb-core",
@@ -3318,7 +3324,7 @@ dependencies = [
 
 [[package]]
 name = "nsb-core"
-version = "0.2.16"
+version = "0.2.17"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3354,6 +3360,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "x509-parser 0.18.1",
+ "yaml_serde",
  "zip",
 ]
 
@@ -4095,7 +4102,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "platform"
-version = "0.2.16"
+version = "0.2.17"
 dependencies = [
  "libc",
  "serde",
@@ -7694,6 +7701,19 @@ dependencies = [
  "rusticata-macros",
  "thiserror 2.0.20",
  "time",
+]
+
+[[package]]
+name = "yaml_serde"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33b729a08a9a6be689bbad3e2bf8015926db54b6622cc89c3a5f7dc174b9e918"
+dependencies = [
+ "indexmap 2.14.2",
+ "itoa",
+ "libyaml-rs",
+ "ryu",
+ "serde",
 ]
 
 [[package]]

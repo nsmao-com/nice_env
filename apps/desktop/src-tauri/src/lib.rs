@@ -1491,32 +1491,39 @@ async fn db_root_password(
 /* ================= 代理（Clash/mihomo） ================= */
 
 #[tauri::command]
-fn proxy_status(
+async fn proxy_status(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<nsb_core::model::serde_proxy::ProxyStatusInfo, tauri::Error> {
-    let running = state
-        .manager
-        .snapshot("mihomo")
-        .map(|s| s.state == nsb_core::model::ServiceState::Running)
-        .unwrap_or(false);
-    let sys = map_jh(platform::get_system_proxy().map_err(AppError::from))?;
-    let mode = state
-        .store
-        .get_setting("proxyMode")
-        .unwrap_or_else(|| "rule".into());
-    let version = if running {
-        nsb_core::proxy::ProxyRuntime::new().version().ok()
-    } else {
-        None
-    };
-    Ok(nsb_core::model::serde_proxy::ProxyStatusInfo {
-        running,
-        mixed_port: nsb_core::configgen::MIHOMO_MIXED_PORT,
-        controller_port: nsb_core::configgen::MIHOMO_CONTROLLER_PORT,
-        mode,
-        system_proxy_enabled: sys.enabled,
-        version,
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let running = st
+            .manager
+            .snapshot("mihomo")
+            .map(|s| s.state == nsb_core::model::ServiceState::Running)
+            .unwrap_or(false);
+        let sys = map_jh(platform::get_system_proxy().map_err(AppError::from))?;
+        let runtime = nsb_core::proxy::ProxyRuntime::new();
+        let mode = if running {
+            map_jh(runtime.mode())?
+        } else {
+            map_jh(nsb_core::proxy::configured_mode(&st.store))?
+        };
+        let version = if running {
+            Some(map_jh(runtime.version())?)
+        } else {
+            None
+        };
+        Ok(nsb_core::model::serde_proxy::ProxyStatusInfo {
+            running,
+            mixed_port: nsb_core::configgen::MIHOMO_MIXED_PORT,
+            controller_port: nsb_core::configgen::MIHOMO_CONTROLLER_PORT,
+            mode,
+            system_proxy_enabled: sys.enabled,
+            version,
+        })
     })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
@@ -1574,24 +1581,16 @@ fn proxy_set_system(
 }
 
 #[tauri::command]
-fn proxy_set_mode(
+async fn proxy_set_mode(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     mode: String,
 ) -> Result<bool, tauri::Error> {
-    let running = state
-        .manager
-        .snapshot("mihomo")
-        .map(|s| s.state == nsb_core::model::ServiceState::Running)
-        .unwrap_or(false);
-    if running {
-        map_jh(nsb_core::proxy::ProxyRuntime::new().set_mode(&mode))?;
-    } else if !matches!(mode.as_str(), "rule" | "global" | "direct") {
-        return map_jh(Err(nsb_core::error::AppError::new(
-            "BAD_PROXY_MODE",
-            "代理模式无效",
-        )));
-    }
-    map_jh(state.store.set_setting("proxyMode", &mode).map(|_| true))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(nsb_core::proxy::set_mode(&st.paths, &st.store, &st.manager, &mode).map(|_| true))
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
@@ -1622,12 +1621,12 @@ async fn proxy_import(
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let id = map_jh(tauri::async_runtime::block_on(async {
-            nsb_core::proxy::import_profile(&name, &url, &st.paths, &st.store).await
+            nsb_core::proxy::import_profile(&name, &url, &st.paths, &st.store, &st.manager).await
         }))?;
         Ok(nsb_core::model::serde_proxy::ProxyProfile {
             id,
-            name,
-            url,
+            name: name.trim().to_string(),
+            url: url.trim().to_string(),
             active: false,
             added_at: nsb_core::services::now_ms(),
         })
@@ -1642,39 +1641,39 @@ async fn proxy_activate_profile(
     id: String,
 ) -> Result<bool, tauri::Error> {
     let st = state.inner().clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        let running = st
-            .manager
-            .snapshot("mihomo")
-            .map(|s| s.state == nsb_core::model::ServiceState::Running)
-            .unwrap_or(false);
-        nsb_core::proxy::activate_profile(&st.paths, &st.store, &id)?;
-        if running {
-            st.stop_service("mihomo")
-                .map_err(|e| e.with_hint("订阅已切换，但 mihomo 停止失败；请查看日志后重试"))?;
-            st.start_service("mihomo")
-                .map_err(|e| e.with_hint("订阅已切换，但 mihomo 重启失败；请查看日志后重试"))?;
-        }
-        Ok(true)
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(
+            nsb_core::proxy::activate_profile(&st.paths, &st.store, &st.manager, &id).map(|_| true),
+        )
     })
     .await
-    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?;
-    map_jh(result)
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
-fn proxy_delete_profile(
+async fn proxy_delete_profile(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<bool, tauri::Error> {
-    map_jh(state.store.delete_proxy_profile(&id).map(|_| true))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(
+            nsb_core::proxy::delete_profile(&st.paths, &st.store, &st.manager, &id).map(|_| true),
+        )
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
-fn proxy_nodes() -> Result<Vec<nsb_core::model::serde_proxy::ProxyGroupView>, tauri::Error> {
-    let rt = nsb_core::proxy::ProxyRuntime::new();
-    let v = map_jh(rt.proxies())?;
-    Ok(nsb_core::model::serde_proxy::parse_groups(&v))
+async fn proxy_nodes() -> Result<Vec<nsb_core::model::serde_proxy::ProxyGroupView>, tauri::Error> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let rt = nsb_core::proxy::ProxyRuntime::new();
+        let v = map_jh(rt.proxies())?;
+        map_jh(nsb_core::model::serde_proxy::parse_groups(&v))
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /* ================= 工具箱扩展（计划任务 / 快速隧道 / Ollama / Adminer） ================= */
@@ -1803,47 +1802,48 @@ async fn adminer_stop(
 }
 
 #[tauri::command]
-fn proxy_connections() -> Result<serde_json::Value, tauri::Error> {
-    let rt = nsb_core::proxy::ProxyRuntime::new();
-    map_jh(rt.connections())
+async fn proxy_connections() -> Result<serde_json::Value, tauri::Error> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let rt = nsb_core::proxy::ProxyRuntime::new();
+        map_jh(rt.connections())
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
-/// 重新拉取订阅并覆盖原文件；该订阅处于激活态且内核在跑时，重启内核生效
+/// 重新拉取并校验订阅；当前订阅热重载失败时恢复旧配置。
 #[tauri::command]
 async fn proxy_update_profile(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<bool, tauri::Error> {
     let st = state.inner().clone();
-    let result = tauri::async_runtime::spawn_blocking(move || -> nsb_core::error::Result<bool> {
-        let active = tauri::async_runtime::block_on(async {
-            nsb_core::proxy::update_profile(&st.paths, &st.store, &id).await
-        })?;
-        let running = st
-            .manager
-            .snapshot("mihomo")
-            .map(|s| s.state == nsb_core::model::ServiceState::Running)
-            .unwrap_or(false);
-        if active && running {
-            st.stop_service("mihomo")
-                .map_err(|e| e.with_hint("订阅已更新，但 mihomo 停止失败；请查看日志后重试"))?;
-            st.start_service("mihomo")
-                .map_err(|e| e.with_hint("订阅已更新，但 mihomo 重启失败；请查看日志后重试"))?;
-        }
-        Ok(true)
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(
+            tauri::async_runtime::block_on(nsb_core::proxy::update_profile(
+                &st.paths,
+                &st.store,
+                &st.manager,
+                &id,
+            ))
+            .map(|_| true),
+        )
     })
     .await
-    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?;
-    map_jh(result)
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
-fn proxy_select_node(group: String, node: String) -> Result<bool, tauri::Error> {
-    map_jh(
-        nsb_core::proxy::ProxyRuntime::new()
-            .select(&group, &node)
-            .map(|_| true),
-    )
+async fn proxy_select_node(group: String, node: String) -> Result<bool, tauri::Error> {
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(
+            nsb_core::proxy::ProxyRuntime::new()
+                .select(&group, &node)
+                .map(|_| true),
+        )
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]

@@ -385,12 +385,18 @@ impl Store {
     }
 
     pub fn set_active_proxy_profile(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock();
-        conn.execute("UPDATE proxy_profiles SET active=0", [])?;
-        conn.execute(
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM proxy_profiles WHERE id=?1)", params![id], |r| r.get(0))?;
+        if !exists {
+            return Err(AppError::new("PROFILE_NOT_FOUND", "代理订阅不存在"));
+        }
+        tx.execute("UPDATE proxy_profiles SET active=0", [])?;
+        tx.execute(
             "UPDATE proxy_profiles SET active=1 WHERE id=?1",
             params![id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 

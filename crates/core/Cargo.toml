@@ -8,6 +8,7 @@ license.workspace = true
 platform = { path = "../platform" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+yaml_serde = "0.10.7"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }

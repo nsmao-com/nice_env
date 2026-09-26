@@ -174,7 +174,7 @@ fn redis_paths(store: &Store) -> Result<(PathBuf, PathBuf)> {
     Ok((dir, exe))
 }
 
-fn mihomo_paths(store: &Store) -> Result<(PathBuf, PathBuf)> {
+pub(crate) fn mihomo_paths(store: &Store) -> Result<(PathBuf, PathBuf)> {
     let inst = installed_by_choice(store, "mihomo")
         .ok_or_else(|| AppError::not_installed("mihomo 内核"))?;
     let dir = PathBuf::from(&inst.install_path);
@@ -673,9 +673,15 @@ fn start_redis(
 
 fn start_mihomo(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>) -> Result<()> {
     let (_, exe) = mihomo_paths(store)?;
-    if !paths.mihomo_config().exists() {
-        configgen::write_mihomo_config(paths, &configgen::render_mihomo_builtin_config())?;
-    }
+    let previous = match std::fs::read_to_string(paths.mihomo_config()) {
+        Ok(value) => Some(value),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(AppError::io("读取代理配置", e)),
+    };
+    let raw = previous.clone().unwrap_or_else(configgen::render_mihomo_builtin_config);
+    let config = configgen::adapt_mihomo_profile(&raw, &crate::proxy::configured_mode(store)?)?;
+    crate::proxy::validate_profile(paths, store, &config)?;
+    crate::cfgeditor::write_generated_config(paths, "mihomo-config", &paths.mihomo_config(), &config, previous.as_deref())?;
     precheck_port(configgen::MIHOMO_MIXED_PORT, "mihomo 混合端口")?;
     // 控制端口也由 mihomo 绑定；被占时内核起不来，且健康检查无法区分「自己起来了」
     // 和「别的进程恰好占着 19090」
@@ -693,10 +699,13 @@ fn start_mihomo(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>) -> 
         detached: None,
     };
     spawn_tracked(manager, "mihomo", &spec)?;
-    if !wait_healthy(configgen::MIHOMO_CONTROLLER_PORT, Duration::from_secs(10)) {
+    if !wait_healthy(configgen::MIHOMO_CONTROLLER_PORT, Duration::from_secs(10))
+        || !wait_healthy(configgen::MIHOMO_MIXED_PORT, Duration::from_secs(3))
+        || !manager.snapshot("mihomo").is_some_and(|s| !s.pids.is_empty()) {
         return Err(AppError::new("MIHOMO_START_TIMEOUT", "mihomo 内核启动超时")
-            .with_hint("查看日志页 mihomo 输出；配置损坏时可在代理页删除订阅恢复内置配置"));
+            .with_hint("查看日志页 mihomo 输出；配置损坏时请重新更新或切换订阅"));
     }
+    crate::proxy::ProxyRuntime::new().version()?;
     Ok(())
 }
 

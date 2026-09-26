@@ -1184,7 +1184,7 @@ export default function SettingsPage() {
                     <div className="flex flex-col">
                       <span className="text-[12.5px] text-secondary">
                         {t("settings.currentVersion")}{" "}
-                        <code className="font-mono text-foreground">v{appVersion || "0.2.16"}</code>
+                        <code className="font-mono text-foreground">v{appVersion || "0.2.17"}</code>
                       </span>
                       <span className="text-[10.5px] text-faint">{t("settings.manifestHint")}</span>
                     </div>
@@ -1258,7 +1258,7 @@ export default function SettingsPage() {
                   <div className="flex flex-col gap-0.5">
                     <span className="text-[12.5px] text-secondary">{t("about.desc")}</span>
                     <span className="text-[10.5px] text-faint">
-                      {t("settings.currentVersion")} v{appVersion || "0.2.16"}
+                      {t("settings.currentVersion")} v{appVersion || "0.2.17"}
                     </span>
                   </div>
                   <div className="flex gap-2">

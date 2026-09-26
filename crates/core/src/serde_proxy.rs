@@ -28,6 +28,7 @@ pub struct ProxyProfile {
 #[serde(rename_all = "camelCase")]
 pub struct ProxyNode {
     pub name: String,
+    #[serde(rename = "type")]
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alive: Option<bool>,
@@ -39,6 +40,7 @@ pub struct ProxyNode {
 #[serde(rename_all = "camelCase")]
 pub struct ProxyGroupView {
     pub name: String,
+    #[serde(rename = "type")]
     pub kind: String,
     pub now: String,
     pub nodes: Vec<ProxyNode>,
@@ -69,11 +71,9 @@ struct MihomoProxies {
 
 const GROUP_TYPES: &[&str] = &["Selector", "URLTest", "Fallback", "LoadBalance", "Relay"];
 
-pub fn parse_groups(value: &serde_json::Value) -> Vec<ProxyGroupView> {
-    let parsed: MihomoProxies = match serde_json::from_value(value.clone()) {
-        Ok(p) => p,
-        Err(_) => return Vec::new(),
-    };
+pub fn parse_groups(value: &serde_json::Value) -> crate::error::Result<Vec<ProxyGroupView>> {
+    let parsed: MihomoProxies = serde_json::from_value(value.clone())
+        .map_err(|_| crate::error::AppError::new("MIHOMO_API", "mihomo 节点响应格式无效，请重试"))?;
     let mut groups = Vec::new();
     for p in parsed.proxies.values() {
         if !GROUP_TYPES.contains(&p.kind.as_str()) {
@@ -105,5 +105,5 @@ pub fn parse_groups(value: &serde_json::Value) -> Vec<ProxyGroupView> {
         });
     }
     groups.sort_by(|a, b| a.name.cmp(&b.name));
-    groups
+    Ok(groups)
 }

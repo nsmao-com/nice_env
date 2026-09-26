@@ -1,118 +1,93 @@
 "use client";
 
 import * as React from "react";
+import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import {
-  Stethoscope,
-  Loader2,
-  Copy,
-  Check,
-  Save,
-  ShieldCheck,
-} from "lucide-react";
+import { Stethoscope, Loader2, Copy, Save, ShieldCheck } from "lucide-react";
 import type { DiagnosticsBundle } from "@nsb/schema";
 import { useT } from "@/lib/store";
-import { toastError } from "@/lib/hooks";
+import { copyText } from "@/lib/hooks";
+import { isTauri, normalizeError } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { CodeBlock } from "@/components/shared/code-block";
 
-/**
- * 诊断包：一键汇总「报 bug 需要的全部信息」。
- *
- * 设计要点：
- * - **必须先脱敏再给人看**：密码/token 打码、用户主目录替换成 <home>。
- *   报告里明确显示「已打码 N 处」，让用户敢直接贴出去。
- * - 一次生成、可复制可另存，不用逐项截图。
- */
+/** 预览、复制和保存使用同一份快照；采集失败时保留已有报告。 */
 export function DiagnosticsCard() {
   const t = useT();
-  const [bundle, setBundle] = React.useState<DiagnosticsBundle | null>(null);
-  const [loading, setLoading] = React.useState(false);
-  const [saving, setSaving] = React.useState(false);
-  const [copied, setCopied] = React.useState(false);
-
-  const build = async () => {
-    setLoading(true);
+  const client = useQueryClient();
+  const report = useQuery({ queryKey: ["diagnostics-report"], queryFn: api.diagnosticsBuild, enabled: false, retry: false });
+  const bundle = report.data;
+  const busy = useIsMutating({ mutationKey: ["diagnostics"] }) > 0;
+  const building = useIsMutating({ mutationKey: ["diagnostics", "build"] }) > 0;
+  const build = useMutation({
+    mutationKey: ["diagnostics", "build"],
+    mutationFn: api.diagnosticsBuild,
+    onSuccess: (next) => client.setQueryData<DiagnosticsBundle>(["diagnostics-report"], next),
+  });
+  const save = useMutation({ mutationKey: ["diagnostics", "save"], mutationFn: api.diagnosticsSave });
+  const [error, setError] = React.useState<string | null>(null);
+  const [saved, setSaved] = React.useState<string | null>(null);
+  const action = React.useRef(false);
+  const errorRef = React.useRef<HTMLParagraphElement>(null);
+  const reportRef = React.useRef<HTMLDivElement>(null);
+  const run = async (kind: "build" | "save") => {
+    if (action.current || client.isMutating({ mutationKey: ["diagnostics"] })) return;
+    if (kind === "save" && !bundle) return;
+    action.current = true;
+    setError(null);
+    setSaved(null);
     try {
-      const b = await api.diagnosticsBuild();
-      setBundle(b);
-    } catch (e) {
-      toastError(e);
+      if (kind === "build") {
+        await build.mutateAsync();
+        requestAnimationFrame(() => reportRef.current?.focus());
+      } else if (bundle) {
+        const path = await save.mutateAsync(bundle);
+        setSaved(path);
+        toast.success(t(isTauri ? "diag.saved" : "diag.downloaded"), { description: path });
+      }
+    } catch (cause) {
+      setError(normalizeError(cause).message);
+      requestAnimationFrame(() => errorRef.current?.focus());
     } finally {
-      setLoading(false);
+      action.current = false;
     }
   };
 
-  const copy = async () => {
-    if (!bundle) return;
-    try {
-      await navigator.clipboard.writeText(bundle.markdown);
-      setCopied(true);
-      toast.success(t("diag.copied"));
-      window.setTimeout(() => setCopied(false), 1600);
-    } catch (e) {
-      toastError(e);
-    }
-  };
-
-  const save = async () => {
-    setSaving(true);
-    try {
-      const p = await api.diagnosticsSave();
-      toast.success(t("diag.saved"), { description: p });
-    } catch (e) {
-      toastError(e);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="flex items-center gap-2">
-        <Button size="sm" variant="secondary" className="h-8" onClick={() => void build()} disabled={loading}>
-          {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Stethoscope className="h-3.5 w-3.5" />}
-          <span className="ml-1.5">{t("diag.generate")}</span>
+  return <div className="flex min-w-0 flex-col gap-3">
+    <div className="flex flex-wrap items-center gap-2">
+      <Button size="sm" variant="secondary" className="min-h-9 h-auto whitespace-normal py-2" onClick={() => void run("build")} disabled={busy}>
+        {building ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> : <Stethoscope className="h-3.5 w-3.5 shrink-0" />}
+        {t(bundle ? "diag.regenerate" : "diag.generate")}
+      </Button>
+      {bundle && <>
+        <Button size="sm" variant="ghost" className="min-h-9" onClick={() => void copyText(bundle.markdown)} disabled={busy}>
+          <Copy className="h-3.5 w-3.5 shrink-0" />{t("diag.copy")}
         </Button>
-        {bundle && (
-          <>
-            <Button size="sm" variant="ghost" className="h-8" onClick={() => void copy()}>
-              {copied ? <Check className="h-3.5 w-3.5 text-running" /> : <Copy className="h-3.5 w-3.5" />}
-              <span className="ml-1.5">{t("diag.copy")}</span>
-            </Button>
-            <Button size="sm" variant="ghost" className="h-8" onClick={() => void save()} disabled={saving}>
-              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-              <span className="ml-1.5">{t("diag.save")}</span>
-            </Button>
-          </>
-        )}
-      </div>
-
-      {bundle && (
-        <>
-          <div className="flex flex-wrap items-center gap-3 text-[11px] text-faint">
-            <span>
-              {t("diag.stats")
-                .replace("{s}", String(bundle.serviceCount))
-                .replace("{n}", String(bundle.siteCount))
-                .replace("{l}", String(bundle.logLines))}
-            </span>
-            {/* 明确告诉用户密码没被打进去 */}
-            <span className="inline-flex items-center gap-1 text-running">
-              <ShieldCheck className="h-3 w-3" />
-              {t("diag.redacted").replace("{n}", String(bundle.redacted))}
-            </span>
-          </div>
-          <CodeBlock
-            code={bundle.markdown}
-            lang="markdown"
-            maxHeight={420}
-            title={t("diag.preview")}
-            compact
-          />
-        </>
-      )}
+        <Button size="sm" variant="ghost" className="min-h-9 h-auto whitespace-normal py-2" onClick={() => void run("save")} disabled={busy}>
+          {save.isPending ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> : <Save className="h-3.5 w-3.5 shrink-0" />}
+          {t(isTauri ? "diag.save" : "diag.download")}
+        </Button>
+      </>}
     </div>
-  );
+    <p className="text-[11px] leading-relaxed text-muted">{t(isTauri ? "diag.snapshotHint" : "diag.demoHint")}</p>
+    {busy && <p role="status" className="text-[11px] text-muted">{t(building ? "diag.building" : "diag.saving")}</p>}
+    {error && <p ref={errorRef} tabIndex={-1} role="alert" className="break-words rounded-md border border-error/30 p-3 text-xs text-error">{error}</p>}
+    {saved && <p role="status" className="break-all text-[11px] text-muted">{t(isTauri ? "diag.saved" : "diag.downloaded")}：{saved}</p>}
+    {bundle && <div ref={reportRef} tabIndex={-1} aria-label={t("diag.preview")} className="min-w-0 space-y-3 rounded-md outline-none focus-visible:ring-2 focus-visible:ring-primary">
+      <div className="flex flex-wrap gap-x-3 gap-y-2 text-[11px] text-muted">
+        <span>{t("diag.stats").replace("{s}", String(bundle.serviceCount)).replace("{n}", String(bundle.siteCount)).replace("{l}", String(bundle.logLines))}</span>
+        <span className="inline-flex items-center gap-1"><ShieldCheck className="h-3 w-3 shrink-0" />{t("diag.redacted").replace("{n}", String(bundle.redacted))}</span>
+        <time dateTime={new Date(bundle.generatedAt * 1000).toISOString()}>{t("diag.generatedAt")} {new Date(bundle.generatedAt * 1000).toLocaleString()}</time>
+      </div>
+      <p className="text-[11px] leading-relaxed text-muted">{t("diag.reviewHint")}</p>
+      {bundle.warnings.length > 0 && <details className="rounded-md border border-warn/30 p-3" open>
+        <summary className="cursor-pointer text-xs text-warn">{t("diag.warnings").replace("{n}", String(bundle.warnings.length))}</summary>
+        <ul className="mt-2 space-y-2 text-[11px] leading-relaxed text-muted">
+          {bundle.warnings.map((warning, i) => <li key={i} className="break-words border-t border-dashed border-border pt-2">{warning}</li>)}
+        </ul>
+      </details>}
+      <CodeBlock code={bundle.markdown} lang="markdown" maxHeight={420} title={t("diag.preview")} compact />
+    </div>}
+  </div>;
 }

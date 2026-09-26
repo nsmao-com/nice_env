@@ -319,7 +319,7 @@ export const envApplyDb = (siteId: string) =>
 
 /* 诊断包 */
 export const diagnosticsBuild = () => safe(invoke<DiagnosticsBundle>("diagnostics_build"));
-export const diagnosticsSave = () => safe(invoke<string>("diagnostics_save"));
+export const diagnosticsSave = (bundle: DiagnosticsBundle) => safe(invoke<string>("diagnostics_save", { bundle }));
 
 /* 环境体检 */
 export const healthCheck = () => safe(invoke<HealthReport>("health_check"));

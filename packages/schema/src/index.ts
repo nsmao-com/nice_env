@@ -723,6 +723,7 @@ export const DiagnosticsBundle = z.object({
   /** 被打码的敏感条目数 */
   redacted: z.number(),
   generatedAt: z.number(),
+  warnings: z.array(z.string()).default([]),
 });
 export type DiagnosticsBundle = z.infer<typeof DiagnosticsBundle>;
 

@@ -79,7 +79,7 @@ export default function ToolsPage() {
         <div id="nsb-tool-config">
           <ConfigEditor />
         </div>
-        <div id="nsb-tool-diagnostics">
+        <div id="nsb-tool-diagnostics" className="min-w-0">
           <ToolCard icon={Stethoscope} title={t("diag.title")} hint={t("diag.hint")}>
             <DiagnosticsCard />
           </ToolCard>

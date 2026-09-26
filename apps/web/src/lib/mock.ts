@@ -2,7 +2,7 @@
  * 浏览器 mock 后端：内存状态实现与 Rust 侧相同的命令面。
  * 仅用于 next dev 下的 UI 开发/演示；桌面端自动走真实 invoke。
  */
-import { PackageManifestEntry, HostsEntry as HostsEntrySchema } from "@nsb/schema";
+import { PackageManifestEntry, HostsEntry as HostsEntrySchema, DiagnosticsBundle as DiagnosticsBundleSchema } from "@nsb/schema";
 import { normalizeError } from "./backend";
 import type { ConfigCheck, BackupPreview, ConfigResetPreview, TunnelInfo, OllamaModelRow, OllamaPullStatus } from "./api";
 import bundledManifest from "../../../../manifest/packages.win.json";
@@ -59,7 +59,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.22";
+const MOCK_APP_VERSION = "0.2.23";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -359,6 +359,10 @@ function logLinesFor(id: string): string[] {
 function downloadLog(content: string, suggestedName: string): string {
   const stem = suggestedName.replace(/\.log$/i, "").replace(/[^a-zA-Z0-9._-]/g, "_").replace(/^[._]+|[._]+$/g, "");
   const name = `${stem || "log"}.log`;
+  return downloadPreviewText(content, name);
+}
+
+function downloadPreviewText(content: string, name: string): string {
   const url = URL.createObjectURL(new Blob([content], { type: "text/plain;charset=utf-8" }));
   try {
     const link = document.createElement("a");
@@ -1354,50 +1358,27 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       } as HealthReport as T;
     }
     case "diagnostics_build": {
-      const now = Math.floor(Date.now() / 1000);
-      const md = [
-        "# NiceEnv 诊断报告",
-        "",
-        `- 应用版本：${MOCK_APP_VERSION}`,
-        `- 生成时间：${new Date().toLocaleString()}`,
-        "- 操作系统：windows x86_64",
-        "- 数据目录：C:\NiceEnv",
-        "",
-        "## 服务状态",
-        "",
-        "| 服务 | 状态 | 端口 | 版本 |",
-        "|------|------|------|------|",
-        "| nginx | Running | 80 | 1.26.2 |",
-        "| mysql@8.0.46 | Running | 3306 | 8.0.46 |",
-        "| redis | Stopped | 6379 | 7.2.5 |",
-        "",
-        "## 端口",
-        "",
-        "| 用途 | 端口 | 占用者 |",
-        "|------|------|--------|",
-        "| HTTP (nginx) | 80 | nginx.exe(pid 1234) |",
-        "| MySQL | 3306 | mysqld.exe(pid 5678) |",
-        "| Redis | 6379 | 空闲 |",
-        "",
-        "## 配置摘要（已脱敏）",
-        "",
-        "```",
-        "[mysqld]",
-        "port=3306",
-        "password=se******",
-        "```",
+      const snapshotServices = Array.from(services.values());
+      const snapshotPackages = Array.from(packages.values()).filter((pkg) => pkg.install);
+      const snapshotSites = Array.from(sites.values());
+      const generatedAt = Math.floor(Date.now() / 1000);
+      const warnings = ["浏览器仅演示当前套件与服务状态；未采集本机端口、证书、配置和日志。"];
+      const markdown = [
+        "# NiceEnv 诊断报告（浏览器演示）", "",
+        `- 应用版本：${MOCK_APP_VERSION}`, `- 生成时间：${new Date(generatedAt * 1000).toLocaleString()}`, "",
+        "## 服务状态", "", "| 服务 | 状态 | 端口 | 版本 |", "|------|------|------|------|",
+        ...snapshotServices.map((row) => `| ${row.id} | ${row.state} | ${row.port ?? "-"} | ${row.version ?? "-"} |`), "",
+        "## 已安装套件", "", ...snapshotPackages.map((pkg) => `- ${pkg.id} ${pkg.version}`), "",
+        "## 站点", "", ...snapshotSites.map((site) => `- ${site.name}：${site.domains.join(", ")}`), "",
+        "## 采集说明", "", ...warnings.map((warning) => `- ${warning}`),
       ].join("\n");
-      return {
-        markdown: md,
-        serviceCount: 3,
-        siteCount: 3,
-        logLines: 82,
-        redacted: 4,
-        generatedAt: now,
-      } as DiagnosticsBundle as T;
+      return { markdown, serviceCount: snapshotServices.length, siteCount: snapshotSites.length, logLines: 0, redacted: 0, generatedAt, warnings } as DiagnosticsBundle as T;
     }
-    case "diagnostics_save":
-      return "C:\NiceEnv\diagnostics\niceenv-diagnostics-20260921-210000.md" as T;
+    case "diagnostics_save": {
+      const bundle = DiagnosticsBundleSchema.parse(args?.bundle);
+      if (!bundle.markdown.trim() || new TextEncoder().encode(bundle.markdown).length > 2 * 1024 * 1024) throw { code: "DIAGNOSTICS_INVALID", message: "报告为空或超过 2 MiB，请重新生成" };
+      return downloadPreviewText(bundle.markdown, `niceenv-diagnostics-${bundle.generatedAt}.md`) as T;
+    }
     case "env_read": {
       return {
         siteId: args!.siteId as string,

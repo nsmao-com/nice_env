@@ -312,6 +312,7 @@ fn platform_listeners() -> Result<Vec<(u16, u32)>> {
             .output()
             .map_err(|e| crate::error::AppError::io("执行 lsof", e))?
     };
+    check_listener_exit(out.status.code(), &out.stdout, &out.stderr, !cfg!(windows))?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut result = Vec::new();
 
@@ -340,6 +341,25 @@ fn platform_listeners() -> Result<Vec<(u16, u32)>> {
         }
     }
     Ok(result)
+}
+
+/// lsof 无匹配时允许 exit 1 且两路输出为空；其它失败不能报告端口空闲。
+pub(crate) fn check_listener_exit(
+    code: Option<i32>,
+    stdout: &[u8],
+    stderr: &[u8],
+    lsof: bool,
+) -> Result<()> {
+    if (code == Some(0) && stderr.is_empty())
+        || (lsof && code == Some(1) && stdout.is_empty() && stderr.is_empty())
+    {
+        return Ok(());
+    }
+    Err(crate::AppError::new(
+        "PORT_SCAN_FAILED",
+        "无法完整读取系统 TCP 监听端口，不能判断端口是否空闲",
+    )
+    .with_detail(platform::decode_command_output(stderr)))
 }
 
 #[cfg(windows)]

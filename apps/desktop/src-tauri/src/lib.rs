@@ -3034,29 +3034,24 @@ fn env_apply_db(
 
 /// 生成诊断报告（Markdown）。内容已脱敏：密码/token 打码、用户主目录替换为 <home>。
 #[tauri::command]
-fn diagnostics_build(
+async fn diagnostics_build(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<nsb_core::diagnostics::DiagnosticsBundle, tauri::Error> {
-    map_jh(nsb_core::diagnostics::build(
-        &state.paths,
-        &state.store,
-        &state.manager,
-        env!("CARGO_PKG_VERSION"),
-    ))
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::diagnostics::build(
+        &state.paths, &state.store, &state.manager, env!("CARGO_PKG_VERSION"),
+    ))).await.map_err(|e| box_err(nsb_core::AppError::internal("生成诊断报告", e.to_string())))?
 }
 
 /// 把诊断包另存为 .md 文件，返回路径
 #[tauri::command]
-fn diagnostics_save(
+async fn diagnostics_save(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    bundle: nsb_core::diagnostics::DiagnosticsBundle,
 ) -> Result<String, tauri::Error> {
-    let bundle = map_jh(nsb_core::diagnostics::build(
-        &state.paths,
-        &state.store,
-        &state.manager,
-        env!("CARGO_PKG_VERSION"),
-    ))?;
-    map_jh(nsb_core::diagnostics::save_to_file(&state.paths, &bundle))
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::diagnostics::save_to_file(&state.paths, &bundle)))
+        .await.map_err(|e| box_err(nsb_core::AppError::internal("保存诊断报告", e.to_string())))?
 }
 
 /* ================= 环境体检 ================= */

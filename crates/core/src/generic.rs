@@ -851,7 +851,6 @@ fn generic_web_target(r: &Resolved, sftpgo: Option<&SftpgoConfig>) -> Result<Str
     let (offset, path) = match r.entry.id.as_str() {
         "mailpit" if args_pair("--listen", "127.0.0.1:{port}") => (0, "/"),
         "consul" if args_pair("-http-port", "{port}") && args_pair("-client", "127.0.0.1") => (0, "/ui/"),
-        "rnacos" if managed_rnacos(r) => (2000, "/rnacos/"),
         "qdrant" if args_pair("--config-path", "{etc}/config.yaml") => (0, "/dashboard/"),
         _ => return Err(web_unavailable("当前运行配置没有已知的管理台入口，请按服务配置访问。")),
     };
@@ -1331,6 +1330,27 @@ fn rnacos_ports_ready(manager: &ServiceManager, r: &Resolved) -> bool {
     owned_ports_ready(manager, &r.service_id, &ports)
 }
 
+/// 从本次进程实际建立的监听生成入口，遵循上游 .env/继承环境的最终结果。
+/// SDK 和控制台可以使用不同地址；不以端口号猜测 127.0.0.1，也不解析远端主机名。
+fn rnacos_http_target(manager: &ServiceManager, r: &Resolved, offset: u16, path: &str) -> Result<String> {
+    if !managed_rnacos(r) { return Err(web_unavailable("当前 r-nacos 运行配置没有受管的 HTTP 入口。")); }
+    let port = r.port.and_then(|port| port.checked_add(offset)).ok_or_else(|| web_unavailable("r-nacos 端口超出范围。"))?;
+    let pids = manager.snapshot(&r.service_id).map(|service| service.pids).unwrap_or_default();
+    if pids.is_empty() || !pids.iter().any(|pid| platform::process_alive(*pid)) {
+        return Err(web_unavailable("r-nacos 进程未运行，请启动后重试。"));
+    }
+    let listeners = crate::ports::listener_endpoints()?;
+    if listeners.iter().any(|entry| entry.port == port && !pids.contains(&entry.pid)) {
+        return Err(web_unavailable("r-nacos 端口由其他进程占用，请检查服务日志。"));
+    }
+    let address = listeners.iter().filter(|entry| entry.port == port && pids.contains(&entry.pid))
+        .filter_map(|entry| entry.probe_address())
+        .filter(|address| !address.ip().is_multicast() && !matches!(address, std::net::SocketAddr::V6(ip) if ip.scope_id() != 0))
+        .min_by_key(|address| (!address.ip().is_loopback(), address.is_ipv6(), *address))
+        .ok_or_else(|| web_unavailable("r-nacos 尚无可访问的本机 HTTP 监听地址；带区域标识的 IPv6 地址暂不支持。"))?;
+    local_web_url(&address.ip().to_string(), port, false, path)
+}
+
 fn owned_ports_ready(manager: &ServiceManager, service_id: &str, ports: &[u16]) -> bool {
     let pids = manager.snapshot(service_id).map(|s| s.pids).unwrap_or_default();
     if pids.is_empty() || !pids.iter().any(|pid| platform::process_alive(*pid)) { return false; }
@@ -1447,7 +1467,6 @@ fn rnacos_raft_metrics_ready(metrics: &serde_json::Value) -> bool {
 }
 
 fn wait_rnacos_healthy(manager: &ServiceManager, r: &Resolved, timeout: Duration) -> bool {
-    let Some(port) = r.port else { return false; };
     let Ok(client) = reqwest::blocking::Client::builder().no_proxy()
         .redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_millis(500)).build() else { return false; };
     let deadline = std::time::Instant::now() + timeout;
@@ -1456,12 +1475,13 @@ fn wait_rnacos_healthy(manager: &ServiceManager, r: &Resolved, timeout: Duration
     while std::time::Instant::now() < deadline {
         if rnacos_startup_panicked(manager, &r.service_id) { return false; }
         if manager.snapshot(&r.service_id).is_none_or(|service| service.pids.iter().all(|pid| !platform::process_alive(*pid))) { return false; }
-        let healthy = rnacos_ports_ready(manager, r) && client.get(format!("http://127.0.0.1:{port}/health"))
+        let origin = if rnacos_ports_ready(manager, r) { rnacos_http_target(manager, r, 0, "/").ok() } else { None };
+        let healthy = origin.as_ref().is_some_and(|origin| client.get(format!("{origin}health"))
             .send().is_ok_and(|response| response.status().is_success()
-                && response.text().is_ok_and(|text| text.trim() == "success"));
+                && response.text().is_ok_and(|text| text.trim() == "success")));
         let ready = healthy && {
             let health_since = first_health.get_or_insert_with(std::time::Instant::now);
-            client.get(format!("http://127.0.0.1:{port}/nacos/v1/raft/metrics")).send().is_ok_and(|response| {
+            client.get(format!("{}nacos/v1/raft/metrics", origin.as_deref().unwrap())).send().is_ok_and(|response| {
                 match response.status().as_u16() {
                     200 => response.json::<serde_json::Value>().is_ok_and(|metrics| rnacos_raft_metrics_ready(&metrics)),
                     // 开启鉴权时不尝试登录或关闭鉴权。上游 /health 初始有 12.5 秒宽限，
@@ -1474,7 +1494,8 @@ fn wait_rnacos_healthy(manager: &ServiceManager, r: &Resolved, timeout: Duration
         if ready {
             // 留出启动日志汇入的时间；上游工作线程 panic 后 HTTP 线程仍可能正常应答。
             if ready_since.get_or_insert_with(std::time::Instant::now).elapsed() >= Duration::from_millis(500) {
-                return !rnacos_startup_panicked(manager, &r.service_id);
+                return !rnacos_startup_panicked(manager, &r.service_id) && rnacos_ports_ready(manager, r)
+                    && rnacos_http_target(manager, r, 0, "/").ok() == origin;
             }
         } else { ready_since = None; }
         std::thread::sleep(Duration::from_millis(100));
@@ -1514,7 +1535,7 @@ pub fn start(
     prepare_config(paths, &r)?;
     let qdrant_env = qdrant_snapshot_env(store, paths, manager, &r)?;
     let sftpgo = if managed_sftpgo(&r.entry, &r.spec) { Some(prepare_sftpgo(store, paths, &r)?) } else { None };
-    let web_target = generic_web_target(&r, sftpgo.as_ref());
+    let mut web_target = generic_web_target(&r, sftpgo.as_ref());
     // CoreDNS 特例：Corefile 每次启动都重写——TLD 设置或转发策略变化要自动跟上，
     // 且通配解析模板含 {{ .Name }} 占位符，不能走通用模板渲染
     if r.entry.id == "coredns" {
@@ -1636,6 +1657,7 @@ pub fn start(
             r.service_id
         ) }));
     }
+    if managed_rnacos(&r) { web_target = rnacos_http_target(manager, &r, 2000, "/rnacos/"); }
     if sftpgo.is_some() {
         let relative = r.etc.strip_prefix(&paths.base).map_err(|_| AppError::new("SFTPGO_CONFIG_PATH", "配置目录超出托管目录"))?;
         if let Err(error) = store.set_setting(SFTPGO_CONFIG_BINDING, &crate::paths::nginx_path(relative)) {
@@ -2044,7 +2066,7 @@ mod startup_tests {
 
     #[test]
     fn console_targets_use_resolved_ports_and_preserve_sftpgo_web_configuration() {
-        for (id, offset, path) in [("mailpit", 0, "/"), ("minio", 1, "/"), ("consul", 0, "/ui"), ("rnacos", 2000, "/rnacos"), ("qdrant", 0, "/dashboard")] {
+        for (id, offset, path) in [("mailpit", 0, "/"), ("minio", 1, "/"), ("consul", 0, "/ui"), ("qdrant", 0, "/dashboard")] {
             let (_temp, state, mut r) = fixture(id); r.port = Some(31000);
             if id == "qdrant" {
                 prepare_config(&state.paths, &r).unwrap();
@@ -3006,11 +3028,20 @@ mod startup_tests {
         register_services(&state.paths, &state.store, &state.manager);
         state.manager.adopt("rnacos", &[u32::MAX], Some(base));
         assert!(!rnacos_ports_ready(&state.manager, &r));
+        assert!(rnacos_http_target(&state.manager, &r, 0, "/").is_err());
         // 只登记当前检查进程为监听所有者，验证归属判断本身。
         state.manager.adopt("rnacos", &[std::process::id()], Some(base));
         assert!(rnacos_ports_ready(&state.manager, &r));
+        assert_eq!(rnacos_http_target(&state.manager, &r, 0, "/").unwrap(), format!("http://127.0.0.1:{base}/"));
+        assert_eq!(rnacos_http_target(&state.manager, &r, 2000, "/rnacos/").unwrap(), format!("http://127.0.0.1:{}/rnacos", base + 2000));
         drop(listeners.pop());
         assert!(!rnacos_ports_ready(&state.manager, &r));
+        assert!(rnacos_http_target(&state.manager, &r, 2000, "/rnacos/").is_err());
+        let ipv6_console = std::net::TcpListener::bind(("::1", base + 2000)).unwrap();
+        assert!(rnacos_ports_ready(&state.manager, &r));
+        assert_eq!(rnacos_http_target(&state.manager, &r, 2000, "/rnacos/").unwrap(), format!("http://[::1]:{}/rnacos", base + 2000));
+        assert!(generic_web_target(&r, None).is_err()); // 未启动时不能猜测控制台地址。
+        drop(ipv6_console);
         state.manager.push_log("rnacos", "thread panicked at old run");
         state.manager.push_log("rnacos", RNACOS_START_MARKER);
         assert!(!rnacos_startup_panicked(&state.manager, "rnacos"));
@@ -3055,14 +3086,20 @@ mod startup_tests {
     fn verify_native_rnacos_config(executable: std::ffi::OsString, version: &str) {
         let (_temp, state, mut r) = fixture_version("rnacos", Some(version));
         std::fs::copy(executable, &r.bin).unwrap();
-        let base = (22000..42000).find(|port| [0, 1, 1000, 1001, 2000, 2001].iter().all(|offset| tcp_port_bindable(port + offset))).unwrap();
-        let occupied_grpc = std::net::TcpListener::bind(("127.0.0.1", base + 1000)).unwrap();
+        let sdk_host = std::env::var("NSB_VERIFY_RNACOS_BIND").unwrap_or_else(|_| "[::1]".into());
+        let console_host = std::env::var("NSB_VERIFY_RNACOS_CONSOLE_HOST").unwrap_or_else(|_| sdk_host.clone());
+        let sdk_ip: std::net::IpAddr = sdk_host.trim_matches(['[', ']']).parse().unwrap();
+        let console_ip = if console_host == "localhost" { "127.0.0.1" } else { console_host.trim_matches(['[', ']']) }.parse::<std::net::IpAddr>().unwrap();
+        let bindable = |port| tcp_port_bindable(port) && std::net::TcpListener::bind((sdk_ip, port)).is_ok()
+            && std::net::TcpListener::bind((console_ip, port)).is_ok();
+        let base = (22000..42000).find(|port| [0, 1, 1000, 1001, 2000, 2001].iter().all(|offset| bindable(port + offset))).unwrap();
+        let occupied_grpc = std::net::TcpListener::bind((sdk_ip, base + 1000)).unwrap();
         state.store.set_port_assign("rnacos", base).unwrap();
         state.store.set_setting("autoFallbackPort", "true").unwrap();
         r.port = Some(base);
         let config = r.etc.join(".env");
         let password = format!("fixture-{}", rand::random::<u64>());
-        let content = format!("{}\n# native fixture\nRNACOS_SDK_HOST=127.0.0.1\nRNACOS_CONSOLE_HOST=127.0.0.1\nRNACOS_HTTP_WORKERS=1\nRNACOS_NAMING_INSTANCE_METADATA_PERSISTENCE_ENABLE=false\nRNACOS_ENABLE_OPEN_API_AUTH=false\nRNACOS_INIT_ADMIN_USERNAME=fixture\nRNACOS_INIT_ADMIN_PASSWORD={password}\n", expand_config(r.spec.config_template.as_deref().unwrap(), &r));
+        let content = format!("{}\n# native fixture\nNSB_FIXTURE_RNACOS_HOST='{sdk_host}'\nRNACOS_SDK_HOST=${{NSB_FIXTURE_RNACOS_HOST}}\nRNACOS_CONSOLE_HOST={console_host}\nRNACOS_HTTP_WORKERS=1\nRNACOS_NAMING_INSTANCE_METADATA_PERSISTENCE_ENABLE=false\nRNACOS_ENABLE_OPEN_API_AUTH=false\nRNACOS_INIT_ADMIN_USERNAME=fixture\nRNACOS_INIT_ADMIN_PASSWORD={password}\n", expand_config(r.spec.config_template.as_deref().unwrap(), &r));
         std::fs::write(&config, content).unwrap();
         struct Cleanup<'a>(&'a crate::CoreState);
         impl Drop for Cleanup<'_> { fn drop(&mut self) { let _ = self.0.stop_service("rnacos"); } }
@@ -3071,7 +3108,7 @@ mod startup_tests {
         let port = state.manager.snapshot("rnacos").unwrap().port.unwrap();
         assert_ne!(port, base);
         let client = reqwest::blocking::Client::builder().no_proxy().pool_max_idle_per_host(0).timeout(Duration::from_secs(3)).build().unwrap();
-        let url = format!("http://127.0.0.1:{port}/nacos/v1/cs/configs");
+        let url = local_web_url(&sdk_host, port, false, "/nacos/v1/cs/configs").unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             let response = client.post(&url).form(&[("dataId", "niceenv-fixture"), ("group", "DEFAULT_GROUP"), ("content", "persisted-fixture")]).send().unwrap();
@@ -3083,22 +3120,35 @@ mod startup_tests {
             assert!(std::time::Instant::now() < deadline, "r-nacos config writer did not become ready: {:?}", state.manager.tail("rnacos", 60));
             std::thread::sleep(Duration::from_millis(200));
         }
-        let console = client.get(format!("http://127.0.0.1:{}/rnacos/", port + 2000)).send().unwrap();
+        let console_url = state.service_web_url("rnacos").unwrap();
+        assert_eq!(console_url, local_web_url(&console_host, port + 2000, false, "/rnacos").unwrap());
+        let console = client.get(&console_url).send().unwrap();
         assert!(console.status().is_success());
-        assert!(console.text().unwrap().to_ascii_lowercase().contains("<html"));
+        let html = console.text().unwrap();
+        assert!(html.to_ascii_lowercase().contains("<html"));
+        let script = regex::Regex::new(r#"src="([^"]+\.js)""#).unwrap().captures(&html).expect("console must load real JavaScript")[1].to_string();
+        let script = client.get(reqwest::Url::parse(&console_url).unwrap().join(&script).unwrap()).send().unwrap().error_for_status().unwrap();
+        assert!(script.headers()[reqwest::header::CONTENT_TYPE].to_str().unwrap().contains("javascript"));
+        assert!(script.text().unwrap().len() > 100);
+        let running_config = std::fs::read_to_string(&config).unwrap();
+        std::fs::write(&config, running_config.replace(&format!("RNACOS_CONSOLE_HOST={console_host}"), "RNACOS_CONSOLE_HOST=192.0.2.1")).unwrap();
+        assert_eq!(state.service_web_url("rnacos").unwrap(), console_url);
+        std::fs::write(&config, &running_config).unwrap();
         assert!(r.data.join("nacos_db").is_dir());
         assert!(!r.root.join("nacos_db").exists());
         let pids = state.manager.snapshot("rnacos").unwrap().pids;
         state.stop_service("rnacos").unwrap();
         assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));
+        assert_eq!(state.service_web_url("rnacos").unwrap_err().code, "SERVICE_NOT_RUNNING");
         // 换一组未使用过的端口制造第二次冲突，不把 Windows TCP 释放延迟当作产品错误。
-        let requested = (base + 10..42000).find(|port| [0, 1000, 2000].iter().all(|offset| tcp_port_bindable(port + offset))).unwrap();
+        let requested = (base + 10..42000).find(|port| [0, 1000, 2000].iter().all(|offset| bindable(port + offset))).unwrap();
         state.store.set_port_override("rnacos", Some(requested)).unwrap();
-        let occupied_console = std::net::TcpListener::bind(("127.0.0.1", requested + 2000)).unwrap();
+        let occupied_console = std::net::TcpListener::bind((console_ip, requested + 2000)).unwrap();
         state.start_service("rnacos").unwrap();
         let second = state.manager.snapshot("rnacos").unwrap().port.unwrap();
         assert_ne!(second, requested);
-        let url = format!("http://127.0.0.1:{second}/nacos/v1/cs/configs");
+        let url = local_web_url(&sdk_host, second, false, "/nacos/v1/cs/configs").unwrap();
+        assert_eq!(state.service_web_url("rnacos").unwrap(), local_web_url(&console_host, second + 2000, false, "/rnacos").unwrap());
         // HTTP 监听建立后，Raft 的本地数据重放仍可能尚未完成。
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
@@ -3111,17 +3161,25 @@ mod startup_tests {
         state.stop_service("rnacos").unwrap();
         let content = std::fs::read_to_string(&config).unwrap();
         assert!(content.contains("# native fixture"));
-        std::fs::write(&config, content.replace("RNACOS_ENABLE_OPEN_API_AUTH=false", "RNACOS_ENABLE_OPEN_API_AUTH=true")).unwrap();
+        std::fs::write(&config, content.replace("RNACOS_ENABLE_OPEN_API_AUTH=false", "RNACOS_ENABLE_OPEN_API_AUTH=true")
+            .replace(&format!("RNACOS_CONSOLE_HOST={console_host}"), "RNACOS_CONSOLE_HOST=192.0.2.1")).unwrap();
+        // 运行描述环境覆盖 .env，控制台切换地址后入口必须来自本次真实监听。
+        let mut entry = r.entry.clone();
+        entry.run.as_mut().unwrap().env.as_mut().unwrap().insert("RNACOS_CONSOLE_HOST".into(), "127.0.0.1".into());
+        std::fs::write(r.root.join(".niceenv-package.json"), serde_json::to_vec(&entry).unwrap()).unwrap();
         state.start_service("rnacos").unwrap();
         let third = state.manager.snapshot("rnacos").unwrap().port.unwrap();
         assert_eq!(state.store.get_port_assign("rnacos"), Some(third));
-        let response = client.get(format!("http://127.0.0.1:{third}/nacos/v1/cs/configs")).query(&[("dataId", "niceenv-fixture"), ("group", "DEFAULT_GROUP")]).send().unwrap();
+        assert_eq!(state.service_web_url("rnacos").unwrap(), format!("http://127.0.0.1:{}/rnacos", third + 2000));
+        assert!(std::fs::read_to_string(&config).unwrap().contains("RNACOS_CONSOLE_HOST=192.0.2.1"));
+        let url = local_web_url(&sdk_host, third, false, "/nacos/v1/cs/configs").unwrap();
+        let response = client.get(&url).query(&[("dataId", "niceenv-fixture"), ("group", "DEFAULT_GROUP")]).send().unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
-        let login = client.post(format!("http://127.0.0.1:{third}/nacos/v1/auth/login"))
+        let login = client.post(local_web_url(&sdk_host, third, false, "/nacos/v1/auth/login").unwrap())
             .form(&[("username", "fixture"), ("password", password.as_str())]).send().unwrap().error_for_status().unwrap()
             .json::<serde_json::Value>().unwrap();
         let token = login["accessToken"].as_str().expect("authenticated login must issue a token");
-        let response = client.get(format!("http://127.0.0.1:{third}/nacos/v1/cs/configs"))
+        let response = client.get(&url)
             .query(&[("dataId", "niceenv-fixture"), ("group", "DEFAULT_GROUP"), ("accessToken", token)])
             .send().unwrap().error_for_status().unwrap();
         assert_eq!(response.text().unwrap(), "persisted-fixture");
@@ -3129,8 +3187,6 @@ mod startup_tests {
         state.stop_service("rnacos").unwrap();
         assert_native_rnacos_stopped(&state, third);
         // 控制台线程失败时 SDK 仍可能启动，必须报错并清理整个临时服务。
-        let content = std::fs::read_to_string(&config).unwrap().replace("RNACOS_CONSOLE_HOST=127.0.0.1", "RNACOS_CONSOLE_HOST=192.0.2.1");
-        std::fs::write(&config, content).unwrap();
         let mut entry = r.entry.clone(); entry.run.as_mut().unwrap().health_timeout_sec = 3;
         std::fs::write(r.root.join(".niceenv-package.json"), serde_json::to_vec(&entry).unwrap()).unwrap();
         let error = state.start_service("rnacos").unwrap_err();

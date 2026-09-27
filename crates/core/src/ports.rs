@@ -454,7 +454,8 @@ impl ListenerEndpoint {
 
     pub fn accepts(&self, target: std::net::SocketAddr) -> bool {
         self.address.is_some_and(|address| address.port() == target.port()
-            && (address == target || (address.ip().is_unspecified() && target.ip().is_loopback())))
+            && (address == target || (address.ip().is_unspecified() && target.ip().is_loopback()
+                && address.is_ipv4() == target.is_ipv4())))
     }
 }
 
@@ -585,6 +586,8 @@ mod tests {
             assert!(entry.accepts(probe.parse().unwrap()));
             assert!(!entry.accepts("192.0.2.20:9000".parse().unwrap()));
             assert!(!entry.accepts("127.0.0.1:9001".parse().unwrap()));
+            let other_family = if entry.address.unwrap().is_ipv4() { "[::1]:9000" } else { "127.0.0.1:9000" };
+            assert!(!entry.accepts(other_family.parse().unwrap()));
         }
         let unknown = parse_listener_endpoint("unknown-host:9000", "88", false).unwrap();
         assert_eq!((unknown.port, unknown.pid), (9000, 88));

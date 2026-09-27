@@ -361,8 +361,8 @@ http {{
         listen {http_port};
         listen {https_port} ssl;
         server_name _;
-        ssl_certificate     "{certs}/ca.crt";
-        ssl_certificate_key "{certs}/ca.key";
+        ssl_certificate     "{certs}/fallback/localhost.crt";
+        ssl_certificate_key "{certs}/fallback/localhost.key";
         location / {{
             default_type text/html;
             return 200 "<h1>NiceEnv is running</h1><p>创建站点后用你的本地域名访问，例如 http://demo.test:{http_port}</p>";
@@ -665,6 +665,7 @@ fn sync_managed_lines(
     }
     let mut prefix = String::new();
     for (index, (_, missing)) in groups.iter().enumerate() {
+        if missing.is_empty() { continue; }
         if !seen[index] {
             if prepend_missing.contains(&index) {
                 prefix.push_str(&missing.replace('\n', newline));
@@ -942,13 +943,12 @@ pub fn write_nginx_conf(
         Some(current) => sync_nginx_config(current, &conf, paths)?,
         None => conf,
     };
+    crate::tls::ensure_server_fallback(paths)?;
     publish_config(paths, "nginx-main", &path, &conf, previous.as_deref())?;
     let fp = paths.etc().join("nginx").join("fastcgi_params");
     if !fp.exists() {
         std::fs::write(&fp, FASTCGI_PARAMS)?;
     }
-    // 自签 CA 兜底（nginx 默认 server 的 ssl 证书）
-    crate::tls::ensure_ca(paths)?;
     Ok(())
 }
 
@@ -1038,6 +1038,12 @@ pub fn validate_nginx(nginx_exe: &std::path::Path, conf: &std::path::Path) -> Re
 
 fn sync_httpd_config(current: &str, paths: &Paths, root: &Path, http: u16, https: u16) -> String {
     let sites = format!("\"{}/*.conf\"", nginx_path(&paths.apache_sites_dir()));
+    let managed_certificate = |line: &str, ext: &str| line.split_once(char::is_whitespace).is_some_and(|(_, value)| {
+        let value = value.trim().trim_matches(['\"', '\'']).replace('\\', "/");
+        value == format!("${{NSB_ETC}}/ssl-dummy.{ext}")
+            || value == format!("{}/ssl-dummy.{ext}", nginx_path(&paths.etc().join("apache")))
+            || value == format!("{}/fallback/localhost.{ext}", nginx_path(&paths.certs()))
+    });
     let replacements = [
         format!("ServerRoot \"{}\"", nginx_path(root)),
         format!(
@@ -1047,10 +1053,14 @@ fn sync_httpd_config(current: &str, paths: &Paths, root: &Path, http: u16, https
         format!("Listen 127.0.0.1:{http}\nListen 127.0.0.1:{https} https"),
         format!("TypesConfig \"{}/conf/mime.types\"", nginx_path(root)),
         format!("IncludeOptional {sites}"),
+        format!("SSLCertificateFile \"{}/fallback/localhost.crt\"", nginx_path(&paths.certs())),
+        format!("SSLCertificateKeyFile \"{}/fallback/localhost.key\"", nginx_path(&paths.certs())),
     ];
     let groups: Vec<_> = replacements
         .into_iter()
-        .map(|line| (line.clone(), line))
+        .enumerate()
+        // TLS 默认证书只替换应用原有行，不向用户自定义全局 TLS 配置追加覆盖项。
+        .map(|(index, line)| (line.clone(), if index >= 5 { String::new() } else { line }))
         .collect();
     let mut depth = 0usize;
     sync_managed_lines(current, &groups, &[0, 1], |line| {
@@ -1074,6 +1084,8 @@ fn sync_httpd_config(current: &str, paths: &Paths, root: &Path, http: u16, https
             "define" if words.next() == Some("NSB_ETC") => Some(1),
             "listen" => Some(2),
             "typesconfig" => Some(3),
+            "sslcertificatefile" if managed_certificate(line, "crt") => Some(5),
+            "sslcertificatekeyfile" if managed_certificate(line, "key") => Some(6),
             "includeoptional" | "include"
                 if line
                     .split_once(char::is_whitespace)
@@ -1130,8 +1142,8 @@ ErrorLog "${{NSB_ETC}}/logs/error.log"
 LogLevel warn
 CustomLog "${{NSB_ETC}}/logs/access.log" common
 
-SSLCertificateFile "${{NSB_ETC}}/ssl-dummy.crt"
-SSLCertificateKeyFile "${{NSB_ETC}}/ssl-dummy.key"
+SSLCertificateFile "{certs}/fallback/localhost.crt"
+SSLCertificateKeyFile "{certs}/fallback/localhost.key"
 SSLSessionCache "shmcb:${{NSB_ETC}}/logs/ssl_scache(512000)"
 
 DocumentRoot "${{NSB_ETC}}/htdocs"
@@ -1147,6 +1159,7 @@ IncludeOptional "{etc}/sites/*.conf"
 "#,
         root = root,
         etc = etc,
+        certs = nginx_path(&paths.certs()),
         http_port = http_port,
         https_port = https_port,
     )
@@ -1296,15 +1309,8 @@ pub fn write_httpd_conf(
         || render_httpd_conf(paths, apache_root, pools, http_port, https_port),
         |current| sync_httpd_config(current, paths, apache_root, http_port, https_port),
     );
+    crate::tls::ensure_server_fallback(paths)?;
     publish_config(paths, "apache-conf", &path, &conf, previous.as_deref())?;
-    // 兜底默认证书（无 https 站点时 Listen https 仍需要证书文件存在）
-    let crt = paths.etc().join("apache").join("ssl-dummy.crt");
-    let key = paths.etc().join("apache").join("ssl-dummy.key");
-    if !crt.exists() || !key.exists() {
-        crate::tls::ensure_ca(paths)?;
-        std::fs::copy(paths.certs().join("ca.crt"), &crt)?;
-        std::fs::copy(paths.certs().join("ca.key"), &key)?;
-    }
     Ok(())
 }
 
@@ -1531,6 +1537,29 @@ secret: fixture-secret
         assert!(output.contains("daemonize no\n"));
         assert!(!output.contains("C:/old"));
         assert_eq!(sync_redis_config(&output, &paths, 26380), output);
+    }
+
+    #[test]
+    fn default_certificate_upgrade_preserves_custom_tls_paths_and_sections() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().to_path_buf());
+        let root = temp.path().join("apache-runtime");
+        let generated = render_httpd_conf(&paths, &root, &[], 8180, 8444);
+        let legacy = generated.replace(&format!("{}/fallback/localhost.crt", nginx_path(&paths.certs())), "${NSB_ETC}/ssl-dummy.crt")
+            .replace(&format!("{}/fallback/localhost.key", nginx_path(&paths.certs())), "${NSB_ETC}/ssl-dummy.key");
+        let upgraded = sync_httpd_config(&legacy, &paths, &root, 8180, 8444);
+        assert!(upgraded.contains("/fallback/localhost.crt")); assert!(!upgraded.contains("ssl-dummy"));
+        let custom = legacy.replace("${NSB_ETC}/ssl-dummy.crt", "D:/custom/ssl-dummy.crt")
+            .replace("${NSB_ETC}/ssl-dummy.key", "D:/custom/ssl-dummy.key")
+            + "\n<VirtualHost *:9443>\nSSLCertificateFile \"${NSB_ETC}/ssl-dummy.crt\"\n</VirtualHost>\n";
+        let preserved = sync_httpd_config(&custom, &paths, &root, 8180, 8444);
+        assert!(preserved.contains("D:/custom/ssl-dummy.crt")); assert!(preserved.contains("D:/custom/ssl-dummy.key"));
+        assert!(preserved.contains("SSLCertificateFile \"${NSB_ETC}/ssl-dummy.crt\""));
+        assert!(!preserved.contains("/fallback/localhost.crt"));
+        let nginx = render_nginx_conf(&paths, &root, 8080, 8443, &[], None);
+        let legacy_nginx = nginx.replace("/fallback/localhost.crt", "/ca.crt").replace("/fallback/localhost.key", "/ca.key");
+        let upgraded_nginx = sync_nginx_config(&legacy_nginx, &nginx, &paths).unwrap();
+        assert!(upgraded_nginx.contains("/fallback/localhost.crt")); assert!(!upgraded_nginx.contains("/ca.key"));
     }
 
     #[test]

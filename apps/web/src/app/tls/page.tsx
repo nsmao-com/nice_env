@@ -2,8 +2,8 @@
 
 import * as React from "react";
 import { toast } from "sonner";
-import { ShieldCheck, ShieldX, RefreshCw, Plus, Trash2, CalendarClock } from "lucide-react";
-import { useQueryClient } from "@tanstack/react-query";
+import { Shield, ShieldCheck, ShieldX, RefreshCw, Plus, Trash2, CalendarClock } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { CertRecord } from "@nsb/schema";
 import { useUI, useT } from "@/lib/store";
 import { useCerts, toastError } from "@/lib/hooks";
@@ -63,7 +63,12 @@ export default function TlsPage() {
     const trigger = actionTrigger.current;
     (trigger?.isConnected && !trigger.disabled ? trigger : issueTrigger.current)?.focus();
   };
-  const ca = certs.find((c) => c.kind === "ca");
+  const healthQuery = useQuery({ queryKey: ["cert-health"], queryFn: api.certHealth });
+  const ca = healthQuery.data?.certs.find((c) => c.kind === "ca");
+  const caKnown = !!healthQuery.data && !healthQuery.error;
+  const caUsable = caKnown && !!ca && ca.filePresent && !["invalid", "expired"].includes(ca.status);
+  const caTrusted = caUsable && !!healthQuery.data?.caTrusted;
+  const caNeedsRepair = caKnown && !!ca && !caUsable;
   // 本机证书 = 自签(site) + ACME 签发(acme) 都算；CA 行单独展示
   const siteCerts = certs.filter((c) => c.kind === "site" || c.kind === "acme");
 
@@ -150,28 +155,28 @@ export default function TlsPage() {
       <Card className="mb-6">
         <CardHeader className="flex-row flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
-            <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border ${ready && ca?.trusted ? "border-running/30 bg-running-soft" : "border-warn/30 bg-warn/10"}`}>
-              {ready && ca?.trusted ? (
+            <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border ${caTrusted ? "border-running/30 bg-running-soft" : caNeedsRepair || caUsable ? "border-warn/30 bg-warn/10" : "border-border bg-fill"}`}>
+              {caTrusted ? (
                 <ShieldCheck className="h-5 w-5 text-running" strokeWidth={1.8} />
-              ) : (
+              ) : caNeedsRepair || caUsable ? (
                 <ShieldX className="h-5 w-5 text-warn" strokeWidth={1.8} />
-              )}
+              ) : <Shield className="h-5 w-5 text-muted" strokeWidth={1.8} />}
             </div>
             <div className="min-w-0">
               <CardTitle className="text-[14px]">{t("tls.ca")}</CardTitle>
               <CardDescription className="mt-1 break-words font-mono text-[11px]">
-                {ca ? `CN=${ca.subject} · ${formatDate(ca.notAfter)}` : t(ready ? "tls.caNotCreated" : "tls.statusUnknown")}
+                {!caKnown ? t("tls.statusUnknown") : ca ? `CN=${ca.subject}${ca.notAfter > 0 ? ` · ${formatDate(ca.notAfter * 1000)}` : ""}` : t("tls.caNotCreated")}
               </CardDescription>
             </div>
           </div>
           {ca && (
             <div className="flex flex-wrap items-center gap-2">
-              <Badge variant={ready && ca.trusted ? "running" : "warn"}>
-                {t(!ready ? "tls.statusUnknown" : ca.trusted ? "tls.trusted" : "tls.notTrusted")}
+              <Badge variant={caTrusted ? "running" : caNeedsRepair ? "error" : "warn"}>
+                {t(!caKnown ? "tls.statusUnknown" : caNeedsRepair ? "tls.caRepair" : caTrusted ? "tls.trusted" : "tls.notTrusted")}
               </Badge>
-              {!ca.trusted && (
+              {caUsable && !caTrusted && (
                 <Button
-                  disabled={!ready || trusting}
+                  disabled={!caUsable || trusting}
                   onClick={async () => {
                     if (trustRef.current) return;
                     trustRef.current = true;
@@ -195,7 +200,7 @@ export default function TlsPage() {
             </div>
           )}
         </CardHeader>
-        {ca && !ca.trusted && (
+        {caUsable && !caTrusted && (
           <CardContent>
             <p className="rounded-lg border border-warn/25 bg-warn/10 px-3 py-2 text-[11.5px] text-warn">
               {/Mac/i.test(typeof navigator !== "undefined" ? navigator.userAgent : "")
@@ -204,6 +209,12 @@ export default function TlsPage() {
             </p>
           </CardContent>
         )}
+        {caKnown && !ca && <CardContent><p className="text-xs leading-relaxed text-muted">{t("tls.caOptional")}</p></CardContent>}
+        {caNeedsRepair && <CardContent><p role="alert" className="rounded-lg bg-error-soft p-3 text-xs leading-relaxed text-error [overflow-wrap:anywhere]">{ca?.advice || t("tls.caRepairHint")}</p></CardContent>}
+        {healthQuery.error && <CardContent><div role="alert" className="flex flex-wrap items-center gap-2 text-xs text-error">
+          <span>{t("tls.caReadFailed")}</span>
+          <Button size="sm" variant="secondary" disabled={healthQuery.isFetching} onClick={() => void healthQuery.refetch()}>{t("bulk.retry")}</Button>
+        </div></CardContent>}
       </Card>
       {trustError && <CertError error={trustError} />}
 

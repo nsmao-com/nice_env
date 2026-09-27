@@ -143,7 +143,7 @@ export function CertHealthCard() {
             <p className="py-3 text-center text-[12px] text-running">{t("cert.allGood")}</p>
           )}
 
-          {report && !report.caTrusted && (
+          {report && !readError && !report.caTrusted && report.certs.some((c) => c.kind === "ca" && c.filePresent && !["invalid", "expired"].includes(c.status)) && (
             <div className="mt-2 flex items-start gap-2 rounded-lg border border-warn/25 bg-warn-soft px-2.5 py-2">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warn" strokeWidth={2} />
               <span className="text-[11.5px]">{t("cert.caNotTrusted")}</span>
@@ -234,7 +234,7 @@ export function CertHealthCard() {
 function CertRow({ cert }: { cert: CertReport["certs"][number] }) {
   const t = useT();
   const Icon =
-    cert.status === "expired"
+    cert.status === "expired" || cert.status === "invalid"
       ? ShieldX
       : cert.status === "critical"
         ? ShieldAlert
@@ -244,7 +244,7 @@ function CertRow({ cert }: { cert: CertReport["certs"][number] }) {
             ? ShieldCheck
             : ShieldQuestion;
   const tone =
-    cert.status === "expired" || cert.status === "critical" || !cert.filePresent
+    cert.status === "expired" || cert.status === "invalid" || cert.status === "critical" || !cert.filePresent
       ? "text-error"
       : cert.status === "warn"
         ? "text-warn"
@@ -256,16 +256,16 @@ function CertRow({ cert }: { cert: CertReport["certs"][number] }) {
         <div className="flex flex-wrap items-center gap-2">
           <span className="truncate font-mono text-[11.5px]">{cert.subject}</span>
           <Badge variant="outline" className="shrink-0 text-[9.5px]">
-            {cert.kind === "ca" ? "CA" : "site"}
+            {cert.kind === "ca" ? "CA" : cert.kind === "acme" ? "ACME" : cert.kind === "imported" ? t("sites.detail.importedCerts") : "site"}
           </Badge>
           <span className={cn("shrink-0 text-[10.5px]", tone)}>
             <CalendarClock className="mr-0.5 inline h-3 w-3" />
-            {cert.daysLeft < 0
+            {!cert.filePresent || cert.notAfter <= 0 ? t("tls.statusUnknown") : cert.status === "invalid" ? t("cert.invalid") : cert.daysLeft < 0
               ? t("cert.expired")
               : t("cert.daysLeft").replace("{n}", String(cert.daysLeft))}
           </span>
         </div>
-        {cert.advice && <p className="mt-0.5 text-[11px] text-muted">{cert.advice}</p>}
+        {cert.advice && <p className="mt-0.5 text-[11px] text-muted [overflow-wrap:anywhere]">{cert.advice}</p>}
         {cert.usedBySites.length > 0 && (
           <p className="mt-0.5 text-[10.5px] text-faint">
             {t("cert.usedBy")}: {cert.usedBySites.join(", ")}

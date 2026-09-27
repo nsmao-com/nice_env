@@ -86,8 +86,8 @@ pub(crate) fn write_cert_pair(
 }
 
 fn load_ca(paths: &Paths) -> Result<(rcgen::KeyPair, rcgen::CertificateParams)> {
-    let key_pem = std::fs::read_to_string(paths.certs().join("ca.key"))?;
-    let cert_pem = std::fs::read_to_string(paths.certs().join("ca.crt"))?;
+    let key_pem = crate::certs::read_managed_pem(&crate::paths::checked_data_path(&paths.base, "certs/ca.key")?)?;
+    let cert_pem = crate::certs::read_managed_pem(&crate::paths::checked_data_path(&paths.base, "certs/ca.crt")?)?;
     let key = rcgen::KeyPair::from_pem(&key_pem)
         .map_err(|e| AppError::internal("解析 CA 私钥", e.to_string()))?;
     let (_, pem) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes())
@@ -115,11 +115,47 @@ fn to_ms(t: OffsetDateTime) -> i64 {
     (t.unix_timestamp_nanos() / 1_000_000) as i64
 }
 
-/// 确保 CA 存在（不存在则生成并入库）
+/// 未知来源的站点文件与历史本地记录要求恢复原 CA；已知 ACME 文件不依赖本地 CA。
+fn has_local_ca_history(paths: &Paths, records: &[CertRecord]) -> Result<bool> {
+    if records.iter().any(|c| matches!(c.kind.as_str(), "ca" | "site")) { return Ok(true); }
+    let acme_paths: Vec<_> = records.iter().filter(|c| c.kind == "acme").filter_map(|c| {
+        let (cert, key) = crate::certs::acme_paths(paths, &c.id).ok()?;
+        (std::path::Path::new(&c.cert_path) == cert && c.key_path.as_deref().map(std::path::Path::new) == Some(key.as_path()))
+            .then_some([cert, key])
+    }).flatten().collect();
+    let directory = crate::paths::checked_data_path(&paths.base, "certs/sites")?;
+    match std::fs::read_dir(directory) {
+        Ok(entries) => for entry in entries {
+            let path = entry?.path();
+            if path.extension().is_some_and(|ext| ext == "crt" || ext == "key") && !acme_paths.contains(&path) { return Ok(true); }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Err(error) => return Err(AppError::io("检查现有站点证书", error)),
+    }
+    Ok(false)
+}
+
+pub(crate) fn local_ca_expected(paths: &Paths, records: &[CertRecord], sites: &[crate::model::Site]) -> Result<bool> {
+    for file in ["ca.crt", "ca.key"] {
+        match std::fs::symlink_metadata(paths.certs().join(file)) {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(AppError::io("检查根 CA 文件", error)),
+        }
+    }
+    Ok(has_local_ca_history(paths, records)? || sites.iter().any(|site| site.https && site.runtime.uses_default_certificate()
+        && !records.iter().any(|cert| cert.kind == "acme" && crate::certs::uses_managed_certificate(site, cert))))
+}
+
+/// 显式签发入口使用；读取列表和服务默认 TLS 不创建根 CA。
 pub fn ensure_ca(paths: &Paths) -> Result<()> {
+    ensure_ca_with_records(paths, &[])
+}
+
+fn ensure_ca_with_records(paths: &Paths, records: &[CertRecord]) -> Result<()> {
     let _files = CERT_FILES.lock();
-    let ca_key = paths.certs().join("ca.key");
-    let ca_crt = paths.certs().join("ca.crt");
+    let ca_key = crate::paths::checked_data_path(&paths.base, "certs/ca.key")?;
+    let ca_crt = crate::paths::checked_data_path(&paths.base, "certs/ca.crt")?;
     if ca_key.exists() && ca_crt.exists() {
         load_ca(paths)?;
         return Ok(());
@@ -128,14 +164,9 @@ pub fn ensure_ca(paths: &Paths) -> Result<()> {
         return Err(AppError::new("CA_INCOMPLETE", "根 CA 文件不完整，已保留现有文件")
             .with_hint("请从备份恢复匹配的 ca.crt 与 ca.key。自动创建新 CA 会使原站点证书失去信任。"));
     }
-    let sites_dir = paths.certs().join("sites");
-    if sites_dir.exists() {
-        for entry in std::fs::read_dir(&sites_dir)? {
-            if entry?.path().extension().is_some_and(|ext| ext == "crt" || ext == "key") {
-                return Err(AppError::new("CA_MISSING", "根 CA 文件丢失，但仍有本地站点证书")
-                    .with_hint("请从备份恢复原来的 ca.crt 与 ca.key，避免自动更换根 CA 导致原证书失去信任。"));
-            }
-        }
+    if has_local_ca_history(paths, records)? {
+        return Err(AppError::new("CA_MISSING", "根 CA 文件丢失，但仍有本地站点证书或历史记录")
+            .with_hint("请从备份恢复原来的 ca.crt 与 ca.key，避免自动更换根 CA 导致原证书失去信任。"));
     }
     let subject = "NiceEnv Local Root CA";
     let key_pair = rcgen::KeyPair::generate()
@@ -181,7 +212,7 @@ pub(crate) fn issue_site_cert_for_update(paths: &Paths, store: &Store, domains: 
         return Err(AppError::new("CERT_IN_USE", format!("此证书文件仍被站点 {} 选择为 ACME 证书，未替换", users.join("、")))
             .with_hint("请先更换这些站点的证书选择，或在当前站点直接选择该 ACME 证书。"));
     }
-    ensure_ca(paths)?;
+    ensure_ca_with_records(paths, &store.list_certs()?)?;
     let primary = &domains[0];
     let (ca_key, ca_params) = load_ca(paths)?;
     // 从持久化的 CA 证书提取参数，并用 CA 密钥重建等价 issuer（同 key/同 subject，
@@ -238,7 +269,7 @@ pub(crate) fn issue_site_cert_for_update(paths: &Paths, store: &Store, domains: 
 /// 信任根 CA：Windows certutil（需管理员） / macOS security
 pub fn trust_ca(paths: &Paths) -> Result<()> {
     let _files = CERT_FILES.lock();
-    ensure_ca(paths)?;
+    load_ca(paths)?;
     let ca = paths.certs().join("ca.crt");
     #[cfg(windows)]
     {
@@ -312,28 +343,44 @@ pub fn ca_trusted(paths: &Paths) -> bool {
     }
 }
 
-/// 证书列表（CA 置顶并附带信任状态）
+fn read_ca_record(paths: &Paths) -> Result<CertRecord> {
+    let pem = crate::certs::read_managed_pem(&crate::paths::checked_data_path(&paths.base, "certs/ca.crt")?)?;
+    let (subject, _, before, after) = crate::certs::parse_pem_info(&pem)
+        .ok_or_else(|| AppError::new("CERT_PARSE_FAILED", "无法解析本地根 CA"))?;
+    Ok(CertRecord {
+        id: "ca".into(), kind: "ca".into(), subject, sans: vec![],
+        not_before: before * 1000, not_after: after * 1000,
+        cert_path: paths.certs().join("ca.crt").to_string_lossy().into(),
+        key_path: Some(paths.certs().join("ca.key").to_string_lossy().into()),
+        trusted: Some(load_ca(paths).is_ok() && ca_trusted(paths)),
+    })
+}
+
+/// 默认欢迎页使用独立的非 CA 证书，不向 Web 服务提供本地根 CA 私钥。
+pub(crate) fn ensure_server_fallback(paths: &Paths) -> Result<()> {
+    let _files = CERT_FILES.lock();
+    let cert = crate::paths::checked_data_path(&paths.base, "certs/fallback/localhost.crt")?;
+    let key = crate::paths::checked_data_path(&paths.base, "certs/fallback/localhost.key")?;
+    let domains = vec!["localhost".into(), "127.0.0.1".into(), "::1".into()];
+    let current = crate::certs::read_managed_pem(&cert).and_then(|pem|
+        crate::certs::read_managed_pem(&key).and_then(|key| crate::certs::deployment_validity(&pem, &key, &domains)));
+    if current.is_ok_and(|(_, after)| after > to_ms(now_plus(RENEW_BEFORE_DAYS))) { return Ok(()); }
+    let pair = rcgen::KeyPair::generate().map_err(|e| AppError::internal("生成默认 TLS 密钥", e.to_string()))?;
+    let mut params = rcgen::CertificateParams::new(domains).map_err(|e| AppError::internal("默认 TLS 参数", e.to_string()))?;
+    params.distinguished_name.push(rcgen::DnType::CommonName, "NiceEnv localhost");
+    params.not_before = now_minus(1); params.not_after = now_plus(365);
+    params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+    let leaf = params.self_signed(&pair).map_err(|e| AppError::internal("生成默认 TLS 证书", e.to_string()))?;
+    std::fs::create_dir_all(cert.parent().unwrap())?;
+    write_cert_pair(paths, &cert, &key, &leaf.pem(), &pair.serialize_pem(), || Ok(()))
+}
+
+/// 只读列表。根 CA 的缺失/损坏由健康接口逐项报告，不阻断其它证书。
 pub fn list_certs(paths: &Paths, store: &Store) -> Result<Vec<CertRecord>> {
     let _files = CERT_FILES.lock();
-    ensure_ca(paths)?;
     let mut list = store.list_certs()?;
-    let pem_bytes = std::fs::read(paths.certs().join("ca.crt"))?;
-    let (_, pem) = x509_parser::pem::parse_x509_pem(&pem_bytes)
-        .map_err(|e| AppError::internal("读取 CA 有效期", e.to_string()))?;
-    let cert = pem.parse_x509().map_err(|e| AppError::internal("读取 CA 有效期", e.to_string()))?;
-    let subject = cert.subject().iter_common_name().next().and_then(|cn| cn.as_str().ok())
-        .unwrap_or("NiceEnv Local Root CA").to_string();
-    let rec = CertRecord {
-        id: "ca".into(), kind: "ca".into(), subject, sans: vec![],
-        not_before: cert.validity().not_before.timestamp() * 1000,
-        not_after: cert.validity().not_after.timestamp() * 1000,
-        cert_path: paths.certs().join("ca.crt").to_string_lossy().to_string(),
-        key_path: Some(paths.certs().join("ca.key").to_string_lossy().to_string()),
-        trusted: Some(ca_trusted(paths)),
-    };
-    store.save_cert(&rec)?;
     list.retain(|c| c.kind != "ca");
-    list.insert(0, rec);
+    if let Ok(ca) = read_ca_record(paths) { list.insert(0, ca); }
     Ok(list)
 }
 
@@ -390,7 +437,7 @@ pub fn reissue_missing_site_certs(paths: &Paths, store: &Store) -> Result<Vec<St
     }
     if !recovered.is_empty() { store.replace_managed_certs(&recovered)?; }
     if local_sites.is_empty() { return Ok(Vec::new()); }
-    ensure_ca(paths)?;
+    ensure_ca_with_records(paths, &store.list_certs()?)?;
     let ca_pem = std::fs::read(paths.certs().join("ca.crt"))?;
     let (_, ca) = x509_parser::pem::parse_x509_pem(&ca_pem)
         .map_err(|e| AppError::internal("解析根 CA", e.to_string()))?;
@@ -457,6 +504,101 @@ mod local_certificate_tests {
             watchdog: std::sync::Arc::new(crate::watchdog::Watchdog::new()),
         };
         (temp, state)
+    }
+
+    #[test]
+    fn certificate_inventory_is_read_only_and_acme_does_not_require_a_local_ca() {
+        let (_temp, state) = fixture();
+        assert!(list_certs(&state.paths, &state.store).unwrap().is_empty());
+        assert!(crate::certs::report(&state.paths, &state.store).unwrap().certs.is_empty());
+        assert!(!state.paths.certs().join("ca.crt").exists());
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["acme.example.com".into()]).unwrap().self_signed(&key).unwrap();
+        let (crt, private) = crate::certs::acme_paths(&state.paths, "acme-acme.example.com").unwrap();
+        std::fs::create_dir_all(crt.parent().unwrap()).unwrap();
+        std::fs::write(&crt, cert.pem()).unwrap(); std::fs::write(&private, key.serialize_pem()).unwrap();
+        let record = CertRecord { id: "acme-acme.example.com".into(), kind: "acme".into(), subject: "acme.example.com".into(),
+            sans: vec!["acme.example.com".into()], not_before: 1, not_after: 2,
+            cert_path: crt.to_string_lossy().into(), key_path: Some(private.to_string_lossy().into()), trusted: None };
+        state.store.save_cert(&record).unwrap();
+        let database = rusqlite::Connection::open(state.paths.db()).unwrap();
+        database.execute_batch("CREATE TRIGGER no_certificate_read_write BEFORE INSERT ON certs BEGIN SELECT RAISE(ABORT,'read-only'); END;").unwrap();
+        assert_eq!(list_certs(&state.paths, &state.store).unwrap().len(), 1);
+        let report = crate::certs::report(&state.paths, &state.store).unwrap();
+        assert_eq!(report.certs.len(), 1); assert_eq!(report.certs[0].kind, "acme");
+        assert_eq!(report.critical, 0); assert!(!report.ca_trusted);
+        assert!(!state.paths.certs().join("ca.key").exists());
+        assert_eq!(std::fs::read_to_string(&crt).unwrap(), cert.pem());
+        database.execute_batch("DROP TRIGGER no_certificate_read_write;").unwrap();
+        state.issue_certificate("new-local.test", &[]).unwrap();
+        assert!(state.paths.certs().join("ca.key").is_file());
+        assert_eq!(std::fs::read_to_string(crt).unwrap(), cert.pem());
+    }
+
+    #[test]
+    fn invalid_ca_does_not_hide_certificates_or_mutate_root_files() {
+        let (_temp, state) = fixture();
+        let local = state.issue_certificate("local.test", &[]).unwrap();
+        let root = state.paths.certs().join("ca.crt"); let key = state.paths.certs().join("ca.key");
+        let original = std::fs::read(&root).unwrap(); let original_key = std::fs::read(&key).unwrap();
+        for failure in ["corrupt", "missing-key", "wrong-key", "not-ca", "missing-both"] {
+            std::fs::write(&root, &original).unwrap(); std::fs::write(&key, &original_key).unwrap();
+            match failure {
+                "corrupt" => std::fs::write(&root, "not a certificate").unwrap(),
+                "missing-key" => std::fs::remove_file(&key).unwrap(),
+                "wrong-key" => std::fs::write(&key, rcgen::KeyPair::generate().unwrap().serialize_pem()).unwrap(),
+                "not-ca" => { std::fs::copy(&local.cert_path, &root).unwrap(); std::fs::copy(local.key_path.as_ref().unwrap(), &key).unwrap(); },
+                _ => { std::fs::remove_file(&root).unwrap(); std::fs::remove_file(&key).unwrap(); },
+            }
+            let before = std::fs::read(&root).ok(); let before_key = std::fs::read(&key).ok();
+            let records = list_certs(&state.paths, &state.store).unwrap();
+            assert!(records.iter().any(|c| c.id == local.id), "{failure}");
+            let report = crate::certs::report(&state.paths, &state.store).unwrap();
+            assert!(!report.ca_trusted, "{failure}");
+            assert_eq!(report.certs.iter().find(|c| c.kind == "ca").unwrap().status, "invalid", "{failure}");
+            assert!(state.issue_certificate("another.test", &[]).is_err(), "{failure}");
+            assert_eq!(std::fs::read(&root).ok(), before); assert_eq!(std::fs::read(&key).ok(), before_key);
+        }
+    }
+
+    #[test]
+    fn ca_certificate_listing_and_export_do_not_persist_records() {
+        let (temp, state) = fixture(); ensure_ca(&state.paths).unwrap();
+        let database = rusqlite::Connection::open(state.paths.db()).unwrap();
+        database.execute_batch("CREATE TRIGGER no_certificate_read_write BEFORE INSERT ON certs BEGIN SELECT RAISE(ABORT,'read-only'); END;").unwrap();
+        assert_eq!(list_certs(&state.paths, &state.store).unwrap()[0].kind, "ca");
+        assert!(state.store.list_certs().unwrap().is_empty());
+        let output = temp.path().join("root.der");
+        export_der(&state.paths, &state.store, "ca", &output).unwrap();
+        let bytes = std::fs::read(output).unwrap();
+        assert!(x509_parser::parse_x509_certificate(&bytes).unwrap().1.is_ca());
+        assert!(state.store.list_certs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn default_server_certificate_is_independent_idempotent_and_preserves_root() {
+        let (_temp, state) = fixture();
+        // 模拟只有 ACME 文件，尚未创建本地 CA。配置生成不读取或改写站点证书。
+        std::fs::create_dir_all(state.paths.certs().join("sites")).unwrap();
+        let existing = state.paths.certs().join("sites/existing.crt"); std::fs::write(&existing, "keep-existing").unwrap();
+        crate::configgen::write_nginx_conf(&state.paths, &state.paths.base.join("nginx-runtime"), &[], 8080, 8443).unwrap();
+        crate::configgen::write_httpd_conf(&state.paths, &state.paths.base.join("apache-runtime"), &[], 8180, 8444).unwrap();
+        assert!(!state.paths.certs().join("ca.crt").exists());
+        let crt = state.paths.certs().join("fallback/localhost.crt"); let key = state.paths.certs().join("fallback/localhost.key");
+        let pem = std::fs::read_to_string(&crt).unwrap(); let key_pem = std::fs::read_to_string(&key).unwrap();
+        crate::certs::deployment_validity(&pem, &key_pem, &["localhost".into(), "127.0.0.1".into(), "::1".into()]).unwrap();
+        let (_, parsed) = x509_parser::pem::parse_x509_pem(pem.as_bytes()).unwrap();
+        assert!(!parsed.parse_x509().unwrap().is_ca());
+        for path in [state.paths.nginx_conf(), state.paths.apache_conf()] {
+            let conf = std::fs::read_to_string(path).unwrap();
+            assert!(conf.contains("/fallback/localhost.crt")); assert!(!conf.contains("/ca.key")); assert!(!conf.contains("ssl-dummy"));
+        }
+        std::fs::write(state.paths.certs().join("ca.crt"), "damaged-root-keep").unwrap();
+        crate::configgen::write_nginx_conf(&state.paths, &state.paths.base.join("nginx-runtime"), &[], 8080, 8443).unwrap();
+        crate::configgen::write_httpd_conf(&state.paths, &state.paths.base.join("apache-runtime"), &[], 8180, 8444).unwrap();
+        assert_eq!(std::fs::read_to_string(&crt).unwrap(), pem); assert_eq!(std::fs::read_to_string(&key).unwrap(), key_pem);
+        assert_eq!(std::fs::read_to_string(existing).unwrap(), "keep-existing");
+        assert_eq!(std::fs::read_to_string(state.paths.certs().join("ca.crt")).unwrap(), "damaged-root-keep");
     }
 
     #[test]
@@ -685,6 +827,7 @@ impl crate::CoreState {
         let _sites = crate::sites::SITE_CHANGES.lock();
         let _operation = self.manager.lifecycle.lock();
         let _files = CERT_FILES.lock();
+        if id == "ca" { return Err(AppError::new("CERT_DELETE_UNSUPPORTED", "这里只能删除本地签发的站点证书")); }
         let cert = self.store.list_certs()?.into_iter().find(|c| c.id == id)
             .ok_or_else(|| AppError::new("NOT_FOUND", "证书不存在"))?;
         if cert.kind != "site" {
@@ -793,11 +936,10 @@ pub fn export_pfx(
     out_path: &std::path::Path,
 ) -> Result<String> {
     let _files = CERT_FILES.lock();
-    let rec = store
-        .list_certs()?
-        .into_iter()
-        .find(|c| c.id == cert_id)
-        .ok_or_else(|| AppError::new("NOT_FOUND", "证书不存在"))?;
+    let rec = if cert_id == "ca" { read_ca_record(paths)? } else {
+        store.list_certs()?.into_iter().find(|c| c.id == cert_id)
+            .ok_or_else(|| AppError::new("NOT_FOUND", "证书不存在"))?
+    };
     let key_pem = std::fs::read_to_string(
         rec.key_path
             .as_deref()
@@ -839,11 +981,10 @@ pub fn export_pfx(
 /// 导出 DER（二进制 X.509，部分设备/中间件要这个格式）：取链里第一张（leaf）
 pub fn export_der(paths: &Paths, store: &Store, cert_id: &str, out_path: &std::path::Path) -> Result<String> {
     let _files = CERT_FILES.lock();
-    let rec = store
-        .list_certs()?
-        .into_iter()
-        .find(|c| c.id == cert_id)
-        .ok_or_else(|| AppError::new("NOT_FOUND", "证书不存在"))?;
+    let rec = if cert_id == "ca" { read_ca_record(paths)? } else {
+        store.list_certs()?.into_iter().find(|c| c.id == cert_id)
+            .ok_or_else(|| AppError::new("NOT_FOUND", "证书不存在"))?
+    };
     let pem =
         std::fs::read_to_string(&rec.cert_path).map_err(|e| AppError::io("读取证书失败", e))?;
     let leaf = pem
@@ -870,11 +1011,10 @@ pub fn export_jks(
     out_path: &std::path::Path,
 ) -> Result<String> {
     let _files = CERT_FILES.lock();
-    let rec = store
-        .list_certs()?
-        .into_iter()
-        .find(|c| c.id == cert_id)
-        .ok_or_else(|| AppError::new("NOT_FOUND", "证书不存在"))?;
+    let rec = if cert_id == "ca" { read_ca_record(paths)? } else {
+        store.list_certs()?.into_iter().find(|c| c.id == cert_id)
+            .ok_or_else(|| AppError::new("NOT_FOUND", "证书不存在"))?
+    };
     let key_pem = std::fs::read_to_string(
         rec.key_path
             .as_deref()
@@ -944,11 +1084,10 @@ pub fn export_pem_bundle(
     out_path: &std::path::Path,
 ) -> Result<String> {
     let _files = CERT_FILES.lock();
-    let rec = store
-        .list_certs()?
-        .into_iter()
-        .find(|c| c.id == cert_id)
-        .ok_or_else(|| AppError::new("NOT_FOUND", "证书不存在"))?;
+    let rec = if cert_id == "ca" { read_ca_record(paths)? } else {
+        store.list_certs()?.into_iter().find(|c| c.id == cert_id)
+            .ok_or_else(|| AppError::new("NOT_FOUND", "证书不存在"))?
+    };
     let key_pem = std::fs::read_to_string(
         rec.key_path
             .as_deref()

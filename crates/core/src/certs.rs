@@ -71,12 +71,13 @@ pub fn report(paths: &Paths, store: &crate::store::Store) -> Result<CertReport> 
     let _files = crate::tls::CERT_FILES.lock();
     let sites = store.list_sites()?;
     let mut certs = store.list_certs()?;
+    let ca_expected = crate::tls::local_ca_expected(paths, &certs, &sites)?;
     certs.retain(|c| c.kind != "ca");
-    certs.insert(0, crate::model::CertRecord {
+    if ca_expected { certs.insert(0, crate::model::CertRecord {
         id: "ca".into(), kind: "ca".into(), subject: "NiceEnv Local Root CA".into(), sans: vec![],
         not_before: 0, not_after: 0, cert_path: paths.certs().join("ca.crt").to_string_lossy().into(),
         key_path: Some(paths.certs().join("ca.key").to_string_lossy().into()), trusted: None,
-    });
+    }); }
     let now = chrono::Utc::now().timestamp();
     let mut out = Vec::new();
     for c in certs {
@@ -86,11 +87,20 @@ pub fn report(paths: &Paths, store: &crate::store::Store) -> Result<CertReport> 
         let mut not_after = c.not_after / 1000;
         let mut not_before = c.not_before / 1000;
         let checked: Result<()> = (|| {
-            let pem = read_pem(Path::new(&c.cert_path))?;
+            let cert_path = if c.kind == "ca" { crate::paths::checked_data_path(&paths.base, "certs/ca.crt")? } else { PathBuf::from(&c.cert_path) };
+            let pem = read_managed_pem(&cert_path)?;
             let info = parse_pem_info(&pem).ok_or_else(|| AppError::new("CERT_PARSE_FAILED", "证书内容损坏，无法解析"))?;
             subject = info.0; sans = info.1; not_before = info.2; not_after = info.3;
             let key = c.key_path.as_deref().ok_or_else(|| AppError::new("NOT_A_KEY", "没有匹配的私钥文件"))?;
-            check_pair(&pem, &read_pem(Path::new(key))?)
+            let key_path = if c.kind == "ca" { crate::paths::checked_data_path(&paths.base, "certs/ca.key")? } else { PathBuf::from(key) };
+            check_pair(&pem, &read_managed_pem(&key_path)?)?;
+            if c.kind == "ca" {
+                let chain = parse_chain(&pem)?;
+                let (_, cert) = x509_parser::parse_x509_certificate(chain[0].as_ref())
+                    .map_err(|e| AppError::new("CERT_PARSE_FAILED", e.to_string()))?;
+                if !cert.is_ca() { return Err(AppError::new("CERT_NOT_CA", "此文件不是根 CA 证书，请恢复原根证书")); }
+            }
+            Ok(())
         })();
         let file_present = Path::new(&c.cert_path).is_file()
             && c.key_path.as_deref().is_some_and(|key| Path::new(key).is_file());
@@ -137,11 +147,12 @@ pub fn report(paths: &Paths, store: &crate::store::Store) -> Result<CertReport> 
         });
     }
     out.sort_by_key(|c| (c.advice.is_empty(), c.days_left));
+    let ca_usable = out.iter().any(|c| c.kind == "ca" && c.file_present && !matches!(c.status.as_str(), "invalid" | "expired"));
     Ok(CertReport {
         expired: out.iter().filter(|c| c.status == "expired").count(),
         critical: out.iter().filter(|c| c.status == "critical" || c.status == "invalid").count(),
         warning: out.iter().filter(|c| c.status == "warn").count(),
-        ca_trusted: crate::tls::ca_trusted(paths), checked_at: now, certs: out,
+        ca_trusted: ca_usable && crate::tls::ca_trusted(paths), checked_at: now, certs: out,
     })
 }
 

@@ -62,7 +62,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.41";
+const MOCK_APP_VERSION = "0.2.42";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -1465,16 +1465,17 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "cert_health": {
       const now = Math.floor(Date.now() / 1000);
       const day = 86400;
+      const ca = certs.get("ca");
       return {
         certs: [
-          { id: "ca", kind: "ca", subject: "NiceEnv Local Root CA", sans: [], notAfter: now + 3600 * day, daysLeft: 3600, status: "ok", filePresent: true, usedBySites: [], missingSans: [], advice: "" },
+          ...(ca ? [{ id: "ca", kind: "ca", subject: ca.subject, sans: [], notAfter: ca.notAfter / 1000, daysLeft: Math.floor((ca.notAfter / 1000 - now) / day), status: ca.notAfter / 1000 <= now ? "expired" : "ok", filePresent: true, usedBySites: [], missingSans: [], advice: ca.notAfter / 1000 <= now ? "根 CA 已过期，请恢复有效根证书" : "" }] : []),
           { id: "laravel-shop", kind: "site", subject: "shop.test", sans: ["shop.test"], notAfter: now + 12 * day, daysLeft: 12, status: "warn", filePresent: true, usedBySites: ["laravel-shop"], missingSans: [], advice: "还有 12 天到期，建议尽快重新签发" },
           { id: "legacy-admin", kind: "site", subject: "admin.test", sans: ["admin.test"], notAfter: now - 2 * day, daysLeft: -2, status: "expired", filePresent: true, usedBySites: ["legacy-admin"], missingSans: ["old.admin.test"], advice: "已过期：到站点详情里重新签发证书即可" },
         ],
         expired: 1,
         critical: 0,
         warning: 1,
-        caTrusted: true,
+        caTrusted: !!ca?.trusted && ca.notAfter / 1000 > now,
         checkedAt: now,
       } as CertReport as T;
     }

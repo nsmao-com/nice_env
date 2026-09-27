@@ -691,7 +691,7 @@ fn check_services(
 
 fn check_certs(
     r: &mut HealthReport,
-    paths: &Paths,
+    _paths: &Paths,
     sites: &[Site],
     report: &crate::certs::CertReport,
 ) {
@@ -702,14 +702,6 @@ fn check_certs(
                 && site.domains.first().is_some_and(|d| d.eq_ignore_ascii_case(&cert.subject))));
     let mut count = 0;
     for cert in &report.certs {
-        // 空环境尚未创建 CA 是无需检查；有任一 CA 文件或本地 HTTPS 引用则不能隐藏损坏。
-        if cert.kind == "ca"
-            && !local_https
-            && !paths.certs().join("ca.crt").exists()
-            && !paths.certs().join("ca.key").exists()
-        {
-            continue;
-        }
         count += 1;
         let issue = if !cert.file_present {
             Some((Severity::Error, "证书或私钥文件缺失"))

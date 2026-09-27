@@ -31,6 +31,7 @@ import type {
   ImportedCert,
   SiteCertificateChoice,
   EnvFileView,
+  EnvRestorePreview,
   DiagnosticsBundle,
   HealthReport,
   ServiceDiagnosticReport,
@@ -372,11 +373,15 @@ export const certImportedReplace = (id: string, certPath: string, keyPath: strin
   safe(invoke<ImportedCert>("cert_imported_replace", { id, certPath, keyPath }));
 
 /* 站点 .env */
-export const envRead = (siteId: string) => safe(invoke<EnvFileView>("env_read", { siteId }));
-export const envSave = (siteId: string, changes: [string, string][], expectedRevision: string) =>
-  safe(invoke<EnvFileView>("env_save", { siteId, changes, expectedRevision }));
-export const envPreviewDb = (siteId: string, expectedRevision: string) =>
-  safe(invoke<[string, string][]>("env_preview_db", { siteId, expectedRevision }));
+export const envRead = (siteId: string, fileName = ".env") => safe(invoke<EnvFileView>("env_read", { siteId, fileName }));
+export const envSave = (siteId: string, changes: [string, string][], expectedRevision: string, fileName = ".env") =>
+  safe(invoke<EnvFileView>("env_save", { siteId, changes, expectedRevision, fileName }));
+export const envPreviewDb = (siteId: string, expectedRevision: string, fileName = ".env") =>
+  safe(invoke<[string, string][]>("env_preview_db", { siteId, expectedRevision, fileName }));
+export const envRestorePreview = (siteId: string, fileName: string, expectedRevision: string) =>
+  safe(invoke<EnvRestorePreview>("env_restore_preview", { siteId, fileName, expectedRevision }));
+export const envRestore = (siteId: string, fileName: string, expectedRevision: string, expectedBackupRevision: string) =>
+  safe(invoke<EnvFileView>("env_restore", { siteId, fileName, expectedRevision, expectedBackupRevision }));
 export const envApplyDb = (siteId: string) =>
   safe(invoke<string[]>("env_apply_db", { siteId }));
 

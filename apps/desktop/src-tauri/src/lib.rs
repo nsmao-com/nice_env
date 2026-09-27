@@ -284,6 +284,8 @@ pub fn run() {
             env_save,
             env_apply_db,
             env_preview_db,
+            env_restore_preview,
+            env_restore,
             // 证书体检
             cert_health,
             cert_import,
@@ -3472,11 +3474,13 @@ async fn cert_imported_delete(
 fn env_read(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     site_id: String,
+    file_name: Option<String>,
 ) -> Result<nsb_core::envfile::EnvFileView, tauri::Error> {
-    map_jh(nsb_core::envfile::read_env(
+    map_jh(nsb_core::envfile::read_env_named(
         &state.paths,
         &state.store,
         &site_id,
+        file_name.as_deref().unwrap_or(".env"),
     ))
 }
 
@@ -3487,10 +3491,11 @@ fn env_save(
     site_id: String,
     changes: Vec<(String, String)>,
     expected_revision: String,
+    file_name: Option<String>,
 ) -> Result<nsb_core::envfile::EnvFileView, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     map_jh(
-        nsb_core::envfile::save_env(&state.paths, &state.store, &site_id, &changes, &expected_revision),
+        nsb_core::envfile::save_env_named(&state.paths, &state.store, &site_id, file_name.as_deref().unwrap_or(".env"), &changes, &expected_revision),
     )
 }
 
@@ -3500,8 +3505,20 @@ fn env_preview_db(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     site_id: String,
     expected_revision: String,
+    file_name: Option<String>,
 ) -> Result<Vec<(String, String)>, tauri::Error> {
-    map_jh(nsb_core::envfile::preview_db_vars(&state.paths, &state.store, &site_id, &expected_revision))
+    map_jh(nsb_core::envfile::preview_db_vars_named(&state.paths, &state.store, &site_id, file_name.as_deref().unwrap_or(".env"), &expected_revision))
+}
+
+#[tauri::command]
+fn env_restore_preview(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, site_id: String, file_name: String, expected_revision: String) -> Result<nsb_core::envfile::EnvRestorePreview, tauri::Error> {
+    map_jh(nsb_core::envfile::preview_env_restore(&state.paths, &state.store, &site_id, &file_name, &expected_revision))
+}
+
+#[tauri::command]
+fn env_restore(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, site_id: String, file_name: String, expected_revision: String, expected_backup_revision: String) -> Result<nsb_core::envfile::EnvFileView, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    map_jh(nsb_core::envfile::restore_env(&state.paths, &state.store, &site_id, &file_name, &expected_revision, &expected_backup_revision))
 }
 
 /// 一键把站点绑定的数据库信息写进 .env（DB_* 变量）

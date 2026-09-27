@@ -13,6 +13,13 @@ export function isEnvSecretKey(key: string): boolean {
     || value.endsWith("_PASS") || value.endsWith("KEY") || value === "DATABASE_URL";
 }
 
+export const ENV_FILE_PRESETS = [".env", ".env.local", ".env.development", ".env.development.local", ".env.production", ".env.production.local", ".env.test", ".env.test.local", ".env.dev", ".env.dev.local", ".env.prod", ".env.prod.local", ".env.staging", ".env.example", ".env.dist"];
+
+export function isEnvFileName(name: string): boolean {
+  return name === ".env" || (name.length <= 128 && /^\.env\.[A-Za-z0-9_.-]+$/.test(name) && !name.endsWith(".")
+    && !/\.(nsb-backup|nsb-before-restore)$/i.test(name) && name.toLowerCase() !== ".env.local.php");
+}
+
 /** 与 sites::proxy_url 保持一致；返回实际配置使用的基础地址，非法输入返回 null。 */
 export function normalizeProxyTarget(input: string): string | null {
   const target = input.trim();

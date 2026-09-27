@@ -44,6 +44,7 @@ import type {
   ImportedCert,
   SiteCertificateChoice,
   EnvFileView,
+  EnvRestorePreview,
   DiagnosticsBundle,
   HealthReport,
   ServiceDiagnosticReport,
@@ -58,12 +59,12 @@ import type {
   CreateSiteInput,
 } from "@nsb/schema";
 import { emitLocal } from "./backend";
-import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSettingValid, isEnvSecretKey } from "./utils";
+import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSettingValid, isEnvSecretKey, isEnvFileName } from "./utils";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.70";
+const MOCK_APP_VERSION = "0.2.71";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -194,22 +195,29 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 const services = new Map<string, ServiceStatus>();
 const sites = new Map<string, Site>();
 const mockEnvFiles = new Map<string, EnvFileView>();
+const mockEnvBackups = new Map<string, { entries: EnvFileView["entries"]; revision: string }>();
+const mockEnvBeforeRestore = new Map<string, EnvFileView["entries"]>();
 let mockEnvRevision = 0;
-function mockEnvView(siteId: string): EnvFileView {
+function mockEnvView(siteId: string, fileName = ".env"): EnvFileView {
+  if (!isEnvFileName(fileName)) throw { code: "BAD_ENV_FILE", message: "请选择 .env 或 .env.* 环境文件，不能选择路径、备份或编译缓存" };
   const site = sites.get(siteId);
   if (!site) throw { code: "SITE_NOT_FOUND", message: "站点不存在，请刷新列表" };
-  const key = `${siteId}:${site.rootDir}`;
+  const prefix = `${siteId}:${site.rootDir}:`;
+  const key = prefix + fileName;
   let view = mockEnvFiles.get(key);
   if (!view) {
     const root = site.rootDir.replace(/[\\/](public|out|dist|build)[\\/]?$/, "").replace(/[\\/]+$/, "");
     const values = [["APP_NAME", site.name], ["APP_ENV", "local"], ["APP_KEY", "base64:preview-key"], ["APP_URL", `https://${site.domains[0]}`]];
     if (site.db?.enabled) values.push(["DB_HOST", "127.0.0.1"], ["DB_PORT", "3306"], ["DB_DATABASE", site.db.database], ["DB_USERNAME", site.db.username], ["DB_PASSWORD", "preview-password"]);
-    view = { siteId, siteName: site.name, path: `${root}/.env`, exists: true, revision: `mock-env-${++mockEnvRevision}`,
+    view = { siteId, siteName: site.name, path: `${root}/${fileName}`, fileName, backupExists: false, hasCompiledEnv: false, exists: [".env", ".env.example"].includes(fileName), revision: `mock-env-${++mockEnvRevision}`,
       entries: values.map(([key, value], index) => ({ key, value, commented: false, secret: isEnvSecretKey(key), line: index + 1, needsQuote: false })),
       variants: [".env", ".env.example"] };
     view.entries.push({ key: "REDIS_PASSWORD", value: "preview", commented: true, secret: true, line: 20, needsQuote: false });
+    if (!view.exists) view.entries = [];
     mockEnvFiles.set(key, view);
   }
+  view.variants = [...new Set([".env", ".env.example", ...Array.from(mockEnvFiles).filter(([key, entry]) => key.startsWith(prefix) && entry.exists).map(([, entry]) => entry.fileName)])].sort();
+  view.backupExists = mockEnvBackups.has(view.path);
   view.dbHint = site.db?.enabled ? { database: site.db.database, username: site.db.username, password: site.db.password ?? "", port: site.db.port ?? 3306 } : null;
   return view;
 }
@@ -1578,9 +1586,9 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return downloadPreviewText(bundle.markdown, `niceenv-diagnostics-${bundle.generatedAt}.md`) as T;
     }
     case "env_read":
-      return structuredClone(mockEnvView(String(args!.siteId))) as T;
+      return structuredClone(mockEnvView(String(args!.siteId), args?.fileName as string | undefined)) as T;
     case "env_save": {
-      const view = mockEnvView(String(args!.siteId));
+      const view = mockEnvView(String(args!.siteId), args?.fileName as string | undefined);
       if (args!.expectedRevision !== view.revision) throw { code: "ENV_CHANGED", message: "环境文件或站点目录已变化，未覆盖当前文件", hint: "请重新读取文件并检查最新内容。" };
       const changes = args!.changes as [string, string][];
       if (new Set(changes.map(([key]) => key)).size !== changes.length || changes.some(([key, value]) => !/^[A-Za-z_][A-Za-z0-9_.]*$/.test(key) || value.includes("\0"))) {
@@ -1589,18 +1597,43 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       for (const [key, value] of changes) {
         if (isEnvSecretKey(key) && /^(true|false|on|off|null|empty|\(true\)|\(false\)|\(null\)|\(empty\))$/i.test(value)) throw { code: "BAD_ENV_VALUE", message: "框架会把此密码或密钥识别为布尔值或空值" };
       }
+      if (!changes.length) return structuredClone(view) as T;
+      const nextEntries = structuredClone(view.entries);
       for (const [key, value] of changes) {
-        const matches = view.entries.filter((entry) => !entry.commented && entry.key === key);
+        const matches = nextEntries.filter((entry) => !entry.commented && entry.key === key);
         if (matches.length) matches.forEach((entry) => { entry.value = value; entry.needsQuote = false; });
-        else view.entries.push({ key, value, commented: false, secret: isEnvSecretKey(key), line: view.entries.length + 1, needsQuote: false });
+        else nextEntries.push({ key, value, commented: false, secret: isEnvSecretKey(key), line: nextEntries.length + 1, needsQuote: false });
       }
+      if (view.exists && JSON.stringify(nextEntries) === JSON.stringify(view.entries)) return structuredClone(view) as T;
+      if (view.exists) mockEnvBackups.set(view.path, { entries: structuredClone(view.entries), revision: `mock-backup-${++mockEnvRevision}` });
+      view.entries = nextEntries;
       view.exists = true; view.revision = `mock-env-${++mockEnvRevision}`;
-      return structuredClone(view) as T;
+      return structuredClone(mockEnvView(view.siteId, view.fileName)) as T;
     }
     case "env_preview_db": {
-      const view = mockEnvView(String(args!.siteId));
+      const view = mockEnvView(String(args!.siteId), args?.fileName as string | undefined);
       if (args!.expectedRevision !== view.revision) throw { code: "ENV_CHANGED", message: "环境文件或站点目录已变化，请重新读取" };
       return mockEnvDbValues(view) as T;
+    }
+    case "env_restore_preview":
+    case "env_restore": {
+      const view = mockEnvView(String(args!.siteId), args?.fileName as string | undefined);
+      if (args!.expectedRevision !== view.revision) throw { code: "ENV_CHANGED", message: "环境文件或站点目录已变化，请重新读取" };
+      const backup = mockEnvBackups.get(view.path);
+      if (!backup) throw { code: "ENV_BACKUP_MISSING", message: "此环境文件没有上次保存的备份" };
+      const contentChanged = !view.exists || JSON.stringify(view.entries) !== JSON.stringify(backup.entries);
+      if (cmd === "env_restore_preview") {
+        const values = (entries: EnvFileView["entries"], key: string) => JSON.stringify(entries.filter((entry) => !entry.commented && entry.key === key).map((entry) => entry.value));
+        const keys = [...new Set([...view.entries, ...backup.entries].filter((entry) => !entry.commented).map((entry) => entry.key))].sort();
+        return { fileName: view.fileName, backupPath: `${view.path}.nsb-backup`, revision: backup.revision, currentExists: view.exists,
+          contentChanged, changedKeys: keys.filter((key) => values(view.entries, key) !== values(backup.entries, key)) } satisfies EnvRestorePreview as T;
+      }
+      if (args!.expectedBackupRevision !== backup.revision) throw { code: "ENV_BACKUP_CHANGED", message: "备份在预览后已变化，请重新预览" };
+      if (contentChanged) {
+        if (view.exists) mockEnvBeforeRestore.set(view.path, structuredClone(view.entries));
+        view.entries = structuredClone(backup.entries); view.exists = true; view.revision = `mock-env-${++mockEnvRevision}`;
+      }
+      return structuredClone(mockEnvView(view.siteId, view.fileName)) as T;
     }
     case "env_apply_db": {
       const view = mockEnvView(String(args!.siteId));

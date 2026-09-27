@@ -801,6 +801,9 @@ export const EnvFileView = z.object({
   siteId: z.string(),
   siteName: z.string(),
   path: z.string(),
+  fileName: z.string(),
+  backupExists: z.boolean(),
+  hasCompiledEnv: z.boolean(),
   exists: z.boolean(),
   revision: z.string(),
   entries: z.array(EnvEntry),
@@ -816,6 +819,16 @@ export const EnvFileView = z.object({
   variants: z.array(z.string()).default([]),
 });
 export type EnvFileView = z.infer<typeof EnvFileView>;
+
+export const EnvRestorePreview = z.object({
+  fileName: z.string(),
+  backupPath: z.string(),
+  revision: z.string(),
+  currentExists: z.boolean(),
+  contentChanged: z.boolean(),
+  changedKeys: z.array(z.string()),
+});
+export type EnvRestorePreview = z.infer<typeof EnvRestorePreview>;
 
 /* ============ 证书体检 ============ */
 

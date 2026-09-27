@@ -39,8 +39,11 @@ pub struct EnvFileView {
     pub site_id: String,
     pub site_name: String,
     pub path: String,
+    pub file_name: String,
+    pub backup_exists: bool,
+    pub has_compiled_env: bool,
     pub exists: bool,
-    /// 绑定站点、项目目录、文件内容和语法，保存时必须仍与读取时一致。
+    /// 绑定站点、项目目录、文件名、内容和语法，保存时必须仍与读取时一致。
     pub revision: String,
     pub entries: Vec<EnvEntry>,
     /// 站点绑定的数据库信息，可用于一键补全 DB_*
@@ -49,6 +52,17 @@ pub struct EnvFileView {
     /// 探测到的 .env 变体文件（.env.example / .env.local …）
     #[serde(default)]
     pub variants: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvRestorePreview {
+    pub file_name: String,
+    pub backup_path: String,
+    pub revision: String,
+    pub current_exists: bool,
+    pub content_changed: bool,
+    pub changed_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -382,6 +396,11 @@ pub fn db_env_vars(hint: &DbHint) -> Vec<(String, String)> {
 }
 
 pub(crate) fn project_db_env_vars(root: &Path, hint: &DbHint) -> Result<Vec<(String, String)>> {
+    let content = std::fs::read_to_string(root.join(".env")).ok();
+    project_db_env_vars_from(root, hint, content.as_deref())
+}
+
+fn project_db_env_vars_from(root: &Path, hint: &DbHint, content: Option<&str>) -> Result<Vec<(String, String)>> {
     match project_syntax(root) {
         EnvSyntax::ThinkPhp => Ok(vec![
             ("DB_TYPE".into(), "mysql".into()),
@@ -403,10 +422,8 @@ pub(crate) fn project_db_env_vars(root: &Path, hint: &DbHint) -> Result<Vec<(Str
         EnvSyntax::Dotenv
             if root.join("bin/console").is_file() && root.join("config/bundles.php").is_file() =>
         {
-            let existing = std::fs::read_to_string(root.join(".env"))
-                .ok()
-                .and_then(|s| {
-                    parse_env(&s)
+            let existing = content.and_then(|s| {
+                    parse_env(s)
                         .into_iter()
                         .find(|e| !e.commented && e.key == "DATABASE_URL")
                 })
@@ -463,6 +480,7 @@ fn project_root(web_root: &Path) -> PathBuf {
                 "artisan",
                 ".env",
                 ".env.example",
+                ".env.local",
             ]
             .iter()
             .any(|name| parent.join(name).is_file())
@@ -476,20 +494,28 @@ fn project_root(web_root: &Path) -> PathBuf {
 
 /// 探测站点目录下的 .env 变体
 pub fn env_variants(root: &Path) -> Vec<String> {
-    const NAMES: &[&str] = &[
-        ".env",
-        ".env.example",
-        ".env.local",
-        ".env.development",
-        ".env.production",
-        ".env.testing",
-        ".env.dist",
-    ];
-    NAMES
-        .iter()
-        .filter(|n| root.join(n).is_file())
-        .map(|s| s.to_string())
-        .collect()
+    let mut names: Vec<_> = std::fs::read_dir(root).into_iter().flatten().filter_map(|entry| {
+        let entry = entry.ok()?;
+        let name = entry.file_name().to_str()?.to_string();
+        valid_env_name(&name).then_some(name)
+    }).collect();
+    names.sort(); names
+}
+
+fn valid_env_name(name: &str) -> bool {
+    if name == ".env" { return true; }
+    let Some(suffix) = name.strip_prefix(".env.") else { return false; };
+    let reserved = name.to_ascii_lowercase();
+    !suffix.is_empty() && name.len() <= 128 && !suffix.ends_with('.')
+        && suffix.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        && !reserved.ends_with(".nsb-backup") && !reserved.ends_with(".nsb-before-restore") && reserved != ".env.local.php"
+}
+
+fn named_env_path(root: &Path, name: &str) -> Result<PathBuf> {
+    if !valid_env_name(name) {
+        return Err(AppError::new("BAD_ENV_FILE", "请选择项目目录中的 .env 或 .env.* 环境文件，不能选择路径、备份或编译缓存"));
+    }
+    Ok(root.join(name))
 }
 
 const MAX_ENV_BYTES: usize = 1024 * 1024;
@@ -520,10 +546,10 @@ fn env_root(site: &crate::model::Site) -> Result<PathBuf> {
     std::fs::canonicalize(project_root(Path::new(&site.root_dir))).map_err(|e| AppError::io("读取项目目录", e))
 }
 
-fn env_revision(site: &crate::model::Site, root: &Path, content: Option<&str>) -> String {
+fn env_revision(site: &crate::model::Site, root: &Path, name: &str, content: Option<&str>) -> String {
     use sha2::{Digest, Sha256};
     let mut digest = Sha256::new();
-    for value in [site.id.as_bytes(), site.root_dir.as_bytes(), root.to_string_lossy().as_bytes()] {
+    for value in [site.id.as_bytes(), site.root_dir.as_bytes(), root.to_string_lossy().as_bytes(), name.as_bytes()] {
         digest.update((value.len() as u64).to_le_bytes()); digest.update(value);
     }
     digest.update([project_syntax(root) as u8, u8::from(content.is_some())]);
@@ -531,7 +557,7 @@ fn env_revision(site: &crate::model::Site, root: &Path, content: Option<&str>) -
     format!("{:x}", digest.finalize())
 }
 
-fn env_view(store: &crate::store::Store, site: &crate::model::Site, root: &Path, content: Option<&str>) -> EnvFileView {
+fn env_view(store: &crate::store::Store, site: &crate::model::Site, root: &Path, name: &str, content: Option<&str>) -> EnvFileView {
     let db_hint = site.db.as_ref().filter(|d| d.enabled).map(|d| DbHint {
         database: d.database.clone(),
         username: d.username.clone(),
@@ -543,9 +569,12 @@ fn env_view(store: &crate::store::Store, site: &crate::model::Site, root: &Path,
     EnvFileView {
         site_id: site.id.clone(),
         site_name: site.name.clone(),
-        path: env_path(root).to_string_lossy().to_string(),
+        path: root.join(name).to_string_lossy().to_string(),
+        file_name: name.into(),
+        backup_exists: std::fs::symlink_metadata(root.join(format!("{name}.nsb-backup"))).is_ok(),
+        has_compiled_env: root.join(".env.local.php").is_file(),
         exists: content.is_some(),
-        revision: env_revision(site, root, content),
+        revision: env_revision(site, root, name, content),
         entries: parse_env_using(content.unwrap_or_default(), project_syntax(root)),
         db_hint,
         variants: env_variants(root),
@@ -554,11 +583,15 @@ fn env_view(store: &crate::store::Store, site: &crate::model::Site, root: &Path,
 
 /// 读取和保存与站点目录变更串行；编辑器的 revision 还会检查外部文件变更。
 pub fn read_env(_paths: &Paths, store: &crate::store::Store, site_id: &str) -> Result<EnvFileView> {
+    read_env_named(_paths, store, site_id, ".env")
+}
+
+pub fn read_env_named(_paths: &Paths, store: &crate::store::Store, site_id: &str, name: &str) -> Result<EnvFileView> {
     let _sites = crate::sites::SITE_CHANGES.lock();
     let site = crate::sites::get(store, site_id)?;
     let root = env_root(&site)?;
-    let content = read_env_file(&env_path(&root))?;
-    Ok(env_view(store, &site, &root, content.as_deref()))
+    let content = read_env_file(&named_env_path(&root, name)?)?;
+    Ok(env_view(store, &site, &root, name, content.as_deref()))
 }
 
 fn env_changed() -> AppError {
@@ -591,30 +624,35 @@ pub fn save_env(
     changes: &[(String, String)],
     expected_revision: &str,
 ) -> Result<EnvFileView> {
+    save_env_named(_paths, store, site_id, ".env", changes, expected_revision)
+}
+
+pub fn save_env_named(_paths: &Paths, store: &crate::store::Store, site_id: &str, name: &str, changes: &[(String, String)], expected_revision: &str) -> Result<EnvFileView> {
     let _sites = crate::sites::SITE_CHANGES.lock();
     let site = crate::sites::get(store, site_id)?;
     let root = env_root(&site)?;
-    let path = env_path(&root);
+    let path = named_env_path(&root, name)?;
     let original = read_env_file(&path)?;
-    if env_revision(&site, &root, original.as_deref()) != expected_revision { return Err(env_changed()); }
+    if env_revision(&site, &root, name, original.as_deref()) != expected_revision { return Err(env_changed()); }
     let mut keys = std::collections::HashSet::new();
     if changes.iter().any(|(key, _)| !keys.insert(key)) {
         return Err(AppError::new("BAD_ENV_KEY", "同次保存不能提交重复变量名"));
     }
-    if changes.is_empty() { return Ok(env_view(store, &site, &root, original.as_deref())); }
+    if changes.is_empty() { return Ok(env_view(store, &site, &root, name, original.as_deref())); }
     let next = apply_project_env_changes(&root, original.as_deref().unwrap_or_default(), changes)?;
     if next.len() > MAX_ENV_BYTES { return Err(AppError::new("ENV_TOO_LARGE", "保存后的环境文件不能超过 1 MiB")); }
-    let mut view = env_view(store, &site, &root, Some(&next));
-    if !view.variants.iter().any(|name| name == ".env") { view.variants.insert(0, ".env".into()); }
+    let mut view = env_view(store, &site, &root, name, Some(&next));
+    if !view.variants.iter().any(|file| file == name) { view.variants.push(name.into()); view.variants.sort(); }
     if original.as_deref() == Some(&next) { return Ok(view); }
     if std::fs::metadata(&path).ok().is_some_and(|m| m.permissions().readonly()) {
-        return Err(AppError::new("ENV_READ_ONLY", ".env 是只读文件，未保存设置"));
+        return Err(AppError::new("ENV_READ_ONLY", format!("{name} 是只读文件，未保存设置")));
     }
     // 就地备份：.env 不进全局备份目录，放在项目旁边更直观
     if let Some(original) = &original {
-        let bak = root.join(".env.nsb-backup");
+        let bak = root.join(format!("{name}.nsb-backup"));
         let previous = read_env_file(&bak)?;
         replace_env_file(&bak, previous.as_deref(), original)?;
+        view.backup_exists = true;
     }
     replace_env_file(&path, original.as_deref(), &next)?;
     Ok(view)
@@ -627,17 +665,22 @@ pub fn preview_db_vars(
     site_id: &str,
     expected_revision: &str,
 ) -> Result<Vec<(String, String)>> {
+    preview_db_vars_named(_paths, store, site_id, ".env", expected_revision)
+}
+
+pub fn preview_db_vars_named(_paths: &Paths, store: &crate::store::Store, site_id: &str, name: &str, expected_revision: &str) -> Result<Vec<(String, String)>> {
     let _sites = crate::sites::SITE_CHANGES.lock();
     let site = crate::sites::get(store, site_id)?;
     let root = env_root(&site)?;
-    let content = read_env_file(&env_path(&root))?;
-    let view = env_view(store, &site, &root, content.as_deref());
+    let path = named_env_path(&root, name)?;
+    let content = read_env_file(&path)?;
+    let view = env_view(store, &site, &root, name, content.as_deref());
     if view.revision != expected_revision { return Err(env_changed()); }
     let hint = view.db_hint.ok_or_else(|| {
         AppError::new("NO_DB_BINDING", "该站点没有绑定数据库")
             .with_hint("先到站点详情里为它创建/绑定一个数据库")
     })?;
-    let mut vars = project_db_env_vars(&root, &hint)?;
+    let mut vars = project_db_env_vars_from(&root, &hint, content.as_deref())?;
     // 老版本未持久化密码：补全其它字段，不能用未知的空密码覆盖项目现有凭据。
     if hint.password.is_empty() {
         vars.retain(|(key, _)| {
@@ -647,8 +690,64 @@ pub fn preview_db_vars(
             )
         });
     }
-    if read_env_file(&env_path(&root))? != content { return Err(env_changed()); }
+    if read_env_file(&path)? != content { return Err(env_changed()); }
     Ok(vars)
+}
+
+pub fn preview_env_restore(_paths: &Paths, store: &crate::store::Store, site_id: &str, name: &str, expected_revision: &str) -> Result<EnvRestorePreview> {
+    let _sites = crate::sites::SITE_CHANGES.lock();
+    let site = crate::sites::get(store, site_id)?;
+    let root = env_root(&site)?;
+    let content = read_env_file(&named_env_path(&root, name)?)?;
+    if env_revision(&site, &root, name, content.as_deref()) != expected_revision { return Err(env_changed()); }
+    let backup_name = format!("{name}.nsb-backup");
+    let backup_path = root.join(&backup_name);
+    let backup = read_env_file(&backup_path)?.ok_or_else(|| AppError::new("ENV_BACKUP_MISSING", "此环境文件没有上次保存的备份"))?;
+    let values = |text: &str| -> std::collections::BTreeMap<String, Vec<String>> {
+        let mut values: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for entry in parse_env_using(text, project_syntax(&root)).into_iter().filter(|entry| !entry.commented) {
+            values.entry(entry.key).or_default().push(entry.value);
+        }
+        values
+    };
+    let current = values(content.as_deref().unwrap_or_default());
+    let previous = values(&backup);
+    let keys: std::collections::BTreeSet<_> = current.keys().chain(previous.keys()).cloned().collect();
+    Ok(EnvRestorePreview {
+        file_name: name.into(), backup_path: backup_path.to_string_lossy().into(),
+        revision: env_revision(&site, &root, &backup_name, Some(&backup)),
+        current_exists: content.is_some(), content_changed: content.as_deref() != Some(&backup),
+        changed_keys: keys.into_iter().filter(|key| current.get(key) != previous.get(key)).collect(),
+    })
+}
+
+/// 还原整份文件，保留用于还原的备份；当前内容另外保存为 nsb-before-restore。
+pub fn restore_env(_paths: &Paths, store: &crate::store::Store, site_id: &str, name: &str, expected_revision: &str, expected_backup_revision: &str) -> Result<EnvFileView> {
+    let _sites = crate::sites::SITE_CHANGES.lock();
+    let site = crate::sites::get(store, site_id)?;
+    let root = env_root(&site)?;
+    let path = named_env_path(&root, name)?;
+    let content = read_env_file(&path)?;
+    if env_revision(&site, &root, name, content.as_deref()) != expected_revision { return Err(env_changed()); }
+    let backup_name = format!("{name}.nsb-backup");
+    let backup = read_env_file(&root.join(&backup_name))?.ok_or_else(|| AppError::new("ENV_BACKUP_MISSING", "备份已不存在，未还原文件"))?;
+    if env_revision(&site, &root, &backup_name, Some(&backup)) != expected_backup_revision {
+        return Err(AppError::new("ENV_BACKUP_CHANGED", "备份在预览后已变化，未还原文件").with_hint("请重新预览并确认备份。"));
+    }
+    let mut view = env_view(store, &site, &root, name, Some(&backup));
+    if !view.variants.iter().any(|file| file == name) { view.variants.push(name.into()); view.variants.sort(); }
+    if content.as_deref() == Some(&backup) { return Ok(view); }
+    if let Some(content) = &content {
+        let recovery = root.join(format!("{name}.nsb-before-restore"));
+        let previous = read_env_file(&recovery)?;
+        replace_env_file(&recovery, previous.as_deref(), content)?;
+    }
+    // 保留备份源原样；外部改动不以旧预览静默覆盖。
+    if read_env_file(&root.join(&backup_name))?.as_deref() != Some(&backup) {
+        return Err(AppError::new("ENV_BACKUP_CHANGED", "备份在还原前已变化，未还原文件"));
+    }
+    replace_env_file(&path, content.as_deref(), &backup)?;
+    Ok(view)
 }
 
 /// 保留内部补全入口，按读取版本保存，文件改变时明确报错。
@@ -1020,6 +1119,144 @@ mod tests {
     }
 
     #[test]
+    fn named_editor_isolates_files_revisions_and_backups() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().join("data"));
+        let store = crate::store::Store::open(paths.db()).unwrap();
+        let site = editor_site(temp.path(), &store);
+        let original = "# shared defaults\r\nAPP_NAME=old\r\n";
+        for name in [".env", ".env.local"] { std::fs::write(temp.path().join(name), original).unwrap(); }
+        let base = read_env(&paths, &store, &site.id).unwrap();
+        let local = read_env_named(&paths, &store, &site.id, ".env.local").unwrap();
+        assert_ne!(base.revision, local.revision);
+        let changes = [("APP_NAME".into(), "local".into())];
+        assert_eq!(save_env_named(&paths, &store, &site.id, ".env.local", &changes, &base.revision).unwrap_err().code, "ENV_CHANGED");
+        let saved = save_env_named(&paths, &store, &site.id, ".env.local", &changes, &local.revision).unwrap();
+        assert!(saved.backup_exists);
+        assert_eq!(std::fs::read_to_string(temp.path().join(".env")).unwrap(), original);
+        assert!(!temp.path().join(".env.nsb-backup").exists());
+        assert_eq!(std::fs::read_to_string(temp.path().join(".env.local.nsb-backup")).unwrap(), original);
+        let name = ".env.team-qa_2";
+        let missing = read_env_named(&paths, &store, &site.id, name).unwrap();
+        assert!(!missing.exists); assert!(!missing.variants.contains(&name.to_string()));
+        preview_db_vars_named(&paths, &store, &site.id, name, &missing.revision).unwrap();
+        save_env_named(&paths, &store, &site.id, name, &[], &missing.revision).unwrap();
+        assert!(!temp.path().join(name).exists());
+        let created = save_env_named(&paths, &store, &site.id, name, &changes, &missing.revision).unwrap();
+        assert!(created.exists); assert!(!created.backup_exists); assert!(created.variants.contains(&name.to_string()));
+        std::fs::write(temp.path().join(".env.local.php"), "<?php return []; ").unwrap();
+        std::fs::write(temp.path().join(".env.local.nsb-before-restore"), "APP_NAME=old").unwrap();
+        let view = read_env(&paths, &store, &site.id).unwrap();
+        assert!(view.has_compiled_env);
+        assert_eq!(view.variants, vec![".env", ".env.local", name]);
+        for invalid in ["../.env", ".env/other", ".env.\\other", ".env.local:secret", ".env.", ".env.local.", ".env.local.php", ".env.LOCAL.PHP", ".env.local.NSB-BACKUP", ".env.NSB-BEFORE-RESTORE"] {
+            assert_eq!(read_env_named(&paths, &store, &site.id, invalid).unwrap_err().code, "BAD_ENV_FILE", "{invalid}");
+        }
+        assert!(!valid_env_name(&format!(".env.{}", "a".repeat(124))));
+    }
+
+    #[test]
+    fn selected_symfony_file_keeps_its_own_database_password() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("bin")).unwrap();
+        std::fs::create_dir_all(temp.path().join("config")).unwrap();
+        std::fs::write(temp.path().join("bin/console"), "").unwrap();
+        std::fs::write(temp.path().join("config/bundles.php"), "<?php return []; ").unwrap();
+        let paths = Paths::new(temp.path().join("data"));
+        let store = crate::store::Store::open(paths.db()).unwrap();
+        let mut site = editor_site(temp.path(), &store);
+        site.db.as_mut().unwrap().password.clear(); store.save_site(&site).unwrap();
+        std::fs::write(temp.path().join(".env"), "DATABASE_URL=mysql://old:base-secret@host/base\n").unwrap();
+        std::fs::write(temp.path().join(".env.local"), "DATABASE_URL=mysql://old:local-secret@host/local\n").unwrap();
+        let view = read_env_named(&paths, &store, &site.id, ".env.local").unwrap();
+        let values = preview_db_vars_named(&paths, &store, &site.id, ".env.local", &view.revision).unwrap();
+        assert_eq!(values.len(), 1); assert_eq!(values[0].0, "DATABASE_URL");
+        let url = reqwest::Url::parse(&values[0].1).unwrap();
+        assert_eq!(url.password(), Some("local-secret")); assert_eq!(url.username(), "app_user");
+        assert!(!temp.path().join(".env.local.nsb-backup").exists());
+        let missing = read_env_named(&paths, &store, &site.id, ".env.test").unwrap();
+        assert_eq!(preview_db_vars_named(&paths, &store, &site.id, ".env.test", &missing.revision).unwrap_err().code, "NO_DB_PASSWORD");
+    }
+
+    #[test]
+    fn restore_preserves_whole_backup_and_current_recovery_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().join("data"));
+        let store = crate::store::Store::open(paths.db()).unwrap();
+        let site = editor_site(temp.path(), &store);
+        let name = ".env.local";
+        let path = temp.path().join(name);
+        let backup = temp.path().join(format!("{name}.nsb-backup"));
+        let recovery = temp.path().join(format!("{name}.nsb-before-restore"));
+        let original = "# private config\r\nDB_PASSWORD=previous-secret\r\nDUP=1\r\nDUP=2\r\n";
+        std::fs::write(&path, original).unwrap();
+        let view = read_env_named(&paths, &store, &site.id, name).unwrap();
+        let view = save_env_named(&paths, &store, &site.id, name, &[("DB_PASSWORD".into(), "current-secret".into()), ("DUP".into(), "2".into())], &view.revision).unwrap();
+        let current = std::fs::read_to_string(&path).unwrap();
+        let preview = preview_env_restore(&paths, &store, &site.id, name, &view.revision).unwrap();
+        assert_eq!(preview.changed_keys, vec!["DB_PASSWORD", "DUP"]);
+        assert!(preview.content_changed); assert!(preview.current_exists);
+        let json = serde_json::to_string(&preview).unwrap();
+        assert!(!json.contains("previous-secret")); assert!(!json.contains("current-secret"));
+        assert!(!recovery.exists()); assert_eq!(std::fs::read_to_string(&path).unwrap(), current);
+        let restored = restore_env(&paths, &store, &site.id, name, &view.revision, &preview.revision).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), original);
+        assert_eq!(std::fs::read_to_string(&recovery).unwrap(), current);
+        let same = preview_env_restore(&paths, &store, &site.id, name, &restored.revision).unwrap();
+        assert!(!same.content_changed); assert!(same.changed_keys.is_empty());
+        restore_env(&paths, &store, &site.id, name, &restored.revision, &same.revision).unwrap();
+        assert_eq!(std::fs::read_to_string(&recovery).unwrap(), current);
+        std::fs::write(&path, original.replace("private config", "changed comment")).unwrap();
+        let view = read_env_named(&paths, &store, &site.id, name).unwrap();
+        let preview = preview_env_restore(&paths, &store, &site.id, name, &view.revision).unwrap();
+        assert!(preview.content_changed); assert!(preview.changed_keys.is_empty());
+        std::fs::remove_file(&path).unwrap();
+        let missing = read_env_named(&paths, &store, &site.id, name).unwrap();
+        let preview = preview_env_restore(&paths, &store, &site.id, name, &missing.revision).unwrap();
+        assert!(!preview.current_exists);
+        let restored = restore_env(&paths, &store, &site.id, name, &missing.revision, &preview.revision).unwrap();
+        assert!(restored.exists); assert!(restored.variants.contains(&name.into()));
+        assert_eq!(std::fs::read_to_string(&recovery).unwrap(), current);
+    }
+
+    #[test]
+    fn restore_rejects_stale_previews_and_unwritable_targets() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().join("data"));
+        let store = crate::store::Store::open(paths.db()).unwrap();
+        let site = editor_site(temp.path(), &store);
+        let path = temp.path().join(".env");
+        let backup = temp.path().join(".env.nsb-backup");
+        let recovery = temp.path().join(".env.nsb-before-restore");
+        std::fs::write(&path, "NAME=current\n").unwrap();
+        std::fs::write(&backup, "NAME=previous\n").unwrap();
+        let view = read_env(&paths, &store, &site.id).unwrap();
+        let preview = preview_env_restore(&paths, &store, &site.id, ".env", &view.revision).unwrap();
+        std::fs::write(&backup, "NAME=external\n").unwrap();
+        assert_eq!(restore_env(&paths, &store, &site.id, ".env", &view.revision, &preview.revision).unwrap_err().code, "ENV_BACKUP_CHANGED");
+        assert!(!recovery.exists());
+        std::fs::write(&backup, "NAME=previous\n").unwrap();
+        std::fs::write(&path, "NAME=external\n").unwrap();
+        assert_eq!(restore_env(&paths, &store, &site.id, ".env", &view.revision, &preview.revision).unwrap_err().code, "ENV_CHANGED");
+        std::fs::write(&path, "NAME=current\n").unwrap();
+        std::fs::create_dir(&recovery).unwrap();
+        assert_eq!(restore_env(&paths, &store, &site.id, ".env", &view.revision, &preview.revision).unwrap_err().code, "ENV_INVALID_FILE");
+        std::fs::remove_dir(&recovery).unwrap();
+        let permissions = std::fs::metadata(&path).unwrap().permissions();
+        let mut readonly = permissions.clone(); readonly.set_readonly(true); std::fs::set_permissions(&path, readonly).unwrap();
+        let result = restore_env(&paths, &store, &site.id, ".env", &view.revision, &preview.revision);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        assert_eq!(result.unwrap_err().code, "ENV_READ_ONLY");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "NAME=current\n");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "NAME=previous\n");
+        std::fs::remove_file(&backup).unwrap(); std::fs::create_dir(&backup).unwrap();
+        assert_eq!(preview_env_restore(&paths, &store, &site.id, ".env", &view.revision).unwrap_err().code, "ENV_INVALID_FILE");
+        assert_eq!(restore_env(&paths, &store, &site.id, ".env", &view.revision, &preview.revision).unwrap_err().code, "ENV_INVALID_FILE");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "NAME=current\n");
+    }
+
+    #[test]
     #[ignore = "requires NSB_ENV_PHP and NSB_ENV_LARAVEL with installed phpdotenv"]
     fn native_env_editor_output_is_readable_by_phpdotenv() {
         let php = std::env::var_os("NSB_ENV_PHP").expect("NSB_ENV_PHP");
@@ -1041,6 +1278,21 @@ mod tests {
         let values: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(values["NAME"], "My app"); assert_eq!(values["DB_PASSWORD"], password);
         assert_eq!(values["MULTI"], "one\ntwo"); assert_eq!(values["EMPTY"], ""); assert_eq!(values["UNCHANGED"], "kept");
+        let selected_path = temp.path().join(".env.local");
+        std::fs::copy(&path, &selected_path).unwrap();
+        let selected = read_env_named(&paths, &store, &site.id, ".env.local").unwrap();
+        let saved = save_env_named(&paths, &store, &site.id, ".env.local", &[("NAME".into(), "Local app".into())], &selected.revision).unwrap();
+        let preview = preview_env_restore(&paths, &store, &site.id, ".env.local", &saved.revision).unwrap();
+        restore_env(&paths, &store, &site.id, ".env.local", &saved.revision, &preview.revision).unwrap();
+        for (file, expected_name) in [(&selected_path, "My app"), (&temp.path().join(".env.local.nsb-before-restore"), "Local app")] {
+            let output = std::process::Command::new(&php).arg("-n").arg("-r")
+                .arg(r#"require $argv[1]; echo json_encode(Dotenv\Dotenv::parse(file_get_contents($argv[2])), JSON_THROW_ON_ERROR);"#)
+                .arg(project.join("vendor/autoload.php")).arg(file).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let values: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(values["NAME"], expected_name); assert_eq!(values["DB_PASSWORD"], password);
+            assert_eq!(values["MULTI"], "one\ntwo");
+        }
         std::fs::write(temp.path().join("think"), "").unwrap();
         std::fs::write(&path, "[DATABASE]\nHOST=db-host ; keep\n[REDIS]\nHOST=redis#host\n").unwrap();
         let view = read_env(&paths, &store, &site.id).unwrap();

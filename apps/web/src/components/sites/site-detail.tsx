@@ -75,7 +75,7 @@ export function SiteDetailSheet({
   const phpPanelRef = React.useRef<HTMLDivElement>(null);
   const phpFocusObserver = React.useRef<MutationObserver | null>(null);
   const envEditorRef = React.useRef<EnvEditorHandle>(null);
-  const [envState, setEnvState] = React.useState<EnvEditorState>({ dirty: false, busy: false, canSave: false });
+  const [envState, setEnvState] = React.useState<EnvEditorState>({ dirty: false, busy: false, canSave: false, fileName: ".env" });
 
   const [draft, setDraft] = React.useState<Site | null>(site);
   const [baseline, setBaseline] = React.useState<Site | null>(site);
@@ -90,7 +90,7 @@ export function SiteDetailSheet({
     setDeleteError(null);
     setDiscardOpen(false);
     setTab("general");
-    setEnvState({ dirty: false, busy: false, canSave: false });
+    setEnvState({ dirty: false, busy: false, canSave: false, fileName: ".env" });
     return () => phpFocusObserver.current?.disconnect();
   }, [site?.id]);
   React.useEffect(() => {
@@ -452,9 +452,9 @@ export function SiteDetailSheet({
           </div>}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <span className="text-xs text-muted">{(tab === "environment" ? envState.dirty : siteDirty) ? t("detail.unsaved") : t(tab === "environment" ? "env.clean" : "detail.saved")}</span>
-            <div className="flex gap-2">
+            <div className="flex min-w-0 max-w-full gap-2">
               <Button variant="ghost" onClick={requestClose} disabled={busy}>{t("common.cancel")}</Button>
-              {tab === "environment" ? <Button onClick={() => void envEditorRef.current?.save()} disabled={siteBusy || !envState.canSave}>{envState.busy ? t("detail.saveBusy") : t("env.saveFile")}</Button>
+              {tab === "environment" ? <Button className="min-w-0" title={t("env.saveNamed").replace("{file}", envState.fileName)} onClick={() => void envEditorRef.current?.save()} disabled={siteBusy || !envState.canSave}><span className="truncate">{envState.busy ? t("detail.saveBusy") : t("env.saveNamed").replace("{file}", envState.fileName)}</span></Button>
                 : <Button onClick={save} disabled={busy || !siteDirty || (directoryChanged && envState.dirty) || proxyInvalid || phpInvalid || (draft.https && !!certificateSelection.problem)}>{saving ? t("detail.saveBusy") : t("common.save")}</Button>}
             </div>
           </div>

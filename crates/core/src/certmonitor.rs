@@ -162,6 +162,7 @@ fn state_of(expires_at: Option<i64>) -> &'static str {
 
 /// 刷新一条监控（同步阻塞；调度线程调用）
 pub fn check(state: &CoreState, id: &str) -> Result<CertMonitor> {
+    let _work = crate::BackgroundWork::begin(format!("证书监控（{id}）"))?;
     let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
     let mut m = state
         .store
@@ -232,6 +233,7 @@ fn fmt_days(expires_at: Option<i64>) -> i64 {
 
 /// 全量刷新（调度器每小时顺带执行）
 pub fn tick_all(state: &CoreState) {
+    let Ok(_work) = crate::BackgroundWork::begin("证书监控调度") else { return; };
     let Ok(list) = state.store.list_cert_monitors() else {
         return;
     };

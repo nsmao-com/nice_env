@@ -46,7 +46,19 @@ pub struct ImportReport {
 }
 
 pub fn export_to(store: &Store, path: &std::path::Path) -> Result<usize> {
-    let bundle = ExportBundle {
+    let _work = crate::BackgroundWork::begin("配置导出")?;
+    let base = store.path.parent().ok_or_else(|| AppError::new("BACKUP_PATH", "配置数据库目录无效"))?;
+    let _activity = crate::paths::DataDirActivity::shared(base)?;
+    let (json, total) = encode_export(store)?;
+    // 相对文件名也有明确父目录，避免路径工具把空 parent 当成目录。
+    let path = if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir()?.join(path) };
+    crate::paths::write_atomic(&path, &json).map_err(|e| AppError::io("保存完整备份文件", e))?;
+    Ok(total)
+}
+
+/// 调用方持有后台任务保护，自动备份可复用编码，避免关闭期间嵌套注册。
+pub(crate) fn encode_export(store: &Store) -> Result<(Vec<u8>, usize)> {
+    let bundle = store.read_snapshot(|store| Ok(ExportBundle {
         format: "niceservbay/backup-v1".into(),
         app_version: env!("CARGO_PKG_VERSION").into(),
         exported_at: crate::services::now_ms(),
@@ -70,17 +82,17 @@ pub fn export_to(store: &Store, path: &std::path::Path) -> Result<usize> {
             .collect(),
         cert_automations: store.list_cert_automations()?,
         cert_monitors: store.list_cert_monitors()?,
-    };
+    }))?;
     let total = bundle.sites.len()
         + bundle.packages.len()
         + bundle.settings.len()
+        + bundle.proxy_profiles.len()
         + bundle.stacks.len()
         + bundle.cert_automations.len()
         + bundle.cert_monitors.len();
-    let json = serde_json::to_string_pretty(&bundle)
+    let json = serde_json::to_vec_pretty(&bundle)
         .map_err(|e| AppError::internal("序列化备份", e.to_string()))?;
-    std::fs::write(path, json).map_err(|e| AppError::io("写入备份文件", e))?;
-    Ok(total)
+    Ok((json, total))
 }
 
 pub fn import_from(
@@ -217,6 +229,51 @@ pub fn import_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_snapshot_stays_consistent_when_another_connection_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("store.sqlite")).unwrap();
+        store.set_setting("fixture", "before").unwrap();
+        store.save_proxy_profile("fixture", "before", "https://example.invalid/fixture", false).unwrap();
+        store.read_snapshot(|snapshot| {
+            assert_eq!(snapshot.get_setting_checked("fixture")?.as_deref(), Some("before"));
+            // 在第一张表读取后，从原连接提交更改；快照中的第二张表仍来自此前版本。
+            store.set_setting("fixture", "after")?;
+            store.save_proxy_profile("fixture", "after", "https://example.invalid/fixture", false)?;
+            assert_eq!(snapshot.list_proxy_profiles()?[0].1, "before");
+            assert!(snapshot.set_setting("fixture", "must-not-write").is_err());
+            Ok(())
+        }).unwrap();
+        let file = temp.path().join("backup.json");
+        let count = export_to(&store, &file).unwrap();
+        assert_eq!(count, 2, "订阅也计入导出数量");
+        let bundle: ExportBundle = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+        assert!(bundle.settings.contains(&("fixture".into(), "after".into())));
+        assert_eq!(bundle.proxy_profiles[0].0, "after");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_atomic_export_preserves_previous_backup_and_removes_pending_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("store.sqlite")).unwrap();
+        let dir = temp.path().join("exports"); std::fs::create_dir(&dir).unwrap();
+        let file = dir.join("backup.json");
+        store.set_setting("fixture", "before").unwrap();
+        export_to(&store, &file).unwrap();
+        let previous = std::fs::read(&file).unwrap();
+        // 允许写入但禁止替换；原来的 fs::write 会覆盖，原子发布应失败并保留旧副本。
+        let held = std::fs::OpenOptions::new().read(true).share_mode(3).open(&file).unwrap();
+        store.set_setting("fixture", "after").unwrap();
+        assert!(export_to(&store, &file).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), previous);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        drop(held);
+        export_to(&store, &file).unwrap();
+        assert_ne!(std::fs::read(&file).unwrap(), previous);
+    }
 
     #[test]
     fn redis_credentials_and_dns_recovery_records_stay_local() {

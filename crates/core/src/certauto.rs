@@ -348,12 +348,17 @@ fn run_inner(
 /// 执行一次（手动「立即签发」与调度器共用）。同步阻塞，调用方负责放线程里。
 /// 全程留痕：日志行进 runs 历史（certd 的执行日志），成功/失败发 webhook 通知。
 pub fn run_once(state: &CoreState, id: &str) -> Result<CertAutomation> {
+    let work = crate::BackgroundWork::begin(format!("证书签发（{id}）"))?;
+    run_once_registered(state, id, work)
+}
+
+fn run_once_registered(state: &CoreState, id: &str, _work: crate::BackgroundWork) -> Result<CertAutomation> {
     let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
     let mut a = state
         .store
         .get_cert_automation(id)?
         .ok_or_else(|| AppError::new("NOT_FOUND", "自动化不存在"))?;
-    if a.state == "issuing" {
+    if a.state == "issuing" || a.state == "manual_wait" {
         return Err(AppError::new(
             "CERT_AUTO_BUSY",
             "该证书自动化正在签发，请等待当前任务结束",
@@ -524,6 +529,7 @@ fn fmt_date(exp: Option<i64>) -> String {
 }
 /// 调度 tick：执行所有「到点」的自动化，返回处理过的 id
 pub fn tick(state: &Arc<CoreState>) -> Vec<String> {
+    let Ok(_work) = crate::BackgroundWork::begin("证书自动化调度") else { return Vec::new(); };
     let Ok(_activity) = crate::paths::DataDirActivity::shared(&state.paths.base) else { return Vec::new(); };
     let mut processed = Vec::new();
     let Ok(list) = state.store.list_cert_automations() else {
@@ -545,10 +551,11 @@ pub fn tick(state: &Arc<CoreState>) -> Vec<String> {
             // 每个任务独立线程：一个任务卡住（网络慢 / 手动等待）不拖累其它
             let st = state.clone();
             let id = a.id.clone();
-            std::thread::spawn(move || {
-                let _ = run_once(&st, &id);
-            });
-            processed.push(a.id);
+            // 先注册再派生线程，退出准备不会漏掉已接受、尚未开始的签发。
+            let Ok(work) = crate::BackgroundWork::begin(format!("证书签发（{id}）")) else { break; };
+            if std::thread::Builder::new().name("certificate-issue".into()).spawn(move || {
+                let _ = run_once_registered(&st, &id, work);
+            }).is_ok() { processed.push(a.id); }
         }
     }
     processed

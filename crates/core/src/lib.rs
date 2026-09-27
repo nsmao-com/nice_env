@@ -140,6 +140,64 @@ pub type EventSink = Arc<dyn Fn(Event) + Send + Sync>;
 
 static AUXILIARY_SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+#[derive(Default)]
+struct BackgroundState {
+    paused: bool,
+    next_id: u64,
+    tasks: std::collections::BTreeMap<u64, String>,
+}
+
+#[derive(Default)]
+struct BackgroundTasks {
+    state: parking_lot::Mutex<BackgroundState>,
+    changed: parking_lot::Condvar,
+}
+
+static BACKGROUND_TASKS: once_cell::sync::Lazy<Arc<BackgroundTasks>> =
+    once_cell::sync::Lazy::new(|| Arc::new(BackgroundTasks::default()));
+
+/// 注册与暂停共用一把锁；持有到文件/数据库写入、部署和通知全部结束。
+pub(crate) struct BackgroundWork { registry: Arc<BackgroundTasks>, id: u64 }
+impl BackgroundWork {
+    pub(crate) fn begin(label: impl Into<String>) -> Result<Self> {
+        BACKGROUND_TASKS.begin(label.into())
+    }
+}
+impl Drop for BackgroundWork {
+    fn drop(&mut self) {
+        self.registry.state.lock().tasks.remove(&self.id);
+        self.registry.changed.notify_all();
+    }
+}
+impl BackgroundTasks {
+    fn begin(self: &Arc<Self>, label: String) -> Result<BackgroundWork> {
+        let mut state = self.state.lock();
+        if state.paused {
+            return Err(AppError::new("APP_BUSY", "应用正在退出、重启或迁移，暂时无法开始证书或备份任务"));
+        }
+        state.next_id += 1;
+        let id = state.next_id;
+        state.tasks.insert(id, label);
+        Ok(BackgroundWork { registry: self.clone(), id })
+    }
+    fn wait_until_idle(&self, timeout: std::time::Duration) -> Result<()> {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut state = self.state.lock();
+        while !state.tasks.is_empty() {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                let mut labels: Vec<_> = state.tasks.values().cloned().collect();
+                labels.sort(); labels.dedup();
+                return Err(AppError::new("AUXILIARY_STOP_FAILED", format!(
+                    "仍有后台任务未完成，操作已中止：{}", labels.join("、")))
+                    .with_hint("应用保持打开，未中断这些任务。请完成证书验证或等待备份、监控结束后重试"));
+            }
+            self.changed.wait_for(&mut state, remaining);
+        }
+        Ok(())
+    }
+}
+
 /// 退出/更新/迁移的可恢复准备阶段。后续失败或取消时恢复入口，不自动重跑已取消任务。
 pub struct AuxiliaryShutdown { committed: bool }
 fn ensure_application_accepts_work() -> Result<()> {
@@ -150,10 +208,16 @@ fn ensure_application_accepts_work() -> Result<()> {
 }
 impl AuxiliaryShutdown {
     pub fn prepare() -> Result<Self> {
+        Self::prepare_with_timeout(std::time::Duration::from_secs(25))
+    }
+    fn prepare_with_timeout(timeout: std::time::Duration) -> Result<Self> {
         use std::sync::atomic::Ordering;
         AUXILIARY_SHUTDOWN.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| AppError::new("APP_BUSY", "应用正在收尾后台任务，请稍候"))?;
         let guard = Self { committed: false };
+        BACKGROUND_TASKS.state.lock().paused = true;
+        // 先等证书部署、备份写入等自然收尾，再停止它们可能依赖的服务和辅助任务。
+        BACKGROUND_TASKS.wait_until_idle(timeout)?;
         let mut errors = Vec::new();
         for (label, result) in [
             ("计划任务", cron::shutdown_checked(std::time::Duration::from_secs(12))),
@@ -176,6 +240,7 @@ impl Drop for AuxiliaryShutdown {
             cron::resume_after_shutdown();
             tunnel::resume_after_shutdown();
             toolbox::ollama_resume_after_shutdown();
+            BACKGROUND_TASKS.state.lock().paused = false;
             AUXILIARY_SHUTDOWN.store(false, std::sync::atomic::Ordering::Release);
         }
     }
@@ -1416,6 +1481,106 @@ impl CoreState {
 
 #[cfg(test)]
 mod dep_tests {
+    #[test]
+    fn background_shutdown_waits_for_real_monitor_and_restores_after_timeout() {
+        let output = platform::command(std::env::current_exe().unwrap())
+            .args(["--exact", "dep_tests::background_shutdown_probe", "--nocapture"])
+            .env("NSB_BACKGROUND_SHUTDOWN_PROBE", "1").output().unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+
+    #[test]
+    fn background_shutdown_probe() {
+        if std::env::var_os("NSB_BACKGROUND_SHUTDOWN_PROBE").is_none() { return; }
+        use super::*;
+        use std::time::{Duration, Instant};
+        let temp = tempfile::tempdir().unwrap();
+        let state = CoreState::init(Some(temp.path().to_path_buf()), Arc::new(|_| {})).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (accepted, connected) = std::sync::mpsc::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline); std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(e) => panic!("fixture listener: {e}"),
+                }
+            };
+            accepted.send(()).unwrap();
+            let _ = wait.recv_timeout(Duration::from_secs(5));
+            drop(socket);
+        });
+        state.store.save_cert_monitor(&model::CertMonitor {
+            id: "fixture".into(), host: "127.0.0.1".into(), port, name: "fixture".into(),
+            state: "idle".into(), issuer: String::new(), expires_at: None, last_checked: None,
+            last_error: String::new(), created_at: 1, updated_at: 1,
+        }).unwrap();
+        let worker_state = state.clone();
+        let worker = std::thread::spawn(move || certmonitor::check(&worker_state, "fixture"));
+        connected.recv_timeout(Duration::from_secs(5)).unwrap();
+        let error = AuxiliaryShutdown::prepare_with_timeout(Duration::from_millis(40)).err().unwrap();
+        assert_eq!(error.code, "AUXILIARY_STOP_FAILED");
+        assert!(error.message.contains("证书监控（fixture）"));
+        assert!(state.store.get_cert_monitor("fixture").unwrap().unwrap().last_checked.is_none());
+        drop(BackgroundWork::begin("失败后恢复入口").unwrap());
+        assert!(!AUXILIARY_SHUTDOWN.load(std::sync::atomic::Ordering::Acquire));
+
+        let shutdown = std::thread::spawn(|| AuxiliaryShutdown::prepare_with_timeout(Duration::from_secs(5)));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !BACKGROUND_TASKS.state.lock().paused {
+            assert!(Instant::now() < deadline); std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(!shutdown.is_finished());
+        assert_eq!(certauto::run_once(&state, "missing").unwrap_err().code, "APP_BUSY");
+        assert_eq!(certmonitor::check(&state, "fixture").unwrap_err().code, "APP_BUSY");
+        assert_eq!(backup_job::run_backup_now(&state.store, &state.paths).unwrap_err().code, "APP_BUSY");
+        let file = temp.path().join("blocked.json");
+        assert_eq!(transfer::export_to(&state.store, &file).unwrap_err().code, "APP_BUSY");
+        assert!(!file.exists());
+        assert!(certauto::tick(&state).is_empty());
+        certmonitor::tick_all(&state);
+        release.send(()).unwrap(); server.join().unwrap();
+        let guard = shutdown.join().unwrap().unwrap();
+        assert_eq!(worker.join().unwrap().unwrap().state, "error");
+        assert!(state.store.get_cert_monitor("fixture").unwrap().unwrap().last_checked.is_some());
+        assert!(BackgroundWork::begin("暂停中").is_err());
+        drop(guard);
+        transfer::export_to(&state.store, &file).unwrap();
+        backup_job::run_backup_now(&state.store, &state.paths).unwrap();
+        let mut guard = AuxiliaryShutdown::prepare().unwrap();
+        guard.commit(); drop(guard);
+        assert!(BackgroundWork::begin("提交退出后").is_err());
+    }
+
+    #[test]
+    fn background_registration_and_pause_cannot_miss_each_other() {
+        use super::*;
+        // 独立 registry 不影响并行执行的其它回归。
+        for _ in 0..64 {
+            let registry = Arc::new(BackgroundTasks::default());
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let other = registry.clone(); let sync = barrier.clone();
+            let thread = std::thread::spawn(move || { sync.wait(); other.begin("正在派生的任务".into()) });
+            barrier.wait();
+            registry.state.lock().paused = true;
+            let work = thread.join().unwrap();
+            match work {
+                Ok(work) => {
+                    assert!(registry.wait_until_idle(std::time::Duration::ZERO).is_err());
+                    drop(work);
+                }
+                Err(error) => assert_eq!(error.code, "APP_BUSY"),
+            }
+            registry.wait_until_idle(std::time::Duration::ZERO).unwrap();
+        }
+    }
+
     /// 从磁盘直接读指定清单文件。
     ///
     /// 不能用 `Installer::bundled()`：它按编译目标 OS 选清单

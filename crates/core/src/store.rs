@@ -90,6 +90,15 @@ impl Store {
         })
     }
 
+    /// 独立只读事务使跨表导出来自同一快照；不执行初始化 SQL，也不重入原连接锁。
+    pub(crate) fn read_snapshot<T>(&self, read: impl FnOnce(&Store) -> Result<T>) -> Result<T> {
+        let conn = Connection::open_with_flags(&self.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.execute_batch("BEGIN DEFERRED;")?;
+        let snapshot = Self { path: self.path.clone(), conn: parking_lot::Mutex::new(conn) };
+        // 连接 Drop 会结束只读事务，包括闭包失败的情况。
+        read(&snapshot)
+    }
+
     /* ---------- settings ---------- */
 
     pub fn get_setting(&self, key: &str) -> Option<String> {

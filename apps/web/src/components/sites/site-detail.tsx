@@ -56,12 +56,14 @@ export function SiteDetailSheet({
   const invalidate = useInvalidate();
   const { data: packages } = usePackages();
   const [saving, setSaving] = React.useState(false);
+  const savingRef = React.useRef(false);
   const [deleting, setDeleting] = React.useState(false);
   const deletingRef = React.useRef(false);
   const [deleteError, setDeleteError] = React.useState<AppErrorShape | null>(null);
   const [reloading, setReloading] = React.useState(false);
   const reloadingRef = React.useRef(false);
-  const [formError, setFormError] = React.useState("");
+  const [formError, setFormError] = React.useState<AppErrorShape | null>(null);
+  const saveErrorRef = React.useRef<HTMLDivElement>(null);
   const [discardOpen, setDiscardOpen] = React.useState(false);
   const [deleteOpen, setDeleteOpen] = React.useState(false);
   const [delHosts, setDelHosts] = React.useState(true);
@@ -75,11 +77,14 @@ export function SiteDetailSheet({
     setDraft(site);
     setBaseline(site);
     setDomainsInput(site?.domains.join(", ") ?? "");
-    setFormError("");
+    setFormError(null);
     setDeleteOpen(false);
     setDeleteError(null);
     setDiscardOpen(false);
   }, [site?.id]);
+  React.useEffect(() => {
+    if (formError) saveErrorRef.current?.focus();
+  }, [formError]);
 
   const certificateSelection = useSiteCertificateSelection(draft?.runtime ?? {}, domainsInput.split(/[,，\s]+/).filter(Boolean), !!site && !!draft && (draft.https || !!draft.runtime.importedCertId || !!draft.runtime.acmeCertId));
 
@@ -99,37 +104,39 @@ export function SiteDetailSheet({
   );
   const busy = saving || deleting || reloading;
   const requestClose = () => {
-    if (busy || deletingRef.current) return;
+    if (busy || savingRef.current || deletingRef.current || reloadingRef.current) return;
     if (dirty) setDiscardOpen(true);
     else onClose();
   };
   const save = async () => {
-    if (busy || (draft.https && certificateSelection.problem)) return;
+    if (busy || savingRef.current || deletingRef.current || reloadingRef.current || (draft.https && certificateSelection.problem)) return;
     const domains = [...new Set(domainsInput.split(/[,，\s]+/).filter(Boolean).map((d) => d.toLowerCase()))];
     if (!draft.name.trim() || !draft.rootDir.trim() || !domains.length) {
-      setFormError(t("detail.requiredFields"));
+      setFormError({ code: "REQUIRED_FIELDS", message: t("detail.requiredFields") });
       return;
     }
-    setFormError("");
+    setFormError(null);
+    savingRef.current = true;
     setSaving(true);
     try {
       const next = await api.updateSite({ ...draft, name: draft.name.trim(), rootDir: draft.rootDir.trim(), domains });
       toast.success(t("detail.updated"));
-      invalidate("sites", "hosts", "certs", "services");
       setDraft(next);
       setBaseline(next);
       setDomainsInput(next.domains.join(", "));
     } catch (e) {
       const error = normalizeError(e);
-      setFormError([error.message, error.hint].filter(Boolean).join(" · "));
-      toastError(e, t("detail.updateFailed"));
+      setFormError(error);
     } finally {
+      // 恢复不完整时也刷新真实状态；站点 id 不变，已有草稿不会被轮询覆盖。
+      invalidate("sites", "hosts", "certs", "services");
+      savingRef.current = false;
       setSaving(false);
     }
   };
 
   const doDelete = async () => {
-    if (busy || deletingRef.current) return;
+    if (busy || savingRef.current || deletingRef.current || reloadingRef.current) return;
     deletingRef.current = true;
     setDeleting(true);
     setDeleteError(null);
@@ -175,7 +182,7 @@ export function SiteDetailSheet({
             <Button variant="secondary" size="sm" onClick={() => api.openInFolder(site.rootDir).catch(toastError)}>
               <FolderOpen className="h-3.5 w-3.5" /> {t("detail.dirBtn")}
             </Button>
-            <Button variant="secondary" size="sm" onClick={() => router.push("/logs?service=" + encodeURIComponent(site.runtime.webServer === "apache" ? "apache" : "site:" + site.id))}>
+            <Button variant="secondary" size="sm" disabled={busy} onClick={() => router.push("/logs?service=" + encodeURIComponent(site.runtime.webServer === "apache" ? "apache" : "site:" + site.id))}>
               <ScrollText className="h-3.5 w-3.5" /> {t("detail.logs")}
             </Button>
             <Button
@@ -183,7 +190,7 @@ export function SiteDetailSheet({
               size="sm"
               disabled={busy || dirty}
               onClick={async () => {
-                if (busy || dirty || reloadingRef.current) return;
+                if (busy || dirty || savingRef.current || deletingRef.current || reloadingRef.current) return;
                 reloadingRef.current = true;
                 setReloading(true);
                 try {
@@ -273,7 +280,7 @@ export function SiteDetailSheet({
                 {(phpVersions.length ? phpVersions : [draft.runtime.phpVersion ?? ""]).filter(Boolean).map((v) => (
                   <button
                     key={v}
-                    disabled={saving}
+                    disabled={busy}
                     onClick={() => setDraft({ ...draft, runtime: { ...draft.runtime, phpVersion: v } })}
                     className={`rounded-lg border px-3 py-1.5 font-mono text-[12px] transition-all ${
                       draft.runtime.phpVersion === v
@@ -387,7 +394,11 @@ export function SiteDetailSheet({
           </div>
         </div>
         <div className="mx-5 shrink-0 border-t border-dashed border-separator py-4 sm:mx-6">
-          {formError && <p role="alert" className="mb-3 text-sm text-error">{formError}</p>}
+          {formError && <div ref={saveErrorRef} tabIndex={-1} role="alert" className="mb-3 max-h-40 space-y-2 overflow-y-auto rounded-lg bg-error-soft p-3 text-xs text-error outline-none focus-visible:ring-2 focus-visible:ring-error [overflow-wrap:anywhere]">
+            <p>{formError.message}</p>
+            {formError.hint && <p>{formError.hint}</p>}
+            {formError.detail && <details><summary className="cursor-pointer">{t("sites.detail.deleteErrorDetail")}</summary><p className="mt-2 whitespace-pre-wrap font-mono">{formError.detail}</p></details>}
+          </div>}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <span className="text-xs text-muted">{dirty ? t("detail.unsaved") : t("detail.saved")}</span>
             <div className="flex gap-2">

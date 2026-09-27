@@ -670,6 +670,7 @@ pub fn update(
     let _change = SITE_CHANGES.lock();
     let _operation = manager.lifecycle.lock();
     let _files = crate::tls::CERT_FILES.lock();
+    let _hosts = crate::hosts::HOSTS_CHANGES.lock();
     let original = get(store, &site_patch.id)?;
     let enabled = derive_status(paths, &original) == "running";
     let was_running = runtime_status(paths, &original, manager) == "running";
@@ -703,6 +704,12 @@ pub fn update(
     crate::certs::validate_site_certificate(paths, store, &current)?;
     let local_certificate_changed = certificate_changed && current.https && current.runtime.uses_default_certificate();
     let mut snapshots = snapshot_site_configs(paths, &current)?;
+    let servers = ["nginx", "apache"].into_iter().enumerate().filter_map(|(index, server)| {
+        (snapshots[index * 2].1.is_some() || (enabled && current.runtime.web_server == server)).then_some(server)
+    }).collect();
+    let mut web = SiteWebChanges::new(manager, servers);
+    let mut record_saved = false;
+    let mut hosts_attempted = false;
     let certificate_id = format!("cert-{}", current.domains[0]);
     let previous_certificates = if local_certificate_changed {
         let stem = current.domains[0].replace('*', "_wildcard").replace(':', "_");
@@ -735,36 +742,51 @@ pub fn update(
         }
         write_site_conf_state(paths, store, &current, enabled)?;
         store.save_site(&current)?;
+        record_saved = true;
         if was_running
             && manager
                 .snapshot(&current.runtime.web_server)
                 .is_none_or(|s| s.state != ServiceState::Running)
         {
-            crate::ops::start_service(store, paths, manager, &current.runtime.web_server)?;
+            web.start(store, paths, manager, &current.runtime.web_server)?;
         }
-        crate::ops::rebuild_and_reload(store, paths, manager)?;
+        web.apply(store, paths, manager)?;
         if current.domains != original.domains {
+            hosts_attempted = true;
             crate::hosts::apply(store, paths, None)?;
         }
         Ok(())
     })();
     if let Err(error) = result {
-        restore_site_configs(&snapshots)?;
-        store.save_site(&original)?;
+        let mut failures = Vec::new();
+        if let Err(e) = restore_site_configs(&snapshots) { failures.push(format!("恢复站点配置：{e}")); }
+        if record_saved {
+            if let Err(e) = store.save_site(&original) { failures.push(format!("恢复站点记录：{e}")); }
+        }
         if local_certificate_changed {
-            if !previous_certificates.is_empty() {
-                store.replace_managed_certs(&previous_certificates)?;
+            let restored = if !previous_certificates.is_empty() {
+                store.replace_managed_certs(&previous_certificates)
             } else {
-                store.delete_cert(&certificate_id)?;
-            }
+                store.delete_cert(&certificate_id)
+            };
+            if let Err(e) = restored { failures.push(format!("恢复证书记录：{e}")); }
         }
-        if let Err(restore_error) = crate::ops::rebuild_and_reload(store, paths, manager) {
-            return Err(error.with_hint(format!(
-                "已恢复原站点配置，但服务恢复失败：{}",
-                restore_error.message
-            )));
+        let configuration_restored = failures.is_empty();
+        if hosts_attempted {
+            if let Err(e) = crate::hosts::apply(store, paths, None) { failures.push(format!("恢复 hosts：{e}")); }
         }
-        return Err(error);
+        failures.extend(web.restore(store, paths, manager, configuration_restored));
+        if !failures.is_empty() {
+            let recovery_hint = match retain_update_recovery(paths, &snapshots, &original, &previous_certificates) {
+                Ok(directory) => format!("原始配置与记录已保存在 {}，请勿删除；查看错误详情后恢复。", directory.display()),
+                Err(e) => { failures.push(format!("保留恢复副本：{e}")); e.hint.unwrap_or_else(|| "请查看错误详情并检查已有配置备份。".into()) }
+            };
+            return Err(AppError::new("SITE_UPDATE_ROLLBACK_FAILED", "保存未完成，部分站点状态未能恢复")
+                .with_hint(recovery_hint)
+                .with_detail(format!("{}：{}；{}；{}", error.code, error.message, error.detail.as_deref().unwrap_or_default(), failures.join("；"))));
+        }
+        let hint = error.hint.clone().unwrap_or_default();
+        return Err(error.with_hint(format!("保存未完成，已恢复原站点配置。{hint}")));
     }
     write_user_ini(&current);
     current.status = runtime_status(paths, &current, manager).to_string();
@@ -774,40 +796,127 @@ pub fn update(
 
 type SiteConfigSnapshot = Vec<(std::path::PathBuf, Option<Vec<u8>>)>;
 
-fn snapshot_site_configs(
-    paths: &Paths,
-    site: &Site,
-) -> Result<SiteConfigSnapshot> {
+fn retain_update_recovery(paths: &Paths, snapshots: &SiteConfigSnapshot, site: &Site, certificates: &[crate::model::CertRecord]) -> Result<std::path::PathBuf> {
+    let backup = crate::paths::checked_data_path(&paths.base, "backup")?;
+    let directory = tempfile::Builder::new().prefix("site-update-recovery-").tempdir_in(backup)?.keep();
+    let result: Result<()> = (|| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let files: Vec<_> = snapshots.iter().enumerate().map(|(i, (path, content))| serde_json::json!({
+            "target": path, "originalFile": content.as_ref().map(|_| format!("{i}.bak")),
+        })).collect();
+        std::fs::write(directory.join("recovery.json"), serde_json::to_vec_pretty(&serde_json::json!({
+            "site": site, "certificates": certificates, "files": files,
+        })).map_err(|e| AppError::internal("记录站点恢复信息", e.to_string()))?)?;
+        for (i, (_, content)) in snapshots.iter().enumerate() {
+            if let Some(content) = content { std::fs::write(directory.join(format!("{i}.bak")), content)?; }
+        }
+        Ok(())
+    })();
+    result.map_err(|e| AppError::new("SITE_RECOVERY_WRITE_FAILED", e.message)
+        .with_hint(format!("恢复副本未完整写入，请保留 {} 并查看已有配置备份。", directory.display())))?;
+    Ok(directory)
+}
+
+/// 保存和删除共用实际受影响服务的应用记录；恢复时不碰尚未尝试的服务。
+struct SiteWebChanges {
+    previous: Vec<(&'static str, Option<crate::model::ServiceStatus>)>,
+    attempted: Vec<String>,
+    applied: Vec<String>,
+}
+impl SiteWebChanges {
+    fn new(manager: &ServiceManager, servers: Vec<&'static str>) -> Self {
+        Self { previous: servers.into_iter().map(|server| (server, manager.snapshot(server))).collect(), attempted: Vec::new(), applied: Vec::new() }
+    }
+    fn start(&mut self, store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, server: &str) -> Result<()> {
+        self.attempted.push(server.into());
+        crate::ops::start_service(store, paths, manager, server)?;
+        self.applied.push(server.into());
+        Ok(())
+    }
+    fn apply(&mut self, store: &Store, paths: &Paths, manager: &Arc<ServiceManager>) -> Result<()> {
+        for (server, _) in &self.previous {
+            // 已经由本次操作启动的实例加载的就是新配置，无需再次重启。
+            if self.applied.iter().any(|s| s == server) { continue; }
+            self.attempted.push((*server).into());
+            crate::ops::rebuild_and_reload_selected(store, paths, manager, &[*server])?;
+            self.applied.push((*server).into());
+        }
+        Ok(())
+    }
+    fn restore(&self, store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, configuration_restored: bool) -> Vec<String> {
+        let mut failures = Vec::new();
+        for (server, before) in &self.previous {
+            if !self.attempted.iter().any(|s| s == server) { continue; }
+            let current = manager.snapshot(server);
+            let applied = self.applied.iter().any(|s| s == server);
+            let was_running = before.as_ref().is_some_and(|s| s.state == ServiceState::Running);
+            if !was_running {
+                // 切换服务器期间新启动的实例必须收回，不让保存失败留下新服务。
+                let changed_pids = current.as_ref().is_some_and(|s| !s.pids.is_empty() && before.as_ref().is_none_or(|old| s.pids != old.pids));
+                let active = current.as_ref().is_some_and(|s| !s.pids.is_empty() || matches!(s.state, ServiceState::Running | ServiceState::Starting));
+                if active && (applied || changed_pids) {
+                    if let Err(e) = crate::ops::stop_service(store, paths, manager, server) { failures.push(format!("停止本次启动的 {server}：{e}")); }
+                }
+                continue;
+            }
+            if !configuration_restored { continue; }
+            let unchanged = cfg!(windows) && current.as_ref().is_some_and(|s| s.state == ServiceState::Running && before.as_ref().is_some_and(|old| s.pids == old.pids));
+            if !applied && unchanged { continue; }
+            let result = if current.is_some_and(|s| s.state == ServiceState::Running) {
+                crate::ops::rebuild_and_reload_selected(store, paths, manager, &[server])
+            } else {
+                crate::ops::start_service(store, paths, manager, server)
+            };
+            if let Err(e) = result { failures.push(format!("恢复 {server}：{e}")); }
+        }
+        failures
+    }
+}
+
+fn site_config_paths(paths: &Paths, site: &Site) -> Result<Vec<std::path::PathBuf>> {
     if site.id.is_empty() || !site.id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')) {
         return Err(AppError::new("BAD_SITE_ID", "站点标识无效，无法操作配置文件"));
     }
     if !matches!(site.runtime.web_server.as_str(), "nginx" | "apache") {
         return Err(AppError::new("BAD_RUNTIME", "站点的 Web 服务类型无效"));
     }
-    let mut snapshots = Vec::new();
+    let mut files = Vec::new();
     for server in ["nginx", "apache"] {
         for suffix in ["conf", "conf.disabled"] {
-            let path = crate::paths::checked_data_path(&paths.base, &format!("etc/{server}/sites/{}.{suffix}", site.id))?;
-            let content = match std::fs::read(&path) {
-                Ok(content) => Some(content),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(error) => return Err(error.into()),
-            };
-            snapshots.push((path, content));
+            files.push(crate::paths::checked_data_path(&paths.base, &format!("etc/{server}/sites/{}.{suffix}", site.id))?);
         }
     }
-    Ok(snapshots)
+    Ok(files)
+}
+
+fn snapshot_site_configs(paths: &Paths, site: &Site) -> Result<SiteConfigSnapshot> {
+    site_config_paths(paths, site)?.into_iter().map(|path| {
+        let content = match std::fs::read(&path) {
+            Ok(content) => Some(content),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        Ok((path, content))
+    }).collect()
 }
 
 fn restore_site_configs(snapshots: &[(std::path::PathBuf, Option<Vec<u8>>)]) -> Result<()> {
+    let mut failures = Vec::new();
     for (path, content) in snapshots {
-        if let Some(content) = content {
-            std::fs::write(path, content)?;
+        let result = if let Some(content) = content {
+            std::fs::write(path, content)
         } else if path.exists() {
-            std::fs::remove_file(path)?;
+            std::fs::remove_file(path)
+        } else { Ok(()) };
+        if let Err(error) = result {
+            failures.push(format!("{}：{error}", path.display()));
         }
     }
-    Ok(())
+    if failures.is_empty() { Ok(()) } else { Err(AppError::new("SITE_CONFIG_RESTORE_FAILED", failures.join("；"))) }
 }
 
 pub fn delete(
@@ -823,14 +932,9 @@ pub fn delete(
     let _files = crate::tls::CERT_FILES.lock();
     let _hosts = crate::hosts::HOSTS_CHANGES.lock();
     let site = get(store, id)?;
-    let mut files = Vec::new();
-    for server in ["nginx", "apache"] {
-        for suffix in ["conf", "conf.disabled"] {
-            files.push(crate::paths::checked_data_path(
-                &paths.base, &format!("etc/{server}/sites/{}.{suffix}", site.id),
-            )?);
-        }
-    }
+    let mut files = site_config_paths(paths, &site)?;
+    let servers = ["nginx", "apache"].into_iter().enumerate().filter_map(|(index, server)| files[index * 2].is_file().then_some(server)).collect();
+    let mut web = SiteWebChanges::new(manager, servers);
     // 只清理此站点主域名对应的本地签发证书。导入证书、ACME 证书和其它站点
     // 使用的证书保留；别名不能成为删除另一个证书的依据。
     let certificate = if remove_certs && site.runtime.uses_default_certificate() {
@@ -858,9 +962,6 @@ pub fn delete(
         }
     }
     let previous_hosts = crate::hosts::extra_entries(store)?;
-    let running: Vec<_> = ["nginx", "apache"].into_iter().filter(|server|
-        manager.snapshot(server).is_some_and(|s| s.state == ServiceState::Running)
-    ).collect();
     // 先移动到同一数据目录的暂存区，保留文件内容和权限。全部生效后才真正删除，
     // 恢复失败时保留暂存文件，不能让 TempDir::drop 把仅存的副本清掉。
     let backup = crate::paths::checked_data_path(&paths.base, "backup")?;
@@ -869,7 +970,6 @@ pub fn delete(
     let mut record_removed = false;
     let mut cert_removed = false;
     let mut hosts_changed = false;
-    let mut web_changed = false;
     let result: Result<()> = (|| {
         for (index, source) in files.iter().enumerate() {
             match std::fs::symlink_metadata(source) {
@@ -904,8 +1004,7 @@ pub fn delete(
             crate::hosts::set_extra_entries(store, &retained)?;
             hosts_changed = true;
         }
-        web_changed = true;
-        crate::ops::rebuild_and_reload(store, paths, manager)?;
+        web.apply(store, paths, manager)?;
         Ok(())
     })();
     if let Err(error) = result {
@@ -927,6 +1026,7 @@ pub fn delete(
                 if let Err(e) = store.save_cert(cert) { failures.push(format!("恢复证书记录：{e}")); }
             }
         }
+        let configuration_restored = failures.is_empty();
         if hosts_changed {
             if remove_hosts {
                 if let Err(e) = crate::hosts::apply(store, paths, None) { failures.push(format!("恢复 hosts：{e}")); }
@@ -934,16 +1034,7 @@ pub fn delete(
                 failures.push(format!("恢复 hosts 选项：{e}"));
             }
         }
-        if web_changed && failures.is_empty() {
-            if let Err(e) = crate::ops::rebuild_and_reload(store, paths, manager) {
-                failures.push(format!("恢复 Web 配置：{e}"));
-            }
-            for server in running {
-                if let Err(e) = crate::ops::start_service(store, paths, manager, server) {
-                    failures.push(format!("恢复 {server}：{e}"));
-                }
-            }
-        }
+        failures.extend(web.restore(store, paths, manager, configuration_restored));
         if !failures.is_empty() {
             let recovery = staging.keep();
             return Err(AppError::new("SITE_DELETE_ROLLBACK_FAILED", "删除未完成，部分站点状态未能恢复")
@@ -2724,7 +2815,7 @@ mod scaffold_tests {
         let site = saved_site(&paths, &store);
         let cert = crate::tls::issue_site_cert(&paths, &store, &site.domains).unwrap();
         let original_cert = std::fs::read(&cert.cert_path).unwrap();
-        write_site_conf_state(&paths, &store, &site, false).unwrap();
+        write_site_conf(&paths, &store, &site).unwrap();
         let runtime = paths.runtime_dir("nginx", "1.0");
         let root = runtime.join("nginx-1.0");
         std::fs::create_dir_all(&root).unwrap();
@@ -2736,10 +2827,10 @@ mod scaffold_tests {
         }).unwrap();
         std::fs::create_dir(paths.nginx_conf()).unwrap();
         let error = delete(&site.id, false, true, &paths, &store, &Arc::new(ServiceManager::new())).unwrap_err();
-        assert_eq!(error.code, "SITE_DELETE_ROLLBACK_FAILED");
-        assert!(error.detail.unwrap().contains("恢复 Web 配置"));
+        assert_ne!(error.code, "SITE_DELETE_ROLLBACK_FAILED");
+        assert!(error.hint.unwrap().contains("已恢复"));
         assert_eq!(get(&store, &site.id).unwrap().domains, site.domains);
-        assert!(paths.nginx_sites_dir().join(format!("{}.conf.disabled", site.id)).is_file());
+        assert!(paths.nginx_sites_dir().join(format!("{}.conf", site.id)).is_file());
         assert_eq!(std::fs::read(&cert.cert_path).unwrap(), original_cert);
         assert!(store.list_certs().unwrap().iter().any(|c| c.id == cert.id));
         assert!(crate::hosts::extra_entries(&store).unwrap().is_empty());
@@ -2765,6 +2856,68 @@ mod scaffold_tests {
         assert_eq!(std::fs::read(cert.key_path.as_ref().unwrap()).unwrap(), key_before);
         let records = store.list_certs().unwrap(); assert_eq!(records.len(), 1);
         assert_eq!(records[0].id, cert.id); assert_eq!(records[0].kind, "acme");
+    }
+
+    #[test]
+    fn saved_and_deleted_disabled_sites_leave_broken_web_configs_untouched() {
+        let temp = Tmp::new("disabled-site-no-reload");
+        let paths = Paths::new(temp.0.clone()); paths.ensure_dirs().unwrap();
+        let store = Store::open(paths.db()).unwrap();
+        let mut site = saved_site(&paths, &store);
+        write_site_conf_state(&paths, &store, &site, false).unwrap();
+        let runtime = paths.runtime_dir("nginx", "1.0");
+        let root = runtime.join("nginx-1.0"); std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(crate::ops::exe_name("nginx")), "not executed").unwrap();
+        store.upsert_installed(&crate::model::InstalledPackage {
+            id: "nginx".into(), version: "1.0".into(), category: "web-server".into(),
+            install_path: runtime.to_string_lossy().into(), config_path: String::new(), installed_at: 1,
+        }).unwrap();
+        std::fs::create_dir(paths.nginx_conf()).unwrap();
+        let manager = Arc::new(ServiceManager::new());
+        site.name = "Edited while disabled".into();
+        assert_eq!(update(&site, &paths, &store, &manager).unwrap().status, "stopped");
+        assert!(paths.nginx_conf().is_dir());
+        delete(&site.id, false, false, &paths, &store, &manager).unwrap();
+        assert!(store.list_sites().unwrap().is_empty());
+        assert!(paths.nginx_conf().is_dir());
+    }
+
+    #[test]
+    fn update_failure_reports_partial_recovery_and_restores_all_possible_files() {
+        let temp = Tmp::new("update-partial-recovery");
+        let paths = Paths::new(temp.0.clone()); paths.ensure_dirs().unwrap();
+        let store = Store::open(paths.db()).unwrap();
+        let site = saved_site(&paths, &store); write_site_conf(&paths, &store, &site).unwrap();
+        let vhost = paths.nginx_sites_dir().join(format!("{}.conf", site.id));
+        let before = std::fs::read(&vhost).unwrap();
+        let runtime = paths.runtime_dir("nginx", "1.0");
+        let root = runtime.join("nginx-1.0"); std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(crate::ops::exe_name("nginx")), "not executed").unwrap();
+        store.upsert_installed(&crate::model::InstalledPackage {
+            id: "nginx".into(), version: "1.0".into(), category: "web-server".into(),
+            install_path: runtime.to_string_lossy().into(), config_path: String::new(), installed_at: 1,
+        }).unwrap();
+        std::fs::create_dir(paths.nginx_conf()).unwrap();
+        let db = rusqlite::Connection::open(paths.db()).unwrap();
+        db.execute_batch("CREATE TRIGGER reject_update_restore BEFORE UPDATE ON sites WHEN NEW.updated_at=1 AND OLD.updated_at<>1 BEGIN SELECT RAISE(ABORT,'restore fixture'); END;").unwrap();
+        let mut patch = site.clone(); patch.name = "Changed".into();
+        let error = update(&patch, &paths, &store, &Arc::new(ServiceManager::new())).unwrap_err();
+        assert_eq!(error.code, "SITE_UPDATE_ROLLBACK_FAILED");
+        assert!(error.hint.unwrap().contains("site-update-recovery-"));
+        assert!(error.detail.unwrap().contains("恢复站点记录"));
+        assert_eq!(std::fs::read(&vhost).unwrap(), before);
+        assert_eq!(get(&store, &site.id).unwrap().name, "Changed");
+        let recovery = std::fs::read_dir(paths.backup()).unwrap().filter_map(|entry| entry.ok()).find(|entry|
+            entry.file_name().to_string_lossy().starts_with("site-update-recovery-")).unwrap().path();
+        assert_eq!(std::fs::read(recovery.join("0.bak")).unwrap(), before);
+        let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(recovery.join("recovery.json")).unwrap()).unwrap();
+        assert_eq!(manifest["site"]["name"], site.name);
+        // 一个文件无法恢复也不能跳过后续文件；把具体路径保留在错误中。
+        let blocked = paths.base.join("blocked"); std::fs::create_dir(&blocked).unwrap();
+        let available = paths.base.join("recoverable");
+        let error = restore_site_configs(&[(blocked.clone(), Some(b"first".to_vec())), (available.clone(), Some(b"second".to_vec()))]).unwrap_err();
+        assert!(error.message.contains("blocked"));
+        assert_eq!(std::fs::read(&available).unwrap(), b"second");
     }
 
     #[test]
@@ -3228,6 +3381,51 @@ mod scaffold_tests {
         assert_eq!(body("stop.demo.test"), "native-site");
         assert_eq!(body("keep.demo.test"), "native-keep");
         assert!(paths.apache_conf().is_dir());
+
+        // 保存仅影响此站点实际使用的 Nginx，损坏的无关 Apache 配置保持原样。
+        let mut patch = get(&store, &site.id).unwrap();
+        patch.root_dir = keep.root_dir.clone();
+        let saved = update(&patch, &paths, &store, &manager).unwrap();
+        assert_eq!(body("stop.demo.test"), "native-keep");
+        assert_eq!(body("keep.demo.test"), "native-keep");
+        assert!(paths.apache_conf().is_dir());
+        // 遗留 Apache vhost 使其成为相关服务。第二个服务失败时必须恢复已应用的 Nginx。
+        let before_switch = manager.snapshot("nginx").unwrap().pids;
+        let mut switch = saved.clone(); switch.runtime.web_server = "apache".into();
+        assert!(update(&switch, &paths, &store, &manager).is_err());
+        assert_eq!(manager.snapshot("nginx").unwrap().pids, before_switch);
+        assert_eq!(get(&store, &site.id).unwrap().runtime.web_server, "nginx");
+        assert_eq!(body("stop.demo.test"), "native-keep");
+        let legacy = paths.apache_sites_dir().join(format!("{}.conf", site.id));
+        std::fs::write(&legacy, "legacy fixture").unwrap();
+        patch.root_dir = site.root_dir.clone();
+        let error = update(&patch, &paths, &store, &manager).unwrap_err();
+        assert_ne!(error.code, "SITE_UPDATE_ROLLBACK_FAILED");
+        assert_eq!(get(&store, &site.id).unwrap().root_dir, saved.root_dir);
+        assert_eq!(get(&store, &site.id).unwrap().updated_at, saved.updated_at);
+        assert_eq!(body("stop.demo.test"), "native-keep");
+        assert_eq!(std::fs::read_to_string(&legacy).unwrap(), "legacy fixture");
+        let error = delete(&site.id, false, false, &paths, &store, &manager).unwrap_err();
+        assert_ne!(error.code, "SITE_DELETE_ROLLBACK_FAILED");
+        assert_eq!(body("stop.demo.test"), "native-keep");
+        assert!(get(&store, &site.id).is_ok());
+        assert!(access_url(&paths, &store, &manager, &site.id).is_ok());
+        std::fs::remove_file(&legacy).unwrap();
+        delete(&site.id, false, false, &paths, &store, &manager).unwrap();
+        assert!(get(&store, &site.id).is_err());
+        assert_ne!(body("stop.demo.test"), "native-keep");
+        assert_eq!(body("keep.demo.test"), "native-keep");
+        assert!(std::path::Path::new(&site.root_dir).join("index.html").is_file());
+        assert!(std::path::Path::new(&keep.root_dir).join("index.html").is_file());
+
+        // 保存失败时收回本次新启动的 Web 实例；只验证真实 Nginx，不冒充 Apache 原生测试。
+        crate::ops::stop_service(&store, &paths, &manager, "nginx").unwrap();
+        let mut web = SiteWebChanges::new(&manager, vec!["nginx"]);
+        web.start(&store, &paths, &manager, "nginx").unwrap();
+        let pids = manager.snapshot("nginx").unwrap().pids;
+        assert!(web.restore(&store, &paths, &manager, true).is_empty());
+        assert_eq!(manager.snapshot("nginx").unwrap().state, ServiceState::Stopped);
+        assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));
     }
 
     #[test]

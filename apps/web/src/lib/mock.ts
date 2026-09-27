@@ -63,7 +63,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.66";
+const MOCK_APP_VERSION = "0.2.67";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -1203,8 +1203,22 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "update_site": {
       const patch = args!.site as Partial<Site> & { id: string };
       const s = sites.get(patch.id);
-      if (s) { Object.assign(s, patch, { updatedAt: now() }); s.accessUrl = mockSiteUrl(s); }
-      return s as T;
+      if (!s) throw { code: "SITE_NOT_FOUND", message: "站点不存在，请刷新列表" };
+      const next = { ...s, name: patch.name?.trim() ?? s.name, domains: patch.domains ?? s.domains,
+        rootDir: patch.rootDir?.trim() ?? s.rootDir, runtime: patch.runtime ?? s.runtime,
+        https: patch.https ?? s.https, rewrite: patch.rewrite ?? s.rewrite,
+        phpOverrides: patch.phpOverrides ?? s.phpOverrides, updatedAt: now() };
+      if (mockSiteStatus(s) === "running") {
+        if (next.runtime.kind === "php" && next.runtime.phpVersion) await runServiceAction("start_service", `php@${next.runtime.phpVersion}`);
+        await runServiceAction("start_service", next.runtime.webServer);
+      }
+      for (const domain of s.domains) {
+        if (!next.domains.includes(domain) && ![...sites.values()].some((other) => other.id !== s.id && other.domains.includes(domain))) hostsManaged.delete(domain);
+      }
+      for (const domain of next.domains.filter((d) => !d.startsWith("*."))) hostsManaged.set(domain, ["127.0.0.1"]);
+      Object.assign(s, next);
+      s.accessUrl = mockSiteStatus(s) === "running" ? mockSiteUrl(s) : undefined;
+      return { ...s, status: mockSiteStatus(s) } as T;
     }
     case "delete_site": {
       const id = args!.id as string;

@@ -19,7 +19,7 @@ import {
   Loader2,
 } from "lucide-react";
 import type { CreateSiteInput, RewritePreset, SiteKind, SiteCreateProgress } from "@nsb/schema";
-import { cn, cmpVersionDesc } from "@/lib/utils";
+import { cn, cmpVersionDesc, normalizeProxyTarget } from "@/lib/utils";
 import { useT } from "@/lib/store";
 import { isTauri, listen, normalizeError } from "@/lib/backend";
 import { usePackages, siteUrl, toastError } from "@/lib/hooks";
@@ -121,6 +121,7 @@ export function SiteWizard({
   const [phpVersion, setPhpVersion] = React.useState("");
   const [webServer, setWebServer] = React.useState<"nginx" | "apache">("nginx");
   const [proxyTarget, setProxyTarget] = React.useState("127.0.0.1:8080");
+  const normalizedProxyTarget = normalizeProxyTarget(proxyTarget);
   const [https, setHttps] = React.useState(false);
   const [certificate, setCertificate] = React.useState<SiteCertificateBinding>({});
   const certificateSelection = useSiteCertificateSelection(certificate, [domain.trim(), ...aliases.split(/[,，\s]+/).filter(Boolean)], open && https);
@@ -194,20 +195,21 @@ export function SiteWizard({
 
   const canNext = React.useMemo(() => {
     if (step >= 3 && https && certificateSelection.problem) return false;
+    if (step >= 2 && kind === "reverse-proxy" && !normalizedProxyTarget) return false;
     switch (step) {
       case 0:
         return name.trim().length > 0 && /^(\*\.)?[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain.trim());
       case 1:
         return rootDir.trim().length > 0 && (!composerTemplate || composerInstalled) && templateNodeCompatible;
       case 2:
-        return webInstalled && templatePhpCompatible && (kind !== "php" || phpVersions.includes(phpVersion)) && (kind !== "reverse-proxy" || !!proxyTarget.trim());
+        return webInstalled && templatePhpCompatible && (kind !== "php" || phpVersions.includes(phpVersion));
       case 4:
       case 5:
         return databaseValid && (!composerTemplate || composerInstalled) && templatePhpCompatible && templateNodeCompatible;
       default:
         return true;
     }
-  }, [https, certificateSelection.problem, step, name, domain, rootDir, kind, phpVersion, phpVersions, webInstalled, proxyTarget, databaseValid, composerTemplate, composerInstalled, templatePhpCompatible, templateNodeCompatible]);
+  }, [https, certificateSelection.problem, step, name, domain, rootDir, kind, phpVersion, phpVersions, webInstalled, normalizedProxyTarget, databaseValid, composerTemplate, composerInstalled, templatePhpCompatible, templateNodeCompatible]);
 
   const pickFolder = async () => {
     if (isTauri) {
@@ -235,7 +237,7 @@ export function SiteWizard({
   };
 
   const submit = async () => {
-    if (submitting.current || (https && certificateSelection.problem)) return;
+    if (submitting.current || !canNext || (kind === "reverse-proxy" && !normalizedProxyTarget) || (https && certificateSelection.problem)) return;
     submitting.current = true;
     setCreating(true);
     setCreateError("");
@@ -251,7 +253,7 @@ export function SiteWizard({
           webServer,
           kind,
           ...(kind === "php" ? { phpVersion } : {}),
-          ...(kind === "reverse-proxy" ? { proxyTarget } : {}),
+          ...(kind === "reverse-proxy" ? { proxyTarget: normalizedProxyTarget! } : {}),
           ...(https ? certificate : {}),
         },
         https,
@@ -488,6 +490,7 @@ export function SiteWizard({
                     {KINDS.map((k) => (
                       <button
                         key={k.value}
+                        aria-pressed={kind === k.value}
                         onClick={() => {
                           setKind(k.value);
                           const staticTemplate = ["static", "spa", "next-export"].includes(template);
@@ -535,41 +538,48 @@ export function SiteWizard({
                     )}
                   </div>
                 )}
-                {(kind === "php" || kind === "static") && (
-                  <div className="flex flex-col gap-1.5">
-                    <Label>{t("sites.wizard.webServer")}</Label>
-                    <div className="flex gap-2">
-                      {[
-                        { v: "nginx", label: t("wz.staticNginx"), hintKey: "wz.nginxHint" },
-                        { v: "apache", label: "Apache", hintKey: "wz.apacheHint" },
-                      ].map((w) => (
-                        <button
-                          key={w.v}
-                          onClick={() => setWebServer(w.v as "nginx" | "apache")}
-                          className={cn(
-                            "flex flex-1 flex-col items-start gap-0.5 rounded-xl border p-3 text-left transition-all",
-                            webServer === w.v
-                              ? "border-primary/60 bg-primary-soft"
-                              : "border-border hover:border-border-strong bg-card-2/40"
-                          )}
-                        >
-                          <span className="text-[12.5px] font-medium">{w.label}</span>
-                          <span className="text-[11px] text-faint">{t(w.hintKey as never)}</span>
-                        </button>
-                      ))}
-                    </div>
+                <div className="flex flex-col gap-1.5">
+                  <Label>{t("sites.wizard.webServer")}</Label>
+                  <div className="flex gap-2">
+                    {[
+                      { v: "nginx", label: "Nginx", hintKey: "wz.nginxHint" },
+                      { v: "apache", label: "Apache", hintKey: "wz.apacheHint" },
+                    ].map((w) => (
+                      <button
+                        key={w.v}
+                        aria-pressed={webServer === w.v}
+                        onClick={() => setWebServer(w.v as "nginx" | "apache")}
+                        className={cn(
+                          "flex flex-1 flex-col items-start gap-0.5 rounded-xl border p-3 text-left transition-all",
+                          webServer === w.v
+                            ? "border-primary/60 bg-primary-soft"
+                            : "border-border hover:border-border-strong bg-card-2/40"
+                        )}
+                      >
+                        <span className="text-[12.5px] font-medium">{w.label}</span>
+                        <span className="text-[11px] text-faint">{t(w.hintKey as never)}</span>
+                      </button>
+                    ))}
                   </div>
-                )}
+                </div>
                 {kind === "reverse-proxy" && (
                   <div className="flex flex-col gap-1.5">
-                    <Label>{t("sites.wizard.proxyTarget")}</Label>
+                    <Label htmlFor="site-create-proxy">{t("sites.wizard.proxyTarget")}</Label>
                     <Input
+                      id="site-create-proxy"
                       value={proxyTarget}
                       onChange={(e) => setProxyTarget(e.target.value)}
                       placeholder="127.0.0.1:8080"
                       className="font-mono text-[13px]"
+                      spellCheck={false}
+                      autoCapitalize="none"
+                      aria-invalid={!normalizedProxyTarget}
+                      aria-describedby="site-create-proxy-hint site-create-proxy-result"
                     />
-                    <p className="text-[11px] text-faint">{t("wz.proxyHint")}</p>
+                    <p id="site-create-proxy-hint" className="text-xs leading-relaxed text-muted">{t("wz.proxyHint")}</p>
+                    <p id="site-create-proxy-result" aria-live="polite" className={cn("text-xs leading-relaxed [overflow-wrap:anywhere]", normalizedProxyTarget ? "text-muted" : "text-error")}>
+                      {normalizedProxyTarget ? t("sites.proxy.effectiveTarget").replace("{target}", normalizedProxyTarget) : t("sites.proxy.invalidTarget")}
+                    </p>
                   </div>
                 )}
               </div>
@@ -667,7 +677,7 @@ export function SiteWizard({
                       kind === "php"
                         ? `${webServer === "apache" ? "Apache" : "Nginx"} + PHP ${phpVersion || t("wz.phpPending")}`
                         : kind === "reverse-proxy"
-                          ? `${webServer === "apache" ? "Apache" : "Nginx"} ${t("sites.proxyP1")} ${proxyTarget}`
+                          ? `${webServer === "apache" ? "Apache" : "Nginx"} ${t("sites.proxyP1")} ${normalizedProxyTarget ?? proxyTarget}`
                           : `${webServer === "apache" ? "Apache" : "Nginx"} · ${t("sites.static")}`
                     }
                   />
@@ -727,7 +737,7 @@ function SummaryRow({ label, value, mono }: { label: string; value: string; mono
   return (
     <div className="flex items-start justify-between gap-4">
       <span className="shrink-0 text-faint">{label}</span>
-      <span className={cn("truncate text-right text-secondary", mono && "font-mono text-[11.5px]")}>{value}</span>
+      <span className={cn("min-w-0 text-right text-secondary [overflow-wrap:anywhere]", mono && "font-mono text-[11.5px]")}>{value}</span>
     </div>
   );
 }

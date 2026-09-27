@@ -362,12 +362,12 @@ fn normalize_domains(domains: &[String]) -> Vec<String> {
     result
 }
 
-/// 兼容 host:port 和完整 HTTP(S) 地址；阻止地址成为服务器配置指令。
+/// 兼容 host:port 和完整 HTTP(S) 地址；基础路径统一以 / 结尾，阻止配置注入。
 pub fn proxy_url(target: &str) -> Result<String> {
     let target = target.trim();
     if target.is_empty()
         || target.chars().any(|c| {
-            c.is_whitespace() || matches!(c, '"' | '\'' | ';' | '{' | '}' | '$' | '\\' | '<' | '>')
+            c.is_whitespace() || c.is_control() || matches!(c, '"' | '\'' | ';' | '{' | '}' | '$' | '\\' | '<' | '>')
         })
     {
         return Err(AppError::new(
@@ -399,7 +399,13 @@ pub fn proxy_url(target: &str) -> Result<String> {
             "代理地址仅支持 HTTP/HTTPS，不能包含账号、查询参数或片段",
         ));
     }
-    Ok(url.to_string())
+    // 两种 Web 服务都把请求路径接到基础目录下。Nginx 缺少末尾斜杠时会把
+    // /api 和 /users 拼成 /apiusers；Apache 的根路径映射也要求两侧一致。
+    let mut normalized = url.to_string();
+    if !normalized.ends_with('/') {
+        normalized.push('/');
+    }
+    Ok(normalized)
 }
 
 /// 单个站点 + 真实状态
@@ -3117,6 +3123,15 @@ mod scaffold_tests {
             proxy_url("http://[::1]:3000").unwrap(),
             "http://[::1]:3000/"
         );
+        for (input, expected) in [
+            (" https://api.example.com/v1 ", "https://api.example.com/v1/"),
+            ("localhost:3000/api", "http://localhost:3000/api/"),
+            ("http://[::1]:3000/api", "http://[::1]:3000/api/"),
+            ("http://a.test/a%20b", "http://a.test/a%20b/"),
+        ] {
+            assert_eq!(proxy_url(input).unwrap(), expected, "{input}");
+            assert_eq!(proxy_url(expected).unwrap(), expected);
+        }
         for invalid in [
             "",
             "http://",
@@ -3124,6 +3139,11 @@ mod scaffold_tests {
             "http://a.test;include",
             "http://u:p@a.test",
             "http://a.test/?x=1",
+            "http://a.test/?",
+            "http://a.test/#",
+            "http://a.test:0/",
+            "http://a.test/\u{0000}",
+            "http://a.test/\u{007f}",
         ] {
             assert!(proxy_url(invalid).is_err(), "{invalid}");
         }
@@ -3137,7 +3157,7 @@ mod scaffold_tests {
         let store = Store::open(paths.db()).unwrap();
         let mut site = saved_site(&paths, &store);
         site.runtime.kind = SiteKind::ReverseProxy;
-        site.runtime.proxy_target = Some("https://api.example.com/v1/".into());
+        site.runtime.proxy_target = Some("https://api.example.com/v1".into());
         site.domains = vec!["*.demo.test".into()];
         site.https = true;
         let nginx = configgen::render_site_conf(
@@ -3696,6 +3716,32 @@ mod scaffold_tests {
         assert_eq!(access_url(&paths, &store, &manager, &site.id).unwrap(), url);
         crate::tunnel::check_origin(&target).unwrap();
         drop(server);
+
+        // 真实上游回显收到的 URI，验证带基础路径的代理与目标变更。
+        let upstream_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let upstream_port = upstream_listener.local_addr().unwrap().port();
+        let upstream = format!("server {{ listen 127.0.0.1:{upstream_port}; location / {{ return 200 \"$request_uri\"; }} }}");
+        let conf = format!("pid nginx.pid;\nerror_log stderr;\nevents {{}}\nhttp {{\n{upstream}\ninclude \"{}/*.conf\";\n}}\n", paths.nginx_sites_dir().to_string_lossy().replace('\\', "/"));
+        std::fs::write(paths.nginx_conf(), conf).unwrap();
+        drop(upstream_listener);
+        site.https = false;
+        site.runtime.kind = SiteKind::ReverseProxy;
+        site.rewrite = crate::model::RewritePreset::None;
+        for (target_path, prefix) in [("/api", "/api"), ("/other/", "/other"), ("", ""), ("/a%20b", "/a%20b")] {
+            site.runtime.proxy_target = Some(format!("127.0.0.1:{upstream_port}{target_path}"));
+            let vhost = configgen::render_site_conf(&site, next_port, 0, &paths.nginx_conf(), &paths.certs(), &paths.logs().join("nginx"));
+            std::fs::write(&vhost_path, vhost).unwrap();
+            let mut server = Server { child: command.spawn().unwrap(), group: platform::ProcessGroup::new().unwrap() };
+            server.group.attach(server.child.id()).unwrap();
+            assert!(crate::services::wait_healthy(next_port, std::time::Duration::from_secs(5)));
+            for path in ["/", "/users?sort=name&limit=2", "/nested/item", "/a%20b?q=a%2Fb"] {
+                let response = client.get(format!("http://127.0.0.1:{next_port}{path}"))
+                    .header("Host", "www.demo.test").send().unwrap();
+                assert_eq!(response.status().as_u16(), 200, "{target_path}: {path}");
+                assert_eq!(response.text().unwrap(), format!("{prefix}{path}"), "{target_path}: {path}");
+            }
+            drop(server);
+        }
     }
 }
 

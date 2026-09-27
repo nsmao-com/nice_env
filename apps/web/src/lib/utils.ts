@@ -6,6 +6,22 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+/** 与 sites::proxy_url 保持一致；返回实际配置使用的基础地址，非法输入返回 null。 */
+export function normalizeProxyTarget(input: string): string | null {
+  const target = input.trim();
+  if (!target || /[\s\u0000-\u001f\u007f-\u009f"';{}$\\<>]/u.test(target)) return null;
+  try {
+    const address = target.includes("://") ? target : `http://${target}`;
+    const url = new URL(address);
+    if (!["http:", "https:"].includes(url.protocol) || !url.hostname || url.username || url.password
+      || address.includes("?") || address.includes("#") || url.port === "0") return null;
+    const normalized = url.toString();
+    return normalized.endsWith("/") ? normalized : `${normalized}/`;
+  } catch {
+    return null;
+  }
+}
+
 /** 与后端证书校验一致：通配符只覆盖一个 DNS 标签，IP 和通配符站点要求精确匹配。 */
 export function certificateCoversDomain(sans: string[], input: string): boolean {
   const domain = input.trim().replace(/\.+$/, "").toLowerCase();

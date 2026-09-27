@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import { ExternalLink, FolderOpen, RefreshCw, Trash2, ScrollText } from "lucide-react";
 import type { Site, RewritePreset } from "@nsb/schema";
 import { useT } from "@/lib/store";
-import { cmpVersionDesc } from "@/lib/utils";
+import { cn, cmpVersionDesc, normalizeProxyTarget } from "@/lib/utils";
 import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { usePackages, useInvalidate, toastError, siteUrl } from "@/lib/hooks";
 import * as api from "@/lib/api";
@@ -103,13 +103,16 @@ export function SiteDetailSheet({
     draft.rewrite !== baseline.rewrite || JSON.stringify(draft.runtime) !== JSON.stringify(baseline.runtime)
   );
   const busy = saving || deleting || reloading;
+  const isProxy = draft.runtime.kind !== "php" && draft.runtime.kind !== "static";
+  const normalizedProxyTarget = normalizeProxyTarget(draft.runtime.proxyTarget ?? "");
+  const proxyInvalid = isProxy && !normalizedProxyTarget;
   const requestClose = () => {
     if (busy || savingRef.current || deletingRef.current || reloadingRef.current) return;
     if (dirty) setDiscardOpen(true);
     else onClose();
   };
   const save = async () => {
-    if (busy || savingRef.current || deletingRef.current || reloadingRef.current || (draft.https && certificateSelection.problem)) return;
+    if (busy || savingRef.current || deletingRef.current || reloadingRef.current || proxyInvalid || (draft.https && certificateSelection.problem)) return;
     const domains = [...new Set(domainsInput.split(/[,，\s]+/).filter(Boolean).map((d) => d.toLowerCase()))];
     if (!draft.name.trim() || !draft.rootDir.trim() || !domains.length) {
       setFormError({ code: "REQUIRED_FIELDS", message: t("detail.requiredFields") });
@@ -119,7 +122,8 @@ export function SiteDetailSheet({
     savingRef.current = true;
     setSaving(true);
     try {
-      const next = await api.updateSite({ ...draft, name: draft.name.trim(), rootDir: draft.rootDir.trim(), domains });
+      const next = await api.updateSite({ ...draft, name: draft.name.trim(), rootDir: draft.rootDir.trim(), domains,
+        runtime: isProxy ? { ...draft.runtime, proxyTarget: normalizedProxyTarget! } : draft.runtime });
       toast.success(t("detail.updated"));
       setDraft(next);
       setBaseline(next);
@@ -298,7 +302,7 @@ export function SiteDetailSheet({
             </div>
           )}
 
-          {draft.runtime.kind !== "php" && draft.runtime.kind !== "static" && (
+          {isProxy && (
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="site-edit-proxy">{t("sites.detail.proxy")}</Label>
               <Input
@@ -308,7 +312,15 @@ export function SiteDetailSheet({
                 onChange={(e) => setDraft({ ...draft, runtime: { ...draft.runtime, proxyTarget: e.target.value } })}
                 className="font-mono text-[12.5px]"
                 placeholder="https://api.example.com"
+                spellCheck={false}
+                autoCapitalize="none"
+                aria-invalid={proxyInvalid}
+                aria-describedby="site-edit-proxy-hint site-edit-proxy-result"
               />
+              <p id="site-edit-proxy-hint" className="text-xs leading-relaxed text-muted">{t("wz.proxyHint")}</p>
+              <p id="site-edit-proxy-result" aria-live="polite" className={cn("text-xs leading-relaxed [overflow-wrap:anywhere]", normalizedProxyTarget ? "text-muted" : "text-error")}>
+                {normalizedProxyTarget ? t("sites.proxy.effectiveTarget").replace("{target}", normalizedProxyTarget) : t("sites.proxy.invalidTarget")}
+              </p>
             </div>
           )}
 
@@ -403,7 +415,7 @@ export function SiteDetailSheet({
             <span className="text-xs text-muted">{dirty ? t("detail.unsaved") : t("detail.saved")}</span>
             <div className="flex gap-2">
               <Button variant="ghost" onClick={requestClose} disabled={busy}>{t("common.cancel")}</Button>
-              <Button onClick={save} disabled={busy || !dirty || (draft.https && !!certificateSelection.problem)}>{saving ? t("detail.saveBusy") : t("common.save")}</Button>
+              <Button onClick={save} disabled={busy || !dirty || proxyInvalid || (draft.https && !!certificateSelection.problem)}>{saving ? t("detail.saveBusy") : t("common.save")}</Button>
             </div>
           </div>
         </div>

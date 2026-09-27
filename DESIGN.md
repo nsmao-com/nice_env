@@ -1997,3 +1997,17 @@ configgen.rs 原有未提交修改保留，本轮仅纳入复用解析器所需�
 包、crate、Tauri 与界面版本统一至 0.2.67，Cargo.lock 只更新三个本项目 crate；pnpm --filter @nsb/web check、cargo metadata --locked --no-deps 与 git diff --check 通过。精确暂存树导出到独立临时目录后，cargo check --workspace --all-targets --locked 通过，Rust 串行回归 617 通过、0 失败、12 ignored、29 filtered out；该发布树上的真实 Nginx 完整保存/删除/恢复流程另行通过。未执行的 ignored/filtered 项不计入验证，Apache 和 macOS 原生恢复尚未验收。未启动前端 dev、未执行本地前端 build，未增加依赖。本次没有数据库结构或数据修复 SQL 变更，未修改 update.sql；应用正常的站点保存/删除沿用现有存储结构。
 
 已确认 v0.2.66 Release completed/success。本轮必须新建 annotated tag v0.2.67，与 main 原子推送并核对远程提交和构建实际状态。原有 configgen.rs 178 additions / 9 deletions 及未跟踪生成文件不纳入发布。继续核对站点级 PHP 配置写入反馈、反向代理编辑与其他功能缺漏，整体目标保持进行。
+
+## 第八十二轮：反向代理路径一致性、地址反馈与服务器选择（v0.2.68）
+
+沿用现有反向代理创建、编辑和站点应用链路。fast-context 确认目标地址的编辑入口已经存在；真正的问题是 Nginx 与 Apache 对基础路径末尾斜杠的处理不一致。通过 Context7 核对官方 proxy_pass 与 ProxyPass 文档（https://nginx.org/en/docs/http/ngx_http_proxy_module.html、https://httpd.apache.org/docs/2.4/howto/reverse_proxy.html），并在已有原生验证中复现：填写 /api 时根请求被转发成 /api，而非 /api/；URI 替换也会使 /users 拼接为 /apiusers。现在 sites::proxy_url 统一为目录形式，省略协议时继续补 HTTP，已有斜杠不重复追加，保留编码路径；同时拒绝控制字符。两种配置生成器继续复用这个入口，不修改工作区原有 configgen.rs。
+
+创建与编辑复用同一个前端地址规范化函数，显示实际基础地址与路径追加示例，禁止账号密码、查询参数、片段、非法协议、端口零及配置控制字符；无效时禁用下一步或保存，并在输入旁给出中英文提示。提交使用预览中的地址，浏览器模拟后端在副作用前执行相同校验。新建反向代理原先隐藏了 Web 服务器选择，现恢复 Nginx/Apache 选项并保留已安装检查；选择按钮补充 aria-pressed，代理输入补齐标签关联及描述。确认页的长地址换行显示，底部动作与虚线两侧留白沿用现有布局。已有站点重新保存或重载后生成新规则，不主动重启用户运行中的服务。
+
+扩展已有 Rust 验证模块，未新增测试文件。隔离真实 Nginx 使用临时目录、随机端口和本地回显上游，对无末尾斜杠、已有斜杠、根地址及编码路径逐一应用配置并请求根路径、嵌套路径及带查询参数的地址，核对上游实际收到的 URI；用例在修复前失败、修复后通过。保留原有 HTTP/HTTPS 静态路由与实际入口检查。设置 NSB_SKIP_HOSTS=1，进程由 RAII 清理，不修改系统 hosts。本轮未原生验收 Apache、HTTPS 上游、WebSocket 或 macOS；这些边界不能由配置字符串验证代替。
+
+隔离浏览器验证创建、编辑、非法地址阻止提交、HTTP 默认协议、HTTPS 与 IPv6 地址预览、步骤返回保留输入、失败草稿保留及重试。通过脚本响应注入统计请求和模拟错误，非法输入零次 update_site，成功提交地址与预览一致；Apache 未安装时阻止继续，模拟已安装后实际 create_site 参数为 apache。注入只存在于隔离上下文，不写产品调试代码。检查中英文、浅深主题与 1280/390/320 宽度；320×480 弹窗宽 296px、两侧 12px，正文可滚动，底部动作可见，长地址无横向溢出。初次截图位于过渡动画期间，待布局稳定后重新目检；一次脚本按旧排序打开了其他站点，按实际列表顺序纠正后通过。最终页面异常为零。
+
+版本统一至 0.2.68，Cargo.lock 只更新三个本项目 crate。pnpm --filter @nsb/web check 通过；本次暂存树导出到独立临时目录后，cargo check --workspace --all-targets --locked 通过，Rust 串行回归 617 通过、0 失败、12 ignored、29 filtered out，另行执行真实 Nginx 检查通过。未执行的忽略或筛选项不计入验收。未启动前端 dev、未执行本地前端 build、未新增依赖。本次没有数据库变更，未修改 update.sql。
+
+已确认 v0.2.67 Release completed/success。遵循根 AGENTS.md，新建 annotated tag v0.2.68，与 main 原子推送并核对远程指向和实际构建状态；不能只推分支，也不能把已触发构建称为安装包已发布。保留原有 configgen.rs 178 additions / 9 deletions 及本地生成文件。站点级 PHP 写入反馈和其他真实功能、跨平台边界继续核对，整体目标保持进行。

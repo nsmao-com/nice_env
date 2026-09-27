@@ -58,12 +58,12 @@ import type {
   CreateSiteInput,
 } from "@nsb/schema";
 import { emitLocal } from "./backend";
-import { cmpVersionDesc, resolveStackService } from "./utils";
+import { cmpVersionDesc, resolveStackService, normalizeProxyTarget } from "./utils";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.67";
+const MOCK_APP_VERSION = "0.2.68";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -1177,6 +1177,9 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "create_site": {
       const input = args!.input as CreateSiteInput;
+      if (input.runtime.kind !== "php" && input.runtime.kind !== "static" && !normalizeProxyTarget(input.runtime.proxyTarget ?? "")) {
+        throw { code: "BAD_PROXY_TARGET", message: "请填写有效的 HTTP/HTTPS 代理地址，不能包含账号、查询参数或片段" };
+      }
       if (input.runtime.kind === "php" && input.runtime.phpVersion) await runServiceAction("start_service", `php@${input.runtime.phpVersion}`);
       await runServiceAction("start_service", input.runtime.webServer);
       const id = `site-${uid()}`;
@@ -1208,6 +1211,9 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         rootDir: patch.rootDir?.trim() ?? s.rootDir, runtime: patch.runtime ?? s.runtime,
         https: patch.https ?? s.https, rewrite: patch.rewrite ?? s.rewrite,
         phpOverrides: patch.phpOverrides ?? s.phpOverrides, updatedAt: now() };
+      if (next.runtime.kind !== "php" && next.runtime.kind !== "static" && !normalizeProxyTarget(next.runtime.proxyTarget ?? "")) {
+        throw { code: "BAD_PROXY_TARGET", message: "请填写有效的 HTTP/HTTPS 代理地址，不能包含账号、查询参数或片段" };
+      }
       if (mockSiteStatus(s) === "running") {
         if (next.runtime.kind === "php" && next.runtime.phpVersion) await runServiceAction("start_service", `php@${next.runtime.phpVersion}`);
         await runServiceAction("start_service", next.runtime.webServer);

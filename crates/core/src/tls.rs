@@ -218,7 +218,7 @@ pub fn issue_site_cert(paths: &Paths, store: &Store, domains: &[String]) -> Resu
         key_path: Some(key_path.to_string_lossy().to_string()),
         trusted: None,
     };
-    write_cert_pair(paths, &crt_path, &key_path, &certified.pem(), &key_pair.serialize_pem(), || store.save_cert(&record))?;
+    write_cert_pair(paths, &crt_path, &key_path, &certified.pem(), &key_pair.serialize_pem(), || store.replace_managed_certs(std::slice::from_ref(&record)))?;
     Ok(record)
 }
 
@@ -328,6 +328,49 @@ pub fn list_certs(paths: &Paths, store: &Store) -> Result<Vec<CertRecord>> {
 /// 本地证书有效期为 30 天，不能把新签的证书也判成“30 天内到期”反复替换。
 pub fn reissue_missing_site_certs(paths: &Paths, store: &Store) -> Result<Vec<String>> {
     let _files = CERT_FILES.lock();
+    let records = store.list_certs()?;
+    // 兼容旧版只为自动化主域名存记录、其它 SAN 站点只有文件副本的情况。
+    let acme_files: Vec<_> = records.iter().filter(|c| c.kind == "acme").filter_map(|c| {
+        let path = crate::paths::checked_data_path(&paths.base, &format!("certs/sites/{}.crt", cert_stem(&c.subject))).ok()?;
+        if std::path::Path::new(&c.cert_path) != path { return None; }
+        crate::certs::read_managed_pem(&path).ok().map(|pem| (c, pem))
+    }).collect();
+    let mut local_sites = Vec::new();
+    let mut recovered = Vec::new();
+    // 先检查全部 ACME 文件，失败时不修改任何站点，防止悄悄降级到本地 CA。
+    for site in store.list_sites()? {
+        if !site.https || site.runtime.imported_cert_id.is_some() || site.domains.is_empty() { continue; }
+        let domains = normalize_domains(&site.domains)?;
+        let primary = &domains[0];
+        let cert = crate::paths::checked_data_path(&paths.base, &format!("certs/sites/{}.crt", cert_stem(primary)))?;
+        let key = crate::paths::checked_data_path(&paths.base, &format!("certs/sites/{}.key", cert_stem(primary)))?;
+        let direct = records.iter().find(|c| c.kind == "acme" && std::path::Path::new(&c.cert_path) == cert);
+        let pem = crate::certs::read_managed_pem(&cert);
+        let legacy = pem.as_ref().ok().and_then(|pem| acme_files.iter().find(|(_, content)| content == pem).map(|(c, _)| *c));
+        if direct.or(legacy).is_none() {
+            local_sites.push((site, domains));
+            continue;
+        }
+        let checked = (|| -> Result<CertRecord> {
+            let pem = pem?;
+            let key_pem = crate::certs::read_managed_pem(&key)?;
+            let (_, sans, _, _) = crate::certs::parse_pem_info(&pem)
+                .ok_or_else(|| AppError::new("CERT_PARSE_FAILED", "无法解析 ACME 证书"))?;
+            let (not_before, not_after) = crate::certs::deployment_validity(&pem, &key_pem, &sans)?;
+            if !domains.iter().all(|d| crate::certs::covers_domain(&sans, d)) {
+                return Err(AppError::new("CERT_SITE_COVERAGE", "ACME 证书未覆盖站点全部域名"));
+            }
+            Ok(CertRecord { id: format!("acme-{primary}"), kind: "acme".into(), subject: primary.clone(),
+                sans, not_before, not_after, cert_path: cert.to_string_lossy().into_owned(),
+                key_path: Some(key.to_string_lossy().into_owned()), trusted: Some(true) })
+        })().map_err(|error| AppError::new("ACME_REPAIR_REQUIRED", format!("站点「{}」的 ACME 证书需要处理：{}", site.name, error.message))
+            .with_hint("原证书已保留。请在证书自动化中重试部署；材料过期或域名变更时重新签发。"))?;
+        if direct.is_none() || records.iter().any(|c| c.kind == "site" && std::path::Path::new(&c.cert_path) == cert) {
+            recovered.push(checked);
+        }
+    }
+    if !recovered.is_empty() { store.replace_managed_certs(&recovered)?; }
+    if local_sites.is_empty() { return Ok(Vec::new()); }
     ensure_ca(paths)?;
     let ca_pem = std::fs::read(paths.certs().join("ca.crt"))?;
     let (_, ca) = x509_parser::pem::parse_x509_pem(&ca_pem)
@@ -337,9 +380,7 @@ pub fn reissue_missing_site_certs(paths: &Paths, store: &Store) -> Result<Vec<St
         .map_err(|e| AppError::internal("读取根 CA", e.to_string()))?;
     let soon = to_ms(now_plus(RENEW_BEFORE_DAYS));
     let mut issued = Vec::new();
-    for site in store.list_sites()? {
-        if !site.https || site.runtime.imported_cert_id.is_some() || site.domains.is_empty() { continue; }
-        let domains = normalize_domains(&site.domains)?;
+    for (_site, domains) in local_sites {
         let primary = &domains[0];
         let existing = store.list_certs()?.into_iter().find(|c| c.kind == "site" && c.subject == *primary);
         let intact = existing.as_ref().is_some_and(|c| {

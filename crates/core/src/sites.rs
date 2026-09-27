@@ -526,8 +526,8 @@ pub fn update(
     let local_certificate_changed = certificate_changed && current.https && current.runtime.imported_cert_id.is_none();
     let mut snapshots = snapshot_site_configs(paths, &current)?;
     let certificate_id = format!("cert-{}", current.domains[0]);
-    let previous_certificate = if local_certificate_changed {
-        let stem = current.domains[0].replace('*', "_wildcard");
+    let previous_certificates = if local_certificate_changed {
+        let stem = current.domains[0].replace('*', "_wildcard").replace(':', "_");
         for extension in ["crt", "key"] {
             let path = paths
                 .certs()
@@ -540,12 +540,12 @@ pub fn update(
             };
             snapshots.push((path, content));
         }
-        store
-            .list_certs()?
-            .into_iter()
-            .find(|cert| cert.id == certificate_id)
+        let cert_path = paths.certs().join("sites").join(format!("{stem}.crt"));
+        store.list_certs()?.into_iter().filter(|cert|
+            matches!(cert.kind.as_str(), "site" | "acme") && std::path::Path::new(&cert.cert_path) == cert_path
+        ).collect::<Vec<_>>()
     } else {
-        None
+        Vec::new()
     };
     let result: Result<()> = (|| {
         if local_certificate_changed {
@@ -574,8 +574,8 @@ pub fn update(
         restore_site_configs(&snapshots)?;
         store.save_site(&original)?;
         if local_certificate_changed {
-            if let Some(certificate) = previous_certificate {
-                store.save_cert(&certificate)?;
+            if !previous_certificates.is_empty() {
+                store.replace_managed_certs(&previous_certificates)?;
             } else {
                 store.delete_cert(&certificate_id)?;
             }
@@ -2553,6 +2553,28 @@ mod scaffold_tests {
         assert_eq!(std::fs::read(&cert.cert_path).unwrap(), original_cert);
         assert!(store.list_certs().unwrap().iter().any(|c| c.id == cert.id));
         assert!(crate::hosts::extra_entries(&store).unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_https_edit_restores_acme_certificate_metadata_and_files() {
+        let temp = Tmp::new("edit-acme-rollback");
+        let paths = Paths::new(temp.0.clone()); paths.ensure_dirs().unwrap();
+        let store = Store::open(paths.db()).unwrap();
+        let mut site = saved_site(&paths, &store);
+        let mut cert = crate::tls::issue_site_cert(&paths, &store, &site.domains).unwrap();
+        cert.id = format!("acme-{}", site.domains[0]); cert.kind = "acme".into();
+        store.replace_managed_certs(std::slice::from_ref(&cert)).unwrap();
+        let before = std::fs::read(&cert.cert_path).unwrap();
+        let key_before = std::fs::read(cert.key_path.as_ref().unwrap()).unwrap();
+        let db = rusqlite::Connection::open(paths.db()).unwrap();
+        db.execute_batch("CREATE TRIGGER reject_https_edit BEFORE UPDATE ON sites WHEN NEW.https=1 BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+        site.https = true;
+        assert!(update(&site, &paths, &store, &Arc::new(ServiceManager::new())).is_err());
+        assert!(!get(&store, &site.id).unwrap().https);
+        assert_eq!(std::fs::read(&cert.cert_path).unwrap(), before);
+        assert_eq!(std::fs::read(cert.key_path.as_ref().unwrap()).unwrap(), key_before);
+        let records = store.list_certs().unwrap(); assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, cert.id); assert_eq!(records[0].kind, "acme");
     }
 
     #[test]

@@ -57,28 +57,49 @@ fn execution_lock(store: &crate::store::Store, id: &str) -> Result<std::fs::File
     Ok(file)
 }
 
-/// 自动化本地部署实际会覆盖的证书对。除了自动化主域名，还要覆盖使用
-/// SAN 中其它域名作为主域名的 HTTPS 站点；导入证书站点不能被 ACME 材料替换。
-fn local_site_output_paths(paths: &crate::paths::Paths, store: &crate::store::Store, a: &CertAutomation) -> Result<Vec<(std::path::PathBuf, std::path::PathBuf, String)>> {
+struct LocalSiteDeployment {
+    // 第三项为该输出路径的主域名，用于持久化实际证书记录。
+    outputs: Vec<(std::path::PathBuf, std::path::PathBuf, String)>,
+    site_count: usize,
+    skipped: Vec<String>,
+}
+
+/// 只有完整覆盖站点全部域名时才替换证书；导入证书站点继续使用其绑定文件。
+fn local_site_deployment(paths: &crate::paths::Paths, store: &crate::store::Store, a: &CertAutomation) -> Result<LocalSiteDeployment> {
     let primary = a.domains.first().ok_or_else(|| AppError::new("BAD_DOMAINS", "至少填写一个域名"))?;
-    let mut sites = vec![(
+    let mut outputs = vec![(
         crate::paths::checked_data_path(&paths.base, &format!("certs/sites/{}.crt", primary.replace('*', "_wildcard").replace(':', "_")))?,
         crate::paths::checked_data_path(&paths.base, &format!("certs/sites/{}.key", primary.replace('*', "_wildcard").replace(':', "_")))?,
         primary.clone(),
     )];
+    let mut site_count = 0;
+    let mut skipped = Vec::new();
+    let mut protected = Vec::new();
     for site in store.list_sites()? {
         if !site.https || site.runtime.imported_cert_id.is_some() { continue; }
-        let matches = site.domains.iter().any(|domain| crate::certs::covers_domain(&a.domains, domain));
         let Some(site_primary) = site.domains.first() else { continue; };
-        if !matches { continue; }
         let stem = site_primary.replace('*', "_wildcard").replace(':', "_");
         let cert = crate::paths::checked_data_path(&paths.base, &format!("certs/sites/{stem}.crt"))?;
         let key = crate::paths::checked_data_path(&paths.base, &format!("certs/sites/{stem}.key"))?;
-        if !sites.iter().any(|(old_cert, old_key, _)| old_cert == &cert && old_key == &key) {
-            sites.push((cert, key, site.name));
+        let missing: Vec<_> = site.domains.iter().filter(|domain| !crate::certs::covers_domain(&a.domains, domain)).collect();
+        if !missing.is_empty() {
+            if missing.len() < site.domains.len() { skipped.push(site.name.clone()); }
+            protected.push((cert, site.name, missing.into_iter().cloned().collect::<Vec<_>>()));
+            continue;
+        }
+        site_count += 1;
+        if !outputs.iter().any(|(old_cert, old_key, _)| old_cert == &cert && old_key == &key) {
+            outputs.push((cert, key, site_primary.clone()));
         }
     }
-    Ok(sites)
+    // 主输出以及历史重复主域名的共享文件都不能绕过完整覆盖检查。
+    for (cert, name, missing) in protected {
+        if outputs.iter().any(|(output, _, _)| output == &cert) {
+            return Err(AppError::new("CERT_SITE_COVERAGE", format!("证书未覆盖站点「{name}」的全部域名：{}，未替换原证书", missing.join("、")))
+                .with_hint("将缺少的域名加入证书自动化后重新签发，或关闭分配给本地站点。"));
+        }
+    }
+    Ok(LocalSiteDeployment { outputs, site_count, skipped })
 }
 
 /// 不同自动化也可能共用验证记录或输出文件。锁文件名仅含摘要，不落盘凭据/目标内容。
@@ -134,7 +155,7 @@ fn resource_locks(paths: &crate::paths::Paths, a: &CertAutomation, retry: bool) 
 fn resource_locks_for_state(state: &CoreState, a: &CertAutomation, retry: bool) -> Result<Vec<std::fs::File>> {
     let mut resources = work_resources(&state.paths, a, retry)?;
     if a.deploy_local && (!retry || !a.local_deploy_result.as_ref().is_some_and(|r| r.ok)) {
-        for (cert, key, label) in local_site_output_paths(&state.paths, &state.store, a)? {
+        for (cert, key, label) in local_site_deployment(&state.paths, &state.store, a)?.outputs {
             for path in [&cert, &key] {
                 resources.insert(certdeploy::local_output_resource(&path.to_string_lossy())?, format!("本地站点证书 {label}"));
             }
@@ -429,14 +450,9 @@ fn deploy_pending(state: &CoreState, a: &mut CertAutomation, material: &IssuedMa
     a.expires_at = Some(after);
     if a.deploy_local && !a.local_deploy_result.as_ref().is_some_and(|r| r.ok) {
         let result = deploy_local(state, a, &material.chain, &material.key_pem, before, after)
-            .map(|record| {
+            .map(|(record, message)| {
                 a.cert_id = Some(record.id);
-                let count = local_site_output_paths(&state.paths, &state.store, a).map(|paths| paths.len()).unwrap_or(1);
-                if count > 1 {
-                    format!("本地部署完成：已同步到 {count} 个本地 HTTPS 站点（{}）", record.cert_path)
-                } else {
-                    format!("本地部署完成：{}", record.cert_path)
-                }
+                message
             });
         a.local_deploy_result = Some(deployment_result(result, log, "本地站点"));
         save_progress(state, a)?;
@@ -474,10 +490,13 @@ fn deploy_local(
     key_pem: &str,
     not_before: i64,
     not_after: i64,
-) -> Result<CertRecord> {
+) -> Result<(CertRecord, String)> {
+    let _sites = crate::sites::SITE_CHANGES.lock();
+    let _operation = state.manager.lifecycle.lock();
     let _files = crate::tls::CERT_FILES.lock();
+    let plan = local_site_deployment(&state.paths, &state.store, a)?;
     let primary = a.domains[0].clone();
-    let outputs = local_site_output_paths(&state.paths, &state.store, a)?;
+    let outputs = &plan.outputs;
     let (crt_path, key_path, _) = outputs.first().cloned().ok_or_else(|| AppError::new("DEPLOY_PATH", "没有可用的本地证书输出位置"))?;
     std::fs::create_dir_all(state.paths.certs().join("sites"))?;
 
@@ -494,7 +513,7 @@ fn deploy_local(
     };
     // 所有匹配站点必须一起切换；任一站点写入失败则恢复本轮已经写入的文件。
     let mut previous = Vec::new();
-    for (cert, key, _) in &outputs {
+    for (cert, key, _) in outputs {
         for path in [cert, key] {
             let content = match std::fs::read_to_string(path) {
                 Ok(content) => Some(content),
@@ -504,15 +523,23 @@ fn deploy_local(
             previous.push((path.clone(), content));
         }
     }
+    let mut written = 0;
     let result: Result<()> = (|| {
-        for (cert, key, _) in &outputs {
+        for (cert, key, _) in outputs {
             crate::tls::write_cert_pair(&state.paths, cert, key, chain, key_pem, || Ok(()))?;
+            written += 2;
         }
-        state.store.save_cert(&record)
+        let records: Vec<_> = outputs.iter().map(|(cert, key, primary)| CertRecord {
+            id: format!("acme-{primary}"), subject: primary.clone(),
+            cert_path: cert.to_string_lossy().into_owned(), key_path: Some(key.to_string_lossy().into_owned()),
+            ..record.clone()
+        }).collect();
+        state.store.replace_managed_certs(&records)
     })();
     if let Err(error) = result {
         let mut failures = Vec::new();
-        for (path, content) in previous.iter().rev() {
+        // write_cert_pair 已处理当前失败的一对文件，只恢复之前已提交的输出。
+        for (path, content) in previous[..written].iter().rev() {
             let restored = match content {
                 Some(value) => crate::paths::write_atomic(path, value.as_bytes()),
                 None => match std::fs::remove_file(path) {
@@ -528,10 +555,7 @@ fn deploy_local(
             .with_detail(format!("{}；{}", error, failures.join("；"))));
     }
 
-    let hit = outputs.len() > 1 || state.store.list_sites()?.iter().any(|s|
-        s.https && s.runtime.imported_cert_id.is_none() && s.domains.iter().any(|d| crate::certs::covers_domain(&a.domains, d))
-    );
-    if hit {
+    if plan.site_count > 0 {
         // 证书文件已经落盘，但服务没有真正加载新证书时必须让调用方知道，
         // 不能继续显示“本地部署完成”或把自动化记成成功。
         crate::ops::rebuild_and_reload(&state.store, &state.paths, &state.manager).map_err(|e| {
@@ -540,7 +564,15 @@ fn deploy_local(
                 .with_detail(e.to_string())
         })?;
     }
-    Ok(record)
+    let mut message = if plan.site_count == 0 {
+        format!("证书已保存，未应用到本地 HTTPS 站点：{}", record.cert_path)
+    } else {
+        format!("本地部署完成：已同步到 {} 个本地 HTTPS 站点（{}）", plan.site_count, record.cert_path)
+    };
+    if !plan.skipped.is_empty() {
+        message.push_str(&format!("；以下站点因域名未完全覆盖而保留原证书：{}", plan.skipped.join("、")));
+    }
+    Ok((record, message))
 }
 
 /* ---------- 单次执行 ---------- */
@@ -1145,10 +1177,10 @@ mod tests {
         state.store.save_site(&https_site("www", "WWW 站点", &["www.example.com"], None, dir.path())).unwrap();
         state.store.save_site(&https_site("imported", "导入站点", &["imported.example.com"], Some("cert-imported"), dir.path())).unwrap();
 
-        let outputs = local_site_output_paths(&state.paths, &state.store, &a).unwrap();
+        let outputs = local_site_deployment(&state.paths, &state.store, &a).unwrap().outputs;
         assert_eq!(outputs.len(), 2, "主域名和 SAN 主域名站点各有一组输出文件");
-        assert!(outputs.iter().any(|(_, _, label)| label == "WWW 站点"));
-        assert!(!outputs.iter().any(|(_, _, label)| label == "导入站点"));
+        assert!(outputs.iter().any(|(_, _, primary)| primary == "www.example.com"));
+        assert!(!outputs.iter().any(|(_, _, primary)| primary == "imported.example.com"));
 
         let imported_cert = state.paths.certs().join("sites/imported.example.com.crt");
         let imported_key = state.paths.certs().join("sites/imported.example.com.key");
@@ -1187,15 +1219,118 @@ mod tests {
         for (path, old) in paths.iter().zip(["old-primary-cert", "old-primary-key", "old-www-cert", "old-www-key"]) {
             std::fs::write(path, old).unwrap();
         }
+        for (offset, domain) in [(0, "example.com"), (2, "www.example.com")] {
+            state.store.save_cert(&CertRecord { id: format!("cert-{domain}"), kind: "site".into(),
+                subject: domain.into(), sans: vec![domain.into()], not_before: 1, not_after: 2,
+                cert_path: paths[offset].to_string_lossy().into_owned(),
+                key_path: Some(paths[offset + 1].to_string_lossy().into_owned()), trusted: None }).unwrap();
+        }
         let db = rusqlite::Connection::open(state.paths.db()).unwrap();
-        db.execute_batch("CREATE TRIGGER reject_fixture_cert BEFORE INSERT ON certs BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+        db.execute_batch("CREATE TRIGGER reject_fixture_cert BEFORE INSERT ON certs WHEN NEW.kind='acme' AND NEW.subject='www.example.com' BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
         let material = material(&a, 30);
         let error = deploy_local(&state, &a, &material.chain, &material.key_pem, 10, 20).unwrap_err();
         assert_eq!(error.code, "INTERNAL");
         for (path, old) in paths.iter().zip(["old-primary-cert", "old-primary-key", "old-www-cert", "old-www-key"]) {
             assert_eq!(std::fs::read_to_string(path).unwrap(), old);
         }
+        let records = state.store.list_certs().unwrap();
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().all(|c| c.kind == "site" && c.not_after == 2), "第二条记录失败必须回滚前一条以及删除的旧记录");
         db.execute_batch("DROP TRIGGER reject_fixture_cert;").unwrap();
+    }
+
+    #[test]
+    fn local_deploy_preserves_partially_covered_sites_and_rejects_primary_conflicts() {
+        let (dir, state, mut a) = fixture(); a.targets.clear();
+        a.domains = vec!["example.com".into(), "www.example.com".into()];
+        let mut site = https_site("multi", "多域名站点", &["www.example.com", "uncovered.example.net"], None, dir.path());
+        state.store.save_site(&site).unwrap();
+        let old = crate::tls::issue_site_cert(&state.paths, &state.store, &site.domains).unwrap();
+        let original = std::fs::read(&old.cert_path).unwrap();
+        let material = material(&a, 60);
+        deploy_pending(&state, &mut a, &material, &mut Vec::new()).unwrap();
+        assert_eq!(std::fs::read(&old.cert_path).unwrap(), original, "部分覆盖不能替换整个站点的证书");
+        assert!(a.local_deploy_result.as_ref().unwrap().message.contains("未应用到本地 HTTPS 站点"));
+        assert!(a.local_deploy_result.as_ref().unwrap().message.contains("多域名站点"));
+        site.domains[0] = "example.com".into(); state.store.save_site(&site).unwrap();
+        a.local_deploy_result = None;
+        let path = state.paths.certs().join("sites/example.com.crt");
+        let before = std::fs::read(&path).unwrap();
+        assert_eq!(resource_locks_for_state(&state, &a, false).unwrap_err().code, "CERT_SITE_COVERAGE");
+        assert!(deploy_local(&state, &a, &material.chain, &material.key_pem, 10, 20).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn acme_deployment_records_each_output_and_local_repair_preserves_it() {
+        let (dir, state, mut a) = fixture(); a.targets.clear();
+        a.domains = vec!["example.com".into(), "*.example.com".into()];
+        let site = https_site("www", "WWW", &["www.example.com", "api.example.com"], None, dir.path());
+        state.store.save_site(&site).unwrap();
+        crate::tls::issue_site_cert(&state.paths, &state.store, &site.domains).unwrap();
+        let material = material(&a, 60);
+        deploy_pending(&state, &mut a, &material, &mut Vec::new()).unwrap();
+        assert!(a.local_deploy_result.as_ref().unwrap().message.contains("1 个本地 HTTPS 站点"));
+        let records = state.store.list_certs().unwrap();
+        assert_eq!(records.iter().filter(|c| c.kind == "acme").count(), 2);
+        assert!(!records.iter().any(|c| c.id == "cert-www.example.com"));
+        assert!(state.repair_site_certificates().unwrap().is_empty());
+        let cert = state.paths.certs().join("sites/www.example.com.crt");
+        assert_eq!(std::fs::read_to_string(&cert).unwrap(), material.chain);
+        let key = state.paths.certs().join("sites/www.example.com.key");
+        std::fs::remove_file(&key).unwrap();
+        assert_eq!(state.repair_site_certificates().unwrap_err().code, "ACME_REPAIR_REQUIRED");
+        assert!(!key.exists());
+        assert_eq!(std::fs::read_to_string(cert).unwrap(), material.chain);
+    }
+
+    #[test]
+    fn repair_recovers_legacy_san_metadata_and_preserves_expired_acme_files() {
+        let (dir, state, mut a) = fixture(); a.targets.clear();
+        a.domains = vec!["example.com".into(), "www.example.com".into()];
+        let site = https_site("www", "WWW", &["www.example.com"], None, dir.path());
+        state.store.save_site(&site).unwrap();
+        let old = crate::tls::issue_site_cert(&state.paths, &state.store, &site.domains).unwrap();
+        let fresh = material(&a, 60);
+        deploy_pending(&state, &mut a, &fresh, &mut Vec::new()).unwrap();
+        // 重现 v0.2.39：副本已写入，但记录仍为之前的本地自签元数据。
+        state.store.delete_cert("acme-www.example.com").unwrap();
+        state.store.save_cert(&old).unwrap();
+        assert!(state.repair_site_certificates().unwrap().is_empty());
+        assert_eq!(std::fs::read_to_string(&old.cert_path).unwrap(), fresh.chain);
+        let records = state.store.list_certs().unwrap();
+        assert!(records.iter().any(|c| c.id == "acme-www.example.com"));
+        assert!(!records.iter().any(|c| c.id == old.id));
+        let expired = material(&a, -1);
+        std::fs::write(&old.cert_path, &expired.chain).unwrap();
+        std::fs::write(old.key_path.as_ref().unwrap(), &expired.key_pem).unwrap();
+        assert_eq!(state.repair_site_certificates().unwrap_err().code, "ACME_REPAIR_REQUIRED");
+        assert_eq!(std::fs::read_to_string(&old.cert_path).unwrap(), expired.chain);
+        // 用户明确手动改回本地 CA 后，过时的 ACME 元数据应一起被替换。
+        crate::tls::issue_site_cert(&state.paths, &state.store, &site.domains).unwrap();
+        assert!(state.repair_site_certificates().unwrap().is_empty());
+        assert!(!state.store.list_certs().unwrap().iter().any(|c| c.id == "acme-www.example.com"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn second_site_write_failure_restores_completed_outputs() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (dir, state, mut a) = fixture(); a.targets.clear();
+        a.domains = vec!["example.com".into(), "www.example.com".into()];
+        let site = https_site("www", "WWW", &["www.example.com"], None, dir.path());
+        state.store.save_site(&site).unwrap();
+        let first = crate::tls::issue_site_cert(&state.paths, &state.store, &["example.com".into()]).unwrap();
+        let second = crate::tls::issue_site_cert(&state.paths, &state.store, &site.domains).unwrap();
+        let outputs = [&first.cert_path, first.key_path.as_ref().unwrap(), &second.cert_path, second.key_path.as_ref().unwrap()];
+        let before: Vec<_> = outputs.iter().map(|p| std::fs::read(p).unwrap()).collect();
+        // 允许快照读取，但禁止第二个站点私钥被替换。
+        let held = std::fs::OpenOptions::new().read(true).share_mode(1).open(second.key_path.as_ref().unwrap()).unwrap();
+        let fresh = material(&a, 60);
+        assert!(deploy_local(&state, &a, &fresh.chain, &fresh.key_pem, 10, 20).is_err());
+        for (path, bytes) in outputs.iter().zip(before) { assert_eq!(std::fs::read(path).unwrap(), bytes); }
+        assert!(state.store.list_certs().unwrap().iter().all(|c| c.kind != "acme"));
+        drop(held);
     }
 
     #[test]
@@ -1208,10 +1343,11 @@ mod tests {
         let held = resource_locks_for_state(&state, &a, false).unwrap();
         let mut b = a.clone();
         b.id = "second".into();
-        b.domains = vec!["other.example.com".into(), "www.example.com".into()];
-        assert_eq!(resource_locks_for_state(&state, &b, false).unwrap_err().code, "CERT_AUTO_RESOURCE_BUSY");
+        b.domains = vec!["other.example.com".into()]; b.deploy_local = false;
+        b.targets = vec![local_target(&state.paths.certs().join("sites"), "www.example.com")];
+        assert_eq!(resource_locks_for_state(&state, &b, true).unwrap_err().code, "CERT_AUTO_RESOURCE_BUSY");
         drop(held);
-        assert!(resource_locks_for_state(&state, &b, false).is_ok());
+        assert!(resource_locks_for_state(&state, &b, true).is_ok());
     }
 
     #[test]

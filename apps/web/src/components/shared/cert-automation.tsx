@@ -845,11 +845,11 @@ function AutomationDialog({
 
           {/* 本地站点 */}
           <div className="flex items-center justify-between gap-4 rounded-xl bg-fill p-3.5">
-            <div className="flex flex-col gap-0.5">
+            <div className="flex min-w-0 flex-col gap-0.5">
               <span className="text-[12.5px] font-medium">{t("certauto.deployLocal")}</span>
-              <span className="text-[11px] text-faint">{t("certauto.deployLocalHint")}</span>
+              <span id="certauto-local-hint" className="text-[11px] leading-relaxed text-faint [overflow-wrap:anywhere]">{t("certauto.deployLocalHint")}</span>
             </div>
-            <Switch checked={form.deployLocal} onCheckedChange={(v) => patch({ deployLocal: v })} />
+            <Switch aria-label={t("certauto.deployLocal")} aria-describedby="certauto-local-hint" className="shrink-0" checked={form.deployLocal} onCheckedChange={(v) => patch({ deployLocal: v })} />
           </div>
 
           {/* 部署目标 */}

@@ -79,3 +79,15 @@
 -- 已签发材料仍供手动重试。实际开始执行后清除等待原因并按原流程记录运行结果。
 -- INSERT INTO cert_automations(id,data,updated_at) VALUES(:id,:data,:updated_at)
 -- ON CONFLICT(id) DO UPDATE SET data=:data, updated_at=:updated_at;
+
+-- v0.2.40：站点实际证书文件与 certs 元数据保持一致；仍为 SQLite，无表结构变化。
+-- 以下为运行时参数化模板，不是手工部署脚本。所有目标记录在同一事务中提交。
+-- 先删除将被替换的同路径 site/acme 记录，再逐一写入新的实际证书信息；
+-- 任一条失败回滚整个事务，调用方同时恢复已写入的证书/私钥文件。
+-- 本地自签、ACME 同步、旧 SAN 副本恢复以及站点编辑失败恢复沿用同一入口。
+-- DELETE FROM certs WHERE cert_path=:cert_path AND kind IN ('site','acme');
+-- INSERT INTO certs(id,kind,subject,sans,not_before,not_after,cert_path,key_path)
+-- VALUES(:id,:kind,:subject,:sans,:not_before,:not_after,:cert_path,:key_path)
+-- ON CONFLICT(id) DO UPDATE SET kind=:kind, subject=:subject, sans=:sans,
+-- not_before=:not_before, not_after=:not_after, cert_path=:cert_path, key_path=:key_path;
+-- 不读取/修改真实用户数据库，不引入 migration；已匹配记录重复执行后结果一致。

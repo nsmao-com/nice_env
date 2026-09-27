@@ -368,11 +368,32 @@ impl Store {
 
     pub fn save_cert(&self, c: &CertRecord) -> Result<()> {
         let conn = self.conn.lock();
+        Self::write_cert(&conn, c)
+    }
+
+    /// 一组实际证书输出与记录一起提交，同路径不保留失效的自签/ACME 元数据。
+    pub(crate) fn replace_managed_certs(&self, records: &[CertRecord]) -> Result<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        for record in records {
+            if !matches!(record.kind.as_str(), "site" | "acme") {
+                return Err(AppError::new("CERT_KIND", "仅可替换本地站点或 ACME 证书记录"));
+            }
+            tx.execute("DELETE FROM certs WHERE cert_path=?1 AND kind IN ('site','acme')", params![record.cert_path])?;
+        }
+        for record in records {
+            Self::write_cert(&tx, record)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn write_cert(conn: &Connection, c: &CertRecord) -> Result<()> {
         conn.execute(
             "INSERT INTO certs(id,kind,subject,sans,not_before,not_after,cert_path,key_path)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
              ON CONFLICT(id) DO UPDATE SET
-               subject=?3, sans=?4, not_before=?5, not_after=?6, cert_path=?7, key_path=?8",
+               kind=?2, subject=?3, sans=?4, not_before=?5, not_after=?6, cert_path=?7, key_path=?8",
             params![
                 c.id,
                 c.kind,

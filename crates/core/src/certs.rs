@@ -295,7 +295,7 @@ fn read_pem(path: &Path) -> Result<String> {
     Ok(text)
 }
 
-fn read_managed_pem(path: &Path) -> Result<String> {
+pub(crate) fn read_managed_pem(path: &Path) -> Result<String> {
     let metadata = std::fs::symlink_metadata(path).map_err(|e| AppError::io("读取托管证书文件", e))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(AppError::new("CERT_FILE", "托管证书文件必须是普通文件，不能是软链接或目录"));

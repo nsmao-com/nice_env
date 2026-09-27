@@ -22,10 +22,11 @@ impl Paths {
     /// 数据目录解析优先级：
     /// 1. 显式 base（冒烟测试等）
     /// 2. NSB_HOME 环境变量（便携化/调试覆盖）
-    /// 3. 安装版：{exe 所在目录}/nsb-data —— 数据跟随安装位置，可整目录迁移
-    /// 4. 开发环境（cargo target 下运行）：LocalAppData，避免 cargo clean 清掉数据
+    /// 3. 用户在设置中确认的数据目录（独立于数据目录保存）
+    /// 4. 安装版：{exe 所在目录}/nsb-data
+    /// 5. 开发环境（cargo target 下运行）：LocalAppData，避免 cargo clean 清掉数据
     /// 相对路径统一锚定到当前目录（子进程 cwd 各异，绝不能把相对路径写进配置/参数）
-    pub fn resolve(base: Option<PathBuf>) -> PathBuf {
+    pub fn resolve(base: Option<PathBuf>) -> crate::error::Result<PathBuf> {
         let absolutize = |p: PathBuf| {
             if p.is_absolute() {
                 p
@@ -34,12 +35,15 @@ impl Paths {
             }
         };
         if let Some(p) = base {
-            return absolutize(p);
+            return Ok(absolutize(p));
         }
         if let Ok(env) = std::env::var("NSB_HOME") {
             if !env.trim().is_empty() {
-                return absolutize(PathBuf::from(env));
+                return Ok(absolutize(PathBuf::from(env)));
             }
+        }
+        if let Some(selected) = read_data_dir_selection(&data_dir_selection_file()?)? {
+            return Ok(selected);
         }
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
@@ -52,7 +56,7 @@ impl Paths {
                         let probe = candidate.join(".write-probe");
                         if std::fs::write(&probe, b"ok").is_ok() {
                             let _ = std::fs::remove_file(&probe);
-                            return candidate;
+                            return Ok(candidate);
                         }
                     }
                 }
@@ -70,11 +74,11 @@ impl Paths {
                     if std::fs::rename(&legacy, &base).is_ok() {
                         break;
                     }
-                    return legacy; // 迁移失败（如被占用）：沿用旧目录，保证还能读到数据
+                    return Ok(legacy); // 迁移失败（如被占用）：沿用旧目录，保证还能读到数据
                 }
             }
         }
-        base
+        Ok(base)
     }
 
     pub fn new(base: PathBuf) -> Self {
@@ -191,6 +195,106 @@ impl Paths {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+struct DataDirSelection {
+    version: u8,
+    path: PathBuf,
+}
+
+fn data_dir_selection_file() -> crate::error::Result<PathBuf> {
+    dirs::config_dir().map(|root| root.join("com.niceservbay.app").join("data-directory.json"))
+        .ok_or_else(|| crate::error::AppError::new("DATA_DIR_SETTINGS", "无法确定应用配置目录，未切换数据目录"))
+}
+
+/// 普通操作持共享锁，复制和等待迁移重启期间持独占锁；Drop 自动恢复。
+pub struct DataDirActivity { _file: std::fs::File }
+impl DataDirActivity {
+    pub fn shared(base: &Path) -> crate::error::Result<Self> { Self::acquire(base, false) }
+    pub fn exclusive(base: &Path) -> crate::error::Result<Self> { Self::acquire(base, true) }
+    fn acquire(base: &Path, exclusive: bool) -> crate::error::Result<Self> {
+        let file = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+            .open(base.join(".data-dir-activity.lock"))?;
+        let result = if exclusive { file.try_lock() } else { file.try_lock_shared() };
+        result.map_err(|error| match error {
+            std::fs::TryLockError::WouldBlock => crate::error::AppError::new("DATA_DIR_BUSY", if exclusive {
+                "仍有操作或后台任务正在使用数据目录，请完成后再迁移"
+            } else { "数据目录正在迁移，请先完成重启或取消迁移" }),
+            std::fs::TryLockError::Error(error) => crate::error::AppError::io("锁定数据目录",error),
+        })?;
+        Ok(Self { _file: file })
+    }
+}
+
+fn read_data_dir_selection(file: &Path) -> crate::error::Result<Option<PathBuf>> {
+    let Some(bytes) = read_optional(file).map_err(|e| crate::error::AppError::io("读取数据目录选择", e))? else { return Ok(None); };
+    let selection: DataDirSelection = serde_json::from_slice(&bytes)
+        .map_err(|_| crate::error::AppError::new("DATA_DIR_SETTINGS", "保存的数据目录选择已损坏，未使用其它目录启动")
+            .with_hint(format!("请检查 {}；也可用 NSB_HOME 显式指定原数据目录恢复启动", file.display())))?;
+    if selection.version != 1 || !selection.path.is_absolute() {
+        return Err(crate::error::AppError::new("DATA_DIR_SETTINGS", "保存的数据目录选择无效，未使用其它目录启动"));
+    }
+    validate_migrated_root(&selection.path).map_err(|e| e.with_hint(format!(
+        "请连接原磁盘并检查 {}；未创建空数据库或回退到旧目录。可用 NSB_HOME 指定可用的数据目录", selection.path.display())))?;
+    Ok(Some(selection.path))
+}
+
+fn write_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| backup_error("目标文件没有父目录"))?;
+    std::fs::create_dir_all(parent)?;
+    let mut pending = tempfile::NamedTempFile::new_in(parent)?;
+    pending.write_all(content)?;
+    pending.as_file().sync_all()?;
+    pending.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
+
+/// 新目录首次启动时更新原本启用的 PATH；失败保留标记，下次可重试。
+pub(crate) fn finish_data_dir_activation(paths: &Paths, sync_path: impl FnOnce() -> crate::error::Result<()>) -> crate::error::Result<()> {
+    let marker = paths.base.join(".data-dir-activation.json");
+    let Some(bytes) = read_optional(&marker)? else { return Ok(()); };
+    let expected: PathBuf = serde_json::from_slice(&bytes).map_err(|e|crate::error::AppError::internal("读取迁移完成标记",e.to_string()))?;
+    if std::fs::canonicalize(&paths.base)? != std::fs::canonicalize(&expected)? {
+        return Err(crate::error::AppError::new("DATA_DIR_MOVED", "迁移副本的位置已变化，请重新从原目录执行迁移"));
+    }
+    sync_path().map_err(|error| error.with_hint("新目录已保留，但环境变量更新未完成。请检查目录权限后重新打开应用；原数据目录仍保留"))?;
+    std::fs::remove_file(marker)?;
+    Ok(())
+}
+
+/// 先保存目录选择再启动新进程；启动失败必须恢复原选择。
+pub fn with_selected_data_dir<T>(target: &Path, launch: impl FnOnce() -> crate::error::Result<T>) -> crate::error::Result<T> {
+    with_selection_file(&data_dir_selection_file()?, target, launch)
+}
+
+fn with_selection_file<T>(file: &Path, target: &Path, launch: impl FnOnce() -> crate::error::Result<T>) -> crate::error::Result<T> {
+    use crate::error::AppError;
+    if !target.is_absolute() { return Err(AppError::new("DATA_DIR_INVALID", "数据目录必须是绝对路径")); }
+    validate_migrated_root(target)?;
+    let parent = file.parent().ok_or_else(|| AppError::new("DATA_DIR_SETTINGS", "应用配置目录无效"))?;
+    std::fs::create_dir_all(parent)?;
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(file.with_extension("lock"))?;
+    lock.try_lock().map_err(|_| AppError::new("DATA_DIR_BUSY", "其它应用进程正在切换数据目录，请稍后重试"))?;
+    let previous = read_optional(file)?;
+    let selection = serde_json::to_vec(&DataDirSelection { version: 1, path: target.to_path_buf() })
+        .map_err(|e| AppError::internal("保存数据目录选择", e.to_string()))?;
+    write_atomic(file, &selection).map_err(|e| AppError::io("保存数据目录选择", e))?;
+    match launch() {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let restored = match previous {
+                Some(bytes) => write_atomic(file, &bytes),
+                None => std::fs::remove_file(file),
+            };
+            if let Err(restore) = restored {
+                return Err(AppError::new("DATA_DIR_ROLLBACK_FAILED", "重启失败，恢复原目录选择也失败；当前应用仍使用原目录")
+                    .with_hint(format!("请检查 {} 的权限，下次启动前修复目录选择", file.display()))
+                    .with_detail(format!("{}; {}", error.message, restore)));
+            }
+            Err(error)
+        }
+    }
+}
+
 /// 数据目录迁移结果。迁移成功后桌面端会重启应用，让新进程从目标目录打开数据库和运行时。
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -198,6 +302,111 @@ pub struct DataDirMigration {
     pub path: String,
     pub files: u64,
     pub bytes: u64,
+    pub rewritten_files: u64,
+}
+
+/// 只替换完整路径前缀，不误改同名前缀的其它目录；历史日志、密码等不参与重写。
+pub(crate) struct DataPathRebase {
+    sources: Vec<String>,
+    target: String,
+    patterns: regex::Regex,
+    replacements: Vec<String>,
+}
+
+fn portable_path_text(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('\\', "/");
+    if let Some(unc) = text.strip_prefix("//?/UNC/") { format!("//{unc}") }
+    else { text.strip_prefix("//?/").unwrap_or(&text).to_string() }
+}
+
+impl DataPathRebase {
+    pub(crate) fn new(source: &Path, target: &Path) -> crate::error::Result<Self> {
+        let canonical = std::fs::canonicalize(source).ok().map(|path|portable_path_text(&path));
+        let source = portable_path_text(source).trim_end_matches('/').to_string();
+        let mut sources = vec![source.clone()];
+        if let Some(canonical) = canonical { if !sources.contains(&canonical) { sources.push(canonical); } }
+        sources.sort_by_key(|s|std::cmp::Reverse(s.len()));
+        let target = portable_path_text(target).trim_end_matches('/').to_string();
+        if source.is_empty() || source.ends_with(':') {
+            return Err(crate::error::AppError::new("DATA_DIR_INVALID", "不能将磁盘根目录作为迁移源"));
+        }
+        // 这些字符会改变现有 shell/配置文件的引号语义，不能直接代入旧模板。
+        if target.chars().any(|c| c.is_control() || "\"'`$%&|<>^;(){}".contains(c)) {
+            return Err(crate::error::AppError::new("DATA_DIR_INVALID", "目标目录包含无法安全写入服务配置的字符，请选择其它目录"));
+        }
+        let mut forms = Vec::new();
+        for source in &sources {
+            forms.push((source.clone(), target.clone()));
+            if cfg!(windows) {
+                let extended = if let Some(unc) = source.strip_prefix("//") { format!("//?/UNC/{unc}") } else { format!("//?/{source}") };
+                forms.push((extended.clone(), target.clone()));
+                for form in [source, &extended] {
+                    let old = form.replace('/', "\\");
+                    let new = target.replace('/', "\\");
+                    forms.push((old.replace('\\', "\\\\"), new.replace('\\', "\\\\")));
+                    forms.push((old, new));
+                }
+            }
+        }
+        forms.sort_by(|a,b| b.0.len().cmp(&a.0.len()));
+        forms.dedup_by(|a,b| a.0 == b.0);
+        let pattern = forms.iter().map(|(old,_)| format!("({})", regex::escape(old))).collect::<Vec<_>>().join("|");
+        let patterns = regex::RegexBuilder::new(&pattern).case_insensitive(cfg!(windows)).build()
+            .map_err(|e| crate::error::AppError::internal("准备目录路径替换", e.to_string()))?;
+        Ok(Self { sources, target, patterns, replacements: forms.into_iter().map(|(_,new)|new).collect() })
+    }
+
+    pub(crate) fn path(&self, value: &str) -> String {
+        // 先消除 . / ..，避免把 source/../external 误当作目录内文件。
+        let mut lexical = PathBuf::new();
+        for component in Path::new(value).components() {
+            match component {
+                Component::CurDir => {},
+                Component::ParentDir if lexical.file_name().is_some() => { lexical.pop(); },
+                other => lexical.push(other.as_os_str()),
+            }
+        }
+        let normalized = portable_path_text(&lexical);
+        let source = self.sources.iter().find(|source| {
+            normalized.get(..source.len()).is_some_and(|prefix| if cfg!(windows) { prefix.eq_ignore_ascii_case(source) } else { prefix == *source })
+                && normalized.get(source.len()..).is_some_and(|suffix|suffix.is_empty() || suffix.starts_with('/'))
+        });
+        if let Some(source) = source {
+            let suffix = &normalized[source.len()..];
+            let rebased = format!("{}{suffix}", self.target);
+            if value.contains('\\') { rebased.replace('/', "\\") } else { rebased }
+        } else { value.to_string() }
+    }
+
+    pub(crate) fn text(&self, value: &str) -> crate::error::Result<String> {
+        let mut out = String::new();
+        let mut cursor = 0;
+        for captures in self.patterns.captures_iter(value) {
+            let Some(found) = captures.get(0) else { continue; };
+            let before = value[..found.start()].chars().next_back();
+            let after = value[found.end()..].chars().next();
+            let boundary = |c: char| c.is_whitespace() || "\"'=;:,()[]{}".contains(c);
+            if !before.is_none_or(boundary) || !after.is_none_or(|c| boundary(c) || c == '/' || c == '\\') { continue; }
+            let suffix = value[found.end()..].split(|c: char| boundary(c)).next().unwrap_or("");
+            if suffix.split(['/', '\\']).any(|part| part == "..") {
+                return Err(crate::error::AppError::new("DATA_DIR_PATH_AMBIGUOUS", "配置中的旧路径包含上级目录引用，无法自动修正")
+                    .with_hint("请先将相关路径改为完整绝对路径后重试"));
+            }
+            let Some(replacement) = captures.iter().skip(1).position(|item| item.is_some()).map(|i| &self.replacements[i]) else { continue; };
+            if replacement.contains(' ') && !found.as_str().contains(' ') {
+                let line = value[..found.start()].rsplit('\n').next().unwrap_or("");
+                if line.matches('"').count() % 2 == 0 && line.matches('\'').count() % 2 == 0 {
+                    return Err(crate::error::AppError::new("DATA_DIR_PATH_QUOTING", "配置中存在未加引号的旧路径，无法安全迁移到含空格的目录")
+                        .with_hint("请选择不含空格的目录，或先为相关配置中的完整路径添加引号后重试"));
+                }
+            }
+            out.push_str(&value[cursor..found.start()]);
+            out.push_str(replacement);
+            cursor = found.end();
+        }
+        out.push_str(&value[cursor..]);
+        Ok(out)
+    }
 }
 
 /// 将整个 NiceEnv 数据目录复制到一个新的空目录。
@@ -208,6 +417,7 @@ pub fn copy_data_dir(
     source: &Path,
     requested_target: &Path,
 ) -> crate::error::Result<DataDirMigration> {
+    let source_alias = source.to_path_buf();
     if let Ok(metadata) = std::fs::symlink_metadata(source) {
         if linked(&metadata) {
             return Err(crate::error::AppError::new(
@@ -245,6 +455,7 @@ pub fn copy_data_dir(
     let parent = std::fs::canonicalize(parent)
         .map_err(|e| crate::error::AppError::io("解析目标数据目录的父目录", e))?;
     let target = parent.join(name);
+    let rebase = DataPathRebase::new(&source_alias, &target)?;
 
     if let Ok(metadata) = std::fs::symlink_metadata(&target) {
         if linked(&metadata) {
@@ -305,15 +516,34 @@ pub fn copy_data_dir(
         .map_err(|e| crate::error::AppError::io("创建迁移暂存目录", e))?;
 
     let mut stats = (0_u64, 0_u64);
-    let copy_result = copy_tree(&source, &staging, &mut stats);
+    let copy_result = copy_tree(&source, &staging, &mut stats, true);
     if let Err(error) = copy_result {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(crate::error::AppError::io("复制数据目录", error));
     }
-    if let Err(error) = validate_migrated_root(&staging) {
+    let prepared = (|| {
+        crate::store::Store::snapshot_for_data_dir(&source.join("nsb.sqlite"), &staging.join("nsb.sqlite"), &rebase)?;
+        stats.0 += 1;
+        stats.1 += std::fs::metadata(staging.join("nsb.sqlite"))?.len();
+        let rewritten = rebase_config_files(&staging, &staging, &rebase)?;
+        validate_migrated_root(&staging)?;
+        let history_file = staging.join(".data-dir-history.json");
+        let mut history = read_path_history(&staging)?;
+        history.extend(rebase.sources.iter().map(PathBuf::from));
+        history.sort(); history.dedup();
+        write_atomic(&history_file,&serde_json::to_vec(&history).map_err(|e|crate::error::AppError::internal("保存目录历史",e.to_string()))?)?;
+        let marker = serde_json::to_vec(&PathBuf::from(portable_path_text(&target)))
+            .map_err(|e|crate::error::AppError::internal("记录迁移目标",e.to_string()))?;
+        write_atomic(&staging.join(".data-dir-activation.json"), &marker)?;
+        Ok::<_, crate::error::AppError>(rewritten)
+    })();
+    let rewritten_files = match prepared {
+        Ok(count) => count,
+        Err(error) => {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(error);
-    }
+        }
+    };
     if target.exists() {
         if let Err(error) = std::fs::remove_dir(&target) {
             let _ = std::fs::remove_dir_all(&staging);
@@ -325,15 +555,18 @@ pub fn copy_data_dir(
         return Err(crate::error::AppError::io("提交新的数据目录", error));
     }
     Ok(DataDirMigration {
-        path: target.to_string_lossy().to_string(),
+        path: portable_path_text(&target),
         files: stats.0,
         bytes: stats.1,
+        rewritten_files,
     })
 }
 
-fn copy_tree(source: &Path, target: &Path, stats: &mut (u64, u64)) -> io::Result<()> {
+fn copy_tree(source: &Path, target: &Path, stats: &mut (u64, u64), root: bool) -> io::Result<()> {
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
+        // 活跃 SQLite 文件不能逐个复制；随后用 VACUUM INTO 创建一致快照。
+        if root && matches!(entry.file_name().to_str(), Some("nsb.sqlite" | "nsb.sqlite-wal" | "nsb.sqlite-shm" | "nsb.sqlite-journal" | ".data-dir-activity.lock" | ".data-dir-activation.json")) { continue; }
         let from = entry.path();
         let to = target.join(entry.file_name());
         let metadata = std::fs::symlink_metadata(&from)?;
@@ -345,7 +578,7 @@ fn copy_tree(source: &Path, target: &Path, stats: &mut (u64, u64)) -> io::Result
         }
         if metadata.is_dir() {
             std::fs::create_dir(&to)?;
-            copy_tree(&from, &to, stats)?;
+            copy_tree(&from, &to, stats, false)?;
         } else if metadata.is_file() {
             std::fs::copy(&from, &to)?;
             stats.0 = stats.0.saturating_add(1);
@@ -360,6 +593,68 @@ fn copy_tree(source: &Path, target: &Path, stats: &mut (u64, u64)) -> io::Result
     Ok(())
 }
 
+fn rebase_config_files(root: &Path, directory: &Path, rebase: &DataPathRebase) -> crate::error::Result<u64> {
+    let mut rewritten = 0;
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        let relative = path.strip_prefix(root).map_err(|_| crate::error::AppError::new("DATA_DIR_INVALID", "配置文件超出迁移目录"))?;
+        let first = relative.components().next().map(|c| c.as_os_str().to_string_lossy().into_owned()).unwrap_or_default();
+        // 历史、下载及数据库业务内容保持原样，不做全盘字符串替换。
+        if matches!(first.as_str(), "backup" | "logs" | "downloads" | "certs" | "cron-locks") { continue; }
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            rewritten += rebase_config_files(root, &path, rebase)?;
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        let config = first == "etc" || first == "user-modules" || name == ".user.ini"
+            || ((first == "runtimes" || first == "data") && matches!(ext.as_str(), "conf" | "cnf" | "ini" | "cfg" | "properties" | "cmd" | "bat" | "ps1" | "sh"))
+            || name == ".niceenv-package.json";
+        if !config { continue; }
+        if metadata.len() > 16 * 1024 * 1024 {
+            return Err(crate::error::AppError::new("DATA_DIR_CONFIG_SIZE", format!("配置文件过大，无法自动检查：{}", relative.display())));
+        }
+        let bytes = std::fs::read(&path)?;
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            // 二进制凭据/缓存保持字节不变；旧路径出现在非 UTF-8 配置时不能假装完成。
+            if rebase.patterns.is_match(&String::from_utf8_lossy(&bytes)) {
+                return Err(crate::error::AppError::new("DATA_DIR_CONFIG_ENCODING", format!("配置不是 UTF-8，无法修正旧路径：{}", relative.display())));
+            }
+            continue;
+        };
+        let rebased = rebase.text(text).map_err(|e| e.with_detail(relative.display().to_string()))?;
+        if rebased != text {
+            std::fs::write(&path, rebased)?;
+            rewritten += 1;
+        }
+    }
+    Ok(rewritten)
+}
+
+fn read_path_history(base: &Path) -> io::Result<Vec<PathBuf>> {
+    let Some(bytes) = read_optional(&base.join(".data-dir-history.json"))? else { return Ok(Vec::new()); };
+    let history: Vec<PathBuf> = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    if history.len() > 100 || history.iter().any(|p| !p.is_absolute()) {
+        return Err(backup_error("数据目录历史记录无效，无法安全转换备份路径"));
+    }
+    Ok(history)
+}
+
+pub(crate) fn rebase_backup_content(base: &Path, content: Vec<u8>) -> io::Result<Vec<u8>> {
+    let mut history = read_path_history(base)?;
+    // 长路径优先，避免多次迁移的相邻目录前缀互相覆盖。
+    history.sort_by_key(|path|std::cmp::Reverse(path.as_os_str().len()));
+    if history.is_empty() { return Ok(content); }
+    let mut text = String::from_utf8(content).map_err(io::Error::other)?;
+    for source in history {
+        let rebase = DataPathRebase::new(&source,base).map_err(io::Error::other)?;
+        text = rebase.text(&text).map_err(io::Error::other)?;
+    }
+    Ok(text.into_bytes())
+}
+
 fn validate_migrated_root(root: &Path) -> crate::error::Result<()> {
     if !root.join("nsb.sqlite").is_file() {
         return Err(crate::error::AppError::new(
@@ -367,6 +662,11 @@ fn validate_migrated_root(root: &Path) -> crate::error::Result<()> {
             "迁移源缺少 NiceEnv 数据库，未切换目录",
         ));
     }
+    let conn = rusqlite::Connection::open_with_flags(root.join("nsb.sqlite"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let check: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+    if check != "ok" { return Err(crate::error::AppError::new("DATA_DIR_INVALID", "数据目录中的数据库校验失败，未切换目录")); }
+    conn.prepare("SELECT key,value FROM settings LIMIT 0")?;
+    conn.prepare("SELECT install_path,config_path FROM installed LIMIT 0")?;
     Ok(())
 }
 
@@ -752,12 +1052,15 @@ fn read_backup_snapshot(
     if expected_hash.is_some_and(|hash| hash != digest) {
         return Err(backup_error("备份内容校验失败，原配置未改动"));
     }
+    let content = rebase_backup_content(base, content)?;
+    let relocated_digest = hex::encode(Sha256::digest(&content));
     let current = read_optional(&target)?;
     let revision = hex::encode(Sha256::digest(
         serde_json::to_vec(&(
             name,
             &relative,
             &digest,
+            &relocated_digest,
             current.as_ref().map(|v| hex::encode(Sha256::digest(v))),
         ))
         .map_err(io::Error::other)?,
@@ -816,19 +1119,210 @@ mod tests {
         let source = temp.path().join("source");
         let paths = Paths::new(source.clone());
         paths.ensure_dirs().unwrap();
-        std::fs::write(paths.db(), b"sqlite-fixture").unwrap();
+        let source_store = crate::store::Store::open(paths.db()).unwrap();
+        source_store.set_setting("snapshot-fixture", "includes-wal").unwrap();
         std::fs::write(paths.etc().join("marker.ini"), b"preserve me").unwrap();
         let target = temp.path().join("target");
 
         let result = copy_data_dir(&source, &target).unwrap();
         assert_eq!(result.files, 2);
-        assert_eq!(std::fs::read(target.join("nsb.sqlite")).unwrap(), b"sqlite-fixture");
+        let copied_store = crate::store::Store::open(target.join("nsb.sqlite")).unwrap();
+        assert_eq!(copied_store.get_setting("snapshot-fixture").as_deref(), Some("includes-wal"));
         assert_eq!(std::fs::read(target.join("etc/marker.ini")).unwrap(), b"preserve me");
 
         std::fs::write(target.join("keep.txt"), b"do not overwrite").unwrap();
         let error = copy_data_dir(&source, &target).unwrap_err();
         assert_eq!(error.code, "DATA_DIR_NOT_EMPTY");
         assert_eq!(std::fs::read(target.join("keep.txt")).unwrap(), b"do not overwrite");
+    }
+
+    #[test]
+    fn data_dir_selection_persists_and_failed_launch_restores_previous_choice() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("application-config/data-directory.json");
+        let source = temp.path().join("original");
+        let target = temp.path().join("relocated");
+        let _source = crate::store::Store::open(source.join("nsb.sqlite")).unwrap();
+        let _target = crate::store::Store::open(target.join("nsb.sqlite")).unwrap();
+        assert!(read_data_dir_selection(&file).unwrap().is_none());
+        let fail = || Err::<(),_>(crate::error::AppError::new("LAUNCH_FAILED", "fixture"));
+        assert_eq!(with_selection_file(&file, &target, fail).unwrap_err().code, "LAUNCH_FAILED");
+        assert!(!file.exists());
+        with_selection_file(&file, &source, || Ok(())).unwrap();
+        let old = std::fs::read(&file).unwrap();
+        with_selection_file(&file, &target, fail).unwrap_err();
+        assert_eq!(std::fs::read(&file).unwrap(), old);
+        with_selection_file(&file, &target, || {
+            assert_eq!(read_data_dir_selection(&file).unwrap().as_deref(), Some(target.as_path()));
+            Ok(())
+        }).unwrap();
+        assert_eq!(read_data_dir_selection(&file).unwrap(), Some(target));
+    }
+
+    #[test]
+    fn data_dir_selection_rejects_unavailable_corrupt_and_concurrent_choices() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("data-directory.json");
+        let missing = temp.path().join("missing");
+        std::fs::write(&file, serde_json::to_vec(&DataDirSelection {version:1,path:missing.clone()}).unwrap()).unwrap();
+        assert!(read_data_dir_selection(&file).is_err());
+        assert!(!missing.exists());
+        std::fs::write(&file, "broken").unwrap();
+        assert_eq!(read_data_dir_selection(&file).unwrap_err().code, "DATA_DIR_SETTINGS");
+        let root = temp.path().join("data");
+        let _store = crate::store::Store::open(root.join("nsb.sqlite")).unwrap();
+        with_selection_file(&file, &root, || {
+            assert_eq!(with_selection_file(&file, &root, || Ok(())).unwrap_err().code, "DATA_DIR_BUSY");
+            Ok(())
+        }).unwrap();
+        let invalid = temp.path().join("invalid");
+        std::fs::create_dir(&invalid).unwrap();
+        std::fs::write(invalid.join("nsb.sqlite"), "not a database").unwrap();
+        let old = std::fs::read(&file).unwrap();
+        assert!(with_selection_file(&file, &invalid, || Ok(())).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), old);
+    }
+
+    #[test]
+    fn data_dir_path_rebase_preserves_boundaries_and_path_styles() {
+        let old = if cfg!(windows) { "C:/old-data" } else { "/old-data" };
+        let new = if cfg!(windows) { "D:/new-data" } else { "/new-data" };
+        let rebase = DataPathRebase::new(Path::new(old),Path::new(new)).unwrap();
+        assert_eq!(rebase.path(&format!("{old}/etc/a.ini")), format!("{new}/etc/a.ini"));
+        assert_eq!(rebase.path(&format!("{old}-external/a")), format!("{old}-external/a"));
+        let value = format!("include \"{old}/etc/*.conf\";\nroot {old}-external/www;\nurl https://example.test{old}/assets;");
+        assert_eq!(rebase.text(&value).unwrap(), format!("include \"{new}/etc/*.conf\";\nroot {old}-external/www;\nurl https://example.test{old}/assets;"));
+        if cfg!(windows) {
+            assert_eq!(rebase.path("c:\\OLD-data\\runtime"), "D:\\new-data\\runtime");
+            assert_eq!(rebase.text(r#"{"path":"C:\\old-data\\etc"}"#).unwrap(), r#"{"path":"D:\\new-data\\etc"}"#);
+            assert_eq!(rebase.text(r#"root "\\?\C:\old-data\www";"#).unwrap(), r#"root "D:\new-data\www";"#);
+            let unc = DataPathRebase::new(Path::new(r"\\?\UNC\server\share\old"),Path::new("D:/new-data")).unwrap();
+            assert_eq!(unc.text(r#"root "\\?\UNC\server\share\old\www";"#).unwrap(),r#"root "D:\new-data\www";"#);
+        }
+        assert_eq!(rebase.path(&format!("{old}/../external")),format!("{old}/../external"));
+        assert!(rebase.text(&format!("root \"{old}/../external\";")).is_err());
+        let spaced = DataPathRebase::new(Path::new(old),Path::new(&format!("{new} with space"))).unwrap();
+        assert!(spaced.text(&format!("command {old}/tool")).is_err());
+        assert_eq!(spaced.text(&format!("command \"{old}/tool\"")).unwrap(), format!("command \"{new} with space/tool\""));
+    }
+
+    #[test]
+    fn data_dir_copy_rebases_live_records_configs_and_keeps_external_and_historical_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let paths = Paths::new(source.clone());
+        paths.ensure_dirs().unwrap();
+        let store = crate::store::Store::open(paths.db()).unwrap();
+        let runtime = paths.runtime_dir("fixture", "1");
+        std::fs::create_dir_all(&runtime).unwrap();
+        let binary = if cfg!(windows) { "fixture.cmd" } else { "fixture.sh" };
+        std::fs::write(runtime.join(binary), if cfg!(windows) { "@echo fixture-runnable\r\n" } else { "#!/bin/sh\necho fixture-runnable\n" }).unwrap();
+        #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(runtime.join(binary), std::fs::Permissions::from_mode(0o755)).unwrap(); }
+        store.upsert_installed(&crate::model::InstalledPackage {id:"fixture".into(),version:"1".into(),category:"runtime".into(),install_path:runtime.to_string_lossy().into_owned(),config_path:paths.etc().to_string_lossy().into_owned(),installed_at:123}).unwrap();
+        let old = portable_path_text(&source);
+        let external = format!("{old}-external");
+        let config = format!("root \"{old}/www\";\ninclude \"{old}/etc/*.conf\";\nexternal \"{external}/etc\";\n");
+        std::fs::write(paths.nginx_conf(), &config).unwrap();
+        std::fs::write(paths.backup().join("original.conf"), &config).unwrap();
+        store.set_setting("mysqlRootPassword", &format!("{old}/secret")).unwrap();
+        store.set_setting("pathEnvDirs", &format!(r#"["{old}/runtimes/fixture/1"]"#)).unwrap();
+        let conn = rusqlite::Connection::open(paths.db()).unwrap();
+        conn.execute("INSERT INTO sites(id,name,domains,root_dir,runtime,https,rewrite,created_at,updated_at) VALUES('site','site','[]',?1,?2,0,'\"none\"',1,2)", rusqlite::params![format!("{old}/www"),serde_json::json!({"kind":"node","cwd":format!("{old}/www"),"command":format!("\"{old}/runtimes/fixture/1/{binary}\""),"custom":"preserve"}).to_string()]).unwrap();
+        conn.execute("INSERT INTO certs(id,kind,subject,sans,not_before,not_after,cert_path,key_path) VALUES('cert','imported','test','[]',0,1,?1,?2)", rusqlite::params![format!("{old}/certs/site.pem"),format!("{external}/key.pem")]).unwrap();
+        let target = temp.path().join("target");
+        let result = copy_data_dir(&source, &target).unwrap();
+        assert_eq!(result.rewritten_files,1);
+        let new = result.path.clone();
+        let copied = crate::store::Store::open(target.join("nsb.sqlite")).unwrap();
+        let installed = copied.list_installed().unwrap().remove(0);
+        assert_eq!(portable_path_text(Path::new(&installed.install_path)),format!("{new}/runtimes/fixture/1"));
+        assert_eq!(copied.list_sites().unwrap()[0].root_dir,format!("{new}/www"));
+        assert_eq!(copied.list_certs().unwrap()[0].cert_path,format!("{new}/certs/site.pem"));
+        assert_eq!(copied.list_certs().unwrap()[0].key_path.as_deref(),Some(format!("{external}/key.pem").as_str()));
+        assert_eq!(copied.get_setting("mysqlRootPassword"),store.get_setting("mysqlRootPassword"));
+        assert_eq!(copied.get_setting("pathEnvDirs"),store.get_setting("pathEnvDirs"));
+        assert_eq!(std::fs::read_to_string(paths.nginx_conf()).unwrap(), config);
+        assert_eq!(std::fs::read_to_string(target.join("backup/original.conf")).unwrap(), config);
+        let migrated = std::fs::read_to_string(target.join("etc/nginx/nginx.conf")).unwrap();
+        assert!(migrated.contains(&format!("{new}/etc")) && migrated.contains(&external));
+        drop(conn); drop(store);
+        std::fs::rename(&source,temp.path().join("unavailable-original")).unwrap();
+        let output = platform::command(Path::new(&installed.install_path).join(binary)).output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("fixture-runnable"));
+    }
+
+    #[test]
+    fn data_dir_copy_failure_leaves_source_and_target_untouched() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let paths = Paths::new(source.clone()); paths.ensure_dirs().unwrap();
+        let _store = crate::store::Store::open(paths.db()).unwrap();
+        let old = portable_path_text(&source);
+        let content = format!("include {old}/etc/*.conf;");
+        std::fs::write(paths.nginx_conf(), &content).unwrap();
+        let target = temp.path().join("contains space");
+        std::fs::create_dir(&target).unwrap();
+        assert_eq!(copy_data_dir(&source, &target).unwrap_err().code, "DATA_DIR_PATH_QUOTING");
+        assert!(std::fs::read_dir(&target).unwrap().next().is_none());
+        assert_eq!(std::fs::read_to_string(paths.nginx_conf()).unwrap(), content);
+        assert!(!std::fs::read_dir(temp.path()).unwrap().any(|entry|entry.unwrap().file_name().to_string_lossy().contains("-migrating-")));
+    }
+
+    #[test]
+    fn data_dir_activity_blocks_overlap_and_releases_after_cancel() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = DataDirActivity::shared(temp.path()).unwrap();
+        let second = DataDirActivity::shared(temp.path()).unwrap();
+        assert!(matches!(DataDirActivity::exclusive(temp.path()), Err(error) if error.code == "DATA_DIR_BUSY"));
+        drop(first); drop(second);
+        let exclusive = DataDirActivity::exclusive(temp.path()).unwrap();
+        let root = temp.path().to_path_buf();
+        std::thread::spawn(move || {
+            assert!(matches!(DataDirActivity::shared(&root), Err(error) if error.code == "DATA_DIR_BUSY"));
+            assert!(matches!(DataDirActivity::exclusive(&root), Err(error) if error.code == "DATA_DIR_BUSY"));
+        }).join().unwrap();
+        drop(exclusive);
+        assert!(DataDirActivity::shared(temp.path()).is_ok());
+    }
+
+    #[test]
+    fn data_dir_activation_retries_failure_and_runs_once() {
+        let (temp, paths) = fixture();
+        let marker = paths.base.join(".data-dir-activation.json");
+        std::fs::write(&marker,serde_json::to_vec(&paths.base).unwrap()).unwrap();
+        assert_eq!(finish_data_dir_activation(&paths,||Err(crate::error::AppError::new("PATH_FAILED","fixture"))).unwrap_err().code,"PATH_FAILED");
+        assert!(marker.exists());
+        let mut count = 0;
+        finish_data_dir_activation(&paths,|| { count += 1; Ok(()) }).unwrap();
+        finish_data_dir_activation(&paths,|| { count += 1; Ok(()) }).unwrap();
+        assert_eq!(count,1);
+        assert!(!marker.exists());
+        std::fs::write(&marker,serde_json::to_vec(&temp.path()).unwrap()).unwrap();
+        assert_eq!(finish_data_dir_activation(&paths,||panic!("must not sync moved copy")).unwrap_err().code,"DATA_DIR_MOVED");
+    }
+
+    #[test]
+    fn data_dir_backup_restore_rebases_history_without_altering_original_backup() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = Paths::new(temp.path().join("source")); source.ensure_dirs().unwrap();
+        let _store = crate::store::Store::open(source.db()).unwrap();
+        let old = portable_path_text(&source.base);
+        let original = format!("root \"{old}/www\";\n");
+        std::fs::write(source.nginx_conf(),&original).unwrap();
+        write_with_backup(&source.nginx_conf(),"changed",&source.backup()).unwrap();
+        let backup = list_backup_files(&source.base).unwrap().remove(0);
+        let target = temp.path().join("destination"); copy_data_dir(&source.base,&target).unwrap();
+        let preview = preview_backup(&target,&backup.name).unwrap();
+        restore_backup_checked(&target,&backup.name,Some(&preview.revision)).unwrap();
+        assert_eq!(std::fs::read_to_string(target.join("etc/nginx/nginx.conf")).unwrap(),format!("root \"{}/www\";\n",portable_path_text(&target)));
+        assert_eq!(std::fs::read_to_string(&backup.path).unwrap(),original);
+        let second = temp.path().join("second"); copy_data_dir(&target,&second).unwrap();
+        let preview = preview_backup(&second,&backup.name).unwrap();
+        restore_backup_checked(&second,&backup.name,Some(&preview.revision)).unwrap();
+        assert_eq!(std::fs::read_to_string(second.join("etc/nginx/nginx.conf")).unwrap(),format!("root \"{}/www\";\n",portable_path_text(&second)));
+        std::fs::write(second.join(".data-dir-history.json"),"[]").unwrap();
+        assert!(restore_backup_checked(&second,&backup.name,Some(&preview.revision)).is_err());
     }
 
     #[test]

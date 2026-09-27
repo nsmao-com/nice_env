@@ -2939,4 +2939,25 @@ powershell.exe -NoProfile -NonInteractive -Command "$listener = [System.Net.Sock
         assert_eq!(std::fs::read_to_string(marker).unwrap(), "preserve");
     }
 
+    #[test]
+    fn service_lifecycle_prepared_migration_blocks_work_until_guard_is_released() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = isolated_state(Paths::new(temp.path().join("source")));
+        let target = temp.path().join("target");
+        let busy = crate::paths::DataDirActivity::shared(&state.paths.base).unwrap();
+        assert!(matches!(state.prepare_data_dir_migration(&target),Err(error) if error.code == "DATA_DIR_BUSY"));
+        assert!(!target.exists());
+        drop(busy);
+        let (result, pending) = state.prepare_data_dir_migration(&target).unwrap();
+        assert!(std::path::Path::new(&result.path).join("nsb.sqlite").is_file());
+        assert_eq!(state.start_service("unknown").unwrap_err().code,"DATA_DIR_BUSY");
+        assert_eq!(state.stop_all_services().unwrap_err().code,"DATA_DIR_BUSY");
+        assert_eq!(crate::backup_job::run_backup_now(&state.store,&state.paths).unwrap_err().code,"DATA_DIR_BUSY");
+        assert_eq!(crate::cron::run_job(&state.store,"unknown",true).unwrap_err().code,"DATA_DIR_BUSY");
+        drop(pending);
+        assert_eq!(state.start_service("unknown").unwrap_err().code,"UNKNOWN_SERVICE");
+        assert!(state.stop_all_services().is_ok());
+        assert!(target.join("nsb.sqlite").is_file());
+    }
+
 }

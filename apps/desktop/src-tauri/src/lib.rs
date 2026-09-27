@@ -11,14 +11,30 @@ use tauri::{Emitter, Manager, State};
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_dialog::DialogExt;
 
-// 0=空闲，1=正在准备，2=已提交退出。失败时 Drop 恢复，避免重复退出或重启。
+// 0=空闲，1=正在准备，2=已提交退出，3=副本已就绪等待重启/取消。
 static APP_TRANSITION: AtomicU8 = AtomicU8::new(0);
-struct AppTransition { committed: bool }
+struct StartupFailure(AppError);
+struct PendingDataDir {
+    result: nsb_core::paths::DataDirMigration,
+    _activity: nsb_core::paths::DataDirActivity,
+}
+static PENDING_DATA_DIR: std::sync::Mutex<Option<PendingDataDir>> = std::sync::Mutex::new(None);
+fn pending_data_dir() -> std::sync::MutexGuard<'static, Option<PendingDataDir>> {
+    PENDING_DATA_DIR.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+struct AppTransition { committed: bool, rollback_state: u8 }
 impl AppTransition {
     fn begin() -> nsb_core::error::Result<Self> {
-        APP_TRANSITION.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+        Self::begin_from(0, 0)
+    }
+    fn begin_from(from: u8, rollback_state: u8) -> nsb_core::error::Result<Self> {
+        APP_TRANSITION.compare_exchange(from, 1, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| AppError::new("APP_BUSY", "应用正在退出、重启或迁移，请稍候"))?;
-        Ok(Self { committed: false })
+        Ok(Self { committed: false, rollback_state })
+    }
+    fn prepared(&mut self) {
+        self.committed = true;
+        APP_TRANSITION.store(3, Ordering::Release);
     }
     fn commit(&mut self) {
         self.committed = true;
@@ -27,7 +43,7 @@ impl AppTransition {
 }
 impl Drop for AppTransition {
     fn drop(&mut self) {
-        if !self.committed { APP_TRANSITION.store(0, Ordering::Release); }
+        if !self.committed { APP_TRANSITION.store(self.rollback_state, Ordering::Release); }
     }
 }
 
@@ -44,9 +60,22 @@ pub fn run() {
             let emit: EventSink = std::sync::Arc::new(move |e: Event| {
                 let _ = handle.emit(e.channel(), e.payload());
             });
-            let state = CoreState::init(None, emit).map_err(|e| {
-                Box::new(std::io::Error::other(format!("{e}"))) as Box<dyn std::error::Error>
-            })?;
+            let state = match CoreState::init(None, emit) {
+                Ok(state) => state,
+                Err(error) => {
+                    // 不回退到空目录，也不能在无控制台的桌面版中直接消失。
+                    let message = format!("{}\n{}",error.message,error.hint.clone().unwrap_or_default());
+                    app.manage(StartupFailure(error));
+                    if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
+                    let handle = app.handle().clone();
+                    app.dialog().message(message).title("无法打开 NiceEnv 数据目录")
+                        .kind(tauri_plugin_dialog::MessageDialogKind::Error).show(move |_| {
+                            APP_TRANSITION.store(2, Ordering::Release);
+                            handle.exit(1);
+                        });
+                    return Ok(());
+                }
+            };
             // 仅桌面应用启动计划任务；CLI/MCP 的只读调用不应触发用户命令。
             nsb_core::cron::spawn_scheduler(state.paths.clone())?;
             app.manage(state);
@@ -326,6 +355,8 @@ pub fn run() {
             import_config_text,
             get_data_dir,
             migrate_data_dir,
+            pending_data_dir_migration,
+            cancel_data_dir_migration,
             restart_app,
             quit_app,
             // 应用更新（在线下载 + 就地安装）
@@ -376,12 +407,29 @@ where
         tauri::async_runtime::spawn_blocking(move || {
             let resolver = invoke.resolver.clone();
             let cmd = invoke.message.command().to_string();
-            if APP_TRANSITION.load(Ordering::Acquire) != 0 && !matches!(cmd.as_str(),
-                "list_service_status" | "tray_panel_state" | "tray_panel_resize" | "tray_panel_hide"
-                | "get_app_version" | "get_data_dir") {
+            if let Some(error) = invoke.message.webview_ref().try_state::<StartupFailure>() {
+                resolver.reject(serde_json::to_string(&error.0).unwrap_or_default());
+                return;
+            }
+            let transition = APP_TRANSITION.load(Ordering::Acquire);
+            let transition_read = matches!(cmd.as_str(),
+                "list_service_status" | "tray_panel_state" | "tray_panel_resize" | "tray_panel_hide" | "tray_open_main"
+                | "get_app_version" | "get_data_dir" | "get_settings" | "pending_data_dir_migration");
+            let pending_action = transition == 3 && matches!(cmd.as_str(), "restart_app" | "cancel_data_dir_migration" | "quit_app");
+            if transition != 0 && !transition_read && !pending_action {
                 resolver.reject(serde_json::to_string(&AppError::new("APP_BUSY", "应用正在退出、重启或迁移，请稍候")).unwrap_or_default());
                 return;
             }
+            // 同步命令在这里持锁；异步命令另外在自身 future 中持锁直到实际完成。
+            let _activity = if transition_read || pending_action || matches!(cmd.as_str(), "migrate_data_dir" | "restart_app" | "quit_app" | "install_update" | "cancel_data_dir_migration") {
+                None
+            } else {
+                let state = invoke.message.webview_ref().state::<Arc<CoreState>>();
+                match nsb_core::paths::DataDirActivity::shared(&state.paths.base) {
+                    Ok(guard) => Some(guard),
+                    Err(error) => { resolver.reject(serde_json::to_string(&error).unwrap_or_default()); return; }
+                }
+            };
             // 已经对 Tauri 返回了 true，找不到命令时要自己 reject，否则前端 Promise 永远挂起
             if !handler(invoke) {
                 resolver.reject(format!("Command {cmd} not found"));
@@ -400,6 +448,12 @@ fn shutdown_auxiliary_tasks() {
 
 /// 系统关闭和菜单退出走同一受控流程；不能在 UI 线程等待数据库停机。
 fn request_app_exit(app: tauri::AppHandle) {
+    if app.try_state::<Arc<CoreState>>().is_none() {
+        APP_TRANSITION.store(2, Ordering::Release);
+        app.exit(1);
+        return;
+    }
+    if APP_TRANSITION.load(Ordering::Acquire) == 3 { let _ = cancel_data_dir_migration(); }
     let Ok(transition) = AppTransition::begin() else { return; };
     tauri::async_runtime::spawn_blocking(move || {
         if let Err(error) = exit_after_stop(app.clone(), transition) {
@@ -441,6 +495,7 @@ async fn install_package(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         tauri::async_runtime::block_on(async move {
@@ -457,6 +512,7 @@ async fn uninstall_package(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         map_jh(st.uninstall_package(&id).map(|_| true))
@@ -476,6 +532,7 @@ async fn set_active_version(
     id: String,
     version: String,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     // 走门面而非直接 ops：切版本后要把 PATH 里的目录一并指过去
     let st = state.inner().clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
@@ -502,6 +559,7 @@ fn pathenv_status(
 async fn terminal_environment(
     state: State<'_, std::sync::Arc<CoreState>>,
 ) -> Result<nsb_core::model::TerminalEnvironment, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(state.terminal_environment()))
         .await
@@ -548,6 +606,7 @@ async fn version_catalog(
     id: String,
     force: Option<bool>,
 ) -> Result<nsb_core::model::VersionCatalog, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         tauri::async_runtime::block_on(async move {
@@ -564,6 +623,7 @@ async fn version_catalogs(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     force: Option<bool>,
 ) -> Result<Vec<nsb_core::model::VersionCatalog>, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         tauri::async_runtime::block_on(
@@ -597,6 +657,7 @@ async fn start_service(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     let service_id = id.clone();
     let (result, freed) = tauri::async_runtime::spawn_blocking(move || {
@@ -618,6 +679,7 @@ async fn stop_service(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     let r =
         tauri::async_runtime::spawn_blocking(move || map_jh(st.stop_service(&id).map(|_| true)))
@@ -633,6 +695,7 @@ async fn restart_service(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     let r = tauri::async_runtime::spawn_blocking(move || map_jh(st.restart_service(&id).map(|_| true)))
     .await
@@ -682,6 +745,7 @@ async fn start_stack(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<nsb_core::model::StackStartReport, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     let report = tauri::async_runtime::spawn_blocking(move || map_jh(st.start_stack(&id)))
         .await
@@ -697,6 +761,7 @@ async fn stop_stack(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<nsb_core::model::StackStartReport, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     let report = tauri::async_runtime::spawn_blocking(move || map_jh(st.stop_stack(&id)))
         .await
@@ -724,6 +789,7 @@ async fn create_site(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     input: nsb_core::model::CreateSiteInput,
 ) -> Result<nsb_core::model::Site, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(nsb_core::sites::create_with_progress(
@@ -750,6 +816,7 @@ async fn update_site(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     site: nsb_core::model::Site,
 ) -> Result<nsb_core::model::Site, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(nsb_core::sites::update(
@@ -770,6 +837,7 @@ async fn delete_site(
     hosts: Option<bool>,
     certs: Option<bool>,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(
@@ -793,6 +861,7 @@ async fn start_site(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(nsb_core::sites::start_site(&id, &st.paths, &st.store, &st.manager).map(|_| true))
@@ -806,6 +875,7 @@ async fn stop_site(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(nsb_core::sites::stop_site(&id, &st.paths, &st.store, &st.manager).map(|_| true))
@@ -828,6 +898,7 @@ async fn apply_hosts(
     entries: Vec<nsb_core::model::HostsEntry>,
     expected_entries: Option<Vec<nsb_core::model::HostsEntry>>,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(nsb_core::hosts::apply_checked(&st.store, &st.paths, Some(entries), expected_entries.as_deref()).map(|_| true))
@@ -872,6 +943,7 @@ async fn certauto_issue(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<nsb_core::model::CertAutomation, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::certauto::run_once(&st, &id)))
         .await
@@ -882,6 +954,7 @@ async fn certauto_issue(
 async fn list_certs(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<Vec<nsb_core::model::CertRecord>, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::tls::list_certs(&st.paths, &st.store)))
         .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -893,6 +966,7 @@ async fn cert_export_pem(
     cert_id: String,
     out_path: String,
 ) -> Result<String, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(nsb_core::tls::export_pem_bundle(
@@ -913,6 +987,7 @@ async fn cert_export_jks(
     password: String,
     out_path: String,
 ) -> Result<String, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(nsb_core::tls::export_jks(
@@ -933,6 +1008,7 @@ async fn cert_export_der(
     cert_id: String,
     out_path: String,
 ) -> Result<String, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(nsb_core::tls::export_der(
@@ -975,6 +1051,7 @@ async fn certmonitor_check(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<nsb_core::model::CertMonitor, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.certmonitor_check(&id)))
         .await
@@ -989,6 +1066,7 @@ async fn cert_export_pfx(
     password: String,
     out_path: String,
 ) -> Result<String, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(nsb_core::tls::export_pfx(
@@ -1009,6 +1087,7 @@ async fn issue_cert(
     domain: String,
     sans: Vec<String>,
 ) -> Result<nsb_core::model::CertRecord, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.issue_certificate(&domain, &sans)))
         .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -1016,6 +1095,7 @@ async fn issue_cert(
 
 #[tauri::command]
 async fn delete_local_cert(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: String) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.delete_local_certificate(&id).map(|_| true)))
         .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -1023,6 +1103,7 @@ async fn delete_local_cert(state: State<'_, std::sync::Arc<nsb_core::CoreState>>
 
 #[tauri::command]
 async fn trust_ca(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::tls::trust_ca(&st.paths).map(|_| true)))
         .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -1033,6 +1114,7 @@ async fn trust_ca(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> Resu
 async fn rebuild_hosts(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::hosts::rebuild(&st.store, &st.paths).map(|_| true)))
         .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -1043,6 +1125,7 @@ async fn rebuild_hosts(
 async fn reissue_site_certs(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<Vec<String>, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.repair_site_certificates()))
         .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -1056,6 +1139,7 @@ async fn tail_logs(
     id: String,
     lines: Option<usize>,
 ) -> Result<Vec<nsb_core::model::LogLine>, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.tail_logs_checked(&id, lines.unwrap_or(200))))
         .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -1072,6 +1156,7 @@ async fn diagnose_port(port: u16) -> Result<nsb_core::model::PortDiagnosis, taur
 async fn scan_ports(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<Vec<nsb_core::model::PortScanEntry>, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::ports::scan_app_ports(&st.store, &st.manager)))
         .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -1084,6 +1169,7 @@ async fn scan_port_range(
     from: u16,
     to: u16,
 ) -> Result<nsb_core::model::PortRangeScan, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.scan_port_range(from, to)))
         .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -1098,6 +1184,7 @@ async fn close_port(
     port: u16,
     expected: Vec<nsb_core::model::ListenerInfo>,
 ) -> Result<nsb_core::ports::ClosePortOutcome, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     let outcome = tauri::async_runtime::spawn_blocking(move || map_jh(st.close_port_checked(port, &expected)))
         .await
@@ -1111,6 +1198,7 @@ async fn close_port(
 async fn list_backups(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<Vec<nsb_core::paths::BackupFile>, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(nsb_core::paths::list_backup_files(&st.paths.base).map_err(Into::into))
@@ -1124,6 +1212,7 @@ async fn preview_backup(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     name: String,
 ) -> Result<nsb_core::paths::BackupPreview, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.preview_backup(&name)))
         .await
@@ -1137,6 +1226,7 @@ async fn restore_backup(
     name: String,
     revision: String,
 ) -> Result<String, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(
@@ -1159,6 +1249,7 @@ async fn validate_configs(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     only: Option<Vec<String>>,
 ) -> Result<Vec<nsb_core::ops::ConfigCheck>, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(state.validate_configs(only.as_deref())))
         .await.map_err(|e| box_err(nsb_core::AppError::internal("检查配置", e.to_string())))?
@@ -1169,6 +1260,7 @@ async fn validate_configs(
 async fn redis_stats(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<nsb_core::stats::RedisStats, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.redis_stats())).await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -1176,6 +1268,7 @@ async fn redis_stats(
 
 #[tauri::command]
 async fn redis_connection(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String) -> Result<nsb_core::stats::RedisConnectionInfo, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.redis_connection(&version))).await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -1183,6 +1276,7 @@ async fn redis_connection(state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 
 #[tauri::command]
 async fn redis_save_connection(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, credentials: nsb_core::stats::RedisCredentials) -> Result<nsb_core::stats::RedisStats, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.save_redis_connection(&version, credentials))).await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -1199,6 +1293,7 @@ async fn dns_interfaces() -> Result<Vec<String>, tauri::Error> {
 /// 指定接口当前 DNS 状态与接管前备份。
 #[tauri::command]
 async fn dns_status_of(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, name: String) -> Result<nsb_core::dns::InterfaceStatus, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::dns::interface_status(&st.store, &name))).await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -1207,6 +1302,7 @@ async fn dns_status_of(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, na
 /// 提权把接口 DNS 指向 127.0.0.1（本地域名解析接管；触发 UAC）
 #[tauri::command]
 async fn dns_takeover(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, name: String) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::dns::takeover(&st.store, &st.manager, &name).map(|_| true))).await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -1215,6 +1311,7 @@ async fn dns_takeover(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, nam
 /// 恢复接管前 DNS；无备份的旧接口可由用户明确选择自动获取。
 #[tauri::command]
 async fn dns_restore(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, name: String, automatic: Option<bool>) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::dns::restore(&st.store, &name, automatic.unwrap_or(false)).map(|_| true))).await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -1230,6 +1327,7 @@ async fn migrate_list_source(
     password: String,
     version: Option<String>,
 ) -> Result<Vec<nsb_core::dbmigrate::SourceDb>, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(st.migrate_list_source(host, port, user, password, version.as_deref()))
@@ -1249,6 +1347,7 @@ async fn migrate_import(
     version: Option<String>,
     databases: Vec<String>,
 ) -> Result<nsb_core::dbmigrate::ImportReport, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(st.migrate_import(host, port, user, password, databases, version.as_deref()))
@@ -1279,6 +1378,7 @@ async fn export_log(
     id: String,
     dest: String,
 ) -> Result<u64, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let src = map_jh(st.log_source_path(&id))?;
@@ -1439,6 +1539,7 @@ async fn db_list(
     state: State<'_, std::sync::Arc<CoreState>>,
     version: Option<String>,
 ) -> Result<Vec<nsb_core::model::DatabaseInfo>, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     run_mysql(&state, version, |_, _, client| client.list_databases()).await
 }
 
@@ -1448,6 +1549,7 @@ async fn db_create(
     name: String,
     version: Option<String>,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     run_mysql(&state, version, move |_, _, client| {
         client.create_database(&name).map(|_| true)
     })
@@ -1460,6 +1562,7 @@ async fn db_drop(
     name: String,
     version: Option<String>,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     run_mysql(&state, version, move |_, _, client| {
         client.drop_database(&name).map(|_| true)
     })
@@ -1471,6 +1574,7 @@ async fn db_users(
     state: State<'_, std::sync::Arc<CoreState>>,
     version: Option<String>,
 ) -> Result<Vec<nsb_core::model::DbUserInfo>, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     run_mysql(&state, version, |_, _, client| client.list_users()).await
 }
 
@@ -1482,6 +1586,7 @@ async fn db_create_user(
     database: String,
     version: Option<String>,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     run_mysql(&state, version, move |_, _, client| {
         client
             .create_user_grant(&username, &password, &database)
@@ -1497,6 +1602,7 @@ async fn db_reset_root_password(
     version: Option<String>,
     use_existing: Option<bool>,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(
@@ -1517,6 +1623,7 @@ async fn db_root_password(
     state: State<'_, std::sync::Arc<CoreState>>,
     version: Option<String>,
 ) -> Result<String, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     run_mysql(&state, version, |_, _, client| {
         Ok(client.root_password.clone())
     })
@@ -1529,6 +1636,7 @@ async fn db_root_password(
 async fn proxy_status(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<nsb_core::model::serde_proxy::ProxyStatusInfo, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let running = st
@@ -1565,6 +1673,7 @@ async fn proxy_status(
 async fn proxy_start(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.start_service("mihomo").map(|_| true)))
         .await
@@ -1575,6 +1684,7 @@ async fn proxy_start(
 async fn proxy_stop(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     let sys = map_jh(platform::get_system_proxy().map_err(AppError::from))?;
     tauri::async_runtime::spawn_blocking(move || {
@@ -1620,6 +1730,7 @@ async fn proxy_set_mode(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     mode: String,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(nsb_core::proxy::set_mode(&st.paths, &st.store, &st.manager, &mode).map(|_| true))
@@ -1653,6 +1764,7 @@ async fn proxy_import(
     name: String,
     url: String,
 ) -> Result<nsb_core::model::serde_proxy::ProxyProfile, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let id = map_jh(tauri::async_runtime::block_on(async {
@@ -1675,6 +1787,7 @@ async fn proxy_activate_profile(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(
@@ -1690,6 +1803,7 @@ async fn proxy_delete_profile(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(
@@ -1750,6 +1864,7 @@ async fn cron_run_now(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<nsb_core::cron::CronJob, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.cron_run_now(&id)))
         .await
@@ -1769,6 +1884,7 @@ async fn tunnel_start(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     port: u16,
 ) -> Result<nsb_core::model::TunnelInfo, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.tunnel_start(port)))
         .await
@@ -1780,6 +1896,7 @@ async fn tunnel_start_site(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<nsb_core::model::TunnelInfo, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.tunnel_start_site(&id)))
         .await
@@ -1791,6 +1908,7 @@ async fn tunnel_remove(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.tunnel_remove(&id).map(|_| true)))
         .await
@@ -1801,6 +1919,7 @@ async fn tunnel_remove(
 async fn tunnel_list(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<Vec<nsb_core::model::TunnelInfo>, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || st.tunnel_list())
         .await
@@ -1812,6 +1931,7 @@ async fn tunnel_stop(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.tunnel_stop(&id).map(|_| true)))
         .await
@@ -1822,6 +1942,7 @@ async fn tunnel_stop(
 async fn ollama_models(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<Vec<nsb_core::toolbox::OllamaModelRow>, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.ollama_models()))
         .await
@@ -1833,6 +1954,7 @@ async fn ollama_delete(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     name: String,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.ollama_delete(&name).map(|_| true)))
         .await
@@ -1844,6 +1966,7 @@ async fn ollama_pull(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     name: String,
 ) -> Result<nsb_core::toolbox::OllamaPullStatus, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.ollama_pull(&name)))
         .await
@@ -1865,6 +1988,7 @@ fn ollama_cancel_pull(id: String) -> Result<bool, tauri::Error> {
 async fn adminer_start(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<nsb_core::toolbox::AdminerStatus, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.adminer_start())).await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -1874,6 +1998,7 @@ async fn adminer_start(
 async fn adminer_status(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<Option<nsb_core::toolbox::AdminerStatus>, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.adminer_status())).await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -1883,6 +2008,7 @@ async fn adminer_status(
 async fn adminer_stop(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.adminer_stop().map(|_| true))).await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -1904,6 +2030,7 @@ async fn proxy_update_profile(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(
@@ -2029,23 +2156,51 @@ fn get_data_dir(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> String
 /// 前端收到复制结果后，再通过 restart_app 将目标路径传给新进程。
 #[tauri::command]
 async fn migrate_data_dir(
+    app: tauri::AppHandle,
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     path: String,
 ) -> Result<nsb_core::paths::DataDirMigration, tauri::Error> {
-    let _transition = map_jh(AppTransition::begin())?;
+    let mut transition = map_jh(AppTransition::begin())?;
+    if std::env::var_os("NSB_HOME").is_some_and(|value| !value.is_empty()) {
+        return Err(box_err(AppError::new("DATA_DIR_OVERRIDE", "当前目录由 NSB_HOME 环境变量指定，无法持久切换")
+            .with_hint("请移除启动配置中的 NSB_HOME 后重新打开应用，再迁移数据目录")));
+    }
     let st = state.inner().clone();
     let target = std::path::PathBuf::from(path);
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        map_jh(st.migrate_data_dir(&target))
+    let (result, activity) = tauri::async_runtime::spawn_blocking(move || {
+        map_jh(st.prepare_data_dir_migration(&target))
     })
     .await
     .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))??;
+    *pending_data_dir() = Some(PendingDataDir { result: result.clone(), _activity: activity });
+    transition.prepared();
+    // 页面在复制中重新加载也能接回已准备的副本，不留下无法操作的等待状态。
+    let _ = app.emit("data-dir://prepared", &result);
     Ok(result)
 }
 
 #[tauri::command]
+fn pending_data_dir_migration() -> Option<nsb_core::paths::DataDirMigration> {
+    pending_data_dir().as_ref().map(|pending| pending.result.clone())
+}
+
+#[tauri::command]
+fn cancel_data_dir_migration() -> Result<bool, tauri::Error> {
+    if APP_TRANSITION.load(Ordering::Acquire) == 0 { return Ok(true); }
+    let _transition = map_jh(AppTransition::begin_from(3, 0))?;
+    pending_data_dir().take();
+    Ok(true)
+}
+
+#[tauri::command]
 fn restart_app(app: tauri::AppHandle, state: State<'_, Arc<CoreState>>, data_dir: Option<String>) -> Result<bool, tauri::Error> {
-    let mut transition = map_jh(AppTransition::begin())?;
+    let prepared = data_dir.is_some();
+    let mut transition = if let Some(path) = &data_dir {
+        if !pending_data_dir().as_ref().is_some_and(|pending| &pending.result.path == path) {
+            return Err(box_err(AppError::new("DATA_DIR_NOT_PREPARED", "迁移副本尚未准备好，请重新选择目录开始迁移")));
+        }
+        map_jh(AppTransition::begin_from(3, 3))?
+    } else { map_jh(AppTransition::begin())? };
     let executable = std::env::current_exe()
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))?;
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
@@ -2054,18 +2209,25 @@ fn restart_app(app: tauri::AppHandle, state: State<'_, Arc<CoreState>>, data_dir
             return Err(box_err(AppError::new("DATA_DIR_INVALID", "新的数据目录缺少 NiceEnv 数据库，未重启")));
         }
     }
-    map_jh(state.with_stopped_services(|| {
+    let launch = || {
         let mut command = platform::command(executable);
         command.args(args);
-        // 只让新进程使用已复制目录，重启失败时当前应用仍保持原目录与环境。
-        if let Some(path) = data_dir { command.env("NSB_HOME", path); }
-        command.spawn()
-            .map_err(|e| AppError::io("启动新的 NiceEnv 进程", e))?;
+        if let Some(path) = data_dir {
+            // 子进程与今后从快捷方式启动都读取同一持久选择；启动失败恢复原选择。
+            command.env_remove("NSB_HOME");
+            nsb_core::paths::with_selected_data_dir(std::path::Path::new(&path), || {
+                command.spawn().map_err(|e| AppError::io("启动新的 NiceEnv 进程", e))
+            })?;
+        } else {
+            command.spawn().map_err(|e| AppError::io("启动新的 NiceEnv 进程", e))?;
+        }
         shutdown_auxiliary_tasks();
         transition.commit();
         app.exit(0);
         Ok(true)
-    }))
+    };
+    // 已准备的迁移持有源目录独占锁，服务已停止且不能再启动；普通重启仍执行停机。
+    map_jh(if prepared { launch() } else { state.with_stopped_services(launch) })
 }
 
 /* ================= 配置导入/导出 ================= */
@@ -2454,6 +2616,7 @@ fn check_updates(
 
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) -> Result<bool, tauri::Error> {
+    if APP_TRANSITION.load(Ordering::Acquire) == 3 { cancel_data_dir_migration()?; }
     let transition = map_jh(AppTransition::begin())?;
     exit_after_stop(app, transition)
 }
@@ -2485,6 +2648,7 @@ async fn download_update(
     version: String,
     asset_name: Option<String>,
 ) -> Result<serde_json::Value, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     use std::io::Write;
 
     if !url.starts_with("https://") {
@@ -2690,6 +2854,7 @@ async fn xdebug_setup(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     input: nsb_core::xdebug::XdebugSetupInput,
 ) -> Result<nsb_core::model::XdebugSetupResult, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         tauri::async_runtime::block_on(async move { map_jh(st.xdebug_setup(input).await) })
@@ -2746,6 +2911,7 @@ async fn db_backup_dump(
     out_name: Option<String>,
     version: Option<String>,
 ) -> Result<String, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     run_mysql(&state, version, move |st, version, client| {
         let conn = db_conn_of(version, client);
         let name = out_name
@@ -2769,6 +2935,7 @@ async fn db_backup_restore(
     version: Option<String>,
     database: Option<String>,
 ) -> Result<nsb_core::model::DbRestoreResult, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     run_mysql(&state, version, move |st, version, client| {
         let conn = db_conn_of(version, client);
         let safety = nsb_core::dbbackup::restore_from_file_into(
@@ -2862,6 +3029,7 @@ async fn config_validate(
     kind: String,
     content: String,
 ) -> Result<nsb_core::cfgeditor::ConfigValidation, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.validate_config(&kind, &content)))
         .await
@@ -2877,6 +3045,7 @@ async fn config_save(
     force: Option<bool>,
     expected_content: Option<String>,
 ) -> Result<nsb_core::cfgeditor::ConfigValidation, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(st.save_config(
@@ -2909,6 +3078,7 @@ async fn config_rollback(
     kind: Option<String>,
     expected_content: Option<String>,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(
@@ -2925,6 +3095,7 @@ async fn config_reset_preview(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     kind: String,
 ) -> Result<nsb_core::cfgeditor::ConfigResetPreview, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.preview_config_reset(&kind)))
         .await
@@ -2937,6 +3108,7 @@ async fn config_reset(
     kind: String,
     revision: String,
 ) -> Result<nsb_core::cfgeditor::ConfigResetPreview, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.reset_config(&kind, &revision)))
         .await
@@ -2949,6 +3121,7 @@ async fn config_reset(
 async fn cert_health(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<nsb_core::certs::CertReport, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::certs::report(&st.paths, &st.store)))
         .await
@@ -2961,6 +3134,7 @@ async fn cert_import(
     cert_path: String,
     key_path: String,
 ) -> Result<nsb_core::certs::ImportedCert, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::certs::import_cert_pair(&st.paths, std::path::Path::new(&cert_path), std::path::Path::new(&key_path))))
         .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -2971,6 +3145,7 @@ async fn cert_import_dir(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     dir: String,
 ) -> Result<nsb_core::certs::DirImportResult, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::certs::import_cert_dir(&st.paths, std::path::Path::new(&dir))))
         .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -2980,6 +3155,7 @@ async fn cert_import_dir(
 async fn cert_imported_list(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<Vec<nsb_core::certs::ImportedCert>, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::certs::list_imported(&st.paths, &st.store)))
         .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -2990,6 +3166,7 @@ async fn cert_imported_delete(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     cert_path: String,
 ) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::certs::delete_imported(&st.paths, &st.store, &cert_path).map(|_| true)))
         .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -3041,6 +3218,7 @@ fn env_apply_db(
 async fn diagnostics_build(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<nsb_core::diagnostics::DiagnosticsBundle, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::diagnostics::build(
         &state.paths, &state.store, &state.manager, env!("CARGO_PKG_VERSION"),
@@ -3053,6 +3231,7 @@ async fn diagnostics_save(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     bundle: nsb_core::diagnostics::DiagnosticsBundle,
 ) -> Result<String, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::diagnostics::save_to_file(&state.paths, &bundle)))
         .await.map_err(|e| box_err(nsb_core::AppError::internal("保存诊断报告", e.to_string())))?
@@ -3065,6 +3244,7 @@ async fn diagnostics_save(
 async fn health_check(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<nsb_core::health::HealthReport, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(nsb_core::health::check(&state.paths, &state.store, &state.manager))
@@ -3078,6 +3258,7 @@ async fn diagnose_service(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
 ) -> Result<nsb_core::diagnostics::ServiceDiagnosticReport, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(nsb_core::diagnostics::diagnose_service(&state.paths, &state.store, &state.manager, &id))
@@ -3091,6 +3272,7 @@ async fn bulk_start(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     ids: Vec<String>,
 ) -> Result<nsb_core::bulk::BulkReport, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     let report = tauri::async_runtime::spawn_blocking(move || {
         map_jh(st.bulk_start(&ids))
@@ -3105,6 +3287,7 @@ async fn bulk_stop(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     ids: Vec<String>,
 ) -> Result<nsb_core::bulk::BulkReport, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     let report = tauri::async_runtime::spawn_blocking(move || {
         map_jh(st.bulk_stop(&ids))
@@ -3119,6 +3302,7 @@ async fn bulk_restart(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     ids: Vec<String>,
 ) -> Result<nsb_core::bulk::BulkReport, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     let report = tauri::async_runtime::spawn_blocking(move || {
         map_jh(st.bulk_restart(&ids))
@@ -3196,6 +3380,7 @@ async fn log_export(
     content: String,
     suggested_name: Option<String>,
 ) -> Result<String, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(st.log_source_path(&service_id))?;

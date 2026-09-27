@@ -150,13 +150,18 @@ pub struct CoreState {
 
 impl CoreState {
     pub fn init(base: Option<std::path::PathBuf>, emit: EventSink) -> Result<Arc<Self>> {
-        let base = paths::Paths::resolve(base);
+        let base = paths::Paths::resolve(base)?;
         let paths = paths::Paths::new(base);
+        std::fs::create_dir_all(&paths.base)?;
+        let _activity = paths::DataDirActivity::shared(&paths.base)?;
         paths.ensure_dirs().map_err(|e| {
             error::AppError::io("初始化数据目录", e)
                 .with_hint("数据目录不可写，可在环境变量 NSB_HOME 指定其它位置")
         })?;
         let store = store::Store::open(paths.db())?;
+        paths::finish_data_dir_activation(&paths, || {
+            pathenv::sync(&store, &paths, &install::Installer::effective(&paths).manifest)
+        })?;
         // 服务栈内置预设（首次运行写入；用户改过的不动）
         let _ = stacks::ensure_presets(&store);
         let manager = Arc::new(ServiceManager::new());
@@ -731,6 +736,7 @@ impl CoreState {
     }
 
     pub fn start_service(&self, id: &str) -> Result<()> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
         let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后启动"))?;
         let mut r = ops::start_service(&self.store, &self.paths, &self.manager, id);
         if r.is_ok() && !self.manager.snapshot(id).is_some_and(|status| status.state == model::ServiceState::Running && !status.pids.is_empty()) {
@@ -748,6 +754,7 @@ impl CoreState {
     }
 
     pub fn stop_service(&self, id: &str) -> Result<()> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
         let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后停止"))?;
         self.manager.snapshot(id).ok_or_else(|| AppError::new("UNKNOWN_SERVICE", format!("服务 {id} 未注册或已卸载")))?;
         let r = ops::stop_service(&self.store, &self.paths, &self.manager, id);
@@ -762,6 +769,7 @@ impl CoreState {
 
     /// 一次用户重启是不可交错的停止与启动；失败阶段保留原错误码和诊断字段。
     pub fn restart_service(&self, id: &str) -> Result<()> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
         let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重启"))?;
         let before = self.manager.snapshot(id).ok_or_else(|| AppError::new("UNKNOWN_SERVICE", format!("服务 {id} 未注册或已卸载")))?;
         if matches!(before.state, model::ServiceState::Starting | model::ServiceState::Stopping) {
@@ -835,9 +843,15 @@ impl CoreState {
     /// 将运行时、配置、服务数据、证书和本地数据库迁移到新目录。
     /// 迁移期间必须没有安装任务；受管服务会先全部优雅停止，桌面端随后重启进程。
     pub fn migrate_data_dir(&self, target: &std::path::Path) -> Result<paths::DataDirMigration> {
+        self.prepare_data_dir_migration(target).map(|(result, _guard)| result)
+    }
+
+    pub fn prepare_data_dir_migration(&self, target: &std::path::Path) -> Result<(paths::DataDirMigration, paths::DataDirActivity)> {
+        // 有在途请求时先返回，不为一次尚不能开始的复制提前停掉服务。
+        drop(paths::DataDirActivity::exclusive(&self.paths.base)?);
         self.with_stopped_services(|| {
-            self.store.checkpoint()?;
-            paths::copy_data_dir(&self.paths.base, target)
+            let guard = paths::DataDirActivity::exclusive(&self.paths.base)?;
+            paths::copy_data_dir(&self.paths.base, target).map(|result| (result, guard))
         })
     }
 
@@ -936,28 +950,34 @@ impl CoreState {
 
     /// 一键启动整栈；单项失败不阻断其它项，结果逐项回报
     pub fn start_stack(&self, id: &str) -> Result<model::StackStartReport> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
         stacks::start_with(&self.store, &self.paths, &self.manager, id, |sid| self.start_service(sid))
     }
 
     pub fn stop_stack(&self, id: &str) -> Result<model::StackStartReport> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
         stacks::stop_with(&self.store, &self.paths, &self.manager, id, |sid| self.stop_service(sid))
     }
 
     pub fn bulk_start(&self, ids: &[String]) -> Result<bulk::BulkReport> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
         bulk::start_many_with(&self.paths, &self.manager, ids, |id| self.start_service(id))
     }
 
     pub fn bulk_stop(&self, ids: &[String]) -> Result<bulk::BulkReport> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
         bulk::stop_many_with(&self.paths, &self.manager, ids, |id| self.stop_service(id))
     }
 
     pub fn bulk_restart(&self, ids: &[String]) -> Result<bulk::BulkReport> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
         bulk::restart_many_with(&self.paths, &self.manager, ids,
             |id| self.start_service(id), |id| self.stop_service(id))
     }
 
     /// 全部停止包含独立管理台；任何失败都保留结果及剩余 PID。
     pub fn stop_all_services(&self) -> Result<bulk::BulkReport> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
         let _operation = self.manager.lifecycle.try_lock()
             .ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后停止全部服务"))?;
         let mut ids = self.manager.list_status().into_iter().map(|s| s.id).collect::<Vec<_>>();

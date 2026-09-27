@@ -53,6 +53,10 @@ fn main() -> ExitCode {
         }
     };
 
+    let _activity = match nsb_core::paths::DataDirActivity::shared(&state.paths.base) {
+        Ok(guard) => guard,
+        Err(error) => { eprintln!("nsbctl: {}", error.message); return ExitCode::FAILURE; }
+    };
     match cmd {
         "status" => cmd_status(&state, json),
         "sites" => cmd_sites(&state, json),

@@ -67,6 +67,10 @@ fn text_result(text: String, is_error: bool) -> Value {
 
 /// 执行一次工具调用（独立函数，便于单测与复用）
 pub fn handle_tool_call(state: &Arc<crate::CoreState>, name: &str, args: &Value) -> Value {
+    let _activity = match crate::paths::DataDirActivity::shared(&state.paths.base) {
+        Ok(guard) => guard,
+        Err(error) => return text_result(error.message, true),
+    };
     let res: Result<Value> = match name {
         "list_services" => {
             let list = state.service_status_list();

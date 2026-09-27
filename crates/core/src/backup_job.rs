@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 /// 生成一份自动备份，返回文件路径。文件名：auto-20260920-103000.json
 pub fn run_backup_now(store: &Store, paths: &Paths) -> Result<PathBuf> {
+    let _activity = crate::paths::DataDirActivity::shared(&paths.base)?;
     let dir = paths.backup().join("auto");
     std::fs::create_dir_all(&dir)?;
     let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
@@ -58,6 +59,7 @@ pub const WEEKLY_MS: i64 = 7 * DAILY_MS;
 pub fn spawn_scheduler(paths: Paths) {
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(6 * 3600));
+        let Ok(_activity) = crate::paths::DataDirActivity::shared(&paths.base) else { continue; };
         let Ok(store) = Store::open(paths.db()) else {
             continue;
         };

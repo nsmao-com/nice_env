@@ -348,6 +348,7 @@ fn run_inner(
 /// 执行一次（手动「立即签发」与调度器共用）。同步阻塞，调用方负责放线程里。
 /// 全程留痕：日志行进 runs 历史（certd 的执行日志），成功/失败发 webhook 通知。
 pub fn run_once(state: &CoreState, id: &str) -> Result<CertAutomation> {
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
     let mut a = state
         .store
         .get_cert_automation(id)?
@@ -523,6 +524,7 @@ fn fmt_date(exp: Option<i64>) -> String {
 }
 /// 调度 tick：执行所有「到点」的自动化，返回处理过的 id
 pub fn tick(state: &Arc<CoreState>) -> Vec<String> {
+    let Ok(_activity) = crate::paths::DataDirActivity::shared(&state.paths.base) else { return Vec::new(); };
     let mut processed = Vec::new();
     let Ok(list) = state.store.list_cert_automations() else {
         return processed;

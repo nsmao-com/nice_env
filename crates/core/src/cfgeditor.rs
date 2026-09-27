@@ -1256,7 +1256,9 @@ pub fn rollback_config_selected(
         }
     }
     let path = target.path(paths, store)?;
-    let content = std::fs::read_to_string(&src).map_err(|e| AppError::io("读取备份", e))?;
+    let content = std::fs::read(&src).map_err(|e| AppError::io("读取备份", e))?;
+    let content = String::from_utf8(crate::paths::rebase_backup_content(&paths.base,content)?)
+        .map_err(|e| AppError::internal("读取备份文本",e.to_string()))?;
     // 回滚前把当前内容也存一份，免得回滚本身变成不可逆操作
     write_config_version(paths, &target, &path, &content, expected_content)?;
     Ok(())

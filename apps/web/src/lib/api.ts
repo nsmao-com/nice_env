@@ -512,9 +512,12 @@ export interface DataDirMigration {
   path: string;
   files: number;
   bytes: number;
+  rewrittenFiles: number;
 }
 export const migrateDataDir = (path: string) =>
   safe(invoke<DataDirMigration>("migrate_data_dir", { path }));
+export const pendingDataDirMigration = () => safe(invoke<DataDirMigration | null>("pending_data_dir_migration"));
+export const cancelDataDirMigration = () => safe(invoke<boolean>("cancel_data_dir_migration"));
 export const restartApp = (dataDir?: string) => safe(invoke<boolean>("restart_app", { dataDir: dataDir ?? null }));
 export const checkUpdates = () => safe(invoke<UpdateCheckResult>("check_updates"));
 

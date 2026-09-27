@@ -162,6 +162,7 @@ fn state_of(expires_at: Option<i64>) -> &'static str {
 
 /// 刷新一条监控（同步阻塞；调度线程调用）
 pub fn check(state: &CoreState, id: &str) -> Result<CertMonitor> {
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
     let mut m = state
         .store
         .get_cert_monitor(id)?

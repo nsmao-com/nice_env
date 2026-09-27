@@ -85,7 +85,7 @@ fn disk_of_base() -> (f64, f64) {
 fn query_disk_of_base() -> (f64, f64) {
     use sysinfo::Disks;
     let disks = Disks::new_with_refreshed_list();
-    let base = crate::paths::Paths::resolve(None);
+    let Ok(base) = crate::paths::Paths::resolve(None) else { return (0.0, 0.0); };
     let mut best: Option<(usize, f64, f64)> = None;
     for d in disks.list() {
         if let Some(mount) = d.mount_point().to_str() {

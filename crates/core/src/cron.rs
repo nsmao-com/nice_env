@@ -116,6 +116,7 @@ pub fn spawn_scheduler(paths: Paths) -> Result<()> {
             if SHUTTING_DOWN.load(std::sync::atomic::Ordering::Acquire) {
                 break;
             }
+            let Ok(_activity) = crate::paths::DataDirActivity::shared(&paths.base) else { continue; };
             if recover_interrupted(&store).is_err() {
                 continue;
             }
@@ -187,6 +188,8 @@ pub fn shutdown() {
 
 /// 手动和自动执行共用：先取得运行锁，再在数据库事务中复核状态和调度条件。
 pub fn run_job(store: &Store, id: &str, manual: bool) -> Result<CronJob> {
+    let base = store.path.parent().ok_or_else(|| AppError::new("CRON_PATH", "计划任务目录无效"))?;
+    let _activity = crate::paths::DataDirActivity::shared(base)?;
     if SHUTTING_DOWN.load(Ordering::Acquire) {
         return Err(AppError::new("CRON_SHUTDOWN", "应用正在退出，无法启动任务"));
     }

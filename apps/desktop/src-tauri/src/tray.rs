@@ -471,6 +471,7 @@ pub fn tray_panel_state(
 pub async fn tray_stop_all(
     app: tauri::AppHandle, state: State<'_, Arc<CoreState>>,
 ) -> Result<nsb_core::bulk::BulkReport, tauri::Error> {
+    let _activity = crate::map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         crate::map_jh(st.stop_all_services())

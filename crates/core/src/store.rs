@@ -124,6 +124,70 @@ impl Store {
         Ok(())
     }
 
+    /// 在副本中修正路径；源数据库、密码及历史记录保持原样。
+    pub(crate) fn snapshot_for_data_dir(source: &std::path::Path, target: &std::path::Path, rebase: &crate::paths::DataPathRebase) -> Result<()> {
+        let source = Connection::open_with_flags(source, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        source.execute("VACUUM main INTO ?1", params![target.to_string_lossy()])?;
+        let mut copy = Connection::open_with_flags(target, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        let tx = copy.transaction()?;
+        fn rewrite(
+            conn: &Connection, table: &str, key: &str, column: &str,
+            transform: impl Fn(&str) -> Result<String>,
+        ) -> Result<()> {
+            // 标识符只来自下方固定列表，路径和值全部参数化。
+            let values = conn.prepare(&format!("SELECT {key},{column} FROM {table} WHERE {column} IS NOT NULL"))?
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (id, value) in values {
+                let updated = transform(&value)?;
+                if updated != value { conn.execute(&format!("UPDATE {table} SET {column}=?1 WHERE {key}=?2"), params![updated,id])?; }
+            }
+            Ok(())
+        }
+        for (table,key,column) in [("installed","key","install_path"),("installed","key","config_path"),("sites","id","root_dir"),("certs","id","cert_path"),("certs","id","key_path")] {
+            rewrite(&tx, table, key, column, |value| Ok(rebase.path(value)))?;
+        }
+        rewrite(&tx, "sites", "id", "runtime", |value| {
+            serde_json::from_str::<SiteRuntime>(value).map_err(|e| AppError::internal("校验站点运行配置",e.to_string()))?;
+            let mut data: serde_json::Value = serde_json::from_str(value).map_err(|e| AppError::internal("读取站点运行配置", e.to_string()))?;
+            if let Some(cwd) = data.get_mut("cwd").and_then(|v| v.as_str().map(str::to_string)) { data["cwd"] = rebase.path(&cwd).into(); }
+            if let Some(command) = data.get("command").and_then(|v|v.as_str()) { data["command"] = rebase.text(command)?.into(); }
+            Ok(data.to_string())
+        })?;
+        rewrite(&tx, "sites", "id", "php_overrides", |value| {
+            let mut data: std::collections::BTreeMap<String,String> = serde_json::from_str(value).map_err(|e|AppError::internal("读取站点 PHP 配置", e.to_string()))?;
+            for value in data.values_mut() { *value = rebase.path(value); }
+            serde_json::to_string(&data).map_err(|e|AppError::internal("保存站点 PHP 配置",e.to_string()))
+        })?;
+        rewrite(&tx, "cron_jobs", "id", "command", |value| rebase.text(value))?;
+        rewrite(&tx, "cert_automations", "id", "data", |value| {
+            serde_json::from_str::<CertAutomation>(value).map_err(|e| AppError::internal("校验证书自动化",e.to_string()))?;
+            let mut data: serde_json::Value = serde_json::from_str(value).map_err(|e|AppError::internal("读取证书自动化",e.to_string()))?;
+            if data["state"] == "issuing" || data["state"] == "manual_wait" {
+                return Err(AppError::new("DATA_DIR_BUSY", "证书自动化仍在执行或等待验证，请完成后再迁移"));
+            }
+            if let Some(targets) = data["targets"].as_array_mut() {
+                for target in targets {
+                    if target["kind"] != "local" { continue; }
+                    if let Some(config) = target["config"].as_object_mut() {
+                        for key in ["certPath", "keyPath", "script"] {
+                            if let Some(value) = config.get_mut(key) {
+                                if let Some(text) = value.as_str() { *value = if key == "script" { rebase.text(text)? } else { rebase.path(text) }.into(); }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(data.to_string())
+        })?;
+        let running: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM cron_jobs WHERE last_exit='running')", [], |r|r.get(0))?;
+        if running { return Err(AppError::new("DATA_DIR_BUSY", "仍有计划任务在运行，请完成或停止后再迁移")); }
+        // pathEnvDirs 是系统 PATH 旧条目的清理凭据，必须保留，不能重写为尚未应用的目录。
+        tx.commit()?;
+        copy.close().map_err(|(_,error)| AppError::from(error))?;
+        Ok(())
+    }
+
     /// 便捷：读取 JSON 序列化设置，缺失时用默认
     pub fn get_setting_or<T: serde::de::DeserializeOwned + Default>(&self, key: &str) -> T {
         match self.get_setting(key) {

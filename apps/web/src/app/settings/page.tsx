@@ -3,6 +3,7 @@
 import * as React from "react";
 import { toast } from "sonner";
 import { useTheme } from "next-themes";
+import { useQuery } from "@tanstack/react-query";
 import {
   Palette,
   Sun,
@@ -938,7 +939,7 @@ export default function SettingsPage() {
                 <CardContent className="flex flex-col gap-4">
                   <SettingRow label={t("settings.ports")}>
                     <Select value={settings.portProfile} onValueChange={(v) => update("portProfile", v)}>
-                      <SelectTrigger className="h-8 w-72 text-xs">
+                      <SelectTrigger className="h-8 w-full sm:w-72 text-xs">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -964,7 +965,7 @@ export default function SettingsPage() {
                           <div
                             key={f.key}
                             className={cn(
-                              "flex items-center justify-between gap-2 px-3 py-2",
+                              "flex flex-wrap items-center justify-between gap-2 px-3 py-2",
                               idx < PORT_FIELDS.length - (PORT_FIELDS.length % 2 === 0 ? 2 : 1) &&
                                 "border-b border-border",
                               idx % 2 === 0 && "sm:border-r sm:border-border"
@@ -1043,16 +1044,9 @@ export default function SettingsPage() {
                     checked={settings.autoClosePortOnStart}
                     onChange={(v) => update("autoClosePortOnStart", v)}
                   />
-                  <ToggleRow
-                    label={
-                      <span className="flex items-center gap-2">
-                        <Activity className="h-3.5 w-3.5 text-faint" />
-                        {t("settings.watchdog")}
-                      </span>
-                    }
-                    hint={t("settings.watchdogHint")}
-                    checked={settings.watchdogEnabled === true}
-                    onChange={(v) => update("watchdogEnabled", v)}
+                  <WatchdogPanel
+                    enabled={settings.watchdogEnabled === true}
+                    onChange={(value) => setSettings((current) => current ? { ...current, watchdogEnabled: value } : current)}
                   />
                 </CardContent>
               </Card>
@@ -1250,7 +1244,7 @@ export default function SettingsPage() {
                     <div className="flex flex-col">
                       <span className="text-[12.5px] text-secondary">
                         {t("settings.currentVersion")}{" "}
-                        <code className="font-mono text-foreground">v{appVersion || "0.2.77"}</code>
+                        <code className="font-mono text-foreground">v{appVersion || "0.2.78"}</code>
                       </span>
                       <span className="text-[10.5px] text-faint">{t("settings.manifestHint")}</span>
                     </div>
@@ -1324,7 +1318,7 @@ export default function SettingsPage() {
                   <div className="flex flex-col gap-0.5">
                     <span className="text-[12.5px] text-secondary">{t("about.desc")}</span>
                     <span className="text-[10.5px] text-faint">
-                      {t("settings.currentVersion")} v{appVersion || "0.2.77"}
+                      {t("settings.currentVersion")} v{appVersion || "0.2.78"}
                     </span>
                   </div>
                   <div className="flex gap-2">
@@ -1388,9 +1382,94 @@ export default function SettingsPage() {
 
 /* ---------- 小组件 ---------- */
 
+function WatchdogPanel({ enabled, onChange }: { enabled: boolean; onChange: (value: boolean) => void }) {
+  const t = useT();
+  const switchId = React.useId();
+  const busyRef = React.useRef(false);
+  const [busy, setBusy] = React.useState<string | null>(null);
+  const query = useQuery({
+    queryKey: ["watchdog"],
+    queryFn: async () => {
+      const [status, services] = await Promise.all([api.watchdogStatus(), api.listServiceStatus()]);
+      return { ...status, watched: status.watched.filter((entry) => entry.enabled).map((entry) => ({
+        ...entry, label: services.find((service) => service.id === entry.id)?.label ?? entry.id,
+      })) };
+    },
+    enabled,
+    refetchInterval: enabled ? 3000 : false,
+    staleTime: 0,
+    retry: false,
+  });
+  const change = async (value: boolean) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy("toggle");
+    try {
+      await api.watchdogSetEnabled(value);
+      onChange(value);
+    } catch (error) { toastError(error); }
+    finally { busyRef.current = false; setBusy(null); }
+  };
+  const retry = async (id: string) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(id);
+    try {
+      await api.watchdogReset(id);
+      toast.success(t("settings.watchdogQueued"));
+      await query.refetch();
+    } catch (error) { toastError(error); }
+    finally { busyRef.current = false; setBusy(null); }
+  };
+  return (
+    <div className="min-w-0 space-y-3">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0 space-y-1">
+          <label htmlFor={switchId} className="flex items-center gap-2 text-[12.5px] text-secondary">
+            <Activity className="h-3.5 w-3.5 shrink-0 text-faint" />{t("settings.watchdog")}
+          </label>
+          <p className="max-w-[42rem] text-[10.5px] leading-relaxed text-faint">{t("settings.watchdogHint")}</p>
+        </div>
+        <Switch id={switchId} checked={enabled} onCheckedChange={change} disabled={busy !== null} className="mt-0.5 shrink-0" />
+      </div>
+      {enabled && (
+        <div className="space-y-3 border-t border-dashed border-border pt-3">
+          <p className="text-xs font-medium">{t("settings.watchdogStatus")}</p>
+          {!isTauri && <p className="text-[11px] leading-relaxed text-faint">{t("settings.watchdogPreview")}</p>}
+          {query.isPending ? <p role="status" className="text-xs text-faint">{t("settings.watchdogLoading")}</p>
+            : query.isError ? <div role="alert" className="flex flex-wrap items-center gap-2 text-xs text-error">
+              <span className="min-w-0 break-words">{t("settings.watchdogLoadFailed")}</span>
+              <Button size="sm" variant="outline" disabled={query.isFetching} onClick={() => void query.refetch()}>{t("settings.watchdogReload")}</Button>
+            </div>
+            : query.data?.watched.length === 0 ? <p className="text-xs leading-relaxed text-faint">{t("settings.watchdogEmpty")}</p>
+            : <ul className="space-y-2" aria-label={t("settings.watchdogStatus")}>
+              {query.data?.watched.map((entry) => (
+                <li key={entry.id} className="flex min-w-0 flex-wrap items-center justify-between gap-2 rounded-md bg-fill px-3 py-2.5">
+                  <div className="min-w-0 flex-1 basis-40 space-y-1">
+                    <p className="break-words text-xs font-medium">{entry.label}</p>
+                    <p className="text-[11px] text-faint">{t("settings.watchdogAttempts").replace("{count}", String(entry.attempts)).replace("{max}", String(query.data.maxAttempts))}</p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant={entry.exhausted ? "error" : entry.running ? "running" : "warn"}>
+                      {t(entry.exhausted ? "settings.watchdogExhausted" : entry.running ? "settings.watchdogRunning" : "settings.watchdogWaiting")}
+                    </Badge>
+                    {entry.exhausted && <Button size="sm" variant="outline" disabled={busy !== null || !isTauri || !query.data.enabled} onClick={() => void retry(entry.id)}>
+                      {busy === entry.id ? <RefreshCw className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />}
+                      {t("settings.watchdogRetry")}
+                    </Button>}
+                  </div>
+                </li>
+              ))}
+            </ul>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SettingRow({ label, children }: { label: React.ReactNode; children: React.ReactNode }) {
   return (
-    <div className="flex items-center justify-between gap-4">
+    <div className="flex flex-wrap items-center justify-between gap-4">
       <span className="text-[12.5px] text-secondary">{label}</span>
       {children}
     </div>

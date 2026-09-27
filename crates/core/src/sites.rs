@@ -669,6 +669,7 @@ pub fn create_with_progress(
         if let Err(e) = store.delete_site(&site.id) { failures.push(e.to_string()); }
         if !manager.is_busy(&crate::applications::service_id(&site)) {
             manager.services.lock().remove(&crate::applications::service_id(&site));
+            manager.watchdog.forget(&crate::applications::service_id(&site));
         }
         if !failures.is_empty() {
             return Err(AppError::new("SITE_CREATE_ROLLBACK_FAILED", "站点创建失败，部分状态未能恢复")
@@ -825,6 +826,7 @@ pub fn update(
     current.status = runtime_status(paths, &current, manager).to_string();
     if current.runtime.application.is_none() && !manager.is_busy(&crate::applications::service_id(&current)) {
         manager.services.lock().remove(&crate::applications::service_id(&current));
+        manager.watchdog.forget(&crate::applications::service_id(&current));
     }
     current.access_url = loaded_endpoint(manager, &current).map(|endpoint| endpoint.url);
     Ok(current)
@@ -1097,6 +1099,7 @@ pub fn delete(
         .with_detail(e.to_string()))?;
     if !manager.is_busy(&crate::applications::service_id(&site)) {
         manager.services.lock().remove(&crate::applications::service_id(&site));
+        manager.watchdog.forget(&crate::applications::service_id(&site));
     }
     Ok(())
 }
@@ -2940,7 +2943,6 @@ mod scaffold_tests {
             installer: crate::install::Installer::bundled(),
             downloader: Arc::new(crate::download::Downloader::new()),
             emit: Arc::new(|_| {}),
-            watchdog: Arc::new(crate::watchdog::Watchdog::new()),
         };
         let id = format!("site:{}", site.id);
         let nginx = state.paths.logs().join("nginx").join(format!("{}.access.log", site.id));
@@ -3881,6 +3883,13 @@ mod scaffold_tests {
         store.set_port_override("http", Some(port)).unwrap();
         store.set_port_override("https", Some(https.local_addr().unwrap().port())).unwrap();
         let manager = Arc::new(ServiceManager::new());
+        let state = crate::CoreState {
+            paths, store, manager: manager.clone(),
+            installer: crate::install::Installer::bundled(),
+            downloader: Arc::new(crate::download::Downloader::new()), emit: Arc::new(|_| {}),
+        };
+        let paths = &state.paths;
+        let store = &state.store;
         struct Cleanup<'a> { store: &'a Store, paths: &'a Paths, manager: Arc<ServiceManager> }
         impl Drop for Cleanup<'_> { fn drop(&mut self) { crate::ops::stop_all(self.store, self.paths, &self.manager); } }
         let _cleanup = Cleanup { store: &store, paths: &paths, manager: manager.clone() };
@@ -3924,6 +3933,36 @@ func main() { fmt.Println("managed-app-log"); http.HandleFunc("/",func(w http.Re
             assert_eq!(crate::install::Installer::effective(&paths).uninstall(&format!("{id}@0.0.1"), &paths, &store, &manager).unwrap_err().code, "PACKAGE_IN_USE");
             start_site(&site.id, &paths, &store, &manager).unwrap();
             let app_id = crate::applications::service_id(&site);
+            let cfg = crate::watchdog::WatchdogConfig { enabled: true, ..Default::default() };
+            assert!(manager.watchdog.status(&cfg).watched.iter().any(|entry| entry.id == app_id && entry.enabled));
+            if id == "node" {
+                store.set_setting("watchdogEnabled", "true").unwrap();
+                store.set_setting("watchdogMaxAttempts", "1").unwrap();
+                let crash = || {
+                    let pids = manager.snapshot(&app_id).unwrap().pids;
+                    platform::ProcessGroup::from_pids(pids.clone()).terminate(true).unwrap();
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    while pids.iter().any(|pid| platform::process_alive(*pid)) && std::time::Instant::now() < deadline {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));
+                    assert_port_released(application_port);
+                };
+                crash();
+                assert!(state.watchdog_tick().is_empty(), "首次崩溃也需要退避");
+                std::thread::sleep(std::time::Duration::from_millis(2100));
+                assert_eq!(state.watchdog_tick(), vec![(app_id.clone(), true)]);
+                assert_eq!(state.watchdog_status().watched.iter().find(|entry| entry.id == app_id).unwrap().attempts, 1);
+                assert!(response(&site.domains[0]).contains("node"));
+                crash();
+                assert!(state.watchdog_tick().is_empty(), "短暂成功后再退出应达到上限");
+                assert!(state.watchdog_status().watched.iter().find(|entry| entry.id == app_id).unwrap().exhausted);
+                state.watchdog_reset(&app_id).unwrap();
+                assert_eq!(state.watchdog_reset(&app_id).unwrap_err().code, "WATCHDOG_NOT_EXHAUSTED");
+                assert_eq!(state.watchdog_tick(), vec![(app_id.clone(), true)]);
+                store.set_setting("watchdogEnabled", "false").unwrap();
+                store.set_setting("watchdogMaxAttempts", "5").unwrap();
+            }
             let pids = manager.snapshot(&app_id).unwrap().pids;
             assert!(!pids.is_empty()); assert_eq!(runtime_status(&paths, &site, &manager), "running");
             let actual: serde_json::Value = serde_json::from_str(&response(&site.domains[0])).unwrap();
@@ -3947,6 +3986,7 @@ func main() { fmt.Println("managed-app-log"); http.HandleFunc("/",func(w http.Re
             }
             stop_site(&site.id, &paths, &store, &manager).unwrap();
             assert_eq!(manager.snapshot(&app_id).unwrap().state, ServiceState::Stopped);
+            assert!(!manager.watchdog.should_restart(&app_id, &cfg));
             assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));
             assert_port_released(application_port);
             update(&changed, &paths, &store, &manager).unwrap();
@@ -3959,6 +3999,7 @@ func main() { fmt.Println("managed-app-log"); http.HandleFunc("/",func(w http.Re
             let mut invalid = changed.clone(); invalid.runtime.application.as_mut().unwrap().args = vec!["does-not-exist".into()];
             update(&invalid, &paths, &store, &manager).unwrap();
             assert_eq!(start_site(&site.id, &paths, &store, &manager).unwrap_err().code, "APP_EXITED");
+            assert!(!manager.watchdog.should_restart(&app_id, &cfg));
             assert!(manager.snapshot(&app_id).unwrap().pids.is_empty());
             assert_port_released(application_port);
             update(&changed, &paths, &store, &manager).unwrap();
@@ -3977,6 +4018,7 @@ func main() { fmt.Println("managed-app-log"); http.HandleFunc("/",func(w http.Re
             let pids = manager.snapshot(&app_id).unwrap().pids;
             delete(&site.id, true, false, &paths, &store, &manager).unwrap();
             assert!(manager.snapshot(&app_id).is_none());
+            assert!(!manager.watchdog.status(&cfg).watched.iter().any(|entry| entry.id == app_id));
             assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));
             assert_port_released(application_port);
             assert!(root.join(entry_name).is_file());

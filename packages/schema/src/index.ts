@@ -970,6 +970,7 @@ export type ScannedProject = z.infer<typeof ScannedProject>;
 export const WatchedService = z.object({
   id: z.string(),
   enabled: z.boolean(),
+  running: z.boolean().default(false),
   attempts: z.number(),
   /** 重试次数已用尽，停止自动重启 */
   exhausted: z.boolean(),
@@ -1310,7 +1311,7 @@ export const AppSettings = z.object({
   /** 启动服务前自动收掉端口占用者（默认为真） */
   autoClosePortOnStart: z.boolean(),
   /** 服务意外退出时自动拉起（用户主动停止的不重启） */
-  watchdogEnabled: z.boolean().default(false).default(true),
+  watchdogEnabled: z.boolean().default(false),
   /** 远端套件清单地址（用于「检查更新」） */
   manifestUrl: z.string().default(""),
   /** 启动应用后自动检查一次更新（有新版弹窗提示） */

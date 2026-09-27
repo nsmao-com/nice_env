@@ -21,6 +21,9 @@ use parking_lot::Mutex;
 
 use crate::model::ServiceState;
 
+/// 短暂拉起不算恢复；稳定运行后才重新获得完整的重试额度。
+const STABLE_RUNNING: Duration = Duration::from_secs(60);
+
 /// 一个服务的看门狗记录
 #[derive(Debug, Clone)]
 pub struct WatchEntry {
@@ -32,6 +35,7 @@ pub struct WatchEntry {
     pub next_attempt_at: Option<Instant>,
     /// 最后一次记录到的状态，用于检测「running → 不在跑」的跳变
     pub last_state: ServiceState,
+    running_since: Option<Instant>,
     /// 用户主动请求停止——设上后看门狗不再干预，直到下次成功启动
     pub user_stopped: bool,
     /// 重启历史（时间戳 + 是否成功），供 UI 展示「最近自动重启过 N 次」
@@ -45,6 +49,7 @@ impl Default for WatchEntry {
             attempts: 0,
             next_attempt_at: None,
             last_state: ServiceState::Stopped,
+            running_since: None,
             user_stopped: false,
             restarts: Vec::new(),
         }
@@ -96,6 +101,7 @@ pub struct WatchdogStatus {
 pub struct WatchedService {
     pub id: String,
     pub enabled: bool,
+    pub running: bool,
     pub attempts: u32,
     /// 已用尽重试次数，停止尝试
     pub exhausted: bool,
@@ -123,6 +129,7 @@ impl Watchdog {
         e.attempts = 0;
         e.next_attempt_at = None;
         e.last_state = ServiceState::Running;
+        e.running_since = Some(Instant::now());
         e.enabled = true;
     }
 
@@ -132,6 +139,7 @@ impl Watchdog {
         let e = m.entry(id.to_string()).or_default();
         e.user_stopped = true;
         e.last_state = ServiceState::Stopped;
+        e.running_since = None;
         e.attempts = 0;
         e.next_attempt_at = None;
     }
@@ -146,17 +154,48 @@ impl Watchdog {
             let drop = e.restarts.len() - 20;
             e.restarts.drain(0..drop);
         }
+        // 每次自动恢复都计数，即使本次暂时启动成功。
+        e.attempts = e.attempts.saturating_add(1);
         if ok {
-            e.attempts = 0;
             e.next_attempt_at = None;
             e.last_state = ServiceState::Running;
+            e.running_since = Some(Instant::now());
         } else {
-            e.attempts = e.attempts.saturating_add(1);
-            // 指数退避，避免一个永远起不来的服务把机器拖垮
-            let factor = 2u64.saturating_pow(e.attempts.min(6));
-            let delay = (cfg.base_delay_sec.saturating_mul(factor)).min(cfg.max_delay_sec);
-            e.next_attempt_at = Some(Instant::now() + Duration::from_secs(delay));
+            e.last_state = ServiceState::Error;
+            e.running_since = None;
+            e.next_attempt_at = Some(Instant::now() + Self::backoff(e.attempts, cfg));
         }
+    }
+
+    fn backoff(attempts: u32, cfg: &WatchdogConfig) -> Duration {
+        Duration::from_secs(
+            cfg.base_delay_sec
+                .saturating_mul(2u64.saturating_pow(attempts.min(6)))
+                .min(cfg.max_delay_sec),
+        )
+    }
+
+    /// 由真实进程快照驱动；不会把未成功启动或手动停止的服务加入监控。
+    pub fn observe(&self, id: &str, state: ServiceState, cfg: &WatchdogConfig) {
+        let mut entries = self.entries.lock();
+        let Some(e) = entries.get_mut(id) else { return };
+        if !e.enabled || e.user_stopped {
+            return;
+        }
+        let now = Instant::now();
+        if state == ServiceState::Running {
+            let since = e.running_since.get_or_insert(now);
+            if now.saturating_duration_since(*since) >= STABLE_RUNNING {
+                e.attempts = 0;
+                e.next_attempt_at = None;
+            }
+        } else {
+            if e.last_state == ServiceState::Running {
+                e.next_attempt_at = Some(now + Self::backoff(e.attempts, cfg));
+            }
+            e.running_since = None;
+        }
+        e.last_state = state;
     }
 
     /// 判断某个服务现在是否该被拉起。
@@ -191,7 +230,12 @@ impl Watchdog {
     pub fn exhausted(&self, id: &str, cfg: &WatchdogConfig) -> bool {
         let m = self.entries.lock();
         m.get(id)
-            .map(|e| e.enabled && !e.user_stopped && e.attempts >= cfg.max_attempts)
+            .map(|e| {
+                e.enabled
+                    && !e.user_stopped
+                    && e.last_state != ServiceState::Running
+                    && e.attempts >= cfg.max_attempts
+            })
             .unwrap_or(false)
     }
 
@@ -202,9 +246,13 @@ impl Watchdog {
             .iter()
             .map(|(id, e)| WatchedService {
                 id: id.clone(),
-                enabled: e.enabled,
+                enabled: e.enabled && !e.user_stopped,
+                running: e.last_state == ServiceState::Running,
                 attempts: e.attempts,
-                exhausted: e.enabled && !e.user_stopped && e.attempts >= cfg.max_attempts,
+                exhausted: e.enabled
+                    && !e.user_stopped
+                    && e.last_state != ServiceState::Running
+                    && e.attempts >= cfg.max_attempts,
                 restart_count: e.restarts.len() as u32,
                 last_restart_at: e.restarts.last().map(|(t, _)| *t),
             })
@@ -236,6 +284,9 @@ impl Watchdog {
         if let Some(e) = m.get_mut(id) {
             e.attempts = 0;
             e.next_attempt_at = None;
+            if e.last_state == ServiceState::Running {
+                e.running_since = Some(Instant::now());
+            }
         }
     }
 
@@ -330,7 +381,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_restart_clears_attempts_and_backoff() {
+    fn successful_restart_requires_stable_running_to_clear_attempts() {
         let w = Watchdog::new();
         w.note_started("nginx");
         let cfg = on();
@@ -339,8 +390,45 @@ mod tests {
         assert!(w.should_restart("nginx", &cfg), "成功后应立刻可再次监控");
         let st = w.status(&cfg);
         let e = st.watched.iter().find(|x| x.id == "nginx").unwrap();
-        assert_eq!(e.attempts, 0);
+        assert_eq!(e.attempts, 2);
         assert_eq!(e.restart_count, 2);
+        w.observe("nginx", ServiceState::Running, &cfg);
+        assert_eq!(w.status(&cfg).watched[0].attempts, 2);
+        w.entries.lock().get_mut("nginx").unwrap().running_since =
+            Some(Instant::now() - STABLE_RUNNING);
+        w.observe("nginx", ServiceState::Running, &cfg);
+        assert_eq!(w.status(&cfg).watched[0].attempts, 0);
+    }
+
+    #[test]
+    fn short_successes_still_exhaust_retries_and_observation_preserves_backoff() {
+        let w = Watchdog::new();
+        let cfg = on();
+        w.note_started("flap");
+        for attempt in 1..=cfg.max_attempts {
+            w.observe("flap", ServiceState::Stopped, &cfg);
+            assert!(!w.should_restart("flap", &cfg));
+            let deadline = w.entries.lock()["flap"].next_attempt_at;
+            w.observe("flap", ServiceState::Stopped, &cfg);
+            assert_eq!(w.entries.lock()["flap"].next_attempt_at, deadline);
+            w.entries.lock().get_mut("flap").unwrap().next_attempt_at = Some(Instant::now());
+            assert!(w.should_restart("flap", &cfg));
+            w.note_restart("flap", true, &cfg);
+            assert_eq!(w.status(&cfg).watched[0].attempts, attempt);
+            assert!(
+                !w.exhausted("flap", &cfg),
+                "最后一次恢复仍在运行时不能误报耗尽"
+            );
+        }
+        w.observe("flap", ServiceState::Stopped, &cfg);
+        assert!(w.exhausted("flap", &cfg));
+        assert!(!w.should_restart("flap", &cfg));
+        w.reset("flap");
+        assert!(w.should_restart("flap", &cfg));
+        w.note_user_stopped("flap");
+        w.reset("flap");
+        assert!(!w.should_restart("flap", &cfg));
+        assert!(!w.status(&cfg).watched[0].enabled);
     }
 
     #[test]

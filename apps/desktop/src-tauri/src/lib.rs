@@ -3271,9 +3271,8 @@ fn watchdog_set_enabled(
 
 /// 清空某服务的重试计数（重试次数用尽后按钮走这里）
 #[tauri::command]
-fn watchdog_reset(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: String) -> bool {
-    state.watchdog_reset(&id);
-    true
+fn watchdog_reset(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: String) -> Result<bool, tauri::Error> {
+    map_jh(state.watchdog_reset(&id).map(|_| true))
 }
 
 /* ================= 项目扫描 ================= */
@@ -3737,27 +3736,25 @@ async fn log_export(
 
 /// 批量启用站点：只为每个站点写 vhost，最后统一 reload 一次
 #[tauri::command]
-fn sites_start_many(
+async fn sites_start_many(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     ids: Vec<String>,
 ) -> Result<nsb_core::sites::SiteBulkReport, tauri::Error> {
-    map_jh(nsb_core::sites::start_many(
-        &state.paths,
-        &state.store,
-        &state.manager,
-        &ids,
-    ))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
+        map_jh(nsb_core::sites::start_many(&st.paths, &st.store, &st.manager, &ids))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
-fn sites_stop_many(
+async fn sites_stop_many(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     ids: Vec<String>,
 ) -> Result<nsb_core::sites::SiteBulkReport, tauri::Error> {
-    map_jh(nsb_core::sites::stop_many(
-        &state.paths,
-        &state.store,
-        &state.manager,
-        &ids,
-    ))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
+        map_jh(nsb_core::sites::stop_many(&st.paths, &st.store, &st.manager, &ids))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }

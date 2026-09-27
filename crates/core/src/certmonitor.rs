@@ -379,7 +379,6 @@ mod tests {
             manager: std::sync::Arc::new(crate::services::ServiceManager::new()),
             installer: crate::install::Installer::bundled(),
             downloader: std::sync::Arc::new(crate::download::Downloader::new()),
-            watchdog: std::sync::Arc::new(crate::watchdog::Watchdog::new()),
             emit: std::sync::Arc::new(move |event| { if let Event::CertMonitorAlert { host, state, .. } = event { sink.lock().push((host, state)); } }),
         };
         (dir, state, events)

@@ -501,7 +501,6 @@ mod local_certificate_tests {
             installer: crate::install::Installer::bundled(),
             downloader: std::sync::Arc::new(crate::download::Downloader::new()),
             emit: std::sync::Arc::new(|_| {}),
-            watchdog: std::sync::Arc::new(crate::watchdog::Watchdog::new()),
         };
         (temp, state)
     }

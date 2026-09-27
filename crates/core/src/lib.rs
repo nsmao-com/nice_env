@@ -254,8 +254,6 @@ pub struct CoreState {
     pub downloader: Arc<Downloader>,
     pub installer: install::Installer,
     pub emit: EventSink,
-    /// 服务看门狗：意外退出后自动拉起（用户主动停止的除外）
-    pub watchdog: Arc<watchdog::Watchdog>,
 }
 
 impl CoreState {
@@ -288,7 +286,6 @@ impl CoreState {
             downloader: Arc::new(Downloader::new()),
             installer,
             emit,
-            watchdog: Arc::new(watchdog::Watchdog::new()),
         });
         if !orphans.adopted.is_empty() || !orphans.killed.is_empty() {
             let mut parts = Vec::new();
@@ -392,7 +389,7 @@ impl CoreState {
             self.installer
                 .uninstall(key, &self.paths, &self.store, &self.manager)?;
         if let Some(sid) = stopped_service {
-            self.watchdog.forget(&sid);
+            self.manager.watchdog.forget(&sid);
         }
         // 卸载后目录已不存在，必须把托管条目摘掉，否则 PATH 里留死路径
         pathenv::sync(&self.store, &self.paths, &self.installer.manifest).map_err(|error| {
@@ -922,18 +919,9 @@ impl CoreState {
         let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
         let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后启动"))?;
         ensure_application_accepts_work()?;
-        let mut r = ops::start_service(&self.store, &self.paths, &self.manager, id);
-        if r.is_ok() && !self.manager.snapshot(id).is_some_and(|status| status.state == model::ServiceState::Running && !status.pids.is_empty()) {
-            let error = AppError::new("SERVICE_START_EXITED", format!("{id} 启动后进程已退出，请检查日志"));
-            self.manager.set_error(id, error.clone());
-            r = Err(error);
-        }
+        let r = ops::start_service(&self.store, &self.paths, &self.manager, id);
         // 记录托管 pid：崩溃后下次启动靠它找回残留进程
         ops::save_pidfile(&self.paths, &self.manager);
-        // 只有真的起来了才算「用户希望它运行」，失败时不该纳入看门狗监控
-        if r.is_ok() {
-            self.watchdog.note_started(id);
-        }
         r
     }
 
@@ -943,11 +931,6 @@ impl CoreState {
         self.manager.snapshot(id).ok_or_else(|| AppError::new("UNKNOWN_SERVICE", format!("服务 {id} 未注册或已卸载")))?;
         let r = ops::stop_service(&self.store, &self.paths, &self.manager, id);
         ops::save_pidfile(&self.paths, &self.manager);
-        // 用户主动停止 → 标记，看门狗不得再拉起它（否则点了停止又被拉起来，
-        // 那个体验比不自动重启还糟）
-        if r.is_ok() {
-            self.watchdog.note_user_stopped(id);
-        }
         r
     }
 
@@ -1197,7 +1180,7 @@ impl CoreState {
         let result = ports::close_port_checked(&self.store, &self.paths, &self.manager, port, expected);
         for id in expected.iter().filter_map(|row| row.service_id.as_deref()) {
             if self.manager.snapshot(id).is_some_and(|status| status.state == model::ServiceState::Stopped && status.pids.is_empty()) {
-                self.watchdog.note_user_stopped(id);
+                self.manager.watchdog.note_user_stopped(id);
             }
         }
         result
@@ -1507,17 +1490,43 @@ impl CoreState {
     }
 
     pub fn watchdog_status(&self) -> watchdog::WatchdogStatus {
-        self.watchdog.status(&self.watchdog_config())
+        let cfg = self.watchdog_config();
+        // 启停正在执行时只返回已有记录，避免把中间态当成崩溃。
+        if let Some(_operation) = self.manager.lifecycle.try_lock() {
+            for status in self.manager.list_status() {
+                self.manager.watchdog.observe(&status.id, status.state, &cfg);
+            }
+        }
+        self.manager.watchdog.status(&cfg)
     }
 
     pub fn watchdog_set_enabled(&self, on: bool) -> Result<()> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
         self.store
             .set_setting("watchdogEnabled", if on { "true" } else { "false" })?;
         Ok(())
     }
 
-    pub fn watchdog_reset(&self, id: &str) {
-        self.watchdog.reset(id);
+    pub fn watchdog_reset(&self, id: &str) -> Result<()> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重试恢复"))?;
+        ensure_application_accepts_work()?;
+        let cfg = self.watchdog_config();
+        if !cfg.enabled { return Err(AppError::new("WATCHDOG_DISABLED", "请先开启服务崩溃后自动重启")); }
+        let status = self.manager.snapshot(id).ok_or_else(|| AppError::new("UNKNOWN_SERVICE", "服务已移除，请刷新列表"))?;
+        if self.manager.is_busy(id) { return Err(AppError::new("SERVICE_BUSY", "服务仍在运行或正在操作，无需重试恢复")); }
+        if let Some(site_id) = applications::site_id(id) {
+            let site = sites::get(&self.store, site_id)?;
+            if site.runtime.application.is_none() || sites::derive_status(&self.paths, &site) != "running" {
+                return Err(AppError::new("SITE_STOPPED", "站点已停止或取消托管，请从站点页面启动"));
+            }
+        }
+        self.manager.watchdog.observe(id, status.state, &cfg);
+        if !self.manager.watchdog.exhausted(id, &cfg) {
+            return Err(AppError::new("WATCHDOG_NOT_EXHAUSTED", "仅达到恢复上限的服务需要重试；主动停止的服务请手动启动"));
+        }
+        self.manager.watchdog.reset(id);
+        Ok(())
     }
 
     /// 看门狗单轮检查：把所有「非用户停止、且确实不在跑」的受监控服务拉起来。
@@ -1537,20 +1546,21 @@ impl CoreState {
         for st in statuses {
             if let Some(id) = applications::site_id(&st.id) {
                 if sites::get(&self.store, id).ok().is_none_or(|site| site.runtime.application.is_none() || sites::derive_status(&self.paths, &site) != "running") {
-                    self.watchdog.note_user_stopped(&st.id);
+                    self.manager.watchdog.note_user_stopped(&st.id);
                     continue;
                 }
             }
+            self.manager.watchdog.observe(&st.id, st.state, &cfg);
             if self.manager.is_busy(&st.id) {
                 continue;
             }
-            if !self.watchdog.should_restart(&st.id, &cfg) {
+            if !self.manager.watchdog.should_restart(&st.id, &cfg) {
                 continue;
             }
             // 只重启「曾经成功跑起来过」的服务：note_started 只在启动成功时调用，
             // 所以没被 note 过的服务压根不在 entries 里，should_restart 会返回 false。
-            let ok = ops::start_service(&self.store, &self.paths, &self.manager, &st.id).is_ok();
-            self.watchdog.note_restart(&st.id, ok, &cfg);
+            let ok = ops::start_service_for_watchdog(&self.store, &self.paths, &self.manager, &st.id).is_ok();
+            self.manager.watchdog.note_restart(&st.id, ok, &cfg);
             if ok {
                 ops::save_pidfile(&self.paths, &self.manager);
             }

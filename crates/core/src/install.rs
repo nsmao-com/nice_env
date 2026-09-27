@@ -851,6 +851,7 @@ impl Installer {
         store.remove_installed(id, version)?;
         if let Some(sid) = &stopped_service {
             manager.services.lock().remove(sid);
+            manager.watchdog.forget(sid);
         }
         if store.get_setting(&format!("active{id}Version")).as_deref() == Some(version) {
             let fallback = crate::ops::installed_by_choice(store, id)
@@ -1347,7 +1348,6 @@ mod tests {
             installer: Installer::bundled(),
             downloader: Arc::new(crate::download::Downloader::new()),
             emit: Arc::new(|_| {}),
-            watchdog: Arc::new(crate::watchdog::Watchdog::new()),
         };
         (temp, state)
     }
@@ -1813,7 +1813,7 @@ mod tests {
             "NOT_INSTALLED"
         );
         assert!(missing.exists());
-        state.watchdog.note_started("nginx");
+        state.manager.watchdog.note_started("nginx");
         state.uninstall_package("nginx@1.31.0").unwrap();
         assert_eq!(
             state.manager.snapshot("nginx").unwrap().version.as_deref(),
@@ -1825,7 +1825,7 @@ mod tests {
         );
         assert!(Path::new(&old.install_path).exists());
         assert!(state
-            .watchdog
+            .manager.watchdog
             .status(&state.watchdog_config())
             .watched
             .is_empty());
@@ -1950,7 +1950,7 @@ mod tests {
         let child = ChildGuard(command.spawn().unwrap());
         let pid = child.0.id();
         state.manager.adopt("caddy", &[pid], Some(32123));
-        state.watchdog.note_started("caddy");
+        state.manager.watchdog.note_started("caddy");
         assert_eq!(
             state
                 .set_active_version("caddy", "2.10.0")
@@ -1965,7 +1965,7 @@ mod tests {
         assert!(platform::process_alive(pid));
         assert_eq!(
             state
-                .watchdog
+                .manager.watchdog
                 .status(&state.watchdog_config())
                 .watched
                 .len(),
@@ -1975,7 +1975,7 @@ mod tests {
         assert!(!platform::process_alive(pid));
         assert!(state.manager.snapshot("caddy").is_none());
         assert!(state
-            .watchdog
+            .manager.watchdog
             .status(&state.watchdog_config())
             .watched
             .is_empty());

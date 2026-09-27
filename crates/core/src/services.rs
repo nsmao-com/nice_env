@@ -45,6 +45,8 @@ pub(crate) struct ServiceWebTarget {
 }
 
 pub struct ServiceManager {
+    /// 所有站点、服务列表及恢复入口共享同一份运行意图。
+    pub watchdog: crate::watchdog::Watchdog,
     /// 启停、版本切换和卸载共用；编排内部允许同线程重入。
     pub(crate) lifecycle: ReentrantMutex<()>,
     pub(crate) adminer: Mutex<Option<crate::toolbox::AdminerRuntime>>,
@@ -57,6 +59,7 @@ pub struct ServiceManager {
 impl ServiceManager {
     pub fn new() -> Self {
         Self {
+            watchdog: crate::watchdog::Watchdog::new(),
             lifecycle: ReentrantMutex::new(()),
             adminer: Mutex::new(None),
             services: Mutex::new(HashMap::new()),
@@ -248,6 +251,9 @@ impl ServiceManager {
             *e.started_port.lock() = Some(p);
         }
         *e.state.lock() = ServiceState::Running;
+        if pids.iter().any(|pid| platform::process_alive(*pid)) {
+            self.watchdog.note_started(id);
+        }
     }
 
     /// 记录本次启动实际绑定的端口（停机命令据此寻址）

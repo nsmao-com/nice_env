@@ -783,7 +783,7 @@ mod tests {
             manager: std::sync::Arc::new(crate::services::ServiceManager::new()),
             installer: crate::install::Installer::bundled(),
             downloader: std::sync::Arc::new(crate::download::Downloader::new()),
-            emit: std::sync::Arc::new(|_| {}), watchdog: std::sync::Arc::new(crate::watchdog::Watchdog::new()),
+            emit: std::sync::Arc::new(|_| {}),
         };
         (temp, state)
     }

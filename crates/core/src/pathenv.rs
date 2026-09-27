@@ -1438,7 +1438,7 @@ mod tests {
         store.save_site(&site).unwrap();
         let state = crate::CoreState { paths, store, manager: std::sync::Arc::new(crate::services::ServiceManager::new()),
             downloader: std::sync::Arc::new(crate::download::Downloader::new()), installer: crate::install::Installer { manifest },
-            emit: std::sync::Arc::new(|_| {}), watchdog: std::sync::Arc::new(crate::watchdog::Watchdog::new()) };
+            emit: std::sync::Arc::new(|_| {}) };
         (temp, state, site)
     }
 

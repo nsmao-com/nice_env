@@ -262,7 +262,17 @@ pub fn start_service(
     manager: &Arc<ServiceManager>,
     id: &str,
 ) -> Result<()> {
-    start_service_inner(store, paths, manager, id, true)
+    start_service_inner(store, paths, manager, id, true, true)
+}
+
+/// 自动恢复不能经过用户启动的计数重置路径。
+pub(crate) fn start_service_for_watchdog(
+    store: &Store,
+    paths: &Paths,
+    manager: &Arc<ServiceManager>,
+    id: &str,
+) -> Result<()> {
+    start_service_inner(store, paths, manager, id, true, false)
 }
 
 /// 站点事务自行应用并回滚受影响的 Web 配置，PHP 启动不能提前重载其它服务。
@@ -272,7 +282,7 @@ pub(crate) fn start_php_for_site(
     manager: &Arc<ServiceManager>,
     version: &str,
 ) -> Result<()> {
-    start_service_inner(store, paths, manager, &format!("php@{version}"), false)
+    start_service_inner(store, paths, manager, &format!("php@{version}"), false, true)
 }
 
 fn start_service_inner(
@@ -281,6 +291,7 @@ fn start_service_inner(
     manager: &Arc<ServiceManager>,
     id: &str,
     reload_php_web: bool,
+    user_start: bool,
 ) -> Result<()> {
     let _operation = manager.lifecycle.lock();
     register_services(paths, store, manager);
@@ -297,6 +308,7 @@ fn start_service_inner(
     }
     if let Some(e) = manager.snapshot(id) {
         if e.state == ServiceState::Running {
+            if user_start { manager.watchdog.note_started(id); }
             return Ok(());
         }
     }
@@ -352,6 +364,12 @@ fn start_service_inner(
             if let Some(e) = manager.services.lock().get(id).cloned() {
                 *e.started_at.lock() = Some(std::time::SystemTime::now());
             }
+            if !manager.snapshot(id).is_some_and(|status| status.state == ServiceState::Running && !status.pids.is_empty()) {
+                let error = AppError::new("SERVICE_START_EXITED", format!("{id} 启动后进程已退出，请检查日志"));
+                manager.set_error(id, error.clone());
+                return Err(error);
+            }
+            if user_start { manager.watchdog.note_started(id); }
             Ok(())
         }
         Err(mut err) => {
@@ -948,11 +966,13 @@ pub fn stop_service(
     let _operation = manager.lifecycle.lock();
     if id == "coredns" { crate::dns::restore_before_stop(store)?; }
     if manager.snapshot(id).is_none() {
+        manager.watchdog.forget(id);
         return Ok(());
     }
     if !manager.is_busy(id) {
         // Error/Unknown 但已无进程时也属于已停止，不再发送无目标的停机命令。
         manager.set_state(id, ServiceState::Stopped);
+        manager.watchdog.note_user_stopped(id);
         return Ok(());
     }
     manager.set_state(id, ServiceState::Stopping);
@@ -1100,6 +1120,7 @@ pub fn stop_service(
     }
     if survivors.is_empty() {
         manager.set_state(id, ServiceState::Stopped);
+        manager.watchdog.note_user_stopped(id);
     } else {
         // 进程仍在：不要谎报 Stopped，否则后续 stop 会被短路掉再也杀不掉
         if let Err(error) = &result {
@@ -1804,7 +1825,6 @@ mod validate_tests {
             installer: crate::install::Installer::bundled(),
             downloader: Arc::new(crate::download::Downloader::new()),
             emit: Arc::new(|_| {}),
-            watchdog: Arc::new(crate::watchdog::Watchdog::new()),
         }
     }
 
@@ -2426,7 +2446,6 @@ mod validate_tests {
             installer: crate::install::Installer::bundled(),
             downloader: Arc::new(crate::download::Downloader::new()),
             emit: Arc::new(|_| {}),
-            watchdog: Arc::new(crate::watchdog::Watchdog::new()),
         };
         struct StopOnDrop<'a>(&'a crate::CoreState);
         impl Drop for StopOnDrop<'_> {
@@ -2791,7 +2810,7 @@ mod validate_tests {
         state.manager.register("redis", "Redis", None, None, None, state.paths.service_log("redis"));
         // 缺少版本会在发送停机请求前失败；使用本测试 PID 证明它仍在，不执行结束命令。
         state.manager.adopt("redis", &[std::process::id()], None);
-        state.watchdog.note_started("redis");
+        state.manager.watchdog.note_started("redis");
         state.store.set_setting("watchdogEnabled", "true").unwrap();
         let error = state.restart_service("redis").unwrap_err();
         assert_eq!(error.code, "REDIS_VERSION_UNKNOWN");
@@ -2823,7 +2842,7 @@ mod validate_tests {
         let state = isolated_state(Paths::new(temp.path().to_path_buf()));
         register_fixture(&state, "nginx", "1", &temp.path().join("missing-runtime"));
         register_services(&state.paths, &state.store, &state.manager);
-        state.watchdog.note_started("nginx");
+        state.manager.watchdog.note_started("nginx");
         let error = state.restart_service("nginx").unwrap_err();
         assert!(error.message.contains("服务已停止，但重新启动失败"));
         assert_ne!(error.code, "UNKNOWN_SERVICE");
@@ -2831,16 +2850,16 @@ mod validate_tests {
         assert_eq!(snapshot.state, ServiceState::Error);
         assert!(snapshot.pids.is_empty());
         let cfg = crate::watchdog::WatchdogConfig { enabled: true, ..Default::default() };
-        assert!(!state.watchdog.should_restart("nginx", &cfg));
+        assert!(!state.manager.watchdog.should_restart("nginx", &cfg));
         assert!(state.paths.data().join("run/pids.json").exists());
         // 已无进程的 Error 也应被主动停止抑制，批量重启失败不能重新启用看门狗。
-        state.watchdog.note_started("nginx");
+        state.manager.watchdog.note_started("nginx");
         let stopped = state.bulk_stop(&["nginx".into()]).unwrap();
         assert_eq!(stopped.already, ["nginx"]);
-        assert!(!state.watchdog.should_restart("nginx", &cfg));
+        assert!(!state.manager.watchdog.should_restart("nginx", &cfg));
         let restarted = state.bulk_restart(&["nginx".into()]).unwrap();
         assert!(restarted.failed[0].error.message.contains("重新启动失败"));
-        assert!(!state.watchdog.should_restart("nginx", &cfg));
+        assert!(!state.manager.watchdog.should_restart("nginx", &cfg));
     }
 
     #[test]
@@ -2903,25 +2922,25 @@ powershell.exe -NoProfile -NonInteractive -Command "$listener = [System.Net.Sock
         state.store.set_setting("autoFallbackPort", "false").unwrap();
         state.start_service("fixture-a").unwrap();
         let cfg = crate::watchdog::WatchdogConfig { enabled: true, ..Default::default() };
-        assert!(state.watchdog.should_restart("fixture-a", &cfg));
+        assert!(state.manager.watchdog.should_restart("fixture-a", &cfg));
         let mut freed = Vec::new();
         state.start_service_with_port_policy("fixture-b", |p| freed.push(p)).unwrap();
         assert_eq!(freed, [port]);
         assert_eq!(state.manager.snapshot("fixture-a").unwrap().state, ServiceState::Stopped);
-        assert!(!state.watchdog.should_restart("fixture-a", &cfg));
+        assert!(!state.manager.watchdog.should_restart("fixture-a", &cfg));
         let before = state.manager.snapshot("fixture-b").unwrap().pids;
         state.restart_service("fixture-b").unwrap();
         let after = state.manager.snapshot("fixture-b").unwrap();
         assert_eq!(after.state, ServiceState::Running);
         assert_ne!(before, after.pids);
         assert!(before.iter().all(|pid| !platform::process_alive(*pid)));
-        assert!(state.watchdog.should_restart("fixture-b", &cfg));
+        assert!(state.manager.watchdog.should_restart("fixture-b", &cfg));
         let recorded: serde_json::Value = serde_json::from_slice(&std::fs::read(state.paths.data().join("run/pids.json")).unwrap()).unwrap();
         assert!(recorded["services"].as_array().unwrap().iter().any(|row| row["id"] == "fixture-b" && row["pids"][0] == after.pids[0]));
         let scan = state.scan_port_range(port, port).unwrap();
         let outcome = state.close_port_checked(port, &scan.listeners).unwrap();
         assert!(outcome.port_free);
-        assert!(!state.watchdog.should_restart("fixture-b", &cfg));
+        assert!(!state.manager.watchdog.should_restart("fixture-b", &cfg));
 
         // 同一真实临时实例覆盖整栈、批量和托盘全部停止所用的核心入口。
         let stack = state.save_stack(crate::model::StackInput {
@@ -2932,23 +2951,23 @@ powershell.exe -NoProfile -NonInteractive -Command "$listener = [System.Net.Sock
         let stack_pid = state.manager.snapshot("fixture-b").unwrap().pids;
         assert_eq!(state.start_stack(&stack.id).unwrap().already_running, ["fixture-b"]);
         assert_eq!(state.manager.snapshot("fixture-b").unwrap().pids, stack_pid);
-        assert!(state.watchdog.should_restart("fixture-b", &cfg));
+        assert!(state.manager.watchdog.should_restart("fixture-b", &cfg));
         assert_eq!(state.stop_stack(&stack.id).unwrap().started, ["fixture-b"]);
-        assert!(!state.watchdog.should_restart("fixture-b", &cfg));
+        assert!(!state.manager.watchdog.should_restart("fixture-b", &cfg));
         let report = state.bulk_start(&["fixture-b".into(), "missing".into(), "fixture-b".into()]).unwrap();
         assert_eq!(report.succeeded, ["fixture-b"], "{report:?}");
         assert_eq!(report.failed[0].service_id, "missing");
-        assert!(state.watchdog.should_restart("fixture-b", &cfg));
+        assert!(state.manager.watchdog.should_restart("fixture-b", &cfg));
         let before = state.manager.snapshot("fixture-b").unwrap().pids;
         let report = state.bulk_restart(&["fixture-b".into()]).unwrap();
         assert_eq!(report.succeeded, ["fixture-b"], "{report:?}");
         assert_ne!(state.manager.snapshot("fixture-b").unwrap().pids, before);
         assert!(before.iter().all(|pid| !platform::process_alive(*pid)));
-        assert!(state.watchdog.should_restart("fixture-b", &cfg));
+        assert!(state.manager.watchdog.should_restart("fixture-b", &cfg));
         let listeners = state.scan_port_range(port, port).unwrap().listeners;
         assert!(!listeners.is_empty());
         assert_eq!(state.stop_all_services().unwrap().succeeded, ["fixture-b"]);
-        assert!(!state.watchdog.should_restart("fixture-b", &cfg));
+        assert!(!state.manager.watchdog.should_restart("fixture-b", &cfg));
         assert!(listeners.iter().all(|listener| !platform::process_alive(listener.pid)));
         assert!(state.scan_port_range(port, port).unwrap().listeners.is_empty());
         // 与真正启动的预检一致，验证端口可重新绑定，避免连接探针额外制造临时连接。
@@ -3010,8 +3029,8 @@ powershell.exe -NoProfile -NonInteractive -Command "$listener = [System.Net.Sock
         let cached = Arc::new(isolated_state(source));
         cached.store.set_setting("watchdogEnabled","true").unwrap();
         cached.manager.register("handoff-probe","Handoff probe",None,None,None,cached.paths.service_log("handoff-probe"));
-        cached.watchdog.note_started("handoff-probe");
-        assert!(cached.watchdog.should_restart("handoff-probe",&cached.watchdog_config()));
+        cached.manager.watchdog.note_started("handoff-probe");
+        assert!(cached.manager.watchdog.should_restart("handoff-probe",&cached.watchdog_config()));
         let target = temp.path().join("target");
         let (_,guard) = state.prepare_data_dir_migration(&target).unwrap();
         let pidfile = std::fs::read(state.paths.data().join("run/pids.json")).unwrap();

@@ -27,7 +27,6 @@ async fn main() {
             manager: Arc::new(nsb_core::services::ServiceManager::new()),
             downloader: Arc::new(nsb_core::download::Downloader::new()),
             emit: Arc::new(|_| {}),
-            watchdog: Arc::new(nsb_core::watchdog::Watchdog::new()),
         })
     } else {
         nsb_core::CoreState::init(Some(base.clone()), std::sync::Arc::new(|_| {})).unwrap()

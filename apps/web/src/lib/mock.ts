@@ -65,7 +65,7 @@ import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSet
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.77";
+const MOCK_APP_VERSION = "0.2.78";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -2143,9 +2143,10 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         enabled: settings.watchdogEnabled === true,
         maxAttempts: 5,
         intervalSec: 3,
-        watched: Array.from(services.keys()).map((id) => ({
-          id,
+        watched: Array.from(services.values()).filter((service) => service.state === "running").map((service) => ({
+          id: service.id,
           enabled: true,
+          running: true,
           attempts: 0,
           exhausted: false,
           restartCount: 0,
@@ -2156,7 +2157,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return true as T;
     }
     case "watchdog_reset":
-      return true as T;
+      throw { code: "WATCHDOG_PREVIEW", message: "浏览器演示不运行本机服务，请在桌面端重试自动恢复" };
     case "db_backup_list":
       return structuredClone(Array.from(mockDbBackups.values()).sort((a, b) => b.createdAt - a.createdAt)) as T;
     case "db_backup_dir": return "C:/NiceEnv/backup/db" as T;

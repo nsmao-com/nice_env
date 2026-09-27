@@ -158,6 +158,7 @@ pub(crate) fn register_services(paths: &Paths, store: &Store, manager: &ServiceM
     for id in stale {
         if !manager.is_busy(&id) {
             manager.services.lock().remove(&id);
+            manager.watchdog.forget(&id);
         }
     }
     for site in sites {

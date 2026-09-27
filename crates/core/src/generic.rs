@@ -1814,7 +1814,6 @@ mod startup_tests {
             installer: crate::install::Installer { manifest: serde_json::from_str(include_str!("../../../manifest/packages.win.json")).unwrap() },
             manager: Arc::new(ServiceManager::new()),
             downloader: Arc::new(crate::download::Downloader::new()), emit: Arc::new(|_| {}),
-            watchdog: Arc::new(crate::watchdog::Watchdog::new()),
         };
         let mut entry = match version { Some(v) => state.installer.find(&format!("{id}@{v}")), None => state.installer.template_for(id) }.unwrap();
         entry.entry = crate::ops::exe_name("fixture");

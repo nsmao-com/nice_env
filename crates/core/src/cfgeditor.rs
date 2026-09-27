@@ -1886,7 +1886,6 @@ mod tests {
             installer: crate::install::Installer::bundled(),
             downloader: Arc::new(crate::download::Downloader::new()),
             emit: Arc::new(|_| {}),
-            watchdog: Arc::new(crate::watchdog::Watchdog::new()),
         };
         let sid = format!("php@{version}");
         struct Cleanup<'a>(&'a crate::CoreState, String);

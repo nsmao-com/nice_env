@@ -1,6 +1,6 @@
 {
-  "revision": 40,
-  "updated": "2026-09-26",
+  "revision": 41,
+  "updated": "2026-09-27",
   "packages": [
     {
       "id": "nginx",
@@ -1277,7 +1277,7 @@
       "version": "2.0.4",
       "category": "service-mesh",
       "displayName": "Consul",
-      "description": "服务发现与配置中心（开发模式，自带 UI）",
+      "description": "服务发现与配置中心（本机单节点，持久化数据，自带 UI）",
       "os": [
         "windows"
       ],
@@ -1294,14 +1294,39 @@
       "run": {
         "args": [
           "agent",
-          "-dev",
+          "-server",
+          "-bootstrap-expect",
+          "1",
+          "-node",
+          "niceenv-consul",
+          "-bind",
+          "127.0.0.1",
           "-client",
           "127.0.0.1",
+          "-data-dir",
+          "{data}",
+          "-ui",
           "-http-port",
-          "{port}"
+          "{port}",
+          "-dns-port",
+          "{port+100}",
+          "-server-port",
+          "{port-200}",
+          "-serf-lan-port",
+          "{port-199}",
+          "-serf-wan-port",
+          "{port-198}",
+          "-grpc-port",
+          "{port+2}",
+          "-grpc-tls-port",
+          "{port+3}",
+          "-hcl",
+          "connect { enabled = true }",
+          "-hcl",
+          "raft_logstore { backend = \"boltdb\" }"
         ],
         "health": "tcp",
-        "healthTimeoutSec": 20
+        "healthTimeoutSec": 30
       }
     },
     {
@@ -3492,14 +3517,39 @@
       "run": {
         "args": [
           "agent",
-          "-dev",
+          "-server",
+          "-bootstrap-expect",
+          "1",
+          "-node",
+          "niceenv-consul",
+          "-bind",
+          "127.0.0.1",
           "-client",
           "127.0.0.1",
+          "-data-dir",
+          "{data}",
+          "-ui",
           "-http-port",
-          "{port}"
+          "{port}",
+          "-dns-port",
+          "{port+100}",
+          "-server-port",
+          "{port-200}",
+          "-serf-lan-port",
+          "{port-199}",
+          "-serf-wan-port",
+          "{port-198}",
+          "-grpc-port",
+          "{port+2}",
+          "-grpc-tls-port",
+          "{port+3}",
+          "-hcl",
+          "connect { enabled = true }",
+          "-hcl",
+          "raft_logstore { backend = \"boltdb\" }"
         ],
         "health": "tcp",
-        "healthTimeoutSec": 20
+        "healthTimeoutSec": 30
       }
     },
     {
@@ -3524,14 +3574,39 @@
       "run": {
         "args": [
           "agent",
-          "-dev",
+          "-server",
+          "-bootstrap-expect",
+          "1",
+          "-node",
+          "niceenv-consul",
+          "-bind",
+          "127.0.0.1",
           "-client",
           "127.0.0.1",
+          "-data-dir",
+          "{data}",
+          "-ui",
           "-http-port",
-          "{port}"
+          "{port}",
+          "-dns-port",
+          "{port+100}",
+          "-server-port",
+          "{port-200}",
+          "-serf-lan-port",
+          "{port-199}",
+          "-serf-wan-port",
+          "{port-198}",
+          "-grpc-port",
+          "{port+2}",
+          "-grpc-tls-port",
+          "{port+3}",
+          "-hcl",
+          "connect { enabled = true }",
+          "-hcl",
+          "raft_logstore { backend = \"boltdb\" }"
         ],
         "health": "tcp",
-        "healthTimeoutSec": 20
+        "healthTimeoutSec": 30
       }
     },
     {

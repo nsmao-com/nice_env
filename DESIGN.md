@@ -1807,3 +1807,17 @@ Qdrant 入口读取本次启动的静态目录、启用开关、监听地址和 
 最终 pnpm --filter @nsb/web check、cargo check --workspace --all-targets --locked、版本一致性和 git diff --check 均通过。包、crate、Tauri 和界面回退版本统一至 0.2.55，Cargo.lock 只同步本项目三个 crate 版本。已确认 v0.2.54 Release completed/success；本轮发布必须新建 annotated tag v0.2.55，与 main 原子推送，再核对远程分支、peeled tag 和 Release workflow 实际状态，不移动旧 tag，保留原有未跟踪文件。
 
 原生验收范围为 Windows SFTPGo 2.7.5→2.7.6，macOS 和外部数据库仍未验收。非回环管理台入口、r-nacos 上游启动 panic、MinIO/Consul 原生验收等仍待完善，整体产品目标保持进行。
+
+## 第七十轮：Consul 持久化、完整端口组与真实管理台验收（v0.2.56）
+
+继续参照 ServBay 的服务管理与卸载保留数据流程（https://support.servbay.com/basic-usage/services-and-packages/service-and-package-management）。检查发现原 Consul 运行描述使用 agent -dev，官方明确此模式为内存服务、关闭持久化，重启丢失 KV；原清单还只设置 HTTP 端口，DNS、RPC、gossip 和 gRPC 仍使用上游默认端口。核对官方 CLI 文档（https://developer.hashicorp.com/consul/docs/agent/config/cli-flags）及实际 2.0.4 agent -help，将 Windows 清单中的 2.0.2–2.0.4 改为本机单节点 server，bootstrap-expect 1，固定节点名称，客户端及集群通信绑定回环地址，显式启用 UI 和原开发模式已提供的 service mesh，数据写入版本无关的 data/consul。
+
+首次原生验收发现 Consul 2.0.3 默认 WAL 后端在 Windows 同步 raft/wal 目录时报 Access is denied，进程退出；没有放宽健康检查或改动目录权限来绕过。按官方 Raft 存储配置（https://developer.hashicorp.com/consul/docs/reference/agent/configuration-file/raft）显式使用 boltdb，完整验收随后通过。此次只更改原内置运行描述，旧安装快照、远端旧清单和版本模板在读取时做精确形状兼容，实际入口、下载来源、校验值及原快照文件保持不变；用户修改过 args、cwd、env、配置或超时的旧描述不被替换。既有内存模式已经丢失的数据无法恢复，本轮不声称将运行中的旧内存状态自动迁移到磁盘。
+
+以 HTTP 主端口为基准同时分配 RPC -200、LAN -199、WAN -198、gRPC +2、gRPC TLS +3 和 DNS +100，复用现有端口组冲突、自动回落和持久化分配。DNS 与两种 gossip 额外检查 UDP，避免仅 TCP 可绑定却实际启动失败；非法端口或派生值越界明确拒绝。数据目录在创建前复用受管路径检查。内置编排启动后要求七个 TCP 端口都属于本次活进程，再确认 /v1/status/leader 返回本节点当前 RPC 地址并稳定存在，不能仅 HTTP 端口打开就显示运行成功；超时或进程退出沿用启动失败清理，不残留服务。自定义集群配置不应用单节点判定。
+
+21 项通用启动与 16 项安装/卸载回归共 37 项通过。新增覆盖三个 UDP 端口冲突、附加 TCP 端口冲突、整体回落、预检不提前提交端口、越界输入和旧运行描述兼容/自定义保留；所有验证位于已有 Rust 源码模块，没有新增测试文件。显式原生 Consul 验收通过，耗时 63.95 秒：官方 2.0.3/2.0.4 ZIP 先核对清单 SHA-256 再解压执行；临时 SQLite、含空格的数据路径和回环端口下，旧安装快照自动采用持久化描述，制造 DNS UDP 冲突后启动，实际写入中文 KV、注册服务，访问管理台 HTML 及真实 JavaScript，并通过 UDP DNS 解析 consul.service.consul。依次重启、移动整组端口、升级 2.0.4、运行中卸载未使用旧版、卸载新版并重新安装，每阶段均确认 KV、服务注册和 NodeID 保留，旧安装文件未被兼容逻辑改写；结束确认无 fixture.exe/consul.exe 残留，没有操作用户真实数据或服务。
+
+最终 pnpm --filter @nsb/web check、cargo check --workspace --all-targets --locked、版本一致性和 git diff --check 均通过。未改界面布局，未启动前端 dev 或执行前端 build。没有新增依赖或数据库变更，未修改 update.sql；Cargo.lock 只同步本项目三个 crate 版本。Windows 清单 revision 更新至 41，包、crate、Tauri 与界面回退版本统一至 0.2.56。已确认 v0.2.55 Release completed/success；本轮必须创建新 annotated tag v0.2.56，与 main 原子推送并核对远程指向及 Release 实际状态，保留旧 tag 和既有未跟踪文件。
+
+本轮原生验收范围为 Windows Consul 2.0.3→2.0.4 的内置本机单节点，2.0.2、macOS 和自定义集群未作原生验收。MinIO 管理台配置及原生读写、非回环管理台入口、r-nacos 上游 panic 等仍需继续完善，整体产品目标保持进行。

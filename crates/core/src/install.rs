@@ -31,6 +31,20 @@ pub(crate) fn official_qdrant(entry: &crate::model::PackageManifestEntry) -> boo
 
 /// 只升级曾随应用发布的原始运行描述；下载信息、实际入口及用户修改保持不变。
 fn upgrade_legacy_run(mut entry: crate::model::PackageManifestEntry) -> crate::model::PackageManifestEntry {
+    if entry.id == "consul" {
+        let legacy: crate::model::ServiceRunSpec = serde_json::from_value(serde_json::json!({
+            "args": ["agent", "-dev", "-client", "127.0.0.1", "-http-port", "{port}"],
+            "health": "tcp", "healthTimeoutSec": 20
+        })).expect("内置旧运行描述合法");
+        if entry.run.as_ref().is_some_and(|run| serde_json::to_value(run).ok() == serde_json::to_value(&legacy).ok()) {
+            let bundled: crate::model::Manifest = serde_json::from_str(include_str!("../../../manifest/packages.win.json")).expect("内置清单合法");
+            entry.run = bundled.packages.into_iter().find(|p| p.id == "consul").and_then(|p| p.run);
+            if entry.description == "服务发现与配置中心（开发模式，自带 UI）" {
+                entry.description = "服务发现与配置中心（本机单节点，持久化数据，自带 UI）".into();
+            }
+        }
+        return entry;
+    }
     if entry.id == "sftpgo" {
         let legacy: crate::model::ServiceRunSpec = serde_json::from_value(serde_json::json!({
             "args": ["serve", "--config-dir", "{etc}", "--log-file-path", "{data}/sftpgo.log"],
@@ -1397,6 +1411,41 @@ mod tests {
                 1 => run.cwd = Some("{data}".into()),
                 2 => { run.env.as_mut().unwrap().insert("RUST_LOG".into(), "warn".into()); },
                 _ => run.config_template.as_mut().unwrap().push_str("RUST_LOG=warn\n"),
+            }
+            std::fs::write(&snapshot, serde_json::to_vec(&custom).unwrap()).unwrap();
+            assert_eq!(serde_json::to_value(state.installer.installed_entry(&installed)).unwrap(), serde_json::to_value(custom).unwrap());
+        }
+    }
+
+    #[test]
+    fn legacy_consul_dev_runs_become_persistent_without_replacing_custom_settings() {
+        let (_temp, mut state) = fixture();
+        state.installer.manifest = serde_json::from_str(include_str!("../../../manifest/packages.win.json")).unwrap();
+        let expected = state.installer.find("consul").unwrap().run.unwrap();
+        let mut legacy = state.installer.find("consul").unwrap();
+        legacy.run = Some(serde_json::from_value(serde_json::json!({
+            "args":["agent","-dev","-client","127.0.0.1","-http-port","{port}"], "health":"tcp", "healthTimeoutSec":20
+        })).unwrap());
+        let installed = install_fixture(&state, "consul", &legacy.version);
+        let snapshot = Path::new(&installed.install_path).join(".niceenv-package.json");
+        let raw = serde_json::to_vec(&legacy).unwrap(); std::fs::write(&snapshot, &raw).unwrap();
+        let upgraded = state.installer.installed_entry(&installed);
+        assert_eq!(upgraded.entry, legacy.entry); assert_eq!(upgraded.url, legacy.url); assert_eq!(upgraded.sha256, legacy.sha256);
+        assert_eq!(serde_json::to_value(upgraded.run.unwrap()).unwrap(), serde_json::to_value(&expected).unwrap());
+        assert_eq!(std::fs::read(&snapshot).unwrap(), raw);
+        state.installer.manifest.packages = vec![legacy.clone()];
+        for run in [state.installer.find("consul").unwrap().run.unwrap(), state.installer.template_for("consul").unwrap().run.unwrap(),
+            state.installer.package_views(&[])[0].manifest.run.clone().unwrap()] {
+            assert_eq!(serde_json::to_value(run).unwrap(), serde_json::to_value(&expected).unwrap());
+        }
+        for variation in 0..5 {
+            let mut custom = legacy.clone(); let run = custom.run.as_mut().unwrap();
+            match variation {
+                0 => run.args.extend(["-data-dir".into(), "custom".into()]),
+                1 => run.cwd = Some("{data}".into()),
+                2 => run.env = Some(std::collections::HashMap::from([("CONSUL_DATACENTER".into(), "custom".into())])),
+                3 => run.config_file = Some("custom.hcl".into()),
+                _ => run.health_timeout_sec = 60,
             }
             std::fs::write(&snapshot, serde_json::to_vec(&custom).unwrap()).unwrap();
             assert_eq!(serde_json::to_value(state.installer.installed_entry(&installed)).unwrap(), serde_json::to_value(custom).unwrap());

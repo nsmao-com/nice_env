@@ -216,6 +216,7 @@ fn resolve_with_sftpgo_directory(store: &Store, paths: &Paths, service_id: &str,
     let data = paths
         .data()
         .join(spec.data_dir.clone().unwrap_or_else(|| id.clone()));
+    if managed_consul(&entry, &spec) { crate::paths::checked_data_path(&paths.base, "data/consul")?; }
     let preview = directory.is_some();
     let etc = if managed_sftpgo(&entry, &spec) {
         match directory { Some(directory) => directory, None => sftpgo_config_dir(store, paths)? }
@@ -310,6 +311,27 @@ static PORT_TOKEN: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::
     regex::Regex::new(r"\{port([+-]\d+)?\}").unwrap());
 
 const SFTPGO_CONFIG_BINDING: &str = "sftpgoConfigDir";
+
+const CONSUL_TCP_OFFSETS: [i32; 7] = [-200, -199, -198, 0, 2, 3, 100];
+const CONSUL_UDP_OFFSETS: [i32; 3] = [-199, -198, 100];
+
+/// 仅对内置持久化单节点编排应用端口组和 leader 检查，不猜测自定义集群设置。
+/// Windows 的上游 WAL 在同步目录时失败；内置清单显式使用受支持的 BoltDB 后端。
+fn managed_consul(entry: &PackageManifestEntry, spec: &ServiceRunSpec) -> bool {
+    entry.id == "consul" && spec.single_instance && spec.data_dir.is_none() && spec.config_file.is_none()
+        && spec.config_template.is_none() && spec.health == "tcp"
+        && spec.args == ["agent", "-server", "-bootstrap-expect", "1", "-node", "niceenv-consul",
+            "-bind", "127.0.0.1", "-client", "127.0.0.1", "-data-dir", "{data}", "-ui",
+            "-http-port", "{port}", "-dns-port", "{port+100}", "-server-port", "{port-200}",
+            "-serf-lan-port", "{port-199}", "-serf-wan-port", "{port-198}", "-grpc-port", "{port+2}",
+            "-grpc-tls-port", "{port+3}", "-hcl", "connect { enabled = true }",
+            "-hcl", "raft_logstore { backend = \"boltdb\" }"]
+}
+
+fn needs_udp(r: &Resolved, base: u16, port: u16) -> bool {
+    r.entry.id == "coredns" || (managed_consul(&r.entry, &r.spec)
+        && CONSUL_UDP_OFFSETS.contains(&(i32::from(port) - i32::from(base))))
+}
 
 fn managed_sftpgo(entry: &PackageManifestEntry, spec: &ServiceRunSpec) -> bool {
     entry.id == "sftpgo" && spec.single_instance && spec.health == "tcp"
@@ -1019,7 +1041,7 @@ fn select_port(store: &Store, r: &Resolved) -> Result<Option<u16>> {
             .and_then(|value| u16::try_from(value).ok()).filter(|p| *p > 0)).collect()
     };
     let available = |base| ports(base).is_some_and(|ports| ports.into_iter().all(|port|
-        tcp_port_bindable(port) && (r.entry.id != "coredns" || std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok())));
+        tcp_port_bindable(port) && (!needs_udp(r, base, port) || std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok())));
     let original = ports(desired).ok_or_else(|| AppError::new("BAD_PORT", "主端口及派生端口必须位于 1–65535，请调整服务端口"))?;
     if available(desired) { return Ok(Some(desired)); }
     let enabled = match store.get_setting_checked("autoFallbackPort")?.as_deref() {
@@ -1041,7 +1063,7 @@ fn select_port(store: &Store, r: &Resolved) -> Result<Option<u16>> {
     }
     for port in original {
         precheck_port(port, &r.entry.display_name)?;
-        if r.entry.id == "coredns" {
+        if needs_udp(r, desired, port) {
             std::net::UdpSocket::bind(("127.0.0.1", port))
                 .map_err(|e| AppError::port_conflict(port, Some("UDP 端口不可用")).with_detail(e.to_string()))?;
         }
@@ -1218,6 +1240,27 @@ fn wait_owned_ports(manager: &ServiceManager, id: &str, ports: &[u16], timeout: 
 
 const RNACOS_START_MARKER: &str = "r-nacos：开始本次启动检查";
 
+fn wait_consul_healthy(manager: &ServiceManager, r: &Resolved, timeout: Duration) -> bool {
+    let Some(port) = r.port else { return false; };
+    let Some(ports) = CONSUL_TCP_OFFSETS.iter().map(|offset| u16::try_from(i32::from(port) + offset).ok())
+        .collect::<Option<Vec<_>>>() else { return false; };
+    let Ok(client) = reqwest::blocking::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_millis(700)).build() else { return false; };
+    let deadline = std::time::Instant::now() + timeout;
+    let mut ready_since = None;
+    while std::time::Instant::now() < deadline {
+        if manager.snapshot(&r.service_id).is_none_or(|service| service.pids.iter().all(|pid| !platform::process_alive(*pid))) { return false; }
+        let ready = owned_ports_ready(manager, &r.service_id, &ports)
+            && client.get(format!("http://127.0.0.1:{port}/v1/status/leader")).send().is_ok_and(|response|
+                response.status().is_success() && response.json::<String>().is_ok_and(|leader| leader == format!("127.0.0.1:{}", ports[0])));
+        if ready {
+            if ready_since.get_or_insert_with(std::time::Instant::now).elapsed() >= Duration::from_millis(300) { return true; }
+        } else { ready_since = None; }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
 fn rnacos_startup_panicked(manager: &ServiceManager, id: &str) -> bool {
     manager.services.lock().get(id).is_some_and(|entry| entry.ring.lock().iter().rev()
         .take_while(|line| line.as_str() != RNACOS_START_MARKER)
@@ -1343,6 +1386,8 @@ pub fn start(
             .is_some_and(|ports| wait_owned_ports(manager, &r.service_id, &ports, timeout))
     } else if managed_rnacos(&r) {
         wait_rnacos_healthy(manager, &r, timeout)
+    } else if managed_consul(&r.entry, &r.spec) {
+        wait_consul_healthy(manager, &r, timeout)
     } else if r.entry.id == "coredns" {
         let tld = store.get_setting_checked("defaultTld")?.unwrap_or_else(|| "test".into());
         let deadline = std::time::Instant::now() + timeout;
@@ -1373,7 +1418,9 @@ pub fn start(
                 "{} 启动超时（{}s 内{}）",
                 r.entry.display_name,
                 r.spec.health_timeout_sec,
-                if r.port.is_some() {
+                if managed_consul(&r.entry, &r.spec) {
+                    "监听端口或单节点 leader 未就绪"
+                } else if r.port.is_some() {
                     "端口未就绪"
                 } else {
                     "进程未存活"
@@ -1693,6 +1740,32 @@ mod startup_tests {
             assert_eq!(std::fs::read_to_string(&config).unwrap(), content);
             assert!(state.store.get_port_assign("rnacos").is_none());
         }
+    }
+
+    #[test]
+    fn consul_allocates_tcp_and_udp_as_one_port_group() {
+        let (_temp, state, mut r) = fixture("consul");
+        assert!(managed_consul(&r.entry, &r.spec));
+        let manifest: crate::model::Manifest = serde_json::from_str(include_str!("../../../manifest/packages.win.json")).unwrap();
+        for entry in manifest.packages.iter().filter(|entry| entry.id == "consul") { assert!(managed_consul(entry, entry.run.as_ref().unwrap())); }
+        let base = (31000..41000).find(|base| CONSUL_TCP_OFFSETS.iter().all(|offset| {
+            let port = (i32::from(*base) + offset) as u16;
+            tcp_port_bindable(port) && std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok()
+        })).unwrap();
+        r.port = Some(base);
+        for offset in CONSUL_UDP_OFFSETS {
+            let port = (i32::from(base) + offset) as u16;
+            let occupied = std::net::UdpSocket::bind(("127.0.0.1", port)).unwrap();
+            assert!(select_port(&state.store, &r).is_err());
+            state.store.set_setting("autoFallbackPort", "true").unwrap();
+            assert_ne!(select_port(&state.store, &r).unwrap(), Some(base));
+            assert!(state.store.get_port_assign("consul").is_none());
+            state.store.set_setting("autoFallbackPort", "false").unwrap(); drop(occupied);
+        }
+        let occupied = std::net::TcpListener::bind(("127.0.0.1", base + 3)).unwrap();
+        assert!(select_port(&state.store, &r).is_err()); drop(occupied);
+        for port in [1, 200, 65500] { r.port = Some(port); assert_eq!(select_port(&state.store, &r).unwrap_err().code, "BAD_PORT"); }
+        r.spec.args.push("-dev".into()); assert!(!managed_consul(&r.entry, &r.spec));
     }
 
     #[test]
@@ -2432,6 +2505,87 @@ mod startup_tests {
         assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));
         assert_eq!(state.service_web_url("mailpit").unwrap_err().code, "SERVICE_NOT_RUNNING");
         drop(occupied);
+    }
+
+    #[test]
+    #[ignore = "requires verified NSB_VERIFY_CONSUL_OLD executable (2.0.3) and NSB_VERIFY_CONSUL_ZIP (2.0.4)"]
+    fn native_consul_keeps_kv_and_services_across_restart_port_change_and_upgrade() {
+        let old_program = std::env::var_os("NSB_VERIFY_CONSUL_OLD").expect("set NSB_VERIFY_CONSUL_OLD");
+        let new_zip = std::env::var_os("NSB_VERIFY_CONSUL_ZIP").expect("set NSB_VERIFY_CONSUL_ZIP");
+        let (_temp, state, r) = fixture_version("consul", Some("2.0.3"));
+        std::fs::copy(old_program, &r.bin).unwrap();
+        // 使用旧安装快照，验证升级应用后无需重新安装就能启用持久化运行描述。
+        let mut legacy = r.entry.clone();
+        legacy.run = Some(serde_json::from_value(serde_json::json!({
+            "args":["agent","-dev","-client","127.0.0.1","-http-port","{port}"], "health":"tcp", "healthTimeoutSec":20
+        })).unwrap());
+        let raw = serde_json::to_vec(&legacy).unwrap();
+        let snapshot = r.root.join(".niceenv-package.json"); std::fs::write(&snapshot, &raw).unwrap();
+        let base = (31000..40000).find(|base| CONSUL_TCP_OFFSETS.iter().all(|offset| {
+            let port = (i32::from(*base) + offset) as u16;
+            tcp_port_bindable(port) && std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok()
+        })).unwrap();
+        let occupied_dns = std::net::UdpSocket::bind(("127.0.0.1", base + 100)).unwrap();
+        state.store.set_port_override("consul", Some(base)).unwrap();
+        state.store.set_setting("autoFallbackPort", "true").unwrap();
+        struct Cleanup<'a>(&'a crate::CoreState);
+        impl Drop for Cleanup<'_> { fn drop(&mut self) { let _ = self.0.stop_service("consul"); } }
+        let _cleanup = Cleanup(&state);
+        let start = || { let result = state.start_service("consul"); assert!(result.is_ok(), "{result:?}\n{:?}", state.manager.tail("consul", 35)); };
+        start();
+        let port = state.manager.snapshot("consul").unwrap().port.unwrap(); assert_ne!(port, base);
+        assert_eq!(std::fs::read(&snapshot).unwrap(), raw);
+        let client = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(5)).build().unwrap();
+        let url = |port, path: &str| format!("http://127.0.0.1:{port}{path}");
+        assert_eq!(client.put(url(port, "/v1/kv/niceenv/persisted")).body("重启和升级后保留").send().unwrap().error_for_status().unwrap().text().unwrap(), "true");
+        client.put(url(port, "/v1/agent/service/register")).json(&serde_json::json!({"ID":"niceenv-fixture","Name":"niceenv-fixture",
+            "Address":"127.0.0.1","Port":12345,"Tags":["preserved"]})).send().unwrap().error_for_status().unwrap();
+        let self_info: serde_json::Value = client.get(url(port, "/v1/agent/self")).send().unwrap().error_for_status().unwrap().json().unwrap();
+        let node_id = self_info["Config"]["NodeID"].clone(); assert!(!node_id.is_null());
+        let verify = || {
+            let current = state.manager.snapshot("consul").unwrap(); let port = current.port.unwrap();
+            assert_eq!(client.get(url(port, "/v1/kv/niceenv/persisted?raw&consistent")).send().unwrap().error_for_status().unwrap().text().unwrap(), "重启和升级后保留");
+            let services: serde_json::Value = client.get(url(port, "/v1/agent/services")).send().unwrap().error_for_status().unwrap().json().unwrap();
+            assert_eq!(services["niceenv-fixture"]["Tags"][0], "preserved");
+            let info: serde_json::Value = client.get(url(port, "/v1/agent/self")).send().unwrap().error_for_status().unwrap().json().unwrap();
+            assert_eq!(info["Config"]["NodeID"], node_id);
+            assert_eq!(info["DebugConfig"]["DevMode"], false);
+            let console = state.service_web_url("consul").unwrap(); assert_eq!(console, url(port, "/ui"));
+            let html = client.get(&console).send().unwrap().error_for_status().unwrap().text().unwrap();
+            assert!(html.to_lowercase().contains("consul"));
+            let script = regex::Regex::new(r#"src="([^"]+\.js(?:\?[^"]*)?)""#).unwrap();
+            let asset = script.captures_iter(&html).last().expect("real Consul UI script");
+            let asset_url = reqwest::Url::parse(&console).unwrap().join(&asset[1]).unwrap();
+            let javascript = client.get(asset_url).send().unwrap().error_for_status().unwrap();
+            assert!(!javascript.headers().get("content-type").unwrap().to_str().unwrap().contains("text/html"));
+            assert!(javascript.bytes().unwrap().len() > 1000);
+            // DNS 使用同组 UDP 端口，实际解析内置 consul 服务。
+            let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap(); socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let query = b"\x46\x91\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x06consul\x07service\x06consul\x00\x00\x01\x00\x01";
+            socket.send_to(query, ("127.0.0.1", port + 100)).unwrap(); let mut answer = [0u8; 4096];
+            let (length, peer) = socket.recv_from(&mut answer).unwrap(); assert_eq!(peer.port(), port + 100);
+            assert_eq!(&answer[..2], &query[..2]); assert_eq!(answer[3] & 0x0f, 0);
+            assert!(u16::from_be_bytes([answer[6], answer[7]]) > 0);
+            assert!(answer[..length].windows(6).any(|bytes| bytes == [0, 4, 127, 0, 0, 1]));
+        };
+        verify();
+        state.restart_service("consul").unwrap(); verify();
+        state.stop_service("consul").unwrap();
+        // 重启时移动整组端口，Raft 必须仍能选出当前节点并读回原数据。
+        state.store.set_port_override("consul", Some(base + 3000)).unwrap(); start(); verify();
+        state.stop_service("consul").unwrap();
+        let key = "consul@2.0.4"; std::fs::copy(&new_zip, state.paths.downloads().join(format!("{key}.pkg"))).unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap(); runtime.block_on(state.install_package(key)).unwrap();
+        state.set_active_version("consul", "2.0.4").unwrap(); start(); verify();
+        let pids = state.manager.snapshot("consul").unwrap().pids;
+        state.uninstall_package("consul@2.0.3").unwrap(); assert_eq!(state.manager.snapshot("consul").unwrap().pids, pids); verify();
+        state.uninstall_package(key).unwrap(); assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));
+        assert!(r.data.join("node-id").is_file()); assert!(r.data.join("raft").is_dir());
+        std::fs::copy(&new_zip, state.paths.downloads().join(format!("{key}.pkg"))).unwrap();
+        runtime.block_on(state.install_package(key)).unwrap(); start(); verify();
+        state.stop_service("consul").unwrap();
+        assert_eq!(state.service_web_url("consul").unwrap_err().code, "SERVICE_NOT_RUNNING");
+        drop(occupied_dns);
     }
 
     #[test]

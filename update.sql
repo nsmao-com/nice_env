@@ -126,3 +126,13 @@
 -- ON CONFLICT(key) DO UPDATE SET value=:value;
 -- COMMIT;
 -- 任一句失败整体回滚；重复保存相同端口保持幂等，配置校验失败不保存端口。
+
+-- v0.2.49：SFTPGo 在首次成功启动并确认 SFTP/Web 两端口归属后绑定原配置目录。
+-- 沿用 SQLite settings 表，已核对 Store::open 中的表定义；无表结构变更、无 migration。
+-- 相对路径允许整个 NiceEnv 数据目录迁移后继续定位；不复制数据库、不重新生成主机密钥。
+-- 以下为应用运行时的参数化 SQL 记录，不需要手工执行；本轮未操作用户实际数据库。
+-- INSERT INTO settings(key,value) VALUES(:key,:value)
+-- ON CONFLICT(key) DO UPDATE SET value=:value;
+-- :key = 'sftpgoConfigDir'，:value = 'etc/sftpgo/shared' 或已确认的原版本配置目录。
+-- 首次配置校验/启动失败不保存绑定；绑定写入失败停止本次进程，保留原目录供重试。
+-- 后续启动必须使用原绑定，目录、配置或可确认的本地状态缺失时拒绝创建空库。

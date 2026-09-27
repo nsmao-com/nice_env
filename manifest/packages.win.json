@@ -1495,7 +1495,11 @@
           "{data}/sftpgo.log"
         ],
         "health": "tcp",
-        "healthTimeoutSec": 20
+        "healthTimeoutSec": 20,
+        "env": {
+          "SFTPGO_SFTPD__BINDINGS__0__PORT": "{port}",
+          "SFTPGO_HTTPD__BINDINGS__0__PORT": "{port+6058}"
+        }
       }
     },
     {
@@ -3917,12 +3921,12 @@
       "arch": [
         "x64"
       ],
-      "kind": "binary",
-      "url": "https://github.com/drakkan/sftpgo/releases/download/v2.7.5/sftpgo_v2.7.5_windows_x86_64.exe",
-      "sizeBytes": 16790803,
-      "entry": "sftpgo_v2.7.5_windows_x86_64.exe",
+      "kind": "archive",
+      "url": "https://github.com/drakkan/sftpgo/releases/download/v2.7.5/sftpgo_v2.7.5_windows_portable.zip",
+      "sizeBytes": 54623789,
+      "entry": "sftpgo.exe",
       "homepage": "https://sftpgo.com",
-      "sha256": "30077c982530de4c301b901631a5033a854a88fe28a9dcf769e84f0097beecbf",
+      "sha256": "75d803598d2c714e3262847ee87a1ea48e4dcddbbd5690b0ef88adea84478838",
       "defaultPort": 2022,
       "run": {
         "args": [
@@ -3933,7 +3937,11 @@
           "{data}/sftpgo.log"
         ],
         "health": "tcp",
-        "healthTimeoutSec": 20
+        "healthTimeoutSec": 20,
+        "env": {
+          "SFTPGO_SFTPD__BINDINGS__0__PORT": "{port}",
+          "SFTPGO_HTTPD__BINDINGS__0__PORT": "{port+6058}"
+        }
       }
     },
     {
@@ -3948,12 +3956,12 @@
       "arch": [
         "x64"
       ],
-      "kind": "binary",
-      "url": "https://github.com/drakkan/sftpgo/releases/download/v2.7.4/sftpgo_v2.7.4_windows_x86_64.exe",
-      "sizeBytes": 16593050,
-      "entry": "sftpgo_v2.7.4_windows_x86_64.exe",
+      "kind": "archive",
+      "url": "https://github.com/drakkan/sftpgo/releases/download/v2.7.4/sftpgo_v2.7.4_windows_portable.zip",
+      "sizeBytes": 53800998,
+      "entry": "sftpgo.exe",
       "homepage": "https://sftpgo.com",
-      "sha256": "e370c000dfa39d4ca59fc1576a8666e546fe130ca1acb8dedf18bef10d59443a",
+      "sha256": "1d146ea9f5e8a26a7bebcb0b4483ba02745af816d83d9126ac4fe09a0c53b562",
       "defaultPort": 2022,
       "run": {
         "args": [
@@ -3964,7 +3972,11 @@
           "{data}/sftpgo.log"
         ],
         "health": "tcp",
-        "healthTimeoutSec": 20
+        "healthTimeoutSec": 20,
+        "env": {
+          "SFTPGO_SFTPD__BINDINGS__0__PORT": "{port}",
+          "SFTPGO_HTTPD__BINDINGS__0__PORT": "{port+6058}"
+        }
       }
     },
     {
@@ -3979,12 +3991,12 @@
       "arch": [
         "x64"
       ],
-      "kind": "binary",
-      "url": "https://github.com/drakkan/sftpgo/releases/download/v2.7.3/sftpgo_v2.7.3_windows_x86_64.exe",
-      "sizeBytes": 16470622,
-      "entry": "sftpgo_v2.7.3_windows_x86_64.exe",
+      "kind": "archive",
+      "url": "https://github.com/drakkan/sftpgo/releases/download/v2.7.3/sftpgo_v2.7.3_windows_portable.zip",
+      "sizeBytes": 52303329,
+      "entry": "sftpgo.exe",
       "homepage": "https://sftpgo.com",
-      "sha256": "91c59bbee64d1aa0b65beb9445b68fb315f9af8b3582c24262b5e3272dd33a1d",
+      "sha256": "0b9eee457279cd9ea74a7aaeb28ba0399fa4cad42978cd07b195a2e5f4079734",
       "defaultPort": 2022,
       "run": {
         "args": [
@@ -3995,7 +4007,11 @@
           "{data}/sftpgo.log"
         ],
         "health": "tcp",
-        "healthTimeoutSec": 20
+        "healthTimeoutSec": 20,
+        "env": {
+          "SFTPGO_SFTPD__BINDINGS__0__PORT": "{port}",
+          "SFTPGO_HTTPD__BINDINGS__0__PORT": "{port+6058}"
+        }
       }
     },
     {

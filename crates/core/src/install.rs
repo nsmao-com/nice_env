@@ -21,6 +21,20 @@ const GH_ACCELERATORS: [&str; 3] = [
 
 /// 只升级曾随应用发布的原始运行描述；下载信息、实际入口及用户修改保持不变。
 fn upgrade_legacy_run(mut entry: crate::model::PackageManifestEntry) -> crate::model::PackageManifestEntry {
+    if entry.id == "sftpgo" {
+        let legacy: crate::model::ServiceRunSpec = serde_json::from_value(serde_json::json!({
+            "args": ["serve", "--config-dir", "{etc}", "--log-file-path", "{data}/sftpgo.log"],
+            "health": "tcp", "healthTimeoutSec": 20
+        })).expect("内置旧运行描述合法");
+        if entry.run.as_ref().is_some_and(|run| serde_json::to_value(run).ok() == serde_json::to_value(&legacy).ok()) {
+            let env = std::collections::HashMap::from([
+                ("SFTPGO_SFTPD__BINDINGS__0__PORT".into(), "{port}".into()),
+                ("SFTPGO_HTTPD__BINDINGS__0__PORT".into(), "{port+6058}".into()),
+            ]);
+            entry.run.as_mut().unwrap().env = Some(env);
+        }
+        return entry;
+    }
     if entry.id != "rnacos" { return entry; }
     let legacy: crate::model::ServiceRunSpec = serde_json::from_value(serde_json::json!({
         "args": [], "health": "tcp", "healthTimeoutSec": 20,
@@ -33,6 +47,25 @@ fn upgrade_legacy_run(mut entry: crate::model::PackageManifestEntry) -> crate::m
         let bundled: crate::model::Manifest = serde_json::from_str(include_str!("../../../manifest/packages.win.json"))
             .expect("内置清单 JSON 必须合法");
         entry.run = bundled.packages.into_iter().find(|p| p.id == "rnacos").and_then(|p| p.run);
+    }
+    entry
+}
+
+pub(crate) fn is_sftpgo_installer(entry: &crate::model::PackageManifestEntry) -> bool {
+    entry.id == "sftpgo" && (entry.entry.ends_with("_windows_x86_64.exe")
+        || entry.url.ends_with("_windows_x86_64.exe"))
+}
+
+/// 仅可下载条目改用 portable 包；已安装快照保留真实入口，以便阻止误启动安装器。
+fn upgrade_available_entry(entry: crate::model::PackageManifestEntry) -> crate::model::PackageManifestEntry {
+    let mut entry = upgrade_legacy_run(entry);
+    if is_sftpgo_installer(&entry)
+        && entry.url == format!("https://github.com/drakkan/sftpgo/releases/download/v{0}/sftpgo_v{0}_windows_x86_64.exe", entry.version) {
+        let bundled: crate::model::Manifest = serde_json::from_str(include_str!("../../../manifest/packages.win.json")).expect("内置清单合法");
+        if let Some(correct) = bundled.packages.into_iter().find(|p| p.id == entry.id && p.version == entry.version && p.kind == "archive") {
+            entry.entry = correct.entry; entry.kind = correct.kind; entry.url = correct.url;
+            entry.size_bytes = correct.size_bytes; entry.sha256 = correct.sha256; entry.mirrors.clear();
+        }
     }
     entry
 }
@@ -123,7 +156,7 @@ impl Installer {
             .collect();
         // 按版本号语义取最新：字符串比较会把 5.26.30 排在 2025.09.0 前、21.0.9 排在 21.0.12 前
         candidates.sort_by(|a, b| crate::versions::cmp_version_desc(&a.version, &b.version));
-        candidates.into_iter().next().map(upgrade_legacy_run)
+        candidates.into_iter().next().map(upgrade_available_entry)
     }
 
     /// 找合成远程版本的模板：优先当前平台、显式版本源与较新版本。
@@ -140,7 +173,7 @@ impl Installer {
                 .then_with(|| b.version_source.is_some().cmp(&a.version_source.is_some()))
                 .then_with(|| crate::versions::cmp_version_desc(&a.version, &b.version))
         });
-        entries.first().map(|p| upgrade_legacy_run((*p).clone()))
+        entries.first().map(|p| upgrade_available_entry((*p).clone()))
     }
 
     /// 安装记录是已安装版本的依据。优先读取安装时保存的实际入口和服务描述，
@@ -203,7 +236,7 @@ impl Installer {
     }
 
     pub fn package_views(&self, installed: &[InstalledPackage]) -> Vec<crate::model::PackageView> {
-        let mut entries: Vec<_> = self.manifest.packages.iter().cloned().map(upgrade_legacy_run).collect();
+        let mut entries: Vec<_> = self.manifest.packages.iter().cloned().map(upgrade_available_entry).collect();
         for package in installed {
             let entry = self.installed_entry(package);
             if let Some(current) = entries
@@ -1287,6 +1320,30 @@ mod tests {
             std::fs::write(&snapshot, serde_json::to_vec(&custom).unwrap()).unwrap();
             assert_eq!(serde_json::to_value(state.installer.installed_entry(&installed)).unwrap(), serde_json::to_value(custom).unwrap());
         }
+    }
+
+    #[test]
+    fn sftpgo_downloads_use_portable_but_installed_setup_executables_are_never_started() {
+        let (_temp, mut state) = fixture();
+        state.installer.manifest = serde_json::from_str(include_str!("../../../manifest/packages.win.json")).unwrap();
+        let mut legacy = state.installer.find("sftpgo@2.7.5").unwrap();
+        legacy.kind = "binary".into(); legacy.entry = "sftpgo_v2.7.5_windows_x86_64.exe".into();
+        legacy.url = format!("https://github.com/drakkan/sftpgo/releases/download/v2.7.5/{}", legacy.entry);
+        legacy.run.as_mut().unwrap().env = None;
+        state.installer.manifest.packages = vec![legacy.clone()];
+        let available = state.installer.find("sftpgo@2.7.5").unwrap();
+        assert_eq!(available.kind, "archive"); assert_eq!(available.entry, "sftpgo.exe");
+        assert!(available.url.ends_with("_windows_portable.zip"));
+        assert!(available.run.as_ref().unwrap().env.as_ref().unwrap().contains_key("SFTPGO_HTTPD__BINDINGS__0__PORT"));
+        let installed = install_fixture(&state, "sftpgo", "2.7.5");
+        let snapshot = Path::new(&installed.install_path).join(".niceenv-package.json");
+        std::fs::write(&snapshot, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(state.installer.installed_entry(&installed).entry, legacy.entry);
+        let error = crate::generic::resolve(&state.store, &state.paths, "sftpgo").err().unwrap();
+        assert_eq!(error.code, "SFTPGO_INSTALLER_PACKAGE");
+        legacy.run.as_mut().unwrap().cwd = Some("{data}".into());
+        std::fs::write(&snapshot, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(serde_json::to_value(state.installer.installed_entry(&installed).run).unwrap(), serde_json::to_value(&legacy.run).unwrap());
     }
 
     #[tokio::test]

@@ -32,6 +32,79 @@ fn account_key_path(base: &crate::paths::Paths, id: &str) -> std::path::PathBuf 
     base.certs().join("acme").join(format!("{id}.account.key"))
 }
 
+fn validate_id(id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 128 || !id.bytes().all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c)) {
+        return Err(AppError::new("CERT_AUTO_ID", "证书自动化标识无效，未访问账号密钥或执行任务"));
+    }
+    Ok(())
+}
+
+fn busy_error() -> AppError {
+    AppError::new("CERT_AUTO_BUSY", "该证书自动化正在执行或修改，请等待当前操作结束")
+        .with_hint("可查看执行状态和历史；运行期间不能重复签发、编辑、切换自动续签或删除")
+}
+
+/// 签发、修改、删除和恢复共用操作系统锁，跨窗口/进程互斥；进程退出自动释放。
+fn execution_lock(store: &crate::store::Store, id: &str) -> Result<std::fs::File> {
+    validate_id(id)?;
+    let dir = store.path.parent().ok_or_else(|| AppError::new("CERT_AUTO_PATH", "证书数据目录无效"))?.join("certauto-locks");
+    std::fs::create_dir_all(&dir)?;
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(dir.join(format!("{id}.lock")))?;
+    file.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => busy_error(),
+        std::fs::TryLockError::Error(error) => AppError::io("锁定证书自动化", error),
+    })?;
+    Ok(file)
+}
+
+fn is_running(a: &CertAutomation) -> bool { matches!(a.state.as_str(), "issuing" | "manual_wait") }
+fn next_revision(previous: i64) -> i64 { now_ms().max(previous.saturating_add(1)) }
+fn load_automation(store: &crate::store::Store, id: &str) -> Result<CertAutomation> {
+    store.get_cert_automation(id)?.ok_or_else(|| AppError::new("NOT_FOUND", "自动化不存在，可能已在其它窗口删除"))
+}
+
+/// 调用者必须持该任务执行锁；有状态却无锁主才算中断，不把另一窗口的工作标成失败。
+fn recover_locked(store: &crate::store::Store, mut a: CertAutomation) -> Result<CertAutomation> {
+    if !is_running(&a) { return Ok(a); }
+    a.state = "error".into();
+    a.enabled = false;
+    a.next_renew_at = i64::MAX / 2;
+    a.last_error = "上次签发已中断，未确认 DNS 清理和部署结果。请检查后手动重试；确认配置无误后可重新启用自动续签".into();
+    a.fail_count = a.fail_count.saturating_add(1);
+    a.updated_at = next_revision(a.updated_at);
+    let mut log = vec![a.last_error.clone()];
+    log.extend(a.manual_records.iter().map(|r| format!("中断时的 TXT 记录（请核对并清理）：{} → {}", r.name, r.value)));
+    a.runs.insert(0, CertRunRecord { at: a.updated_at, ok: false, message: "签发中断，等待人工检查".into(), log });
+    a.runs.truncate(MAX_RUNS);
+    store.save_cert_automation(&a)?;
+    Ok(a)
+}
+
+fn recover_interrupted(store: &crate::store::Store) -> Result<()> {
+    for a in store.list_cert_automations()? {
+        if !is_running(&a) { continue; }
+        let _lock = match execution_lock(store, &a.id) {
+            Ok(lock) => lock,
+            Err(error) if error.code == "CERT_AUTO_BUSY" => continue,
+            Err(error) => return Err(error),
+        };
+        if let Some(current) = store.get_cert_automation(&a.id)? { recover_locked(store, current)?; }
+    }
+    Ok(())
+}
+
+fn read_account_key(path: &std::path::Path) -> Result<Option<String>> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(AppError::io("读取 ACME 账号密钥", e)),
+    };
+    if !meta.is_file() || meta.file_type().is_symlink() {
+        return Err(AppError::new("CERT_ACCOUNT_KEY", "ACME 账号密钥不是普通文件，请检查证书目录"));
+    }
+    std::fs::read_to_string(path).map(Some).map_err(|e| AppError::io("读取 ACME 账号密钥", e))
+}
+
 /* ---------- 校验 ---------- */
 
 const DNS_KINDS: &[&str] = &[
@@ -54,6 +127,15 @@ const KEY_ALGS: &[&str] = &["ec256", "ec384", "rsa2048", "rsa3072", "rsa4096"];
 const MAX_RUNS: usize = 20;
 
 fn validate(a: &CertAutomation) -> Result<()> {
+    validate_id(&a.id)?;
+    let domains = crate::tls::normalize_domains(&a.domains)?;
+    if domains.iter().any(|d| d == "localhost" || d.parse::<std::net::IpAddr>().is_ok()) {
+        return Err(AppError::new("BAD_DOMAINS", "DNS 验证需要完整域名，不能使用 localhost 或 IP 地址"));
+    }
+    if !(1..=90).contains(&a.renew_days_ahead) || !(0..=100).contains(&a.retry_times)
+        || !(1..=1440).contains(&a.retry_interval_min) || !(0..=3600).contains(&a.dns_wait_sec) {
+        return Err(AppError::new("CERT_AUTO_SCHEDULE", "续签提前天数应为 1–90，重试次数为 0–100，重试间隔为 1–1440 分钟，DNS 等待为 0–3600 秒"));
+    }
     if a.domains.is_empty() {
         return Err(AppError::new("BAD_DOMAINS", "至少填写一个要签发的域名"));
     }
@@ -210,14 +292,14 @@ fn mark_manual_wait(
         .store
         .get_cert_automation(id)?
         .ok_or_else(|| AppError::new("NOT_FOUND", "自动化不存在"))?;
-    if !a.manual_records.iter().any(|r| r.name == name) {
+    if !a.manual_records.iter().any(|r| r.name == name && r.value == value) {
         a.manual_records.push(model::DnsTxtRecord {
             name: name.to_string(),
             value: value.to_string(),
         });
     }
     a.state = "manual_wait".into();
-    a.updated_at = now_ms();
+    a.updated_at = next_revision(a.updated_at);
     state.store.save_cert_automation(&a)?;
     log.push(format!("请在 DNS 控制台添加 TXT 记录：{name} → {value}"));
     state.emit_event(Event::CertAuto {
@@ -235,7 +317,7 @@ fn run_inner(
 ) -> Result<(Option<CertRecord>, Vec<crate::model::DeployTarget>)> {
     // ACME 账号密钥：每个自动化独立账号（凭据隔离，换邮箱互不影响）
     let key_path = account_key_path(&state.paths, &a.id);
-    let existing = std::fs::read_to_string(&key_path).ok();
+    let existing = read_account_key(&key_path)?;
     let (mut client, fresh_pem) = AcmeClient::connect(
         &a.ca,
         existing.as_deref(),
@@ -249,7 +331,7 @@ fn run_inner(
     )?;
     if let Some(pem) = fresh_pem {
         std::fs::create_dir_all(key_path.parent().unwrap_or(&state.paths.certs()))?;
-        std::fs::write(&key_path, pem)?;
+        crate::paths::write_atomic(&key_path, pem.as_bytes()).map_err(|e| AppError::io("保存 ACME 账号密钥", e))?;
     }
 
     let manual = a.dns.kind == "manual";
@@ -263,13 +345,13 @@ fn run_inner(
             let name = format!("{prefix}.{dns_domain}");
             mark_manual_wait(state, &auto_id, &name, value, log)?;
             let timeout = if a.dns_wait_sec > 0 {
-                (a.dns_wait_sec * 60) as u64
+                a.dns_wait_sec as u64
             } else {
                 3600
             };
             log.push(format!(
-                "等待 TXT 生效（每 10s 检查一次，最长 {} 分钟）…",
-                timeout / 60
+                "等待 TXT 生效（每 10s 检查一次，最长 {} 秒）…",
+                timeout
             ));
             dnsprov::wait_txt_visible(&name, value, timeout)?;
             log.push("TXT 已生效，继续验证".into());
@@ -349,28 +431,35 @@ fn run_inner(
 /// 全程留痕：日志行进 runs 历史（certd 的执行日志），成功/失败发 webhook 通知。
 pub fn run_once(state: &CoreState, id: &str) -> Result<CertAutomation> {
     let work = crate::BackgroundWork::begin(format!("证书签发（{id}）"))?;
-    run_once_registered(state, id, work)
+    run_once_registered(state, id, work, false)
 }
 
-fn run_once_registered(state: &CoreState, id: &str, _work: crate::BackgroundWork) -> Result<CertAutomation> {
-    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
-    let mut a = state
-        .store
-        .get_cert_automation(id)?
-        .ok_or_else(|| AppError::new("NOT_FOUND", "自动化不存在"))?;
-    if a.state == "issuing" || a.state == "manual_wait" {
-        return Err(AppError::new(
-            "CERT_AUTO_BUSY",
-            "该证书自动化正在签发，请等待当前任务结束",
-        )
-        .with_hint("可在自动化记录中查看进度；完成或失败后再重试"));
+/// 持执行锁后再次读取排期，防止调度快照过期导致关闭后仍签发或刚续完又续。
+fn claim_run(store: &crate::store::Store, id: &str, scheduled: bool) -> Result<CertAutomation> {
+    let mut a = load_automation(store, id)?;
+    if is_running(&a) {
+        let a = recover_locked(store, a)?;
+        return Err(AppError::new("CERT_AUTO_INTERRUPTED", a.last_error));
     }
-    let mut log: Vec<String> = Vec::new();
+    if scheduled && (!a.enabled || a.next_renew_at > now_ms()) {
+        return Err(AppError::new("CERT_AUTO_NOT_DUE", "自动续签已关闭或尚未到执行时间"));
+    }
+    a.domains = crate::tls::normalize_domains(&a.domains)?;
+    validate(&a)?;
     a.state = "issuing".into();
     a.last_error = String::new();
     a.last_run_at = now_ms();
-    a.updated_at = now_ms();
-    state.store.save_cert_automation(&a)?;
+    a.manual_records.clear();
+    a.updated_at = next_revision(a.updated_at);
+    store.save_cert_automation(&a)?;
+    Ok(a)
+}
+
+fn run_once_registered(state: &CoreState, id: &str, _work: crate::BackgroundWork, scheduled: bool) -> Result<CertAutomation> {
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    let _lock = execution_lock(&state.store, id)?;
+    let mut a = claim_run(&state.store, id, scheduled)?;
+    let mut log: Vec<String> = Vec::new();
     state.emit_event(Event::CertAuto {
         id: a.id.clone(),
         state: "issuing".into(),
@@ -443,7 +532,7 @@ fn run_once_registered(state: &CoreState, id: &str, _work: crate::BackgroundWork
     if !a.manual_records.is_empty() {
         a.manual_records.clear();
     }
-    a.updated_at = now_ms();
+    a.updated_at = next_revision(state.store.get_cert_automation(id)?.map(|current| current.updated_at).unwrap_or(a.updated_at));
     state.store.save_cert_automation(&a)?;
 
     let message = if a.state == "error" {
@@ -531,6 +620,7 @@ fn fmt_date(exp: Option<i64>) -> String {
 pub fn tick(state: &Arc<CoreState>) -> Vec<String> {
     let Ok(_work) = crate::BackgroundWork::begin("证书自动化调度") else { return Vec::new(); };
     let Ok(_activity) = crate::paths::DataDirActivity::shared(&state.paths.base) else { return Vec::new(); };
+    if recover_interrupted(&state.store).is_err() { return Vec::new(); }
     let mut processed = Vec::new();
     let Ok(list) = state.store.list_cert_automations() else {
         return processed;
@@ -545,7 +635,7 @@ pub fn tick(state: &Arc<CoreState>) -> Vec<String> {
             // 手动模式的续期需要人加记录：调度只负责唤醒提示（发事件），
             // 不在这里占着调度线程等 1 小时 —— 用户在界面上点「立即续签」
             if a.dns.kind == "manual" && a.issued_at.is_some() {
-                a_emit_manual_due(state, &a.id);
+                let _ = a_emit_manual_due(state, &a.id);
                 continue;
             }
             // 每个任务独立线程：一个任务卡住（网络慢 / 手动等待）不拖累其它
@@ -554,7 +644,7 @@ pub fn tick(state: &Arc<CoreState>) -> Vec<String> {
             // 先注册再派生线程，退出准备不会漏掉已接受、尚未开始的签发。
             let Ok(work) = crate::BackgroundWork::begin(format!("证书签发（{id}）")) else { break; };
             if std::thread::Builder::new().name("certificate-issue".into()).spawn(move || {
-                let _ = run_once_registered(&st, &id, work);
+                let _ = run_once_registered(&st, &id, work, true);
             }).is_ok() { processed.push(a.id); }
         }
     }
@@ -562,19 +652,22 @@ pub fn tick(state: &Arc<CoreState>) -> Vec<String> {
 }
 
 /// 手动模式到期提醒：状态回 idle + 发事件，等用户来点
-fn a_emit_manual_due(state: &CoreState, id: &str) {
-    if let Ok(Some(mut a)) = state.store.get_cert_automation(id) {
+fn a_emit_manual_due(state: &CoreState, id: &str) -> Result<()> {
+    let _lock = execution_lock(&state.store, id)?;
+    if let Some(mut a) = state.store.get_cert_automation(id)? {
+        if !a.enabled || is_running(&a) || a.next_renew_at > now_ms() || a.dns.kind != "manual" || a.issued_at.is_none() { return Ok(()); }
         a.state = "idle".into();
         a.last_error = "证书到期需要手动续签（点「立即续签」会给出 TXT 记录）".into();
         a.next_renew_at = now_ms() + 24 * 3600 * 1000; // 明天再提醒
-        a.updated_at = now_ms();
-        let _ = state.store.save_cert_automation(&a);
+        a.updated_at = next_revision(a.updated_at);
+        state.store.save_cert_automation(&a)?;
         state.emit_event(Event::CertAuto {
             id: a.id.clone(),
             state: "manual_due".into(),
             message: a.last_error.clone(),
         });
     }
+    Ok(())
 }
 
 /// 后台调度线程：启动 30 秒后先跑一轮（覆盖「开应用就能续上」），
@@ -601,51 +694,94 @@ pub fn spawn_scheduler_when_ready(state: Arc<CoreState>, gate: Option<std::sync:
 
 impl CoreState {
     pub fn certauto_list(&self) -> Result<Vec<CertAutomation>> {
+        let _work = crate::BackgroundWork::begin("检查证书任务状态")?;
+        let _activity = crate::paths::DataDirActivity::shared(&self.paths.base)?;
+        recover_interrupted(&self.store)?;
         self.store.list_cert_automations()
     }
 
     pub fn certauto_save(&self, mut a: CertAutomation) -> Result<CertAutomation> {
-        let existing = self.store.get_cert_automation(&a.id)?;
+        let _work = crate::BackgroundWork::begin("保存证书自动化")?;
+        let _activity = crate::paths::DataDirActivity::shared(&self.paths.base)?;
+        let creating = a.id.trim().is_empty();
         if a.id.trim().is_empty() {
-            a.id = format!("auto-{}", now_ms());
-            a.created_at = now_ms();
-        } else if existing.is_none() {
-            a.created_at = now_ms();
+            a.id = format!("auto-{}-{:016x}", now_ms(), rand::random::<u64>());
         }
-        a.updated_at = now_ms();
+        let _lock = execution_lock(&self.store, &a.id)?;
+        a.domains = crate::tls::normalize_domains(&a.domains)?;
         if a.name.trim().is_empty() {
             a.name = a.domains.first().cloned().unwrap_or_else(|| a.id.clone());
         }
         validate(&a)?;
-        // 新建（或未签发过）时排到「现在」：调度器 1 小时内自动跑首签，
-        // 想立刻拿证书就点「立即签发」
-        if a.next_renew_at == 0 {
-            a.next_renew_at = now_ms();
+        if creating {
+            if self.store.get_cert_automation(&a.id)?.is_some() { return Err(busy_error()); }
+            a.state = "idle".into(); a.last_error.clear(); a.cert_id = None;
+            a.issued_at = None; a.expires_at = None; a.last_run_at = 0; a.fail_count = 0;
+            a.runs.clear(); a.manual_records.clear();
+            a.created_at = now_ms(); a.updated_at = a.created_at;
+            a.next_renew_at = if a.enabled { now_ms() } else { i64::MAX / 2 };
+            for target in &mut a.targets { target.last_result = None; }
+        } else {
+            let existing = recover_locked(&self.store, load_automation(&self.store, &a.id)?)?;
+            if a.updated_at != existing.updated_at {
+                return Err(AppError::new("CERT_AUTO_CONFLICT", "自动化状态或配置已在其它操作中更新，未覆盖最新记录")
+                    .with_hint("当前表单内容仍保留。请关闭后重新打开编辑，核对最新结果再修改"));
+            }
+            let identity_changed = a.domains != existing.domains || a.key_alg != existing.key_alg || a.ca != existing.ca;
+            // 客户端只能修改配置，执行结果、排期、历史和自动续签开关由各自入口维护。
+            a.state = existing.state; a.last_error = existing.last_error; a.cert_id = existing.cert_id;
+            a.issued_at = existing.issued_at; a.expires_at = existing.expires_at;
+            a.last_run_at = existing.last_run_at; a.fail_count = existing.fail_count;
+            a.runs = existing.runs; a.manual_records = existing.manual_records;
+            a.enabled = existing.enabled; a.created_at = existing.created_at;
+            a.next_renew_at = if a.enabled && a.renew_days_ahead != existing.renew_days_ahead {
+                a.expires_at.filter(|exp| *exp > 0).map(|exp| exp.saturating_sub(a.renew_days_ahead * 86_400_000)).unwrap_or(existing.next_renew_at)
+            } else { existing.next_renew_at };
+            a.updated_at = next_revision(existing.updated_at);
+            for target in &mut a.targets {
+                target.last_result = existing.targets.iter().find(|old| old.id == target.id && old.kind == target.kind && old.config == target.config)
+                    .and_then(|old| old.last_result.clone());
+            }
+            if identity_changed {
+                // 旧证书文件/历史保留给已有站点；不能把旧域名或旧算法的结果显示成新配置已签发。
+                a.state = "idle".into(); a.last_error.clear(); a.cert_id = None;
+                a.issued_at = None; a.expires_at = None; a.fail_count = 0;
+                a.next_renew_at = if a.enabled { now_ms() } else { i64::MAX / 2 };
+                for target in &mut a.targets { target.last_result = None; }
+            }
         }
-        a.domains = a
-            .domains
-            .iter()
-            .map(|d| d.trim().trim_end_matches('.').to_string())
-            .filter(|d| !d.is_empty())
-            .collect();
         self.store.save_cert_automation(&a)?;
         Ok(a)
     }
 
     pub fn certauto_delete(&self, id: &str) -> Result<bool> {
+        let _work = crate::BackgroundWork::begin("删除证书自动化")?;
+        let _activity = crate::paths::DataDirActivity::shared(&self.paths.base)?;
+        let _lock = execution_lock(&self.store, id)?;
+        load_automation(&self.store, id)?;
         // 账号密钥一并清掉；已签发的证书文件保留（站点可能还在用）
-        let _ = std::fs::remove_file(account_key_path(&self.paths, id));
-        self.store.delete_cert_automation(id)?;
+        let path = account_key_path(&self.paths, id);
+        let previous = read_account_key(&path)?;
+        if previous.is_some() { std::fs::remove_file(&path).map_err(|e| AppError::io("删除 ACME 账号密钥", e))?; }
+        if let Err(error) = self.store.delete_cert_automation(id) {
+            if let Some(previous) = previous {
+                crate::paths::write_atomic(&path, previous.as_bytes()).map_err(|restore| AppError::new(
+                    "CERT_AUTO_DELETE_FAILED", format!("删除记录失败，账号密钥恢复也失败：{error}；{restore}")))?;
+            }
+            return Err(error);
+        }
         Ok(true)
     }
 
     pub fn certauto_set_enabled(&self, id: &str, enabled: bool) -> Result<CertAutomation> {
-        let mut a = self
-            .store
-            .get_cert_automation(id)?
-            .ok_or_else(|| AppError::new("NOT_FOUND", "自动化不存在"))?;
+        let _work = crate::BackgroundWork::begin("切换证书自动续签")?;
+        let _activity = crate::paths::DataDirActivity::shared(&self.paths.base)?;
+        let _lock = execution_lock(&self.store, id)?;
+        let mut a = recover_locked(&self.store, load_automation(&self.store, id)?)?;
+        if enabled { validate(&a)?; }
+        if a.enabled == enabled { return Ok(a); }
         a.enabled = enabled;
-        a.updated_at = now_ms();
+        a.updated_at = next_revision(a.updated_at);
         // 关掉就不再排期；重新打开则从现在起算
         a.next_renew_at = if enabled { now_ms() } else { i64::MAX / 2 };
         self.store.save_cert_automation(&a)?;
@@ -662,6 +798,154 @@ impl CoreState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture() -> (tempfile::TempDir, Arc<CoreState>, CertAutomation) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = CoreState::init(Some(dir.path().to_path_buf()), Arc::new(|_| {})).unwrap();
+        let a = sample(); state.store.save_cert_automation(&a).unwrap();
+        (dir, state, a)
+    }
+
+    #[test]
+    fn certificate_lock_probe() {
+        let Some(root) = std::env::var_os("NSB_CERTIFICATE_LOCK_PROBE") else { return; };
+        let paths = crate::paths::Paths::new(root.into());
+        let store = crate::store::Store::open(paths.db()).unwrap();
+        let _lock = execution_lock(&store, "auto-1").unwrap();
+        let mut a = claim_run(&store, "auto-1", false).unwrap();
+        a.state = "manual_wait".into();
+        a.manual_records.push(model::DnsTxtRecord { name: "_acme-challenge.example.invalid".into(), value: "fixture-value".into() });
+        store.save_cert_automation(&a).unwrap();
+        std::fs::write(paths.base.join("lock-ready"), "ready").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(5)); // 父进程会提前结束此有限夹具。
+    }
+
+    #[test]
+    fn live_process_blocks_conflicts_and_crash_is_recovered_once() {
+        let (dir, state, original) = fixture();
+        let mut child = platform::command(std::env::current_exe().unwrap())
+            .args(["--exact", "certauto::tests::certificate_lock_probe", "--nocapture"])
+            .env("NSB_CERTIFICATE_LOCK_PROBE", dir.path()).spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !dir.path().join("lock-ready").is_file() {
+            assert!(std::time::Instant::now() < deadline);
+            assert!(child.try_wait().unwrap().is_none());
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(state.certauto_list().unwrap()[0].state, "manual_wait");
+        assert_eq!(run_once(&state, &original.id).unwrap_err().code, "CERT_AUTO_BUSY");
+        assert_eq!(state.certauto_save(original.clone()).unwrap_err().code, "CERT_AUTO_BUSY");
+        assert_eq!(state.certauto_set_enabled(&original.id, false).unwrap_err().code, "CERT_AUTO_BUSY");
+        assert_eq!(state.certauto_delete(&original.id).unwrap_err().code, "CERT_AUTO_BUSY");
+        child.kill().unwrap(); child.wait().unwrap();
+        let recovered = state.certauto_list().unwrap().remove(0);
+        assert_eq!(recovered.state, "error"); assert!(!recovered.enabled);
+        assert!(recovered.last_error.contains("中断"));
+        assert_eq!(recovered.manual_records.len(), 1);
+        assert_eq!(recovered.runs.len(), 1);
+        assert!(recovered.runs[0].log.iter().any(|line| line.contains("fixture-value")));
+        assert_eq!(state.certauto_list().unwrap()[0].runs.len(), 1);
+        assert!(tick(&state).is_empty());
+        let enabled = state.certauto_set_enabled(&original.id, true).unwrap();
+        assert!(enabled.enabled);
+        assert_eq!(enabled.runs.len(), 1);
+    }
+
+    #[test]
+    fn edits_preserve_runtime_reject_stale_forms_and_never_resurrect_deleted_tasks() {
+        let (_dir, state, mut a) = fixture();
+        a.state = "ok".into(); a.cert_id = Some("certificate-fixture".into());
+        a.issued_at = Some(100); a.expires_at = Some(now_ms() + 60 * 86_400_000);
+        a.runs.push(CertRunRecord { at: 100, ok: true, message: "saved result".into(), log: vec![] });
+        a.targets[0].last_result = Some(DeployResult { ok: true, message: "saved deployment".into(), at: 100 });
+        state.store.save_cert_automation(&a).unwrap();
+        let mut edited = a.clone(); edited.name = "new name".into();
+        edited.state = "error".into(); edited.cert_id = None; edited.runs.clear(); edited.enabled = false;
+        edited.targets[0].last_result = None;
+        edited.domains = vec![" A.COM. ".into(), "a.com".into()];
+        let saved = state.certauto_save(edited).unwrap();
+        assert_eq!(saved.domains, vec!["a.com"]); assert!(saved.enabled);
+        assert_eq!(saved.state, "ok"); assert_eq!(saved.cert_id, a.cert_id);
+        assert_eq!(saved.runs.len(), 1); assert!(saved.targets[0].last_result.as_ref().unwrap().ok);
+        assert!(saved.updated_at > a.updated_at);
+        assert_eq!(state.certauto_save(a).unwrap_err().code, "CERT_AUTO_CONFLICT");
+        let mut identity = saved.clone(); identity.domains = vec!["changed.example.invalid".into()];
+        let changed = state.certauto_save(identity).unwrap();
+        assert_eq!(changed.state, "idle"); assert!(changed.cert_id.is_none()); assert!(changed.expires_at.is_none());
+        assert_eq!(changed.runs.len(), 1); assert!(changed.targets[0].last_result.is_none());
+        state.certauto_set_enabled(&saved.id, false).unwrap();
+        assert_eq!(state.certauto_save(saved.clone()).unwrap_err().code, "CERT_AUTO_CONFLICT");
+        state.certauto_delete(&saved.id).unwrap();
+        assert_eq!(state.certauto_save(saved.clone()).unwrap_err().code, "NOT_FOUND");
+        assert_eq!(state.certauto_delete(&saved.id).unwrap_err().code, "NOT_FOUND");
+        let mut new = saved; new.id.clear();
+        let created = state.certauto_save(new.clone()).unwrap();
+        assert_eq!(created.state, "idle"); assert!(created.runs.is_empty());
+        assert!(created.cert_id.is_none()); assert!(created.targets[0].last_result.is_none());
+        assert_ne!(created.id, state.certauto_save(new).unwrap().id);
+    }
+
+    #[test]
+    fn delayed_scheduler_rechecks_enable_and_due_without_starting_acme() {
+        let (_dir, state, mut a) = fixture();
+        let _lock = execution_lock(&state.store, &a.id).unwrap();
+        a.enabled = false; state.store.save_cert_automation(&a).unwrap();
+        assert_eq!(claim_run(&state.store, &a.id, true).unwrap_err().code, "CERT_AUTO_NOT_DUE");
+        a.enabled = true; a.next_renew_at = now_ms() + 86_400_000;
+        state.store.save_cert_automation(&a).unwrap();
+        assert_eq!(claim_run(&state.store, &a.id, true).unwrap_err().code, "CERT_AUTO_NOT_DUE");
+        a.enabled = false; state.store.save_cert_automation(&a).unwrap();
+        let manual = claim_run(&state.store, &a.id, false).unwrap();
+        assert_eq!(manual.state, "issuing"); assert!(!manual.enabled);
+        let mut log = Vec::new();
+        mark_manual_wait(&state, &a.id, "_acme-challenge.example.invalid", "first", &mut log).unwrap();
+        mark_manual_wait(&state, &a.id, "_acme-challenge.example.invalid", "second", &mut log).unwrap();
+        mark_manual_wait(&state, &a.id, "_acme-challenge.example.invalid", "second", &mut log).unwrap();
+        let records = state.store.get_cert_automation(&a.id).unwrap().unwrap().manual_records;
+        assert_eq!(records.len(), 2, "同一 TXT 名称可有不同验证值");
+    }
+
+    #[test]
+    fn invalid_identifiers_domains_and_corrupt_rows_fail_without_hiding_data() {
+        let (_dir, state, a) = fixture();
+        for id in ["../outside", "C:\\outside", "a/b", "", "a.b"] {
+            assert!(execution_lock(&state.store, id).is_err());
+            assert!(state.certauto_delete(id).is_err());
+        }
+        for domain in ["../bad.example", "example.com/escape", "127.0.0.1", "localhost", "*.127.0.0.1"] {
+            let mut bad = a.clone(); bad.domains = vec![domain.into()];
+            assert!(validate(&bad).is_err());
+        }
+        let db = rusqlite::Connection::open(state.paths.db()).unwrap();
+        db.execute("UPDATE cert_automations SET data=?1 WHERE id=?2", rusqlite::params!["{", a.id]).unwrap();
+        assert_eq!(state.certauto_list().unwrap_err().code, "CERT_AUTO_CORRUPT");
+        assert_eq!(state.store.get_cert_automation(&a.id).unwrap_err().code, "CERT_AUTO_CORRUPT");
+        let count: i64 = db.query_row("SELECT count(*) FROM cert_automations", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn account_key_errors_are_visible_and_failed_delete_restores_key() {
+        let (_dir, state, a) = fixture();
+        let key = account_key_path(&state.paths, &a.id);
+        std::fs::create_dir_all(&key).unwrap();
+        assert_eq!(state.certauto_delete(&a.id).unwrap_err().code, "CERT_ACCOUNT_KEY");
+        // run_inner 在读取账号文件时即失败，不会访问任何 CA/DNS/部署/通知服务。
+        let result = run_once(&state, &a.id).unwrap();
+        assert_eq!(result.state, "error"); assert!(result.last_error.contains("普通文件"));
+        assert_eq!(result.runs.len(), 1);
+        std::fs::remove_dir(&key).unwrap();
+        std::fs::write(&key, "fixture-account-key").unwrap();
+        let db = rusqlite::Connection::open(state.paths.db()).unwrap();
+        // 普通 trigger 对独立连接生效；仅在临时数据库中制造删除失败。
+        db.execute_batch("CREATE TRIGGER block_fixture_delete BEFORE DELETE ON cert_automations BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+        assert!(state.certauto_delete(&a.id).is_err());
+        assert_eq!(std::fs::read_to_string(&key).unwrap(), "fixture-account-key");
+        assert!(state.store.get_cert_automation(&a.id).unwrap().is_some());
+        db.execute_batch("DROP TRIGGER block_fixture_delete;").unwrap();
+        state.certauto_delete(&a.id).unwrap();
+        assert!(!key.exists());
+    }
 
     fn sample() -> CertAutomation {
         serde_json::from_str(

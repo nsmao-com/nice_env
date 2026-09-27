@@ -24,3 +24,16 @@
 -- :value 为启动前保存的 pathEnvDirs JSON 数组，幂等恢复后供下一次激活使用。
 -- INSERT INTO settings(key,value) VALUES('pathEnvDirs',:value)
 -- ON CONFLICT(key) DO UPDATE SET value=:value;
+
+-- v0.2.35：证书自动化异常中断恢复与配置更新记录。
+-- 沿用当前 SQLite cert_automations 表，不新增表或字段，不需手工部署。
+-- 应用取得同一任务的操作系统独占锁后，重新读取该行；只有 issuing/manual_wait
+-- 且已没有锁主的任务才按中断恢复。JSON 中将 state 置为 error、enabled 置为 false，
+-- 暂停 nextRenewAt，保留 manualRecords、证书结果，并新增一条有上限的执行历史。
+-- 重复检查已恢复的记录不会重复写入；其它窗口仍持锁时不执行恢复。
+-- 配置编辑也在该锁下核对 updatedAt，拒绝旧表单并保留后台维护的运行字段。
+-- 以下是现有参数化写入模板；:data 为完整序列化 JSON，:updated_at 单调递增。
+-- INSERT INTO cert_automations(id,data,updated_at) VALUES(:id,:data,:updated_at)
+-- ON CONFLICT(id) DO UPDATE SET data=:data, updated_at=:updated_at;
+-- 删除入口先检查任务存在和执行锁；账号密钥删除失败保留记录，入库失败恢复密钥。
+-- DELETE FROM cert_automations WHERE id=:id;

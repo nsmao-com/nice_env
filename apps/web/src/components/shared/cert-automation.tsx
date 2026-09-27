@@ -153,10 +153,11 @@ function useCertAutos() {
     queryKey: ["certautos"],
     queryFn: api.certAutoList,
     refetchInterval: 15_000,
-    initialData: [],
-    initialDataUpdatedAt: 0,
   });
 }
+
+const isRunning = (a?: CertAutomation | null) => a?.state === "issuing" || a?.state === "manual_wait";
+const actionErrorText = (error: unknown) => { const value = normalizeError(error); return [value.message, value.hint].filter(Boolean).join("\n"); };
 
 export function CertAutomationSection() {
   const t = useT();
@@ -165,12 +166,20 @@ export function CertAutomationSection() {
   const [creating, setCreating] = React.useState(false);
   const [editing, setEditing] = React.useState<CertAutomation | null>(null);
   const [removing, setRemoving] = React.useState<CertAutomation | null>(null);
-  const [issuingId, setIssuingId] = React.useState<string | null>(null);
+  const [issuingIds, setIssuingIds] = React.useState<Set<string>>(() => new Set());
+  const issueRequests = React.useRef(new Set<string>());
   const [historyOf, setHistoryOf] = React.useState<CertAutomation | null>(null);
+  const [deleting, setDeleting] = React.useState(false);
+  const deleteRequest = React.useRef(false);
+  const [deleteError, setDeleteError] = React.useState<string | null>(null);
+  const deleteErrorRef = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => { if (deleteError) deleteErrorRef.current?.focus(); }, [deleteError]);
 
   /** 手动立即签发：ACME 全流程要 1–2 分钟，按钮转圈并提示 */
   const issueNow = async (a: CertAutomation) => {
-    setIssuingId(a.id);
+    if (issueRequests.current.has(a.id) || isRunning(a)) return;
+    issueRequests.current.add(a.id);
+    setIssuingIds(new Set(issueRequests.current));
     invalidate();
     try {
       const result = await api.certAutoIssue(a.id);
@@ -184,16 +193,17 @@ export function CertAutomationSection() {
     } catch (e) {
       toastError(e, t("certauto.issueFailed"));
     } finally {
-      setIssuingId(null);
+      issueRequests.current.delete(a.id);
+      setIssuingIds(new Set(issueRequests.current));
       invalidate();
     }
   };
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-[11.5px] text-faint">{t("certauto.sectionHint")}</p>
-        <Button size="sm" onClick={() => setCreating(true)}>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="min-w-0 flex-1 text-[11.5px] text-faint">{t("certauto.sectionHint")}</p>
+        <Button size="sm" className="shrink-0" onClick={() => setCreating(true)}>
           <Plus className="h-3.5 w-3.5" /> {t("certauto.new")}
         </Button>
       </div>
@@ -223,10 +233,10 @@ export function CertAutomationSection() {
               <AutomationCard
                 key={a.id}
                 a={a}
-                busy={issuingId === a.id}
+                busy={issuingIds.has(a.id) || isRunning(a)}
                 onIssue={() => issueNow(a)}
                 onEdit={() => setEditing(a)}
-                onRemove={() => setRemoving(a)}
+                onRemove={() => { setDeleteError(null); setRemoving(a); }}
                 onHistory={() => setHistoryOf(a)}
               />
             ))}
@@ -237,6 +247,7 @@ export function CertAutomationSection() {
       <AutomationDialog
         open={creating || editing !== null}
         automation={editing}
+        running={Boolean(editing && (issuingIds.has(editing.id) || isRunning(autos.find((a) => a.id === editing.id))))}
         onOpenChange={(o) => {
           if (!o) {
             setCreating(false);
@@ -245,28 +256,35 @@ export function CertAutomationSection() {
         }}
       />
 
-      <RunHistoryDrawer automation={historyOf} onClose={() => setHistoryOf(null)} />
+      <RunHistoryDrawer automation={historyOf ? autos.find((a) => a.id === historyOf.id) ?? historyOf : null} onClose={() => setHistoryOf(null)} />
 
       <ConfirmDialog
         open={removing !== null}
-        onOpenChange={(o) => !o && setRemoving(null)}
+        onOpenChange={(o) => !deleting && !o && setRemoving(null)}
         title={`${t("common.delete")} · ${removing?.name ?? ""}`}
         description={t("certauto.deleteHint")}
         danger
         confirmText={t("common.delete")}
+        loading={deleting}
+        confirmDisabled={Boolean(removing && (issuingIds.has(removing.id) || isRunning(autos.find((a) => a.id === removing.id))))}
         onConfirm={async () => {
-          if (!removing) return;
+          if (!removing || deleteRequest.current) return;
+          deleteRequest.current = true; setDeleting(true); setDeleteError(null);
           try {
             await api.certAutoDelete(removing.id);
             toast.success(t("certauto.deleted"));
-          } catch (e) {
-            toastError(e);
-          } finally {
             setRemoving(null);
+          } catch (e) {
+            setDeleteError(actionErrorText(e));
+          } finally {
+            deleteRequest.current = false; setDeleting(false);
             invalidate();
           }
         }}
-      />
+      >
+        {removing && (issuingIds.has(removing.id) || isRunning(autos.find((a) => a.id === removing.id))) && <p role="status" className="text-xs text-muted">{t("certauto.issueBusyHint")}</p>}
+        {deleteError && <div ref={deleteErrorRef} tabIndex={-1} role="alert" className="rounded-lg border border-error/30 bg-error-soft p-3 text-xs text-error whitespace-pre-wrap [overflow-wrap:anywhere]">{deleteError}</div>}
+      </ConfirmDialog>
     </div>
   );
 }
@@ -288,14 +306,20 @@ function AutomationCard({
 }) {
   const t = useT();
   const invalidate = useInvalidateSafe();
+  const [toggling, setToggling] = React.useState(false);
+  const toggleRequest = React.useRef(false);
   const daysLeft = a.expiresAt ? Math.max(0, Math.round((a.expiresAt - Date.now()) / 86400_000)) : null;
 
   const toggle = async (enabled: boolean) => {
+    if (busy || toggleRequest.current) return;
+    toggleRequest.current = true; setToggling(true);
     try {
       await api.certAutoSetEnabled(a.id, enabled);
       invalidate();
     } catch (e) {
       toastError(e);
+    } finally {
+      toggleRequest.current = false; setToggling(false); invalidate();
     }
   };
 
@@ -311,7 +335,7 @@ function AutomationCard({
             </div>
             <p className="mt-0.5 truncate font-mono text-[11px] text-faint">{a.domains.join(" · ")}</p>
           </div>
-          <Switch checked={a.enabled} onCheckedChange={toggle} aria-label={t("common.start")} />
+          <Switch checked={a.enabled} onCheckedChange={toggle} disabled={busy || toggling} aria-label={t("certauto.autoRenew")} />
         </div>
 
         {/* 元信息 */}
@@ -344,31 +368,29 @@ function AutomationCard({
           {a.lastRunAt
             ? `${t("certauto.lastRun")} ${new Date(a.lastRunAt).toLocaleString()}`
             : t("certauto.neverRun")}
-          {a.nextRenewAt > 0 && a.nextRenewAt < 8_000_000_000_000
+          {a.enabled && a.nextRenewAt > 0 && a.nextRenewAt < 8_000_000_000_000
             ? ` · ${t("certauto.nextRenew")} ${new Date(a.nextRenewAt).toLocaleDateString()}`
             : ""}
           {a.failCount > 0 ? ` · ${t("certauto.failCount")} ${a.failCount}` : ""}
         </p>
 
         {/* 手动 DNS 等待：把要加的 TXT 记录摆出来（certd 手动模式的核心交互） */}
-        {a.state === "manual_wait" && a.manualRecords.length > 0 && (
+        {a.manualRecords.length > 0 && (
           <div className="flex flex-col gap-1.5 rounded-lg border border-info/30 bg-info-soft px-2.5 py-2">
-            <p className="text-[11px] font-medium text-info">{t("certauto.manualWaitTitle")}</p>
+            <p className="text-[11px] font-medium text-info">{t(a.state === "manual_wait" ? "certauto.manualWaitTitle" : "certauto.interruptedTxtTitle")}</p>
             {a.manualRecords.map((r) => (
-              <div key={r.name} className="flex items-center gap-2">
-                <code className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-secondary">{r.name}</code>
-                <span className="text-faint">→</span>
-                <code className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-secondary">{r.value}</code>
-                <CopyButton text={r.value} />
+              <div key={`${r.name}:${r.value}`} className="min-w-0 space-y-1 rounded-md bg-card/50 p-2">
+                <div className="flex min-w-0 items-center gap-2"><code className="min-w-0 flex-1 font-mono text-[10.5px] text-secondary [overflow-wrap:anywhere]">{r.name}</code><CopyButton text={r.name} className="shrink-0" /></div>
+                <div className="flex min-w-0 items-center gap-2"><code className="min-w-0 flex-1 font-mono text-[10.5px] text-secondary [overflow-wrap:anywhere]">{r.value}</code><CopyButton text={r.value} className="shrink-0" /></div>
               </div>
             ))}
-            <p className="text-[10.5px] text-info/80">{t("certauto.manualWaitHint")}</p>
+            <p className="text-[10.5px] text-info/80">{t(a.state === "manual_wait" ? "certauto.manualWaitHint" : "certauto.interruptedTxtHint")}</p>
           </div>
         )}
 
         {/* 失败原因就地可见 */}
         {a.state === "error" && a.lastError && (
-          <p className="rounded-lg border border-error/25 bg-error/10 px-2.5 py-1.5 text-[11px] text-error">
+          <p className="rounded-lg border border-error/25 bg-error/10 px-2.5 py-1.5 text-[11px] text-error [overflow-wrap:anywhere]">
             {a.lastError}
           </p>
         )}
@@ -392,18 +414,18 @@ function AutomationCard({
         )}
 
         {/* 操作 */}
-        <div className="mt-auto flex items-center gap-2 border-t border-border pt-3">
-          <Button size="sm" className="flex-1" disabled={busy || !a.enabled} onClick={onIssue}>
+        <div className="mt-auto flex flex-wrap items-center gap-2 border-t border-dashed border-border pt-3">
+          <Button size="sm" className="flex-1" disabled={busy || toggling} onClick={onIssue}>
             {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Rocket className="h-3.5 w-3.5" />}
             {a.issuedAt ? t("certauto.renewNow") : t("certauto.issueNow")}
           </Button>
-          <Button size="icon-sm" variant="ghost" title={t("certauto.history")} onClick={onHistory}>
+          <Button size="icon-sm" variant="ghost" title={t("certauto.history")} aria-label={t("certauto.history")} onClick={onHistory}>
             <History className="h-3.5 w-3.5" />
           </Button>
-          <Button size="icon-sm" variant="ghost" title={t("stack.edit")} onClick={onEdit}>
+          <Button size="icon-sm" variant="ghost" title={t("certauto.edit")} aria-label={t("certauto.edit")} disabled={busy || toggling} onClick={onEdit}>
             <Pencil className="h-3.5 w-3.5" />
           </Button>
-          <Button size="icon-sm" variant="ghost" className="text-error/80 hover:text-error" title={t("common.delete")} onClick={onRemove}>
+          <Button size="icon-sm" variant="ghost" className="text-error/80 hover:text-error" title={t("common.delete")} aria-label={t("common.delete")} disabled={busy || toggling} onClick={onRemove}>
             <Trash2 className="h-3.5 w-3.5" />
           </Button>
         </div>
@@ -530,31 +552,39 @@ function emptyAutomation(): CertAutomation {
 function AutomationDialog({
   open,
   automation,
+  running,
   onOpenChange,
 }: {
   open: boolean;
   automation: CertAutomation | null;
+  running: boolean;
   onOpenChange: (o: boolean) => void;
 }) {
   const t = useT();
   const invalidate = useInvalidateSafe();
   const [form, setForm] = React.useState<CertAutomation | null>(null);
   const [busy, setBusy] = React.useState(false);
+  const saveRequest = React.useRef(false);
+  const [saveError, setSaveError] = React.useState<string | null>(null);
+  const saveErrorRef = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => { if (saveError) saveErrorRef.current?.focus({ preventScroll: true }); }, [saveError]);
 
   React.useEffect(() => {
     if (!open) return;
     setForm(automation ? structuredClone(automation) : emptyAutomation());
+    setSaveError(null);
   }, [open, automation]);
 
   if (!form) return null;
   const patch = (p: Partial<CertAutomation>) => setForm({ ...form, ...p });
 
   const save = async () => {
+    if (saveRequest.current || running) return;
     if (form.domains.length === 0) {
       toast.error(t("certauto.errDomains"));
       return;
     }
-    setBusy(true);
+    saveRequest.current = true; setBusy(true); setSaveError(null);
     try {
       await api.certAutoSave(form);
       toast.success(t("certauto.saved"), {
@@ -563,9 +593,9 @@ function AutomationDialog({
       onOpenChange(false);
       invalidate();
     } catch (e) {
-      toastError(e);
+      setSaveError(actionErrorText(e)); invalidate();
     } finally {
-      setBusy(false);
+      saveRequest.current = false; setBusy(false);
     }
   };
 
@@ -581,7 +611,7 @@ function AutomationDialog({
       targets: [
         ...form.targets,
         {
-          id: `t-${Date.now()}`,
+          id: `t-${crypto.randomUUID()}`,
           kind,
           name: t(`certauto.target.${kind}` as never),
           config: {},
@@ -593,14 +623,15 @@ function AutomationDialog({
   const needEab = EAB_CAS.includes(form.ca);
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[88vh] max-w-xl overflow-y-auto">
-        <DialogHeader>
+    <Dialog open={open} onOpenChange={(next) => !busy && onOpenChange(next)}>
+      <DialogContent hideClose={busy} className="flex max-h-[88dvh] max-w-xl flex-col overflow-hidden">
+        <DialogHeader className="shrink-0 pr-5">
           <DialogTitle>{automation ? t("certauto.edit") : t("certauto.new")}</DialogTitle>
           <DialogDescription>{t("certauto.editorHint")}</DialogDescription>
         </DialogHeader>
 
-        <div className="flex flex-col gap-4">
+        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
+        <fieldset disabled={busy || running} className="min-w-0 space-y-4 px-1 pb-1">
           {/* 域名 */}
           <div className="flex flex-col gap-1.5">
             <Label>{t("certauto.domains")}</Label>
@@ -920,13 +951,16 @@ function AutomationDialog({
               </div>
             </div>
           </details>
+        </fieldset>
         </div>
 
-        <DialogFooter>
+        {running && <p role="status" className="shrink-0 text-xs text-muted">{t("certauto.editRunningHint")}</p>}
+        {saveError && <div ref={saveErrorRef} tabIndex={-1} role="alert" className="max-h-32 shrink-0 overflow-y-auto rounded-lg border border-error/30 bg-error-soft p-3 text-xs text-error whitespace-pre-wrap [overflow-wrap:anywhere]">{saveError}</div>}
+        <DialogFooter className="shrink-0">
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
             {t("common.cancel")}
           </Button>
-          <Button onClick={save} disabled={busy}>
+          <Button onClick={save} disabled={busy || running}>
             {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />}
             {t("common.save")}
           </Button>
@@ -937,7 +971,7 @@ function AutomationDialog({
 }
 
 function Separator() {
-  return <div className="h-px bg-border" />;
+  return <div className="mx-1 border-t border-dashed border-border" />;
 }
 
 function useInvalidateSafe() {

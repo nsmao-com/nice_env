@@ -61,7 +61,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.34";
+const MOCK_APP_VERSION = "0.2.35";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -183,10 +183,12 @@ const mockPathEnv: { enabled: boolean; selected: string[] | null; versions: Reco
 };
 
 const certs = new Map<string, CertRecord>();
-/* 证书自动化（ACME）：mock 一条样例，覆盖列表/编辑/签发的浏览器预览 */
+/* 证书自动化（ACME）：浏览器仅预览配置；签发明确要求桌面端。 */
 const certAutos = new Map<string, CertAutomation>();
+let certAutosSeeded = false;
 function seedCertAutos() {
-  if (certAutos.size > 0) return;
+  if (certAutosSeeded) return;
+  certAutosSeeded = true;
   certAutos.set("auto-demo", {
     id: "auto-demo",
     name: "demo.example.com",
@@ -2318,29 +2320,43 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "certauto_save": {
       seedCertAutos();
       const a = args!.a as CertAutomation;
-      const next: CertAutomation = { ...a, id: a.id || `auto-${uid()}`, updatedAt: Date.now() };
+      const previous = a.id ? certAutos.get(a.id) : undefined;
+      if (a.id && !previous) throw { code: "NOT_FOUND", message: "自动化不存在，可能已在其它窗口删除" };
+      if (previous && ["issuing", "manual_wait"].includes(previous.state)) throw { code: "CERT_AUTO_BUSY", message: "该证书自动化正在执行，请等待当前任务结束" };
+      if (previous && a.updatedAt !== previous.updatedAt) throw { code: "CERT_AUTO_CONFLICT", message: "自动化已更新，请重新打开编辑后重试" };
+      const next: CertAutomation = {
+        ...a, id: previous?.id || `auto-${uid()}`, updatedAt: Math.max(Date.now(), (previous?.updatedAt ?? 0) + 1),
+        enabled: previous?.enabled ?? a.enabled, createdAt: previous?.createdAt ?? Date.now(),
+        state: previous?.state ?? "idle", lastError: previous?.lastError ?? "", certId: previous?.certId ?? null,
+        issuedAt: previous?.issuedAt ?? null, expiresAt: previous?.expiresAt ?? null,
+        lastRunAt: previous?.lastRunAt ?? 0, nextRenewAt: previous?.nextRenewAt ?? 0,
+        runs: previous?.runs ?? [], manualRecords: previous?.manualRecords ?? [], failCount: previous?.failCount ?? 0,
+        targets: a.targets.map(target => ({ ...target, lastResult: previous?.targets.find(old => old.id === target.id && old.kind === target.kind && JSON.stringify(old.config) === JSON.stringify(target.config))?.lastResult ?? null })),
+      };
+      if (previous && (JSON.stringify(a.domains) !== JSON.stringify(previous.domains) || a.ca !== previous.ca || a.keyAlg !== previous.keyAlg)) {
+        next.state = "idle"; next.lastError = ""; next.certId = null; next.issuedAt = null; next.expiresAt = null; next.failCount = 0;
+        next.nextRenewAt = 0; next.targets = next.targets.map(target => ({ ...target, lastResult: null }));
+      }
       certAutos.set(next.id, next);
       return next as T;
     }
     case "certauto_delete": {
+      const previous = certAutos.get(args!.id as string);
+      if (!previous) throw { code: "NOT_FOUND", message: "自动化不存在" };
+      if (["issuing", "manual_wait"].includes(previous.state)) throw { code: "CERT_AUTO_BUSY", message: "该证书自动化正在执行，请等待当前任务结束" };
       certAutos.delete(args!.id as string);
       return true as T;
     }
     case "certauto_set_enabled": {
       const a0 = certAutos.get(args!.id as string);
-      if (a0) certAutos.set(a0.id, { ...a0, enabled: args!.enabled as boolean });
-      return a0 as T;
+      if (!a0) throw { code: "NOT_FOUND", message: "自动化不存在" };
+      if (["issuing", "manual_wait"].includes(a0.state)) throw { code: "CERT_AUTO_BUSY", message: "该证书自动化正在执行，请等待当前任务结束" };
+      const next = { ...a0, enabled: args!.enabled as boolean, updatedAt: Math.max(Date.now(), a0.updatedAt + 1) };
+      certAutos.set(a0.id, next);
+      return next as T;
     }
     case "certauto_issue": {
-      seedCertAutos();
-      const a1 = certAutos.get(args!.id as string);
-      if (a1) {
-        const next = { ...a1, state: "ok", issuedAt: Date.now(), expiresAt: Date.now() + 86400_000 * 90,
-          nextRenewAt: Date.now() + 86400_000 * 60, lastRunAt: Date.now() };
-        certAutos.set(next.id, next);
-        return next as T;
-      }
-      throw new Error("mock: 自动化不存在");
+      throw { code: "DESKTOP_ONLY", message: "证书签发需要在桌面应用中执行；网页预览不会申请或部署真实证书。" };
     }
     case "certmonitor_list":
       return [

@@ -773,13 +773,14 @@ impl Store {
     /* ---------- 证书自动化（ACME 签发/续签/部署） ---------- */
 
     pub fn save_cert_automation(&self, a: &CertAutomation) -> Result<()> {
+        let data = serde_json::to_string(a).map_err(|e| AppError::internal("保存证书自动化", e.to_string()))?;
         let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO cert_automations(id,data,updated_at) VALUES(?1,?2,?3)
              ON CONFLICT(id) DO UPDATE SET data=?2, updated_at=?3",
             params![
                 a.id,
-                serde_json::to_string(a).unwrap_or_else(|_| "{}".into()),
+                data,
                 a.updated_at
             ],
         )?;
@@ -789,25 +790,29 @@ impl Store {
     pub fn list_cert_automations(&self) -> Result<Vec<CertAutomation>> {
         let conn = self.conn.lock();
         let mut stmt =
-            conn.prepare("SELECT data FROM cert_automations ORDER BY updated_at DESC")?;
-        let list = stmt
-            .query_map([], |r| r.get::<_, String>(0))?
-            .filter_map(|r| r.ok())
-            .filter_map(|s| serde_json::from_str(&s).ok())
-            .collect();
-        Ok(list)
+            conn.prepare("SELECT id,data FROM cert_automations ORDER BY updated_at DESC")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter().map(|(id, data)| Self::decode_cert_automation(&id, &data)).collect()
+    }
+
+    fn decode_cert_automation(id: &str, data: &str) -> Result<CertAutomation> {
+        let a: CertAutomation = serde_json::from_str(data).map_err(|_| AppError::new(
+            "CERT_AUTO_CORRUPT", format!("证书自动化 {id} 的保存数据损坏，未隐藏或覆盖该记录")))?;
+        if a.id != id { return Err(AppError::new("CERT_AUTO_CORRUPT", "证书自动化记录标识不一致，请检查备份或修复记录")); }
+        Ok(a)
     }
 
     pub fn get_cert_automation(&self, id: &str) -> Result<Option<CertAutomation>> {
-        Ok(self
-            .list_cert_automations()?
-            .into_iter()
-            .find(|a| a.id == id))
+        let data: Option<String> = self.conn.lock().query_row("SELECT data FROM cert_automations WHERE id=?1", params![id], |r| r.get(0)).optional()?;
+        data.map(|data| Self::decode_cert_automation(id, &data)).transpose()
     }
 
     pub fn delete_cert_automation(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock();
-        conn.execute("DELETE FROM cert_automations WHERE id=?1", params![id])?;
+        if conn.execute("DELETE FROM cert_automations WHERE id=?1", params![id])? == 0 {
+            return Err(AppError::new("NOT_FOUND", "证书自动化不存在，未删除其它数据"));
+        }
         Ok(())
     }
 

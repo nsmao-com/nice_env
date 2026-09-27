@@ -86,7 +86,8 @@ pub fn site_terminal_environment(store: &Store, paths: &Paths, manifest: &Manife
     let content = read_project_file(&root.join(PROJECT_FILE))?;
     let mut required = project_versions(&project_document(content.as_deref())?)?;
     let files = runtime_version_files(&root);
-    let sources = apply_detected_versions(&mut required, &detect_project_versions(store, &files)?)?;
+    let detected = detect_project_versions(store, &files)?;
+    let sources = apply_detected_versions(&mut required, &detected)?;
     validate_project_versions(store, manifest, &required)?;
     if site.runtime.kind == crate::model::SiteKind::Php && !required.contains_key("php") {
         let version = site.runtime.php_version.as_ref().filter(|v| !v.is_empty()).ok_or_else(||
@@ -97,7 +98,7 @@ pub fn site_terminal_environment(store: &Store, paths: &Paths, manifest: &Manife
     for entry in &mut environment.entries { entry.source = sources.get(&entry.id).cloned(); }
     environment.cwd = root.to_string_lossy().into_owned();
     // 文件本身也是快照的一部分，外部改写后必须重新预览。
-    environment.revision = terminal_revision(&environment, Some(&project_revision(&site, &root, content.as_deref(), &files)));
+    environment.revision = terminal_revision(&environment, Some(&project_revision(&site, &root, content.as_deref(), &files, &detected)));
     Ok(environment)
 }
 
@@ -119,7 +120,9 @@ fn numeric_runtime_version(value: &str, node: bool) -> Option<Vec<u64>> {
     parts.into_iter().map(|part| part.parse().ok()).collect()
 }
 
-fn runtime_file_requirement(name: &str, content: &str) -> std::result::Result<(String, Option<Vec<u64>>), String> {
+enum RuntimeRequirement { Numeric(Vec<u64>), Any, NodeLts(String) }
+
+fn runtime_file_requirement(name: &str, content: &str) -> std::result::Result<(String, RuntimeRequirement), String> {
     let lines: Vec<_> = content.trim_start_matches('\u{feff}').lines().map(|line| line.split('#').next().unwrap_or("").trim())
         .filter(|line| !line.is_empty() && !(name == ".nvmrc" && line.contains('='))).collect();
     if lines.len() != 1 || lines[0].split_whitespace().count() != 1 || lines[0].contains(':') {
@@ -127,10 +130,16 @@ fn runtime_file_requirement(name: &str, content: &str) -> std::result::Result<(S
     }
     let value = lines[0];
     if value.len() > 128 || value.chars().any(char::is_control) { return Err(format!("{name} 中的版本号格式无效")); }
-    if name == ".nvmrc" && matches!(value, "node" | "stable") { return Ok((value.into(), None)); }
+    if name == ".nvmrc" {
+        if matches!(value, "node" | "stable") { return Ok((value.into(), RuntimeRequirement::Any)); }
+        if let Some(alias) = value.strip_prefix("lts/").filter(|alias| *alias == "*" || (!alias.is_empty()
+            && alias.len() <= 64 && alias.bytes().all(|c| c.is_ascii_alphabetic() || c == b'-'))) {
+            return Ok((value.into(), RuntimeRequirement::NodeLts(alias.into())));
+        }
+    }
     let numeric = numeric_runtime_version(value, name != ".python-version").ok_or_else(||
         format!("{name} 使用了无法自动解析的版本写法；请在项目版本页选择已安装版本"))?;
-    Ok((value.into(), Some(numeric)))
+    Ok((value.into(), RuntimeRequirement::Numeric(numeric)))
 }
 
 fn detect_project_versions(store: &Store, files: &RuntimeVersionFiles) -> Result<Vec<crate::model::ProjectRuntimeDetection>> {
@@ -152,7 +161,17 @@ fn detect_project_versions(store: &Store, files: &RuntimeVersionFiles) -> Result
             match result {
                 Ok((request, constraint)) => {
                     detection.requirements.push(format!("{name}: {request}"));
-                    if let Some(constraint) = constraint { constraints.push(constraint); }
+                    match constraint {
+                        RuntimeRequirement::Numeric(parts) => constraints.push(parts),
+                        RuntimeRequirement::Any => {},
+                        RuntimeRequirement::NodeLts(alias) => match crate::versions::node_lts_version(store, &alias) {
+                            Ok(version) => {
+                                *detection.requirements.last_mut().unwrap() = format!("{name}: {request} → {version}");
+                                if let Some(parts) = numeric_runtime_version(&version, true) { constraints.push(parts); }
+                            }
+                            Err(error) => if detection.issue.is_none() { detection.issue = Some(error.message); },
+                        },
+                    }
                 }
                 Err(issue) => if detection.issue.is_none() { detection.issue = Some(issue); },
             }
@@ -232,9 +251,9 @@ fn project_versions(value: &serde_json::Value) -> Result<std::collections::BTree
     Ok(versions)
 }
 
-fn project_revision(site: &crate::model::Site, root: &std::path::Path, content: Option<&str>, files: &RuntimeVersionFiles) -> String {
+fn project_revision(site: &crate::model::Site, root: &std::path::Path, content: Option<&str>, files: &RuntimeVersionFiles, detected: &[crate::model::ProjectRuntimeDetection]) -> String {
     use sha2::{Digest, Sha256};
-    let payload = (&site.id, &site.root_dir, root.to_string_lossy(), content, files);
+    let payload = (&site.id, &site.root_dir, root.to_string_lossy(), content, files, detected);
     format!("{:x}", Sha256::digest(serde_json::to_vec(&payload).expect("project snapshot contains only strings")))
 }
 
@@ -263,7 +282,7 @@ fn project_view(store: &Store, manifest: &Manifest, site: &crate::model::Site, r
         .filter(|other| project_directory(other).ok().as_deref() == Some(root)).map(|other| other.name).collect();
     Ok(crate::model::ProjectRuntimeVersions {
         path: root.join(PROJECT_FILE).to_string_lossy().into_owned(), exists: content.is_some(),
-        revision: project_revision(site, root, content, files), versions, options: options.into_values().collect(), shared_sites, detected,
+        revision: project_revision(site, root, content, files, &detected), versions, options: options.into_values().collect(), shared_sites, detected,
         php_version: (site.runtime.kind == crate::model::SiteKind::Php).then(|| site.runtime.php_version.clone()).flatten(),
     })
 }
@@ -295,20 +314,22 @@ pub fn save_project_runtime_versions(store: &Store, manifest: &Manifest, site_id
     let path = root.join(PROJECT_FILE);
     let original = read_project_file(&path)?;
     let files = runtime_version_files(&root);
-    if project_revision(&site, &root, original.as_deref(), &files) != expected_revision {
-        return Err(AppError::new("PROJECT_RUNTIME_CHANGED", "项目版本文件或目录已变化，未覆盖当前文件")
+    let detected = detect_project_versions(store, &files)?;
+    if project_revision(&site, &root, original.as_deref(), &files, &detected) != expected_revision {
+        return Err(AppError::new("PROJECT_RUNTIME_CHANGED", "项目文件、目录或自动匹配版本已变化，未覆盖当前文件")
             .with_hint("草稿已保留。请重新读取并核对最新版本后再保存。"));
     }
     let mut document = project_document(original.as_deref())?;
     let mut effective = versions.clone();
-    apply_detected_versions(&mut effective, &detect_project_versions(store, &files)?)?;
+    apply_detected_versions(&mut effective, &detected)?;
     validate_project_versions(store, manifest, &effective)?;
     if project_versions(&document)? == *versions { return project_view(store, manifest, &site, &root, original.as_deref(), &files); }
     document["runtimes"] = serde_json::json!(versions);
     let next = format!("{}\n", serde_json::to_string_pretty(&document).map_err(|e| AppError::internal("保存项目版本", e.to_string()))?);
     if next.len() > 1024 * 1024 { return Err(AppError::new("PROJECT_RUNTIME_TOO_LARGE", "项目版本文件不能超过 1 MiB")); }
     let view = project_view(store, manifest, &site, &root, Some(&next), &files)?;
-    if project_revision(&site, &root, original.as_deref(), &runtime_version_files(&root)) != expected_revision {
+    let current_files = runtime_version_files(&root);
+    if project_revision(&site, &root, original.as_deref(), &current_files, &detect_project_versions(store, &current_files)?) != expected_revision {
         return Err(AppError::new("PROJECT_RUNTIME_CHANGED", "项目版本文件已变化，未覆盖当前文件").with_hint("请重新读取并核对最新内容后保存。"));
     }
     if std::fs::metadata(&path).ok().is_some_and(|m| m.permissions().readonly()) {
@@ -1605,7 +1626,7 @@ mod tests {
         assert_eq!(state.save_project_runtime_versions(&site.id, &Default::default(), &saved.revision).unwrap_err().code, "PROJECT_RUNTIME_DETECTION");
         assert!(state.project_runtime_versions(&site.id).unwrap().versions.contains_key("node"));
         std::fs::remove_file(root.join(PROJECT_FILE)).unwrap(); std::fs::remove_file(root.join(".node-version")).unwrap();
-        for unsupported in ["", "lts/*", "default", "$(echo 2.0.0)", "1\n2", "1.0.0-rc.1", "01.0.0"] {
+        for unsupported in ["", "default", "$(echo 2.0.0)", "1\n2", "1.0.0-rc.1", "01.0.0"] {
             std::fs::write(root.join(".nvmrc"), unsupported).unwrap();
             let view = state.project_runtime_versions(&site.id).unwrap();
             assert!(view.detected[0].issue.is_some(), "{unsupported}");
@@ -1622,6 +1643,45 @@ mod tests {
             assert!(state.project_runtime_versions(&site.id).unwrap().detected.iter().find(|entry| entry.id == "python").unwrap().issue.is_some());
             assert_eq!(state.site_terminal_environment(&site.id).unwrap_err().code, "PROJECT_RUNTIME_DETECTION");
         }
+    }
+
+    #[test]
+    fn project_lts_aliases_refresh_snapshots_and_require_the_exact_official_release() {
+        let (_temp, state, site) = project_runtime_fixture();
+        let root = project_directory(&site).unwrap();
+        let file = root.join(".nvmrc");
+        std::fs::write(&file, "lts/*\n").unwrap();
+        let missing = state.project_runtime_versions(&site.id).unwrap();
+        assert!(missing.detected[0].issue.as_deref().unwrap().contains("刷新"));
+        assert_eq!(missing.detected[0].requirements, vec![".nvmrc: lts/*"]);
+        let index = serde_json::json!([{"version":"v1.0.0","lts":"First"},{"version":"v2.0.0","lts":false}]);
+        crate::versions::cache_node_lts_aliases(&state.store, index.as_array().unwrap()).unwrap();
+        let view = state.project_runtime_versions(&site.id).unwrap();
+        assert_eq!(view.detected[0].resolved_version.as_deref(), Some("1.0.0"));
+        assert!(view.detected[0].requirements[0].contains("→ 1.0.0"));
+        let preview = state.site_terminal_environment(&site.id).unwrap();
+        assert_eq!(state.uninstall_package("node@1.0.0").unwrap_err().code, "PACKAGE_IN_USE");
+        let pins = std::collections::BTreeMap::from([("node".into(), "2.0.0".into())]);
+        assert_eq!(state.save_project_runtime_versions(&site.id, &pins, &missing.revision).unwrap_err().code, "PROJECT_RUNTIME_CHANGED");
+        let updated = serde_json::json!([{"version":"v1.0.0","lts":"First"},{"version":"v2.0.0","lts":"Second"}]);
+        crate::versions::cache_node_lts_aliases(&state.store, updated.as_array().unwrap()).unwrap();
+        assert_eq!(state.with_terminal_environment::<()>(Some(&site.id), &preview.revision, |_| panic!("stale LTS launched")).unwrap_err().code, "TERMINAL_ENV_CHANGED");
+        assert_eq!(state.save_project_runtime_versions(&site.id, &pins, &view.revision).unwrap_err().code, "PROJECT_RUNTIME_CHANGED");
+        for (request, expected) in [("lts/*", "2.0.0"), ("lts/FiRsT", "1.0.0")] {
+            std::fs::write(&file, request).unwrap();
+            assert_eq!(state.site_terminal_environment(&site.id).unwrap().entries.iter().find(|e| e.id == "node").unwrap().version, expected);
+        }
+        std::fs::write(root.join(".node-version"), "2").unwrap();
+        assert!(state.project_runtime_versions(&site.id).unwrap().detected[0].issue.as_deref().unwrap().contains("冲突"));
+        std::fs::remove_file(root.join(".node-version")).unwrap();
+        let newer = serde_json::json!([{"version":"v1.1.0","lts":"First"}]);
+        crate::versions::cache_node_lts_aliases(&state.store, newer.as_array().unwrap()).unwrap();
+        let unavailable = state.project_runtime_versions(&site.id).unwrap();
+        assert!(unavailable.detected[0].issue.as_deref().unwrap().contains("1.1.0"));
+        assert!(unavailable.detected[0].resolved_version.is_none());
+        state.save_project_runtime_versions(&site.id, &pins, &unavailable.revision).unwrap();
+        assert_eq!(state.site_terminal_environment(&site.id).unwrap().entries.iter().find(|e| e.id == "node").unwrap().version, "2.0.0");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "lts/FiRsT");
     }
 
     #[test]
@@ -1697,13 +1757,24 @@ mod tests {
         std::fs::write(root.join(".node-version"), format!("v{}\n", versions["node"])).unwrap();
         std::fs::write(root.join(".python-version"), format!("{}\n", versions["python"].rsplit_once('.').unwrap().0)).unwrap();
         assert!(!root.join(PROJECT_FILE).exists());
-        for pin in [false, true] {
+        for mode in ["numeric", "lts", "pin"] {
+            let pin = mode == "pin";
+            if mode == "lts" {
+                let lts = platform::command(&executables["node"]).args(["-p", "process.release.lts"]).output().unwrap();
+                assert!(lts.status.success());
+                let name = String::from_utf8(lts.stdout).unwrap().trim().to_string();
+                assert_ne!(name, "undefined", "native LTS verification requires an LTS Node binary");
+                let index = serde_json::json!([{"version":format!("v{}", versions["node"]),"lts":name}]);
+                crate::versions::cache_node_lts_aliases(&state.store, index.as_array().unwrap()).unwrap();
+                std::fs::remove_file(root.join(".node-version")).unwrap();
+                std::fs::write(root.join(".nvmrc"), "lts/*\n").unwrap();
+            }
             if pin {
                 let view = state.project_runtime_versions(&site.id).unwrap();
                 state.save_project_runtime_versions(&site.id, &versions, &view.revision).unwrap();
             }
             let mut environment = state.site_terminal_environment(&site.id).unwrap();
-            assert!(environment.entries.iter().all(|entry| entry.source.as_deref() == Some(if pin { PROJECT_FILE } else if entry.id == "node" { ".node-version" } else { ".python-version" })));
+            assert!(environment.entries.iter().all(|entry| entry.source.as_deref() == Some(if pin { PROJECT_FILE } else if entry.id == "node" { if mode == "lts" { ".nvmrc" } else { ".node-version" } } else { ".python-version" })));
             environment.script.push_str("\n[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\n$nodePath=(Get-Command node -CommandType Application).Source\n$pythonPath=(Get-Command python -CommandType Application).Source\n$nodeVersion= & node --version\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n$pythonVersion= & python --version\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n[pscustomobject]@{nodePath=$nodePath;pythonPath=$pythonPath;nodeVersion=$nodeVersion;pythonVersion=$pythonVersion;cwd=(Get-Location).ProviderPath} | ConvertTo-Json -Compress");
             let args = powershell_terminal_args(&environment).unwrap().into_iter().filter(|arg| arg != "-NoExit").collect::<Vec<_>>();
             let powershell = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/WindowsPowerShell/v1.0/powershell.exe");

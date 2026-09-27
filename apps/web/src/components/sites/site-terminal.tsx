@@ -21,14 +21,15 @@ export function SiteTerminalButton({ site }: { site: Pick<Site, "id" | "name"> }
   const qc = useQueryClient();
   const [open, setOpen] = React.useState(false);
   const [tab, setTab] = React.useState("terminal");
-  const [busy, setBusy] = React.useState<"open" | "save" | "reload" | null>(null);
+  const [busy, setBusy] = React.useState<"open" | "save" | "reload" | "lts" | null>(null);
   const running = React.useRef(false);
   const [error, setError] = React.useState<AppErrorShape | null>(null);
   const [saveError, setSaveError] = React.useState<AppErrorShape | null>(null);
   const [opened, setOpened] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
   const [draft, setDraft] = React.useState<{ base: ProjectRuntimeVersions; versions: Record<string, string> } | null>(null);
-  const [confirm, setConfirm] = React.useState<"close" | "reload" | null>(null);
+  const [confirm, setConfirm] = React.useState<"close" | "reload" | "lts" | null>(null);
+  const [ltsRefreshed, setLtsRefreshed] = React.useState(false);
   const errorRef = React.useRef<HTMLDivElement>(null);
   const projectErrorRef = React.useRef<HTMLDivElement>(null);
   const environment = useQuery({ queryKey: ["pathenv", "terminal", site.id], queryFn: () => api.terminalEnvironment(site.id), enabled: open && tab === "terminal",
@@ -77,6 +78,21 @@ export function SiteTerminalButton({ site }: { site: Pick<Site, "id" | "name"> }
     } catch (e) { setSaveError(normalizeError(e)); }
     finally { running.current = false; setBusy(null); }
   };
+  const refreshLts = async () => {
+    if (running.current || project.isFetching) return;
+    running.current = true; setBusy("lts"); setSaveError(null); setSaved(false); setLtsRefreshed(false);
+    try {
+      const catalog = await api.versionCatalog("node", true);
+      qc.setQueryData(["version-catalogs", "node"], catalog);
+      if (!catalog.online || catalog.error) throw { code: "NODE_LTS_REFRESH_FAILED", message: t("sites.project.ltsFailed"), hint: catalog.error || t("sites.project.ltsOffline") };
+      const view = await api.projectRuntimeVersions(site.id);
+      setDraft({ base: view, versions: { ...view.versions } }); qc.setQueryData(["project-runtimes", site.id], view);
+      setLtsRefreshed(true); setError(null); setOpened(false);
+      await qc.invalidateQueries({ queryKey: ["pathenv", "terminal"] });
+      await qc.invalidateQueries({ queryKey: ["project-runtimes"], predicate: (query) => query.queryKey[1] !== site.id });
+    } catch (e) { setSaveError(normalizeError(e)); }
+    finally { running.current = false; setBusy(null); }
+  };
   const launch = async () => {
     if (running.current || dirty || environment.isFetching || environment.error || !environment.data || !isTauri || error?.code === "TERMINAL_ENV_CHANGED") return;
     running.current = true; setBusy("open"); setError(null); setOpened(false);
@@ -88,7 +104,7 @@ export function SiteTerminalButton({ site }: { site: Pick<Site, "id" | "name"> }
   const data = environment.data;
   return <>
     <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon-sm" className="text-faint hover:text-foreground" aria-label={t("dashboard.openTerminal")}
-      onClick={() => { setError(null); setSaveError(null); setOpened(false); setSaved(false); setDraft(null); setTab("terminal"); setOpen(true); }}><TerminalSquare className="h-3.5 w-3.5" /></Button></TooltipTrigger><TooltipContent>{t("sites.terminal.title")}</TooltipContent></Tooltip>
+      onClick={() => { setError(null); setSaveError(null); setOpened(false); setSaved(false); setLtsRefreshed(false); setDraft(null); setTab("terminal"); setOpen(true); }}><TerminalSquare className="h-3.5 w-3.5" /></Button></TooltipTrigger><TooltipContent>{t("sites.terminal.title")}</TooltipContent></Tooltip>
     <Dialog open={open} onOpenChange={(next) => { if (running.current) return; if (!next && dirty) setConfirm("close"); else if (!next) close(); else setOpen(true); }}>
       <DialogContent hideClose={!!busy} className="flex max-h-[85dvh] max-w-xl flex-col overflow-hidden">
         <DialogHeader className="shrink-0 pr-5"><DialogTitle title={site.name} className="line-clamp-2 leading-snug [overflow-wrap:anywhere]">{t("sites.terminal.title")} · {site.name}</DialogTitle><DialogDescription>{t("sites.terminal.hint")}</DialogDescription></DialogHeader>
@@ -140,6 +156,12 @@ export function SiteTerminalButton({ site }: { site: Pick<Site, "id" | "name"> }
                   {detected && <div className="space-y-1 text-secondary [overflow-wrap:anywhere]">
                     <p>{t("sites.project.source").replace("{source}", detected.requirements.length ? detected.requirements.join(" · ") : detected.files.join(" · "))}</p>
                     {selected ? <p>{t(selected === draft.base.versions[option.id] ? "sites.project.overridden" : "sites.project.overrideDraft")}</p> : detected.issue ? <p role="status" className="text-warn">{detected.issue}</p> : <p>{t("sites.project.autoHint")}</p>}
+                    {detected.requirements.some((requirement) => /^\.nvmrc: lts\//.test(requirement)) && <div className="space-y-2 pt-1">
+                      <p>{t("sites.project.ltsHint")}</p>
+                      <Button variant="ghost" size="sm" className="h-auto max-w-full justify-start whitespace-normal py-2 text-left" disabled={!!busy || project.isFetching}
+                        onClick={() => dirty ? setConfirm("lts") : void refreshLts()}><RefreshCw className={`h-3.5 w-3.5 shrink-0 ${busy === "lts" ? "animate-spin motion-reduce:animate-none" : ""}`} />{t(busy === "lts" ? "sites.project.ltsRefreshing" : "sites.project.ltsRefresh")}</Button>
+                      {ltsRefreshed && <p role="status">{t("sites.project.ltsRefreshed")}</p>}
+                    </div>}
                   </div>}
                   {missing && <p className="text-warn">{t("sites.project.missing")}</p>}
                 </div>;
@@ -155,6 +177,6 @@ export function SiteTerminalButton({ site }: { site: Pick<Site, "id" | "name"> }
       </DialogContent>
     </Dialog>
     <ConfirmDialog open={confirm !== null} onOpenChange={(next) => { if (!next) setConfirm(null); }} title={t("cfgeditor.discardTitle")} description={t("sites.project.discard")}
-      confirmText={t(confirm === "reload" ? "env.reload" : "cfgeditor.discard")} onConfirm={() => { const action = confirm; setConfirm(null); if (action === "close") close(); else void reloadProject(); }} />
+      confirmText={t(confirm === "lts" ? "sites.project.ltsRefresh" : confirm === "reload" ? "env.reload" : "cfgeditor.discard")} onConfirm={() => { const action = confirm; setConfirm(null); if (action === "close") close(); else if (action === "lts") void refreshLts(); else void reloadProject(); }} />
   </>;
 }

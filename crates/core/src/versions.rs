@@ -378,7 +378,7 @@ pub async fn catalog(
             return hit;
         }
     }
-    match fetch(&src, template).await {
+    match fetch(store, &src, template).await {
         Ok(mut cat) => {
             cat.online = true;
             cat.cached_at = Some(crate::services::now_ms());
@@ -432,7 +432,7 @@ pub fn clear_cache(store: &Store) {
 
 /* ================= 各上游抓取 ================= */
 
-async fn fetch(src: &VersionSource, template: &PackageManifestEntry) -> Result<VersionCatalog> {
+async fn fetch(store: &Store, src: &VersionSource, template: &PackageManifestEntry) -> Result<VersionCatalog> {
     for pattern in [&src.asset_match, &src.version_filter, &src.version_strip]
         .into_iter()
         .flatten()
@@ -442,7 +442,7 @@ async fn fetch(src: &VersionSource, template: &PackageManifestEntry) -> Result<V
     }
     let list = match src.kind.as_str() {
         "github" => fetch_github(src, template).await?,
-        "nodejs" => fetch_nodejs(src, template).await?,
+        "nodejs" => fetch_nodejs(store, src, template).await?,
         "php" => fetch_php(src, template).await?,
         "go" => fetch_go(src, template).await?,
         "nginx" => fetch_nginx(src, template).await?,
@@ -612,6 +612,7 @@ async fn fetch_github(
 
 /// Node.js：官方 dist 索引；校验文件延迟到安装选中的版本时读取。
 async fn fetch_nodejs(
+    store: &Store,
     src: &VersionSource,
     template: &PackageManifestEntry,
 ) -> Result<Vec<RemoteVersion>> {
@@ -650,7 +651,7 @@ async fn fetch_nodejs(
         .and_then(|p| regex::Regex::new(p).ok());
 
     let mut out = Vec::new();
-    for row in rows {
+    for row in &rows {
         let ver = row["version"].as_str().unwrap_or("");
         if ver.is_empty() {
             continue;
@@ -679,8 +680,48 @@ async fn fetch_nodejs(
     }
     out = limit_and_sort(out, src);
 
+    if !out.is_empty() { cache_node_lts_aliases(store, &rows)?; }
+
     // 校验值在选择安装版本时读取，避免版本列表多等 12 次网络请求。
     Ok(out)
+}
+
+// LTS 别名来自完整官方索引，独立于平台筛选、显示数量和普通版本目录的清理。
+// 项目读取只查本地快照；无法联网刷新时保留之前已确认的别名。
+const NODE_LTS_KEY: &str = "nodeLtsAliases:v1";
+
+fn valid_node_release(version: &str) -> bool {
+    let parts: Vec<_> = version.split('.').collect();
+    parts.len() == 3 && parts.iter().all(|part| !part.is_empty()
+        && part.bytes().all(|c| c.is_ascii_digit()) && !(part.len() > 1 && part.starts_with('0'))
+        && part.parse::<u64>().is_ok())
+}
+
+pub(crate) fn cache_node_lts_aliases(store: &Store, rows: &[serde_json::Value]) -> Result<()> {
+    let mut aliases = std::collections::BTreeMap::<String, String>::new();
+    for row in rows {
+        let Some(name) = row["lts"].as_str().filter(|name| !name.is_empty() && name.len() <= 64
+            && name.bytes().all(|c| c.is_ascii_alphabetic() || c == b'-')) else { continue; };
+        let Some(version) = row["version"].as_str().and_then(|v| v.strip_prefix('v')).filter(|v| valid_node_release(v)) else { continue; };
+        for alias in ["*".to_string(), name.to_ascii_lowercase()] {
+            if aliases.get(&alias).is_none_or(|previous| cmp_version_desc(version, previous).is_lt()) {
+                aliases.insert(alias, version.into());
+            }
+        }
+    }
+    if aliases.is_empty() { return Err(AppError::new("NODE_LTS_CATALOG_INVALID", "Node.js 官方索引缺少有效 LTS 信息，已保留上次结果")); }
+    let content = serde_json::to_string(&aliases).map_err(|e| AppError::internal("保存 Node.js LTS 信息", e.to_string()))?;
+    // 与项目保存、卸载和终端启动串行，避免快照核对后又切换别名。
+    let _guard = crate::sites::SITE_CHANGES.lock();
+    store.set_setting(NODE_LTS_KEY, &content)
+}
+
+pub(crate) fn node_lts_version(store: &Store, alias: &str) -> Result<String> {
+    let missing = || AppError::new("NODE_LTS_CATALOG_MISSING", "尚无可用的 Node.js LTS 信息，请点击刷新 Node.js 版本信息后重试");
+    let content = store.get_setting_checked(NODE_LTS_KEY)?.ok_or_else(missing)?;
+    let aliases: std::collections::BTreeMap<String, String> = serde_json::from_str(&content).map_err(|_| missing())?;
+    aliases.get(&alias.to_ascii_lowercase()).filter(|version| valid_node_release(version)).cloned()
+        .ok_or_else(|| AppError::new("NODE_LTS_ALIAS_UNKNOWN", format!("上次获取的官方索引中没有 lts/{alias}，请刷新 Node.js 版本信息或检查代号")))
 }
 
 /// 按实际下载文件名读取 Node 的官方校验值，支持 Windows 与 macOS。
@@ -1046,6 +1087,58 @@ fn version_parts(v: &str) -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "reads the official Node.js index; no package downloads or services"]
+    async fn official_node_lts_catalog_refresh_persists_aliases_beyond_display_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("state.db")).unwrap();
+        let mut template = crate::install::Installer::bundled().template_for("node").unwrap();
+        let mut source = source_for(&template).unwrap(); source.max_versions = Some(1);
+        template.version_source = Some(source);
+        let catalog = catalog(&store, &template, true).await;
+        assert!(catalog.online, "{:?}", catalog.error);
+        assert_eq!(catalog.remote.len(), 1);
+        let aliases: std::collections::BTreeMap<String, String> = serde_json::from_str(&store.get_setting_checked(NODE_LTS_KEY).unwrap().unwrap()).unwrap();
+        assert!(aliases.len() >= 5);
+        assert_eq!(node_lts_version(&store, "argon").unwrap(), "4.9.1");
+        assert!(valid_node_release(&node_lts_version(&store, "*").unwrap()));
+        // 独立核对 nvm 使用的官方 TSV 索引，避免只验证同一解析函数的结果。
+        let tab = get_text(&http().unwrap(), "https://nodejs.org/dist/index.tab").await.unwrap();
+        let columns: Vec<_> = tab.lines().next().unwrap().split('\t').collect();
+        let lts_column = columns.iter().position(|name| *name == "lts").unwrap();
+        let latest = tab.lines().skip(1).find_map(|line| {
+            let cells: Vec<_> = line.split('\t').collect();
+            (cells.get(lts_column).is_some_and(|lts| !lts.is_empty() && *lts != "-"))
+                .then(|| cells[0].trim_start_matches('v').to_string())
+        }).unwrap();
+        assert_eq!(node_lts_version(&store, "*").unwrap(), latest);
+    }
+
+    #[test]
+    fn node_lts_aliases_use_full_official_metadata_and_keep_last_valid_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("state.db")).unwrap();
+        assert_eq!(node_lts_version(&store, "*").unwrap_err().code, "NODE_LTS_CATALOG_MISSING");
+        let rows = serde_json::json!([
+            {"version":"v22.9.0","lts":"Jod"}, {"version":"v22.10.0","lts":"Jod"},
+            {"version":"v20.19.0","lts":"Iron"}, {"version":"v26.0.0","lts":false},
+            {"version":"v30.0.0-rc.1","lts":"Future"}, {"version":"v32.0.0","lts":""},
+            {"version":"v40.0.0","lts":"bad/name"}, {"version":"broken","lts":"Jod"}
+        ]);
+        cache_node_lts_aliases(&store, rows.as_array().unwrap()).unwrap();
+        assert_eq!(node_lts_version(&store, "*").unwrap(), "22.10.0");
+        assert_eq!(node_lts_version(&store, "JoD").unwrap(), "22.10.0");
+        assert_eq!(node_lts_version(&store, "iron").unwrap(), "20.19.0");
+        assert_eq!(node_lts_version(&store, "unknown").unwrap_err().code, "NODE_LTS_ALIAS_UNKNOWN");
+        assert_eq!(cache_node_lts_aliases(&store, &[]).unwrap_err().code, "NODE_LTS_CATALOG_INVALID");
+        clear_cache(&store);
+        drop(store);
+        let reopened = Store::open(temp.path().join("state.db")).unwrap();
+        assert_eq!(node_lts_version(&reopened, "*").unwrap(), "22.10.0");
+        reopened.set_setting(NODE_LTS_KEY, "broken").unwrap();
+        assert_eq!(node_lts_version(&reopened, "*").unwrap_err().code, "NODE_LTS_CATALOG_MISSING");
+    }
 
     fn sorted(list: &[&str]) -> Vec<String> {
         let mut v: Vec<String> = list.iter().map(|s| s.to_string()).collect();

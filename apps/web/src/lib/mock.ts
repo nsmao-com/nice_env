@@ -65,7 +65,7 @@ import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSet
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.74";
+const MOCK_APP_VERSION = "0.2.75";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -242,6 +242,7 @@ const mockPathEnv: { enabled: boolean; selected: string[] | null; versions: Reco
 // 浏览器只在内存保存；同一项目目录的站点共用版本选择。
 const mockProjectVersions = new Map<string, Record<string, string>>();
 const mockProjectVersionFiles = new Map<string, Record<string, string>>();
+const mockNodeLtsAliases = new Map<string, string>();
 const terminalRuntimeLabel = (id: string, name: string) => {
   switch (id) { case "php": return "PHP"; case "node": return "Node.js"; case "python": return "Python"; case "go": return "Go"; default: return name; }
 };
@@ -262,6 +263,14 @@ function mockDetectedVersions(root: string): ProjectRuntimeVersions["detected"] 
         const lines = files[name].replace(/^\uFEFF/, "").split(/\r?\n/).map((line) => line.split("#")[0].trim()).filter((line) => line && !(name === ".nvmrc" && line.includes("=")));
         if (lines.length !== 1 || /\s|:/.test(lines[0])) { issue ??= `${name} 需要一个版本号；空文件或多个解释器请在项目版本页明确选择版本`; continue; }
         const value = lines[0], parts = numeric(value, id === "node");
+        if (name === ".nvmrc" && /^lts\/(\*|[a-zA-Z-]{1,64})$/.test(value)) {
+          const version = mockNodeLtsAliases.get(value.slice(4).toLowerCase());
+          const resolved = version ? numeric(version, true) : null;
+          requirements.push(`${name}: ${value}${resolved ? ` → ${version}` : ""}`);
+          if (resolved?.length === 3) constraints.push(resolved);
+          else issue ??= mockNodeLtsAliases.size ? `上次获取的官方索引中没有 ${value}，请刷新 Node.js 版本信息或检查代号` : "尚无可用的 Node.js LTS 信息，请点击刷新 Node.js 版本信息后重试";
+          continue;
+        }
         if (value.length > 128 || (!parts && !(name === ".nvmrc" && ["node", "stable"].includes(value)))) {
           issue ??= `${name} 使用了无法自动解析的版本写法；请在项目版本页选择已安装版本`; continue;
         }
@@ -294,7 +303,7 @@ function mockProjectView(siteId: string): ProjectRuntimeVersions {
   const detected = mockDetectedVersions(root);
   const installed = Array.from(packages.values()).filter((p) => p.install && p.category === "runtime" && p.entry && !/\.(phar|php|jar|txt|json|toml|yaml|yml|md|ini)$/i.test(p.entry));
   const ids = [...new Set([...installed.map((p) => p.id), ...Object.keys(versions), ...detected.map((entry) => entry.id)])].sort();
-  return { path: `${root}/.niceenv.json`, exists: mockProjectVersions.has(root), revision: JSON.stringify([siteId, root, mockProjectVersions.get(root) ?? null, mockProjectVersionFiles.get(root) ?? null]), versions, detected,
+  return { path: `${root}/.niceenv.json`, exists: mockProjectVersions.has(root), revision: JSON.stringify([siteId, root, mockProjectVersions.get(root) ?? null, mockProjectVersionFiles.get(root) ?? null, detected]), versions, detected,
     options: ids.map((id) => ({ id, label: terminalRuntimeLabel(id, Array.from(packages.values()).find((p) => p.id === id)?.displayName ?? id),
       versions: installed.filter((p) => p.id === id).map((p) => p.version).sort(cmpVersionDesc) })),
     sharedSites: Array.from(sites.values()).filter((other) => other.id !== siteId && mockProjectRoot(other) === root).map((other) => other.name),
@@ -1157,7 +1166,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         return {
           shell: "powershell",
           cwd,
-          revision: `mock-terminal-${JSON.stringify([siteId, cwd, chosen, mockPathEnv.versions, required, site ? mockProjectVersionFiles.get(mockProjectRoot(site)) : null])}`,
+          revision: `mock-terminal-${JSON.stringify([siteId, cwd, chosen, mockPathEnv.versions, required, site ? mockProjectView(site.id).revision : null])}`,
           script: chosen.length ? `# Browser demo paths — generate the actual script in the desktop app.
 & {
   $nsbDirs = @(

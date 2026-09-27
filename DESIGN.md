@@ -2126,3 +2126,21 @@ Windows 使用现有可见独立 PowerShell 启动方式，加入由后端生成
 版本统一为 0.2.74，Cargo.lock 仅更新三个本项目 crate。最终前端类型检查及工作区 core 编译检查通过；精确暂存内容导出的独立发布树通过 cargo check --workspace --all-targets --locked，pathenv/envfile/install 模块回归 71 通过、0 失败、4 ignored、605 filtered out；同一发布树另行显式执行两项原生终端验证，均通过。未执行的其他模块和忽略项不计入验收。原有 configgen.rs 的 178 additions / 9 deletions 与未跟踪本地文件保留，不纳入提交。已核实 v0.2.73 Release completed/success。依根 AGENTS.md 必须新建 annotated tag v0.2.74，与 main 原子推送，并核对远程指向与实际 Release 状态。
 
 本次没有数据库变更，未修改 update.sql。未启动前端 dev、未执行本地前端 build、未新增依赖。macOS 原生终端和目录自动切换尚未验收；整体功能完善目标保持进行。
+
+## 第八十九轮：Node.js LTS 别名与项目版本刷新（v0.2.75）
+
+继续参考 ServBay 项目 CLI 版本隔离，补齐 .nvmrc 常见 lts/* 和 lts/代号写法。fast-context 确认上游 Node 索引已提供 LTS 名称，但仅用于套件列表备注，项目版本无法使用。通过 Context7 核对 nvm 官方 README：LTS 别名由访问 Node 官方索引时更新，本地别名指向相应系列最新正式版本。本轮不根据偶数主版本或显示名称猜测 LTS，也不静态硬编码未来系列。
+
+现有 Node.js 版本查询成功时，从完整官方 index.json 提取各 LTS 代号及最新版本，另存为本机已有 settings 存储中的别名快照，不受平台过滤和版本列表显示数量限制。lts/* 指向最新 LTS，lts/代号大小写不敏感，要求安装精确解析版本；缺失时显示文件要求和具体版本，不悄悄退到旧版。项目读取只用缓存，不自动联网、安装或执行文件；索引刷新失败保留上次快照，清理普通套件列表缓存也不清除项目仍需使用的 LTS 信息。缓存写入与项目保存、卸载及终端启动通过已有站点锁串行。
+
+项目 revision 纳入自动检测结果，LTS 别名或已安装匹配结果变化时，旧保存与启动预览均需重新核对。明确固定的 .niceenv.json 仍优先，原 .nvmrc 保持。无法读取缓存、未知代号、两个 Node 文件冲突和解析版本未安装均可通过固定版本修复。未新增 API 或 schema 字段，沿用 version_catalog 与已有项目读写接口。
+
+使用 LTS 的选项显示来源、解析版本和缓存规则，并提供“刷新 Node.js 版本信息”。有草稿时沿用放弃确认，取消保留编辑；刷新失败或后续项目读取失败也保留草稿及错误焦点，成功才重新读取选择并更新终端缓存。同步互斥防止重复请求，运行中禁用控件、页签和关闭。长按钮在窄屏换行，底部保存仍固定可见。浏览器默认不查询真实上游，其内存模拟支持相同别名选择；验收注入只位于自建浏览器上下文，没有产品调试入口。
+
+已有 Rust 模块内补充别名排序、排除非 LTS 与预发布、损坏索引保留、重开离线缓存、精确版本缺失、显式覆盖、文件冲突及缓存刷新使旧快照失效的验证，未新增测试文件。相关 33 项检查全部通过，含短时隐藏 PowerShell 的真实 Node/Python/PHP 执行；Node 验收扩展至读取真实 process.release.lts 后验证 LTS 自动选择。另行执行官方联网用例，通过生产 catalog 流程获取 index.json，将显示上限设为 1 后仍可解析历史代号，再用独立 index.tab 核对最新 LTS，验证通过；不下载套件、不启动长期服务。
+
+隔离浏览器验收缺少缓存、刷新失败及重试、双击仅一次请求、运行中 Escape 保护、放弃确认取消、失败保留草稿、固定保存及预览来源、恢复自动和刷新切换到新版本。发现新增刷新异常缺少规范 code 导致显示 [object Object]，按项目错误结构修复后重新确认中文提示及焦点。中英文、浅深色、1280 与 320×480 检查并目检截图；窄屏面板宽 296px、两侧 12px，没有横向溢出，英文刷新按钮可换行，下拉虚线两侧各 8px。页面异常为零，自建上下文已关闭，原页面保留。
+
+版本统一至 0.2.75，Cargo.lock 只更新三个本项目 crate。最终前端类型检查通过；精确暂存内容导出的独立发布树通过 cargo check --workspace --all-targets --locked，pathenv/versions/envfile/install 回归 76 通过、0 失败、5 ignored、602 filtered out，同一发布树另行显式执行两项原生终端和一项官方索引验证，3 项均通过。未执行的其他模块与忽略项不计入验收。原有 configgen.rs 的 178 additions / 9 deletions 和本地生成文件不纳入提交。已核实 v0.2.74 Release completed/success。按根 AGENTS.md 新建 annotated tag v0.2.75，与 main 原子推送并核对实际 Release 状态。
+
+本次没有数据库结构或数据修复 SQL 变更，未修改 update.sql；运行时缓存沿用既有 settings 存储。未启动前端 dev、未执行本地前端 build、未新增依赖。自定义 nvm 别名、多解释器、目录自动切换和 macOS 原生终端验收尚需后续推进，整体目标保持进行。

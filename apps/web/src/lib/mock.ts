@@ -63,7 +63,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.65";
+const MOCK_APP_VERSION = "0.2.66";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -2189,11 +2189,13 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "tunnel_start":
     case "tunnel_start_site": {
       const site = cmd === "tunnel_start_site" ? sites.get(args!.id as string) : undefined;
-      if (cmd === "tunnel_start_site" && (!site || site.status !== "running")) throw { code: "TUNNEL_SITE_STOPPED", message: "请先启动所选站点及依赖服务" };
-      const port = site ? ownPorts().find(([id, name]) => id === site.runtime.webServer && !name.includes("HTTPS"))?.[2] : Number(args!.port);
+      if (cmd === "tunnel_start_site" && (!site || mockSiteStatus(site) !== "running")) throw { code: "TUNNEL_SITE_STOPPED", message: "请先启动所选站点及依赖服务" };
+      if (site && !site.accessUrl) throw { code: "SITE_URL_UNAVAILABLE", message: "尚未确认本次加载的站点地址", hint: "请重启对应 Web 服务后重试" };
+      const address = site?.accessUrl ? new URL(site.accessUrl) : undefined;
+      const port = address ? Number(address.port || (address.protocol === "https:" ? 443 : 80)) : Number(args!.port);
       if (!port || !Number.isInteger(port) || port < 1 || port > 65535) throw { code: "TUNNEL_BAD_PORT", message: "本地 HTTP 端口必须为 1–65535" };
-      const target = `http://${site?.domains[0] ?? "127.0.0.1"}:${port}`;
-      const existing = [...mockTunnels.values()].find((row) => row.alive && row.target === target);
+      const target = site?.accessUrl ?? `http://127.0.0.1${port === 80 ? "" : `:${port}`}`;
+      const existing = [...mockTunnels.values()].find((row) => row.alive && row.target === target && row.siteId === site?.id);
       if (existing) return structuredClone(existing) as T;
       if (mockTunnels.size >= 20) {
         const ended = [...mockTunnels.values()].find((row) => !row.alive);
@@ -2207,6 +2209,13 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "tunnel_list": {
       for (const row of mockTunnels.values()) {
+        if (row.alive && row.siteId) {
+          const site = sites.get(row.siteId);
+          if (!site || mockSiteStatus(site) !== "running" || site.accessUrl !== row.target) {
+            row.alive = false; row.state = "failed"; row.localReachable = false;
+            row.error = "站点已停止或访问地址已变化，请确认站点后重新创建隧道";
+          }
+        }
         if (row.state === "starting" && row.alive && Date.now() - row.startedAt >= 1500) {
           row.state = "connected"; row.url = `https://preview-${row.id}.example.invalid`;
           row.logs.push("模拟连接完成，示例地址不可访问。");

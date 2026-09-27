@@ -1961,3 +1961,21 @@ configgen.rs 原有未提交修改保留，本轮仅纳入复用解析器所需�
 隔离浏览器通过脚本响应注入统计调用和模拟错误，不修改产品调试代码或用户页面。验证两站操作部分失败后重试仅发送失败 ID，成功结果保留；请求异常保留选择；运行时 Escape 不关闭、选择禁用；完成后焦点进入结果；错误详情长文本换行。站点详情启动已停止 PHP 站点会调用 start_site 并恢复依赖状态。已检查 1280、390、320 宽度，中英文和主题场景；320×480 英文深色目检发现重复通知遮挡底部操作，已删除这处重复 toast，保留弹窗结果与焦点提示；最终弹窗宽 296px、x=12，正文独立滚动、无横向溢出，底部按钮可点击，关闭后焦点回到批量入口。pnpm --filter @nsb/web check 通过；精确暂存树导出到独立临时目录后 cargo check --workspace --all-targets --locked 通过，Rust 回归串行执行 613 通过、0 失败、12 ignored、28 filtered out，真实 Nginx 停止回滚及隔离流程在该发布树再次通过。未把 ignored 或 filtered 项报告为已验证。
 
 已确认 v0.2.64 Release completed/success；本轮版本统一为 0.2.65，新增 annotated tag 并与 main 原子推送，核对远程提交及构建实际状态。原有 configgen.rs 178 additions / 9 deletions 与未跟踪生成文件保留，不纳入本轮提交。未运行本地前端 dev/build，未新增依赖。本次没有数据库变更，未修改 update.sql。站点保存/删除的进一步隔离、隧道入口端口一致性和此前跨平台原生边界仍待继续验证，整体目标保持进行。
+
+## 第八十轮：临时隧道实际入口、HTTPS 验证与站点失效处理（v0.2.66）
+
+参考 ServBay 官方临时隧道与公网访问说明（https://support.servbay.com/advanced-settings/how-to-use-cloudflared、https://support.servbay.com/advanced-settings/access-from-internet），继续核对已运行站点的分享流程。原逻辑从 Web 服务主端口构造 HTTP 地址，即便站点已经启用 HTTPS 或使用独立 vhost 端口，仍可能转发错误；首域名是通配域名时也无法创建。本轮复用 v0.2.64 的已加载入口快照及端口归属检查，按真实协议、域名和端口构造隧道。通配站点沿用实际访问地址的域名展开规则，设置中尚未生效的新端口不改变当前转发目标。
+
+通过 Context7 核对 cloudflared 和 reqwest 官方实现后，HTTPS 本地探测使用 URL 域名进行 SNI 与证书校验，并将 DNS 固定到 127.0.0.1；请求不使用代理、不跟随跳转。cloudflared 的上游 URL 固定使用回环地址，通过 --http-host-header 和 --origin-server-name 匹配站点，--origin-ca-pool 使用独立临时证书快照。默认站点读取本地 CA，显式导入/ACME 站点读取其既有证书链并复用来源校验；不向隧道传递私钥，不关闭 TLS 校验。独立目录随隧道记录保存配置和公开证书，避免用户已有 cloudflared 配置或后续证书文件变动改变本次启动参数。拒绝非 127.0.0.1 的 IP 字面量入口并提示添加本地域名，因为 reqwest 的 DNS 覆盖不会改写字面 IP。没有引入依赖或修改证书持久化结构。
+
+站点隧道保留创建时的站点、进程及已加载地址；监测发现配置停用、服务重启、入口变化或监听归属不符后，停止隧道并保留可重试的失败记录。生命周期锁忙时跳过该次归属检查，下一轮继续，避免退出与服务启停互相阻塞；此检查是轮询，不承诺站点切换的零时间窗口。所有隧道改为真实 HTTP/HTTPS 可达性探测，不再只检查 TCP 端口；本地服务不可达时不能显示 connected，持续不可用沿用 90 秒超时结束。去重同时考虑站点、协议和可信证书，旧入口失效后不能直接复用旧连接。
+
+工具箱下拉及创建前提示显示后端实际地址；未运行或地址未确认的站点不能创建。创建失败保留后端错误建议，停止或失效记录不再提供复制失效分享链接的按钮。浏览器模拟使用已加载 accessUrl 和派生依赖状态，支持地址失效后终止模拟隧道，保留浏览器预览不创建公网连接的说明。同步中英文文案，提高本轮说明文字对比度；沿用下拉虚线和左右留白，不改全局组件。
+
+在已有 Rust 模块补充 HTTPS、SNI、Host、临时证书目录、域名不匹配、证书过期、不受信任、自签名证书及站点失效停止的验证，未新增测试文件。首次隧道回归中一条旧断线测试仍期望本地停止后 connected，已按新的真实连接语义改为 reconnecting 后通过。隔离真实 Nginx 使用临时配置、随机端口、通配域名和本地 CA 验证 HTTPS HEAD 与实际静态内容，并验证修改端口设置仍保持原运行地址；NSB_SKIP_HOSTS=1，不修改用户 hosts，进程由 RAII 清理。官方 cloudflared 可执行文件验证 HTTPS 参数被接受，--help 不建立公网隧道。本轮未执行公网端到端分享，也未单独验收 Apache 或 macOS 原生 HTTPS。
+
+浏览器隔离上下文覆盖 1280、390、320 宽度，检查中文浅色、英文深色、长 HTTPS 地址、证书错误与建议、目标失效后的禁用/失败状态、重新创建及自定义 HTTP 端口。站点创建仅发送站点 id，自定义端口发送实际端口；失效条目不提供复制，键盘打开下拉后 Escape 恢复入口焦点。下拉分隔线为 dashed，两侧约 12px，无横向溢出，最终页面异常为 0。注入脚本只用于浏览器响应中的临时样例和调用统计，未写入产品；首次错误样例缺少 code 导致错误规范化失败，补齐真实接口结构后验证通过。隔离上下文已关闭，用户原页面保留。
+
+版本和 Cargo.lock 中三个本项目 crate 统一为 0.2.66；pnpm --filter @nsb/web check、cargo metadata --locked --no-deps 与 git diff --check 通过。精确暂存树导出到系统临时目录后，cargo check --workspace --all-targets --locked 通过；Rust 回归串行运行 615 通过、0 失败、12 ignored、29 filtered out。该发布树另行通过 3 项隧道原生生命周期检查、真实 Nginx HTTPS 验证和官方 cloudflared 参数验证，不依赖工作区 configgen.rs 的原有未提交修改。未启动前端 dev、未执行本地前端 build。本次没有数据库变更，未修改 update.sql。
+
+已确认 v0.2.65 Release completed/success。遵循根 AGENTS.md，新建 annotated tag v0.2.66，与 main 原子推送，并核对远程指向及实际构建状态；不移动旧 tag。保留原有 configgen.rs 修改和本地生成文件。其他功能缺漏、站点保存/删除隔离及跨平台验证继续处理，整体目标保持进行。

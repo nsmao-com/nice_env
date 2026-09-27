@@ -1,8 +1,8 @@
-//! 临时 HTTP 隧道：本地目标检查、真实 readiness、限量诊断输出与受管进程生命周期。
+//! 临时 HTTP/HTTPS 隧道：本地目标检查、真实 readiness、限量诊断输出与受管进程生命周期。
 use crate::error::{AppError, Result};
 use crate::model::TunnelInfo;
 use parking_lot::Mutex;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -18,11 +18,21 @@ fn registry() -> &'static TunnelRegistry {
     REGISTRY.get_or_init(TunnelRegistry::default)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct Target {
     pub port: u16,
     pub host: Option<String>,
     pub site_id: Option<String>,
+    https: bool,
+    ca_pem: Option<String>,
+    site: Option<Arc<SiteBinding>>,
+}
+
+struct SiteBinding {
+    paths: crate::paths::Paths,
+    site: crate::model::Site,
+    manager: Arc<crate::services::ServiceManager>,
+    pids: Vec<u32>,
 }
 impl Target {
     pub fn local(port: u16) -> Result<Self> {
@@ -36,36 +46,67 @@ impl Target {
             port,
             host: None,
             site_id: None,
+            https: false,
+            ca_pem: None,
+            site: None,
         })
     }
-    pub fn site(site: &crate::model::Site, port: u16) -> Result<Self> {
-        let host = site
-            .domains
-            .first()
-            .filter(|s| {
-                !s.is_empty()
-                    && s.len() <= 253
-                    && s.bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b))
-            })
+    pub fn site(site: &crate::model::Site, address: &str, paths: &crate::paths::Paths,
+        store: &crate::store::Store, manager: Arc<crate::services::ServiceManager>) -> Result<Self> {
+        let url = reqwest::Url::parse(address)
+            .map_err(|_| AppError::new("TUNNEL_BAD_HOST", "站点访问地址无效，请重启对应 Web 服务"))?;
+        let host = url.host_str().filter(|host| !host.is_empty() && host.bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b".-".contains(&byte)))
             .ok_or_else(|| AppError::new("TUNNEL_BAD_HOST", "站点没有有效的本地域名"))?;
-        let mut target = Self::local(port)?;
-        target.host = Some(host.clone());
+        // reqwest 的 DNS 覆盖不会改写 IP 字面量，不能因此连接到外部地址。
+        if host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip != std::net::Ipv4Addr::LOCALHOST) {
+            return Err(AppError::new("TUNNEL_BAD_HOST", "此站点使用 IP 地址，请添加本地域名后再创建隧道")
+                .with_hint("隧道仅连接 127.0.0.1；请选择以本地域名或 127.0.0.1 访问的站点。"));
+        }
+        if !matches!(url.scheme(), "http" | "https") || !url.username().is_empty() || url.password().is_some()
+            || url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+            return Err(AppError::new("TUNNEL_BAD_HOST", "站点访问地址无效，请重启对应 Web 服务"));
+        }
+        let mut target = Self::local(url.port_or_known_default().unwrap_or(0))?;
+        target.host = Some(host.to_owned());
         target.site_id = Some(site.id.clone());
+        target.https = url.scheme() == "https";
+        if target.https {
+            let _files = crate::tls::CERT_FILES.lock();
+            crate::certs::validate_site_certificate(paths, store, site)?;
+            // 只信任用户为该站点选择的证书链，或应用本地 CA；不向隧道传递私钥，也不关闭 TLS 校验。
+            let certificate = if let Some(id) = &site.runtime.imported_cert_id {
+                crate::certs::imported_paths(paths, id)?.0
+            } else if let Some(id) = &site.runtime.acme_cert_id {
+                crate::certs::acme_paths(paths, id)?.0
+            } else {
+                crate::paths::checked_data_path(&paths.base, "certs/ca.crt")?
+            };
+            target.ca_pem = Some(crate::certs::read_managed_pem(&certificate)?);
+        }
+        let pids = manager.snapshot(&site.runtime.web_server).map(|status| status.pids).unwrap_or_default();
+        target.site = Some(Arc::new(SiteBinding { paths: paths.clone(), site: site.clone(), manager, pids }));
         Ok(target)
     }
+    fn scheme(&self) -> &str { if self.https { "https" } else { "http" } }
     fn origin(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
+        format!("{}://127.0.0.1:{}", self.scheme(), self.port)
     }
     fn label(&self) -> String {
-        format!(
-            "http://{}:{}",
-            self.host.as_deref().unwrap_or("127.0.0.1"),
-            self.port
-        )
+        let port = if self.port == if self.https { 443 } else { 80 } { String::new() } else { format!(":{}", self.port) };
+        format!("{}://{}{port}", self.scheme(), self.host.as_deref().unwrap_or("127.0.0.1"))
     }
     fn same_origin(&self, other: &Self) -> bool {
-        self.port == other.port && self.host == other.host
+        self.port == other.port && self.host == other.host && self.https == other.https
+            && self.site_id == other.site_id && self.ca_pem == other.ca_pem
+    }
+    fn is_current(&self) -> bool {
+        let Some(binding) = &self.site else { return true };
+        // 启停期间不阻塞隧道退出；下一次监测再核对，避免与生命周期操作形成锁等待。
+        let Some(_operation) = binding.manager.lifecycle.try_lock() else { return true };
+        binding.manager.snapshot(&binding.site.runtime.web_server).is_some_and(|status| status.pids == binding.pids)
+            && crate::sites::running_url(&binding.paths, binding.site.clone(), &binding.manager)
+                .is_ok_and(|address| address == self.label())
     }
 }
 
@@ -78,22 +119,39 @@ fn local_client() -> Result<reqwest::blocking::Client> {
         .map_err(|e| AppError::internal("创建隧道检查客户端", e.to_string()))
 }
 
-/// 验证端口提供 HTTP；不跟随跳转，站点以真实 Host 请求同一个回环地址。
-fn check_origin(target: &Target) -> Result<()> {
-    let client = local_client()?;
-    let mut request = client.head(target.origin());
+fn origin_client(target: &Target) -> Result<reqwest::blocking::Client> {
+    let mut builder = reqwest::blocking::Client::builder().no_proxy()
+        .redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(2))
+        .pool_max_idle_per_host(0);
+    if let Some(host) = &target.host {
+        builder = builder.resolve(host, std::net::SocketAddr::from(([127, 0, 0, 1], target.port)));
+    }
+    if let Some(pem) = &target.ca_pem {
+        let certs = reqwest::Certificate::from_pem_bundle(pem.as_bytes())
+            .map_err(|e| AppError::internal("读取站点可信证书", e.to_string()))?;
+        if certs.is_empty() { return Err(AppError::new("TUNNEL_CERT_EMPTY", "站点可信证书为空，请重新配置 HTTPS 证书")); }
+        for certificate in certs { builder = builder.add_root_certificate(certificate); }
+    }
+    builder.build().map_err(|e| AppError::internal("创建站点检查客户端", e.to_string()))
+}
+
+/// 固定连接回环，URL 保留域名以发送 SNI 并验证证书；不跟随站点的跳转。
+fn check_origin_with(client: &reqwest::blocking::Client, target: &Target) -> Result<()> {
+    let mut request = client.head(target.label());
     if let Some(host) = &target.host {
         request = request.header(reqwest::header::HOST, host);
     }
     request.send().map_err(|e| {
         AppError::new(
             "TUNNEL_ORIGIN_UNAVAILABLE",
-            format!("本地 HTTP 服务无法访问：{}", e.without_url()),
+            format!("本地站点无法访问：{}", e.without_url()),
         )
-        .with_hint("请先启动对应站点或 HTTP 服务；此入口不支持数据库端口或仅提供 HTTPS 的端口")
+        .with_hint(if target.https { "请检查站点是否运行、证书是否有效且覆盖当前域名；更新证书后重启 Web 服务再试。" }
+            else { "请先启动对应 HTTP 服务；HTTPS 站点请通过站点列表选择，不要填写其 HTTPS 端口。" })
     })?;
     Ok(())
 }
+pub(crate) fn check_origin(target: &Target) -> Result<()> { check_origin_with(&origin_client(target)?, target) }
 
 struct ManagedProcess {
     child: std::process::Child,
@@ -136,7 +194,7 @@ struct Entry {
     metrics: Mutex<Option<String>>,
     process: Mutex<ManagedProcess>,
     // 保留本次独立配置，避免使用用户已有 cloudflared 的账号或 ingress 配置。
-    _config: Option<tempfile::NamedTempFile>,
+    _config: Option<tempfile::TempDir>,
 }
 impl Entry {
     fn snapshot(&self) -> TunnelInfo {
@@ -235,7 +293,7 @@ impl TunnelRegistry {
     fn start(
         &self,
         target: Target,
-        command: impl FnOnce() -> Result<(std::process::Command, Option<tempfile::NamedTempFile>)>,
+        command: impl FnOnce() -> Result<(std::process::Command, Option<tempfile::TempDir>)>,
         timing: Timing,
     ) -> Result<TunnelInfo> {
         let _operation = self.start_gate.lock();
@@ -248,8 +306,10 @@ impl TunnelRegistry {
         for entry in self.entries.lock().iter() {
             if entry.target.same_origin(&target) {
                 let info = entry.snapshot();
-                if info.alive {
+                if info.alive && entry.target.is_current() {
                     return Ok(info);
+                } else if info.alive {
+                    entry.stop(Some("站点运行地址已失效，请重新创建隧道"))?;
                 }
             }
         }
@@ -484,6 +544,10 @@ fn monitor(entry: Arc<Entry>, timing: Timing) {
             return;
         }
     };
+    let origin = match origin_client(&entry.target) {
+        Ok(client) => client,
+        Err(error) => { let _ = entry.stop(Some(&error.message)); return; }
+    };
     let mut last_available = Instant::now();
     let mut was_connected = false;
     loop {
@@ -494,22 +558,23 @@ fn monitor(entry: Arc<Entry>, timing: Timing) {
         } {
             return;
         }
+        if !entry.target.is_current() {
+            entry.info.lock().local_reachable = Some(false);
+            let _ = entry.stop(Some("站点已停止、重启或访问地址已变化，请确认站点后重新创建隧道"));
+            return;
+        }
         let metrics = entry.metrics.lock().clone();
         let ready = metrics
             .as_deref()
             .is_some_and(|url| readiness(&client, url));
-        let local = std::net::TcpStream::connect_timeout(
-            &std::net::SocketAddr::from(([127, 0, 0, 1], entry.target.port)),
-            Duration::from_millis(500),
-        )
-        .is_ok();
+        let local = check_origin_with(&origin, &entry.target).is_ok();
         {
             let mut info = entry.info.lock();
             if !info.alive || info.state == "failed" {
                 return;
             }
             info.local_reachable = Some(local);
-            if ready && info.url.is_some() {
+            if ready && local && info.url.is_some() {
                 info.state = "connected".into();
                 info.error = None;
                 was_connected = true;
@@ -524,7 +589,9 @@ fn monitor(entry: Arc<Entry>, timing: Timing) {
             }
         }
         if last_available.elapsed() >= timing.unavailable {
-            let message = if was_connected {
+            let message = if !local {
+                "本地 HTTP/HTTPS 服务持续不可用，隧道已结束；请检查站点与证书后重试"
+            } else if was_connected {
                 "隧道断线后 90 秒内未恢复，请检查网络和输出后重试"
             } else {
                 "90 秒内未建立可用隧道，请检查 cloudflared 输出与网络后重试"
@@ -539,17 +606,15 @@ fn monitor(entry: Arc<Entry>, timing: Timing) {
 fn cloudflared_command(
     exe: &Path,
     target: &Target,
-) -> Result<(std::process::Command, Option<tempfile::NamedTempFile>)> {
-    let mut config = tempfile::Builder::new()
+) -> Result<(std::process::Command, Option<tempfile::TempDir>)> {
+    let config = tempfile::Builder::new()
         .prefix("niceenv-tunnel-")
-        .suffix(".yml")
-        .tempfile()?;
-    config.write_all(b"{}\n")?;
-    config.flush()?;
+        .tempdir()?;
+    std::fs::write(config.path().join("config.yml"), b"{}\n")?;
     let mut command = platform::command(exe);
     command
         .args(["tunnel", "--no-autoupdate", "--config"])
-        .arg(config.path())
+        .arg(config.path().join("config.yml"))
         .args([
             "--url",
             &target.origin(),
@@ -560,6 +625,12 @@ fn cloudflared_command(
         ]);
     if let Some(host) = &target.host {
         command.args(["--http-host-header", host]);
+        if target.https { command.args(["--origin-server-name", host]); }
+    }
+    if let Some(pem) = &target.ca_pem {
+        let ca = config.path().join("origin-ca.pem");
+        std::fs::write(&ca, pem)?;
+        command.arg("--origin-ca-pool").arg(ca);
     }
     for (name, _) in std::env::vars_os() {
         if name
@@ -605,6 +676,7 @@ pub fn resume_after_shutdown() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::net::TcpListener;
 
     /// 有界回环 HTTP 服务，仅用于这个已有模块的回归验证。
@@ -708,7 +780,7 @@ mod tests {
     fn command(
         mode: &str,
         metrics: Option<u16>,
-    ) -> Result<(std::process::Command, Option<tempfile::NamedTempFile>)> {
+    ) -> Result<(std::process::Command, Option<tempfile::TempDir>)> {
         let mut command = platform::command(std::env::current_exe().unwrap());
         command
             .args([
@@ -880,7 +952,7 @@ mod tests {
         wait_for(|| entry.snapshot().state == "connected");
         drop(origin);
         wait_for(|| entry.snapshot().local_reachable == Some(false));
-        assert_eq!(entry.snapshot().state, "connected");
+        assert_eq!(entry.snapshot().state, "reconnecting");
         // 延迟返回的 readiness 不得将已停止状态改回 connected。
         ready.delay.store(200, Ordering::Release);
         let count = ready.requests.lock().len();
@@ -1013,6 +1085,7 @@ mod tests {
             port: 8180,
             host: Some("site.test".into()),
             site_id: Some("site-1".into()),
+            ..Target::local(8180).unwrap()
         };
         let (command, file) = cloudflared_command(Path::new("cloudflared"), &target).unwrap();
         let args: Vec<_> = command
@@ -1028,9 +1101,115 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["--metrics", "127.0.0.1:0"]));
         assert!(args.windows(2).any(|w| w == ["--output", "json"]));
         assert_eq!(
-            std::fs::read_to_string(file.unwrap().path()).unwrap(),
+            std::fs::read_to_string(file.unwrap().path().join("config.yml")).unwrap(),
             "{}\n"
         );
+    }
+
+    #[test]
+    fn https_command_keeps_sni_and_ca_snapshot_until_process_ends() {
+        let pem = rcgen::generate_simple_self_signed(vec!["site.test".into()]).unwrap().cert.pem();
+        let target = Target { host: Some("site.test".into()), https: true, ca_pem: Some(pem.clone()), ..Target::local(8443).unwrap() };
+        let (command, directory) = cloudflared_command(Path::new("cloudflared"), &target).unwrap();
+        let args: Vec<_> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        for expected in [["--url", "https://127.0.0.1:8443"], ["--origin-server-name", "site.test"], ["--http-host-header", "site.test"]] {
+            assert!(args.windows(2).any(|pair| pair == expected));
+        }
+        let ca = std::path::PathBuf::from(&args[args.iter().position(|arg| arg == "--origin-ca-pool").unwrap() + 1]);
+        assert_eq!(std::fs::read_to_string(&ca).unwrap(), pem);
+        assert!(!args.iter().any(|arg| arg.contains("no-tls-verify")));
+        let mut http = target.clone(); http.https = false;
+        assert!(!target.same_origin(&http));
+        drop(directory);
+        assert!(!ca.exists());
+    }
+
+    #[test]
+    fn native_site_tunnel_stops_when_loaded_address_is_lost() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::new(temp.path().to_path_buf()); paths.ensure_dirs().unwrap();
+        let store = crate::store::Store::open(paths.db()).unwrap();
+        let site: crate::model::Site = serde_json::from_value(serde_json::json!({
+            "id":"tunnel-site", "name":"Tunnel site", "domains":["*.demo.test"], "rootDir":temp.path(),
+            "runtime":{"kind":"static", "webServer":"nginx"}, "https":false, "rewrite":"none", "createdAt":1, "updatedAt":1
+        })).unwrap();
+        store.save_site(&site).unwrap();
+        let origin = HttpFixture::new(200, "");
+        let ready = HttpFixture::new(200, r#"{"readyConnections":1}"#);
+        std::fs::write(paths.nginx_conf(), format!("events {{}} http {{ include \"{}/*.conf\"; }}", paths.nginx_sites_dir().to_string_lossy().replace('\\', "/"))).unwrap();
+        let vhost = paths.nginx_sites_dir().join("tunnel-site.conf");
+        std::fs::write(&vhost, format!("server {{ listen {}; server_name *.demo.test; }}", origin.port)).unwrap();
+        let manager = Arc::new(crate::services::ServiceManager::new());
+        manager.register("nginx", "Nginx", None, None, Some(80), paths.logs().join("nginx.log"));
+        manager.adopt("nginx", &[std::process::id()], Some(80));
+        crate::sites::record_endpoints(&manager, "nginx", crate::sites::snapshot_endpoints(&paths, &store, "nginx"));
+        let url = crate::sites::access_url(&paths, &store, &manager, &site.id).unwrap();
+        let target = Target::site(&site, &url, &paths, &store, manager.clone()).unwrap();
+        assert_eq!(target.port, origin.port); assert_eq!(target.host.as_deref(), Some("www.demo.test"));
+        assert_eq!(Target::site(&site, "https://198.51.100.2:443", &paths, &store, manager.clone()).err().unwrap().code, "TUNNEL_BAD_HOST");
+        assert!(target.is_current());
+        let registry = TunnelRegistry::default();
+        let info = registry.start(target, || command("hold", Some(ready.port)), timing()).unwrap();
+        let entry = registry.find(&info.id).unwrap();
+        wait_for(|| entry.snapshot().state == "connected");
+        // 端口仍开放，但站点配置已停用，不能继续共享默认 vhost。
+        std::fs::rename(&vhost, vhost.with_extension("conf.disabled")).unwrap();
+        wait_for(|| !entry.snapshot().alive);
+        assert_eq!(entry.snapshot().state, "failed");
+        assert_eq!(entry.snapshot().local_reachable, Some(false));
+        assert!(!platform::process_alive(entry.process.lock().child.id()));
+    }
+
+    #[test]
+    fn https_origin_verifies_ca_hostname_and_expiry_with_loopback_sni() {
+        for (host, trusted, expired, self_signed) in [
+            ("app.test", true, false, false), ("wrong.test", true, false, false),
+            ("app.test", false, false, false), ("app.test", true, true, false),
+            ("app.test", true, false, true), ("app.test", true, true, true),
+        ] {
+            let ca_key = rcgen::KeyPair::generate().unwrap();
+            let mut ca_params = rcgen::CertificateParams::new(vec!["CA.test".into()]).unwrap();
+            ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+            let ca = ca_params.self_signed(&ca_key).unwrap();
+            let key = rcgen::KeyPair::generate().unwrap();
+            let mut params = rcgen::CertificateParams::new(vec!["app.test".into()]).unwrap();
+            params.not_before = time::OffsetDateTime::now_utc() - time::Duration::days(30);
+            params.not_after = time::OffsetDateTime::now_utc() + time::Duration::days(if expired { -1 } else { 30 });
+            let cert = if self_signed { params.self_signed(&key).unwrap() } else { params.signed_by(&key, &ca, &ca_key).unwrap() };
+            let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions().unwrap().with_no_client_auth()
+                .with_single_cert(vec![cert.der().clone()], rustls::pki_types::PrivatePkcs8KeyDer::from(key.serialize_der()).into()).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            listener.set_nonblocking(true).unwrap();
+            let worker = std::thread::spawn(move || {
+                tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                    let (stream, _) = tokio::time::timeout(Duration::from_secs(4), listener.accept()).await.unwrap().unwrap();
+                    let result = tokio::time::timeout(Duration::from_secs(3), tokio_rustls::TlsAcceptor::from(Arc::new(config)).accept(stream)).await.unwrap();
+                    let Ok(mut stream) = result else { return None };
+                    let sni = stream.get_ref().1.server_name().map(str::to_owned);
+                    let mut data = [0; 2048];
+                    let n = tokio::time::timeout(Duration::from_secs(3), stream.read(&mut data)).await.unwrap().unwrap_or(0);
+                    if n == 0 { return None; }
+                    let request = String::from_utf8_lossy(&data[..n]).to_ascii_lowercase();
+                    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                    Some((sni, request))
+                })
+            });
+            let target = Target { host: Some(host.into()), https: true,
+                ca_pem: trusted.then(|| if self_signed { cert.pem() } else { ca.pem() }), ..Target::local(port).unwrap() };
+            let result = check_origin(&target);
+            let request = worker.join().unwrap();
+            let valid = trusted && !expired && host == "app.test";
+            assert_eq!(result.is_ok(), valid, "host={host}, trusted={trusted}, expired={expired}, self_signed={self_signed}: {result:?}");
+            if valid {
+                let (sni, request) = request.unwrap();
+                assert_eq!(sni.as_deref(), Some("app.test"));
+                assert!(request.contains("\r\nhost: app.test\r\n"));
+            }
+        }
     }
 
     #[test]
@@ -1041,6 +1220,9 @@ mod tests {
             port: 8180,
             host: Some("site.test".into()),
             site_id: None,
+            https: true,
+            ca_pem: Some(rcgen::generate_simple_self_signed(vec!["site.test".into()]).unwrap().cert.pem()),
+            ..Target::local(8180).unwrap()
         };
         let (mut command, _config) = cloudflared_command(Path::new(&exe), &target).unwrap();
         // --help 只验证 CLI 参数，不建立公网连接。此版本未知 flag 也可能退出 0。
@@ -1056,7 +1238,8 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("--http-host-header") && text.contains("--output"),
+            text.contains("--http-host-header") && text.contains("--output")
+                && text.contains("--origin-server-name") && text.contains("--origin-ca-pool"),
             "{text}"
         );
     }

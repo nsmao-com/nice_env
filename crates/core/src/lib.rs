@@ -483,15 +483,8 @@ impl CoreState {
                 "请先启动此站点及其依赖服务，再创建隧道",
             ));
         }
-        let port = self
-            .manager
-            .snapshot(&site.runtime.web_server)
-            .and_then(|s| s.port)
-            .ok_or_else(|| AppError::new(
-                "TUNNEL_SITE_PORT",
-                "无法确认站点当前的 HTTP 端口，请重启对应 Web 服务",
-            ))?;
-        let target = crate::tunnel::Target::site(&site, port)?;
+        let address = sites::access_url(&self.paths, &self.store, &self.manager, id)?;
+        let target = crate::tunnel::Target::site(&site, &address, &self.paths, &self.store, self.manager.clone())?;
         let exe = toolbox::resolve_exe(&self.store, &self.paths, &self.installer, "cloudflared")?;
         crate::tunnel::start_target(&exe, target)
     }

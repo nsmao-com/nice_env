@@ -198,7 +198,11 @@ fn loaded_endpoint(manager: &ServiceManager, site: &Site) -> Option<SiteEndpoint
 /// 打开和复制之前再次核对服务与端口归属，设置变更、外部文件编辑都不能偷换运行中地址。
 pub fn access_url(paths: &Paths, store: &Store, manager: &ServiceManager, id: &str) -> Result<String> {
     let _operation = manager.lifecycle.lock();
-    let mut site = get(store, id)?;
+    running_url(paths, get(store, id)?, manager)
+}
+
+/// 调用方持有生命周期锁；隧道监测复用已选站点及本次加载入口。
+pub(crate) fn running_url(paths: &Paths, mut site: Site, manager: &ServiceManager) -> Result<String> {
     site.status = runtime_status(paths, &site, manager).into();
     let endpoint = loaded_endpoint(manager, &site).ok_or_else(|| AppError::new("SITE_URL_UNAVAILABLE", "站点未运行或尚未确认本次加载的访问地址")
         .with_hint("请启动站点或重启对应 Web 服务；自定义监听地址请在配置中核对。"))?;
@@ -3370,7 +3374,7 @@ mod scaffold_tests {
         let conf = format!("pid nginx.pid;\nerror_log stderr;\nevents {{}}\nhttp {{\ninclude \"{}/*.conf\";\n}}\n", paths.nginx_sites_dir().to_string_lossy().replace('\\', "/"));
         std::fs::write(paths.nginx_conf(), conf).unwrap();
         let snapshot = snapshot_endpoints(&paths, &store, "nginx");
-        let manager = ServiceManager::new();
+        let manager = Arc::new(ServiceManager::new());
         manager.register("nginx", "Nginx", None, None, Some(port), paths.logs().join("nginx.log"));
         struct Server {
             child: std::process::Child,
@@ -3464,6 +3468,35 @@ mod scaffold_tests {
         record_endpoints(&manager, "nginx", snapshot);
         assert_eq!(access_url(&paths, &store, &manager, &site.id).unwrap(), format!("http://www.demo.test:{next_port}"));
         assert_eq!(client.get(format!("http://127.0.0.1:{next_port}/about")).header("Host", "www.demo.test").send().unwrap().text().unwrap(), "route-about");
+        drop(server);
+
+        // HTTPS 隧道使用实际 vhost 端口和通配域名展开值，不能落回 Web 服务主 HTTP 端口。
+        manager.set_state("nginx", ServiceState::Stopped);
+        let tls_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let tls_port = tls_listener.local_addr().unwrap().port();
+        site.https = true;
+        store.save_site(&site).unwrap();
+        let vhost = configgen::render_site_conf(&site, next_port, tls_port, &paths.nginx_conf(), &paths.certs().join("sites"), &paths.logs().join("nginx"));
+        std::fs::write(&vhost_path, vhost).unwrap();
+        let snapshot = snapshot_endpoints(&paths, &store, "nginx");
+        drop(tls_listener);
+        let mut server = Server { child: command.spawn().unwrap(), group: platform::ProcessGroup::new().unwrap() };
+        server.group.attach(server.child.id()).unwrap();
+        manager.adopt("nginx", &[server.child.id()], Some(next_port));
+        assert!(crate::services::wait_healthy(tls_port, std::time::Duration::from_secs(5)));
+        record_endpoints(&manager, "nginx", snapshot);
+        let url = access_url(&paths, &store, &manager, &site.id).unwrap();
+        assert_eq!(url, format!("https://www.demo.test:{tls_port}"));
+        let target = crate::tunnel::Target::site(&site, &url, &paths, &store, manager.clone()).unwrap();
+        assert_eq!(target.port, tls_port);
+        crate::tunnel::check_origin(&target).unwrap();
+        let ca = reqwest::Certificate::from_pem(&std::fs::read(paths.certs().join("ca.crt")).unwrap()).unwrap();
+        let tls_client = reqwest::blocking::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(2))
+            .resolve("www.demo.test", ([127, 0, 0, 1], tls_port).into()).add_root_certificate(ca).build().unwrap();
+        assert_eq!(tls_client.get(format!("{url}/about")).send().unwrap().text().unwrap(), "route-about");
+        store.set_port_override("https", Some(28444)).unwrap();
+        assert_eq!(access_url(&paths, &store, &manager, &site.id).unwrap(), url);
+        crate::tunnel::check_origin(&target).unwrap();
         drop(server);
     }
 }

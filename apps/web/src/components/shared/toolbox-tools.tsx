@@ -248,7 +248,7 @@ export function TunnelTool() {
   const [expanded, setExpanded] = React.useState<string | null>(null);
   const targetId = React.useId();
   const selectedSite = sites.data?.find((site) => `site:${site.id}` === target);
-  const validTarget = target === "custom" || (!!selectedSite && selectedSite.status === "running" && !sites.error);
+  const validTarget = target === "custom" || (!!selectedSite && selectedSite.status === "running" && !!selectedSite.accessUrl && !sites.error);
   const refresh = () => query.refetch();
   const start = async (retry?: TunnelInfo) => {
     if (startGuard.current) return;
@@ -266,7 +266,7 @@ export function TunnelTool() {
       if (info.state === "failed") { setExpanded(info.id); toast.error(info.error || t("tools.tunnel.failed")); }
       else toast.message(t(info.state === "connected" ? "tools.tunnel.connected" : "tools.tunnel.starting"));
       await refresh();
-    } catch (e) { setStartError(normalizeError(e).message); if (retry) toastError(e); }
+    } catch (e) { const error = normalizeError(e); setStartError([error.message, error.hint].filter(Boolean).join("\n")); if (retry) toastError(e); }
     finally { startGuard.current = false; setStarting(false); }
   };
   const act = async (id: string, action: () => Promise<unknown>) => {
@@ -285,8 +285,8 @@ export function TunnelTool() {
           <Select value={target} onValueChange={(value) => { setTarget(value); setStartError(null); }} disabled={starting}>
             <SelectTrigger className="min-w-0 text-xs" aria-labelledby={targetId}><SelectValue placeholder={t("tools.tunnel.choose")} /></SelectTrigger>
             <SelectContent>
-              {(sites.data ?? []).map((site) => <SelectItem key={site.id} value={`site:${site.id}`} disabled={site.status !== "running" || !!sites.error} className="text-xs [&>span:last-child]:min-w-0 [&>span:last-child]:break-all">
-                {site.name} · {site.domains[0]}{site.status !== "running" ? ` · ${t("tools.tunnel.siteStopped")}` : ""}
+              {(sites.data ?? []).map((site) => <SelectItem key={site.id} value={`site:${site.id}`} disabled={site.status !== "running" || !site.accessUrl || !!sites.error} className="text-xs [&>span:last-child]:min-w-0 [&>span:last-child]:break-all">
+                {site.name} · {site.accessUrl || site.domains[0]}{site.status !== "running" ? ` · ${t("tools.tunnel.siteStopped")}` : !site.accessUrl ? ` · ${t("tools.tunnel.addressPending")}` : ""}
               </SelectItem>)}
               {!!sites.data?.length && <SelectSeparator />}
               <SelectItem value="custom" className="text-xs">{t("tools.tunnel.custom")}</SelectItem>
@@ -300,8 +300,11 @@ export function TunnelTool() {
           {target === "custom" && <label className="space-y-1.5 text-xs text-muted">{t("tools.tunnel.port")}
             <Input type="number" min={1} max={65535} step={1} required value={port} disabled={starting} onChange={(event) => setPort(event.target.value)} className="font-mono text-xs" />
           </label>}
-          <p className="text-[11px] leading-relaxed text-faint">{t("tools.tunnel.targetHint")}</p>
-          {startError && <p role="alert" className="break-words text-xs text-error">{startError}</p>}
+          {selectedSite && <p role="status" className="break-all rounded-lg bg-card-2/50 p-3 text-xs text-secondary">
+            {validTarget ? <>{t("tools.tunnel.forwardTo")} <span className="font-mono">{selectedSite.accessUrl}</span></> : t("tools.tunnel.addressUnavailable")}
+          </p>}
+          <p className="text-[11px] leading-relaxed text-muted">{t("tools.tunnel.targetHint")}</p>
+          {startError && <p role="alert" className="whitespace-pre-line break-words text-xs text-error">{startError}</p>}
           <Button type="submit" size="sm" className="self-start" disabled={starting || query.isPending || !!query.error || !validTarget}>
             {starting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Globe2 className="h-3.5 w-3.5" />}{t("tools.tunnel.start")}
           </Button>
@@ -324,7 +327,7 @@ export function TunnelTool() {
             : tn.alive && <p className="mt-2 text-[11px] text-faint">{t("tools.tunnel.pending")}</p>}
           <div className="mt-2 flex flex-wrap items-center gap-1 border-t border-dashed border-border pt-2">
             {tn.url && <>
-              <CopyButton text={tn.url} />
+              {!query.error && tn.state === "connected" && tn.localReachable && <CopyButton text={tn.url} />}
               <Button size="sm" variant="ghost" disabled={!isTauri || !!query.error || tn.state !== "connected" || !tn.localReachable}
                 onClick={() => void api.openInBrowser(tn.url!).catch(toastError)}><ExternalLink className="h-3.5 w-3.5" />{t("common.open")}</Button>
             </>}
@@ -338,7 +341,7 @@ export function TunnelTool() {
           </div>
           {expanded === tn.id && <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-card-2/50 p-3 font-mono text-[11px] leading-relaxed text-secondary">{tn.logs.join("\n") || t("tools.tunnel.noOutput")}</pre>}
         </section>)}
-        <p className="text-[11px] leading-relaxed text-faint">{t("tools.tunnel.hint2")}</p>
+        <p className="text-[11px] leading-relaxed text-muted">{t("tools.tunnel.hint2")}</p>
       </div>
     </ToolCard>
   );

@@ -57,23 +57,30 @@ pub const WEEKLY_MS: i64 = 7 * DAILY_MS;
 /// 后台线程主体：每 6 小时醒来一次，按设置决定是否备份。
 /// 线程内自开 SQLite 连接（Store 非 Clone；WAL 下多连接安全），独立于主状态。
 pub fn spawn_scheduler(paths: Paths) {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_secs(6 * 3600));
-        let Ok(_activity) = crate::paths::DataDirActivity::shared(&paths.base) else { continue; };
-        let Ok(store) = Store::open(paths.db()) else {
-            continue;
-        };
-        let mode = store
-            .get_setting("backupSchedule")
-            .unwrap_or_else(|| "off".into());
-        let interval = match mode.as_str() {
-            "daily" => Some(DAILY_MS),
-            "weekly" => Some(WEEKLY_MS),
-            _ => None,
-        };
-        if let Some(iv) = interval {
-            if due(&store, iv) {
-                let _ = run_backup_now(&store, &paths);
+    spawn_scheduler_when_ready(paths,None);
+}
+
+pub fn spawn_scheduler_when_ready(paths: Paths, gate: Option<std::sync::Arc<crate::restart::StartupGate>>) {
+    std::thread::spawn(move || {
+        if gate.is_some_and(|gate| !gate.wait()) { return; }
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(6 * 3600));
+            let Ok(_activity) = crate::paths::DataDirActivity::shared(&paths.base) else { continue; };
+            let Ok(store) = Store::open(paths.db()) else {
+                continue;
+            };
+            let mode = store
+                .get_setting("backupSchedule")
+                .unwrap_or_else(|| "off".into());
+            let interval = match mode.as_str() {
+                "daily" => Some(DAILY_MS),
+                "weekly" => Some(WEEKLY_MS),
+                _ => None,
+            };
+            if let Some(iv) = interval {
+                if due(&store, iv) {
+                    let _ = run_backup_now(&store, &paths);
+                }
             }
         }
     });

@@ -9,6 +9,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { isTauri, listen } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { applyAppearance } from "@/lib/appearance";
+import { toastError } from "@/lib/hooks";
 import { useInstallTasks } from "@/lib/install-tasks";
 
 /**
@@ -18,6 +19,8 @@ import { useInstallTasks } from "@/lib/install-tasks";
  */
 function AppearanceSync() {
   const { setTheme } = useTheme();
+  const qc = useQueryClient();
+  const readySent = React.useRef(false);
   const { data } = useQuery({
     queryKey: ["settings"],
     queryFn: api.getSettings,
@@ -41,6 +44,15 @@ function AppearanceSync() {
   React.useEffect(() => {
     if (data) applyAppearance(data);
   }, [data]);
+
+  React.useEffect(() => {
+    if (!isTauri || !data || readySent.current) return;
+    readySent.current = true;
+    // 设置读取和 React 挂载都完成后才确认页面就绪；交接完成后重取准备期间受限的数据。
+    void api.frontendReady().then((activated) => {
+      if (activated) void qc.invalidateQueries();
+    }).catch(toastError);
+  }, [data, qc]);
 
   return null;
 }

@@ -14,6 +14,11 @@ use tauri_plugin_dialog::DialogExt;
 // 0=空闲，1=正在准备，2=已提交退出，3=副本已就绪等待重启/取消。
 static APP_TRANSITION: AtomicU8 = AtomicU8::new(0);
 struct StartupFailure(AppError);
+struct DesktopStartup {
+    child: std::sync::Mutex<Option<nsb_core::restart::RestartChild>>,
+    gate: Arc<nsb_core::restart::StartupGate>,
+    frontend: nsb_core::restart::StartupGate,
+}
 struct PendingDataDir {
     result: nsb_core::paths::DataDirMigration,
     activity: nsb_core::paths::DataDirActivity,
@@ -48,42 +53,48 @@ impl Drop for AppTransition {
 }
 
 pub fn run() {
+    let (child, channel_error) = match nsb_core::restart::RestartChild::from_env() {
+        Ok(child) => (child,None),
+        Err(error) => (None,Some(error)),
+    };
+    if child.is_some() { APP_TRANSITION.store(1,Ordering::Release); }
+    let startup = Arc::new(DesktopStartup {
+        child: std::sync::Mutex::new(child),
+        gate: Arc::new(nsb_core::restart::StartupGate::default()),
+        frontend: nsb_core::restart::StartupGate::default(),
+    });
+    let setup_startup = startup.clone();
     tauri::Builder::default()
+        .manage(startup.clone())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             None,
         ))
-        .setup(|app| {
+        .setup(move |app| {
+            let outcome = (|| -> std::result::Result<(),Box<dyn std::error::Error>> {
+            if let Some(error) = channel_error.clone() { return Err(error.into()); }
+            if setup_startup.child.lock().unwrap_or_else(|e|e.into_inner()).is_some() {
+                if let Some(window) = app.get_webview_window("main") { window.hide()?; }
+            }
             let handle = app.handle().clone();
             let emit: EventSink = std::sync::Arc::new(move |e: Event| {
                 let _ = handle.emit(e.channel(), e.payload());
             });
-            let state = match CoreState::init(None, emit) {
-                Ok(state) => state,
-                Err(error) => {
-                    // 不回退到空目录，也不能在无控制台的桌面版中直接消失。
-                    let message = format!("{}\n{}",error.message,error.hint.clone().unwrap_or_default());
-                    app.manage(StartupFailure(error));
-                    if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
-                    let handle = app.handle().clone();
-                    app.dialog().message(message).title("无法打开 NiceEnv 数据目录")
-                        .kind(tauri_plugin_dialog::MessageDialogKind::Error).show(move |_| {
-                            APP_TRANSITION.store(2, Ordering::Release);
-                            handle.exit(1);
-                        });
-                    return Ok(());
-                }
-            };
+            let state = CoreState::init(None, emit)?;
+            if let Some(child) = setup_startup.child.lock().unwrap_or_else(|e|e.into_inner()).as_ref() {
+                child.verify_path(&state.paths.base)?;
+            }
             // 仅桌面应用启动计划任务；CLI/MCP 的只读调用不应触发用户命令。
-            nsb_core::cron::spawn_scheduler(state.paths.clone())?;
+            nsb_core::cron::spawn_scheduler_when_ready(state.paths.clone(),Some(setup_startup.gate.clone()))?;
+            nsb_core::backup_job::spawn_scheduler_when_ready(state.paths.clone(),Some(setup_startup.gate.clone()));
             app.manage(state);
 
             /* ---------- 证书自动化调度：启动 30s 后先补一轮，之后每小时检查到期 ---------- */
             {
                 let st = app.state::<Arc<CoreState>>().inner().clone();
-                nsb_core::certauto::spawn_scheduler(st);
+                nsb_core::certauto::spawn_scheduler_when_ready(st,Some(setup_startup.gate.clone()));
             }
 
             /* ---------- 托盘 ---------- */
@@ -98,7 +109,9 @@ pub fn run() {
             {
                 let st = tray_state.clone();
                 let handle_for_stack = app.handle().clone();
+                let gate = setup_startup.gate.clone();
                 std::thread::spawn(move || {
+                    if !gate.wait() { return; }
                     let _ = st.start_stack(&stack_id);
                     tray::refresh(&handle_for_stack);
                 });
@@ -110,16 +123,20 @@ pub fn run() {
             {
                 let st = tray_state.clone();
                 let handle_for_wd = app.handle().clone();
-                std::thread::spawn(move || loop {
-                    let cfg = st.watchdog_config();
-                    std::thread::sleep(std::time::Duration::from_secs(cfg.interval_sec.max(1)));
-                    if !st.watchdog_config().enabled {
-                        continue;
-                    }
-                    let acted = st.watchdog_tick();
-                    if !acted.is_empty() {
-                        // 重启改变了运行态，托盘勾选/角标要跟着刷新
-                        tray::refresh(&handle_for_wd);
+                let gate = setup_startup.gate.clone();
+                std::thread::spawn(move || {
+                    if !gate.wait() { return; }
+                    loop {
+                        let cfg = st.watchdog_config();
+                        std::thread::sleep(std::time::Duration::from_secs(cfg.interval_sec.max(1)));
+                        if !st.watchdog_config().enabled {
+                            continue;
+                        }
+                        let acted = st.watchdog_tick();
+                        if !acted.is_empty() {
+                            // 重启改变了运行态，托盘勾选/角标要跟着刷新
+                            tray::refresh(&handle_for_wd);
+                        }
                     }
                 });
             }
@@ -151,8 +168,32 @@ pub fn run() {
             });
 
             Ok(())
+            })();
+            if let Err(error) = outcome {
+                let error = match error.downcast::<AppError>() {
+                    Ok(error) => *error,
+                    Err(error) => AppError::new("APP_INITIALIZATION_FAILED",format!("初始化 NiceEnv 失败：{error}")),
+                };
+                setup_startup.gate.cancel();
+                app.manage(StartupFailure(error.clone()));
+                if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
+                if let Some(mut child) = setup_startup.child.lock().unwrap_or_else(|e|e.into_inner()).take() {
+                    child.fail(error);
+                    APP_TRANSITION.store(2,Ordering::Release);
+                    app.handle().exit(1);
+                } else {
+                    let handle = app.handle().clone();
+                    app.dialog().message(format!("{}\n{}",error.message,error.hint.unwrap_or_default()))
+                        .title("无法打开 NiceEnv").kind(tauri_plugin_dialog::MessageDialogKind::Error).show(move |_| {
+                            APP_TRANSITION.store(2,Ordering::Release);
+                            handle.exit(1);
+                        });
+                }
+            }
+            Ok(())
         })
         .invoke_handler(off_main_thread(tauri::generate_handler![
+            frontend_ready,
             // 套件
             list_packages,
             install_package,
@@ -372,7 +413,37 @@ pub fn run() {
         ]))
         .build(tauri::generate_context!())
         .expect("NiceEnv 启动失败")
-        .run(|app, event| {
+        .run(move |app, event| {
+            if matches!(event,tauri::RunEvent::Ready) && app.try_state::<StartupFailure>().is_none() {
+                let child = startup.child.lock().unwrap_or_else(|e|e.into_inner()).take();
+                if let Some(mut child) = child {
+                    let handle = app.clone();
+                    let gate = startup.gate.clone();
+                    let ready = startup.clone();
+                    let started = std::thread::Builder::new().name("restart-handoff".into()).spawn(move || {
+                        if !ready.frontend.wait_timeout(std::time::Duration::from_secs(35)) {
+                            child.fail(AppError::new("RESTART_FRONTEND_TIMEOUT", "新窗口页面未能完成加载，请检查安装文件后重试"));
+                            gate.cancel();
+                            APP_TRANSITION.store(2, Ordering::Release);
+                            handle.exit(1);
+                            return;
+                        }
+                        let result = child.ready(|| {
+                            let window = handle.get_webview_window("main").ok_or_else(||AppError::new("APP_WINDOW_MISSING","新进程缺少主窗口"))?;
+                            window.show().map_err(|e|AppError::internal("显示新窗口",e.to_string()))
+                        });
+                        if result.is_ok() {
+                            APP_TRANSITION.store(0,Ordering::Release);
+                            gate.start();
+                        } else {
+                            gate.cancel();
+                            APP_TRANSITION.store(2,Ordering::Release);
+                            handle.exit(1);
+                        }
+                    });
+                    if started.is_err() { startup.gate.cancel(); APP_TRANSITION.store(2,Ordering::Release); app.exit(1); }
+                } else { startup.gate.start(); }
+            }
             if let tauri::RunEvent::ExitRequested { api, .. } = &event {
                 if APP_TRANSITION.load(Ordering::Acquire) != 2 {
                     api.prevent_exit();
@@ -413,7 +484,7 @@ where
             }
             // 旧实例保留必要的显示与退出/重新打开入口，其余请求不能继续读取或写入旧数据。
             let recovery_action = matches!(cmd.as_str(), "get_app_version" | "get_data_dir" | "get_settings"
-                | "restart_app" | "quit_app" | "tray_panel_resize" | "tray_panel_hide" | "tray_open_main");
+                | "frontend_ready" | "restart_app" | "quit_app" | "tray_panel_resize" | "tray_panel_hide" | "tray_open_main");
             if !recovery_action {
                 let state = invoke.message.webview_ref().state::<Arc<CoreState>>();
                 if let Err(error) = nsb_core::paths::ensure_data_dir_current(&state.paths.base) {
@@ -424,7 +495,7 @@ where
             let transition = APP_TRANSITION.load(Ordering::Acquire);
             let transition_read = matches!(cmd.as_str(),
                 "list_service_status" | "tray_panel_state" | "tray_panel_resize" | "tray_panel_hide" | "tray_open_main"
-                | "get_app_version" | "get_data_dir" | "get_settings" | "pending_data_dir_migration");
+                | "get_app_version" | "get_data_dir" | "get_settings" | "pending_data_dir_migration" | "frontend_ready");
             let pending_action = transition == 3 && matches!(cmd.as_str(), "restart_app" | "cancel_data_dir_migration" | "quit_app");
             if transition != 0 && !transition_read && !pending_action {
                 resolver.reject(serde_json::to_string(&AppError::new("APP_BUSY", "应用正在退出、重启或迁移，请稍候")).unwrap_or_default());
@@ -2153,6 +2224,13 @@ fn set_setting(
 }
 
 #[tauri::command]
+fn frontend_ready(window: tauri::WebviewWindow, startup: State<'_, Arc<DesktopStartup>>) -> bool {
+    if window.label() != "main" { return false; }
+    startup.frontend.start();
+    startup.gate.wait_timeout(std::time::Duration::from_secs(45))
+}
+
+#[tauri::command]
 fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
@@ -2229,7 +2307,16 @@ fn restart_app(app: tauri::AppHandle, state: State<'_, Arc<CoreState>>, data_dir
             let pending = pending_data_dir();
             let pending = pending.as_ref().ok_or_else(|| AppError::new("DATA_DIR_NOT_PREPARED", "迁移副本尚未准备好"))?;
             pending.activity.with_selected_data_dir(std::path::Path::new(&path), || {
-                command.spawn().map_err(|e| AppError::io("启动新的 NiceEnv 进程", e))
+                let rollback = nsb_core::pathenv::MigrationActivationRollback::capture(std::path::Path::new(&path))?;
+                match nsb_core::restart::launch_and_wait(&mut command,std::path::Path::new(&path),std::time::Duration::from_secs(45)) {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.code == "RESTART_CHILD_CLEANUP_FAILED" => Err(error),
+                    Err(error) => {
+                        rollback.restore().map_err(|restore|AppError::new(&restore.code,format!("{}；{}",error.message,restore.message))
+                            .with_hint(restore.hint.unwrap_or_default()).with_detail(restore.detail.unwrap_or_default()))?;
+                        Err(error)
+                    }
+                }
             })?;
         } else {
             if relocated { command.env_remove("NSB_HOME"); }
@@ -2241,7 +2328,13 @@ fn restart_app(app: tauri::AppHandle, state: State<'_, Arc<CoreState>>, data_dir
         Ok(true)
     };
     // 已准备的迁移持有源目录独占锁，服务已停止且不能再启动；普通重启仍执行停机。
-    map_jh(if prepared || relocated { launch() } else { state.with_stopped_services(launch) })
+    let result = if prepared || relocated { launch() } else { state.with_stopped_services(launch) };
+    if result.is_err() && nsb_core::paths::redirected_data_dir(&state.paths.base).ok().flatten().is_some() {
+        // 清理/选择回滚未确认：旧实例只保留退出和重新打开入口，不能提示继续重试旧副本。
+        pending_data_dir().take();
+        transition.rollback_state = 0;
+    }
+    map_jh(result)
 }
 
 /* ================= 配置导入/导出 ================= */

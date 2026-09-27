@@ -61,7 +61,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.31";
+const MOCK_APP_VERSION = "0.2.32";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -2257,6 +2257,8 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return true as T;
     case "restart_app":
       throw { code: "DESKTOP_ONLY", message: "浏览器无法重启 NiceEnv，请在桌面端执行" };
+    case "frontend_ready":
+      return false as T;
     case "open_in_browser": {
       const url = args?.url as string | undefined;
       if (url && typeof window !== "undefined") window.open(url, "_blank", "noopener,noreferrer");

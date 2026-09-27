@@ -292,7 +292,7 @@ fn read_data_dir_selection(file: &Path) -> crate::error::Result<Option<PathBuf>>
     Ok(Some(selection.path))
 }
 
-fn write_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| backup_error("目标文件没有父目录"))?;
     std::fs::create_dir_all(parent)?;
     let mut pending = tempfile::NamedTempFile::new_in(parent)?;
@@ -348,6 +348,7 @@ fn with_selection_and_source<T>(file: &Path, target: &Path, source: Option<&Path
     match launch() {
         Ok(value) => Ok(value),
         Err(error) => {
+            if error.code == "RESTART_CHILD_CLEANUP_FAILED" { return Err(error); }
             let restored = match previous {
                 Some(bytes) => write_atomic(file, &bytes),
                 None => std::fs::remove_file(file),
@@ -1292,6 +1293,52 @@ mod tests {
         assert_eq!(redirected_data_dir(&source).unwrap(),Some(final_root.clone()));
         assert_eq!(redirected_data_dir(&target).unwrap(),Some(final_root));
         assert_eq!(original.get_setting("handoff-value").as_deref(),Some("original"));
+    }
+
+    #[test]
+    fn data_dir_handoff_restores_selection_after_real_child_failure_but_not_uncertain_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("config/selection.json");
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        let _source = crate::store::Store::open(source.join("nsb.sqlite")).unwrap();
+        let store = crate::store::Store::open(target.join("nsb.sqlite")).unwrap();
+        store.set_setting("pathEnvEnabled", "0").unwrap();
+        store.set_setting_json("pathEnvDirs", &vec!["original-path"]).unwrap();
+        let marker_file = target.join(".data-dir-activation.json");
+        let marker = serde_json::to_vec(&source).unwrap();
+        std::fs::write(&marker_file, &marker).unwrap();
+        with_selection_file(&file, &source, || Ok(())).unwrap();
+        let previous = std::fs::read(&file).unwrap();
+        let guard = DataDirActivity::exclusive(&source).unwrap();
+        for mode in ["fail", "hang"] {
+            let error = guard.select_with_file(&file, &target, || {
+                let rollback = crate::pathenv::MigrationActivationRollback::capture(&target)?;
+                let mut command = platform::command(std::env::current_exe().unwrap());
+                command.args(["--exact", "restart::tests::restart_child_probe", "--nocapture"])
+                    .env("NSB_RESTART_PROBE_MODE", mode).env("NSB_RESTART_PROBE_ROOT", &target)
+                    .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+                let result = crate::restart::launch_and_wait(&mut command, &target, std::time::Duration::from_secs(2));
+                // 模拟新进程激活副本后出现后续初始化错误；仅写临时副本。
+                store.set_setting_json("pathEnvDirs", &vec!["changed-path"])?;
+                std::fs::remove_file(&marker_file)?;
+                rollback.restore()?;
+                result
+            }).unwrap_err();
+            assert_eq!(error.code, if mode=="fail" {"FIXTURE_INIT_FAILED"} else {"RESTART_TIMEOUT"});
+            assert_eq!(std::fs::read(&file).unwrap(), previous);
+            assert!(redirected_data_dir(&source).unwrap().is_none());
+            assert_eq!(std::fs::read(&marker_file).unwrap(), marker);
+            assert_eq!(store.get_setting("pathEnvDirs").as_deref(), Some("[\"original-path\"]"));
+            let pid: u32 = std::fs::read_to_string(target.join("child-pid")).unwrap().parse().unwrap();
+            assert!(!platform::process_alive(pid));
+        }
+        let error = guard.select_with_file(&file, &target, || Err::<(), _>(crate::error::AppError::new(
+            "RESTART_CHILD_CLEANUP_FAILED", "fixture: child cleanup could not be verified"))).unwrap_err();
+        assert_eq!(error.code, "RESTART_CHILD_CLEANUP_FAILED");
+        assert_eq!(redirected_data_dir(&source).unwrap(), Some(target));
+        drop(guard);
+        assert!(matches!(DataDirActivity::shared(&source), Err(error) if error.code=="DATA_DIR_RELOCATED"));
     }
 
     #[test]

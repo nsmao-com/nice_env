@@ -178,6 +178,17 @@ impl ProcessGroup {
     }
 }
 
+/// 确认本次创建的 Unix 进程组已经消失；权限错误不当作已清理。
+#[cfg(unix)]
+pub fn process_group_gone(pid: u32) -> Result<bool> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return Err(PlatformError::Io("无效的进程组 ID".into()));
+    }
+    if unsafe { libc::kill(-(pid as libc::pid_t), 0) } == 0 { return Ok(false); }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) { Ok(true) } else { Err(io_err(error)) }
+}
+
 /// Unix：先终止进程组，组不存在时退回单进程。
 #[cfg(not(windows))]
 fn kill_tree(pid: u32, sig: libc::c_int) {

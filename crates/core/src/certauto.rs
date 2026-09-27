@@ -573,7 +573,12 @@ fn a_emit_manual_due(state: &CoreState, id: &str) {
 /// 后台调度线程：启动 30 秒后先跑一轮（覆盖「开应用就能续上」），
 /// 之后每小时 tick。桌面端在 CoreState 初始化后 spawn 一次。
 pub fn spawn_scheduler(state: Arc<CoreState>) {
+    spawn_scheduler_when_ready(state,None);
+}
+
+pub fn spawn_scheduler_when_ready(state: Arc<CoreState>, gate: Option<std::sync::Arc<crate::restart::StartupGate>>) {
     std::thread::spawn(move || {
+        if gate.is_some_and(|gate| !gate.wait()) { return; }
         std::thread::sleep(std::time::Duration::from_secs(30));
         let _ = tick(&state);
         crate::certmonitor::tick_all(&state);

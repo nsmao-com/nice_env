@@ -194,6 +194,7 @@ export default function SettingsPage() {
   const migrationBusy = React.useRef(false);
   const [migrationResult, setMigrationResult] = React.useState<api.DataDirMigration | null>(null);
   const [migrationError, setMigrationError] = React.useState<string | null>(null);
+  const [migrationNeedsReopen, setMigrationNeedsReopen] = React.useState(false);
   const migrationErrorRef = React.useRef<HTMLDivElement>(null);
   React.useEffect(() => { if (migrationError) migrationErrorRef.current?.focus(); }, [migrationError]);
   const [localFonts, setLocalFonts] = React.useState<string[]>([]);
@@ -410,6 +411,10 @@ export default function SettingsPage() {
     setMigrationError(null);
     let copied = migrationResult;
     try {
+      if (migrationNeedsReopen) {
+        await api.quitApp();
+        return;
+      }
       if (!copied) {
         copied = await api.migrateDataDir(migrationTarget);
         setMigrationResult(copied);
@@ -419,6 +424,7 @@ export default function SettingsPage() {
       setMigrationTarget(null);
     } catch (error) {
       const message = normalizeError(error);
+      if (["RESTART_CHILD_CLEANUP_FAILED", "DATA_DIR_ROLLBACK_FAILED", "DATA_DIR_RELOCATED"].includes(message.code)) setMigrationNeedsReopen(true);
       setMigrationError([copied ? t("settings.migrate.restartFailed") : t("settings.migrate.failed"), message.message, message.hint].filter(Boolean).join("\n"));
     } finally {
       migrationBusy.current = false;
@@ -431,10 +437,11 @@ export default function SettingsPage() {
     migrationBusy.current = true;
     setMigrating(true);
     try {
-      await api.cancelDataDirMigration();
+      if (!migrationNeedsReopen) await api.cancelDataDirMigration();
       setMigrationTarget(null);
       setMigrationResult(null);
       setMigrationError(null);
+      setMigrationNeedsReopen(false);
     } catch (error) {
       const message = normalizeError(error);
       setMigrationError([message.message, message.hint].filter(Boolean).join("\n"));
@@ -1243,7 +1250,7 @@ export default function SettingsPage() {
                     <div className="flex flex-col">
                       <span className="text-[12.5px] text-secondary">
                         {t("settings.currentVersion")}{" "}
-                        <code className="font-mono text-foreground">v{appVersion || "0.2.31"}</code>
+                        <code className="font-mono text-foreground">v{appVersion || "0.2.32"}</code>
                       </span>
                       <span className="text-[10.5px] text-faint">{t("settings.manifestHint")}</span>
                     </div>
@@ -1317,7 +1324,7 @@ export default function SettingsPage() {
                   <div className="flex flex-col gap-0.5">
                     <span className="text-[12.5px] text-secondary">{t("about.desc")}</span>
                     <span className="text-[10.5px] text-faint">
-                      {t("settings.currentVersion")} v{appVersion || "0.2.31"}
+                      {t("settings.currentVersion")} v{appVersion || "0.2.32"}
                     </span>
                   </div>
                   <div className="flex gap-2">
@@ -1343,7 +1350,7 @@ export default function SettingsPage() {
         onOpenChange={(open) => { if (!migrating && !open) void cancelMigration(); }}
         title={t("settings.migrate.confirmTitle")}
         description={t("settings.migrate.confirmDesc")}
-        confirmText={t(migrationResult ? "settings.migrate.retryRestart" : "settings.migrate.confirmButton")}
+        confirmText={t(migrationNeedsReopen ? "settings.migrate.closeOld" : migrationResult ? "settings.migrate.retryRestart" : "settings.migrate.confirmButton")}
         loading={migrating}
         onConfirm={() => void migrateDataDir()}
       >
@@ -1352,7 +1359,7 @@ export default function SettingsPage() {
         </div>
         {migrationResult && <div className="space-y-2 text-xs text-muted">
           <p>{t("settings.migrate.copySummary").replace("{files}", String(migrationResult.files)).replace("{size}", fmtBytes(migrationResult.bytes)).replace("{configs}", String(migrationResult.rewrittenFiles))}</p>
-          <p>{t("settings.migrate.copyReady")}</p>
+          <p role="status">{t(migrating ? "settings.migrate.waitingWindow" : migrationNeedsReopen ? "settings.migrate.reopenRequired" : "settings.migrate.copyReady")}</p>
         </div>}
         {migrationError && <div ref={migrationErrorRef} tabIndex={-1} role="alert" className="rounded-lg border border-error/30 bg-error-soft p-3 text-xs text-error whitespace-pre-wrap [overflow-wrap:anywhere]">{migrationError}</div>}
       </ConfirmDialog>

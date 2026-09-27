@@ -18,3 +18,9 @@
 -- sites.runtime 仅修改 cwd 和 command；保留其它 JSON 字段。
 -- cert_automations.data 仅修改本地部署目标的 certPath/keyPath/script。
 -- pathEnvDirs 保留原值，用于首次启动新目录时精确移除原有托管 PATH 条目。
+
+-- v0.2.32：迁移子进程初始化失败且已确认清理后，恢复目标副本的 PATH 记录。
+-- 仅目标 SQLite 副本的 settings 表；没有表结构变更，不需要手工执行。
+-- :value 为启动前保存的 pathEnvDirs JSON 数组，幂等恢复后供下一次激活使用。
+-- INSERT INTO settings(key,value) VALUES('pathEnvDirs',:value)
+-- ON CONFLICT(key) DO UPDATE SET value=:value;

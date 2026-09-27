@@ -107,36 +107,43 @@ fn recover_interrupted(store: &Store) -> Result<()> {
 
 /// 调度线程：持有独立 SQLite 连接，每 20 秒复核到期任务。
 pub fn spawn_scheduler(paths: Paths) -> Result<()> {
+    spawn_scheduler_when_ready(paths,None)
+}
+
+pub fn spawn_scheduler_when_ready(paths: Paths, gate: Option<std::sync::Arc<crate::restart::StartupGate>>) -> Result<()> {
     let _activity = crate::paths::DataDirActivity::shared(&paths.base)?;
     let store = Store::open(paths.db())?;
     recover_interrupted(&store)?;
     std::thread::Builder::new()
         .name("cron-scheduler".into())
-        .spawn(move || loop {
-            std::thread::sleep(Duration::from_secs(20));
-            if SHUTTING_DOWN.load(std::sync::atomic::Ordering::Acquire) {
-                break;
-            }
-            let Ok(_activity) = crate::paths::DataDirActivity::shared(&paths.base) else { continue; };
-            if recover_interrupted(&store).is_err() {
-                continue;
-            }
-            let Ok(jobs) = store.list_cron_jobs() else {
-                continue;
-            };
-            let now = crate::services::now_ms();
-            for job in jobs {
-                if job.enabled && job.last_exit.as_deref() != Some(RUNNING) && is_due(&job, now) {
-                    let path = paths.db();
-                    let _ = std::thread::Builder::new()
-                        .name(format!("cron-{}", job.id))
-                        .spawn(move || {
-                            let Some(base) = path.parent() else { return; };
-                            let Ok(_activity) = crate::paths::DataDirActivity::shared(base) else { return; };
-                            if let Ok(store) = Store::open(path) {
-                                let _ = run_job(&store, &job.id, false);
-                            }
-                        });
+        .spawn(move || {
+            if gate.is_some_and(|gate| !gate.wait()) { return; }
+            loop {
+                std::thread::sleep(Duration::from_secs(20));
+                if SHUTTING_DOWN.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                let Ok(_activity) = crate::paths::DataDirActivity::shared(&paths.base) else { continue; };
+                if recover_interrupted(&store).is_err() {
+                    continue;
+                }
+                let Ok(jobs) = store.list_cron_jobs() else {
+                    continue;
+                };
+                let now = crate::services::now_ms();
+                for job in jobs {
+                    if job.enabled && job.last_exit.as_deref() != Some(RUNNING) && is_due(&job, now) {
+                        let path = paths.db();
+                        let _ = std::thread::Builder::new()
+                            .name(format!("cron-{}", job.id))
+                            .spawn(move || {
+                                let Some(base) = path.parent() else { return; };
+                                let Ok(_activity) = crate::paths::DataDirActivity::shared(base) else { return; };
+                                if let Ok(store) = Store::open(path) {
+                                    let _ = run_job(&store, &job.id, false);
+                                }
+                            });
+                    }
                 }
             }
         })

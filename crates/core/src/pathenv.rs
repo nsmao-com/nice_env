@@ -735,9 +735,204 @@ pub fn sync(store: &Store, paths: &Paths, manifest: &Manifest) -> Result<()> {
     apply(store, paths, manifest).map(|_| ())
 }
 
+enum MigrationSystemPath {
+    Unchanged,
+    #[cfg(windows)]
+    Windows {
+        previous: platform::pathenv::RawPath,
+        expected: String,
+    },
+    #[cfg(not(windows))]
+    Profiles(Vec<(std::path::PathBuf, Option<String>, String)>),
+}
+
+/// 只用于尚未确认接管的迁移子进程；失败后恢复其激活状态，供原窗口继续重试。
+pub struct MigrationActivationRollback {
+    paths: Paths,
+    managed: Vec<String>,
+    marker: Option<Vec<u8>>,
+    system: MigrationSystemPath,
+}
+
+fn rollback_content_needed(
+    current: Option<&str>,
+    previous: Option<&str>,
+    expected: &str,
+) -> Result<bool> {
+    if current == previous {
+        return Ok(false);
+    }
+    if current == Some(expected) {
+        return Ok(true);
+    }
+    Err(AppError::new(
+        "PATH_ROLLBACK_CONFLICT",
+        "启动过程中环境变量被其它操作修改，未覆盖这些改动",
+    )
+    .with_hint("请检查工具箱中的环境变量状态后重新应用 PATH"))
+}
+
+impl MigrationActivationRollback {
+    pub fn capture(target: &std::path::Path) -> Result<Self> {
+        let paths = Paths::new(target.to_path_buf());
+        let store = Store::open(paths.db())?;
+        let managed = read_selection::<Vec<String>>(&store, DIRS_KEY)?;
+        let marker = match std::fs::read(paths.base.join(".data-dir-activation.json")) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(AppError::io("读取迁移激活状态", error)),
+        };
+        let enabled = store.get_setting_checked(ENABLED_KEY)?.as_deref() == Some("1");
+        let system = if enabled && marker.is_some() {
+            let manifest = crate::install::Installer::effective(&paths).manifest;
+            let desired = desired_dirs(&store, &manifest);
+            for dir in &desired {
+                validate_terminal_dir(dir, cfg!(windows))?;
+            }
+            #[cfg(windows)]
+            {
+                let previous = platform::pathenv::read_user_path().map_err(AppError::from)?;
+                let expected = merge_win_path(&previous.value, &managed, &desired);
+                MigrationSystemPath::Windows { previous, expected }
+            }
+            #[cfg(not(windows))]
+            {
+                let mut snapshots = Vec::new();
+                for path in platform::pathenv::shell_profiles() {
+                    let previous = match std::fs::read_to_string(&path) {
+                        Ok(value) => Some(value),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(error) => return Err(AppError::io("保存 shell PATH 快照", error)),
+                    };
+                    let expected = platform::pathenv::merge_profile_content(
+                        previous.as_deref().unwrap_or(""),
+                        &desired,
+                    );
+                    snapshots.push((path, previous, expected));
+                }
+                MigrationSystemPath::Profiles(snapshots)
+            }
+        } else {
+            MigrationSystemPath::Unchanged
+        };
+        Ok(Self {
+            paths,
+            managed,
+            marker,
+            system,
+        })
+    }
+
+    pub fn restore(self) -> Result<()> {
+        let mut failures = Vec::new();
+        let restored = (|| -> Result<()> {
+            match self.system {
+                MigrationSystemPath::Unchanged => {}
+                #[cfg(windows)]
+                MigrationSystemPath::Windows { previous, expected } => {
+                    let current = platform::pathenv::read_user_path().map_err(AppError::from)?;
+                    if current.reg_type != previous.reg_type {
+                        return Err(AppError::new(
+                            "PATH_ROLLBACK_CONFLICT",
+                            "用户 PATH 类型已改变，未覆盖其它操作",
+                        ));
+                    }
+                    if rollback_content_needed(
+                        Some(&current.value),
+                        Some(&previous.value),
+                        &expected,
+                    )? {
+                        platform::pathenv::write_user_path(&previous.value, previous.reg_type)
+                            .map_err(AppError::from)?;
+                    }
+                }
+                #[cfg(not(windows))]
+                MigrationSystemPath::Profiles(snapshots) => {
+                    for (path, previous, expected) in snapshots {
+                        let attempt = (|| -> Result<()> {
+                            let current = match std::fs::read_to_string(&path) {
+                                Ok(value) => Some(value),
+                                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                                Err(error) => return Err(AppError::io("读取 shell PATH", error)),
+                            };
+                            if rollback_content_needed(
+                                current.as_deref(),
+                                previous.as_deref(),
+                                &expected,
+                            )? {
+                                match previous {
+                                    Some(content) => std::fs::write(&path, content)?,
+                                    None => std::fs::remove_file(&path)?,
+                                }
+                            }
+                            Ok(())
+                        })();
+                        if let Err(error) = attempt {
+                            failures.push(format!("{}：{}", path.display(), error.message));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = restored {
+            failures.push(error.message);
+        }
+        let local = (|| -> Result<()> {
+            Store::open(self.paths.db())?.set_setting_json(DIRS_KEY, &self.managed)?;
+            if let Some(marker) = self.marker {
+                crate::paths::write_atomic(
+                    &self.paths.base.join(".data-dir-activation.json"),
+                    &marker,
+                )?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = local {
+            failures.push(error.message);
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(AppError::new(
+                "DATA_DIR_ACTIVATION_ROLLBACK_FAILED",
+                "新进程未完成启动，恢复迁移激活状态时也遇到问题",
+            )
+            .with_hint("副本已保留。请检查环境变量状态与目录权限后再重试")
+            .with_detail(failures.join("；")))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_activation_rollback_restores_copy_for_retry_without_system_writes() {
+        let temp=tempfile::tempdir().unwrap();
+        let paths=Paths::new(temp.path().to_path_buf());paths.ensure_dirs().unwrap();
+        let store=Store::open(paths.db()).unwrap();
+        store.set_setting_json(DIRS_KEY,&vec!["old-managed"]).unwrap();
+        let marker=serde_json::to_vec(&paths.base).unwrap();
+        let marker_file=paths.base.join(".data-dir-activation.json");
+        std::fs::write(&marker_file,&marker).unwrap();
+        // PATH 未启用：capture/restore 不读取或修改实际注册表/profile。
+        let rollback=MigrationActivationRollback::capture(&paths.base).unwrap();
+        store.set_setting_json(DIRS_KEY,&vec!["new-managed"]).unwrap();
+        std::fs::remove_file(&marker_file).unwrap();
+        rollback.restore().unwrap();
+        assert_eq!(managed_dirs(&store),vec!["old-managed"]);
+        assert_eq!(std::fs::read(marker_file).unwrap(),marker);
+    }
+
+    #[test]
+    fn migration_path_rollback_preserves_concurrent_edits() {
+        assert!(!rollback_content_needed(Some("original"),Some("original"),"migrated").unwrap());
+        assert!(rollback_content_needed(Some("migrated"),Some("original"),"migrated").unwrap());
+        assert!(rollback_content_needed(Some("new managed block"),None,"new managed block").unwrap());
+        assert_eq!(rollback_content_needed(Some("external edit"),Some("original"),"migrated").unwrap_err().code,"PATH_ROLLBACK_CONFLICT");
+    }
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()

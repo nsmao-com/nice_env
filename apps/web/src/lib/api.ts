@@ -519,6 +519,7 @@ export const migrateDataDir = (path: string) =>
 export const pendingDataDirMigration = () => safe(invoke<DataDirMigration | null>("pending_data_dir_migration"));
 export const cancelDataDirMigration = () => safe(invoke<boolean>("cancel_data_dir_migration"));
 export const restartApp = (dataDir?: string) => safe(invoke<boolean>("restart_app", { dataDir: dataDir ?? null }));
+export const frontendReady = () => safe(invoke<boolean>("frontend_ready"));
 export const checkUpdates = () => safe(invoke<UpdateCheckResult>("check_updates"));
 
 /** 拉取远端套件清单（设置项 manifestUrl）并落盘为快照；下次启动生效 */

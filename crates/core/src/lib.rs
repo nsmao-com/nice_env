@@ -27,6 +27,7 @@ pub mod logs_export;
 pub mod model;
 pub mod ops;
 pub mod paths;
+pub mod restart;
 pub mod toolbox;
 pub mod tunnel;
 use paths::write_with_backup;
@@ -210,8 +211,7 @@ impl CoreState {
                 error: Some(parts.join("；")),
             }));
         }
-        // 自动备份调度（off/daily/weekly；线程内自己判断档位）
-        backup_job::spawn_scheduler(state.paths.clone());
+        // 调度器由桌面端在启动交接提交后放行；CLI/MCP 初始化不启动后台任务。
         Ok(state)
     }
 

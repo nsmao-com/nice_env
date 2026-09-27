@@ -35,6 +35,10 @@
 -- 以下是现有参数化写入模板；:data 为完整序列化 JSON，:updated_at 单调递增。
 -- INSERT INTO cert_automations(id,data,updated_at) VALUES(:id,:data,:updated_at)
 -- ON CONFLICT(id) DO UPDATE SET data=:data, updated_at=:updated_at;
+
+-- v0.2.39：ACME 证书自动化按 SAN 同步所有匹配的本地 HTTPS 站点，沿用
+-- cert_automations.data JSON；无表结构变更，无需手工执行。
+-- UPDATE cert_automations SET data = :value WHERE id = :id;
 -- 删除入口先检查任务存在和执行锁；账号密钥删除失败保留记录，入库失败恢复密钥。
 -- DELETE FROM cert_automations WHERE id=:id;
 

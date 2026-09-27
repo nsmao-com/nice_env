@@ -724,6 +724,7 @@ pub fn update(
         (snapshots[index * 2].1.is_some() || (enabled && current.runtime.web_server == server)).then_some(server)
     }).collect();
     let mut web = SiteWebChanges::new(manager, servers);
+    let mut php = SitePhpStart::default();
     let mut record_saved = false;
     let mut hosts_attempted = false;
     let certificate_id = format!("cert-{}", current.domains[0]);
@@ -755,7 +756,7 @@ pub fn update(
         }
         // 更换 PHP 版本时先启动新的池，确保新配置引用的 upstream 已就绪。
         if was_running {
-            ensure_php_running(paths, store, manager, &current)?;
+            php.ensure_running(paths, store, manager, &current)?;
         }
         write_site_conf_state(paths, store, &current, enabled)?;
         store.save_site(&current)?;
@@ -793,6 +794,8 @@ pub fn update(
         if hosts_attempted {
             if let Err(e) = crate::hosts::apply(store, paths, None) { failures.push(format!("恢复 hosts：{e}")); }
         }
+        // 先收回新池，再重建原 Web 配置，避免把失败操作的 upstream 留在主配置中。
+        failures.extend(php.restore(paths, store, manager));
         failures.extend(web.restore(store, paths, manager, configuration_restored));
         if !failures.is_empty() {
             let recovery_hint = match retain_update_recovery(paths, &snapshots, &original, &previous_certificates) {
@@ -838,7 +841,7 @@ fn retain_update_recovery(paths: &Paths, snapshots: &SiteConfigSnapshot, site: &
     Ok(directory)
 }
 
-/// 保存和删除共用实际受影响服务的应用记录；恢复时不碰尚未尝试的服务。
+/// 启动、保存和删除共用实际受影响服务的应用记录；恢复时不碰尚未尝试的服务。
 struct SiteWebChanges {
     previous: Vec<(&'static str, Option<crate::model::ServiceStatus>)>,
     attempted: Vec<String>,
@@ -1100,21 +1103,20 @@ fn start_site_inner(
     let servers: Vec<_> = ["nginx", "apache"].into_iter().enumerate().filter_map(|(index, server)| {
         (site.runtime.web_server == server || snapshots[index * 2].1.is_some()).then_some(server)
     }).collect();
+    let mut web = SiteWebChanges::new(manager, servers);
+    let mut php = SitePhpStart::default();
     let result: Result<()> = (|| {
         user_ini.apply(paths)?;
-        ensure_php_running(paths, store, manager, &site)?;
+        php.ensure_running(paths, store, manager, &site)?;
         write_site_conf(paths, store, &site)?;
         let web_server = &site.runtime.web_server;
         if manager
             .snapshot(web_server)
             .is_none_or(|s| s.state != ServiceState::Running)
         {
-            crate::ops::start_service(store, paths, manager, web_server)?;
-            let others: Vec<_> = servers.iter().copied().filter(|server| *server != web_server).collect();
-            crate::ops::rebuild_and_reload_selected(store, paths, manager, &others)?;
-        } else {
-            crate::ops::rebuild_and_reload_selected(store, paths, manager, &servers)?;
+            web.start(store, paths, manager, web_server)?;
         }
+        web.apply(store, paths, manager)?;
         crate::hosts::apply(store, paths, None)?;
         Ok(())
     })();
@@ -1123,41 +1125,47 @@ fn start_site_inner(
         if let Err(e) = user_ini.restore() { failures.push(format!("恢复 PHP 设置：{e}")); }
         if let Err(e) = restore_site_configs(&snapshots) {
             failures.push(format!("恢复站点配置：{e}"));
-        } else if let Err(e) = crate::ops::rebuild_and_reload_selected(store, paths, manager, &servers) {
-            failures.push(format!("恢复服务：{e}"));
         }
+        let configuration_restored = failures.is_empty();
+        failures.extend(php.restore(paths, store, manager));
+        failures.extend(web.restore(store, paths, manager, configuration_restored));
         if !failures.is_empty() {
             return Err(AppError::new("SITE_START_ROLLBACK_FAILED", "启动失败，部分配置或服务未能恢复")
                 .with_hint(user_ini.recovery_hint())
-                .with_detail(format!("{error}；{}", failures.join("；"))));
+                .with_detail(format!("{}：{}；{}；{}", error.code, error.message, error.detail.as_deref().unwrap_or_default(), failures.join("；"))));
         }
         return Err(error);
     }
     Ok(())
 }
 
-fn ensure_php_running(
-    paths: &Paths,
-    store: &Store,
-    manager: &Arc<ServiceManager>,
-    site: &Site,
-) -> Result<()> {
-    if let crate::model::SiteKind::Php = site.runtime.kind {
-        let ver = site
-            .runtime
-            .php_version
-            .clone()
+/// 调用方持有 lifecycle 锁：只收回由本次操作从空闲状态启动的 PHP 池。
+#[derive(Default)]
+struct SitePhpStart {
+    attempted: Option<String>,
+}
+impl SitePhpStart {
+    fn ensure_running(&mut self, paths: &Paths, store: &Store, manager: &Arc<ServiceManager>, site: &Site) -> Result<()> {
+        if site.runtime.kind != crate::model::SiteKind::Php { return Ok(()); }
+        let ver = site.runtime.php_version.as_deref()
             .ok_or_else(|| AppError::new("NO_PHP_VERSION", "站点未绑定 PHP 版本"))?;
         let sid = format!("php@{ver}");
-        if manager
-            .snapshot(&sid)
-            .map(|s| s.state != ServiceState::Running)
-            .unwrap_or(true)
-        {
-            crate::ops::start_service(store, paths, manager, &sid)?;
-        }
+        if manager.snapshot(&sid).is_some_and(|s| s.state == ServiceState::Running) { return Ok(()); }
+        // Error 状态也可能有原来的活进程；SERVICE_BUSY 失败时绝不能把它当作新池停止。
+        if !manager.is_busy(&sid) { self.attempted = Some(sid); }
+        crate::ops::start_php_for_site(store, paths, manager, ver)
     }
-    Ok(())
+    fn restore(&self, paths: &Paths, store: &Store, manager: &Arc<ServiceManager>) -> Vec<String> {
+        if let Some(id) = &self.attempted {
+            // 包括启动本身失败、首次清理后仍有进程残留的情况。
+            if manager.is_busy(id) {
+                if let Err(error) = crate::ops::stop_service(store, paths, manager, id) {
+                    return vec![format!("停止本次启动的 {id}：{error}；{}", error.detail.as_deref().unwrap_or_default())];
+                }
+            }
+        }
+        Vec::new()
+    }
 }
 
 /// 停止站点：禁用 vhost 并重载（不动 web server 本体）
@@ -3602,6 +3610,188 @@ mod scaffold_tests {
         assert!(web.restore(&store, &paths, &manager, true).is_empty());
         assert_eq!(manager.snapshot("nginx").unwrap().state, ServiceState::Stopped);
         assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));
+
+        // 真正的站点启动先拉起 Nginx，再因遗留 Apache 配置失败，也必须收回新进程。
+        write_site_conf_state(&paths, &store, &keep, false).unwrap();
+        let legacy = paths.apache_sites_dir().join(format!("{}.conf", keep.id));
+        std::fs::write(&legacy, "legacy start fixture").unwrap();
+        let error = start_site(&keep.id, &paths, &store, &manager).unwrap_err();
+        assert_eq!(manager.snapshot("nginx").unwrap().state, ServiceState::Stopped, "{error}");
+        assert_eq!(derive_status(&paths, &keep), "stopped");
+        assert_eq!(std::fs::read_to_string(&legacy).unwrap(), "legacy start fixture");
+        assert!(!crate::services::tcp_port_open(port));
+    }
+
+    #[test]
+    #[ignore = "requires NSB_NGINX_ROOT, NSB_ENV_PHP and NSB_SKIP_HOSTS=1; uses isolated real PHP pools and Nginx"]
+    fn site_php_native_rolls_back_new_services_and_preserves_shared_processes() {
+        assert_eq!(std::env::var("NSB_SKIP_HOSTS").as_deref(), Ok("1"));
+        let nginx_root = PathBuf::from(std::env::var("NSB_NGINX_ROOT").expect("NSB_NGINX_ROOT"));
+        let php = PathBuf::from(std::env::var("NSB_ENV_PHP").expect("NSB_ENV_PHP"));
+        assert!(php.parent().unwrap().join(crate::ops::exe_name("php-cgi")).is_file());
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().to_path_buf()); paths.ensure_dirs().unwrap();
+        let store = Store::open(paths.db()).unwrap();
+        let version = nginx_root.file_name().unwrap().to_str().unwrap().strip_prefix("nginx-").unwrap();
+        store.upsert_installed(&crate::model::InstalledPackage {
+            id: "nginx".into(), version: version.into(), category: "web-server".into(),
+            install_path: nginx_root.parent().unwrap().to_string_lossy().into(), config_path: String::new(), installed_at: 1,
+        }).unwrap();
+        // 两个逻辑版本使用同一真实二进制；验收池的隔离和回滚，不冒充不同 PHP 发行版。
+        for version in ["1.0", "2.0"] {
+            store.upsert_installed(&crate::model::InstalledPackage {
+                id: "php".into(), version: version.into(), category: "runtime".into(),
+                install_path: php.parent().unwrap().to_string_lossy().into(), config_path: String::new(), installed_at: 1,
+            }).unwrap();
+        }
+        fn reserve_pool() -> Vec<std::net::TcpListener> {
+            for _ in 0..100 {
+                let first = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let base = first.local_addr().unwrap().port();
+                if base.checked_add(configgen::PHP_POOL_WORKERS).is_none() { continue; }
+                let mut listeners = vec![first];
+                for offset in 1..configgen::PHP_POOL_WORKERS {
+                    if let Ok(listener) = std::net::TcpListener::bind(("127.0.0.1", base + offset)) { listeners.push(listener); } else { break; }
+                }
+                if listeners.len() == configgen::PHP_POOL_WORKERS as usize { return listeners; }
+            }
+            panic!("no free isolated PHP pool");
+        }
+        let old_pool = reserve_pool(); let new_pool = reserve_pool();
+        let old_base = old_pool[0].local_addr().unwrap().port();
+        let new_base = new_pool[0].local_addr().unwrap().port();
+        store.set_port_assign("php@1.0", old_base).unwrap();
+        store.set_port_assign("php@2.0", new_base).unwrap();
+        let http = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let https = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = http.local_addr().unwrap().port();
+        store.set_port_override("http", Some(port)).unwrap();
+        store.set_port_override("https", Some(https.local_addr().unwrap().port())).unwrap();
+        let mut site = saved_site(&paths, &store);
+        site.runtime.kind = SiteKind::Php; site.runtime.php_version = Some("1.0".into());
+        site.root_dir = temp.path().join("project").to_string_lossy().into();
+        std::fs::create_dir_all(&site.root_dir).unwrap();
+        std::fs::write(PathBuf::from(&site.root_dir).join("index.php"), "<?php echo 'native-php';").unwrap();
+        let ini = PathBuf::from(&site.root_dir).join(".user.ini");
+        std::fs::write(&ini, "; original settings\nmemory_limit=128M\n").unwrap();
+        store.save_site(&site).unwrap();
+        let mut keep = site.clone(); keep.id = "shared-php".into(); keep.domains = vec!["shared.demo.test".into()];
+        keep.root_dir = temp.path().join("shared-project").to_string_lossy().into();
+        std::fs::create_dir_all(&keep.root_dir).unwrap();
+        std::fs::write(PathBuf::from(&keep.root_dir).join("index.php"), "<?php echo 'native-php';").unwrap();
+        store.save_site(&keep).unwrap(); write_site_conf(&paths, &store, &keep).unwrap();
+        let manager = Arc::new(ServiceManager::new());
+        struct Cleanup<'a> { store: &'a Store, paths: &'a Paths, manager: Arc<ServiceManager> }
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                for id in ["nginx", "php@1.0", "php@2.0"] { let _ = crate::ops::stop_service(self.store, self.paths, &self.manager, id); }
+            }
+        }
+        let _cleanup = Cleanup {store: &store, paths: &paths, manager: manager.clone()};
+        drop(http); drop(https); drop(old_pool); drop(new_pool);
+        start_site(&site.id, &paths, &store, &manager).unwrap();
+        let client = reqwest::blocking::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(3)).build().unwrap();
+        let body = |domain: &str| client.get(format!("http://127.0.0.1:{port}/index.php")).header("Host", domain).send().unwrap().text().unwrap();
+        let original_php = manager.snapshot("php@1.0").unwrap().pids;
+        assert_eq!(original_php.len(), configgen::PHP_POOL_WORKERS as usize);
+        assert_eq!(body(&site.domains[0]), "native-php");
+        assert_eq!(body(&keep.domains[0]), "native-php");
+        let assert_new_pool_stopped = || {
+            assert_eq!(manager.snapshot("php@2.0").unwrap().state, ServiceState::Stopped);
+            assert!(manager.snapshot("php@2.0").unwrap().pids.is_empty());
+            assert!((0..configgen::PHP_POOL_WORKERS).all(|i| !crate::services::tcp_port_open(new_base + i)));
+            assert_eq!(manager.snapshot("php@1.0").unwrap().pids, original_php);
+        };
+
+        // 新 PHP 已启动、记录尚未保存时失败：旧 Web 不应被提前重载，原池和文件保持。
+        let db = rusqlite::Connection::open(paths.db()).unwrap();
+        db.execute_batch("CREATE TRIGGER reject_switch BEFORE UPDATE ON sites WHEN NEW.name='reject pool switch' BEGIN SELECT RAISE(ABORT,'switch fixture'); END;").unwrap();
+        let original_nginx = manager.snapshot("nginx").unwrap().pids;
+        let original_main = std::fs::read(paths.nginx_conf()).unwrap();
+        let mut patch = site.clone(); patch.name = "reject pool switch".into(); patch.runtime.php_version = Some("2.0".into());
+        patch.php_overrides = Some([("memory_limit".into(), "512M".into())].into());
+        let error = update(&patch, &paths, &store, &manager).unwrap_err();
+        assert_ne!(error.code, "SITE_UPDATE_ROLLBACK_FAILED");
+        assert!(error.message.contains("switch fixture"), "{error:?}");
+        assert_new_pool_stopped();
+        assert_eq!(manager.snapshot("nginx").unwrap().pids, original_nginx);
+        assert_eq!(std::fs::read(paths.nginx_conf()).unwrap(), original_main);
+        assert_eq!(std::fs::read_to_string(&ini).unwrap(), "; original settings\nmemory_limit=128M\n");
+        assert_eq!(get(&store, &site.id).unwrap().runtime.php_version, site.runtime.php_version);
+        assert!(manager.history_tail(100).iter().any(|(_, id, event)| id == "php@2.0" && event == "Starting → Running"));
+        assert_eq!(body(&keep.domains[0]), "native-php");
+        db.execute_batch("DROP TRIGGER reject_switch;").unwrap();
+
+        // 记录恢复也失败时仍清理新池，报告部分恢复并保留恢复副本。
+        db.execute_batch("CREATE TRIGGER reject_restore BEFORE UPDATE ON sites WHEN NEW.updated_at=1 AND OLD.updated_at<>1 BEGIN SELECT RAISE(ABORT,'restore fixture'); END;").unwrap();
+        store.set_setting("extraHosts", "invalid fixture").unwrap();
+        let mut partial = patch.clone(); partial.name = site.name.clone(); partial.domains = vec!["changed.demo.test".into()];
+        let error = update(&partial, &paths, &store, &manager).unwrap_err();
+        assert_eq!(error.code, "SITE_UPDATE_ROLLBACK_FAILED");
+        assert!(error.detail.unwrap().contains("恢复站点记录"));
+        assert_new_pool_stopped();
+        assert!(std::fs::read_dir(paths.backup()).unwrap().filter_map(|entry| entry.ok())
+            .any(|entry| entry.path().join("recovery.json").is_file()));
+        db.execute_batch("DROP TRIGGER reject_restore;").unwrap();
+        store.save_site(&site).unwrap(); write_site_conf(&paths, &store, &site).unwrap();
+        store.set_setting("extraHosts", "[]").unwrap();
+        crate::ops::rebuild_and_reload_selected(&store, &paths, &manager, &["nginx"]).unwrap();
+        assert_eq!(body(&site.domains[0]), "native-php");
+
+        // 失败的 start 复用已运行的共享池，不能停止旧进程。
+        store.set_setting("extraHosts", "invalid fixture").unwrap();
+        let error = start_site(&site.id, &paths, &store, &manager).unwrap_err();
+        assert_eq!(error.code, "HOSTS_SETTINGS_INVALID");
+        assert_eq!(manager.snapshot("php@1.0").unwrap().pids, original_php);
+        assert_eq!(body(&keep.domains[0]), "native-php");
+
+        // 新站点的 Web 已应用后 hosts 阶段失败：清理新池并恢复原 Web 的真实响应。
+        let mut creation = input(SiteKind::Php); creation.runtime.php_version = Some("2.0".into());
+        creation.root_dir = temp.path().join("created-project").to_string_lossy().into();
+        creation.domains = vec!["created.demo.test".into()]; creation.template = "blank-php".into();
+        creation.php_overrides = Some([("memory_limit".into(), "512M".into())].into());
+        let error = create(&creation, &paths, &store, &manager).unwrap_err();
+        assert_eq!(error.code, "HOSTS_SETTINGS_INVALID");
+        assert_new_pool_stopped();
+        assert_eq!(store.list_sites().unwrap().len(), 2);
+        assert!(PathBuf::from(&creation.root_dir).join("index.php").is_file());
+        assert!(!PathBuf::from(&creation.root_dir).join(".user.ini").exists());
+        assert_eq!(body(&site.domains[0]), "native-php");
+        assert_eq!(body(&keep.domains[0]), "native-php");
+        assert!(!std::fs::read_to_string(paths.nginx_conf()).unwrap().contains(&configgen::nginx_upstream_name("2.0")));
+        store.set_setting("extraHosts", "[]").unwrap();
+
+        // Error + 活进程被 SERVICE_BUSY 拒绝时，不认领或终止原池，也不重载未触及的 Web。
+        let before_busy = manager.snapshot("nginx").unwrap().pids;
+        manager.set_error("php@1.0", AppError::new("FIXTURE", "original live pool"));
+        let error = start_site(&site.id, &paths, &store, &manager).unwrap_err();
+        assert_eq!(error.code, "SERVICE_BUSY");
+        assert_eq!(manager.snapshot("php@1.0").unwrap().pids, original_php);
+        assert!(original_php.iter().all(|pid| platform::process_alive(*pid)));
+        assert_eq!(manager.snapshot("nginx").unwrap().pids, before_busy);
+        manager.set_state("php@1.0", ServiceState::Running);
+
+        // 正常切换会保留新池，另一站点继续使用原池；两个池均提供真实 PHP 响应。
+        patch.name = site.name.clone();
+        update(&patch, &paths, &store, &manager).unwrap();
+        assert_eq!(manager.snapshot("php@2.0").unwrap().state, ServiceState::Running);
+        assert_eq!(manager.snapshot("php@1.0").unwrap().pids, original_php);
+        assert_eq!(body(&site.domains[0]), "native-php");
+        assert_eq!(body(&keep.domains[0]), "native-php");
+        let new_pids = manager.snapshot("php@2.0").unwrap().pids;
+        stop_many(&paths, &store, &manager, &[site.id.clone(), keep.id.clone()]).unwrap();
+        for id in ["nginx", "php@1.0", "php@2.0"] { crate::ops::stop_service(&store, &paths, &manager, id).unwrap(); }
+        assert!(original_php.iter().chain(&new_pids).all(|pid| !platform::process_alive(*pid)));
+
+        // 原先两个服务均停止时，创建失败必须把本次启动的 PHP 与 Web 一起收回。
+        store.set_setting("extraHosts", "invalid fixture").unwrap();
+        let error = create(&creation, &paths, &store, &manager).unwrap_err();
+        assert_eq!(error.code, "HOSTS_SETTINGS_INVALID");
+        assert_eq!(manager.snapshot("nginx").unwrap().state, ServiceState::Stopped);
+        assert_eq!(manager.snapshot("php@2.0").unwrap().state, ServiceState::Stopped);
+        assert!(!crate::services::tcp_port_open(port));
+        assert!((0..configgen::PHP_POOL_WORKERS).all(|i| !crate::services::tcp_port_open(new_base + i)));
+        assert_eq!(store.list_sites().unwrap().len(), 2);
     }
 
     #[test]

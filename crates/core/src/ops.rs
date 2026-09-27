@@ -261,6 +261,26 @@ pub fn start_service(
     manager: &Arc<ServiceManager>,
     id: &str,
 ) -> Result<()> {
+    start_service_inner(store, paths, manager, id, true)
+}
+
+/// 站点事务自行应用并回滚受影响的 Web 配置，PHP 启动不能提前重载其它服务。
+pub(crate) fn start_php_for_site(
+    store: &Store,
+    paths: &Paths,
+    manager: &Arc<ServiceManager>,
+    version: &str,
+) -> Result<()> {
+    start_service_inner(store, paths, manager, &format!("php@{version}"), false)
+}
+
+fn start_service_inner(
+    store: &Store,
+    paths: &Paths,
+    manager: &Arc<ServiceManager>,
+    id: &str,
+    reload_php_web: bool,
+) -> Result<()> {
     let _operation = manager.lifecycle.lock();
     register_services(paths, store, manager);
     crate::generic::register_services(paths, store, manager);
@@ -295,7 +315,7 @@ pub fn start_service(
         "postgresql" => start_postgresql(store, paths, manager, &ports),
         "mongodb" => start_mongodb(store, paths, manager, &ports),
         s if s.starts_with("php@") => {
-            start_php(store, paths, manager, s.trim_start_matches("php@"), &ports)
+            start_php(store, paths, manager, s.trim_start_matches("php@"), &ports, reload_php_web)
         }
         s if s.starts_with("mysql@") => start_mysql(
             store,
@@ -393,6 +413,7 @@ fn start_php(
     manager: &Arc<ServiceManager>,
     version: &str,
     ports: &PortsProfile,
+    reload_web: bool,
 ) -> Result<()> {
     let service_id = format!("php@{version}");
     let exe = php_exe(store, version)?;
@@ -433,7 +454,8 @@ fn start_php(
         )
         .with_hint("查看日志；常见原因是 php.ini 扩展加载失败或缺少 VC 运行库"));
     }
-    // PHP 池启动后重建并加载正在运行的 Web 服务配置，确保新版本立即可被站点使用。
+    if !reload_web { return Ok(()); }
+    // 单独启动 PHP 池时重建并加载正在运行的 Web 服务配置，确保新版本立即可被站点使用。
     // 不能只 reload 旧配置：旧配置里还没有刚分配的 PHP upstream。
     let mut pools = running_php_pools(store, manager);
     if !pools.iter().any(|(ver, _)| ver == version) {

@@ -2144,3 +2144,19 @@ Windows 使用现有可见独立 PowerShell 启动方式，加入由后端生成
 版本统一至 0.2.75，Cargo.lock 只更新三个本项目 crate。最终前端类型检查通过；精确暂存内容导出的独立发布树通过 cargo check --workspace --all-targets --locked，pathenv/versions/envfile/install 回归 76 通过、0 失败、5 ignored、602 filtered out，同一发布树另行显式执行两项原生终端和一项官方索引验证，3 项均通过。未执行的其他模块与忽略项不计入验收。原有 configgen.rs 的 178 additions / 9 deletions 和本地生成文件不纳入提交。已核实 v0.2.74 Release completed/success。按根 AGENTS.md 新建 annotated tag v0.2.75，与 main 原子推送并核对实际 Release 状态。
 
 本次没有数据库结构或数据修复 SQL 变更，未修改 update.sql；运行时缓存沿用既有 settings 存储。未启动前端 dev、未执行本地前端 build、未新增依赖。自定义 nvm 别名、多解释器、目录自动切换和 macOS 原生终端验收尚需后续推进，整体目标保持进行。
+
+## 第九十轮：站点启动与 PHP 切换失败的服务回滚（v0.2.76）
+
+沿现有站点生命周期继续补齐真实服务行为。fast-context 和调用链检查发现：创建/启动站点成功拉起 Web 后，后续步骤失败只恢复 vhost，可能把本次新启动的服务留在运行状态；运行中站点切换 PHP 后保存失败，也未收回新池。先扩展已有真实 Nginx 用例复现：遗留 Apache 配置失败后，Nginx 状态仍为 Running。
+
+启动流程复用已有 SiteWebChanges，按本次尝试、成功应用及启动前状态恢复：收回新增实例、恢复原运行服务，只处理实际触及的服务。新增站点内部 PHP 启动入口，继续复用服务注册、忙状态检查、进程组和健康检查；池就绪后由站点事务统一应用受影响的 Web 配置，避免提前重载导致记录保存失败也干扰原 Web。套件页单独启动 PHP 仍沿用原来的 Web 同步行为。
+
+站点更新和启动持有现有 lifecycle 锁，记录本次从空闲状态启动的 PHP 池。失败时先清理新池，再恢复 Web，避免恢复后的主配置带上失败操作的 upstream；已运行共享池和 Error 状态下原有活进程不被认领或终止。文件或站点记录恢复失败也继续尝试进程清理，沿用部分恢复错误与恢复副本，启动错误保留原错误码和详情。创建失败仍保留项目与数据库，不改变现有数据保留语义。
+
+验证扩展位于已有 sites.rs 模块内，未新增测试文件。原生夹具使用临时目录、独立端口、真实 Nginx 和 PHP，跳过系统 hosts 写入；两个逻辑 PHP 版本引用同一真实 PHP 二进制，验证独立池切换，不冒充不同发行版兼容性验收。覆盖记录保存失败前无额外 Web 重载、部分记录恢复失败仍清理新池、创建和启动在后续 hosts 阶段失败、共享池及忙状态进程保留、正常切换与原池站点同时返回真实 PHP 响应，以及原先服务停止时创建失败能同时收回新 PHP/Web。所有隔离实例均通过清理守卫停止。
+
+版本统一为 0.2.76，Cargo.lock 仅更新三个本项目 crate；界面只同步版本显示，未改布局。原有 configgen.rs 的 178 additions / 9 deletions 与未跟踪本地文件保留，不纳入提交。发布前以精确暂存内容导出的独立目录验证，排除本地原有改动影响。已核实 v0.2.75 Release completed/success；本轮按根 AGENTS.md 新建 annotated tag v0.2.76，与 main 原子推送并核对远程指向及实际构建状态。
+
+最终前端类型检查通过；精确暂存内容导出的独立发布树通过 cargo check --workspace --all-targets --locked，sites/ops/services/hosts 回归 60 通过、0 失败、13 ignored、611 filtered out。同一发布树另行显式执行本轮两项真实 Nginx/PHP 验证，2 通过、0 失败；其余忽略项和未执行模块不计入验收。首次 PHP 夹具因共用目录的已有设置保护而未到达目标故障点，拆分项目目录后验证通过，并增加错误来源断言以保证确实覆盖记录保存失败。
+
+本次没有数据库变更，未修改 update.sql；故障注入只作用于临时 SQLite 夹具。未启动前端 dev、未执行本地前端 build、未新增依赖。macOS 与真实 Apache 的服务回滚尚未实机验收，应用运行时进程托管等其他缺漏继续后续推进，整体目标保持进行。

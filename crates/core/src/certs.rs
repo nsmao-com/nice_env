@@ -421,17 +421,73 @@ pub fn import_cert_pair(paths: &Paths, cert_src: &Path, key_src: &Path) -> Resul
     Ok(imported_entry(paths, &id))
 }
 
+/// 调用方持有站点与服务生命周期锁。原位置更新并保留绑定，发布失败成对恢复。
+fn replace_imported_with_reload(
+    paths: &Paths, store: &crate::store::Store, id: &str, cert_src: &Path, key_src: &Path,
+    reload: impl FnOnce(&[crate::model::Site]) -> Result<()>,
+) -> Result<ImportedCert> {
+    let _files = crate::tls::CERT_FILES.lock();
+    let (cert, key) = imported_paths(paths, id)?;
+    let users: Vec<_> = store.list_sites()?.into_iter()
+        .filter(|site| site.runtime.imported_cert_id.as_deref() == Some(id)).collect();
+    if !cert.try_exists()? && !key.try_exists()? && users.is_empty() {
+        return Err(AppError::new("NOT_FOUND", "导入证书已不存在，请刷新列表或重新导入"));
+    }
+    let cert_pem = read_pem(cert_src)?;
+    let key_pem = read_pem(key_src)?;
+    let (_, sans, _, _) = parse_pem_info(&cert_pem)
+        .ok_or_else(|| AppError::new("CERT_PARSE_FAILED", "无法解析新证书，请选择 PEM 证书或完整证书链"))?;
+    deployment_validity(&cert_pem, &key_pem, &sans)?;
+    // 关闭 HTTPS 或停用站点仍保留选择，不能在续期时移除它们需要的域名。
+    for site in &users {
+        validate_coverage(&sans, &site.domains).map_err(|error|
+            error.with_hint(format!("站点「{}」仍选择此证书。请提供覆盖全部引用域名的新证书，或先更换该站点的证书。", site.name)))?;
+    }
+    crate::certdeploy::local_pair(&cert.to_string_lossy(), &key.to_string_lossy(), &cert_pem, &key_pem)?;
+    // 重载失败时保留已验证的新材料，避免部分服务已经加载新证书却又退回旧文件。
+    reload(&users).map_err(|error| AppError::new("CERT_RELOAD_FAILED", "新证书已保存，但 Web 服务未能完成加载")
+        .with_hint("站点绑定保持不变。请检查服务状态和配置，修复后启动或重启对应 Web 服务；服务仍运行时也可再次应用这组文件。")
+        .with_detail(error.to_string()))?;
+    let mut updated = imported_entry(paths, id);
+    updated.used_by_sites = users.into_iter().map(|site| site.name).collect();
+    Ok(updated)
+}
+
+impl crate::CoreState {
+    pub fn replace_imported_certificate(&self, id: &str, cert_src: &Path, key_src: &Path) -> Result<ImportedCert> {
+        let _work = crate::BackgroundWork::begin("更新导入证书")?;
+        let _sites = crate::sites::SITE_CHANGES.lock();
+        let _operation = self.manager.lifecycle.lock();
+        replace_imported_with_reload(&self.paths, &self.store, id, cert_src, key_src, |sites| {
+            let servers: std::collections::BTreeSet<_> = sites.iter().filter(|site|
+                site.https && crate::sites::derive_status(&self.paths, site) == "running"
+                    && self.manager.snapshot(&site.runtime.web_server).is_some_and(|s| s.state == crate::model::ServiceState::Running)
+            ).map(|site| site.runtime.web_server.as_str()).collect();
+            // 已运行服务的安装入口丢失不能被通用重建入口跳过并误报成功。
+            for server in &servers {
+                match *server {
+                    "nginx" => { crate::ops::nginx_exe(&self.store)?; }
+                    "apache" => { crate::ops::apache_paths(&self.store)?; }
+                    _ => return Err(AppError::new("BAD_WEB_SERVER", "此站点的 Web 服务不支持自动加载证书")),
+                }
+            }
+            if servers.is_empty() { return Ok(()); }
+            crate::ops::rebuild_and_reload_selected(&self.store, &self.paths, &self.manager, &servers.into_iter().collect::<Vec<_>>())
+        })
+    }
+}
+
 /// 目录读取错误如实返回；损坏证书与孤立私钥保留在列表并标明原因，便于清理。
 pub fn list_imported(paths: &Paths, store: &crate::store::Store) -> Result<Vec<ImportedCert>> {
     let _files = crate::tls::CERT_FILES.lock();
     let dir = crate::paths::checked_data_path(&paths.base, "certs/imported")?;
     let read = match std::fs::read_dir(&dir) {
-        Ok(read) => read,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Ok(read) => Some(read),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(AppError::io("读取导入证书目录", error)),
     };
     let mut ids = std::collections::BTreeSet::new();
-    for entry in read {
+    for entry in read.into_iter().flatten() {
         let entry = entry?;
         if entry.file_type()?.is_symlink() { continue; }
         let path = entry.path();
@@ -440,6 +496,8 @@ pub fn list_imported(paths: &Paths, store: &crate::store::Store) -> Result<Vec<I
         }
     }
     let sites = store.list_sites()?;
+    // 文件全部丢失时仍保留已绑定的条目，使用户可以原位恢复续期材料。
+    ids.extend(sites.iter().filter_map(|site| site.runtime.imported_cert_id.clone()));
     let mut out: Vec<_> = ids.into_iter().map(|id| {
         let mut entry = imported_entry(paths, &id);
         entry.used_by_sites = sites.iter().filter(|s| s.runtime.imported_cert_id.as_deref() == Some(&id))
@@ -716,6 +774,173 @@ fn collect_files(dir: &Path, depth: u8, out: &mut Vec<PathBuf>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn renewal_fixture() -> (tempfile::TempDir, crate::CoreState) {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().to_path_buf()); paths.ensure_dirs().unwrap();
+        let state = crate::CoreState {
+            store: crate::store::Store::open(paths.db()).unwrap(), paths,
+            manager: std::sync::Arc::new(crate::services::ServiceManager::new()),
+            installer: crate::install::Installer::bundled(),
+            downloader: std::sync::Arc::new(crate::download::Downloader::new()),
+            emit: std::sync::Arc::new(|_| {}), watchdog: std::sync::Arc::new(crate::watchdog::Watchdog::new()),
+        };
+        (temp, state)
+    }
+
+    fn renewal_pair(directory: &Path, name: &str, domains: &[&str], days: i64) -> (PathBuf, PathBuf) {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(domains.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
+        params.not_before = time::OffsetDateTime::now_utc() - time::Duration::days(10);
+        params.not_after = time::OffsetDateTime::now_utc() + time::Duration::days(days);
+        let cert = params.self_signed(&key).unwrap();
+        let crt = directory.join(format!("{name}.crt")); let private = directory.join(format!("{name}.key"));
+        std::fs::write(&crt, cert.pem()).unwrap(); std::fs::write(&private, key.serialize_pem()).unwrap();
+        (crt, private)
+    }
+
+    fn renewal_site(state: &crate::CoreState, id: &str, certificate: &str, domain: &str, https: bool) -> crate::model::Site {
+        let site: crate::model::Site = serde_json::from_value(serde_json::json!({
+            "id": id, "name": id, "domains": [domain], "rootDir": state.paths.base,
+            "runtime": {"kind": "static", "webServer": "nginx", "importedCertId": certificate},
+            "https": https, "rewrite": "none", "db": null, "status": "stopped", "createdAt": 1, "updatedAt": 1
+        })).unwrap();
+        state.store.save_site(&site).unwrap(); site
+    }
+
+    #[test]
+    fn imported_certificate_renewal_preserves_identity_bindings_and_source_files() {
+        let (_temp, state) = renewal_fixture();
+        let (old, old_key) = renewal_pair(&state.paths.base, "old", &["*.example.com", "example.com"], 2);
+        let original = import_cert_pair(&state.paths, &old, &old_key).unwrap();
+        renewal_site(&state, "shop", &original.id, "shop.example.com", true);
+        renewal_site(&state, "off", &original.id, "example.com", false);
+        let (new, new_key) = renewal_pair(&state.paths.base, "new", &["*.example.com", "example.com"], 90);
+        let content = std::fs::read(&new).unwrap(); let private = std::fs::read(&new_key).unwrap();
+        let updated = state.replace_imported_certificate(&original.id, &new, &new_key).unwrap();
+        assert_eq!(updated.id, original.id); assert_eq!(updated.cert_path, original.cert_path);
+        assert!(updated.usable && updated.days_left > 80); assert_eq!(updated.used_by_sites.len(), 2);
+        assert_eq!(std::fs::read(&updated.cert_path).unwrap(), content);
+        assert_eq!(std::fs::read(&updated.key_path).unwrap(), private);
+        assert_eq!(std::fs::read(new).unwrap(), content); assert_eq!(std::fs::read(new_key).unwrap(), private);
+        assert!(state.store.list_sites().unwrap().iter().all(|s| s.runtime.imported_cert_id.as_deref() == Some(original.id.as_str())));
+        assert_eq!(list_imported(&state.paths, &state.store).unwrap().len(), 1);
+        assert!(!state.paths.certs().join("ca.crt").exists());
+        assert!(!state.paths.nginx_conf().exists()); // 停止中的服务不创建配置、不启动。
+        assert_eq!(report(&state.paths, &state.store).unwrap().certs[0].status, "ok");
+    }
+
+    #[test]
+    fn imported_certificate_renewal_rejects_invalid_material_and_partial_coverage() {
+        let (_temp, state) = renewal_fixture();
+        let (old, old_key) = renewal_pair(&state.paths.base, "old", &["shop.example.com", "example.com"], 2);
+        let original = import_cert_pair(&state.paths, &old, &old_key).unwrap();
+        renewal_site(&state, "off", &original.id, "example.com", false);
+        let before = std::fs::read(&original.cert_path).unwrap(); let before_key = std::fs::read(&original.key_path).unwrap();
+        let (valid, valid_key) = renewal_pair(&state.paths.base, "valid", &["shop.example.com", "example.com"], 90);
+        let (partial, partial_key) = renewal_pair(&state.paths.base, "partial", &["*.example.com"], 90);
+        let (expired, expired_key) = renewal_pair(&state.paths.base, "expired", &["example.com"], -1);
+        let corrupt = state.paths.base.join("corrupt.crt"); std::fs::write(&corrupt, "invalid").unwrap();
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(vec!["example.com".into()]).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca = state.paths.base.join("root.crt"); let key = state.paths.base.join("root.key");
+        std::fs::write(&ca, params.self_signed(&ca_key).unwrap().pem()).unwrap(); std::fs::write(&key, ca_key.serialize_pem()).unwrap();
+        for (cert, key, code) in [(&partial, &partial_key, "CERT_DOMAIN_MISMATCH"), (&valid, &partial_key, "CERT_KEY_MISMATCH"),
+            (&expired, &expired_key, "CERT_DEPLOY_EXPIRED"), (&corrupt, &valid_key, "CERT_PARSE_FAILED"), (&ca, &key, "CERT_IS_CA")] {
+            let error = replace_imported_with_reload(&state.paths, &state.store, &original.id, cert, key, |_| panic!("invalid material must not reload")).unwrap_err();
+            assert_eq!(error.code, code);
+            assert_eq!(std::fs::read(&original.cert_path).unwrap(), before); assert_eq!(std::fs::read(&original.key_path).unwrap(), before_key);
+        }
+        assert_eq!(state.replace_imported_certificate("../old", &valid, &valid_key).unwrap_err().code, "BAD_CERT_ID");
+        assert_eq!(state.replace_imported_certificate("gone", &valid, &valid_key).unwrap_err().code, "NOT_FOUND");
+    }
+
+    #[test]
+    fn imported_certificate_missing_pair_can_be_restored_and_reload_failure_is_explicit() {
+        let (_temp, state) = renewal_fixture();
+        renewal_site(&state, "bound", "missing-cert", "repair.example.com", true);
+        let missing = list_imported(&state.paths, &state.store).unwrap();
+        assert_eq!(missing.len(), 1); assert!(!missing[0].usable); assert_eq!(missing[0].used_by_sites, ["bound"]);
+        let (new, new_key) = renewal_pair(&state.paths.base, "repair", &["repair.example.com"], 90);
+        let error = replace_imported_with_reload(&state.paths, &state.store, "missing-cert", &new, &new_key, |sites| {
+            assert_eq!(sites.len(), 1);
+            let (cert, key) = imported_paths(&state.paths, "missing-cert").unwrap();
+            assert_eq!(std::fs::read(cert).unwrap(), std::fs::read(&new).unwrap());
+            assert_eq!(std::fs::read(key).unwrap(), std::fs::read(&new_key).unwrap());
+            Err(AppError::new("RELOAD_DENIED", "fixture reload rejected"))
+        }).unwrap_err();
+        assert_eq!(error.code, "CERT_RELOAD_FAILED");
+        assert!(list_imported(&state.paths, &state.store).unwrap()[0].usable);
+        assert!(state.replace_imported_certificate("missing-cert", &new, &new_key).unwrap().usable);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn imported_certificate_second_file_failure_restores_original_pair() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (_temp, state) = renewal_fixture();
+        let (old, old_key) = renewal_pair(&state.paths.base, "old", &["example.com"], 2);
+        let original = import_cert_pair(&state.paths, &old, &old_key).unwrap();
+        let before = std::fs::read(&original.cert_path).unwrap(); let before_key = std::fs::read(&original.key_path).unwrap();
+        let (new, new_key) = renewal_pair(&state.paths.base, "new", &["example.com"], 90);
+        let _locked = std::fs::OpenOptions::new().read(true).share_mode(1).open(&original.key_path).unwrap();
+        assert!(replace_imported_with_reload(&state.paths, &state.store, &original.id, &new, &new_key, |_| panic!("failed publish must not reload")).is_err());
+        assert_eq!(std::fs::read(&original.cert_path).unwrap(), before); assert_eq!(std::fs::read(&original.key_path).unwrap(), before_key);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires NSB_NGINX_ROOT; runs an isolated Nginx on ephemeral ports and stops it"]
+    fn imported_certificate_native_nginx_serves_renewed_leaf() {
+        let source = PathBuf::from(std::env::var("NSB_NGINX_ROOT").expect("NSB_NGINX_ROOT"));
+        let (_temp, state) = renewal_fixture();
+        let install = state.paths.base.join("runtime"); let root = install.join("nginx-fixture");
+        std::fs::create_dir_all(root.join("conf")).unwrap(); std::fs::create_dir_all(root.join("logs")).unwrap();
+        std::fs::copy(source.join("nginx.exe"), root.join("nginx.exe")).unwrap();
+        std::fs::copy(source.join("conf/mime.types"), root.join("conf/mime.types")).unwrap();
+        state.store.upsert_installed(&crate::model::InstalledPackage {
+            id: "nginx".into(), version: "fixture".into(), category: "web-server".into(),
+            install_path: install.to_string_lossy().into(), config_path: String::new(), installed_at: 0,
+        }).unwrap();
+        let http = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let https = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let http_port = http.local_addr().unwrap().port(); let https_port = https.local_addr().unwrap().port();
+        state.store.set_setting("portOverride.http", &http_port.to_string()).unwrap();
+        state.store.set_setting("portOverride.https", &https_port.to_string()).unwrap();
+        let (old, old_key) = renewal_pair(&state.paths.base, "old", &["localhost"], 2);
+        let cert = import_cert_pair(&state.paths, &old, &old_key).unwrap();
+        let mut site = renewal_site(&state, "native-renewal", &cert.id, "localhost", true);
+        let www = state.paths.base.join("www"); std::fs::create_dir_all(&www).unwrap();
+        site.root_dir = www.to_string_lossy().into(); state.store.save_site(&site).unwrap();
+        std::fs::write(www.join("index.html"), "renewal fixture").unwrap();
+        let conf = crate::configgen::render_site_conf(&site, http_port, https_port,
+            &state.paths.etc().join("nginx/fastcgi_params"), &state.paths.certs().join("sites"), &state.paths.logs());
+        std::fs::write(state.paths.nginx_sites_dir().join("native-renewal.conf"), conf).unwrap();
+        crate::ops::register_services(&state.paths, &state.store, &state.manager);
+        struct Stop<'a>(&'a crate::CoreState);
+        impl Drop for Stop<'_> { fn drop(&mut self) { let _ = crate::ops::stop_service(&self.0.store, &self.0.paths, &self.0.manager, "nginx"); } }
+        let guard = Stop(&state); drop(http); drop(https);
+        crate::ops::start_service(&state.store, &state.paths, &state.manager, "nginx").unwrap();
+        let leaf = || {
+            let response = reqwest::blocking::Client::builder().no_proxy().danger_accept_invalid_certs(true).tls_info(true)
+                .timeout(std::time::Duration::from_secs(5)).build().unwrap()
+                .get(format!("https://localhost:{https_port}/")).send().unwrap();
+            assert!(response.status().is_success());
+            let der = response.extensions().get::<reqwest::tls::TlsInfo>().unwrap().peer_certificate().unwrap().to_vec();
+            assert_eq!(response.text().unwrap(), "renewal fixture"); der
+        };
+        assert_eq!(leaf(), parse_chain(&std::fs::read_to_string(old).unwrap()).unwrap()[0].as_ref());
+        let (new, new_key) = renewal_pair(&state.paths.base, "renewed", &["localhost"], 90);
+        state.replace_imported_certificate(&cert.id, &new, &new_key).unwrap();
+        assert_eq!(leaf(), parse_chain(&std::fs::read_to_string(new).unwrap()).unwrap()[0].as_ref());
+        assert!(!state.paths.certs().join("ca.crt").exists());
+        assert!(!state.paths.apache_conf().exists());
+        let pids = state.manager.snapshot("nginx").unwrap().pids;
+        drop(guard);
+        assert!(!crate::services::tcp_port_open(http_port)); assert!(!crate::services::tcp_port_open(https_port));
+        assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));
+    }
 
     #[test]
     fn status_thresholds() {

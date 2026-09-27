@@ -62,7 +62,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.42";
+const MOCK_APP_VERSION = "0.2.43";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -1509,6 +1509,8 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return { id: "imported", usable: true, usedBySites: [], certPath: "D:/mock/imported.crt", keyPath: "D:/mock/imported.key", subject: "imported", sans: [], notBefore: 0, notAfter: 0, daysLeft: 365 } as ImportedCert as T;
     case "cert_imported_delete":
       return true as T;
+    case "cert_imported_replace":
+      throw { code: "DESKTOP_ONLY", message: "浏览器预览无法读取或更新真实证书，请在桌面端操作" };
     case "list_certs":
       return structuredClone(Array.from(certs.values())) as T;
     case "issue_cert": {

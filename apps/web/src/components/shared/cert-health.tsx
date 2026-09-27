@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   ShieldCheck,
@@ -36,6 +36,7 @@ import { ConfirmDialog } from "@/components/shared/misc";
  */
 export function CertHealthCard() {
   const t = useT();
+  const qc = useQueryClient();
   const reportQuery = useQuery({ queryKey: ["cert-health"], queryFn: api.certHealth });
   const importedQuery = useQuery({ queryKey: ["cert-imported"], queryFn: api.certImportedList });
   const report = reportQuery.data;
@@ -46,8 +47,49 @@ export function CertHealthCard() {
   const busyRef = React.useRef(false);
   const [error, setError] = React.useState<AppErrorShape | null>(null);
   const [confirmDel, setConfirmDel] = React.useState<ImportedCert | null>(null);
+  const [replacement, setReplacement] = React.useState<{ cert: ImportedCert; certPath: string; keyPath: string } | null>(null);
 
-  const load = () => Promise.all([reportQuery.refetch(), importedQuery.refetch()]);
+  const load = () => Promise.all([
+    reportQuery.refetch(), importedQuery.refetch(),
+    qc.invalidateQueries({ queryKey: ["site-certificate-choices"] }),
+  ]);
+
+  const pickReplacement = async (field: "certPath" | "keyPath") => {
+    if (busyRef.current) return;
+    if (!isTauri) { toast.info(t("tls.desktopOnly")); return; }
+    busyRef.current = true;
+    setBusy(true);
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const path = await open({ title: t(field === "certPath" ? "cert.pickCert" : "cert.pickKey"), multiple: false,
+        filters: [{ name: "PEM", extensions: field === "certPath" ? ["crt", "pem", "cer"] : ["key", "pem"] }] });
+      if (typeof path === "string") {
+        setReplacement((current) => current ? { ...current, [field]: path } : current);
+        setError(null);
+      }
+    } catch (e) { setError(normalizeError(e)); }
+    finally { busyRef.current = false; setBusy(false); }
+  };
+
+  const doReplace = async () => {
+    if (busyRef.current || !replacement?.certPath || !replacement.keyPath) return;
+    busyRef.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.certImportedReplace(replacement.cert.id, replacement.certPath, replacement.keyPath);
+      toast.success(t("cert.replaced"));
+      setReplacement(null);
+    } catch (e) {
+      setError(normalizeError(e));
+    } finally {
+      // 重载失败也可能已保存新材料；重新读取真实状态，不保留旧有效期。
+      await load();
+      await qc.invalidateQueries({ queryKey: ["services"] });
+      busyRef.current = false;
+      setBusy(false);
+    }
+  };
 
   const doImport = async () => {
     if (busyRef.current) return;
@@ -157,55 +199,61 @@ export function CertHealthCard() {
                 <span className="text-[10px] font-semibold uppercase tracking-[0.09em] text-faint/70">
                   {t("cert.importedList")}
                 </span>
-                <span className="h-px flex-1 bg-border/60" />
+                <span className="mx-2 flex-1 border-t border-dashed border-border/60" />
               </div>
               <div className="space-y-1.5">
                 {imported.map((c) => (
                   <div
                     key={c.certPath}
-                    className="group flex items-center gap-2.5 rounded-lg border border-border/60 bg-card-2/25 px-2.5 py-2"
+                    className="group min-w-0 rounded-lg border border-border/60 bg-card-2/25 px-3 py-3"
                   >
-                    <FileKey2 className="h-3.5 w-3.5 shrink-0 text-faint" />
-                    <div className="min-w-0 flex-1">
-                      <span className="block truncate font-mono text-[11.5px]">{c.subject}</span>
-                      <p className="truncate text-[10.5px] text-faint">
-                        {c.sans.slice(0, 3).join(", ")}
-                        {c.sans.length > 3 ? ` +${c.sans.length - 3}` : ""}
-                      </p>
+                    <div className="flex min-w-0 items-start gap-2.5">
+                      <FileKey2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-faint" />
+                      <div className="min-w-0 flex-1">
+                        <span className="block font-mono text-[11.5px] [overflow-wrap:anywhere]">{c.subject}</span>
+                        <p className="mt-1 text-[10.5px] text-faint [overflow-wrap:anywhere]">{c.sans.join(", ")}</p>
+                      </div>
                     </div>
-                    <Badge
-                      variant="outline"
-                      className={cn(
-                        "shrink-0 text-[9.5px]",
-                        !c.usable
-                          ? "text-error"
-                          : c.daysLeft < 0
-                          ? "text-error"
-                          : c.daysLeft <= 7
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <Badge
+                        variant="outline"
+                        className={cn(
+                          "shrink-0 text-[9.5px]",
+                          !c.usable || c.daysLeft <= 7
                             ? "text-error"
                             : c.daysLeft <= 30
                               ? "text-warn"
                               : ""
-                      )}
-                    >
-                      {!c.usable
-                        ? (c.problem ?? t("cert.invalid"))
-                        : c.daysLeft < 0
-                        ? t("cert.expired")
-                        : t("cert.daysLeft").replace("{n}", String(c.daysLeft))}
-                    </Badge>
-                    {!c.usable && c.problem && <p className="mt-1 text-[10.5px] text-error [overflow-wrap:anywhere]">{c.problem}</p>}
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-7 shrink-0 px-2 text-error"
-                      disabled={busy || !!readError}
-                      onClick={() => { setError(null); setConfirmDel(c); }}
-                      aria-label={`${t("cert.delete")} ${c.subject}`}
-                      title={t("cert.delete")}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
+                        )}
+                      >
+                        {!c.usable
+                          ? t("cert.invalid")
+                          : c.daysLeft < 0
+                            ? t("cert.expired")
+                            : t("cert.daysLeft").replace("{n}", String(c.daysLeft))}
+                      </Badge>
+                    </div>
+                    {!c.usable && c.problem && <p className="mt-2 text-[11px] text-error [overflow-wrap:anywhere]">{c.problem}</p>}
+                    {c.usedBySites.length > 0 && <p className="mt-2 text-[11px] text-muted [overflow-wrap:anywhere]">{t("cert.usedBy")}: {c.usedBySites.join(", ")}</p>}
+                    <div className="mx-2 my-3 border-t border-dashed border-border/60" />
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button variant="secondary" size="sm" disabled={busy || !!readError}
+                        onClick={() => { setError(null); setReplacement({ cert: c, certPath: "", keyPath: "" }); }}
+                        aria-label={`${t("cert.replace")} ${c.subject}`}>
+                        <RefreshCw className="mr-1.5 h-3.5 w-3.5" />{t("cert.replace")}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="shrink-0 px-2 text-error"
+                        disabled={busy || !!readError}
+                        onClick={() => { setError(null); setConfirmDel(c); }}
+                        aria-label={`${t("cert.delete")} ${c.subject}`}
+                        title={t("cert.delete")}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -213,6 +261,31 @@ export function CertHealthCard() {
           )}
         </CardContent>
       </Card>
+
+      <ConfirmDialog
+        open={replacement != null}
+        onOpenChange={(open) => { if (!open && !busyRef.current) { setReplacement(null); setError(null); } }}
+        title={t("cert.replace")}
+        description={t("cert.replaceHint")}
+        confirmText={t("cert.replaceApply")}
+        loading={busy}
+        confirmDisabled={!replacement?.certPath || !replacement?.keyPath}
+        onConfirm={() => void doReplace()}
+      >
+        <p className="text-sm font-medium [overflow-wrap:anywhere]">{replacement?.cert.subject}</p>
+        {!!replacement?.cert.usedBySites.length && <p className="text-xs leading-relaxed text-muted [overflow-wrap:anywhere]">
+          {t("cert.usedBy")}: {replacement.cert.usedBySites.join(", ")}
+        </p>}
+        {(["certPath", "keyPath"] as const).map((field) => <div key={field} className="space-y-2">
+          <Button variant="secondary" className="w-full justify-start whitespace-normal text-left" disabled={busy} onClick={() => void pickReplacement(field)}>
+            <Upload className="mr-2 h-3.5 w-3.5 shrink-0" />{t(field === "certPath" ? "cert.pickCert" : "cert.pickKey")}
+          </Button>
+          {replacement?.[field] && <p className="text-xs text-muted [overflow-wrap:anywhere]">{replacement[field]}</p>}
+        </div>)}
+        {error && <p role="alert" className="rounded-lg bg-error-soft p-3 text-xs text-error [overflow-wrap:anywhere]">
+          {error.message}{error.hint && <span className="mt-1 block">{error.hint}</span>}
+        </p>}
+      </ConfirmDialog>
 
       <ConfirmDialog
         open={confirmDel != null}

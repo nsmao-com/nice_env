@@ -327,6 +327,8 @@ export const certImportedList = () => safe(invoke<ImportedCert[]>("cert_imported
 export const siteCertificateChoices = () => safe(invoke<SiteCertificateChoice[]>("site_certificate_choices"));
 export const certImportedDelete = (certPath: string) =>
   safe(invoke<boolean>("cert_imported_delete", { certPath }));
+export const certImportedReplace = (id: string, certPath: string, keyPath: string) =>
+  safe(invoke<ImportedCert>("cert_imported_replace", { id, certPath, keyPath }));
 
 /* 站点 .env */
 export const envRead = (siteId: string) => safe(invoke<EnvFileView>("env_read", { siteId }));

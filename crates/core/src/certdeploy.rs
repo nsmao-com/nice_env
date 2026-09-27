@@ -649,7 +649,7 @@ fn local_path(path: &str) -> Result<std::path::PathBuf> {
     crate::paths::checked_data_path(root, &relative).map_err(|error| AppError::new("DEPLOY_PATH", format!("部署路径无效：{error}")))
 }
 
-fn local_pair(cert: &str, key: &str, cert_pem: &str, key_pem: &str) -> Result<()> {
+pub(crate) fn local_pair(cert: &str, key: &str, cert_pem: &str, key_pem: &str) -> Result<()> {
     local_pair_with_publish(cert, key, cert_pem, key_pem, |file, path| file.persist(path).map(|_| ()).map_err(|e| e.error))
 }
 

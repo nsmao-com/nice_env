@@ -1165,12 +1165,22 @@ pub fn rebuild_and_reload(
     paths: &Paths,
     manager: &Arc<ServiceManager>,
 ) -> Result<()> {
+    rebuild_and_reload_selected(store, paths, manager, &["nginx", "apache"])
+}
+
+/// 证书更新只应用到实际引用它的 Web 服务，沿用原有配置验证和重载顺序。
+pub(crate) fn rebuild_and_reload_selected(
+    store: &Store,
+    paths: &Paths,
+    manager: &Arc<ServiceManager>,
+    servers: &[&str],
+) -> Result<()> {
     let _operation = manager.lifecycle.lock();
     let ports = PortsProfile::from_settings(store);
     let pools = running_php_pools(store, manager);
 
     // ---- nginx ----
-    if nginx_exe(store).is_ok() {
+    if servers.contains(&"nginx") && nginx_exe(store).is_ok() {
         let (root, exe) = nginx_exe(store)?;
         configgen::write_nginx_conf(paths, &root, &pools, ports.http, ports.https)?;
         if manager
@@ -1193,7 +1203,7 @@ pub fn rebuild_and_reload(
     }
 
     // ---- apache ----
-    if apache_paths(store).is_ok() {
+    if servers.contains(&"apache") && apache_paths(store).is_ok() {
         let (root, exe) = apache_paths(store)?;
         let running = manager
             .snapshot("apache")

@@ -20,6 +20,7 @@ import * as api from "@/lib/api";
 function ShellFrame({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const wizardOpen = useUI((s) => s.wizardOpen);
+  const wizardKind = useUI((s) => s.wizardKind);
   const setWizardOpen = useUI((s) => s.setWizardOpen);
   const invalidate = useInvalidate();
   const t = useT();
@@ -79,6 +80,7 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
       <CertAlertListener />
       <SiteWizard
         open={wizardOpen}
+        initialKind={wizardKind}
         onOpenChange={setWizardOpen}
         onCreated={() => invalidate("sites", "hosts", "certs", "databases")}
       />

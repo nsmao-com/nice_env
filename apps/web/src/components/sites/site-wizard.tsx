@@ -85,10 +85,12 @@ export function SiteWizard({
   open,
   onOpenChange,
   onCreated,
+  initialKind = "php",
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onCreated?: () => void;
+  initialKind?: SiteKind;
 }) {
   const t = useT();
   const ports = usePorts();
@@ -156,7 +158,7 @@ export function SiteWizard({
       setAliases("");
       setRootDir("");
       setTemplate("none");
-      setKind("php");
+      setKind(initialKind);
       setPhpVersion(phpVersions[0] ?? "");
       setWebServer("nginx");
       setHttps(false);
@@ -168,7 +170,7 @@ export function SiteWizard({
       setDbUser("");
     }
     wasOpen.current = open;
-  }, [open, phpVersions]);
+  }, [open, phpVersions, initialKind]);
 
   React.useEffect(() => {
     if (open && !phpVersion && phpVersions[0]) setPhpVersion(phpVersions[0]);

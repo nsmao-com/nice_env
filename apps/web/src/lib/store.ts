@@ -5,6 +5,7 @@ import * as React from "react";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { Lang, TKey } from "./i18n";
+import type { SiteKind } from "@nsb/schema";
 import { translate } from "./i18n";
 
 interface UIState {
@@ -13,7 +14,8 @@ interface UIState {
   commandOpen: boolean;
   setCommandOpen: (open: boolean) => void;
   wizardOpen: boolean;
-  setWizardOpen: (open: boolean) => void;
+  wizardKind: SiteKind;
+  setWizardOpen: (open: boolean, kind?: SiteKind) => void;
   onboardingOpen: boolean;
   setOnboardingOpen: (open: boolean) => void;
   /** 服务列表展示形态：卡片（信息全）/ 列表（一屏看更多） */
@@ -50,7 +52,8 @@ export const useUI = create<UIState>()(
       commandOpen: false,
       setCommandOpen: (open) => set({ commandOpen: open }),
       wizardOpen: false,
-      setWizardOpen: (open) => set({ wizardOpen: open }),
+      wizardKind: "php",
+      setWizardOpen: (open, kind) => set({ wizardOpen: open, ...(open ? { wizardKind: kind ?? "php" } : {}) }),
       onboardingOpen: false,
       setOnboardingOpen: (open) => set({ onboardingOpen: open }),
       serviceView: "card",

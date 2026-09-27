@@ -62,7 +62,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.49";
+const MOCK_APP_VERSION = "0.2.50";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -2297,13 +2297,8 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       throw { code: "DESKTOP_ONLY", message: "浏览器无法重启 NiceEnv，请在桌面端执行" };
     case "frontend_ready":
       return false as T;
-    case "open_in_browser": {
-      const url = args?.url as string | undefined;
-      if (url && typeof window !== "undefined") window.open(url, "_blank", "noopener,noreferrer");
-      return true as T;
-    }
     case "open_in_folder":
-      return true as T;
+      throw { code: "DESKTOP_ONLY", message: "浏览器无法打开本机文件夹，请使用桌面端" };
     case "open_terminal":
       throw { code: "DESKTOP_ONLY", message: "浏览器无法打开本机终端，请使用桌面端" };
     case "refresh_remote_manifest":

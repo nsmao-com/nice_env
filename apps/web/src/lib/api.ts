@@ -51,7 +51,7 @@ import type {
   CertMonitor,
   DownloadUpdateResult,
 } from "@nsb/schema";
-import { invoke, safe } from "./backend";
+import { browserUrl, invoke, isTauri, safe } from "./backend";
 
 /* 服务 */
 export const listServiceStatus = () =>
@@ -241,8 +241,26 @@ export const configReset = (kind: string, revision: string) => safe(invoke<Confi
 export const getSystemStats = () => safe(invoke<SystemStats>("get_system_stats"));
 
 /* 打开外部 */
-export const openInBrowser = (url: string) =>
-  safe(invoke<boolean>("open_in_browser", { url }));
+export async function openInBrowser(input: string): Promise<boolean> {
+  const url = browserUrl(input);
+  if (isTauri) return safe(invoke<boolean>("open_in_browser", { url }));
+  // 必须在点击的同步阶段打开，不能经过 mock 延迟而丢失浏览器的用户手势。
+  // 先隔离空白窗口的 opener，再导航；只有拿到窗口句柄才能识别弹窗被拦截。
+  const opened = window.open("about:blank", "_blank");
+  if (!opened) throw { code: "BROWSER_OPEN_BLOCKED", message: "浏览器拦截了新窗口，请允许本站弹窗后重试" };
+  try {
+    opened.opener = null;
+    const link = opened.document.createElement("a");
+    link.href = url;
+    link.rel = "noopener noreferrer";
+    opened.document.body.append(link);
+    link.click();
+  } catch {
+    opened.close();
+    throw { code: "OPEN_FAILED", message: "浏览器未能打开网页，请重试" };
+  }
+  return true;
+}
 export const openInFolder = (path: string) =>
   safe(invoke<boolean>("open_in_folder", { path }));
 export const openTerminal = (cwd: string) =>

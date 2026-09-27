@@ -22,6 +22,20 @@ export interface AppErrorShape {
   detail?: string;
 }
 
+/** 网页导航与桌面端同一约束；保留查询参数，拒绝可执行协议和嵌入凭据。 */
+export function browserUrl(input: string): string {
+  const invalid = (): AppErrorShape => ({
+    code: "BROWSER_URL_INVALID",
+    message: "无法打开网页：请使用完整的 HTTP 或 HTTPS 地址",
+    hint: "地址不能包含登录凭据、反斜杠或控制字符；本地文件请使用“打开所在文件夹”。",
+  });
+  if (/[\u0000-\u001f\u007f-\u009f\\]/.test(input) || !/^https?:\/\/[^/?#]/i.test(input.trim())) throw invalid();
+  let url: URL;
+  try { url = new URL(input.trim()); } catch { throw invalid(); }
+  if (!url.hostname || url.username || url.password || url.port === "0") throw invalid();
+  return url.href;
+}
+
 /** 把 invoke 抛出的任意错误规整为 AppErrorShape（人话 + 建议） */
 export async function safe<T>(p: Promise<T>): Promise<T> {
   try {

@@ -1510,39 +1510,107 @@ fn service_history(
 /* ================= 打开外部 ================= */
 
 #[tauri::command]
-fn open_in_browser(url: String) -> Result<bool, tauri::Error> {
-    open_target(&url, false).map_err(|e| box_err(nsb_core::AppError::new("OPEN_FAILED", e)))
+async fn open_in_browser(url: String) -> Result<bool, tauri::Error> {
+    tauri::async_runtime::spawn_blocking(move || map_jh(open_browser_with(&url, |target| {
+        tauri_plugin_opener::open_url(target, None::<&str>).map_err(|e| e.to_string())
+    }))).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]
-fn open_in_folder(path: String) -> Result<bool, tauri::Error> {
-    open_target(&path, true).map_err(|e| box_err(nsb_core::AppError::new("OPEN_FAILED", e)))
+async fn open_in_folder(path: String) -> Result<bool, tauri::Error> {
+    tauri::async_runtime::spawn_blocking(move || map_jh(open_folder(&path)))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
-fn open_target(target: &str, folder: bool) -> Result<bool, String> {
-    #[cfg(windows)]
-    {
-        let prog = if folder { "explorer" } else { "cmd" };
-        let args: Vec<String> = if folder {
-            vec![target.to_string()]
-        } else {
-            vec!["/c".into(), "start".into(), "".into(), target.to_string()]
-        };
-        // 外层 cmd 只是个跳板，不隐藏会闪一下黑框；start 打开的目标程序不受影响
-        platform::command(prog)
-            .args(&args)
-            .spawn()
-            .map(|_| true)
-            .map_err(|e| e.to_string())
+/// 网页只能交给系统浏览器；URL 作为完整数据传递，不能进入 cmd/start 命令串。
+fn open_browser_with(target: &str, open: impl FnOnce(&str) -> Result<(), String>) -> nsb_core::error::Result<bool> {
+    let invalid = || AppError::new("BROWSER_URL_INVALID", "无法打开网页：请使用完整的 HTTP 或 HTTPS 地址")
+        .with_hint("地址不能包含登录凭据、反斜杠或控制字符；本地文件请使用“打开所在文件夹”。");
+    if target.chars().any(char::is_control) || target.contains('\\') { return Err(invalid()); }
+    let target = target.trim();
+    if !target.get(..7).is_some_and(|v| v.eq_ignore_ascii_case("http://"))
+        && !target.get(..8).is_some_and(|v| v.eq_ignore_ascii_case("https://")) { return Err(invalid()); }
+    if target.split_once("://").is_none_or(|(_, rest)| rest.is_empty() || rest.starts_with(['/', '?', '#'])) { return Err(invalid()); }
+    let url = reqwest::Url::parse(target).map_err(|_| invalid())?;
+    if url.host_str().is_none_or(str::is_empty) || !url.username().is_empty() || url.password().is_some()
+        || url.port() == Some(0) { return Err(invalid()); }
+    open(url.as_str()).map_err(|_| AppError::new("OPEN_FAILED", "系统未能打开网页，请检查默认浏览器设置后重试"))?;
+    Ok(true)
+}
+
+/// 文件路径只用于定位，不通过文件关联执行配置、脚本或快捷方式。
+fn folder_target(target: &str) -> nsb_core::error::Result<(std::path::PathBuf, bool)> {
+    if target.trim().is_empty() || target.chars().any(char::is_control) {
+        return Err(AppError::new("FOLDER_PATH_INVALID", "请选择要打开的文件或文件夹"));
     }
-    #[cfg(not(windows))]
-    {
-        let _ = folder;
-        std::process::Command::new("open")
-            .arg(target)
-            .spawn()
-            .map(|_| true)
-            .map_err(|e| e.to_string())
+    let path = std::path::absolute(target).map_err(|_| AppError::new("FOLDER_PATH_INVALID", "文件路径无效"))?;
+    let metadata = std::fs::metadata(&path).map_err(|_| AppError::new("FOLDER_PATH_UNAVAILABLE", "文件或文件夹不存在，或当前没有读取权限"))?;
+    if !metadata.is_dir() && !metadata.is_file() {
+        return Err(AppError::new("FOLDER_PATH_INVALID", "此位置不是普通文件或文件夹"));
+    }
+    Ok((path, metadata.is_dir()))
+}
+
+fn open_folder(target: &str) -> nsb_core::error::Result<bool> {
+    let (path, directory) = folder_target(target)?;
+    let result = if directory {
+        tauri_plugin_opener::open_path(&path, None::<&str>)
+    } else {
+        tauri_plugin_opener::reveal_item_in_dir(&path)
+    };
+    result.map_err(|_| AppError::new("OPEN_FAILED", "系统未能打开所在文件夹，请检查文件管理器后重试"))?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod external_open_tests {
+    use super::*;
+
+    #[test]
+    fn browser_urls_preserve_parameters_and_never_launch_invalid_targets() {
+        for (input, expected) in [
+            (" https://example.test/?a=1&b=two#result ", "https://example.test/?a=1&b=two#result"),
+            ("HTTP://127.0.0.1:28080/web/admin", "http://127.0.0.1:28080/web/admin"),
+            ("https://[::1]:8443/中文 文档?q=a%26b&value=%PATH%", "https://[::1]:8443/%E4%B8%AD%E6%96%87%20%E6%96%87%E6%A1%A3?q=a%26b&value=%PATH%"),
+            ("http://example.test/?next=a&echo=hello|world", "http://example.test/?next=a&echo=hello|world"),
+        ] {
+            let mut launched = Vec::new();
+            assert!(open_browser_with(input, |url| { launched.push(url.to_string()); Ok(()) }).unwrap());
+            assert_eq!(launched, [expected]);
+        }
+        for input in ["", "example.test", "//example.test", "http:example.test", "http:///example.test", "https://",
+            "javascript:alert(1)", "data:text/html,hello", "file:///C:/Windows/system32/cmd.exe", "ms-settings:display",
+            "ftp://example.test", "https://user:secret@example.test", "https://user@example.test", "http://example.test:0",
+            "http://example.test:65536", "https://example.test\nextra", "https://example.test\u{85}extra", "https://example.test\\other"] {
+            let error = open_browser_with(input, |_| panic!("invalid target reached OS launcher")).unwrap_err();
+            assert_eq!(error.code, "BROWSER_URL_INVALID", "{input}");
+        }
+    }
+
+    #[test]
+    fn browser_launcher_failure_is_reported_without_leaking_the_target() {
+        let error = open_browser_with("https://example.test/?token=private", |_| Err("launcher failed: token=private".into())).unwrap_err();
+        assert_eq!(error.code, "OPEN_FAILED");
+        assert!(!format!("{error:?}").contains("private"));
+    }
+
+    #[test]
+    fn folder_targets_distinguish_files_from_directories_and_reject_missing_paths() {
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+        let root = std::env::temp_dir().join(format!("niceenv-open-{}", rand::random::<u64>()));
+        std::fs::create_dir(&root).unwrap();
+        let _cleanup = Cleanup(root.clone());
+        let directory = root.join("中文 space & [folder]");
+        std::fs::create_dir(&directory).unwrap();
+        let file = directory.join("config & [one].cmd");
+        std::fs::write(&file, b"must only be revealed").unwrap();
+        assert_eq!(folder_target(directory.to_str().unwrap()).unwrap(), (directory, true));
+        assert_eq!(folder_target(file.to_str().unwrap()).unwrap(), (file, false));
+        assert_eq!(folder_target(root.join("missing").to_str().unwrap()).unwrap_err().code, "FOLDER_PATH_UNAVAILABLE");
+        for input in ["", " ", "a\0b", "a\nb"] {
+            assert_eq!(folder_target(input).unwrap_err().code, "FOLDER_PATH_INVALID");
+        }
     }
 }
 
@@ -2936,14 +3004,14 @@ fn install_update(app: tauri::AppHandle, path: String) -> Result<bool, tauri::Er
 
 /// 打开更新包所在目录（下载完想让用户自己看一眼时用）
 #[tauri::command]
-fn open_update_dir(
+async fn open_update_dir(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<bool, tauri::Error> {
     let dir = update_dir(&state);
-    std::fs::create_dir_all(&dir).ok();
-    open_target(&dir.to_string_lossy(), true)
-        .map(|_| true)
-        .map_err(|e| box_err(nsb_core::AppError::new("OPEN_FAILED", e)))
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(std::fs::create_dir_all(&dir).map_err(|e| AppError::io("创建更新目录", e)))?;
+        map_jh(open_folder(&dir.to_string_lossy()))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /* ================= PHP 扩展 ================= */

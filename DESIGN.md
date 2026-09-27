@@ -1659,3 +1659,15 @@ PFX 采用的 BMPString 密码不支持部分扩展字符，前后端提前校�
 沿用 ui-ux-coding 的弹窗和表单规则，在隔离浏览器验证 320 / 390 / 1280 宽度的四种格式、密码边界、取消路径选择、失败重试、忙时禁用、重开重置和焦点恢复；导入证书标识与输出扩展名正确，无横向溢出或页面异常，三种宽度截图已目检。夹具只注入隔离上下文，结束后全部关闭，用户原套件标签保留。真实桌面文件选择、IIS 与 Java 应用导入仍需实机验收，当前通过材料往返、Rustls 私钥匹配及 OpenJDK 摘要规则验证格式。
 
 Web 类型检查、workspace 全 targets Rust 编译检查及 git diff --check 通过。同步版本至 0.2.45，必须新增 annotated tag v0.2.45 与 main 原子推送并核对远程指向和 Release workflow 状态，不移动旧 tag。已确认 v0.2.44 Release completed/success。未启动前端 dev 或执行前端 build，保留原有未跟踪文件；整体产品完善目标继续进行。
+
+## 第六十轮：PFX Unicode 密码与原生互操作（v0.2.46）
+
+解除上一轮记录的 PFX 限制：中文、emoji 和补充平面汉字密码均可导出，叶证书及链证书的主体包含这些字符时也可保留原始 DER。确认 p12-keystore 0.3.2 的高层 writer 仍将密码及每张证书主体强制写为 BMPString；复用已有 RustCrypto ASN.1、PBES2、PKCS#12 KDF 和 HMAC 组装标准 PFX，没有自行实现密码学算法或调用外部程序完成产品导出。直接依赖 pkcs12、pkcs5 和 sha2 0.11，均为现有锁文件中已使用的版本，原 p12-keystore 移到开发依赖用于独立读回，Cargo.lock 仅调整直接依赖关系及本项目版本。
+
+证书 safe 和私钥 bag 继续使用 PBKDF2-HMAC-SHA256 / AES-256-CBC，完整性使用 PKCS#12 KDF / HMAC-SHA256，维持 10,000 次迭代并使用独立随机盐和 IV。PBES2 密码沿用 UTF-8，MAC 密码显式转换为以零结尾的 UTF-16BE，支持代理对及空密码；临时密码字节和 MAC 密钥使用已有 Zeroizing。省略证书 bag 可选的 friendlyName，通过叶证书摘要关联私钥，私钥友好名沿用已有别名回退规则；不修改证书主体或链顺序。保留材料匹配检查、原子导出、受管目录覆盖保护、后台工作登记与文件锁。前后端仅拒绝原生接口会截断的嵌入 NUL，更新中英文提示。
+
+14 项本地 TLS 回归通过，覆盖现有归档、传统 RSA/EC 私钥转换、坏材料保护和新增 Unicode 导出行为。在已有源码测试模块加入默认忽略、显式运行的原生互操作检查，没有新增测试文件。实际使用 PowerShell 7 的 Windows X509Certificate2Collection/EphemeralKeySet 及 OpenSSL 3.2.3，验证 RSA/EC × ASCII/中文/emoji 与扩展汉字/空密码共 8 组材料。两种读取器均核对完整双证书链和原始 DER；Windows 执行私钥签名及公钥验签，OpenSSL 输出材料经 Rustls 核对私钥匹配，并核对加密算法及 MAC 参数。两种读取器均拒绝错误密码和被篡改的 MAC。最初原生夹具在捕获预期异常后保留 PowerShell 失败退出码，已改为显式成功退出后完整通过。所有材料均在临时目录，Windows 仅内存导入，没有修改系统证书库、信任状态或真实用户文件。
+
+隔离浏览器在 320 / 390 / 1280 宽度验证 NUL 提示、完整 Unicode 密码传参、取消选择和失败保留输入、忙态、重试、四种格式、重开清空及关闭后焦点恢复。分隔线保持左右各 8px 留白和虚线，没有页面异常或横向溢出，三种宽度截图均已目检，检查后关闭上下文并保留用户原套件标签。Web 类型检查、workspace 全 targets Rust 编译检查通过；没有启动前端 dev 或执行前端 build。本次没有数据库变更，未修改 update.sql。
+
+根 AGENTS.md 已明确每次提交、push 或发布必须新增 annotated tag，不能只推分支。本轮同步全部包、crate、Tauri 及界面回退版本至 0.2.46，新增 v0.2.46 并与 main 原子推送，推送后核对远程 SHA 和 Release workflow 实际状态；不移动旧 tag，保留原有未跟踪文件。已确认 v0.2.45 Release completed/success。IIS 实际绑定与 macOS 原生导入仍需实机验收，整体产品完善目标保持进行。

@@ -388,7 +388,7 @@ function PfxExportDialog({ cert, onClose, onCloseAutoFocus }: { cert: CertExport
   const t = useT();
   const [password, setPassword] = React.useState("");
   const [format, setFormat] = React.useState<"pfx" | "der" | "jks" | "pem">("pfx");
-  const unsupportedPfxPassword = format === "pfx" && [...password].some((c) => c === "\0" || c.codePointAt(0)! > 0xffff);
+  const unsupportedPfxPassword = format === "pfx" && password.includes("\0");
   const [busy, setBusy] = React.useState(false);
   const busyRef = React.useRef(false);
   const [error, setError] = React.useState<AppErrorShape | null>(null);

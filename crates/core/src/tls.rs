@@ -745,8 +745,10 @@ mod local_certificate_tests {
         let (alias, entry) = p12.private_key_chain().unwrap(); assert_eq!(alias, "export.example.com"); assert_eq!(entry.certs().len(), 2);
         assert_eq!(entry.key().as_der(), key.serialize_der());
         assert!(p12_keystore::KeyStore::from_pkcs12(&pfx, "wrong", p12_keystore::Pkcs12ImportPolicy::Strict).is_err());
-        assert_eq!(export_pfx(&state.paths, &state.store, id, "emoji-🔑", &out.with_extension("pfx")).unwrap_err().code, "PFX_PASSWORD");
+        assert_eq!(export_pfx(&state.paths, &state.store, id, "invalid\0password", &out.with_extension("pfx")).unwrap_err().code, "PFX_PASSWORD");
         assert_eq!(std::fs::read(out.with_extension("pfx")).unwrap(), pfx);
+        export_pfx(&state.paths, &state.store, id, "emoji-🔑", &out.with_extension("pfx")).unwrap();
+        assert_ne!(std::fs::read(out.with_extension("pfx")).unwrap(), pfx);
         let password = "导出密码-🔑123";
         export_jks(&state.paths, &state.store, id, password, &out.with_extension("jks")).unwrap();
         // 独立按 OpenJDK JavaKeyStore 的 char[] 大端编码核对完整性摘要，避免库自身往返掩盖乱码密码。
@@ -840,11 +842,117 @@ mod local_certificate_tests {
         params.distinguished_name.push(rcgen::DnType::CommonName, "导出🔑证书");
         let unicode = params.self_signed(&key).unwrap();
         std::fs::write(&crt, unicode.pem()).unwrap(); std::fs::write(&private, key.serialize_pem()).unwrap();
-        assert_eq!(export_pfx(&state.paths, &state.store, "imported:archive", "fixture", &out).unwrap_err().code, "PFX_CERT_NAME");
-        assert_eq!(std::fs::read(&out).unwrap(), cert.der().as_ref());
+        export_pfx(&state.paths, &state.store, "imported:archive", "fixture", &out).unwrap();
+        let pfx = std::fs::read(&out).unwrap();
+        let p12 = p12_keystore::KeyStore::from_pkcs12(&pfx, "fixture", p12_keystore::Pkcs12ImportPolicy::Strict).unwrap();
+        let (alias, entry) = p12.private_key_chain().unwrap();
+        assert_eq!(alias, "imported:archive"); assert_eq!(entry.certs()[0].as_der(), unicode.der().as_ref());
         export_jks(&state.paths, &state.store, "imported:archive", "fixture", &out).unwrap();
         let mut jks = jks::KeyStore::new(); jks.load(std::fs::File::open(&out).unwrap(), b"fixture").unwrap();
         assert_eq!(jks.get_private_key_entry("imported:archive", b"fixture").unwrap().certificate_chain[0].content, unicode.der().as_ref());
+    }
+
+    // 显式运行才调用外部工具；仅内存导入临时材料，不写系统证书库或持久化私钥。
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires NSB_PFX_VERIFY_OPENSSL and optional NSB_PFX_VERIFY_POWERSHELL"]
+    fn pfx_native_interoperability() {
+        use std::{io::Write, process::{Command, Stdio}};
+        use p256::pkcs8::der::{Decode, Encode, asn1::OctetString};
+        use rsa::pkcs8::EncodePrivateKey;
+        let openssl = std::env::var_os("NSB_PFX_VERIFY_OPENSSL").expect("set NSB_PFX_VERIFY_OPENSSL to the OpenSSL executable");
+        let powershell = std::env::var_os("NSB_PFX_VERIFY_POWERSHELL").unwrap_or_else(|| "powershell.exe".into());
+        let (_temp, state) = fixture();
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(vec!["fixture-root.example.com".into()]).unwrap();
+        ca_params.distinguished_name.push(rcgen::DnType::CommonName, "根证书🔒");
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca = ca_params.self_signed(&ca_key).unwrap();
+        let rsa = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+        let rsa = rcgen::KeyPair::from_pem(&rsa.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF).unwrap()).unwrap();
+        let ec = rcgen::KeyPair::generate().unwrap();
+        let script = r#"
+$ErrorActionPreference = 'Stop'
+$items = [System.Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
+try {
+    $items.Import($env:NSB_PFX_FILE, $env:NSB_PFX_PASSWORD, [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet)
+    if ($env:NSB_PFX_REJECT -eq '1') { throw 'Accepted invalid PFX/password' }
+    if ($items.Count -ne 2) { throw 'Incomplete certificate chain' }
+    $actual = @($items | ForEach-Object { [Convert]::ToBase64String($_.RawData) } | Sort-Object)
+    $expected = @($env:NSB_PFX_LEAF, $env:NSB_PFX_ROOT) | Sort-Object
+    if (@(Compare-Object $actual $expected).Count -ne 0) { throw 'Certificate bytes changed' }
+    $leaf = @($items | Where-Object HasPrivateKey)
+    if ($leaf.Count -ne 1) { throw 'Missing or duplicate private key' }
+    $data = [Text.Encoding]::UTF8.GetBytes('NiceEnv PFX interoperability fixture')
+    $hash = [System.Security.Cryptography.HashAlgorithmName]::SHA256
+    if ($env:NSB_PFX_ALGORITHM -eq 'rsa') {
+        $key = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($leaf[0])
+        $pub = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($leaf[0])
+        try {
+            $padding = [System.Security.Cryptography.RSASignaturePadding]::Pkcs1
+            $signature = $key.SignData($data, $hash, $padding)
+            if (!$pub.VerifyData($data, $signature, $hash, $padding)) { throw 'RSA signing failed' }
+        } finally { $key.Dispose(); $pub.Dispose() }
+    } else {
+        $key = [System.Security.Cryptography.X509Certificates.ECDsaCertificateExtensions]::GetECDsaPrivateKey($leaf[0])
+        $pub = [System.Security.Cryptography.X509Certificates.ECDsaCertificateExtensions]::GetECDsaPublicKey($leaf[0])
+        try {
+            $signature = $key.SignData($data, $hash)
+            if (!$pub.VerifyData($data, $signature, $hash)) { throw 'EC signing failed' }
+        } finally { $key.Dispose(); $pub.Dispose() }
+    }
+} catch [System.Security.Cryptography.CryptographicException] {
+    if ($env:NSB_PFX_REJECT -ne '1') { throw }
+} finally { foreach ($cert in $items) { $cert.Dispose() } }
+exit 0
+"#;
+        use base64::Engine;
+        for (algorithm, key) in [("rsa", rsa), ("ec", ec)] {
+            let mut params = rcgen::CertificateParams::new(vec!["native-export.example.com".into()]).unwrap();
+            params.distinguished_name.push(rcgen::DnType::CommonName, "导出🔑证书");
+            let leaf = params.signed_by(&key, &ca, &ca_key).unwrap();
+            let cert_pem = format!("{}{}", leaf.pem(), ca.pem());
+            let (crt, private) = crate::certs::imported_paths(&state.paths, algorithm).unwrap();
+            std::fs::create_dir_all(crt.parent().unwrap()).unwrap();
+            std::fs::write(&crt, &cert_pem).unwrap(); std::fs::write(&private, key.serialize_pem()).unwrap();
+            for (index, password) in ["ascii-fixture", "导出密码123", "导出🔑𠀀密码123", ""].into_iter().enumerate() {
+                let output = state.paths.base.join(format!("{algorithm}-{index}.pfx"));
+                export_pfx(&state.paths, &state.store, &format!("imported:{algorithm}"), password, &output).unwrap();
+                let mut tampered = pkcs12::Pfx::from_der(&std::fs::read(&output).unwrap()).unwrap();
+                let mac = tampered.mac_data.as_mut().unwrap();
+                let mut digest = mac.mac.digest.as_bytes().to_vec(); digest[0] ^= 1;
+                mac.mac.digest = OctetString::new(digest).unwrap();
+                let damaged = output.with_extension("tampered.pfx"); std::fs::write(&damaged, tampered.to_der().unwrap()).unwrap();
+                for (file, supplied_password, reject) in [(&output, password, false), (&output, "wrong-fixture-password", true), (&damaged, password, true)] {
+                    let native = Command::new(&powershell).args(["-NoProfile", "-NonInteractive", "-Command", script])
+                        .env("NSB_PFX_FILE", file).env("NSB_PFX_PASSWORD", supplied_password)
+                        .env("NSB_PFX_REJECT", if reject { "1" } else { "0" }).env("NSB_PFX_ALGORITHM", algorithm)
+                        .env("NSB_PFX_LEAF", base64::engine::general_purpose::STANDARD.encode(leaf.der()))
+                        .env("NSB_PFX_ROOT", base64::engine::general_purpose::STANDARD.encode(ca.der()))
+                        .output().unwrap();
+                    assert!(native.status.success(), "Windows {algorithm}/{index}, reject={reject}: {}", String::from_utf8_lossy(&native.stderr));
+                    let mut command = Command::new(&openssl);
+                    command.args(["pkcs12", "-in"]).arg(file).args(["-passin", "stdin", "-info"]);
+                    command.arg(if reject { "-noout" } else { "-noenc" });
+                    let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+                    writeln!(child.stdin.take().unwrap(), "{supplied_password}").unwrap();
+                    let result = child.wait_with_output().unwrap();
+                    assert_eq!(result.status.success(), !reject, "OpenSSL {algorithm}/{index}, reject={reject}: {}", String::from_utf8_lossy(&result.stderr));
+                    if !reject {
+                        let pem = String::from_utf8(result.stdout).unwrap();
+                        let chain = crate::certs::parse_chain(&pem).unwrap();
+                        assert_eq!(chain.len(), 2); assert_eq!(chain[0], *leaf.der()); assert_eq!(chain[1], *ca.der());
+                        crate::certs::check_pair(&cert_pem, &pem).unwrap();
+                        let details = String::from_utf8_lossy(&result.stderr);
+                        assert!(details.contains("MAC: sha256, Iteration 10000"));
+                        assert!(details.contains("AES-256-CBC") && details.contains("PRF hmacWithSHA256"));
+                    }
+                }
+            }
+            assert_eq!(std::fs::read_to_string(&crt).unwrap(), cert_pem);
+            assert!(std::fs::read_to_string(&private).unwrap() == key.serialize_pem());
+        }
+        assert!(!state.paths.certs().join("ca.crt").exists()); assert!(state.store.list_certs().unwrap().is_empty());
     }
 
     #[test]
@@ -1088,6 +1196,87 @@ fn write_certificate_export(paths: &Paths, store: &Store, out_path: &std::path::
     Ok(out_path.to_string_lossy().to_string())
 }
 
+/// 保留 PBES2/AES-256 与 SHA-256 MAC，避免高层 writer 把密码和证书主体强制转成 BMPString。
+/// 只有可选的 friendlyName 需要 BMPString；证书 DER 原样保存，密码按 UTF-16 代理对派生 MAC。
+fn build_pfx(material: &ExportMaterial, alias: &str, password: &str) -> Result<Vec<u8>> {
+    use p256::{elliptic_curve::zeroize::Zeroizing, pkcs8::der::{
+        Any, Decode, Encode, asn1::{BmpString, ObjectIdentifier, OctetString, SetOfVec},
+    }};
+    use pkcs12::cms::{
+        cert::x509::{attr::{Attribute, Attributes}, spki::AlgorithmIdentifierOwned},
+        content_info::{CmsVersion, ContentInfo}, encrypted_data::EncryptedData,
+        enveloped_data::EncryptedContentInfo,
+    };
+    use hmac::{KeyInit, Mac};
+    use sha2_11::{Digest, Sha256};
+    const DATA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.1");
+    const ENCRYPTED_DATA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.6");
+    const PBES2: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.5.13");
+    const SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.1");
+    const FRIENDLY_NAME: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.20");
+    const LOCAL_KEY_ID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.21");
+    const ITERATIONS: i32 = 10_000;
+    fn error(e: impl std::fmt::Display) -> AppError { AppError::new("PFX_BUILD", format!("生成 PFX 失败：{e}")) }
+    fn any(value: &impl Encode) -> Result<Any> {
+        Any::from_der(&value.to_der().map_err(error)?).map_err(error)
+    }
+    fn encrypt(data: &[u8], password: &str) -> Result<(AlgorithmIdentifierOwned, Vec<u8>)> {
+        let salt: [u8; 32] = rand::random(); let iv: [u8; 16] = rand::random();
+        let params = pkcs5::pbes2::Parameters::generate_pbkdf2_sha256_aes256cbc(ITERATIONS as u32, &salt, iv).map_err(error)?;
+        let encrypted = params.encrypt(password.as_bytes(), data).map_err(error)?;
+        Ok((AlgorithmIdentifierOwned { oid: PBES2, parameters: Some(any(&params)?) }, encrypted))
+    }
+    let mut key_id = Attributes::new();
+    key_id.insert(Attribute {
+        oid: LOCAL_KEY_ID,
+        values: SetOfVec::from_iter([any(&OctetString::new(Sha256::digest(material.chain[0].as_ref()).to_vec()).map_err(error)?)?]).map_err(error)?,
+    }).map_err(error)?;
+    let mut cert_bags = Vec::with_capacity(material.chain.len());
+    for (index, cert) in material.chain.iter().enumerate() {
+        let cert = pkcs12::CertBag { cert_id: pkcs12::PKCS_12_X509_CERT_OID, cert_value: OctetString::new(cert.as_ref()).map_err(error)? };
+        cert_bags.push(pkcs12::SafeBag {
+            bag_id: pkcs12::PKCS_12_CERT_BAG_OID, bag_value: cert.to_der().map_err(error)?,
+            // 链证书的 friendlyName 是可选属性；省略以完整保留任意 Unicode 主体。
+            bag_attributes: if index == 0 { Some(key_id.clone()) } else { None },
+        });
+    }
+    let (content_enc_alg, encrypted_certs) = encrypt(&cert_bags.to_der().map_err(error)?, password)?;
+    let cert_safe = ContentInfo { content_type: ENCRYPTED_DATA, content: any(&EncryptedData {
+        version: CmsVersion::V0,
+        enc_content_info: EncryptedContentInfo { content_type: DATA, content_enc_alg, encrypted_content: Some(OctetString::new(encrypted_certs).map_err(error)?) },
+        unprotected_attrs: None,
+    })? };
+    let key = material.key_der.as_deref().ok_or_else(|| AppError::new("CERT_EXPORT_NO_KEY", "证书没有私钥"))?;
+    let (encryption_algorithm, encrypted_key) = encrypt(key, password)?;
+    let mut key_attrs = key_id;
+    key_attrs.insert(Attribute {
+        oid: FRIENDLY_NAME, values: SetOfVec::from_iter([any(&BmpString::from_utf8(alias).map_err(error)?)?]).map_err(error)?,
+    }).map_err(error)?;
+    let key_bags = vec![pkcs12::SafeBag {
+        bag_id: pkcs12::PKCS_12_PKCS8_KEY_BAG_OID,
+        bag_value: pkcs12::pbe_params::EncryptedPrivateKeyInfo {
+            encryption_algorithm, encrypted_data: OctetString::new(encrypted_key).map_err(error)?,
+        }.to_der().map_err(error)?,
+        bag_attributes: Some(key_attrs),
+    }];
+    let key_safe = ContentInfo { content_type: DATA, content: any(&OctetString::new(key_bags.to_der().map_err(error)?).map_err(error)?)? };
+    let safes = vec![cert_safe, key_safe].to_der().map_err(error)?;
+    let salt: [u8; 32] = rand::random();
+    // PKCS#12 MAC 密码是以 NUL 结尾的 UTF-16BE，空密码也必须包含结尾的两个零字节。
+    let password_utf16 = Zeroizing::new(password.encode_utf16().chain(std::iter::once(0)).flat_map(u16::to_be_bytes).collect::<Vec<_>>());
+    let mac_key = Zeroizing::new(pkcs12::kdf::derive_key::<Sha256>(&password_utf16, &salt, pkcs12::kdf::Pkcs12KeyType::Mac, ITERATIONS, 32));
+    let mut mac = hmac::Hmac::<Sha256>::new_from_slice(&mac_key).map_err(error)?;
+    mac.update(&safes);
+    pkcs12::Pfx {
+        version: pkcs12::pfx::Version::V3,
+        auth_safe: ContentInfo { content_type: DATA, content: any(&OctetString::new(safes).map_err(error)?)? },
+        mac_data: Some(pkcs12::MacData {
+            mac: pkcs12::DigestInfo { algorithm: AlgorithmIdentifierOwned { oid: SHA256, parameters: None }, digest: OctetString::new(mac.finalize().into_bytes().to_vec()).map_err(error)? },
+            mac_salt: OctetString::new(salt).map_err(error)?, iterations: ITERATIONS,
+        }),
+    }.to_der().map_err(error)
+}
+
 /// 把某张本机证书（含私钥与证书链）导出为 PKCS#12 (.pfx)。
 /// Windows IIS / 部分设备导入只认这个格式。password 可为空（空密码保护）。
 pub fn export_pfx(
@@ -1100,32 +1289,13 @@ pub fn export_pfx(
     let _work = crate::BackgroundWork::begin("导出 PFX 证书")?;
     let _activity = crate::paths::DataDirActivity::shared(&paths.base)?;
     let _files = CERT_FILES.lock();
-    // PKCS#12 的 BMPString 密码不支持补充平面字符；给出可操作提示，不等到 ASN.1 写出失败。
-    if password.chars().any(|c| c == '\0' || c as u32 > 0xffff) {
-        return Err(AppError::new("PFX_PASSWORD", "PFX 密码不支持部分扩展字符（如 emoji），请改用常用中文、字母或数字"));
+    // 原生导入 API 使用 NUL 结尾的字符串，提前拦截嵌入 NUL，避免密码被截断。
+    if password.contains('\0') {
+        return Err(AppError::new("PFX_PASSWORD", "PFX 密码不能包含空字符（NUL），请移除后重试"));
     }
     let material = export_material(paths, store, cert_id, true)?;
-    let key = p12_keystore::PrivateKey::from_der(material.key_der.as_deref().unwrap())
-        .map_err(|e| AppError::new("PFX_DECODE", format!("私钥解析失败：{e}")))?;
-    let certs = material.chain.iter().map(|der| p12_keystore::Certificate::from_der(der.as_ref())
-        .map_err(|e| AppError::new("PFX_DECODE", format!("证书解析失败：{e}")))).collect::<Result<Vec<_>>>()?;
-    // 当前库还会把链中每张证书的完整主体写为 BMPString friendlyName，不能只替换条目别名。
-    if certs.iter().any(|cert| cert.subject().chars().any(|c| c == '\0' || c as u32 > 0xffff)) {
-        return Err(AppError::new("PFX_CERT_NAME", "PFX 暂不支持此证书名称中的扩展字符，请选择 PEM、JKS 或 DER 格式")
-            .with_hint("原证书和已有导出文件保持不变。"));
-    }
-
     let alias = export_alias(&material.subject, cert_id);
-    let chain = p12_keystore::PrivateKeyChain::new(alias.clone(), key, certs);
-    let mut store12 = p12_keystore::KeyStore::new();
-    store12.add_entry(
-        &alias,
-        p12_keystore::KeyStoreEntry::PrivateKeyChain(chain),
-    );
-    let pfx = store12
-        .writer(password)
-        .write()
-        .map_err(|e| AppError::new("PFX_BUILD", format!("生成 PFX 失败：{e}")))?;
+    let pfx = build_pfx(&material, &alias, password)?;
     write_certificate_export(paths, store, out_path, &pfx)
 }
 

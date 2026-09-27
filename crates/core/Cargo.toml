@@ -35,7 +35,10 @@ md-5 = "0.11.0"
 russh-sftp = "3.0.0"
 rsa = { version = "0.9.10", features = ["pem"] }
 russh = { version = "0.63.3", default-features = false, features = ["ring"] }
-p12-keystore = "0.3.2"
+# 复用原 p12-keystore 已引入的编码/加密库，直接控制可选别名和 UTF-16 密码。
+pkcs12 = { version = "0.2.0-pre.0", features = ["kdf"] }
+pkcs5 = { version = "0.8", features = ["alloc", "pbes2"] }
+sha2_11 = { package = "sha2", version = "0.11" }
 tokio-rustls = "0.26.5"
 rustls = { version = "0.23.45", features = ["ring"] }
 x509-parser = "0.18.1"
@@ -50,3 +53,4 @@ lettre = { version = "0.11", default-features = false, features = [
 
 [dev-dependencies]
 tempfile = { workspace = true }
+p12-keystore = "0.3.2"

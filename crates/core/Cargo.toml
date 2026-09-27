@@ -9,6 +9,8 @@ platform = { path = "../platform" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 yaml_serde = "0.10.7"
+# 与 r-nacos 上游使用同一解析器，预检时不改变父进程环境。
+dotenv = "0.15.0"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }

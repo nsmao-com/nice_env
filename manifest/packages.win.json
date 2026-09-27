@@ -1356,15 +1356,20 @@
       "sha256": "15820b5c213ccaebe608884383d9485df407cd85370c218e7df012fc4a1b053b",
       "defaultPort": 8848,
       "run": {
-        "args": [],
+        "args": [
+          "-e",
+          "{etc}/.env"
+        ],
         "health": "tcp",
         "healthTimeoutSec": 20,
         "env": {
           "RNACOS_HTTP_PORT": "{port}",
-          "RNACOS_DATA_DIR": "{data}/nacos_db"
+          "RNACOS_DATA_DIR": "{data}/nacos_db",
+          "RNACOS_GRPC_PORT": "{port+1000}",
+          "RNACOS_HTTP_CONSOLE_PORT": "{port+2000}"
         },
         "configFile": ".env",
-        "configTemplate": "RNACOS_HTTP_PORT={port}\nRNACOS_GRPC_PORT={port+1000}\nRNACOS_HTTP_CONSOLE_PORT={port+2000}\nRNACOS_DATA_DIR={data}/nacos_db\nRNACOS_CONFIG_DB_FILE={data}/nacos_db/config.db\nRNACOS_NAMING_DB_FILE={data}/nacos_db/naming.db\n"
+        "configTemplate": "RNACOS_HTTP_PORT={port}\nRNACOS_GRPC_PORT={port+1000}\nRNACOS_HTTP_CONSOLE_PORT={port+2000}\nRNACOS_DATA_DIR=\"{data}/nacos_db\"\n"
       }
     },
     {
@@ -4416,15 +4421,20 @@
       "sha256": "e4de03e9feda431e2a42b7b76e420357f000822015b5a2113b747dfb27f342be",
       "defaultPort": 8848,
       "run": {
-        "args": [],
+        "args": [
+          "-e",
+          "{etc}/.env"
+        ],
         "health": "tcp",
         "healthTimeoutSec": 20,
         "env": {
           "RNACOS_HTTP_PORT": "{port}",
-          "RNACOS_DATA_DIR": "{data}/nacos_db"
+          "RNACOS_DATA_DIR": "{data}/nacos_db",
+          "RNACOS_GRPC_PORT": "{port+1000}",
+          "RNACOS_HTTP_CONSOLE_PORT": "{port+2000}"
         },
         "configFile": ".env",
-        "configTemplate": "RNACOS_HTTP_PORT={port}\nRNACOS_GRPC_PORT={port+1000}\nRNACOS_HTTP_CONSOLE_PORT={port+2000}\nRNACOS_DATA_DIR={data}/nacos_db\nRNACOS_CONFIG_DB_FILE={data}/nacos_db/config.db\nRNACOS_NAMING_DB_FILE={data}/nacos_db/naming.db\n"
+        "configTemplate": "RNACOS_HTTP_PORT={port}\nRNACOS_GRPC_PORT={port+1000}\nRNACOS_HTTP_CONSOLE_PORT={port+2000}\nRNACOS_DATA_DIR=\"{data}/nacos_db\"\n"
       }
     },
     {
@@ -4447,15 +4457,20 @@
       "sha256": "5d99d7f40d6b1f9ad712894056fde9d6de1387cc9a75a8abcec4825b228d316a",
       "defaultPort": 8848,
       "run": {
-        "args": [],
+        "args": [
+          "-e",
+          "{etc}/.env"
+        ],
         "health": "tcp",
         "healthTimeoutSec": 20,
         "env": {
           "RNACOS_HTTP_PORT": "{port}",
-          "RNACOS_DATA_DIR": "{data}/nacos_db"
+          "RNACOS_DATA_DIR": "{data}/nacos_db",
+          "RNACOS_GRPC_PORT": "{port+1000}",
+          "RNACOS_HTTP_CONSOLE_PORT": "{port+2000}"
         },
         "configFile": ".env",
-        "configTemplate": "RNACOS_HTTP_PORT={port}\nRNACOS_GRPC_PORT={port+1000}\nRNACOS_HTTP_CONSOLE_PORT={port+2000}\nRNACOS_DATA_DIR={data}/nacos_db\nRNACOS_CONFIG_DB_FILE={data}/nacos_db/config.db\nRNACOS_NAMING_DB_FILE={data}/nacos_db/naming.db\n"
+        "configTemplate": "RNACOS_HTTP_PORT={port}\nRNACOS_GRPC_PORT={port+1000}\nRNACOS_HTTP_CONSOLE_PORT={port+2000}\nRNACOS_DATA_DIR=\"{data}/nacos_db\"\n"
       }
     },
     {
@@ -4478,15 +4493,20 @@
       "sha256": "698785b91535986177f00723d2a0b30beeb0afb684b0cbe9893301a8c05e726e",
       "defaultPort": 8848,
       "run": {
-        "args": [],
+        "args": [
+          "-e",
+          "{etc}/.env"
+        ],
         "health": "tcp",
         "healthTimeoutSec": 20,
         "env": {
           "RNACOS_HTTP_PORT": "{port}",
-          "RNACOS_DATA_DIR": "{data}/nacos_db"
+          "RNACOS_DATA_DIR": "{data}/nacos_db",
+          "RNACOS_GRPC_PORT": "{port+1000}",
+          "RNACOS_HTTP_CONSOLE_PORT": "{port+2000}"
         },
         "configFile": ".env",
-        "configTemplate": "RNACOS_HTTP_PORT={port}\nRNACOS_GRPC_PORT={port+1000}\nRNACOS_HTTP_CONSOLE_PORT={port+2000}\nRNACOS_DATA_DIR={data}/nacos_db\nRNACOS_CONFIG_DB_FILE={data}/nacos_db/config.db\nRNACOS_NAMING_DB_FILE={data}/nacos_db/naming.db\n"
+        "configTemplate": "RNACOS_HTTP_PORT={port}\nRNACOS_GRPC_PORT={port+1000}\nRNACOS_HTTP_CONSOLE_PORT={port+2000}\nRNACOS_DATA_DIR=\"{data}/nacos_db\"\n"
       }
     },
     {

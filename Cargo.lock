@@ -1480,6 +1480,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dotenv"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77c90badedccf4105eca100756a0b1289e191f6fcbdadd3cee1d2f614f97da8f"
+
+[[package]]
 name = "dpi"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3274,7 +3280,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "niceservbay"
-version = "0.2.47"
+version = "0.2.48"
 dependencies = [
  "anyhow",
  "nsb-core",
@@ -3324,11 +3330,12 @@ dependencies = [
 
 [[package]]
 name = "nsb-core"
-version = "0.2.47"
+version = "0.2.48"
 dependencies = [
  "base64 0.22.1",
  "chrono",
  "dirs 5.0.1",
+ "dotenv",
  "futures-util",
  "hex",
  "hmac",
@@ -4105,7 +4112,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "platform"
-version = "0.2.47"
+version = "0.2.48"
 dependencies = [
  "libc",
  "serde",

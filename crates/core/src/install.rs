@@ -19,6 +19,24 @@ const GH_ACCELERATORS: [&str; 3] = [
     "https://gh-proxy.com/",
 ];
 
+/// 只升级曾随应用发布的原始运行描述；下载信息、实际入口及用户修改保持不变。
+fn upgrade_legacy_run(mut entry: crate::model::PackageManifestEntry) -> crate::model::PackageManifestEntry {
+    if entry.id != "rnacos" { return entry; }
+    let legacy: crate::model::ServiceRunSpec = serde_json::from_value(serde_json::json!({
+        "args": [], "health": "tcp", "healthTimeoutSec": 20,
+        "env": { "RNACOS_HTTP_PORT": "{port}", "RNACOS_DATA_DIR": "{data}/nacos_db" },
+        "configFile": ".env",
+        "configTemplate": "RNACOS_HTTP_PORT={port}\nRNACOS_GRPC_PORT={port+1000}\nRNACOS_HTTP_CONSOLE_PORT={port+2000}\nRNACOS_DATA_DIR={data}/nacos_db\nRNACOS_CONFIG_DB_FILE={data}/nacos_db/config.db\nRNACOS_NAMING_DB_FILE={data}/nacos_db/naming.db\n"
+    })).expect("内置旧运行描述合法");
+    if entry.run.as_ref().is_some_and(|run| serde_json::to_value(run).ok() == serde_json::to_value(&legacy).ok()) {
+        // 显式使用 Windows 清单：历史安装快照可能来自另一台机器。
+        let bundled: crate::model::Manifest = serde_json::from_str(include_str!("../../../manifest/packages.win.json"))
+            .expect("内置清单 JSON 必须合法");
+        entry.run = bundled.packages.into_iter().find(|p| p.id == "rnacos").and_then(|p| p.run);
+    }
+    entry
+}
+
 fn is_github_url(url: &str) -> bool {
     url.starts_with("https://github.com/")
         || url.starts_with("https://raw.githubusercontent.com/")
@@ -105,7 +123,7 @@ impl Installer {
             .collect();
         // 按版本号语义取最新：字符串比较会把 5.26.30 排在 2025.09.0 前、21.0.9 排在 21.0.12 前
         candidates.sort_by(|a, b| crate::versions::cmp_version_desc(&a.version, &b.version));
-        candidates.into_iter().next()
+        candidates.into_iter().next().map(upgrade_legacy_run)
     }
 
     /// 找合成远程版本的模板：优先当前平台、显式版本源与较新版本。
@@ -122,7 +140,7 @@ impl Installer {
                 .then_with(|| b.version_source.is_some().cmp(&a.version_source.is_some()))
                 .then_with(|| crate::versions::cmp_version_desc(&a.version, &b.version))
         });
-        entries.first().map(|p| (*p).clone())
+        entries.first().map(|p| upgrade_legacy_run((*p).clone()))
     }
 
     /// 安装记录是已安装版本的依据。优先读取安装时保存的实际入口和服务描述，
@@ -137,7 +155,7 @@ impl Installer {
             .and_then(|raw| serde_json::from_str::<crate::model::PackageManifestEntry>(&raw).ok())
             .filter(|entry| entry.id == installed.id && entry.version == installed.version)
         {
-            return entry;
+            return upgrade_legacy_run(entry);
         }
         if let Some(entry) = self.find(&format!("{}@{}", installed.id, installed.version)) {
             return entry;
@@ -185,7 +203,7 @@ impl Installer {
     }
 
     pub fn package_views(&self, installed: &[InstalledPackage]) -> Vec<crate::model::PackageView> {
-        let mut entries = self.manifest.packages.clone();
+        let mut entries: Vec<_> = self.manifest.packages.iter().cloned().map(upgrade_legacy_run).collect();
         for package in installed {
             let entry = self.installed_entry(package);
             if let Some(current) = entries
@@ -1230,6 +1248,45 @@ mod tests {
         entry.size_bytes = bytes.len() as u64;
         state.installer.manifest.packages.push(entry);
         key
+    }
+
+    #[test]
+    fn legacy_rnacos_snapshots_upgrade_without_replacing_custom_runs_or_install_metadata() {
+        let (_temp, mut state) = fixture();
+        state.installer.manifest = serde_json::from_str(include_str!("../../../manifest/packages.win.json")).unwrap();
+        let mut legacy = state.installer.find("rnacos").unwrap();
+        let run = legacy.run.as_mut().unwrap();
+        run.args.clear();
+        run.env.as_mut().unwrap().remove("RNACOS_GRPC_PORT");
+        run.env.as_mut().unwrap().remove("RNACOS_HTTP_CONSOLE_PORT");
+        run.config_template = Some("RNACOS_HTTP_PORT={port}\nRNACOS_GRPC_PORT={port+1000}\nRNACOS_HTTP_CONSOLE_PORT={port+2000}\nRNACOS_DATA_DIR={data}/nacos_db\nRNACOS_CONFIG_DB_FILE={data}/nacos_db/config.db\nRNACOS_NAMING_DB_FILE={data}/nacos_db/naming.db\n".into());
+        legacy.entry = "original/rnacos.exe".into();
+        let installed = install_fixture(&state, "rnacos", &legacy.version);
+        let snapshot = Path::new(&installed.install_path).join(".niceenv-package.json");
+        let raw = serde_json::to_vec(&legacy).unwrap();
+        std::fs::write(&snapshot, &raw).unwrap();
+        let upgraded = state.installer.installed_entry(&installed);
+        assert_eq!(upgraded.entry, legacy.entry);
+        assert_eq!(upgraded.url, legacy.url);
+        assert_eq!(upgraded.sha256, legacy.sha256);
+        assert_eq!(upgraded.run.unwrap().args, ["-e", "{etc}/.env"]);
+        assert_eq!(std::fs::read(&snapshot).unwrap(), raw);
+        state.installer.manifest.packages = vec![legacy.clone()];
+        assert_eq!(state.installer.find("rnacos").unwrap().run.unwrap().args.len(), 2);
+        assert_eq!(state.installer.template_for("rnacos").unwrap().run.unwrap().args.len(), 2);
+        assert_eq!(state.installer.package_views(&[])[0].manifest.run.as_ref().unwrap().args.len(), 2);
+        for variation in 0..4 {
+            let mut custom = legacy.clone();
+            let run = custom.run.as_mut().unwrap();
+            match variation {
+                0 => run.args = vec!["-e".into(), "my.env".into()],
+                1 => run.cwd = Some("{data}".into()),
+                2 => { run.env.as_mut().unwrap().insert("RUST_LOG".into(), "warn".into()); },
+                _ => run.config_template.as_mut().unwrap().push_str("RUST_LOG=warn\n"),
+            }
+            std::fs::write(&snapshot, serde_json::to_vec(&custom).unwrap()).unwrap();
+            assert_eq!(serde_json::to_value(state.installer.installed_entry(&installed)).unwrap(), serde_json::to_value(custom).unwrap());
+        }
     }
 
     #[tokio::test]

@@ -107,6 +107,12 @@ pub fn import_from(
     if !bundle.format.starts_with("niceservbay/") {
         return Err(AppError::new("BAD_BACKUP", "不是 NiceEnv 的备份文件"));
     }
+    // 备份只含选择信息，不含 PEM；证书缺失时在任何导入写入前明确失败，不能回退到本地 CA。
+    let current_domains: Vec<_> = store.list_sites()?.into_iter().flat_map(|site| site.domains).collect();
+    for site in bundle.sites.iter().filter(|site| !site.domains.iter().any(|d| current_domains.contains(d))) {
+        crate::certs::validate_site_certificate(paths, store, site).map_err(|error|
+            error.with_hint(format!("站点「{}」的证书尚不可用。请先恢复或部署原证书，再导入配置。", site.name)))?;
+    }
     let mut report = ImportReport::default();
 
     // ---- 设置（逐项覆盖） ----

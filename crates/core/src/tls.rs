@@ -166,8 +166,21 @@ pub fn ensure_ca(paths: &Paths) -> Result<()> {
 
 /// 站点证书签发（SAN 支持多域名），写入 certs/sites/{primary}.crt/.key
 pub fn issue_site_cert(paths: &Paths, store: &Store, domains: &[String]) -> Result<CertRecord> {
+    issue_site_cert_for_update(paths, store, domains, None)
+}
+
+/// 站点改回默认证书时允许解除自身选择，但不能覆盖其它站点仍绑定的 ACME 文件。
+pub(crate) fn issue_site_cert_for_update(paths: &Paths, store: &Store, domains: &[String], site_id: Option<&str>) -> Result<CertRecord> {
     let domains = normalize_domains(domains)?;
     let _files = CERT_FILES.lock();
+    let acme_id = format!("acme-{}", domains[0]);
+    let users: Vec<_> = store.list_sites()?.into_iter().filter(|site|
+        Some(site.id.as_str()) != site_id && site.runtime.acme_cert_id.as_deref() == Some(&acme_id)
+    ).map(|site| site.name).collect();
+    if !users.is_empty() {
+        return Err(AppError::new("CERT_IN_USE", format!("此证书文件仍被站点 {} 选择为 ACME 证书，未替换", users.join("、")))
+            .with_hint("请先更换这些站点的证书选择，或在当前站点直接选择该 ACME 证书。"));
+    }
     ensure_ca(paths)?;
     let primary = &domains[0];
     let (ca_key, ca_params) = load_ca(paths)?;
@@ -340,6 +353,12 @@ pub fn reissue_missing_site_certs(paths: &Paths, store: &Store) -> Result<Vec<St
     // 先检查全部 ACME 文件，失败时不修改任何站点，防止悄悄降级到本地 CA。
     for site in store.list_sites()? {
         if !site.https || site.runtime.imported_cert_id.is_some() || site.domains.is_empty() { continue; }
+        if site.runtime.acme_cert_id.is_some() {
+            crate::certs::validate_site_certificate(paths, store, &site).map_err(|error|
+                AppError::new("ACME_REPAIR_REQUIRED", format!("站点「{}」的 ACME 证书需要处理：{}", site.name, error.message))
+                    .with_hint("已保留证书选择与文件，请在证书自动化中续签并重新部署。"))?;
+            continue;
+        }
         let domains = normalize_domains(&site.domains)?;
         let primary = &domains[0];
         let cert = crate::paths::checked_data_path(&paths.base, &format!("certs/sites/{}.crt", cert_stem(primary)))?;
@@ -617,13 +636,14 @@ mod local_certificate_tests {
 impl crate::CoreState {
     /// 与站点写配置共用生命周期锁，更新证书后让运行中的 Web 服务加载新文件。
     pub fn issue_certificate(&self, domain: &str, sans: &[String]) -> Result<CertRecord> {
+        let _sites = crate::sites::SITE_CHANGES.lock();
         let _operation = self.manager.lifecycle.lock();
         let mut requested = vec![domain.to_string()];
         requested.extend_from_slice(sans);
         let mut domains = normalize_domains(&requested)?;
         let sites = self.store.list_sites()?;
         for site in &sites {
-            if site.https && site.domains.first().is_some_and(|d| d.eq_ignore_ascii_case(&domains[0])) {
+            if site.https && site.runtime.uses_default_certificate() && site.domains.first().is_some_and(|d| d.eq_ignore_ascii_case(&domains[0])) {
                 // 同一主域名对应同一证书文件，手动签发不能移除已绑定站点需要的 SAN。
                 for name in normalize_domains(&site.domains)? {
                     if !domains.contains(&name) { domains.push(name); }
@@ -636,6 +656,7 @@ impl crate::CoreState {
     }
 
     pub fn repair_site_certificates(&self) -> Result<Vec<String>> {
+        let _sites = crate::sites::SITE_CHANGES.lock();
         let _operation = self.manager.lifecycle.lock();
         let issued = reissue_missing_site_certs(&self.paths, &self.store)?;
         self.reload_certificate_sites(&issued)?;
@@ -661,6 +682,7 @@ impl crate::CoreState {
 
     /// 删除不再被 HTTPS 站点使用的本地证书；这不是公有 CA 的吊销操作。
     pub fn delete_local_certificate(&self, id: &str) -> Result<()> {
+        let _sites = crate::sites::SITE_CHANGES.lock();
         let _operation = self.manager.lifecycle.lock();
         let _files = CERT_FILES.lock();
         let cert = self.store.list_certs()?.into_iter().find(|c| c.id == id)
@@ -670,7 +692,8 @@ impl crate::CoreState {
         }
         let primary = normalize_domains(&[cert.subject.clone()])?.remove(0);
         let users: Vec<_> = self.store.list_sites()?.into_iter().filter(|site|
-            site.https && site.domains.first().is_some_and(|d| d.eq_ignore_ascii_case(&primary))
+            site.runtime.acme_cert_id.as_deref() == Some(&format!("acme-{primary}"))
+                || (site.https && site.runtime.uses_default_certificate() && site.domains.first().is_some_and(|d| d.eq_ignore_ascii_case(&primary)))
         ).map(|site| site.name).collect();
         if !users.is_empty() {
             return Err(AppError::new("CERT_IN_USE", format!("证书仍被站点 {} 使用", users.join("、")))

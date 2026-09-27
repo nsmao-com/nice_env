@@ -697,7 +697,9 @@ fn check_certs(
 ) {
     let local_https = sites
         .iter()
-        .any(|site| site.https && site.runtime.imported_cert_id.is_none());
+        .any(|site| site.https && site.runtime.uses_default_certificate()
+            && !report.certs.iter().any(|cert| cert.kind == "acme"
+                && site.domains.first().is_some_and(|d| d.eq_ignore_ascii_case(&cert.subject))));
     let mut count = 0;
     for cert in &report.certs {
         // 空环境尚未创建 CA 是无需检查；有任一 CA 文件或本地 HTTPS 引用则不能隐藏损坏。
@@ -736,15 +738,20 @@ fn check_certs(
             report
                 .certs
                 .iter()
-                .any(|cert| match site.runtime.imported_cert_id.as_deref() {
-                    Some(id) => cert.kind == "imported" && cert.id == id,
-                    None => {
-                        cert.kind != "ca"
-                            && cert.kind != "imported"
-                            && site.domains.first().is_some_and(|domain| {
-                                cert.id.eq_ignore_ascii_case(&format!("cert-{domain}"))
-                                    || cert.subject.eq_ignore_ascii_case(domain)
-                            })
+                .any(|cert| {
+                    if let Some(id) = &site.runtime.acme_cert_id {
+                        return cert.kind == "acme" && cert.id == *id;
+                    }
+                    match site.runtime.imported_cert_id.as_deref() {
+                        Some(id) => cert.kind == "imported" && cert.id == id,
+                        None => {
+                            cert.kind != "ca"
+                                && cert.kind != "imported"
+                                && site.domains.first().is_some_and(|domain| {
+                                    cert.id.eq_ignore_ascii_case(&format!("cert-{domain}"))
+                                        || cert.subject.eq_ignore_ascii_case(domain)
+                                })
+                        }
                     }
                 });
         if !found {
@@ -1093,6 +1100,17 @@ mod tests {
         let mut r = HealthReport::default();
         check_certs(&mut r, &paths, &[imported], &report);
         assert!(!r.items.iter().any(|item| item.id == "ca-untrusted"));
+        let mut selected = site(&paths.base);
+        selected.https = true; selected.runtime.acme_cert_id = Some("acme-example.com".into());
+        let mut report = report;
+        report.certs = vec![crate::certs::CertHealth { id: "acme-example.com".into(), kind: "acme".into(),
+            subject: "example.com".into(), ..cert("acme-example.com", "ok") }];
+        let mut r = HealthReport::default();
+        check_certs(&mut r, &paths, std::slice::from_ref(&selected), &report);
+        assert!(!r.items.iter().any(|item| item.id == "ca-untrusted" || item.id.starts_with("site-cert-missing-")));
+        report.certs.clear(); let mut r = HealthReport::default();
+        check_certs(&mut r, &paths, &[selected], &report);
+        assert!(r.items.iter().any(|item| item.id.starts_with("site-cert-missing-")));
     }
 
     #[test]

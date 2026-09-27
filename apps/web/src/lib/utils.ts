@@ -6,6 +6,18 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+/** 与后端证书校验一致：通配符只覆盖一个 DNS 标签，IP 和通配符站点要求精确匹配。 */
+export function certificateCoversDomain(sans: string[], input: string): boolean {
+  const domain = input.trim().replace(/\.+$/, "").toLowerCase();
+  return sans.some((value) => {
+    const san = value.toLowerCase();
+    if (san === domain) return true;
+    if (domain.startsWith("*.") || domain.includes(":") || /^\d+\.\d+\.\d+\.\d+$/.test(domain)) return false;
+    const dot = domain.indexOf(".");
+    return san.startsWith("*.") && dot > 0 && domain.slice(dot + 1) === san.slice(2);
+  });
+}
+
 /** 与后端 stacks::resolve_service_id 一致：精确 ID 优先，固定版本缺失不替换。 */
 export function resolveStackService(id: string, services: ServiceStatus[], packages: PackageView[]) {
   const exact = services.find((service) => service.id === id);

@@ -1,7 +1,6 @@
 "use client";
 
 import * as React from "react";
-import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -45,6 +44,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+
+import { SiteCertificateSelect, useSiteCertificateSelection, type SiteCertificateBinding } from "./site-certificate-select";
 
 const STEPS = [
   { key: "sites.wizard.step1", icon: Globe },
@@ -120,8 +121,8 @@ export function SiteWizard({
   const [webServer, setWebServer] = React.useState<"nginx" | "apache">("nginx");
   const [proxyTarget, setProxyTarget] = React.useState("127.0.0.1:8080");
   const [https, setHttps] = React.useState(false);
-  const [importedCertId, setImportedCertId] = React.useState<string>("local");
-  const importedCerts = useQuery({ queryKey: ["cert-imported"], queryFn: api.certImportedList, enabled: https });
+  const [certificate, setCertificate] = React.useState<SiteCertificateBinding>({});
+  const certificateSelection = useSiteCertificateSelection(certificate, [domain.trim(), ...aliases.split(/[,，\s]+/).filter(Boolean)], open && https);
   const [dbEnabled, setDbEnabled] = React.useState(false);
   const [dbName, setDbName] = React.useState("");
   const [dbUser, setDbUser] = React.useState("");
@@ -159,6 +160,7 @@ export function SiteWizard({
       setPhpVersion(phpVersions[0] ?? "");
       setWebServer("nginx");
       setHttps(false);
+      setCertificate({});
       setDbEnabled(false);
       setRewrite("none");
       setProxyTarget("127.0.0.1:8080");
@@ -190,6 +192,7 @@ export function SiteWizard({
   }, [open]);
 
   const canNext = React.useMemo(() => {
+    if (step >= 3 && https && certificateSelection.problem) return false;
     switch (step) {
       case 0:
         return name.trim().length > 0 && /^(\*\.)?[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain.trim());
@@ -203,7 +206,7 @@ export function SiteWizard({
       default:
         return true;
     }
-  }, [step, name, domain, rootDir, kind, phpVersion, phpVersions, webInstalled, proxyTarget, databaseValid, composerTemplate, composerInstalled, templatePhpCompatible, templateNodeCompatible]);
+  }, [https, certificateSelection.problem, step, name, domain, rootDir, kind, phpVersion, phpVersions, webInstalled, proxyTarget, databaseValid, composerTemplate, composerInstalled, templatePhpCompatible, templateNodeCompatible]);
 
   const pickFolder = async () => {
     if (isTauri) {
@@ -231,7 +234,7 @@ export function SiteWizard({
   };
 
   const submit = async () => {
-    if (submitting.current) return;
+    if (submitting.current || (https && certificateSelection.problem)) return;
     submitting.current = true;
     setCreating(true);
     setCreateError("");
@@ -248,7 +251,7 @@ export function SiteWizard({
           kind,
           ...(kind === "php" ? { phpVersion } : {}),
           ...(kind === "reverse-proxy" ? { proxyTarget } : {}),
-          ...(https && importedCertId !== "local" ? { importedCertId } : {}),
+          ...(https ? certificate : {}),
         },
         https,
         rewrite,
@@ -578,30 +581,13 @@ export function SiteWizard({
                     <span className="flex items-center gap-2 text-[13px] font-medium">
                       <Lock className="h-3.5 w-3.5 text-primary" /> {t("sites.wizard.https")}
                     </span>
-                    <span className="text-[11.5px] text-faint">{t("sites.wizard.httpsHint")}</span>
+                    <span className="text-[11.5px] text-faint">{t("sites.detail.httpsSelectHint")}</span>
                   </div>
                   <Switch checked={https} onCheckedChange={setHttps} aria-label={t("sites.wizard.https")} />
                 </div>
                 {https && (
-                  <div className="flex flex-col gap-3 rounded-xl border border-info/25 bg-info-soft px-4 py-3 text-[11.5px] text-info">
-                    {t("wz.httpsHint")} <b className="font-mono">{domain}</b>
-                    {t("wz.trustOnceHint")}
-                    <div className="flex flex-col gap-1.5 text-foreground">
-                      <Label htmlFor="sw-cert-source">{t("sites.detail.certSource")}</Label>
-                      <Select value={importedCertId} onValueChange={setImportedCertId} disabled={importedCerts.isLoading}>
-                        <SelectTrigger id="sw-cert-source"><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="local">{t("sites.detail.localCert")}</SelectItem>
-                          {importedCerts.data?.map((cert) => (
-                            <SelectItem key={cert.id} value={cert.id} disabled={!cert.usable}>
-                              {cert.subject}{cert.usable ? ` · ${cert.daysLeft}d` : ` · ${t("sites.detail.certInvalid")}`}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      {importedCerts.error && <p className="text-[11px] text-error">{t("tls.readFailed")}</p>}
-                      <p className="text-[11px] text-muted">{t("sites.detail.certSourceHint")}</p>
-                    </div>
+                  <div className="min-w-0 rounded-xl border border-border p-4">
+                    <SiteCertificateSelect id="sw-cert-source" selection={certificateSelection} onChange={setCertificate} disabled={creating} />
                   </div>
                 )}
               </div>
@@ -684,7 +670,7 @@ export function SiteWizard({
                           : `${webServer === "apache" ? "Apache" : "Nginx"} · ${t("sites.static")}`
                     }
                   />
-                  <SummaryRow label="HTTPS" value={https ? t("wz.caAuto") : t("detail.none")} />
+                  <SummaryRow label="HTTPS" value={https ? certificateSelection.value === "local" ? t("wz.caAuto") : certificateSelection.selected?.subject ?? t("sites.detail.certUnavailableSelection") : t("detail.none")} />
                   <SummaryRow label={t("wz.db")} value={dbEnabled ? `${dbName}（${dbUser}）` : t("wz.noDb")} />
                   <SummaryRow label={t("wz.rewrite")} value={rewrite === "none" ? t("wz.noneOpt") : REWRITES.find((r) => r.value === rewrite)?.label ?? ""} />
                 </div>
@@ -708,6 +694,12 @@ export function SiteWizard({
           <div className="max-h-40 shrink-0 overflow-y-auto break-words rounded-lg bg-error-soft p-3 text-xs leading-relaxed text-error">
             <p role="alert">{createError}</p>
             {createErrorDetail && <details className="mt-2"><summary className="cursor-pointer font-medium">{t("wz.errorDetails")}</summary><pre className="mt-2 whitespace-pre-wrap break-all font-mono text-[11px]">{createErrorDetail}</pre></details>}
+          </div>
+        )}
+        {step > 3 && https && certificateSelection.problem && (
+          <div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 rounded-lg bg-error-soft p-3 text-xs text-error">
+            <span className="min-w-0 break-all">{certificateSelection.problem}</span>
+            <Button variant="ghost" size="sm" disabled={creating} onClick={() => setStep(3)}>{t("sites.detail.certSource")}</Button>
           </div>
         )}
 

@@ -41,7 +41,7 @@ export default function TlsPage() {
   const certs = certQuery.data;
   const ready = certQuery.dataUpdatedAt > 0 && !certQuery.error;
   const queryClient = useQueryClient();
-  const refresh = () => Promise.all(["certs", "cert-health", "cert-imported", "services", "sites"].map(
+  const refresh = () => Promise.all(["certs", "cert-health", "cert-imported", "site-certificate-choices", "services", "sites"].map(
     (key) => queryClient.invalidateQueries({ queryKey: [key] })
   ));
   const [tab, setTab] = React.useState("local");

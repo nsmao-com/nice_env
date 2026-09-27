@@ -64,7 +64,7 @@ struct LocalSiteDeployment {
     skipped: Vec<String>,
 }
 
-/// 只有完整覆盖站点全部域名时才替换证书；导入证书站点继续使用其绑定文件。
+/// 默认站点同步完整覆盖的证书；显式选择的站点只跟随自身证书输出，不改写绑定。
 fn local_site_deployment(paths: &crate::paths::Paths, store: &crate::store::Store, a: &CertAutomation) -> Result<LocalSiteDeployment> {
     let primary = a.domains.first().ok_or_else(|| AppError::new("BAD_DOMAINS", "至少填写一个域名"))?;
     let mut outputs = vec![(
@@ -75,22 +75,36 @@ fn local_site_deployment(paths: &crate::paths::Paths, store: &crate::store::Stor
     let mut site_count = 0;
     let mut skipped = Vec::new();
     let mut protected = Vec::new();
-    for site in store.list_sites()? {
-        if !site.https || site.runtime.imported_cert_id.is_some() { continue; }
+    let sites = store.list_sites()?;
+    for site in &sites {
+        if !site.https || !site.runtime.uses_default_certificate() { continue; }
         let Some(site_primary) = site.domains.first() else { continue; };
         let stem = site_primary.replace('*', "_wildcard").replace(':', "_");
         let cert = crate::paths::checked_data_path(&paths.base, &format!("certs/sites/{stem}.crt"))?;
         let key = crate::paths::checked_data_path(&paths.base, &format!("certs/sites/{stem}.key"))?;
+        if site_primary != primary && sites.iter().any(|other|
+            other.runtime.acme_cert_id.as_deref() == Some(&format!("acme-{site_primary}"))) {
+            skipped.push(format!("{}（证书文件已被选择为另一 ACME 主证书）", site.name));
+            continue;
+        }
         let missing: Vec<_> = site.domains.iter().filter(|domain| !crate::certs::covers_domain(&a.domains, domain)).collect();
         if !missing.is_empty() {
-            if missing.len() < site.domains.len() { skipped.push(site.name.clone()); }
-            protected.push((cert, site.name, missing.into_iter().cloned().collect::<Vec<_>>()));
+            if missing.len() < site.domains.len() { skipped.push(format!("{}（域名未完全覆盖）", site.name)); }
+            protected.push((cert, site.name.clone(), missing.into_iter().cloned().collect::<Vec<_>>()));
             continue;
         }
         site_count += 1;
         if !outputs.iter().any(|(old_cert, old_key, _)| old_cert == &cert && old_key == &key) {
             outputs.push((cert, key, site_primary.clone()));
         }
+    }
+    for site in &sites {
+        let Some(id) = &site.runtime.acme_cert_id else { continue; };
+        let (cert, _) = crate::certs::acme_paths(paths, id)?;
+        if !outputs.iter().any(|(output, _, _)| output == &cert) { continue; }
+        let missing: Vec<_> = site.domains.iter().filter(|domain| !crate::certs::covers_domain(&a.domains, domain)).cloned().collect();
+        if !missing.is_empty() { protected.push((cert, site.name.clone(), missing)); }
+        else if site.https { site_count += 1; }
     }
     // 主输出以及历史重复主域名的共享文件都不能绕过完整覆盖检查。
     for (cert, name, missing) in protected {
@@ -570,7 +584,7 @@ fn deploy_local(
         format!("本地部署完成：已同步到 {} 个本地 HTTPS 站点（{}）", plan.site_count, record.cert_path)
     };
     if !plan.skipped.is_empty() {
-        message.push_str(&format!("；以下站点因域名未完全覆盖而保留原证书：{}", plan.skipped.join("、")));
+        message.push_str(&format!("；以下站点未自动分配，已保留原证书：{}", plan.skipped.join("、")));
     }
     Ok((record, message))
 }
@@ -1159,13 +1173,143 @@ mod tests {
             id: id.into(), name: name.into(), domains: domains.iter().map(|v| (*v).into()).collect(),
             root_dir: root.to_string_lossy().into(),
             runtime: model::SiteRuntime {
-                imported_cert_id: imported_cert_id.map(str::to_owned), web_server: "nginx".into(),
+                acme_cert_id: None, imported_cert_id: imported_cert_id.map(str::to_owned), web_server: "nginx".into(),
                 kind: model::SiteKind::Static, php_version: None, proxy_target: None,
                 command: None, cwd: None,
             },
             https: true, rewrite: model::RewritePreset::None, db: None, status: "running".into(),
             php_overrides: None, created_at: 1, updated_at: 1,
         }
+    }
+
+    #[test]
+    fn acme_selected_certificate_roundtrips_renders_and_renews_without_a_local_ca() {
+        let (dir, state, mut a) = fixture(); a.targets.clear();
+        a.domains = vec!["*.example.com".into(), "example.com".into()];
+        let first = material(&a, 60);
+        let (record, _) = deploy_local(&state, &a, &first.chain, &first.key_pem, 1, 2).unwrap();
+        let mut site = https_site("selected", "ACME 站点", &["www.example.com", "api.example.com"], None, dir.path());
+        site.runtime.acme_cert_id = Some(record.id.clone());
+        state.store.save_site(&site).unwrap();
+        let restored: model::Site = serde_json::from_str(&serde_json::to_string(&site).unwrap()).unwrap();
+        assert_eq!(restored.runtime.acme_cert_id, site.runtime.acme_cert_id);
+        assert_eq!(state.store.list_sites().unwrap()[0].runtime.acme_cert_id, site.runtime.acme_cert_id);
+        crate::certs::validate_site_certificate(&state.paths, &state.store, &site).unwrap();
+        for server in ["nginx", "apache"] {
+            site.runtime.web_server = server.into();
+            crate::sites::write_site_conf(&state.paths, &state.store, &site).unwrap();
+            let config = std::fs::read_to_string(state.paths.etc().join(server).join("sites/selected.conf")).unwrap();
+            assert!(config.contains("_wildcard.example.com.crt"));
+            assert!(config.contains("_wildcard.example.com.key"));
+            assert!(!config.contains("www.example.com.crt"));
+        }
+        assert!(!state.paths.certs().join("ca.crt").exists());
+        let choices = crate::certs::site_certificate_choices(&state.paths, &state.store).unwrap();
+        assert_eq!(choices.len(), 1); assert!(choices[0].usable);
+        assert_eq!(choices[0].used_by_sites, [site.name.clone()]);
+        assert!(state.repair_site_certificates().unwrap().is_empty());
+        assert!(!state.paths.certs().join("ca.crt").exists());
+        let second = material(&a, 90);
+        let (_, message) = deploy_local(&state, &a, &second.chain, &second.key_pem, 3, 4).unwrap();
+        assert!(message.contains("1 个本地 HTTPS 站点"));
+        assert_eq!(std::fs::read_to_string(&record.cert_path).unwrap(), second.chain);
+        assert!(!state.paths.certs().join("sites/www.example.com.crt").exists());
+        let report = crate::certs::report(&state.paths, &state.store).unwrap();
+        assert_eq!(report.certs.iter().find(|c| c.id == record.id).unwrap().used_by_sites, [site.name]);
+        crate::sites::delete(&site.id, false, true, &state.paths, &state.store, &state.manager).unwrap();
+        assert!(std::path::Path::new(&record.cert_path).is_file());
+        assert!(state.store.list_certs().unwrap().iter().any(|c| c.id == record.id));
+    }
+
+    #[test]
+    fn acme_selected_certificate_rejects_partial_wildcard_coverage_invalid_ids_and_double_binding() {
+        let (dir, state, mut a) = fixture(); a.targets.clear();
+        a.domains = vec!["*.example.com".into(), "example.com".into()];
+        let signed = material(&a, 60);
+        let (record, _) = deploy_local(&state, &a, &signed.chain, &signed.key_pem, 1, 2).unwrap();
+        let mut site = https_site("selected", "Selected", &["www.example.com", "two.level.example.com"], None, dir.path());
+        site.runtime.acme_cert_id = Some(record.id.clone());
+        assert_eq!(crate::certs::validate_site_certificate(&state.paths, &state.store, &site).unwrap_err().code, "CERT_DOMAIN_MISMATCH");
+        site.domains = vec!["example.com".into(), "www.example.com".into()];
+        crate::certs::validate_site_certificate(&state.paths, &state.store, &site).unwrap();
+        for id in ["acme-../escape", "acme-Example.com", "acme-example.com/../../evil", "cert-example.com", "acme-"] {
+            site.runtime.acme_cert_id = Some(id.into());
+            assert_eq!(crate::certs::validate_site_certificate(&state.paths, &state.store, &site).unwrap_err().code, "BAD_CERT_ID");
+        }
+        site.runtime.acme_cert_id = Some("acme-missing.example.com".into());
+        assert_eq!(crate::certs::validate_site_certificate(&state.paths, &state.store, &site).unwrap_err().code, "ACME_CERT_MISSING");
+        site.runtime.acme_cert_id = Some(record.id);
+        site.runtime.imported_cert_id = Some("imported".into()); site.https = false;
+        assert_eq!(crate::certs::validate_site_certificate(&state.paths, &state.store, &site).unwrap_err().code, "BAD_CERT_ID");
+    }
+
+    #[test]
+    fn acme_selected_certificate_uses_real_files_and_keeps_unusable_choices_visible() {
+        let (dir, state, mut a) = fixture(); a.targets.clear();
+        a.domains = vec!["example.com".into(), "www.example.com".into()];
+        let fresh = material(&a, 60);
+        let (record, _) = deploy_local(&state, &a, &fresh.chain, &fresh.key_pem, 1, 2).unwrap();
+        let mut site = https_site("selected", "Selected", &["www.example.com"], None, dir.path());
+        site.runtime.acme_cert_id = Some(record.id.clone()); state.store.save_site(&site).unwrap();
+        let key = record.key_path.as_ref().unwrap();
+        let expired = material(&a, -1);
+        for failure in ["expired", "wrong-key", "missing-key", "missing-cert", "bad-record-path"] {
+            std::fs::write(&record.cert_path, &fresh.chain).unwrap();
+            std::fs::write(key, &fresh.key_pem).unwrap();
+            state.store.save_cert(&record).unwrap();
+            match failure {
+                "expired" => { std::fs::write(&record.cert_path, &expired.chain).unwrap(); std::fs::write(key, &expired.key_pem).unwrap(); }
+                "wrong-key" => std::fs::write(key, &expired.key_pem).unwrap(),
+                "missing-key" => std::fs::remove_file(key).unwrap(),
+                "missing-cert" => std::fs::remove_file(&record.cert_path).unwrap(),
+                _ => { let mut wrong = record.clone(); wrong.cert_path = dir.path().join("outside.crt").to_string_lossy().into_owned(); state.store.save_cert(&wrong).unwrap(); }
+            }
+            let before = std::fs::read(&record.cert_path).ok();
+            let choices = crate::certs::site_certificate_choices(&state.paths, &state.store).unwrap();
+            assert_eq!(choices.len(), 1, "{failure}"); assert!(!choices[0].usable, "{failure}");
+            assert!(choices[0].problem.is_some(), "{failure}");
+            assert_eq!(crate::certs::validate_site_certificate(&state.paths, &state.store, &site).unwrap_err().code, "CERT_UNUSABLE");
+            assert_eq!(state.repair_site_certificates().unwrap_err().code, "ACME_REPAIR_REQUIRED");
+            assert_eq!(std::fs::read(&record.cert_path).ok(), before);
+            assert!(!state.paths.certs().join("ca.crt").exists());
+        }
+    }
+
+    #[test]
+    fn acme_explicit_selection_protects_output_from_other_automations_and_self_signing() {
+        let (dir, state, mut a) = fixture(); a.targets.clear();
+        a.domains = vec!["example.com".into(), "*.example.com".into()];
+        let signed = material(&a, 60);
+        let (record, _) = deploy_local(&state, &a, &signed.chain, &signed.key_pem, 1, 2).unwrap();
+        let mut selected = https_site("selected", "Selected", &["www.example.com"], None, dir.path());
+        selected.runtime.acme_cert_id = Some(record.id.clone()); state.store.save_site(&selected).unwrap();
+        let default = https_site("default", "Default", &["example.com"], None, dir.path()); state.store.save_site(&default).unwrap();
+        assert_eq!(state.issue_certificate("example.com", &[]).unwrap_err().code, "CERT_IN_USE");
+        let mut other = a.clone(); other.domains = vec!["other.example.com".into(), "*.example.com".into(), "example.com".into()];
+        let plan = local_site_deployment(&state.paths, &state.store, &other).unwrap();
+        assert_eq!(plan.outputs.len(), 1); assert_eq!(plan.site_count, 0); assert_eq!(plan.skipped.len(), 1);
+        let other_material = material(&other, 60);
+        deploy_local(&state, &other, &other_material.chain, &other_material.key_pem, 1, 2).unwrap();
+        assert_eq!(std::fs::read_to_string(&record.cert_path).unwrap(), signed.chain);
+        // 移除已绑定站点所需 SAN 时，在签发准备和部署阶段都拒绝；关闭 HTTPS 也保留选择保护。
+        selected.https = false; state.store.save_site(&selected).unwrap(); a.domains = vec!["example.com".into()];
+        assert_eq!(resource_locks_for_state(&state, &a, false).unwrap_err().code, "CERT_SITE_COVERAGE");
+        assert_eq!(local_site_deployment(&state.paths, &state.store, &a).err().unwrap().code, "CERT_SITE_COVERAGE");
+        assert_eq!(state.issue_certificate("example.com", &[]).unwrap_err().code, "CERT_IN_USE");
+    }
+
+    #[test]
+    fn acme_missing_binding_in_config_import_fails_before_any_import_writes() {
+        let (dir, state, _a) = fixture();
+        let mut site = https_site("selected", "Selected", &["www.example.com"], None, dir.path());
+        site.runtime.acme_cert_id = Some("acme-example.com".into());
+        let bundle = crate::transfer::ExportBundle { format: "niceservbay/1".into(), sites: vec![site],
+            settings: vec![("certificate-import-sentinel".into(), "changed".into())], ..Default::default() };
+        let file = dir.path().join("fixture-backup.json");
+        std::fs::write(&file, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        assert_eq!(crate::transfer::import_from(&file, &state.paths, &state.store, &state.manager).unwrap_err().code, "ACME_CERT_MISSING");
+        assert!(state.store.list_sites().unwrap().is_empty());
+        assert!(state.store.get_setting("certificate-import-sentinel").is_none());
     }
 
     #[test]
@@ -1274,6 +1418,9 @@ mod tests {
         let records = state.store.list_certs().unwrap();
         assert_eq!(records.iter().filter(|c| c.kind == "acme").count(), 2);
         assert!(!records.iter().any(|c| c.id == "cert-www.example.com"));
+        let choices = crate::certs::site_certificate_choices(&state.paths, &state.store).unwrap();
+        assert_eq!(choices.len(), 1, "只列主证书，不把站点同步副本作为可续签的选择");
+        assert_eq!(choices[0].id, "acme-example.com");
         assert!(state.repair_site_certificates().unwrap().is_empty());
         let cert = state.paths.certs().join("sites/www.example.com.crt");
         assert_eq!(std::fs::read_to_string(&cert).unwrap(), material.chain);

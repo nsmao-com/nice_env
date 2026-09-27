@@ -1,7 +1,6 @@
 "use client";
 
 import * as React from "react";
-import { useQuery } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { ExternalLink, FolderOpen, RefreshCw, Trash2, ScrollText } from "lucide-react";
@@ -25,8 +24,10 @@ import { Switch } from "@/components/ui/switch";
 import { EnvEditor } from "./env-editor";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ConfirmDialog } from "@/components/shared/misc";
+
+import { SiteCertificateSelect, useSiteCertificateSelection } from "./site-certificate-select";
 
 const REWRITE_OPTIONS: { value: RewritePreset; label?: string; labelKey?: string }[] = [
   { value: "none", labelKey: "detail.none" },
@@ -54,7 +55,6 @@ export function SiteDetailSheet({
   const router = useRouter();
   const invalidate = useInvalidate();
   const ports = usePorts();
-  const importedCerts = useQuery({ queryKey: ["cert-imported"], queryFn: api.certImportedList });
   const { data: packages } = usePackages();
   const [saving, setSaving] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
@@ -81,6 +81,8 @@ export function SiteDetailSheet({
     setDiscardOpen(false);
   }, [site?.id]);
 
+  const certificateSelection = useSiteCertificateSelection(draft?.runtime ?? {}, domainsInput.split(/[,，\s]+/).filter(Boolean), !!site && !!draft && (draft.https || !!draft.runtime.importedCertId || !!draft.runtime.acmeCertId));
+
   if (!site || !draft) return null;
 
   const phpVersions = packages
@@ -102,7 +104,7 @@ export function SiteDetailSheet({
     else onClose();
   };
   const save = async () => {
-    if (busy) return;
+    if (busy || (draft.https && certificateSelection.problem)) return;
     const domains = [...new Set(domainsInput.split(/[,，\s]+/).filter(Boolean).map((d) => d.toLowerCase()))];
     if (!draft.name.trim() || !draft.rootDir.trim() || !domains.length) {
       setFormError(t("detail.requiredFields"));
@@ -118,6 +120,8 @@ export function SiteDetailSheet({
       setBaseline(next);
       setDomainsInput(next.domains.join(", "));
     } catch (e) {
+      const error = normalizeError(e);
+      setFormError([error.message, error.hint].filter(Boolean).join(" · "));
       toastError(e, t("detail.updateFailed"));
     } finally {
       setSaving(false);
@@ -301,7 +305,7 @@ export function SiteDetailSheet({
           <div className="flex items-center justify-between gap-4 rounded-xl bg-fill p-3.5">
             <div className="flex flex-col gap-0.5">
               <span className="text-[12.5px] font-medium">HTTPS</span>
-              <span className="text-[11px] text-faint">{t("sites.wizard.httpsHint")}</span>
+              <span className="text-[11px] text-faint">{t("sites.detail.httpsSelectHint")}</span>
             </div>
             <Switch
               aria-label="HTTPS"
@@ -311,34 +315,9 @@ export function SiteDetailSheet({
             />
           </div>
 
-          {(draft.https || draft.runtime.importedCertId) && (
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="site-edit-cert">{t("sites.detail.certSource")}</Label>
-              <Select
-                value={draft.runtime.importedCertId ?? "local"}
-                disabled={busy || importedCerts.isLoading}
-                onValueChange={(value) => setDraft({ ...draft, runtime: { ...draft.runtime, importedCertId: value === "local" ? undefined : value } })}
-              >
-                <SelectTrigger id="site-edit-cert"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="local">{t("sites.detail.localCert")}</SelectItem>
-                  {!!importedCerts.data?.length && <SelectSeparator />}
-                  {importedCerts.data?.map((cert) => (
-                    <SelectItem key={cert.id} value={cert.id} disabled={!cert.usable}>
-                      {cert.subject}{cert.usable ? ` · ${cert.daysLeft}d` : ` · ${t("sites.detail.certInvalid")}`}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {importedCerts.error && <div role="alert" className="flex flex-wrap items-center gap-2 text-[11px] text-error">
-                <span>{t("tls.readFailed")}</span>
-                <Button size="sm" variant="ghost" disabled={busy || importedCerts.isFetching} onClick={() => void importedCerts.refetch()}>{t("bulk.retry")}</Button>
-              </div>}
-              {draft.runtime.importedCertId && importedCerts.isSuccess && !importedCerts.data?.some((cert) => cert.id === draft.runtime.importedCertId) && (
-                <p className="text-[11px] text-error">{t("sites.detail.certMissing")}</p>
-              )}
-              <p className="text-[11px] text-faint">{t("sites.detail.certSourceHint")}</p>
-            </div>
+          {(draft.https || draft.runtime.importedCertId || draft.runtime.acmeCertId) && (
+            <SiteCertificateSelect id="site-edit-cert" selection={certificateSelection} disabled={busy}
+              onChange={(binding) => setDraft({ ...draft, runtime: { ...draft.runtime, ...binding } })} />
           )}
 
           {/* 伪静态 */}
@@ -409,7 +388,7 @@ export function SiteDetailSheet({
             <span className="text-xs text-muted">{dirty ? t("detail.unsaved") : t("detail.saved")}</span>
             <div className="flex gap-2">
               <Button variant="ghost" onClick={requestClose} disabled={busy}>{t("common.cancel")}</Button>
-              <Button onClick={save} disabled={busy || !dirty}>{saving ? t("detail.saveBusy") : t("common.save")}</Button>
+              <Button onClick={save} disabled={busy || !dirty || (draft.https && !!certificateSelection.problem)}>{saving ? t("detail.saveBusy") : t("common.save")}</Button>
             </div>
           </div>
         </div>

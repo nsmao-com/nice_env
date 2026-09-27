@@ -80,8 +80,7 @@ pub fn report(paths: &Paths, store: &crate::store::Store) -> Result<CertReport> 
     let now = chrono::Utc::now().timestamp();
     let mut out = Vec::new();
     for c in certs {
-        let users: Vec<_> = sites.iter().filter(|s| s.https && s.runtime.imported_cert_id.is_none()
-            && s.domains.first().is_some_and(|domain| domain.eq_ignore_ascii_case(&c.subject))).collect();
+        let users: Vec<_> = sites.iter().filter(|s| s.https && uses_managed_certificate(s, &c)).collect();
         let mut subject = c.subject;
         let mut sans = c.sans;
         let mut not_after = c.not_after / 1000;
@@ -440,8 +439,105 @@ pub fn list_imported(paths: &Paths, store: &crate::store::Store) -> Result<Vec<I
     Ok(out)
 }
 
-pub fn validate_site_certificate(paths: &Paths, site: &crate::model::Site) -> Result<()> {
+/// 同一输出路径可能被主域名默认配置或显式 ACME 选择引用。
+pub(crate) fn uses_managed_certificate(site: &crate::model::Site, cert: &crate::model::CertRecord) -> bool {
+    if site.runtime.imported_cert_id.is_some() || !matches!(cert.kind.as_str(), "site" | "acme") { return false; }
+    match site.runtime.acme_cert_id.as_deref() {
+        Some(id) => cert.kind == "acme" && cert.id == id,
+        None => site.domains.first().is_some_and(|domain| domain.eq_ignore_ascii_case(&cert.subject)),
+    }
+}
+
+pub(crate) fn acme_primary(id: &str) -> Result<String> {
+    let primary = id.strip_prefix("acme-").ok_or_else(|| AppError::new("BAD_CERT_ID", "请选择有效的 ACME 证书"))?;
+    let domains = crate::tls::normalize_domains(&[primary.into()])
+        .map_err(|_| AppError::new("BAD_CERT_ID", "ACME 证书标识无效，请重新选择"))?;
+    if domains[0] != primary { return Err(AppError::new("BAD_CERT_ID", "ACME 证书标识无效，请重新选择")); }
+    Ok(primary.into())
+}
+
+pub(crate) fn acme_paths(paths: &Paths, id: &str) -> Result<(PathBuf, PathBuf)> {
+    let stem = acme_primary(id)?.replace('*', "_wildcard").replace(':', "_");
+    Ok((crate::paths::checked_data_path(&paths.base, &format!("certs/sites/{stem}.crt"))?,
+        crate::paths::checked_data_path(&paths.base, &format!("certs/sites/{stem}.key"))?))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteCertificateChoice {
+    pub id: String,
+    pub kind: String,
+    pub subject: String,
+    pub sans: Vec<String>,
+    pub not_before: i64,
+    pub not_after: i64,
+    pub days_left: i64,
+    pub usable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+    pub used_by_sites: Vec<String>,
+}
+
+fn acme_entry(paths: &Paths, cert: &crate::model::CertRecord) -> SiteCertificateChoice {
+    let mut entry = SiteCertificateChoice { id: cert.id.clone(), kind: "acme".into(), subject: cert.subject.clone(),
+        sans: vec![], not_before: 0, not_after: 0, days_left: 0, usable: false, problem: None, used_by_sites: vec![] };
+    let checked: Result<()> = (|| {
+        let (crt, key) = acme_paths(paths, &cert.id)?;
+        if cert.kind != "acme" || Path::new(&cert.cert_path) != crt
+            || cert.key_path.as_deref().map(Path::new) != Some(key.as_path())
+        { return Err(AppError::new("CERT_PATH", "ACME 证书记录与受管文件位置不一致，请重新部署")); }
+        let pem = read_managed_pem(&crt)?;
+        let (subject, sans, before, after) = parse_pem_info(&pem)
+            .ok_or_else(|| AppError::new("CERT_PARSE_FAILED", "无法解析 ACME 证书"))?;
+        entry.subject = subject; entry.sans = sans; entry.not_before = before; entry.not_after = after;
+        entry.days_left = (after - chrono::Utc::now().timestamp()).div_euclid(86_400);
+        deployment_validity(&pem, &read_managed_pem(&key)?, &entry.sans)?;
+        Ok(())
+    })();
+    match checked { Ok(()) => entry.usable = true, Err(error) => entry.problem = Some(error.message) }
+    entry
+}
+
+/// 只读取已保存记录与真实文件，不生成或信任本地根 CA。
+pub fn site_certificate_choices(paths: &Paths, store: &crate::store::Store) -> Result<Vec<SiteCertificateChoice>> {
+    let _files = crate::tls::CERT_FILES.lock();
+    let sites = store.list_sites()?;
+    // SAN 站点的同步副本不是独立签发输出；只提供自动化主证书，确保绑定路径在续签后仍被更新。
+    let mut out: Vec<_> = store.list_certs()?.iter().filter(|c| c.kind == "acme" && c.sans.first() == Some(&c.subject)).map(|cert| {
+        let mut entry = acme_entry(paths, cert);
+        entry.used_by_sites = sites.iter().filter(|site| uses_managed_certificate(site, cert)).map(|s| s.name.clone()).collect();
+        entry
+    }).collect();
+    out.extend(list_imported(paths, store)?.into_iter().map(|c| SiteCertificateChoice {
+        id: c.id, kind: "imported".into(), subject: c.subject, sans: c.sans, not_before: c.not_before,
+        not_after: c.not_after, days_left: c.days_left, usable: c.usable, problem: c.problem, used_by_sites: c.used_by_sites,
+    }));
+    out.sort_by_key(|c| (c.kind.clone(), !c.usable, c.subject.clone(), c.id.clone()));
+    Ok(out)
+}
+
+pub fn validate_acme_domains(paths: &Paths, store: &crate::store::Store, id: &str, domains: &[String]) -> Result<()> {
+    let _files = crate::tls::CERT_FILES.lock();
+    acme_primary(id)?;
+    let cert = store.list_certs()?.into_iter().find(|c| c.kind == "acme" && c.id == id)
+        .ok_or_else(|| AppError::new("ACME_CERT_MISSING", "所选 ACME 证书不存在，请重新部署或更换证书"))?;
+    if cert.sans.first() != Some(&cert.subject) {
+        return Err(AppError::new("BAD_CERT_ID", "请选择自动化的 ACME 主证书；站点同步副本不单独绑定"));
+    }
+    let entry = acme_entry(paths, &cert);
+    if !entry.usable {
+        return Err(AppError::new("CERT_UNUSABLE", entry.problem.unwrap_or_else(|| "ACME 证书不可用".into()))
+            .with_hint("请在证书自动化中续签并重新部署，或更换站点证书。"));
+    }
+    validate_coverage(&entry.sans, domains)
+}
+
+pub fn validate_site_certificate(paths: &Paths, store: &crate::store::Store, site: &crate::model::Site) -> Result<()> {
+    if site.runtime.imported_cert_id.is_some() && site.runtime.acme_cert_id.is_some() {
+        return Err(AppError::new("BAD_CERT_ID", "每个站点只能选择一种证书来源"));
+    }
     if !site.https { return Ok(()); }
+    if let Some(id) = &site.runtime.acme_cert_id { return validate_acme_domains(paths, store, id, &site.domains); }
     let Some(id) = &site.runtime.imported_cert_id else { return Ok(()) };
     validate_imported_domains(paths, id, &site.domains)
 }
@@ -453,7 +549,11 @@ pub fn validate_imported_domains(paths: &Paths, id: &str, domains: &[String]) ->
         return Err(AppError::new("CERT_UNUSABLE", cert.problem.unwrap_or_else(|| "证书不可用".into()))
             .with_hint("请重新导入有效证书，或改为使用本地根 CA 签发。"));
     }
-    let missing: Vec<_> = domains.iter().filter(|d| !covers_domain(&cert.sans, d)).cloned().collect();
+    validate_coverage(&cert.sans, domains)
+}
+
+fn validate_coverage(sans: &[String], domains: &[String]) -> Result<()> {
+    let missing: Vec<_> = domains.iter().filter(|d| !covers_domain(sans, d)).cloned().collect();
     if !missing.is_empty() {
         return Err(AppError::new("CERT_DOMAIN_MISMATCH", format!("所选证书未覆盖域名：{}", missing.join("、")))
             .with_hint("请选择覆盖所有站点域名的证书，或修改站点域名。"));

@@ -91,3 +91,11 @@
 -- ON CONFLICT(id) DO UPDATE SET kind=:kind, subject=:subject, sans=:sans,
 -- not_before=:not_before, not_after=:not_after, cert_path=:cert_path, key_path=:key_path;
 -- 不读取/修改真实用户数据库，不引入 migration；已匹配记录重复执行后结果一致。
+
+-- v0.2.41：站点直接选择已签发的 ACME 主证书。
+-- 沿用 SQLite sites.runtime JSON，可选 acmeCertId 与 importedCertId 互斥；
+-- 旧记录缺少 acmeCertId 时仍使用原有证书来源。没有新增表、列、索引或 migration。
+-- 以下仅记录现有站点保存语句的相关部分，不需要手工执行；完整 runtime 保留其它字段。
+-- UPDATE sites SET runtime=:runtime, updated_at=:updated_at WHERE id=:id;
+-- 文件/记录/域名覆盖校验失败不保存选择，后续应用失败恢复原 runtime 和配置。
+-- 导入只含绑定信息，不含私钥；所选证书未恢复时在任何导入写入前拒绝。

@@ -282,6 +282,7 @@ pub fn run() {
             cert_health,
             cert_import,
             cert_imported_list,
+            site_certificate_choices,
             cert_imported_delete,
             cert_import_dir,
             // 证书自动化（ACME 签发 / 定时续签 / 多平台部署）
@@ -3288,6 +3289,16 @@ async fn cert_imported_list(
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::certs::list_imported(&st.paths, &st.store)))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn site_certificate_choices(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+) -> Result<Vec<nsb_core::certs::SiteCertificateChoice>, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::certs::site_certificate_choices(&st.paths, &st.store)))
         .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

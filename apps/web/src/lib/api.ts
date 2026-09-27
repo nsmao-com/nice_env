@@ -28,6 +28,7 @@ import type {
   ConfigBackup,
   CertReport,
   ImportedCert,
+  SiteCertificateChoice,
   EnvFileView,
   DiagnosticsBundle,
   HealthReport,
@@ -323,6 +324,7 @@ export const certHealth = () => safe(invoke<CertReport>("cert_health"));
 export const certImport = (certPath: string, keyPath: string) =>
   safe(invoke<ImportedCert>("cert_import", { certPath, keyPath }));
 export const certImportedList = () => safe(invoke<ImportedCert[]>("cert_imported_list"));
+export const siteCertificateChoices = () => safe(invoke<SiteCertificateChoice[]>("site_certificate_choices"));
 export const certImportedDelete = (certPath: string) =>
   safe(invoke<boolean>("cert_imported_delete", { certPath }));
 

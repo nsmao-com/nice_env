@@ -1075,5 +1075,6 @@ function useInvalidateSafe() {
   return React.useCallback(() => {
     qc.invalidateQueries({ queryKey: ["certautos"] });
     qc.invalidateQueries({ queryKey: ["certs"] });
+    qc.invalidateQueries({ queryKey: ["site-certificate-choices"] });
   }, [qc]);
 }

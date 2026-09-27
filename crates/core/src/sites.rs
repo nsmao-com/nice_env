@@ -167,6 +167,10 @@ fn validate_site_fields(
     if runtime.imported_cert_id.as_deref().is_some_and(|id| !crate::certs::valid_imported_id(id)) {
         return Err(AppError::new("BAD_CERT_ID", "请选择有效的导入证书"));
     }
+    if let Some(id) = &runtime.acme_cert_id {
+        crate::certs::acme_primary(id)?;
+        if runtime.imported_cert_id.is_some() { return Err(AppError::new("BAD_CERT_ID", "每个站点只能选择一种证书来源")); }
+    }
     if runtime.kind == SiteKind::Php {
         let version = runtime.php_version.as_deref().unwrap_or_default();
         if version.is_empty() || !version.chars().all(|c| c.is_ascii_digit() || c == '.') {
@@ -284,6 +288,9 @@ pub fn create_with_progress(
     if input.https {
         if let Some(id) = &input.runtime.imported_cert_id {
             crate::certs::validate_imported_domains(paths, id, &input.domains)?;
+        }
+        if let Some(id) = &input.runtime.acme_cert_id {
+            crate::certs::validate_acme_domains(paths, store, id, &input.domains)?;
         }
     }
     validate_site_fields(
@@ -472,7 +479,7 @@ pub fn create_with_progress(
     write_user_ini(&site);
 
     let result: Result<()> = (|| {
-        if site.https && site.runtime.imported_cert_id.is_none() {
+        if site.https && site.runtime.uses_default_certificate() {
             crate::tls::issue_site_cert(paths, store, &site.domains)?;
         }
         progress("starting", None);
@@ -493,6 +500,8 @@ pub fn update(
     manager: &Arc<ServiceManager>,
 ) -> Result<Site> {
     let _change = SITE_CHANGES.lock();
+    let _operation = manager.lifecycle.lock();
+    let _files = crate::tls::CERT_FILES.lock();
     let original = get(store, &site_patch.id)?;
     let enabled = derive_status(paths, &original) == "running";
     let was_running = runtime_status(paths, &original, manager) == "running";
@@ -503,7 +512,8 @@ pub fn update(
     current.runtime = site_patch.runtime.clone();
     let certificate_changed =
         current.https != site_patch.https || current.domains != original.domains
-            || current.runtime.imported_cert_id != original.runtime.imported_cert_id;
+            || current.runtime.imported_cert_id != original.runtime.imported_cert_id
+            || current.runtime.acme_cert_id != original.runtime.acme_cert_id;
     current.https = site_patch.https;
     current.rewrite = site_patch.rewrite.clone();
     current.php_overrides = site_patch.php_overrides.clone();
@@ -522,8 +532,8 @@ pub fn update(
             "站点根目录不存在，请重新选择目录",
         ));
     }
-    crate::certs::validate_site_certificate(paths, &current)?;
-    let local_certificate_changed = certificate_changed && current.https && current.runtime.imported_cert_id.is_none();
+    crate::certs::validate_site_certificate(paths, store, &current)?;
+    let local_certificate_changed = certificate_changed && current.https && current.runtime.uses_default_certificate();
     let mut snapshots = snapshot_site_configs(paths, &current)?;
     let certificate_id = format!("cert-{}", current.domains[0]);
     let previous_certificates = if local_certificate_changed {
@@ -549,7 +559,7 @@ pub fn update(
     };
     let result: Result<()> = (|| {
         if local_certificate_changed {
-            crate::tls::issue_site_cert(paths, store, &current.domains)?;
+            crate::tls::issue_site_cert_for_update(paths, store, &current.domains, Some(&current.id))?;
         }
         // 更换 PHP 版本时先启动新的池，确保新配置引用的 upstream 已就绪。
         if was_running {
@@ -646,7 +656,7 @@ pub fn delete(
     }
     // 只清理此站点主域名对应的本地签发证书。导入证书、ACME 证书和其它站点
     // 使用的证书保留；别名不能成为删除另一个证书的依据。
-    let certificate = if remove_certs && site.runtime.imported_cert_id.is_none() {
+    let certificate = if remove_certs && site.runtime.uses_default_certificate() {
         let certs = store.list_certs()?;
         let all_sites = store.list_sites()?;
         let automations = store.list_cert_automations()?;
@@ -654,8 +664,8 @@ pub fn delete(
             cert.kind == "site"
                 && site.domains.first() == Some(&cert.subject)
                 && !all_sites.iter().any(|other| other.id != site.id
-                    && other.runtime.imported_cert_id.is_none()
-                    && other.domains.first() == Some(&cert.subject))
+                    && (other.runtime.acme_cert_id.as_deref() == Some(&format!("acme-{}", cert.subject))
+                        || (other.runtime.uses_default_certificate() && other.domains.first() == Some(&cert.subject))))
                 && !automations.iter().any(|a| a.domains.first() == Some(&cert.subject))
         }).cloned()
     } else {
@@ -880,7 +890,7 @@ pub fn write_site_conf(paths: &Paths, store: &Store, site: &Site) -> Result<()> 
 }
 
 fn write_site_conf_state(paths: &Paths, store: &Store, site: &Site, enabled: bool) -> Result<()> {
-    crate::certs::validate_site_certificate(paths, site)?;
+    crate::certs::validate_site_certificate(paths, store, site)?;
     let extension = if enabled { "conf" } else { "conf.disabled" };
     let ports = PortsProfile::from_settings(store);
     if site.runtime.web_server == "apache" {
@@ -1965,6 +1975,7 @@ mod scaffold_tests {
             domains: vec!["t.test".into()],
             root_dir: String::new(),
             runtime: SiteRuntime {
+                acme_cert_id: None,
                 imported_cert_id: None,
                 web_server: "nginx".into(),
                 kind,
@@ -2575,6 +2586,34 @@ mod scaffold_tests {
         assert_eq!(std::fs::read(cert.key_path.as_ref().unwrap()).unwrap(), key_before);
         let records = store.list_certs().unwrap(); assert_eq!(records.len(), 1);
         assert_eq!(records[0].id, cert.id); assert_eq!(records[0].kind, "acme");
+    }
+
+    #[test]
+    fn saving_acme_certificate_binding_rolls_back_failed_save_without_replacing_files() {
+        let temp = Tmp::new("bind-acme-rollback");
+        let paths = Paths::new(temp.0.clone()); paths.ensure_dirs().unwrap();
+        let store = Store::open(paths.db()).unwrap();
+        let mut site = saved_site(&paths, &store);
+        let mut cert = crate::tls::issue_site_cert(&paths, &store, &["shared.test".into(), site.domains[0].clone()]).unwrap();
+        cert.id = "acme-shared.test".into(); cert.kind = "acme".into();
+        store.replace_managed_certs(std::slice::from_ref(&cert)).unwrap();
+        let before = std::fs::read(&cert.cert_path).unwrap();
+        let key = std::fs::read(cert.key_path.as_ref().unwrap()).unwrap();
+        let db = rusqlite::Connection::open(paths.db()).unwrap();
+        db.execute_batch("CREATE TRIGGER reject_acme_selection BEFORE UPDATE ON sites WHEN NEW.https=1 BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+        site.https = true; site.runtime.acme_cert_id = Some(cert.id.clone());
+        let manager = Arc::new(ServiceManager::new());
+        assert!(update(&site, &paths, &store, &manager).is_err());
+        assert!(get(&store, &site.id).unwrap().runtime.acme_cert_id.is_none());
+        assert_eq!(std::fs::read(&cert.cert_path).unwrap(), before);
+        assert_eq!(std::fs::read(cert.key_path.as_ref().unwrap()).unwrap(), key);
+        db.execute_batch("DROP TRIGGER reject_acme_selection;").unwrap();
+        let saved = update(&site, &paths, &store, &manager).unwrap();
+        assert_eq!(saved.runtime.acme_cert_id.as_deref(), Some("acme-shared.test"));
+        let config = std::fs::read_to_string(paths.nginx_sites_dir().join(format!("{}.conf.disabled", site.id))).unwrap();
+        assert!(config.contains("shared.test.crt"));
+        assert!(!config.contains(&format!("{}.crt", site.domains[0])));
+        assert_eq!(std::fs::read(&cert.cert_path).unwrap(), before);
     }
 
     #[test]

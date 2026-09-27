@@ -117,9 +117,11 @@ pub enum RewritePreset {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct SiteRuntime {
-    /// 从导入证书列表选择的标识；为空时使用本地签发证书。保存在已有 runtime JSON 中。
+    /// 显式选择的证书标识；两者互斥，均为空时使用主域名默认文件。保存在已有 runtime JSON 中。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported_cert_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acme_cert_id: Option<String>,
     #[serde(default = "default_web_server")]
     pub web_server: String,
     pub kind: SiteKind,
@@ -131,6 +133,12 @@ pub struct SiteRuntime {
     pub command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+}
+
+impl SiteRuntime {
+    pub fn uses_default_certificate(&self) -> bool {
+        self.imported_cert_id.is_none() && self.acme_cert_id.is_none()
+    }
 }
 
 fn default_web_server() -> String {

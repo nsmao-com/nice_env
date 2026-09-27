@@ -453,14 +453,16 @@ pub fn rewrite_snippet(preset: &RewritePreset) -> &'static str {
     }
 }
 
-/// 已导入的证书从同级 imported 目录读取；本地证书继续使用原来的主域名路径。
+/// 显式 ACME 选择引用签发时的主域名文件；导入和默认来源保留原有目录。
 fn site_certificate_files(site: &Site, cert_dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
     let (directory, stem) = match &site.runtime.imported_cert_id {
         Some(id) => (
             cert_dir.parent().unwrap_or(cert_dir).join("imported"),
             if crate::certs::valid_imported_id(id) { id.clone() } else { "invalid-certificate".into() },
         ),
-        None => (cert_dir.to_path_buf(), site.domains.first().map(String::as_str).unwrap_or("localhost")
+        None => (cert_dir.to_path_buf(), site.runtime.acme_cert_id.as_deref()
+            .map(|id| crate::certs::acme_primary(id).unwrap_or_else(|_| "invalid-certificate".into()))
+            .unwrap_or_else(|| site.domains.first().cloned().unwrap_or_else(|| "localhost".into()))
             .replace('*', "_wildcard").replace(':', "_")),
     };
     (directory.join(format!("{stem}.crt")), directory.join(format!("{stem}.key")))

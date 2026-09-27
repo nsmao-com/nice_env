@@ -247,7 +247,10 @@ export function toastPortConflict(
 export function useInvalidate() {
   const qc = useQueryClient();
   return (...keys: string[]) =>
-    keys.forEach((k) => qc.invalidateQueries({ queryKey: [k] }));
+    keys.forEach((k) => {
+      void qc.invalidateQueries({ queryKey: [k] });
+      if (["certs", "cert-imported", "certautos"].includes(k)) void qc.invalidateQueries({ queryKey: ["site-certificate-choices"] });
+    });
 }
 
 /** 停机失败可能仍有 PID，Error 不能直接当作已停止。 */

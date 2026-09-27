@@ -41,6 +41,7 @@ import type {
   CertMonitor,
   CertReport,
   ImportedCert,
+  SiteCertificateChoice,
   EnvFileView,
   DiagnosticsBundle,
   HealthReport,
@@ -61,7 +62,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.40";
+const MOCK_APP_VERSION = "0.2.41";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -1125,7 +1126,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           if (!others.some((site) => site.domains.includes(domain))) hostsManaged.delete(domain);
         });
       }
-      if (args?.certs !== false && !s.runtime.importedCertId) {
+      if (args?.certs !== false && !s.runtime.importedCertId && !s.runtime.acmeCertId) {
         const cert = Array.from(certs.values()).find((cert) => cert.kind === "site" && cert.subject === s.domains[0]);
         if (cert && !others.some((site) => !site.runtime.importedCertId && site.domains[0] === cert.subject)
           && !Array.from(certAutos.values()).some((automation) => automation.domains[0] === cert.subject)) {
@@ -1491,6 +1492,18 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return [
         { id: "corp-wildcard", usable: true, usedBySites: [], certPath: "C:\NiceEnv\certs\imported\corp-wildcard.crt", keyPath: "C:\NiceEnv\certs\imported\corp-wildcard.key", subject: "*.corp.internal", sans: ["*.corp.internal", "corp.internal"], notBefore: 1700000000, notAfter: 1800000000, daysLeft: 210 },
       ] as ImportedCert[] as T;
+    case "site_certificate_choices": {
+      const imported = await mockInvoke<ImportedCert[]>("cert_imported_list");
+      // 浏览器不能读取真实 PEM 或私钥，不把内存中的 ACME 记录标记为已验证。
+      return [
+        ...Array.from(certs.values()).filter((cert) => cert.kind === "acme" && cert.sans[0] === cert.subject).map((cert) => ({
+          id: cert.id, kind: "acme", subject: cert.subject, sans: cert.sans, notBefore: cert.notBefore / 1000,
+          notAfter: cert.notAfter / 1000, daysLeft: Math.floor((cert.notAfter - now()) / 86400000),
+          usable: false, problem: "浏览器预览无法校验真实证书，请在桌面端签发并部署", usedBySites: [],
+        })),
+        ...imported.map(({ certPath: _certPath, keyPath: _keyPath, ...cert }) => ({ ...cert, kind: "imported" })),
+      ] as SiteCertificateChoice[] as T;
+    }
     case "cert_import":
       return { id: "imported", usable: true, usedBySites: [], certPath: "D:/mock/imported.crt", keyPath: "D:/mock/imported.key", subject: "imported", sans: [], notBefore: 0, notAfter: 0, daysLeft: 365 } as ImportedCert as T;
     case "cert_imported_delete":

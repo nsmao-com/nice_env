@@ -326,6 +326,7 @@ export type RewritePreset = z.infer<typeof RewritePreset>;
 
 export const SiteRuntime = z.object({
   importedCertId: z.string().optional(),
+  acmeCertId: z.string().optional(),
   webServer: z.enum(["nginx", "apache"]).default("nginx"),
   kind: SiteKind,
   phpVersion: z.string().optional(),
@@ -842,6 +843,11 @@ export const ImportedCert = z.object({
   daysLeft: z.number(),
 });
 export type ImportedCert = z.infer<typeof ImportedCert>;
+
+export const SiteCertificateChoice = ImportedCert.omit({ certPath: true, keyPath: true }).extend({
+  kind: z.enum(["acme", "imported"]),
+});
+export type SiteCertificateChoice = z.infer<typeof SiteCertificateChoice>;
 
 /* ============ 配置文件编辑 ============ */
 

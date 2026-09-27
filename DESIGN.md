@@ -2069,3 +2069,23 @@ configgen.rs 原有未提交修改保留，本轮仅纳入复用解析器所需�
 精确暂存内容导出为独立发布树，排除原有 configgen.rs 修改；cargo check --workspace --all-targets --locked 通过，Rust 串行常规回归 628 通过、0 失败、12 ignored、30 filtered out。显式原生 PHP 环境文件用例在同一发布树另行通过。最终版本的前端类型检查及 git diff --check 通过；忽略、筛选项和 macOS 运行验证不算已执行。
 
 已核实 v0.2.70 Release completed/success。版本统一至 0.2.71，并按根 AGENTS.md 新建 annotated tag，与 main 原子推送，核对远程提交和 Release 实际状态。保留原有 configgen.rs 的 178 additions / 9 deletions 及未跟踪本地文件。未启动前端 dev、未执行本地前端 build。本次没有数据库变更，未修改 update.sql。项目运行时锁、其他真实功能缺漏与跨平台验收仍需继续，整体目标保持进行。
+
+## 第八十六轮：站点终端版本一致性与自动注入（v0.2.72）
+
+上一轮完成实质发布与验证，本轮重新检查 main、工作区和 Release：v0.2.71 已 completed/success。fast-context 沿站点/总览终端按钮、open_terminal、pathenv 与 SiteRuntime 追踪，确认现有打开动作仅设置工作目录，未使用应用选择的 PATH 版本，更没有使用站点绑定的 PHP。参考 ServBay 的 CLI 与网站环境说明 https://support.servbay.com/php/set-different-php-for-each-project 和项目配置说明 https://support.servbay.com/advanced-settings/using-servbay-config ，本轮先补足站点 Web PHP 与新终端 CLI PHP 的明确对应，不把这项功能描述成完整的项目版本文件或目录自动切换。
+
+复用现有 terminal_environment 与 PATH 选择规则，新增按站点读取的快照。PHP 站点强制使用已保存的 phpVersion，即使全局 PATH 选择未勾选 PHP，也注入该站点版本；其他命令沿用全局 PATH 选择。指定 PHP 未安装、缺少真实 CLI 入口、入口越界、无执行权限或路径不适合 PATH 时明确失败，不能悄悄换另一版。终端校验 php.exe / php，而非清单中用于服务的 php-cgi / php-fpm；Unix sbin/php-fpm 对应 bin/php。工作目录复用环境文件的项目根目录识别，Laravel public 等在存在项目标识时回到项目目录，不自动执行 runtime.command 或项目脚本。
+
+TerminalEnvironment 新增绑定站点、目录、版本目录、脚本和警告的 revision。打开命令只接收站点标识与 expectedRevision，脚本和目录均由后端重新生成；版本、目录或可用项变化则要求刷新预览。沿 SITE_CHANGES -> lifecycle 顺序持锁直到终端进程创建，Tauri 同时持有数据目录活动锁，避免预览后站点编辑、卸载或迁移与启动交错。不修改系统 PATH、已保存的版本选择、站点记录或项目文件。
+
+Windows 使用现有可见独立 PowerShell 启动方式，加入由后端生成的 UTF-16LE EncodedCommand，当前目录通过进程 API 传入；注入只影响新终端及子进程。参数长度有上限，脚本沿用引号与 PATH 分隔符保护。macOS 通过固定 AppleScript 和单独 argv 将命令交给 Terminal，以无用户启动配置的 Zsh 建立所选环境，失败返回系统错误与权限提示；目录和脚本不插入 AppleScript 源码。现有工具箱也使用同一快照校验和自动注入入口，保留复制脚本到已有会话的高级用途。浏览器继续明确只演示，不假装打开系统终端。
+
+站点列表与总览复用新的 SiteTerminalButton：先显示工作目录及将使用的命令版本，站点 PHP 排第一，CLI 条目不再标成 FPM。说明明确会话范围和切换目录不会自动更改版本。窄窗口中优先呈现目录和版本，将长说明、脚本放在可滚动正文后部；固定底栏显示刷新与打开，长名称限两行、路径与标签可换行。版本变化错误需刷新后再打开，读取错误不允许使用旧缓存启动；错误区聚焦，关闭后恢复触发按钮焦点。同步互斥阻止重复打开和启动期间关闭。
+
+在已有 pathenv.rs 验证模块中增加真实文件和启动前检查，未新增测试文件。覆盖站点 PHP 覆盖全局选择、未勾选 PHP、CLI 缺失、项目根目录、预览后 PHP/目录/全局选择变化、跨线程检查锁持有以及不写持久 PATH。21 项 PATH/终端检查通过，包含显式原生用例：启动短时隐藏 PowerShell，使用生产生成的参数（去掉交互 NoExit），将子进程初始 PATH 指向无 PHP 的目录，再执行真实 PHP 8.4.26，核对 Get-Command php 的路径、PHP_VERSION 和含中文、空格、引号及特殊字符的 cwd，父进程 PATH 保持原样。PowerShell 捕获验证输出时单独指定 UTF-8，避免系统代码页影响断言；没有启动长期服务或交互终端。
+
+隔离浏览器验证两个站点分别显示 PHP 8.3.17 与 7.4.33、项目根目录、总览入口、读取/启动失败、刷新重试、错误聚焦、关闭焦点恢复、重复点击一次请求和启动期间 Escape 保护。临时注入只存在自建上下文，模拟打开不会启动系统终端；请求只含站点和 revision，不携带脚本。检查中文浅色、英文深色、1280 与 320×480；窄屏面板宽 296px、两侧各 12px、正文可滚动且底部按钮可见，版本分隔线为内缩虚线。自建上下文已关闭，原有页面保留，页面异常为零。最终 0.2.72 前端类型检查通过。
+
+精确暂存内容导出为独立发布树，排除原有 configgen.rs 修改。cargo check --workspace --all-targets --locked 通过；Rust 串行常规回归 630 通过、0 失败、12 ignored、31 filtered out，显式原生 PowerShell/PHP 用例在同一发布树另行通过。忽略和筛选项不算已执行；Windows 验证不等于 macOS Terminal 实机验收。
+
+版本号统一为 0.2.72，依项目规则新建 annotated tag，与 main 原子推送并核对实际 Release 状态。保留原有 configgen.rs 178 additions / 9 deletions 及未跟踪本地文件。本次没有数据库变更，未修改 update.sql；未启动前端 dev、未执行本地前端 build。项目版本文件、其他语言的项目级选择、cd 自动切换及 macOS 原生终端验收仍需继续，整体目标保持进行。

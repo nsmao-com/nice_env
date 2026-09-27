@@ -3,11 +3,12 @@
 import * as React from "react";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "motion/react";
-import { Globe, Plus, ExternalLink, FolderOpen, Loader2, Power, Settings2, TerminalSquare, FolderSearch, Copy, AppWindow, Search, RefreshCw } from "lucide-react";
+import { Globe, Plus, ExternalLink, FolderOpen, Loader2, Power, Settings2, FolderSearch, Copy, AppWindow, Search, RefreshCw } from "lucide-react";
 import type { Site } from "@nsb/schema";
 import { useUI, useT } from "@/lib/store";
 import { useSites, useInvalidate, toastError, siteUrl } from "@/lib/hooks";
 import * as api from "@/lib/api";
+import { SiteTerminalButton } from "@/components/sites/site-terminal";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -192,14 +193,7 @@ function SiteCard({ site, onOpenDetail }: { site: Site; onOpenDetail: () => void
               </TooltipTrigger>
               <TooltipContent>{t("dashboard.openFolder")}</TooltipContent>
             </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button aria-label={t("dashboard.openTerminal")} variant="ghost" size="icon-sm" className="text-faint hover:text-foreground" onClick={() => api.openTerminal(site.rootDir).catch(toastError)}>
-                  <TerminalSquare className="h-3.5 w-3.5" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>{t("dashboard.openTerminal")}</TooltipContent>
-            </Tooltip>
+            <SiteTerminalButton site={site} />
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button aria-label={t("sites.siteSettings")} variant="ghost" size="icon-sm" className="text-faint hover:text-foreground" onClick={onOpenDetail}>

@@ -647,10 +647,14 @@ fn pathenv_status(
 #[tauri::command]
 async fn terminal_environment(
     state: State<'_, std::sync::Arc<CoreState>>,
+    site_id: Option<String>,
 ) -> Result<nsb_core::model::TerminalEnvironment, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || map_jh(state.terminal_environment()))
+    tauri::async_runtime::spawn_blocking(move || map_jh(match site_id {
+        Some(id) => state.site_terminal_environment(&id),
+        None => state.terminal_environment(),
+    }))
         .await
         .map_err(|e| box_err(nsb_core::AppError::internal("读取终端环境", e.to_string())))?
 }
@@ -1674,23 +1678,11 @@ mod external_open_tests {
 }
 
 #[tauri::command]
-async fn open_terminal(cwd: String) -> Result<bool, tauri::Error> {
-    tauri::async_runtime::spawn_blocking(move || -> nsb_core::error::Result<bool> {
-        if cwd.trim().is_empty() {
-            return Err(nsb_core::AppError::new(
-                "TERMINAL_DIRECTORY_INVALID",
-                "请选择终端工作目录",
-            ));
-        }
-        let directory = std::path::Path::new(&cwd)
-            .canonicalize()
-            .map_err(|e| nsb_core::AppError::io("读取终端工作目录", e))?;
-        if !directory.is_dir() {
-            return Err(nsb_core::AppError::new(
-                "TERMINAL_DIRECTORY_INVALID",
-                "终端工作目录不是文件夹",
-            ));
-        }
+async fn open_terminal(state: State<'_, std::sync::Arc<CoreState>>, site_id: Option<String>, expected_revision: String) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || state.with_terminal_environment(site_id.as_deref(), &expected_revision, |environment| {
+        let directory = nsb_core::pathenv::terminal_directory(&environment.cwd)?;
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -1701,7 +1693,7 @@ async fn open_terminal(cwd: String) -> Result<bool, tauri::Error> {
                 .join("System32/WindowsPowerShell/v1.0/powershell.exe");
             // 用户明确点击打开终端：创建可见的独立控制台。cwd 只传给进程 API，不经 shell 解释。
             let mut child = std::process::Command::new(powershell)
-                .args(["-NoLogo", "-NoProfile", "-NoExit"])
+                .args(nsb_core::pathenv::powershell_terminal_args(environment)?)
                 .current_dir(&directory)
                 .creation_flags(0x0000_0010) // CREATE_NEW_CONSOLE
                 .spawn()
@@ -1720,16 +1712,17 @@ async fn open_terminal(cwd: String) -> Result<bool, tauri::Error> {
         }
         #[cfg(target_os = "macos")]
         {
-            let status = std::process::Command::new("/usr/bin/open")
-                .args(["-a", "Terminal"])
-                .arg(&directory)
-                .status()
+            let _ = directory;
+            let command = nsb_core::pathenv::posix_terminal_command(environment)?;
+            let output = platform::command("/usr/bin/osascript")
+                .args(["-e", "on run argv\ntell application \"Terminal\"\ndo script (item 1 of argv)\nactivate\nend tell\nend run", "--", &command])
+                .output()
                 .map_err(|e| nsb_core::AppError::io("打开终端", e))?;
-            if !status.success() {
+            if !output.status.success() {
                 return Err(nsb_core::AppError::new(
                     "TERMINAL_OPEN_FAILED",
-                    format!("系统终端打开失败：{status}"),
-                ));
+                    "无法打开已配置环境的终端",
+                ).with_hint("请检查系统设置中 NiceEnv 对 Terminal 的自动化权限。").with_detail(String::from_utf8_lossy(&output.stderr).into_owned()));
             }
             Ok(true)
         }
@@ -1740,7 +1733,7 @@ async fn open_terminal(cwd: String) -> Result<bool, tauri::Error> {
                 "此平台请手动打开 Bash / Zsh 并粘贴脚本",
             ))
         }
-    })
+    }))
     .await
     .map_err(|e| box_err(nsb_core::AppError::internal("打开终端", e.to_string())))?
     .map_err(box_err)

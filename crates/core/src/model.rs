@@ -441,6 +441,7 @@ pub struct PathEnvEntry {
 pub struct TerminalEnvironment {
     pub shell: String,
     pub cwd: String,
+    pub revision: String,
     pub script: String,
     pub entries: Vec<TerminalEnvironmentEntry>,
     pub warnings: Vec<String>,

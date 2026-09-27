@@ -245,6 +245,7 @@ export type PathEnvStatus = z.infer<typeof PathEnvStatus>;
 export const TerminalEnvironment = z.object({
   shell: z.enum(["powershell", "posix"]),
   cwd: z.string(),
+  revision: z.string(),
   script: z.string(),
   entries: z.array(PathEnvEntry.pick({ id: true, label: true, version: true, binDir: true })),
   warnings: z.array(z.string()),

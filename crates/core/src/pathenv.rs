@@ -75,9 +75,47 @@ pub fn terminal_environment(
     paths: &Paths,
     manifest: &Manifest,
 ) -> Result<crate::model::TerminalEnvironment> {
+    terminal_environment_selected(store, paths, manifest, &Default::default())
+}
+
+/// 站点终端固定使用站点的 PHP；其余命令沿用 PATH 选择，不更改持久配置。
+/// 调用方按 SITE_CHANGES -> lifecycle 的顺序锁定站点与安装版本。
+pub fn site_terminal_environment(store: &Store, paths: &Paths, manifest: &Manifest, site_id: &str) -> Result<crate::model::TerminalEnvironment> {
+    let site = crate::sites::get(store, site_id)?;
+    let mut required = std::collections::BTreeMap::new();
+    if site.runtime.kind == crate::model::SiteKind::Php {
+        let version = site.runtime.php_version.as_ref().filter(|v| !v.is_empty()).ok_or_else(||
+            AppError::new("TERMINAL_RUNTIME_UNAVAILABLE", "该 PHP 站点尚未指定 PHP 版本，请先保存站点设置"))?;
+        required.insert("php".into(), version.clone());
+    }
+    terminal_directory(&site.root_dir)?;
+    let cwd = crate::envfile::project_root(std::path::Path::new(&site.root_dir)).canonicalize().map_err(|e| AppError::io("读取项目目录", e))?;
+    let mut environment = terminal_environment_selected(store, paths, manifest, &required)?;
+    environment.cwd = cwd.to_string_lossy().into_owned();
+    environment.revision = terminal_revision(&environment, Some(site_id));
+    Ok(environment)
+}
+
+pub fn terminal_directory(cwd: &str) -> Result<std::path::PathBuf> {
+    if cwd.trim().is_empty() || cwd.chars().any(char::is_control) {
+        return Err(AppError::new("TERMINAL_DIRECTORY_INVALID", "终端目录不能为空或包含控制字符"));
+    }
+    let directory = std::path::Path::new(cwd).canonicalize().map_err(|e| AppError::io("读取终端工作目录", e))?;
+    if !directory.is_dir() { return Err(AppError::new("TERMINAL_DIRECTORY_INVALID", "终端工作目录不是文件夹")); }
+    Ok(directory)
+}
+
+fn terminal_revision(environment: &crate::model::TerminalEnvironment, site_id: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+    let payload = (&environment.shell, &environment.cwd, &environment.script, &environment.entries, &environment.warnings, site_id);
+    format!("{:x}", Sha256::digest(serde_json::to_vec(&payload).expect("terminal snapshot contains only strings")))
+}
+
+fn terminal_environment_selected(store: &Store, paths: &Paths, manifest: &Manifest, required: &std::collections::BTreeMap<String, String>) -> Result<crate::model::TerminalEnvironment> {
     let installed = store.list_installed()?;
-    let versions =
+    let mut versions =
         read_selection::<std::collections::BTreeMap<String, String>>(store, VERSIONS_KEY)?;
+    versions.extend(required.iter().map(|(id, version)| (id.clone(), version.clone())));
     let selected = read_selection::<Option<Vec<String>>>(store, SELECTED_KEY)?;
     let installer = crate::install::Installer {
         manifest: manifest.clone(),
@@ -90,21 +128,27 @@ pub fn terminal_environment(
     let mut entries = Vec::new();
     let mut warnings = Vec::new();
     for id in ids {
-        if !wants(&selected, id) {
+        if !wants(&selected, id) && !required.contains_key(id) {
             continue;
         }
         let Some(package) = chosen_from(store, &installed, &versions, id)? else {
+            if let Some(version) = required.get(id) {
+                return Err(AppError::new("TERMINAL_RUNTIME_UNAVAILABLE", format!("站点指定的 {id} {version} 尚未安装，未打开终端"))
+                    .with_hint("请先安装此版本，或在站点设置中选择已安装版本。"));
+            }
             warnings.push(format!("{id}：所选 PATH 版本已卸载，请重新选择版本"));
             continue;
         };
         let meta = installer.installed_entry(package);
         if is_non_executable_entry(&meta.entry) {
+            if required.contains_key(id) { return Err(AppError::new("TERMINAL_RUNTIME_UNAVAILABLE", "站点指定版本没有可用的命令行入口")); }
             continue;
         }
         let check = (|| -> std::result::Result<String, String> {
-            let dir = bin_dir_for(&package.install_path, &meta.entry)
+            let entry = terminal_cli_entry(id, &meta.entry, cfg!(windows));
+            let dir = bin_dir_for(&package.install_path, &entry)
                 .ok_or_else(|| "无法确定安装入口，请重新安装该版本".to_string())?;
-            let relative = meta.entry.replace('\\', "/");
+            let relative = entry.replace('\\', "/");
             if relative
                 .split('/')
                 .any(|part| part == ".." || part.contains(':'))
@@ -145,27 +189,59 @@ pub fn terminal_environment(
         match check {
             Ok(bin_dir) => entries.push(crate::model::TerminalEnvironmentEntry {
                 id: id.into(),
-                label: meta.display_name,
+                label: if id == "php" { "PHP".into() } else { meta.display_name },
                 version: package.version.clone(),
                 bin_dir,
             }),
-            Err(reason) => warnings.push(format!(
-                "{} {}：{reason}",
-                meta.display_name, package.version
-            )),
+            Err(reason) => {
+                let message = format!("{} {}：{reason}", meta.display_name, package.version);
+                if required.contains_key(id) { return Err(AppError::new("TERMINAL_RUNTIME_UNAVAILABLE", message).with_hint("站点指定版本不可用，请修复或重新安装后再打开终端。")); }
+                warnings.push(message);
+            }
         }
     }
+    entries.sort_by_key(|entry| (!required.contains_key(&entry.id), entry.id.clone()));
     let dirs = entries
         .iter()
         .map(|entry| entry.bin_dir.clone())
         .collect::<Vec<_>>();
-    Ok(crate::model::TerminalEnvironment {
+    let mut environment = crate::model::TerminalEnvironment {
         shell: if cfg!(windows) { "powershell" } else { "posix" }.into(),
         cwd: paths.base.to_string_lossy().into_owned(),
+        revision: String::new(),
         script: render_terminal_script(&dirs, cfg!(windows))?,
         entries,
         warnings,
-    })
+    };
+    environment.revision = terminal_revision(&environment, None);
+    Ok(environment)
+}
+
+fn terminal_cli_entry(id: &str, entry: &str, windows: bool) -> String {
+    if id != "php" { return entry.into(); }
+    let entry = entry.replace('\\', "/");
+    let parent = entry.rsplit_once('/').map(|(parent, _)| parent).unwrap_or("");
+    let parent = if !windows && (parent == "sbin" || parent.ends_with("/sbin")) {
+        format!("{}bin", &parent[..parent.len() - 4])
+    } else { parent.into() };
+    let executable = if windows { "php.exe" } else { "php" };
+    if parent.is_empty() { executable.into() } else { format!("{parent}/{executable}") }
+}
+
+/// 参数由后端快照生成，前端不能提交待执行脚本。
+pub fn powershell_terminal_args(environment: &crate::model::TerminalEnvironment) -> Result<Vec<String>> {
+    use base64::Engine;
+    let script = format!("$ErrorActionPreference = 'Stop'\n{}", environment.script);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(script.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>());
+    if encoded.len() > 24_000 { return Err(AppError::new("TERMINAL_ENV_TOO_LARGE", "终端环境过长，请减少 PATH 中选择的套件后重试")); }
+    Ok(vec!["-NoLogo".into(), "-NoProfile".into(), "-NoExit".into(), "-EncodedCommand".into(), encoded])
+}
+
+pub fn posix_terminal_command(environment: &crate::model::TerminalEnvironment) -> Result<String> {
+    if environment.cwd.chars().any(char::is_control) { return Err(AppError::new("TERMINAL_DIRECTORY_INVALID", "终端目录包含控制字符")); }
+    let quote = |text: &str| format!("'{}'", text.replace('\'', "'\"'\"'"));
+    let script = format!("cd -- {} || exit\n{}\nexec /bin/zsh -f", quote(&environment.cwd), environment.script);
+    Ok(format!("/bin/zsh -f -c {}", quote(&script)))
 }
 
 fn validate_terminal_dir(dir: &str, windows: bool) -> Result<()> {
@@ -1064,6 +1140,108 @@ mod tests {
             assert!(render_terminal_script(&v(&[dir]), windows).is_err());
         }
         assert!(render_terminal_script(&[], true).unwrap().is_empty());
+    }
+
+    fn site_terminal_fixture() -> (tempfile::TempDir, crate::CoreState, crate::model::Site) {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().join("data"));
+        paths.ensure_dirs().unwrap();
+        let store = Store::open(paths.db()).unwrap();
+        let mut manifest = crate::install::Installer::bundled().manifest;
+        let mut template = manifest.packages.iter().find(|p| p.id == "php").cloned().unwrap_or_else(|| manifest.packages[0].clone());
+        template.id = "php".into();
+        template.entry = if cfg!(windows) { "nested/bin/php-cgi.exe" } else { "nested/sbin/php-fpm" }.into();
+        manifest.packages.clear();
+        for version in ["1.0.0", "2.0.0"] {
+            let mut entry = template.clone(); entry.version = version.into();
+            let root = paths.base.join(format!("PHP O'Brien $var`&()/{version}"));
+            for relative in [entry.entry.clone(), terminal_cli_entry("php", &entry.entry, cfg!(windows))] {
+                let file = root.join(relative); std::fs::create_dir_all(file.parent().unwrap()).unwrap(); std::fs::write(&file, "fixture").unwrap();
+                #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap(); }
+            }
+            store.upsert_installed(&crate::model::InstalledPackage { id: "php".into(), version: version.into(), category: "runtime".into(), install_path: root.to_string_lossy().into_owned(), config_path: String::new(), installed_at: 0 }).unwrap();
+            manifest.packages.push(entry);
+        }
+        let project = temp.path().join("Project 中文 O'Brien $var`&()");
+        std::fs::create_dir_all(project.join("public")).unwrap(); std::fs::write(project.join("composer.json"), "{}").unwrap();
+        let site: crate::model::Site = serde_json::from_value(serde_json::json!({"id":"terminal-site","name":"Terminal","domains":["terminal.test"],"rootDir":project.join("public"),"runtime":{"kind":"php","phpVersion":"1.0.0"},"https":false,"rewrite":"none","createdAt":1,"updatedAt":1})).unwrap();
+        store.save_site(&site).unwrap();
+        let state = crate::CoreState { paths, store, manager: std::sync::Arc::new(crate::services::ServiceManager::new()),
+            downloader: std::sync::Arc::new(crate::download::Downloader::new()), installer: crate::install::Installer { manifest },
+            emit: std::sync::Arc::new(|_| {}), watchdog: std::sync::Arc::new(crate::watchdog::Watchdog::new()) };
+        (temp, state, site)
+    }
+
+    #[test]
+    fn site_terminal_uses_php_cli_and_project_root_without_changing_global_selection() {
+        let (_temp, state, site) = site_terminal_fixture();
+        state.store.set_setting(VERSIONS_KEY, r#"{"php":"2.0.0"}"#).unwrap();
+        state.store.set_setting(SELECTED_KEY, "[]").unwrap();
+        state.store.set_setting("activephpVersion", "2.0.0").unwrap();
+        let result = state.site_terminal_environment(&site.id).unwrap();
+        assert_eq!(result.entries.len(), 1); assert_eq!(result.entries[0].version, "1.0.0");
+        assert!(result.entries[0].bin_dir.replace('\\', "/").ends_with("1.0.0/nested/bin"));
+        assert!(std::path::Path::new(&result.cwd).join("composer.json").is_file());
+        assert!(state.terminal_environment().unwrap().entries.is_empty());
+        assert_eq!(state.store.get_setting(VERSIONS_KEY).as_deref(), Some(r#"{"php":"2.0.0"}"#));
+        assert_eq!(state.store.get_setting("activephpVersion").as_deref(), Some("2.0.0"));
+        assert!(!is_enabled(&state.store)); assert!(state.store.get_setting(DIRS_KEY).is_none());
+        let cli = std::path::Path::new(&result.entries[0].bin_dir).join(if cfg!(windows) { "php.exe" } else { "php" });
+        std::fs::remove_file(cli).unwrap();
+        assert_eq!(state.site_terminal_environment(&site.id).unwrap_err().code, "TERMINAL_RUNTIME_UNAVAILABLE");
+    }
+
+    #[test]
+    fn terminal_launch_rechecks_site_versions_directory_and_holds_lifecycle_locks() {
+        let (temp, state, mut site) = site_terminal_fixture();
+        let view = state.site_terminal_environment(&site.id).unwrap();
+        let called = std::cell::Cell::new(false);
+        state.with_terminal_environment(Some(&site.id), &view.revision, |actual| {
+            assert_eq!(actual.revision, view.revision);
+            std::thread::scope(|scope| scope.spawn(|| {
+                assert!(state.manager.lifecycle.try_lock().is_none());
+                assert!(crate::sites::SITE_CHANGES.try_lock().is_none());
+            }).join().unwrap());
+            called.set(true); Ok(())
+        }).unwrap();
+        assert!(called.get());
+        site.runtime.php_version = Some("2.0.0".into()); state.store.save_site(&site).unwrap();
+        assert_eq!(state.with_terminal_environment::<()>(Some(&site.id), &view.revision, |_| panic!("stale PHP launched")).unwrap_err().code, "TERMINAL_ENV_CHANGED");
+        let view = state.site_terminal_environment(&site.id).unwrap();
+        let other = temp.path().join("other"); std::fs::create_dir(&other).unwrap(); site.root_dir = other.to_string_lossy().into_owned(); state.store.save_site(&site).unwrap();
+        assert_eq!(state.with_terminal_environment::<()>(Some(&site.id), &view.revision, |_| panic!("stale directory launched")).unwrap_err().code, "TERMINAL_ENV_CHANGED");
+        site.runtime.php_version = Some("missing".into()); state.store.save_site(&site).unwrap();
+        assert_eq!(state.site_terminal_environment(&site.id).unwrap_err().code, "TERMINAL_RUNTIME_UNAVAILABLE");
+        let global = state.terminal_environment().unwrap();
+        state.store.set_setting(SELECTED_KEY, "[]").unwrap();
+        assert_eq!(state.with_terminal_environment::<()>(None, &global.revision, |_| panic!("stale selection launched")).unwrap_err().code, "TERMINAL_ENV_CHANGED");
+        for invalid in ["", "\n", "a\0b"] { assert_eq!(terminal_directory(invalid).unwrap_err().code, "TERMINAL_DIRECTORY_INVALID"); }
+        assert!(terminal_directory(temp.path().join("absent").to_str().unwrap()).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires NSB_ENV_PHP; runs a short hidden PowerShell with real PHP, no interactive terminal"]
+    fn native_site_terminal_resolves_real_php_and_literal_working_directory() {
+        let php = std::path::PathBuf::from(std::env::var_os("NSB_ENV_PHP").expect("NSB_ENV_PHP")).canonicalize().unwrap();
+        let (_temp, mut state, mut site) = site_terminal_fixture();
+        let root = php.parent().unwrap();
+        let mut entry = state.installer.manifest.packages[0].clone(); entry.version = "8.4.26".into(); entry.entry = "php-cgi.exe".into();
+        state.installer.manifest.packages.push(entry);
+        state.store.upsert_installed(&crate::model::InstalledPackage { id: "php".into(), version: "8.4.26".into(), category: "runtime".into(), install_path: root.to_string_lossy().into_owned(), config_path: String::new(), installed_at: 0 }).unwrap();
+        site.runtime.php_version = Some("8.4.26".into()); state.store.save_site(&site).unwrap();
+        let mut environment = state.site_terminal_environment(&site.id).unwrap();
+        environment.script.push_str("\n[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\n$resolved = (Get-Command php -CommandType Application).Source\n$version = & php -n -r 'echo PHP_VERSION;'\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n[pscustomobject]@{ resolved=$resolved; version=$version; cwd=(Get-Location).ProviderPath } | ConvertTo-Json -Compress");
+        let args = powershell_terminal_args(&environment).unwrap().into_iter().filter(|arg| arg != "-NoExit").collect::<Vec<_>>();
+        let powershell = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let global_path = std::env::var_os("PATH");
+        let output = platform::command(powershell).args(args).current_dir(terminal_directory(&environment.cwd).unwrap()).env("PATH", "C:/not-the-selected-php").output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(std::path::Path::new(result["resolved"].as_str().unwrap()).canonicalize().unwrap(), php);
+        assert_eq!(result["version"], "8.4.26");
+        assert_eq!(std::path::Path::new(result["cwd"].as_str().unwrap()).canonicalize().unwrap(), terminal_directory(&environment.cwd).unwrap());
+        assert_eq!(std::env::var_os("PATH"), global_path);
     }
 
     #[cfg(windows)]

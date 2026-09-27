@@ -512,7 +512,7 @@ function TerminalInjectTool() {
   const t = useT();
   const environment = useQuery({
     queryKey: ["pathenv", "terminal"],
-    queryFn: api.terminalEnvironment,
+    queryFn: () => api.terminalEnvironment(),
     staleTime: 5_000,
     refetchInterval: 15_000,
     retry: false,
@@ -526,7 +526,7 @@ function TerminalInjectTool() {
     openingRef.current = true;
     setOpening(true);
     try {
-      await api.openTerminal(data.cwd);
+      await api.openTerminal(data.revision);
     } catch (error) {
       toastError(error);
     } finally {
@@ -570,7 +570,7 @@ function TerminalInjectTool() {
               <CodeBlock code={data.script} lang="shell" title={data.shell === "powershell" ? "PowerShell" : "Bash / Zsh"} maxHeight={240} compact />
             </> : <p className="rounded-lg bg-fill p-3 text-[12px] leading-relaxed text-muted">{t("tools.termInjectNone")}</p>}
             <div className="flex flex-wrap gap-2">
-              <Button variant="secondary" size="sm" className="h-auto whitespace-normal py-2 text-left" disabled={opening || !isTauri} onClick={() => void open()}>
+              <Button variant="secondary" size="sm" className="h-auto whitespace-normal py-2 text-left" disabled={opening || environment.isFetching || !isTauri} onClick={() => void open()}>
                 {opening && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
                 {data.shell === "powershell" ? t("tools.termInjectOpenPs") : t("dashboard.openTerminal")}
               </Button>

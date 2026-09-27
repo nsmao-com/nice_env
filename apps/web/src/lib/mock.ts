@@ -64,7 +64,7 @@ import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSet
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.71";
+const MOCK_APP_VERSION = "0.2.72";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -1050,11 +1050,22 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           };
         });
       if (cmd === "terminal_environment") {
-        const chosen = entries.filter((entry) => entry.selected).sort((a, b) => a.id.localeCompare(b.id));
+        const siteId = args?.siteId as string | undefined;
+        const site = siteId ? sites.get(siteId) : undefined;
+        if (siteId && !site) throw { code: "SITE_NOT_FOUND", message: "站点不存在，请刷新列表" };
+        let chosen = entries.filter((entry) => entry.selected);
+        if (site?.runtime.kind === "php") {
+          const php = entries.find((entry) => entry.id === "php" && entry.version === site.runtime.phpVersion);
+          if (!php) throw { code: "TERMINAL_RUNTIME_UNAVAILABLE", message: `站点指定的 PHP ${site.runtime.phpVersion ?? ""} 尚未安装，请先安装或更改站点设置` };
+          chosen = [...chosen.filter((entry) => entry.id !== "php"), php];
+        }
+        chosen.sort((a, b) => Number(b.id === "php" && site?.runtime.kind === "php") - Number(a.id === "php" && site?.runtime.kind === "php") || a.id.localeCompare(b.id));
+        const cwd = site ? site.rootDir.replace(/[\\/](public|out|dist|build)[\\/]?$/, "") : "…";
         const quoted = chosen.map((entry) => `'${entry.binDir.replace(/['‘’‚‛]/g, (quote) => quote + quote)}'`).join(",\n    ");
         return {
           shell: "powershell",
-          cwd: "…",
+          cwd,
+          revision: `mock-terminal-${JSON.stringify([siteId, cwd, chosen, mockPathEnv.versions])}`,
           script: chosen.length ? `# Browser demo paths — generate the actual script in the desktop app.
 & {
   $nsbDirs = @(
@@ -1069,9 +1080,9 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
   }
   $env:PATH = (@($nsbDirs) + $nsbRest) -join ';'
 }` : "",
-          entries: chosen.map(({ id, label, version, binDir }) => ({ id, label, version, binDir })),
+          entries: chosen.map(({ id, label, version, binDir }) => ({ id, label: id === "php" ? "PHP" : label, version, binDir })),
           warnings: Object.entries(mockPathEnv.versions)
-            .filter(([id, version]) => (mockPathEnv.selected === null || mockPathEnv.selected.includes(id))
+            .filter(([id, version]) => !(id === "php" && site?.runtime.kind === "php") && (mockPathEnv.selected === null || mockPathEnv.selected.includes(id))
               && !installed.some((p) => p.id === id && p.version === version))
             .map(([id]) => `${id}：所选 PATH 版本已卸载，请重新选择版本`),
         } as T;

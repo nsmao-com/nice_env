@@ -541,6 +541,26 @@ impl CoreState {
         pathenv::terminal_environment(&self.store, &self.paths, &self.installer.manifest)
     }
 
+    pub fn site_terminal_environment(&self, site_id: &str) -> Result<model::TerminalEnvironment> {
+        let _sites = sites::SITE_CHANGES.lock();
+        let _operation = self.manager.lifecycle.lock();
+        pathenv::site_terminal_environment(&self.store, &self.paths, &self.installer.manifest, site_id)
+    }
+
+    /// 在启动前重新生成快照，并把版本和站点变更锁持有到进程创建完成。
+    pub fn with_terminal_environment<T>(&self, site_id: Option<&str>, expected_revision: &str, launch: impl FnOnce(&model::TerminalEnvironment) -> Result<T>) -> Result<T> {
+        let _sites = sites::SITE_CHANGES.lock();
+        let _operation = self.manager.lifecycle.lock();
+        let environment = match site_id {
+            Some(id) => pathenv::site_terminal_environment(&self.store, &self.paths, &self.installer.manifest, id)?,
+            None => pathenv::terminal_environment(&self.store, &self.paths, &self.installer.manifest)?,
+        };
+        if environment.revision != expected_revision {
+            return Err(AppError::new("TERMINAL_ENV_CHANGED", "终端目录或版本选择已变化，未打开终端").with_hint("请刷新环境预览后重试。"));
+        }
+        launch(&environment)
+    }
+
     /// 开/关总开关
     pub fn pathenv_set_enabled(&self, enabled: bool) -> Result<model::PathEnvStatus> {
         let _operation = self.manager.lifecycle.lock();

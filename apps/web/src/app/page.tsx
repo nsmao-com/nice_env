@@ -9,7 +9,6 @@ import {
   Globe,
   ExternalLink,
   FolderOpen,
-  TerminalSquare,
   AlertTriangle,
   ChevronRight,
   Plus,
@@ -31,6 +30,7 @@ import {
   useStacks,
 } from "@/lib/hooks";
 import * as api from "@/lib/api";
+import { SiteTerminalButton } from "@/components/sites/site-terminal";
 import { normalizeError } from "@/lib/backend";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -257,9 +257,7 @@ export default function DashboardPage() {
                                 <Button variant="ghost" size="icon-sm" className="text-faint hover:text-foreground" title={t("dashboard.openFolder")} onClick={() => api.openInFolder(site.rootDir).catch(toastError)}>
                                   <FolderOpen className="h-3.5 w-3.5" />
                                 </Button>
-                                <Button variant="ghost" size="icon-sm" className="text-faint hover:text-foreground" title={t("dashboard.openTerminal")} onClick={() => api.openTerminal(site.rootDir).catch(toastError)}>
-                                  <TerminalSquare className="h-3.5 w-3.5" />
-                                </Button>
+                                <SiteTerminalButton site={site} />
                               </div>
                             </div>
                             <div className="mt-2 flex items-center justify-between gap-2">

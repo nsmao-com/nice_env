@@ -468,7 +468,7 @@ pub fn env_path(root: &Path) -> PathBuf {
 }
 
 /// public/out 是对外目录，框架环境文件位于包含项目清单的上一级目录。
-fn project_root(web_root: &Path) -> PathBuf {
+pub(crate) fn project_root(web_root: &Path) -> PathBuf {
     if matches!(
         web_root.file_name().and_then(|name| name.to_str()),
         Some("public" | "out" | "dist" | "build")

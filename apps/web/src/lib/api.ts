@@ -283,8 +283,8 @@ async function openResolvedBrowserUrl(resolve: () => string | Promise<string>): 
 }
 export const openInFolder = (path: string) =>
   safe(invoke<boolean>("open_in_folder", { path }));
-export const openTerminal = (cwd: string) =>
-  safe(invoke<boolean>("open_terminal", { cwd }));
+export const openTerminal = (expectedRevision: string, siteId?: string) =>
+  safe(invoke<boolean>("open_terminal", { expectedRevision, siteId }));
 
 /* 数据库 */
 export const dbList = (version?: string) => safe(invoke<DatabaseInfo[]>("db_list", { version }));
@@ -545,7 +545,7 @@ export const adminerStatus = () => safe(invoke<AdminerStatus | null>("adminer_st
 export const adminerStop = () => safe(invoke<boolean>("adminer_stop"));
 
 /* 环境变量注入（PATH） */
-export const terminalEnvironment = () => safe(invoke<TerminalEnvironment>("terminal_environment"));
+export const terminalEnvironment = (siteId?: string) => safe(invoke<TerminalEnvironment>("terminal_environment", { siteId }));
 export const pathenvStatus = () => safe(invoke<PathEnvStatus>("pathenv_status"));
 export const pathenvSetEnabled = (enabled: boolean) =>
   safe(invoke<PathEnvStatus>("pathenv_set_enabled", { enabled }));

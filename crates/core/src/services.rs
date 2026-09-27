@@ -30,10 +30,17 @@ pub struct ServiceEntry {
     /// 而不是当前设置里的端口——用户在运行期切换端口方案时会变。
     pub started_port: Mutex<Option<u16>>,
     /// 本次启动时解析的管理台入口；配置之后发生变化不能改写运行中入口。
-    pub(crate) web_target: Mutex<Option<Result<String>>>,
+    pub(crate) web_target: Mutex<Option<Result<ServiceWebTarget>>>,
     /// 清单声明的前置依赖（服务 id）。注册时从清单带入，
     /// 这样列表就能显示「需要先装 X」而不必再查一次清单。
     pub requires: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ServiceWebTarget {
+    pub url: String,
+    /// 明确配置反向代理时仅探测本机实际控制台，浏览器访问 url；后端不请求代理地址。
+    pub probe: Option<String>,
 }
 
 pub struct ServiceManager {
@@ -245,10 +252,14 @@ impl ServiceManager {
     }
 
     pub(crate) fn set_web_target(&self, id: &str, target: Result<String>) {
-        if let Some(e) = self.entry(id) { *e.web_target.lock() = Some(target); }
+        if let Some(e) = self.entry(id) { *e.web_target.lock() = Some(target.map(|url| ServiceWebTarget { url, probe: None })); }
     }
 
-    pub(crate) fn web_target(&self, id: &str) -> Result<String> {
+    pub(crate) fn set_web_target_with_probe(&self, id: &str, target: Result<String>, probe: String) {
+        if let Some(e) = self.entry(id) { *e.web_target.lock() = Some(target.map(|url| ServiceWebTarget { url, probe: Some(probe) })); }
+    }
+
+    pub(crate) fn web_target(&self, id: &str) -> Result<ServiceWebTarget> {
         self.entry(id).and_then(|e| e.web_target.lock().clone()).unwrap_or_else(||
             Err(AppError::new("SERVICE_WEB_UNKNOWN", "尚未记录本次服务的管理台地址")
                 .with_hint("请重启此服务后重试，以获取实际启动地址。")))

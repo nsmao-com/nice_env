@@ -1821,3 +1821,19 @@ Qdrant 入口读取本次启动的静态目录、启用开关、监听地址和 
 最终 pnpm --filter @nsb/web check、cargo check --workspace --all-targets --locked、版本一致性和 git diff --check 均通过。未改界面布局，未启动前端 dev 或执行前端 build。没有新增依赖或数据库变更，未修改 update.sql；Cargo.lock 只同步本项目三个 crate 版本。Windows 清单 revision 更新至 41，包、crate、Tauri 与界面回退版本统一至 0.2.56。已确认 v0.2.55 Release completed/success；本轮必须创建新 annotated tag v0.2.56，与 main 原子推送并核对远程指向及 Release 实际状态，保留旧 tag 和既有未跟踪文件。
 
 本轮原生验收范围为 Windows Consul 2.0.3→2.0.4 的内置本机单节点，2.0.2、macOS 和自定义集群未作原生验收。MinIO 管理台配置及原生读写、非回环管理台入口、r-nacos 上游 panic 等仍需继续完善，整体产品目标保持进行。
+
+## 第七十一轮：MinIO 管理台代理入口、启动检查与真实对象验收（v0.2.57）
+
+沿用 ServBay 服务管理的快捷入口与保留数据流程，继续验收 MinIO。原逻辑只检查 S3 主端口，管理台固定为本机根路径，不能正确处理 MINIO_BROWSER、代理子路径及控制台延迟就绪。核对官方 RELEASE.2025-09-07T16-13-09Z 的 cmd/common-main.go、server-main.go、config-dir.go、internal/config/bool-flag.go，以及 minio/pkg v3.1.3 env.Get；配置说明为 https://github.com/minio/minio/blob/RELEASE.2025-09-07T16-13-09Z/docs/config/README.md。按上游规则读取继承环境、展开后的 run.env 与 MINIO_CONFIG_ENV_FILE，文件内最后一次赋值覆盖前值，不执行 shell 插值；支持 export、字面量单双引号、空行与整行注释，布尔值和空值回退遵循上游语义。Windows 环境名称大小写冲突明确拒绝。坏赋值、NUL、非法编码或超长文本在启动前报错，不回显配置值、不修改原文件或父进程环境；环境文件不存在时沿用上游忽略行为。
+
+首次真实代理子路径检查发现：直接访问 MinIO 本机端口下的子路径会返回 SPA HTML，却把 JavaScript 请求也返回成 HTML，页面实际不可用。上游通过 MINIO_BROWSER_REDIRECT_URL 改变页面 base，仍要求外部代理剥离前缀。因此入口现在保存本次启动的浏览器目标和本机探测地址：先确认本机控制台端口属于当前活进程并返回网页，再将经过校验的完整代理 URL 交给已有浏览器打开流程。后端不请求代理地址、不跟随远端跳转、不携带凭据；拒绝非 HTTP/HTTPS、内嵌凭据、查询和片段配置。没有代理设置时保留本机直接访问，并通过实际探测识别 HTTP/HTTPS；只设置 CONSOLE_SUBPATH 却没有完整代理地址时明确提示所缺配置。服务停止或重新启动清除旧入口，运行中编辑待生效配置不改变当前记录，其他服务的本机入口约束保持不变。
+
+内置本地单盘运行描述允许已有证书目录和日志参数。开启管理台时检查 S3 与控制台两个端口的进程归属，再请求本机 /minio/health/ready 并等待稳定；关闭管理台时只检查 S3，不因未使用的控制台端口冲突而回落或阻止启动。自签证书只在受管回环探测时允许，浏览器仍正常处理证书信任。对象目录在初始化前复用受管路径检查；MINIO_CONFIG 的 YAML 若覆盖托管监听端口，会明确报出配置冲突并保留原文件，不能只改健康检查端口。没有改变凭据设置、对象目录、下载来源或既有安装描述，不引入依赖。
+
+23 项通用启动与 11 项服务状态回归共 34 项通过，新增覆盖环境文件优先级、父环境不污染、关闭控制台不占端口、错误不泄露值、配置原样保留、代理目标仅经本机探测、凭据与非回环探测地址拒绝、停机清除入口。验证位于已有 generic.rs 源码模块，没有新增测试文件。两项显式原生验收最终通过，耗时 59.04 秒：使用官方 MinIO 2025-07-23 与 2025-09-07 Windows 程序，下载后核对清单 SHA-256；真实代理使用官方 Caddy 2.11.4，核对 ZIP 摘要和 ZIP 内程序与待执行程序一致。所有数据、SQLite、证书和代理配置均在临时目录，未修改用户实际服务、配置或系统信任库。
+
+HTTP 与自签证书 HTTPS 两条路径均完成真实 AWS Signature V4 请求、创建 bucket、写入和下载中文对象内容，分别验证重启、升级新版、运行中卸载未使用旧版、卸载新版再重装后的数据保留。Caddy 实际剥离 /niceenv/ 前缀，转发管理台 HTML、真实 JavaScript 与登录 API；HTTPS 场景同时验证代理与 MinIO 两段 TLS。另验证运行中编辑环境文件不会改写入口，关闭控制台后即使其端口被占用仍可使用 S3，移除代理后可直接打开本机根入口并登录，坏开关配置不创建进程。最终核对无 fixture.exe/minio.exe/caddy.exe 临时进程残留。没有仅凭 HTML 状态码宣称代理管理台可用。
+
+最终 pnpm --filter @nsb/web check、cargo check --workspace --all-targets --locked、版本一致性和 git diff --check 均通过。未改界面布局、启动前端 dev 或执行前端 build；本次没有数据库变更，未修改 update.sql。包、crate、Tauri 与界面回退版本同步至 0.2.57，Cargo.lock 只更新本项目三个 crate 版本。已确认 v0.2.56 Release completed/success；本轮必须新增 annotated tag v0.2.57，与 main 原子推送，再核对远程分支、tag 和实际 Release 状态，保留旧 tag 及原有未跟踪文件。
+
+原生验收范围为 Windows MinIO 2025-07-23→2025-09-07 的本地单盘模式与 Caddy 代理，macOS、分布式布局、外部身份提供商和其他历史版本未验收。此功能只在用户点击管理台时打开其明确配置的代理地址，代理的运行状态和外部网络可达性仍由浏览器体现。其他服务的非回环管理台入口、r-nacos 上游 panic 等继续完善，整体产品目标保持进行。

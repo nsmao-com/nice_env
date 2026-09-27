@@ -686,6 +686,108 @@ fn web_unavailable(hint: &str) -> AppError {
     AppError::new("SERVICE_WEB_UNAVAILABLE", "无法确定此服务的管理台入口").with_hint(hint)
 }
 
+struct MinioSettings {
+    browser: bool,
+    subpath: String,
+    destination: Option<String>,
+}
+
+/// 内置本地单盘运行描述；允许指定证书目录和日志选项，不猜测自定义地址或分布式布局。
+fn managed_minio(r: &Resolved) -> bool {
+    if r.entry.id != "minio" || !r.spec.single_instance || r.spec.health != "tcp" || r.spec.init_args.is_some()
+        || !r.spec.args.starts_with(&["server".into(), "{data}/data".into(), "--address".into(), "127.0.0.1:{port}".into(),
+            "--console-address".into(), "127.0.0.1:{port+1}".into()]) { return false; }
+    let mut args = r.spec.args[6..].iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--certs-dir" | "-S" | "--config-dir" | "-C" => if args.next().is_none() { return false; },
+            "--quiet" | "--anonymous" | "--json" => {},
+            value if value.starts_with("--certs-dir=") || value.starts_with("--config-dir=") => {},
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn minio_settings(r: &Resolved) -> Result<MinioSettings> {
+    let key = |value: &str| if cfg!(windows) { value.to_ascii_uppercase() } else { value.to_owned() };
+    let mut env: std::collections::HashMap<_, _> = std::env::vars_os().filter_map(|(name, value)|
+        Some((key(&name.into_string().ok()?), value.into_string().ok()?))).collect();
+    let mut names = std::collections::HashSet::new();
+    for (name, value) in r.spec.env.iter().flatten() {
+        let name = key(name);
+        if !names.insert(name.clone()) { return Err(AppError::new("MINIO_ENV_INVALID", "MinIO 运行配置包含重复的大小写环境变量名，请合并后重试")); }
+        env.insert(name, expand(value, r));
+    }
+    let cwd = r.spec.cwd.as_ref().map(|path| PathBuf::from(expand(path, r))).unwrap_or_else(|| r.root.clone());
+    // CLI 的 YAML 配置环境默认值早于 MINIO_CONFIG_ENV_FILE 读取。
+    if let Some(config) = env.get("MINIO_CONFIG").filter(|value| !value.is_empty()) {
+        let file = cwd.join(config); let metadata = std::fs::metadata(&file)?;
+        if !metadata.is_file() || metadata.len() > 1024 * 1024 { return Err(AppError::new("MINIO_CONFIG_INVALID", "MinIO YAML 配置必须是小于 1 MiB 的文本文件")); }
+        let config: serde_json::Value = yaml_serde::from_str(&std::fs::read_to_string(&file)?)
+            .map_err(|_| AppError::new("MINIO_CONFIG_INVALID", "MinIO YAML 配置无法解析，请检查后重试"))?;
+        for (name, expected) in [("address", expand("127.0.0.1:{port}", r)), ("console-address", expand("127.0.0.1:{port+1}", r))] {
+            if config.get(name).is_some_and(|value| value.as_str().is_none_or(|value| !value.is_empty() && value != expected)) {
+                return Err(AppError::new("MINIO_PORT_CONFIG", "MinIO YAML 配置覆盖了托管监听地址或端口")
+                    .with_hint("请使 YAML 的 address 和 console-address 与服务端口一致，或移除这两项以使用托管参数；原配置未修改。"));
+            }
+        }
+    }
+    // 环境文件按逐行 KEY=value 解析，最后一次赋值覆盖；值为字面量，不执行 shell 插值。
+    if let Some(file) = env.get("MINIO_CONFIG_ENV_FILE").filter(|value| !value.is_empty()) {
+        let file = cwd.join(file.trim());
+        match std::fs::metadata(&file) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error.into()),
+            Ok(metadata) => {
+                let invalid = |line| AppError::new("MINIO_ENV_INVALID", "MinIO 环境文件无法完整解析，未启动服务")
+                    .with_hint(format!("请检查 {} 第 {} 行的赋值或编码；原文件已保留。", file.display(), line));
+                if !metadata.is_file() || metadata.len() > 1024 * 1024 { return Err(invalid(1)); }
+                let content = std::fs::read_to_string(&file).map_err(|_| invalid(1))?;
+                for (index, line) in content.split('\n').enumerate() {
+                    if line.len() >= 65536 { return Err(invalid(index + 1)); }
+                    let line = line.trim(); if line.is_empty() || line.starts_with('#') { continue; }
+                    let line = line.strip_prefix("export").unwrap_or(line).trim();
+                    let (name, value) = line.split_once('=').ok_or_else(|| invalid(index + 1))?;
+                    let value = if value.len() >= 2 && ((value.starts_with('"') && value.ends_with('"')) || (value.starts_with('\'') && value.ends_with('\''))) {
+                        &value[1..value.len()-1]
+                    } else { value };
+                    if name.is_empty() || name.contains('\0') || value.contains('\0') { return Err(invalid(index + 1)); }
+                    env.insert(key(name), value.to_owned());
+                }
+            },
+        }
+    }
+    let value = |name: &str, fallback: &str| env.get(name).filter(|value| !value.is_empty()).map(String::as_str).unwrap_or(fallback).trim().to_owned();
+    let browser = match value("MINIO_BROWSER", "on").as_str() {
+        "1" | "t" | "T" | "true" | "TRUE" | "True" | "on" | "ON" | "On" => true,
+        "0" | "f" | "F" | "false" | "FALSE" | "False" | "off" | "OFF" | "Off" => false,
+        other if other.eq_ignore_ascii_case("enabled") => true,
+        other if other.eq_ignore_ascii_case("disabled") => false,
+        _ => return Err(AppError::new("MINIO_ENV_INVALID", "MINIO_BROWSER 开关值无效，请使用 on 或 off")),
+    };
+    let subpath = value("CONSOLE_SUBPATH", "/");
+    let mut destination = None;
+    let redirect = value("MINIO_BROWSER_REDIRECT_URL", "");
+    if browser && !redirect.is_empty() {
+        let invalid = || AppError::new("MINIO_REDIRECT_INVALID", "MinIO 管理台重定向地址无效，请检查 MINIO_BROWSER_REDIRECT_URL");
+        let url = reqwest::Url::parse(&redirect).map_err(|_| invalid())?;
+        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() || !url.username().is_empty() || url.password().is_some()
+            || url.query().is_some() || url.fragment().is_some() { return Err(invalid()); }
+        // 子路径由代理剥离；直接访问本机相同路径只会返回 SPA HTML，脚本和登录 API 无法工作。
+        destination = Some(url.to_string());
+    }
+    Ok(MinioSettings { browser, subpath, destination })
+}
+
+fn minio_web_target(r: &Resolved, settings: &MinioSettings) -> Result<String> {
+    if !settings.browser { return Err(web_unavailable("MinIO 管理台已关闭；S3 服务可继续使用，如需管理台请启用 MINIO_BROWSER 后重启。")); }
+    if let Some(destination) = &settings.destination { return Ok(destination.clone()); }
+    if !settings.subpath.trim_matches('/').is_empty() { return Err(web_unavailable("MinIO 控制台子路径需要反向代理；请配置 MINIO_BROWSER_REDIRECT_URL 为完整访问地址后重启。")); }
+    let port = r.port.and_then(|port| port.checked_add(1)).ok_or_else(|| web_unavailable("MinIO 管理台端口超出范围。"))?;
+    local_web_url("127.0.0.1", port, false, "/")
+}
+
 /// 只生成本机回环链接；不把远端地址、凭据或原始配置拼进 URL。
 fn local_web_url(address: &str, port: u16, https: bool, path: &str) -> Result<String> {
     let host = match address {
@@ -740,11 +842,11 @@ fn sftpgo_web_target(r: &Resolved, config: &serde_json::Value, environment: &std
 /// 仅识别由本程序明确传入监听端口的运行描述；不猜测自定义命令的端口。
 fn generic_web_target(r: &Resolved, sftpgo: Option<&SftpgoConfig>) -> Result<String> {
     if let Some(config) = sftpgo { return config.web_target.clone(); }
+    if managed_minio(r) { return minio_web_target(r, &minio_settings(r)?); }
     if crate::install::official_qdrant(&r.entry) && r.entry.run.as_ref().is_some_and(|run| run.args == r.spec.args) { return qdrant_web_target(r); }
     let args_pair = |flag: &str, value: &str| r.spec.args.windows(2).any(|pair| pair[0] == flag && pair[1] == value);
     let (offset, path) = match r.entry.id.as_str() {
         "mailpit" if args_pair("--listen", "127.0.0.1:{port}") => (0, "/"),
-        "minio" if args_pair("--console-address", "127.0.0.1:{port+1}") => (1, "/"),
         "consul" if args_pair("-http-port", "{port}") && args_pair("-client", "127.0.0.1") => (0, "/ui/"),
         "rnacos" if managed_rnacos(r) => (2000, "/rnacos/"),
         "qdrant" if args_pair("--config-path", "{etc}/config.yaml") => (0, "/dashboard/"),
@@ -980,7 +1082,11 @@ pub fn service_web_url(manager: &ServiceManager, id: &str) -> Result<String> {
         return Err(AppError::new("SERVICE_NOT_RUNNING", "请先启动服务，再打开管理台"));
     }
     let original = manager.web_target(id)?;
-    let mut url = reqwest::Url::parse(&original).map_err(|_| web_unavailable("本次启动的管理台地址无效，请重启服务。"))?;
+    let destination = reqwest::Url::parse(&original.url).map_err(|_| web_unavailable("本次启动的管理台地址无效，请重启服务。"))?;
+    if !matches!(destination.scheme(), "http" | "https") || destination.host_str().is_none() || !destination.username().is_empty() || destination.password().is_some() {
+        return Err(web_unavailable("管理台地址必须是无内嵌凭据的 HTTP/HTTPS 地址。"));
+    }
+    let mut url = reqwest::Url::parse(original.probe.as_deref().unwrap_or(&original.url)).map_err(|_| web_unavailable("本次启动的管理台探测地址无效，请重启服务。"))?;
     if !matches!(url.scheme(), "http" | "https") || !url.username().is_empty() || url.password().is_some()
         || !url.host_str().and_then(|host| host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().ok()).is_some_and(|ip| ip.is_loopback()) {
         return Err(web_unavailable("管理台快捷入口仅支持本机 HTTP/HTTPS 监听地址。"));
@@ -1014,7 +1120,8 @@ pub fn service_web_url(manager: &ServiceManager, id: &str) -> Result<String> {
     if current.state != crate::model::ServiceState::Running || current.pids != before.pids || !owned()? {
         return Err(AppError::new("SERVICE_NOT_RUNNING", "管理台检查期间服务状态发生变化，请重试"));
     }
-    reachable.ok_or_else(|| web_unavailable("管理台未返回可访问的网页；请检查是否启用了 Web 界面、自定义路径或访问限制。"))
+    reachable.map(|reachable| if original.probe.is_some() { original.url } else { reachable })
+        .ok_or_else(|| web_unavailable("管理台未返回可访问的网页；请检查是否启用了 Web 界面、自定义路径或访问限制。"))
 }
 
 /// 验证整个端口组，不能把溢出的派生端口钳到 1/65535，也不能只检查主端口。
@@ -1036,6 +1143,7 @@ fn select_port(store: &Store, r: &Resolved) -> Result<Option<u16>> {
             offsets.insert(offset);
         }
     }
+    if managed_minio(r) && !minio_settings(r)?.browser { offsets.remove(&1); }
     let ports = |base: u16| -> Option<Vec<u16>> {
         offsets.iter().map(|offset| i32::from(base).checked_add(*offset)
             .and_then(|value| u16::try_from(value).ok()).filter(|p| *p > 0)).collect()
@@ -1238,6 +1346,33 @@ fn wait_owned_ports(manager: &ServiceManager, id: &str, ports: &[u16], timeout: 
     false
 }
 
+fn wait_minio_healthy(manager: &ServiceManager, r: &Resolved, settings: &MinioSettings, timeout: Duration) -> bool {
+    let Some(port) = r.port else { return false; };
+    let mut ports = vec![port];
+    if settings.browser { let Some(console) = port.checked_add(1) else { return false; }; ports.push(console); }
+    // 仅探测已确认归属本次进程的回环端口，不携带凭据；兼容用户已有的本地自签证书。
+    let Ok(client) = reqwest::blocking::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
+        .danger_accept_invalid_certs(true).timeout(Duration::from_millis(700)).build() else { return false; };
+    let deadline = std::time::Instant::now() + timeout;
+    let mut ready_since = None; let mut last_scheme = "http";
+    while std::time::Instant::now() < deadline {
+        if manager.snapshot(&r.service_id).is_none_or(|service| service.pids.iter().all(|pid| !platform::process_alive(*pid))) { return false; }
+        let mut ready = false;
+        if owned_ports_ready(manager, &r.service_id, &ports) {
+            for scheme in [last_scheme, if last_scheme == "http" { "https" } else { "http" }] {
+                if client.get(format!("{scheme}://127.0.0.1:{port}/minio/health/ready")).send().is_ok_and(|response| response.status().is_success()) {
+                    last_scheme = scheme; ready = true; break;
+                }
+            }
+        }
+        if ready {
+            if ready_since.get_or_insert_with(std::time::Instant::now).elapsed() >= Duration::from_millis(300) { return true; }
+        } else { ready_since = None; }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
 const RNACOS_START_MARKER: &str = "r-nacos：开始本次启动检查";
 
 fn wait_consul_healthy(manager: &ServiceManager, r: &Resolved, timeout: Duration) -> bool {
@@ -1313,6 +1448,11 @@ pub fn start(
     // 先确定最终端口再生成配置、初始化和展开命令，所有阶段使用同一组端口。
     let planned = r.port;
     r.port = select_port(store, &r)?;
+    let minio = if managed_minio(&r) { Some(minio_settings(&r)?) } else { None };
+    if minio.is_some() {
+        let relative = r.data.join("data").strip_prefix(&paths.base).map_err(|_| AppError::new("MINIO_DATA_PATH", "MinIO 数据目录不在托管路径内"))?.to_path_buf();
+        crate::paths::checked_data_path(&paths.base, &crate::paths::nginx_path(&relative))?;
+    }
     prepare_config(paths, &r)?;
     let qdrant_env = qdrant_snapshot_env(store, paths, manager, &r)?;
     let sftpgo = if managed_sftpgo(&r.entry, &r.spec) { Some(prepare_sftpgo(store, paths, &r)?) } else { None };
@@ -1388,6 +1528,8 @@ pub fn start(
         wait_rnacos_healthy(manager, &r, timeout)
     } else if managed_consul(&r.entry, &r.spec) {
         wait_consul_healthy(manager, &r, timeout)
+    } else if let Some(settings) = &minio {
+        wait_minio_healthy(manager, &r, settings, timeout)
     } else if r.entry.id == "coredns" {
         let tld = store.get_setting_checked("defaultTld")?.unwrap_or_else(|| "test".into());
         let deadline = std::time::Instant::now() + timeout;
@@ -1420,6 +1562,8 @@ pub fn start(
                 r.spec.health_timeout_sec,
                 if managed_consul(&r.entry, &r.spec) {
                     "监听端口或单节点 leader 未就绪"
+                } else if minio.is_some() {
+                    "S3 服务或已启用的管理台未就绪"
                 } else if r.port.is_some() {
                     "端口未就绪"
                 } else {
@@ -1442,7 +1586,10 @@ pub fn start(
     if let Some(port) = r.port {
         manager.set_started_port(&r.service_id, port);
     }
-    manager.set_web_target(&r.service_id, web_target);
+    if minio.as_ref().is_some_and(|settings| settings.destination.is_some()) {
+        let probe = local_web_url("127.0.0.1", r.port.and_then(|port| port.checked_add(1)).ok_or_else(|| web_unavailable("MinIO 管理台端口无效。"))?, false, "/")?;
+        manager.set_web_target_with_probe(&r.service_id, web_target, probe);
+    } else { manager.set_web_target(&r.service_id, web_target); }
     Ok(())
 }
 
@@ -1854,6 +2001,67 @@ mod startup_tests {
         assert!(sftpgo_web_target(&r, &config, &sftpgo_process_env(&r).unwrap()).unwrap().starts_with("http://"));
         assert!(local_web_url("remote.example", 8080, false, "/").is_err());
         assert!(local_web_url("127.0.0.1", 0, false, "/").is_err());
+    }
+
+    #[test]
+    fn minio_console_configuration_matches_environment_file_precedence_and_disabled_ports() {
+        let (_temp, state, mut r) = fixture("minio"); r.port = Some(33000);
+        let env = r.spec.env.as_mut().unwrap();
+        for (key, value) in [("MINIO_CONFIG", ""), ("MINIO_CONFIG_ENV_FILE", ""), ("MINIO_BROWSER", "on"),
+            ("MINIO_BROWSER_REDIRECT_URL", ""), ("CONSOLE_SUBPATH", "")] { env.insert(key.into(), value.into()); }
+        r.spec.env.as_mut().unwrap().insert("MINIO_BROWSER_REDIRECT_URL".into(), "https://console.example.invalid/one//two/../%E4%B8%AD%E6%96%87%20path+plus/".into());
+        assert_eq!(generic_web_target(&r, None).unwrap(), "https://console.example.invalid/one//%E4%B8%AD%E6%96%87%20path+plus/");
+        let file = r.root.join("minio.env");
+        let marker = format!("NICEENV_MINIO_FIXTURE_{}", rand::random::<u64>());
+        let content = format!("# fixture\r\nMINIO_BROWSER=on\r\nexport MINIO_BROWSER='Off'\r\n{marker}='$literal'\r\n");
+        std::fs::write(&file, &content).unwrap(); r.spec.env.as_mut().unwrap().insert("MINIO_CONFIG_ENV_FILE".into(), "minio.env".into());
+        assert!(!minio_settings(&r).unwrap().browser); assert!(generic_web_target(&r, None).unwrap_err().hint.unwrap().contains("已关闭"));
+        assert!(std::env::var_os(&marker).is_none()); assert_eq!(std::fs::read_to_string(&file).unwrap(), content);
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap(); let console = occupied.local_addr().unwrap().port();
+        r.port = Some(console - 1);
+        if tcp_port_bindable(console - 1) { assert_eq!(select_port(&state.store, &r).unwrap(), r.port); }
+        std::fs::write(&file, "MINIO_BROWSER=ENABLED\nMINIO_BROWSER_REDIRECT_URL='https://external.invalid/from-file'\n").unwrap();
+        assert!(select_port(&state.store, &r).is_err());
+        assert!(generic_web_target(&r, None).unwrap().ends_with("/from-file")); drop(occupied);
+        for invalid in ["bad secret-line", "MINIO_BROWSER=on # not a supported inline comment", "MINIO_BROWSER=hidden-secret\0"] {
+            std::fs::write(&file, invalid).unwrap();
+            let error = minio_settings(&r).err().unwrap(); assert_eq!(error.code, "MINIO_ENV_INVALID");
+            assert!(!format!("{error:?}").contains("hidden-secret")); assert_eq!(std::fs::read_to_string(&file).unwrap(), invalid);
+        }
+        std::fs::write(&file, "MINIO_BROWSER=on\nMINIO_BROWSER_REDIRECT_URL=https://secret:password@example.invalid/path\n").unwrap();
+        let error = minio_settings(&r).err().unwrap(); assert_eq!(error.code, "MINIO_REDIRECT_INVALID"); assert!(!format!("{error:?}").contains("password"));
+        r.spec.env.as_mut().unwrap().insert("MINIO_CONFIG_ENV_FILE".into(), "absent.env".into());
+        assert!(minio_settings(&r).unwrap().browser);
+        let config = r.root.join("config.yaml"); std::fs::write(&config, "version: v2\naddress: 127.0.0.1:1234\n").unwrap();
+        r.spec.env.as_mut().unwrap().insert("MINIO_CONFIG".into(), "config.yaml".into());
+        assert_eq!(minio_settings(&r).err().unwrap().code, "MINIO_PORT_CONFIG");
+        assert_eq!(std::fs::read_to_string(config).unwrap(), "version: v2\naddress: 127.0.0.1:1234\n");
+    }
+
+    #[test]
+    fn configured_console_proxy_is_returned_after_only_a_local_owned_probe() {
+        use std::io::{Read, Write};
+        let (_temp, state, _r) = fixture("minio"); register_services(&state.paths, &state.store, &state.manager);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap(); let port = listener.local_addr().unwrap().port();
+        let local = format!("http://127.0.0.1:{port}/"); let public = "https://console.example.invalid/storage/";
+        state.manager.adopt("minio", &[std::process::id()], Some(port));
+        state.manager.set_web_target_with_probe("minio", Ok(public.into()), local.clone());
+        let worker = listener.try_clone().unwrap();
+        let serve = std::thread::spawn(move || {
+            let (mut stream, _) = worker.accept().unwrap(); stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut input = [0; 4096]; let length = stream.read(&mut input).unwrap();
+            let request = String::from_utf8_lossy(&input[..length]); assert!(request.starts_with("GET / HTTP/1.1"));
+            assert!(!request.to_ascii_lowercase().contains("authorization:"));
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 13\r\nConnection: close\r\n\r\n<html></html>").unwrap();
+        });
+        assert_eq!(state.service_web_url("minio").unwrap(), public); serve.join().unwrap();
+        state.manager.set_web_target_with_probe("minio", Ok("https://secret:password@example.invalid/".into()), local.clone());
+        let error = state.service_web_url("minio").unwrap_err(); assert_eq!(error.code, "SERVICE_WEB_UNAVAILABLE"); assert!(!format!("{error:?}").contains("password"));
+        state.manager.set_web_target_with_probe("minio", Ok(public.into()), "http://example.invalid/".into());
+        assert_eq!(state.service_web_url("minio").unwrap_err().code, "SERVICE_WEB_UNAVAILABLE");
+        state.manager.services.lock().get("minio").unwrap().pids.lock().clear(); state.manager.set_state("minio", crate::model::ServiceState::Stopped);
+        assert_eq!(state.manager.web_target("minio").unwrap_err().code, "SERVICE_WEB_UNKNOWN");
+        state.manager.services.lock().remove("minio");
     }
 
     #[test]
@@ -2586,6 +2794,132 @@ mod startup_tests {
         state.stop_service("consul").unwrap();
         assert_eq!(state.service_web_url("consul").unwrap_err().code, "SERVICE_NOT_RUNNING");
         drop(occupied_dns);
+    }
+
+    #[test]
+    #[ignore = "requires verified NSB_VERIFY_MINIO_OLD, NSB_VERIFY_MINIO_NEW and NSB_VERIFY_CADDY executables"]
+    fn native_minio_objects_and_console_survive_restart_upgrade_and_reinstall() { verify_native_minio(false); }
+
+    #[test]
+    #[ignore = "requires verified NSB_VERIFY_MINIO_OLD, NSB_VERIFY_MINIO_NEW and NSB_VERIFY_CADDY executables"]
+    fn native_minio_tls_and_disabled_console_keep_s3_available() { verify_native_minio(true); }
+
+    fn verify_native_minio(tls: bool) {
+        use hmac::{KeyInit, Mac};
+        use sha2_11::{Digest, Sha256};
+        let old_program = std::env::var_os("NSB_VERIFY_MINIO_OLD").expect("set NSB_VERIFY_MINIO_OLD");
+        let new_program = std::env::var_os("NSB_VERIFY_MINIO_NEW").expect("set NSB_VERIFY_MINIO_NEW");
+        let caddy_program = std::env::var_os("NSB_VERIFY_CADDY").expect("set NSB_VERIFY_CADDY");
+        let proxy_socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap(); let proxy_port = proxy_socket.local_addr().unwrap().port(); drop(proxy_socket);
+        let scheme = if tls { "https" } else { "http" };
+        let public_url = format!("{scheme}://127.0.0.1:{proxy_port}/niceenv/");
+        let (_temp, state, mut r) = fixture_version("minio", Some("RELEASE.2025-07-23T15-54-02Z"));
+        std::fs::copy(old_program, &r.bin).unwrap();
+        let password = format!("fixture-{}", rand::random::<u64>()); let user = "niceenv-fixture";
+        r.spec.args.extend(["--certs-dir".into(), "{data}/certs".into(), "--config-dir".into(), "{etc}".into()]);
+        let env = r.spec.env.as_mut().unwrap();
+        for name in ["MINIO_CONFIG", "MINIO_VOLUMES", "MINIO_ENDPOINTS", "MINIO_SERVER_URL", "MINIO_BROWSER_REDIRECT_URL", "CONSOLE_SUBPATH",
+            "MINIO_ROOT_USER_FILE", "MINIO_ROOT_PASSWORD_FILE", "MINIO_ACCESS_KEY_FILE", "MINIO_SECRET_KEY_FILE"] { env.insert(name.into(), "".into()); }
+        env.insert("MINIO_ROOT_USER".into(), user.into()); env.insert("MINIO_ROOT_PASSWORD".into(), password.clone());
+        env.insert("MINIO_BROWSER".into(), "off".into());
+        env.insert("MINIO_CONFIG_ENV_FILE".into(), "{data}/minio.env".into());
+        let environment_file = r.data.join("minio.env");
+        std::fs::write(&environment_file, format!("# preserved native configuration\r\nMINIO_BROWSER=off\r\nexport MINIO_BROWSER='on'\r\nMINIO_BROWSER_REDIRECT_URL='{public_url}'\r\n")).unwrap();
+        let certs = r.data.join("certs"); std::fs::create_dir_all(&certs).unwrap();
+        if tls {
+            let certificate = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into(), "localhost".into()]).unwrap();
+            std::fs::write(certs.join("public.crt"), certificate.cert.pem()).unwrap();
+            std::fs::write(certs.join("private.key"), certificate.key_pair.serialize_pem()).unwrap();
+        }
+        let save_run = |entry: &PackageManifestEntry, root: &std::path::Path| {
+            let mut entry = entry.clone(); entry.run = Some(r.spec.clone());
+            std::fs::write(root.join(".niceenv-package.json"), serde_json::to_vec(&entry).unwrap()).unwrap();
+        };
+        save_run(&r.entry, &r.root);
+        let base = (34000..42000).find(|port| [0, 1, 2].iter().all(|offset| tcp_port_bindable(port + offset))).unwrap();
+        let occupied_console = std::net::TcpListener::bind(("127.0.0.1", base + 1)).unwrap();
+        state.store.set_port_override("minio", Some(base)).unwrap(); state.store.set_setting("autoFallbackPort", "true").unwrap();
+        struct Cleanup<'a>(&'a crate::CoreState);
+        impl Drop for Cleanup<'_> { fn drop(&mut self) { let _ = self.0.stop_service("minio"); } }
+        let _cleanup = Cleanup(&state);
+        let start = || { let result = state.start_service("minio"); assert!(result.is_ok(), "{result:?}\n{:?}", state.manager.tail("minio", 30)); };
+        let client = reqwest::blocking::Client::builder().no_proxy().danger_accept_invalid_certs(true).timeout(Duration::from_secs(8)).build().unwrap();
+        let sign = |key: &[u8], bytes: &[u8]| {
+            let mut mac = hmac::Hmac::<Sha256>::new_from_slice(key).unwrap(); mac.update(bytes); mac.finalize().into_bytes().to_vec()
+        };
+        let s3 = |method: reqwest::Method, path: &str, bytes: &[u8]| {
+            let port = state.manager.snapshot("minio").unwrap().port.unwrap(); let host = format!("127.0.0.1:{port}");
+            let now = chrono::Utc::now(); let date = now.format("%Y%m%d").to_string(); let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+            let payload = hex::encode(Sha256::digest(bytes)); let signed = "host;x-amz-content-sha256;x-amz-date";
+            let canonical = format!("{method}\n{path}\n\nhost:{host}\nx-amz-content-sha256:{payload}\nx-amz-date:{timestamp}\n\n{signed}\n{payload}");
+            let scope = format!("{date}/us-east-1/s3/aws4_request");
+            let message = format!("AWS4-HMAC-SHA256\n{timestamp}\n{scope}\n{}", hex::encode(Sha256::digest(canonical.as_bytes())));
+            let key = sign(format!("AWS4{password}").as_bytes(), date.as_bytes()); let key = sign(&key, b"us-east-1");
+            let key = sign(&key, b"s3"); let key = sign(&key, b"aws4_request"); let signature = hex::encode(sign(&key, message.as_bytes()));
+            client.request(method, format!("{scheme}://{host}{path}")).header("x-amz-date", timestamp).header("x-amz-content-sha256", payload)
+                .header("Authorization", format!("AWS4-HMAC-SHA256 Credential={user}/{scope}, SignedHeaders={signed}, Signature={signature}"))
+                .body(bytes.to_vec()).send().unwrap()
+        };
+        let contents = "原生 S3 对象：重启、升级及重装后保留\n".as_bytes();
+        let read_object = || { assert_eq!(s3(reqwest::Method::GET, "/niceenv-fixture/preserved.txt", &[]).error_for_status().unwrap().bytes().unwrap().as_ref(), contents); };
+        let verify_console = || {
+            let port = state.manager.snapshot("minio").unwrap().port.unwrap();
+            // 真实 Caddy 剥离子路径并转发静态资源和登录 API；代理端口不属于 MinIO。
+            let proxy_config = r.data.join("Caddyfile");
+            let tls_config = if tls { format!("tls \"{}\" \"{}\"", crate::paths::nginx_path(&certs.join("public.crt")), crate::paths::nginx_path(&certs.join("private.key"))) } else { String::new() };
+            let transport = if tls { "transport http {\n tls_insecure_skip_verify\n }" } else { "" };
+            std::fs::write(&proxy_config, format!("{{\n admin off\n auto_https off\n persist_config off\n}}\n{scheme}://127.0.0.1:{proxy_port} {{\n {tls_config}\n handle_path /niceenv/* {{\n reverse_proxy {scheme}://127.0.0.1:{} {{\n {transport}\n }}\n }}\n}}\n", port + 1)).unwrap();
+            struct Proxy(std::process::Child);
+            impl Drop for Proxy { fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); } }
+            let mut proxy = Proxy(platform::command(&caddy_program).args(["run", "--adapter", "caddyfile", "--config"]).arg(&proxy_config)
+                .env("XDG_CONFIG_HOME", r.data.join("proxy-config")).env("XDG_DATA_HOME", r.data.join("proxy-data"))
+                .stdout(std::process::Stdio::null()).stderr(std::fs::File::create(r.data.join("proxy.log")).unwrap()).spawn().unwrap());
+            assert!(wait_healthy(proxy_port, Duration::from_secs(5)), "{}", std::fs::read_to_string(r.data.join("proxy.log")).unwrap());
+            assert!(proxy.0.try_wait().unwrap().is_none());
+            let console = state.service_web_url("minio").unwrap(); assert_eq!(console, public_url);
+            let html = client.get(&console).send().unwrap().error_for_status().unwrap().text().unwrap(); assert!(html.contains("MinIO"));
+            let script = regex::Regex::new(r#"src="([^"]+\.js(?:\?[^"]*)?)""#).unwrap();
+            let asset = script.captures_iter(&html).last().expect("real MinIO console script");
+            let asset_url = reqwest::Url::parse(&console).unwrap().join(&asset[1]).unwrap();
+            let javascript = client.get(asset_url.clone()).send().unwrap().error_for_status().unwrap();
+            assert!(!javascript.headers().get("content-type").unwrap().to_str().unwrap().contains("text/html"),
+                "MinIO asset {asset_url} returned HTML");
+            assert!(javascript.bytes().unwrap().len() > 1000);
+            let login = client.post(format!("{console}api/v1/login")).json(&serde_json::json!({"accessKey":user,"secretKey":password})).send().unwrap();
+            assert!(login.status().is_success(), "{}", login.text().unwrap());
+        };
+        start(); assert_ne!(state.manager.snapshot("minio").unwrap().port, Some(base));
+        s3(reqwest::Method::PUT, "/niceenv-fixture", &[]).error_for_status().unwrap();
+        s3(reqwest::Method::PUT, "/niceenv-fixture/preserved.txt", contents).error_for_status().unwrap(); read_object(); verify_console();
+        let original_env = std::fs::read(&environment_file).unwrap(); std::fs::write(&environment_file, "MINIO_BROWSER=off\n").unwrap();
+        assert_eq!(state.service_web_url("minio").unwrap(), public_url); std::fs::write(&environment_file, original_env).unwrap();
+        state.restart_service("minio").unwrap(); read_object(); verify_console(); state.stop_service("minio").unwrap();
+        let new_version = "RELEASE.2025-09-07T16-13-09Z"; let key = format!("minio@{new_version}");
+        std::fs::copy(&new_program, state.paths.downloads().join(format!("{key}.pkg"))).unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap(); runtime.block_on(state.install_package(&key)).unwrap();
+        let installed = state.store.find_installed("minio", Some(new_version)).unwrap(); let new_entry = state.installer.installed_entry(&installed);
+        save_run(&new_entry, std::path::Path::new(&installed.install_path)); state.set_active_version("minio", new_version).unwrap();
+        start(); read_object(); verify_console();
+        let pids = state.manager.snapshot("minio").unwrap().pids;
+        state.uninstall_package("minio@RELEASE.2025-07-23T15-54-02Z").unwrap(); assert_eq!(state.manager.snapshot("minio").unwrap().pids, pids);
+        state.uninstall_package(&key).unwrap(); assert!(pids.iter().all(|pid| !platform::process_alive(*pid))); assert!(r.data.join("data/niceenv-fixture").is_dir());
+        std::fs::copy(&new_program, state.paths.downloads().join(format!("{key}.pkg"))).unwrap(); runtime.block_on(state.install_package(&key)).unwrap();
+        save_run(&new_entry, std::path::Path::new(&installed.install_path)); start(); read_object(); verify_console(); state.stop_service("minio").unwrap();
+        std::fs::write(&environment_file, "MINIO_BROWSER=off\n").unwrap();
+        state.store.set_port_override("minio", Some(base)).unwrap(); start();
+        assert_eq!(state.manager.snapshot("minio").unwrap().port, Some(base)); read_object();
+        assert!(state.service_web_url("minio").unwrap_err().hint.unwrap().contains("已关闭"));
+        state.stop_service("minio").unwrap();
+        // 未配置代理时直接访问根入口，HTTPS 由实际本机控制台确认。
+        std::fs::write(&environment_file, "MINIO_BROWSER=on\n").unwrap(); start(); read_object();
+        let port = state.manager.snapshot("minio").unwrap().port.unwrap();
+        let direct = state.service_web_url("minio").unwrap(); assert_eq!(direct, format!("{scheme}://127.0.0.1:{}/", port + 1));
+        assert!(client.get(&direct).send().unwrap().error_for_status().unwrap().text().unwrap().contains("MinIO"));
+        assert!(client.post(format!("{direct}api/v1/login")).json(&serde_json::json!({"accessKey":user,"secretKey":password})).send().unwrap().status().is_success());
+        state.stop_service("minio").unwrap();
+        std::fs::write(&environment_file, "MINIO_BROWSER=invalid-value\n").unwrap();
+        assert_eq!(state.start_service("minio").unwrap_err().code, "MINIO_ENV_INVALID");
+        assert!(state.manager.snapshot("minio").unwrap().pids.is_empty()); drop(occupied_console);
     }
 
     #[test]

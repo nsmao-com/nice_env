@@ -788,16 +788,19 @@ fn minio_web_target(r: &Resolved, settings: &MinioSettings) -> Result<String> {
     local_web_url("127.0.0.1", port, false, "/")
 }
 
-/// 只生成本机回环链接；不把远端地址、凭据或原始配置拼进 URL。
+/// 根据监听 IP 生成链接；打开前再用系统监听表核实地址确实属于本机受管进程。
 fn local_web_url(address: &str, port: u16, https: bool, path: &str) -> Result<String> {
     let host = match address {
         "" | "0.0.0.0" | "localhost" => "127.0.0.1".to_string(),
         "::" | "[::]" => "[::1]".to_string(),
         other => {
             let ip: std::net::IpAddr = other.trim_matches(['[', ']']).parse()
-                .map_err(|_| web_unavailable("管理台未使用本机回环监听，请按服务配置访问。"))?;
-            if !ip.is_loopback() { return Err(web_unavailable("管理台绑定了指定网卡地址，请按服务配置访问。")); }
-            match ip { std::net::IpAddr::V4(ip) => ip.to_string(), std::net::IpAddr::V6(ip) => format!("[{ip}]") }
+                .map_err(|_| web_unavailable("管理台监听地址不是可识别的 IP，请按服务配置访问。"))?;
+            if ip.is_multicast() { return Err(web_unavailable("管理台不能使用组播地址。")); }
+            match ip {
+                std::net::IpAddr::V4(ip) => if ip.is_unspecified() { "127.0.0.1".into() } else { ip.to_string() },
+                std::net::IpAddr::V6(ip) => if ip.is_unspecified() { "[::1]".into() } else { format!("[{ip}]") },
+            }
         }
     };
     if port == 0 { return Err(web_unavailable("管理台端口未启用。")); }
@@ -1087,15 +1090,18 @@ pub fn service_web_url(manager: &ServiceManager, id: &str) -> Result<String> {
         return Err(web_unavailable("管理台地址必须是无内嵌凭据的 HTTP/HTTPS 地址。"));
     }
     let mut url = reqwest::Url::parse(original.probe.as_deref().unwrap_or(&original.url)).map_err(|_| web_unavailable("本次启动的管理台探测地址无效，请重启服务。"))?;
-    if !matches!(url.scheme(), "http" | "https") || !url.username().is_empty() || url.password().is_some()
-        || !url.host_str().and_then(|host| host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().ok()).is_some_and(|ip| ip.is_loopback()) {
+    let ip = url.host_str().and_then(|host| host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().ok())
+        .filter(|ip| !ip.is_unspecified() && !ip.is_multicast())
+        .ok_or_else(|| web_unavailable("管理台快捷入口需要可核实的本机监听 IP。"))?;
+    if !matches!(url.scheme(), "http" | "https") || !url.username().is_empty() || url.password().is_some() {
         return Err(web_unavailable("管理台快捷入口仅支持本机 HTTP/HTTPS 监听地址。"));
     }
     let port = url.port_or_known_default().ok_or_else(|| web_unavailable("管理台端口无效。"))?;
     let owned = || -> Result<bool> {
-        let listeners = crate::ports::listeners()?;
-        Ok(listeners.iter().any(|(p, pid)| *p == port && before.pids.contains(pid))
-            && listeners.iter().filter(|(p, _)| *p == port).all(|(_, pid)| before.pids.contains(pid)))
+        let listeners = crate::ports::listener_endpoints()?;
+        let target = std::net::SocketAddr::new(ip, port);
+        Ok(listeners.iter().any(|entry| entry.accepts(target) && before.pids.contains(&entry.pid))
+            && listeners.iter().filter(|entry| entry.port == port).all(|entry| before.pids.contains(&entry.pid)))
     };
     if !owned()? { return Err(web_unavailable("管理台端口尚未就绪或已由其他进程占用，请查看服务日志。")); }
     // 仅探测本机受管进程，不携带凭据、不跟随跳转；自签证书仍由浏览器正常提示。
@@ -1148,9 +1154,11 @@ fn select_port(store: &Store, r: &Resolved) -> Result<Option<u16>> {
         offsets.iter().map(|offset| i32::from(base).checked_add(*offset)
             .and_then(|value| u16::try_from(value).ok()).filter(|p| *p > 0)).collect()
     };
-    let available = |base| ports(base).is_some_and(|ports| ports.into_iter().all(|port|
-        tcp_port_bindable(port) && (!needs_udp(r, base, port) || std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok())));
     let original = ports(desired).ok_or_else(|| AppError::new("BAD_PORT", "主端口及派生端口必须位于 1–65535，请调整服务端口"))?;
+    let listeners = crate::ports::listeners()?;
+    let available = |base| ports(base).is_some_and(|ports| ports.into_iter().all(|port|
+        !listeners.iter().any(|(bound, _)| *bound == port) && tcp_port_bindable(port)
+            && (!needs_udp(r, base, port) || std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok())));
     if available(desired) { return Ok(Some(desired)); }
     let enabled = match store.get_setting_checked("autoFallbackPort")?.as_deref() {
         None | Some("false") => false,
@@ -1170,6 +1178,9 @@ fn select_port(store: &Store, r: &Resolved) -> Result<Option<u16>> {
         }
     }
     for port in original {
+        if let Some((_, pid)) = listeners.iter().find(|(bound, _)| *bound == port) {
+            return Err(AppError::port_conflict(port, crate::ports::process_name(*pid).as_deref()).with_pid(*pid));
+        }
         precheck_port(port, &r.entry.display_name)?;
         if needs_udp(r, desired, port) {
             std::net::UdpSocket::bind(("127.0.0.1", port))
@@ -1323,9 +1334,11 @@ fn rnacos_ports_ready(manager: &ServiceManager, r: &Resolved) -> bool {
 fn owned_ports_ready(manager: &ServiceManager, service_id: &str, ports: &[u16]) -> bool {
     let pids = manager.snapshot(service_id).map(|s| s.pids).unwrap_or_default();
     if pids.is_empty() || !pids.iter().any(|pid| platform::process_alive(*pid)) { return false; }
-    ports.iter().all(|port| tcp_port_open(*port)) && crate::ports::listeners().is_ok_and(|listeners|
-        ports.iter().all(|port| listeners.iter().any(|(p, pid)| p == port && pids.contains(pid))
-            && listeners.iter().filter(|(p, _)| p == port).all(|(_, pid)| pids.contains(pid))))
+    crate::ports::listener_endpoints().is_ok_and(|listeners| ports.iter().all(|port|
+        listeners.iter().filter(|entry| entry.port == *port).all(|entry| pids.contains(&entry.pid))
+            && listeners.iter().filter(|entry| entry.port == *port && pids.contains(&entry.pid))
+                .filter_map(|entry| entry.probe_address()).any(|address|
+                    std::net::TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok())))
 }
 
 fn wait_sftpgo_healthy(manager: &ServiceManager, r: &Resolved, timeout: Duration) -> bool {
@@ -1855,7 +1868,7 @@ mod startup_tests {
     #[test]
     fn final_port_selection_covers_secondary_ports_and_never_commits_early() {
         let (_temp, state, mut r) = fixture("qdrant");
-        let secondary = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let secondary = std::net::TcpListener::bind(("::1", 0)).unwrap();
         let port = secondary.local_addr().unwrap().port(); r.port = Some(port - 1);
         state.store.set_setting("autoFallbackPort", "true").unwrap();
         let selected = select_port(&state.store, &r).unwrap().unwrap();
@@ -1863,6 +1876,12 @@ mod startup_tests {
         assert!(tcp_port_bindable(selected)); assert!(tcp_port_bindable(selected + 1));
         assert!(state.store.get_port_assign("qdrant").is_none());
         assert!(state.store.get_setting("portOverride.qdrant").is_none());
+        state.store.set_setting("autoFallbackPort", "false").unwrap();
+        state.store.set_port_override("qdrant", r.port).unwrap();
+        let error = select_port(&state.store, &r).unwrap_err();
+        assert_eq!(error.code, "PORT_IN_USE"); assert_eq!(error.port, Some(port));
+        assert_eq!(error.pid, Some(std::process::id()));
+        state.store.set_port_override("qdrant", None).unwrap();
         r.port = Some(selected); prepare_config(&state.paths, &r).unwrap();
         let config = std::fs::read_to_string(r.etc.join("config.yaml")).unwrap();
         assert!(config.contains(&format!("http_port: {selected}")));
@@ -2116,9 +2135,9 @@ mod startup_tests {
         use std::io::{Read, Write};
         let (_temp, state, _r) = fixture("mailpit");
         register_services(&state.paths, &state.store, &state.manager);
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let listener = std::net::TcpListener::bind(("::1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
-        let url = format!("http://127.0.0.1:{port}/console");
+        let url = format!("http://[::1]:{port}/console");
         state.manager.set_web_target("mailpit", Ok(url.clone()));
         assert_eq!(state.service_web_url("mailpit").unwrap_err().code, "SERVICE_NOT_RUNNING");
         state.manager.adopt("mailpit", &[std::process::id()], Some(port));
@@ -2134,6 +2153,8 @@ mod startup_tests {
         assert_eq!(state.service_web_url("mailpit").unwrap(), url);
         serve.join().unwrap();
         state.manager.set_web_target("mailpit", Ok("https://example.invalid/".into()));
+        assert_eq!(state.service_web_url("mailpit").unwrap_err().code, "SERVICE_WEB_UNAVAILABLE");
+        state.manager.set_web_target("mailpit", Ok(format!("http://192.0.2.10:{port}/")));
         assert_eq!(state.service_web_url("mailpit").unwrap_err().code, "SERVICE_WEB_UNAVAILABLE");
         state.manager.set_web_target("mailpit", Ok(url));
         drop(listener);
@@ -2262,8 +2283,12 @@ mod startup_tests {
         let cache = state.paths.downloads().join(format!("{key}--qdrant-web-ui-0.2.18.pkg"));
         std::fs::copy(ui_archive, &cache).unwrap();
         assert_eq!(crate::download::sha256_file(&cache).unwrap(), "fdce24c04ec1627d2369cb8fe610ee06ad9236f82aad214aa7f294ac37372859");
+        prepare_config(&state.paths, &r).unwrap();
+        let config_path = r.etc.join("config.yaml");
+        let content = std::fs::read_to_string(&config_path).unwrap().replace("host: 127.0.0.1", "host: \"::1\"");
+        std::fs::write(&config_path, content).unwrap();
         let base = (30000..42000).find(|port| [0, 1, 2].iter().all(|offset| tcp_port_bindable(port + offset))).unwrap();
-        let occupied_grpc = std::net::TcpListener::bind(("127.0.0.1", base + 1)).unwrap();
+        let occupied_grpc = std::net::TcpListener::bind(("::1", base + 1)).unwrap();
         state.store.set_port_override("qdrant", Some(base)).unwrap(); state.store.set_setting("autoFallbackPort", "true").unwrap();
         struct Cleanup(Arc<crate::CoreState>);
         impl Drop for Cleanup { fn drop(&mut self) { let _ = self.0.stop_service("qdrant"); } }
@@ -2273,7 +2298,7 @@ mod startup_tests {
         assert!(owned_ports_ready(&state.manager, "qdrant", &[port, port + 1]));
         assert_eq!(state.service_web_url("qdrant").unwrap_err().code, "QDRANT_WEB_MISSING");
         let client = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(10)).build().unwrap();
-        let endpoint = |port, path: &str| format!("http://127.0.0.1:{port}{path}");
+        let endpoint = |port, path: &str| format!("http://[::1]:{port}{path}");
         let response = client.put(endpoint(port, "/collections/niceenv_verify"))
             .json(&serde_json::json!({"vectors":{"size":3,"distance":"Cosine"}})).send().unwrap();
         assert!(response.status().is_success(), "{}", response.text().unwrap());
@@ -2556,6 +2581,9 @@ mod startup_tests {
     fn verify_native_sftpgo_upgrade(with_env_directory: bool) {
         let old_source = PathBuf::from(std::env::var_os("NSB_VERIFY_SFTPGO_OLD").expect("set NSB_VERIFY_SFTPGO_OLD"));
         let new_source = PathBuf::from(std::env::var_os("NSB_VERIFY_SFTPGO_NEW").expect("set NSB_VERIFY_SFTPGO_NEW"));
+        let address: std::net::IpAddr = std::env::var("NSB_VERIFY_SFTPGO_BIND")
+            .unwrap_or_else(|_| if with_env_directory { "::1" } else { "127.0.0.1" }.into()).parse().unwrap();
+        let host = match address { std::net::IpAddr::V4(ip) => ip.to_string(), std::net::IpAddr::V6(ip) => format!("[{ip}]") };
         let (_temp, state, _initial) = fixture_version("sftpgo", Some("2.7.5"));
         let password = format!("Native-fixture-{}!", rand::random::<u64>());
         fn copy_tree(source: &std::path::Path, destination: &std::path::Path) {
@@ -2583,8 +2611,8 @@ mod startup_tests {
         install("2.7.5", &old_source);
         let legacy_dir = state.paths.etc_dir("sftpgo", "2.7.5"); std::fs::create_dir_all(&legacy_dir).unwrap();
         let mut config: serde_json::Value = serde_json::from_slice(&std::fs::read(old_source.join("sftpgo.json")).unwrap()).unwrap();
-        config["sftpd"]["bindings"][0]["address"] = "127.0.0.1".into();
-        config["httpd"]["bindings"][0]["address"] = "127.0.0.1".into();
+        config["sftpd"]["bindings"][0]["address"] = host.clone().into();
+        config["httpd"]["bindings"][0]["address"] = host.clone().into();
         config["common"]["idle_timeout"] = 17.into();
         config["httpd"]["web_root"] = "/niceenv-console".into();
         let original_config = serde_json::to_vec_pretty(&config).unwrap();
@@ -2600,10 +2628,10 @@ mod startup_tests {
             let second = "SFTPGO_HTTPD__WEB_ROOT=/ignored-later\nSFTPGO_HTTPD__BINDINGS__0__ENABLE_HTTPS=false\n";
             let mut encoded = vec![0xff, 0xfe]; for word in second.encode_utf16() { encoded.extend(word.to_le_bytes()); }
             std::fs::write(directory.join("20-last.env"), encoded).unwrap();
-            std::fs::write(directory.join("10-first.env"), first).unwrap();
+            std::fs::write(directory.join("10-first.env"), first.replace("ADDRESS: 127.0.0.1", &format!("ADDRESS: {host}"))).unwrap();
         }
         let base = (22000..42000).find(|port| [0, 1, 6058, 6059].iter().all(|offset| tcp_port_bindable(port + offset))).unwrap();
-        let occupied_web = std::net::TcpListener::bind(("127.0.0.1", base + 6058)).unwrap();
+        let occupied_web = std::net::TcpListener::bind((address, base + 6058)).unwrap();
         state.store.set_port_override("sftpgo", Some(base)).unwrap();
         state.store.set_setting("autoFallbackPort", "true").unwrap();
         struct Cleanup<'a>(&'a crate::CoreState);
@@ -2613,17 +2641,17 @@ mod startup_tests {
         let first = state.manager.snapshot("sftpgo").unwrap().port.unwrap(); assert_ne!(first, base);
         let client = reqwest::blocking::Client::builder().no_proxy().pool_max_idle_per_host(0).timeout(Duration::from_secs(5)).build().unwrap();
         let token = |port: u16| {
-            let response = client.get(format!("http://127.0.0.1:{}/api/v2/token", port + 6058)).basic_auth("fixture", Some(&password)).send().unwrap();
+            let response = client.get(format!("http://{host}:{}/api/v2/token", port + 6058)).basic_auth("fixture", Some(&password)).send().unwrap();
             assert!(response.status().is_success(), "token status: {}", response.status());
             response.json::<serde_json::Value>().unwrap()["access_token"].as_str().unwrap().to_string()
         };
         let access = token(first);
         let user_home = state.paths.data().join("sftpgo/user-files");
-        let response = client.post(format!("http://127.0.0.1:{}/api/v2/users", first + 6058)).bearer_auth(&access)
+        let response = client.post(format!("http://{host}:{}/api/v2/users", first + 6058)).bearer_auth(&access)
             .json(&serde_json::json!({"username":"native-user","password":password,"status":1,"home_dir":user_home.to_string_lossy(),"permissions":{"/":["*"]}})).send().unwrap();
         assert!(response.status().is_success(), "create user status: {}", response.status());
         let web_url = state.service_web_url("sftpgo").unwrap();
-        assert_eq!(web_url, format!("http://127.0.0.1:{}{console_path}/web/admin", first + 6058));
+        assert_eq!(web_url, format!("http://{host}:{}{console_path}/web/admin", first + 6058));
         let admin = client.get(&web_url).send().unwrap();
         assert!(admin.status().is_success()); assert!(admin.text().unwrap().to_ascii_lowercase().contains("<html"));
         // 修改文件中的待生效路径和计划端口，不得改变当前进程的入口。
@@ -2632,7 +2660,7 @@ mod startup_tests {
         state.store.set_port_override("sftpgo", Some(first + 10)).unwrap();
         assert_eq!(state.service_web_url("sftpgo").unwrap(), web_url);
         std::fs::write(&config_path, &original_config).unwrap();
-        let fingerprint = crate::certdeploy::probe_ssh("127.0.0.1", first).unwrap().fingerprint;
+        let fingerprint = crate::certdeploy::probe_ssh(&address.to_string(), first).unwrap().fingerprint;
         struct VerifyHost(String);
         impl russh::client::Handler for VerifyHost {
             type Error = russh::Error;
@@ -2643,7 +2671,7 @@ mod startup_tests {
         let transfer = |port: u16, write: bool| {
             tokio::runtime::Runtime::new().unwrap().block_on(async {
                 tokio::time::timeout(Duration::from_secs(10), async {
-                    let mut handle = russh::client::connect(Arc::new(russh::client::Config::default()), ("127.0.0.1", port), VerifyHost(fingerprint.clone())).await.unwrap();
+                    let mut handle = russh::client::connect(Arc::new(russh::client::Config::default()), (address, port), VerifyHost(fingerprint.clone())).await.unwrap();
                     assert!(handle.authenticate_password("native-user", &password).await.unwrap().success());
                     let channel = handle.channel_open_session().await.unwrap(); channel.request_subsystem(true, "sftp").await.unwrap();
                     let sftp = russh_sftp::client::SftpSession::new(channel.into_stream()).await.unwrap(); sftp.set_timeout(5);
@@ -2674,7 +2702,7 @@ mod startup_tests {
             state.select_sftpgo_config("etc/sftpgo/archive", "2.7.5", Some("etc/sftpgo/2.7.5")).unwrap();
             state.start_service("sftpgo").unwrap();
             let alternate_port = state.manager.snapshot("sftpgo").unwrap().port.unwrap();
-            let response = client.post(format!("http://127.0.0.1:{}/api/v2/users", alternate_port + 6058)).bearer_auth(token(alternate_port))
+            let response = client.post(format!("http://{host}:{}/api/v2/users", alternate_port + 6058)).bearer_auth(token(alternate_port))
                 .json(&serde_json::json!({"username":"alternate-only","password":password,"status":1,
                     "home_dir":state.paths.data().join("sftpgo/alternate-files").to_string_lossy(),"permissions":{"/":["*"]}})).send().unwrap();
             assert!(response.status().is_success());
@@ -2685,17 +2713,17 @@ mod startup_tests {
         }
         install("2.7.6", &new_source); state.set_active_version("sftpgo", "2.7.6").unwrap();
         let requested = (base + 20..42000).find(|port| [0, 6058].iter().all(|offset| tcp_port_bindable(port + offset))).unwrap();
-        let occupied_sftp = std::net::TcpListener::bind(("127.0.0.1", requested)).unwrap();
+        let occupied_sftp = std::net::TcpListener::bind((address, requested)).unwrap();
         state.store.set_port_override("sftpgo", Some(requested)).unwrap();
         state.start_service("sftpgo").unwrap_or_else(|e| panic!("{e:?}\n{:?}", state.manager.tail("sftpgo", 20)));
         let second = state.manager.snapshot("sftpgo").unwrap().port.unwrap(); assert_ne!(second, requested);
-        assert_eq!(state.service_web_url("sftpgo").unwrap(), format!("http://127.0.0.1:{}{console_path}/web/admin", second + 6058));
+        assert_eq!(state.service_web_url("sftpgo").unwrap(), format!("http://{host}:{}{console_path}/web/admin", second + 6058));
         assert_eq!(state.manager.snapshot("sftpgo").unwrap().version.as_deref(), Some("2.7.6"));
-        assert_eq!(crate::certdeploy::probe_ssh("127.0.0.1", second).unwrap().fingerprint, fingerprint);
-        let response = client.get(format!("http://127.0.0.1:{}/api/v2/users/native-user", second + 6058)).bearer_auth(token(second)).send().unwrap();
+        assert_eq!(crate::certdeploy::probe_ssh(&address.to_string(), second).unwrap().fingerprint, fingerprint);
+        let response = client.get(format!("http://{host}:{}/api/v2/users/native-user", second + 6058)).bearer_auth(token(second)).send().unwrap();
         assert!(response.status().is_success()); transfer(second, false);
         if with_env_directory {
-            let response = client.get(format!("http://127.0.0.1:{}/api/v2/users/alternate-only", second + 6058)).bearer_auth(token(second)).send().unwrap();
+            let response = client.get(format!("http://{host}:{}/api/v2/users/alternate-only", second + 6058)).bearer_auth(token(second)).send().unwrap();
             assert_eq!(response.status().as_u16(), 404);
         }
         assert_eq!(std::fs::read(&config_path).unwrap(), original_config);

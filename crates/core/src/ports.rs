@@ -435,11 +435,49 @@ pub fn kill_pid(pid: u32) -> Result<bool> {
     }
 }
 
-/// (port, pid) 监听列表
+/// 保留监听地址以核实管理台确实属于本机进程，不能把同端口的远端 IP 当作本机。
+#[derive(Clone, Debug)]
+pub(crate) struct ListenerEndpoint {
+    pub port: u16,
+    pub pid: u32,
+    pub address: Option<std::net::SocketAddr>,
+}
+
+impl ListenerEndpoint {
+    pub fn probe_address(&self) -> Option<std::net::SocketAddr> {
+        let mut address = self.address?;
+        if address.ip().is_unspecified() {
+            address.set_ip(if address.is_ipv4() { std::net::Ipv4Addr::LOCALHOST.into() } else { std::net::Ipv6Addr::LOCALHOST.into() });
+        }
+        Some(address)
+    }
+
+    pub fn accepts(&self, target: std::net::SocketAddr) -> bool {
+        self.address.is_some_and(|address| address.port() == target.port()
+            && (address == target || (address.ip().is_unspecified() && target.ip().is_loopback())))
+    }
+}
+
+/// 地址无法识别时仍保留端口/PID，避免扫描和结束端口流程将其错误报告为空闲。
+fn parse_listener_endpoint(name: &str, pid: &str, ipv6: bool) -> Option<ListenerEndpoint> {
+    let (host, port) = name.rsplit_once(':')?;
+    let port: u16 = port.parse().ok()?;
+    let pid = pid.parse().ok()?;
+    let address = if host == "*" {
+        Some(std::net::SocketAddr::new(if ipv6 { std::net::Ipv6Addr::UNSPECIFIED.into() } else { std::net::Ipv4Addr::UNSPECIFIED.into() }, port))
+    } else { name.parse().ok() };
+    Some(ListenerEndpoint { port, pid, address })
+}
+
 fn platform_listeners() -> Result<Vec<(u16, u32)>> {
+    Ok(listener_endpoints()?.into_iter().map(|entry| (entry.port, entry.pid)).collect())
+}
+
+pub(crate) fn listener_endpoints() -> Result<Vec<ListenerEndpoint>> {
     let out = if cfg!(windows) {
         platform::command("netstat")
-            .args(["-ano", "-p", "tcp"])
+            // -p tcp 在 Windows 会排除 TCPv6；统一读取，再仅解析 TCP LISTENING。
+            .args(["-ano"])
             .output()
             .map_err(|e| crate::error::AppError::io("执行 netstat", e))?
     } else {
@@ -457,9 +495,9 @@ fn platform_listeners() -> Result<Vec<(u16, u32)>> {
         for line in text.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
             // Proto Local-Address Foreign-Address State PID
-            if parts.len() >= 5 && parts[3].eq_ignore_ascii_case("LISTENING") {
-                if let Some((port, pid)) = parse_addr_pid(parts[1], parts[4]) {
-                    result.push((port, pid));
+            if parts.len() >= 5 && parts[0].eq_ignore_ascii_case("TCP") && parts[3].eq_ignore_ascii_case("LISTENING") {
+                if let Some(entry) = parse_listener_endpoint(parts[1], parts[4], false) {
+                    result.push(entry);
                 }
             }
         }
@@ -470,8 +508,8 @@ fn platform_listeners() -> Result<Vec<(u16, u32)>> {
             let parts: Vec<&str> = line.split_whitespace().collect();
             // COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
             if parts.len() >= 9 {
-                if let Some((port, pid)) = parse_lsof(parts[8], parts[1]) {
-                    result.push((port, pid));
+                if let Some(entry) = parse_listener_endpoint(parts[8], parts[1], parts[4] == "IPv6") {
+                    result.push(entry);
                 }
             }
         }
@@ -496,21 +534,6 @@ pub(crate) fn check_listener_exit(
         "无法完整读取系统 TCP 监听端口，不能判断端口是否空闲",
     )
     .with_detail(platform::decode_command_output(stderr)))
-}
-
-#[cfg(windows)]
-fn parse_addr_pid(addr: &str, pid: &str) -> Option<(u16, u32)> {
-    let port = addr.rsplit(':').next()?.parse().ok()?;
-    let pid = pid.parse().ok()?;
-    Some((port, pid))
-}
-
-#[cfg(not(windows))]
-fn parse_lsof(name: &str, pid: &str) -> Option<(u16, u32)> {
-    // *:8080 (LISTEN) 或 127.0.0.1:3306
-    let port = name.split(':').last()?.parse().ok()?;
-    let pid = pid.parse().ok()?;
-    Some((port, pid))
 }
 
 pub fn process_name(pid: u32) -> Option<String> {
@@ -543,6 +566,33 @@ pub fn process_cmdline(pid: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listener_endpoint_retains_family_scope_and_unrecognized_owners() {
+        for (name, ipv6, probe) in [
+            ("127.0.0.2:9000", false, "127.0.0.2:9000"),
+            ("192.0.2.10:9000", false, "192.0.2.10:9000"),
+            ("0.0.0.0:9000", false, "127.0.0.1:9000"),
+            ("[::]:9000", false, "[::1]:9000"),
+            ("[::1]:9000", false, "[::1]:9000"),
+            ("[fe80::1%12]:9000", true, "[fe80::1%12]:9000"),
+            ("*:9000", false, "127.0.0.1:9000"),
+            ("*:9000", true, "[::1]:9000"),
+        ] {
+            let entry = parse_listener_endpoint(name, "77", ipv6).unwrap();
+            assert_eq!((entry.port, entry.pid), (9000, 77));
+            assert_eq!(entry.probe_address().unwrap().to_string(), probe);
+            assert!(entry.accepts(probe.parse().unwrap()));
+            assert!(!entry.accepts("192.0.2.20:9000".parse().unwrap()));
+            assert!(!entry.accepts("127.0.0.1:9001".parse().unwrap()));
+        }
+        let unknown = parse_listener_endpoint("unknown-host:9000", "88", false).unwrap();
+        assert_eq!((unknown.port, unknown.pid), (9000, 88));
+        assert!(unknown.probe_address().is_none());
+        assert!(!unknown.accepts("127.0.0.1:9000".parse().unwrap()));
+        assert!(!parse_listener_endpoint("[fe80::1%12]:9000", "77", true).unwrap()
+            .accepts("[fe80::1%13]:9000".parse().unwrap()));
+    }
 
     fn row(pid: u32) -> ListenerInfo {
         ListenerInfo {
@@ -680,6 +730,12 @@ mod tests {
         let manager = Arc::new(ServiceManager::new());
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        let v6 = std::net::TcpListener::bind("[::1]:0").unwrap();
+        let v6_addr = v6.local_addr().unwrap();
+        let endpoints = listener_endpoints().unwrap();
+        assert!(endpoints.iter().any(|entry| entry.pid == std::process::id() && entry.address == Some(v6_addr)));
+        assert!(endpoints.iter().any(|entry| entry.pid == std::process::id() && entry.address == Some(listener.local_addr().unwrap())));
+        assert!(scan_port_range(&manager, v6_addr.port(), v6_addr.port()).unwrap().listeners.iter().any(|entry| entry.pid == std::process::id()));
         manager.register(
             "fixture",
             "Fixture",

@@ -608,6 +608,7 @@ MySQL 8.0.46（`cdn.mysql.com` macos15 tarball）与 mihomo（darwin-arm64）。
 
 ## 已知边界（Phase 3 范围）
 
+- Windows 端口扫描同时识别 IPv4 与 IPv6。SFTPGo、Qdrant 使用 IPv6 或指定本机 IP 监听时，启动检查和管理台入口按实际监听地址工作；打开前仍会确认地址与端口属于当前服务进程。原生验收覆盖 SFTPGo 2.7.5→2.7.6 的 IPv4、IPv6 和本机虚拟网卡，以及 Qdrant 1.19.1 的 IPv6。管理台监听配置目前需使用明确 IP；主机名和带区域标识的 IPv6 管理台 URL 尚未支持，macOS 仍需原生验收。
 - Windows r-nacos 0.8.6 / 0.8.7 存在上游初始化竞态，可能在 `src/raft/filestore/raftapply.rs` 第 421–424 行的依赖读取处 panic。NiceEnv 检测到后会停止服务并保留配置和数据；HTTP 可连接或写入接口返回 `true` 都不能单独证明配置保存成功。遇到这个具体错误且不需要**注册实例元数据持久化**时，可在该服务的 `.env` 中显式设置 `RNACOS_NAMING_INSTANCE_METADATA_PERSISTENCE_ENABLE=false` 后重试。这会停止加载和保存注册实例元数据，配置中心配置仍可持久化；需要该功能时应保留原配置并等待上游修复。父进程环境或自定义运行描述中同名变量的优先级高于 `.env`，也需要核对。NiceEnv 不自动关闭该功能、不删除 Raft 数据、不替换官方程序。已在两个版本上验证此配置下的真实写入读回、重启保留、端口回落和登录鉴权；该规避方式不代表已修复上游竞态，也不能修复失败启动遗留的异常 Raft 数据。NiceEnv 额外核对 Raft 的 leader、角色和已应用日志；状态接口需要鉴权时，等待上游健康检查的初始宽限期结束后再次确认，通常至少需要约 14 秒。仍未就绪时会停止服务并保留数据，已有异常数据应从可用备份恢复。
 - Windows nginx `-s reload` 有平台差异：站点变更采用亚秒级「快速重启」保证生效（`ops.rs` 有注释）
 - Caddy/Apache/Tomcat、PostgreSQL/MongoDB、Go/JDK/Python/Node 运行时、Mailpit、MinIO：清单与架构已就绪，待补 manifest 条目与启停编排

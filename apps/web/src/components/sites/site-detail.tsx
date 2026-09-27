@@ -60,6 +60,7 @@ export function SiteDetailSheet({
   const deletingRef = React.useRef(false);
   const [deleteError, setDeleteError] = React.useState<AppErrorShape | null>(null);
   const [reloading, setReloading] = React.useState(false);
+  const reloadingRef = React.useRef(false);
   const [formError, setFormError] = React.useState("");
   const [discardOpen, setDiscardOpen] = React.useState(false);
   const [deleteOpen, setDeleteOpen] = React.useState(false);
@@ -182,21 +183,25 @@ export function SiteDetailSheet({
               size="sm"
               disabled={busy || dirty}
               onClick={async () => {
+                if (busy || dirty || reloadingRef.current) return;
+                reloadingRef.current = true;
                 setReloading(true);
                 try {
-                  await api.restartService(site.runtime.webServer);
+                  await api.startSite(site.id);
                   toast.success(t("detail.reloaded"));
-                  invalidate("sites", "services");
                 } catch (e) {
                   toastError(e);
                 } finally {
+                  invalidate("sites", "services", "hosts");
+                  reloadingRef.current = false;
                   setReloading(false);
                 }
               }}
             >
-              <RefreshCw className="h-3.5 w-3.5" /> {t("detail.reload")}
+              <RefreshCw className={`h-3.5 w-3.5 ${reloading ? "animate-spin" : ""}`} /> {t(site.status === "running" ? "detail.reload" : "common.start")}
             </Button>
           </div>
+          <p className="text-xs leading-relaxed text-faint">{t("detail.reloadHint").replace("{server}", site.runtime.webServer === "apache" ? "Apache" : "Nginx")}</p>
 
           <Tabs defaultValue="general">
             <TabsList className="mb-5">

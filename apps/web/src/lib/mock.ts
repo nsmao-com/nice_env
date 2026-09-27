@@ -63,7 +63,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.64";
+const MOCK_APP_VERSION = "0.2.65";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -630,6 +630,17 @@ function mockSiteUrl(site: Site) {
 }
 for (const site of sites.values()) site.accessUrl = mockSiteUrl(site);
 
+function mockSiteStatus(site: Site): Site["status"] {
+  if (site.status !== "running") return site.status;
+  const dependencies: string[] = [site.runtime.webServer];
+  if (site.runtime.kind === "php") {
+    if (!site.runtime.phpVersion) return "unconfigured";
+    dependencies.push(`php@${site.runtime.phpVersion}`);
+  }
+  const states = dependencies.map((id) => services.get(id)?.state);
+  return states.includes("error") ? "error" : states.every((state) => state === "running") ? "running" : "stopped";
+}
+
 /** 预览也按运行描述注册服务；Node/Python 等纯运行时只选择版本。 */
 function refreshPackageSelection(id: string) {
   const all = Array.from(packages.values()).filter((p) => p.id === id);
@@ -1153,12 +1164,13 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "list_sites":
       return Array.from(sites.values()).map((site) => ({ ...site,
-        accessUrl: site.status === "running" && services.get(site.runtime.webServer)?.state === "running" ? site.accessUrl : undefined,
+        status: mockSiteStatus(site),
+        accessUrl: mockSiteStatus(site) === "running" ? site.accessUrl : undefined,
       })) as T;
     case "site_access_url": {
       const site = sites.get(args?.id as string);
       if (!site) throw { code: "SITE_NOT_FOUND", message: "站点不存在" };
-      if (site.status !== "running" || services.get(site.runtime.webServer)?.state !== "running" || !site.accessUrl) {
+      if (mockSiteStatus(site) !== "running" || !site.accessUrl) {
         throw { code: "SITE_URL_UNAVAILABLE", message: "站点未运行或尚未确认本次加载的访问地址", hint: "请启动或重启该站点后重试。" };
       }
       return site.accessUrl as T;
@@ -1369,23 +1381,18 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const ids = args!.ids as string[];
       // 用命令名判断动作，别依赖一个不存在的参数
       const action = cmd === "sites_start_many" ? "start" : "stop";
-      if (cmd === "sites_start_many") {
-        for (const id of ids) {
-          const st = sites.get(id);
-          if (st) st.status = "running";
-        }
-      } else {
-        for (const id of ids) {
-          const st = sites.get(id);
-          if (st) st.status = "stopped";
-        }
+      const report: SiteBulkReport = { action, succeeded: [], already: [], failed: [] };
+      for (const id of new Set(ids)) {
+        const site = sites.get(id);
+        if (!site) { report.failed.push({siteId: id, error: {code: "SITE_NOT_FOUND", message: "站点不存在"}}); continue; }
+        const running = mockSiteStatus(site) === "running";
+        if (action === "start" ? running : site.status === "stopped") { report.already.push(id); continue; }
+        try {
+          await mockInvoke(action === "start" ? "start_site" : "stop_site", { id });
+          report.succeeded.push(id);
+        } catch (error) { report.failed.push({siteId: id, error: normalizeError(error)}); }
       }
-      return {
-        action,
-        succeeded: ids,
-        already: [],
-        failed: [],
-      } as SiteBulkReport as T;
+      return report as T;
     }
     case "bulk_start":
     case "bulk_stop":

@@ -29,6 +29,8 @@ pub struct ServiceEntry {
     /// 本进程实际启动时使用的端口。停机命令（mysqladmin/redis-cli）必须用它，
     /// 而不是当前设置里的端口——用户在运行期切换端口方案时会变。
     pub started_port: Mutex<Option<u16>>,
+    /// 本次启动时解析的管理台入口；配置之后发生变化不能改写运行中入口。
+    pub(crate) web_target: Mutex<Option<Result<String>>>,
     /// 清单声明的前置依赖（服务 id）。注册时从清单带入，
     /// 这样列表就能显示「需要先装 X」而不必再查一次清单。
     pub requires: Vec<String>,
@@ -97,6 +99,7 @@ impl ServiceManager {
                     log_file,
                     port,
                     started_port: Mutex::new(None),
+                    web_target: Mutex::new(None),
                     requires: Vec::new(),
                 }),
             );
@@ -177,6 +180,7 @@ impl ServiceManager {
 
     pub fn set_state(&self, id: &str, state: ServiceState) {
         if let Some(e) = self.entry(id) {
+            if matches!(state, ServiceState::Starting | ServiceState::Stopped) { *e.web_target.lock() = None; }
             // 一旦进入运行态，上一次的失败记录就不再适用
             if matches!(state, ServiceState::Running | ServiceState::Starting) {
                 *e.last_error.lock() = None;
@@ -240,6 +244,16 @@ impl ServiceManager {
         }
     }
 
+    pub(crate) fn set_web_target(&self, id: &str, target: Result<String>) {
+        if let Some(e) = self.entry(id) { *e.web_target.lock() = Some(target); }
+    }
+
+    pub(crate) fn web_target(&self, id: &str) -> Result<String> {
+        self.entry(id).and_then(|e| e.web_target.lock().clone()).unwrap_or_else(||
+            Err(AppError::new("SERVICE_WEB_UNKNOWN", "尚未记录本次服务的管理台地址")
+                .with_hint("请重启此服务后重试，以获取实际启动地址。")))
+    }
+
     /// 本次启动实际使用的端口；没有记录时回退到当前设置端口
     pub fn started_port_or(&self, id: &str, fallback: u16) -> u16 {
         self.entry(id)
@@ -277,6 +291,7 @@ impl ServiceManager {
                 pids.clear();
                 *e.started_at.lock() = None;
                 *e.started_port.lock() = None;
+                *e.web_target.lock() = None;
                 *e.group.lock() = None;
                 state.clone()
             }

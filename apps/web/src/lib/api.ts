@@ -56,6 +56,8 @@ import { browserUrl, invoke, isTauri, safe } from "./backend";
 /* 服务 */
 export const listServiceStatus = () =>
   safe(invoke<ServiceStatus[]>("list_service_status"));
+export const serviceWebUrl = (id: string) =>
+  safe(invoke<string>("service_web_url", { id }));
 export const diagnoseService = (id: string) =>
   safe(invoke<ServiceDiagnosticReport>("diagnose_service", { id }));
 export const startService = (id: string) =>

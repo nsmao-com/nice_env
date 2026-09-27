@@ -758,6 +758,12 @@ impl CoreState {
         self.manager.history_tail(n)
     }
 
+    pub fn service_web_url(&self, id: &str) -> Result<String> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后打开管理台"))?;
+        generic::service_web_url(&self.manager, id)
+    }
+
     pub fn service_status_list(&self) -> Vec<model::ServiceStatus> {
         let mut list = self.manager.list_status();
         let installed = self.store.list_installed().unwrap_or_default();

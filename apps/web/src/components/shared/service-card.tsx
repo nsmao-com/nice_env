@@ -14,6 +14,7 @@ import { StatusLight } from "./status-light";
 import { StatChip } from "./stat-chip";
 import { ServiceDiagnostics } from "./service-diagnostics";
 import { ServiceIcon } from "./service-icon";
+import { ServiceWebButton } from "./service-web-button";
 import { useUI, useT } from "@/lib/store";
 import { useInvalidate, toastError, toastPortConflict } from "@/lib/hooks";
 import { fmtUptime } from "@/lib/utils";
@@ -144,6 +145,7 @@ export function ServiceCard({ service }: { service: ServiceStatus }) {
               {fmtUptime(service.uptimeSec)}
             </StatChip>
           )}
+          <ServiceWebButton service={service} disabled={busy} />
           {service.logFile ? (
             <>
               <Button

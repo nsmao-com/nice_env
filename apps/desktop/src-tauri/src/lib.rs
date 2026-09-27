@@ -211,6 +211,7 @@ pub fn run() {
             version_catalogs,
             // 服务
             list_service_status,
+            service_web_url,
             start_service,
             stop_service,
             restart_service,
@@ -724,6 +725,14 @@ fn cancel_download(
 }
 
 /* ================= 服务 ================= */
+
+#[tauri::command]
+async fn service_web_url(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: String) -> Result<String, tauri::Error> {
+    let activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || { let _activity = activity; map_jh(st.service_web_url(&id)) })
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
 
 #[tauri::command]
 fn list_service_status(

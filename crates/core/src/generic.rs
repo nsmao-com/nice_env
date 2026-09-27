@@ -349,6 +349,7 @@ fn sftpgo_config_dir(store: &Store, paths: &Paths) -> Result<PathBuf> {
 struct SftpgoConfig {
     file: PathBuf,
     env: Vec<(String, String)>,
+    web_target: Result<String>,
 }
 
 fn sftpgo_config_file(directory: &std::path::Path) -> Result<Option<PathBuf>> {
@@ -467,7 +468,127 @@ fn prepare_sftpgo(store: &Store, paths: &Paths, r: &Resolved) -> Result<SftpgoCo
     if file != source {
         crate::paths::write_with_backup_expected(&file, &content, &paths.backup(), Some(None))?;
     }
-    Ok(SftpgoConfig { file, env })
+    let web_target = sftpgo_web_target(r, &config, &file_env_keys);
+    Ok(SftpgoConfig { file, env, web_target })
+}
+
+fn web_unavailable(hint: &str) -> AppError {
+    AppError::new("SERVICE_WEB_UNAVAILABLE", "无法确定此服务的管理台入口").with_hint(hint)
+}
+
+/// 只生成本机回环链接；不把远端地址、凭据或原始配置拼进 URL。
+fn local_web_url(address: &str, port: u16, https: bool, path: &str) -> Result<String> {
+    let host = match address {
+        "" | "0.0.0.0" | "localhost" => "127.0.0.1".to_string(),
+        "::" | "[::]" => "[::1]".to_string(),
+        other => {
+            let ip: std::net::IpAddr = other.trim_matches(['[', ']']).parse()
+                .map_err(|_| web_unavailable("管理台未使用本机回环监听，请按服务配置访问。"))?;
+            if !ip.is_loopback() { return Err(web_unavailable("管理台绑定了指定网卡地址，请按服务配置访问。")); }
+            match ip { std::net::IpAddr::V4(ip) => ip.to_string(), std::net::IpAddr::V6(ip) => format!("[{ip}]") }
+        }
+    };
+    if port == 0 { return Err(web_unavailable("管理台端口未启用。")); }
+    let mut url = reqwest::Url::parse(&format!("{}://{host}:{port}/", if https { "https" } else { "http" }))
+        .map_err(|_| web_unavailable("管理台地址无效，请检查服务配置。"))?;
+    let mut segments = Vec::new();
+    for segment in path.split('/') {
+        match segment { "" | "." => {}, ".." => { segments.pop(); }, other => segments.push(other) }
+    }
+    url.path_segments_mut().map_err(|_| web_unavailable("管理台路径无效。"))?.clear().extend(segments);
+    Ok(url.to_string())
+}
+
+fn sftpgo_web_target(r: &Resolved, config: &serde_json::Value, file_env_keys: &std::collections::HashSet<String>) -> Result<String> {
+    let value = |key: &str, pointer: &str, default: &str| -> Result<String> {
+        if let Some(value) = r.spec.env.as_ref().and_then(|env| env.get(key)) { return Ok(expand(value, r)); }
+        if let Ok(value) = std::env::var(key) { return Ok(value); }
+        if file_env_keys.contains(key) {
+            return Err(web_unavailable("env.d 自定义了管理台地址；请按该文件访问，或把管理台地址设置放入 SFTPGo 的 JSON/YAML 配置后重启。"));
+        }
+        Ok(config.pointer(pointer).map(|value| value.as_str().map(str::to_string).unwrap_or_else(|| value.to_string())).unwrap_or_else(|| default.into()))
+    };
+    let boolean = |value: String| -> Result<bool> {
+        match value.to_ascii_lowercase().as_str() {
+            "true" | "t" | "1" => Ok(true), "false" | "f" | "0" => Ok(false),
+            _ => Err(web_unavailable("管理台开关配置无法识别，请检查配置后重启。")),
+        }
+    };
+    if !boolean(value("SFTPGO_HTTPD__BINDINGS__0__ENABLE_WEB_ADMIN", "/httpd/bindings/0/enable_web_admin", "true")?)? {
+        return Err(web_unavailable("SFTPGo Web Admin 已关闭；如需管理台，请启用后重启服务。"));
+    }
+    let address = value("SFTPGO_HTTPD__BINDINGS__0__ADDRESS", "/httpd/bindings/0/address", "")?;
+    let https = boolean(value("SFTPGO_HTTPD__BINDINGS__0__ENABLE_HTTPS", "/httpd/bindings/0/enable_https", "false")?)?;
+    let root = value("SFTPGO_HTTPD__WEB_ROOT", "/httpd/web_root", "")?;
+    let root = if root.starts_with('/') { root.as_str() } else { "" };
+    let port = r.port.and_then(|port| port.checked_add(6058)).ok_or_else(|| web_unavailable("管理台派生端口超出范围。"))?;
+    local_web_url(&address, port, https, &format!("{root}/web/admin"))
+}
+
+/// 仅识别由本程序明确传入监听端口的运行描述；不猜测自定义命令的端口。
+fn generic_web_target(r: &Resolved, sftpgo: Option<&SftpgoConfig>) -> Result<String> {
+    if let Some(config) = sftpgo { return config.web_target.clone(); }
+    let args_pair = |flag: &str, value: &str| r.spec.args.windows(2).any(|pair| pair[0] == flag && pair[1] == value);
+    let (offset, path) = match r.entry.id.as_str() {
+        "mailpit" if args_pair("--listen", "127.0.0.1:{port}") => (0, "/"),
+        "minio" if args_pair("--console-address", "127.0.0.1:{port+1}") => (1, "/"),
+        "consul" if args_pair("-http-port", "{port}") && args_pair("-client", "127.0.0.1") => (0, "/ui/"),
+        "rnacos" if managed_rnacos(r) => (2000, "/rnacos/"),
+        "qdrant" if args_pair("--config-path", "{etc}/config.yaml") => (0, "/dashboard/"),
+        _ => return Err(web_unavailable("当前运行配置没有已知的管理台入口，请按服务配置访问。")),
+    };
+    let port = r.port.and_then(|port| port.checked_add(offset)).ok_or_else(|| web_unavailable("管理台派生端口超出范围。"))?;
+    if r.entry.id == "mailpit" {
+        let root = r.spec.args.windows(2).find(|pair| pair[0] == "--webroot").map(|pair| expand(&pair[1], r))
+            .or_else(|| r.spec.args.iter().find_map(|arg| arg.strip_prefix("--webroot=").map(|value| expand(value, r))))
+            .or_else(|| r.spec.env.as_ref().and_then(|env| env.get("MP_WEBROOT")).map(|value| expand(value, r)))
+            .or_else(|| std::env::var("MP_WEBROOT").ok()).unwrap_or_else(|| "/".into());
+        return local_web_url("127.0.0.1", port, false, &root);
+    }
+    local_web_url("127.0.0.1", port, false, path)
+}
+
+pub fn service_web_url(manager: &ServiceManager, id: &str) -> Result<String> {
+    let before = manager.snapshot(id).ok_or_else(|| AppError::new("UNKNOWN_SERVICE", "该服务未安装或已卸载"))?;
+    if before.state != crate::model::ServiceState::Running || before.pids.is_empty() {
+        return Err(AppError::new("SERVICE_NOT_RUNNING", "请先启动服务，再打开管理台"));
+    }
+    let original = manager.web_target(id)?;
+    let mut url = reqwest::Url::parse(&original).map_err(|_| web_unavailable("本次启动的管理台地址无效，请重启服务。"))?;
+    if !matches!(url.scheme(), "http" | "https") || !url.username().is_empty() || url.password().is_some()
+        || !url.host_str().and_then(|host| host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().ok()).is_some_and(|ip| ip.is_loopback()) {
+        return Err(web_unavailable("管理台快捷入口仅支持本机 HTTP/HTTPS 监听地址。"));
+    }
+    let port = url.port_or_known_default().ok_or_else(|| web_unavailable("管理台端口无效。"))?;
+    let owned = || -> Result<bool> {
+        let listeners = crate::ports::listeners()?;
+        Ok(listeners.iter().any(|(p, pid)| *p == port && before.pids.contains(pid))
+            && listeners.iter().filter(|(p, _)| *p == port).all(|(_, pid)| before.pids.contains(pid)))
+    };
+    if !owned()? { return Err(web_unavailable("管理台端口尚未就绪或已由其他进程占用，请查看服务日志。")); }
+    // 仅探测本机受管进程，不携带凭据、不跟随跳转；自签证书仍由浏览器正常提示。
+    let client = reqwest::blocking::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
+        .danger_accept_invalid_certs(true).timeout(Duration::from_millis(1500)).build()
+        .map_err(|_| web_unavailable("无法创建本机管理台连接。"))?;
+    let mut reachable = None;
+    for scheme in [url.scheme().to_string(), if url.scheme() == "http" { "https".into() } else { "http".into() }] {
+        url.set_scheme(&scheme).map_err(|_| web_unavailable("管理台协议无效。"))?;
+        url.set_port(Some(port)).map_err(|_| web_unavailable("管理台端口无效。"))?;
+        if let Ok(response) = client.get(url.clone()).send() {
+            let status = response.status();
+            let html = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.to_ascii_lowercase().starts_with("text/html"));
+            if (status.is_success() && html) || (status.is_redirection() && response.headers().contains_key(reqwest::header::LOCATION))
+                || status == reqwest::StatusCode::UNAUTHORIZED {
+                reachable = Some(url.to_string()); break;
+            }
+        }
+    }
+    let current = manager.snapshot(id).ok_or_else(|| AppError::new("SERVICE_NOT_RUNNING", "服务已停止，请重新启动后重试"))?;
+    if current.state != crate::model::ServiceState::Running || current.pids != before.pids || !owned()? {
+        return Err(AppError::new("SERVICE_NOT_RUNNING", "管理台检查期间服务状态发生变化，请重试"));
+    }
+    reachable.ok_or_else(|| web_unavailable("管理台未返回可访问的网页；请检查是否启用了 Web 界面、自定义路径或访问限制。"))
 }
 
 /// 验证整个端口组，不能把溢出的派生端口钳到 1/65535，也不能只检查主端口。
@@ -742,6 +863,7 @@ pub fn start(
     r.port = select_port(store, &r)?;
     prepare_config(paths, &r)?;
     let sftpgo = if managed_sftpgo(&r.entry, &r.spec) { Some(prepare_sftpgo(store, paths, &r)?) } else { None };
+    let web_target = generic_web_target(&r, sftpgo.as_ref());
     // CoreDNS 特例：Corefile 每次启动都重写——TLD 设置或转发策略变化要自动跟上，
     // 且通配解析模板含 {{ .Name }} 占位符，不能走通用模板渲染
     if r.entry.id == "coredns" {
@@ -859,6 +981,7 @@ pub fn start(
     if let Some(port) = r.port {
         manager.set_started_port(&r.service_id, port);
     }
+    manager.set_web_target(&r.service_id, web_target);
     Ok(())
 }
 
@@ -1182,6 +1305,81 @@ mod startup_tests {
     }
 
     #[test]
+    fn console_targets_use_resolved_ports_and_preserve_sftpgo_web_configuration() {
+        for (id, offset, path) in [("mailpit", 0, "/"), ("minio", 1, "/"), ("consul", 0, "/ui"), ("rnacos", 2000, "/rnacos"), ("qdrant", 0, "/dashboard")] {
+            let (_temp, _state, mut r) = fixture(id); r.port = Some(31000);
+            assert_eq!(generic_web_target(&r, None).unwrap(), format!("http://127.0.0.1:{}{path}", 31000 + offset));
+            r.spec.args = vec!["custom".into()];
+            assert_eq!(generic_web_target(&r, None).unwrap_err().code, "SERVICE_WEB_UNAVAILABLE");
+        }
+        let (_temp, _state, mut r) = fixture("sftpgo"); r.port = Some(31000);
+        let config = serde_json::json!({"httpd":{"web_root":"/custom/../中文 path","bindings":[{"address":"::","enable_https":true,"enable_web_admin":true}]}});
+        let keys = std::collections::HashSet::new();
+        assert_eq!(sftpgo_web_target(&r, &config, &keys).unwrap(), "https://[::1]:37058/%E4%B8%AD%E6%96%87%20path/web/admin");
+        r.spec.env.as_mut().unwrap().insert("SFTPGO_HTTPD__WEB_ROOT".into(), "/environment".into());
+        assert_eq!(sftpgo_web_target(&r, &config, &keys).unwrap(), "https://[::1]:37058/environment/web/admin");
+        r.spec.env.as_mut().unwrap().insert("SFTPGO_HTTPD__BINDINGS__0__ENABLE_WEB_ADMIN".into(), "false".into());
+        assert!(sftpgo_web_target(&r, &config, &keys).unwrap_err().hint.unwrap().contains("已关闭"));
+        assert!(local_web_url("remote.example", 8080, false, "/").is_err());
+        assert!(local_web_url("127.0.0.1", 0, false, "/").is_err());
+    }
+
+    #[test]
+    fn console_probe_checks_live_owner_http_response_and_does_not_follow_external_redirects() {
+        use std::io::{Read, Write};
+        let (_temp, state, _r) = fixture("mailpit");
+        register_services(&state.paths, &state.store, &state.manager);
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("http://127.0.0.1:{port}/console");
+        state.manager.set_web_target("mailpit", Ok(url.clone()));
+        assert_eq!(state.service_web_url("mailpit").unwrap_err().code, "SERVICE_NOT_RUNNING");
+        state.manager.adopt("mailpit", &[std::process::id()], Some(port));
+        let worker = listener.try_clone().unwrap();
+        let serve = std::thread::spawn(move || {
+            let (mut stream, _) = worker.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut input = [0; 4096]; let n = stream.read(&mut input).unwrap();
+            assert!(String::from_utf8_lossy(&input[..n]).starts_with("GET /console HTTP/1.1"));
+            assert!(!String::from_utf8_lossy(&input[..n]).to_ascii_lowercase().contains("authorization:"));
+            stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: https://example.invalid/login\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        assert_eq!(state.service_web_url("mailpit").unwrap(), url);
+        serve.join().unwrap();
+        state.manager.set_web_target("mailpit", Ok("https://example.invalid/".into()));
+        assert_eq!(state.service_web_url("mailpit").unwrap_err().code, "SERVICE_WEB_UNAVAILABLE");
+        state.manager.set_web_target("mailpit", Ok(url));
+        drop(listener);
+        assert_eq!(state.service_web_url("mailpit").unwrap_err().code, "SERVICE_WEB_UNAVAILABLE");
+        state.manager.set_state("mailpit", crate::model::ServiceState::Stopped);
+        assert_eq!(state.manager.web_target("mailpit").unwrap_err().code, "SERVICE_WEB_UNKNOWN");
+        state.manager.services.lock().remove("mailpit");
+    }
+
+    #[test]
+    fn console_probe_rejects_an_api_response_and_keeps_the_service_running() {
+        use std::io::{Read, Write};
+        let (_temp, state, _r) = fixture("qdrant");
+        register_services(&state.paths, &state.store, &state.manager);
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        state.manager.adopt("qdrant", &[std::process::id()], Some(port));
+        state.manager.set_web_target("qdrant", Ok(format!("http://127.0.0.1:{port}/dashboard")));
+        let worker = listener.try_clone().unwrap();
+        let serve = std::thread::spawn(move || {
+            let (mut stream, _) = worker.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut input = [0; 4096]; let _ = stream.read(&mut input).unwrap();
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+            let (stream, _) = worker.accept().unwrap(); drop(stream); // HTTPS 探测也不能把 API 误报成网页。
+        });
+        assert_eq!(state.service_web_url("qdrant").unwrap_err().code, "SERVICE_WEB_UNAVAILABLE");
+        serve.join().unwrap();
+        assert_eq!(state.manager.snapshot("qdrant").unwrap().state, crate::model::ServiceState::Running);
+        state.manager.services.lock().remove("qdrant");
+    }
+
+    #[test]
     fn sftpgo_preserves_provider_custom_resources_and_rejects_bad_configuration() {
         let (_temp, state, r) = fixture("sftpgo");
         let content = "{\"data_provider\":{\"driver\":\"bolt\",\"name\":\"kept.db\"},\"httpd\":{\"templates_path\":\"custom-templates\"}}\n";
@@ -1246,6 +1444,7 @@ mod startup_tests {
         config["sftpd"]["bindings"][0]["address"] = "127.0.0.1".into();
         config["httpd"]["bindings"][0]["address"] = "127.0.0.1".into();
         config["common"]["idle_timeout"] = 17.into();
+        config["httpd"]["web_root"] = "/niceenv-console".into();
         let original_config = serde_json::to_vec_pretty(&config).unwrap();
         let config_path = legacy_dir.join("sftpgo.json"); std::fs::write(&config_path, &original_config).unwrap();
         let base = (22000..42000).find(|port| [0, 1, 6058, 6059].iter().all(|offset| tcp_port_bindable(port + offset))).unwrap();
@@ -1268,8 +1467,16 @@ mod startup_tests {
         let response = client.post(format!("http://127.0.0.1:{}/api/v2/users", first + 6058)).bearer_auth(&access)
             .json(&serde_json::json!({"username":"native-user","password":password,"status":1,"home_dir":user_home.to_string_lossy(),"permissions":{"/":["*"]}})).send().unwrap();
         assert!(response.status().is_success(), "create user status: {}", response.status());
-        let admin = client.get(format!("http://127.0.0.1:{}/web/admin", first + 6058)).send().unwrap();
+        let web_url = state.service_web_url("sftpgo").unwrap();
+        assert_eq!(web_url, format!("http://127.0.0.1:{}/niceenv-console/web/admin", first + 6058));
+        let admin = client.get(&web_url).send().unwrap();
         assert!(admin.status().is_success()); assert!(admin.text().unwrap().to_ascii_lowercase().contains("<html"));
+        // 修改文件中的待生效路径和计划端口，不得改变当前进程的入口。
+        config["httpd"]["web_root"] = "/next-start".into();
+        std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+        state.store.set_port_override("sftpgo", Some(first + 10)).unwrap();
+        assert_eq!(state.service_web_url("sftpgo").unwrap(), web_url);
+        std::fs::write(&config_path, &original_config).unwrap();
         let fingerprint = crate::certdeploy::probe_ssh("127.0.0.1", first).unwrap().fingerprint;
         struct VerifyHost(String);
         impl russh::client::Handler for VerifyHost {
@@ -1298,12 +1505,14 @@ mod startup_tests {
         transfer(first, true);
         assert_eq!(std::fs::read(user_home.join("native.txt")).unwrap(), b"persistent SFTP content");
         state.stop_service("sftpgo").unwrap();
+        assert_eq!(state.service_web_url("sftpgo").unwrap_err().code, "SERVICE_NOT_RUNNING");
         install("2.7.6", &new_source); state.set_active_version("sftpgo", "2.7.6").unwrap();
         let requested = (base + 20..42000).find(|port| [0, 6058].iter().all(|offset| tcp_port_bindable(port + offset))).unwrap();
         let occupied_sftp = std::net::TcpListener::bind(("127.0.0.1", requested)).unwrap();
         state.store.set_port_override("sftpgo", Some(requested)).unwrap();
         state.start_service("sftpgo").unwrap_or_else(|e| panic!("{e:?}\n{:?}", state.manager.tail("sftpgo", 20)));
         let second = state.manager.snapshot("sftpgo").unwrap().port.unwrap(); assert_ne!(second, requested);
+        assert_eq!(state.service_web_url("sftpgo").unwrap(), format!("http://127.0.0.1:{}/niceenv-console/web/admin", second + 6058));
         assert_eq!(state.manager.snapshot("sftpgo").unwrap().version.as_deref(), Some("2.7.6"));
         assert_eq!(crate::certdeploy::probe_ssh("127.0.0.1", second).unwrap().fingerprint, fingerprint);
         let response = client.get(format!("http://127.0.0.1:{}/api/v2/users/native-user", second + 6058)).bearer_auth(token(second)).send().unwrap();
@@ -1323,6 +1532,43 @@ mod startup_tests {
         assert_eq!(state.start_service("sftpgo").unwrap_err().code, "SFTPGO_CONFIG_INVALID");
         assert!(state.manager.snapshot("sftpgo").unwrap().pids.is_empty());
         drop(occupied_web); drop(occupied_sftp);
+    }
+
+    #[test]
+    #[ignore = "requires NSB_VERIFY_MAILPIT pointing to the official Windows Mailpit executable"]
+    fn native_mailpit_console_uses_fallback_port_and_opens_real_mail_interface() {
+        let executable = std::env::var_os("NSB_VERIFY_MAILPIT").expect("set NSB_VERIFY_MAILPIT");
+        let (_temp, state, mut r) = fixture("mailpit");
+        std::fs::copy(executable, &r.bin).unwrap();
+        r.entry.run.as_mut().unwrap().args.extend(["--webroot".into(), "/niceenv-mail/".into()]);
+        r.spec = r.entry.run.clone().unwrap();
+        std::fs::write(PathBuf::from(&r.inst.install_path).join(".niceenv-package.json"), serde_json::to_vec(&r.entry).unwrap()).unwrap();
+        let base = (29000..42000).find(|port| [0, 1, -7000, -6999].iter().all(|offset| tcp_port_bindable((*port as i32 + offset) as u16))).unwrap();
+        let occupied = std::net::TcpListener::bind(("127.0.0.1", base)).unwrap();
+        state.store.set_port_override("mailpit", Some(base)).unwrap();
+        state.store.set_setting("autoFallbackPort", "true").unwrap();
+        struct Cleanup<'a>(&'a crate::CoreState);
+        impl Drop for Cleanup<'_> { fn drop(&mut self) { let _ = self.0.stop_service("mailpit"); } }
+        let _cleanup = Cleanup(&state);
+        state.start_service("mailpit").unwrap();
+        let port = state.manager.snapshot("mailpit").unwrap().port.unwrap();
+        assert_ne!(port, base);
+        let url = state.service_web_url("mailpit").unwrap();
+        assert_eq!(url, format!("http://127.0.0.1:{port}/niceenv-mail"));
+        let client = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(3)).build().unwrap();
+        let response = client.get(&url).send().unwrap();
+        assert!(response.status().is_success()); assert!(response.text().unwrap().contains("Mailpit"));
+        let list = client.get(format!("{url}/api/v1/messages")).send().unwrap();
+        assert!(list.status().is_success()); assert_eq!(list.json::<serde_json::Value>().unwrap()["total"], 0);
+        r.port = Some(port);
+        assert_eq!(generic_web_target(&r, None).unwrap(), url);
+        state.store.set_port_override("mailpit", Some(port + 10)).unwrap();
+        assert_eq!(state.service_web_url("mailpit").unwrap(), url);
+        let pids = state.manager.snapshot("mailpit").unwrap().pids;
+        state.stop_service("mailpit").unwrap();
+        assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));
+        assert_eq!(state.service_web_url("mailpit").unwrap_err().code, "SERVICE_NOT_RUNNING");
+        drop(occupied);
     }
 
     #[test]

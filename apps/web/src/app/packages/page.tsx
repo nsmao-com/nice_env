@@ -53,6 +53,7 @@ import { BulkResult } from "@/components/shared/bulk-actions";
 import { InstallDialog, type InstallTarget } from "@/components/shared/install-dialog";
 import { ServiceIcon } from "@/components/shared/service-icon";
 import { ServiceDiagnostics } from "@/components/shared/service-diagnostics";
+import { ServiceWebButton } from "@/components/shared/service-web-button";
 import { PageHeader } from "@/components/layout/app-shell";
 import { cmpVersionDesc, isPrerelease } from "@/lib/utils";
 
@@ -813,6 +814,7 @@ function PackageRow({
                     <button type="button" aria-label={t("svc.diag.title").replace("{name}", `${service.label}${service.version ? ` ${service.version}` : ""}`)}
                       className="inline-flex min-h-8 items-center gap-1 rounded px-1 py-1 text-primary hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                       onClick={() => setDiagnosticService(service)}><Stethoscope className="h-3 w-3 shrink-0" />{t("svc.diagnose")}</button>
+                    <ServiceWebButton service={service} disabled={disabled} />
                     {service.lastError && service.state === "error" && <p className="w-full break-words text-error [overflow-wrap:anywhere]">{service.lastError.message}</p>}
                   </div>)}
               </div>

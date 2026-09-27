@@ -10,6 +10,7 @@ import { cn, fmtUptime } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { ServiceSwitch } from "./service-switch";
 import { ServiceIcon } from "./service-icon";
+import { ServiceWebButton } from "./service-web-button";
 import { StatusLight } from "./status-light";
 import { useT } from "@/lib/store";
 import { useInvalidate, toastError, toastPortConflict } from "@/lib/hooks";
@@ -143,6 +144,7 @@ export function ServiceRow({ service }: { service: ServiceStatus }) {
           </Button>
         )}
 
+        <ServiceWebButton service={service} disabled={busy} />
         {service.logFile && (
           <>
             <Button

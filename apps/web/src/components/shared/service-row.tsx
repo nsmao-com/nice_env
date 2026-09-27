@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { ServiceSwitch } from "./service-switch";
 import { ServiceIcon } from "./service-icon";
 import { ServiceWebButton } from "./service-web-button";
+import { SftpgoConfigButton } from "./sftpgo-config-button";
 import { StatusLight } from "./status-light";
 import { useT } from "@/lib/store";
 import { useInvalidate, toastError, toastPortConflict } from "@/lib/hooks";
@@ -145,6 +146,7 @@ export function ServiceRow({ service }: { service: ServiceStatus }) {
         )}
 
         <ServiceWebButton service={service} disabled={busy} />
+        <SftpgoConfigButton service={service} disabled={busy} />
         {service.logFile && (
           <>
             <Button

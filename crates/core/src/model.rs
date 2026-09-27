@@ -77,6 +77,25 @@ pub struct ServiceStatus {
     pub missing_requires: Vec<String>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SftpgoConfigDirectory {
+    pub directory: String,
+    pub label: String,
+    pub config_file: Option<String>,
+    pub state_files: Vec<String>,
+    pub modified_at: Option<u64>,
+    pub issue: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SftpgoConfigDirectories {
+    pub version: String,
+    pub current: Option<String>,
+    pub directories: Vec<SftpgoConfigDirectory>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum SiteKind {

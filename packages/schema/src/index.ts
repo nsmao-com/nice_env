@@ -295,6 +295,22 @@ export const ServiceStatus = z.object({
 });
 export type ServiceStatus = z.infer<typeof ServiceStatus>;
 
+export const SftpgoConfigDirectory = z.object({
+  directory: z.string(),
+  label: z.string(),
+  configFile: z.string().nullable(),
+  stateFiles: z.array(z.string()),
+  modifiedAt: z.number().nullable(),
+  issue: z.string().nullable(),
+});
+export type SftpgoConfigDirectory = z.infer<typeof SftpgoConfigDirectory>;
+export const SftpgoConfigDirectories = z.object({
+  version: z.string(),
+  current: z.string().nullable(),
+  directories: z.array(SftpgoConfigDirectory),
+});
+export type SftpgoConfigDirectories = z.infer<typeof SftpgoConfigDirectories>;
+
 /* ============ 站点 / Sites ============ */
 
 export const SiteKind = z.enum([

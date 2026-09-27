@@ -213,6 +213,8 @@ pub fn run() {
             list_service_status,
             service_web_url,
             repair_service_web_ui,
+            sftpgo_config_directories,
+            select_sftpgo_config,
             start_service,
             stop_service,
             restart_service,
@@ -726,6 +728,27 @@ fn cancel_download(
 }
 
 /* ================= 服务 ================= */
+
+#[tauri::command]
+async fn sftpgo_config_directories(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> Result<nsb_core::model::SftpgoConfigDirectories, tauri::Error> {
+    let activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || { let _activity = activity; map_jh(st.sftpgo_config_directories()) })
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn select_sftpgo_config(app: tauri::AppHandle, state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    directory: String, version: String, expected_current: Option<String>) -> Result<bool, tauri::Error> {
+    let activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    let st = state.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let _activity = activity;
+        map_jh(st.select_sftpgo_config(&directory, &version, expected_current.as_deref()).map(|_| true))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?;
+    crate::tray::refresh(&app);
+    result
+}
 
 #[tauri::command]
 async fn service_web_url(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: String) -> Result<String, tauri::Error> {

@@ -877,6 +877,20 @@ impl CoreState {
         out
     }
 
+    pub fn sftpgo_config_directories(&self) -> Result<model::SftpgoConfigDirectories> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后读取配置目录"))?;
+        generic::sftpgo_config_directories(&self.store, &self.paths)
+    }
+
+    pub fn select_sftpgo_config(&self, directory: &str, version: &str, expected_current: Option<&str>) -> Result<()> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后选择配置目录"))?;
+        ensure_application_accepts_work()?;
+        if self.downloader.has_tasks() { return Err(AppError::new("PACKAGE_BUSY", "套件正在安装或卸载，请完成后再选择配置目录")); }
+        generic::select_sftpgo_config(&self.store, &self.paths, &self.manager, directory, version, expected_current)
+    }
+
     pub fn start_service(&self, id: &str) -> Result<()> {
         let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
         let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后启动"))?;

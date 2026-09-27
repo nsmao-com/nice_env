@@ -1,5 +1,6 @@
 import type {
   ServiceStatus,
+  SftpgoConfigDirectories,
   Site,
   PackageView,
   SystemStats,
@@ -68,6 +69,10 @@ export const stopService = (id: string) =>
   safe(invoke<boolean>("stop_service", { id }));
 export const restartService = (id: string) =>
   safe(invoke<boolean>("restart_service", { id }));
+export const sftpgoConfigDirectories = () =>
+  safe(invoke<SftpgoConfigDirectories>("sftpgo_config_directories"));
+export const selectSftpgoConfig = (directory: string, version: string, expectedCurrent: string | null) =>
+  safe(invoke<boolean>("select_sftpgo_config", { directory, version, expectedCurrent }));
 
 /* 服务栈（用户自定义的一整套服务 + 一键启动） */
 export const listStacks = () => safe(invoke<Stack[]>("list_stacks"));

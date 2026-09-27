@@ -49,6 +49,7 @@ import { RingProgress } from "@/components/shared/ring-progress";
 import { VersionPicker, type VersionItem } from "@/components/shared/version-picker";
 import { PhpExtensionsDialog, PhpExtBadge } from "@/components/shared/php-extensions";
 import { ConfirmDialog } from "@/components/shared/misc";
+import { SftpgoConfigButton } from "@/components/shared/sftpgo-config-button";
 import { BulkResult } from "@/components/shared/bulk-actions";
 import { InstallDialog, type InstallTarget } from "@/components/shared/install-dialog";
 import { ServiceIcon } from "@/components/shared/service-icon";
@@ -815,6 +816,7 @@ function PackageRow({
                       className="inline-flex min-h-8 items-center gap-1 rounded px-1 py-1 text-primary hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                       onClick={() => setDiagnosticService(service)}><Stethoscope className="h-3 w-3 shrink-0" />{t("svc.diagnose")}</button>
                     <ServiceWebButton service={service} disabled={disabled} />
+                    <SftpgoConfigButton service={service} disabled={disabled} />
                     {service.lastError && service.state === "error" && <p className="w-full break-words text-error [overflow-wrap:anywhere]">{service.lastError.message}</p>}
                   </div>)}
               </div>

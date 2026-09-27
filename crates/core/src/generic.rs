@@ -160,6 +160,11 @@ pub fn manifest_entry_for(store: &Store, service_id: &str) -> Option<PackageMani
 
 /// 解析服务上下文：安装信息 + 清单条目 + run 描述 + 各占位符取值
 pub fn resolve(store: &Store, paths: &Paths, service_id: &str) -> Result<Resolved> {
+    resolve_with_sftpgo_directory(store, paths, service_id, None)
+}
+
+/// 显式目录只供选择前的只读检查，不能创建目录或绕过路径检查。
+fn resolve_with_sftpgo_directory(store: &Store, paths: &Paths, service_id: &str, directory: Option<PathBuf>) -> Result<Resolved> {
     let entry = manifest_entry_for(store, service_id).ok_or_else(|| {
         AppError::new("UNKNOWN_SERVICE", format!("清单里没有服务 {service_id}"))
             .with_hint("该服务可能是内置编排（nginx/mysql 等），或清单需要更新")
@@ -211,10 +216,12 @@ pub fn resolve(store: &Store, paths: &Paths, service_id: &str) -> Result<Resolve
     let data = paths
         .data()
         .join(spec.data_dir.clone().unwrap_or_else(|| id.clone()));
-    let etc = if managed_sftpgo(&entry, &spec) { sftpgo_config_dir(store, paths)? } else { paths.etc_dir(&id, &version) };
+    let preview = directory.is_some();
+    let etc = if managed_sftpgo(&entry, &spec) {
+        match directory { Some(directory) => directory, None => sftpgo_config_dir(store, paths)? }
+    } else { paths.etc_dir(&id, &version) };
     let log = paths.service_log(&service_id.replace('@', "_"));
-    std::fs::create_dir_all(&data)?;
-    std::fs::create_dir_all(&etc)?;
+    if !preview { std::fs::create_dir_all(&data)?; std::fs::create_dir_all(&etc)?; }
 
     let http_port = crate::services::PortsProfile::from_settings(store).http;
     let port = resolve_port(store, service_id, &entry, &spec)?;
@@ -314,12 +321,7 @@ fn managed_sftpgo(entry: &PackageManifestEntry, spec: &ServiceRunSpec) -> bool {
 /// 绑定相对配置目录；不复制数据库或 SSH 主机密钥，切换程序版本继续使用原目录。
 fn sftpgo_config_dir(store: &Store, paths: &Paths) -> Result<PathBuf> {
     if let Some(relative) = store.get_setting_checked(SFTPGO_CONFIG_BINDING)? {
-        let parts: Vec<_> = relative.split('/').collect();
-        if parts.len() != 3 || parts[0] != "etc" || parts[1] != "sftpgo" || parts[2].is_empty()
-            || matches!(parts[2], "." | "..") || !parts[2].bytes().all(|c| c.is_ascii_alphanumeric() || b"._+-".contains(&c)) {
-            return Err(AppError::new("SFTPGO_CONFIG_PATH", "SFTPGo 的已绑定配置目录无效"));
-        }
-        let path = crate::paths::checked_data_path(&paths.base, &relative)?;
+        let path = checked_sftpgo_directory(paths, &relative)?;
         if !path.is_dir() {
             return Err(AppError::new("SFTPGO_CONFIG_MISSING", "SFTPGo 原配置和数据目录不存在，未创建空库")
                 .with_hint(format!("请恢复原目录后重试：{}", path.display())));
@@ -342,14 +344,85 @@ fn sftpgo_config_dir(store: &Store, paths: &Paths) -> Result<PathBuf> {
         0 => Ok(crate::paths::checked_data_path(&paths.base, "etc/sftpgo/shared")?),
         1 => Ok(candidates.remove(0)),
         _ => Err(AppError::new("SFTPGO_CONFIG_AMBIGUOUS", "发现多份旧 SFTPGo 配置和数据，未自动选择或合并")
-            .with_hint("请先备份各目录，再在 etc/sftpgo 下保留需要继续使用的一份，其余移至备份目录后重试。")),
+            .with_hint("请在服务的“配置目录”中选择要继续使用的一份，再启动服务；各目录的原文件会保留。")),
     }
+}
+
+fn checked_sftpgo_directory(paths: &Paths, relative: &str) -> Result<PathBuf> {
+    let parts: Vec<_> = relative.split('/').collect();
+    if parts.len() != 3 || parts[0] != "etc" || parts[1] != "sftpgo" || parts[2].is_empty()
+        || matches!(parts[2], "." | "..") || !parts[2].bytes().all(|c| c.is_ascii_alphanumeric() || b"._+-".contains(&c)) {
+        return Err(AppError::new("SFTPGO_CONFIG_PATH", "SFTPGo 配置目录无效，请从已发现的目录中选择"));
+    }
+    Ok(crate::paths::checked_data_path(&paths.base, relative)?)
+}
+
+pub(crate) fn sftpgo_config_directories(store: &Store, paths: &Paths) -> Result<crate::model::SftpgoConfigDirectories> {
+    let entry = manifest_entry_for(store, "sftpgo").ok_or_else(|| AppError::not_installed("SFTPGo"))?;
+    if entry.run.as_ref().is_none_or(|spec| !managed_sftpgo(&entry, spec)) {
+        return Err(AppError::new("SFTPGO_CONFIG_UNSUPPORTED", "此 SFTPGo 使用自定义运行配置，请按其启动参数管理配置目录"));
+    }
+    let current = store.get_setting_checked(SFTPGO_CONFIG_BINDING)?;
+    let parent = crate::paths::checked_data_path(&paths.base, "etc/sftpgo")?;
+    let mut directories = Vec::new();
+    let entries = match std::fs::read_dir(&parent) {
+        Ok(entries) => Some(entries), Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries.into_iter().flatten() {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() { continue; }
+        let label = entry.file_name().to_string_lossy().into_owned();
+        let relative = format!("etc/sftpgo/{label}");
+        let mut row = crate::model::SftpgoConfigDirectory { directory: relative.clone(), label, config_file: None,
+            state_files: vec![], modified_at: None, issue: None };
+        let inspected = (|| -> Result<()> {
+            let directory = checked_sftpgo_directory(paths, &relative)?;
+            if std::fs::read_dir(&directory)?.next().transpose()?.is_none() && current.as_deref() != Some(&relative) { return Ok(()); }
+            row.modified_at = std::fs::metadata(&directory)?.modified().ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs());
+            row.config_file = sftpgo_config_file(&directory)?.and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()));
+            let r = resolve_with_sftpgo_directory(store, paths, "sftpgo", Some(directory))?;
+            let config = inspect_sftpgo(store, paths, &r, true, false)?;
+            row.state_files = config.state_files.iter().map(|path| path.strip_prefix(&r.etc).unwrap_or(path).to_string_lossy().into_owned()).collect();
+            for file in std::iter::once(&config.file).chain(config.state_files.iter()) {
+                let modified = std::fs::metadata(file)?.modified().ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs());
+                row.modified_at = row.modified_at.max(modified);
+            }
+            Ok(())
+        })();
+        if let Err(error) = inspected { row.issue = Some(match error.hint { Some(hint) => format!("{}：{hint}", error.message), None => error.message }); }
+        if row.modified_at.is_some() || row.issue.is_some() { directories.push(row); }
+    }
+    directories.sort_by(|a, b| a.directory.cmp(&b.directory));
+    Ok(crate::model::SftpgoConfigDirectories { version: entry.version, current, directories })
+}
+
+pub(crate) fn select_sftpgo_config(store: &Store, paths: &Paths, manager: &ServiceManager,
+    directory: &str, version: &str, expected_current: Option<&str>) -> Result<()> {
+    checked_sftpgo_directory(paths, directory)?;
+    if manager.snapshot("sftpgo").is_some_and(|s| matches!(s.state, crate::model::ServiceState::Running | crate::model::ServiceState::Starting | crate::model::ServiceState::Stopping)
+        || s.pids.iter().any(|pid| platform::process_alive(*pid))) {
+        return Err(AppError::new("SERVICE_BUSY", "请先停止 SFTPGo，再选择配置目录"));
+    }
+    let latest = sftpgo_config_directories(store, paths)?;
+    if latest.version != version || (latest.current.as_deref() != expected_current && latest.current.as_deref() != Some(directory)) {
+        return Err(AppError::new("SFTPGO_CONFIG_CHANGED", "SFTPGo 版本或目录选择已经变化，请刷新后重新选择"));
+    }
+    let candidate = latest.directories.iter().find(|entry| entry.directory == directory)
+        .ok_or_else(|| AppError::new("SFTPGO_CONFIG_MISSING", "所选配置目录已不存在，请刷新后重新选择"))?;
+    if let Some(issue) = &candidate.issue { return Err(AppError::new("SFTPGO_CONFIG_INVALID", "所选目录未通过启动前检查，原选择保持不变").with_hint(issue)); }
+    store.set_setting(SFTPGO_CONFIG_BINDING, directory)?;
+    if manager.snapshot("sftpgo").is_some_and(|s| s.last_error.is_some_and(|e| e.code.starts_with("SFTPGO_CONFIG_") || e.code == "SFTPGO_STATE_MISSING")) {
+        manager.set_state("sftpgo", crate::model::ServiceState::Stopped);
+    }
+    Ok(())
 }
 
 struct SftpgoConfig {
     file: PathBuf,
     env: Vec<(String, String)>,
     web_target: Result<String>,
+    state_files: Vec<PathBuf>,
 }
 
 fn sftpgo_config_file(directory: &std::path::Path) -> Result<Option<PathBuf>> {
@@ -506,8 +579,11 @@ fn sftpgo_process_env(r: &Resolved) -> Result<std::collections::HashMap<String, 
 }
 
 fn prepare_sftpgo(store: &Store, paths: &Paths, r: &Resolved) -> Result<SftpgoConfig> {
+    inspect_sftpgo(store, paths, r, store.get_setting_checked(SFTPGO_CONFIG_BINDING)?.is_some(), true)
+}
+
+fn inspect_sftpgo(store: &Store, paths: &Paths, r: &Resolved, previously_started: bool, write_config: bool) -> Result<SftpgoConfig> {
     let existing = sftpgo_config_file(&r.etc)?;
-    let previously_started = store.get_setting_checked(SFTPGO_CONFIG_BINDING)?.is_some();
     if previously_started && existing.is_none() {
         return Err(AppError::new("SFTPGO_CONFIG_MISSING", "原 SFTPGo 配置文件已丢失，未使用默认配置创建空库")
             .with_hint(format!("请恢复 {} 下的原配置文件后重试。", r.etc.display())));
@@ -551,16 +627,18 @@ fn prepare_sftpgo(store: &Store, paths: &Paths, r: &Resolved) -> Result<SftpgoCo
     // 默认资源路径也属于子进程环境，env.d 的插值必须能读取到相同的值。
     if !env.is_empty() { effective_env = sftpgo_parse_env(&files, process_env)?; }
     // 使用实际生效的环境配置检查本地状态，避免 env.d 使丢失检查被跳过。
+    let mut state_files = Vec::new();
     if previously_started {
         let value = |key: &str, pointer: &str, default: &str| {
             effective_env.get(key).cloned()
                 .unwrap_or_else(|| config.pointer(pointer).and_then(|value| value.as_str()).unwrap_or(default).to_string())
         };
-        let require = |name: &str| -> Result<()> {
+        let mut require = |name: &str| -> Result<()> {
             let path = r.etc.join(name);
             let present = std::fs::metadata(&path).map(|m| m.is_file() && m.len() > 0).unwrap_or(false);
             if !present { return Err(AppError::new("SFTPGO_STATE_MISSING", "SFTPGo 原数据库或主机密钥缺失，未自动重新初始化")
                 .with_hint(format!("请先恢复原文件：{}", path.display()))); }
+            state_files.push(path);
             Ok(())
         };
         let driver = value("SFTPGO_DATA_PROVIDER__DRIVER", "/data_provider/driver", "sqlite");
@@ -575,11 +653,11 @@ fn prepare_sftpgo(store: &Store, paths: &Paths, r: &Resolved) -> Result<SftpgoCo
         else { for name in keys { require(name)?; } }
     }
     let file = existing.unwrap_or_else(|| r.etc.join(source.file_name().unwrap()));
-    if file != source {
+    if write_config && file != source {
         crate::paths::write_with_backup_expected(&file, &content, &paths.backup(), Some(None))?;
     }
     let web_target = sftpgo_web_target(r, &config, &effective_env);
-    Ok(SftpgoConfig { file, env, web_target })
+    Ok(SftpgoConfig { file, env, web_target, state_files })
 }
 
 fn web_unavailable(hint: &str) -> AppError {
@@ -1641,6 +1719,44 @@ mod startup_tests {
     }
 
     #[test]
+    fn sftpgo_directory_selection_is_read_only_until_confirmed_and_rechecks_state() {
+        let (_temp, state, r) = fixture("sftpgo");
+        for version in ["2.7.4", "2.7.5"] {
+            let directory = state.paths.etc_dir("sftpgo", version); std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("sftpgo.json"), r#"{"data_provider":{"driver":"bolt","name":"accounts.db"},"sftpd":{"host_keys":["identity"]}}"#).unwrap();
+            std::fs::write(directory.join("accounts.db"), version).unwrap();
+            std::fs::write(directory.join("identity"), format!("key-{version}")).unwrap();
+        }
+        let report = state.sftpgo_config_directories().unwrap();
+        assert!(report.current.is_none()); assert_eq!(report.directories.len(), 2);
+        assert!(report.directories.iter().all(|item| item.issue.is_none() && item.state_files.len() == 2));
+        assert!(!r.etc.join("sftpgo.json").exists()); assert!(!r.etc.join("accounts.db").exists());
+        assert!(state.store.get_setting(SFTPGO_CONFIG_BINDING).is_none());
+        assert_eq!(sftpgo_config_dir(&state.store, &state.paths).unwrap_err().code, "SFTPGO_CONFIG_AMBIGUOUS");
+        for invalid in ["../outside", "etc/sftpgo/../2.7.5", "etc/sftpgo/2.7.5/extra", "etc/sftpgo/.."] {
+            assert_eq!(state.select_sftpgo_config(invalid, &report.version, None).unwrap_err().code, "SFTPGO_CONFIG_PATH");
+        }
+        assert_eq!(state.select_sftpgo_config("etc/sftpgo/2.7.5", "stale-version", None).unwrap_err().code, "SFTPGO_CONFIG_CHANGED");
+        let removed = state.paths.etc_dir("sftpgo", "2.7.5").join("identity"); std::fs::remove_file(&removed).unwrap();
+        assert_eq!(state.select_sftpgo_config("etc/sftpgo/2.7.5", &report.version, None).unwrap_err().code, "SFTPGO_CONFIG_INVALID");
+        assert!(state.store.get_setting(SFTPGO_CONFIG_BINDING).is_none());
+        std::fs::write(removed, "key-2.7.5").unwrap();
+        state.select_sftpgo_config("etc/sftpgo/2.7.5", &report.version, None).unwrap();
+        assert_eq!(sftpgo_config_dir(&state.store, &state.paths).unwrap(), state.paths.etc_dir("sftpgo", "2.7.5"));
+        assert_eq!(state.select_sftpgo_config("etc/sftpgo/2.7.4", &report.version, None).unwrap_err().code, "SFTPGO_CONFIG_CHANGED");
+        register_services(&state.paths, &state.store, &state.manager);
+        state.manager.adopt("sftpgo", &[std::process::id()], Some(2022));
+        assert_eq!(state.select_sftpgo_config("etc/sftpgo/2.7.4", &report.version, Some("etc/sftpgo/2.7.5")).unwrap_err().code, "SERVICE_BUSY");
+        state.manager.services.lock().remove("sftpgo");
+        state.select_sftpgo_config("etc/sftpgo/2.7.4", &report.version, Some("etc/sftpgo/2.7.5")).unwrap();
+        for version in ["2.7.4", "2.7.5"] {
+            let directory = state.paths.etc_dir("sftpgo", version);
+            assert_eq!(std::fs::read_to_string(directory.join("accounts.db")).unwrap(), version);
+            assert_eq!(std::fs::read_to_string(directory.join("identity")).unwrap(), format!("key-{version}"));
+        }
+    }
+
+    #[test]
     fn console_targets_use_resolved_ports_and_preserve_sftpgo_web_configuration() {
         for (id, offset, path) in [("mailpit", 0, "/"), ("minio", 1, "/"), ("consul", 0, "/ui"), ("rnacos", 2000, "/rnacos"), ("qdrant", 0, "/dashboard")] {
             let (_temp, state, mut r) = fixture(id); r.port = Some(31000);
@@ -2224,6 +2340,20 @@ mod startup_tests {
             }
             std::fs::write(legacy_dir.join("env.d/30-keys.env"),
                 "SFTPGO_SFTPD__HOST_KEYS='ssh-keys/id_rsa,ssh-keys/id_ecdsa,ssh-keys/id_ed25519'\n").unwrap();
+            let alternate = state.paths.etc_dir("sftpgo", "archive"); copy_tree(&legacy_dir, &alternate);
+            let choices = state.sftpgo_config_directories().unwrap();
+            assert_eq!(choices.directories.len(), 2); assert!(choices.directories.iter().all(|row| row.issue.is_none()));
+            state.select_sftpgo_config("etc/sftpgo/archive", "2.7.5", Some("etc/sftpgo/2.7.5")).unwrap();
+            state.start_service("sftpgo").unwrap();
+            let alternate_port = state.manager.snapshot("sftpgo").unwrap().port.unwrap();
+            let response = client.post(format!("http://127.0.0.1:{}/api/v2/users", alternate_port + 6058)).bearer_auth(token(alternate_port))
+                .json(&serde_json::json!({"username":"alternate-only","password":password,"status":1,
+                    "home_dir":state.paths.data().join("sftpgo/alternate-files").to_string_lossy(),"permissions":{"/":["*"]}})).send().unwrap();
+            assert!(response.status().is_success());
+            assert_eq!(state.select_sftpgo_config("etc/sftpgo/2.7.5", "2.7.5", Some("etc/sftpgo/archive")).unwrap_err().code, "SERVICE_BUSY");
+            state.stop_service("sftpgo").unwrap();
+            state.select_sftpgo_config("etc/sftpgo/2.7.5", "2.7.5", Some("etc/sftpgo/archive")).unwrap();
+            assert!(alternate.join(database_name).is_file());
         }
         install("2.7.6", &new_source); state.set_active_version("sftpgo", "2.7.6").unwrap();
         let requested = (base + 20..42000).find(|port| [0, 6058].iter().all(|offset| tcp_port_bindable(port + offset))).unwrap();
@@ -2236,6 +2366,10 @@ mod startup_tests {
         assert_eq!(crate::certdeploy::probe_ssh("127.0.0.1", second).unwrap().fingerprint, fingerprint);
         let response = client.get(format!("http://127.0.0.1:{}/api/v2/users/native-user", second + 6058)).bearer_auth(token(second)).send().unwrap();
         assert!(response.status().is_success()); transfer(second, false);
+        if with_env_directory {
+            let response = client.get(format!("http://127.0.0.1:{}/api/v2/users/alternate-only", second + 6058)).bearer_auth(token(second)).send().unwrap();
+            assert_eq!(response.status().as_u16(), 404);
+        }
         assert_eq!(std::fs::read(&config_path).unwrap(), original_config);
         assert_eq!(state.store.get_setting(SFTPGO_CONFIG_BINDING).as_deref(), Some("etc/sftpgo/2.7.5"));
         assert!(!state.paths.etc_dir("sftpgo", "2.7.6").join("sftpgo.db").exists());

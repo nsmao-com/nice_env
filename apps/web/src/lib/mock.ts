@@ -62,7 +62,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.54";
+const MOCK_APP_VERSION = "0.2.55";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -808,6 +808,9 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "service_web_url":
     case "repair_service_web_ui":
       throw { code: "DESKTOP_ONLY", message: "浏览器预览不能确认本机服务的管理台地址，请使用桌面端" };
+    case "sftpgo_config_directories":
+    case "select_sftpgo_config":
+      throw { code: "DESKTOP_ONLY", message: "请在桌面应用中检查和选择 SFTPGo 配置目录；网页预览无法读取本机文件" };
     case "start_service":
     case "stop_service":
     case "restart_service":

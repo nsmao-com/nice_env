@@ -1381,6 +1381,7 @@ export const CertMonitor = z.object({
   expiresAt: z.number().nullable().default(null),
   lastChecked: z.number().nullable().default(null),
   lastError: z.string().default(""),
+  notificationError: z.string().optional(),
   createdAt: z.number(),
   updatedAt: z.number(),
 });

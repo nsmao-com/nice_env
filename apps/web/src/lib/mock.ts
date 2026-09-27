@@ -62,8 +62,26 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.43";
+const MOCK_APP_VERSION = "0.2.44";
 const MOCK_NEXT_VERSION = "0.3.0";
+
+const certMonitors = new Map<string, CertMonitor>();
+let monitorNotifications = { kind: "none", url: "" };
+
+function monitorEndpoint(input: string, port: number): { host: string; port: number } {
+  try {
+    const raw = input.trim();
+    if (!raw || raw.length > 2048 || /[\s\\]/.test(raw) || !Number.isInteger(port) || port < 1 || port > 65535) throw Error();
+    const bareIPv6 = !raw.includes("://") && !raw.includes("[") && (raw.match(/:/g)?.length ?? 0) > 1;
+    const url = new URL(raw.includes("://") ? raw : `https://${bareIPv6 ? `[${raw}]` : raw}`);
+    const authority = raw.replace(/^https:\/\//i, "").split(/[/?#]/)[0];
+    if (url.protocol !== "https:" || !url.hostname || url.username || url.password || (!bareIPv6 && authority.endsWith(":"))) throw Error();
+    const explicitPort = !bareIPv6 && /:\d+$/.test(authority);
+    const parsedPort = explicitPort || raw.includes("://") ? Number(url.port || 443) : port;
+    if (!parsedPort) throw Error();
+    return { host: url.hostname.replace(/^\[|\]$/g, "").replace(/\.+$/, "").toLowerCase(), port: parsedPort };
+  } catch { throw { code: "BAD_HOST", message: "请填写域名、IP、host:port 或 HTTPS 地址；IPv6 带端口时使用 [::1]:8443" }; }
+}
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
 function ownPorts(): [string, string, number][] {
@@ -2394,35 +2412,35 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       throw { code: "DESKTOP_ONLY", message: "证书签发需要在桌面应用中执行；网页预览不会申请或部署真实证书。" };
     }
     case "certmonitor_list":
-      return [
-        {
-          id: "mon-demo", host: "demo.example.com", port: 443, name: "",
-          state: "ok", issuer: "CN=R11, O=Let's Encrypt, C=US",
-          expiresAt: Date.now() + 86400_000 * 62,
-          lastChecked: Date.now() - 3600_000, lastError: "",
-          createdAt: Date.now(), updatedAt: Date.now(),
-        },
-        {
-          id: "mon-old", host: "old-router.lan", port: 443, name: "",
-          state: "expiring", issuer: "CN=self-signed",
-          expiresAt: Date.now() + 86400_000 * 5,
-          lastChecked: Date.now() - 3600_000, lastError: "",
-          createdAt: Date.now(), updatedAt: Date.now(),
-        },
-      ] as T;
-    case "certmonitor_add":
-      return { ...(args!.m as CertMonitor), id: `mon-${uid()}` } as T;
+      return structuredClone([...certMonitors.values()].sort((a, b) => b.createdAt - a.createdAt)) as T;
+    case "certmonitor_add": {
+      const input = args!.m as CertMonitor;
+      if (input.id) throw { code: "BAD_MONITOR_ID", message: "新增监控不能覆盖已有记录" };
+      const target = monitorEndpoint(input.host, input.port);
+      if ([...certMonitors.values()].some(m => m.host === target.host && m.port === target.port)) throw { code: "MONITOR_EXISTS", message: "该地址和端口已在监控列表中" };
+      const m: CertMonitor = { ...input, ...target, id: `mon-${crypto.randomUUID()}`, state: "idle", issuer: "", lastError: "", notificationError: "", expiresAt: null, lastChecked: null, createdAt: Date.now(), updatedAt: Date.now() };
+      certMonitors.set(m.id, m);
+      return structuredClone(m) as T;
+    }
     case "certmonitor_delete":
+      if (!certMonitors.delete(args!.id as string)) throw { code: "NOT_FOUND", message: "监控不存在" };
       return true as T;
-    case "certmonitor_check": {
-      const m = args!.id as string;
-      return {
-        id: m, host: m, port: 443, name: "", state: "ok",
-        issuer: "CN=R11, O=Let's Encrypt, C=US",
-        expiresAt: Date.now() + 86400_000 * 62,
-        lastChecked: Date.now(), lastError: "",
-        createdAt: Date.now(), updatedAt: Date.now(),
-      } as T;
+    case "certmonitor_check":
+      throw { code: "DESKTOP_ONLY", message: "真实 TLS 证书检查需要在桌面应用中执行；网页预览不会连接目标网站。" };
+    case "certmonitor_notification_get":
+      return { ...monitorNotifications } as T;
+    case "certmonitor_notification_save": {
+      const input = args!.settings as typeof monitorNotifications;
+      if (!["none", "generic", "dingtalk", "wecom", "feishu"].includes(input.kind)) throw { code: "BAD_NOTIFY_KIND", message: "请选择支持的通知方式" };
+      const url = input.url.trim();
+      if (input.kind !== "none") {
+        try {
+          const parsed = new URL(url);
+          if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || parsed.hash) throw Error();
+        } catch { throw { code: "BAD_NOTIFY_URL", message: "请填写完整的 HTTP/HTTPS Webhook 地址，不要包含用户名或密码" }; }
+      }
+      monitorNotifications = { kind: input.kind, url };
+      return { ...monitorNotifications } as T;
     }
     case "cert_export_pfx":
       return "D:\\mock\\cert.pfx" as T;

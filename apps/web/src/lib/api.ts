@@ -138,6 +138,10 @@ export const certDeployProbeSsh = (host: string, port: number) =>
 
 /* 网站证书监控 */
 export const certMonitorList = () => safe(invoke<CertMonitor[]>("certmonitor_list"));
+export interface MonitorNotificationSettings { kind: string; url: string }
+export const certMonitorNotificationGet = () => safe(invoke<MonitorNotificationSettings>("certmonitor_notification_get"));
+export const certMonitorNotificationSave = (settings: MonitorNotificationSettings) =>
+  safe(invoke<MonitorNotificationSettings>("certmonitor_notification_save", { settings }));
 export const certMonitorAdd = (m: CertMonitor) =>
   safe(invoke<CertMonitor>("certmonitor_add", { m }));
 export const certMonitorDelete = (id: string) =>

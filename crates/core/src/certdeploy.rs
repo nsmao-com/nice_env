@@ -132,16 +132,25 @@ pub fn notify(kind: &str, url: &str, ok: bool, title: &str, detail: &str) -> Res
             "source": "NiceEnv",
         }),
     };
-    let resp = http()
+    let resp = reqwest::blocking::Client::builder().timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none()).user_agent(USER_AGENT).build()
+        .map_err(|_| AppError::new("NOTIFY_HTTP", "无法创建通知连接"))?
         .post(url.trim())
         .json(&body)
         .send()
-        .map_err(|e| AppError::new("NOTIFY_HTTP", format!("通知发送失败：{e}")))?;
+        .map_err(|_| AppError::new("NOTIFY_HTTP", "通知发送失败，请检查 Webhook 地址与网络连接"))?;
     if !resp.status().is_success() {
         return Err(AppError::new(
             "NOTIFY_HTTP",
             format!("通知端点返回 {}", resp.status()),
         ));
+    }
+    if matches!(kind, "dingtalk" | "wecom" | "feishu") {
+        let body: serde_json::Value = resp.json().map_err(|_| AppError::new("NOTIFY_RESPONSE", "通知端点未返回有效确认"))?;
+        let code = if kind == "feishu" { body.get("code").or_else(|| body.get("StatusCode")) } else { body.get("errcode") };
+        if code.and_then(|v| v.as_i64()) != Some(0) {
+            return Err(AppError::new("NOTIFY_REJECTED", "通知被服务端拒绝，请检查机器人地址、关键词或签名配置"));
+        }
     }
     Ok(())
 }
@@ -1524,6 +1533,22 @@ mod tests {
             }
         });
         (url, worker)
+    }
+
+    #[test]
+    fn notification_http_and_business_errors_are_not_success_or_secret_leaks() {
+        for (kind, status, body, ok) in [
+            ("generic", 204, "", true), ("generic", 500, "private-fixture", false), ("generic", 302, "", false),
+            ("dingtalk", 200, r#"{"errcode":0}"#, true), ("wecom", 200, r#"{"errcode":0}"#, true),
+            ("feishu", 200, r#"{"code":0}"#, true), ("feishu", 200, r#"{"StatusCode":0}"#, true),
+            ("dingtalk", 200, r#"{"errcode":310000,"errmsg":"private-fixture"}"#, false),
+            ("wecom", 200, "{}", false), ("feishu", 200, "<html>login</html>", false),
+        ] {
+            let (url, worker) = panel_fixture(vec![(status, body)]);
+            let result = notify(kind, &format!("{url}/?token=private-fixture"), false, "fixture", "certificate expired");
+            worker.join().unwrap(); assert_eq!(result.is_ok(), ok, "{kind} {body}");
+            if let Err(error) = result { assert!(!error.to_string().contains("private-fixture")); }
+        }
     }
 
     #[test]

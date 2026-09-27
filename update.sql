@@ -99,3 +99,18 @@
 -- UPDATE sites SET runtime=:runtime, updated_at=:updated_at WHERE id=:id;
 -- 文件/记录/域名覆盖校验失败不保存选择，后续应用失败恢复原 runtime 和配置。
 -- 导入只含绑定信息，不含私钥；所选证书未恢复时在任何导入写入前拒绝。
+
+-- v0.2.44：网站证书监控使用规范化端点、并发执行锁与结果版本比较。
+-- 继续使用 SQLite cert_monitors.data JSON，新增可选 notificationError；无表结构变更。
+-- 以下是应用运行时参数化语句记录，不需手工执行；没有操作真实用户数据库。
+-- 新增/导入先规范化 host 和 port，BEGIN IMMEDIATE 内读取已有记录去重，仅 INSERT；
+-- 导入不携带来源机器的状态、签发者、到期时间、检查时间或告警错误，重复端点跳过。
+-- INSERT INTO cert_monitors(id,data,updated_at) VALUES(:id,:data,:updated_at);
+-- 网络探测、推送重试完成后均只更新原版本；删除或编辑之后不重新创建/覆盖记录。
+-- UPDATE cert_monitors SET data=:data,updated_at=:updated_at
+-- WHERE id=:id AND updated_at=:expected_revision;
+-- DELETE FROM cert_monitors WHERE id=:id;
+-- 告警方式与地址在同一事务保存；第二项写入失败时整体回滚。
+-- INSERT INTO settings(key,value) VALUES(:key,:value)
+-- ON CONFLICT(key) DO UPDATE SET value=:value;
+-- :key 依次为 monitorNotifyKind、monitorNotifyUrl；不把实际 Webhook 凭据写入此文件。

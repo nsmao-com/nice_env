@@ -299,6 +299,8 @@ pub fn run() {
             certmonitor_add,
             certmonitor_delete,
             certmonitor_check,
+            certmonitor_notification_get,
+            certmonitor_notification_save,
             cert_export_pfx,
             cert_export_der,
             cert_export_jks,
@@ -1152,6 +1154,16 @@ async fn certmonitor_check(
     tauri::async_runtime::spawn_blocking(move || map_jh(st.certmonitor_check(&id)))
         .await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+fn certmonitor_notification_get(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> Result<nsb_core::certmonitor::MonitorNotificationSettings, tauri::Error> {
+    map_jh(state.certmonitor_notification_get())
+}
+
+#[tauri::command]
+fn certmonitor_notification_save(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, settings: nsb_core::certmonitor::MonitorNotificationSettings) -> Result<nsb_core::certmonitor::MonitorNotificationSettings, tauri::Error> {
+    map_jh(state.certmonitor_notification_save(settings))
 }
 
 // ---- PFX 导出：本机证书 + 私钥打包 PKCS#12（Windows IIS / 设备导入用） ----

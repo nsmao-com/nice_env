@@ -113,6 +113,9 @@ pub fn import_from(
         crate::certs::validate_site_certificate(paths, store, site).map_err(|error|
             error.with_hint(format!("站点「{}」的证书尚不可用。请先恢复或部署原证书，再导入配置。", site.name)))?;
     }
+    // 在任何导入写入前校验监控目标；旧运行结果不代表本机已经完成检查。
+    let monitors = bundle.cert_monitors.iter().cloned().map(crate::certmonitor::prepare_monitor).collect::<Result<Vec<_>>>()?;
+    store.list_cert_monitors()?;
     let mut report = ImportReport::default();
 
     // ---- 设置（逐项覆盖） ----
@@ -213,20 +216,12 @@ pub fn import_from(
     }
 
     // ---- 网站证书监控（按 host:port 去重） ----
-    let existing_hosts: Vec<String> = store
-        .list_cert_monitors()?
-        .into_iter()
-        .map(|m| format!("{}:{}", m.host, m.port))
-        .collect();
-    for m in &bundle.cert_monitors {
-        let key = format!("{}:{}", m.host, m.port);
-        if existing_hosts.contains(&key) {
-            continue;
+    for imported in monitors {
+        match store.create_cert_monitor(&imported) {
+            Ok(()) => report.cert_monitors += 1,
+            Err(error) if error.code == "MONITOR_EXISTS" => {},
+            Err(error) => return Err(error),
         }
-        let mut imported = m.clone();
-        imported.id = format!("mon-{}-{}", now, imported.id);
-        store.save_cert_monitor(&imported)?;
-        report.cert_monitors += 1;
     }
 
     // ---- 套件缺失报告 ----
@@ -378,11 +373,12 @@ mod tests {
                 host: "h.com".into(),
                 port: 443,
                 name: String::new(),
-                state: "idle".into(),
-                issuer: String::new(),
-                expires_at: None,
-                last_checked: None,
+                state: "ok".into(),
+                issuer: "foreign result".into(),
+                expires_at: Some(123),
+                last_checked: Some(123),
                 last_error: String::new(),
+                notification_error: String::new(),
                 created_at: 1,
                 updated_at: 1,
             }],
@@ -401,5 +397,19 @@ mod tests {
         assert!(!imported.enabled); assert_eq!(imported.state, "idle");
         assert!(imported.deployment_id.is_empty()); assert!(imported.local_deploy_result.is_none());
         assert!(imported.cert_id.is_none()); assert!(imported.issued_at.is_none()); assert!(imported.expires_at.is_none());
+        let monitor = store.list_cert_monitors().unwrap().remove(0);
+        assert_ne!(monitor.id, "m1"); assert_eq!(monitor.state, "idle"); assert!(monitor.issuer.is_empty());
+        assert!(monitor.expires_at.is_none() && monitor.last_checked.is_none());
+        let mut duplicates = back; duplicates.cert_automations.clear();
+        duplicates.cert_monitors[0].host = "https://H.COM.:443/path".into();
+        duplicates.cert_monitors.push(duplicates.cert_monitors[0].clone());
+        std::fs::write(&file, serde_json::to_string(&duplicates).unwrap()).unwrap();
+        assert_eq!(import_from(&file, &paths, &store, &Arc::new(ServiceManager::new())).unwrap().cert_monitors, 0);
+        assert_eq!(store.list_cert_monitors().unwrap().len(), 1);
+        duplicates.settings.push(("fixturePreflight".into(), "should-not-be-written".into()));
+        duplicates.cert_monitors[0].host = "http://invalid.example.com".into();
+        std::fs::write(&file, serde_json::to_string(&duplicates).unwrap()).unwrap();
+        assert!(import_from(&file, &paths, &store, &Arc::new(ServiceManager::new())).is_err());
+        assert!(store.get_setting_checked("fixturePreflight").unwrap().is_none());
     }
 }

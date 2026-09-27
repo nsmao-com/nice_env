@@ -99,26 +99,23 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
 /**
  * 证书监控告警：后端 certmonitor://alert 事件 → 全局 toast。
- * 只在状态跃迁时发（后端去重），这里按 host+state 再兜个底防重复。
+ * 后端按状态跃迁去重；恢复后再次故障仍需展示。
  */
 function CertAlertListener() {
   const t = useT();
-  const seen = React.useRef(new Set<string>());
   React.useEffect(() => {
     let un: (() => void) | undefined;
+    let disposed = false;
     listen<{ host: string; state: string; message: string }>("certmonitor://alert", (p) => {
-      if (!p?.host) return;
-      const key = `${p.host}|${p.state}`;
-      if (seen.current.has(key)) return;
-      seen.current.add(key);
+      if (disposed || !p?.host) return;
       const expired = p.state === "expired";
       const error = p.state === "error";
       (expired ? toast.error : error ? toast.error : toast.warning)(
         `${p.host} · ${t(expired ? "monitor.expired" : error ? "monitor.checkFailed" : "monitor.expiring")}`,
         { description: p.message, duration: 10000 }
       );
-    }).then((u) => (un = u));
-    return () => un?.();
+    }).then((u) => { if (disposed) u(); else un = u; });
+    return () => { disposed = true; un?.(); };
   }, [t]);
   return null;
 }

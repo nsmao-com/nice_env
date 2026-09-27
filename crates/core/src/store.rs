@@ -845,13 +845,14 @@ impl Store {
     /* ---------- 网站证书监控 ---------- */
 
     pub fn save_cert_monitor(&self, m: &CertMonitor) -> Result<()> {
+        let data = serde_json::to_string(m).map_err(|e| AppError::internal("保存证书监控", e.to_string()))?;
         let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO cert_monitors(id,data,updated_at) VALUES(?1,?2,?3)
              ON CONFLICT(id) DO UPDATE SET data=?2, updated_at=?3",
             params![
                 m.id,
-                serde_json::to_string(m).unwrap_or_else(|_| "{}".into()),
+                data,
                 m.updated_at
             ],
         )?;
@@ -860,22 +861,63 @@ impl Store {
 
     pub fn list_cert_monitors(&self) -> Result<Vec<CertMonitor>> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare("SELECT data FROM cert_monitors ORDER BY updated_at DESC")?;
-        let list = stmt
-            .query_map([], |r| r.get::<_, String>(0))?
-            .filter_map(|r| r.ok())
-            .filter_map(|s| serde_json::from_str(&s).ok())
-            .collect();
+        let mut stmt = conn.prepare("SELECT id,data FROM cert_monitors ORDER BY id")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut list = rows.into_iter().map(|(id, data)| Self::decode_cert_monitor(&id, &data)).collect::<Result<Vec<_>>>()?;
+        list.sort_by_key(|m| std::cmp::Reverse(m.created_at));
         Ok(list)
     }
 
     pub fn get_cert_monitor(&self, id: &str) -> Result<Option<CertMonitor>> {
-        Ok(self.list_cert_monitors()?.into_iter().find(|m| m.id == id))
+        let data: Option<String> = self.conn.lock().query_row("SELECT data FROM cert_monitors WHERE id=?1", params![id], |r| r.get(0)).optional()?;
+        data.map(|data| Self::decode_cert_monitor(id, &data)).transpose()
+    }
+
+    fn decode_cert_monitor(id: &str, data: &str) -> Result<CertMonitor> {
+        let m: CertMonitor = serde_json::from_str(data).map_err(|_| AppError::new("MONITOR_CORRUPT", format!("证书监控 {id} 的保存数据损坏，请检查备份")))?;
+        if m.id != id { return Err(AppError::new("MONITOR_CORRUPT", "证书监控标识不一致，未隐藏或覆盖该记录")); }
+        Ok(m)
+    }
+
+    /// 在写事务内按规范化端点去重；不同窗口/进程同时新增也只保留一条。
+    pub(crate) fn create_cert_monitor(&self, m: &CertMonitor) -> Result<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let rows = tx.prepare("SELECT id,data FROM cert_monitors")?.query_map([], |r|
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        for (id, data) in rows {
+            let old = Self::decode_cert_monitor(&id, &data)?;
+            if crate::certmonitor::normalize_endpoint(&old.host, old.port).ok() == Some((m.host.clone(), m.port)) {
+                return Err(AppError::new("MONITOR_EXISTS", "此地址和端口已在监控列表中，请使用原条目的立即检查"));
+            }
+        }
+        let data = serde_json::to_string(m).map_err(|e| AppError::internal("保存证书监控", e.to_string()))?;
+        tx.execute("INSERT INTO cert_monitors(id,data,updated_at) VALUES(?1,?2,?3)", params![m.id,data,m.updated_at])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 网络探测完成后只更新原版本，删除或编辑之后的迟到结果不能复活/覆盖记录。
+    pub(crate) fn complete_cert_monitor(&self, m: &CertMonitor, expected: i64) -> Result<bool> {
+        let data = serde_json::to_string(m).map_err(|e| AppError::internal("保存证书监控结果", e.to_string()))?;
+        Ok(self.conn.lock().execute("UPDATE cert_monitors SET data=?1,updated_at=?2 WHERE id=?3 AND updated_at=?4",
+            params![data,m.updated_at,m.id,expected])? == 1)
+    }
+
+    pub(crate) fn save_monitor_notifications(&self, kind: &str, url: &str) -> Result<()> {
+        let mut conn = self.conn.lock(); let tx = conn.transaction()?;
+        for (key, value) in [("monitorNotifyKind",kind),("monitorNotifyUrl",url)] {
+            tx.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=?2", params![key,value])?;
+        }
+        tx.commit()?; Ok(())
     }
 
     pub fn delete_cert_monitor(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock();
-        conn.execute("DELETE FROM cert_monitors WHERE id=?1", params![id])?;
+        if conn.execute("DELETE FROM cert_monitors WHERE id=?1", params![id])? == 0 {
+            return Err(AppError::new("NOT_FOUND", "监控已不存在，请刷新列表"));
+        }
         Ok(())
     }
 }

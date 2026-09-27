@@ -1519,7 +1519,7 @@ mod dep_tests {
         state.store.save_cert_monitor(&model::CertMonitor {
             id: "fixture".into(), host: "127.0.0.1".into(), port, name: "fixture".into(),
             state: "idle".into(), issuer: String::new(), expires_at: None, last_checked: None,
-            last_error: String::new(), created_at: 1, updated_at: 1,
+            last_error: String::new(), notification_error: String::new(), created_at: 1, updated_at: 1,
         }).unwrap();
         let worker_state = state.clone();
         let worker = std::thread::spawn(move || certmonitor::check(&worker_state, "fixture"));

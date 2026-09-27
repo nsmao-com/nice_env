@@ -674,6 +674,8 @@ pub struct CertMonitor {
     pub last_checked: Option<i64>,
     #[serde(default)]
     pub last_error: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notification_error: String,
     pub created_at: i64,
     pub updated_at: i64,
 }

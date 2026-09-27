@@ -291,6 +291,7 @@ pub fn run() {
             certauto_set_enabled,
             certauto_issue,
             certauto_retry_deploy,
+            certdeploy_probe_ssh,
             // 证书监控 + PFX 导出
             certmonitor_list,
             certmonitor_add,
@@ -1044,6 +1045,12 @@ async fn certauto_retry_deploy(
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.certauto_retry_deploy(&id)))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn certdeploy_probe_ssh(host: String, port: u16) -> Result<nsb_core::certdeploy::SshHostKey, tauri::Error> {
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::certdeploy::probe_ssh(&host, port)))
         .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

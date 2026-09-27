@@ -21,7 +21,7 @@ import {
 import type { CertAutomation, CertRunRecord, DeployResult, DeployTarget } from "@nsb/schema";
 import { useT } from "@/lib/store";
 import { toastError } from "@/lib/hooks";
-import { normalizeError } from "@/lib/backend";
+import { isTauri, normalizeError } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Card } from "@/components/ui/card";
@@ -118,8 +118,6 @@ const TARGET_FIELDS: Record<string, { key: string; labelKey: string; secret?: bo
     { key: "host", labelKey: "certauto.field.host" },
     { key: "port", labelKey: "certauto.field.port" },
     { key: "user", labelKey: "certauto.field.user" },
-    { key: "password", labelKey: "certauto.field.password", secret: true },
-    { key: "keyPath", labelKey: "certauto.field.sshKeyPath" },
     { key: "certPath", labelKey: "certauto.field.remoteCertPath" },
     { key: "keyPath", labelKey: "certauto.field.remoteKeyPath" },
     { key: "script", labelKey: "certauto.field.script" },
@@ -530,6 +528,80 @@ function TargetDot({ result }: { result?: DeployResult | null }) {
   );
 }
 
+function DeploymentTargetFields({ target, onChange }: { target: DeployTarget; onChange: (values: Record<string, string>) => void }) {
+  const t = useT();
+  const [probing, setProbing] = React.useState(false);
+  const [probe, setProbe] = React.useState<{ host: string; port: string; fingerprint: string } | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+  const latest = React.useRef({ target, onChange }); latest.current = { target, onChange };
+  const alive = React.useRef(true);
+  React.useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  const config = target.config;
+  const ssh = target.kind === "ssh";
+  const auth = config.auth || "password";
+  const endpoint = `${config.host || ""}:${config.port || "22"}`;
+  const request = React.useRef(false);
+  const change = (key: string, value: string) => {
+    if (key === "host" || key === "port") { setProbe(null); setError(null); onChange({ [key]: value, hostFingerprint: "" }); }
+    else onChange({ [key]: value });
+  };
+  const choose = async (key: string) => {
+    if (!isTauri) { toast.info(t("tls.desktopOnly")); return; }
+    try {
+      const dialog = await import("@tauri-apps/plugin-dialog");
+      const value = key === "identityFile"
+        ? await dialog.open({ title: t("certauto.field.sshKeyPath"), multiple: false })
+        : await dialog.save({ title: t(key === "certPath" ? "certauto.field.localCertPath" : "certauto.field.localKeyPath"), defaultPath: config[key] || undefined });
+      if (alive.current && typeof value === "string") latest.current.onChange({ [key]: value });
+    } catch (error) { if (alive.current) setError(actionErrorText(error)); }
+  };
+  const field = (key: string, labelKey: string, secret = false) => {
+    const picker = key === "identityFile" || (target.kind === "local" && ["certPath", "keyPath"].includes(key));
+    const value = key === "identityFile" ? config.identityFile ?? config.privateKey ?? "" : config[key] ?? "";
+    return <div key={key} className="flex min-w-0 flex-col gap-1.5">
+      <Label htmlFor={`${target.id}-${key}`} className="text-[11px]">{t(labelKey as never)}</Label>
+      <div className="flex min-w-0 gap-1.5">
+        <Input id={`${target.id}-${key}`} type={secret ? "password" : "text"} value={value} onChange={(e) => change(key, e.target.value)} placeholder={key === "port" ? "22" : undefined} className="min-w-0 font-mono text-[12px]" />
+        {picker && <Button type="button" variant="secondary" size="sm" className="shrink-0" aria-label={`${t("certauto.chooseFile")} · ${t(labelKey as never)}`} onClick={() => void choose(key)}>{t("certauto.chooseFile")}</Button>}
+      </div>
+    </div>;
+  };
+  const probeHost = async () => {
+    if (request.current) return;
+    request.current = true; setProbing(true); setProbe(null); setError(null);
+    try {
+      const port = Number(config.port || "22");
+      if (!config.host?.trim() || !Number.isInteger(port) || port < 1 || port > 65535) throw { code: "SSH_CONFIG", message: t("certauto.sshEndpointError") };
+      const value = await api.certDeployProbeSsh(config.host, port);
+      const current = latest.current.target.config;
+      if (alive.current && endpoint === `${current.host || ""}:${current.port || "22"}`) setProbe({ host: config.host, port: config.port || "22", fingerprint: value.fingerprint });
+    } catch (error) {
+      const current = latest.current.target.config;
+      if (alive.current && endpoint === `${current.host || ""}:${current.port || "22"}`) setError(actionErrorText(error));
+    } finally { request.current = false; if (alive.current) setProbing(false); }
+  };
+  return <div className="min-w-0 space-y-3">
+    {ssh && <>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">{field("host", "certauto.field.host")}{field("port", "certauto.field.port")}{field("user", "certauto.field.user")}
+        <div className="flex flex-col gap-1.5"><Label htmlFor={`${target.id}-auth`} className="text-[11px]">{t("certauto.sshAuth")}</Label>
+          <Select value={auth} onValueChange={(value) => onChange({ auth: value })}><SelectTrigger id={`${target.id}-auth`}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="password">{t("certauto.sshPassword")}</SelectItem><SelectItem value="key">{t("certauto.sshKey")}</SelectItem></SelectContent></Select>
+        </div>
+      </div>
+      {auth === "key" ? <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">{field("identityFile", "certauto.field.sshKeyPath")}{field("keyPassphrase", "certauto.sshPassphrase", true)}</div> : field("password", "certauto.field.password", true)}
+      <div className="min-w-0 space-y-2 rounded-lg border border-dashed border-border p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-[11px] font-medium">{t(config.hostFingerprint ? "certauto.sshTrusted" : "certauto.sshTrustRequired")}</span><Button type="button" size="sm" variant="secondary" disabled={probing} onClick={() => void probeHost()}>{probing && <Loader2 className="h-3 w-3 animate-spin" />}{t("certauto.sshReadKey")}</Button></div>
+        {config.hostFingerprint && <code className="block text-[10.5px] text-muted [overflow-wrap:anywhere]">{config.hostFingerprint}</code>}
+        {probe && <div className="space-y-2" role="status"><p className="text-[11px] text-muted">{t("certauto.sshVerifyHint")}</p><code className="block text-[11px] [overflow-wrap:anywhere]">{probe.fingerprint}</code><Button type="button" size="sm" variant="secondary" onClick={() => { if (endpoint === `${probe.host}:${probe.port}`) { onChange({ hostFingerprint: probe.fingerprint }); setProbe(null); } }}>{t("certauto.sshUseKey")}</Button></div>}
+      </div>
+    </>}
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">{(TARGET_FIELDS[target.kind] ?? []).filter((item) => !["host", "port", "user", "script"].includes(item.key) || !ssh && item.key !== "script").map((item) => field(item.key, item.labelKey, item.secret))}</div>
+    {(["local", "ssh"].includes(target.kind)) && <details className="rounded-lg border border-dashed border-border p-3"><summary className="cursor-pointer text-[11px] text-secondary">{t("certauto.scriptOptions")}</summary><div className="mt-3 space-y-3">{field("script", "certauto.field.script")}
+      <div className="flex flex-col gap-1.5"><Label htmlFor={`${target.id}-timeout`}>{t("certauto.scriptTimeout")}</Label><Input id={`${target.id}-timeout`} type="number" min={1} max={600} value={config.timeoutSec ?? "60"} onChange={(e) => change("timeoutSec", e.target.value)} /></div>
+      <p className="text-[11px] text-faint">{t("certauto.scriptHint")}</p></div></details>}
+    {error && <p role="alert" className="rounded-lg border border-error/25 bg-error-soft p-2 text-[11px] text-error whitespace-pre-wrap [overflow-wrap:anywhere]">{error}</p>}
+  </div>;
+}
+
 /* ============ 创建 / 编辑 ============ */
 
 function emptySmtp() {
@@ -625,10 +697,10 @@ function AutomationDialog({
     }
   };
 
-  const setTargetConfig = (tid: string, key: string, value: string) =>
+  const setTargetConfig = (tid: string, values: Record<string, string>) =>
     patch({
       targets: form.targets.map((tg) =>
-        tg.id === tid ? { ...tg, config: { ...tg.config, [key]: value } } : tg
+        tg.id === tid ? { ...tg, config: { ...tg.config, ...values } } : tg
       ),
     });
 
@@ -790,24 +862,14 @@ function AutomationDialog({
                   <Button
                     size="icon-sm"
                     variant="ghost"
+                    aria-label={`${t("common.delete")} · ${tg.name}`}
                     className="text-error/70 hover:text-error"
                     onClick={() => patch({ targets: form.targets.filter((x) => x.id !== tg.id) })}
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </Button>
                 </div>
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  {(TARGET_FIELDS[tg.kind] ?? []).map((f) => (
-                    <Input
-                      key={f.key}
-                      type={f.secret ? "password" : "text"}
-                      value={tg.config[f.key] ?? ""}
-                      onChange={(e) => setTargetConfig(tg.id, f.key, e.target.value)}
-                      placeholder={t(f.labelKey as never)}
-                      className="font-mono text-[12px]"
-                    />
-                  ))}
-                </div>
+                <DeploymentTargetFields target={tg} onChange={(values) => setTargetConfig(tg.id, values)} />
                 {tg.kind === "btpanel" && (
                   <p className="text-[10.5px] text-faint">{t("certauto.btHint")}</p>
                 )}

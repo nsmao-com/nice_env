@@ -51,3 +51,17 @@
 -- ON CONFLICT(id) DO UPDATE SET data=:data, updated_at=:updated_at;
 -- 删除前保存账号与材料原文，删除文件或记录失败则恢复，成功部署的站点证书不删除。
 -- DELETE FROM cert_automations WHERE id=:id;
+
+-- v0.2.37：SSH / 本地证书部署配置与不确定结果。仍使用 cert_automations.data JSON，
+-- 没有表结构变更；以下为程序参数化语句记录，不需手工执行。
+-- SSH 配置使用 auth，新增 identityFile、keyPassphrase、hostFingerprint、timeoutSec；
+-- 兼容 privateKey 登录路径，keyPath 只表示远程证书私钥输出位置。
+-- 调度前校验失败会暂停并记录历史；已有签发批次保持 deploy_error，可修正配置后重试。
+-- 脚本超时/退出异常或远程发布结果不确定时保存目标结果，再进入 deploy_interrupted，
+-- 关闭自动续签，保留已签发材料和其它已成功目标，避免自动重放。
+-- INSERT INTO cert_automations(id,data,updated_at) VALUES(:id,:data,:updated_at)
+-- ON CONFLICT(id) DO UPDATE SET data=:data, updated_at=:updated_at;
+-- 数据目录迁移只在目标 SQLite 副本中重写 SSH 的 identityFile/privateKey，
+-- 不改远程 certPath/keyPath/script；本地部署仍按原规则重写本机路径和命令。
+-- deploying 与 issuing/manual_wait 一样拒绝迁移。
+-- UPDATE cert_automations SET data=:value WHERE id=:id;

@@ -131,6 +131,8 @@ export const certAutoIssue = (id: string) =>
   safe(invoke<CertAutomation>("certauto_issue", { id }));
 export const certAutoRetryDeploy = (id: string) =>
   safe(invoke<CertAutomation>("certauto_retry_deploy", { id }));
+export const certDeployProbeSsh = (host: string, port: number) =>
+  safe(invoke<{ host: string; port: number; fingerprint: string }>("certdeploy_probe_ssh", { host, port }));
 
 
 /* 网站证书监控 */

@@ -201,6 +201,7 @@ fn validate(a: &CertAutomation) -> Result<()> {
                 format!("部署目标「{}」类型未知：{}", t.name, t.kind),
             ));
         }
+        certdeploy::validate_target(t)?;
     }
     if a.notify_kind == "email" {
         let Some(smtp) = a.notify_smtp.as_ref() else {
@@ -319,16 +320,22 @@ fn deploy_pending(state: &CoreState, a: &mut CertAutomation, material: &IssuedMa
         a.local_deploy_result = Some(deployment_result(result, log, "本地站点"));
         save_progress(state, a)?;
     }
+    let mut uncertain = None;
     for index in 0..a.targets.len() {
         if a.targets[index].last_result.as_ref().is_some_and(|r| r.ok) {
             log.push(format!("[{}] 本批证书已部署成功，跳过", a.targets[index].name));
             continue;
         }
         let target = &a.targets[index];
-        let result = deployment_result(certdeploy::deploy(target, &a.domains, &material.chain, &material.key_pem), log, &target.name);
+        let outcome = certdeploy::deploy(target, &a.domains, &material.chain, &material.key_pem);
+        if let Err(error) = &outcome {
+            if error.code == "DEPLOY_UNCERTAIN" { uncertain = Some(error.clone()); }
+        }
+        let result = deployment_result(outcome, log, &target.name);
         a.targets[index].last_result = Some(result);
         save_progress(state, a)?;
     }
+    if let Some(error) = uncertain { return Err(error); }
     let failed = usize::from(a.deploy_local && !a.local_deploy_result.as_ref().is_some_and(|r| r.ok))
         + a.targets.iter().filter(|t| !t.last_result.as_ref().is_some_and(|r| r.ok)).count();
     if failed > 0 {
@@ -547,8 +554,21 @@ fn claim_work(store: &crate::store::Store, id: &str, scheduled: bool, retry: boo
     if retry && a.deployment_id.is_empty() {
         return Err(AppError::new("CERT_DEPLOY_MISSING", "没有可重试的签发批次，请先签发证书"));
     }
-    a.domains = crate::tls::normalize_domains(&a.domains)?;
-    validate(&a)?;
+    let checked = crate::tls::normalize_domains(&a.domains).and_then(|domains| {
+        a.domains = domains;
+        validate(&a)
+    });
+    if let Err(error) = checked {
+        if scheduled {
+            a.state = if a.deployment_id.is_empty() { "error" } else { "deploy_error" }.into();
+            a.enabled = false; a.next_renew_at = i64::MAX / 2;
+            a.last_error = format!("配置检查失败，自动执行已暂停：{error}");
+            a.updated_at = next_revision(a.updated_at);
+            a.runs.insert(0, CertRunRecord { at: a.updated_at, ok: false, message: a.last_error.clone(), log: Vec::new() });
+            a.runs.truncate(MAX_RUNS); store.save_cert_automation(&a)?;
+        }
+        return Err(error);
+    }
     a.state = if retry { "deploying" } else { "issuing" }.into();
     a.last_error = String::new();
     a.last_run_at = now_ms();
@@ -931,6 +951,64 @@ mod tests {
         model::DeployTarget { id: name.into(), name: name.into(), kind: "local".into(), last_result: None,
             config: [("certPath".into(), root.join(format!("{name}.crt")).to_string_lossy().into_owned()),
                 ("keyPath".into(), root.join(format!("{name}.key")).to_string_lossy().into_owned())].into() }
+    }
+
+    #[test]
+    fn invalid_scheduled_deployment_is_paused_with_visible_history() {
+        let (_dir, state, mut a) = fixture();
+        a.targets[0].kind = "ssh".into(); a.next_renew_at = 0;
+        state.store.save_cert_automation(&a).unwrap();
+        assert_eq!(claim_run(&state.store, &a.id, true).unwrap_err().code, "DEPLOY_CONFIG");
+        let saved = state.store.get_cert_automation(&a.id).unwrap().unwrap();
+        assert!(!saved.enabled); assert_eq!(saved.state, "error"); assert_eq!(saved.runs.len(), 1);
+        assert!(saved.last_error.contains("自动执行已暂停")); assert!(tick(&state).is_empty());
+        assert_eq!(claim_run(&state.store, &a.id, true).unwrap_err().code, "CERT_AUTO_NOT_DUE");
+        assert_eq!(state.store.get_cert_automation(&a.id).unwrap().unwrap().runs.len(), 1);
+        // 已签发批次不能退回重新签发；修正配置后仍可复用材料重试。
+        a.deployment_id = "retained-batch".into(); a.state = "deploy_error".into();
+        state.store.save_cert_automation(&a).unwrap();
+        assert!(claim_work(&state.store, &a.id, true, true).is_err());
+        let saved = state.store.get_cert_automation(&a.id).unwrap().unwrap();
+        assert_eq!(saved.state, "deploy_error"); assert_eq!(saved.deployment_id, "retained-batch"); assert!(!saved.enabled);
+    }
+
+    #[test]
+    fn directory_move_rebases_only_local_ssh_identity_and_refuses_active_deployment() {
+        let (dir, state, mut a) = fixture();
+        a.targets[0].kind = "ssh".into();
+        let identity = dir.path().join("identity").to_string_lossy().into_owned();
+        a.targets[0].config = [("identityFile".into(), identity.clone()), ("privateKey".into(), identity.clone()),
+            ("certPath".into(), "/etc/ssl/cert.pem".into()), ("keyPath".into(), "/etc/ssl/key.pem".into()),
+            ("script".into(), format!("echo {identity}"))].into();
+        state.store.save_cert_automation(&a).unwrap();
+        let target = dir.path().join("copy"); std::fs::create_dir(&target).unwrap();
+        let rebase = crate::paths::DataPathRebase::new(dir.path(), &target).unwrap();
+        crate::store::Store::snapshot_for_data_dir(&state.paths.db(), &target.join("nsb.sqlite"), &rebase).unwrap();
+        let store = crate::store::Store::open(target.join("nsb.sqlite")).unwrap();
+        let copy = store.get_cert_automation(&a.id).unwrap().unwrap();
+        assert_eq!(copy.targets[0].config["identityFile"], rebase.path(&identity));
+        assert_eq!(copy.targets[0].config["privateKey"], rebase.path(&identity));
+        for key in ["certPath", "keyPath", "script"] { assert_eq!(copy.targets[0].config[key], a.targets[0].config[key]); }
+        assert_eq!(state.store.get_cert_automation(&a.id).unwrap().unwrap().targets[0].config["identityFile"], identity);
+        a.state = "deploying".into(); state.store.save_cert_automation(&a).unwrap();
+        assert_eq!(crate::store::Store::snapshot_for_data_dir(&state.paths.db(), &target.join("busy.sqlite"), &rebase).unwrap_err().code, "DATA_DIR_BUSY");
+    }
+
+    #[test]
+    fn uncertain_script_pauses_retry_but_other_targets_finish() {
+        let (dir, state, mut a) = fixture();
+        a.deploy_local = false; a.dns.kind = "manual".into();
+        a.targets = vec![local_target(dir.path(), "failed"), local_target(dir.path(), "saved")];
+        a.targets[0].config.insert("script".into(), "exit 7".into());
+        let material = material(&a, 45); retain_issued(&state, &mut a, &material).unwrap();
+        let mut log = Vec::new(); let outcome = deploy_pending(&state, &mut a, &material, &mut log);
+        assert_eq!(outcome.as_ref().unwrap_err().code, "DEPLOY_UNCERTAIN");
+        let done = finish_execution(&state, a, &outcome, log).unwrap();
+        assert_eq!(done.state, "deploy_interrupted"); assert!(!done.enabled); assert!(tick(&state).is_empty());
+        assert!(!done.targets[0].last_result.as_ref().unwrap().ok); assert!(done.targets[1].last_result.as_ref().unwrap().ok);
+        assert_eq!(std::fs::read_to_string(dir.path().join("failed.crt")).unwrap(), material.chain);
+        assert_eq!(std::fs::read_to_string(dir.path().join("saved.key")).unwrap(), material.key_pem);
+        assert!(read_issued(&state, &done).is_ok());
     }
 
     #[test]

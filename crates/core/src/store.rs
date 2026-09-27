@@ -172,14 +172,19 @@ impl Store {
         rewrite(&tx, "cert_automations", "id", "data", |value| {
             serde_json::from_str::<CertAutomation>(value).map_err(|e| AppError::internal("校验证书自动化",e.to_string()))?;
             let mut data: serde_json::Value = serde_json::from_str(value).map_err(|e|AppError::internal("读取证书自动化",e.to_string()))?;
-            if data["state"] == "issuing" || data["state"] == "manual_wait" {
+            if data["state"] == "issuing" || data["state"] == "manual_wait" || data["state"] == "deploying" {
                 return Err(AppError::new("DATA_DIR_BUSY", "证书自动化仍在执行或等待验证，请完成后再迁移"));
             }
             if let Some(targets) = data["targets"].as_array_mut() {
                 for target in targets {
-                    if target["kind"] != "local" { continue; }
+                    let keys: &[&str] = match target["kind"].as_str() {
+                        Some("local") => &["certPath", "keyPath", "script"],
+                        // SSH 登录密钥在本机；远程输出路径和远程脚本不可改写。
+                        Some("ssh") => &["identityFile", "privateKey"],
+                        _ => continue,
+                    };
                     if let Some(config) = target["config"].as_object_mut() {
-                        for key in ["certPath", "keyPath", "script"] {
+                        for &key in keys {
                             if let Some(value) = config.get_mut(key) {
                                 if let Some(text) = value.as_str() { *value = if key == "script" { rebase.text(text)? } else { rebase.path(text) }.into(); }
                             }

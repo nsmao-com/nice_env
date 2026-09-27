@@ -212,6 +212,15 @@ pub fn panel_state_json<R: Runtime>(
     app: &AppHandle<R>,
     state: &Arc<CoreState>,
 ) -> serde_json::Value {
+    if let Err(error) = nsb_core::paths::ensure_data_dir_current(&state.paths.base) {
+        return serde_json::json!({
+            "version": app.package_info().version.to_string(),
+            "readErrors": [format!("{}{}",error.message,error.hint.map(|hint|format!("；{hint}")).unwrap_or_default())],
+            "running": 0, "active": 0, "total": 0,
+            "dataDir": state.paths.base.to_string_lossy(),
+            "groupTitles": GROUP_TITLES, "services": [], "stacks": [], "sites": [],
+        });
+    }
     let services = state.service_status_list();
     let running = services
         .iter()
@@ -450,6 +459,12 @@ pub fn refresh<R: Runtime>(app: &AppHandle<R>) {
         return;
     };
     let state = app.state::<Arc<CoreState>>().inner().clone();
+    if nsb_core::paths::ensure_data_dir_current(&state.paths.base).is_err() {
+        let _ = tray.set_icon(Some(base_icon(app)));
+        let _ = tray.set_tooltip(Some("NiceEnv：数据目录已变化，请退出旧窗口并重新打开"));
+        push_state(app, &state);
+        return;
+    }
     let _ = tray.set_icon(Some(badge_icon(&base_icon(app), running_count(&state))));
     let _ = tray.set_tooltip(Some(tooltip_text(&state)));
     push_state(app, &state);

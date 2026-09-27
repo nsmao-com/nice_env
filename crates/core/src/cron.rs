@@ -107,6 +107,7 @@ fn recover_interrupted(store: &Store) -> Result<()> {
 
 /// 调度线程：持有独立 SQLite 连接，每 20 秒复核到期任务。
 pub fn spawn_scheduler(paths: Paths) -> Result<()> {
+    let _activity = crate::paths::DataDirActivity::shared(&paths.base)?;
     let store = Store::open(paths.db())?;
     recover_interrupted(&store)?;
     std::thread::Builder::new()
@@ -130,6 +131,8 @@ pub fn spawn_scheduler(paths: Paths) -> Result<()> {
                     let _ = std::thread::Builder::new()
                         .name(format!("cron-{}", job.id))
                         .spawn(move || {
+                            let Some(base) = path.parent() else { return; };
+                            let Ok(_activity) = crate::paths::DataDirActivity::shared(base) else { return; };
                             if let Ok(store) = Store::open(path) {
                                 let _ = run_job(&store, &job.id, false);
                             }

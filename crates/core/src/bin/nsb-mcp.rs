@@ -10,7 +10,7 @@ fn main() {
         Ok(s) => s,
         Err(e) => {
             // MCP 初始化失败只能写 stderr（stdout 是协议通道）
-            eprintln!("nsb-mcp: init failed: {}", e.message);
+            eprintln!("nsb-mcp: init failed: {}{}", e.message,e.hint.map(|hint|format!("\n{hint}")).unwrap_or_default());
             std::process::exit(1);
         }
     };

@@ -199,6 +199,14 @@ impl Paths {
 struct DataDirSelection {
     version: u8,
     path: PathBuf,
+    #[serde(default)]
+    retired: Vec<PathBuf>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DataDirAuthority {
+    version: u8,
+    selection_file: PathBuf,
 }
 
 fn data_dir_selection_file() -> crate::error::Result<PathBuf> {
@@ -207,7 +215,7 @@ fn data_dir_selection_file() -> crate::error::Result<PathBuf> {
 }
 
 /// 普通操作持共享锁，复制和等待迁移重启期间持独占锁；Drop 自动恢复。
-pub struct DataDirActivity { _file: std::fs::File }
+pub struct DataDirActivity { _file: std::fs::File, base: PathBuf, exclusive: bool }
 impl DataDirActivity {
     pub fn shared(base: &Path) -> crate::error::Result<Self> { Self::acquire(base, false) }
     pub fn exclusive(base: &Path) -> crate::error::Result<Self> { Self::acquire(base, true) }
@@ -221,18 +229,64 @@ impl DataDirActivity {
             } else { "数据目录正在迁移，请先完成重启或取消迁移" }),
             std::fs::TryLockError::Error(error) => crate::error::AppError::io("锁定数据目录",error),
         })?;
-        Ok(Self { _file: file })
+        ensure_data_dir_current(base)?;
+        Ok(Self { _file: file, base: std::fs::canonicalize(base)?, exclusive })
     }
+
+    /// 持源目录独占锁时提交选择及旧目录失效记录；二者使用同一个原子文件。
+    pub fn with_selected_data_dir<T>(&self, target: &Path, launch: impl FnOnce() -> crate::error::Result<T>) -> crate::error::Result<T> {
+        self.select_with_file(&data_dir_selection_file()?, target, launch)
+    }
+
+    pub(crate) fn select_with_file<T>(&self, file: &Path, target: &Path, launch: impl FnOnce() -> crate::error::Result<T>) -> crate::error::Result<T> {
+        if !self.exclusive {
+            return Err(crate::error::AppError::new("DATA_DIR_BUSY", "切换数据目录需要持有源目录独占锁"));
+        }
+        ensure_data_dir_current(&self.base)?;
+        with_selection_and_source(file, target, Some(&self.base), launch)
+    }
+}
+
+fn parse_data_dir_selection(bytes: &[u8]) -> crate::error::Result<DataDirSelection> {
+    let selection: DataDirSelection = serde_json::from_slice(bytes)
+        .map_err(|_| crate::error::AppError::new("DATA_DIR_SETTINGS", "保存的数据目录选择已损坏，未使用其它目录启动"))?;
+    if selection.version != 1 || !selection.path.is_absolute() || selection.retired.iter().any(|path| !path.is_absolute()) {
+        return Err(crate::error::AppError::new("DATA_DIR_SETTINGS", "保存的数据目录选择无效，未使用其它目录启动"));
+    }
+    Ok(selection)
+}
+
+/// 旧实例每次操作重新检查已提交的目录选择；连续迁移返回当前的最终目录。
+pub fn redirected_data_dir(base: &Path) -> crate::error::Result<Option<PathBuf>> {
+    let Some(bytes) = read_optional(&base.join(".data-dir-authority.json"))? else { return Ok(None); };
+    let authority: DataDirAuthority = serde_json::from_slice(&bytes)
+        .map_err(|e| crate::error::AppError::internal("读取数据目录交接记录",e.to_string()))?;
+    if authority.version != 1 || !authority.selection_file.is_absolute() {
+        return Err(crate::error::AppError::new("DATA_DIR_SETTINGS", "数据目录交接记录无效，未继续操作"));
+    }
+    // 首次提交前进程终止时，选择文件还不存在，原目录仍可使用。
+    let Some(bytes) = read_optional(&authority.selection_file)? else { return Ok(None); };
+    let selection = parse_data_dir_selection(&bytes)?;
+    let current = portable_path_text(&std::fs::canonicalize(base)?);
+    let retired = selection.retired.iter().any(|path| {
+        let path = portable_path_text(path);
+        if cfg!(windows) { path.eq_ignore_ascii_case(&current) } else { path == current }
+    });
+    Ok(retired.then_some(selection.path))
+}
+
+pub fn ensure_data_dir_current(base: &Path) -> crate::error::Result<()> {
+    if let Some(target) = redirected_data_dir(base)? {
+        return Err(crate::error::AppError::new("DATA_DIR_RELOCATED", "数据目录已在其它进程中迁移，当前实例已停止数据操作")
+            .with_hint(format!("请退出这个旧窗口并重新打开 NiceEnv；当前数据目录：{}。使用 MCP 的客户端请重新连接", target.display())));
+    }
+    Ok(())
 }
 
 fn read_data_dir_selection(file: &Path) -> crate::error::Result<Option<PathBuf>> {
     let Some(bytes) = read_optional(file).map_err(|e| crate::error::AppError::io("读取数据目录选择", e))? else { return Ok(None); };
-    let selection: DataDirSelection = serde_json::from_slice(&bytes)
-        .map_err(|_| crate::error::AppError::new("DATA_DIR_SETTINGS", "保存的数据目录选择已损坏，未使用其它目录启动")
-            .with_hint(format!("请检查 {}；也可用 NSB_HOME 显式指定原数据目录恢复启动", file.display())))?;
-    if selection.version != 1 || !selection.path.is_absolute() {
-        return Err(crate::error::AppError::new("DATA_DIR_SETTINGS", "保存的数据目录选择无效，未使用其它目录启动"));
-    }
+    let selection = parse_data_dir_selection(&bytes)
+        .map_err(|error|error.with_hint(format!("请检查 {}，恢复有效的数据目录选择后重新打开应用",file.display())))?;
     validate_migrated_root(&selection.path).map_err(|e| e.with_hint(format!(
         "请连接原磁盘并检查 {}；未创建空数据库或回退到旧目录。可用 NSB_HOME 指定可用的数据目录", selection.path.display())))?;
     Ok(Some(selection.path))
@@ -261,21 +315,34 @@ pub(crate) fn finish_data_dir_activation(paths: &Paths, sync_path: impl FnOnce()
     Ok(())
 }
 
-/// 先保存目录选择再启动新进程；启动失败必须恢复原选择。
-pub fn with_selected_data_dir<T>(target: &Path, launch: impl FnOnce() -> crate::error::Result<T>) -> crate::error::Result<T> {
-    with_selection_file(&data_dir_selection_file()?, target, launch)
+#[cfg(test)]
+fn with_selection_file<T>(file: &Path, target: &Path, launch: impl FnOnce() -> crate::error::Result<T>) -> crate::error::Result<T> {
+    with_selection_and_source(file, target, None, launch)
 }
 
-fn with_selection_file<T>(file: &Path, target: &Path, launch: impl FnOnce() -> crate::error::Result<T>) -> crate::error::Result<T> {
+/// 选择文件同时提交旧目录列表，启动失败原文回滚即可重新启用源目录。
+fn with_selection_and_source<T>(file: &Path, target: &Path, source: Option<&Path>, launch: impl FnOnce() -> crate::error::Result<T>) -> crate::error::Result<T> {
     use crate::error::AppError;
     if !target.is_absolute() { return Err(AppError::new("DATA_DIR_INVALID", "数据目录必须是绝对路径")); }
+    if !file.is_absolute() { return Err(AppError::new("DATA_DIR_SETTINGS", "目录选择文件必须是绝对路径")); }
     validate_migrated_root(target)?;
     let parent = file.parent().ok_or_else(|| AppError::new("DATA_DIR_SETTINGS", "应用配置目录无效"))?;
     std::fs::create_dir_all(parent)?;
     let lock = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(file.with_extension("lock"))?;
     lock.try_lock().map_err(|_| AppError::new("DATA_DIR_BUSY", "其它应用进程正在切换数据目录，请稍后重试"))?;
     let previous = read_optional(file)?;
-    let selection = serde_json::to_vec(&DataDirSelection { version: 1, path: target.to_path_buf() })
+    let mut retired = previous.as_deref().map(parse_data_dir_selection).transpose()?.map(|selection|selection.retired).unwrap_or_default();
+    if let Some(source) = source {
+        let source = std::fs::canonicalize(source)?;
+        let target = std::fs::canonicalize(target)?;
+        if source == target { return Err(AppError::new("DATA_DIR_INVALID", "不能将当前目录标记为已迁移")); }
+        // 在选择文件提交前准备引用；若提交失败或回滚，旧选择不含此源目录，引用保持无效。
+        let authority = DataDirAuthority {version:1,selection_file:file.to_path_buf()};
+        write_atomic(&source.join(".data-dir-authority.json"), &serde_json::to_vec(&authority)
+            .map_err(|e|AppError::internal("保存目录交接记录",e.to_string()))?)?;
+        if !retired.contains(&source) { retired.push(source); }
+    }
+    let selection = serde_json::to_vec(&DataDirSelection { version: 1, path: target.to_path_buf(), retired })
         .map_err(|e| AppError::internal("保存数据目录选择", e.to_string()))?;
     write_atomic(file, &selection).map_err(|e| AppError::io("保存数据目录选择", e))?;
     match launch() {
@@ -566,7 +633,7 @@ fn copy_tree(source: &Path, target: &Path, stats: &mut (u64, u64), root: bool) -
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
         // 活跃 SQLite 文件不能逐个复制；随后用 VACUUM INTO 创建一致快照。
-        if root && matches!(entry.file_name().to_str(), Some("nsb.sqlite" | "nsb.sqlite-wal" | "nsb.sqlite-shm" | "nsb.sqlite-journal" | ".data-dir-activity.lock" | ".data-dir-activation.json")) { continue; }
+        if root && matches!(entry.file_name().to_str(), Some("nsb.sqlite" | "nsb.sqlite-wal" | "nsb.sqlite-shm" | "nsb.sqlite-journal" | ".data-dir-activity.lock" | ".data-dir-activation.json" | ".data-dir-authority.json")) { continue; }
         let from = entry.path();
         let to = target.join(entry.file_name());
         let metadata = std::fs::symlink_metadata(&from)?;
@@ -656,6 +723,7 @@ pub(crate) fn rebase_backup_content(base: &Path, content: Vec<u8>) -> io::Result
 }
 
 fn validate_migrated_root(root: &Path) -> crate::error::Result<()> {
+    ensure_data_dir_current(root)?;
     if !root.join("nsb.sqlite").is_file() {
         return Err(crate::error::AppError::new(
             "DATA_DIR_INVALID",
@@ -1164,13 +1232,15 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("data-directory.json");
         let missing = temp.path().join("missing");
-        std::fs::write(&file, serde_json::to_vec(&DataDirSelection {version:1,path:missing.clone()}).unwrap()).unwrap();
+        std::fs::write(&file, serde_json::to_vec(&DataDirSelection {version:1,path:missing.clone(),retired:Vec::new()}).unwrap()).unwrap();
         assert!(read_data_dir_selection(&file).is_err());
         assert!(!missing.exists());
         std::fs::write(&file, "broken").unwrap();
         assert_eq!(read_data_dir_selection(&file).unwrap_err().code, "DATA_DIR_SETTINGS");
         let root = temp.path().join("data");
         let _store = crate::store::Store::open(root.join("nsb.sqlite")).unwrap();
+        assert_eq!(with_selection_file(&file, &root, || Ok(())).unwrap_err().code, "DATA_DIR_SETTINGS");
+        std::fs::remove_file(&file).unwrap();
         with_selection_file(&file, &root, || {
             assert_eq!(with_selection_file(&file, &root, || Ok(())).unwrap_err().code, "DATA_DIR_BUSY");
             Ok(())
@@ -1181,6 +1251,77 @@ mod tests {
         let old = std::fs::read(&file).unwrap();
         assert!(with_selection_file(&file, &invalid, || Ok(())).is_err());
         assert_eq!(std::fs::read(&file).unwrap(), old);
+    }
+
+    #[test]
+    fn data_dir_handoff_retires_old_roots_and_rolls_back_failed_launch() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("config/selection.json");
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        let final_root = temp.path().join("final");
+        let original = crate::store::Store::open(source.join("nsb.sqlite")).unwrap();
+        original.set_setting("handoff-value", "original").unwrap();
+        let _target = crate::store::Store::open(target.join("nsb.sqlite")).unwrap();
+        let _final = crate::store::Store::open(final_root.join("nsb.sqlite")).unwrap();
+        with_selection_file(&file,&source,||Ok(())).unwrap();
+        let before = std::fs::read(&file).unwrap();
+        let shared = DataDirActivity::shared(&source).unwrap();
+        assert_eq!(shared.select_with_file(&file,&target,||Ok(())).unwrap_err().code,"DATA_DIR_BUSY");
+        drop(shared);
+        let guard = DataDirActivity::exclusive(&source).unwrap();
+        guard.select_with_file(&file,&target,|| {
+            assert_eq!(redirected_data_dir(&source).unwrap(),Some(target.clone()));
+            Err::<(),_>(crate::error::AppError::new("LAUNCH_FAILED","fixture"))
+        }).unwrap_err();
+        assert_eq!(std::fs::read(&file).unwrap(),before);
+        assert!(redirected_data_dir(&source).unwrap().is_none());
+        guard.select_with_file(&file,&target,||Ok(())).unwrap();
+        drop(guard);
+        assert!(matches!(DataDirActivity::shared(&source),Err(error) if error.code=="DATA_DIR_RELOCATED"));
+        assert!(matches!(DataDirActivity::exclusive(&source),Err(error) if error.code=="DATA_DIR_RELOCATED"));
+        assert!(DataDirActivity::shared(&target).is_ok());
+        assert!(crate::CoreState::init(Some(source.clone()),std::sync::Arc::new(|_|{})).is_err());
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact","paths::tests::data_dir_handoff_child_probe","--nocapture"])
+            .env("NSB_HANDOFF_PROBE_ROOT",&source).output().unwrap();
+        assert!(output.status.success(),"{}\n{}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));
+        let next = DataDirActivity::exclusive(&target).unwrap();
+        next.select_with_file(&file,&final_root,||Ok(())).unwrap();
+        drop(next);
+        assert_eq!(redirected_data_dir(&source).unwrap(),Some(final_root.clone()));
+        assert_eq!(redirected_data_dir(&target).unwrap(),Some(final_root));
+        assert_eq!(original.get_setting("handoff-value").as_deref(),Some("original"));
+    }
+
+    #[test]
+    fn data_dir_handoff_child_probe() {
+        let Some(root) = std::env::var_os("NSB_HANDOFF_PROBE_ROOT") else { return; };
+        let root = PathBuf::from(root);
+        assert!(matches!(DataDirActivity::shared(&root),Err(error) if error.code=="DATA_DIR_RELOCATED"));
+    }
+
+    #[test]
+    fn data_dir_handoff_uncommitted_reference_and_corruption_are_distinguished() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("selection.json");
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        let _source = crate::store::Store::open(source.join("nsb.sqlite")).unwrap();
+        let _target = crate::store::Store::open(target.join("nsb.sqlite")).unwrap();
+        let guard = DataDirActivity::exclusive(&source).unwrap();
+        guard.select_with_file(&file,&target,||Err::<(),_>(crate::error::AppError::new("LAUNCH_FAILED","fixture"))).unwrap_err();
+        drop(guard);
+        assert!(!file.exists());
+        assert!(DataDirActivity::shared(&source).is_ok());
+        let copied = temp.path().join("copied");
+        copy_data_dir(&source,&copied).unwrap();
+        assert!(!copied.join(".data-dir-authority.json").exists());
+        std::fs::write(&file,"broken").unwrap();
+        assert!(matches!(DataDirActivity::shared(&source),Err(error) if error.code=="DATA_DIR_SETTINGS"));
+        std::fs::remove_file(&file).unwrap();
+        std::fs::write(source.join(".data-dir-authority.json"),"broken").unwrap();
+        assert!(DataDirActivity::shared(&source).is_err());
     }
 
     #[test]

@@ -292,7 +292,7 @@ function render() {
         title:`${s.label} · ${stateText(s)}；${hasProcess(s) ? "停止" : "启动"}服务`,
         dot:transitioning(s) || busy.has("svc:" + s.id) ? "busy" : s.state === "running" ? "running" : s.state === "error" ? "error" : ""});
     }
-  } else { env += '<div class="empty">尚未安装服务，请到「套件 / 服务」安装。</div>'; }
+  } else { env += `<div class="empty">${loadError ? "服务状态暂不可用，请先处理上方提示。" : "尚未安装服务，请到「套件 / 服务」安装。"}</div>`; }
   if (S.sites?.length) {
     env += '<div class="sep"></div><div class="cap">站点</div>';
     env += S.sites.map((site) => row({key:"site:" + site.id, icon:ICONS.globe, label:site.name, meta:site.https ? "HTTPS" : "HTTP", chev:true})).join("");

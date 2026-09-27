@@ -46,8 +46,8 @@ fn main() -> ExitCode {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
-                "nsbctl: 初始化失败：{}（提示：数据目录不可写时可设 NSB_HOME）",
-                e.message
+                "nsbctl: 初始化失败：{}{}",
+                e.message, e.hint.map(|hint|format!("\n{hint}")).unwrap_or_default()
             );
             return ExitCode::FAILURE;
         }
@@ -55,7 +55,7 @@ fn main() -> ExitCode {
 
     let _activity = match nsb_core::paths::DataDirActivity::shared(&state.paths.base) {
         Ok(guard) => guard,
-        Err(error) => { eprintln!("nsbctl: {}", error.message); return ExitCode::FAILURE; }
+        Err(error) => { eprintln!("nsbctl: {}{}", error.message,error.hint.map(|hint|format!("\n{hint}")).unwrap_or_default()); return ExitCode::FAILURE; }
     };
     match cmd {
         "status" => cmd_status(&state, json),

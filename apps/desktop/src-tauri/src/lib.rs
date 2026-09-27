@@ -16,7 +16,7 @@ static APP_TRANSITION: AtomicU8 = AtomicU8::new(0);
 struct StartupFailure(AppError);
 struct PendingDataDir {
     result: nsb_core::paths::DataDirMigration,
-    _activity: nsb_core::paths::DataDirActivity,
+    activity: nsb_core::paths::DataDirActivity,
 }
 static PENDING_DATA_DIR: std::sync::Mutex<Option<PendingDataDir>> = std::sync::Mutex::new(None);
 fn pending_data_dir() -> std::sync::MutexGuard<'static, Option<PendingDataDir>> {
@@ -410,6 +410,16 @@ where
             if let Some(error) = invoke.message.webview_ref().try_state::<StartupFailure>() {
                 resolver.reject(serde_json::to_string(&error.0).unwrap_or_default());
                 return;
+            }
+            // 旧实例保留必要的显示与退出/重新打开入口，其余请求不能继续读取或写入旧数据。
+            let recovery_action = matches!(cmd.as_str(), "get_app_version" | "get_data_dir" | "get_settings"
+                | "restart_app" | "quit_app" | "tray_panel_resize" | "tray_panel_hide" | "tray_open_main");
+            if !recovery_action {
+                let state = invoke.message.webview_ref().state::<Arc<CoreState>>();
+                if let Err(error) = nsb_core::paths::ensure_data_dir_current(&state.paths.base) {
+                    resolver.reject(serde_json::to_string(&error).unwrap_or_default());
+                    return;
+                }
             }
             let transition = APP_TRANSITION.load(Ordering::Acquire);
             let transition_read = matches!(cmd.as_str(),
@@ -2172,7 +2182,7 @@ async fn migrate_data_dir(
     })
     .await
     .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))??;
-    *pending_data_dir() = Some(PendingDataDir { result: result.clone(), _activity: activity });
+    *pending_data_dir() = Some(PendingDataDir { result: result.clone(), activity });
     transition.prepared();
     // 页面在复制中重新加载也能接回已准备的副本，不留下无法操作的等待状态。
     let _ = app.emit("data-dir://prepared", &result);
@@ -2195,6 +2205,7 @@ fn cancel_data_dir_migration() -> Result<bool, tauri::Error> {
 #[tauri::command]
 fn restart_app(app: tauri::AppHandle, state: State<'_, Arc<CoreState>>, data_dir: Option<String>) -> Result<bool, tauri::Error> {
     let prepared = data_dir.is_some();
+    let relocated = map_jh(nsb_core::paths::redirected_data_dir(&state.paths.base))?.is_some();
     let mut transition = if let Some(path) = &data_dir {
         if !pending_data_dir().as_ref().is_some_and(|pending| &pending.result.path == path) {
             return Err(box_err(AppError::new("DATA_DIR_NOT_PREPARED", "迁移副本尚未准备好，请重新选择目录开始迁移")));
@@ -2215,10 +2226,13 @@ fn restart_app(app: tauri::AppHandle, state: State<'_, Arc<CoreState>>, data_dir
         if let Some(path) = data_dir {
             // 子进程与今后从快捷方式启动都读取同一持久选择；启动失败恢复原选择。
             command.env_remove("NSB_HOME");
-            nsb_core::paths::with_selected_data_dir(std::path::Path::new(&path), || {
+            let pending = pending_data_dir();
+            let pending = pending.as_ref().ok_or_else(|| AppError::new("DATA_DIR_NOT_PREPARED", "迁移副本尚未准备好"))?;
+            pending.activity.with_selected_data_dir(std::path::Path::new(&path), || {
                 command.spawn().map_err(|e| AppError::io("启动新的 NiceEnv 进程", e))
             })?;
         } else {
+            if relocated { command.env_remove("NSB_HOME"); }
             command.spawn().map_err(|e| AppError::io("启动新的 NiceEnv 进程", e))?;
         }
         shutdown_auxiliary_tasks();
@@ -2227,7 +2241,7 @@ fn restart_app(app: tauri::AppHandle, state: State<'_, Arc<CoreState>>, data_dir
         Ok(true)
     };
     // 已准备的迁移持有源目录独占锁，服务已停止且不能再启动；普通重启仍执行停机。
-    map_jh(if prepared { launch() } else { state.with_stopped_services(launch) })
+    map_jh(if prepared || relocated { launch() } else { state.with_stopped_services(launch) })
 }
 
 /* ================= 配置导入/导出 ================= */
@@ -2623,12 +2637,15 @@ fn quit_app(app: tauri::AppHandle) -> Result<bool, tauri::Error> {
 
 fn exit_after_stop(app: tauri::AppHandle, mut transition: AppTransition) -> Result<bool, tauri::Error> {
     let state = app.state::<Arc<CoreState>>();
-    map_jh(state.with_stopped_services(|| {
+    let relocated = map_jh(nsb_core::paths::redirected_data_dir(&state.paths.base))?.is_some();
+    let mut exit = || {
         shutdown_auxiliary_tasks();
         transition.commit();
         app.exit(0);
         Ok(true)
-    }))
+    };
+    // 目录已由其它进程接管时，只退出旧实例，不覆写旧 PID 记录或处理新实例的服务。
+    map_jh(if relocated { exit() } else { state.with_stopped_services(exit) })
 }
 
 /* ================= 应用更新：在线下载 + 就地安装 ================= */

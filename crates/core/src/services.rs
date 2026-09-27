@@ -694,11 +694,28 @@ pub fn precheck_port(port: u16, what: &str) -> Result<()> {
     if port == 0 {
         return Err(AppError::new("BAD_PORT", "监听端口必须在 1–65535 范围内"));
     }
-    let bind_error = match std::net::TcpListener::bind(("127.0.0.1", port)) {
+    let mut bind_error = match std::net::TcpListener::bind(("127.0.0.1", port)) {
         Ok(_) => return Ok(()),
         Err(error) => error,
     };
-    let diag = crate::ports::diagnose_port(port)?;
+    let mut diag = crate::ports::diagnose_port(port)?;
+    // Windows 进程组已经退出、监听已消失时，内核仍可能短暂保留绑定。
+    // 只对无监听者的 AddrInUse 有界等待；真实监听冲突和权限错误立即返回。
+    if !diag.in_use && bind_error.kind() == std::io::ErrorKind::AddrInUse {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+            match std::net::TcpListener::bind(("127.0.0.1",port)) {
+                Ok(_) => return Ok(()),
+                Err(error) => {
+                    bind_error = error;
+                    if bind_error.kind() != std::io::ErrorKind::AddrInUse { break; }
+                }
+            }
+        }
+        // 等待期间可能出现新的监听者，保留其实际身份，不能沿用旧诊断。
+        diag = crate::ports::diagnose_port(port)?;
+    }
     if !diag.in_use {
         let mut err = AppError::new("PORT_UNAVAILABLE", format!("端口 {port} 暂时无法绑定"))
             .with_hint("端口可能已被其它套接字绑定或由系统保留；请稍后重试，或在设置中选择其它端口")
@@ -888,6 +905,22 @@ mod fallback_tests {
         assert_eq!(precheck_port(0, "Fixture").unwrap_err().code, "BAD_PORT");
         assert_eq!(find_free_port_near(u16::MAX, &[], 32), None);
         assert_eq!(find_free_port_near(u16::MAX - 1, &[u16::MAX], 32), None);
+    }
+
+    #[test]
+    fn port_precheck_waits_for_transient_binding_without_ignoring_live_listeners() {
+        let bound = tokio::net::TcpSocket::new_v4().unwrap();
+        bound.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let port = bound.local_addr().unwrap().port();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            drop(bound);
+        });
+        precheck_port(port,"Transient binding").unwrap();
+        release.join().unwrap();
+        let listener = std::net::TcpListener::bind(("127.0.0.1",port)).unwrap();
+        assert_eq!(precheck_port(port,"New listener").unwrap_err().code,"PORT_IN_USE");
+        drop(listener);
     }
 
     #[test]

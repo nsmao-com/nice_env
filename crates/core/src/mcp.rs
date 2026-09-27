@@ -69,7 +69,7 @@ fn text_result(text: String, is_error: bool) -> Value {
 pub fn handle_tool_call(state: &Arc<crate::CoreState>, name: &str, args: &Value) -> Value {
     let _activity = match crate::paths::DataDirActivity::shared(&state.paths.base) {
         Ok(guard) => guard,
-        Err(error) => return text_result(error.message, true),
+        Err(error) => return text_result(format!("{}{}", error.message, error.hint.map(|hint|format!("\n{hint}")).unwrap_or_default()), true),
     };
     let res: Result<Value> = match name {
         "list_services" => {

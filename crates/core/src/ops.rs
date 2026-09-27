@@ -2960,4 +2960,34 @@ powershell.exe -NoProfile -NonInteractive -Command "$listener = [System.Net.Sock
         assert!(target.join("nsb.sqlite").is_file());
     }
 
+    #[test]
+    fn service_lifecycle_migration_fences_cached_instances_and_watchdog() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = Paths::new(temp.path().join("source"));
+        let state = isolated_state(source.clone());
+        let cached = Arc::new(isolated_state(source));
+        cached.store.set_setting("watchdogEnabled","true").unwrap();
+        cached.manager.register("handoff-probe","Handoff probe",None,None,None,cached.paths.service_log("handoff-probe"));
+        cached.watchdog.note_started("handoff-probe");
+        assert!(cached.watchdog.should_restart("handoff-probe",&cached.watchdog_config()));
+        let target = temp.path().join("target");
+        let (_,guard) = state.prepare_data_dir_migration(&target).unwrap();
+        let pidfile = std::fs::read(state.paths.data().join("run/pids.json")).unwrap();
+        assert!(cached.watchdog_tick().is_empty());
+        assert_eq!(cached.watchdog_status().watched[0].attempts,0);
+        guard.select_with_file(&temp.path().join("selection.json"),&target,||Ok(())).unwrap();
+        drop(guard);
+        assert_eq!(cached.start_service("handoff-probe").unwrap_err().code,"DATA_DIR_RELOCATED");
+        assert_eq!(cached.stop_all_services().unwrap_err().code,"DATA_DIR_RELOCATED");
+        assert!(cached.watchdog_tick().is_empty());
+        assert_eq!(cached.watchdog_status().watched[0].attempts,0);
+        assert_eq!(crate::backup_job::run_backup_now(&cached.store,&cached.paths).unwrap_err().code,"DATA_DIR_RELOCATED");
+        assert_eq!(crate::cron::run_job(&cached.store,"missing",true).unwrap_err().code,"DATA_DIR_RELOCATED");
+        let result = crate::mcp::handle_tool_call(&cached,"list_services",&serde_json::json!({}));
+        assert_eq!(result["isError"],true);
+        assert!(result["content"][0]["text"].as_str().unwrap().contains("重新连接"));
+        assert_eq!(std::fs::read(state.paths.data().join("run/pids.json")).unwrap(),pidfile);
+        assert_eq!(cached.store.get_setting("watchdogEnabled").as_deref(),Some("true"));
+    }
+
 }

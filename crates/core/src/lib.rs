@@ -1340,6 +1340,7 @@ impl CoreState {
     /// 返回本轮实际尝试过的 (服务 id, 是否成功)。调用方（desktop 的背景线程）
     /// 自己决定多久跑一次；间隔由 `WatchdogConfig::interval_sec` 提供。
     pub fn watchdog_tick(&self) -> Vec<(String, bool)> {
+        let Ok(_activity) = paths::DataDirActivity::shared(&self.paths.base) else { return Vec::new(); };
         let _operation = self.manager.lifecycle.lock();
         let cfg = self.watchdog_config();
         if !cfg.enabled {

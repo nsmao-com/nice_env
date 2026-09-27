@@ -247,7 +247,7 @@ export const TerminalEnvironment = z.object({
   cwd: z.string(),
   revision: z.string(),
   script: z.string(),
-  entries: z.array(PathEnvEntry.pick({ id: true, label: true, version: true, binDir: true })),
+  entries: z.array(PathEnvEntry.pick({ id: true, label: true, version: true, binDir: true }).extend({ source: z.string().optional() })),
   warnings: z.array(z.string()),
 });
 export type TerminalEnvironment = z.infer<typeof TerminalEnvironment>;
@@ -260,6 +260,10 @@ export const ProjectRuntimeVersions = z.object({
   options: z.array(z.object({ id: z.string(), label: z.string(), versions: z.array(z.string()) })),
   sharedSites: z.array(z.string()),
   phpVersion: z.string().nullable(),
+  detected: z.array(z.object({
+    id: z.string(), files: z.array(z.string()), requirements: z.array(z.string()),
+    resolvedVersion: z.string().nullable(), issue: z.string().nullable(),
+  })),
 });
 export type ProjectRuntimeVersions = z.infer<typeof ProjectRuntimeVersions>;
 

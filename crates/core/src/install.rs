@@ -877,7 +877,7 @@ impl Installer {
         let mut users = Vec::new();
         for site in store.list_sites()? {
             let project_ref = target.category == "runtime"
-                && crate::pathenv::project_references_version(&site, &target.id, &target.version)?;
+                && crate::pathenv::project_references_version(store, &site, &target.id, &target.version)?;
             let php_ref = target.id == "php"
                 && site.runtime.kind == crate::model::SiteKind::Php
                 && site.runtime.php_version.as_deref() == Some(target.version.as_str());

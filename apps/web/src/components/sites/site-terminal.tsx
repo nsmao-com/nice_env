@@ -40,7 +40,8 @@ export function SiteTerminalButton({ site }: { site: Pick<Site, "id" | "name"> }
   }, [project.data, project.isFetching, project.error, draft, open, tab]);
   const dirty = !!draft && (Object.keys(draft.versions).length !== Object.keys(draft.base.versions).length
     || Object.entries(draft.versions).some(([id, version]) => draft.base.versions[id] !== version));
-  const invalid = !!draft && Object.entries(draft.versions).some(([id, version]) => !draft.base.options.find((o) => o.id === id)?.versions.includes(version));
+  const invalid = !!draft && (Object.entries(draft.versions).some(([id, version]) => !draft.base.options.find((o) => o.id === id)?.versions.includes(version))
+    || draft.base.detected.some((entry) => entry.issue && !Object.hasOwn(draft.versions, entry.id)));
   const problem = error ?? (environment.error ? normalizeError(environment.error) : null);
   const projectProblem = saveError ?? (project.error ? normalizeError(project.error) : null);
   React.useEffect(() => { if (problem && tab === "terminal") errorRef.current?.focus(); }, [problem?.message, tab]);
@@ -101,7 +102,7 @@ export function SiteTerminalButton({ site }: { site: Pick<Site, "id" | "name"> }
           {data && !environment.error && !environment.isFetching && <>
             <div className="space-y-1"><p className="text-secondary">{t("sites.terminal.directory")}</p><p className="font-mono [overflow-wrap:anywhere]">{data.cwd}</p></div>
             {data.warnings.length > 0 && <div role="status" className="rounded-lg bg-warn-soft p-3 text-warn"><p>{t("tools.termInjectSkipped")}</p><ul className="mt-2 list-disc space-y-1 pl-4 [overflow-wrap:anywhere]">{data.warnings.map((warning, i) => <li key={i}>{warning}</li>)}</ul></div>}
-            <div className="rounded-lg bg-fill px-3">{data.entries.map((entry) => <div key={entry.id} className="space-y-1 border-b border-dashed border-separator py-3 last:border-0"><p className="flex flex-wrap items-center justify-between gap-2"><span className="min-w-0 font-medium [overflow-wrap:anywhere]">{entry.label}</span><code className="min-w-0 [overflow-wrap:anywhere]">{entry.version}</code></p><p className="font-mono text-secondary [overflow-wrap:anywhere]">{entry.binDir}</p></div>)}
+            <div className="rounded-lg bg-fill px-3">{data.entries.map((entry) => <div key={entry.id} className="space-y-1 border-b border-dashed border-separator py-3 last:border-0"><p className="flex flex-wrap items-center justify-between gap-2"><span className="min-w-0 font-medium [overflow-wrap:anywhere]">{entry.label}</span><code className="min-w-0 [overflow-wrap:anywhere]">{entry.version}</code></p>{entry.source && <p className="text-secondary [overflow-wrap:anywhere]">{t("sites.project.source").replace("{source}", entry.source)}</p>}<p className="font-mono text-secondary [overflow-wrap:anywhere]">{entry.binDir}</p></div>)}
               {data.entries.length === 0 && <p className="py-3 text-secondary">{t("sites.terminal.empty")}</p>}</div>
             <p className="text-secondary">{t("sites.terminal.selectionHint")}</p>
             <p className="text-secondary">{t("sites.terminal.scope")}</p>
@@ -118,8 +119,9 @@ export function SiteTerminalButton({ site }: { site: Pick<Site, "id" | "name"> }
               {draft.base.sharedSites.length > 0 && <p className="rounded-lg bg-warn-soft p-3 text-warn [overflow-wrap:anywhere]">{t("sites.project.shared").replace("{sites}", draft.base.sharedSites.join("、"))}</p>}
               <div className="rounded-lg bg-fill px-3">{draft.base.options.map((option) => {
                 const selected = Object.hasOwn(draft.versions, option.id) ? draft.versions[option.id] : undefined;
+                const detected = draft.base.detected.find((entry) => entry.id === option.id);
                 const missing = !!selected && !option.versions.includes(selected);
-                const inherit = option.id === "php" && draft.base.phpVersion
+                const inherit = detected ? (detected.resolvedVersion ? t("sites.project.autoVersion").replace("{version}", detected.resolvedVersion) : t("sites.project.autoIssue")) : option.id === "php" && draft.base.phpVersion
                   ? t("sites.project.followPhp").replace("{version}", draft.base.phpVersion) : t("sites.project.followPath");
                 return <div key={option.id} className="space-y-2 border-b border-dashed border-separator py-3 last:border-0">
                   <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
@@ -128,18 +130,22 @@ export function SiteTerminalButton({ site }: { site: Pick<Site, "id" | "name"> }
                       setDraft((current) => { if (!current) return current; const versions = { ...current.versions }; if (value === "__inherit") delete versions[option.id]; else versions[option.id] = value; return { ...current, versions }; });
                       setSaved(false); setSaveError(null);
                     }}>
-                      <SelectTrigger aria-label={option.label} aria-invalid={missing || undefined} className="min-w-0 sm:w-64 sm:shrink-0"><SelectValue /></SelectTrigger>
+                      <SelectTrigger aria-label={option.label} aria-invalid={missing || (!!detected?.issue && !selected) || undefined} className="min-w-0 sm:w-64 sm:shrink-0"><SelectValue /></SelectTrigger>
                       <SelectContent><SelectItem value="__inherit">{inherit}</SelectItem>{(option.versions.length > 0 || missing) && <SelectSeparator />}
                         {missing && <SelectItem value={selected} disabled>{selected} · {t("sites.project.unavailable")}</SelectItem>}
                         {option.versions.map((version) => <SelectItem key={version} value={version}>{version}</SelectItem>)}
                       </SelectContent>
                     </Select>
                   </div>
+                  {detected && <div className="space-y-1 text-secondary [overflow-wrap:anywhere]">
+                    <p>{t("sites.project.source").replace("{source}", detected.requirements.length ? detected.requirements.join(" · ") : detected.files.join(" · "))}</p>
+                    {selected ? <p>{t(selected === draft.base.versions[option.id] ? "sites.project.overridden" : "sites.project.overrideDraft")}</p> : detected.issue ? <p role="status" className="text-warn">{detected.issue}</p> : <p>{t("sites.project.autoHint")}</p>}
+                  </div>}
                   {missing && <p className="text-warn">{t("sites.project.missing")}</p>}
                 </div>;
               })}{draft.base.options.length === 0 && <p className="py-3 text-secondary">{t("sites.project.empty")}</p>}</div>
               <p className="text-secondary">{t("sites.project.phpScope")}</p>
-              <details><summary className="cursor-pointer text-secondary">{t("sites.project.file")}</summary><div className="mt-2 space-y-2"><p className="font-mono [overflow-wrap:anywhere]">{draft.base.path}</p><p className="text-secondary">{t("sites.project.backup")}</p></div></details>
+              <details><summary className="cursor-pointer text-secondary">{t("sites.project.file")}</summary><div className="mt-2 space-y-2"><p className="font-mono [overflow-wrap:anywhere]">{draft.base.path}</p><p className="text-secondary">{t("sites.project.backup")}</p><p className="text-secondary">{t("sites.project.detectScope")}</p></div></details>
               {dirty && <p role="status" className="text-warn">{t("detail.unsaved")}</p>}
             </>}
             {saved && <p role="status" className="rounded-lg bg-fill p-3 text-secondary">{t(isTauri ? "sites.project.saved" : "sites.project.demoSaved")}</p>}

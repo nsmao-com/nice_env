@@ -65,7 +65,7 @@ import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSet
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.73";
+const MOCK_APP_VERSION = "0.2.74";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -241,18 +241,60 @@ const mockPathEnv: { enabled: boolean; selected: string[] | null; versions: Reco
 
 // 浏览器只在内存保存；同一项目目录的站点共用版本选择。
 const mockProjectVersions = new Map<string, Record<string, string>>();
+const mockProjectVersionFiles = new Map<string, Record<string, string>>();
 const terminalRuntimeLabel = (id: string, name: string) => {
   switch (id) { case "php": return "PHP"; case "node": return "Node.js"; case "python": return "Python"; case "go": return "Go"; default: return name; }
 };
 const mockProjectRoot = (site: Site) => site.rootDir.replace(/\\/g, "/").replace(/\/$/, "").replace(/\/(public|out|dist|build)$/, "");
+function mockDetectedVersions(root: string): ProjectRuntimeVersions["detected"] {
+  const files = mockProjectVersionFiles.get(root) ?? {};
+  const numeric = (value: string, node: boolean) => {
+    const text = node ? value.replace(/^v/, "") : value;
+    return /^(0|[1-9]\d*)(\.(0|[1-9]\d*)){0,2}$/.test(text) ? text.split(".") : null;
+  };
+  return ([{ id: "node", names: [".nvmrc", ".node-version"] }, { id: "python", names: [".python-version"] }])
+    .filter(({ names }) => names.some((name) => Object.hasOwn(files, name)))
+    .map(({ id, names }) => {
+      const present = names.filter((name) => Object.hasOwn(files, name));
+      const requirements: string[] = [], constraints: string[][] = [];
+      let issue: string | null = null;
+      for (const name of present) {
+        const lines = files[name].replace(/^\uFEFF/, "").split(/\r?\n/).map((line) => line.split("#")[0].trim()).filter((line) => line && !(name === ".nvmrc" && line.includes("=")));
+        if (lines.length !== 1 || /\s|:/.test(lines[0])) { issue ??= `${name} 需要一个版本号；空文件或多个解释器请在项目版本页明确选择版本`; continue; }
+        const value = lines[0], parts = numeric(value, id === "node");
+        if (value.length > 128 || (!parts && !(name === ".nvmrc" && ["node", "stable"].includes(value)))) {
+          issue ??= `${name} 使用了无法自动解析的版本写法；请在项目版本页选择已安装版本`; continue;
+        }
+        requirements.push(`${name}: ${value}`); if (parts) constraints.push(parts);
+      }
+      if (!issue && constraints.length === 2 && constraints[0].slice(0, Math.min(...constraints.map((parts) => parts.length))).some((part, index) => part !== constraints[1][index])) {
+        issue = ".nvmrc 与 .node-version 的版本要求冲突，请统一文件或在项目版本页明确选择 Node.js 版本";
+      }
+      const resolvedVersion = issue ? null : Array.from(packages.values()).filter((p) => p.id === id && p.category === "runtime" && p.install)
+        .filter((p) => { const parts = numeric(p.version, id === "node"); return parts?.length === 3 && constraints.every((constraint) => constraint.every((part, index) => part === parts[index])); })
+        .sort((a, b) => cmpVersionDesc(a.version, b.version))[0]?.version ?? null;
+      if (!issue && !resolvedVersion) issue = `${requirements.join("；")}：没有符合文件要求的已安装版本，请先安装或在项目版本页明确选择版本`;
+      return { id, files: present, requirements, resolvedVersion, issue };
+    });
+}
+
+function mockProjectReferences(site: Site, id: string, version: string): boolean {
+  const root = mockProjectRoot(site), pinned = mockProjectVersions.get(root);
+  if (pinned && Object.hasOwn(pinned, id)) return pinned[id] === version;
+  const detected = mockDetectedVersions(root).find((entry) => entry.id === id);
+  if (detected?.issue) throw { code: "PROJECT_RUNTIME_UNREADABLE", message: `无法检查站点「${site.name}」的项目版本，未卸载运行时`, hint: detected.issue };
+  return detected?.resolvedVersion === version;
+}
+
 function mockProjectView(siteId: string): ProjectRuntimeVersions {
   const site = sites.get(siteId);
   if (!site) throw { code: "SITE_NOT_FOUND", message: "站点不存在，请刷新列表" };
   const root = mockProjectRoot(site);
   const versions = { ...mockProjectVersions.get(root) };
+  const detected = mockDetectedVersions(root);
   const installed = Array.from(packages.values()).filter((p) => p.install && p.category === "runtime" && p.entry && !/\.(phar|php|jar|txt|json|toml|yaml|yml|md|ini)$/i.test(p.entry));
-  const ids = [...new Set([...installed.map((p) => p.id), ...Object.keys(versions)])].sort();
-  return { path: `${root}/.niceenv.json`, exists: mockProjectVersions.has(root), revision: JSON.stringify([siteId, root, mockProjectVersions.get(root) ?? null]), versions,
+  const ids = [...new Set([...installed.map((p) => p.id), ...Object.keys(versions), ...detected.map((entry) => entry.id)])].sort();
+  return { path: `${root}/.niceenv.json`, exists: mockProjectVersions.has(root), revision: JSON.stringify([siteId, root, mockProjectVersions.get(root) ?? null, mockProjectVersionFiles.get(root) ?? null]), versions, detected,
     options: ids.map((id) => ({ id, label: terminalRuntimeLabel(id, Array.from(packages.values()).find((p) => p.id === id)?.displayName ?? id),
       versions: installed.filter((p) => p.id === id).map((p) => p.version).sort(cmpVersionDesc) })),
     sharedSites: Array.from(sites.values()).filter((other) => other.id !== siteId && mockProjectRoot(other) === root).map((other) => other.name),
@@ -1028,6 +1070,9 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const { siteId, versions, expectedRevision } = args as { siteId: string; versions: Record<string, string>; expectedRevision: string };
       const view = mockProjectView(siteId);
       if (view.revision !== expectedRevision) throw { code: "PROJECT_RUNTIME_CHANGED", message: "项目版本文件或目录已变化，未覆盖当前配置", hint: "草稿已保留，请重新读取后核对。" };
+      for (const detected of view.detected) {
+        if (detected.issue && !Object.hasOwn(versions, detected.id)) throw { code: "PROJECT_RUNTIME_DETECTION", message: detected.issue, hint: "请选择已安装版本覆盖此项，或修正版本文件后重新读取。" };
+      }
       for (const [id, version] of Object.entries(versions)) {
         if (!view.options.find((option) => option.id === id)?.versions.includes(version)) throw { code: "TERMINAL_RUNTIME_UNAVAILABLE", message: `${id} ${version} 尚未安装，请改选已安装版本或取消固定` };
       }
@@ -1089,6 +1134,12 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         if (siteId && !site) throw { code: "SITE_NOT_FOUND", message: "站点不存在，请刷新列表" };
         let chosen = entries.filter((entry) => entry.selected);
         const required = site ? { ...mockProjectVersions.get(mockProjectRoot(site)) } : {};
+        const sources: Record<string, string> = Object.fromEntries(Object.keys(required).map((id) => [id, ".niceenv.json"]));
+        for (const detected of site ? mockDetectedVersions(mockProjectRoot(site)) : []) {
+          if (Object.hasOwn(required, detected.id)) continue;
+          if (!detected.resolvedVersion) throw { code: "PROJECT_RUNTIME_DETECTION", message: detected.issue ?? "无法确定项目运行时版本", hint: "请在项目版本页选择已安装版本覆盖此项，或修正版本文件后刷新。" };
+          required[detected.id] = detected.resolvedVersion; sources[detected.id] = detected.files.join(" + ");
+        }
         if (site?.runtime.kind === "php" && !required.php) {
           const php = entries.find((entry) => entry.id === "php" && entry.version === site.runtime.phpVersion);
           if (!php) throw { code: "TERMINAL_RUNTIME_UNAVAILABLE", message: `站点指定的 PHP ${site.runtime.phpVersion ?? ""} 尚未安装，请先安装或更改站点设置` };
@@ -1099,13 +1150,14 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           if (!selected) throw { code: "TERMINAL_RUNTIME_UNAVAILABLE", message: `项目指定的 ${id} ${version} 尚未安装，请在项目版本中改选或取消固定` };
           chosen = [...chosen.filter((entry) => entry.id !== id), selected];
         }
-        chosen.sort((a, b) => Number(b.id === "php" && site?.runtime.kind === "php") - Number(a.id === "php" && site?.runtime.kind === "php") || a.id.localeCompare(b.id));
+        const prioritized = (id: string) => Object.hasOwn(required, id) || (id === "php" && site?.runtime.kind === "php");
+        chosen.sort((a, b) => Number(prioritized(b.id)) - Number(prioritized(a.id)) || a.id.localeCompare(b.id));
         const cwd = site ? site.rootDir.replace(/[\\/](public|out|dist|build)[\\/]?$/, "") : "…";
         const quoted = chosen.map((entry) => `'${entry.binDir.replace(/['‘’‚‛]/g, (quote) => quote + quote)}'`).join(",\n    ");
         return {
           shell: "powershell",
           cwd,
-          revision: `mock-terminal-${JSON.stringify([siteId, cwd, chosen, mockPathEnv.versions, required])}`,
+          revision: `mock-terminal-${JSON.stringify([siteId, cwd, chosen, mockPathEnv.versions, required, site ? mockProjectVersionFiles.get(mockProjectRoot(site)) : null])}`,
           script: chosen.length ? `# Browser demo paths — generate the actual script in the desktop app.
 & {
   $nsbDirs = @(
@@ -1120,7 +1172,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
   }
   $env:PATH = (@($nsbDirs) + $nsbRest) -join ';'
 }` : "",
-          entries: chosen.map(({ id, label, version, binDir }) => ({ id, label: terminalRuntimeLabel(id, label), version, binDir })),
+          entries: chosen.map(({ id, label, version, binDir }) => ({ id, label: terminalRuntimeLabel(id, label), version, binDir, source: sources[id] })),
           warnings: Object.entries(mockPathEnv.versions)
             .filter(([id, version]) => !required[id] && !(id === "php" && site?.runtime.kind === "php") && (mockPathEnv.selected === null || mockPathEnv.selected.includes(id))
               && !installed.some((p) => p.id === id && p.version === version))
@@ -1232,7 +1284,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const usedBy = [
         ...Array.from(sites.values()).filter((site) =>
           (p.id === "php" && site.runtime.kind === "php" && site.runtime.phpVersion === p.version)
-          || mockProjectVersions.get(mockProjectRoot(site))?.[p.id] === p.version
+          || (p.category === "runtime" && mockProjectReferences(site, p.id, p.version))
           || ((site.runtime.webServer ?? "nginx") === p.id && !hasAlternative)
           || (p.id === "mysql" && site.db?.enabled
             && (site.db.version != null ? site.db.version === p.version : !hasAlternative))

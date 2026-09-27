@@ -454,6 +454,8 @@ pub struct TerminalEnvironmentEntry {
     pub label: String,
     pub version: String,
     pub bin_dir: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -466,6 +468,17 @@ pub struct ProjectRuntimeVersions {
     pub options: Vec<ProjectRuntimeOption>,
     pub shared_sites: Vec<String>,
     pub php_version: Option<String>,
+    pub detected: Vec<ProjectRuntimeDetection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimeDetection {
+    pub id: String,
+    pub files: Vec<String>,
+    pub requirements: Vec<String>,
+    pub resolved_version: Option<String>,
+    pub issue: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

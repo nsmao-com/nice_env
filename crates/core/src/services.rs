@@ -31,6 +31,7 @@ pub struct ServiceEntry {
     pub started_port: Mutex<Option<u16>>,
     /// 本次启动时解析的管理台入口；配置之后发生变化不能改写运行中入口。
     pub(crate) web_target: Mutex<Option<Result<ServiceWebTarget>>>,
+    pub(crate) site_endpoints: Mutex<HashMap<String, crate::sites::SiteEndpoint>>,
     /// 清单声明的前置依赖（服务 id）。注册时从清单带入，
     /// 这样列表就能显示「需要先装 X」而不必再查一次清单。
     pub requires: Vec<String>,
@@ -107,6 +108,7 @@ impl ServiceManager {
                     port,
                     started_port: Mutex::new(None),
                     web_target: Mutex::new(None),
+                    site_endpoints: Mutex::new(HashMap::new()),
                     requires: Vec::new(),
                 }),
             );
@@ -187,7 +189,10 @@ impl ServiceManager {
 
     pub fn set_state(&self, id: &str, state: ServiceState) {
         if let Some(e) = self.entry(id) {
-            if matches!(state, ServiceState::Starting | ServiceState::Stopped) { *e.web_target.lock() = None; }
+            if matches!(state, ServiceState::Starting | ServiceState::Stopped) {
+                *e.web_target.lock() = None;
+                e.site_endpoints.lock().clear();
+            }
             // 一旦进入运行态，上一次的失败记录就不再适用
             if matches!(state, ServiceState::Running | ServiceState::Starting) {
                 *e.last_error.lock() = None;
@@ -236,6 +241,7 @@ impl ServiceManager {
     /// 收养后的组没有 Job 句柄，停止走「优雅命令 + 按 pid taskkill」兜底。
     pub fn adopt(&self, id: &str, pids: &[u32], port: Option<u16>) {
         let Some(e) = self.entry(id) else { return };
+        e.site_endpoints.lock().clear();
         *e.pids.lock() = pids.to_vec();
         *e.started_at.lock() = Some(std::time::SystemTime::now());
         if let Some(p) = port {
@@ -303,6 +309,7 @@ impl ServiceManager {
                 *e.started_at.lock() = None;
                 *e.started_port.lock() = None;
                 *e.web_target.lock() = None;
+                e.site_endpoints.lock().clear();
                 *e.group.lock() = None;
                 state.clone()
             }

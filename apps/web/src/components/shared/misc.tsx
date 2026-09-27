@@ -5,7 +5,7 @@ import { motion } from "motion/react";
 import { Check, Copy } from "lucide-react";
 import { useUI, useT } from "@/lib/store";
 import { cn } from "@/lib/utils";
-import { copyText } from "@/lib/hooks";
+import { copyText, toastError } from "@/lib/hooks";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import {
@@ -20,27 +20,38 @@ import {
 /* ============ 复制按钮 ============ */
 export function CopyButton({
   text,
+  resolveText,
   className,
   size = "icon-sm",
 }: {
   text: string;
+  resolveText?: () => Promise<string>;
   className?: string;
   size?: "icon-sm" | "sm" | "default";
 }) {
   const t = useT();
   const [copied, setCopied] = React.useState(false);
+  const [pending, setPending] = React.useState(false);
+  const pendingRef = React.useRef(false);
   return (
     <Button
       variant="ghost"
       size={size}
+      disabled={pending}
       className={cn("text-faint hover:text-foreground", className)}
       onClick={async (e) => {
         e.preventDefault();
         e.stopPropagation();
-        if (await copyText(text)) {
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1200);
-        }
+        if (pendingRef.current) return;
+        pendingRef.current = true;
+        setPending(true);
+        try {
+          if (await copyText(resolveText ? await resolveText() : text)) {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1200);
+          }
+        } catch (error) { toastError(error); }
+        finally { pendingRef.current = false; setPending(false); }
       }}
       title={t("common.copyTitle")}
       aria-label={t("common.copyTitle")}

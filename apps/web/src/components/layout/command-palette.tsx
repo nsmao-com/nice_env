@@ -28,7 +28,7 @@ import {
 } from "lucide-react";
 import { CommandDialog, CommandGroup, CommandInput, CommandItem, CommandList, CommandEmpty } from "@/components/ui/command";
 import { useUI, useT } from "@/lib/store";
-import { useServices, useSites, useStacks, toastError, useQuickServiceActions, usePorts, siteUrl } from "@/lib/hooks";
+import { useServices, useSites, useStacks, toastError, useQuickServiceActions } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import { StatusLight } from "@/components/shared/status-light";
 import { BulkResult } from "@/components/shared/bulk-actions";
@@ -56,7 +56,6 @@ export function CommandPalette() {
   const { data: services } = useServices(0);
   const { data: sites } = useSites();
   const { data: stacks } = useStacks();
-  const ports = usePorts();
   const [confirmStopAll, setConfirmStopAll] = React.useState(false);
   const quick = useQuickServiceActions(services, stacks);
   const busy = quick.busy;
@@ -179,12 +178,11 @@ export function CommandPalette() {
         {sites.length > 0 && (
           <CommandGroup heading={t("cmd.sites")}>
             {sites.slice(0, 8).map((s) => {
-              const url = siteUrl(s, ports);
               return (
                 <CommandItem
                   key={s.id}
                   value={`site ${s.name} ${s.domains.join(" ")}`}
-                  onSelect={() => run(() => api.openInBrowser(url))}
+                  onSelect={() => run(() => api.openSite(s.id))}
                 >
                   <ExternalLink />
                   <span className="flex-1 truncate">

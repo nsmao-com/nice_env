@@ -63,7 +63,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.63";
+const MOCK_APP_VERSION = "0.2.64";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -619,6 +619,17 @@ function seed() {
 }
 seed();
 
+// 浏览器预览也保留上次加载的站点端口，修改设置本身不会替换运行中入口。
+function mockSiteUrl(site: Site) {
+  const key = site.runtime.webServer === "apache" ? site.https ? "apacheHttps" : "apacheHttp" : site.https ? "https" : "http";
+  const defaults = settings.portProfile === "safe" ? { http: 8080, https: 8443, apacheHttp: 8180, apacheHttps: 8444 }
+    : { http: 80, https: 443, apacheHttp: 8080, apacheHttps: 8443 };
+  const port = settings.portOverrides?.[key] ?? defaults[key];
+  const domain = (site.domains.find((domain) => !domain.startsWith("*.")) ?? site.domains[0] ?? "localhost").replace(/^\*\./, "www.");
+  return `${site.https ? "https" : "http"}://${domain}${port === (site.https ? 443 : 80) ? "" : `:${port}`}`;
+}
+for (const site of sites.values()) site.accessUrl = mockSiteUrl(site);
+
 /** 预览也按运行描述注册服务；Node/Python 等纯运行时只选择版本。 */
 function refreshPackageSelection(id: string) {
   const all = Array.from(packages.values()).filter((p) => p.id === id);
@@ -1141,9 +1152,21 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return true as T;
     }
     case "list_sites":
-      return Array.from(sites.values()) as T;
+      return Array.from(sites.values()).map((site) => ({ ...site,
+        accessUrl: site.status === "running" && services.get(site.runtime.webServer)?.state === "running" ? site.accessUrl : undefined,
+      })) as T;
+    case "site_access_url": {
+      const site = sites.get(args?.id as string);
+      if (!site) throw { code: "SITE_NOT_FOUND", message: "站点不存在" };
+      if (site.status !== "running" || services.get(site.runtime.webServer)?.state !== "running" || !site.accessUrl) {
+        throw { code: "SITE_URL_UNAVAILABLE", message: "站点未运行或尚未确认本次加载的访问地址", hint: "请启动或重启该站点后重试。" };
+      }
+      return site.accessUrl as T;
+    }
     case "create_site": {
       const input = args!.input as CreateSiteInput;
+      if (input.runtime.kind === "php" && input.runtime.phpVersion) await runServiceAction("start_service", `php@${input.runtime.phpVersion}`);
+      await runServiceAction("start_service", input.runtime.webServer);
       const id = `site-${uid()}`;
       sites.set(id, {
         id,
@@ -1161,13 +1184,14 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         updatedAt: now(),
       });
       if (input.createDb) databases.set(input.createDb.database, { name: input.createDb.database, tables: 0, sizeKb: 0 });
+      sites.get(id)!.accessUrl = mockSiteUrl(sites.get(id)!);
       input.domains.filter((d) => !d.startsWith("*.")).forEach((d) => hostsManaged.set(d, ["127.0.0.1"]));
       return sites.get(id) as T;
     }
     case "update_site": {
       const patch = args!.site as Partial<Site> & { id: string };
       const s = sites.get(patch.id);
-      if (s) Object.assign(s, patch, { updatedAt: now() });
+      if (s) { Object.assign(s, patch, { updatedAt: now() }); s.accessUrl = mockSiteUrl(s); }
       return s as T;
     }
     case "delete_site": {
@@ -1193,7 +1217,14 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "start_site":
     case "stop_site": {
       const s = sites.get(args!.id as string);
-      if (s) s.status = cmd === "start_site" ? "running" : "stopped";
+      if (s) {
+        if (cmd === "start_site") {
+          if (s.runtime.kind === "php" && s.runtime.phpVersion) await runServiceAction("start_service", `php@${s.runtime.phpVersion}`);
+          await runServiceAction("start_service", s.runtime.webServer);
+          s.accessUrl = mockSiteUrl(s);
+        }
+        s.status = cmd === "start_site" ? "running" : "stopped";
+      }
       return true as T;
     }
     case "read_hosts": {

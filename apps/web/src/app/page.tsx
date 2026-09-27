@@ -28,7 +28,6 @@ import {
   useQuickServiceActions,
   serviceHasProcess,
   siteUrl,
-  usePorts,
   useStacks,
 } from "@/lib/hooks";
 import * as api from "@/lib/api";
@@ -75,7 +74,6 @@ export default function DashboardPage() {
 
   const view = useUI((st) => st.serviceView);
   const setView = useUI((st) => st.setServiceView);
-  const ports = usePorts();
   const recentSites = React.useMemo(
     () => [...sites].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 8),
     [sites]
@@ -242,7 +240,7 @@ export default function DashboardPage() {
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                   <AnimatePresence>
                     {recentSites.map((site) => {
-                      const url = siteUrl(site, ports);
+                      const url = siteUrl(site);
                       return (
                         <motion.div key={site.id} layout initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.97 }}>
                           <Card className="group p-4 transition-colors hover:border-border-strong">
@@ -252,8 +250,8 @@ export default function DashboardPage() {
                                 <span className="text-[13.5px] font-medium">{site.name}</span>
                               </div>
                               <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-                                <CopyButton text={url} />
-                                <Button variant="ghost" size="icon-sm" className="text-faint hover:text-foreground" title={t("dashboard.openBrowser")} onClick={() => api.openInBrowser(url).catch(toastError)}>
+                                <CopyButton text={url} resolveText={() => api.siteAccessUrl(site.id)} />
+                                <Button variant="ghost" size="icon-sm" className="text-faint hover:text-foreground" title={t("dashboard.openBrowser")} onClick={() => api.openSite(site.id).catch(toastError)}>
                                   <ExternalLink className="h-3.5 w-3.5" />
                                 </Button>
                                 <Button variant="ghost" size="icon-sm" className="text-faint hover:text-foreground" title={t("dashboard.openFolder")} onClick={() => api.openInFolder(site.rootDir).catch(toastError)}>
@@ -269,11 +267,11 @@ export default function DashboardPage() {
                                 className="truncate text-xs text-primary/90 hover:underline"
                                 onClick={(e) => {
                                   e.preventDefault();
-                                  api.openInBrowser(url).catch(toastError);
+                                  api.openSite(site.id).catch(toastError);
                                 }}
-                                href={url}
+                                href={url || undefined}
                               >
-                                {url}
+                                {url || t("sites.addressPending")}
                               </a>
                               <span className="shrink-0 text-[10.5px] text-faint">
                                 {site.runtime.kind === "php"

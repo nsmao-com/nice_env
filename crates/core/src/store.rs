@@ -343,6 +343,7 @@ impl Store {
             let db: Option<String> = r.get(7)?;
             let php_overrides: Option<String> = r.get(8)?;
             Ok(Site {
+                access_url: None,
                 id: r.get(0)?,
                 name: r.get(1)?,
                 domains: decode_site_json(2, &domains)?,

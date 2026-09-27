@@ -107,6 +107,8 @@ export const versionCatalogs = (force = false) =>
 export const listSites = () => safe(invoke<Site[]>("list_sites"));
 export const createSite = (input: CreateSiteInput) =>
   safe(invoke<Site>("create_site", { input }));
+export const siteAccessUrl = (id: string) => safe(invoke<string>("site_access_url", { id }));
+export const openSite = (id: string) => openResolvedBrowserUrl(() => siteAccessUrl(id));
 export const updateSite = (site: Partial<Site> & { id: string }) =>
   safe(invoke<Site>("update_site", { site }));
 export const deleteSite = (id: string, opts: { hosts?: boolean; certs?: boolean }) =>
@@ -250,15 +252,23 @@ export const configReset = (kind: string, revision: string) => safe(invoke<Confi
 export const getSystemStats = () => safe(invoke<SystemStats>("get_system_stats"));
 
 /* 打开外部 */
-export async function openInBrowser(input: string): Promise<boolean> {
-  const url = browserUrl(input);
-  if (isTauri) return safe(invoke<boolean>("open_in_browser", { url }));
+export const openInBrowser = (input: string): Promise<boolean> => openResolvedBrowserUrl(() => input);
+
+async function openResolvedBrowserUrl(resolve: () => string | Promise<string>): Promise<boolean> {
+  if (isTauri) return safe(invoke<boolean>("open_in_browser", { url: browserUrl(await resolve()) }));
   // 必须在点击的同步阶段打开，不能经过 mock 延迟而丢失浏览器的用户手势。
   // 先隔离空白窗口的 opener，再导航；只有拿到窗口句柄才能识别弹窗被拦截。
   const opened = window.open("about:blank", "_blank");
   if (!opened) throw { code: "BROWSER_OPEN_BLOCKED", message: "浏览器拦截了新窗口，请允许本站弹窗后重试" };
+  let url: string;
   try {
     opened.opener = null;
+    url = browserUrl(await resolve());
+  } catch (error) {
+    opened.close();
+    throw error;
+  }
+  try {
     const link = opened.document.createElement("a");
     link.href = url;
     link.rel = "noopener noreferrer";

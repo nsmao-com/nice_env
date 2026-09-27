@@ -147,6 +147,16 @@ pub fn listeners() -> Result<Vec<(u16, u32)>> {
     platform_listeners()
 }
 
+/// Web 服务的监听者可能是 worker；按已有进程树归属规则核对，未知归属不放行。
+pub(crate) fn owns_listener(target: std::net::SocketAddr, roots: &[u32]) -> Result<bool> {
+    let listeners = listener_endpoints()?;
+    let processes = ProcessSnapshot::read();
+    let owners: Vec<_> = listeners.iter().filter(|entry| entry.accepts(target)).collect();
+    Ok(!owners.is_empty() && owners.iter().all(|entry| {
+        ownership(entry.pid, roots, &processes.parents) == Ownership::Own
+    }))
+}
+
 /// 仅供已启用自动释放端口的内部启动流程；UI 必须传扫描时选中的监听者。
 pub fn close_port(
     store: &Store,

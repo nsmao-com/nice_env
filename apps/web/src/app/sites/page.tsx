@@ -6,7 +6,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { Globe, Plus, ExternalLink, FolderOpen, Loader2, Power, Settings2, TerminalSquare, FolderSearch, Copy, AppWindow, Search, RefreshCw } from "lucide-react";
 import type { Site } from "@nsb/schema";
 import { useUI, useT } from "@/lib/store";
-import { useSites, useInvalidate, toastError, siteUrl, usePorts } from "@/lib/hooks";
+import { useSites, useInvalidate, toastError, siteUrl } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -140,8 +140,7 @@ export default function SitesPage() {
 function SiteCard({ site, onOpenDetail }: { site: Site; onOpenDetail: () => void }) {
   const t = useT();
   const invalidate = useInvalidate();
-  const ports = usePorts();
-  const url = siteUrl(site, ports);
+  const url = siteUrl(site);
   const running = site.status === "running";
   const [pending, setPending] = React.useState(false);
 
@@ -176,10 +175,10 @@ function SiteCard({ site, onOpenDetail }: { site: Site; onOpenDetail: () => void
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
-            <CopyButton text={url} />
+            <CopyButton text={url} resolveText={() => api.siteAccessUrl(site.id)} />
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button aria-label={t("dashboard.openBrowser")} variant="ghost" size="icon-sm" className="text-faint hover:text-foreground" onClick={() => api.openInBrowser(url).catch(toastError)}>
+                <Button aria-label={t("dashboard.openBrowser")} variant="ghost" size="icon-sm" className="text-faint hover:text-foreground" onClick={() => api.openSite(site.id).catch(toastError)}>
                   <ExternalLink className="h-3.5 w-3.5" />
                 </Button>
               </TooltipTrigger>
@@ -230,7 +229,7 @@ function SiteCard({ site, onOpenDetail }: { site: Site; onOpenDetail: () => void
 
         <div className="mt-auto flex items-center justify-between gap-3 border-t border-dashed border-separator pt-3">
           <code className="min-w-0 truncate rounded bg-card-2/70 px-2 py-1 font-mono text-[11px] text-secondary">
-            {url.replace(/^https?:\/\//, "")}
+            {url ? url.replace(/^https?:\/\//, "") : t("sites.addressPending")}
           </code>
           <Button variant={running ? "secondary" : "default"} className="shrink-0" size="sm" disabled={pending} onClick={toggle}>
             {pending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Power className="h-3 w-3" />}
@@ -246,47 +245,59 @@ function SiteCard({ site, onOpenDetail }: { site: Site; onOpenDetail: () => void
 /* ============ 批量打开 / 复制全部站点地址 ============ */
 function BatchUrlActions({ sites }: { sites: Site[] }) {
   const t = useT();
-  const ports = usePorts();
   const [opening, setOpening] = React.useState(false);
-  const urls = React.useMemo(
-    () => sites.map((s) => siteUrl(s, ports)),
-    [sites, ports]
-  );
+  const busyRef = React.useRef(false);
 
   const openAll = async () => {
-    if (urls.length === 0 || opening) return;
+    if (sites.length === 0 || busyRef.current) return;
+    busyRef.current = true;
     setOpening(true);
     let opened = 0;
-    let failed = 0;
+    const failed: string[] = [];
     // 逐个打开：浏览器会聚成一组标签页；间隔一点避免被弹窗拦截
-    for (const u of urls) {
+    for (const site of sites) {
       try {
-        await api.openInBrowser(u);
+        await api.openSite(site.id);
         opened++;
       } catch {
-        failed++;
+        failed.push(site.name);
       }
       await new Promise((r) => setTimeout(r, 250));
     }
     setOpening(false);
+    busyRef.current = false;
     if (opened) toast.success(`${t("sites.openedAllP1")} ${opened} ${t("sites.openedAllP2")}`);
-    if (failed) toast.error(`${t("sites.openFailed")} (${failed})`);
+    if (failed.length) toast.error(`${t("sites.addressUnavailable")} (${failed.length})`, { description: failed.join("、"), classNames: { description: "line-clamp-2 [overflow-wrap:anywhere]" } });
   };
 
   const copyAll = async () => {
-    if (urls.length === 0) return;
+    if (sites.length === 0 || busyRef.current) return;
+    busyRef.current = true;
+    setOpening(true);
     try {
-      await navigator.clipboard.writeText(urls.join("\n"));
-      toast.success(t("sites.copiedAll"));
+      const urls: string[] = [];
+      const failed: string[] = [];
+      for (const site of sites) {
+        try { urls.push(await api.siteAccessUrl(site.id)); }
+        catch { failed.push(site.name); }
+      }
+      if (urls.length) {
+        await navigator.clipboard.writeText(urls.join("\n"));
+        toast.success(t("sites.copiedCount").replace("{count}", String(urls.length)));
+      }
+      if (failed.length) toast.error(`${t("sites.addressUnavailable")} (${failed.length})`, { description: failed.join("、"), classNames: { description: "line-clamp-2 [overflow-wrap:anywhere]" } });
     } catch {
       toast.error(t("sites.copyFailed"));
+    } finally {
+      busyRef.current = false;
+      setOpening(false);
     }
   };
 
   if (sites.length === 0) return null;
   return (
     <>
-      <Button variant="ghost" onClick={copyAll} title={t("sites.copyAllHint")}>
+      <Button variant="ghost" disabled={opening} onClick={copyAll} title={t("sites.copyAllHint")}>
         <Copy className="h-3.5 w-3.5" /> {t("sites.copyAll")}
       </Button>
       <Button variant="ghost" disabled={opening} onClick={openAll} title={t("sites.openAllHint")}>

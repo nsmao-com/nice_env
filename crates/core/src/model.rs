@@ -181,6 +181,9 @@ pub struct SiteDbBinding {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Site {
+    /// 本次成功加载的站点入口；仅由运行状态派生，不接受客户端提交或持久化。
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub access_url: Option<String>,
     pub id: String,
     pub name: String,
     pub domains: Vec<String>,

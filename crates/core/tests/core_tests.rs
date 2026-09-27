@@ -110,6 +110,7 @@ fn php_ini_enables_pdo_mysql() {
 #[test]
 fn site_conf_php_has_fastcgi_upstream() {
     let site = nsb_core::model::Site {
+        access_url: None,
         id: "site-x".into(),
         name: "x".into(),
         domains: vec!["x.test".into()],
@@ -154,6 +155,7 @@ fn site_conf_php_has_fastcgi_upstream() {
 #[test]
 fn site_conf_proxy_has_websocket_headers() {
     let site = nsb_core::model::Site {
+        access_url: None,
         id: "site-p".into(),
         name: "p".into(),
         domains: vec!["p.test".into()],
@@ -772,6 +774,7 @@ fn service_history_records_transitions() {
 #[test]
 fn user_ini_written_for_php_sites_only() {
     let mk = |kind: nsb_core::model::SiteKind| nsb_core::model::Site {
+        access_url: None,
         id: "s1".into(),
         name: "t".into(),
         domains: vec!["a.test".into()],
@@ -893,6 +896,7 @@ fn site_conf_contains_per_site_access_log() {
     let _ = site;
 
     let s = nsb_core::model::Site {
+        access_url: None,
         id: "site-log".into(),
         name: "logtest".into(),
         domains: vec!["log.test".into()],

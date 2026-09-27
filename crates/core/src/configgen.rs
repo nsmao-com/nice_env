@@ -33,11 +33,11 @@ pub fn nginx_upstream_name(php_version: &str) -> String {
 }
 
 #[derive(Debug)]
-struct NginxDirective {
+pub(crate) struct NginxDirective {
     start: usize,
     end: usize,
-    words: Vec<String>,
-    children: Vec<NginxDirective>,
+    pub(crate) words: Vec<String>,
+    pub(crate) children: Vec<NginxDirective>,
 }
 
 struct NginxToken {
@@ -56,7 +56,7 @@ fn nginx_structure_error() -> AppError {
 }
 
 /// 只解析指令边界，不重新序列化用户配置。引号、注释、转义、${变量} 均不能当作块边界。
-fn nginx_directives(content: &str) -> Result<Vec<NginxDirective>> {
+pub(crate) fn nginx_directives(content: &str) -> Result<Vec<NginxDirective>> {
     let bytes = content.as_bytes();
     let mut tokens = Vec::new();
     let mut pos = 0;

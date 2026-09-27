@@ -49,6 +49,167 @@ pub fn list(store: &Store) -> Result<Vec<Site>> {
     store.list_sites()
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SiteEndpoint {
+    url: String,
+    port: u16,
+    domains: Vec<String>,
+    https: bool,
+}
+
+/// 入口来自本次加载的 vhost，而不是之后可能被修改的端口设置。
+fn endpoint_from_config(site: &Site, content: &str) -> Option<SiteEndpoint> {
+    let domain = site.domains.iter().find(|domain| !domain.starts_with("*."))
+        .or_else(|| site.domains.first())?.replacen("*.", "www.", 1);
+    let matches_name = |name: &str| name.eq_ignore_ascii_case(&domain)
+        || name.strip_prefix("*.").is_some_and(|suffix| domain.to_ascii_lowercase().ends_with(&format!(".{}", suffix.to_ascii_lowercase())));
+    let local_port = |value: &str| -> Option<u16> {
+        if let Ok(port) = value.parse::<u16>() { return (port > 0).then_some(port); }
+        if let Some(port) = value.strip_prefix("*:") { return port.parse::<u16>().ok().filter(|p| *p > 0); }
+        let address = value.parse::<std::net::SocketAddr>().ok()?;
+        // hosts 管理将站点指向 127.0.0.1；不能把仅网卡 IP / IPv6 的监听冒充该入口。
+        (address.is_ipv4() && (address.ip().is_unspecified() || address.ip() == std::net::Ipv4Addr::LOCALHOST) && address.port() > 0)
+            .then_some(address.port())
+    };
+    let mut ports = Vec::new();
+    if site.runtime.web_server == "nginx" {
+        let nodes = configgen::nginx_directives(content.trim_start_matches('\u{feff}')).ok()?;
+        for node in nodes.iter().filter(|node| node.words[0] == "server") {
+            if !node.children.iter().any(|child| child.words[0] == "server_name" && child.words[1..].iter().any(|name| matches_name(name))) { continue; }
+            for child in node.children.iter().filter(|child| child.words[0] == "listen") {
+                if child.words.iter().any(|word| word == "ssl") == site.https
+                    && !child.words.iter().any(|word| matches!(word.as_str(), "quic" | "proxy_protocol")) {
+                    if let Some(port) = child.words.get(1).and_then(|value| local_port(value)) { ports.push(port); }
+                }
+            }
+        }
+    } else if site.runtime.web_server == "apache" {
+        let mut addresses = Vec::new();
+        let mut matching = false;
+        let mut ssl = false;
+        let mut in_vhost = false;
+        for line in content.lines() {
+            let line = line.trim();
+            if line.starts_with('#') { continue; }
+            let lower = line.to_ascii_lowercase();
+            // 条件、宏和额外 include 的求值依赖服务器上下文，不能据文本猜测。
+            if lower.starts_with("<if") || lower.starts_with("<macro")
+                || lower.starts_with("include") || lower.starts_with("use ") { return None; }
+            if lower.strip_prefix("<virtualhost").is_some_and(|rest| rest.starts_with(char::is_whitespace)) && line.ends_with('>') {
+                addresses = line[12..line.len() - 1].split_whitespace().filter_map(local_port).collect();
+                matching = false; ssl = false; in_vhost = true;
+            } else if lower == "</virtualhost>" {
+                if in_vhost && matching && ssl == site.https { ports.extend(addresses.iter().copied()); }
+                in_vhost = false;
+            } else if in_vhost {
+                let words: Vec<_> = line.split_whitespace().collect();
+                if let Some(key) = words.first() {
+                    if key.eq_ignore_ascii_case("ServerName") || key.eq_ignore_ascii_case("ServerAlias") {
+                        matching |= words[1..].iter().any(|name| matches_name(name.trim_matches('"')));
+                    }
+                    if key.eq_ignore_ascii_case("SSLEngine") {
+                        ssl = words.get(1).is_some_and(|v| v.eq_ignore_ascii_case("on"));
+                    }
+                }
+            }
+        }
+    }
+    let port = *ports.first()?;
+    let scheme = if site.https { "https" } else { "http" };
+    let suffix = if port == if site.https { 443 } else { 80 } { String::new() } else { format!(":{port}") };
+    Some(SiteEndpoint { url: format!("{scheme}://{domain}{suffix}"), port, domains: site.domains.clone(), https: site.https })
+}
+
+pub(crate) struct SiteEndpointSnapshot {
+    main_path: std::path::PathBuf,
+    main_source: String,
+    sites: Vec<(String, std::path::PathBuf, String, SiteEndpoint)>,
+}
+
+fn includes_sites(source: &str, paths: &Paths, server: &str) -> bool {
+    let dir = if server == "apache" { paths.apache_sites_dir() } else { paths.nginx_sites_dir() };
+    let pattern = format!("{}/*.conf", dir.to_string_lossy().replace('\\', "/"));
+    if server == "nginx" {
+        return configgen::nginx_directives(source.trim_start_matches('\u{feff}')).is_ok_and(|nodes| {
+            nodes.iter().filter(|node| node.words[0] == "http").any(|http| http.children.iter().any(|node| {
+                node.words.first().is_some_and(|word| word == "include") && node.words.get(1) == Some(&pattern)
+            }))
+        });
+    }
+    let mut depth = 0usize;
+    source.lines().any(|line| {
+        let line = line.trim();
+        if line.starts_with('#') { return false; }
+        if line.starts_with("</") { depth = depth.saturating_sub(1); return false; }
+        if line.starts_with('<') { depth += 1; return false; }
+        depth == 0 && line.split_once(char::is_whitespace).is_some_and(|(key, value)| {
+            (key.eq_ignore_ascii_case("IncludeOptional") || key.eq_ignore_ascii_case("Include"))
+                && value.trim().trim_matches('"').replace('\\', "/") == pattern
+        })
+    })
+}
+
+/// 在校验配置之后、启动/重载之前读取；失败只关闭快捷入口，不改写用户配置。
+pub(crate) fn snapshot_endpoints(paths: &Paths, store: &Store, server: &str) -> SiteEndpointSnapshot {
+    let main_path = if server == "apache" { paths.apache_conf() } else { paths.nginx_conf() };
+    let main_source = std::fs::read_to_string(&main_path).unwrap_or_default();
+    let sites = store.list_sites().unwrap_or_default().into_iter()
+        .filter(|site| site.runtime.web_server == server && includes_sites(&main_source, paths, server))
+        .filter_map(|site| {
+            if site.id.is_empty() || !site.id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')) { return None; }
+            let path = crate::paths::checked_data_path(&paths.base, &format!("etc/{server}/sites/{}.conf", site.id)).ok()?;
+            let source = std::fs::read_to_string(&path).ok()?;
+            let endpoint = endpoint_from_config(&site, &source)?;
+            Some((site.id, path, source, endpoint))
+        }).collect();
+    SiteEndpointSnapshot { main_path, main_source, sites }
+}
+
+pub(crate) fn record_endpoints(manager: &ServiceManager, server: &str, snapshot: SiteEndpointSnapshot) {
+    if let Some(entry) = manager.services.lock().get(server).cloned() {
+        let main_unchanged = std::fs::read_to_string(snapshot.main_path).ok().as_deref() == Some(snapshot.main_source.as_str());
+        *entry.site_endpoints.lock() = snapshot.sites.into_iter().filter_map(|(id, path, source, endpoint)| {
+            (main_unchanged && std::fs::read_to_string(path).ok().as_deref() == Some(source.as_str())).then_some((id, endpoint))
+        }).collect();
+    }
+}
+
+/// 异步重载只能保留未变化的入口；新增/变更地址由同步重启确认后发布。
+pub(crate) fn retain_reloaded_endpoints(manager: &ServiceManager, server: &str, mut snapshot: SiteEndpointSnapshot) {
+    let previous = manager.services.lock().get(server).map(|entry| entry.site_endpoints.lock().clone()).unwrap_or_default();
+    snapshot.sites.retain(|(id, _, _, endpoint)| previous.get(id) == Some(endpoint));
+    record_endpoints(manager, server, snapshot);
+}
+
+#[cfg(any(not(windows), test))]
+pub(crate) fn endpoints_changed(manager: &ServiceManager, server: &str, snapshot: &SiteEndpointSnapshot) -> bool {
+    let current = manager.services.lock().get(server).map(|entry| entry.site_endpoints.lock().clone()).unwrap_or_default();
+    current.len() != snapshot.sites.len() || snapshot.sites.iter().any(|(id, _, _, endpoint)| current.get(id) != Some(endpoint))
+}
+
+fn loaded_endpoint(manager: &ServiceManager, site: &Site) -> Option<SiteEndpoint> {
+    let status = manager.snapshot(&site.runtime.web_server)?;
+    if status.state != ServiceState::Running || site.status != "running" { return None; }
+    let entry = manager.services.lock().get(&site.runtime.web_server)?.clone();
+    let endpoint = entry.site_endpoints.lock().get(&site.id)?.clone();
+    (endpoint.domains == site.domains && endpoint.https == site.https).then_some(endpoint)
+}
+
+/// 打开和复制之前再次核对服务与端口归属，设置变更、外部文件编辑都不能偷换运行中地址。
+pub fn access_url(paths: &Paths, store: &Store, manager: &ServiceManager, id: &str) -> Result<String> {
+    let _operation = manager.lifecycle.lock();
+    let mut site = get(store, id)?;
+    site.status = runtime_status(paths, &site, manager).into();
+    let endpoint = loaded_endpoint(manager, &site).ok_or_else(|| AppError::new("SITE_URL_UNAVAILABLE", "站点未运行或尚未确认本次加载的访问地址")
+        .with_hint("请启动站点或重启对应 Web 服务；自定义监听地址请在配置中核对。"))?;
+    let status = manager.snapshot(&site.runtime.web_server).ok_or_else(|| AppError::new("SITE_URL_UNAVAILABLE", "站点服务已停止"))?;
+    let target = std::net::SocketAddr::from(([127, 0, 0, 1], endpoint.port));
+    if !crate::ports::owns_listener(target, &status.pids)? {
+        return Err(AppError::new("SITE_URL_UNAVAILABLE", "站点端口尚未就绪或已被其他进程占用").with_hint("请查看对应 Web 服务的日志与端口诊断后重试。"));
+    }
+    Ok(endpoint.url)
+}
+
 /// 带真实状态的站点列表（需要 Paths 才能判断 vhost 在不在）
 pub fn list_with_status(
     paths: &Paths,
@@ -58,6 +219,7 @@ pub fn list_with_status(
     let mut sites = store.list_sites()?;
     for s in sites.iter_mut() {
         s.status = runtime_status(paths, s, manager).to_string();
+        s.access_url = loaded_endpoint(manager, s).map(|endpoint| endpoint.url);
     }
     Ok(sites)
 }
@@ -455,7 +617,8 @@ pub fn create_with_progress(
         }
     }
     let now = now_ms();
-    let site = Site {
+    let mut site = Site {
+        access_url: None,
         id: format!("site-{}-{:08x}", now, rand::random::<u32>()),
         name: input.name.trim().to_string(),
         domains: input.domains.clone(),
@@ -490,6 +653,7 @@ pub fn create_with_progress(
         return Err(error.with_hint("站点未创建成功，项目文件和数据库已保留；请根据错误修复后重试"));
     }
 
+    site.access_url = loaded_endpoint(manager, &site).map(|endpoint| endpoint.url);
     Ok(site)
 }
 
@@ -600,6 +764,7 @@ pub fn update(
     }
     write_user_ini(&current);
     current.status = runtime_status(paths, &current, manager).to_string();
+    current.access_url = loaded_endpoint(manager, &current).map(|endpoint| endpoint.url);
     Ok(current)
 }
 
@@ -2436,6 +2601,7 @@ mod scaffold_tests {
 
     fn saved_site(paths: &Paths, store: &Store) -> Site {
         let site = Site {
+            access_url: None,
             id: "site-lifecycle".into(),
             name: "Lifecycle".into(),
             domains: vec!["lifecycle.test".into()],
@@ -2890,6 +3056,68 @@ mod scaffold_tests {
     }
 
     #[test]
+    fn site_endpoints_follow_vhosts_and_reject_unconfirmed_loads() {
+        let temp = Tmp::new("site-endpoints");
+        let paths = Paths::new(temp.0.clone());
+        paths.ensure_dirs().unwrap();
+        let store = Store::open(paths.db()).unwrap();
+        let mut site = saved_site(&paths, &store);
+        let config = "server { listen 18080; server_name lifecycle.test; }\nserver { listen 18443 ssl; server_name lifecycle.test; }";
+        assert_eq!(endpoint_from_config(&site, config).unwrap().url, "http://lifecycle.test:18080");
+        site.https = true;
+        assert_eq!(endpoint_from_config(&site, config).unwrap().url, "https://lifecycle.test:18443");
+        site.https = false;
+        for listener in ["192.0.2.1:8080", "[::1]:8080", "0", "$port", "8080 proxy_protocol", "8080 quic"] {
+            assert!(endpoint_from_config(&site, &format!("server {{ listen {listener}; server_name lifecycle.test; }}")).is_none(), "{listener}");
+        }
+        site.domains = vec!["*.demo.test".into()];
+        assert_eq!(endpoint_from_config(&site, "server { listen 80; server_name *.DEMO.TEST; }").unwrap().url, "http://www.demo.test");
+        site.domains = vec!["lifecycle.test".into()];
+        site.runtime.web_server = "apache".into();
+        let apache = "# ignored\n<VirtualHost\t127.0.0.1:8180>\nServerName lifecycle.test\n</VirtualHost>\n<VirtualHost *:8444>\nServerAlias LIFECYCLE.TEST\nSSLEngine on\n</VirtualHost>";
+        assert_eq!(endpoint_from_config(&site, apache).unwrap().url, "http://lifecycle.test:8180");
+        site.https = true;
+        assert_eq!(endpoint_from_config(&site, apache).unwrap().url, "https://lifecycle.test:8444");
+        assert!(endpoint_from_config(&site, &format!("<IfDefine unknown>\n{apache}\n</IfDefine>")).is_none());
+        let mut json = serde_json::to_value(&site).unwrap();
+        json["accessUrl"] = "https://untrusted.test".into();
+        assert!(serde_json::from_value::<Site>(json).unwrap().access_url.is_none());
+
+        site.runtime.web_server = "nginx".into();
+        site.https = false;
+        store.save_site(&site).unwrap();
+        let main = format!("events {{}} http {{ include \"{}/*.conf\"; }}", paths.nginx_sites_dir().to_string_lossy().replace('\\', "/"));
+        let vhost = paths.nginx_sites_dir().join(format!("{}.conf", site.id));
+        std::fs::write(paths.nginx_conf(), &main).unwrap();
+        std::fs::write(&vhost, config).unwrap();
+        let manager = ServiceManager::new();
+        manager.register("nginx", "Nginx", None, None, Some(18080), paths.logs().join("nginx.log"));
+        manager.adopt("nginx", &[std::process::id()], Some(18080));
+        record_endpoints(&manager, "nginx", snapshot_endpoints(&paths, &store, "nginx"));
+        assert_eq!(list_with_status(&paths, &store, &manager).unwrap()[0].access_url.as_deref(), Some("http://lifecycle.test:18080"));
+        assert!(!endpoints_changed(&manager, "nginx", &snapshot_endpoints(&paths, &store, "nginx")));
+        store.set_port_override("http", Some(28080)).unwrap();
+        std::fs::write(&vhost, config.replace("18080", "28080")).unwrap();
+        assert_eq!(list_with_status(&paths, &store, &manager).unwrap()[0].access_url.as_deref(), Some("http://lifecycle.test:18080"));
+        assert!(endpoints_changed(&manager, "nginx", &snapshot_endpoints(&paths, &store, "nginx")));
+        retain_reloaded_endpoints(&manager, "nginx", snapshot_endpoints(&paths, &store, "nginx"));
+        assert!(list_with_status(&paths, &store, &manager).unwrap()[0].access_url.is_none());
+        let pending = snapshot_endpoints(&paths, &store, "nginx");
+        std::fs::write(&vhost, config).unwrap();
+        record_endpoints(&manager, "nginx", pending);
+        assert!(list_with_status(&paths, &store, &manager).unwrap()[0].access_url.is_none());
+        let pending = snapshot_endpoints(&paths, &store, "nginx");
+        std::fs::write(paths.nginx_conf(), "events {} http {}").unwrap();
+        record_endpoints(&manager, "nginx", pending);
+        assert!(list_with_status(&paths, &store, &manager).unwrap()[0].access_url.is_none());
+        assert!(snapshot_endpoints(&paths, &store, "nginx").sites.is_empty());
+        std::fs::write(paths.nginx_conf(), main).unwrap();
+        record_endpoints(&manager, "nginx", snapshot_endpoints(&paths, &store, "nginx"));
+        manager.set_state("nginx", ServiceState::Stopped);
+        assert!(access_url(&paths, &store, &manager, &site.id).is_err());
+    }
+
+    #[test]
     #[ignore = "requires NSB_NGINX_ROOT; checks config and briefly serves isolated static route fixtures"]
     fn nginx_accepts_configs_and_serves_static_routes() {
         let nginx_root = PathBuf::from(std::env::var("NSB_NGINX_ROOT").expect("NSB_NGINX_ROOT"));
@@ -2965,9 +3193,14 @@ mod scaffold_tests {
             &paths.certs(),
             &paths.logs().join("nginx"),
         );
-        let conf =
-            format!("pid nginx.pid;\nerror_log stderr;\nevents {{}}\nhttp {{\n{vhost}\n}}\n");
+        store.save_site(&site).unwrap();
+        let vhost_path = paths.nginx_sites_dir().join(format!("{}.conf", site.id));
+        std::fs::write(&vhost_path, &vhost).unwrap();
+        let conf = format!("pid nginx.pid;\nerror_log stderr;\nevents {{}}\nhttp {{\ninclude \"{}/*.conf\";\n}}\n", paths.nginx_sites_dir().to_string_lossy().replace('\\', "/"));
         std::fs::write(paths.nginx_conf(), conf).unwrap();
+        let snapshot = snapshot_endpoints(&paths, &store, "nginx");
+        let manager = ServiceManager::new();
+        manager.register("nginx", "Nginx", None, None, Some(port), paths.logs().join("nginx.log"));
         struct Server {
             child: std::process::Child,
             group: platform::ProcessGroup,
@@ -3003,6 +3236,8 @@ mod scaffold_tests {
             group: platform::ProcessGroup::new().unwrap(),
         };
         server.group.attach(server.child.id()).unwrap();
+        manager.adopt("nginx", &[server.child.id()], Some(port));
+        record_endpoints(&manager, "nginx", snapshot);
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
             .timeout(std::time::Duration::from_secs(2))
@@ -3036,6 +3271,28 @@ mod scaffold_tests {
             assert_eq!(response.status().as_u16(), status, "{path}");
             assert_eq!(response.text().unwrap(), body, "{path}");
         }
+        assert_eq!(access_url(&paths, &store, &manager, &site.id).unwrap(), format!("http://www.demo.test:{port}"));
+        let next_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let next_port = next_listener.local_addr().unwrap().port();
+        store.set_port_override("http", Some(next_port)).unwrap();
+        let next_vhost = configgen::render_site_conf(&site, next_port, 0, &paths.nginx_conf(), &paths.certs(), &paths.logs().join("nginx"));
+        std::fs::write(&vhost_path, next_vhost).unwrap();
+        assert_eq!(access_url(&paths, &store, &manager, &site.id).unwrap(), format!("http://www.demo.test:{port}"));
+        assert_eq!(client.get(format!("http://127.0.0.1:{port}/")).header("Host", "www.demo.test").send().unwrap().text().unwrap(), "route-home");
+        // 新端口由测试进程占用，即便配置已保存也不能当作 Nginx 的入口。
+        assert!(!crate::ports::owns_listener(next_listener.local_addr().unwrap(), &[server.child.id()]).unwrap());
+        drop(server);
+        manager.set_state("nginx", ServiceState::Stopped);
+        assert!(access_url(&paths, &store, &manager, &site.id).is_err());
+        drop(next_listener);
+        let snapshot = snapshot_endpoints(&paths, &store, "nginx");
+        let mut server = Server { child: command.spawn().unwrap(), group: platform::ProcessGroup::new().unwrap() };
+        server.group.attach(server.child.id()).unwrap();
+        manager.adopt("nginx", &[server.child.id()], Some(next_port));
+        assert!(crate::services::wait_healthy(next_port, std::time::Duration::from_secs(5)));
+        record_endpoints(&manager, "nginx", snapshot);
+        assert_eq!(access_url(&paths, &store, &manager, &site.id).unwrap(), format!("http://www.demo.test:{next_port}"));
+        assert_eq!(client.get(format!("http://127.0.0.1:{next_port}/about")).header("Host", "www.demo.test").send().unwrap().text().unwrap(), "route-about");
         drop(server);
     }
 }

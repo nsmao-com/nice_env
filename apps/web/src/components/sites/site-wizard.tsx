@@ -22,7 +22,7 @@ import type { CreateSiteInput, RewritePreset, SiteKind, SiteCreateProgress } fro
 import { cn, cmpVersionDesc } from "@/lib/utils";
 import { useT } from "@/lib/store";
 import { isTauri, listen, normalizeError } from "@/lib/backend";
-import { usePackages, usePorts, siteUrl, toastError } from "@/lib/hooks";
+import { usePackages, siteUrl, toastError } from "@/lib/hooks";
 import { useInstallTasks } from "@/lib/install-tasks";
 import * as api from "@/lib/api";
 import {
@@ -93,7 +93,6 @@ export function SiteWizard({
   initialKind?: SiteKind;
 }) {
   const t = useT();
-  const ports = usePorts();
   const { data: packages, refetch: refreshPackages } = usePackages();
   const [step, setStep] = React.useState(0);
   const [creating, setCreating] = React.useState(false);
@@ -270,7 +269,7 @@ export function SiteWizard({
       toast.success(`${t("wz.createdP1")} ${site.name} ${t("wz.createdP2")}`, {
         description: template === "wordpress"
           ? t("wz.wordpressFinish")
-          : `${t("wz.visit")} ${siteUrl(site, ports)}`,
+          : siteUrl(site) ? `${t("wz.visit")} ${siteUrl(site)}` : t("sites.addressPending"),
       });
       onOpenChange(false);
       onCreated?.();

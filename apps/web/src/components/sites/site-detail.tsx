@@ -8,7 +8,7 @@ import type { Site, RewritePreset } from "@nsb/schema";
 import { useT } from "@/lib/store";
 import { cmpVersionDesc } from "@/lib/utils";
 import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
-import { usePackages, useInvalidate, toastError, siteUrl, usePorts } from "@/lib/hooks";
+import { usePackages, useInvalidate, toastError, siteUrl } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import {
   Sheet,
@@ -54,7 +54,6 @@ export function SiteDetailSheet({
   const t = useT();
   const router = useRouter();
   const invalidate = useInvalidate();
-  const ports = usePorts();
   const { data: packages } = usePackages();
   const [saving, setSaving] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
@@ -90,7 +89,7 @@ export function SiteDetailSheet({
     .map((p) => p.version)
     .sort(cmpVersionDesc);
 
-  const url = siteUrl(site, ports);
+  const url = siteUrl(site);
 
   const dirty = !!baseline && (
     draft.name !== baseline.name || domainsInput !== baseline.domains.join(", ") ||
@@ -160,8 +159,8 @@ export function SiteDetailSheet({
             </Badge>
           </SheetTitle>
           <SheetDescription className="flex items-center gap-2">
-            <a href={url} onClick={(e) => { e.preventDefault(); api.openInBrowser(url).catch(toastError); }} className="truncate font-mono text-primary hover:underline">
-              {url}
+            <a href={url || undefined} onClick={(e) => { e.preventDefault(); api.openSite(site.id).catch(toastError); }} className="truncate font-mono text-primary hover:underline">
+              {url || t("sites.addressPending")}
             </a>
           </SheetDescription>
         </SheetHeader>
@@ -169,7 +168,7 @@ export function SiteDetailSheet({
         <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-5 pb-5 sm:px-6">
           {/* 快捷操作 */}
           <div className="flex flex-wrap items-center gap-2">
-            <Button variant="secondary" size="sm" onClick={() => api.openInBrowser(url).catch(toastError)}>
+            <Button variant="secondary" size="sm" onClick={() => api.openSite(site.id).catch(toastError)}>
               <ExternalLink className="h-3.5 w-3.5" /> {t("detail.browser")}
             </Button>
             <Button variant="secondary" size="sm" onClick={() => api.openInFolder(site.rootDir).catch(toastError)}>

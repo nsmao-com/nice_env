@@ -1170,6 +1170,7 @@ mod tests {
         root: &std::path::Path,
     ) -> model::Site {
         model::Site {
+            access_url: None,
             id: id.into(), name: name.into(), domains: domains.iter().map(|v| (*v).into()).collect(),
             root_dir: root.to_string_lossy().into(),
             runtime: model::SiteRuntime {

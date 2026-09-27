@@ -366,6 +366,8 @@ export const SiteState = z.enum(["running", "stopped", "error", "unconfigured"])
 export type SiteState = z.infer<typeof SiteState>;
 
 export const Site = z.object({
+  /** 已成功加载的访问入口；不是当前端口设置的推算值。 */
+  accessUrl: z.string().optional(),
   id: z.string(),
   name: z.string(),
   domains: z.array(z.string()),

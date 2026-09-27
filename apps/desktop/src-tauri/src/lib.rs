@@ -242,6 +242,7 @@ pub fn run() {
             stop_stack,
             // 站点
             list_sites,
+            site_access_url,
             create_site,
             update_site,
             delete_site,
@@ -907,6 +908,16 @@ fn list_sites(
         &state.store,
         &state.manager,
     ))
+}
+
+#[tauri::command]
+async fn site_access_url(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    id: String,
+) -> Result<String, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::sites::access_url(&st.paths, &st.store, &st.manager, &id)))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]

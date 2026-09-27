@@ -362,6 +362,7 @@ fn start_nginx(
     configgen::write_nginx_conf(paths, &root, &pools, ports.http, ports.https)?;
     configgen::validate_nginx(&exe, &paths.nginx_conf())?;
 
+    let site_endpoints = crate::sites::snapshot_endpoints(paths, store, "nginx");
     let spec = SpawnSpec {
         program: exe.clone(),
         args: vec![
@@ -382,6 +383,7 @@ fn start_nginx(
                 .with_hint("查看日志页 nginx 的最后输出；常见原因是配置错误或端口冲突"),
         );
     }
+    crate::sites::record_endpoints(manager, "nginx", site_endpoints);
     Ok(())
 }
 
@@ -445,7 +447,7 @@ fn start_php(
         let (root, exe) = nginx_exe(store)?;
         configgen::write_nginx_conf(paths, &root, &pools, ports.http, ports.https)?;
         configgen::validate_nginx(&exe, &paths.nginx_conf())?;
-        reload_nginx(store, paths).map_err(|error| {
+        reload_nginx(store, paths, manager).map_err(|error| {
             AppError::new(
                 "PHP_NGINX_RELOAD_FAILED",
                 format!("PHP {version} 已启动，但 Nginx 未能加载新的 PHP 池配置"),
@@ -462,7 +464,7 @@ fn start_php(
         let (root, exe) = apache_paths(store)?;
         configgen::write_httpd_conf(paths, &root, &pools, ports.apache_http, ports.apache_https)?;
         configgen::validate_httpd(&exe, &paths.apache_conf())?;
-        reload_apache(&root, &exe, paths, manager.started_port_or("apache", ports.apache_http))
+        reload_apache(&root, &exe, paths, store, manager, manager.started_port_or("apache", ports.apache_http))
             .map_err(|error| {
                 AppError::new(
                     "PHP_APACHE_RELOAD_FAILED",
@@ -750,6 +752,7 @@ fn start_apache(
     configgen::write_httpd_conf(paths, &root, &pools, ports.apache_http, ports.apache_https)?;
     configgen::validate_httpd(&exe, &paths.apache_conf())?;
 
+    let site_endpoints = crate::sites::snapshot_endpoints(paths, store, "apache");
     let spec = SpawnSpec {
         program: exe.clone(),
         args: vec![
@@ -769,6 +772,7 @@ fn start_apache(
                 .with_hint("查看日志页 apache 输出；常见原因是端口冲突或缺少 VC 运行库"),
         );
     }
+    crate::sites::record_endpoints(manager, "apache", site_endpoints);
     Ok(())
 }
 
@@ -1113,9 +1117,10 @@ fn terminate_group(manager: &Arc<ServiceManager>, id: &str) -> Result<()> {
 
 /* ================= nginx 重载 ================= */
 
-pub fn reload_nginx(store: &Store, paths: &Paths) -> Result<()> {
+pub fn reload_nginx(store: &Store, paths: &Paths, manager: &ServiceManager) -> Result<()> {
     let (root, exe) = nginx_exe(store)?;
     configgen::validate_nginx(&exe, &paths.nginx_conf())?;
+    let site_endpoints = crate::sites::snapshot_endpoints(paths, store, "nginx");
     let out = platform::command(&exe)
         .args([
             "-p".into(),
@@ -1131,10 +1136,12 @@ pub fn reload_nginx(store: &Store, paths: &Paths) -> Result<()> {
         return Err(AppError::new("NGINX_RELOAD_FAILED", "nginx 重载失败")
             .with_detail(String::from_utf8_lossy(&out.stderr).to_string()));
     }
+    crate::sites::retain_reloaded_endpoints(manager, "nginx", site_endpoints);
     Ok(())
 }
 
-fn reload_apache(root: &Path, exe: &Path, paths: &Paths, port: u16) -> Result<()> {
+fn reload_apache(root: &Path, exe: &Path, paths: &Paths, store: &Store, manager: &ServiceManager, port: u16) -> Result<()> {
+    let site_endpoints = crate::sites::snapshot_endpoints(paths, store, "apache");
     let out = platform::command(exe)
         .args([
             "-d".into(),
@@ -1153,13 +1160,14 @@ fn reload_apache(root: &Path, exe: &Path, paths: &Paths, port: u16) -> Result<()
     if !wait_healthy(port, Duration::from_secs(12)) {
         return Err(AppError::new("APACHE_RELOAD_TIMEOUT", "Apache 重载后端口未恢复"));
     }
+    crate::sites::retain_reloaded_endpoints(manager, "apache", site_endpoints);
     Ok(())
 }
 
 /// 重建主配置并重载（站点/池变化后）。
 /// Windows 上 nginx -s reload 存在已知信号语义差异（新增 server 块可能不生效），
-/// 因此 Windows 采用「快速重启」（stop→start，亚秒级）；类 Unix 用热 reload。
-/// Apache 同样重建：运行中则 httpd -k restart（信号经 pidfile，跨平台可靠）。
+/// 因此 Windows 采用 stop→start；类 Unix 仅在站点入口不变时使用热 reload。
+/// 入口新增或变化时同步重启，避免把异步信号发送成功当作新地址已经加载。
 pub fn rebuild_and_reload(
     store: &Store,
     paths: &Paths,
@@ -1197,7 +1205,13 @@ pub(crate) fn rebuild_and_reload_selected(
             }
             #[cfg(not(windows))]
             {
-                reload_nginx(store, paths)?;
+                let snapshot = crate::sites::snapshot_endpoints(paths, store, "nginx");
+                if crate::sites::endpoints_changed(manager, "nginx", &snapshot) {
+                    stop_service(store, paths, manager, "nginx")?;
+                    start_service(store, paths, manager, "nginx")?;
+                } else {
+                    reload_nginx(store, paths, manager)?;
+                }
             }
         }
     }
@@ -1242,20 +1256,12 @@ pub(crate) fn rebuild_and_reload_selected(
             }
             #[cfg(not(windows))]
             {
-                let out = platform::command(&exe)
-                    .args([
-                        "-d".into(),
-                        root.to_string_lossy().to_string(),
-                        "-f".into(),
-                        paths.apache_conf().to_string_lossy().to_string(),
-                        "-k".into(),
-                        "restart".into(),
-                    ])
-                    .output()
-                    .map_err(|e| AppError::io("重载 Apache", e))?;
-                if !out.status.success() {
-                    return Err(AppError::new("APACHE_RELOAD_FAILED", "Apache 重载失败")
-                        .with_detail(String::from_utf8_lossy(&out.stderr).to_string()));
+                let snapshot = crate::sites::snapshot_endpoints(paths, store, "apache");
+                if crate::sites::endpoints_changed(manager, "apache", &snapshot) {
+                    stop_service(store, paths, manager, "apache")?;
+                    start_service(store, paths, manager, "apache")?;
+                } else {
+                    reload_apache(&root, &exe, paths, store, manager, manager.started_port_or("apache", ports.apache_http))?;
                 }
             }
         }

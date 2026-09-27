@@ -351,14 +351,9 @@ export function expectedPorts(profile: "safe" | "standard") {
     : { http: 80, https: 443, mysql: 3306, redis: 6379, apacheHttp: 8080, apacheHttps: 8443, postgres: 5432, mongodb: 27017 };
 }
 
-/* 站点 URL 拼装 */
-export function siteUrl(site: Pick<Site, "domains" | "https" | "runtime">, ports: ReturnType<typeof expectedPorts>) {
-  const domain = (site.domains.find((domain) => !domain.startsWith("*.")) ?? site.domains[0] ?? "localhost").replace(/^\*\./, "www.");
-  const httpPort = site.runtime.webServer === "apache" ? ports.apacheHttp : ports.http;
-  const httpsPort = site.runtime.webServer === "apache" ? ports.apacheHttps : ports.https;
-  const standard = site.https ? httpsPort === 443 : httpPort === 80;
-  const port = site.https ? httpsPort : httpPort;
-  return `${site.https ? "https" : "http"}://${domain}${standard ? "" : `:${port}`}`;
+/* 仅展示后端本次加载的入口；端口设置可能尚未应用到运行中的 vhost。 */
+export function siteUrl(site: Pick<Site, "accessUrl">) {
+  return site.accessUrl ?? "";
 }
 
 /* 复制到剪贴板 */

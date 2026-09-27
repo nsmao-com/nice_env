@@ -33,6 +33,8 @@ import { KeyRound, Download, FolderArchive, Loader2 } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Workflow } from "lucide-react";
 
+type CertExportTarget = Pick<CertRecord, "id" | "subject">;
+
 export default function TlsPage() {
   const t = useT();
   const lang = useUI((s) => s.lang);
@@ -55,7 +57,7 @@ export default function TlsPage() {
   const [trustError, setTrustError] = React.useState<AppErrorShape | null>(null);
   const [importing, setImporting] = React.useState(false);
   const importRef = React.useRef(false);
-  const [pfxTarget, setPfxTarget] = React.useState<CertRecord | null>(null);
+  const [pfxTarget, setPfxTarget] = React.useState<CertExportTarget | null>(null);
   const actionTrigger = React.useRef<HTMLButtonElement | null>(null);
   const issueTrigger = React.useRef<HTMLButtonElement | null>(null);
   const restoreActionFocus = (event: Event) => {
@@ -138,7 +140,10 @@ export default function TlsPage() {
           <div className="flex flex-col gap-6">
           {/* 证书体检：放在页头下方，不要塞进 actions —— 那会变成 button 套 button */}
           <section>
-            <CertHealthCard />
+            <CertHealthCard onExport={(cert, trigger) => {
+              actionTrigger.current = trigger;
+              setPfxTarget({ id: `imported:${cert.id}`, subject: cert.subject });
+            }} />
           </section>
 
           {/* 网站证书监控：盯任意站点/设备的证书到期（certd 的站点监控） */}
@@ -379,14 +384,15 @@ function IssueCertDialog({ open, onOpenChange, onDone, onCloseAutoFocus }: { ope
 
 
 /* ============ PFX 导出（Windows IIS / 设备导入） ============ */
-function PfxExportDialog({ cert, onClose, onCloseAutoFocus }: { cert: CertRecord | null; onClose: () => void; onCloseAutoFocus: (event: Event) => void }) {
+function PfxExportDialog({ cert, onClose, onCloseAutoFocus }: { cert: CertExportTarget | null; onClose: () => void; onCloseAutoFocus: (event: Event) => void }) {
   const t = useT();
   const [password, setPassword] = React.useState("");
   const [format, setFormat] = React.useState<"pfx" | "der" | "jks" | "pem">("pfx");
+  const unsupportedPfxPassword = format === "pfx" && [...password].some((c) => c === "\0" || c.codePointAt(0)! > 0xffff);
   const [busy, setBusy] = React.useState(false);
   const busyRef = React.useRef(false);
   const [error, setError] = React.useState<AppErrorShape | null>(null);
-  React.useEffect(() => { setPassword(""); setError(null); }, [cert?.id]);
+  React.useEffect(() => { setPassword(""); setFormat("pfx"); setError(null); }, [cert?.id]);
 
   const doExport = async () => {
     if (!cert || busyRef.current) return;
@@ -394,6 +400,7 @@ function PfxExportDialog({ cert, onClose, onCloseAutoFocus }: { cert: CertRecord
     if (format === "jks" && [...password].length < 6) {
       setError({ code: "JKS_PASSWORD", message: t("pfx.jksMin") }); return;
     }
+    if (unsupportedPfxPassword) { setError({ code: "PFX_PASSWORD", message: t("pfx.passwordUnsupported") }); return; }
     busyRef.current = true;
     setBusy(true);
     setError(null);
@@ -462,6 +469,7 @@ function PfxExportDialog({ cert, onClose, onCloseAutoFocus }: { cert: CertRecord
             ))}
           </div>
         </div>
+        <p className="text-xs leading-relaxed text-muted">{t(format === "der" ? "pfx.derHint" : format === "pem" ? "pfx.pemHint" : "pfx.keyHint")}</p>
         {format === "pfx" || format === "jks" ? (
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="pfx-pass">
@@ -471,6 +479,9 @@ function PfxExportDialog({ cert, onClose, onCloseAutoFocus }: { cert: CertRecord
           <Input
             id="pfx-pass"
             type="password"
+            autoComplete="new-password"
+            aria-invalid={unsupportedPfxPassword}
+            aria-describedby={unsupportedPfxPassword ? "pfx-password-error" : undefined}
             disabled={busy}
             value={password}
             onChange={(e) => { setPassword(e.target.value); setError(null); }}
@@ -478,14 +489,16 @@ function PfxExportDialog({ cert, onClose, onCloseAutoFocus }: { cert: CertRecord
             className="font-mono text-[12px]"
             autoFocus
           />
+          {unsupportedPfxPassword && <p id="pfx-password-error" role="alert" className="text-xs text-error">{t("pfx.passwordUnsupported")}</p>}
         </div>
         ) : null}
         {!isTauri && <p className="text-xs text-muted">{t("tls.desktopOnly")}</p>}
         {error && <CertError error={error} />}
         </div>
-        <DialogFooter className="shrink-0">
+        <div className="mx-2 border-t border-dashed border-border/60" />
+        <DialogFooter className="shrink-0 flex-wrap">
           <Button variant="ghost" onClick={onClose} disabled={busy}>{t("common.cancel")}</Button>
-          <Button onClick={doExport} disabled={busy || !isTauri || (format === "jks" && [...password].length < 6)}>
+          <Button onClick={doExport} disabled={busy || !isTauri || unsupportedPfxPassword || (format === "jks" && [...password].length < 6)}>
             {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <KeyRound className="h-3.5 w-3.5" />}
             {t("pfx.export")}
           </Button>

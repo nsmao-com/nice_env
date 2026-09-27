@@ -227,7 +227,7 @@ fn pem_to_der(pem: &str) -> Option<Vec<u8>> {
     base64_decode(&body.chars().filter(|c| !c.is_whitespace()).collect::<String>())
 }
 
-fn parse_chain(pem: &str) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+pub(crate) fn parse_chain(pem: &str) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
     use rustls::pki_types::pem::PemObject;
     let chain = rustls::pki_types::CertificateDer::pem_slice_iter(pem.as_bytes())
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -265,7 +265,7 @@ fn cert_info(der: &[u8]) -> Result<(String, Vec<String>, i64, i64)> {
     Ok((subject, sans, cert.validity().not_before.timestamp(), cert.validity().not_after.timestamp()))
 }
 
-fn check_pair(cert_pem: &str, key_pem: &str) -> Result<()> {
+pub(crate) fn check_pair(cert_pem: &str, key_pem: &str) -> Result<()> {
     use rustls::pki_types::pem::PemObject;
     let chain = parse_chain(cert_pem)?;
     let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(key_pem.as_bytes())

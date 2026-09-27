@@ -62,7 +62,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.44";
+const MOCK_APP_VERSION = "0.2.45";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -2443,13 +2443,10 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return { ...monitorNotifications } as T;
     }
     case "cert_export_pfx":
-      return "D:\\mock\\cert.pfx" as T;
     case "cert_export_der":
-      return "D:\\mock\\cert.der" as T;
     case "cert_export_jks":
-      return "D:\\mock\\cert.jks" as T;
     case "cert_export_pem":
-      return "D:\\mock\\cert.pem" as T;
+      throw { code: "DESKTOP_ONLY", message: "证书导出需要在桌面应用中执行；网页预览不会写入真实证书文件。" };
     case "install_update":
       throw { code: "DESKTOP_ONLY", message: "浏览器无法安装桌面更新，请在桌面端执行" };
     case "open_update_dir":

@@ -15,6 +15,7 @@ import {
   Loader2,
   CalendarClock,
   AlertTriangle,
+  Download,
 } from "lucide-react";
 import type { CertReport, ImportedCert } from "@nsb/schema";
 import { useT } from "@/lib/store";
@@ -34,7 +35,7 @@ import { ConfirmDialog } from "@/components/shared/misc";
  * 浏览器给的原因往往看不出是证书过期。这里把剩余天数、文件是否还在、
  * 站点域名有没有被 SAN 覆盖一次列出来。
  */
-export function CertHealthCard() {
+export function CertHealthCard({ onExport }: { onExport: (cert: ImportedCert, trigger: HTMLButtonElement) => void }) {
   const t = useT();
   const qc = useQueryClient();
   const reportQuery = useQuery({ queryKey: ["cert-health"], queryFn: api.certHealth });
@@ -237,6 +238,10 @@ export function CertHealthCard() {
                     {c.usedBySites.length > 0 && <p className="mt-2 text-[11px] text-muted [overflow-wrap:anywhere]">{t("cert.usedBy")}: {c.usedBySites.join(", ")}</p>}
                     <div className="mx-2 my-3 border-t border-dashed border-border/60" />
                     <div className="flex flex-wrap items-center gap-2">
+                      <Button variant="secondary" size="sm" disabled={busy || !!readError}
+                        onClick={(event) => onExport(c, event.currentTarget)} aria-label={`${t("pfx.export")} ${c.subject}`}>
+                        <Download className="mr-1.5 h-3.5 w-3.5" />{t("pfx.export")}
+                      </Button>
                       <Button variant="secondary" size="sm" disabled={busy || !!readError}
                         onClick={() => { setError(null); setReplacement({ cert: c, certPath: "", keyPath: "" }); }}
                         aria-label={`${t("cert.replace")} ${c.subject}`}>

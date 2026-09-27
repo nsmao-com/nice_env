@@ -149,7 +149,7 @@ export const certMonitorDelete = (id: string) =>
 /** 同步做一次 TLS 握手刷新到期时间 */
 export const certMonitorCheck = (id: string) =>
   safe(invoke<CertMonitor>("certmonitor_check", { id }));
-/** 导出本机证书为 PFX (PKCS#12)，返回保存路径 */
+/** 导出本机证书为 PFX (PKCS#12)，返回保存路径；导入证书使用 imported:<id> 标识。 */
 export const certExportPfx = (certId: string, password: string, outPath: string) =>
   safe(invoke<string>("cert_export_pfx", { certId, password, outPath }));
 /** 导出 DER（二进制 X.509） */

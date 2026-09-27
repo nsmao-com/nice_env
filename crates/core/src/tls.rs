@@ -723,6 +723,131 @@ mod local_certificate_tests {
     }
 
     #[test]
+    fn imported_exports_preserve_chain_and_key_without_creating_local_ca() {
+        let (_temp, state) = fixture();
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(vec!["fixture-ca.example.com".into()]).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca = ca_params.self_signed(&ca_key).unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(vec!["export.example.com".into()]).unwrap();
+        params.distinguished_name.push(rcgen::DnType::CommonName, "export.example.com");
+        let leaf = params.signed_by(&key, &ca, &ca_key).unwrap();
+        let cert_pem = format!("{}{}", leaf.pem(), ca.pem());
+        let (cert_path, key_path) = crate::certs::imported_paths(&state.paths, "fixture-export").unwrap();
+        std::fs::create_dir_all(cert_path.parent().unwrap()).unwrap();
+        std::fs::write(&cert_path, &cert_pem).unwrap(); std::fs::write(&key_path, key.serialize_pem()).unwrap();
+        let id = "imported:fixture-export"; let out = state.paths.base.join("download");
+        let password = "导出密码-123";
+        export_pfx(&state.paths, &state.store, id, password, &out.with_extension("pfx")).unwrap();
+        let pfx = std::fs::read(out.with_extension("pfx")).unwrap();
+        let p12 = p12_keystore::KeyStore::from_pkcs12(&pfx, password, p12_keystore::Pkcs12ImportPolicy::Strict).unwrap();
+        let (alias, entry) = p12.private_key_chain().unwrap(); assert_eq!(alias, "export.example.com"); assert_eq!(entry.certs().len(), 2);
+        assert_eq!(entry.key().as_der(), key.serialize_der());
+        assert!(p12_keystore::KeyStore::from_pkcs12(&pfx, "wrong", p12_keystore::Pkcs12ImportPolicy::Strict).is_err());
+        assert_eq!(export_pfx(&state.paths, &state.store, id, "emoji-🔑", &out.with_extension("pfx")).unwrap_err().code, "PFX_PASSWORD");
+        assert_eq!(std::fs::read(out.with_extension("pfx")).unwrap(), pfx);
+        let password = "导出密码-🔑123";
+        export_jks(&state.paths, &state.store, id, password, &out.with_extension("jks")).unwrap();
+        // 独立按 OpenJDK JavaKeyStore 的 char[] 大端编码核对完整性摘要，避免库自身往返掩盖乱码密码。
+        use sha1::Digest;
+        let bytes = std::fs::read(out.with_extension("jks")).unwrap();
+        let java_password = [0x5b,0xfc,0x51,0xfa,0x5b,0xc6,0x78,0x01,0x00,0x2d,0xd8,0x3d,0xdd,0x11,0x00,0x31,0x00,0x32,0x00,0x33];
+        let mut digest = sha1::Sha1::new(); digest.update(java_password); digest.update(b"Mighty Aphrodite"); digest.update(&bytes[..bytes.len()-20]);
+        assert_eq!(digest.finalize().as_slice(), &bytes[bytes.len()-20..]);
+        let mut reader = bytes.as_slice(); let mut decoder = jks::decoder::Decoder::new(&mut reader);
+        decoder.update_digest(&java_password); decoder.update_digest(b"Mighty Aphrodite");
+        assert_eq!(decoder.read_u32().unwrap(), jks::common::MAGIC); let version = decoder.read_u32().unwrap();
+        assert_eq!(decoder.read_u32().unwrap(), 1); assert_eq!(decoder.read_u32().unwrap(), jks::common::PRIVATE_KEY_TAG);
+        assert_eq!(decoder.read_string().unwrap(), "export.example.com");
+        let mut entry = decoder.read_private_key_entry(version).unwrap(); decoder.verify_digest().unwrap();
+        entry.private_key = jks::keyprotector::decrypt(&entry.private_key, password.as_bytes(), jks_password_bytes).unwrap();
+        assert_eq!(entry.certificate_chain.len(), 2); assert_eq!(entry.certificate_chain[0].content, leaf.der().as_ref());
+        assert_eq!(entry.certificate_chain[1].content, ca.der().as_ref()); assert_eq!(entry.private_key, key.serialize_der());
+        export_pem_bundle(&state.paths, &state.store, id, &out.with_extension("pem")).unwrap();
+        assert_eq!(std::fs::read_to_string(out.with_extension("pem")).unwrap(), format!("{cert_pem}{}", key.serialize_pem()));
+        export_der(&state.paths, &state.store, id, &out.with_extension("der")).unwrap();
+        assert_eq!(std::fs::read(out.with_extension("der")).unwrap(), leaf.der().as_ref());
+        assert!(!state.paths.certs().join("ca.crt").exists()); assert!(state.store.list_certs().unwrap().is_empty());
+        assert_eq!(std::fs::read_to_string(cert_path).unwrap(), cert_pem); assert_eq!(std::fs::read_to_string(key_path).unwrap(), key.serialize_pem());
+    }
+
+    #[test]
+    fn traditional_rsa_and_ec_keys_export_as_valid_pkcs8() {
+        use rsa::{pkcs1::EncodeRsaPrivateKey, pkcs8::EncodePrivateKey};
+        use p256::pkcs8::DecodePrivateKey;
+        let (_temp, state) = fixture();
+        let rsa = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+        let rsa_pkcs8 = rsa.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF).unwrap();
+        let rsa_pem = rsa.to_pkcs1_pem(rsa::pkcs1::LineEnding::LF).unwrap();
+        let ec_key = rcgen::KeyPair::generate().unwrap();
+        let ec = p256::SecretKey::from_pkcs8_pem(&ec_key.serialize_pem()).unwrap();
+        let ec_pem = ec.to_sec1_pem(p256::pkcs8::LineEnding::LF).unwrap();
+        for (id, pkcs8, traditional) in [("rsa", rsa_pkcs8.to_string(), rsa_pem.to_string()), ("ec", ec_key.serialize_pem(), ec_pem.to_string())] {
+            let key = rcgen::KeyPair::from_pem(&pkcs8).unwrap();
+            let cert = rcgen::CertificateParams::new(vec!["traditional.example.com".into()]).unwrap().self_signed(&key).unwrap();
+            let (crt, private) = crate::certs::imported_paths(&state.paths, id).unwrap(); std::fs::create_dir_all(crt.parent().unwrap()).unwrap();
+            std::fs::write(crt, cert.pem()).unwrap(); std::fs::write(private, &traditional).unwrap();
+            let material = export_material(&state.paths, &state.store, &format!("imported:{id}"), true).unwrap();
+            let normalized = rustls::pki_types::PrivatePkcs8KeyDer::from(material.key_der.unwrap());
+            let certified = rustls::sign::CertifiedKey::from_der(material.chain, normalized.into(), &rustls::crypto::ring::default_provider()).unwrap();
+            certified.keys_match().unwrap();
+            let output = state.paths.base.join(format!("{id}.pfx"));
+            export_pfx(&state.paths, &state.store, &format!("imported:{id}"), "", &output).unwrap();
+            let p12 = p12_keystore::KeyStore::from_pkcs12(&std::fs::read(output).unwrap(), "", p12_keystore::Pkcs12ImportPolicy::Strict).unwrap();
+            let converted = rcgen::KeyPair::try_from(p12.private_key_chain().unwrap().1.key().as_der()).unwrap();
+            assert_eq!(converted.public_key_der(), key.public_key_der());
+            let output = state.paths.base.join(format!("{id}.jks"));
+            export_jks(&state.paths, &state.store, &format!("imported:{id}"), "fixture", &output).unwrap();
+            let mut jks = jks::KeyStore::new(); jks.load(std::fs::File::open(output).unwrap(), b"fixture").unwrap();
+            let converted = rcgen::KeyPair::try_from(jks.get_private_key_entry(&material.subject, b"fixture").unwrap().private_key.as_slice()).unwrap();
+            assert_eq!(converted.public_key_der(), key.public_key_der());
+        }
+    }
+
+    #[test]
+    fn invalid_export_material_never_replaces_existing_download_and_der_needs_no_key() {
+        let (_temp, state) = fixture(); let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(vec!["expired.example.com".into()]).unwrap();
+        params.not_before = OffsetDateTime::now_utc() - time::Duration::days(30);
+        params.not_after = OffsetDateTime::now_utc() - time::Duration::days(1);
+        let cert = params.self_signed(&key).unwrap();
+        let (crt, private) = crate::certs::imported_paths(&state.paths, "archive").unwrap(); std::fs::create_dir_all(crt.parent().unwrap()).unwrap();
+        std::fs::write(&crt, cert.pem()).unwrap(); std::fs::write(&private, key.serialize_pem()).unwrap();
+        let out = state.paths.base.join("download");
+        export_pfx(&state.paths, &state.store, "imported:archive", "", &out).unwrap(); // 过期证书可归档。
+        std::fs::write(&private, rcgen::KeyPair::generate().unwrap().serialize_pem()).unwrap();
+        std::fs::write(&out, b"previous-download").unwrap();
+        assert_eq!(export_pfx(&state.paths, &state.store, "imported:archive", "", &out).unwrap_err().code, "CERT_KEY_MISMATCH");
+        assert_eq!(export_jks(&state.paths, &state.store, "imported:archive", "fixture", &out).unwrap_err().code, "CERT_KEY_MISMATCH");
+        assert_eq!(export_pem_bundle(&state.paths, &state.store, "imported:archive", &out).unwrap_err().code, "CERT_KEY_MISMATCH");
+        assert_eq!(std::fs::read(&out).unwrap(), b"previous-download");
+        std::fs::remove_file(&private).unwrap(); export_der(&state.paths, &state.store, "imported:archive", &out).unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), cert.der().as_ref());
+        for invalid in ["", "-----BEGIN CERTIFICATE-----\nbm90LXg1MDk=\n-----END CERTIFICATE-----\n"] {
+            std::fs::write(&crt, invalid).unwrap();
+            assert!(export_der(&state.paths, &state.store, "imported:archive", &out).is_err());
+            assert_eq!(std::fs::read(&out).unwrap(), cert.der().as_ref());
+        }
+        assert_eq!(export_der(&state.paths, &state.store, "imported:../escape", &out).unwrap_err().code, "BAD_CERT_ID");
+        std::fs::write(&crt, cert.pem()).unwrap();
+        assert_eq!(export_der(&state.paths, &state.store, "imported:archive", &crt).unwrap_err().code, "CERT_EXPORT_TARGET");
+        let folder = state.paths.base.join("target-folder"); std::fs::create_dir(&folder).unwrap();
+        let before = std::fs::read_dir(&state.paths.base).unwrap().count();
+        assert!(export_der(&state.paths, &state.store, "imported:archive", &folder).is_err());
+        assert_eq!(std::fs::read_dir(&state.paths.base).unwrap().count(), before);
+        let mut params = rcgen::CertificateParams::new(vec!["unicode.example.com".into()]).unwrap();
+        params.distinguished_name.push(rcgen::DnType::CommonName, "导出🔑证书");
+        let unicode = params.self_signed(&key).unwrap();
+        std::fs::write(&crt, unicode.pem()).unwrap(); std::fs::write(&private, key.serialize_pem()).unwrap();
+        assert_eq!(export_pfx(&state.paths, &state.store, "imported:archive", "fixture", &out).unwrap_err().code, "PFX_CERT_NAME");
+        assert_eq!(std::fs::read(&out).unwrap(), cert.der().as_ref());
+        export_jks(&state.paths, &state.store, "imported:archive", "fixture", &out).unwrap();
+        let mut jks = jks::KeyStore::new(); jks.load(std::fs::File::open(&out).unwrap(), b"fixture").unwrap();
+        assert_eq!(jks.get_private_key_entry("imported:archive", b"fixture").unwrap().certificate_chain[0].content, unicode.der().as_ref());
+    }
+
+    #[test]
     fn exports_are_readable_and_cannot_overwrite_managed_keys() {
         let (_temp, state) = fixture();
         let cert = state.issue_certificate("export.test", &[]).unwrap();
@@ -876,6 +1001,64 @@ impl crate::CoreState {
 
 /* ================= 证书导出 ================= */
 
+struct ExportMaterial {
+    subject: String,
+    cert_pem: String,
+    chain: Vec<rustls::pki_types::CertificateDer<'static>>,
+    key_pem: Option<String>,
+    key_der: Option<Vec<u8>>,
+}
+
+// PKCS#12 别名使用 BMPString，JKS 的库字符串编码不支持补充平面字符。
+// 证书主体不修改；仅在格式元数据无法表示名称时使用稳定的 ASCII 标识作别名。
+fn export_alias(subject: &str, cert_id: &str) -> String {
+    if subject.chars().any(|c| c == '\0' || c as u32 > 0xffff) { cert_id.to_ascii_lowercase() }
+    else { subject.to_lowercase() }
+}
+
+/// imported: 前缀区分无数据库记录的导入证书；本地/ACME 的 cert-/acme- 标识保持兼容。
+/// 导出用于迁移和归档，因此允许过期证书；含私钥的格式必须先核对真实材料匹配。
+fn export_material(paths: &Paths, store: &Store, cert_id: &str, include_key: bool) -> Result<ExportMaterial> {
+    use rustls::pki_types::{pem::PemObject, PrivateKeyDer};
+    use rsa::pkcs8::{der::Encode, spki::SubjectPublicKeyInfoRef, PrivateKeyInfo};
+    let (cert_path, key_path) = if let Some(id) = cert_id.strip_prefix("imported:") {
+        let (cert, key) = crate::certs::imported_paths(paths, id)?;
+        (cert, Some(key))
+    } else {
+        let record = if cert_id == "ca" { read_ca_record(paths)? } else {
+            store.list_certs()?.into_iter().find(|c| c.id == cert_id)
+                .ok_or_else(|| AppError::new("NOT_FOUND", "证书不存在，请刷新列表"))?
+        };
+        (std::path::PathBuf::from(record.cert_path), record.key_path.map(std::path::PathBuf::from))
+    };
+    let cert_pem = crate::certs::read_managed_pem(&cert_path)?;
+    let chain = crate::certs::parse_chain(&cert_pem)?;
+    let (_, leaf) = x509_parser::parse_x509_certificate(chain[0].as_ref())
+        .map_err(|_| AppError::new("CERT_PARSE_FAILED", "无法解析导出证书"))?;
+    let subject = crate::certs::parse_pem_info(&cert_pem).map(|info| info.0).unwrap_or_else(|| cert_id.into());
+    let (key_pem, key_der) = if include_key {
+        let path = key_path.ok_or_else(|| AppError::new("CERT_EXPORT_NO_KEY", "证书没有私钥，请选择仅导出证书的 DER 格式"))?;
+        let pem = crate::certs::read_managed_pem(&path)?;
+        crate::certs::check_pair(&cert_pem, &pem)?;
+        let key = PrivateKeyDer::from_pem_slice(pem.as_bytes())
+            .map_err(|_| AppError::new("NOT_A_KEY", "无法解析导出私钥"))?;
+        // JKS/PKCS#12 需要 PKCS#8。用已核对的叶证书算法参数包装 PKCS#1/SEC1，
+        // 保留 RSA 参数及 EC 曲线，不把传统 PEM 的裸 DER 冒充 PKCS#8。
+        let der = match &key {
+            PrivateKeyDer::Pkcs8(key) => key.secret_pkcs8_der().to_vec(),
+            PrivateKeyDer::Pkcs1(_) | PrivateKeyDer::Sec1(_) => {
+                let spki = SubjectPublicKeyInfoRef::try_from(leaf.public_key().raw)
+                    .map_err(|_| AppError::new("CERT_EXPORT_KEY", "无法读取证书的密钥算法"))?;
+                PrivateKeyInfo::new(spki.algorithm, key.secret_der()).to_der()
+                    .map_err(|_| AppError::new("CERT_EXPORT_KEY", "无法将私钥转换为 PKCS#8"))?
+            }
+            _ => return Err(AppError::new("CERT_EXPORT_KEY", "此私钥格式不支持导出")),
+        };
+        (Some(pem), Some(der))
+    } else { (None, None) };
+    Ok(ExportMaterial { subject, cert_pem, chain, key_pem, key_der })
+}
+
 /// 导出不能覆盖托管证书目录或已有证书/私钥。临时文件替换避免写到一半破坏旧导出。
 fn write_certificate_export(paths: &Paths, store: &Store, out_path: &std::path::Path, bytes: &[u8]) -> Result<String> {
     use std::io::Write;
@@ -905,29 +1088,8 @@ fn write_certificate_export(paths: &Paths, store: &Store, out_path: &std::path::
     Ok(out_path.to_string_lossy().to_string())
 }
 
-/// 把一段 PEM（可能是链）拆成 DER 列表
-fn pem_chain_to_certs(pem: &str) -> Result<Vec<p12_keystore::Certificate>> {
-    let mut out = Vec::new();
-    for block in pem.split("-----END CERTIFICATE-----") {
-        let b = block.trim();
-        if b.is_empty() {
-            continue;
-        }
-        let b64: String = b.lines().filter(|l| !l.starts_with("-----")).collect();
-        use base64::Engine as _;
-        let der = base64::engine::general_purpose::STANDARD
-            .decode(b64.trim())
-            .map_err(|e| AppError::new("PFX_DECODE", format!("证书 PEM 解码失败：{e}")))?;
-        out.push(
-            p12_keystore::Certificate::from_der(&der)
-                .map_err(|e| AppError::new("PFX_DECODE", format!("证书 DER 解析失败：{e}")))?,
-        );
-    }
-    Ok(out)
-}
-
 /// 把某张本机证书（含私钥与证书链）导出为 PKCS#12 (.pfx)。
-/// Windows IIS / 部分设备导入只认这个格式。password 可为空（不加密）。
+/// Windows IIS / 部分设备导入只认这个格式。password 可为空（空密码保护）。
 pub fn export_pfx(
     paths: &Paths,
     store: &Store,
@@ -935,40 +1097,29 @@ pub fn export_pfx(
     password: &str,
     out_path: &std::path::Path,
 ) -> Result<String> {
+    let _work = crate::BackgroundWork::begin("导出 PFX 证书")?;
+    let _activity = crate::paths::DataDirActivity::shared(&paths.base)?;
     let _files = CERT_FILES.lock();
-    let rec = if cert_id == "ca" { read_ca_record(paths)? } else {
-        store.list_certs()?.into_iter().find(|c| c.id == cert_id)
-            .ok_or_else(|| AppError::new("NOT_FOUND", "证书不存在"))?
-    };
-    let key_pem = std::fs::read_to_string(
-        rec.key_path
-            .as_deref()
-            .ok_or_else(|| AppError::new("PFX_NO_KEY", "该证书没有私钥，无法导出 PFX"))?,
-    )
-    .map_err(|e| AppError::io("读取私钥失败", e))?;
-    let cert_pem =
-        std::fs::read_to_string(&rec.cert_path).map_err(|e| AppError::io("读取证书失败", e))?;
-
-    // 私钥 PEM → PKCS#8 DER
-    let key_b64: String = key_pem
-        .lines()
-        .filter(|l| !l.starts_with("-----"))
-        .collect();
-    use base64::Engine as _;
-    let key_der = base64::engine::general_purpose::STANDARD
-        .decode(key_b64.trim())
-        .map_err(|e| AppError::new("PFX_DECODE", format!("私钥 PEM 解码失败：{e}")))?;
-    let key = p12_keystore::PrivateKey::from_der(&key_der)
+    // PKCS#12 的 BMPString 密码不支持补充平面字符；给出可操作提示，不等到 ASN.1 写出失败。
+    if password.chars().any(|c| c == '\0' || c as u32 > 0xffff) {
+        return Err(AppError::new("PFX_PASSWORD", "PFX 密码不支持部分扩展字符（如 emoji），请改用常用中文、字母或数字"));
+    }
+    let material = export_material(paths, store, cert_id, true)?;
+    let key = p12_keystore::PrivateKey::from_der(material.key_der.as_deref().unwrap())
         .map_err(|e| AppError::new("PFX_DECODE", format!("私钥解析失败：{e}")))?;
-    let certs = pem_chain_to_certs(&cert_pem)?;
-    if certs.is_empty() {
-        return Err(AppError::new("PFX_DECODE", "证书文件里没有证书"));
+    let certs = material.chain.iter().map(|der| p12_keystore::Certificate::from_der(der.as_ref())
+        .map_err(|e| AppError::new("PFX_DECODE", format!("证书解析失败：{e}")))).collect::<Result<Vec<_>>>()?;
+    // 当前库还会把链中每张证书的完整主体写为 BMPString friendlyName，不能只替换条目别名。
+    if certs.iter().any(|cert| cert.subject().chars().any(|c| c == '\0' || c as u32 > 0xffff)) {
+        return Err(AppError::new("PFX_CERT_NAME", "PFX 暂不支持此证书名称中的扩展字符，请选择 PEM、JKS 或 DER 格式")
+            .with_hint("原证书和已有导出文件保持不变。"));
     }
 
-    let chain = p12_keystore::PrivateKeyChain::new(rec.subject.clone(), key, certs);
+    let alias = export_alias(&material.subject, cert_id);
+    let chain = p12_keystore::PrivateKeyChain::new(alias.clone(), key, certs);
     let mut store12 = p12_keystore::KeyStore::new();
     store12.add_entry(
-        &rec.subject,
+        &alias,
         p12_keystore::KeyStoreEntry::PrivateKeyChain(chain),
     );
     let pfx = store12
@@ -980,29 +1131,21 @@ pub fn export_pfx(
 
 /// 导出 DER（二进制 X.509，部分设备/中间件要这个格式）：取链里第一张（leaf）
 pub fn export_der(paths: &Paths, store: &Store, cert_id: &str, out_path: &std::path::Path) -> Result<String> {
+    let _work = crate::BackgroundWork::begin("导出 DER 证书")?;
+    let _activity = crate::paths::DataDirActivity::shared(&paths.base)?;
     let _files = CERT_FILES.lock();
-    let rec = if cert_id == "ca" { read_ca_record(paths)? } else {
-        store.list_certs()?.into_iter().find(|c| c.id == cert_id)
-            .ok_or_else(|| AppError::new("NOT_FOUND", "证书不存在"))?
-    };
-    let pem =
-        std::fs::read_to_string(&rec.cert_path).map_err(|e| AppError::io("读取证书失败", e))?;
-    let leaf = pem
-        .split("-----END CERTIFICATE-----")
-        .next()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| AppError::new("PFX_DECODE", "证书文件为空"))?;
-    let b64: String = leaf.lines().filter(|l| !l.starts_with("-----")).collect();
-    use base64::Engine as _;
-    let der = base64::engine::general_purpose::STANDARD
-        .decode(b64.trim())
-        .map_err(|e| AppError::new("PFX_DECODE", format!("证书解码失败：{e}")))?;
-    write_certificate_export(paths, store, out_path, &der)
+    let material = export_material(paths, store, cert_id, false)?;
+    write_certificate_export(paths, store, out_path, material.chain[0].as_ref())
+}
+
+// OpenJDK 对 Java char[]（UTF-16 code units）逐个写大端字节。jks crate 默认按
+// UTF-8 的每个字节补零，只对 ASCII 密码兼容；输入来自 Rust str，需显式转换。
+fn jks_password_bytes(password: &[u8]) -> Vec<u8> {
+    String::from_utf8_lossy(password).encode_utf16().flat_map(u16::to_be_bytes).collect()
 }
 
 /// 导出 JKS（Java Keystore，Tomcat 等 Java 系中间件用）。
-/// JKS 规范要求密码 ≥ 6 字符，这里如实转述错误而不是悄悄放行。
+/// 沿用 keytool 的至少 6 个字符要求，避免生成后续工具拒绝使用的密码。
 pub fn export_jks(
     paths: &Paths,
     store: &Store,
@@ -1010,68 +1153,45 @@ pub fn export_jks(
     password: &str,
     out_path: &std::path::Path,
 ) -> Result<String> {
+    let _work = crate::BackgroundWork::begin("导出 JKS 证书")?;
+    let _activity = crate::paths::DataDirActivity::shared(&paths.base)?;
     let _files = CERT_FILES.lock();
-    let rec = if cert_id == "ca" { read_ca_record(paths)? } else {
-        store.list_certs()?.into_iter().find(|c| c.id == cert_id)
-            .ok_or_else(|| AppError::new("NOT_FOUND", "证书不存在"))?
-    };
-    let key_pem = std::fs::read_to_string(
-        rec.key_path
-            .as_deref()
-            .ok_or_else(|| AppError::new("JKS_NO_KEY", "该证书没有私钥，无法导出 JKS"))?,
-    )
-    .map_err(|e| AppError::io("读取私钥失败", e))?;
-    let cert_pem =
-        std::fs::read_to_string(&rec.cert_path).map_err(|e| AppError::io("读取证书失败", e))?;
     if password.chars().count() < 6 {
         return Err(AppError::new(
             "JKS_PASSWORD",
-            "JKS 密码至少 6 个字符（Java Keystore 规范）",
+            "JKS 密码至少 6 个字符",
         ));
     }
 
-    use base64::Engine as _;
-    let b64 = base64::engine::general_purpose::STANDARD;
-    let key_b64: String = key_pem
-        .lines()
-        .filter(|l| !l.starts_with("-----"))
-        .collect();
-    let key_der = b64
-        .decode(key_b64.trim())
-        .map_err(|e| AppError::new("JKS_DECODE", format!("私钥解码失败：{e}")))?;
-    let mut chain = Vec::new();
-    for block in cert_pem.split("-----END CERTIFICATE-----") {
-        let b = block.trim();
-        if b.is_empty() {
-            continue;
-        }
-        let c_b64: String = b.lines().filter(|l| !l.starts_with("-----")).collect();
-        let der = b64
-            .decode(c_b64.trim())
-            .map_err(|e| AppError::new("JKS_DECODE", format!("证书解码失败：{e}")))?;
-        chain.push(jks::Certificate {
-            cert_type: "X509".into(),
-            content: der,
-        });
-    }
-    if chain.is_empty() {
-        return Err(AppError::new("JKS_DECODE", "证书文件里没有证书"));
-    }
+    let material = export_material(paths, store, cert_id, true)?;
+    let chain = material.chain.iter().map(|der| jks::Certificate { cert_type: "X509".into(), content: der.to_vec() }).collect();
+    let alias = export_alias(&material.subject, cert_id);
 
-    let mut ks = jks::KeyStore::new();
+    let mut ks = jks::KeyStore::with_options(jks::KeyStoreOptions { password_bytes: jks_password_bytes, ..Default::default() });
     ks.set_private_key_entry(
-        &rec.subject,
+        &alias,
         jks::PrivateKeyEntry {
             creation_time: std::time::SystemTime::now(),
-            private_key: key_der,
+            private_key: material.key_der.unwrap(),
             certificate_chain: chain,
         },
         password.as_bytes(),
     )
     .map_err(|e| AppError::new("JKS_BUILD", format!("构建 JKS 失败：{e}")))?;
     let mut buf = Vec::new();
-    ks.store(&mut buf, password.as_bytes())
-        .map_err(|e| AppError::new("JKS_BUILD", format!("序列化 JKS 失败：{e}")))?;
+    // store() 忽略 Options.password_bytes，仍按 UTF-8 每字节补零；使用库的 Encoder
+    // 显式传入 Java 密码摘要，并复用已加密的条目与标准文件结构。
+    let serialize = (|| -> jks::Result<()> {
+        let mut encoder = jks::encoder::Encoder::new(&mut buf);
+        encoder.update_digest(&jks_password_bytes(password.as_bytes()));
+        encoder.update_digest(jks::common::WHITENER_MESSAGE);
+        encoder.write_u32(jks::common::MAGIC)?;
+        encoder.write_u32(jks::common::VERSION_02)?;
+        encoder.write_u32(1)?;
+        encoder.write_private_key_entry(&alias, &ks.get_raw_private_key_entry(&alias)?)?;
+        encoder.write_digest()
+    })();
+    serialize.map_err(|e| AppError::new("JKS_BUILD", format!("序列化 JKS 失败：{e}")))?;
 
     write_certificate_export(paths, store, out_path, &buf)
 }
@@ -1083,23 +1203,14 @@ pub fn export_pem_bundle(
     cert_id: &str,
     out_path: &std::path::Path,
 ) -> Result<String> {
+    let _work = crate::BackgroundWork::begin("导出 PEM 证书")?;
+    let _activity = crate::paths::DataDirActivity::shared(&paths.base)?;
     let _files = CERT_FILES.lock();
-    let rec = if cert_id == "ca" { read_ca_record(paths)? } else {
-        store.list_certs()?.into_iter().find(|c| c.id == cert_id)
-            .ok_or_else(|| AppError::new("NOT_FOUND", "证书不存在"))?
-    };
-    let key_pem = std::fs::read_to_string(
-        rec.key_path
-            .as_deref()
-            .ok_or_else(|| AppError::new("PEM_NO_KEY", "该证书没有私钥，无法打包"))?,
-    )
-    .map_err(|e| AppError::io("读取私钥失败", e))?;
-    let cert_pem =
-        std::fs::read_to_string(&rec.cert_path).map_err(|e| AppError::io("读取证书失败", e))?;
-    let mut bundle = cert_pem;
+    let material = export_material(paths, store, cert_id, true)?;
+    let mut bundle = material.cert_pem;
     if !bundle.ends_with('\n') {
         bundle.push('\n');
     }
-    bundle.push_str(&key_pem);
+    bundle.push_str(material.key_pem.as_deref().unwrap());
     write_certificate_export(paths, store, out_path, bundle.as_bytes())
 }

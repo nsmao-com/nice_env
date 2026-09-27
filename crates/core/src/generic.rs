@@ -528,6 +528,7 @@ fn sftpgo_web_target(r: &Resolved, config: &serde_json::Value, file_env_keys: &s
 /// 仅识别由本程序明确传入监听端口的运行描述；不猜测自定义命令的端口。
 fn generic_web_target(r: &Resolved, sftpgo: Option<&SftpgoConfig>) -> Result<String> {
     if let Some(config) = sftpgo { return config.web_target.clone(); }
+    if crate::install::official_qdrant(&r.entry) && r.entry.run.as_ref().is_some_and(|run| run.args == r.spec.args) { return qdrant_web_target(r); }
     let args_pair = |flag: &str, value: &str| r.spec.args.windows(2).any(|pair| pair[0] == flag && pair[1] == value);
     let (offset, path) = match r.entry.id.as_str() {
         "mailpit" if args_pair("--listen", "127.0.0.1:{port}") => (0, "/"),
@@ -546,6 +547,32 @@ fn generic_web_target(r: &Resolved, sftpgo: Option<&SftpgoConfig>) -> Result<Str
         return local_web_url("127.0.0.1", port, false, &root);
     }
     local_web_url("127.0.0.1", port, false, path)
+}
+
+fn qdrant_web_target(r: &Resolved) -> Result<String> {
+    let config: serde_json::Value = yaml_serde::from_str(&std::fs::read_to_string(r.etc.join("config.yaml"))?)
+        .map_err(|_| web_unavailable("Qdrant 配置无法解析，请检查后重启。"))?;
+    let value = |key: &str, pointer: &str, fallback: &str| {
+        r.spec.env.as_ref().and_then(|env| env.get(key)).map(|value| expand(value, r))
+            .or_else(|| std::env::var(key).ok())
+            .or_else(|| config.pointer(pointer).filter(|value| !value.is_null()).map(|value| value.as_str().map(str::to_string).unwrap_or_else(|| value.to_string())))
+            .unwrap_or_else(|| fallback.into())
+    };
+    let enabled = value("QDRANT__SERVICE__ENABLE_STATIC_CONTENT", "/service/enable_static_content", "true");
+    if enabled != "true" { return Err(web_unavailable("Qdrant 静态管理台未启用，请检查 enable_static_content 后重启。")); }
+    let content = value("QDRANT__SERVICE__STATIC_CONTENT_DIR", "/service/static_content_dir", "./static");
+    let directory = r.root.join(&content);
+    if !directory.join("index.html").is_file() {
+        if matches!(content.as_str(), "static" | "./static") && !directory.exists() {
+            return Err(AppError::new("QDRANT_WEB_MISSING", "此 Qdrant 安装尚未包含管理台文件")
+                .with_hint("可下载官方管理台并重启服务；数据库和配置会保留。"));
+        }
+        return Err(web_unavailable("Qdrant 静态目录缺少 index.html，请检查 static_content_dir；已有文件不会自动覆盖。"));
+    }
+    let host = value("QDRANT__SERVICE__HOST", "/service/host", "127.0.0.1");
+    let tls = value("QDRANT__SERVICE__ENABLE_TLS", "/service/enable_tls", "false");
+    if !matches!(tls.as_str(), "true" | "false") { return Err(web_unavailable("Qdrant TLS 设置无效，请检查配置。")); }
+    local_web_url(&host, r.port.ok_or_else(|| web_unavailable("Qdrant 端口未配置。"))?, tls == "true", "/dashboard")
 }
 
 pub fn service_web_url(manager: &ServiceManager, id: &str) -> Result<String> {
@@ -790,18 +817,23 @@ fn owned_ports_ready(manager: &ServiceManager, service_id: &str, ports: &[u16]) 
     let pids = manager.snapshot(service_id).map(|s| s.pids).unwrap_or_default();
     if pids.is_empty() || !pids.iter().any(|pid| platform::process_alive(*pid)) { return false; }
     ports.iter().all(|port| tcp_port_open(*port)) && crate::ports::listeners().is_ok_and(|listeners|
-        ports.iter().all(|port| listeners.iter().any(|(p, pid)| p == port && pids.contains(pid))))
+        ports.iter().all(|port| listeners.iter().any(|(p, pid)| p == port && pids.contains(pid))
+            && listeners.iter().filter(|(p, _)| p == port).all(|(_, pid)| pids.contains(pid))))
 }
 
 fn wait_sftpgo_healthy(manager: &ServiceManager, r: &Resolved, timeout: Duration) -> bool {
     let Some(ports) = r.port.and_then(|port| port.checked_add(6058).map(|web| [port, web])) else { return false; };
+    wait_owned_ports(manager, &r.service_id, &ports, timeout)
+}
+
+fn wait_owned_ports(manager: &ServiceManager, id: &str, ports: &[u16], timeout: Duration) -> bool {
     let deadline = std::time::Instant::now() + timeout;
     let mut ready_since = None;
     while std::time::Instant::now() < deadline {
-        if owned_ports_ready(manager, &r.service_id, &ports) {
+        if owned_ports_ready(manager, id, ports) {
             if ready_since.get_or_insert_with(std::time::Instant::now).elapsed() >= Duration::from_millis(300) { return true; }
         } else { ready_since = None; }
-        if manager.snapshot(&r.service_id).is_none_or(|service| service.pids.iter().all(|pid| !platform::process_alive(*pid))) { return false; }
+        if manager.snapshot(id).is_none_or(|service| service.pids.iter().all(|pid| !platform::process_alive(*pid))) { return false; }
         std::thread::sleep(Duration::from_millis(100));
     }
     false
@@ -927,6 +959,9 @@ pub fn start(
     let timeout = Duration::from_secs(r.spec.health_timeout_sec.max(3));
     let healthy = if sftpgo.is_some() {
         wait_sftpgo_healthy(manager, &r, timeout)
+    } else if crate::install::official_qdrant(&r.entry) {
+        r.port.and_then(|port| port.checked_add(1).map(|grpc| [port, grpc]))
+            .is_some_and(|ports| wait_owned_ports(manager, &r.service_id, &ports, timeout))
     } else if managed_rnacos(&r) {
         wait_rnacos_healthy(manager, &r, timeout)
     } else if r.entry.id == "coredns" {
@@ -1307,7 +1342,12 @@ mod startup_tests {
     #[test]
     fn console_targets_use_resolved_ports_and_preserve_sftpgo_web_configuration() {
         for (id, offset, path) in [("mailpit", 0, "/"), ("minio", 1, "/"), ("consul", 0, "/ui"), ("rnacos", 2000, "/rnacos"), ("qdrant", 0, "/dashboard")] {
-            let (_temp, _state, mut r) = fixture(id); r.port = Some(31000);
+            let (_temp, state, mut r) = fixture(id); r.port = Some(31000);
+            if id == "qdrant" {
+                prepare_config(&state.paths, &r).unwrap();
+                std::fs::create_dir(r.root.join("static")).unwrap();
+                std::fs::write(r.root.join("static/index.html"), "<html></html>").unwrap();
+            }
             assert_eq!(generic_web_target(&r, None).unwrap(), format!("http://127.0.0.1:{}{path}", 31000 + offset));
             r.spec.args = vec!["custom".into()];
             assert_eq!(generic_web_target(&r, None).unwrap_err().code, "SERVICE_WEB_UNAVAILABLE");
@@ -1354,6 +1394,112 @@ mod startup_tests {
         state.manager.set_state("mailpit", crate::model::ServiceState::Stopped);
         assert_eq!(state.manager.web_target("mailpit").unwrap_err().code, "SERVICE_WEB_UNKNOWN");
         state.manager.services.lock().remove("mailpit");
+    }
+
+    #[test]
+    fn qdrant_console_respects_disabled_custom_tls_and_missing_assets() {
+        let (_temp, state, mut r) = fixture("qdrant"); r.port = Some(31000);
+        prepare_config(&state.paths, &r).unwrap();
+        assert_eq!(qdrant_web_target(&r).unwrap_err().code, "QDRANT_WEB_MISSING");
+        let config = r.etc.join("config.yaml");
+        let content = std::fs::read_to_string(&config).unwrap();
+        std::fs::write(&config, content.replace("service:", "service:\n  enable_static_content: false")).unwrap();
+        assert_eq!(qdrant_web_target(&r).unwrap_err().code, "SERVICE_WEB_UNAVAILABLE");
+        std::fs::write(&config, content.replace("service:", "service:\n  static_content_dir: custom-ui\n  enable_tls: true")).unwrap();
+        assert_eq!(qdrant_web_target(&r).unwrap_err().code, "SERVICE_WEB_UNAVAILABLE");
+        std::fs::create_dir(r.root.join("custom-ui")).unwrap();
+        std::fs::write(r.root.join("custom-ui/index.html"), "user dashboard").unwrap();
+        assert_eq!(qdrant_web_target(&r).unwrap(), "https://127.0.0.1:31000/dashboard");
+        r.spec.env = Some(std::collections::HashMap::from([("QDRANT__SERVICE__ENABLE_STATIC_CONTENT".into(), "false".into())]));
+        assert_eq!(qdrant_web_target(&r).unwrap_err().code, "SERVICE_WEB_UNAVAILABLE");
+        assert_eq!(std::fs::read_to_string(r.root.join("custom-ui/index.html")).unwrap(), "user dashboard");
+    }
+
+    #[test]
+    #[ignore = "requires NSB_VERIFY_QDRANT and NSB_VERIFY_QDRANT_ZIP and NSB_VERIFY_QDRANT_UI pointing to official verified assets"]
+    fn native_qdrant_repairs_console_and_preserves_real_vectors_across_restart_and_reinstall() {
+        let executable = std::env::var_os("NSB_VERIFY_QDRANT").expect("set NSB_VERIFY_QDRANT");
+        let archive = std::env::var_os("NSB_VERIFY_QDRANT_ZIP").expect("set NSB_VERIFY_QDRANT_ZIP");
+        let ui_archive = std::env::var_os("NSB_VERIFY_QDRANT_UI").expect("set NSB_VERIFY_QDRANT_UI");
+        let (_temp, state, r) = fixture("qdrant");
+        let stop_during_download = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = stop_during_download.clone();
+        let state = Arc::new_cyclic(|weak: &std::sync::Weak<crate::CoreState>| {
+            let weak = weak.clone();
+            crate::CoreState { emit: Arc::new(move |event| {
+                if matches!(event, crate::Event::DownloadProgress(ref p) if p.state == "downloading")
+                    && flag.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    weak.upgrade().unwrap().stop_service("qdrant").unwrap();
+                }
+            }), ..state }
+        });
+        std::fs::copy(executable, &r.bin).unwrap();
+        let key = format!("qdrant@{}", r.entry.version);
+        let package = state.installer.find(&key).unwrap();
+        assert_eq!(crate::download::sha256_file(std::path::Path::new(&archive)).unwrap(), package.sha256.unwrap());
+        std::fs::copy(archive, state.paths.downloads().join(format!("{key}.pkg"))).unwrap();
+        let cache = state.paths.downloads().join(format!("{key}--qdrant-web-ui-0.2.18.pkg"));
+        std::fs::copy(ui_archive, &cache).unwrap();
+        assert_eq!(crate::download::sha256_file(&cache).unwrap(), "fdce24c04ec1627d2369cb8fe610ee06ad9236f82aad214aa7f294ac37372859");
+        let base = (30000..42000).find(|port| [0, 1, 2].iter().all(|offset| tcp_port_bindable(port + offset))).unwrap();
+        let occupied_grpc = std::net::TcpListener::bind(("127.0.0.1", base + 1)).unwrap();
+        state.store.set_port_override("qdrant", Some(base)).unwrap(); state.store.set_setting("autoFallbackPort", "true").unwrap();
+        struct Cleanup(Arc<crate::CoreState>);
+        impl Drop for Cleanup { fn drop(&mut self) { let _ = self.0.stop_service("qdrant"); } }
+        let _cleanup = Cleanup(state.clone());
+        state.start_service("qdrant").unwrap_or_else(|e| panic!("{e:?}\n{:?}", state.manager.tail("qdrant", 20)));
+        let first = state.manager.snapshot("qdrant").unwrap(); let port = first.port.unwrap(); assert_ne!(port, base);
+        assert!(owned_ports_ready(&state.manager, "qdrant", &[port, port + 1]));
+        assert_eq!(state.service_web_url("qdrant").unwrap_err().code, "QDRANT_WEB_MISSING");
+        let client = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(10)).build().unwrap();
+        let endpoint = |port, path: &str| format!("http://127.0.0.1:{port}{path}");
+        let response = client.put(endpoint(port, "/collections/niceenv_verify"))
+            .json(&serde_json::json!({"vectors":{"size":3,"distance":"Cosine"}})).send().unwrap();
+        assert!(response.status().is_success(), "{}", response.text().unwrap());
+        let response = client.put(endpoint(port, "/collections/niceenv_verify/points?wait=true"))
+            .json(&serde_json::json!({"points":[{"id":42,"vector":[0.2,0.4,0.8],"payload":{"name":"保留向量"}}]})).send().unwrap();
+        assert!(response.status().is_success(), "{}", response.text().unwrap());
+        let config_path = r.etc.join("config.yaml");
+        let original = std::fs::read_to_string(&config_path).unwrap() + "\n# user comment preserved\n";
+        std::fs::write(&config_path, &original).unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        assert_eq!(runtime.block_on(state.repair_service_web_ui("qdrant", "wrong-version")).unwrap_err().code, "SERVICE_CHANGED");
+        stop_during_download.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(runtime.block_on(state.repair_service_web_ui("qdrant", &r.entry.version)).unwrap_err().code, "SERVICE_CHANGED");
+        let stopped = state.manager.snapshot("qdrant").unwrap();
+        assert_eq!(stopped.state, crate::model::ServiceState::Stopped); assert!(stopped.pids.is_empty());
+        assert!(r.root.join("static/index.html").is_file());
+        std::fs::rename(r.root.join("static"), _temp.path().join("verified-dashboard")).unwrap();
+        state.start_service("qdrant").unwrap();
+        let url = runtime.block_on(state.repair_service_web_ui("qdrant", &r.entry.version)).unwrap();
+        let after = state.manager.snapshot("qdrant").unwrap(); assert_ne!(after.pids, first.pids);
+        assert_eq!(url, endpoint(after.port.unwrap(), "/dashboard"));
+        let html = client.get(&url).send().unwrap().error_for_status().unwrap().text().unwrap();
+        assert!(html.contains("Qdrant Web UI"));
+        let script = regex::Regex::new(r#"src="(/dashboard/assets/[^" ]+\.js)""#).unwrap();
+        let script = script.captures(&html).unwrap().get(1).unwrap().as_str();
+        assert!(client.get(endpoint(after.port.unwrap(), script)).send().unwrap().error_for_status().unwrap().bytes().unwrap().len() > 1000);
+        let read_vector = |port| {
+            let value: serde_json::Value = client.get(endpoint(port, "/collections/niceenv_verify/points/42"))
+                .send().unwrap().error_for_status().unwrap().json().unwrap();
+            assert_eq!(value["result"]["payload"]["name"], "保留向量");
+        };
+        read_vector(after.port.unwrap());
+        assert!(std::fs::read_to_string(&config_path).unwrap().contains("# user comment preserved"));
+        state.stop_service("qdrant").unwrap();
+        state.uninstall_package(&key).unwrap();
+        runtime.block_on(state.install_package(&key)).unwrap();
+        let new_binary = state.paths.runtime_dir("qdrant", &r.entry.version);
+        assert!(new_binary.join("static/index.html").is_file());
+        assert!(new_binary.join("static/openapi.json").is_file());
+        state.start_service("qdrant").unwrap();
+        let last = state.manager.snapshot("qdrant").unwrap();
+        read_vector(last.port.unwrap());
+        assert!(state.service_web_url("qdrant").unwrap().ends_with("/dashboard"));
+        state.stop_service("qdrant").unwrap();
+        assert!(last.pids.iter().all(|pid| !platform::process_alive(*pid)));
+        assert_eq!(state.service_web_url("qdrant").unwrap_err().code, "SERVICE_NOT_RUNNING");
+        drop(occupied_grpc);
     }
 
     #[test]

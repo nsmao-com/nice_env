@@ -764,6 +764,34 @@ impl CoreState {
         generic::service_web_url(&self.manager, id)
     }
 
+    pub async fn repair_service_web_ui(self: &Arc<Self>, id: &str, version: &str) -> Result<String> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
+        ensure_application_accepts_work()?;
+        let (before, installed) = {
+            let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重试"))?;
+            let service = self.manager.snapshot(id).filter(|s| id == "qdrant" && s.state == model::ServiceState::Running
+                && s.version.as_deref() == Some(version) && !s.pids.is_empty())
+                .ok_or_else(|| AppError::new("SERVICE_CHANGED", "Qdrant 状态或版本已变化，请刷新后重试"))?;
+            if !self.manager.web_target(id).is_err_and(|error| error.code == "QDRANT_WEB_MISSING") {
+                return Err(AppError::new("QDRANT_WEB_CUSTOM", "当前服务没有可自动补齐的管理台，请检查配置"));
+            }
+            let installed = self.store.find_installed(id, Some(version)).ok_or_else(|| AppError::not_installed("Qdrant"))?;
+            (service, installed)
+        };
+        // 下载期间服务继续运行；若用户停止或切换版本，不能在下载完成后擅自拉起。
+        self.installer.repair_qdrant_web_ui(&installed, &self.paths, &self.store, &self.downloader, &|e| (self.emit)(e)).await?;
+        let state = self.clone(); let id = id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let _activity = _activity;
+            let _operation = state.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "管理台已补齐；请在当前操作完成后重启 Qdrant"))?;
+            let unchanged = state.manager.snapshot(&id).is_some_and(|s| s.state == model::ServiceState::Running
+                && s.version == before.version && s.pids == before.pids);
+            if !unchanged { return Err(AppError::new("SERVICE_CHANGED", "管理台已补齐，但服务状态已变化；请手动启动或重启 Qdrant")); }
+            state.restart_service(&id)?;
+            state.service_web_url(&id)
+        }).await.map_err(|error| AppError::internal("补齐管理台", error.to_string()))?
+    }
+
     pub fn service_status_list(&self) -> Vec<model::ServiceStatus> {
         let mut list = self.manager.list_status();
         let installed = self.store.list_installed().unwrap_or_default();

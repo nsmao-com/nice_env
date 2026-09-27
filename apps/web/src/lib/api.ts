@@ -58,6 +58,8 @@ export const listServiceStatus = () =>
   safe(invoke<ServiceStatus[]>("list_service_status"));
 export const serviceWebUrl = (id: string) =>
   safe(invoke<string>("service_web_url", { id }));
+export const repairServiceWebUi = (id: string, version: string) =>
+  safe(invoke<string>("repair_service_web_ui", { id, version }));
 export const diagnoseService = (id: string) =>
   safe(invoke<ServiceDiagnosticReport>("diagnose_service", { id }));
 export const startService = (id: string) =>

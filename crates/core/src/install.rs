@@ -19,6 +19,16 @@ const GH_ACCELERATORS: [&str; 3] = [
     "https://gh-proxy.com/",
 ];
 
+const QDRANT_WEB_ASSET: &str = "qdrant-web-ui-0.2.18";
+const QDRANT_WEB_URL: &str = "https://github.com/qdrant/qdrant-web-ui/releases/download/v0.2.18/dist-qdrant.zip";
+const QDRANT_WEB_SHA256: &str = "fdce24c04ec1627d2369cb8fe610ee06ad9236f82aad214aa7f294ac37372859";
+
+pub(crate) fn official_qdrant(entry: &crate::model::PackageManifestEntry) -> bool {
+    entry.id == "qdrant" && entry.url.starts_with("https://github.com/qdrant/qdrant/releases/download/")
+        && entry.run.as_ref().is_some_and(|run| run.args == ["--config-path", "{etc}/config.yaml", "--disable-telemetry"]
+            && run.config_file.as_deref() == Some("config.yaml") && run.cwd.is_none())
+}
+
 /// 只升级曾随应用发布的原始运行描述；下载信息、实际入口及用户修改保持不变。
 fn upgrade_legacy_run(mut entry: crate::model::PackageManifestEntry) -> crate::model::PackageManifestEntry {
     if entry.id == "sftpgo" {
@@ -404,6 +414,59 @@ impl Installer {
         result
     }
 
+    /// 官方原生发行包只包含主程序；补齐官方静态 UI，不修改程序、数据或配置。
+    async fn ensure_qdrant_web_ui(
+        &self, entry: &crate::model::PackageManifestEntry, root: &Path, paths: &Paths, store: &Store,
+        downloader: &Arc<Downloader>, task: &crate::download::DownloadTask,
+        emit: &dyn Fn(crate::Event), published: bool,
+    ) -> Result<()> {
+        if !official_qdrant(entry) { return Ok(()); }
+        let relative = root.strip_prefix(&paths.base).map_err(|_| AppError::new("INVALID_PACKAGE_PATH", "Qdrant 程序目录不在托管目录内"))?;
+        let root = crate::paths::checked_data_path(&paths.base, &crate::paths::nginx_path(relative))?;
+        let target = crate::paths::checked_data_path(&root, "static")?;
+        if target.exists() {
+            if crate::paths::checked_data_path(&target, "index.html")?.is_file() { return Ok(()); }
+            return Err(AppError::new("QDRANT_WEB_INCOMPLETE", "Qdrant 已有管理台目录缺少 index.html，原目录已保留")
+                .with_hint("请先备份并修复或移走程序目录中的 static，再重试补齐管理台。"));
+        }
+        emit(crate::Event::state(task.id(), "downloading"));
+        let mut asset = entry.clone(); asset.url = QDRANT_WEB_URL.into(); asset.mirrors.clear();
+        let archive = downloader.download_asset_with_task(task, QDRANT_WEB_ASSET, &self.candidate_urls(&asset, store),
+            QDRANT_WEB_SHA256, 7_189_135, paths, emit).await?;
+        emit(crate::Event::state(task.id(), "extracting"));
+        let staging = tempfile::Builder::new().prefix(".qdrant-web-").tempdir_in(&root)?;
+        extract_zip_checked(&archive, staging.path(), &|| task.check_cancelled())?;
+        let prepared = staging.path().join("dist");
+        if !prepared.join("index.html").is_file() || !prepared.join("assets").is_dir() || !prepared.join("openapi.json").is_file() {
+            return Err(AppError::new("QDRANT_WEB_INCOMPLETE", "下载的 Qdrant 管理台文件不完整"));
+        }
+        task.check_cancelled()?;
+        crate::paths::checked_data_path(&root, "static")?;
+        if target.exists() { return Err(AppError::new("QDRANT_WEB_CHANGED", "管理台目录在安装期间发生变化，请重试")); }
+        if published { task.begin_commit()?; }
+        std::fs::rename(&prepared, &target).map_err(|e| AppError::io("安装 Qdrant 管理台", e))?;
+        Ok(())
+    }
+
+    pub(crate) async fn repair_qdrant_web_ui(
+        &self, installed: &InstalledPackage, paths: &Paths, store: &Store,
+        downloader: &Arc<Downloader>, emit: &dyn Fn(crate::Event),
+    ) -> Result<()> {
+        let entry = self.installed_entry(installed);
+        if !official_qdrant(&entry) { return Err(AppError::new("QDRANT_WEB_CUSTOM", "自定义 Qdrant 安装请按其配置补齐管理台")); }
+        let task = downloader.begin_task(&format!("{}@{}", installed.id, installed.version))?;
+        let bin = Path::new(&installed.install_path).join(entry_relative_path(&entry.entry));
+        if !bin.is_file() { return Err(AppError::new("BROKEN_INSTALL", "Qdrant 主程序已丢失，请重新安装此版本")); }
+        let result = self.ensure_qdrant_web_ui(&entry, bin.parent().unwrap(), paths, store, downloader, &task, emit, true).await;
+        if let Err(error) = result {
+            emit(crate::Event::state(task.id(), if error.code == "CANCELLED" { "cancelled" } else { "error" }));
+            return Err(error);
+        }
+        task.begin_commit()?;
+        emit(crate::Event::state(task.id(), "installed"));
+        Ok(())
+    }
+
     async fn install_task(
         &self,
         key: &str,
@@ -466,6 +529,8 @@ impl Installer {
                 )
                 .with_hint("停止该服务，卸载此版本后重新安装"));
             }
+            let binary = Path::new(&p.install_path).join(entry_relative_path(&metadata.entry));
+            self.ensure_qdrant_web_ui(&metadata, binary.parent().unwrap(), paths, store, downloader, task, emit, true).await?;
             task.begin_commit()?;
             emit(crate::Event::state(&task_id, "installed"));
             return Ok(p);
@@ -562,6 +627,7 @@ impl Installer {
         if !entry_path.is_file() || std::fs::metadata(&entry_path)?.len() == 0 {
             return Err(AppError::new("ENTRY_MISSING", "套件主程序不是有效文件"));
         }
+        self.ensure_qdrant_web_ui(&entry, entry_path.parent().unwrap(), paths, store, downloader, task, emit, false).await?;
         task.check_cancelled()?;
 
         emit(crate::Event::state(&task_id, "configuring"));
@@ -751,7 +817,19 @@ impl Installer {
 
         let runtime_dir = paths.runtime_dir(id, version);
         if runtime_dir.exists() {
-            std::fs::remove_dir_all(&runtime_dir).map_err(|e| AppError::io("删除运行时目录", e))?;
+            // Windows 在进程退出后仍可能短暂保留映像/静态文件句柄；有限重试，不改权限。
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                crate::paths::checked_data_path(&paths.base, &crate::paths::nginx_path(runtime_dir.strip_prefix(&paths.base)
+                    .map_err(|_| AppError::new("INVALID_PACKAGE_PATH", "运行时目录超出托管目录"))?))?;
+                match std::fs::remove_dir_all(&runtime_dir) {
+                    Ok(()) => break,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                    Err(error) if cfg!(windows) && matches!(error.raw_os_error(), Some(5 | 32 | 33 | 145))
+                        && std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(50)),
+                    Err(error) => return Err(AppError::io("删除运行时目录", error)),
+                }
+            }
         }
         store.remove_installed(id, version)?;
         if let Some(sid) = &stopped_service {
@@ -1320,6 +1398,47 @@ mod tests {
             std::fs::write(&snapshot, serde_json::to_vec(&custom).unwrap()).unwrap();
             assert_eq!(serde_json::to_value(state.installer.installed_entry(&installed)).unwrap(), serde_json::to_value(custom).unwrap());
         }
+    }
+
+    #[tokio::test]
+    async fn qdrant_console_preserves_existing_assets_and_cancellation_never_publishes_partial_files() {
+        let (_temp, state) = fixture();
+        let manifest: crate::model::Manifest = serde_json::from_str(include_str!("../../../manifest/packages.win.json")).unwrap();
+        let entry = manifest.packages.into_iter().find(|p| p.id == "qdrant").unwrap();
+        let root = state.paths.runtime_dir(&entry.id, &entry.version); std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("qdrant.exe"), "keep program").unwrap();
+        let task = state.downloader.begin_task("qdrant-console-fixture").unwrap();
+        let result = state.installer.ensure_qdrant_web_ui(&entry, &root, &state.paths, &state.store, &state.downloader, &task, &|_| {
+            state.downloader.cancel(task.id());
+        }, true).await;
+        assert_eq!(result.unwrap_err().code, "CANCELLED");
+        assert!(!root.join("static").exists());
+        assert_eq!(std::fs::read_to_string(root.join("qdrant.exe")).unwrap(), "keep program");
+        drop(task);
+        let task = state.downloader.begin_task("qdrant-console-fixture").unwrap();
+        std::fs::create_dir(root.join("static")).unwrap();
+        std::fs::write(root.join("static/keep.txt"), "custom asset").unwrap();
+        assert_eq!(state.installer.ensure_qdrant_web_ui(&entry, &root, &state.paths, &state.store, &state.downloader, &task, &|_| {}, true)
+            .await.unwrap_err().code, "QDRANT_WEB_INCOMPLETE");
+        std::fs::write(root.join("static/index.html"), "custom dashboard").unwrap();
+        state.installer.ensure_qdrant_web_ui(&entry, &root, &state.paths, &state.store, &state.downloader, &task, &|_| panic!("must not download existing UI"), true).await.unwrap();
+        assert_eq!(std::fs::read_to_string(root.join("static/index.html")).unwrap(), "custom dashboard");
+        assert_eq!(std::fs::read_to_string(root.join("static/keep.txt")).unwrap(), "custom asset");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn uninstall_waits_for_a_short_lived_windows_file_handle() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (_temp, state) = fixture();
+        let installed = install_fixture(&state, "fixture", "1.0.0");
+        let locked = std::fs::OpenOptions::new().read(true).share_mode(0)
+            .open(Path::new(&installed.install_path).join("keep.txt")).unwrap();
+        let release = std::thread::spawn(move || { std::thread::sleep(std::time::Duration::from_millis(200)); drop(locked); });
+        state.uninstall_package("fixture@1.0.0").unwrap();
+        release.join().unwrap();
+        assert!(!Path::new(&installed.install_path).exists());
+        assert!(state.store.find_installed("fixture", Some("1.0.0")).is_none());
     }
 
     #[test]

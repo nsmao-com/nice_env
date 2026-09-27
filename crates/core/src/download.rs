@@ -177,9 +177,27 @@ impl Downloader {
         paths: &Paths,
         emit: &dyn Fn(crate::Event),
     ) -> Result<PathBuf> {
+        self.download_cached_with_task(task, task.id(), urls, expected_sha256, expected_size, paths, emit).await
+    }
+
+    /// 附属资源沿用安装任务的取消和进度，但不能覆盖主程序压缩包缓存。
+    pub(crate) async fn download_asset_with_task(
+        &self, task: &DownloadTask, asset: &str, urls: &[String], expected_sha256: &str,
+        expected_size: u64, paths: &Paths, emit: &dyn Fn(crate::Event),
+    ) -> Result<PathBuf> {
+        if asset.is_empty() || !asset.bytes().all(|c| c.is_ascii_alphanumeric() || b"-._".contains(&c)) {
+            return Err(AppError::new("INVALID_PACKAGE_KEY", "非法的附属资源标识"));
+        }
+        self.download_cached_with_task(task, &format!("{}--{asset}", task.id()), urls, expected_sha256, expected_size, paths, emit).await
+    }
+
+    async fn download_cached_with_task(
+        &self, task: &DownloadTask, cache_key: &str, urls: &[String], expected_sha256: &str,
+        expected_size: u64, paths: &Paths, emit: &dyn Fn(crate::Event),
+    ) -> Result<PathBuf> {
         task.check_cancelled()?;
         std::fs::create_dir_all(paths.downloads())?;
-        let final_path = paths.downloads().join(format!("{}.pkg", task.id()));
+        let final_path = paths.downloads().join(format!("{cache_key}.pkg"));
         if final_path.is_file() && expected_sha256 != "0" {
             if hash_file_checked(&final_path, task).await? == expected_sha256.to_lowercase() {
                 let size = std::fs::metadata(&final_path)?.len();
@@ -196,7 +214,7 @@ impl Downloader {
             }
         }
 
-        let part_path = paths.downloads().join(format!("{}.part", task.id()));
+        let part_path = paths.downloads().join(format!("{cache_key}.part"));
         let mut last_err = None;
         for url in urls {
             task.check_cancelled()?;

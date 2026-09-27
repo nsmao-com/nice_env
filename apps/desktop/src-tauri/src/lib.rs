@@ -212,6 +212,7 @@ pub fn run() {
             // 服务
             list_service_status,
             service_web_url,
+            repair_service_web_ui,
             start_service,
             stop_service,
             restart_service,
@@ -732,6 +733,18 @@ async fn service_web_url(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, 
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || { let _activity = activity; map_jh(st.service_web_url(&id)) })
         .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn repair_service_web_ui(app: tauri::AppHandle, state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: String, version: String) -> Result<String, tauri::Error> {
+    let activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    let st = state.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let _activity = activity;
+        tauri::async_runtime::block_on(async move { map_jh(st.repair_service_web_ui(&id, &version).await) })
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?;
+    crate::tray::refresh(&app);
+    result
 }
 
 #[tauri::command]

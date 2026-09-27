@@ -62,7 +62,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.51";
+const MOCK_APP_VERSION = "0.2.52";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -806,6 +806,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "list_service_status":
       return structuredClone(Array.from(services.values())) as T;
     case "service_web_url":
+    case "repair_service_web_ui":
       throw { code: "DESKTOP_ONLY", message: "浏览器预览不能确认本机服务的管理台地址，请使用桌面端" };
     case "start_service":
     case "stop_service":

@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useIsMutating } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "motion/react";
-import { Check, ChevronDown, Download, Loader2, Pin, Power, RefreshCw, Trash2, WifiOff } from "lucide-react";
+import { Check, ChevronDown, Download, Loader2, Pin, Power, RefreshCw, Trash2, WifiOff, X } from "lucide-react";
 import type { RemoteVersion } from "@nsb/schema";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/store";
@@ -50,7 +50,7 @@ interface Props {
     loading: boolean;
   };
   onRefresh: () => Promise<void> | void;
-  onPick: (item: VersionItem) => Promise<void> | void;
+  onPick: (item: VersionItem, trigger: HTMLButtonElement | null) => Promise<void> | void;
   onSetActive: (item: VersionItem) => Promise<void>;
   onUninstall: (version: string, trigger: HTMLButtonElement | null) => void;
 }
@@ -84,10 +84,16 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
   const [busy, setBusy] = React.useState<string | null>(null);
   const busyRef = React.useRef(false);
   const triggerRef = React.useRef<HTMLButtonElement>(null);
-  const uninstallHandoff = React.useRef(false);
+  const searchRef = React.useRef<HTMLInputElement>(null);
+  const dialogHandoff = React.useRef(false);
   const refreshRef = React.useRef(false);
   const [refreshing, setRefreshing] = React.useState(false);
   const [failure, setFailure] = React.useState<{ item: VersionItem; action: "pick" | "active"; error: AppErrorShape } | null>(null);
+  const failureRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    if (open && failure) failureRef.current?.scrollIntoView({ block: "nearest" });
+  }, [open, failure]);
 
   const installedCount = items.filter((i) => i.installed).length;
   const headline = summarise(items, `${installedCount} ${t("versions.countUnit")}`);
@@ -121,11 +127,19 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
     busyRef.current = true;
     setBusy(item.version);
     setFailure(null);
+    const opensInstall = action === "pick" && !item.installed;
     try {
       if (action === "active") await onSetActive(item);
-      else await onPick(item);
-      // 安装/切换后保持打开，让用户看到状态变化
+      else {
+        if (opensInstall) {
+          dialogHandoff.current = true;
+          setOpen(false);
+        }
+        await onPick(item, triggerRef.current);
+      }
+      // 切换/启停保持打开；安装交给独立弹窗，避免两个浮层争抢焦点。
     } catch (error) {
+      if (opensInstall) { dialogHandoff.current = false; setOpen(true); }
       setFailure({ item, action, error: normalizeError(error) });
     } finally {
       busyRef.current = false;
@@ -142,7 +156,7 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
       <PopoverTrigger asChild>
         <button
           ref={triggerRef}
-          aria-label={`${group.displayName} ${headline.text} ${t("versions.available")}`}
+          aria-label={`${group.displayName} ${t("versions.manage")} · ${headline.text}`}
           className={cn(
             "flex min-w-[6.5rem] max-w-full shrink-0 items-center gap-2 whitespace-nowrap rounded-full border px-3 py-1.5 text-[12px] transition-colors",
             installedCount > 0
@@ -155,7 +169,7 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
           )}
           <span className="min-w-0 truncate font-mono">{headline.text}</span>
           {headline.sub && (
-            <span className="font-mono text-[10.5px] text-faint">{headline.sub}</span>
+            <span className="font-mono text-[10.5px] text-muted">{headline.sub}</span>
           )}
           {catalog?.loading && <Loader2 className="h-3 w-3 animate-spin opacity-50" />}
           <ChevronDown className="h-3 w-3 shrink-0 opacity-50" />
@@ -163,23 +177,32 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
       </PopoverTrigger>
 
       <PopoverContent align="end" collisionPadding={12}
+        aria-label={`${group.displayName} ${t("versions.manage")}`}
         onCloseAutoFocus={(event) => {
-          if (uninstallHandoff.current) {
+          if (dialogHandoff.current) {
             event.preventDefault();
-            uninstallHandoff.current = false;
+            dialogHandoff.current = false;
           }
         }}
         className="flex max-h-[var(--radix-popover-content-available-height)] w-[22rem] max-w-[calc(100vw-24px)] flex-col overflow-hidden p-0">
         {/* 搜索 + 刷新 */}
         <div className="flex shrink-0 items-center gap-1.5 p-2">
-          <input
-            value={query}
-            disabled={busy !== null}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder={t("versions.search")}
-            aria-label={t("versions.search")}
-            className="h-8 min-w-0 flex-1 rounded-md border border-border bg-card px-2 text-[12px] outline-none placeholder:text-faint focus:border-primary"
-          />
+          <div className="relative min-w-0 flex-1">
+            <input
+              ref={searchRef}
+              value={query}
+              disabled={busy !== null}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={t("versions.search")}
+              aria-label={t("versions.search")}
+              className="h-8 w-full min-w-0 rounded-md border border-border bg-card pl-2 pr-8 text-[12px] outline-none placeholder:text-muted focus:border-primary"
+            />
+            {query && <button type="button" aria-label={t("versions.clearSearch")} disabled={busy !== null}
+              onClick={() => { setQuery(""); searchRef.current?.focus(); }}
+              className="absolute inset-y-0 right-0 flex w-8 items-center justify-center rounded-md text-muted hover:bg-fill hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary disabled:opacity-50">
+              <X className="h-3.5 w-3.5" />
+            </button>}
+          </div>
           <Tooltip>
             <TooltipTrigger asChild>
               <button
@@ -206,10 +229,12 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
         </div>
         <div role="separator" className="mx-3 border-t border-dashed border-separator" />
 
+        {/* 搜索和来源固定；列表、提示和错误一起滚动，矮窗口也能操作版本。 */}
+        <div className="min-h-0 max-h-[19rem] overflow-y-auto overscroll-contain py-1">
         {/* 远程状态提示 */}
         {showRefreshHint && (
           <>
-            <div className="flex items-start gap-1.5 bg-warning-soft/40 px-2.5 py-1.5 text-[10.5px] text-warning">
+            <div role="status" className="flex items-start gap-1.5 bg-warning-soft/40 px-2.5 py-1.5 text-[10.5px] text-warning [overflow-wrap:anywhere]">
               <WifiOff className="mt-px h-3 w-3 shrink-0" />
               <span className="leading-snug">{catalog?.error}</span>
             </div>
@@ -218,19 +243,19 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
         )}
 
         {/* 版本列表 */}
-        <div className="min-h-0 max-h-[19rem] overflow-y-auto py-1">
           {groups.length === 0 && (
-            <p className="px-3 py-6 text-center text-[12px] text-faint">
-              {catalog?.loading ? t("versions.loading") : t("versions.empty")}
+            <p role="status" className="px-3 py-4 text-center text-[12px] text-faint">
+              {catalog?.loading ? t("versions.loading") : t(query.trim() ? "versions.empty" : "versions.noVersions")}
             </p>
           )}
-          {groups.map((g) => (
-            <div key={g.key} className="pb-1">
+          {groups.map((g, index) => (
+            <div key={g.key} role="group" aria-label={g.label} className="pb-1">
+              {index > 0 && <div role="separator" className="mx-3 my-1 border-t border-dashed border-separator" />}
               <div className="flex items-baseline justify-between px-2.5 pb-1 pt-1.5">
-                <span className="text-[10px] font-medium uppercase tracking-wide text-faint">
+                <span className="text-[10px] font-medium uppercase tracking-wide text-muted">
                   {g.label}
                 </span>
-                <span className="text-[10px] tabular text-faint">{g.items.length}</span>
+                <span className="text-[10px] tabular text-muted">{g.items.length}</span>
               </div>
               <AnimatePresence initial={false}>
                 {g.items.map((item) => (
@@ -290,7 +315,7 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
                           )}
                         </span>
                         {!!(item.note || item.sizeBytes) && (
-                          <span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-faint">
+                          <span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-muted">
                             {item.note && <span>{item.note}</span>}
                             {item.sizeBytes ? (
                               <span className="tabular">{fmtSize(item.sizeBytes)}</span>
@@ -299,7 +324,7 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
                         )}
                       </span>
 
-                      <span className="shrink-0 text-[10px] text-faint">
+                      <span className="shrink-0 text-[11px] text-foreground">
                         {item.installing ? t("packages.installing")
                           : !statusKnown && item.installed && group.isService ? t("packages.statusUnknown")
                           : !item.installed
@@ -321,11 +346,11 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
                         disabled={disabled || pathBusy || busy !== null || item.installing}
                         onClick={(e) => {
                           e.stopPropagation();
-                          uninstallHandoff.current = true;
+                          dialogHandoff.current = true;
                           setOpen(false);
                           onUninstall(item.version, triggerRef.current);
                         }}
-                        className="flex w-10 shrink-0 items-center justify-center text-faint transition-colors hover:bg-error-soft hover:text-error focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-primary disabled:opacity-45"
+                        className="flex w-10 shrink-0 items-center justify-center text-muted transition-colors hover:bg-error-soft hover:text-error focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-primary disabled:opacity-45"
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
@@ -350,22 +375,22 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
               </AnimatePresence>
             </div>
           ))}
-        </div>
 
         {failure && (
-          <div role="alert" className="mx-2.5 mb-2 max-h-32 shrink-0 overflow-y-auto rounded-lg bg-error-soft p-2 text-[11px] text-error [overflow-wrap:anywhere]">
+          <div ref={failureRef} role="alert" className="mx-2.5 mb-2 rounded-lg bg-error-soft p-2 text-[11px] text-error [overflow-wrap:anywhere]">
             <p>{failure.error.message}</p>
             {failure.error.hint && <p className="mt-1">{failure.error.hint}</p>}
             <button type="button" disabled={disabled || busy !== null || items.find((i) => i.version === failure.item.version)?.installing} onClick={() => void pick(failure.item, failure.action)} className="mt-1.5 rounded-md border border-error/30 px-2 py-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">{t("bulk.retry")}</button>
           </div>
         )}
         {installedCount > 0 && (
-          <p className="shrink-0 px-2.5 pb-2 text-[10px] leading-relaxed text-muted">{t("tools.pathEnvOnlyActive")}{group.multiInstance ? ` ${t("versions.defaultHint")}` : ""}</p>
+          <p className="px-2.5 pb-2 text-[10px] leading-relaxed text-muted">{t("tools.pathEnvOnlyActive")}{group.multiInstance ? ` ${t("versions.defaultHint")}` : ""}</p>
         )}
+        </div>
 
         {/* 底部：数据来源 */}
         <div role="separator" className="mx-3 border-t border-dashed border-separator" />
-        <div className="flex shrink-0 items-center justify-between gap-2 px-2.5 py-1.5 text-[10px] text-faint">
+        <div className="flex shrink-0 items-center justify-between gap-2 px-2.5 py-1.5 text-[10px] text-muted">
           <span>
             {!isTauri
               ? t("versions.preview")
@@ -377,7 +402,9 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
                 ? t("versions.fromCache")
                 : t("versions.fromManifest")}
           </span>
-          <span className="tabular">{items.length}</span>
+          <span className="shrink-0 tabular" aria-label={query.trim() ? `${t("versions.matches")} ${filtered.length} / ${items.length}` : undefined}>
+            {query.trim() ? `${filtered.length} / ${items.length}` : items.length}
+          </span>
         </div>
       </PopoverContent>
     </Popover>

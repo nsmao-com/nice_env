@@ -79,12 +79,14 @@ export interface InstallTarget {
 export function InstallDialog({
   target,
   onOpenChange,
+  onCloseAutoFocus,
   onDone,
   /** 完成后是否询问启动（服务型包） */
   startableAs,
 }: {
   target: InstallTarget | null;
   onOpenChange: (open: boolean) => void;
+  onCloseAutoFocus?: React.ComponentProps<typeof DialogContent>["onCloseAutoFocus"];
   onDone?: () => void;
   /** 传服务 id 表示装完可直接启动 */
   startableAs?: string | null;
@@ -167,7 +169,7 @@ export function InstallDialog({
 
   return (
     <Dialog open={target !== null} onOpenChange={close}>
-      <DialogContent hideClose={starting} className="flex max-h-[calc(100dvh-24px)] max-w-lg flex-col gap-0 overflow-hidden p-0">
+      <DialogContent hideClose={starting} onCloseAutoFocus={onCloseAutoFocus} className="flex max-h-[calc(100dvh-24px)] max-w-lg flex-col gap-0 overflow-hidden p-0">
         {/* 头部 */}
         <div className="relative shrink-0 border-b border-border bg-card-2/30 py-5 pl-4 pr-12 sm:pl-6">
           <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/40 to-transparent" />

@@ -195,6 +195,7 @@ export default function PackagesPage() {
   const [uninstalling, setUninstalling] = React.useState(false);
   const uninstallRef = React.useRef(false);
   const uninstallOpener = React.useRef<HTMLButtonElement | null>(null);
+  const installOpener = React.useRef<HTMLButtonElement | null>(null);
   const [uninstallError, setUninstallError] = React.useState<AppErrorShape | null>(null);
   const [uninstallPathPending, setUninstallPathPending] = React.useState(false);
   const packageQuery = usePackages();
@@ -225,6 +226,10 @@ export default function PackagesPage() {
   const [category, setCategory] = React.useState("all");
   const [uninstallTarget, setUninstallTarget] = React.useState<{ id: string; version: string; name: string } | null>(null);
   const [installTarget, setInstallTarget] = React.useState<InstallTarget | null>(null);
+  const openInstall = (target: InstallTarget, trigger: HTMLButtonElement | null) => {
+    installOpener.current = trigger;
+    setInstallTarget(target);
+  };
   const uninstallInstalling = !!uninstallTarget && Object.values(installTasks).some((task) =>
     task.status === "running" && task.id === uninstallTarget.id
     && (!task.version || task.version === uninstallTarget.version)
@@ -455,7 +460,7 @@ export default function PackagesPage() {
             catalogById={catalogById}
             onRefresh={refreshCatalogs}
             onUninstallTarget={openUninstall}
-            onInstall={(target) => setInstallTarget(target)}
+            onInstall={openInstall}
             empty={empty}
             disabled={actionsDisabled}
             statusKnown={statusKnown}
@@ -490,7 +495,7 @@ export default function PackagesPage() {
                       catalogById={catalogById}
                       onRefresh={refreshCatalogs}
                       onUninstallTarget={openUninstall}
-                      onInstall={(target) => setInstallTarget(target)}
+                      onInstall={openInstall}
                       empty={empty}
                       disabled={actionsDisabled}
                       statusKnown={statusKnown}
@@ -505,7 +510,7 @@ export default function PackagesPage() {
                         catalogById={catalogById}
                         onRefresh={refreshCatalogs}
                         onUninstallTarget={openUninstall}
-                        onInstall={(target) => setInstallTarget(target)}
+                        onInstall={openInstall}
                         empty={empty}
                         disabled={actionsDisabled}
                         statusKnown={statusKnown}
@@ -521,7 +526,7 @@ export default function PackagesPage() {
                   catalogById={catalogById}
                   onRefresh={refreshCatalogs}
                   onUninstallTarget={openUninstall}
-                  onInstall={(target) => setInstallTarget(target)}
+                  onInstall={openInstall}
                   empty={empty}
                   disabled={actionsDisabled}
                   statusKnown={statusKnown}
@@ -580,6 +585,12 @@ export default function PackagesPage() {
       <InstallDialog
         target={installTarget}
         onOpenChange={(o) => !o && setInstallTarget(null)}
+        onCloseAutoFocus={(event) => {
+          if (installOpener.current?.isConnected) {
+            event.preventDefault();
+            installOpener.current.focus();
+          }
+        }}
         onDone={() => { void refreshState(true); }}
         startableAs={
           installTarget
@@ -615,7 +626,7 @@ function PackageRow({
   catalog?: ReturnType<typeof useVersionCatalogs>["byId"] extends Map<string, infer Catalog> ? Catalog : never;
   onRefresh: () => Promise<void> | void;
   onUninstall: (version: string, trigger: HTMLButtonElement | null) => void;
-  onInstall: (target: InstallTarget) => void;
+  onInstall: (target: InstallTarget, trigger: HTMLButtonElement | null) => void;
 }) {
   const t = useT();
   const queryClient = useQueryClient();
@@ -716,7 +727,7 @@ function PackageRow({
     }
   };
 
-  const clickVersion = async (item: VersionItem) => {
+  const clickVersion = async (item: VersionItem, trigger: HTMLButtonElement | null) => {
     if (disabled || item.installing) return;
     const { version, installed } = item;
     const v = group.versions.find((x) => x.version === version);
@@ -740,7 +751,7 @@ function PackageRow({
           version,
           sizeBytes: item.sizeBytes,
           reinstall: false,
-        });
+        }, trigger);
         return;
       }
       if (sid) {
@@ -915,7 +926,7 @@ function PackageRows({
   catalogById: ReturnType<typeof useVersionCatalogs>["byId"];
   onRefresh: (id: string) => Promise<void>;
   onUninstallTarget: (g: PackageGroup, version: string, trigger: HTMLButtonElement | null) => void;
-  onInstall: (target: InstallTarget) => void;
+  onInstall: (target: InstallTarget, trigger: HTMLButtonElement | null) => void;
   empty: React.ReactNode;
 }) {
   return (

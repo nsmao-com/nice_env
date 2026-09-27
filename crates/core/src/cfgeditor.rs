@@ -1878,7 +1878,7 @@ mod tests {
         let initial = format!("[PHP]\nmemory_limit=321M\ndisplay_errors=Off\nextension_dir=\"{}\"\nextension=gettext\n", crate::paths::nginx_path(&runtime.join("ext")));
         register_php(&paths, &store, &version, &initial);
         let script = paths.base.join("settings-probe.php");
-        std::fs::write(&script, "<?php echo json_encode(['limit'=>ini_get('memory_limit'),'gettext'=>extension_loaded('gettext')]);").unwrap();
+        std::fs::write(&script, "<?php echo json_encode(['limit'=>ini_get('memory_limit'),'precision'=>ini_get('precision'),'gettext'=>extension_loaded('gettext')]);").unwrap();
         let state = crate::CoreState {
             paths,
             store,
@@ -1937,9 +1937,11 @@ mod tests {
                 .unwrap();
             record(&mut stream, 1, &[0, 1, 0, 0, 0, 0, 0, 0]);
             let filename = crate::paths::nginx_path(script);
+            let document_root = crate::paths::nginx_path(script.parent().unwrap());
             let mut params = Vec::new();
             for (name, value) in [
                 ("SCRIPT_FILENAME", filename.as_str()),
+                ("DOCUMENT_ROOT", document_root.as_str()),
                 ("REQUEST_METHOD", "GET"),
                 ("SCRIPT_NAME", "/settings-probe.php"),
                 ("SERVER_PROTOCOL", "HTTP/1.1"),
@@ -2005,6 +2007,26 @@ mod tests {
                 && final_response.contains("\"gettext\":false"),
             "{final_response}"
         );
+        // 经站点保存链路写 .user.ini，重启对应 PHP 池清除默认 300 秒缓存后检查真实值。
+        let manual = "; user project settings\n[PHP]\nprecision=12\n";
+        std::fs::write(state.paths.base.join(".user.ini"), manual).unwrap();
+        let mut site: crate::model::Site = serde_json::from_value(serde_json::json!({
+            "id": "site-php-native", "name": "PHP settings", "domains": ["php-settings.test"],
+            "rootDir": state.paths.base, "runtime": {"webServer":"nginx", "kind":"php", "phpVersion":version},
+            "https": false, "rewrite":"none", "status":"stopped", "createdAt":0, "updatedAt":0,
+        })).unwrap();
+        state.store.save_site(&site).unwrap();
+        site.php_overrides = Some([("memory_limit".into(), "192M".into())].into());
+        crate::sites::update(&site, &state.paths, &state.store, &state.manager).unwrap();
+        state.stop_service(&sid).unwrap(); state.start_service(&sid).unwrap();
+        let local = request(state.store.get_port_assign(&sid).unwrap(), &script);
+        assert!(local.contains("\"limit\":\"192M\"") && local.contains("\"precision\":\"12\""), "{local}");
+        site.php_overrides = Some(Default::default());
+        crate::sites::update(&site, &state.paths, &state.store, &state.manager).unwrap();
+        assert_eq!(std::fs::read_to_string(state.paths.base.join(".user.ini")).unwrap(), manual);
+        state.stop_service(&sid).unwrap(); state.start_service(&sid).unwrap();
+        let inherited = request(state.store.get_port_assign(&sid).unwrap(), &script);
+        assert!(inherited.contains("\"limit\":\"512M\"") && inherited.contains("\"precision\":\"12\""), "{inherited}");
         let pids = state.manager.snapshot(&sid).unwrap().pids;
         state.stop_service(&sid).unwrap();
         assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));

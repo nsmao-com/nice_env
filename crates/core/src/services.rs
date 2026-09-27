@@ -847,12 +847,16 @@ pub fn fallback_port_for(store: &Store, key: &str, desired: u16, avoid: &[u16]) 
     }
     let found = find_free_port_near(desired, avoid, 32).or_else(|| {
         // 附近的端口可能全部被占用；开启自动回落时再让操作系统分配空闲端口。
-        for _ in 0..32 {
+        // 保留被排除端口的监听器，避免操作系统反复分配刚释放的同一端口。
+        // 排除列表可能覆盖连续的 32 个端口，固定尝试 32 次会在仍有空闲端口时失败。
+        let mut skipped = Vec::new();
+        for _ in 0..=avoid.len() {
             let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?;
             let port = listener.local_addr().ok()?.port();
             if !avoid.contains(&port) && port != desired {
                 return Some(port);
             }
+            skipped.push(listener);
         }
         None
     })?;

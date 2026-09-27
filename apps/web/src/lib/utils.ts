@@ -22,6 +22,37 @@ export function normalizeProxyTarget(input: string): string | null {
   }
 }
 
+export const PHP_SITE_OPTIONS = [
+  { key: "memory_limit", type: "size", initial: "512M" },
+  { key: "upload_max_filesize", type: "size", initial: "64M" },
+  { key: "post_max_size", type: "size", initial: "128M" },
+  { key: "max_execution_time", type: "number", initial: "300" },
+  { key: "max_input_time", type: "number", initial: "60" },
+  { key: "max_input_vars", type: "number", initial: "1000" },
+  { key: "max_file_uploads", type: "number", initial: "20" },
+  { key: "display_errors", type: "switch", initial: "On" },
+  { key: "log_errors", type: "switch", initial: "On" },
+] as const;
+
+/** 与 sites::validate_php_overrides 对齐；文件写入前后端仍会再次校验。 */
+export function isPhpSiteSettingValid(key: string, value: string, previousValue?: string): boolean {
+  const option = PHP_SITE_OPTIONS.find((option) => option.key === key);
+  if (!value || /[\s\u0000-\u001f\u007f-\u009f]/u.test(value)) return false;
+  if (!option) return value === previousValue && /^[a-zA-Z0-9_.]+$/.test(key) && !/['";$\[\]]/.test(value);
+  if (option.type === "switch") return ["on", "off", "0", "1"].includes(value.toLowerCase());
+  if (option.type === "size") {
+    if (key === "memory_limit" && value === "-1") return true;
+    const match = /^(\d{1,20})([kmg]?)$/i.exec(value);
+    if (!match) return false;
+    const multiplier = { "": 1n, k: 1024n, m: 1048576n, g: 1073741824n }[match[2].toLowerCase()]!;
+    const bytes = BigInt(match[1]) * multiplier;
+    return bytes <= 9223372036854775807n && (key !== "memory_limit" || bytes >= 2097152n);
+  }
+  if (key === "max_input_time" && value === "-1") return true;
+  return /^\d+$/.test(value) && Number(value) <= 4294967295
+    && (!["max_input_vars", "max_file_uploads"].includes(key) || Number(value) > 0);
+}
+
 /** 与后端证书校验一致：通配符只覆盖一个 DNS 标签，IP 和通配符站点要求精确匹配。 */
 export function certificateCoversDomain(sans: string[], input: string): boolean {
   const domain = input.trim().replace(/\.+$/, "").toLowerCase();

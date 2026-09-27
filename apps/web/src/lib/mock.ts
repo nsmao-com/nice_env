@@ -58,12 +58,12 @@ import type {
   CreateSiteInput,
 } from "@nsb/schema";
 import { emitLocal } from "./backend";
-import { cmpVersionDesc, resolveStackService, normalizeProxyTarget } from "./utils";
+import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSettingValid } from "./utils";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.68";
+const MOCK_APP_VERSION = "0.2.69";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -1211,6 +1211,9 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         rootDir: patch.rootDir?.trim() ?? s.rootDir, runtime: patch.runtime ?? s.runtime,
         https: patch.https ?? s.https, rewrite: patch.rewrite ?? s.rewrite,
         phpOverrides: patch.phpOverrides ?? s.phpOverrides, updatedAt: now() };
+      if (next.runtime.kind === "php" && Object.entries(next.phpOverrides ?? {}).some(([key, value]) => !isPhpSiteSettingValid(key, value, s.phpOverrides?.[key]))) {
+        throw { code: "BAD_PHP_OVERRIDE", message: "PHP 设置不受支持或值无效，请检查后重试" };
+      }
       if (next.runtime.kind !== "php" && next.runtime.kind !== "static" && !normalizeProxyTarget(next.runtime.proxyTarget ?? "")) {
         throw { code: "BAD_PROXY_TARGET", message: "请填写有效的 HTTP/HTTPS 代理地址，不能包含账号、查询参数或片段" };
       }

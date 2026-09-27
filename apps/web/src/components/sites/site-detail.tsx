@@ -2,11 +2,12 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ExternalLink, FolderOpen, RefreshCw, Trash2, ScrollText } from "lucide-react";
 import type { Site, RewritePreset } from "@nsb/schema";
 import { useT } from "@/lib/store";
-import { cn, cmpVersionDesc, normalizeProxyTarget } from "@/lib/utils";
+import { cn, cmpVersionDesc, normalizeProxyTarget, isPhpSiteSettingValid } from "@/lib/utils";
 import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { usePackages, useInvalidate, toastError, siteUrl } from "@/lib/hooks";
 import * as api from "@/lib/api";
@@ -28,6 +29,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ConfirmDialog } from "@/components/shared/misc";
 
 import { SiteCertificateSelect, useSiteCertificateSelection } from "./site-certificate-select";
+import { SitePhpSettings } from "./site-php-settings";
 
 const REWRITE_OPTIONS: { value: RewritePreset; label?: string; labelKey?: string }[] = [
   { value: "none", labelKey: "detail.none" },
@@ -54,6 +56,7 @@ export function SiteDetailSheet({
   const t = useT();
   const router = useRouter();
   const invalidate = useInvalidate();
+  const queryClient = useQueryClient();
   const { data: packages } = usePackages();
   const [saving, setSaving] = React.useState(false);
   const savingRef = React.useRef(false);
@@ -68,6 +71,9 @@ export function SiteDetailSheet({
   const [deleteOpen, setDeleteOpen] = React.useState(false);
   const [delHosts, setDelHosts] = React.useState(true);
   const [delCerts, setDelCerts] = React.useState(true);
+  const [tab, setTab] = React.useState("general");
+  const phpPanelRef = React.useRef<HTMLDivElement>(null);
+  const phpFocusObserver = React.useRef<MutationObserver | null>(null);
 
   const [draft, setDraft] = React.useState<Site | null>(site);
   const [baseline, setBaseline] = React.useState<Site | null>(site);
@@ -81,6 +87,8 @@ export function SiteDetailSheet({
     setDeleteOpen(false);
     setDeleteError(null);
     setDiscardOpen(false);
+    setTab("general");
+    return () => phpFocusObserver.current?.disconnect();
   }, [site?.id]);
   React.useEffect(() => {
     if (formError) saveErrorRef.current?.focus();
@@ -100,19 +108,21 @@ export function SiteDetailSheet({
   const dirty = !!baseline && (
     draft.name !== baseline.name || domainsInput !== baseline.domains.join(", ") ||
     draft.rootDir !== baseline.rootDir || draft.https !== baseline.https ||
-    draft.rewrite !== baseline.rewrite || JSON.stringify(draft.runtime) !== JSON.stringify(baseline.runtime)
+    draft.rewrite !== baseline.rewrite || JSON.stringify(draft.runtime) !== JSON.stringify(baseline.runtime) ||
+    JSON.stringify(draft.phpOverrides ?? {}) !== JSON.stringify(baseline.phpOverrides ?? {})
   );
   const busy = saving || deleting || reloading;
   const isProxy = draft.runtime.kind !== "php" && draft.runtime.kind !== "static";
   const normalizedProxyTarget = normalizeProxyTarget(draft.runtime.proxyTarget ?? "");
   const proxyInvalid = isProxy && !normalizedProxyTarget;
+  const phpInvalid = draft.runtime.kind === "php" && Object.entries(draft.phpOverrides ?? {}).some(([key, value]) => !isPhpSiteSettingValid(key, value, baseline?.phpOverrides?.[key]));
   const requestClose = () => {
     if (busy || savingRef.current || deletingRef.current || reloadingRef.current) return;
     if (dirty) setDiscardOpen(true);
     else onClose();
   };
   const save = async () => {
-    if (busy || savingRef.current || deletingRef.current || reloadingRef.current || proxyInvalid || (draft.https && certificateSelection.problem)) return;
+    if (busy || savingRef.current || deletingRef.current || reloadingRef.current || proxyInvalid || phpInvalid || (draft.https && certificateSelection.problem)) return;
     const domains = [...new Set(domainsInput.split(/[,，\s]+/).filter(Boolean).map((d) => d.toLowerCase()))];
     if (!draft.name.trim() || !draft.rootDir.trim() || !domains.length) {
       setFormError({ code: "REQUIRED_FIELDS", message: t("detail.requiredFields") });
@@ -124,7 +134,8 @@ export function SiteDetailSheet({
     try {
       const next = await api.updateSite({ ...draft, name: draft.name.trim(), rootDir: draft.rootDir.trim(), domains,
         runtime: isProxy ? { ...draft.runtime, proxyTarget: normalizedProxyTarget! } : draft.runtime });
-      toast.success(t("detail.updated"));
+      queryClient.setQueryData<Site[]>(["sites"], (sites) => sites?.map((item) => item.id === next.id ? next : item));
+      toast.success(t(draft.runtime.kind === "php" && (Object.keys(draft.phpOverrides ?? {}).length > 0 || Object.keys(baseline?.phpOverrides ?? {}).length > 0) ? "sites.php.saved" : "detail.updated"));
       setDraft(next);
       setBaseline(next);
       setDomainsInput(next.domains.join(", "));
@@ -214,10 +225,11 @@ export function SiteDetailSheet({
           </div>
           <p className="text-xs leading-relaxed text-faint">{t("detail.reloadHint").replace("{server}", site.runtime.webServer === "apache" ? "Apache" : "Nginx")}</p>
 
-          <Tabs defaultValue="general">
-            <TabsList className="mb-5">
-              <TabsTrigger value="general">{t("detail.general")}</TabsTrigger>
-              <TabsTrigger value="environment">{t("env.title")}</TabsTrigger>
+          <Tabs value={tab} onValueChange={setTab}>
+            <TabsList className="mb-5 max-w-full">
+              <TabsTrigger value="general" className="px-2.5 text-xs sm:px-3 sm:text-[13px]">{t("detail.general")}</TabsTrigger>
+              <TabsTrigger value="environment" className="px-2.5 text-xs sm:px-3 sm:text-[13px]">{t("env.title")}</TabsTrigger>
+              {draft.runtime.kind === "php" && <TabsTrigger value="php" className="px-2.5 text-xs sm:px-3 sm:text-[13px]">PHP{phpInvalid && <span className="text-error" aria-label={t("sites.php.review")}>!</span>}</TabsTrigger>}
             </TabsList>
             <TabsContent value="general" forceMount className="mt-0 space-y-5 data-[state=inactive]:hidden">
           <div className="flex flex-col gap-1.5">
@@ -368,6 +380,10 @@ export function SiteDetailSheet({
             <TabsContent value="environment" forceMount className="mt-0 data-[state=inactive]:hidden">
               <EnvEditor siteId={site.id} />
             </TabsContent>
+            {draft.runtime.kind === "php" && <TabsContent ref={phpPanelRef} value="php" forceMount className="mt-0 data-[state=inactive]:hidden">
+              <SitePhpSettings values={draft.phpOverrides ?? {}} previousValues={baseline?.phpOverrides ?? {}} rootDir={draft.rootDir} disabled={busy}
+                onChange={(phpOverrides) => setDraft({ ...draft, phpOverrides })} />
+            </TabsContent>}
           </Tabs>
 
           {/* 删除 */}
@@ -406,6 +422,21 @@ export function SiteDetailSheet({
           </div>
         </div>
         <div className="mx-5 shrink-0 border-t border-dashed border-separator py-4 sm:mx-6">
+          {phpInvalid && <button className="mb-2 text-left text-xs text-error underline" onClick={() => {
+            phpFocusObserver.current?.disconnect();
+            const panel = phpPanelRef.current;
+            const focusInvalid = () => {
+              if (panel?.dataset.state !== "active") return;
+              const input = panel.querySelector<HTMLElement>('[aria-invalid="true"]:not(:disabled), [data-php-error="true"]');
+              input?.scrollIntoView({ block: "nearest" }); input?.focus();
+              phpFocusObserver.current?.disconnect();
+            };
+            if (panel) {
+              phpFocusObserver.current = new MutationObserver(focusInvalid);
+              phpFocusObserver.current.observe(panel, { attributes: true, attributeFilter: ["data-state"] });
+            }
+            setTab("php"); focusInvalid();
+          }}>{t("sites.php.review")}</button>}
           {formError && <div ref={saveErrorRef} tabIndex={-1} role="alert" className="mb-3 max-h-40 space-y-2 overflow-y-auto rounded-lg bg-error-soft p-3 text-xs text-error outline-none focus-visible:ring-2 focus-visible:ring-error [overflow-wrap:anywhere]">
             <p>{formError.message}</p>
             {formError.hint && <p>{formError.hint}</p>}
@@ -415,7 +446,7 @@ export function SiteDetailSheet({
             <span className="text-xs text-muted">{dirty ? t("detail.unsaved") : t("detail.saved")}</span>
             <div className="flex gap-2">
               <Button variant="ghost" onClick={requestClose} disabled={busy}>{t("common.cancel")}</Button>
-              <Button onClick={save} disabled={busy || !dirty || proxyInvalid || (draft.https && !!certificateSelection.problem)}>{saving ? t("detail.saveBusy") : t("common.save")}</Button>
+              <Button onClick={save} disabled={busy || !dirty || proxyInvalid || phpInvalid || (draft.https && !!certificateSelection.problem)}>{saving ? t("detail.saveBusy") : t("common.save")}</Button>
             </div>
           </div>
         </div>

@@ -473,6 +473,7 @@ pub fn create_with_progress(
         store,
         None,
     )?;
+    validate_php_overrides(&input.runtime.kind, input.php_overrides.as_ref())?;
     if store
         .find_installed(&input.runtime.web_server, None)
         .is_none()
@@ -648,10 +649,11 @@ pub fn create_with_progress(
         created_at: now,
         updated_at: now,
     };
+    let mut user_ini = UserIniChanges::prepare(store, &site, None)?;
     store.save_site(&site)?;
-    write_user_ini(&site);
 
     let result: Result<()> = (|| {
+        user_ini.apply(paths)?;
         if site.https && site.runtime.uses_default_certificate() {
             crate::tls::issue_site_cert(paths, store, &site.domains)?;
         }
@@ -659,7 +661,14 @@ pub fn create_with_progress(
         start_site_inner(&site.id, paths, store, manager)
     })();
     if let Err(error) = result {
-        store.delete_site(&site.id)?;
+        let mut failures = Vec::new();
+        if let Err(e) = user_ini.restore() { failures.push(e.to_string()); }
+        if let Err(e) = store.delete_site(&site.id) { failures.push(e.to_string()); }
+        if !failures.is_empty() {
+            return Err(AppError::new("SITE_CREATE_ROLLBACK_FAILED", "站点创建失败，部分状态未能恢复")
+                .with_hint(user_ini.recovery_hint())
+                .with_detail(format!("{}；{}", error, failures.join("；"))));
+        }
         return Err(error.with_hint("站点未创建成功，项目文件和数据库已保留；请根据错误修复后重试"));
     }
 
@@ -708,6 +717,7 @@ pub fn update(
         ));
     }
     crate::certs::validate_site_certificate(paths, store, &current)?;
+    let mut user_ini = UserIniChanges::prepare(store, &current, Some(&original))?;
     let local_certificate_changed = certificate_changed && current.https && current.runtime.uses_default_certificate();
     let mut snapshots = snapshot_site_configs(paths, &current)?;
     let servers = ["nginx", "apache"].into_iter().enumerate().filter_map(|(index, server)| {
@@ -739,6 +749,7 @@ pub fn update(
         Vec::new()
     };
     let result: Result<()> = (|| {
+        user_ini.apply(paths)?;
         if local_certificate_changed {
             crate::tls::issue_site_cert_for_update(paths, store, &current.domains, Some(&current.id))?;
         }
@@ -765,6 +776,7 @@ pub fn update(
     })();
     if let Err(error) = result {
         let mut failures = Vec::new();
+        if let Err(e) = user_ini.restore() { failures.push(format!("恢复 PHP 设置：{e}；{}", user_ini.recovery_hint())); }
         if let Err(e) = restore_site_configs(&snapshots) { failures.push(format!("恢复站点配置：{e}")); }
         if record_saved {
             if let Err(e) = store.save_site(&original) { failures.push(format!("恢复站点记录：{e}")); }
@@ -794,7 +806,6 @@ pub fn update(
         let hint = error.hint.clone().unwrap_or_default();
         return Err(error.with_hint(format!("保存未完成，已恢复原站点配置。{hint}")));
     }
-    write_user_ini(&current);
     current.status = runtime_status(paths, &current, manager).to_string();
     current.access_url = loaded_endpoint(manager, &current).map(|endpoint| endpoint.url);
     Ok(current)
@@ -1085,10 +1096,12 @@ fn start_site_inner(
         Some(id),
     )?;
     let snapshots = snapshot_site_configs(paths, &site)?;
+    let mut user_ini = UserIniChanges::prepare(store, &site, Some(&site))?;
     let servers: Vec<_> = ["nginx", "apache"].into_iter().enumerate().filter_map(|(index, server)| {
         (site.runtime.web_server == server || snapshots[index * 2].1.is_some()).then_some(server)
     }).collect();
     let result: Result<()> = (|| {
+        user_ini.apply(paths)?;
         ensure_php_running(paths, store, manager, &site)?;
         write_site_conf(paths, store, &site)?;
         let web_server = &site.runtime.web_server;
@@ -1106,12 +1119,17 @@ fn start_site_inner(
         Ok(())
     })();
     if let Err(error) = result {
-        restore_site_configs(&snapshots)?;
-        if let Err(restore_error) = crate::ops::rebuild_and_reload_selected(store, paths, manager, &servers) {
-            return Err(error.with_hint(format!(
-                "已恢复站点配置，但服务恢复失败：{}",
-                restore_error.message
-            )));
+        let mut failures = Vec::new();
+        if let Err(e) = user_ini.restore() { failures.push(format!("恢复 PHP 设置：{e}")); }
+        if let Err(e) = restore_site_configs(&snapshots) {
+            failures.push(format!("恢复站点配置：{e}"));
+        } else if let Err(e) = crate::ops::rebuild_and_reload_selected(store, paths, manager, &servers) {
+            failures.push(format!("恢复服务：{e}"));
+        }
+        if !failures.is_empty() {
+            return Err(AppError::new("SITE_START_ROLLBACK_FAILED", "启动失败，部分配置或服务未能恢复")
+                .with_hint(user_ini.recovery_hint())
+                .with_detail(format!("{error}；{}", failures.join("；"))));
         }
         return Err(error);
     }
@@ -2730,6 +2748,144 @@ mod scaffold_tests {
     }
 
     #[test]
+    fn php_settings_preserve_manual_config_and_roll_back_with_site_record() {
+        let temp = Tmp::new("site-php-transaction");
+        let paths = Paths::new(temp.0.clone()); paths.ensure_dirs().unwrap();
+        let store = Store::open(paths.db()).unwrap();
+        let mut site = saved_site(&paths, &store);
+        site.runtime = input(SiteKind::Php).runtime;
+        site.php_overrides = Some([("date.timezone".into(), "Asia/Taipei".into())].into());
+        store.save_site(&site).unwrap();
+        write_site_conf_state(&paths, &store, &site, false).unwrap();
+        let target = paths.base.join(".user.ini");
+        let manual = "; project settings\r\nprecision=12\r\n";
+        std::fs::write(&target, manual).unwrap();
+        let manager = Arc::new(ServiceManager::new());
+        site.php_overrides.as_mut().unwrap().insert("memory_limit".into(), "256M".into());
+        let saved = update(&site, &paths, &store, &manager).unwrap();
+        let before = std::fs::read(&target).unwrap();
+        assert!(String::from_utf8_lossy(&before).starts_with(manual));
+        assert!(String::from_utf8_lossy(&before).contains("memory_limit=256M\r\n"));
+        assert!(String::from_utf8_lossy(&before).contains("date.timezone=Asia/Taipei\r\n"));
+        site.php_overrides.as_mut().unwrap().insert("date.timezone".into(), "UTC".into());
+        assert_eq!(update(&site, &paths, &store, &manager).unwrap_err().code, "BAD_PHP_OVERRIDE");
+        assert_eq!(std::fs::read(&target).unwrap(), before);
+        assert_eq!(get(&store, &site.id).unwrap().php_overrides, saved.php_overrides);
+        site.php_overrides = saved.php_overrides.clone();
+        let db = rusqlite::Connection::open(paths.db()).unwrap();
+        db.execute_batch("CREATE TRIGGER reject_php_edit BEFORE UPDATE ON sites WHEN NEW.php_overrides LIKE '%512M%' BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+        site.php_overrides.as_mut().unwrap().insert("memory_limit".into(), "512M".into());
+        assert!(update(&site, &paths, &store, &manager).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), before);
+        assert_eq!(get(&store, &site.id).unwrap().php_overrides, saved.php_overrides);
+        site.php_overrides = Some(Default::default());
+        update(&site, &paths, &store, &manager).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), manual);
+        std::fs::remove_file(&target).unwrap(); std::fs::create_dir(&target).unwrap();
+        site.php_overrides = Some([("memory_limit".into(), "256M".into())].into());
+        assert_eq!(update(&site, &paths, &store, &manager).unwrap_err().code, "USER_INI_INVALID_FILE");
+        assert!(get(&store, &site.id).unwrap().php_overrides.unwrap().is_empty());
+    }
+
+    #[test]
+    fn php_settings_handle_legacy_files_shared_roots_and_external_edits() {
+        let temp = Tmp::new("site-php-files");
+        let paths = Paths::new(temp.0.clone()); paths.ensure_dirs().unwrap();
+        let store = Store::open(paths.db()).unwrap();
+        let mut site = saved_site(&paths, &store);
+        site.runtime = input(SiteKind::Php).runtime;
+        site.php_overrides = Some([("memory_limit".into(), "256M".into())].into());
+        store.save_site(&site).unwrap();
+        let target = paths.base.join(".user.ini");
+        let legacy = "; NiceEnv managed .user.ini\nmemory_limit=256M\n";
+        std::fs::write(&target, legacy).unwrap();
+        let mut next = site.clone(); next.php_overrides.as_mut().unwrap().insert("memory_limit".into(), "512M".into());
+        let mut changes = UserIniChanges::prepare(&store, &next, Some(&site)).unwrap();
+        changes.apply(&paths).unwrap();
+        assert!(std::fs::read_to_string(&target).unwrap().contains("memory_limit=512M"));
+        changes.restore().unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), legacy);
+        std::fs::write(&target, format!("{legacy}; manual edit\n")).unwrap();
+        assert_eq!(UserIniChanges::prepare(&store, &next, Some(&site)).err().unwrap().code, "USER_INI_CONFLICT");
+        std::fs::write(&target, "; manual\n").unwrap();
+        let mut changes = UserIniChanges::prepare(&store, &next, Some(&site)).unwrap();
+        changes.apply(&paths).unwrap();
+        std::fs::write(&target, "; external update\n").unwrap();
+        assert!(changes.restore().is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "; external update\n");
+        assert!(changes.backup.as_ref().unwrap().join("0.bak").is_file());
+        let mut other = site.clone(); other.id = "site-shared".into(); other.domains = vec!["shared.test".into()];
+        store.save_site(&other).unwrap();
+        assert_eq!(UserIniChanges::prepare(&store, &next, Some(&site)).err().unwrap().code, "USER_INI_SHARED_ROOT");
+        let new_root = paths.base.join("new-root"); std::fs::create_dir(&new_root).unwrap();
+        next.root_dir = new_root.to_string_lossy().into();
+        let mut changes = UserIniChanges::prepare(&store, &next, Some(&site)).unwrap();
+        changes.apply(&paths).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "; external update\n");
+        assert!(new_root.join(".user.ini").is_file());
+        changes.restore().unwrap(); assert!(!new_root.join(".user.ini").exists());
+    }
+
+    #[test]
+    fn php_settings_reject_invalid_or_system_values_without_partial_writes() {
+        for (key, value) in [("date.timezone", "Asia/Taipei"), ("extension", "x"), ("memory_limit", "1M"), ("memory_limit", "512M\nprecision=2"),
+            ("memory_limit", "999999999999999999G"), ("display_errors", "yes;extension=x"),
+            ("max_input_vars", "0"), ("post_max_size", "2.5M"), ("max_execution_time", "-1")] {
+            assert!(validate_php_overrides(&SiteKind::Php, Some(&[(key.into(), value.into())].into())).is_err(), "{key}={value}");
+        }
+        for (key, value) in [("date.timezone", "Asia/Taipei\nprecision=2"), ("date.timezone", "${TZ}"), ("date.timezone", "UTC;precision=2"), ("[PATH=/]", "UTC")] {
+            let values: PhpOverrides = [(key.into(), value.into())].into();
+            assert!(validate_php_overrides_with_previous(&SiteKind::Php, Some(&values), Some(&values)).is_err());
+        }
+        let temp = Tmp::new("site-php-readonly");
+        let target = temp.0.join(".user.ini"); std::fs::write(&target, "memory_limit=128M\n").unwrap();
+        let permissions = std::fs::metadata(&target).unwrap().permissions();
+        let mut readonly = permissions.clone(); readonly.set_readonly(true); std::fs::set_permissions(&target, readonly).unwrap();
+        let result = replace_user_ini(&target, Some(b"memory_limit=128M\n"), Some(b"memory_limit=256M\n"), None);
+        std::fs::set_permissions(&target, permissions).unwrap();
+        assert_eq!(result.unwrap_err().code, "USER_INI_READ_ONLY");
+        assert_eq!(std::fs::read(&target).unwrap(), b"memory_limit=128M\n");
+        assert_eq!(render_user_ini(Some(b""), None, None).unwrap(), Some(Vec::new()));
+        assert!(render_user_ini(Some(USER_INI_BEGIN.as_bytes()), None, None).is_err());
+    }
+
+    #[test]
+    fn php_settings_create_failure_restores_existing_project_file() {
+        let temp = Tmp::new("site-php-create-failure");
+        let paths = Paths::new(temp.0.clone()); paths.ensure_dirs().unwrap();
+        let store = Store::open(paths.db()).unwrap();
+        let root = paths.base.join("project"); std::fs::create_dir(&root).unwrap();
+        let target = root.join(".user.ini");
+        let original = "; original project file\nmemory_limit=128M\n";
+        std::fs::write(&target, original).unwrap();
+        let mut input = input(SiteKind::Php);
+        input.root_dir = root.to_string_lossy().into(); input.template = "none".into();
+        input.write_env_example = false;
+        input.php_overrides = Some([("memory_limit".into(), "512M".into())].into());
+        for (id, version) in [("nginx", "1.0"), ("php", input.runtime.php_version.as_deref().unwrap())] {
+            let runtime = paths.runtime_dir(id, version); std::fs::create_dir_all(&runtime).unwrap();
+            store.upsert_installed(&crate::model::InstalledPackage {
+                id: id.into(), version: version.into(), category: "runtime".into(),
+                install_path: runtime.to_string_lossy().into(), config_path: String::new(), installed_at: 1,
+            }).unwrap();
+        }
+        let manager = Arc::new(ServiceManager::new());
+        // 注册套件但不提供可执行文件，使文件写入后的启动阶段失败。
+        assert!(create(&input, &paths, &store, &manager).is_err());
+        assert!(store.list_sites().unwrap().is_empty());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), original);
+        assert!(std::fs::read_dir(paths.backup()).unwrap().filter_map(|entry| entry.ok())
+            .any(|entry| std::fs::read_to_string(entry.path().join("0.bak")).is_ok_and(|text| text == original)));
+        let permissions = std::fs::metadata(&target).unwrap().permissions();
+        let mut readonly = permissions.clone(); readonly.set_readonly(true); std::fs::set_permissions(&target, readonly).unwrap();
+        let error = create(&input, &paths, &store, &manager).unwrap_err();
+        std::fs::set_permissions(&target, permissions).unwrap();
+        assert_eq!(error.code, "USER_INI_READ_ONLY");
+        assert!(store.list_sites().unwrap().is_empty());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), original);
+    }
+
+    #[test]
     fn site_log_sources_follow_web_server_and_reject_unknown_paths() {
         let temp = Tmp::new("site-logs");
         let paths = Paths::new(temp.0.clone());
@@ -3962,37 +4118,220 @@ fn disable_site_conf(paths: &Paths, site: &Site) -> Result<()> {
     Ok(())
 }
 
-/// 站点级 PHP 覆盖 → rootDir/.user.ini（PHP 默认的用户级 ini 文件名）。
-/// 仅 php 站点写；键值做白名单字符校验，防止换行注入任意 ini 指令。
-pub fn write_user_ini(site: &Site) {
-    if site.runtime.kind != crate::model::SiteKind::Php {
-        return;
+const USER_INI_BEGIN: &str = "; BEGIN NiceEnv PHP settings";
+const USER_INI_END: &str = "; END NiceEnv PHP settings";
+type PhpOverrides = std::collections::BTreeMap<String, String>;
+
+/// 只提供 PHP_INI_PERDIR / PHP_INI_ALL 的常用项；不能把系统级配置写入后假称生效。
+fn validate_php_overrides(kind: &SiteKind, overrides: Option<&PhpOverrides>) -> Result<()> {
+    validate_php_overrides_with_previous(kind, overrides, None)
+}
+
+fn validate_php_overrides_with_previous(kind: &SiteKind, overrides: Option<&PhpOverrides>, previous: Option<&PhpOverrides>) -> Result<()> {
+    if *kind != SiteKind::Php { return Ok(()); }
+    for (key, value) in overrides.into_iter().flatten() {
+        let number = value.parse::<u32>().ok();
+        let valid = match key.as_str() {
+            "memory_limit" | "upload_max_filesize" | "post_max_size" => {
+                let (digits, multiplier) = match value.as_bytes().last() {
+                    Some(b'K' | b'k') => (&value[..value.len() - 1], 1024u64),
+                    Some(b'M' | b'm') => (&value[..value.len() - 1], 1024u64.pow(2)),
+                    Some(b'G' | b'g') => (&value[..value.len() - 1], 1024u64.pow(3)),
+                    _ => (value.as_str(), 1),
+                };
+                let bytes = digits.parse::<u64>().ok().filter(|_| digits.bytes().all(|b| b.is_ascii_digit()))
+                    .and_then(|n| n.checked_mul(multiplier)).filter(|n| *n <= i64::MAX as u64);
+                (key == "memory_limit" && value == "-1") || bytes.is_some_and(|n| key != "memory_limit" || n >= 2 * 1024 * 1024)
+            }
+            "max_execution_time" => number.is_some() && value.bytes().all(|b| b.is_ascii_digit()),
+            "max_input_time" => (number.is_some() && value.bytes().all(|b| b.is_ascii_digit())) || value == "-1",
+            "max_input_vars" | "max_file_uploads" => number.is_some_and(|n| n > 0) && value.bytes().all(|b| b.is_ascii_digit()),
+            "display_errors" | "log_errors" => matches!(value.to_ascii_lowercase().as_str(), "on" | "off" | "1" | "0"),
+            // 已保存的自定义项仅允许安全地原样保留；新增或修改仍使用上面的常用项。
+            _ => previous.and_then(|values| values.get(key)) == Some(value)
+                && !key.is_empty() && key.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.'))
+                && !value.is_empty() && !value.contains(['\'', '"', ';', '$', '[', ']']),
+        };
+        if !valid || value.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            return Err(AppError::new("BAD_PHP_OVERRIDE", format!("PHP 设置 {key} 不受支持或值无效"))
+                .with_hint("请使用站点 PHP 设置中的选项；扩展等系统级设置请到对应 PHP 版本的配置中修改。"));
+        }
     }
-    let Some(overrides) = &site.php_overrides else {
-        return;
+    Ok(())
+}
+
+fn read_user_ini(path: &std::path::Path) -> Result<Option<Vec<u8>>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(AppError::io("读取站点 PHP 设置", e)),
     };
-    let root = std::path::PathBuf::from(&site.root_dir);
-    if !root.is_dir() {
-        return;
+    let mut linked = metadata.file_type().is_symlink();
+    #[cfg(windows)] {
+        use std::os::windows::fs::MetadataExt;
+        linked |= metadata.file_attributes() & 0x400 != 0;
     }
-    let mut body = String::from("; NiceEnv managed .user.ini\n");
-    for (k, v) in overrides {
-        let k = k.trim();
-        let v = v.trim();
-        if k.is_empty() {
-            continue;
-        }
-        // 键只允许 ini 键字符；值不允许换行（防注入第二条指令）
-        if !k
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
-        {
-            continue;
-        }
-        let v = v.replace('\n', " ").replace('\r', " ");
-        body.push_str(&format!("{k}={v}\n"));
+    if linked || !metadata.is_file() || metadata.len() > 1024 * 1024 {
+        return Err(AppError::new("USER_INI_INVALID_FILE", ".user.ini 必须是小于 1 MiB 的普通文件，不能是链接或目录")
+            .with_hint(path.display().to_string()));
     }
-    std::fs::write(root.join(".user.ini"), body).ok();
+    Ok(Some(std::fs::read(path).map_err(|e| AppError::io("读取 .user.ini", e))?))
+}
+
+fn render_user_ini(before: Option<&[u8]>, overrides: Option<&PhpOverrides>, previous: Option<&PhpOverrides>) -> Result<Option<Vec<u8>>> {
+    let raw = std::str::from_utf8(before.unwrap_or_default())
+        .map_err(|_| AppError::new("USER_INI_ENCODING", ".user.ini 不是 UTF-8 文本，未修改原文件"))?;
+    let mut unmanaged = String::new();
+    let mut inside = false;
+    let mut seen = false;
+    for line in raw.split_inclusive('\n') {
+        match line.trim_end_matches(['\r', '\n']) {
+            USER_INI_BEGIN if !inside && !seen => { inside = true; seen = true; }
+            USER_INI_END if inside => inside = false,
+            USER_INI_BEGIN | USER_INI_END => return Err(AppError::new("USER_INI_CONFLICT", ".user.ini 托管标记重复或不完整，未覆盖原文件")),
+            _ if !inside => unmanaged.push_str(line),
+            _ => {}
+        }
+    }
+    if inside { return Err(AppError::new("USER_INI_CONFLICT", ".user.ini 托管区未结束，未覆盖原文件")); }
+    // 旧版把整份文件当成托管文件。只迁移与旧记录完全一致的内容，保留人工改动。
+    if raw.starts_with("; NiceEnv managed .user.ini\n") {
+        let mut legacy = String::from("; NiceEnv managed .user.ini\n");
+        for (key, value) in previous.into_iter().flatten() {
+            let key = key.trim();
+            if !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.') {
+                legacy.push_str(&format!("{key}={}\n", value.trim().replace(['\n', '\r'], " ")));
+            }
+        }
+        if raw != legacy { return Err(AppError::new("USER_INI_CONFLICT", "旧版 .user.ini 已被手动修改，未覆盖原文件")
+            .with_hint("请先备份并移除文件首行的旧版 NiceEnv managed 标记，再保存；手写配置将保留。")); }
+        unmanaged.clear();
+    }
+    let Some(overrides) = overrides.filter(|values| !values.is_empty()) else {
+        if !seen && !raw.starts_with("; NiceEnv managed .user.ini\n") { return Ok(before.map(|bytes| bytes.to_vec())); }
+        return Ok(if unmanaged.is_empty() { None } else { Some(unmanaged.into_bytes()) });
+    };
+    if !unmanaged.is_empty() && !unmanaged.ends_with('\n') { unmanaged.push('\n'); }
+    let newline = if raw.contains("\r\n") { "\r\n" } else { "\n" };
+    unmanaged.push_str(&format!("{USER_INI_BEGIN}{newline}"));
+    for (key, value) in overrides { unmanaged.push_str(&format!("{key}={value}{newline}")); }
+    unmanaged.push_str(&format!("{USER_INI_END}{newline}"));
+    Ok(Some(unmanaged.into_bytes()))
+}
+
+struct UserIniChange { path: std::path::PathBuf, before: Option<Vec<u8>>, after: Option<Vec<u8>>, permissions: Option<std::fs::Permissions>, applied: bool }
+#[derive(Default)]
+struct UserIniChanges { files: Vec<UserIniChange>, backup: Option<std::path::PathBuf> }
+
+fn same_site_directory(first: &std::path::Path, second: &std::path::Path) -> bool {
+    std::fs::canonicalize(first).ok().zip(std::fs::canonicalize(second).ok()).is_some_and(|(a, b)| {
+        if cfg!(windows) { a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()) } else { a == b }
+    })
+}
+
+impl UserIniChanges {
+    fn prepare(store: &Store, site: &Site, original: Option<&Site>) -> Result<Self> {
+        validate_php_overrides_with_previous(&site.runtime.kind, site.php_overrides.as_ref(), original.and_then(|old| old.php_overrides.as_ref()))?;
+        let mut plan = Self::default();
+        let root = std::path::Path::new(&site.root_dir);
+        let others = store.list_sites()?;
+        let same_root = |other: &Site, root: &std::path::Path| {
+            other.id != site.id && other.runtime.kind == SiteKind::Php
+                && same_site_directory(std::path::Path::new(&other.root_dir), root)
+        };
+        let old = original.filter(|old| old.runtime.kind == SiteKind::Php && old.php_overrides.is_some());
+        if let Some(old) = old {
+            let old_root = std::path::Path::new(&old.root_dir);
+            if old_root.is_dir() && (site.runtime.kind != SiteKind::Php || !same_site_directory(old_root, root))
+                && !others.iter().any(|other| same_root(other, old_root)) {
+                plan.add(old_root, None, old.php_overrides.as_ref())?;
+            }
+        }
+        if site.runtime.kind == SiteKind::Php && (site.php_overrides.is_some() || old.is_some()) {
+            if others.iter().filter(|other| same_root(other, root)).any(|other| {
+                other.php_overrides.as_ref().cloned().unwrap_or_default() != site.php_overrides.as_ref().cloned().unwrap_or_default()
+            }) {
+                return Err(AppError::new("USER_INI_SHARED_ROOT", "多个 PHP 站点共用此根目录，不能应用不同的 PHP 设置")
+                    .with_hint("请合并为同一站点的域名别名，或为站点选择不同根目录；未修改共享文件。"));
+            }
+            plan.add(root, site.php_overrides.as_ref(), original.and_then(|old| old.php_overrides.as_ref()))?;
+        }
+        Ok(plan)
+    }
+    fn add(&mut self, root: &std::path::Path, overrides: Option<&PhpOverrides>, previous: Option<&PhpOverrides>) -> Result<()> {
+        let path = std::fs::canonicalize(root).map_err(|e| AppError::io("读取站点根目录", e))?.join(".user.ini");
+        let before = read_user_ini(&path)?;
+        let after = render_user_ini(before.as_deref(), overrides, previous)?;
+        let permissions = std::fs::metadata(&path).ok().map(|m| m.permissions());
+        if before != after { self.files.push(UserIniChange { path, before, after, permissions, applied: false }); }
+        Ok(())
+    }
+    fn apply(&mut self, paths: &Paths) -> Result<()> {
+        if self.files.is_empty() { return Ok(()); }
+        let backup = crate::paths::checked_data_path(&paths.base, "backup")?;
+        std::fs::create_dir_all(&backup)?;
+        let directory = tempfile::Builder::new().prefix("site-php-settings-").tempdir_in(backup)?;
+        let mut entries = Vec::new();
+        for (index, file) in self.files.iter().enumerate() {
+            if let Some(before) = &file.before { std::fs::write(directory.path().join(format!("{index}.bak")), before)?; }
+            entries.push(serde_json::json!({ "target": file.path, "originalFile": file.before.as_ref().map(|_| format!("{index}.bak")) }));
+        }
+        std::fs::write(directory.path().join("files.json"), serde_json::to_vec_pretty(&entries)
+            .map_err(|e| AppError::internal("记录 PHP 设置备份", e.to_string()))?)?;
+        self.backup = Some(directory.keep());
+        for file in &mut self.files {
+            replace_user_ini(&file.path, file.before.as_deref(), file.after.as_deref(), None)?;
+            file.applied = true;
+        }
+        Ok(())
+    }
+    fn restore(&mut self) -> Result<()> {
+        let mut failures = Vec::new();
+        for file in self.files.iter_mut().rev().filter(|file| file.applied) {
+            match replace_user_ini(&file.path, file.after.as_deref(), file.before.as_deref(), file.permissions.as_ref()) {
+                Ok(()) => file.applied = false,
+                Err(error) => failures.push(format!("{}：{error}", file.path.display())),
+            }
+        }
+        if failures.is_empty() { Ok(()) } else { Err(AppError::new("USER_INI_RESTORE_FAILED", failures.join("；"))) }
+    }
+    fn recovery_hint(&self) -> String {
+        self.backup.as_ref().map(|path| format!("PHP 设置的原始文件及路径映射保存在 {}，请勿删除。", path.display()))
+            .unwrap_or_else(|| "请查看错误详情；项目文件与数据库已保留。".into())
+    }
+}
+
+fn replace_user_ini(path: &std::path::Path, expected: Option<&[u8]>, content: Option<&[u8]>, permissions: Option<&std::fs::Permissions>) -> Result<()> {
+    if read_user_ini(path)?.as_deref() != expected { return Err(AppError::new("USER_INI_CHANGED", ".user.ini 已被其他操作修改，请检查文件后重试")); }
+    let metadata = std::fs::metadata(path).ok();
+    if metadata.as_ref().is_some_and(|m| m.permissions().readonly()) {
+        return Err(AppError::new("USER_INI_READ_ONLY", ".user.ini 是只读文件，未修改站点设置").with_hint(path.display().to_string()));
+    }
+    if let Some(content) = content {
+        use std::io::Write;
+        let mut pending = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
+        pending.write_all(content)?;
+        if let Some(permissions) = permissions.cloned().or_else(|| metadata.map(|m| m.permissions())) {
+            pending.as_file().set_permissions(permissions)?;
+        }
+        #[cfg(unix)]
+        if expected.is_none() && permissions.is_none() { use std::os::unix::fs::PermissionsExt; pending.as_file().set_permissions(std::fs::Permissions::from_mode(0o644))?; }
+        pending.as_file().sync_all()?;
+        if read_user_ini(path)?.as_deref() != expected { return Err(AppError::new("USER_INI_CHANGED", ".user.ini 在写入前已变化，未覆盖当前内容")); }
+        if expected.is_none() { pending.persist_noclobber(path).map_err(|e| AppError::io("创建 .user.ini", e.error))?; }
+        else { pending.persist(path).map_err(|e| AppError::io("保存 .user.ini", e.error))?; }
+    } else if expected.is_some() { std::fs::remove_file(path).map_err(|e| AppError::io("移除托管 PHP 设置", e))?; }
+    Ok(())
+}
+
+/// 独立写入入口也必须返回错误；站点生命周期使用带快照、备份和恢复的 UserIniChanges。
+pub fn write_user_ini(site: &Site) -> Result<()> {
+    if site.runtime.kind != SiteKind::Php || site.php_overrides.is_none() { return Ok(()); }
+    validate_php_overrides(&site.runtime.kind, site.php_overrides.as_ref())?;
+    let mut changes = UserIniChanges::default();
+    changes.add(std::path::Path::new(&site.root_dir), site.php_overrides.as_ref(), site.php_overrides.as_ref())?;
+    for file in changes.files { replace_user_ini(&file.path, file.before.as_deref(), file.after.as_deref(), None)?; }
+    Ok(())
 }
 
 /// 读取项目运行时锁定文件 {rootDir}/.nsb.json。

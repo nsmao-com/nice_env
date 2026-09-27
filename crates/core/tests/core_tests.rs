@@ -798,7 +798,7 @@ fn user_ini_written_for_php_sites_only() {
         php_overrides: Some(
             [
                 ("memory_limit".to_string(), "512M".to_string()),
-                ("evil\nkey".to_string(), "x".to_string()), // 非法键 → 丢弃
+                ("evil\nkey".to_string(), "x".to_string()), // 非法键必须报错，不能误报保存成功
             ]
             .into_iter()
             .collect(),
@@ -811,22 +811,27 @@ fn user_ini_written_for_php_sites_only() {
     let root = std::path::PathBuf::from(mk(nsb_core::model::SiteKind::Php).root_dir.clone());
     std::fs::create_dir_all(&root).unwrap();
 
-    // php 站点：写入；合法键在、非法键被丢弃、值内无换行
-    let site = mk(nsb_core::model::SiteKind::Php);
-    nsb_core::sites::write_user_ini(&site);
+    let mut site = mk(nsb_core::model::SiteKind::Php);
+    let manual = "; project settings\nprecision=12\n";
+    std::fs::write(root.join(".user.ini"), manual).unwrap();
+    assert!(nsb_core::sites::write_user_ini(&site).is_err());
+    assert_eq!(std::fs::read_to_string(root.join(".user.ini")).unwrap(), manual);
+    site.php_overrides.as_mut().unwrap().remove("evil\nkey");
+    nsb_core::sites::write_user_ini(&site).unwrap();
     let ini = std::fs::read_to_string(root.join(".user.ini")).unwrap();
+    assert!(ini.starts_with(manual));
     assert!(ini.contains("memory_limit=512M"));
     assert!(!ini.contains("evil"));
     assert!(!ini.contains('\r'));
 
     // 非 php 站点：不写
     let static_site = mk(nsb_core::model::SiteKind::Static);
-    nsb_core::sites::write_user_ini(&static_site);
+    nsb_core::sites::write_user_ini(&static_site).unwrap();
     assert!(
         !root.join(".user.ini").exists() || {
             // 若上面 php 用例写过则文件存在；这里只断言 static 没改内容 —— 直接删掉重验
             let _ = std::fs::remove_file(root.join(".user.ini"));
-            nsb_core::sites::write_user_ini(&static_site);
+            nsb_core::sites::write_user_ini(&static_site).unwrap();
             !root.join(".user.ini").exists()
         }
     );

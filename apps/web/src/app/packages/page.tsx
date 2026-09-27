@@ -51,7 +51,7 @@ import { PhpExtensionsDialog, PhpExtBadge } from "@/components/shared/php-extens
 import { ConfirmDialog } from "@/components/shared/misc";
 import { SftpgoConfigButton } from "@/components/shared/sftpgo-config-button";
 import { BulkResult } from "@/components/shared/bulk-actions";
-import { InstallDialog, type InstallTarget } from "@/components/shared/install-dialog";
+import { InstallDialog, InstallTasksPanel, type InstallTarget } from "@/components/shared/install-dialog";
 import { ServiceIcon } from "@/components/shared/service-icon";
 import { ServiceDiagnostics } from "@/components/shared/service-diagnostics";
 import { ServiceWebButton } from "@/components/shared/service-web-button";
@@ -435,6 +435,8 @@ export default function PackagesPage() {
 
       {readStatus}
 
+      <InstallTasksPanel onInspect={openInstall} />
+
       {packageQuery.dataUpdatedAt > 0 && <Tabs value={category} onValueChange={setCategory}>
         {/* 第一行：大类（全部 + 分组）；小类在选中大类后出现在第二行 */}
         <TabsList className="max-w-full flex-wrap justify-start rounded-2xl">
@@ -596,7 +598,8 @@ export default function PackagesPage() {
           installTarget
             ? (() => {
                 const g = groups.find((x) => x.id === installTarget.id);
-                const v = g?.versions.find((x) => x.version === installTarget.version);
+                const version = installTarget.version ?? (installTarget.taskKey ? installTasks[installTarget.taskKey]?.resolvedVersion : undefined);
+                const v = g?.versions.find((x) => x.version === version && x.installed);
                 return v?.serviceId ?? null;
               })()
             : null

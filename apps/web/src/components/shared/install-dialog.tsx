@@ -7,6 +7,7 @@ import {
   AlertTriangle,
   ArrowRight,
   Check,
+  ChevronDown,
   Download,
   FileArchive,
   HardDrive,
@@ -20,9 +21,10 @@ import type { PackageView, ServiceStatus } from "@nsb/schema";
 import { cn, fmtBytes, fmtSpeed, fmtDuration } from "@/lib/utils";
 import { useT } from "@/lib/store";
 import { toastError, useInvalidate } from "@/lib/hooks";
-import { useInstallTasks } from "@/lib/install-tasks";
+import { progressForTask, useInstallTasks, type InstallTask } from "@/lib/install-tasks";
 import * as api from "@/lib/api";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -61,7 +63,8 @@ function stageFromState(state: string): StageId {
     case "configuring":
       return "config";
     case "installed":
-      return "done";
+      // 下载器结束后后端还需完成注册；任务 Promise 成功才显示安装完成。
+      return "config";
     default:
       return "download";
   }
@@ -70,8 +73,11 @@ function stageFromState(state: string): StageId {
 export interface InstallTarget {
   id: string;
   displayName: string;
-  version: string;
+  version?: string;
   sizeBytes?: number;
+  /** 查看已有任务不会再次发起安装；只有显式“重试”才会重新调用后端。 */
+  inspect?: boolean;
+  taskKey?: string;
   /** 已装时二次安装 = 重装提示 */
   reinstall?: boolean;
 }
@@ -96,18 +102,20 @@ export function InstallDialog({
   const [starting, setStarting] = React.useState(false);
   const startedRef = React.useRef<string | null>(null);
 
-  const taskId = target ? `${target.id}@${target.version}` : null;
+  const taskId = target ? target.taskKey ?? (target.version ? `${target.id}@${target.version}` : target.id) : null;
   /* 安装本身是全局后台任务（见 lib/install-tasks），弹窗只负责展示，随时可关 */
   const task = useInstallTasks((s) => (taskId ? s.tasks[taskId] : undefined));
-  const progress = useInstallTasks((s) => (taskId ? s.progress[taskId] : undefined)) ?? null;
+  const progress = useInstallTasks((s) => progressForTask(s.progress, taskId ? s.tasks[taskId] : undefined)) ?? null;
   const startTask = useInstallTasks((s) => s.start);
   const cancelTask = useInstallTasks((s) => s.cancel);
+  const displayVersion = task?.resolvedVersion ?? target?.version;
+  const missing = !!target?.inspect && !task;
 
   const busy = task?.status === "running";
   const finished = task?.status === "done";
   const cancelled = task?.status === "cancelled";
   const cancelling = busy && !!task?.cancelRequested;
-  const error = task?.status === "error" ? (task.error ?? t("install.failed")) : null;
+  const error = missing ? t("install.taskMissing") : task?.status === "error" ? (task.error ?? t("install.failed")) : null;
   const stage: StageId = finished ? "done" : progress ? stageFromState(progress.state) : "download";
 
   /* 打开即开始安装；同一版本已在后台安装时只是重新显示它的进度 */
@@ -118,7 +126,7 @@ export function InstallDialog({
     }
     if (startedRef.current === taskId) return;
     startedRef.current = taskId;
-    void startTask(target);
+    if (!target.inspect) void startTask(target);
   }, [target, taskId, startTask]);
 
   /* 页面级的完成回调（全局刷新由 InstallTasksBridge 负责，这里只在弹窗还开着时补调） */
@@ -151,7 +159,8 @@ export function InstallDialog({
     setStarting(true);
     try {
       if (target && startableAs === target.id) {
-        await api.setActiveVersion(target.id, target.version);
+        if (!displayVersion) return;
+        await api.setActiveVersion(target.id, displayVersion);
       }
       await api.startService(startableAs);
       toast.success(t("common.running"));
@@ -197,7 +206,7 @@ export function InstallDialog({
                     : `${t("install.title")} · ${target?.displayName ?? ""}`}
               </DialogTitle>
               <DialogDescription className="mt-1 flex flex-wrap items-center gap-x-2 text-[12px]">
-                <span className="font-mono [overflow-wrap:anywhere]">v{target?.version}</span>
+                <span className="font-mono [overflow-wrap:anywhere]">{displayVersion ? `v${displayVersion}` : t("install.automaticVersion")}</span>
                 {target?.sizeBytes ? (
                   <>
                     <span className="text-faint">·</span>
@@ -296,14 +305,14 @@ export function InstallDialog({
                 <HardDrive className="h-4 w-4 shrink-0 text-running" />
                 <div className="flex min-w-0 flex-col">
                   <span className="text-[12.5px] font-medium text-secondary">
-                    {target?.displayName} {target?.version}
+                    {target?.displayName} {displayVersion}
                   </span>
                   <span className="text-[11px] text-faint">{t("install.doneHint")}</span>
                 </div>
                 {/* 装完顺手把命令加进环境变量：就地一步，不再跑去找入口 */}
-                {target && (
+                {target && displayVersion && (
                   <div className="ml-auto shrink-0">
-                    <PathEnvToggle pkgId={target.id} version={target.version} />
+                    <PathEnvToggle pkgId={target.id} version={displayVersion} />
                   </div>
                 )}
               </motion.div>
@@ -359,9 +368,9 @@ export function InstallDialog({
               <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={starting}>
                 {t("common.close")}
               </Button>
-              <Button onClick={retry} disabled={busy}>
+              {!missing && <Button onClick={retry} disabled={busy}>
                 {t("install.retry")}
-              </Button>
+              </Button>}
             </>
           ) : finished ? (
             <>
@@ -386,6 +395,94 @@ export function InstallDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+/** 会话内的任务入口独立于套件筛选；切换页面或关闭进度弹窗后仍可查看结果。 */
+export function InstallTasksPanel({ onInspect }: {
+  onInspect: (target: InstallTarget, trigger: HTMLButtonElement | null) => void;
+}) {
+  const t = useT();
+  const tasks = useInstallTasks((s) => s.tasks);
+  const dismiss = useInstallTasks((s) => s.dismiss);
+  const [expanded, setExpanded] = React.useState(true);
+  const [hasShown, setHasShown] = React.useState(false);
+  const contentId = React.useId();
+  const toggleRef = React.useRef<HTMLButtonElement>(null);
+  const rank = { running: 0, error: 1, cancelled: 2, done: 3 };
+  const list = Object.values(tasks).sort((a, b) => rank[a.status] - rank[b.status] || b.startedAt - a.startedAt);
+  React.useEffect(() => {
+    if (list.length) setHasShown(true);
+  }, [list.length]);
+  if (!list.length && !hasShown) return null;
+  const running = list.filter((task) => task.status === "running").length;
+  const failed = list.filter((task) => task.status === "error").length;
+  return <Card role="region" className="mb-4 overflow-hidden" aria-label={t("install.tasks")}>
+    <div className="flex flex-wrap items-center gap-2 p-3">
+      <button ref={toggleRef} type="button" aria-expanded={expanded} aria-controls={contentId} onClick={() => setExpanded(!expanded)}
+        className="flex min-h-9 min-w-0 flex-1 basis-full items-center gap-2 rounded-lg px-1 text-left text-sm font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary sm:basis-0">
+        <Download className="h-4 w-4 shrink-0" />
+        <span className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+          <span>{t("install.tasks")}</span><span className="text-muted">{list.length}</span>
+          {running > 0 && <span className="text-xs text-info">{running} {t("install.tasksRunning")}</span>}
+          {failed > 0 && <span className="text-xs text-error">{failed} {t("install.failed")}</span>}
+        </span>
+        <ChevronDown className={cn("h-4 w-4 shrink-0", expanded && "rotate-180")} />
+      </button>
+      <Button variant="ghost" size="sm" className="ml-auto" disabled={running === list.length} onClick={() => {
+        list.filter((task) => task.status !== "running").forEach((task) => dismiss(task.key));
+        toggleRef.current?.focus();
+      }}>{t("install.clearFinished")}</Button>
+    </div>
+    <div id={contentId} hidden={!expanded}>
+      <div role="separator" className="mx-3 border-t border-dashed border-separator" />
+      <p className="px-4 py-2 text-xs leading-relaxed text-muted">{t("install.tasksHint")}</p>
+      {!list.length && <p role="status" className="px-4 pb-4 text-xs text-muted">{t("install.noTasks")}</p>}
+      <ul aria-label={t("install.tasks")} className="max-h-72 overflow-y-auto overscroll-contain px-3 pb-2">
+        {list.map((task) => <InstallTaskRow key={task.key} task={task} onInspect={onInspect}
+          onDismiss={() => { dismiss(task.key); toggleRef.current?.focus(); }} />)}
+      </ul>
+    </div>
+  </Card>;
+}
+
+function InstallTaskRow({ task, onInspect, onDismiss }: {
+  task: InstallTask;
+  onInspect: (target: InstallTarget, trigger: HTMLButtonElement | null) => void;
+  onDismiss: () => void;
+}) {
+  const t = useT();
+  const progress = useInstallTasks((s) => progressForTask(s.progress, task));
+  const cancel = useInstallTasks((s) => s.cancel);
+  const busy = task.status === "running";
+  const stage = progress ? stageFromState(progress.state) : "download";
+  const label = task.status === "error" ? t("install.failed") : task.status === "done" ? t("install.stage.done")
+    : task.status === "cancelled" ? t("install.cancelled") : task.cancelRequested ? t("install.cancelling")
+    : progress ? t(STAGES.find((s) => s.id === stage)?.labelKey ?? "install.stage.download") : t("install.preparing");
+  const version = task.resolvedVersion ?? task.version;
+  const name = `${task.displayName} ${version ?? t("install.automaticVersion")}`;
+  const pct = progress && progress.total > 0 ? Math.min(100, Math.max(0, progress.received / progress.total * 100)) : undefined;
+  return <li className="flex flex-wrap items-center gap-3 border-t border-dashed border-separator px-1 py-3 first:border-t-0">
+    <div className="min-w-0 flex-1 basis-44 space-y-1">
+      <p className="text-xs font-medium [overflow-wrap:anywhere]">{name}</p>
+      <p className={cn("flex items-center gap-1.5 text-xs", task.status === "error" ? "text-error" : "text-muted")}>
+        {busy && <Loader2 className="h-3 w-3 shrink-0 animate-spin" />}{label}
+      </p>
+      {busy && progress && <div role="progressbar" aria-label={`${name} ${label}`} aria-valuemin={0} aria-valuemax={100}
+        aria-valuenow={stage === "download" ? pct : undefined} className="h-1 overflow-hidden rounded-full bg-fill">
+        <div className={cn("h-full rounded-full bg-primary", pct === undefined && "w-1/3")} style={pct !== undefined ? { width: `${pct}%` } : undefined} />
+      </div>}
+      {busy && progress && stage === "download" && <p className="text-[11px] tabular text-muted">{fmtBytes(progress.received)}{progress.total > 0 ? ` / ${fmtBytes(progress.total)}` : ""} · {fmtSpeed(progress.speedBps)}</p>}
+      {task.error && <p className="line-clamp-2 text-xs text-error [overflow-wrap:anywhere]">{task.error}</p>}
+    </div>
+    <div className="flex shrink-0 flex-wrap items-center gap-1">
+      <Button size="sm" variant="outline" aria-label={`${t("install.viewTask")} ${name}`} onClick={(event) => onInspect({
+        id: task.id, version: task.version, displayName: task.displayName, taskKey: task.key, inspect: true,
+      }, event.currentTarget)}>{t("install.viewTask")}</Button>
+      {busy ? <Button size="sm" variant="ghost" aria-label={`${t("install.cancel")} ${name}`}
+        disabled={task.cancelRequested || stage === "config"} onClick={() => void cancel(task.key)}>{t(task.cancelRequested ? "install.cancelling" : "install.cancel")}</Button>
+        : <Button size="icon" variant="ghost" className="h-8 w-8" aria-label={`${t("install.dismissTask")} ${name}`} onClick={onDismiss}><X className="h-3.5 w-3.5" /></Button>}
+    </div>
+  </li>;
 }
 
 /** 供套件页判断：这个包能不能在装完后直接启动 */

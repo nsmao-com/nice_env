@@ -7,6 +7,7 @@ import { normalizeError } from "./backend";
 import type { ConfigCheck, BackupPreview, ConfigResetPreview, TunnelInfo, OllamaModelRow, OllamaPullStatus } from "./api";
 import bundledManifest from "../../../../manifest/packages.win.json";
 import type {
+  DownloadProgress,
   VersionCatalog,
   ServiceStatus,
   Site,
@@ -62,7 +63,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.61";
+const MOCK_APP_VERSION = "0.2.62";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -1032,8 +1033,10 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return structuredClone(Array.from(packages.values())) as T;
     case "cancel_download": {
       const taskId = args?.taskId as string | undefined;
-      if (!taskId || !activeDownloads.has(taskId)) return false as T;
-      cancelledDownloads.add(taskId);
+      if (!taskId) return false as T;
+      const matches = Array.from(activeDownloads).filter((key) => key === taskId || (!taskId.includes("@") && key.startsWith(`${taskId}@`)));
+      if (matches.length !== 1) return false as T;
+      cancelledDownloads.add(matches[0]);
       return true as T;
     }
     case "set_active_version": {
@@ -1062,14 +1065,36 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return Array.from(ids).sort().map(one) as T;
     }
     case "install_package": {
-      const key = args!.id as string;
-      const p = packages.get(key);
-      if (!p) throw { code: "PACKAGE_NOT_FOUND", message: `找不到套件 ${key}` };
+      const requested = args!.id as string;
+      const p = requested.includes("@") ? packages.get(requested)
+        : Array.from(packages.values()).filter((pkg) => pkg.id === requested).sort((a, b) => cmpVersionDesc(a.version, b.version))[0];
+      if (!p) throw { code: "PACKAGE_NOT_FOUND", message: `找不到套件 ${requested}` };
+      const key = `${p.id}@${p.version}`;
+      if (activeDownloads.has(key)) throw { code: "DOWNLOAD_BUSY", message: `${key} 正在安装` };
       activeDownloads.add(key);
+      const total = p.sizeBytes || 0;
+      const report = (state: DownloadProgress["state"], ratio: number, error?: string) => emitLocal("download://progress", {
+        taskId: key, received: Math.round(total * ratio), total,
+        speedBps: state === "downloading" ? total / 2 : 0, etaSec: 0, state, error,
+      } satisfies DownloadProgress);
+      const checkCancelled = () => {
+        if (cancelledDownloads.has(key)) throw { code: "CANCELLED", message: "安装已取消" };
+      };
       try {
-        // 给取消按钮留出与桌面端下载任务相同的可观察窗口。
-        await delay(280);
-        if (cancelledDownloads.delete(key)) throw { code: "CANCELLED", message: "安装已取消" };
+        // 浏览器预览沿用桌面端事件结构；仅模拟阶段，不下载或写入本机文件。
+        for (const ratio of [0, 0.25, 0.5, 0.75, 1]) {
+          report("downloading", ratio);
+          await delay(200);
+          checkCancelled();
+        }
+        for (const state of ["verifying", "extracting"] as const) {
+          report(state, 1);
+          await delay(150);
+          checkCancelled();
+        }
+        // 与原生提交阶段一致，此后不再接受取消。
+        activeDownloads.delete(key);
+        report("configuring", 1);
         p.install = {
           version: p.version,
           installPath: `…/runtimes/${p.id}/${p.version}`,
@@ -1077,7 +1102,12 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           installedAt: now(),
         };
         refreshPackageSelection(p.id);
+        report("installed", 1);
         return true as T;
+      } catch (e) {
+        const error = normalizeError(e);
+        report(error.code === "CANCELLED" ? "cancelled" : "error", 0, error.message);
+        throw e;
       } finally {
         activeDownloads.delete(key);
         cancelledDownloads.delete(key);

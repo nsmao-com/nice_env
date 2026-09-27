@@ -203,6 +203,8 @@ pub fn run() {
             set_active_version,
             pathenv_status,
             terminal_environment,
+            project_runtime_versions,
+            save_project_runtime_versions,
             pathenv_set_enabled,
             pathenv_set_selected,
             pathenv_set_version,
@@ -657,6 +659,30 @@ async fn terminal_environment(
     }))
         .await
         .map_err(|e| box_err(nsb_core::AppError::internal("读取终端环境", e.to_string())))?
+}
+
+#[tauri::command]
+async fn project_runtime_versions(
+    state: State<'_, std::sync::Arc<CoreState>>,
+    site_id: String,
+) -> Result<nsb_core::model::ProjectRuntimeVersions, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(state.project_runtime_versions(&site_id)))
+        .await.map_err(|e| box_err(nsb_core::AppError::internal("读取项目版本", e.to_string())))?
+}
+
+#[tauri::command]
+async fn save_project_runtime_versions(
+    state: State<'_, std::sync::Arc<CoreState>>,
+    site_id: String,
+    versions: std::collections::BTreeMap<String, String>,
+    expected_revision: String,
+) -> Result<nsb_core::model::ProjectRuntimeVersions, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(state.save_project_runtime_versions(&site_id, &versions, &expected_revision)))
+        .await.map_err(|e| box_err(nsb_core::AppError::internal("保存项目版本", e.to_string())))?
 }
 
 #[tauri::command]

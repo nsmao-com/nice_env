@@ -2089,3 +2089,22 @@ Windows 使用现有可见独立 PowerShell 启动方式，加入由后端生成
 精确暂存内容导出为独立发布树，排除原有 configgen.rs 修改。cargo check --workspace --all-targets --locked 通过；Rust 串行常规回归 630 通过、0 失败、12 ignored、31 filtered out，显式原生 PowerShell/PHP 用例在同一发布树另行通过。忽略和筛选项不算已执行；Windows 验证不等于 macOS Terminal 实机验收。
 
 版本号统一为 0.2.72，依项目规则新建 annotated tag，与 main 原子推送并核对实际 Release 状态。保留原有 configgen.rs 178 additions / 9 deletions 及未跟踪本地文件。本次没有数据库变更，未修改 update.sql；未启动前端 dev、未执行本地前端 build。项目版本文件、其他语言的项目级选择、cd 自动切换及 macOS 原生终端验收仍需继续，整体目标保持进行。
+
+
+## 第八十七轮：项目运行时版本、文件保存与终端应用（v0.2.73）
+
+参考 ServBay 项目版本文件与 CLI 版本的设计（https://support.servbay.com/advanced-settings/using-servbay-config、https://support.servbay.com/nodejs/set-different-nodejs-for-each-project），沿用已有站点终端、PATH 快照、安装元数据和项目根目录识别。项目 .niceenv.json 使用 schemaVersion: 1 与 runtimes 版本映射；界面从已安装运行时派生下拉选项，无需手填 JSON。明确固定的项目 CLI 版本优先，未固定 PHP 继续跟随站点，其他命令沿用全局 PATH 选择。CLI PHP 与 Web PHP 独立，不改站点绑定或系统 PATH；切换目录不会自动更换版本。
+
+读取不写盘，缺失或未知的固定项仍显示并允许解除，不依赖终端预览成功。保存以站点、真实项目目录、文件内容计算 revision，拒绝覆盖外部修改；保留未知顶层字段，拒绝不支持的 schemaVersion 和无效 JSON。复用 envfile 的普通文件、链接、容量、只读、原子替换检查；覆盖前在同目录保留 .niceenv.json.nsb-backup。共享目录的站点使用同一文件并在界面提示。public/out/dist/build 上级项目识别补充 Python、Go 及已有 NiceEnv 配置标记。没有引入依赖、数据库字段或 migration。
+
+终端启动前再次验证固定版本及 CLI 文件，并把项目文件 revision 纳入环境快照；缺失或损坏时明确报错，不悄悄回退。卸载会检查已登记站点的项目固定版本，文件存在但无法读取时要求先修复；站点编辑、项目保存与卸载沿 SITE_CHANGES -> lifecycle 顺序持锁。保护范围是站点列表可访问的项目，不扫描任意磁盘目录或跟踪已移除站点。
+
+站点终端新增“终端预览 / 项目版本”页签，保留草稿、关闭与重新读取确认、保存失败恢复、错误聚焦及重复提交互斥。未保存时阻止启动，保存成功后失效相关终端缓存，同目录站点下次读取即使用新配置。路径和备份说明折叠在选项之后，窄屏下选择控件堆叠，正文滚动而底部操作固定；下拉分隔线沿用内缩虚线。PHP、Node.js、Python、Go 的标签去除旧版本前缀，实际版本单独显示。浏览器只演示内存选择，明确不写文件、不启动系统终端。
+
+已有 pathenv.rs 验证模块扩展真实文件检查：多运行时覆盖、共享目录、解除固定、保留未知字段、外部修改和目录变更冲突、无效配置、只读与备份失败、CLI 不可用、卸载保护及新项目标记。未新增测试文件。25 项 PATH/终端检查（含显式原生用例）通过：短时隐藏 PowerShell 在空的运行时 PATH 中读取真实 Node 22.21.0、Python 3.13.3 与 PHP 8.4.26，核对实际命令路径、版本及含中文、空格、引号的工作目录，父进程 PATH 不变。安装器定向回归 16 通过、1 个需联网下载的检查保持忽略。
+
+隔离浏览器完成多版本选择、保存同步预览、草稿跨页签保留、关闭取消、缺失版本修复、保存冲突保留草稿、错误聚焦、重试及双击互斥检查；故障注入仅存在自建上下文的脚本响应，不写入产品。中英文、浅深色、1280 与 320×480 窗口检查通过，窄屏面板宽 296px、左右各 12px，保存按钮可见且没有横向溢出。未启动前端 dev、未执行本地前端 build。
+
+版本统一为 0.2.73，Cargo.lock 仅更新三个本项目 crate。最终前端类型检查通过；提交内容导出的独立发布树通过 cargo check --workspace --all-targets --locked，pathenv/envfile/install 相关模块回归 68 通过、0 失败、4 ignored、605 filtered，另行显式执行两项原生终端验证均通过。未执行的其他模块、忽略项不计入验收。排除原有 configgen.rs 178 additions / 9 deletions 与本地生成文件。已确认 v0.2.72 三个平台的 Release 构建均 completed/success。本轮按根 AGENTS.md 新建 annotated tag v0.2.73，与 main 原子推送并核对远程指向及实际发布状态，不能只推送分支。
+
+本次没有数据库变更，未修改 update.sql。仍需后续推进其他功能与 macOS 实机验收；.nvmrc / .python-version 自动识别及 cd 动态切换不在本轮支持范围，整体目标保持进行。

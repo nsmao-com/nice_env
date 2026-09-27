@@ -252,6 +252,17 @@ export const TerminalEnvironment = z.object({
 });
 export type TerminalEnvironment = z.infer<typeof TerminalEnvironment>;
 
+export const ProjectRuntimeVersions = z.object({
+  path: z.string(),
+  exists: z.boolean(),
+  revision: z.string(),
+  versions: z.record(z.string(), z.string()),
+  options: z.array(z.object({ id: z.string(), label: z.string(), versions: z.array(z.string()) })),
+  sharedSites: z.array(z.string()),
+  phpVersion: z.string().nullable(),
+});
+export type ProjectRuntimeVersions = z.infer<typeof ProjectRuntimeVersions>;
+
 
 /* ============ 服务 / Services ============ */
 

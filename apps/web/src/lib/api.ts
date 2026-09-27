@@ -48,6 +48,7 @@ import type {
   VersionCatalog,
   PathEnvStatus,
   TerminalEnvironment,
+  ProjectRuntimeVersions,
   UpdateCheckResult,
   CertAutomation,
   CertMonitor,
@@ -546,6 +547,9 @@ export const adminerStop = () => safe(invoke<boolean>("adminer_stop"));
 
 /* 环境变量注入（PATH） */
 export const terminalEnvironment = (siteId?: string) => safe(invoke<TerminalEnvironment>("terminal_environment", { siteId }));
+export const projectRuntimeVersions = (siteId: string) => safe(invoke<ProjectRuntimeVersions>("project_runtime_versions", { siteId }));
+export const saveProjectRuntimeVersions = (siteId: string, versions: Record<string, string>, expectedRevision: string) =>
+  safe(invoke<ProjectRuntimeVersions>("save_project_runtime_versions", { siteId, versions, expectedRevision }));
 export const pathenvStatus = () => safe(invoke<PathEnvStatus>("pathenv_status"));
 export const pathenvSetEnabled = (enabled: boolean) =>
   safe(invoke<PathEnvStatus>("pathenv_set_enabled", { enabled }));

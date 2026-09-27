@@ -876,6 +876,8 @@ impl Installer {
         };
         let mut users = Vec::new();
         for site in store.list_sites()? {
+            let project_ref = target.category == "runtime"
+                && crate::pathenv::project_references_version(&site, &target.id, &target.version)?;
             let php_ref = target.id == "php"
                 && site.runtime.kind == crate::model::SiteKind::Php
                 && site.runtime.php_version.as_deref() == Some(target.version.as_str());
@@ -887,7 +889,7 @@ impl Installer {
                             version == target.version.as_str()
                         })
                 });
-            if php_ref || web_ref || db_ref {
+            if php_ref || web_ref || db_ref || project_ref {
                 users.push(format!("站点「{}」", site.name));
             }
         }
@@ -926,7 +928,7 @@ impl Installer {
                     users.join("、")
                 ),
             )
-            .with_hint("先修改相关站点或服务栈的版本绑定，或卸载依赖它的套件后重试"));
+            .with_hint("先修改相关站点、项目版本或服务栈的版本绑定，或卸载依赖它的套件后重试"));
         }
         Ok(())
     }

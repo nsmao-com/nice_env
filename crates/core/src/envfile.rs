@@ -467,7 +467,7 @@ pub fn env_path(root: &Path) -> PathBuf {
     root.join(".env")
 }
 
-/// public/out 是对外目录，框架环境文件位于包含项目清单的上一级目录。
+/// public/out 等是对外目录，环境文件和版本配置位于包含项目清单的上一级目录。
 pub(crate) fn project_root(web_root: &Path) -> PathBuf {
     if matches!(
         web_root.file_name().and_then(|name| name.to_str()),
@@ -477,6 +477,10 @@ pub(crate) fn project_root(web_root: &Path) -> PathBuf {
             if [
                 "composer.json",
                 "package.json",
+                "pyproject.toml",
+                "requirements.txt",
+                "go.mod",
+                ".niceenv.json",
                 "artisan",
                 ".env",
                 ".env.example",
@@ -520,7 +524,7 @@ fn named_env_path(root: &Path, name: &str) -> Result<PathBuf> {
 
 const MAX_ENV_BYTES: usize = 1024 * 1024;
 
-fn read_env_file(path: &Path) -> Result<Option<String>> {
+pub(crate) fn read_env_file(path: &Path) -> Result<Option<String>> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -599,7 +603,7 @@ fn env_changed() -> AppError {
         .with_hint("请重新读取文件并检查最新内容，草稿不会自动覆盖外部修改。")
 }
 
-fn replace_env_file(path: &Path, expected: Option<&str>, content: &str) -> Result<()> {
+pub(crate) fn replace_env_file(path: &Path, expected: Option<&str>, content: &str) -> Result<()> {
     use std::io::Write;
     if read_env_file(path)?.as_deref() != expected { return Err(env_changed()); }
     let metadata = std::fs::metadata(path).ok();

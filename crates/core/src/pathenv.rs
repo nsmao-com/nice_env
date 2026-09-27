@@ -78,22 +78,165 @@ pub fn terminal_environment(
     terminal_environment_selected(store, paths, manifest, &Default::default())
 }
 
-/// 站点终端固定使用站点的 PHP；其余命令沿用 PATH 选择，不更改持久配置。
+/// 项目版本优先；未固定的 PHP 跟随站点，其余命令沿用 PATH 选择。
 /// 调用方按 SITE_CHANGES -> lifecycle 的顺序锁定站点与安装版本。
 pub fn site_terminal_environment(store: &Store, paths: &Paths, manifest: &Manifest, site_id: &str) -> Result<crate::model::TerminalEnvironment> {
     let site = crate::sites::get(store, site_id)?;
-    let mut required = std::collections::BTreeMap::new();
-    if site.runtime.kind == crate::model::SiteKind::Php {
+    let root = project_directory(&site)?;
+    let content = read_project_file(&root.join(PROJECT_FILE))?;
+    let mut required = project_versions(&project_document(content.as_deref())?)?;
+    validate_project_versions(store, manifest, &required)?;
+    if site.runtime.kind == crate::model::SiteKind::Php && !required.contains_key("php") {
         let version = site.runtime.php_version.as_ref().filter(|v| !v.is_empty()).ok_or_else(||
             AppError::new("TERMINAL_RUNTIME_UNAVAILABLE", "该 PHP 站点尚未指定 PHP 版本，请先保存站点设置"))?;
         required.insert("php".into(), version.clone());
     }
-    terminal_directory(&site.root_dir)?;
-    let cwd = crate::envfile::project_root(std::path::Path::new(&site.root_dir)).canonicalize().map_err(|e| AppError::io("读取项目目录", e))?;
     let mut environment = terminal_environment_selected(store, paths, manifest, &required)?;
-    environment.cwd = cwd.to_string_lossy().into_owned();
-    environment.revision = terminal_revision(&environment, Some(site_id));
+    environment.cwd = root.to_string_lossy().into_owned();
+    // 文件本身也是快照的一部分，外部改写后必须重新预览。
+    environment.revision = terminal_revision(&environment, Some(&project_revision(&site, &root, content.as_deref())));
     Ok(environment)
+}
+
+const PROJECT_FILE: &str = ".niceenv.json";
+
+fn terminal_runtime_label(id: &str, display_name: &str) -> String {
+    match id { "php" => "PHP", "node" => "Node.js", "python" => "Python", "go" => "Go", _ => display_name }.into()
+}
+
+fn project_directory(site: &crate::model::Site) -> Result<std::path::PathBuf> {
+    terminal_directory(&site.root_dir)?;
+    crate::envfile::project_root(std::path::Path::new(&site.root_dir)).canonicalize()
+        .map_err(|e| AppError::io("读取项目目录", e))
+}
+
+fn project_file_error(mut error: AppError) -> AppError {
+    error.code = error.code.replace("ENV_", "PROJECT_RUNTIME_");
+    error.message = error.message.replace("环境文件", "项目版本文件");
+    error
+}
+
+fn read_project_file(path: &std::path::Path) -> Result<Option<String>> {
+    crate::envfile::read_env_file(path).map_err(project_file_error)
+}
+
+fn project_document(content: Option<&str>) -> Result<serde_json::Value> {
+    let Some(content) = content else { return Ok(serde_json::json!({"schemaVersion": 1, "runtimes": {}})); };
+    let value: serde_json::Value = serde_json::from_str(content.trim_start_matches('\u{feff}'))
+        .map_err(|_| AppError::new("PROJECT_RUNTIME_FORMAT", ".niceenv.json 格式无效，未覆盖原文件")
+            .with_hint("请修正项目文件中的 JSON 格式后重新读取。"))?;
+    if !value.is_object() || value["schemaVersion"].as_u64() != Some(1) {
+        return Err(AppError::new("PROJECT_RUNTIME_FORMAT", ".niceenv.json 的配置版本不受支持，未覆盖原文件")
+            .with_hint("当前支持 schemaVersion 为 1 的项目配置。"));
+    }
+    project_versions(&value)?;
+    Ok(value)
+}
+
+fn project_versions(value: &serde_json::Value) -> Result<std::collections::BTreeMap<String, String>> {
+    let versions = value.get("runtimes").cloned().unwrap_or_else(|| serde_json::json!({}));
+    let versions: std::collections::BTreeMap<String, String> = serde_json::from_value(versions)
+        .map_err(|_| AppError::new("PROJECT_RUNTIME_FORMAT", "项目版本必须由运行时名称和版本号组成"))?;
+    if versions.len() > 128 || versions.iter().any(|(id, version)| id.is_empty() || id.len() > 128 || version.is_empty() || version.len() > 128
+        || id.chars().chain(version.chars()).any(char::is_control)) {
+        return Err(AppError::new("PROJECT_RUNTIME_FORMAT", "项目版本名称或版本号无效，请检查 .niceenv.json"));
+    }
+    Ok(versions)
+}
+
+fn project_revision(site: &crate::model::Site, root: &std::path::Path, content: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+    let payload = (&site.id, &site.root_dir, root.to_string_lossy(), content);
+    format!("{:x}", Sha256::digest(serde_json::to_vec(&payload).expect("project snapshot contains only strings")))
+}
+
+fn project_view(store: &Store, manifest: &Manifest, site: &crate::model::Site, root: &std::path::Path, content: Option<&str>) -> Result<crate::model::ProjectRuntimeVersions> {
+    let versions = project_versions(&project_document(content)?)?;
+    let installed = store.list_installed()?;
+    let installer = crate::install::Installer { manifest: manifest.clone() };
+    let mut options: std::collections::BTreeMap<String, crate::model::ProjectRuntimeOption> = std::collections::BTreeMap::new();
+    for package in &installed {
+        let entry = installer.installed_entry(package);
+        if package.category != "runtime" || entry.entry.is_empty() || is_non_executable_entry(&entry.entry) { continue; }
+        let option = options.entry(package.id.clone()).or_insert_with(|| crate::model::ProjectRuntimeOption {
+            id: package.id.clone(), label: terminal_runtime_label(&package.id, &entry.display_name), versions: Vec::new(),
+        });
+        option.versions.push(package.version.clone());
+    }
+    // 缺失或未知的固定项仍可见、可解除，读取不能依赖终端预览成功。
+    for id in versions.keys() {
+        options.entry(id.clone()).or_insert_with(|| crate::model::ProjectRuntimeOption {
+            id: id.clone(), label: terminal_runtime_label(id, manifest.packages.iter().find(|p| p.id == *id).map(|p| p.display_name.as_str()).unwrap_or(id)), versions: Vec::new(),
+        });
+    }
+    for option in options.values_mut() { option.versions.sort_by(|a, b| crate::versions::cmp_version_desc(a, b)); option.versions.dedup(); }
+    let shared_sites = store.list_sites()?.into_iter().filter(|other| other.id != site.id)
+        .filter(|other| project_directory(other).ok().as_deref() == Some(root)).map(|other| other.name).collect();
+    Ok(crate::model::ProjectRuntimeVersions {
+        path: root.join(PROJECT_FILE).to_string_lossy().into_owned(), exists: content.is_some(),
+        revision: project_revision(site, root, content), versions, options: options.into_values().collect(), shared_sites,
+        php_version: (site.runtime.kind == crate::model::SiteKind::Php).then(|| site.runtime.php_version.clone()).flatten(),
+    })
+}
+
+pub fn project_runtime_versions(store: &Store, manifest: &Manifest, site_id: &str) -> Result<crate::model::ProjectRuntimeVersions> {
+    let site = crate::sites::get(store, site_id)?;
+    let root = project_directory(&site)?;
+    let content = read_project_file(&root.join(PROJECT_FILE))?;
+    project_view(store, manifest, &site, &root, content.as_deref())
+}
+
+fn validate_project_versions(store: &Store, manifest: &Manifest, versions: &std::collections::BTreeMap<String, String>) -> Result<()> {
+    let installed = store.list_installed()?;
+    let installer = crate::install::Installer { manifest: manifest.clone() };
+    for (id, version) in versions {
+        let package = installed.iter().find(|p| p.id == *id && p.version == *version && p.category == "runtime")
+            .ok_or_else(|| AppError::new("TERMINAL_RUNTIME_UNAVAILABLE", format!("项目指定的 {id} {version} 尚未安装或不是可用运行时"))
+                .with_hint("请在项目版本中改选已安装版本或取消固定，也可以先到套件页安装所需版本。"))?;
+        let entry = installer.installed_entry(package);
+        terminal_package_directory(package, &entry).map_err(|reason| AppError::new("TERMINAL_RUNTIME_UNAVAILABLE", format!("{id} {version}：{reason}"))
+            .with_hint("请修复此运行时，或在项目版本中改选其他版本。"))?;
+    }
+    Ok(())
+}
+
+pub fn save_project_runtime_versions(store: &Store, manifest: &Manifest, site_id: &str, versions: &std::collections::BTreeMap<String, String>, expected_revision: &str) -> Result<crate::model::ProjectRuntimeVersions> {
+    let site = crate::sites::get(store, site_id)?;
+    let root = project_directory(&site)?;
+    let path = root.join(PROJECT_FILE);
+    let original = read_project_file(&path)?;
+    if project_revision(&site, &root, original.as_deref()) != expected_revision {
+        return Err(AppError::new("PROJECT_RUNTIME_CHANGED", "项目版本文件或目录已变化，未覆盖当前文件")
+            .with_hint("草稿已保留。请重新读取并核对最新版本后再保存。"));
+    }
+    let mut document = project_document(original.as_deref())?;
+    validate_project_versions(store, manifest, versions)?;
+    if project_versions(&document)? == *versions { return project_view(store, manifest, &site, &root, original.as_deref()); }
+    document["runtimes"] = serde_json::json!(versions);
+    let next = format!("{}\n", serde_json::to_string_pretty(&document).map_err(|e| AppError::internal("保存项目版本", e.to_string()))?);
+    if next.len() > 1024 * 1024 { return Err(AppError::new("PROJECT_RUNTIME_TOO_LARGE", "项目版本文件不能超过 1 MiB")); }
+    let view = project_view(store, manifest, &site, &root, Some(&next))?;
+    if std::fs::metadata(&path).ok().is_some_and(|m| m.permissions().readonly()) {
+        return Err(AppError::new("PROJECT_RUNTIME_READ_ONLY", "项目版本文件是只读文件，未保存设置"));
+    }
+    if let Some(original) = &original {
+        let backup = root.join(format!("{PROJECT_FILE}.nsb-backup"));
+        let previous = read_project_file(&backup)?;
+        crate::envfile::replace_env_file(&backup, previous.as_deref(), original).map_err(project_file_error)?;
+    }
+    crate::envfile::replace_env_file(&path, original.as_deref(), &next).map_err(project_file_error)?;
+    Ok(view)
+}
+
+/// 只保护仍在站点列表中、可读取的项目；不扫描任意磁盘目录。
+pub(crate) fn project_references_version(site: &crate::model::Site, id: &str, version: &str) -> Result<bool> {
+    let path = crate::envfile::project_root(std::path::Path::new(&site.root_dir)).join(PROJECT_FILE);
+    let result = (|| {
+        let content = read_project_file(&path)?;
+        Ok(project_versions(&project_document(content.as_deref())?)?.get(id).map(String::as_str) == Some(version))
+    })();
+    result.map_err(|error: AppError| AppError::new("PROJECT_RUNTIME_UNREADABLE", format!("无法检查站点「{}」的项目版本，未卸载运行时", site.name))
+        .with_hint("请先修复项目版本文件或目录访问权限，再重试卸载。").with_detail(error.message))
 }
 
 pub fn terminal_directory(cwd: &str) -> Result<std::path::PathBuf> {
@@ -144,52 +287,11 @@ fn terminal_environment_selected(store: &Store, paths: &Paths, manifest: &Manife
             if required.contains_key(id) { return Err(AppError::new("TERMINAL_RUNTIME_UNAVAILABLE", "站点指定版本没有可用的命令行入口")); }
             continue;
         }
-        let check = (|| -> std::result::Result<String, String> {
-            let entry = terminal_cli_entry(id, &meta.entry, cfg!(windows));
-            let dir = bin_dir_for(&package.install_path, &entry)
-                .ok_or_else(|| "无法确定安装入口，请重新安装该版本".to_string())?;
-            let relative = entry.replace('\\', "/");
-            if relative
-                .split('/')
-                .any(|part| part == ".." || part.contains(':'))
-                || std::path::Path::new(&relative).is_absolute()
-            {
-                return Err("安装入口必须位于安装目录内".into());
-            }
-            if !std::path::Path::new(&package.install_path).is_absolute() {
-                return Err("安装目录不是绝对路径，请重新安装该版本".into());
-            }
-            let root = std::path::Path::new(&package.install_path)
-                .canonicalize()
-                .map_err(|error| format!("无法读取安装目录：{error}"))?;
-            let executable = root
-                .join(relative)
-                .canonicalize()
-                .map_err(|error| format!("无法读取入口文件：{error}"))?;
-            if !executable.starts_with(&root) || !executable.is_file() {
-                return Err("入口文件不可用或指向安装目录外".into());
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if executable
-                    .metadata()
-                    .map_err(|e| e.to_string())?
-                    .permissions()
-                    .mode()
-                    & 0o111
-                    == 0
-                {
-                    return Err("入口文件没有执行权限".into());
-                }
-            }
-            validate_terminal_dir(&dir, cfg!(windows)).map_err(|e| e.message)?;
-            Ok(dir)
-        })();
+        let check = terminal_package_directory(package, &meta);
         match check {
             Ok(bin_dir) => entries.push(crate::model::TerminalEnvironmentEntry {
                 id: id.into(),
-                label: if id == "php" { "PHP".into() } else { meta.display_name },
+                label: terminal_runtime_label(id, &meta.display_name),
                 version: package.version.clone(),
                 bin_dir,
             }),
@@ -215,6 +317,50 @@ fn terminal_environment_selected(store: &Store, paths: &Paths, manifest: &Manife
     };
     environment.revision = terminal_revision(&environment, None);
     Ok(environment)
+}
+
+fn terminal_package_directory(package: &crate::model::InstalledPackage, meta: &crate::model::PackageManifestEntry) -> std::result::Result<String, String> {
+    if meta.entry.trim().is_empty() || is_non_executable_entry(&meta.entry) { return Err("该运行时没有可用的命令行入口".into()); }
+    let entry = terminal_cli_entry(&package.id, &meta.entry, cfg!(windows));
+    let dir = bin_dir_for(&package.install_path, &entry)
+        .ok_or_else(|| "无法确定安装入口，请重新安装该版本".to_string())?;
+    let relative = entry.replace('\\', "/");
+    if relative
+        .split('/')
+        .any(|part| part == ".." || part.contains(':'))
+        || std::path::Path::new(&relative).is_absolute()
+    {
+        return Err("安装入口必须位于安装目录内".into());
+    }
+    if !std::path::Path::new(&package.install_path).is_absolute() {
+        return Err("安装目录不是绝对路径，请重新安装该版本".into());
+    }
+    let root = std::path::Path::new(&package.install_path)
+        .canonicalize()
+        .map_err(|error| format!("无法读取安装目录：{error}"))?;
+    let executable = root
+        .join(relative)
+        .canonicalize()
+        .map_err(|error| format!("无法读取入口文件：{error}"))?;
+    if !executable.starts_with(&root) || !executable.is_file() {
+        return Err("入口文件不可用或指向安装目录外".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if executable
+            .metadata()
+            .map_err(|e| e.to_string())?
+            .permissions()
+            .mode()
+            & 0o111
+            == 0
+        {
+            return Err("入口文件没有执行权限".into());
+        }
+    }
+    validate_terminal_dir(&dir, cfg!(windows)).map_err(|e| e.message)?;
+    Ok(dir)
 }
 
 fn terminal_cli_entry(id: &str, entry: &str, windows: bool) -> String {
@@ -1191,6 +1337,117 @@ mod tests {
         assert_eq!(state.site_terminal_environment(&site.id).unwrap_err().code, "TERMINAL_RUNTIME_UNAVAILABLE");
     }
 
+    fn project_runtime_fixture() -> (tempfile::TempDir, crate::CoreState, crate::model::Site) {
+        let (temp, mut state, site) = site_terminal_fixture();
+        for id in ["node", "python"] {
+            for version in ["1.0.0", "2.0.0"] {
+                let mut entry = state.installer.manifest.packages[0].clone();
+                entry.id = id.into(); entry.category = "runtime".into(); entry.version = version.into();
+                entry.entry = format!("bin/{id}{}", if cfg!(windows) { ".exe" } else { "" });
+                let root = state.paths.runtime_dir(id, version);
+                let file = root.join(&entry.entry);
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap(); std::fs::write(&file, "fixture").unwrap();
+                #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap(); }
+                state.store.upsert_installed(&crate::model::InstalledPackage { id: id.into(), version: version.into(), category: "runtime".into(), install_path: root.to_string_lossy().into_owned(), config_path: String::new(), installed_at: 0 }).unwrap();
+                state.installer.manifest.packages.push(entry);
+            }
+        }
+        (temp, state, site)
+    }
+
+    #[test]
+    fn project_versions_save_real_file_share_directory_and_override_only_terminal() {
+        let (_temp, state, site) = project_runtime_fixture();
+        state.store.set_setting(VERSIONS_KEY, r#"{"node":"2.0.0","python":"2.0.0"}"#).unwrap();
+        state.store.set_setting(SELECTED_KEY, "[]").unwrap();
+        let view = state.project_runtime_versions(&site.id).unwrap();
+        assert!(!view.exists); assert!(!std::path::Path::new(&view.path).exists());
+        let mut shared = site.clone(); shared.id = "shared-project".into(); shared.name = "Shared".into(); state.store.save_site(&shared).unwrap();
+        let versions = std::collections::BTreeMap::from([("node".into(), "1.0.0".into()), ("python".into(), "1.0.0".into()), ("php".into(), "2.0.0".into())]);
+        let saved = state.save_project_runtime_versions(&site.id, &versions, &view.revision).unwrap();
+        assert!(saved.exists); assert_eq!(saved.shared_sites, vec!["Shared"]);
+        let document: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&saved.path).unwrap()).unwrap();
+        assert_eq!(document["schemaVersion"], 1); assert_eq!(document["runtimes"]["node"], "1.0.0");
+        assert_eq!(state.project_runtime_versions(&shared.id).unwrap().versions, versions);
+        let environment = state.site_terminal_environment(&site.id).unwrap();
+        assert_eq!(environment.entries.len(), 3);
+        for (id, version) in &versions { assert_eq!(&environment.entries.iter().find(|e| e.id == *id).unwrap().version, version); }
+        assert_eq!(crate::sites::get(&state.store, &site.id).unwrap().runtime.php_version.as_deref(), Some("1.0.0"));
+        assert!(state.terminal_environment().unwrap().entries.is_empty());
+        assert_eq!(state.store.get_setting(VERSIONS_KEY).as_deref(), Some(r#"{"node":"2.0.0","python":"2.0.0"}"#));
+        let old = std::fs::read_to_string(&saved.path).unwrap();
+        let cleared = state.save_project_runtime_versions(&site.id, &Default::default(), &saved.revision).unwrap();
+        assert!(cleared.versions.is_empty());
+        assert_eq!(std::fs::read_to_string(format!("{}.nsb-backup", saved.path)).unwrap(), old);
+        let environment = state.site_terminal_environment(&site.id).unwrap();
+        assert_eq!(environment.entries.len(), 1); assert_eq!(environment.entries[0].version, "1.0.0");
+    }
+
+    #[test]
+    fn project_versions_detect_conflicts_preserve_unknown_fields_and_repair_missing_versions() {
+        let (temp, state, mut site) = project_runtime_fixture();
+        let view = state.project_runtime_versions(&site.id).unwrap();
+        let original = r#"{"schemaVersion":1,"runtimes":{"node":"missing","unknown-runtime":"9"},"custom":{"keep":true}}"#;
+        std::fs::write(&view.path, original).unwrap();
+        assert_eq!(state.save_project_runtime_versions(&site.id, &Default::default(), &view.revision).unwrap_err().code, "PROJECT_RUNTIME_CHANGED");
+        assert_eq!(state.site_terminal_environment(&site.id).unwrap_err().code, "TERMINAL_RUNTIME_UNAVAILABLE");
+        let view = state.project_runtime_versions(&site.id).unwrap();
+        assert!(view.options.iter().any(|o| o.id == "unknown-runtime" && o.versions.is_empty()));
+        let valid = std::collections::BTreeMap::from([("node".into(), "1.0.0".into())]);
+        let saved = state.save_project_runtime_versions(&site.id, &valid, &view.revision).unwrap();
+        let content = std::fs::read_to_string(&saved.path).unwrap();
+        let document: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(document["custom"]["keep"], true);
+        assert_eq!(std::fs::read_to_string(format!("{}.nsb-backup", saved.path)).unwrap(), original);
+        let preview = state.site_terminal_environment(&site.id).unwrap();
+        std::fs::write(&saved.path, format!("{content}\n")).unwrap();
+        assert_eq!(state.with_terminal_environment::<()>(Some(&site.id), &preview.revision, |_| panic!("stale project launched")).unwrap_err().code, "TERMINAL_ENV_CHANGED");
+        let view = state.project_runtime_versions(&site.id).unwrap();
+        let other = temp.path().join("other-project"); std::fs::create_dir(&other).unwrap(); site.root_dir = other.to_string_lossy().into_owned(); state.store.save_site(&site).unwrap();
+        assert_eq!(state.save_project_runtime_versions(&site.id, &valid, &view.revision).unwrap_err().code, "PROJECT_RUNTIME_CHANGED");
+        assert!(!other.join(PROJECT_FILE).exists());
+        for invalid in ["{broken", r#"{"schemaVersion":2,"runtimes":{}}"#, r#"{"schemaVersion":1,"runtimes":{"node":1}}"#] {
+            std::fs::write(other.join(PROJECT_FILE), invalid).unwrap();
+            assert_eq!(state.project_runtime_versions(&site.id).unwrap_err().code, "PROJECT_RUNTIME_FORMAT");
+            assert_eq!(std::fs::read_to_string(other.join(PROJECT_FILE)).unwrap(), invalid);
+        }
+        for marker in ["pyproject.toml", "requirements.txt", "go.mod", PROJECT_FILE] {
+            let root = temp.path().join(marker); let output = root.join("dist");
+            std::fs::create_dir_all(&output).unwrap(); std::fs::write(root.join(marker), "{}").unwrap();
+            assert_eq!(crate::envfile::project_root(&output), root);
+        }
+    }
+
+    #[test]
+    fn project_versions_validate_cli_backup_and_protect_uninstall() {
+        let (_temp, state, site) = project_runtime_fixture();
+        let view = state.project_runtime_versions(&site.id).unwrap();
+        let valid = std::collections::BTreeMap::from([("node".into(), "1.0.0".into())]);
+        let invalid = std::collections::BTreeMap::from([("node".into(), "3.0.0".into())]);
+        assert_eq!(state.save_project_runtime_versions(&site.id, &invalid, &view.revision).unwrap_err().code, "TERMINAL_RUNTIME_UNAVAILABLE");
+        assert!(!std::path::Path::new(&view.path).exists());
+        let saved = state.save_project_runtime_versions(&site.id, &valid, &view.revision).unwrap();
+        assert_eq!(state.uninstall_package("node@1.0.0").unwrap_err().code, "PACKAGE_IN_USE");
+        assert!(state.paths.runtime_dir("node", "1.0.0").is_dir());
+        let backup = format!("{}.nsb-backup", saved.path);
+        std::fs::create_dir(&backup).unwrap();
+        assert_eq!(state.save_project_runtime_versions(&site.id, &Default::default(), &saved.revision).unwrap_err().code, "PROJECT_RUNTIME_INVALID_FILE");
+        assert_eq!(state.project_runtime_versions(&site.id).unwrap().versions, valid);
+        std::fs::remove_dir(&backup).unwrap();
+        let mut perms = std::fs::metadata(&saved.path).unwrap().permissions(); let original_perms = perms.clone(); perms.set_readonly(true);
+        std::fs::set_permissions(&saved.path, perms).unwrap();
+        assert_eq!(state.save_project_runtime_versions(&site.id, &Default::default(), &saved.revision).unwrap_err().code, "PROJECT_RUNTIME_READ_ONLY");
+        std::fs::set_permissions(&saved.path, original_perms).unwrap();
+        state.save_project_runtime_versions(&site.id, &Default::default(), &saved.revision).unwrap();
+        let entry = state.installer.manifest.packages.iter().find(|e| e.id == "node" && e.version == "1.0.0").unwrap();
+        std::fs::remove_file(state.paths.runtime_dir("node", "1.0.0").join(&entry.entry)).unwrap();
+        let view = state.project_runtime_versions(&site.id).unwrap();
+        assert_eq!(state.save_project_runtime_versions(&site.id, &valid, &view.revision).unwrap_err().code, "TERMINAL_RUNTIME_UNAVAILABLE");
+        assert!(state.project_runtime_versions(&site.id).unwrap().versions.is_empty());
+        std::fs::write(&view.path, "broken").unwrap();
+        assert_eq!(state.uninstall_package("node@1.0.0").unwrap_err().code, "PROJECT_RUNTIME_UNREADABLE");
+    }
+
     #[test]
     fn terminal_launch_rechecks_site_versions_directory_and_holds_lifecycle_locks() {
         let (temp, state, mut site) = site_terminal_fixture();
@@ -1217,6 +1474,43 @@ mod tests {
         assert_eq!(state.with_terminal_environment::<()>(None, &global.revision, |_| panic!("stale selection launched")).unwrap_err().code, "TERMINAL_ENV_CHANGED");
         for invalid in ["", "\n", "a\0b"] { assert_eq!(terminal_directory(invalid).unwrap_err().code, "TERMINAL_DIRECTORY_INVALID"); }
         assert!(terminal_directory(temp.path().join("absent").to_str().unwrap()).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires NSB_ENV_NODE and NSB_ENV_PYTHON; runs short hidden commands, no interactive terminal"]
+    fn native_project_terminal_resolves_pinned_node_and_python() {
+        let (_temp, mut state, mut site) = site_terminal_fixture();
+        site.runtime.kind = crate::model::SiteKind::Static; state.store.save_site(&site).unwrap();
+        state.store.set_setting(SELECTED_KEY, "[]").unwrap();
+        let mut versions = std::collections::BTreeMap::new();
+        let mut executables = std::collections::BTreeMap::new();
+        for (id, key) in [("node", "NSB_ENV_NODE"), ("python", "NSB_ENV_PYTHON")] {
+            let exe = std::path::PathBuf::from(std::env::var_os(key).expect(key)).canonicalize().unwrap();
+            let output = platform::command(&exe).arg("--version").output().unwrap();
+            assert!(output.status.success());
+            let version = String::from_utf8(output.stdout).unwrap().trim().trim_start_matches("Python ").trim_start_matches('v').to_string();
+            assert!(!version.is_empty());
+            let mut entry = state.installer.manifest.packages[0].clone(); entry.id = id.into(); entry.category = "runtime".into(); entry.version = version.clone(); entry.entry = format!("{id}.exe");
+            state.installer.manifest.packages.push(entry);
+            state.store.upsert_installed(&crate::model::InstalledPackage { id: id.into(), version: version.clone(), category: "runtime".into(), install_path: exe.parent().unwrap().to_string_lossy().into_owned(), config_path: String::new(), installed_at: 0 }).unwrap();
+            versions.insert(id.into(), version); executables.insert(id, exe);
+        }
+        let view = state.project_runtime_versions(&site.id).unwrap();
+        state.save_project_runtime_versions(&site.id, &versions, &view.revision).unwrap();
+        let mut environment = state.site_terminal_environment(&site.id).unwrap();
+        environment.script.push_str("\n[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\n$nodePath=(Get-Command node -CommandType Application).Source\n$pythonPath=(Get-Command python -CommandType Application).Source\n$nodeVersion= & node --version\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n$pythonVersion= & python --version\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n[pscustomobject]@{nodePath=$nodePath;pythonPath=$pythonPath;nodeVersion=$nodeVersion;pythonVersion=$pythonVersion;cwd=(Get-Location).ProviderPath} | ConvertTo-Json -Compress");
+        let args = powershell_terminal_args(&environment).unwrap().into_iter().filter(|arg| arg != "-NoExit").collect::<Vec<_>>();
+        let powershell = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let before = std::env::var_os("PATH");
+        let output = platform::command(powershell).args(args).current_dir(terminal_directory(&environment.cwd).unwrap()).env("PATH", "C:/no-node-or-python").output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let actual: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        for id in ["node", "python"] { assert_eq!(std::path::Path::new(actual[format!("{id}Path")].as_str().unwrap()).canonicalize().unwrap(), executables[id]); }
+        assert_eq!(actual["nodeVersion"], format!("v{}", versions["node"]));
+        assert_eq!(actual["pythonVersion"], format!("Python {}", versions["python"]));
+        assert_eq!(terminal_directory(actual["cwd"].as_str().unwrap()).unwrap(), terminal_directory(&environment.cwd).unwrap());
+        assert_eq!(std::env::var_os("PATH"), before);
     }
 
     #[cfg(windows)]

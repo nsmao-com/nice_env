@@ -377,6 +377,7 @@ impl CoreState {
     }
 
     pub fn uninstall_package(&self, key: &str) -> Result<()> {
+        let _sites = sites::SITE_CHANGES.lock();
         let _operation = self.manager.lifecycle.lock();
         let task_id = match key.split_once('@') {
             Some(_) => key.to_string(),
@@ -545,6 +546,18 @@ impl CoreState {
         let _sites = sites::SITE_CHANGES.lock();
         let _operation = self.manager.lifecycle.lock();
         pathenv::site_terminal_environment(&self.store, &self.paths, &self.installer.manifest, site_id)
+    }
+
+    pub fn project_runtime_versions(&self, site_id: &str) -> Result<model::ProjectRuntimeVersions> {
+        let _sites = sites::SITE_CHANGES.lock();
+        let _operation = self.manager.lifecycle.lock();
+        pathenv::project_runtime_versions(&self.store, &self.installer.manifest, site_id)
+    }
+
+    pub fn save_project_runtime_versions(&self, site_id: &str, versions: &std::collections::BTreeMap<String, String>, expected_revision: &str) -> Result<model::ProjectRuntimeVersions> {
+        let _sites = sites::SITE_CHANGES.lock();
+        let _operation = self.manager.lifecycle.lock();
+        pathenv::save_project_runtime_versions(&self.store, &self.installer.manifest, site_id, versions, expected_revision)
     }
 
     /// 在启动前重新生成快照，并把版本和站点变更锁持有到进程创建完成。

@@ -456,6 +456,26 @@ pub struct TerminalEnvironmentEntry {
     pub bin_dir: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimeVersions {
+    pub path: String,
+    pub exists: bool,
+    pub revision: String,
+    pub versions: std::collections::BTreeMap<String, String>,
+    pub options: Vec<ProjectRuntimeOption>,
+    pub shared_sites: Vec<String>,
+    pub php_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimeOption {
+    pub id: String,
+    pub label: String,
+    pub versions: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct PackageView {

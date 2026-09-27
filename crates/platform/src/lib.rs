@@ -170,7 +170,7 @@ impl ProcessGroup {
         {
             let sig = if force { libc::SIGKILL } else { libc::SIGTERM };
             for pid in &self.pids {
-                kill_tree(*pid, sig);
+                kill_tree(*pid, sig)?;
             }
         }
         self.pids.clear();
@@ -191,7 +191,8 @@ pub fn process_group_gone(pid: u32) -> Result<bool> {
 
 /// Unix：先终止进程组，组不存在时退回单进程。
 #[cfg(not(windows))]
-fn kill_tree(pid: u32, sig: libc::c_int) {
+fn kill_tree(pid: u32, sig: libc::c_int) -> Result<()> {
+    if pid == 0 || pid > i32::MAX as u32 { return Err(PlatformError::Io("无效的进程组 ID".into())); }
     let pid = pid as libc::pid_t;
     unsafe {
         // 负 pid = 整个进程组（子进程启动时 setpgid(0,0)，pgid == pid）
@@ -199,10 +200,16 @@ fn kill_tree(pid: u32, sig: libc::c_int) {
             let e = std::io::Error::last_os_error();
             // ESRCH：组不存在，可能未被置组，退回杀单个进程
             if e.raw_os_error() == Some(libc::ESRCH) {
-                libc_kill(pid as u32, sig);
+                if libc_kill(pid as u32, sig) != 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::ESRCH) { return Err(io_err(error)); }
+                }
+            } else {
+                return Err(io_err(e));
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(not(windows))]

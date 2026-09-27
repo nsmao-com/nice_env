@@ -121,7 +121,7 @@ pub fn spawn_scheduler_when_ready(paths: Paths, gate: Option<std::sync::Arc<crat
             loop {
                 std::thread::sleep(Duration::from_secs(20));
                 if SHUTTING_DOWN.load(std::sync::atomic::Ordering::Acquire) {
-                    break;
+                    continue;
                 }
                 let Ok(_activity) = crate::paths::DataDirActivity::shared(&paths.base) else { continue; };
                 if recover_interrupted(&store).is_err() {
@@ -161,16 +161,34 @@ type RunKey = (std::path::PathBuf, String);
 struct ActiveRun {
     cancelled: AtomicBool,
     group: Mutex<platform::ProcessGroup>,
+    pid: std::sync::atomic::AtomicU32,
+    tree_owned: AtomicBool,
+    finished: AtomicBool,
+    cleanup_failed: AtomicBool,
+    record_error: Mutex<Option<AppError>>,
 }
 static ACTIVE: OnceLock<Mutex<HashMap<RunKey, Arc<ActiveRun>>>> = OnceLock::new();
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 fn active() -> &'static Mutex<HashMap<RunKey, Arc<ActiveRun>>> {
     ACTIVE.get_or_init(|| Mutex::new(HashMap::new()))
 }
+fn forget_run(key: &RunKey, run: &Arc<ActiveRun>) {
+    let mut runs = active().lock();
+    if runs.get(key).is_some_and(|current| Arc::ptr_eq(current, run)) { runs.remove(key); }
+}
 struct RunGuard(RunKey);
 impl Drop for RunGuard {
     fn drop(&mut self) {
-        active().lock().remove(&self.0);
+        let mut runs = active().lock();
+        if let Some(run) = runs.get(&self.0) {
+            if std::thread::panicking() {
+                run.cleanup_failed.store(true, Ordering::Release);
+                *run.record_error.lock() = Some(AppError::new("CRON_WORKER_FAILED", "计划任务执行线程异常结束"));
+            }
+            run.finished.store(true, Ordering::Release);
+            // 清理失败时保留组句柄和 PID，后续停止/退出仍能重试。
+            if !run.cleanup_failed.load(Ordering::Acquire) { runs.remove(&self.0); }
+        }
     }
 }
 
@@ -184,16 +202,90 @@ pub fn stop_job(store: &Store, id: &str) -> Result<()> {
         )
     })?;
     run.cancelled.store(true, Ordering::Release);
+    if run.finished.load(Ordering::Acquire) {
+        retry_cleanup(&run)?;
+        forget_run(&key, &run);
+    }
     Ok(())
 }
 
 /// 应用退出时关闭调度并终止本进程拥有的命令树（包括命令启动的子进程）。
 pub fn shutdown() {
-    SHUTTING_DOWN.store(true, Ordering::Release);
-    for run in active().lock().values() {
-        run.cancelled.store(true, Ordering::Release);
-        let _ = run.group.lock().terminate(true);
+    let _ = shutdown_checked(Duration::from_secs(12));
+}
+
+pub fn resume_after_shutdown() {
+    SHUTTING_DOWN.store(false, Ordering::Release);
+}
+
+pub fn shutdown_checked(timeout: Duration) -> Result<()> {
+    let runs = {
+        let runs = active().lock();
+        SHUTTING_DOWN.store(true, Ordering::Release);
+        runs.iter().map(|(key, run)| (key.clone(), run.clone())).collect::<Vec<_>>()
+    };
+    for (_, run) in &runs { run.cancelled.store(true, Ordering::Release); }
+    let deadline = std::time::Instant::now() + timeout;
+    while runs.iter().any(|(_, run)| !run.finished.load(Ordering::Acquire)) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
     }
+    let mut errors = Vec::new();
+    for (key, run) in runs {
+        if !run.finished.load(Ordering::Acquire) {
+            errors.push(format!("任务 {} 仍在结束或保存结果，请稍后重试", key.1));
+            continue;
+        }
+        if run.cleanup_failed.load(Ordering::Acquire) {
+            if std::time::Instant::now() >= deadline {
+                errors.push(format!("任务 {} 的清理尚未确认，请再次停止后重试", key.1));
+                continue;
+            }
+            match retry_cleanup(&run) {
+                Ok(()) => { forget_run(&key, &run); },
+                Err(error) => errors.push(format!("任务 {}：{}", key.1, error.message)),
+            }
+        }
+        if let Some(error) = run.record_error.lock().as_ref() {
+            errors.push(format!("任务 {} 结果保存失败：{}", key.1, error.message));
+        }
+    }
+    if errors.is_empty() { Ok(()) } else {
+        Err(AppError::new("CRON_SHUTDOWN_FAILED", errors.join("；")))
+    }
+}
+
+fn verify_process_gone(pid: u32) -> Result<()> {
+    if pid == 0 { return Ok(()); }
+    if platform::process_alive(pid) { return Err(AppError::new("CRON_STOP_FAILED", "计划任务进程仍未退出")); }
+    #[cfg(unix)]
+    {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !platform::process_group_gone(pid).map_err(AppError::from)? {
+            if std::time::Instant::now() >= deadline {
+                return Err(AppError::new("CRON_STOP_FAILED", "计划任务子进程组仍未退出"));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    Ok(())
+}
+
+fn retry_cleanup(run: &ActiveRun) -> Result<()> {
+    let pid = run.pid.load(Ordering::Acquire);
+    if pid != 0 && !run.tree_owned.load(Ordering::Acquire) {
+        return Err(AppError::new("CRON_STOP_FAILED", "命令未能加入受管进程组，无法确认其子进程已全部退出；请检查系统进程状态"));
+    }
+    let mut group = run.group.try_lock_for(Duration::from_secs(2))
+        .ok_or_else(|| AppError::new("CRON_BUSY", "计划任务进程组正在清理，请稍后重试"))?;
+    #[cfg(unix)]
+    if pid != 0 && group.pids().is_empty() && !platform::process_group_gone(pid).map_err(AppError::from)? {
+        *group = platform::ProcessGroup::from_pids(vec![pid]);
+    }
+    group.terminate(true).map_err(AppError::from)?;
+    drop(group);
+    verify_process_gone(pid)?;
+    run.cleanup_failed.store(false, Ordering::Release);
+    Ok(())
 }
 
 /// 手动和自动执行共用：先取得运行锁，再在数据库事务中复核状态和调度条件。
@@ -209,8 +301,18 @@ pub fn run_job(store: &Store, id: &str, manual: bool) -> Result<CronJob> {
     let run = Arc::new(ActiveRun {
         cancelled: AtomicBool::new(false),
         group: Mutex::new(platform::ProcessGroup::new()?),
+        pid: std::sync::atomic::AtomicU32::new(0),
+        tree_owned: AtomicBool::new(false),
+        finished: AtomicBool::new(false),
+        cleanup_failed: AtomicBool::new(false),
+        record_error: Mutex::new(None),
     });
-    active().lock().insert(key.clone(), run.clone());
+    {
+        let mut runs = active().lock();
+        if SHUTTING_DOWN.load(Ordering::Acquire) { return Err(AppError::new("CRON_SHUTDOWN", "应用正在退出，无法启动任务")); }
+        if runs.contains_key(&key) { return Err(AppError::new("CRON_BUSY", "任务仍在运行或清理，请先停止后重试")); }
+        runs.insert(key.clone(), run.clone());
+    }
     let _registration = RunGuard(key);
     let now = crate::services::now_ms();
     let Some(job) = store.claim_cron_run(id, manual, now)? else {
@@ -219,7 +321,10 @@ pub fn run_job(store: &Store, id: &str, manual: bool) -> Result<CronJob> {
             .ok_or_else(|| AppError::new("CRON_NOT_FOUND", "计划任务不存在"));
     };
     let (exit, output) = run_shell(&job.command, &run, Duration::from_secs(MAX_RUN_SECS));
-    store.finish_cron_run(id, now, &exit, &output)?;
+    store.finish_cron_run(id, now, &exit, &output).map_err(|error| {
+        *run.record_error.lock() = Some(error.clone());
+        error
+    })?;
     store
         .get_cron_job(id)?
         .ok_or_else(|| AppError::new("CRON_NOT_FOUND", "任务运行后记录不存在，请检查本机存储"))
@@ -297,11 +402,17 @@ fn run_shell(command: &str, run: &ActiveRun, timeout: Duration) -> (String, Stri
             Ok(child) => child,
             Err(e) => return ("spawn failed".into(), e.to_string()),
         };
+        run.pid.store(child.id(), Ordering::Release);
         if let Err(e) = group.attach(child.id()) {
+            run.cleanup_failed.store(true, Ordering::Release);
             let _ = child.kill();
-            let _ = child.wait();
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            while matches!(child.try_wait(), Ok(None)) && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
             return ("spawn failed".into(), format!("无法管理命令进程树：{e}"));
         }
+        run.tree_owned.store(true, Ordering::Release);
         child
     };
     let stdout = child.stdout.take().map(drain);
@@ -330,11 +441,24 @@ fn run_shell(command: &str, run: &ActiveRun, timeout: Duration) -> (String, Stri
     };
     // 即使 shell 先退出，也清理仍继承输出句柄的后台子进程，避免输出读取永久等待。
     if let Err(e) = run.group.lock().terminate(true) {
+        run.cleanup_failed.store(true, Ordering::Release);
         exit = "stop failed".into();
         detail = format!("进程树清理失败：{e}");
     }
     let _ = child.kill();
-    let _ = child.wait();
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => { run.cleanup_failed.store(true, Ordering::Release); break; },
+        }
+    }
+    if let Err(error) = verify_process_gone(child.id()) {
+        run.cleanup_failed.store(true, Ordering::Release);
+        detail = format!("{detail}\n{}", error.message);
+    }
+    if run.cleanup_failed.load(Ordering::Acquire) { exit = "stop failed".into(); }
     let read = |receiver: Option<std::sync::mpsc::Receiver<String>>| {
         receiver
             .and_then(|r| r.recv_timeout(Duration::from_secs(2)).ok())
@@ -400,7 +524,76 @@ mod tests {
         Arc::new(ActiveRun {
             cancelled: AtomicBool::new(false),
             group: Mutex::new(platform::ProcessGroup::new().unwrap()),
+            pid: std::sync::atomic::AtomicU32::new(0),
+            tree_owned: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
+            cleanup_failed: AtomicBool::new(false),
+            record_error: Mutex::new(None),
         })
+    }
+
+    #[test]
+    fn cron_shutdown_waits_and_failed_transition_restores_operations() {
+        let output = platform::command(std::env::current_exe().unwrap())
+            .args(["--exact", "cron::tests::cron_shutdown_probe", "--nocapture"])
+            .env("NSB_CRON_SHUTDOWN_PROBE", "1").output().unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+
+    #[test]
+    fn cron_shutdown_probe() {
+        if std::env::var_os("NSB_CRON_SHUTDOWN_PROBE").is_none() { return; }
+        let (_dir, store, job) = fixture(slow_command());
+        let other = Store::open(store.path.clone()).unwrap();
+        let id = job.id.clone();
+        let worker = std::thread::spawn(move || run_job(&other, &id, true));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let run = loop {
+            let run = active().lock().get(&(store.path.clone(), job.id.clone())).cloned();
+            if let Some(run) = run {
+                if run.pid.load(Ordering::Acquire) != 0 { break run; }
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        // 真实命令仍在运行；暂持组锁使执行线程无法清理，超时不能报成功。
+        let held = run.group.lock();
+        let pid = run.pid.load(Ordering::Acquire);
+        assert_eq!(shutdown_checked(Duration::from_millis(30)).unwrap_err().code, "CRON_SHUTDOWN_FAILED");
+        assert!(platform::process_alive(pid));
+        assert_eq!(run_job(&store, &job.id, true).unwrap_err().code, "CRON_SHUTDOWN");
+        drop(held);
+        resume_after_shutdown();
+        let state = crate::CoreState::init(Some(store.path.parent().unwrap().to_path_buf()), Arc::new(|_| {})).unwrap();
+        let guard = crate::AuxiliaryShutdown::prepare().unwrap();
+        assert!(!platform::process_alive(pid));
+        assert_eq!(worker.join().unwrap().unwrap().last_exit.as_deref(), Some("cancelled"));
+        assert_eq!(store.get_cron_job(&job.id).unwrap().unwrap().last_exit.as_deref(), Some("cancelled"));
+        assert_eq!(state.start_service("fixture-missing").unwrap_err().code, "APP_BUSY");
+        assert!(state.watchdog_tick().is_empty());
+        assert!(crate::AuxiliaryShutdown::prepare().is_err());
+        // 模拟下一步启动安装器失败或用户取消迁移，释放准备状态后可正常运行新任务。
+        drop(guard);
+        let failed = (|| -> Result<()> {
+            let _guard = crate::AuxiliaryShutdown::prepare()?;
+            state.with_stopped_services(|| Err(AppError::new("FIXTURE_LAUNCH_FAILED", "fixture: installer did not start")))
+        })();
+        assert_eq!(failed.unwrap_err().code, "FIXTURE_LAUNCH_FAILED");
+        // 已完成但结果保存失败必须向组合清理流程返回错误，并撤销所有关闭标记。
+        let failed_run = run_state();
+        failed_run.finished.store(true, Ordering::Release);
+        *failed_run.record_error.lock() = Some(AppError::new("FIXTURE_RECORD_FAILED", "fixture: result could not be saved"));
+        let failed_key = (store.path.clone(), "failed-result".to_string());
+        active().lock().insert(failed_key.clone(), failed_run);
+        assert!(matches!(crate::AuxiliaryShutdown::prepare(), Err(error) if error.code=="AUXILIARY_STOP_FAILED"));
+        active().lock().remove(&failed_key);
+        assert!(!SHUTTING_DOWN.load(Ordering::Acquire));
+        let (_next, store, job) = fixture("echo shutdown resumed");
+        assert_eq!(run_job(&store, &job.id, true).unwrap().last_exit.as_deref(), Some("exit 0"));
+        let mut guard = crate::AuxiliaryShutdown::prepare().unwrap();
+        guard.commit();
+        drop(guard);
+        assert_eq!(run_job(&store, &job.id, true).unwrap_err().code, "CRON_SHUTDOWN");
     }
 
     #[test]

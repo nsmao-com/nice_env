@@ -22,6 +22,7 @@ struct DesktopStartup {
 struct PendingDataDir {
     result: nsb_core::paths::DataDirMigration,
     activity: nsb_core::paths::DataDirActivity,
+    shutdown: nsb_core::AuxiliaryShutdown,
 }
 static PENDING_DATA_DIR: std::sync::Mutex<Option<PendingDataDir>> = std::sync::Mutex::new(None);
 fn pending_data_dir() -> std::sync::MutexGuard<'static, Option<PendingDataDir>> {
@@ -518,13 +519,6 @@ where
         });
         true
     }
-}
-
-/// 受管服务已经停止后，关闭辅助任务；PID 文件保留为核对后的空记录。
-fn shutdown_auxiliary_tasks() {
-    nsb_core::cron::shutdown();
-    nsb_core::tunnel::shutdown();
-    nsb_core::toolbox::ollama_shutdown();
 }
 
 /// 系统关闭和菜单退出走同一受控流程；不能在 UI 线程等待数据库停机。
@@ -2255,12 +2249,14 @@ async fn migrate_data_dir(
     }
     let st = state.inner().clone();
     let target = std::path::PathBuf::from(path);
-    let (result, activity) = tauri::async_runtime::spawn_blocking(move || {
-        map_jh(st.prepare_data_dir_migration(&target))
+    let (result, activity, shutdown) = tauri::async_runtime::spawn_blocking(move || {
+        let shutdown = map_jh(nsb_core::AuxiliaryShutdown::prepare())?;
+        let (result, activity) = map_jh(st.prepare_data_dir_migration(&target))?;
+        Ok::<_, tauri::Error>((result, activity, shutdown))
     })
     .await
     .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))??;
-    *pending_data_dir() = Some(PendingDataDir { result: result.clone(), activity });
+    *pending_data_dir() = Some(PendingDataDir { result: result.clone(), activity, shutdown });
     transition.prepared();
     // 页面在复制中重新加载也能接回已准备的副本，不留下无法操作的等待状态。
     let _ = app.emit("data-dir://prepared", &result);
@@ -2290,6 +2286,8 @@ fn restart_app(app: tauri::AppHandle, state: State<'_, Arc<CoreState>>, data_dir
         }
         map_jh(AppTransition::begin_from(3, 3))?
     } else { map_jh(AppTransition::begin())? };
+    // 清理先于服务生命周期锁，避免与模型删除/服务操作的锁顺序相反。
+    let mut shutdown = if prepared { None } else { Some(map_jh(nsb_core::AuxiliaryShutdown::prepare())?) };
     let executable = std::env::current_exe()
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))?;
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
@@ -2304,8 +2302,8 @@ fn restart_app(app: tauri::AppHandle, state: State<'_, Arc<CoreState>>, data_dir
         if let Some(path) = data_dir {
             // 子进程与今后从快捷方式启动都读取同一持久选择；启动失败恢复原选择。
             command.env_remove("NSB_HOME");
-            let pending = pending_data_dir();
-            let pending = pending.as_ref().ok_or_else(|| AppError::new("DATA_DIR_NOT_PREPARED", "迁移副本尚未准备好"))?;
+            let mut pending = pending_data_dir();
+            let pending = pending.as_mut().ok_or_else(|| AppError::new("DATA_DIR_NOT_PREPARED", "迁移副本尚未准备好"))?;
             pending.activity.with_selected_data_dir(std::path::Path::new(&path), || {
                 let rollback = nsb_core::pathenv::MigrationActivationRollback::capture(std::path::Path::new(&path))?;
                 match nsb_core::restart::launch_and_wait(&mut command,std::path::Path::new(&path),std::time::Duration::from_secs(45)) {
@@ -2318,11 +2316,12 @@ fn restart_app(app: tauri::AppHandle, state: State<'_, Arc<CoreState>>, data_dir
                     }
                 }
             })?;
+            pending.shutdown.commit();
         } else {
             if relocated { command.env_remove("NSB_HOME"); }
             command.spawn().map_err(|e| AppError::io("启动新的 NiceEnv 进程", e))?;
         }
-        shutdown_auxiliary_tasks();
+        if let Some(shutdown) = shutdown.as_mut() { shutdown.commit(); }
         transition.commit();
         app.exit(0);
         Ok(true)
@@ -2731,8 +2730,9 @@ fn quit_app(app: tauri::AppHandle) -> Result<bool, tauri::Error> {
 fn exit_after_stop(app: tauri::AppHandle, mut transition: AppTransition) -> Result<bool, tauri::Error> {
     let state = app.state::<Arc<CoreState>>();
     let relocated = map_jh(nsb_core::paths::redirected_data_dir(&state.paths.base))?.is_some();
+    let mut shutdown = map_jh(nsb_core::AuxiliaryShutdown::prepare())?;
     let mut exit = || {
-        shutdown_auxiliary_tasks();
+        shutdown.commit();
         transition.commit();
         app.exit(0);
         Ok(true)
@@ -2865,7 +2865,7 @@ async fn download_update(
 ///
 /// - Windows：运行 NSIS 安装器（`/S` 静默由用户决定，这里用交互式安装器让用户看到进度），
 ///   安装器会自行结束并替换本程序；我们随即退出，避免文件占用导致安装失败。
-/// - macOS：挂载 dmg 并把 .app 拷到 /Applications（需要用户授权），完成后退出。
+/// - macOS：打开 dmg 后退出，用户仍需手动将 .app 拖入 Applications。
 #[tauri::command]
 fn install_update(app: tauri::AppHandle, path: String) -> Result<bool, tauri::Error> {
     let mut transition = map_jh(AppTransition::begin())?;
@@ -2877,6 +2877,7 @@ fn install_update(app: tauri::AppHandle, path: String) -> Result<bool, tauri::Er
         )));
     }
     let state = app.state::<Arc<CoreState>>();
+    let mut shutdown = map_jh(nsb_core::AuxiliaryShutdown::prepare())?;
     map_jh(state.with_stopped_services(|| {
         #[cfg(windows)]
         {
@@ -2893,7 +2894,7 @@ fn install_update(app: tauri::AppHandle, path: String) -> Result<bool, tauri::Er
                 .map_err(|e| AppError::io("打开 dmg", e))?;
         }
         // 安装器需要独占替换可执行文件：先收尾再退出
-        shutdown_auxiliary_tasks();
+        shutdown.commit();
         transition.commit();
         app.exit(0);
         Ok(true)

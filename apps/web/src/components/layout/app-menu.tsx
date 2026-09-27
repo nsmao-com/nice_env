@@ -79,7 +79,7 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
   const { isMac, minimize, close } = useDesktopWindow();
   const [aboutOpen, setAboutOpen] = React.useState(false);
   const [checking, setChecking] = React.useState(false);
-  const [version, setVersion] = React.useState("0.2.32");
+  const [version, setVersion] = React.useState("0.2.33");
   const [updateOpen, setUpdateOpen] = React.useState(false);
   const [confirm, setConfirm] = React.useState<null | "stopAll" | "quit">(null);
   const [busy, setBusy] = React.useState(false);
@@ -294,6 +294,7 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
           }
         }}
       >
+        {busy && <p role="status" className="text-xs leading-relaxed text-muted">{t("confirm.quittingHint")}</p>}
         {quitError && <div ref={quitErrorRef} tabIndex={-1} role="alert" className="rounded-lg border border-error/30 bg-error-soft p-3 text-xs text-error whitespace-pre-wrap [overflow-wrap:anywhere]">{quitError}</div>}
       </ConfirmDialog>
 

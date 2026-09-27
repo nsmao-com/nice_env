@@ -264,6 +264,7 @@ mod ollama {
     struct PullJob {
         info: Mutex<OllamaPullStatus>,
         cancel: tokio::sync::watch::Sender<bool>,
+        worker: Mutex<Option<std::thread::JoinHandle<()>>>,
     }
     #[derive(Default)]
     struct Controller {
@@ -312,6 +313,7 @@ mod ollama {
                     ended_at: None,
                 }),
                 cancel,
+                worker: Mutex::new(None),
             });
             *self.job.lock() = Some(job.clone());
             let running = job.clone();
@@ -335,12 +337,15 @@ mod ollama {
                 } }
                 info.ended_at = Some(crate::services::now_ms());
             });
-            if let Err(e) = result {
-                let mut info = job.info.lock();
-                info.state = "failed".into();
-                info.error = Some(format!("无法启动拉取任务：{e}"));
-                info.ended_at = Some(crate::services::now_ms());
-                return Err(AppError::io("启动模型拉取任务", e));
+            match result {
+                Ok(worker) => { *job.worker.lock() = Some(worker); },
+                Err(e) => {
+                    let mut info = job.info.lock();
+                    info.state = "failed".into();
+                    info.error = Some(format!("无法启动拉取任务：{e}"));
+                    info.ended_at = Some(crate::services::now_ms());
+                    return Err(AppError::io("启动模型拉取任务", e));
+                },
             }
             let info = job.info.lock().clone();
             Ok(info)
@@ -364,12 +369,39 @@ mod ollama {
             job.cancel.send_replace(true);
             Ok(())
         }
-        fn shutdown(&self) {
-            let _operation = self.operation.lock();
+        fn shutdown(&self) -> Result<()> {
             self.closing.store(true, Ordering::Release);
+            let _operation = self.operation.try_lock_for(Duration::from_secs(2))
+                .ok_or_else(|| AppError::new("OLLAMA_BUSY", "模型操作正在完成，请稍后重试退出"))?;
             if let Some(info) = self.status() {
-                let _ = self.cancel(&info.id);
+                self.cancel(&info.id)?;
             }
+            if let Some(job) = self.job.lock().clone() {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    let mut worker = job.worker.lock();
+                    if worker.as_ref().is_none_or(|worker| worker.is_finished()) {
+                        if let Some(worker) = worker.take() {
+                            if worker.join().is_err() {
+                                let error = AppError::new("OLLAMA_STOP_FAILED", "模型下载线程异常结束，请检查任务状态后重试");
+                                let mut info = job.info.lock();
+                                info.state = "failed".into();
+                                info.error = Some(error.message.clone());
+                                info.ended_at = Some(crate::services::now_ms());
+                                return Err(error);
+                            }
+                        }
+                        break;
+                    }
+                    drop(worker);
+                    if std::time::Instant::now() >= deadline { return Err(AppError::new("OLLAMA_STOP_TIMEOUT", "模型下载请求尚未结束，请稍后重试退出")); }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+            Ok(())
+        }
+        fn resume(&self) {
+            self.closing.store(false, Ordering::Release);
         }
         fn delete(&self, endpoint: &Endpoint, raw: &str) -> Result<()> {
             let _operation = self.operation.lock();
@@ -561,7 +593,13 @@ mod ollama {
         controller().cancel(id)
     }
     pub fn ollama_shutdown() {
-        controller().shutdown();
+        let _ = controller().shutdown();
+    }
+    pub fn ollama_shutdown_checked() -> Result<()> {
+        controller().shutdown()
+    }
+    pub fn ollama_resume_after_shutdown() {
+        controller().resume();
     }
 
     #[cfg(test)]
@@ -900,11 +938,23 @@ mod ollama {
             controller
                 .start(fixture.endpoint.clone(), "tiny", timing())
                 .unwrap();
-            controller.shutdown();
+            controller.shutdown().unwrap();
             assert_eq!(ended(&controller).state, "cancelled");
             assert!(controller
                 .start(fixture.endpoint.clone(), "tiny", timing())
                 .is_err());
+            controller.resume();
+            fixture.closed.store(false, Ordering::Release);
+            controller.start(fixture.endpoint.clone(), "tiny", PullTiming { idle: Duration::from_secs(8), total: Duration::from_secs(12) }).unwrap();
+            let operation = controller.operation.lock();
+            assert_eq!(controller.shutdown().unwrap_err().code, "OLLAMA_BUSY");
+            drop(operation);
+            controller.resume();
+            assert!(controller.status().unwrap().active());
+            controller.shutdown().unwrap();
+            assert_eq!(controller.status().unwrap().state, "cancelled");
+            assert!(controller.job.lock().as_ref().unwrap().worker.lock().is_none());
+            wait_for(|| fixture.closed.load(Ordering::Acquire));
         }
         #[test]
         fn idle_and_total_timeouts_end_the_request() {
@@ -973,7 +1023,7 @@ mod ollama {
 }
 pub use ollama::{
     ollama_cancel_pull, ollama_delete, ollama_models, ollama_pull, ollama_pull_status,
-    ollama_shutdown, OllamaModelRow, OllamaPullStatus,
+    ollama_shutdown, ollama_shutdown_checked, ollama_resume_after_shutdown, OllamaModelRow, OllamaPullStatus,
 };
 
 /* ================= Adminer 数据库管理台 ================= */

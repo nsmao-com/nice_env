@@ -99,6 +99,26 @@ struct ManagedProcess {
     child: std::process::Child,
     group: platform::ProcessGroup,
 }
+impl ManagedProcess {
+    fn stop_checked(&mut self) -> Result<()> {
+        self.group.terminate(true).map_err(AppError::from)?;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if self.child.try_wait().map_err(|e| AppError::io("确认隧道停止", e))?.is_some() {
+                #[cfg(unix)]
+                if !platform::process_group_gone(self.child.id()).map_err(AppError::from)? {
+                    if Instant::now() < deadline { std::thread::sleep(Duration::from_millis(30)); continue; }
+                    // 保留组 ID，下一次仍可终止尚未退出的子进程。
+                    self.group = platform::ProcessGroup::from_pids(vec![self.child.id()]);
+                    return Err(AppError::new("TUNNEL_STOP_TIMEOUT", "隧道子进程仍未退出，请重试停止"));
+                }
+                return Ok(());
+            }
+            if Instant::now() >= deadline { return Err(AppError::new("TUNNEL_STOP_TIMEOUT", "隧道尚未退出，请再次停止或查看输出")); }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+    }
+}
 impl Drop for ManagedProcess {
     fn drop(&mut self) {
         let _ = self.group.terminate(true);
@@ -132,10 +152,14 @@ impl Entry {
         }
         match exit {
             Ok(Some(status)) => {
-                let _ = process.group.terminate(true);
-                info.alive = false;
                 info.state = "failed".into();
-                info.error = Some(format!("cloudflared 已退出（{status}），请查看输出后重试"));
+                match process.stop_checked() {
+                    Ok(()) => {
+                        info.alive = false;
+                        info.error = Some(format!("cloudflared 已退出（{status}），请查看输出后重试"));
+                    },
+                    Err(error) => { info.error = Some(error.message); },
+                }
             }
             Ok(None) => {}
             Err(e) => {
@@ -145,32 +169,12 @@ impl Entry {
         }
     }
     fn stop(&self, failure: Option<&str>) -> Result<()> {
-        let mut process = self.process.lock();
+        let mut process = self.process.try_lock_for(Duration::from_secs(2))
+            .ok_or_else(|| AppError::new("TUNNEL_BUSY", "隧道正在结束，请稍后重试"))?;
         if !self.info.lock().alive {
             return Ok(());
         }
-        let result = (|| -> Result<()> {
-            process.group.terminate(true).map_err(AppError::from)?;
-            let deadline = Instant::now() + Duration::from_secs(3);
-            loop {
-                match process
-                    .child
-                    .try_wait()
-                    .map_err(|e| AppError::io("确认隧道停止", e))?
-                {
-                    Some(_) => return Ok(()),
-                    None if Instant::now() < deadline => {
-                        std::thread::sleep(Duration::from_millis(30))
-                    }
-                    None => {
-                        return Err(AppError::new(
-                            "TUNNEL_STOP_TIMEOUT",
-                            "隧道尚未退出，请再次停止或查看输出",
-                        ))
-                    }
-                }
-            }
-        })();
+        let result = process.stop_checked();
         let mut info = self.info.lock();
         match result {
             Ok(()) => {
@@ -323,12 +327,24 @@ impl TunnelRegistry {
         }
         Ok(entry.snapshot())
     }
-    fn shutdown(&self) {
-        let _operation = self.start_gate.lock();
+    fn shutdown(&self) -> Result<()> {
         self.closing.store(true, Ordering::Release);
-        for entry in self.entries.lock().iter() {
-            let _ = entry.stop(None);
+        let _operation = self.start_gate.try_lock_for(Duration::from_secs(2))
+            .ok_or_else(|| AppError::new("TUNNEL_BUSY", "隧道正在创建，请稍后重试退出"))?;
+        let entries = self.entries.lock().clone();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut errors = Vec::new();
+        for entry in entries {
+            if Instant::now() >= deadline {
+                errors.push("其它隧道尚未确认停止，请重试".to_string());
+                break;
+            }
+            if let Err(error) = entry.stop(None) { errors.push(format!("{}：{}", entry.target.label(), error.message)); }
         }
+        if errors.is_empty() { Ok(()) } else { Err(AppError::new("TUNNEL_SHUTDOWN_FAILED", errors.join("；"))) }
+    }
+    fn resume(&self) {
+        self.closing.store(false, Ordering::Release);
     }
 }
 #[derive(Clone, Copy)]
@@ -577,7 +593,13 @@ pub fn remove(id: &str) -> Result<()> {
     registry().remove(id)
 }
 pub fn shutdown() {
-    registry().shutdown();
+    let _ = registry().shutdown();
+}
+pub fn shutdown_checked() -> Result<()> {
+    registry().shutdown()
+}
+pub fn resume_after_shutdown() {
+    registry().resume();
 }
 
 #[cfg(test)]
@@ -951,7 +973,7 @@ mod tests {
             .iter()
             .map(|e| e.process.lock().child.id())
             .collect();
-        registry.shutdown();
+        registry.shutdown().unwrap();
         assert!(pids.into_iter().all(|pid| !platform::process_alive(pid)));
         assert!(registry.list().iter().all(|entry| entry.state == "stopped"));
         assert!(registry
@@ -962,6 +984,29 @@ mod tests {
             )
             .is_err());
     }
+    #[test]
+    fn shutdown_failure_retains_process_and_resume_allows_retry() {
+        let origin = HttpFixture::new(200, "");
+        let registry = TunnelRegistry::default();
+        let info = registry.start(Target::local(origin.port).unwrap(), || command("hold", None), timing()).unwrap();
+        let entry = registry.find(&info.id).unwrap();
+        let pid = entry.process.lock().child.id();
+        let held = entry.process.lock();
+        assert_eq!(registry.shutdown().unwrap_err().code, "TUNNEL_SHUTDOWN_FAILED");
+        assert!(platform::process_alive(pid));
+        assert!(entry.info.lock().alive);
+        drop(held);
+        registry.resume();
+        let same = registry.start(Target::local(origin.port).unwrap(), || panic!("existing tunnel must be retained"), timing()).unwrap();
+        assert_eq!(same.id, info.id);
+        registry.shutdown().unwrap();
+        assert!(!platform::process_alive(pid));
+        registry.resume();
+        let next = registry.start(Target::local(origin.port).unwrap(), || command("hold", None), timing()).unwrap();
+        assert_ne!(next.id, info.id);
+        registry.shutdown().unwrap();
+    }
+
     #[test]
     fn command_isolates_config_and_forwards_site_host() {
         let target = Target {

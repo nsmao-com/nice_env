@@ -345,8 +345,8 @@ export function UpdateDialog({
 
               {phase === "installing" && (
                 <div className="flex items-center gap-3 rounded-xl border border-primary/25 bg-primary-soft/50 p-3">
-                  <Loader2 className="h-5 w-5 animate-spin text-primary" />
-                  <div className="flex flex-col">
+                  <Loader2 className="h-5 w-5 shrink-0 animate-spin text-primary" />
+                  <div className="flex min-w-0 flex-1 flex-col">
                     <span className="text-[12.5px] font-medium text-secondary">{t("update.installing")}</span>
                     <span className="text-[11px] text-faint">{t("update.installingHint")}</span>
                   </div>
@@ -413,7 +413,7 @@ export function UpdateDialog({
               </Button>
             </>
           )}
-          {phase === "installing" && <span className="text-[11.5px] text-faint">{t("update.installingHint")}</span>}
+          {phase === "installing" && <span role="status" className="text-[11.5px] text-faint">{t("update.installing")}</span>}
           {(phase === "uptodate" || phase === "unknown" || phase === "error") && (
             <>
               <Button variant="ghost" onClick={() => onOpenChange(false)}>

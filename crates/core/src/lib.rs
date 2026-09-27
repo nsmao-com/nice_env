@@ -138,6 +138,49 @@ impl Event {
 
 pub type EventSink = Arc<dyn Fn(Event) + Send + Sync>;
 
+static AUXILIARY_SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 退出/更新/迁移的可恢复准备阶段。后续失败或取消时恢复入口，不自动重跑已取消任务。
+pub struct AuxiliaryShutdown { committed: bool }
+fn ensure_application_accepts_work() -> Result<()> {
+    if AUXILIARY_SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(AppError::new("APP_BUSY", "应用正在退出、重启或迁移，无法启动新服务"));
+    }
+    Ok(())
+}
+impl AuxiliaryShutdown {
+    pub fn prepare() -> Result<Self> {
+        use std::sync::atomic::Ordering;
+        AUXILIARY_SHUTDOWN.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| AppError::new("APP_BUSY", "应用正在收尾后台任务，请稍候"))?;
+        let guard = Self { committed: false };
+        let mut errors = Vec::new();
+        for (label, result) in [
+            ("计划任务", cron::shutdown_checked(std::time::Duration::from_secs(12))),
+            ("临时隧道", tunnel::shutdown_checked()),
+            ("模型下载", toolbox::ollama_shutdown_checked()),
+        ] {
+            if let Err(error) = result { errors.push(format!("{label}：{}", error.message)); }
+        }
+        if !errors.is_empty() {
+            return Err(AppError::new("AUXILIARY_STOP_FAILED", format!("后台任务未能全部结束，操作已中止。{}", errors.join("；")))
+                .with_hint("应用保持打开。请检查计划任务、隧道或模型下载状态后重试；已停止的任务不会自动重跑"));
+        }
+        Ok(guard)
+    }
+    pub fn commit(&mut self) { self.committed = true; }
+}
+impl Drop for AuxiliaryShutdown {
+    fn drop(&mut self) {
+        if !self.committed {
+            cron::resume_after_shutdown();
+            tunnel::resume_after_shutdown();
+            toolbox::ollama_resume_after_shutdown();
+            AUXILIARY_SHUTDOWN.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
 pub struct CoreState {
     pub paths: paths::Paths,
     pub store: store::Store,
@@ -738,6 +781,7 @@ impl CoreState {
     pub fn start_service(&self, id: &str) -> Result<()> {
         let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
         let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后启动"))?;
+        ensure_application_accepts_work()?;
         let mut r = ops::start_service(&self.store, &self.paths, &self.manager, id);
         if r.is_ok() && !self.manager.snapshot(id).is_some_and(|status| status.state == model::ServiceState::Running && !status.pids.is_empty()) {
             let error = AppError::new("SERVICE_START_EXITED", format!("{id} 启动后进程已退出，请检查日志"));
@@ -771,6 +815,7 @@ impl CoreState {
     pub fn restart_service(&self, id: &str) -> Result<()> {
         let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
         let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重启"))?;
+        ensure_application_accepts_work()?;
         let before = self.manager.snapshot(id).ok_or_else(|| AppError::new("UNKNOWN_SERVICE", format!("服务 {id} 未注册或已卸载")))?;
         if matches!(before.state, model::ServiceState::Starting | model::ServiceState::Stopping) {
             return Err(AppError::new("SERVICE_BUSY", "服务正在切换状态，请稍后重启"));
@@ -1342,6 +1387,7 @@ impl CoreState {
     pub fn watchdog_tick(&self) -> Vec<(String, bool)> {
         let Ok(_activity) = paths::DataDirActivity::shared(&self.paths.base) else { return Vec::new(); };
         let _operation = self.manager.lifecycle.lock();
+        if ensure_application_accepts_work().is_err() { return Vec::new(); }
         let cfg = self.watchdog_config();
         if !cfg.enabled {
             return Vec::new();

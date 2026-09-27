@@ -235,6 +235,8 @@ pub fn run() {
             watchdog_status,
             watchdog_set_enabled,
             watchdog_reset,
+            process_recovery_status,
+            recover_processes,
             // 服务栈
             list_stacks,
             save_stack,
@@ -3273,6 +3275,18 @@ fn watchdog_set_enabled(
 #[tauri::command]
 fn watchdog_reset(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: String) -> Result<bool, tauri::Error> {
     map_jh(state.watchdog_reset(&id).map(|_| true))
+}
+
+#[tauri::command]
+fn process_recovery_status(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> nsb_core::ops::OrphanReport {
+    state.process_recovery_status()
+}
+
+#[tauri::command]
+async fn recover_processes(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> Result<nsb_core::ops::OrphanReport, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.recover_processes()))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /* ================= 项目扫描 ================= */

@@ -49,7 +49,7 @@ pub fn list(store: &Store) -> Result<Vec<Site>> {
     store.list_sites()
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SiteEndpoint {
     url: String,
     port: u16,

@@ -305,13 +305,8 @@ pub(crate) fn spawn(
             }
             if std::net::TcpStream::connect_timeout(&target, Duration::from_millis(300)).is_ok() {
                 // Go / Node worker 可由启动器派生；记录已确认归属的监听进程，便于停机核验。
-                if let Some(entry) = manager.services.lock().get(id).cloned() {
-                    let mut pids = entry.pids.lock();
-                    for listener in owned {
-                        if !pids.contains(&listener.pid) {
-                            pids.push(listener.pid);
-                        }
-                    }
+                for listener in owned {
+                    manager.track_pid(id, listener.pid)?;
                 }
                 manager.set_started_port(id, target.port());
                 return Ok(());

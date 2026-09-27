@@ -23,6 +23,7 @@ import type {
   DbBackupFile,
   DbRestoreResult,
   WatchdogStatus,
+  ProcessRecoveryReport,
   ScannedProject,
   ConfigFileInfo,
   ConfigValidation,
@@ -57,6 +58,8 @@ import type {
 import { browserUrl, invoke, isTauri, safe } from "./backend";
 
 /* 服务 */
+export const processRecoveryStatus = () => safe(invoke<ProcessRecoveryReport>("process_recovery_status"));
+export const recoverProcesses = () => safe(invoke<ProcessRecoveryReport>("recover_processes"));
 export const listServiceStatus = () =>
   safe(invoke<ServiceStatus[]>("list_service_status"));
 export const serviceWebUrl = (id: string) =>

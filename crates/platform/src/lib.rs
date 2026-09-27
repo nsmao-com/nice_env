@@ -80,6 +80,67 @@ pub fn decode_command_output(bytes: &[u8]) -> String {
 
 /* ================= 进程树管理 ================= */
 
+/// PID 会被复用，恢复与停机必须同时核对内核提供的创建标识。
+/// 保留原生精度，不使用 sysinfo 按秒取整的 start_time。
+pub fn process_start_marker(pid: u32) -> Option<String> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return None;
+    }
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+        use windows_sys::Win32::System::Threading::{
+            GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let mut created: FILETIME = std::mem::zeroed();
+        let mut exited: FILETIME = std::mem::zeroed();
+        let mut kernel: FILETIME = std::mem::zeroed();
+        let mut user: FILETIME = std::mem::zeroed();
+        let ok = GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user);
+        CloseHandle(handle);
+        return (ok != 0).then(|| {
+            format!(
+                "win:{}",
+                ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64
+            )
+        });
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // comm 字段可含空格和括号；其后的第 20 项是 starttime（字段 22）。
+        let tail = stat.get(stat.rfind(')')? + 1..)?;
+        let ticks: u64 = tail.split_whitespace().nth(19)?.parse().ok()?;
+        let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+        return Some(format!("linux:{}:{ticks}", boot.trim()));
+    }
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let mut info: libc::proc_bsdinfo = std::mem::zeroed();
+        let size = std::mem::size_of_val(&info) as libc::c_int;
+        if libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        ) != size
+        {
+            return None;
+        }
+        return Some(format!(
+            "mac:{}:{}",
+            info.pbi_start_tvsec, info.pbi_start_tvusec
+        ));
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    None
+}
+
 /// 进程组句柄：Windows=Job Object(KILL_ON_JOB_CLOSE)，Unix=记录 pid 集合。
 pub struct ProcessGroup {
     #[cfg(windows)]

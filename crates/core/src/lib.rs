@@ -276,7 +276,7 @@ impl CoreState {
         ops::register_services(&paths, &store, &manager);
         generic::register_services(&paths, &store, &manager);
         // 上次会话崩溃/被强杀时留下的进程：启动即清理，否则它们占着端口让服务起不来
-        let orphans = ops::sweep_orphans(&paths, &manager);
+        let orphans = ops::sweep_orphans(&paths, &store, &manager);
         // effective() 要在 paths 被 move 进 state 之前用掉
         let installer = install::Installer::effective(&paths);
         let state = Arc::new(Self {
@@ -287,7 +287,7 @@ impl CoreState {
             installer,
             emit,
         });
-        if !orphans.adopted.is_empty() || !orphans.killed.is_empty() {
+        if !orphans.adopted.is_empty() || !orphans.killed.is_empty() || !orphans.unresolved.is_empty() {
             let mut parts = Vec::new();
             if !orphans.adopted.is_empty() {
                 let d = orphans
@@ -307,13 +307,14 @@ impl CoreState {
                     .join(", ");
                 parts.push(format!("清理 {}", d));
             }
+            parts.extend(orphans.unresolved.iter().cloned());
             (state.emit)(Event::DownloadProgress(model::DownloadProgress {
                 task_id: "orphans".into(),
                 received: 0,
                 total: 0,
                 speed_bps: 0,
                 eta_sec: 0.0,
-                state: "orphans-resolved".into(),
+                state: if orphans.unresolved.is_empty() { "orphans-resolved" } else { "orphans-pending" }.into(),
                 error: Some(parts.join("；")),
             }));
         }
@@ -1487,6 +1488,17 @@ impl CoreState {
 
     pub fn watchdog_config(&self) -> watchdog::WatchdogConfig {
         watchdog::config_from_store(&self.store)
+    }
+
+    pub fn process_recovery_status(&self) -> ops::OrphanReport {
+        self.manager.recovery.lock().clone()
+    }
+
+    pub fn recover_processes(&self) -> Result<ops::OrphanReport> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重新检查"))?;
+        ensure_application_accepts_work()?;
+        Ok(ops::sweep_orphans(&self.paths, &self.store, &self.manager))
     }
 
     pub fn watchdog_status(&self) -> watchdog::WatchdogStatus {

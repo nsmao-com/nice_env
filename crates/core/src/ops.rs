@@ -294,6 +294,9 @@ fn start_service_inner(
     user_start: bool,
 ) -> Result<()> {
     let _operation = manager.lifecycle.lock();
+    if manager.recovery.lock().blocked_services.iter().any(|blocked| blocked == id) {
+        return Err(AppError::new("PROCESS_RECOVERY_UNVERIFIED", "历史进程尚未确认，暂不能启动此服务，请先重新检查服务接管状态"));
+    }
     register_services(paths, store, manager);
     crate::generic::register_services(paths, store, manager);
     let status = manager
@@ -964,6 +967,9 @@ pub fn stop_service(
     id: &str,
 ) -> Result<()> {
     let _operation = manager.lifecycle.lock();
+    if manager.recovery.lock().blocked_services.iter().any(|blocked| blocked == id) && !manager.is_process_busy(id) {
+        return Err(AppError::new("PROCESS_RECOVERY_UNVERIFIED", "历史进程尚未确认，无法安全停止，请先检查端口占用并重新检查服务接管状态"));
+    }
     if id == "coredns" { crate::dns::restore_before_stop(store)?; }
     if manager.snapshot(id).is_none() {
         manager.watchdog.forget(id);
@@ -974,6 +980,12 @@ pub fn stop_service(
         manager.set_state(id, ServiceState::Stopped);
         manager.watchdog.note_user_stopped(id);
         return Ok(());
+    }
+    if let Some(entry) = manager.services.lock().get(id).cloned() {
+        let identities = entry.identities.lock().clone();
+        if entry.pids.lock().iter().any(|pid| identities.get(pid).is_none_or(|identity| identity.current().is_none())) {
+            return Err(AppError::new("PROCESS_IDENTITY_UNAVAILABLE", "服务进程身份暂时无法确认，请检查权限后重试停止"));
+        }
     }
     manager.set_state(id, ServiceState::Stopping);
     let ports = PortsProfile::from_settings(store);
@@ -1334,148 +1346,461 @@ pub fn stop_all(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>) {
 
 /* ================= 孤儿进程清理 ================= */
 
-/// 把当前托管的 pid 落盘（{data}/run/pids.json）。
-/// 崩溃/被强杀时不会走到 stop_all，只能在下次启动时靠这份记录找回残留进程。
-pub fn save_pidfile(paths: &Paths, manager: &Arc<ServiceManager>) {
-    let _ = save_pidfile_checked(paths, manager);
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProcessRecord {
+    id: String,
+    pids: Vec<u32>,
+    #[serde(default)]
+    processes: Option<Vec<ProcessIdentity>>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    owner_pid: Option<u32>,
+    #[serde(default)]
+    owner_started: Option<String>,
+    #[serde(default)]
+    recorded_at: Option<u64>,
+    #[serde(default)]
+    started_at: Option<u64>,
+    #[serde(default)]
+    site_endpoints: std::collections::HashMap<String, crate::sites::SiteEndpoint>,
+    #[serde(default)]
+    web_target: Option<Result<ServiceWebTarget>>,
 }
 
-/// 退出或迁移前必须确认恢复记录写入成功，不能把写入失败当作已完成收尾。
-pub fn save_pidfile_checked(paths: &Paths, manager: &Arc<ServiceManager>) -> Result<()> {
-    // 注意：必须先把 id 列表拷出来再逐个取，不能写成
-    // `for id in manager.services.lock().keys()` —— 那样整个循环都持有该锁，
-    // 循环体里再取同一个 Mutex 就是自死锁（parking_lot 不可重入）
-    let ids: Vec<String> = manager.services.lock().keys().cloned().collect();
-    let mut entries: Vec<(String, Vec<u32>)> = Vec::new();
-    for id in ids {
-        if let Some(e) = manager.services.lock().get(&id).cloned() {
-            let pids = e.pids.lock().clone();
-            if !pids.is_empty() {
-                entries.push((id, pids));
-            }
-        }
-    }
-    // 管理台独立于套件服务列表；异常退出后仍由既有归属校验清理其残留进程。
-    if let Some(pid) = crate::toolbox::adminer_pid(manager) {
-        entries.push(("adminer-console".into(), vec![pid]));
-    }
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProcessFile {
+    #[serde(default)]
+    format_version: u32,
+    app_pid: u32,
+    #[serde(default)]
+    app_started: Option<String>,
+    saved_at: u64,
+    services: Vec<ProcessRecord>,
+}
+
+/// 同一数据目录的 CLI 与桌面端共用文件锁，避免并发保存互相覆盖。
+fn lock_pidfile(paths: &Paths) -> Result<std::fs::File> {
     let dir = paths.data().join("run");
     std::fs::create_dir_all(&dir).map_err(|e| AppError::io("创建进程记录目录", e))?;
-    let json = serde_json::json!({
-        "appPid": std::process::id(),
-        "savedAt": crate::services::now_ms(),
-        "services": entries.iter().map(|(k, v)| {
-            let port = manager.started_port_or(k, 0);
-            serde_json::json!({"id": k, "pids": v, "port": port})
-        }).collect::<Vec<_>>(),
-    });
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join("pids.lock"))
+        .map_err(|e| AppError::io("打开进程记录锁", e))?;
+    lock.lock().map_err(|e| AppError::io("锁定进程记录", e))?;
+    Ok(lock)
+}
+
+fn read_pidfile(paths: &Paths) -> Result<Option<ProcessFile>> {
+    let raw = match std::fs::read(paths.data().join("run/pids.json")) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(AppError::io("读取进程恢复记录", e)),
+    };
+    let mut file: ProcessFile = serde_json::from_slice(&raw).map_err(|e| {
+        AppError::new(
+            "PROCESS_RECORD_INVALID",
+            "进程恢复记录格式损坏，已保留原文件，未接管或清理进程",
+        )
+        .with_hint("请检查数据目录 data/run/pids.json；确认残留进程后再备份并移走损坏文件。")
+        .with_detail(e.to_string())
+    })?;
+    if file.format_version > 2 {
+        return Err(AppError::new(
+            "PROCESS_RECORD_NEWER",
+            "进程恢复记录由较新版本生成，请使用原版本管理这些服务",
+        ));
+    }
+    for record in &mut file.services {
+        if record.recorded_at.is_none() {
+            record.recorded_at = Some(file.saved_at);
+        }
+        if record.owner_pid.is_none() {
+            record.owner_pid = Some(file.app_pid);
+            record.owner_started = file.app_started.clone();
+        }
+    }
+    Ok(Some(file))
+}
+
+fn write_pidfile(paths: &Paths, services: Vec<ProcessRecord>) -> Result<()> {
+    let file = ProcessFile {
+        format_version: 2,
+        app_pid: std::process::id(),
+        app_started: platform::process_start_marker(std::process::id()),
+        saved_at: crate::services::now_ms() as u64,
+        services,
+    };
+    let bytes = serde_json::to_vec(&file)
+        .map_err(|e| AppError::internal("序列化进程记录", e.to_string()))?;
+    let dir = paths.data().join("run");
     let mut pending = tempfile::NamedTempFile::new_in(&dir)
         .map_err(|e| AppError::io("创建进程记录暂存文件", e))?;
     use std::io::Write;
-    pending.write_all(json.to_string().as_bytes()).and_then(|_| pending.flush())
+    pending
+        .write_all(&bytes)
+        .and_then(|_| pending.as_file().sync_all())
         .map_err(|e| AppError::io("写入进程记录", e))?;
-    pending.persist(dir.join("pids.json"))
+    pending
+        .persist(dir.join("pids.json"))
         .map_err(|e| AppError::io("保存进程记录", e.error))?;
     Ok(())
 }
 
-/// 启动时对上次会话残留的处置：**能收养就收养，收养不了才清杀**。
-///
-/// 背景：nsbctl CLI 分离启动的服务在 CLI 退出后仍存活（无 KILL_ON_JOB_CLOSE），
-/// 桌面 App 启动时应该接管它们（按 pidfile 恢复 pid/端口/Running 态），
-/// 而不是把它们当孤儿杀掉——用户在终端里起的服务被桌面端顺手杀掉会很意外。
-///
-/// 安全护栏：
-/// 1. pidfile 写入者仍存活 → 是并发运行的另一个实例 → 整体跳过；
-/// 2. 只处理 pidfile 记录过、且当前仍存活的 pid；
-/// 3. pid 的可执行文件必须位于本应用 runtimes/ 内；
-/// 4. 服务在注册表里 → 收养；不在（已卸载版本残留）→ 清杀；
-/// 5. 本会话已 Running 的服务不动。
-#[derive(Default, Debug)]
+/// 崩溃/被强杀时不会经过 stop_all，下次会话通过创建标识确认进程归属。
+pub fn save_pidfile(paths: &Paths, manager: &Arc<ServiceManager>) {
+    let _ = save_pidfile_checked(paths, manager);
+}
+
+pub fn save_pidfile_checked(paths: &Paths, manager: &Arc<ServiceManager>) -> Result<()> {
+    let _operation = manager.lifecycle.lock();
+    let _file_lock = lock_pidfile(paths)?;
+    let previous = read_pidfile(paths)?;
+    let ids: Vec<_> = manager.services.lock().keys().cloned().collect();
+    let mut records = Vec::new();
+    for id in ids {
+        let Some(status) = manager.snapshot(&id) else {
+            continue;
+        };
+        let Some(entry) = manager.services.lock().get(&id).cloned() else {
+            continue;
+        };
+        let identities = entry.identities.lock().clone();
+        let processes: Vec<_> = status
+            .pids
+            .iter()
+            .filter_map(|pid| identities.get(pid).cloned())
+            .collect();
+        if processes.is_empty() {
+            continue;
+        }
+        records.push(ProcessRecord {
+            id,
+            pids: processes.iter().map(|process| process.pid).collect(),
+            processes: Some(processes),
+            version: status.version,
+            port: *entry.started_port.lock(),
+            owner_pid: Some(std::process::id()),
+            owner_started: platform::process_start_marker(std::process::id()),
+            recorded_at: Some(crate::services::now_ms() as u64),
+            started_at: entry.started_at.lock().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|duration| duration.as_millis() as u64),
+            site_endpoints: entry.site_endpoints.lock().clone(),
+            web_target: entry.web_target.lock().clone(),
+        });
+    }
+    if let Some(pid) = crate::toolbox::adminer_pid(manager) {
+        let process = ProcessIdentity::capture(pid).ok_or_else(|| {
+            AppError::new(
+                "PROCESS_IDENTITY_UNAVAILABLE",
+                "无法核实管理台进程，未覆盖恢复记录",
+            )
+        })?;
+        records.push(ProcessRecord {
+            id: "adminer-console".into(),
+            pids: vec![pid],
+            processes: Some(vec![process]),
+            version: None,
+            port: None,
+            owner_pid: Some(std::process::id()),
+            owner_started: platform::process_start_marker(std::process::id()),
+            recorded_at: Some(crate::services::now_ms() as u64),
+            started_at: None,
+            site_endpoints: Default::default(),
+            web_target: None,
+        });
+    }
+    // 保留其他实例或尚未接管的记录。已确认死亡/复用的 PID 才可淘汰。
+    if let Some(previous) = previous {
+        for mut record in previous.services {
+            if let Some(processes) = record.processes.as_mut() {
+                let unidentified: Vec<_> = record
+                    .pids
+                    .iter()
+                    .copied()
+                    .filter(|pid| {
+                        platform::process_alive(*pid)
+                            && !processes.iter().any(|process| process.pid == *pid)
+                            && !records.iter().any(|known| known.pids.contains(pid))
+                    })
+                    .collect();
+                processes.retain(|process| {
+                    process.current() != Some(false)
+                        && !records.iter().any(|known| {
+                            known.processes.as_ref().is_some_and(|list| {
+                                list.iter().any(|item| {
+                                    item.pid == process.pid && item.started == process.started
+                                })
+                            })
+                        })
+                });
+                record.pids = processes.iter().map(|process| process.pid).collect();
+                record.pids.extend(unidentified);
+            } else {
+                record.pids.retain(|pid| {
+                    platform::process_alive(*pid)
+                        && !records.iter().any(|known| known.pids.contains(pid))
+                });
+            }
+            if !record.pids.is_empty() {
+                records.push(record);
+            }
+        }
+    }
+    write_pidfile(paths, records)
+}
+
+#[derive(Default, Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OrphanReport {
     pub adopted: Vec<(String, u32)>,
     pub killed: Vec<(String, u32)>,
+    pub unresolved: Vec<String>,
+    pub blocked_services: Vec<String>,
 }
 
-pub fn sweep_orphans(paths: &Paths, manager: &Arc<ServiceManager>) -> OrphanReport {
-    let path = paths.data().join("run").join("pids.json");
+fn record_owner_alive(record: &ProcessRecord) -> bool {
+    let Some(pid) = record.owner_pid else {
+        return false;
+    };
+    if !platform::process_alive(pid) {
+        return false;
+    }
+    match &record.owner_started {
+        Some(expected) => {
+            platform::process_start_marker(pid).is_none_or(|actual| actual == *expected)
+        }
+        None => true, // 旧记录无法排除并发实例，保留原有保护。
+    }
+}
+
+/// 旧版本没有创建标识，只接受 runtimes 内、创建时间不晚于记录的进程。
+fn legacy_process(pid: u32, saved_at: u64, paths: &Paths) -> Option<ProcessIdentity> {
+    let identity = ProcessIdentity::capture(pid)?;
+    let root = std::fs::canonicalize(paths.runtimes()).ok()?;
+    let executable = std::fs::canonicalize(&identity.executable).ok()?;
+    if !executable.starts_with(root) {
+        return None;
+    }
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(
+        sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]),
+        true,
+    );
+    let started = system.process(sysinfo::Pid::from_u32(pid))?.start_time();
+    (started > 0 && started <= saved_at / 1000 && identity.current() == Some(true))
+        .then_some(identity)
+}
+
+/// 只接管已确认的原进程；外部 Go 临时可执行文件也由出生标识确认。
+/// 成功后保留并转交恢复记录，CLI 只查一次 status 再退出也不会丢掉服务。
+pub fn sweep_orphans(paths: &Paths, store: &Store, manager: &Arc<ServiceManager>) -> OrphanReport {
+    let _operation = manager.lifecycle.lock();
     let mut report = OrphanReport::default();
-    let Ok(raw) = std::fs::read_to_string(&path) else {
-        return report;
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        let _ = std::fs::remove_file(&path);
-        return report;
-    };
-
-    // 护栏 1：写入者仍存活 → 那是另一个正在运行的实例，它的服务不能被我们收走
-    let writer_pid = v.get("appPid").and_then(|p| p.as_u64()).map(|p| p as u32);
-    if let Some(w) = writer_pid {
-        if w == std::process::id() || platform::process_alive(w) {
-            return report;
-        }
-    }
-
-    let runtimes = paths.runtimes();
-    let runtimes_canon = std::fs::canonicalize(&runtimes).ok();
-    let belongs_to_us = |pid: u32| -> bool {
-        use sysinfo::{Pid, ProcessesToUpdate, System};
-        let mut sys = System::new();
-        sys.refresh_processes(ProcessesToUpdate::Some(&[Pid::from_u32(pid)]), true);
-        let Some(p) = sys.process(Pid::from_u32(pid)) else {
-            return false;
+    let mut restore = || -> Result<()> {
+        let _file_lock = lock_pidfile(paths)?;
+        let Some(mut file) = read_pidfile(paths)? else {
+            return Ok(());
         };
-        let Some(exe) = p.exe() else {
-            return false;
-        };
-        let exe_canon = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
-        match &runtimes_canon {
-            Some(rt) => exe_canon.starts_with(rt),
-            None => exe_canon.starts_with(&runtimes),
-        }
-    };
-
-    if let Some(arr) = v.get("services").and_then(|s| s.as_array()) {
-        for item in arr {
-            let Some(sid) = item.get("id").and_then(|i| i.as_str()) else {
-                continue;
-            };
-            let Some(pids) = item.get("pids").and_then(|p| p.as_array()) else {
-                continue;
-            };
-            // 护栏 4：本会话里已经起来的，不动
-            if manager
-                .snapshot(sid)
-                .map(|s| s.state == ServiceState::Running)
-                .unwrap_or(false)
-            {
+        let installed = store.list_installed()?;
+        for record in &mut file.services {
+            if record_owner_alive(record) {
                 continue;
             }
-            let alive: Vec<u32> = pids
-                .iter()
-                .filter_map(|p| p.as_u64())
-                .map(|p| p as u32)
-                .filter(|pid| platform::process_alive(*pid) && belongs_to_us(*pid))
-                .collect();
-            if alive.is_empty() {
-                continue;
-            }
-            let port = item.get("port").and_then(|p| p.as_u64()).map(|p| p as u16);
-            // 护栏 4b：注册表里的服务 → 收养；否则清杀
-            if manager.snapshot(sid).is_some() {
-                manager.adopt(sid, &alive, port);
-                for pid in &alive {
-                    report.adopted.push((sid.to_string(), *pid));
+            if manager.is_process_busy(&record.id) {
+                let tracked = manager
+                    .services
+                    .lock()
+                    .get(&record.id)
+                    .map(|entry| entry.identities.lock().clone())
+                    .unwrap_or_default();
+                if record
+                    .pids
+                    .iter()
+                    .any(|pid| platform::process_alive(*pid) && !tracked.contains_key(pid))
+                {
+                    report.unresolved.push(format!(
+                        "{} 还有未接管的历史进程，当前实例保持运行，请先处理历史进程",
+                        record.id
+                    ));
                 }
+                continue;
+            }
+            let mut verified = Vec::new();
+            let mut unknown = false;
+            for pid in &record.pids {
+                if !platform::process_alive(*pid) {
+                    continue;
+                }
+                let identity = match &record.processes {
+                    Some(processes) => processes
+                        .iter()
+                        .find(|process| process.pid == *pid)
+                        .cloned(),
+                    None => {
+                        legacy_process(*pid, record.recorded_at.unwrap_or(file.saved_at), paths)
+                    }
+                };
+                match identity {
+                    Some(identity) if identity.current() == Some(true) => verified.push(identity),
+                    Some(identity) if identity.current() == Some(false) => {} // PID 已复用，不能认领。
+                    _ => unknown = true,
+                }
+            }
+            if unknown {
+                let error = AppError::new(
+                    "PROCESS_RECOVERY_UNVERIFIED",
+                    format!("{} 的部分历史进程身份无法确认，已保留记录", record.id),
+                )
+                .with_hint("请检查服务日志和端口占用，确认这些进程后再操作，未自动结束未知进程。");
+                manager.set_error(&record.id, error.clone());
+                report.unresolved.push(error.message);
+                report.blocked_services.push(record.id.clone());
+                continue;
+            }
+            manager
+                .recovery
+                .lock()
+                .blocked_services
+                .retain(|id| id != &record.id);
+            if verified.is_empty() {
+                if let Some(entry) = manager.services.lock().get(&record.id).cloned() {
+                    let mut error = entry.last_error.lock();
+                    if error.as_ref().is_some_and(|error| {
+                        matches!(
+                            error.code.as_str(),
+                            "PROCESS_RECOVERY_UNVERIFIED" | "PROCESS_VERSION_UNKNOWN"
+                        )
+                    }) {
+                        *error = None;
+                        *entry.state.lock() = ServiceState::Stopped;
+                    }
+                }
+                record.pids.clear();
+                record.processes = Some(Vec::new());
+                continue;
+            }
+            if let Some(status) = manager.snapshot(&record.id) {
+                // 按记录显示实际运行版本，不能将旧实例冒充当前默认版本。
+                let version = record.version.clone().or_else(|| {
+                    installed
+                        .iter()
+                        .filter(|package| {
+                            let base = record.id.split('@').next().unwrap_or(&record.id);
+                            package.id == base
+                                && verified.iter().any(|process| {
+                                    std::fs::canonicalize(&process.executable)
+                                        .ok()
+                                        .zip(
+                                            std::fs::canonicalize(if package.id == "nginx" {
+                                                PathBuf::from(&package.install_path)
+                                                    .join(format!("nginx-{}", package.version))
+                                            } else {
+                                                PathBuf::from(&package.install_path)
+                                            })
+                                            .ok(),
+                                        )
+                                        .is_some_and(|(exe, root)| exe.starts_with(root))
+                                })
+                        })
+                        .max_by_key(|package| package.install_path.len())
+                        .map(|package| package.version.clone())
+                });
+                if version.is_none() && record.processes.is_none() {
+                    let error = AppError::new(
+                        "PROCESS_VERSION_UNKNOWN",
+                        format!("{} 的旧记录无法确定运行版本，已保留进程", record.id),
+                    );
+                    manager.set_error(&record.id, error.clone());
+                    report.unresolved.push(error.message);
+                    report.blocked_services.push(record.id.clone());
+                    continue;
+                }
+                if version != status.version {
+                    let entry = manager.services.lock().get(&record.id).cloned().unwrap();
+                    manager.register(
+                        &record.id,
+                        &status.label,
+                        version.clone(),
+                        status.category,
+                        record.port,
+                        entry.log_file.clone(),
+                    );
+                }
+                manager.adopt_identified(
+                    &record.id,
+                    &verified,
+                    record.port.filter(|port| *port > 0),
+                );
+                if let Some(entry) = manager.services.lock().get(&record.id).cloned() {
+                    *entry.site_endpoints.lock() = record.site_endpoints.clone();
+                    *entry.web_target.lock() = record.web_target.clone();
+                    if let Some(started) = record.started_at.and_then(|millis| std::time::UNIX_EPOCH.checked_add(Duration::from_millis(millis))) {
+                        *entry.started_at.lock() = Some(started);
+                    }
+                }
+                let adopted = manager
+                    .snapshot(&record.id)
+                    .map(|status| status.pids)
+                    .unwrap_or_default();
+                report
+                    .adopted
+                    .extend(adopted.iter().map(|pid| (record.id.clone(), *pid)));
+                record.pids = adopted;
+                record.processes = Some(verified);
+                record.version = version;
+                record.owner_pid = Some(std::process::id());
+                record.owner_started = platform::process_start_marker(std::process::id());
             } else {
-                for pid in &alive {
-                    let _ = crate::ports::kill_pid(*pid);
-                    report.killed.push((sid.to_string(), *pid));
+                // 已删除的服务只清理确认过的进程，并核对结果后才报告成功。
+                for process in &verified {
+                    if process.current() != Some(true) {
+                        continue;
+                    }
+                    if let Err(error) = crate::ports::kill_pid(process.pid) {
+                        report
+                            .unresolved
+                            .push(format!("{}：{}", record.id, error.message));
+                    } else {
+                        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                        while process.current() == Some(true)
+                            && std::time::Instant::now() < deadline
+                        {
+                            std::thread::sleep(Duration::from_millis(25));
+                        }
+                        if process.current() == Some(false) {
+                            report.killed.push((record.id.clone(), process.pid));
+                        } else {
+                            report
+                                .unresolved
+                                .push(format!("{} 的进程 {} 尚未结束", record.id, process.pid));
+                        }
+                    }
                 }
+                verified.retain(|process| process.current() != Some(false));
+                record.pids = verified.iter().map(|process| process.pid).collect();
+                record.processes = Some(verified);
             }
         }
+        file.services.retain(|record| !record.pids.is_empty());
+        write_pidfile(paths, file.services)
+    };
+    if let Err(error) = restore() {
+        report.unresolved.push(error.message);
+        // 记录整体不可读时无法排除仍在运行的旧实例，不能让新启动绕过接管检查。
+        report
+            .blocked_services
+            .extend(manager.services.lock().keys().cloned());
+        report.blocked_services.sort();
+        report.blocked_services.dedup();
     }
-    let _ = std::fs::remove_file(&path);
+    *manager.recovery.lock() = report.clone();
     report
 }
 
@@ -1826,6 +2151,318 @@ mod validate_tests {
             downloader: Arc::new(crate::download::Downloader::new()),
             emit: Arc::new(|_| {}),
         }
+    }
+
+    #[test]
+    fn process_recovery_payload() {
+        let Some(ready) = std::env::var_os("NSB_RECOVERY_PAYLOAD") else {
+            return;
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        std::fs::write(ready, listener.local_addr().unwrap().port().to_string()).unwrap();
+        std::thread::sleep(Duration::from_secs(90)); // 有限寿命；父验收的守卫负责提前清理。
+    }
+
+    #[test]
+    fn process_recovery_handoff_worker() {
+        let Some(base) = std::env::var_os("NSB_RECOVERY_HANDOFF") else {
+            return;
+        };
+        let state = isolated_state(Paths::new(base.into()));
+        let manager = &state.manager;
+        manager.register(
+            "handoff",
+            "Handoff",
+            Some("2".into()),
+            Some("tool".into()),
+            None,
+            state.paths.service_log("handoff"),
+        );
+        if std::env::var_os("NSB_RECOVERY_READ_ONLY").is_some() {
+            let report = sweep_orphans(&state.paths, &state.store, manager);
+            assert_eq!(report.adopted.len(), 1, "{report:?}");
+            assert_eq!(
+                manager.snapshot("handoff").unwrap().version.as_deref(),
+                Some("1")
+            );
+            return; // 只读取状态即退出，恢复记录仍必须保留。
+        }
+        manager.register(
+            "handoff",
+            "Handoff",
+            Some("1".into()),
+            Some("tool".into()),
+            None,
+            state.paths.service_log("handoff"),
+        );
+        let ready = state.paths.base.join("ready-port");
+        let program = if std::env::var_os("NSB_RECOVERY_LEGACY").is_some() {
+            let root = state.paths.runtime_dir("handoff", "1");
+            std::fs::create_dir_all(&root).unwrap();
+            let program = root.join(exe_name("handoff"));
+            std::fs::copy(std::env::current_exe().unwrap(), &program).unwrap();
+            register_fixture(&state, "handoff", "1", &root);
+            program
+        } else {
+            std::env::current_exe().unwrap()
+        };
+        let pid = spawn_tracked(
+            manager,
+            "handoff",
+            &SpawnSpec {
+                program,
+                args: vec![
+                    "--exact".into(),
+                    "ops::validate_tests::process_recovery_payload".into(),
+                    "--nocapture".into(),
+                ],
+                cwd: None,
+                env: vec![(
+                    "NSB_RECOVERY_PAYLOAD".into(),
+                    ready.to_string_lossy().into(),
+                )],
+                detached: Some(true),
+            },
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !ready.is_file() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let port: u16 = std::fs::read_to_string(&ready).unwrap().parse().unwrap();
+        manager.set_state("handoff", ServiceState::Running);
+        manager.set_started_port("handoff", port);
+        manager.set_web_target("handoff", Ok(format!("http://127.0.0.1:{port}/")));
+        let endpoint: crate::sites::SiteEndpoint = serde_json::from_value(serde_json::json!({"url":"http://handoff.test:8080/", "port":8080,"domains":["handoff.test"],"https":false})).unwrap();
+        manager
+            .services
+            .lock()
+            .get("handoff")
+            .unwrap()
+            .site_endpoints
+            .lock()
+            .insert("site".into(), endpoint);
+        save_pidfile_checked(&state.paths, manager).unwrap();
+        if std::env::var_os("NSB_RECOVERY_LEGACY").is_some() {
+            let file = read_pidfile(&state.paths).unwrap().unwrap();
+            let legacy = serde_json::json!({"appPid":std::process::id(), "savedAt":file.saved_at,
+                    "services":[{"id":"handoff", "pids":[pid], "port":port}]});
+            std::fs::write(
+                state.paths.data().join("run/pids.json"),
+                serde_json::to_vec(&legacy).unwrap(),
+            )
+            .unwrap();
+        }
+        assert!(platform::process_alive(pid));
+    }
+
+    #[test]
+    fn process_recovery_survives_two_real_session_exits_and_preserves_version_and_endpoints() {
+        for legacy in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let paths = Paths::new(temp.path().to_path_buf());
+            let launch = |read_only: bool| {
+                let mut command = platform::command(std::env::current_exe().unwrap());
+                command
+                    .args([
+                        "--exact",
+                        "ops::validate_tests::process_recovery_handoff_worker",
+                        "--nocapture",
+                    ])
+                    .env("NSB_RECOVERY_HANDOFF", &paths.base);
+                if read_only {
+                    command.env("NSB_RECOVERY_READ_ONLY", "1");
+                }
+                if legacy {
+                    command.env("NSB_RECOVERY_LEGACY", "1");
+                }
+                // Windows 的分离子进程可能继承管道句柄；等待会话 PID 退出，不等待后代关闭输出管道。
+                let output = tempfile::NamedTempFile::new_in(&paths.base).unwrap();
+                command
+                    .stdout(output.as_file().try_clone().unwrap())
+                    .stderr(output.as_file().try_clone().unwrap());
+                let status = command.status().unwrap();
+                let text = std::fs::read_to_string(output.path()).unwrap();
+                assert!(status.success(), "{text}");
+                text
+            };
+            let launch_output = launch(false);
+            let original = read_pidfile(&paths).unwrap().unwrap();
+            let pid = original.services[0].pids[0];
+            struct Cleanup(u32);
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    let _ = crate::ports::kill_pid(self.0);
+                }
+            }
+            let _cleanup = Cleanup(pid);
+            assert!(
+                platform::process_alive(pid),
+                "launcher: {launch_output}; child log: {:?}",
+                std::fs::read_to_string(paths.service_log("handoff"))
+            );
+            if !legacy {
+                assert!(!original.services[0].processes.as_ref().unwrap()[0]
+                    .executable
+                    .starts_with(paths.runtimes()));
+            }
+            launch(true);
+            let state = isolated_state(paths);
+            state.manager.register(
+                "handoff",
+                "Handoff",
+                Some("2".into()),
+                Some("tool".into()),
+                None,
+                state.paths.service_log("handoff"),
+            );
+            let report = state.recover_processes().unwrap();
+            assert_eq!(state.process_recovery_status().adopted, report.adopted);
+            assert_eq!(report.adopted, [("handoff".into(), pid)], "{report:?}");
+            assert!(report.unresolved.is_empty());
+            let status = state.manager.snapshot("handoff").unwrap();
+            assert_eq!(status.version.as_deref(), Some("1"));
+            let port = status.port.unwrap();
+            assert!(tcp_port_open(port));
+            if !legacy {
+                assert_eq!(
+                    state.manager.web_target("handoff").unwrap().url,
+                    format!("http://127.0.0.1:{port}/")
+                );
+                assert!(state
+                    .manager
+                    .services
+                    .lock()
+                    .get("handoff")
+                    .unwrap()
+                    .site_endpoints
+                    .lock()
+                    .contains_key("site"));
+            }
+            assert!(state
+                .watchdog_status()
+                .watched
+                .iter()
+                .any(|entry| entry.id == "handoff" && entry.enabled));
+            state.stop_service("handoff").unwrap();
+            assert!(!platform::process_alive(pid));
+            assert!(read_pidfile(&state.paths)
+                .unwrap()
+                .unwrap()
+                .services
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn process_recovery_rejects_reused_pid_and_preserves_live_owner_and_corrupt_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = isolated_state(Paths::new(temp.path().to_path_buf()));
+        state.manager.register(
+            "probe",
+            "Probe",
+            Some("1".into()),
+            None,
+            None,
+            state.paths.service_log("probe"),
+        );
+        state.manager.adopt("probe", &[std::process::id()], None);
+        save_pidfile_checked(&state.paths, &state.manager).unwrap();
+        let original = read_pidfile(&state.paths).unwrap().unwrap();
+        let other = Arc::new(ServiceManager::new());
+        other.register(
+            "probe",
+            "Probe",
+            Some("2".into()),
+            None,
+            None,
+            state.paths.service_log("probe"),
+        );
+        assert!(sweep_orphans(&state.paths, &state.store, &other)
+            .adopted
+            .is_empty());
+        save_pidfile_checked(&state.paths, &other).unwrap();
+        assert_eq!(
+            read_pidfile(&state.paths).unwrap().unwrap().services.len(),
+            1,
+            "另一个实例不能覆盖存活写入者的记录"
+        );
+        let mut wrong = original.services.clone();
+        wrong[0].owner_started = Some("previous-writer".into());
+        wrong[0].processes.as_mut().unwrap()[0].started = "reused-pid".into();
+        write_pidfile(&state.paths, wrong).unwrap();
+        let report = sweep_orphans(&state.paths, &state.store, &other);
+        assert!(report.adopted.is_empty() && report.killed.is_empty());
+        assert!(platform::process_alive(std::process::id()));
+        assert!(read_pidfile(&state.paths)
+            .unwrap()
+            .unwrap()
+            .services
+            .is_empty());
+        let mut unknown = original.services;
+        unknown[0].owner_started = Some("previous-writer".into());
+        unknown[0].processes = Some(Vec::new());
+        write_pidfile(&state.paths, unknown).unwrap();
+        let report = sweep_orphans(&state.paths, &state.store, &other);
+        assert_eq!(report.unresolved.len(), 1);
+        assert_eq!(
+            start_service(&state.store, &state.paths, &other, "probe")
+                .unwrap_err()
+                .code,
+            "PROCESS_RECOVERY_UNVERIFIED"
+        );
+        assert_eq!(
+            stop_service(&state.store, &state.paths, &other, "probe")
+                .unwrap_err()
+                .code,
+            "PROCESS_RECOVERY_UNVERIFIED"
+        );
+        assert!(other.is_busy("probe"));
+        save_pidfile_checked(&state.paths, &other).unwrap();
+        assert_eq!(
+            read_pidfile(&state.paths).unwrap().unwrap().services[0].pids,
+            [std::process::id()]
+        );
+        let path = state.paths.data().join("run/pids.json");
+        std::fs::write(&path, b"damaged record").unwrap();
+        assert!(!sweep_orphans(&state.paths, &state.store, &other)
+            .unresolved
+            .is_empty());
+        assert_eq!(
+            save_pidfile_checked(&state.paths, &other).unwrap_err().code,
+            "PROCESS_RECORD_INVALID"
+        );
+        assert_eq!(std::fs::read(path).unwrap(), b"damaged record");
+    }
+
+    #[test]
+    fn process_recovery_snapshot_does_not_recapture_a_reused_pid() {
+        let manager = ServiceManager::new();
+        let temp = tempfile::tempdir().unwrap();
+        manager.register(
+            "fixture",
+            "Fixture",
+            None,
+            None,
+            None,
+            temp.path().join("service.log"),
+        );
+        manager.adopt("fixture", &[std::process::id()], None);
+        manager
+            .services
+            .lock()
+            .get("fixture")
+            .unwrap()
+            .identities
+            .lock()
+            .get_mut(&std::process::id())
+            .unwrap()
+            .started = "old-instance".into();
+        assert!(!manager.is_busy("fixture"));
+        let status = manager.snapshot("fixture").unwrap();
+        assert_eq!(status.state, ServiceState::Stopped);
+        assert!(status.pids.is_empty());
+        assert!(platform::process_alive(std::process::id()));
     }
 
     fn register_fixture(state: &crate::CoreState, id: &str, version: &str, runtime: &Path) {

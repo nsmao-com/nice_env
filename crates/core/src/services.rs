@@ -20,6 +20,7 @@ pub struct ServiceEntry {
     pub category: Option<String>,
     pub state: Mutex<ServiceState>,
     pub pids: Mutex<Vec<u32>>,
+    pub(crate) identities: Mutex<HashMap<u32, ProcessIdentity>>,
     pub started_at: Mutex<Option<SystemTime>>,
     pub last_error: Mutex<Option<AppError>>,
     pub group: Mutex<Option<platform::ProcessGroup>>,
@@ -37,16 +38,59 @@ pub struct ServiceEntry {
     pub requires: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ServiceWebTarget {
     pub url: String,
     /// 明确配置反向代理时仅探测本机实际控制台，浏览器访问 url；后端不请求代理地址。
     pub probe: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProcessIdentity {
+    pub pid: u32,
+    pub started: String,
+    pub executable: PathBuf,
+}
+
+impl ProcessIdentity {
+    pub(crate) fn capture(pid: u32) -> Option<Self> {
+        let started = platform::process_start_marker(pid)?;
+        let mut system = sysinfo::System::new();
+        system.refresh_processes(
+            sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]),
+            true,
+        );
+        let executable = system
+            .process(sysinfo::Pid::from_u32(pid))?
+            .exe()?
+            .to_path_buf();
+        if !executable.is_absolute()
+            || platform::process_start_marker(pid).as_deref() != Some(&started)
+        {
+            return None;
+        }
+        Some(Self {
+            pid,
+            started,
+            executable,
+        })
+    }
+
+    /// None 表示存活但无权读取身份，不能当成已退出，也不能据此结束进程。
+    pub(crate) fn current(&self) -> Option<bool> {
+        match platform::process_start_marker(self.pid) {
+            Some(started) => Some(started == self.started && platform::process_alive(self.pid)),
+            None if !platform::process_alive(self.pid) => Some(false),
+            None => None,
+        }
+    }
+}
+
 pub struct ServiceManager {
     /// 所有站点、服务列表及恢复入口共享同一份运行意图。
     pub watchdog: crate::watchdog::Watchdog,
+    pub(crate) recovery: Mutex<crate::ops::OrphanReport>,
     /// 启停、版本切换和卸载共用；编排内部允许同线程重入。
     pub(crate) lifecycle: ReentrantMutex<()>,
     pub(crate) adminer: Mutex<Option<crate::toolbox::AdminerRuntime>>,
@@ -60,6 +104,7 @@ impl ServiceManager {
     pub fn new() -> Self {
         Self {
             watchdog: crate::watchdog::Watchdog::new(),
+            recovery: Mutex::new(crate::ops::OrphanReport::default()),
             lifecycle: ReentrantMutex::new(()),
             adminer: Mutex::new(None),
             services: Mutex::new(HashMap::new()),
@@ -103,6 +148,7 @@ impl ServiceManager {
                     category,
                     state: Mutex::new(ServiceState::Stopped),
                     pids: Mutex::new(Vec::new()),
+                    identities: Mutex::new(HashMap::new()),
                     started_at: Mutex::new(None),
                     last_error: Mutex::new(None),
                     group: Mutex::new(None),
@@ -120,6 +166,10 @@ impl ServiceManager {
 
     /// Error 也可能仍有进程；切换或删除前必须检查实际 pid。
     pub(crate) fn is_busy(&self, id: &str) -> bool {
+        self.recovery.lock().blocked_services.iter().any(|blocked| blocked == id) || self.is_process_busy(id)
+    }
+
+    pub(crate) fn is_process_busy(&self, id: &str) -> bool {
         self.entry(id).is_some_and(|e| {
             matches!(
                 *e.state.lock(),
@@ -128,7 +178,7 @@ impl ServiceManager {
                 .pids
                 .lock()
                 .iter()
-                .any(|pid| platform::process_alive(*pid))
+                .any(|pid| e.identities.lock().get(pid).is_some_and(|identity| identity.current() != Some(false)))
         })
     }
 
@@ -243,17 +293,32 @@ impl ServiceManager {
     /// 收养上次会话/CLI 留下的进程：恢复 pid 列表、Running 态与启动端口。
     /// 收养后的组没有 Job 句柄，停止走「优雅命令 + 按 pid taskkill」兜底。
     pub fn adopt(&self, id: &str, pids: &[u32], port: Option<u16>) {
+        self.adopt_identified(id, &pids.iter().filter_map(|pid| ProcessIdentity::capture(*pid)).collect::<Vec<_>>(), port);
+    }
+
+    pub(crate) fn adopt_identified(&self, id: &str, processes: &[ProcessIdentity], port: Option<u16>) {
         let Some(e) = self.entry(id) else { return };
+        let processes: Vec<_> = processes.iter().filter(|process| process.current() == Some(true)).cloned().collect();
         e.site_endpoints.lock().clear();
-        *e.pids.lock() = pids.to_vec();
+        *e.pids.lock() = processes.iter().map(|process| process.pid).collect();
+        *e.identities.lock() = processes.iter().map(|process| (process.pid, process.clone())).collect();
         *e.started_at.lock() = Some(std::time::SystemTime::now());
         if let Some(p) = port {
             *e.started_port.lock() = Some(p);
         }
         *e.state.lock() = ServiceState::Running;
-        if pids.iter().any(|pid| platform::process_alive(*pid)) {
+        if !processes.is_empty() {
             self.watchdog.note_started(id);
         }
+    }
+
+    pub(crate) fn track_pid(&self, id: &str, pid: u32) -> Result<()> {
+        let identity = ProcessIdentity::capture(pid).ok_or_else(|| AppError::new("PROCESS_IDENTITY_UNAVAILABLE", format!("无法核实新启动进程 {pid} 的身份，请检查进程是否已退出")))?;
+        let entry = self.entry(id).ok_or_else(|| AppError::new("UNKNOWN_SERVICE", "服务已移除"))?;
+        entry.identities.lock().insert(pid, identity);
+        let mut pids = entry.pids.lock();
+        if !pids.contains(&pid) { pids.push(pid); }
+        Ok(())
     }
 
     /// 记录本次启动实际绑定的端口（停机命令据此寻址）
@@ -299,10 +364,12 @@ impl ServiceManager {
         let e = self.entry(id)?;
         let mut state = e.state.lock();
         let mut pids = e.pids.lock().clone();
+        pids.retain(|pid| e.identities.lock().get(pid).is_some_and(|identity| identity.current() != Some(false)));
+        *e.pids.lock() = pids.clone();
         // 真实进程校验：running 状态但进程全没了 → 回写 Stopped，
         // 否则 e.state 会永远停在 Running，stop_service 的短路判断与 UI 显示长期不一致
         let effective = if matches!(*state, ServiceState::Running | ServiceState::Error) {
-            let alive = pids.iter().any(|p| platform::process_alive(*p));
+            let alive = !pids.is_empty();
             if alive {
                 state.clone()
             } else {
@@ -311,6 +378,7 @@ impl ServiceManager {
                     self.push_history(id, "Running → Stopped（进程已退出）".into());
                 }
                 e.pids.lock().clear();
+                e.identities.lock().clear();
                 pids.clear();
                 *e.started_at.lock() = None;
                 *e.started_port.lock() = None;
@@ -464,7 +532,6 @@ pub fn spawn_tracked(
         let _ = child.wait();
         return Err(err);
     }
-    entry.pids.lock().push(pid);
 
     // 日志线程：stdout + stderr → ring + 文件
     if let Some(out) = child.stdout.take() {
@@ -472,6 +539,13 @@ pub fn spawn_tracked(
     }
     if let Some(err) = child.stderr.take() {
         spawn_log_reader(Arc::clone(manager), service_id, err, "ERR");
+    }
+
+    if let Err(error) = manager.track_pid(service_id, pid) {
+        let _ = entry.group.lock().as_mut().map(|group| group.terminate(true));
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
     }
 
     // 回收线程（防止僵尸）

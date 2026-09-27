@@ -1,6 +1,9 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { AlertTriangle, RefreshCw } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useUI } from "@/lib/store";
 import { Sidebar } from "./sidebar";
@@ -9,13 +12,14 @@ import { DesktopWindowProvider, useDesktopWindow, WindowControls } from "./title
 import { CommandPalette } from "./command-palette";
 import { SiteWizard } from "@/components/sites/site-wizard";
 import { Onboarding } from "@/components/sites/onboarding";
-import { useInvalidate, useSettings } from "@/lib/hooks";
+import { toastError, useInvalidate, useSettings } from "@/lib/hooks";
 import { toast } from "sonner";
 import { useT } from "@/lib/store";
 import { isTauri, listen } from "@/lib/backend";
 import { cn } from "@/lib/utils";
 import { UpdateDialog } from "@/components/shared/update-dialog";
 import * as api from "@/lib/api";
+import { Button } from "@/components/ui/button";
 
 function ShellFrame({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -72,6 +76,7 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
         <main className="relative min-h-0 flex-1 overflow-y-auto">
           {/* 路由内容由 Next 管理；避免退出动画保留旧树或让返回页面停留在透明状态。 */}
           <div className="mx-auto h-full w-full max-w-[1240px] px-3 py-4 sm:px-6 sm:py-6">
+            <RecoveryAlert />
             {children}
           </div>
         </main>
@@ -88,6 +93,51 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
       <UpdateWatcher />
       <WindowControls />
     </div>
+  );
+}
+
+function RecoveryAlert() {
+  const t = useT();
+  const client = useQueryClient();
+  const query = useQuery({ queryKey: ["process-recovery"], queryFn: api.processRecoveryStatus, staleTime: Infinity, retry: false });
+  const busyRef = React.useRef(false);
+  const [busy, setBusy] = React.useState(false);
+  const retry = async () => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    try {
+      if (query.isError) {
+        await query.refetch();
+      } else {
+        const report = await api.recoverProcesses();
+        client.setQueryData(["process-recovery"], report);
+        await Promise.all(["services", "sites", "watchdog"].map((key) => client.invalidateQueries({ queryKey: [key] })));
+        if (report.unresolved.length === 0) toast.success(t("recovery.done"));
+      }
+    } catch (error) { toastError(error); }
+    finally { busyRef.current = false; setBusy(false); }
+  };
+  if (!query.isError && !query.data?.unresolved.length) return null;
+  return (
+    <section role="alert" className="mb-5 min-w-0 space-y-3 rounded-xl border border-warn/25 bg-warn-soft px-4 py-3">
+      <div className="flex items-start gap-2 text-warn">
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+        <h2 className="min-w-0 text-[13px] font-medium">{t(query.isError ? "recovery.loadFailed" : "recovery.title")}</h2>
+      </div>
+      <p className="text-xs leading-relaxed text-secondary">{t("recovery.hint")}</p>
+      {!query.isError && <ul className="max-h-36 space-y-1 overflow-y-auto break-words text-xs leading-relaxed text-secondary">
+        {query.data?.unresolved.map((message, index) => <li key={`${index}:${message}`}>{message}</li>)}
+      </ul>}
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" variant="outline" disabled={busy || (!isTauri && !query.isError)} onClick={() => void retry()}>
+          <RefreshCw className={cn("h-3.5 w-3.5", busy && "animate-spin")} />
+          {t(busy ? "recovery.checking" : query.isError ? "recovery.reload" : "recovery.retry")}
+        </Button>
+        <Button size="sm" variant="ghost" asChild><Link href="/tools">{t("recovery.tools")}</Link></Button>
+      </div>
+      {!isTauri && <p className="text-[11px] text-faint">{t("recovery.preview")}</p>}
+    </section>
   );
 }
 

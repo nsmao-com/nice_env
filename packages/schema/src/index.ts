@@ -967,6 +967,14 @@ export type ScannedProject = z.infer<typeof ScannedProject>;
 
 /* ============ 服务看门狗 ============ */
 
+export const ProcessRecoveryReport = z.object({
+  adopted: z.array(z.tuple([z.string(), z.number()])),
+  killed: z.array(z.tuple([z.string(), z.number()])),
+  unresolved: z.array(z.string()),
+  blockedServices: z.array(z.string()).default([]),
+});
+export type ProcessRecoveryReport = z.infer<typeof ProcessRecoveryReport>;
+
 export const WatchedService = z.object({
   id: z.string(),
   enabled: z.boolean(),

@@ -121,7 +121,7 @@ function FontSelect({
   );
 
   return (
-    <div className="flex flex-col gap-1.5">
+    <div className="flex max-w-full flex-col gap-1.5">
       <Select
         value={customOpen ? "__custom__" : value}
         onValueChange={(v) => {
@@ -133,7 +133,7 @@ function FontSelect({
           onChange(v);
         }}
       >
-        <SelectTrigger className="h-8 w-52 text-xs">
+        <SelectTrigger className="h-8 w-52 max-w-full text-xs">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -162,7 +162,7 @@ function FontSelect({
           autoFocus={customOpen}
           defaultValue={isLocal ? value.slice("local:".length) : ""}
           placeholder={customLabel}
-          className="h-7 w-52 font-mono text-[11px]"
+          className="h-7 w-52 max-w-full font-mono text-[11px]"
           onKeyDown={(e) => {
             if (e.key === "Enter") (e.target as HTMLInputElement).blur();
           }}
@@ -1244,7 +1244,7 @@ export default function SettingsPage() {
                     <div className="flex flex-col">
                       <span className="text-[12.5px] text-secondary">
                         {t("settings.currentVersion")}{" "}
-                        <code className="font-mono text-foreground">v{appVersion || "0.2.78"}</code>
+                        <code className="font-mono text-foreground">v{appVersion || "0.2.79"}</code>
                       </span>
                       <span className="text-[10.5px] text-faint">{t("settings.manifestHint")}</span>
                     </div>
@@ -1318,7 +1318,7 @@ export default function SettingsPage() {
                   <div className="flex flex-col gap-0.5">
                     <span className="text-[12.5px] text-secondary">{t("about.desc")}</span>
                     <span className="text-[10.5px] text-faint">
-                      {t("settings.currentVersion")} v{appVersion || "0.2.78"}
+                      {t("settings.currentVersion")} v{appVersion || "0.2.79"}
                     </span>
                   </div>
                   <div className="flex gap-2">
@@ -1469,7 +1469,7 @@ function WatchdogPanel({ enabled, onChange }: { enabled: boolean; onChange: (val
 
 function SettingRow({ label, children }: { label: React.ReactNode; children: React.ReactNode }) {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-4">
+    <div className="flex flex-wrap items-center justify-between gap-4 [&>*]:max-w-full">
       <span className="text-[12.5px] text-secondary">{label}</span>
       {children}
     </div>

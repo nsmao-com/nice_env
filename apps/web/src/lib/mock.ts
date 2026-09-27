@@ -65,7 +65,7 @@ import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSet
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.78";
+const MOCK_APP_VERSION = "0.2.79";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -2152,6 +2152,10 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           restartCount: 0,
         })),
       } as WatchdogStatus as T;
+    case "process_recovery_status":
+      return { adopted: [], killed: [], unresolved: [], blockedServices: [] } as T;
+    case "recover_processes":
+      throw { code: "RECOVERY_PREVIEW", message: "请在桌面端重新检查本机服务进程" };
     case "watchdog_set_enabled": {
       settings.watchdogEnabled = args!.enabled as boolean;
       return true as T;

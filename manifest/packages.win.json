@@ -1203,7 +1203,7 @@
           "storage"
         ],
         "configFile": "config.yaml",
-        "configTemplate": "log_level: INFO\nservice:\n  host: 127.0.0.1\n  http_port: {port}\n  grpc_port: {port+1}\nstorage:\n  storage_path: {data}/storage\ntelemetry_disabled: true\n"
+        "configTemplate": "log_level: INFO\nservice:\n  host: 127.0.0.1\n  http_port: {port}\n  grpc_port: {port+1}\nstorage:\n  storage_path: {data}/storage\n  snapshots_path: \"{data}/snapshots\"\ntelemetry_disabled: true\n"
       }
     },
     {
@@ -2112,7 +2112,7 @@
           "storage"
         ],
         "configFile": "config.yaml",
-        "configTemplate": "log_level: INFO\nservice:\n  host: 127.0.0.1\n  http_port: {port}\n  grpc_port: {port+1}\nstorage:\n  storage_path: {data}/storage\ntelemetry_disabled: true\n"
+        "configTemplate": "log_level: INFO\nservice:\n  host: 127.0.0.1\n  http_port: {port}\n  grpc_port: {port+1}\nstorage:\n  storage_path: {data}/storage\n  snapshots_path: \"{data}/snapshots\"\ntelemetry_disabled: true\n"
       }
     },
     {
@@ -2146,7 +2146,7 @@
           "storage"
         ],
         "configFile": "config.yaml",
-        "configTemplate": "log_level: INFO\nservice:\n  host: 127.0.0.1\n  http_port: {port}\n  grpc_port: {port+1}\nstorage:\n  storage_path: {data}/storage\ntelemetry_disabled: true\n"
+        "configTemplate": "log_level: INFO\nservice:\n  host: 127.0.0.1\n  http_port: {port}\n  grpc_port: {port+1}\nstorage:\n  storage_path: {data}/storage\n  snapshots_path: \"{data}/snapshots\"\ntelemetry_disabled: true\n"
       }
     },
     {
@@ -2180,7 +2180,7 @@
           "storage"
         ],
         "configFile": "config.yaml",
-        "configTemplate": "log_level: INFO\nservice:\n  host: 127.0.0.1\n  http_port: {port}\n  grpc_port: {port+1}\nstorage:\n  storage_path: {data}/storage\ntelemetry_disabled: true\n"
+        "configTemplate": "log_level: INFO\nservice:\n  host: 127.0.0.1\n  http_port: {port}\n  grpc_port: {port+1}\nstorage:\n  storage_path: {data}/storage\n  snapshots_path: \"{data}/snapshots\"\ntelemetry_disabled: true\n"
       }
     },
     {

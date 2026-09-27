@@ -1767,3 +1767,15 @@ Qdrant 入口读取本次启动的静态目录、启用开关、监听地址和 
 最终 Web 类型检查、workspace 全 targets Rust 编译及 diff 检查通过。本次没有数据库或 schema 变更，未修改 update.sql；Cargo.lock 仅同步本项目版本。版本统一至 0.2.52，发布必须新建 annotated tag v0.2.52，与 main 原子推送并核对远程指向和实际 Release 状态，不移动旧 tag。已确认 v0.2.51 Release completed/success，原有未跟踪文件保持不变。
 
 原生验收范围为 Windows Qdrant v1.19.1 与官方 UI v0.2.18；其他 Qdrant 版本、macOS、MinIO/Consul 管理台以及服务端自定义配置叠加仍需进一步验收。Qdrant 快照目录目前还可能使用程序目录下的上游默认路径，跨版本快照保留需继续完善；本轮真实持久化验证覆盖 collection/向量数据。SFTPGo 多配置目录选择与 r-nacos 上游故障仍未解决，整体完善目标保持进行。
+
+## 第六十七轮：Qdrant 跨版本快照保留（v0.2.53）
+
+继续处理上一轮发现的默认快照目录问题。参考官方快照文档（https://qdrant.tech/documentation/concepts/snapshots/）与上游配置加载实现，Windows 清单中的四个 Qdrant 版本均明确将快照写入 data/qdrant/snapshots。对于仍使用旧安装描述和旧配置的官方原生单实例，启动时通过子进程环境修正上游 runtime 内的默认路径，不重写用户配置、注释或 CRLF；已有自定义数据目录和运行描述不纳入自动处理。快照路径及 local/s3 类型依次读取 run.env、继承环境、显式配置、local、RUN_MODE 和基础配置，支持 YAML/YML/JSON，Windows 环境变量名按大小写不敏感匹配并拒绝重复名称。未被高优先级值覆盖的多份同名配置或未支持的 TOML/INI/RON/JSON5 格式明确报错，提示在主配置写明设置，不猜测路径。
+
+启动前扫描已安装官方版本的旧默认 snapshots 目录，卸载时仅处理目标版本，并在删除 runtime 和安装记录前完成保留。先扫描受管路径、拒绝链接和特殊文件、计算 SHA-256，检查同名文件及祖先路径冲突；同名同内容复用，异内容中止且不覆盖。缺少的文件在同卷暂存，校验和刷盘后独占发布，再将原整个目录移至 backup/qdrant-snapshots-<version>-<随机>/snapshots。源目录退出扫描范围，因此通过 Qdrant API 删除的快照不会在下次启动时再次导入。发生中断时可重试，可能已有部分新文件发布，但不覆盖目标既有文件，原目录保留到该来源备份完成；这不是整个目录的事务。旧目录仍有内容且服务存活时拒绝迁移；来源已保留时，卸载未使用旧版不会打断新版 PID。用户自定义快照仍在将删除的 runtime 内时明确阻止卸载，并提示先搬移和更新配置。
+
+17 项通用启动及 15 项安装/卸载回归共 32 项通过，新增覆盖快照合并、原目录备份、冲突保护、删除不复活、配置优先级、环境展开、大小写环境名、原配置字节保留、自定义 runtime 目录卸载保护和活动进程保护。验证位于已有 generic.rs 源码模块，没有新增测试文件。显式运行两项原生检查均通过：使用经官方 SHA-256 核对的 Qdrant 1.19.0、1.19.1 与 UI 0.2.18，在临时目录、SQLite 和回环地址复现旧版默认路径，实际创建集合、写入中文 payload、生成集合快照与全库快照。分别走“先卸载旧版再安装新版”和“先切换新版再卸载未使用旧版”，通过新版 API 下载并核对快照摘要，从真实快照恢复原向量，确认新快照落入独立数据目录、删除后重启不复活、卸载新版后快照仍在。结束后确认无 fixture.exe 或 qdrant.exe 临时进程残留，没有操作用户实际数据。
+
+初次普通检查的 Windows 路径分隔符比较已改为规范化比较；先前并行编译与运行同一 Windows 测试可执行文件发生 LNK1104，改为顺序执行后通过。最终两项原生检查共耗时 83.22 秒。Web 类型检查、workspace 全 targets Rust 编译检查、版本及四个清单模板检查、git diff --check 均通过。没有新增依赖、schema 或数据库变更，未修改 update.sql；Cargo.lock 仅同步本项目三个 crate 的版本。未改 UI 布局、启动前端 dev 或执行前端 build。
+
+根 AGENTS.md 已固定每次提交、push 或发布必须新增 annotated tag 的要求。本轮统一版本至 0.2.53，必须将发布提交与新 tag v0.2.53 原子推送，再核对远程分支、tag 及 Release workflow 的实际状态；不移动旧 tag，保留原有未跟踪文件。已确认 v0.2.52 Release completed/success。原生验收范围为 Windows Qdrant 1.19.0→1.19.1；macOS、S3 和自定义运行描述仍需继续验收。SFTPGo 多配置目录选择、r-nacos 上游 panic、MinIO/Consul 原生管理台等仍待完善，整体产品完善目标保持进行。

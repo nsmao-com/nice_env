@@ -814,6 +814,9 @@ impl Installer {
         if let Some(sid) = &stopped_service {
             crate::ops::stop_service(store, paths, manager, sid)?;
         }
+        if id == "qdrant" {
+            crate::generic::preserve_qdrant_snapshots(store, paths, manager, Some(&installed))?;
+        }
 
         let runtime_dir = paths.runtime_dir(id, version);
         if runtime_dir.exists() {

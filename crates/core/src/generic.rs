@@ -575,6 +575,193 @@ fn qdrant_web_target(r: &Resolved) -> Result<String> {
     local_web_url(&host, r.port.ok_or_else(|| web_unavailable("Qdrant 端口未配置。"))?, tls == "true", "/dashboard")
 }
 
+fn qdrant_managed_snapshots(entry: &PackageManifestEntry) -> bool {
+    crate::install::official_qdrant(entry) && entry.run.as_ref().is_some_and(|run| run.single_instance && run.data_dir.is_none())
+}
+
+/// 对快照设置按 Qdrant 的环境、显式配置、local、RUN_MODE、基础配置顺序读取。
+/// 只读与数据保留有关的值；不能识别的配置格式在未被高优先级设置覆盖时明确报错。
+fn qdrant_snapshot_setting(entry: &PackageManifestEntry, root: &std::path::Path, paths: &Paths,
+    key: &str, pointer: &str, default: &str) -> Result<String> {
+    let data = paths.data().join("qdrant"); let etc = paths.etc_dir("qdrant", &entry.version);
+    let env_value = |key: &str| -> Result<Option<String>> {
+        let values: Vec<_> = entry.run.as_ref().and_then(|run| run.env.as_ref()).into_iter().flatten()
+            .filter(|(name, _)| if cfg!(windows) { name.eq_ignore_ascii_case(key) } else { name.as_str() == key }).map(|(_, value)| value).collect();
+        if values.len() > 1 { return Err(AppError::new("QDRANT_CONFIG_ENV", "Qdrant 环境变量存在重复的大小写名称，请合并后重试")); }
+        Ok(values.first().map(|value| value.replace("{root}", &crate::paths::nginx_path(root)).replace("{data}", &crate::paths::nginx_path(&data))
+            .replace("{etc}", &crate::paths::nginx_path(&etc))).or_else(|| std::env::var(key).ok()))
+    };
+    if let Some(value) = env_value(key)? { return Ok(value); }
+    let read = |path: &std::path::Path| -> Result<Option<String>> {
+        let relative = path.strip_prefix(&paths.base).map_err(|_| AppError::new("QDRANT_CONFIG_PATH", "Qdrant 配置不在托管目录内"))?;
+        let path = crate::paths::checked_data_path(&paths.base, &crate::paths::nginx_path(relative))?;
+        let meta = match std::fs::metadata(&path) {
+            Ok(meta) => meta, Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None), Err(e) => return Err(e.into()),
+        };
+        if !meta.is_file() || meta.len() > 1024 * 1024 { return Err(AppError::new("QDRANT_CONFIG_READ", "Qdrant 配置必须是小于 1 MiB 的文本文件")); }
+        let config: serde_json::Value = yaml_serde::from_str(&std::fs::read_to_string(&path)?)
+            .map_err(|_| AppError::new("QDRANT_CONFIG_INVALID", "无法解析 Qdrant 配置，未改动快照").with_hint(path.display().to_string()))?;
+        config.pointer(pointer).map(|value| value.as_str().map(str::to_string)
+            .ok_or_else(|| AppError::new("QDRANT_CONFIG_INVALID", "Qdrant 快照设置必须是有效的文本值"))).transpose()
+    };
+    if let Some(value) = read(&etc.join("config.yaml"))? { return Ok(value); }
+    let mode = env_value("RUN_MODE")?.unwrap_or_else(|| "development".into());
+    if mode.is_empty() || !mode.bytes().all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c)) {
+        return Err(AppError::new("QDRANT_CONFIG_MODE", "无法确认自定义 RUN_MODE 的快照设置，请在主配置中明确设置快照路径"));
+    }
+    for name in ["local", mode.as_str(), "config"] {
+        let candidates: Vec<_> = ["yaml", "yml", "json", "toml", "ini", "ron", "json5"]
+            .iter().map(|ext| root.join("config").join(format!("{name}.{ext}"))).filter(|path| path.exists()).collect();
+        if candidates.len() > 1 || candidates.first().is_some_and(|path| !matches!(path.extension().and_then(|s| s.to_str()), Some("yaml" | "yml" | "json"))) {
+            return Err(AppError::new("QDRANT_CONFIG_AMBIGUOUS", "无法确认 Qdrant 叠加配置的快照设置，未改动快照")
+                .with_hint("请在 etc/qdrant 对应版本的 config.yaml 中明确设置 storage.snapshots_path 和 storage.snapshots_config.snapshots_storage。"));
+        }
+        if let Some(path) = candidates.first() { if let Some(value) = read(path)? { return Ok(value); } }
+    }
+    Ok(default.into())
+}
+
+fn qdrant_snapshot_directory(entry: &PackageManifestEntry, root: &std::path::Path, paths: &Paths) -> Result<PathBuf> {
+    let value = qdrant_snapshot_setting(entry, root, paths, "QDRANT__STORAGE__SNAPSHOTS_PATH", "/storage/snapshots_path", "./snapshots")?;
+    if value.is_empty() { return Err(AppError::new("QDRANT_SNAPSHOT_PATH", "Qdrant 快照目录不能为空")); }
+    let mut normalized = PathBuf::new();
+    for part in root.join(value).components() {
+        match part {
+            std::path::Component::CurDir => {},
+            std::path::Component::ParentDir => { if !normalized.pop() { return Err(AppError::new("QDRANT_SNAPSHOT_PATH", "Qdrant 快照路径无效")); } },
+            part => normalized.push(part.as_os_str()),
+        }
+    }
+    Ok(normalized)
+}
+
+fn qdrant_path_key(path: &std::path::Path) -> String {
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let text = path.to_string_lossy().replace('\\', "/");
+    let text = text.strip_prefix("//?/").unwrap_or(&text).trim_end_matches('/');
+    if cfg!(windows) { text.to_lowercase() } else { text.into() }
+}
+
+fn qdrant_snapshot_env(store: &Store, paths: &Paths, manager: &ServiceManager, r: &Resolved) -> Result<Vec<(String, String)>> {
+    if !qdrant_managed_snapshots(&r.entry) { return Ok(vec![]); }
+    let location = qdrant_snapshot_directory(&r.entry, &r.root, paths)?;
+    let storage = qdrant_snapshot_setting(&r.entry, &r.root, paths, "QDRANT__STORAGE__SNAPSHOTS_CONFIG__SNAPSHOTS_STORAGE",
+        "/storage/snapshots_config/snapshots_storage", "local")?;
+    if !matches!(storage.as_str(), "local" | "s3") { return Err(AppError::new("QDRANT_SNAPSHOT_CONFIG", "Qdrant 快照存储类型必须是 local 或 s3")); }
+    preserve_qdrant_snapshots(store, paths, manager, None)?;
+    let target = crate::paths::checked_data_path(&paths.base, "data/qdrant/snapshots")?;
+    if storage == "local" && (qdrant_path_key(&location) == qdrant_path_key(&r.root.join("snapshots"))
+        || qdrant_path_key(&location) == qdrant_path_key(&target)) {
+        std::fs::create_dir_all(&target)?;
+        // 原文件的注释和自定义设置不重写；只修正上游默认的易丢失路径。
+        return Ok(vec![("QDRANT__STORAGE__SNAPSHOTS_PATH".into(), target.to_string_lossy().into_owned())]);
+    }
+    Ok(vec![])
+}
+
+/// 将旧程序目录的默认快照汇入独立数据目录，再把原目录完整留作备份。
+/// 先检查所有重名文件；新文件独占发布，失败可以重试，绝不覆盖已有快照。
+pub(crate) fn preserve_qdrant_snapshots(store: &Store, paths: &Paths, manager: &ServiceManager,
+    uninstall: Option<&InstalledPackage>) -> Result<()> {
+    use std::collections::BTreeMap;
+    let destination = crate::paths::checked_data_path(&paths.base, "data/qdrant/snapshots")?;
+    let installer = crate::install::Installer::bundled();
+    let packages = match uninstall { Some(installed) => vec![installed.clone()], None => store.list_installed()? };
+    let mut sources = Vec::new();
+    for installed in packages.into_iter().filter(|p| p.id == "qdrant") {
+        let entry = installer.installed_entry(&installed);
+        if !qdrant_managed_snapshots(&entry) { continue; }
+        let binary = PathBuf::from(&installed.install_path).join(entry_relative_path(&entry.entry));
+        let root = binary.parent().ok_or_else(|| AppError::new("QDRANT_SNAPSHOT_PATH", "Qdrant 程序路径无效"))?;
+        if uninstall.is_some() {
+            let configured = qdrant_snapshot_directory(&entry, root, paths)?;
+            let runtime = paths.runtime_dir("qdrant", &installed.version);
+            let configured_key = qdrant_path_key(&configured); let runtime_key = qdrant_path_key(&runtime);
+            if (configured_key == runtime_key || configured_key.starts_with(&format!("{runtime_key}/")))
+                && configured_key != qdrant_path_key(&root.join("snapshots")) && configured.exists() {
+                return Err(AppError::new("QDRANT_SNAPSHOT_IN_RUNTIME", "自定义快照仍保存在待卸载的程序目录中，已中止卸载")
+                    .with_hint(format!("请先把 {} 移到程序目录之外，并更新 storage.snapshots_path 后再卸载。", configured.display())));
+            }
+        }
+        let source = root.join("snapshots");
+        let relative = source.strip_prefix(&paths.base).map_err(|_| AppError::new("QDRANT_SNAPSHOT_PATH", "快照路径超出托管目录"))?;
+        let source = crate::paths::checked_data_path(&paths.base, &crate::paths::nginx_path(relative))?;
+        if source.exists() && std::fs::read_dir(&source)?.next().transpose()?.is_some() { sources.push((installed.version, source)); }
+    }
+    if sources.is_empty() { return Ok(()); }
+    if manager.snapshot("qdrant").is_some_and(|s| s.pids.iter().any(|pid| platform::process_alive(*pid))) {
+        return Err(AppError::new("SERVICE_BUSY", "请先停止 Qdrant，再保留旧版快照或卸载此版本"));
+    }
+    fn scan(root: &std::path::Path, relative: &str, depth: usize, files: &mut Vec<(String, PathBuf)>) -> Result<()> {
+        if depth > 32 || files.len() > 100_000 { return Err(AppError::new("QDRANT_SNAPSHOT_LIMIT", "快照目录层级或文件数量过多，请手动整理后重试")); }
+        let directory = if relative.is_empty() { root.to_path_buf() } else { crate::paths::checked_data_path(root, relative)? };
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let name = entry.file_name().into_string().map_err(|_| AppError::new("QDRANT_SNAPSHOT_PATH", "快照文件名不是有效的 UTF-8"))?;
+            let key = if relative.is_empty() { name } else { format!("{relative}/{name}") };
+            let path = crate::paths::checked_data_path(root, &key)?;
+            let meta = std::fs::metadata(&path)?;
+            if meta.is_dir() { scan(root, &key, depth + 1, files)?; }
+            else if meta.is_file() { files.push((key, path)); }
+            else { return Err(AppError::new("QDRANT_SNAPSHOT_PATH", "快照目录包含特殊文件，未移动原目录")); }
+        }
+        Ok(())
+    }
+    let mut plan: BTreeMap<String, (String, PathBuf, String)> = BTreeMap::new();
+    let conflict = |key: &str| AppError::new("QDRANT_SNAPSHOT_CONFLICT", format!("同名快照内容不同，未覆盖：{key}"))
+        .with_hint("请备份并重命名冲突文件后重试；原程序目录和已有快照均保留。");
+    let mut originals = Vec::new();
+    for (_, source) in &sources {
+        let mut files = Vec::new(); scan(source, "", 0, &mut files)?;
+        for (key, path) in files {
+            let digest = crate::download::sha256_file(&path)?;
+            let folded = if cfg!(windows) { key.to_lowercase() } else { key.clone() };
+            if let Some((_, _, previous)) = plan.get(&folded) { if previous != &digest { return Err(conflict(&key)); } }
+            else { plan.insert(folded, (key, path.clone(), digest.clone())); }
+            originals.push((path, digest));
+        }
+    }
+    for (key, _, digest) in plan.values() {
+        let mut parent = std::path::Path::new(key).parent();
+        while let Some(path) = parent.filter(|path| !path.as_os_str().is_empty()) {
+            let key = crate::paths::nginx_path(path); let folded = if cfg!(windows) { key.to_lowercase() } else { key.clone() };
+            if plan.contains_key(&folded) { return Err(conflict(&key)); }
+            parent = path.parent();
+        }
+        let target = crate::paths::checked_data_path(&destination, key)?;
+        if target.exists() && (!target.is_file() || crate::download::sha256_file(&target)? != *digest) { return Err(conflict(key)); }
+    }
+    std::fs::create_dir_all(&destination)?;
+    let staging = tempfile::Builder::new().prefix(".qdrant-snapshots-").tempdir_in(destination.parent().unwrap())?;
+    let mut ready = Vec::new();
+    for (key, source, digest) in plan.values() {
+        let target = crate::paths::checked_data_path(&destination, key)?;
+        if target.is_file() { continue; }
+        let mut temporary = tempfile::NamedTempFile::new_in(staging.path())?;
+        std::io::copy(&mut std::fs::File::open(source)?, temporary.as_file_mut())?;
+        temporary.as_file().sync_all()?;
+        if crate::download::sha256_file(temporary.path())? != *digest { return Err(conflict(key)); }
+        ready.push((key.clone(), temporary));
+    }
+    // 防止复制期间有外部进程改写原快照；验证失败时不挪走来源目录。
+    for (source, digest) in &originals { if crate::download::sha256_file(source)? != *digest { return Err(conflict(&source.display().to_string())); } }
+    for (key, temporary) in ready {
+        let target = crate::paths::checked_data_path(&destination, &key)?;
+        std::fs::create_dir_all(target.parent().unwrap())?;
+        temporary.persist_noclobber(target).map_err(|e| AppError::io("保留 Qdrant 快照", e.error))?;
+    }
+    let backups = crate::paths::checked_data_path(&paths.base, "backup")?;
+    std::fs::create_dir_all(&backups)?;
+    for (version, source) in sources {
+        crate::paths::checked_data_path(&paths.base, &crate::paths::nginx_path(source.strip_prefix(&paths.base)
+            .map_err(|_| AppError::new("QDRANT_SNAPSHOT_PATH", "快照路径超出托管目录"))?))?;
+        let backup = tempfile::Builder::new().prefix(&format!("qdrant-snapshots-{version}-")).tempdir_in(&backups)?;
+        std::fs::rename(&source, backup.path().join("snapshots")).map_err(|e| AppError::io("备份旧版 Qdrant 快照目录", e))?;
+        let _ = backup.keep();
+    }
+    Ok(())
+}
+
 pub fn service_web_url(manager: &ServiceManager, id: &str) -> Result<String> {
     let before = manager.snapshot(id).ok_or_else(|| AppError::new("UNKNOWN_SERVICE", "该服务未安装或已卸载"))?;
     if before.state != crate::model::ServiceState::Running || before.pids.is_empty() {
@@ -894,6 +1081,7 @@ pub fn start(
     let planned = r.port;
     r.port = select_port(store, &r)?;
     prepare_config(paths, &r)?;
+    let qdrant_env = qdrant_snapshot_env(store, paths, manager, &r)?;
     let sftpgo = if managed_sftpgo(&r.entry, &r.spec) { Some(prepare_sftpgo(store, paths, &r)?) } else { None };
     let web_target = generic_web_target(&r, sftpgo.as_ref());
     // CoreDNS 特例：Corefile 每次启动都重写——TLD 设置或转发策略变化要自动跟上，
@@ -931,6 +1119,7 @@ pub fn start(
         .flatten()
         .map(|(k, v)| (k.clone(), expand(v, &r)))
         .collect::<Vec<_>>());
+    env.extend(qdrant_env);
 
     // .bat/.cmd 不是可执行文件：Windows 上须经 cmd.exe 转发（Tomcat/Neo4j/MariaDB 等）
     let (program, args) = if cfg!(windows) && is_script(&r.bin) {
@@ -1416,6 +1605,80 @@ mod startup_tests {
     }
 
     #[test]
+    fn qdrant_snapshots_are_preserved_without_overwriting_and_do_not_reappear_after_deletion() {
+        let (_temp, state, r) = fixture("qdrant");
+        let legacy = r.root.join("snapshots/collection"); std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("one.snapshot"), "first snapshot").unwrap();
+        std::fs::write(r.root.join("snapshots/full.snapshot"), "full snapshot").unwrap();
+        let durable = state.paths.data().join("qdrant/snapshots");
+        std::fs::create_dir_all(durable.join("collection")).unwrap();
+        std::fs::write(durable.join("collection/one.snapshot"), "first snapshot").unwrap();
+        std::fs::write(durable.join("keep.snapshot"), "existing snapshot").unwrap();
+        preserve_qdrant_snapshots(&state.store, &state.paths, &state.manager, None).unwrap();
+        assert!(!r.root.join("snapshots").exists());
+        assert_eq!(std::fs::read_to_string(durable.join("full.snapshot")).unwrap(), "full snapshot");
+        assert_eq!(std::fs::read_to_string(durable.join("keep.snapshot")).unwrap(), "existing snapshot");
+        let backup = std::fs::read_dir(state.paths.backup()).unwrap().flatten().find(|e| e.file_name().to_string_lossy().starts_with("qdrant-snapshots-")).unwrap();
+        assert_eq!(std::fs::read_to_string(backup.path().join("snapshots/collection/one.snapshot")).unwrap(), "first snapshot");
+        std::fs::remove_file(durable.join("collection/one.snapshot")).unwrap();
+        preserve_qdrant_snapshots(&state.store, &state.paths, &state.manager, None).unwrap();
+        assert!(!durable.join("collection/one.snapshot").exists());
+        std::fs::create_dir_all(&legacy).unwrap(); std::fs::write(legacy.join("conflict.snapshot"), "legacy").unwrap();
+        std::fs::write(durable.join("collection/conflict.snapshot"), "current").unwrap();
+        assert_eq!(preserve_qdrant_snapshots(&state.store, &state.paths, &state.manager, None).unwrap_err().code, "QDRANT_SNAPSHOT_CONFLICT");
+        assert_eq!(std::fs::read_to_string(legacy.join("conflict.snapshot")).unwrap(), "legacy");
+        assert_eq!(std::fs::read_to_string(durable.join("collection/conflict.snapshot")).unwrap(), "current");
+    }
+
+    #[test]
+    fn qdrant_snapshot_paths_follow_configuration_precedence_and_preserve_user_text() {
+        let (_temp, state, mut r) = fixture("qdrant");
+        prepare_config(&state.paths, &r).unwrap();
+        let config = r.etc.join("config.yaml");
+        let original = std::fs::read_to_string(&config).unwrap().lines().filter(|line| !line.contains("snapshots_path:"))
+            .collect::<Vec<_>>().join("\r\n") + "\r\n# keep this comment\r\n";
+        std::fs::write(&config, &original).unwrap();
+        let env = qdrant_snapshot_env(&state.store, &state.paths, &state.manager, &r).unwrap();
+        assert_eq!(qdrant_path_key(std::path::Path::new(&env[0].1)), qdrant_path_key(&state.paths.data().join("qdrant/snapshots")));
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), original);
+        std::fs::create_dir_all(r.root.join("config")).unwrap();
+        std::fs::write(r.root.join("config/config.yaml"), "storage:\n  snapshots_path: base-snapshots\n").unwrap();
+        std::fs::write(r.root.join("config/local.json"), r#"{"storage":{"snapshots_path":"custom-snapshots"}}"#).unwrap();
+        assert_eq!(qdrant_snapshot_directory(&r.entry, &r.root, &state.paths).unwrap(), r.root.join("custom-snapshots"));
+        assert!(qdrant_snapshot_env(&state.store, &state.paths, &state.manager, &r).unwrap().is_empty());
+        std::fs::write(&config, original.replace("storage:", "storage:\r\n  snapshots_path: explicit-snapshots")).unwrap();
+        assert_eq!(qdrant_snapshot_directory(&r.entry, &r.root, &state.paths).unwrap(), r.root.join("explicit-snapshots"));
+        r.entry.run.as_mut().unwrap().env = Some(std::collections::HashMap::from([("QDRANT__STORAGE__SNAPSHOTS_PATH".into(), "{data}/private-snapshots".into())]));
+        assert_eq!(qdrant_snapshot_directory(&r.entry, &r.root, &state.paths).unwrap(), state.paths.data().join("qdrant/private-snapshots"));
+        if cfg!(windows) {
+            r.entry.run.as_mut().unwrap().env = Some(std::collections::HashMap::from([("qdrant__storage__snapshots_path".into(), "{data}/lowercase-snapshots".into())]));
+            assert_eq!(qdrant_snapshot_directory(&r.entry, &r.root, &state.paths).unwrap(), state.paths.data().join("qdrant/lowercase-snapshots"));
+            r.entry.run.as_mut().unwrap().env.as_mut().unwrap().insert("QDRANT__STORAGE__SNAPSHOTS_PATH".into(), "other".into());
+            assert_eq!(qdrant_snapshot_directory(&r.entry, &r.root, &state.paths).unwrap_err().code, "QDRANT_CONFIG_ENV");
+        }
+    }
+
+    #[test]
+    fn qdrant_uninstall_refuses_custom_snapshot_data_in_runtime_and_busy_migration() {
+        let (_temp, state, r) = fixture("qdrant");
+        prepare_config(&state.paths, &r).unwrap();
+        let config = r.etc.join("config.yaml"); let original = std::fs::read_to_string(&config).unwrap();
+        std::fs::write(&config, original.lines().map(|line| if line.contains("snapshots_path:") { "  snapshots_path: custom-snapshots" } else { line }).collect::<Vec<_>>().join("\n")).unwrap();
+        std::fs::create_dir(r.root.join("custom-snapshots")).unwrap();
+        std::fs::write(r.root.join("custom-snapshots/keep.snapshot"), "keep").unwrap();
+        let key = format!("qdrant@{}", r.entry.version);
+        assert_eq!(state.uninstall_package(&key).unwrap_err().code, "QDRANT_SNAPSHOT_IN_RUNTIME");
+        assert!(r.bin.exists()); assert!(state.store.find_installed("qdrant", Some(&r.entry.version)).is_some());
+        std::fs::write(&config, &original).unwrap();
+        std::fs::create_dir(r.root.join("snapshots")).unwrap(); std::fs::write(r.root.join("snapshots/old.snapshot"), "old").unwrap();
+        register_services(&state.paths, &state.store, &state.manager);
+        state.manager.adopt("qdrant", &[std::process::id()], Some(31000));
+        assert_eq!(preserve_qdrant_snapshots(&state.store, &state.paths, &state.manager, None).unwrap_err().code, "SERVICE_BUSY");
+        assert!(r.root.join("snapshots/old.snapshot").is_file());
+        state.manager.services.lock().remove("qdrant");
+    }
+
+    #[test]
     #[ignore = "requires NSB_VERIFY_QDRANT and NSB_VERIFY_QDRANT_ZIP and NSB_VERIFY_QDRANT_UI pointing to official verified assets"]
     fn native_qdrant_repairs_console_and_preserves_real_vectors_across_restart_and_reinstall() {
         let executable = std::env::var_os("NSB_VERIFY_QDRANT").expect("set NSB_VERIFY_QDRANT");
@@ -1500,6 +1763,105 @@ mod startup_tests {
         assert!(last.pids.iter().all(|pid| !platform::process_alive(*pid)));
         assert_eq!(state.service_web_url("qdrant").unwrap_err().code, "SERVICE_NOT_RUNNING");
         drop(occupied_grpc);
+    }
+
+    #[test]
+    #[ignore = "requires verified NSB_VERIFY_QDRANT_OLD (1.19.0), NSB_VERIFY_QDRANT_ZIP (1.19.1), NSB_VERIFY_QDRANT_UI"]
+    fn native_qdrant_snapshots_survive_old_version_uninstall_and_restore_on_new_version() {
+        verify_native_qdrant_snapshot_upgrade(true);
+    }
+
+    #[test]
+    #[ignore = "requires verified NSB_VERIFY_QDRANT_OLD (1.19.0), NSB_VERIFY_QDRANT_ZIP (1.19.1), NSB_VERIFY_QDRANT_UI"]
+    fn native_qdrant_snapshots_survive_version_switch_and_inactive_uninstall() {
+        verify_native_qdrant_snapshot_upgrade(false);
+    }
+
+    fn verify_native_qdrant_snapshot_upgrade(uninstall_first: bool) {
+        use sha2::Digest;
+        let old_program = std::env::var_os("NSB_VERIFY_QDRANT_OLD").expect("set NSB_VERIFY_QDRANT_OLD");
+        let new_zip = std::env::var_os("NSB_VERIFY_QDRANT_ZIP").expect("set NSB_VERIFY_QDRANT_ZIP");
+        let ui_zip = std::env::var_os("NSB_VERIFY_QDRANT_UI").expect("set NSB_VERIFY_QDRANT_UI");
+        let (_temp, state, mut r) = fixture_version("qdrant", Some("v1.19.0"));
+        std::fs::copy(old_program, &r.bin).unwrap();
+        r.port = Some((30000..42000).find(|port| [0, 1].iter().all(|offset| tcp_port_bindable(port + offset))).unwrap());
+        let port = r.port.unwrap();
+        prepare_config(&state.paths, &r).unwrap();
+        // 复现旧发布的实际行为：主程序从 runtime 启动，配置未声明快照路径。
+        let config_file = r.etc.join("config.yaml");
+        let legacy_config = std::fs::read_to_string(&config_file).unwrap().lines().filter(|line| !line.contains("snapshots_path:"))
+            .collect::<Vec<_>>().join("\r\n") + "\r\n# legacy user configuration\r\n";
+        std::fs::write(&config_file, &legacy_config).unwrap();
+        register_services(&state.paths, &state.store, &state.manager);
+        state.manager.set_state("qdrant", crate::model::ServiceState::Starting);
+        struct Cleanup<'a>(&'a crate::CoreState);
+        impl Drop for Cleanup<'_> { fn drop(&mut self) { let _ = self.0.stop_service("qdrant"); } }
+        let _cleanup = Cleanup(&state);
+        spawn_tracked(&state.manager, "qdrant", &SpawnSpec { program: r.bin.clone(),
+            args: vec!["--config-path".into(), config_file.to_string_lossy().into_owned(), "--disable-telemetry".into()],
+            cwd: Some(r.root.clone()), env: vec![], detached: None }).unwrap();
+        assert!(wait_owned_ports(&state.manager, "qdrant", &[port, port + 1], Duration::from_secs(20)), "{:?}", state.manager.tail("qdrant", 20));
+        state.manager.set_started_port("qdrant", port); state.manager.set_state("qdrant", crate::model::ServiceState::Running);
+        let client = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(15)).build().unwrap();
+        let url = |port, path: &str| format!("http://127.0.0.1:{port}{path}");
+        client.put(url(port, "/collections/snapshot_source")).json(&serde_json::json!({"vectors":{"size":3,"distance":"Cosine"},
+            "optimizers_config":{"default_segment_number":1},"wal_config":{"wal_capacity_mb":1}}))
+            .send().unwrap().error_for_status().unwrap();
+        client.put(url(port, "/collections/snapshot_source/points?wait=true")).json(&serde_json::json!({"points":[{"id":7,"vector":[0.3,0.5,0.9],"payload":{"value":"跨版本快照"}}]}))
+            .send().unwrap().error_for_status().unwrap();
+        let snapshot: serde_json::Value = client.post(url(port, "/collections/snapshot_source/snapshots")).send().unwrap().error_for_status().unwrap().json().unwrap();
+        let name = snapshot["result"]["name"].as_str().unwrap();
+        let bytes = client.get(url(port, &format!("/collections/snapshot_source/snapshots/{name}"))).send().unwrap().error_for_status().unwrap().bytes().unwrap();
+        let digest = hex::encode(sha2::Sha256::digest(&bytes));
+        assert_eq!(crate::download::sha256_file(&r.root.join("snapshots/snapshot_source").join(name)).unwrap(), digest);
+        let full: serde_json::Value = client.post(url(port, "/snapshots")).send().unwrap().error_for_status().unwrap().json().unwrap();
+        let full_name = full["result"]["name"].as_str().unwrap();
+        let full_digest = crate::download::sha256_file(&r.root.join("snapshots").join(full_name)).unwrap();
+        let old_pids = state.manager.snapshot("qdrant").unwrap().pids;
+        if uninstall_first { state.uninstall_package("qdrant@v1.19.0").unwrap(); }
+        else { state.stop_service("qdrant").unwrap(); }
+        assert!(old_pids.iter().all(|pid| !platform::process_alive(*pid)));
+        assert_eq!(r.root.exists(), !uninstall_first);
+        assert_eq!(std::fs::read_to_string(&config_file).unwrap(), legacy_config);
+        let durable = state.paths.data().join("qdrant/snapshots");
+        let key = "qdrant@v1.19.1";
+        std::fs::copy(new_zip, state.paths.downloads().join(format!("{key}.pkg"))).unwrap();
+        std::fs::copy(ui_zip, state.paths.downloads().join(format!("{key}--qdrant-web-ui-0.2.18.pkg"))).unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap(); runtime.block_on(state.install_package(key)).unwrap();
+        state.store.set_setting("autoFallbackPort", "true").unwrap();
+        state.set_active_version("qdrant", "v1.19.1").unwrap();
+        state.start_service("qdrant").unwrap(); let port = state.manager.snapshot("qdrant").unwrap().port.unwrap();
+        assert_eq!(crate::download::sha256_file(&durable.join("snapshot_source").join(name)).unwrap(), digest);
+        assert_eq!(crate::download::sha256_file(&durable.join(full_name)).unwrap(), full_digest);
+        if !uninstall_first {
+            assert!(!r.root.join("snapshots").exists());
+            let current_pids = state.manager.snapshot("qdrant").unwrap().pids;
+            state.uninstall_package("qdrant@v1.19.0").unwrap();
+            assert_eq!(state.manager.snapshot("qdrant").unwrap().pids, current_pids);
+        }
+        let list: serde_json::Value = client.get(url(port, "/collections/snapshot_source/snapshots")).send().unwrap().error_for_status().unwrap().json().unwrap();
+        assert!(list["result"].as_array().unwrap().iter().any(|item| item["name"] == name));
+        let bytes = client.get(url(port, &format!("/collections/snapshot_source/snapshots/{name}"))).send().unwrap().error_for_status().unwrap().bytes().unwrap();
+        assert_eq!(hex::encode(sha2::Sha256::digest(&bytes)), digest);
+        let full_bytes = client.get(url(port, &format!("/snapshots/{full_name}"))).send().unwrap().error_for_status().unwrap().bytes().unwrap();
+        assert_eq!(hex::encode(sha2::Sha256::digest(&full_bytes)), full_digest);
+        let location = reqwest::Url::from_file_path(durable.join("snapshot_source").join(name)).unwrap();
+        let restored = client.put(url(port, "/collections/restored_from_snapshot/snapshots/recover"))
+            .json(&serde_json::json!({"location":location.as_str(),"priority":"snapshot"})).send().unwrap();
+        assert!(restored.status().is_success(), "{}", restored.text().unwrap());
+        let point: serde_json::Value = client.get(url(port, "/collections/restored_from_snapshot/points/7"))
+            .send().unwrap().error_for_status().unwrap().json().unwrap();
+        assert_eq!(point["result"]["payload"]["value"], "跨版本快照");
+        let fresh: serde_json::Value = client.post(url(port, "/collections/restored_from_snapshot/snapshots"))
+            .send().unwrap().error_for_status().unwrap().json().unwrap();
+        let fresh_name = fresh["result"]["name"].as_str().unwrap();
+        assert!(durable.join("restored_from_snapshot").join(fresh_name).is_file());
+        client.delete(url(port, &format!("/collections/snapshot_source/snapshots/{name}"))).send().unwrap().error_for_status().unwrap();
+        state.restart_service("qdrant").unwrap();
+        assert!(!durable.join("snapshot_source").join(name).exists());
+        state.uninstall_package(key).unwrap();
+        assert!(durable.join("restored_from_snapshot").join(fresh_name).is_file());
+        assert!(durable.join(full_name).is_file());
     }
 
     #[test]

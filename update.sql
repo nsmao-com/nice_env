@@ -114,3 +114,15 @@
 -- INSERT INTO settings(key,value) VALUES(:key,:value)
 -- ON CONFLICT(key) DO UPDATE SET value=:value;
 -- :key 依次为 monitorNotifyKind、monitorNotifyUrl；不把实际 Webhook 凭据写入此文件。
+
+-- v0.2.47：通用服务的配置准备完成后，原子保存端口分配及自动回落覆盖。
+-- 沿用 SQLite port_assign、settings 表，无新增表、列、索引或 migration。
+-- 以下为应用运行时参数化 SQL 记录，无需手工执行；本轮未操作真实用户数据库。
+-- BEGIN;
+-- INSERT INTO port_assign(service_id,base_port) VALUES(:service_id,:port)
+-- ON CONFLICT(service_id) DO UPDATE SET base_port=:port;
+-- 仅发生自动回落时执行下一句，:key 为 portOverride.<service_id>，:value 为端口数字文本。
+-- INSERT INTO settings(key,value) VALUES(:key,:value)
+-- ON CONFLICT(key) DO UPDATE SET value=:value;
+-- COMMIT;
+-- 任一句失败整体回滚；重复保存相同端口保持幂等，配置校验失败不保存端口。

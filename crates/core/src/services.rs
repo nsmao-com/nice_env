@@ -553,7 +553,7 @@ pub fn tcp_port_open(port: u16) -> bool {
 }
 
 /// 分配监听端口必须尝试绑定；已绑定但未监听的套接字、系统保留端口也可能不可用。
-fn tcp_port_bindable(port: u16) -> bool {
+pub(crate) fn tcp_port_bindable(port: u16) -> bool {
     port != 0 && std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
 }
 

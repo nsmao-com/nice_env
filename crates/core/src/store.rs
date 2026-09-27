@@ -707,6 +707,19 @@ impl Store {
         rows.filter_map(|r| r.ok()).collect()
     }
 
+    /// 通用服务完成配置准备后再保存端口；回落覆盖与分配记录必须一致。
+    pub(crate) fn save_generic_port(&self, service_id: &str, port: u16, fallback: bool) -> Result<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        tx.execute("INSERT INTO port_assign(service_id,base_port) VALUES(?1,?2) ON CONFLICT(service_id) DO UPDATE SET base_port=?2", params![service_id, port])?;
+        if fallback {
+            tx.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=?2",
+                params![format!("portOverride.{service_id}"), port.to_string()])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /* ---------- 端口覆盖（设置 → 端口） ---------- */
 
     /// 用户在设置里逐个改过的端口。存成 `portOverride.{key}` 单键，

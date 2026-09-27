@@ -744,7 +744,7 @@ pub fn write_with_backup(path: &Path, content: &str, backup_dir: &Path) -> std::
     write_with_backup_expected(path, content, backup_dir, None)
 }
 
-fn write_with_backup_expected(
+pub(crate) fn write_with_backup_expected(
     path: &Path,
     content: &str,
     backup_dir: &Path,

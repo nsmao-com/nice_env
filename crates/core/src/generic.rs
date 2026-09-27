@@ -1402,17 +1402,62 @@ fn rnacos_startup_panicked(manager: &ServiceManager, id: &str) -> bool {
         .any(|line| line.contains("panicked at ")))
 }
 
+fn rnacos_panic_error(manager: &ServiceManager, r: &Resolved) -> AppError {
+    let known_init_failure = cfg!(windows) && matches!(r.entry.version.as_str(), "0.8.6" | "0.8.7")
+        && manager.services.lock().get(&r.service_id).is_some_and(|entry| entry.ring.lock().iter().rev()
+            .take_while(|line| line.as_str() != RNACOS_START_MARKER)
+            .find(|line| line.contains("panicked at "))
+            .is_some_and(|line| {
+                let normalized = line.replace('\\', "/");
+                (421..=424).any(|line| normalized.contains(&format!("src/raft/filestore/raftapply.rs:{line}:")))
+            }));
+    if known_init_failure {
+        // 这两个官方版本在依赖注入前启动 Raft，实例元数据初始化的异步 I/O 可触发竞态。
+        // 关闭持久化会改变注册中心语义，只提供经验证的选项，不自动改配置或清空数据。
+        AppError::new("SERVICE_RUNTIME_PANIC", "r-nacos 的 Raft 初始化失败，已停止服务并保留配置和数据")
+            .with_hint(format!("若不需要注册实例元数据持久化，可在 {} 中显式设置 RNACOS_NAMING_INSTANCE_METADATA_PERSISTENCE_ENABLE=false 后重试；这会停止加载和保存注册实例元数据，配置中心的配置仍可持久化。此选项不能修复已异常的 Raft 数据。需要实例元数据持久化时，请保留原配置并等待上游修复。", r.etc.join(".env").display()))
+    } else {
+        AppError::new("SERVICE_RUNTIME_PANIC", "r-nacos 内部线程启动失败，已停止服务")
+            .with_hint("请查看服务日志中的 panic 原因，或切换其他已安装版本；仅 HTTP 端口可连接不能证明配置中心可用。")
+    }
+}
+
+fn rnacos_raft_metrics_ready(metrics: &serde_json::Value) -> bool {
+    let Some(id) = metrics["id"].as_u64().filter(|id| *id > 0) else { return false; };
+    let Some(leader) = metrics["current_leader"].as_u64().filter(|id| *id > 0) else { return false; };
+    metrics["last_applied"].as_u64().is_some_and(|index| index > 0)
+        && match metrics["state"].as_str() {
+            Some("Leader") => leader == id,
+            Some("Follower") => leader != id,
+            _ => false,
+        }
+}
+
 fn wait_rnacos_healthy(manager: &ServiceManager, r: &Resolved, timeout: Duration) -> bool {
     let Some(port) = r.port else { return false; };
     let Ok(client) = reqwest::blocking::Client::builder().no_proxy()
         .redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_millis(500)).build() else { return false; };
     let deadline = std::time::Instant::now() + timeout;
     let mut ready_since = None;
+    let mut first_health = None;
     while std::time::Instant::now() < deadline {
         if rnacos_startup_panicked(manager, &r.service_id) { return false; }
-        let ready = rnacos_ports_ready(manager, r) && client.get(format!("http://127.0.0.1:{port}/health"))
+        if manager.snapshot(&r.service_id).is_none_or(|service| service.pids.iter().all(|pid| !platform::process_alive(*pid))) { return false; }
+        let healthy = rnacos_ports_ready(manager, r) && client.get(format!("http://127.0.0.1:{port}/health"))
             .send().is_ok_and(|response| response.status().is_success()
                 && response.text().is_ok_and(|text| text.trim() == "success"));
+        let ready = healthy && {
+            let health_since = first_health.get_or_insert_with(std::time::Instant::now);
+            client.get(format!("http://127.0.0.1:{port}/nacos/v1/raft/metrics")).send().is_ok_and(|response| {
+                match response.status().as_u16() {
+                    200 => response.json::<serde_json::Value>().is_ok_and(|metrics| rnacos_raft_metrics_ready(&metrics)),
+                    // 开启鉴权时不尝试登录或关闭鉴权。上游 /health 初始有 12.5 秒宽限，
+                    // 须在宽限结束后再次确认，不能把尚无 leader 的节点当作可用服务。
+                    401 | 403 | 404 => health_since.elapsed() >= Duration::from_secs(13),
+                    _ => false,
+                }
+            })
+        };
         if ready {
             // 留出启动日志汇入的时间；上游工作线程 panic 后 HTTP 线程仍可能正常应答。
             if ready_since.get_or_insert_with(std::time::Instant::now).elapsed() >= Duration::from_millis(500) {
@@ -1548,12 +1593,10 @@ pub fn start(
         },
     }};
     if !healthy {
-        let panicked = managed_rnacos(&r) && rnacos_startup_panicked(manager, &r.service_id);
+        let panic_error = (managed_rnacos(&r) && rnacos_startup_panicked(manager, &r.service_id))
+            .then(|| rnacos_panic_error(manager, &r));
         if r.entry.id == "coredns" || managed_rnacos(&r) || sftpgo.is_some() { crate::ops::stop_service(store, paths, manager, &r.service_id)?; }
-        if panicked {
-            return Err(AppError::new("SERVICE_RUNTIME_PANIC", "r-nacos 内部线程启动失败，已停止服务")
-                .with_hint("请查看服务日志中的 panic 原因，或切换其他已安装版本；仅 HTTP 端口可连接不能证明配置中心可用。"));
-        }
+        if let Some(error) = panic_error { return Err(error); }
         return Err(AppError::new(
             "SERVICE_START_TIMEOUT",
             format!(
@@ -1562,6 +1605,8 @@ pub fn start(
                 r.spec.health_timeout_sec,
                 if managed_consul(&r.entry, &r.spec) {
                     "监听端口或单节点 leader 未就绪"
+                } else if managed_rnacos(&r) {
+                    "监听端口或 Raft 集群未就绪"
                 } else if minio.is_some() {
                     "S3 服务或已启用的管理台未就绪"
                 } else if r.port.is_some() {
@@ -1571,10 +1616,12 @@ pub fn start(
                 }
             ),
         )
-        .with_hint(format!(
+        .with_hint(if managed_rnacos(&r) {
+            "已停止服务并保留配置和数据。请查看 r-nacos 日志，核对 Raft 集群配置；已有异常数据应从可用备份恢复。开启鉴权时健康检查至少需要约 14 秒，请预留足够启动时间。".into()
+        } else { format!(
             "查看日志页 {} 的最后输出；常见原因是端口冲突、缺少依赖运行库或配置不合法",
             r.service_id
-        )));
+        ) }));
     }
     if sftpgo.is_some() {
         let relative = r.etc.strip_prefix(&paths.base).map_err(|_| AppError::new("SFTPGO_CONFIG_PATH", "配置目录超出托管目录"))?;
@@ -2941,15 +2988,44 @@ mod startup_tests {
         assert!(!rnacos_startup_panicked(&state.manager, "rnacos"));
         state.manager.push_log("rnacos", "thread panicked at this run");
         assert!(rnacos_startup_panicked(&state.manager, "rnacos"));
+        assert!(!rnacos_panic_error(&state.manager, &r).hint.unwrap().contains("PERSISTENCE_ENABLE"));
+        for line in 421..=424 {
+            state.manager.push_log("rnacos", &format!("thread '<unnamed>' panicked at src\\raft\\filestore\\raftapply.rs:{line}:52:"));
+            let error = rnacos_panic_error(&state.manager, &r);
+            assert_eq!(error.code, "SERVICE_RUNTIME_PANIC");
+            assert_eq!(error.hint.unwrap().contains("PERSISTENCE_ENABLE=false"), cfg!(windows));
+        }
+        r.entry.version = "0.8.8".into();
+        assert!(!rnacos_panic_error(&state.manager, &r).hint.unwrap().contains("PERSISTENCE_ENABLE"));
+        r.entry.version = "0.8.7".into();
+        state.manager.push_log("rnacos", RNACOS_START_MARKER);
+        assert!(!rnacos_startup_panicked(&state.manager, "rnacos"));
+        assert!(!rnacos_panic_error(&state.manager, &r).hint.unwrap().contains("PERSISTENCE_ENABLE"));
+        state.manager.push_log("rnacos", "thread panicked at src/raft/filestore/raftapply.rs:200:20:");
+        assert!(!rnacos_panic_error(&state.manager, &r).hint.unwrap().contains("PERSISTENCE_ENABLE"));
         state.manager.services.lock().remove("rnacos");
         drop(listeners);
+        for (state, leader, applied, ready) in [
+            ("Leader", Some(1), 2, true), ("Follower", Some(2), 2, true),
+            ("Learner", None, 0, false), ("Candidate", None, 2, false),
+            ("Leader", None, 2, false), ("Leader", Some(2), 2, false),
+            ("Follower", Some(1), 2, false), ("Leader", Some(1), 0, false),
+        ] {
+            assert_eq!(rnacos_raft_metrics_ready(&serde_json::json!({"id":1,"state":state,"current_leader":leader,"last_applied":applied})), ready);
+        }
+        assert!(!rnacos_raft_metrics_ready(&serde_json::json!({})));
     }
 
     #[test]
-    #[ignore = "requires NSB_VERIFY_RNACOS pointing to the official r-nacos 0.8.6 executable"]
+    #[ignore = "requires NSB_VERIFY_RNACOS (0.8.7) and NSB_VERIFY_RNACOS_PREVIOUS (0.8.6) official executables"]
     fn native_rnacos_loads_config_keeps_data_and_moves_all_ports_together() {
-        let executable = std::env::var_os("NSB_VERIFY_RNACOS").expect("set NSB_VERIFY_RNACOS");
-        let (_temp, state, mut r) = fixture_version("rnacos", Some("0.8.6"));
+        for (version, variable) in [("0.8.6", "NSB_VERIFY_RNACOS_PREVIOUS"), ("0.8.7", "NSB_VERIFY_RNACOS")] {
+            verify_native_rnacos_config(std::env::var_os(variable).expect(variable), version);
+        }
+    }
+
+    fn verify_native_rnacos_config(executable: std::ffi::OsString, version: &str) {
+        let (_temp, state, mut r) = fixture_version("rnacos", Some(version));
         std::fs::copy(executable, &r.bin).unwrap();
         let base = (22000..42000).find(|port| [0, 1, 1000, 1001, 2000, 2001].iter().all(|offset| tcp_port_bindable(port + offset))).unwrap();
         let occupied_grpc = std::net::TcpListener::bind(("127.0.0.1", base + 1000)).unwrap();
@@ -2957,7 +3033,8 @@ mod startup_tests {
         state.store.set_setting("autoFallbackPort", "true").unwrap();
         r.port = Some(base);
         let config = r.etc.join(".env");
-        let content = format!("{}\n# native fixture\nRNACOS_SDK_HOST=127.0.0.1\nRNACOS_CONSOLE_HOST=127.0.0.1\nRNACOS_HTTP_WORKERS=1\nRNACOS_ENABLE_OPEN_API_AUTH=false\nRNACOS_INIT_ADMIN_USERNAME=fixture\nRNACOS_INIT_ADMIN_PASSWORD=fixture-{}\n", expand_config(r.spec.config_template.as_deref().unwrap(), &r), rand::random::<u64>());
+        let password = format!("fixture-{}", rand::random::<u64>());
+        let content = format!("{}\n# native fixture\nRNACOS_SDK_HOST=127.0.0.1\nRNACOS_CONSOLE_HOST=127.0.0.1\nRNACOS_HTTP_WORKERS=1\nRNACOS_NAMING_INSTANCE_METADATA_PERSISTENCE_ENABLE=false\nRNACOS_ENABLE_OPEN_API_AUTH=false\nRNACOS_INIT_ADMIN_USERNAME=fixture\nRNACOS_INIT_ADMIN_PASSWORD={password}\n", expand_config(r.spec.config_template.as_deref().unwrap(), &r));
         std::fs::write(&config, content).unwrap();
         struct Cleanup<'a>(&'a crate::CoreState);
         impl Drop for Cleanup<'_> { fn drop(&mut self) { let _ = self.0.stop_service("rnacos"); } }
@@ -3012,8 +3089,17 @@ mod startup_tests {
         assert_eq!(state.store.get_port_assign("rnacos"), Some(third));
         let response = client.get(format!("http://127.0.0.1:{third}/nacos/v1/cs/configs")).query(&[("dataId", "niceenv-fixture"), ("group", "DEFAULT_GROUP")]).send().unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+        let login = client.post(format!("http://127.0.0.1:{third}/nacos/v1/auth/login"))
+            .form(&[("username", "fixture"), ("password", password.as_str())]).send().unwrap().error_for_status().unwrap()
+            .json::<serde_json::Value>().unwrap();
+        let token = login["accessToken"].as_str().expect("authenticated login must issue a token");
+        let response = client.get(format!("http://127.0.0.1:{third}/nacos/v1/cs/configs"))
+            .query(&[("dataId", "niceenv-fixture"), ("group", "DEFAULT_GROUP"), ("accessToken", token)])
+            .send().unwrap().error_for_status().unwrap();
+        assert_eq!(response.text().unwrap(), "persisted-fixture");
+        assert!(std::fs::read_to_string(&config).unwrap().contains("RNACOS_NAMING_INSTANCE_METADATA_PERSISTENCE_ENABLE=false"));
         state.stop_service("rnacos").unwrap();
-        assert!([0, 1000, 2000].iter().all(|offset| !tcp_port_open(third + offset)));
+        assert_native_rnacos_stopped(&state, third);
         // 控制台线程失败时 SDK 仍可能启动，必须报错并清理整个临时服务。
         let content = std::fs::read_to_string(&config).unwrap().replace("RNACOS_CONSOLE_HOST=127.0.0.1", "RNACOS_CONSOLE_HOST=192.0.2.1");
         std::fs::write(&config, content).unwrap();
@@ -3022,7 +3108,7 @@ mod startup_tests {
         let error = state.start_service("rnacos").unwrap_err();
         assert!(matches!(error.code.as_str(), "SERVICE_START_TIMEOUT" | "SERVICE_RUNTIME_PANIC"), "{error:?}");
         let failed_port = state.store.get_port_assign("rnacos").unwrap();
-        assert!([0, 1000, 2000].iter().all(|offset| !tcp_port_open(failed_port + offset)));
+        assert_native_rnacos_stopped(&state, failed_port);
         drop(occupied_console); drop(occupied_grpc);
     }
 
@@ -3030,22 +3116,97 @@ mod startup_tests {
     #[ignore = "requires NSB_VERIFY_RNACOS_BROKEN pointing to the official r-nacos 0.8.7 Windows executable"]
     fn native_rnacos_upstream_panic_cannot_report_a_healthy_service() {
         let executable = std::env::var_os("NSB_VERIFY_RNACOS_BROKEN").expect("set NSB_VERIFY_RNACOS_BROKEN");
+        verify_native_rnacos_without_leader(&executable);
+        // 初始化竞态不保证每次触发；成功必须能读写，失败必须完整清理且不修改配置。
+        for _ in 0..3 { verify_native_rnacos_startup_recovery(&executable); }
+    }
+
+    fn verify_native_rnacos_without_leader(executable: &std::ffi::OsStr) {
+        let (_temp, state, mut r) = fixture_version("rnacos", Some("0.8.7"));
+        std::fs::copy(executable, &r.bin).unwrap();
+        let port = (42000..44000).find(|port| [0, 1000, 2000].iter().all(|offset| tcp_port_bindable(port + offset))).unwrap();
+        state.store.set_port_override("rnacos", Some(port)).unwrap(); r.port = Some(port);
+        let content = format!("{}\nRNACOS_SDK_HOST=127.0.0.1\nRNACOS_CONSOLE_HOST=127.0.0.1\nRNACOS_HTTP_WORKERS=1\nRNACOS_ENABLE_OPEN_API_AUTH=true\nRNACOS_RAFT_AUTO_INIT=false\nRNACOS_NAMING_INSTANCE_METADATA_PERSISTENCE_ENABLE=false\n", expand_config(r.spec.config_template.as_deref().unwrap(), &r));
+        std::fs::write(r.etc.join(".env"), &content).unwrap();
+        let mut entry = r.entry.clone(); entry.run.as_mut().unwrap().health_timeout_sec = 15;
+        std::fs::write(r.root.join(".niceenv-package.json"), serde_json::to_vec(&entry).unwrap()).unwrap();
+        struct Cleanup<'a>(&'a crate::CoreState);
+        impl Drop for Cleanup<'_> { fn drop(&mut self) { let _ = self.0.stop_service("rnacos"); } }
+        let _cleanup = Cleanup(&state);
+        // /health 在初始宽限期返回 success，受保护的 metrics 返回 403；不能提前放行。
+        let error = state.start_service("rnacos").unwrap_err();
+        assert_eq!(error.code, "SERVICE_START_TIMEOUT", "{error:?}");
+        assert!(error.message.contains("Raft"));
+        assert_eq!(std::fs::read_to_string(r.etc.join(".env")).unwrap(), content);
+        assert_native_rnacos_stopped(&state, port);
+    }
+
+    fn verify_native_rnacos_startup_recovery(executable: &std::ffi::OsStr) {
         let (_temp, state, mut r) = fixture_version("rnacos", Some("0.8.7"));
         std::fs::copy(executable, &r.bin).unwrap();
         let port = (30000..42000).find(|port| [0, 1000, 2000].iter().all(|offset| tcp_port_bindable(port + offset))).unwrap();
         state.store.set_port_override("rnacos", Some(port)).unwrap(); r.port = Some(port);
-        let content = format!("{}\nRNACOS_SDK_HOST=127.0.0.1\nRNACOS_CONSOLE_HOST=127.0.0.1\nRNACOS_HTTP_WORKERS=1\n", expand_config(r.spec.config_template.as_deref().unwrap(), &r));
-        std::fs::write(r.etc.join(".env"), content).unwrap();
+        let content = format!("{}\nRNACOS_SDK_HOST=127.0.0.1\nRNACOS_CONSOLE_HOST=127.0.0.1\nRNACOS_HTTP_WORKERS=1\nRNACOS_ENABLE_OPEN_API_AUTH=false\nRNACOS_NAMING_INSTANCE_METADATA_PERSISTENCE_ENABLE=true\n", expand_config(r.spec.config_template.as_deref().unwrap(), &r));
+        std::fs::write(r.etc.join(".env"), &content).unwrap();
         struct Cleanup<'a>(&'a crate::CoreState);
         impl Drop for Cleanup<'_> { fn drop(&mut self) { let _ = self.0.stop_service("rnacos"); } }
         let _cleanup = Cleanup(&state);
-        let error = state.start_service("rnacos").unwrap_err();
-        assert_eq!(error.code, "SERVICE_RUNTIME_PANIC", "{error:?}");
+        let start = state.start_service("rnacos");
+        let initial_succeeded = start.is_ok();
+        if let Err(error) = start {
+            assert_eq!(error.code, "SERVICE_RUNTIME_PANIC", "{error:?}");
+            assert!(error.hint.as_deref().unwrap().contains("PERSISTENCE_ENABLE=false"), "{error:?}; {:?}", state.manager.tail("rnacos", 80));
+        } else {
+            verify_native_rnacos_recovery_value(&state, true);
+            state.stop_service("rnacos").unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(r.etc.join(".env")).unwrap(), content);
+        assert_native_rnacos_stopped(&state, port);
+        // 模拟用户明确选择规避方式；沿用失败时的数据目录，不删除 Raft 文件。
+        let marker = r.data.join("keep-existing-data");
+        std::fs::write(&marker, "preserved").unwrap();
+        std::fs::write(r.etc.join(".env"), content.replace("PERSISTENCE_ENABLE=true", "PERSISTENCE_ENABLE=false")).unwrap();
+        if let Err(error) = state.start_service("rnacos") {
+            // 失败的初始 Raft 写入可能留下未就绪数据，关闭元数据持久化并不能修复它。
+            assert!(!initial_succeeded, "healthy data failed to restart: {error:?}");
+            assert_eq!(error.code, "SERVICE_START_TIMEOUT", "{error:?}");
+            assert!(error.message.contains("Raft"));
+            assert_native_rnacos_stopped(&state, port);
+            assert_eq!(std::fs::read_to_string(marker).unwrap(), "preserved");
+            return;
+        }
+        verify_native_rnacos_recovery_value(&state, !initial_succeeded);
+        state.restart_service("rnacos").unwrap();
+        verify_native_rnacos_recovery_value(&state, false);
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "preserved");
+        state.stop_service("rnacos").unwrap();
+        assert_native_rnacos_stopped(&state, port);
+    }
+
+    fn assert_native_rnacos_stopped(state: &crate::CoreState, port: u16) {
         assert!(state.manager.snapshot("rnacos").unwrap().pids.is_empty());
+        // Windows 终止进程后释放监听句柄可能稍有延迟，但最终必须全部关闭。
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         while [0, 1000, 2000].iter().any(|offset| tcp_port_open(port + offset)) {
-            assert!(std::time::Instant::now() < deadline, "failed r-nacos kept a listener open");
+            assert!(std::time::Instant::now() < deadline, "stopped r-nacos kept a listener open");
             std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn verify_native_rnacos_recovery_value(state: &crate::CoreState, write: bool) {
+        let port = state.manager.snapshot("rnacos").unwrap().port.unwrap();
+        let url = format!("http://127.0.0.1:{port}/nacos/v1/cs/configs");
+        let client = reqwest::blocking::Client::builder().no_proxy().pool_max_idle_per_host(0).timeout(Duration::from_secs(3)).build().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let write_status = if write {
+                Some(client.post(&url).form(&[("dataId", "recovery-fixture"), ("group", "DEFAULT_GROUP"), ("content", "recovered-value")])
+                    .send().unwrap().status())
+            } else { None };
+            let response = client.get(&url).query(&[("dataId", "recovery-fixture"), ("group", "DEFAULT_GROUP")]).send().unwrap();
+            if response.status().is_success() && response.text().unwrap() == "recovered-value" { break; }
+            assert!(std::time::Instant::now() < deadline, "r-nacos did not preserve configuration; write status {write_status:?}: {:?}", state.manager.tail("rnacos", 40));
+            std::thread::sleep(Duration::from_millis(200));
         }
     }
 

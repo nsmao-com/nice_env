@@ -1837,3 +1837,17 @@ HTTP 与自签证书 HTTPS 两条路径均完成真实 AWS Signature V4 请求�
 最终 pnpm --filter @nsb/web check、cargo check --workspace --all-targets --locked、版本一致性和 git diff --check 均通过。未改界面布局、启动前端 dev 或执行前端 build；本次没有数据库变更，未修改 update.sql。包、crate、Tauri 与界面回退版本同步至 0.2.57，Cargo.lock 只更新本项目三个 crate 版本。已确认 v0.2.56 Release completed/success；本轮必须新增 annotated tag v0.2.57，与 main 原子推送，再核对远程分支、tag 和实际 Release 状态，保留旧 tag 及原有未跟踪文件。
 
 原生验收范围为 Windows MinIO 2025-07-23→2025-09-07 的本地单盘模式与 Caddy 代理，macOS、分布式布局、外部身份提供商和其他历史版本未验收。此功能只在用户点击管理台时打开其明确配置的代理地址，代理的运行状态和外部网络可达性仍由浏览器体现。其他服务的非回环管理台入口、r-nacos 上游 panic 等继续完善，整体产品目标保持进行。
+
+## 第七十二轮：r-nacos Raft 就绪检查与初始化故障诊断（v0.2.58）
+
+继续追查官方 Windows r-nacos 0.8.6 / 0.8.7 的启动 panic。重新核对两个 ZIP 的 SHA-256 与清单一致，并确认待执行程序与 ZIP 内 rnacos.exe 摘要相同。上游最新 Release 仍为 v0.8.7；核对对应版本 starter.rs、raft/filestore/raftapply.rs、naming/instance_meta_manager.rs、health/core.rs、raft/network/management.rs 与 openapi/middle/auth_middle.rs。源码表明 Raft 在 BeanFactory 注入之前启动，实例元数据持久化初始化的异步 I/O 可能让 apply 请求先到达未注入的 StateApplyManager。真实运行捕获到 raftapply.rs:421:52 的 Option::unwrap panic，也观察到同样配置偶尔正常启动，不能把这个竞态当作每次必现的版本行为。
+
+更关键的是，失败启动遗留的数据在重启后可能没有 leader，但上游 /health 初始化时会给 RaftCluster 12.5 秒宽限，期间返回 success，写配置却持续返回 500。generic.rs 现在同时核对三个监听端口的进程归属、本轮 panic、/health 及只读 /nacos/v1/raft/metrics。Raft 必须有有效节点 ID、leader、已应用日志，以及相符的 Leader/Follower 角色；没有 leader、尚未应用日志、候选状态、畸形响应和请求错误均不能提前判定就绪。状态接口返回 401/403/404 时，不自动登录或关闭鉴权，改为等首次健康响应之后至少 13 秒再核对 /health，并保持半秒稳定窗口。开启鉴权的正常启动因此通常至少需要约 14 秒，默认 20 秒超时仍适用。进程退出会结束检查，超时会停止服务并明确提示 Raft 未就绪。
+
+对 Windows 0.8.6 / 0.8.7 本轮日志中 raftapply.rs 第 421–424 行的依赖读取 panic，提供精确的初始化失败说明；其他版本、其他 panic 位置和历史启动日志不会套用该诊断。经原生验证，在全新或正常数据目录中显式设置 RNACOS_NAMING_INSTANCE_METADATA_PERSISTENCE_ENABLE=false 可规避已观察到的初始化路径，配置中心写入、重启后读回仍有效。但此开关会停止加载和保存注册实例元数据，也不能修复失败启动遗留的异常 Raft 数据，所以只作为用户明确选择的临时方案提示，不修改默认模板、不自动关闭该功能、不删除数据、不替换官方程序。README 同步说明限制、环境变量优先级、鉴权检查耗时及已有异常数据需要备份恢复的边界。
+
+现有 generic.rs 源码验收模块覆盖两个官方版本的实际写入读回、重启保留、HTTP/gRPC/控制台端口回落、管理台 HTML、启用 Open API 鉴权后匿名访问被拒、真实账号登录及携带 token 读回。失败场景保留原 .env 与数据目录，再按明确配置重试：能恢复时必须真实读写且重启保留，仍无 leader 时必须报错、释放端口并保留数据。针对竞态分别接受经过真实读写证明的成功和经过日志、状态、端口核对的失败，不再要求每次必现 panic。额外使用鉴权开启、RAFT_AUTO_INIT=false 的官方进程确认 /health 初始宽限不能提前放行。两项原生验收通过，最终补充的鉴权与重复启动故障验收通过，耗时 82.49 秒；此前完整两项运行耗时 104.69 秒。全部使用临时目录和回环地址，无测试文件新增；检查后未发现 fixture.exe / rnacos.exe 残留。
+
+通用启动回归 23 项通过，12 项需要独立官方程序的原生检查默认忽略；本轮相关的两项 r-nacos 检查已按上述方式显式执行。pnpm --filter @nsb/web check 与 cargo check --workspace --all-targets --locked 均通过。包、crate、Tauri 和界面版本回退值同步至 0.2.58，Cargo.lock 只修改本项目三个 crate 版本，无依赖变更。未启动本地前端 dev 或执行前端 build，本次没有数据库变更，未修改 update.sql。发布遵循根 AGENTS.md：必须新增 annotated tag v0.2.58，与 main 原子推送并核对远程提交和实际构建状态；v0.2.57 Release 已确认 completed/success。
+
+本轮解决 NiceEnv 的 r-nacos 启动误报和诊断缺失，上游初始化竞态本身仍未修复。没有验收 macOS r-nacos、其他历史版本或真实多节点集群，不能将临时关闭实例元数据持久化表述为完整恢复该功能。其他服务管理台、自定义配置和 UI 仍需继续完善，整体产品目标保持进行。

@@ -133,9 +133,21 @@ pub enum RewritePreset {
     Joomla,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteApplication {
+    pub version: String,
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct SiteRuntime {
+    /// 明确开启的应用进程托管；历史 command/cwd 字段不会触发执行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application: Option<SiteApplication>,
     /// 显式选择的证书标识；两者互斥，均为空时使用主域名默认文件。保存在已有 runtime JSON 中。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported_cert_id: Option<String>,

@@ -1174,6 +1174,7 @@ mod tests {
             id: id.into(), name: name.into(), domains: domains.iter().map(|v| (*v).into()).collect(),
             root_dir: root.to_string_lossy().into(),
             runtime: model::SiteRuntime {
+                application: None,
                 acme_cert_id: None, imported_cert_id: imported_cert_id.map(str::to_owned), web_server: "nginx".into(),
                 kind: model::SiteKind::Static, php_version: None, proxy_target: None,
                 command: None, cwd: None,

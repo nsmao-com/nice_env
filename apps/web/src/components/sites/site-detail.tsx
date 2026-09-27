@@ -4,12 +4,12 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ExternalLink, FolderOpen, RefreshCw, Trash2, ScrollText } from "lucide-react";
+import { ExternalLink, FolderOpen, RefreshCw, Trash2, ScrollText, Square } from "lucide-react";
 import type { Site, RewritePreset } from "@nsb/schema";
 import { useT } from "@/lib/store";
-import { cn, cmpVersionDesc, normalizeProxyTarget, isPhpSiteSettingValid } from "@/lib/utils";
+import { cn, cmpVersionDesc, normalizeProxyTarget, isPhpSiteSettingValid, APPLICATION_RUNTIMES, applicationRuntime, validApplication } from "@/lib/utils";
 import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
-import { usePackages, useInvalidate, toastError, siteUrl } from "@/lib/hooks";
+import { usePackages, useService, useInvalidate, toastError, siteUrl } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import {
   Sheet,
@@ -30,6 +30,7 @@ import { ConfirmDialog } from "@/components/shared/misc";
 
 import { SiteCertificateSelect, useSiteCertificateSelection } from "./site-certificate-select";
 import { SitePhpSettings } from "./site-php-settings";
+import { SiteApplicationFields } from "./site-application-fields";
 
 const REWRITE_OPTIONS: { value: RewritePreset; label?: string; labelKey?: string }[] = [
   { value: "none", labelKey: "detail.none" },
@@ -58,6 +59,7 @@ export function SiteDetailSheet({
   const invalidate = useInvalidate();
   const queryClient = useQueryClient();
   const { data: packages } = usePackages();
+  const { data: applicationStatus } = useService(site ? `site-app:${site.id}` : undefined);
   const [saving, setSaving] = React.useState(false);
   const savingRef = React.useRef(false);
   const [deleting, setDeleting] = React.useState(false);
@@ -121,6 +123,10 @@ export function SiteDetailSheet({
   const isProxy = draft.runtime.kind !== "php" && draft.runtime.kind !== "static";
   const normalizedProxyTarget = normalizeProxyTarget(draft.runtime.proxyTarget ?? "");
   const proxyInvalid = isProxy && !normalizedProxyTarget;
+  const appRuntime = applicationRuntime(draft.runtime.kind);
+  const appVersions = packages.filter((p) => p.id === appRuntime?.id && p.install).map((p) => p.version).sort(cmpVersionDesc);
+  const applicationInvalid = !!draft.runtime.application && (!validApplication(draft.runtime.application, draft.runtime.proxyTarget ?? "") || !appVersions.includes(draft.runtime.application.version));
+  const applicationBusy = !!applicationStatus && (!!applicationStatus.pids.length || ["running", "starting", "stopping"].includes(applicationStatus.state));
   const phpInvalid = draft.runtime.kind === "php" && Object.entries(draft.phpOverrides ?? {}).some(([key, value]) => !isPhpSiteSettingValid(key, value, baseline?.phpOverrides?.[key]));
   const requestClose = () => {
     if (busy || savingRef.current || deletingRef.current || reloadingRef.current || envEditorRef.current?.isBusy()) return;
@@ -128,7 +134,7 @@ export function SiteDetailSheet({
     else onClose();
   };
   const save = async () => {
-    if (busy || savingRef.current || deletingRef.current || reloadingRef.current || envEditorRef.current?.isBusy() || (directoryChanged && envState.dirty) || proxyInvalid || phpInvalid || (draft.https && certificateSelection.problem)) return;
+    if (busy || savingRef.current || deletingRef.current || reloadingRef.current || envEditorRef.current?.isBusy() || (directoryChanged && envState.dirty) || proxyInvalid || applicationInvalid || phpInvalid || (draft.https && certificateSelection.problem)) return;
     const domains = [...new Set(domainsInput.split(/[,，\s]+/).filter(Boolean).map((d) => d.toLowerCase()))];
     if (!draft.name.trim() || !draft.rootDir.trim() || !domains.length) {
       setFormError({ code: "REQUIRED_FIELDS", message: t("detail.requiredFields") });
@@ -179,7 +185,7 @@ export function SiteDetailSheet({
 
   return (
     <Sheet open={!!site} onOpenChange={(o) => !o && requestClose()}>
-      <SheetContent className="flex w-[calc(100vw-1.5rem)] flex-col gap-0 overflow-hidden sm:max-w-[640px]">
+      <SheetContent className="flex w-[calc(100vw_-_1.5rem)] flex-col gap-0 overflow-hidden sm:max-w-[640px]">
         <SheetHeader className="shrink-0 pr-14 pb-4">
           <SheetTitle className="flex min-w-0 items-center gap-2">
             <span className="truncate">{site.name}</span>
@@ -228,14 +234,23 @@ export function SiteDetailSheet({
             >
               <RefreshCw className={`h-3.5 w-3.5 ${reloading ? "animate-spin" : ""}`} /> {t(site.status === "running" ? "detail.reload" : "common.start")}
             </Button>
+            {site.runtime.application && <Button variant="secondary" size="sm" disabled={busy || (!applicationBusy && site.status === "stopped")}
+              onClick={async () => {
+                if (busy || savingRef.current || deletingRef.current || reloadingRef.current || envEditorRef.current?.isBusy()) return;
+                reloadingRef.current = true; setReloading(true);
+                try { await api.stopSite(site.id); }
+                catch (error) { toastError(error); }
+                finally { invalidate("sites", "services", "hosts"); reloadingRef.current = false; setReloading(false); }
+              }}><Square className="size-3.5" />{t("appProcess.stop")}</Button>}
           </div>
           <p className="text-xs leading-relaxed text-faint">{t("detail.reloadHint").replace("{server}", site.runtime.webServer === "apache" ? "Apache" : "Nginx")}</p>
 
           <Tabs value={tab} onValueChange={setTab}>
             <TabsList className="mb-5 max-w-full">
-              <TabsTrigger value="general" className="px-2.5 text-xs sm:px-3 sm:text-[13px]">{t("detail.general")}</TabsTrigger>
-              <TabsTrigger value="environment" className="px-2.5 text-xs sm:px-3 sm:text-[13px]">{t("env.title")}</TabsTrigger>
-              {draft.runtime.kind === "php" && <TabsTrigger value="php" className="px-2.5 text-xs sm:px-3 sm:text-[13px]">PHP{phpInvalid && <span className="text-error" aria-label={t("sites.php.review")}>!</span>}</TabsTrigger>}
+              <TabsTrigger value="general" className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("detail.general")}</TabsTrigger>
+              <TabsTrigger value="environment" className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("env.title")}</TabsTrigger>
+              {isProxy && <TabsTrigger value="application" className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("appProcess.title")}{applicationInvalid && <span className="text-error" aria-label={t("appProcess.invalid")}>!</span>}</TabsTrigger>}
+              {draft.runtime.kind === "php" && <TabsTrigger value="php" className="px-2 text-[11px] sm:px-3 sm:text-[13px]">PHP{phpInvalid && <span className="text-error" aria-label={t("sites.php.review")}>!</span>}</TabsTrigger>}
             </TabsList>
             <TabsContent value="general" forceMount className="mt-0 space-y-5 data-[state=inactive]:hidden">
           <div className="flex flex-col gap-1.5">
@@ -260,14 +275,14 @@ export function SiteDetailSheet({
             <div className="flex gap-2">
               <Input
                 id="site-edit-root"
-                disabled={busy}
+                disabled={busy || applicationBusy}
                 value={draft.rootDir}
                 onChange={(e) => setDraft({ ...draft, rootDir: e.target.value })}
                 className="min-w-0 flex-1 font-mono text-[12.5px]"
               />
               <Button
                 variant="secondary"
-                disabled={busy || !isTauri}
+                disabled={busy || applicationBusy || !isTauri}
                 title={!isTauri ? t("detail.desktopFolder") : undefined}
                 onClick={async () => {
                   try {
@@ -325,7 +340,7 @@ export function SiteDetailSheet({
               <Label htmlFor="site-edit-proxy">{t("sites.detail.proxy")}</Label>
               <Input
                 id="site-edit-proxy"
-                disabled={busy}
+                disabled={busy || applicationBusy}
                 value={draft.runtime.proxyTarget ?? ""}
                 onChange={(e) => setDraft({ ...draft, runtime: { ...draft.runtime, proxyTarget: e.target.value } })}
                 className="font-mono text-[12.5px]"
@@ -336,6 +351,7 @@ export function SiteDetailSheet({
                 aria-describedby="site-edit-proxy-hint site-edit-proxy-result"
               />
               <p id="site-edit-proxy-hint" className="text-xs leading-relaxed text-muted">{t("wz.proxyHint")}</p>
+              {applicationBusy && <p className="text-xs leading-relaxed text-muted">{t("appProcess.stopBeforeEdit")}</p>}
               <p id="site-edit-proxy-result" aria-live="polite" className={cn("text-xs leading-relaxed [overflow-wrap:anywhere]", normalizedProxyTarget ? "text-muted" : "text-error")}>
                 {normalizedProxyTarget ? t("sites.proxy.effectiveTarget").replace("{target}", normalizedProxyTarget) : t("sites.proxy.invalidTarget")}
               </p>
@@ -383,6 +399,27 @@ export function SiteDetailSheet({
           </div>
 
             </TabsContent>
+            {isProxy && <TabsContent value="application" forceMount className="mt-0 space-y-4 data-[state=inactive]:hidden">
+              <div className="space-y-1.5">
+                <Label htmlFor="site-edit-app-kind">{t("appProcess.runtime")}</Label>
+                <Select value={draft.runtime.kind} disabled={busy || applicationBusy}
+                  onValueChange={(kind: Site["runtime"]["kind"]) => setDraft({ ...draft, runtime: { ...draft.runtime, kind, application: undefined } })}>
+                  <SelectTrigger id="site-edit-app-kind"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="reverse-proxy">{t("wz.kindProxy")}</SelectItem>
+                    {APPLICATION_RUNTIMES.map((runtime) => <SelectItem key={runtime.kind} value={runtime.kind}>{runtime.label}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              {applicationStatus && <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-fill p-3 text-xs">
+                <span>{t("appProcess.state")} · {t(("state." + applicationStatus.state) as "state.running")}</span>
+                <Button variant="ghost" size="sm" disabled={busy || dirty} onClick={() => router.push(`/logs?service=${encodeURIComponent(`site-app:${site.id}`)}`)}><ScrollText className="size-3.5" />{t("appProcess.logs")}</Button>
+              </div>}
+              {appRuntime ? <SiteApplicationFields id="site-edit-app" kind={draft.runtime.kind} value={draft.runtime.application} versions={appVersions}
+                rootDir={draft.rootDir} disabled={busy} locked={applicationBusy} onChange={(application) => setDraft({ ...draft, runtime: { ...draft.runtime, application } })} />
+                : <p className="text-xs leading-relaxed text-muted">{t("appProcess.externalHint")}</p>}
+              {applicationInvalid && <p role="alert" className="text-xs leading-relaxed text-error">{t("appProcess.invalid")}</p>}
+            </TabsContent>}
             <TabsContent value="environment" forceMount className="mt-0 data-[state=inactive]:hidden">
               <EnvEditor key={`${site.id}:${baseline?.rootDir}`} ref={envEditorRef} siteId={site.id} disabled={siteBusy}
                 directoryChanged={directoryChanged} onStateChange={setEnvState} />
@@ -455,7 +492,7 @@ export function SiteDetailSheet({
             <div className="flex min-w-0 max-w-full gap-2">
               <Button variant="ghost" onClick={requestClose} disabled={busy}>{t("common.cancel")}</Button>
               {tab === "environment" ? <Button className="min-w-0" title={t("env.saveNamed").replace("{file}", envState.fileName)} onClick={() => void envEditorRef.current?.save()} disabled={siteBusy || !envState.canSave}><span className="truncate">{envState.busy ? t("detail.saveBusy") : t("env.saveNamed").replace("{file}", envState.fileName)}</span></Button>
-                : <Button onClick={save} disabled={busy || !siteDirty || (directoryChanged && envState.dirty) || proxyInvalid || phpInvalid || (draft.https && !!certificateSelection.problem)}>{saving ? t("detail.saveBusy") : t("common.save")}</Button>}
+                : <Button onClick={save} disabled={busy || !siteDirty || (directoryChanged && envState.dirty) || proxyInvalid || applicationInvalid || phpInvalid || (draft.https && !!certificateSelection.problem)}>{saving ? t("detail.saveBusy") : t("common.save")}</Button>}
             </div>
           </div>
         </div>

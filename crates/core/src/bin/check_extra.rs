@@ -150,6 +150,7 @@ fn main() {
             .to_string_lossy()
             .to_string(),
         runtime: nsb_core::model::SiteRuntime {
+            application: None,
             acme_cert_id: None,
             imported_cert_id: None,
             web_server: "apache".into(),

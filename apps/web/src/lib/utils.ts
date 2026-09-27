@@ -1,6 +1,35 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
-import type { PackageView, ServiceStatus, StackItem } from "@nsb/schema";
+import type { PackageView, ServiceStatus, StackItem, SiteRuntime } from "@nsb/schema";
+
+export const APPLICATION_RUNTIMES = [
+  { kind: "node", id: "node", label: "Node.js", args: ["server.js"] },
+  { kind: "python", id: "python", label: "Python", args: ["app.py"] },
+  { kind: "java", id: "temurin-jdk21", label: "Java", args: ["-jar", "app.jar"] },
+  { kind: "go", id: "go", label: "Go", args: ["run", "."] },
+] as const;
+
+export function applicationRuntime(kind: SiteRuntime["kind"]) {
+  return APPLICATION_RUNTIMES.find((runtime) => runtime.kind === kind);
+}
+
+/** 与原生应用配置校验一致；这里只接受规范化后的回环 IP。 */
+export function validApplication(application: SiteRuntime["application"], proxyTarget: string) {
+  if (!application) return true;
+  const bytes = (value: string) => new TextEncoder().encode(value).length;
+  if (!application.version || bytes(application.version) > 128 || /[\u0000-\u001f\u007f-\u009f]/.test(application.version)
+    || !application.args.length || application.args.length > 64 || !application.args[0].trim()
+    || application.args.some((arg) => arg.includes("\0") || bytes(arg) > 8192)
+    || bytes(application.args.join("")) > 32 * 1024
+    || (application.cwd && (bytes(application.cwd) > 4096 || /[\u0000-\u001f\u007f-\u009f]/.test(application.cwd)))) return false;
+  try {
+    const raw = proxyTarget.trim();
+    const url = new URL(raw.includes("://") ? raw : `http://${raw}`);
+    const ipv4 = /^127(?:\.\d{1,3}){3}$/.test(url.hostname) && url.hostname.split(".").every((part) => Number(part) <= 255);
+    return url.protocol === "http:" && (ipv4 || url.hostname === "[::1]")
+      && url.port !== "0" && !url.username && !url.password && !raw.includes("?") && !raw.includes("#") && url.pathname === "/";
+  } catch { return false; }
+}
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));

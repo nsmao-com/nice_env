@@ -53,6 +53,7 @@ pub struct BulkFailure {
 ///
 /// 判层级靠 id 前缀匹配，因为服务 id 形如 `php@8.3.33` / `mysql@8.0.46`。
 pub fn tier_of(service_id: &str) -> u8 {
+    if crate::applications::site_id(service_id).is_some() { return 1; }
     let base = service_id.split('@').next().unwrap_or(service_id);
     match base {
         "mysql" | "mariadb" | "postgresql" | "mongodb" | "qdrant" | "neo4j" | "redis"

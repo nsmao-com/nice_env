@@ -15,6 +15,7 @@ use std::time::Duration;
 /// 内置编排的服务（nginx/mysql 等）走这里；其余清单声明 `run` 的包走 `generic::register_services`。
 pub fn register_services(paths: &Paths, store: &Store, manager: &Arc<ServiceManager>) {
     let _operation = manager.lifecycle.lock();
+    crate::applications::register_services(paths, store, manager);
     let Ok(installed) = store.list_installed() else {
         return;
     };
@@ -299,7 +300,7 @@ fn start_service_inner(
             return Ok(());
         }
     }
-    if !id.contains('@') {
+    if !id.contains('@') && crate::applications::site_id(id).is_none() {
         if let Some(version) = status.version {
             set_active_version(store, id, &version)?;
         }
@@ -308,6 +309,7 @@ fn start_service_inner(
     manager.set_state(id, ServiceState::Starting);
 
     let result = match id {
+        s if crate::applications::site_id(s).is_some() => crate::applications::spawn(store, paths, manager, s),
         "nginx" => start_nginx(store, paths, manager, &ports),
         "apache" => start_apache(store, paths, manager, &ports),
         "redis" => start_redis(store, paths, manager, &ports),
@@ -1294,6 +1296,8 @@ pub(crate) fn rebuild_and_reload_selected(
 /// 停全部（托盘退出时用）
 pub fn stop_all(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>) {
     let _ = crate::toolbox::adminer_stop(manager);
+    let applications: Vec<_> = manager.services.lock().keys().filter(|id| crate::applications::site_id(id).is_some()).cloned().collect();
+    for id in applications { let _ = stop_service(store, paths, manager, &id); }
     if let Ok(list) = store.list_installed() {
         for p in list {
             let sid = if p.id == "php" || p.id == "mysql" {

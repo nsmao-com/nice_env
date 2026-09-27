@@ -443,7 +443,7 @@ fn terminal_environment_selected(store: &Store, paths: &Paths, manifest: &Manife
     Ok(environment)
 }
 
-fn terminal_package_directory(package: &crate::model::InstalledPackage, meta: &crate::model::PackageManifestEntry) -> std::result::Result<String, String> {
+pub(crate) fn terminal_package_directory(package: &crate::model::InstalledPackage, meta: &crate::model::PackageManifestEntry) -> std::result::Result<String, String> {
     if meta.entry.trim().is_empty() || is_non_executable_entry(&meta.entry) { return Err("该运行时没有可用的命令行入口".into()); }
     let entry = terminal_cli_entry(&package.id, &meta.entry, cfg!(windows));
     let dir = bin_dir_for(&package.install_path, &entry)

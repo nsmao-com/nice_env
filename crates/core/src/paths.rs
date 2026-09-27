@@ -1415,7 +1415,7 @@ mod tests {
         store.set_setting("mysqlRootPassword", &format!("{old}/secret")).unwrap();
         store.set_setting("pathEnvDirs", &format!(r#"["{old}/runtimes/fixture/1"]"#)).unwrap();
         let conn = rusqlite::Connection::open(paths.db()).unwrap();
-        conn.execute("INSERT INTO sites(id,name,domains,root_dir,runtime,https,rewrite,created_at,updated_at) VALUES('site','site','[]',?1,?2,0,'\"none\"',1,2)", rusqlite::params![format!("{old}/www"),serde_json::json!({"kind":"node","cwd":format!("{old}/www"),"command":format!("\"{old}/runtimes/fixture/1/{binary}\""),"custom":"preserve"}).to_string()]).unwrap();
+        conn.execute("INSERT INTO sites(id,name,domains,root_dir,runtime,https,rewrite,created_at,updated_at) VALUES('site','site','[]',?1,?2,0,'\"none\"',1,2)", rusqlite::params![format!("{old}/www"),serde_json::json!({"kind":"node","cwd":format!("{old}/www"),"command":format!("\"{old}/runtimes/fixture/1/{binary}\""),"custom":"preserve","application":{"version":"1","cwd":format!("{old}/app"),"args":[format!("{old}/app/server.js"),format!("{external}/file"),"literal & ; argument"]}}).to_string()]).unwrap();
         conn.execute("INSERT INTO certs(id,kind,subject,sans,not_before,not_after,cert_path,key_path) VALUES('cert','imported','test','[]',0,1,?1,?2)", rusqlite::params![format!("{old}/certs/site.pem"),format!("{external}/key.pem")]).unwrap();
         let target = temp.path().join("target");
         let result = copy_data_dir(&source, &target).unwrap();
@@ -1425,6 +1425,10 @@ mod tests {
         let installed = copied.list_installed().unwrap().remove(0);
         assert_eq!(portable_path_text(Path::new(&installed.install_path)),format!("{new}/runtimes/fixture/1"));
         assert_eq!(copied.list_sites().unwrap()[0].root_dir,format!("{new}/www"));
+        let application = copied.list_sites().unwrap()[0].runtime.application.clone().unwrap();
+        assert_eq!(application.cwd.as_deref(), Some(format!("{new}/app").as_str()));
+        assert_eq!(application.args, vec![format!("{new}/app/server.js"), format!("{external}/file"), "literal & ; argument".into()]);
+        assert_eq!(store.list_sites().unwrap()[0].runtime.application.as_ref().unwrap().args[0], format!("{old}/app/server.js"));
         assert_eq!(copied.list_certs().unwrap()[0].cert_path,format!("{new}/certs/site.pem"));
         assert_eq!(copied.list_certs().unwrap()[0].key_path.as_deref(),Some(format!("{external}/key.pem").as_str()));
         assert_eq!(copied.get_setting("mysqlRootPassword"),store.get_setting("mysqlRootPassword"));

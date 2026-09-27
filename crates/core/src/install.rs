@@ -881,6 +881,8 @@ impl Installer {
             let php_ref = target.id == "php"
                 && site.runtime.kind == crate::model::SiteKind::Php
                 && site.runtime.php_version.as_deref() == Some(target.version.as_str());
+            let application_ref = crate::applications::runtime_id(&site.runtime.kind) == Some(target.id.as_str())
+                && site.runtime.application.as_ref().is_some_and(|app| app.version == target.version);
             let web_ref = site.runtime.web_server == target.id && !has_alternative;
             let db_ref = target.id == "mysql"
                 && site.db.as_ref().is_some_and(|db| {
@@ -889,7 +891,7 @@ impl Installer {
                             version == target.version.as_str()
                         })
                 });
-            if php_ref || web_ref || db_ref || project_ref {
+            if php_ref || application_ref || web_ref || db_ref || project_ref {
                 users.push(format!("站点「{}」", site.name));
             }
         }

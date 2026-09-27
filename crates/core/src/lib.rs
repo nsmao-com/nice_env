@@ -1,6 +1,7 @@
 //! core：NiceEnv 全部业务逻辑（无 Tauri 依赖，可独立测试/无头运行）。
 
 pub mod acme;
+pub mod applications;
 pub mod bulk;
 pub mod certauto;
 pub mod certdeploy;
@@ -1534,6 +1535,12 @@ impl CoreState {
         let statuses = self.manager.list_status();
         let mut acted = Vec::new();
         for st in statuses {
+            if let Some(id) = applications::site_id(&st.id) {
+                if sites::get(&self.store, id).ok().is_none_or(|site| site.runtime.application.is_none() || sites::derive_status(&self.paths, &site) != "running") {
+                    self.watchdog.note_user_stopped(&st.id);
+                    continue;
+                }
+            }
             if self.manager.is_busy(&st.id) {
                 continue;
             }

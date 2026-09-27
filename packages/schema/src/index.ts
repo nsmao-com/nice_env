@@ -361,6 +361,11 @@ export const SiteRuntime = z.object({
   acmeCertId: z.string().optional(),
   webServer: z.enum(["nginx", "apache"]).default("nginx"),
   kind: SiteKind,
+  application: z.object({
+    version: z.string(),
+    args: z.array(z.string()),
+    cwd: z.string().optional(),
+  }).optional(),
   phpVersion: z.string().optional(),
   proxyTarget: z.string().optional(),
   command: z.string().optional(),

@@ -161,6 +161,12 @@ impl Store {
             let mut data: serde_json::Value = serde_json::from_str(value).map_err(|e| AppError::internal("读取站点运行配置", e.to_string()))?;
             if let Some(cwd) = data.get_mut("cwd").and_then(|v| v.as_str().map(str::to_string)) { data["cwd"] = rebase.path(&cwd).into(); }
             if let Some(command) = data.get("command").and_then(|v|v.as_str()) { data["command"] = rebase.text(command)?.into(); }
+            if let Some(application) = data.get_mut("application") {
+                if let Some(cwd) = application.get("cwd").and_then(|v| v.as_str()).map(str::to_owned) { application["cwd"] = rebase.path(&cwd).into(); }
+                if let Some(args) = application.get_mut("args").and_then(|v| v.as_array_mut()) {
+                    for arg in args { if let Some(value) = arg.as_str() { *arg = rebase.path(value).into(); } }
+                }
+            }
             Ok(data.to_string())
         })?;
         rewrite(&tx, "sites", "id", "php_overrides", |value| {

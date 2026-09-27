@@ -235,6 +235,7 @@ pub fn runtime_status(paths: &Paths, site: &Site, manager: &ServiceManager) -> &
         return configured;
     }
     let mut dependencies = vec![site.runtime.web_server.clone()];
+    if site.runtime.application.is_some() { dependencies.push(crate::applications::service_id(site)); }
     if site.runtime.kind == SiteKind::Php {
         let Some(version) = &site.runtime.php_version else {
             return "unconfigured";
@@ -348,6 +349,8 @@ fn validate_site_fields(
     } else if runtime.kind != SiteKind::Static {
         proxy_url(runtime.proxy_target.as_deref().unwrap_or_default())?;
     }
+    crate::applications::validate(runtime)?;
+    if runtime.application.is_some() { crate::applications::installed_version(store, runtime)?; }
     Ok(())
 }
 
@@ -664,6 +667,9 @@ pub fn create_with_progress(
         let mut failures = Vec::new();
         if let Err(e) = user_ini.restore() { failures.push(e.to_string()); }
         if let Err(e) = store.delete_site(&site.id) { failures.push(e.to_string()); }
+        if !manager.is_busy(&crate::applications::service_id(&site)) {
+            manager.services.lock().remove(&crate::applications::service_id(&site));
+        }
         if !failures.is_empty() {
             return Err(AppError::new("SITE_CREATE_ROLLBACK_FAILED", "站点创建失败，部分状态未能恢复")
                 .with_hint(user_ini.recovery_hint())
@@ -702,6 +708,10 @@ pub fn update(
     current.rewrite = site_patch.rewrite.clone();
     current.php_overrides = site_patch.php_overrides.clone();
     current.updated_at = now_ms();
+    if crate::applications::running_settings_changed(&original, &current, manager) {
+        return Err(AppError::new("APP_RUNNING", "应用正在运行，请先停止站点后修改运行时、入口、参数、目录或监听地址")
+            .with_hint("草稿未保存；停止站点会同时停止该站点托管的应用进程。"));
+    }
     validate_site_fields(
         &current.name,
         &current.domains,
@@ -725,6 +735,7 @@ pub fn update(
     }).collect();
     let mut web = SiteWebChanges::new(manager, servers);
     let mut php = SitePhpStart::default();
+    let mut application = crate::applications::ApplicationStart::default();
     let mut record_saved = false;
     let mut hosts_attempted = false;
     let certificate_id = format!("cert-{}", current.domains[0]);
@@ -761,6 +772,7 @@ pub fn update(
         write_site_conf_state(paths, store, &current, enabled)?;
         store.save_site(&current)?;
         record_saved = true;
+        if was_running { application.ensure_running(&current, paths, store, manager)?; }
         if was_running
             && manager
                 .snapshot(&current.runtime.web_server)
@@ -796,6 +808,7 @@ pub fn update(
         }
         // 先收回新池，再重建原 Web 配置，避免把失败操作的 upstream 留在主配置中。
         failures.extend(php.restore(paths, store, manager));
+        failures.extend(application.restore(paths, store, manager));
         failures.extend(web.restore(store, paths, manager, configuration_restored));
         if !failures.is_empty() {
             let recovery_hint = match retain_update_recovery(paths, &snapshots, &original, &previous_certificates) {
@@ -810,6 +823,9 @@ pub fn update(
         return Err(error.with_hint(format!("保存未完成，已恢复原站点配置。{hint}")));
     }
     current.status = runtime_status(paths, &current, manager).to_string();
+    if current.runtime.application.is_none() && !manager.is_busy(&crate::applications::service_id(&current)) {
+        manager.services.lock().remove(&crate::applications::service_id(&current));
+    }
     current.access_url = loaded_endpoint(manager, &current).map(|endpoint| endpoint.url);
     Ok(current)
 }
@@ -982,6 +998,9 @@ pub fn delete(
         }
     }
     let previous_hosts = crate::hosts::extra_entries(store)?;
+    let application_was_running = manager.snapshot(&crate::applications::service_id(&site))
+        .is_some_and(|status| status.state == ServiceState::Running);
+    let mut application_stop_attempted = false;
     // 先移动到同一数据目录的暂存区，保留文件内容和权限。全部生效后才真正删除，
     // 恢复失败时保留暂存文件，不能让 TempDir::drop 把仅存的副本清掉。
     let backup = crate::paths::checked_data_path(&paths.base, "backup")?;
@@ -1025,6 +1044,10 @@ pub fn delete(
             hosts_changed = true;
         }
         web.apply(store, paths, manager)?;
+        if manager.is_busy(&crate::applications::service_id(&site)) {
+            application_stop_attempted = true;
+            crate::applications::stop(&site, paths, store, manager)?;
+        }
         Ok(())
     })();
     if let Err(error) = result {
@@ -1054,6 +1077,10 @@ pub fn delete(
                 failures.push(format!("恢复 hosts 选项：{e}"));
             }
         }
+        if application_stop_attempted && application_was_running {
+            let mut application = crate::applications::ApplicationStart::default();
+            if let Err(error) = application.ensure_running(&site, paths, store, manager) { failures.push(format!("恢复应用进程：{error}")); }
+        }
         failures.extend(web.restore(store, paths, manager, configuration_restored));
         if !failures.is_empty() {
             let recovery = staging.keep();
@@ -1068,6 +1095,9 @@ pub fn delete(
     staging.close().map_err(|e| AppError::new("SITE_DELETE_CLEANUP_FAILED", "站点已删除，但暂存文件清理失败")
         .with_hint(format!("无需再次删除站点。请检查并清理暂存目录 {}。", staging_path.display()))
         .with_detail(e.to_string()))?;
+    if !manager.is_busy(&crate::applications::service_id(&site)) {
+        manager.services.lock().remove(&crate::applications::service_id(&site));
+    }
     Ok(())
 }
 
@@ -1105,8 +1135,10 @@ fn start_site_inner(
     }).collect();
     let mut web = SiteWebChanges::new(manager, servers);
     let mut php = SitePhpStart::default();
+    let mut application = crate::applications::ApplicationStart::default();
     let result: Result<()> = (|| {
         user_ini.apply(paths)?;
+        application.ensure_running(&site, paths, store, manager)?;
         php.ensure_running(paths, store, manager, &site)?;
         write_site_conf(paths, store, &site)?;
         let web_server = &site.runtime.web_server;
@@ -1128,6 +1160,7 @@ fn start_site_inner(
         }
         let configuration_restored = failures.is_empty();
         failures.extend(php.restore(paths, store, manager));
+        failures.extend(application.restore(paths, store, manager));
         failures.extend(web.restore(store, paths, manager, configuration_restored));
         if !failures.is_empty() {
             return Err(AppError::new("SITE_START_ROLLBACK_FAILED", "启动失败，部分配置或服务未能恢复")
@@ -2276,6 +2309,7 @@ mod scaffold_tests {
             domains: vec!["t.test".into()],
             root_dir: String::new(),
             runtime: SiteRuntime {
+                application: None,
                 acme_cert_id: None,
                 imported_cert_id: None,
                 web_server: "nginx".into(),
@@ -3795,6 +3829,169 @@ mod scaffold_tests {
     }
 
     #[test]
+    fn managed_application_validation_requires_explicit_supported_configuration() {
+        let mut runtime = input(SiteKind::Node).runtime;
+        runtime.command = Some("historical command must not execute".into());
+        assert!(crate::applications::validate(&runtime).is_ok());
+        runtime.application = Some(crate::model::SiteApplication { version: "22.0.0".into(), args: vec!["server.js".into()], cwd: None });
+        for target in ["http://example.test:8080", "https://127.0.0.1:8080", "http://127.0.0.1:8080/api", "http://user@127.0.0.1:8080", "127.0.0.1:0"] {
+            runtime.proxy_target = Some(target.into()); assert!(crate::applications::validate(&runtime).is_err(), "{target}");
+        }
+        for target in ["127.0.0.1:8080", "http://[::1]:8080"] {
+            runtime.proxy_target = Some(target.into()); crate::applications::validate(&runtime).unwrap();
+        }
+        runtime.kind = SiteKind::Static;
+        assert_eq!(crate::applications::validate(&runtime).unwrap_err().code, "APP_BAD_RUNTIME");
+        runtime.kind = SiteKind::Node; runtime.application.as_mut().unwrap().args.clear();
+        assert_eq!(crate::applications::validate(&runtime).unwrap_err().code, "APP_BAD_ARGUMENTS");
+        runtime.application.as_mut().unwrap().args = vec!["server.js".into(), "literal & ; $() with spaces".into()];
+        crate::applications::validate(&runtime).unwrap();
+        let serialized = serde_json::to_value(&runtime).unwrap();
+        assert_eq!(serialized["application"]["args"][1], "literal & ; $() with spaces");
+        let mut legacy = serialized; legacy.as_object_mut().unwrap().remove("application");
+        assert!(serde_json::from_value::<crate::model::SiteRuntime>(legacy).unwrap().application.is_none());
+    }
+
+    #[test]
+    #[ignore = "requires NSB_NGINX_ROOT, NSB_ENV_NODE, NSB_ENV_PYTHON, NSB_SKIP_HOSTS=1; optional NSB_ENV_GO; isolated real applications"]
+    fn managed_application_native_lifecycle_serves_apps_and_rolls_back() {
+        assert_eq!(std::env::var("NSB_SKIP_HOSTS").as_deref(), Ok("1"));
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().to_path_buf()); paths.ensure_dirs().unwrap();
+        let store = Store::open(paths.db()).unwrap();
+        let nginx = PathBuf::from(std::env::var("NSB_NGINX_ROOT").unwrap());
+        let nginx_version = nginx.file_name().unwrap().to_str().unwrap().strip_prefix("nginx-").unwrap();
+        store.upsert_installed(&crate::model::InstalledPackage { id: "nginx".into(), version: nginx_version.into(), category: "web-server".into(),
+            install_path: nginx.parent().unwrap().to_string_lossy().into(), config_path: String::new(), installed_at: 1 }).unwrap();
+        let mut manifest = crate::install::Installer::bundled().manifest;
+        manifest.packages.retain(|entry| matches!(entry.id.as_str(), "node" | "python" | "go"));
+        let mut runtimes = vec![("node", "NSB_ENV_NODE"), ("python", "NSB_ENV_PYTHON")];
+        if std::env::var_os("NSB_ENV_GO").is_some() { runtimes.push(("go", "NSB_ENV_GO")); }
+        for (id, variable) in runtimes {
+            let executable = PathBuf::from(std::env::var(variable).unwrap()).canonicalize().unwrap();
+            let entry = manifest.packages.iter_mut().find(|entry| entry.id == id).unwrap();
+            entry.version = "0.0.1".into(); entry.entry = executable.file_name().unwrap().to_string_lossy().into();
+            store.upsert_installed(&crate::model::InstalledPackage { id: id.into(), version: "0.0.1".into(), category: "runtime".into(),
+                install_path: executable.parent().unwrap().to_string_lossy().into(), config_path: String::new(), installed_at: 1 }).unwrap();
+        }
+        std::fs::write(paths.etc().join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let http = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let https = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = http.local_addr().unwrap().port();
+        store.set_port_override("http", Some(port)).unwrap();
+        store.set_port_override("https", Some(https.local_addr().unwrap().port())).unwrap();
+        let manager = Arc::new(ServiceManager::new());
+        struct Cleanup<'a> { store: &'a Store, paths: &'a Paths, manager: Arc<ServiceManager> }
+        impl Drop for Cleanup<'_> { fn drop(&mut self) { crate::ops::stop_all(self.store, self.paths, &self.manager); } }
+        let _cleanup = Cleanup { store: &store, paths: &paths, manager: manager.clone() };
+        let keep = saved_site(&paths, &store);
+        std::fs::write(paths.base.join("index.html"), "keep-static").unwrap();
+        drop(http); drop(https);
+        start_site(&keep.id, &paths, &store, &manager).unwrap();
+        let client = reqwest::blocking::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(4)).build().unwrap();
+        let response = |domain: &str| client.get(format!("http://127.0.0.1:{port}/")).header("Host", domain).send().unwrap().text().unwrap();
+        let assert_port_released = |port| {
+            // Windows 进程退出后，TCP 栈可能短暂完成先前的握手；同时核对监听表并限时等待释放。
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while crate::services::tcp_port_open(port) && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            assert!(!crate::ports::listener_endpoints().unwrap().iter().any(|endpoint| endpoint.port == port));
+            assert!(!crate::services::tcp_port_open(port), "application port {port} remained open after stop");
+        };
+        let mut cases = vec![
+            (SiteKind::Node, "node", "entry with spaces.js", "const http=require('http'); console.log('managed-app-log'); http.createServer((req,res)=>{res.setHeader('content-type','application/json');res.end(JSON.stringify({args:process.argv.slice(2),cwd:process.cwd(),runtime:'node'}));}).listen(Number(process.env.PORT),process.env.HOST);"),
+            (SiteKind::Python, "python", "entry with spaces.py", "import http.server,json,os,sys\nprint('managed-app-log',flush=True)\nclass Handler(http.server.BaseHTTPRequestHandler):\n def do_GET(self):\n  self.send_response(200)\n  self.end_headers()\n  self.wfile.write(json.dumps({'args':sys.argv[1:],'cwd':os.getcwd(),'runtime':'python'}).encode())\nhttp.server.HTTPServer((os.environ['HOST'],int(os.environ['PORT'])),Handler).serve_forever()\n"),
+        ];
+        if std::env::var_os("NSB_ENV_GO").is_some() {
+            cases.push((SiteKind::Go, "go", "entry with spaces.go", r#"package main
+import ("encoding/json"; "fmt"; "net/http"; "os")
+func main() { fmt.Println("managed-app-log"); http.HandleFunc("/",func(w http.ResponseWriter,r *http.Request) { cwd,_:=os.Getwd(); json.NewEncoder(w).Encode(map[string]interface{}{"args":os.Args[1:],"cwd":cwd,"runtime":"go"}) }); if err:=http.ListenAndServe(os.Getenv("HOST")+":"+os.Getenv("PORT"),nil);err!=nil { panic(err) } }
+"#));
+        }
+        for (kind, id, entry_name, source) in cases {
+            let root = paths.base.join(format!("{id} 中文 O'Brien & project")); std::fs::create_dir(&root).unwrap();
+            std::fs::write(root.join(entry_name), source).unwrap();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let application_port = listener.local_addr().unwrap().port(); drop(listener);
+            let mut site = keep.clone(); site.id = format!("managed-{id}"); site.name = id.into(); site.domains = vec![format!("{id}.demo.test")];
+            site.root_dir = root.to_string_lossy().into(); site.runtime.kind = kind;
+            site.runtime.proxy_target = Some(format!("127.0.0.1:{application_port}"));
+            site.runtime.application = Some(crate::model::SiteApplication { version: "0.0.1".into(),
+                args: vec![entry_name.into(), "literal & ; $() ' \" 中文".into()], cwd: None });
+            if id == "go" { site.runtime.application.as_mut().unwrap().args.insert(0, "run".into()); }
+            store.save_site(&site).unwrap();
+            assert_eq!(crate::install::Installer::effective(&paths).uninstall(&format!("{id}@0.0.1"), &paths, &store, &manager).unwrap_err().code, "PACKAGE_IN_USE");
+            start_site(&site.id, &paths, &store, &manager).unwrap();
+            let app_id = crate::applications::service_id(&site);
+            let pids = manager.snapshot(&app_id).unwrap().pids;
+            assert!(!pids.is_empty()); assert_eq!(runtime_status(&paths, &site, &manager), "running");
+            let actual: serde_json::Value = serde_json::from_str(&response(&site.domains[0])).unwrap();
+            assert_eq!(actual["args"][0], "literal & ; $() ' \" 中文"); assert_eq!(actual["runtime"], id);
+            assert_eq!(PathBuf::from(actual["cwd"].as_str().unwrap()).canonicalize().unwrap(), root.canonicalize().unwrap());
+            assert_eq!(response(&keep.domains[0]), "keep-static");
+            assert!(manager.tail(&app_id, 30).iter().any(|line| line.contains("managed-app-log")));
+            start_site(&site.id, &paths, &store, &manager).unwrap();
+            assert_eq!(manager.snapshot(&app_id).unwrap().pids, pids);
+            let mut changed = site.clone(); changed.runtime.application.as_mut().unwrap().args.push("second".into());
+            assert_eq!(update(&changed, &paths, &store, &manager).unwrap_err().code, "APP_RUNNING");
+            if id == "node" {
+                let db = rusqlite::Connection::open(paths.db()).unwrap();
+                db.execute_batch("CREATE TRIGGER reject_managed_stop BEFORE UPDATE ON sites WHEN NEW.id='managed-node' BEGIN SELECT RAISE(ABORT,'managed stop fixture'); END;").unwrap();
+                let report = stop_many(&paths, &store, &manager, &[keep.id.clone(), site.id.clone()]).unwrap();
+                assert_eq!(report.failed.len(), 2); assert!(report.succeeded.is_empty());
+                assert_eq!(manager.snapshot(&app_id).unwrap().pids, pids);
+                assert_eq!(runtime_status(&paths, &site, &manager), "running");
+                assert_eq!(response(&keep.domains[0]), "keep-static");
+                db.execute_batch("DROP TRIGGER reject_managed_stop;").unwrap();
+            }
+            stop_site(&site.id, &paths, &store, &manager).unwrap();
+            assert_eq!(manager.snapshot(&app_id).unwrap().state, ServiceState::Stopped);
+            assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));
+            assert_port_released(application_port);
+            update(&changed, &paths, &store, &manager).unwrap();
+            let occupied = std::net::TcpListener::bind(("127.0.0.1", application_port)).unwrap();
+            assert_eq!(start_site(&site.id, &paths, &store, &manager).unwrap_err().code, "PORT_IN_USE");
+            assert!(manager.snapshot(&app_id).unwrap().pids.is_empty());
+            assert_eq!(occupied.local_addr().unwrap().port(), application_port);
+            assert!(crate::ports::listener_endpoints().unwrap().iter().any(|endpoint| endpoint.port == application_port && endpoint.pid == std::process::id()));
+            drop(occupied);
+            let mut invalid = changed.clone(); invalid.runtime.application.as_mut().unwrap().args = vec!["does-not-exist".into()];
+            update(&invalid, &paths, &store, &manager).unwrap();
+            assert_eq!(start_site(&site.id, &paths, &store, &manager).unwrap_err().code, "APP_EXITED");
+            assert!(manager.snapshot(&app_id).unwrap().pids.is_empty());
+            assert_port_released(application_port);
+            update(&changed, &paths, &store, &manager).unwrap();
+            store.set_setting("extraHosts", "bad fixture").unwrap();
+            assert_eq!(start_site(&site.id, &paths, &store, &manager).unwrap_err().code, "HOSTS_SETTINGS_INVALID");
+            assert_eq!(manager.snapshot(&app_id).unwrap().state, ServiceState::Stopped);
+            assert_port_released(application_port);
+            assert_eq!(derive_status(&paths, &site), "stopped");
+            assert_eq!(response(&keep.domains[0]), "keep-static");
+            store.set_setting("extraHosts", "[]").unwrap();
+            start_site(&site.id, &paths, &store, &manager).unwrap();
+            let stopped = stop_many(&paths, &store, &manager, &[site.id.clone(), site.id.clone()]).unwrap();
+            assert_eq!(stopped.succeeded, vec![site.id.clone()]); assert!(stopped.failed.is_empty());
+            assert_port_released(application_port);
+            start_site(&site.id, &paths, &store, &manager).unwrap();
+            let pids = manager.snapshot(&app_id).unwrap().pids;
+            delete(&site.id, true, false, &paths, &store, &manager).unwrap();
+            assert!(manager.snapshot(&app_id).is_none());
+            assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));
+            assert_port_released(application_port);
+            assert!(root.join(entry_name).is_file());
+            let mut failed = input(site.runtime.kind.clone());
+            failed.root_dir = site.root_dir.clone(); failed.runtime = site.runtime.clone();
+            failed.runtime.application.as_mut().unwrap().args = vec!["does-not-exist".into()];
+            failed.name = "Failed application".into(); failed.domains = vec!["failed-application.test".into()];
+            assert_eq!(create(&failed, &paths, &store, &manager).unwrap_err().code, "APP_EXITED");
+            assert_eq!(store.list_sites().unwrap().len(), 1);
+            assert!(manager.list_status().iter().all(|status| !status.id.starts_with("site-app:")));
+            assert!(root.join(entry_name).is_file());
+        }
+    }
+
+    #[test]
     fn site_endpoints_follow_vhosts_and_reject_unconfirmed_loads() {
         let temp = Tmp::new("site-endpoints");
         let paths = Paths::new(temp.0.clone());
@@ -4205,7 +4402,8 @@ pub fn stop_many(
             Err(error) => { report.failed.push(SiteBulkFailure { site_id: id.clone(), error: error.into() }); continue; }
         };
         // 连旧版本遗留在另一 Web 服务下的启用配置也要处理，不能静默遗漏。
-        if !snapshot.iter().enumerate().any(|(i, (_, content))| i % 2 == 0 && content.is_some()) {
+        if !snapshot.iter().enumerate().any(|(i, (_, content))| i % 2 == 0 && content.is_some())
+            && !manager.is_busy(&crate::applications::service_id(&site)) {
             report.already.push(id.clone());
             continue;
         }
@@ -4226,6 +4424,9 @@ fn stop_prepared_sites(paths: &Paths, store: &Store, manager: &Arc<ServiceManage
         pending.iter().any(|(_, snapshot)| snapshot[index * 2].1.is_some()).then_some(server)
     }).collect();
     let previous: Vec<_> = servers.iter().map(|server| (*server, manager.snapshot(server))).collect();
+    let applications: Vec<_> = pending.iter().filter_map(|(site, _)| manager.snapshot(&crate::applications::service_id(site))
+        .filter(|status| status.state == ServiceState::Running).map(|_| site)).collect();
+    let mut applications_attempted = Vec::new();
     let mut saved = Vec::new();
     let mut applied = Vec::new();
     let mut attempted = None;
@@ -4243,6 +4444,13 @@ fn stop_prepared_sites(paths: &Paths, store: &Store, manager: &Arc<ServiceManage
             crate::ops::rebuild_and_reload_selected(store, paths, manager, &[*server])?;
             applied.push(*server);
         }
+        for (site, _) in pending {
+            let id = crate::applications::service_id(site);
+            if manager.is_busy(&id) {
+                applications_attempted.push(site.id.clone());
+                crate::applications::stop(site, paths, store, manager)?;
+            }
+        }
         Ok(())
     })();
     let Err(error) = result else { return Ok(()); };
@@ -4253,6 +4461,12 @@ fn stop_prepared_sites(paths: &Paths, store: &Store, manager: &Arc<ServiceManage
     let configs_restored = recovery.is_empty();
     for site in saved {
         if let Err(failure) = store.save_site(site) { recovery.push(format!("恢复 {} 记录：{}", site.name, failure.message)); }
+    }
+    for site in applications {
+        if applications_attempted.contains(&site.id) {
+            let mut application = crate::applications::ApplicationStart::default();
+            if let Err(error) = application.ensure_running(site, paths, store, manager) { recovery.push(format!("恢复 {} 应用：{error}", site.name)); }
+        }
     }
     // 未开始重载时只恢复文件；已应用的服务须加载恢复后的配置，停止过的实例须重新启动。
     if configs_restored {

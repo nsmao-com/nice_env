@@ -60,12 +60,12 @@ import type {
   CreateSiteInput,
 } from "@nsb/schema";
 import { emitLocal } from "./backend";
-import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSettingValid, isEnvSecretKey, isEnvFileName } from "./utils";
+import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSettingValid, isEnvSecretKey, isEnvFileName, applicationRuntime, validApplication } from "./utils";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.76";
+const MOCK_APP_VERSION = "0.2.77";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -742,12 +742,56 @@ for (const site of sites.values()) site.accessUrl = mockSiteUrl(site);
 function mockSiteStatus(site: Site): Site["status"] {
   if (site.status !== "running") return site.status;
   const dependencies: string[] = [site.runtime.webServer];
+  if (site.runtime.application) dependencies.push(`site-app:${site.id}`);
   if (site.runtime.kind === "php") {
     if (!site.runtime.phpVersion) return "unconfigured";
     dependencies.push(`php@${site.runtime.phpVersion}`);
   }
   const states = dependencies.map((id) => services.get(id)?.state);
   return states.includes("error") ? "error" : states.every((state) => state === "running") ? "running" : "stopped";
+}
+
+function mockApplicationBusy(id: string) {
+  const service = services.get(`site-app:${id}`);
+  return !!service && (!!service.pids.length || ["running", "starting", "stopping"].includes(service.state));
+}
+
+function validateMockApplication(runtime: Site["runtime"]) {
+  const app = runtime.application;
+  if (!app) return;
+  const selected = applicationRuntime(runtime.kind);
+  if (!selected || !validApplication(app, runtime.proxyTarget ?? "")) {
+    throw { code: "APP_INVALID", message: "请检查运行时、入口参数和本机 HTTP 监听地址" };
+  }
+  if (!packages.get(`${selected.id}@${app.version}`)?.install) {
+    throw { code: "APP_RUNTIME_UNAVAILABLE", message: "所选应用运行时尚未安装，请先安装或选择其他版本" };
+  }
+}
+
+function registerMockApplication(site: Site) {
+  const id = `site-app:${site.id}`;
+  if (mockApplicationBusy(site.id)) return;
+  if (!site.runtime.application) { services.delete(id); return; }
+  validateMockApplication(site.runtime);
+  const target = new URL(normalizeProxyTarget(site.runtime.proxyTarget ?? "")!);
+  services.set(id, { id, label: `${site.name} · 应用`, state: "stopped", pids: [], requires: [], missingRequires: [],
+    version: site.runtime.application.version, category: "runtime", port: Number(target.port || 80) });
+}
+
+/** 仅演示服务状态；每次失败还原本次涉及的服务，不模拟执行本机程序。 */
+async function startMockSiteServices(site: Site) {
+  validateMockApplication(site.runtime);
+  const ids: string[] = [site.runtime.webServer];
+  if (site.runtime.kind === "php" && site.runtime.phpVersion) ids.unshift(`php@${site.runtime.phpVersion}`);
+  if (site.runtime.application) ids.unshift(`site-app:${site.id}`);
+  const before = new Map(ids.map((id) => [id, structuredClone(services.get(id))]));
+  try {
+    registerMockApplication(site);
+    for (const id of ids) await performServiceAction("start_service", id);
+  } catch (error) {
+    for (const [id, service] of before) { if (service) services.set(id, service); else services.delete(id); }
+    throw error;
+  }
 }
 
 /** 预览也按运行描述注册服务；Node/Python 等纯运行时只选择版本。 */
@@ -915,6 +959,21 @@ async function performServiceAction(action: "start_service" | "stop_service" | "
     stopping = false;
     if (action !== "stop_service" && service.state !== "running") {
       if (service.state === "error" && service.pids.length) throw { code: "SERVICE_BUSY", message: "服务仍有进程，请先停止后重试" };
+      if (id.startsWith("site-app:")) {
+        const site = sites.get(id.slice("site-app:".length));
+        if (!site?.runtime.application) throw { code: "APP_NOT_MANAGED", message: "此站点未开启应用进程托管" };
+        validateMockApplication(site.runtime);
+        const defaults = settings.portProfile === "safe" ? { http: 8080, https: 8443, apacheHttp: 8180, apacheHttps: 8444 }
+          : { http: 80, https: 443, apacheHttp: 8080, apacheHttps: 8443 };
+        const ports = site.runtime.webServer === "apache" ? ["apacheHttp", "apacheHttps"] as const : ["http", "https"] as const;
+        if (ports.some((key) => (settings.portOverrides?.[key] ?? defaults[key]) === service.port)) {
+          throw { code: "APP_WEB_PORT_CONFLICT", message: "应用监听端口与站点 Web 服务相同，请为应用选择另一个端口" };
+        }
+        if (Array.from(services.values()).some((other) => other.id !== id && other.port === service.port && other.state === "running")) {
+          throw { code: "PORT_IN_USE", message: "应用监听端口已被其他演示服务占用" };
+        }
+        serviceLogLines.set(id, ["[浏览器演示] 模拟应用启停；未读取项目文件或执行本机程序。"]);
+      }
       service.state = "starting";
       service.lastError = undefined;
       await delay(700);
@@ -1293,6 +1352,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const usedBy = [
         ...Array.from(sites.values()).filter((site) =>
           (p.id === "php" && site.runtime.kind === "php" && site.runtime.phpVersion === p.version)
+          || (applicationRuntime(site.runtime.kind)?.id === p.id && site.runtime.application?.version === p.version)
           || (p.category === "runtime" && mockProjectReferences(site, p.id, p.version))
           || ((site.runtime.webServer ?? "nginx") === p.id && !hasAlternative)
           || (p.id === "mysql" && site.db?.enabled
@@ -1325,12 +1385,12 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return site.accessUrl as T;
     }
     case "create_site": {
+      return withServiceOperation(async () => {
       const input = args!.input as CreateSiteInput;
       if (input.runtime.kind !== "php" && input.runtime.kind !== "static" && !normalizeProxyTarget(input.runtime.proxyTarget ?? "")) {
         throw { code: "BAD_PROXY_TARGET", message: "请填写有效的 HTTP/HTTPS 代理地址，不能包含账号、查询参数或片段" };
       }
-      if (input.runtime.kind === "php" && input.runtime.phpVersion) await runServiceAction("start_service", `php@${input.runtime.phpVersion}`);
-      await runServiceAction("start_service", input.runtime.webServer);
+      validateMockApplication(input.runtime);
       const id = `site-${uid()}`;
       sites.set(id, {
         id,
@@ -1347,12 +1407,16 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         createdAt: now(),
         updatedAt: now(),
       });
+      try { await startMockSiteServices(sites.get(id)!); }
+      catch (error) { sites.delete(id); services.delete(`site-app:${id}`); throw error; }
       if (input.createDb) databases.set(input.createDb.database, { name: input.createDb.database, tables: 0, sizeKb: 0 });
       sites.get(id)!.accessUrl = mockSiteUrl(sites.get(id)!);
       input.domains.filter((d) => !d.startsWith("*.")).forEach((d) => hostsManaged.set(d, ["127.0.0.1"]));
       return sites.get(id) as T;
+      });
     }
     case "update_site": {
+      return withServiceOperation(async () => {
       const patch = args!.site as Partial<Site> & { id: string };
       const s = sites.get(patch.id);
       if (!s) throw { code: "SITE_NOT_FOUND", message: "站点不存在，请刷新列表" };
@@ -1360,6 +1424,11 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         rootDir: patch.rootDir?.trim() ?? s.rootDir, runtime: patch.runtime ?? s.runtime,
         https: patch.https ?? s.https, rewrite: patch.rewrite ?? s.rewrite,
         phpOverrides: patch.phpOverrides ?? s.phpOverrides, updatedAt: now() };
+      if (mockApplicationBusy(s.id) && (JSON.stringify(next.runtime.application) !== JSON.stringify(s.runtime.application)
+        || next.runtime.kind !== s.runtime.kind || next.rootDir !== s.rootDir || next.runtime.proxyTarget !== s.runtime.proxyTarget)) {
+        throw { code: "APP_RUNNING", message: "应用正在运行，请先停止站点再修改入口、参数、目录、运行时或监听地址" };
+      }
+      validateMockApplication(next.runtime);
       if (next.runtime.kind === "php" && Object.entries(next.phpOverrides ?? {}).some(([key, value]) => !isPhpSiteSettingValid(key, value, s.phpOverrides?.[key]))) {
         throw { code: "BAD_PHP_OVERRIDE", message: "PHP 设置不受支持或值无效，请检查后重试" };
       }
@@ -1367,21 +1436,26 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         throw { code: "BAD_PROXY_TARGET", message: "请填写有效的 HTTP/HTTPS 代理地址，不能包含账号、查询参数或片段" };
       }
       if (mockSiteStatus(s) === "running") {
-        if (next.runtime.kind === "php" && next.runtime.phpVersion) await runServiceAction("start_service", `php@${next.runtime.phpVersion}`);
-        await runServiceAction("start_service", next.runtime.webServer);
+        sites.set(s.id, next);
+        try { await startMockSiteServices(next); }
+        finally { sites.set(s.id, s); }
       }
       for (const domain of s.domains) {
         if (!next.domains.includes(domain) && ![...sites.values()].some((other) => other.id !== s.id && other.domains.includes(domain))) hostsManaged.delete(domain);
       }
       for (const domain of next.domains.filter((d) => !d.startsWith("*."))) hostsManaged.set(domain, ["127.0.0.1"]);
       Object.assign(s, next);
+      registerMockApplication(s);
       s.accessUrl = mockSiteStatus(s) === "running" ? mockSiteUrl(s) : undefined;
       return { ...s, status: mockSiteStatus(s) } as T;
+      });
     }
     case "delete_site": {
+      return withServiceOperation(async () => {
       const id = args!.id as string;
       const s = sites.get(id);
       if (!s) throw { code: "SITE_NOT_FOUND", message: "站点不存在" };
+      if (services.has(`site-app:${id}`)) await performServiceAction("stop_service", `site-app:${id}`);
       const others = Array.from(sites.values()).filter((site) => site.id !== id);
       if (args?.hosts !== false) {
         s.domains.forEach((domain) => {
@@ -1396,20 +1470,26 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         }
       }
       sites.delete(id);
+      services.delete(`site-app:${id}`);
       return true as T;
+      });
     }
     case "start_site":
     case "stop_site": {
+      return withServiceOperation(async () => {
       const s = sites.get(args!.id as string);
+      if (!s) throw { code: "SITE_NOT_FOUND", message: "站点不存在" };
       if (s) {
         if (cmd === "start_site") {
-          if (s.runtime.kind === "php" && s.runtime.phpVersion) await runServiceAction("start_service", `php@${s.runtime.phpVersion}`);
-          await runServiceAction("start_service", s.runtime.webServer);
+          await startMockSiteServices(s);
           s.accessUrl = mockSiteUrl(s);
+        } else if (services.has(`site-app:${s.id}`)) {
+          await performServiceAction("stop_service", `site-app:${s.id}`);
         }
         s.status = cmd === "start_site" ? "running" : "stopped";
       }
       return true as T;
+      });
     }
     case "read_hosts": {
       const list: HostsEntry[] = [];
@@ -1558,7 +1638,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         const site = sites.get(id);
         if (!site) { report.failed.push({siteId: id, error: {code: "SITE_NOT_FOUND", message: "站点不存在"}}); continue; }
         const running = mockSiteStatus(site) === "running";
-        if (action === "start" ? running : site.status === "stopped") { report.already.push(id); continue; }
+        if (action === "start" ? running : site.status === "stopped" && !mockApplicationBusy(id)) { report.already.push(id); continue; }
         try {
           await mockInvoke(action === "start" ? "start_site" : "stop_site", { id });
           report.succeeded.push(id);
@@ -1573,6 +1653,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const ids = [...new Set(args!.ids as string[])];
       const action = cmd.slice(5) as "start" | "stop" | "restart";
       const tier = (id: string) => {
+        if (id.startsWith("site-app:")) return 1;
         const base = id.split("@")[0];
         if (["mysql", "mariadb", "redis", "postgresql", "mongodb", "memcached", "qdrant", "neo4j", "rabbitmq", "elasticsearch", "meilisearch", "zincsearch", "minio", "rustfs", "consul", "etcd", "r-nacos", "temporal"].includes(base)) return 0;
         if (["php", "node", "python", "go", "java", "dotnet", "bun", "deno", "ruby", "rust", "zig", "flutter", "perl", "erlang", "ollama"].includes(base)) return 1;

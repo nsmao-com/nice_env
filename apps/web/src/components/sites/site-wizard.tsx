@@ -46,6 +46,8 @@ import {
 } from "@/components/ui/select";
 
 import { SiteCertificateSelect, useSiteCertificateSelection, type SiteCertificateBinding } from "./site-certificate-select";
+import { SiteApplicationFields } from "./site-application-fields";
+import { APPLICATION_RUNTIMES, applicationRuntime, validApplication } from "@/lib/utils";
 
 const STEPS = [
   { key: "sites.wizard.step1", icon: Globe },
@@ -60,6 +62,7 @@ const KINDS: { value: SiteKind; labelKey: string; hintKey: string }[] = [
   { value: "php", labelKey: "wz.kindPhp", hintKey: "wz.kindPhpHint2" },
   { value: "static", labelKey: "wz.kindStatic", hintKey: "wz.staticHint" },
   { value: "reverse-proxy", labelKey: "wz.kindProxy", hintKey: "wz.proxyTargetHint" },
+  ...APPLICATION_RUNTIMES.map((runtime) => ({ value: runtime.kind, labelKey: runtime.label, hintKey: "appProcess.kindHint" })),
 ];
 
 const REWRITES: { value: RewritePreset; label: string }[] = [
@@ -120,7 +123,12 @@ export function SiteWizard({
   const [kind, setKind] = React.useState<SiteKind>("php");
   const [phpVersion, setPhpVersion] = React.useState("");
   const [webServer, setWebServer] = React.useState<"nginx" | "apache">("nginx");
-  const [proxyTarget, setProxyTarget] = React.useState("127.0.0.1:8080");
+  const [proxyTarget, setProxyTarget] = React.useState("127.0.0.1:3001");
+  const [application, setApplication] = React.useState<CreateSiteInput["runtime"]["application"]>();
+  const appRuntime = applicationRuntime(kind);
+  const appVersions = packages.filter((p) => p.id === appRuntime?.id && p.install).map((p) => p.version).sort(cmpVersionDesc);
+  const applicationValid = validApplication(application, proxyTarget) && (!application || appVersions.includes(application.version));
+  const isProxy = kind !== "php" && kind !== "static";
   const normalizedProxyTarget = normalizeProxyTarget(proxyTarget);
   const [https, setHttps] = React.useState(false);
   const [certificate, setCertificate] = React.useState<SiteCertificateBinding>({});
@@ -165,7 +173,8 @@ export function SiteWizard({
       setCertificate({});
       setDbEnabled(false);
       setRewrite("none");
-      setProxyTarget("127.0.0.1:8080");
+      setProxyTarget("127.0.0.1:3001");
+      setApplication(undefined);
       setDbName("");
       setDbUser("");
     }
@@ -195,7 +204,7 @@ export function SiteWizard({
 
   const canNext = React.useMemo(() => {
     if (step >= 3 && https && certificateSelection.problem) return false;
-    if (step >= 2 && kind === "reverse-proxy" && !normalizedProxyTarget) return false;
+    if (step >= 2 && isProxy && (!normalizedProxyTarget || !applicationValid)) return false;
     switch (step) {
       case 0:
         return name.trim().length > 0 && /^(\*\.)?[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain.trim());
@@ -209,7 +218,7 @@ export function SiteWizard({
       default:
         return true;
     }
-  }, [https, certificateSelection.problem, step, name, domain, rootDir, kind, phpVersion, phpVersions, webInstalled, normalizedProxyTarget, databaseValid, composerTemplate, composerInstalled, templatePhpCompatible, templateNodeCompatible]);
+  }, [https, certificateSelection.problem, step, name, domain, rootDir, kind, phpVersion, phpVersions, webInstalled, normalizedProxyTarget, databaseValid, composerTemplate, composerInstalled, templatePhpCompatible, templateNodeCompatible, isProxy, applicationValid]);
 
   const pickFolder = async () => {
     if (isTauri) {
@@ -237,7 +246,7 @@ export function SiteWizard({
   };
 
   const submit = async () => {
-    if (submitting.current || !canNext || (kind === "reverse-proxy" && !normalizedProxyTarget) || (https && certificateSelection.problem)) return;
+    if (submitting.current || !canNext || (isProxy && (!normalizedProxyTarget || !applicationValid)) || (https && certificateSelection.problem)) return;
     submitting.current = true;
     setCreating(true);
     setCreateError("");
@@ -253,7 +262,8 @@ export function SiteWizard({
           webServer,
           kind,
           ...(kind === "php" ? { phpVersion } : {}),
-          ...(kind === "reverse-proxy" ? { proxyTarget: normalizedProxyTarget! } : {}),
+          ...(isProxy ? { proxyTarget: normalizedProxyTarget! } : {}),
+          ...(appRuntime && application ? { application } : {}),
           ...(https ? certificate : {}),
         },
         https,
@@ -304,7 +314,7 @@ export function SiteWizard({
 
   return (
     <Dialog open={open} onOpenChange={(o) => !creating && onOpenChange(o)}>
-      <DialogContent className="flex max-w-[640px] max-h-[86vh] flex-col overflow-hidden">
+      <DialogContent className="flex w-[calc(100vw_-_1.5rem)] max-w-[640px] max-h-[86vh] flex-col overflow-hidden">
         <DialogHeader>
           <DialogTitle>{t("sites.create")}</DialogTitle>
           <DialogDescription>
@@ -486,15 +496,16 @@ export function SiteWizard({
                 {!webInstalled && <p role="alert" className="rounded-lg bg-warn-soft p-3 text-xs text-warn">{t("wz.installWebFirst")}</p>}
                 <div className="flex flex-col gap-1.5">
                   <Label>{t("sites.wizard.kind")}</Label>
-                  <div className="flex flex-col gap-2">
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                     {KINDS.map((k) => (
                       <button
                         key={k.value}
                         aria-pressed={kind === k.value}
                         onClick={() => {
                           setKind(k.value);
+                          if (k.value !== kind) setApplication(undefined);
                           const staticTemplate = ["static", "spa", "next-export"].includes(template);
-                          if (k.value === "reverse-proxy" || (template !== "none" && (staticTemplate !== (k.value === "static")))) {
+                          if ((k.value !== "php" && k.value !== "static") || (template !== "none" && (staticTemplate !== (k.value === "static")))) {
                             setTemplate("none"); setRewrite("none");
                           }
                         }}
@@ -505,7 +516,7 @@ export function SiteWizard({
                             : "border-border hover:border-border-strong bg-card-2/40"
                         )}
                       >
-                        <span className="text-[12.5px] font-medium">{t(k.labelKey as never)}</span>
+                        <span className="text-[12.5px] font-medium">{applicationRuntime(k.value)?.label ?? t(k.labelKey as never)}</span>
                         <span className="text-[11px] text-faint">{t(k.hintKey as never)}</span>
                       </button>
                     ))}
@@ -562,7 +573,7 @@ export function SiteWizard({
                     ))}
                   </div>
                 </div>
-                {kind === "reverse-proxy" && (
+                {isProxy && (
                   <div className="flex flex-col gap-1.5">
                     <Label htmlFor="site-create-proxy">{t("sites.wizard.proxyTarget")}</Label>
                     <Input
@@ -582,6 +593,9 @@ export function SiteWizard({
                     </p>
                   </div>
                 )}
+                {appRuntime && <SiteApplicationFields id="site-create-app" kind={kind} value={application} versions={appVersions} rootDir={rootDir}
+                  disabled={creating} onChange={setApplication} />}
+                {!applicationValid && <p role="alert" className="text-xs leading-relaxed text-error">{t("appProcess.invalid")}</p>}
               </div>
             )}
 
@@ -676,11 +690,12 @@ export function SiteWizard({
                     value={
                       kind === "php"
                         ? `${webServer === "apache" ? "Apache" : "Nginx"} + PHP ${phpVersion || t("wz.phpPending")}`
-                        : kind === "reverse-proxy"
+                        : isProxy
                           ? `${webServer === "apache" ? "Apache" : "Nginx"} ${t("sites.proxyP1")} ${normalizedProxyTarget ?? proxyTarget}`
                           : `${webServer === "apache" ? "Apache" : "Nginx"} · ${t("sites.static")}`
                     }
                   />
+                  {appRuntime && <SummaryRow label={t("appProcess.title")} value={application ? `${appRuntime.label} ${application.version} · ${application.args.join(" · ")}` : t("appProcess.externalHint")} />}
                   <SummaryRow label="HTTPS" value={https ? certificateSelection.value === "local" ? t("wz.caAuto") : certificateSelection.selected?.subject ?? t("sites.detail.certUnavailableSelection") : t("detail.none")} />
                   <SummaryRow label={t("wz.db")} value={dbEnabled ? `${dbName}（${dbUser}）` : t("wz.noDb")} />
                   <SummaryRow label={t("wz.rewrite")} value={rewrite === "none" ? t("wz.noneOpt") : REWRITES.find((r) => r.value === rewrite)?.label ?? ""} />

@@ -6,6 +6,13 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+/** 与 envfile::is_secret_key 一致，新变量在落盘前也需要隐藏敏感值。 */
+export function isEnvSecretKey(key: string): boolean {
+  const value = key.toUpperCase();
+  return /PASSWORD|PASSWD|SECRET|_KEY|TOKEN|PRIVATE|CREDENTIAL/.test(value)
+    || value.endsWith("_PASS") || value.endsWith("KEY") || value === "DATABASE_URL";
+}
+
 /** 与 sites::proxy_url 保持一致；返回实际配置使用的基础地址，非法输入返回 null。 */
 export function normalizeProxyTarget(input: string): string | null {
   const target = input.trim();

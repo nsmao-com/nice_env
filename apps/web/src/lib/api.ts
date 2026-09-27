@@ -373,8 +373,10 @@ export const certImportedReplace = (id: string, certPath: string, keyPath: strin
 
 /* 站点 .env */
 export const envRead = (siteId: string) => safe(invoke<EnvFileView>("env_read", { siteId }));
-export const envSave = (siteId: string, changes: [string, string][]) =>
-  safe(invoke<boolean>("env_save", { siteId, changes }));
+export const envSave = (siteId: string, changes: [string, string][], expectedRevision: string) =>
+  safe(invoke<EnvFileView>("env_save", { siteId, changes, expectedRevision }));
+export const envPreviewDb = (siteId: string, expectedRevision: string) =>
+  safe(invoke<[string, string][]>("env_preview_db", { siteId, expectedRevision }));
 export const envApplyDb = (siteId: string) =>
   safe(invoke<string[]>("env_apply_db", { siteId }));
 

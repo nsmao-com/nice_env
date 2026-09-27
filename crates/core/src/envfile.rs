@@ -40,6 +40,8 @@ pub struct EnvFileView {
     pub site_name: String,
     pub path: String,
     pub exists: bool,
+    /// 绑定站点、项目目录、文件内容和语法，保存时必须仍与读取时一致。
+    pub revision: String,
     pub entries: Vec<EnvEntry>,
     /// 站点绑定的数据库信息，可用于一键补全 DB_*
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -157,7 +159,7 @@ fn project_syntax(root: &Path) -> EnvSyntax {
 }
 
 fn quote_project_value(value: &str, syntax: EnvSyntax) -> String {
-    if !needs_quoting(value) {
+    if !needs_quoting(value) && !(syntax == EnvSyntax::ThinkPhp && value.contains(';')) {
         return value.to_string();
     }
     match syntax {
@@ -176,16 +178,23 @@ pub(crate) fn apply_project_env_changes(
     changes: &[(String, String)],
 ) -> Result<String> {
     let syntax = project_syntax(root);
+    if let Some(record) = env_records(original, syntax).into_iter().find(|record| !record.entry.commented && !record.valid) {
+        return Err(AppError::new("ENV_SYNTAX", format!("环境文件第 {} 行的 {} 引号或行尾格式不完整", record.entry.line, record.entry.key))
+            .with_hint("请先在项目文件中修正这一行后重新读取；未覆盖原文件。"));
+    }
     for (key, value) in changes {
-        if key.is_empty()
+        if !key.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
             || !key
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
         {
             return Err(AppError::new(
                 "BAD_ENV_KEY",
-                "环境变量名只允许字母、数字、下划线和点",
+                "环境变量名须以字母或下划线开头，且只允许字母、数字、下划线和点",
             ));
+        }
+        if value.contains('\0') {
+            return Err(AppError::new("BAD_ENV_VALUE", "环境变量值不能包含空字符"));
         }
         if syntax != EnvSyntax::Dotenv && value.contains(['\n', '\r']) {
             return Err(AppError::new(
@@ -221,7 +230,7 @@ pub(crate) fn apply_project_env_changes(
             .with_hint("请使用不包含这种表达式的密码，或点击重新生成"));
         }
     }
-    Ok(apply_env_changes_using(original, changes, &|value| {
+    Ok(apply_env_changes_using(original, changes, syntax, &|value| {
         quote_project_value(value, syntax)
     }))
 }
@@ -234,115 +243,130 @@ pub fn parse_env(content: &str) -> Vec<EnvEntry> {
     parse_env_using(content, EnvSyntax::Dotenv)
 }
 
-fn parse_env_using(content: &str, syntax: EnvSyntax) -> Vec<EnvEntry> {
-    let mut out = Vec::new();
-    for (i, raw) in content.lines().enumerate() {
-        let line_no = i + 1;
-        let t = raw.trim();
-        if t.is_empty() {
-            continue;
-        }
-        let (body, commented) = match t.strip_prefix('#') {
-            Some(rest) => (rest.trim_start(), true),
-            None => (t, false),
-        };
-        // 支持 export KEY=VALUE
-        let body = body.strip_prefix("export ").unwrap_or(body);
-        let Some((k, v)) = body.split_once('=') else {
-            continue; // 不是赋值行（纯注释文字），不进列表
-        };
-        let key = k.trim().to_string();
-        if key.is_empty() {
-            continue;
-        }
-        let raw_value = v.trim();
-        let quoted = (raw_value.starts_with('"') && raw_value.ends_with('"'))
-            || (raw_value.starts_with('\'') && raw_value.ends_with('\''));
-        let value = match syntax {
-            EnvSyntax::ThinkPhp
-                if raw_value.len() >= 2
-                    && raw_value.starts_with('"')
-                    && raw_value.ends_with('"') =>
-            {
-                raw_value[1..raw_value.len() - 1].to_string()
-            }
-            EnvSyntax::ThinkPhp => raw_value.to_string(),
-            EnvSyntax::CodeIgniter if raw_value.len() >= 2 && quoted => raw_value
-                [1..raw_value.len() - 1]
-                .replace(&format!("\\{}", &raw_value[..1]), &raw_value[..1])
-                .replace("\\\\", "\\"),
-            _ => unquote(raw_value),
-        };
-        out.push(EnvEntry {
-            secret: is_secret_key(&key),
-            // 已加引号的就没问题
-            needs_quote: !commented && !quoted && needs_quoting(&value),
-            key,
-            value,
-            commented,
-            line: line_no,
-        });
-    }
-    out
+struct EnvRecord {
+    entry: EnvEntry,
+    start: usize,
+    end: usize,
+    prefix: String,
+    suffix: String,
+    valid: bool,
 }
 
-/// 重新生成 .env 内容：更新已有键，保留注释与空行，末尾追加新键。
-///
-/// 之所以不「整份重写」：用户 .env 里常有分组注释和空行，
-/// 整份重写会把这些结构抹掉，下次打开就不认识了。
+fn env_value_end(value: &str, syntax: EnvSyntax) -> Option<usize> {
+    let Some(quote) = value.chars().next() else { return Some(0); };
+    if !matches!(quote, '\'' | '"') { return Some(value.find(if syntax == EnvSyntax::ThinkPhp { ';' } else { '#' }).unwrap_or(value.len())); }
+    let mut escaped = false;
+    for (offset, c) in value.char_indices().skip(1) {
+        if escaped { escaped = false; continue; }
+        if c == '\\' && syntax != EnvSyntax::ThinkPhp && (quote == '"' || syntax == EnvSyntax::CodeIgniter) {
+            escaped = true; continue;
+        }
+        if c == quote { return Some(offset + 1); }
+    }
+    None
+}
+
+fn env_section(line: &str) -> Option<&str> {
+    let (name, rest) = line.trim().strip_prefix('[')?.split_once(']')?;
+    (!name.is_empty() && (rest.trim().is_empty() || rest.trim_start().starts_with([';', '#']))).then_some(name)
+}
+
+fn env_records(content: &str, syntax: EnvSyntax) -> Vec<EnvRecord> {
+    let lines: Vec<_> = content.lines().collect();
+    let mut records = Vec::new();
+    let mut index = 0;
+    let mut section = None;
+    while index < lines.len() {
+        let start = index;
+        let raw = lines[index]; index += 1;
+        let t = raw.trim_start_matches('\u{feff}').trim();
+        if syntax == EnvSyntax::ThinkPhp {
+            if let Some(name) = env_section(t) { section = Some(name); continue; }
+        }
+        let (body, commented) = t.strip_prefix('#').map(|rest| (rest.trim_start(), true)).unwrap_or((t, false));
+        let body = body.strip_prefix("export ").unwrap_or(body);
+        let Some((key, first_value)) = body.split_once('=') else { continue; };
+        let key = key.trim();
+        if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.')) { continue; }
+        let mut text = first_value.trim_start().to_string();
+        while !commented && env_value_end(&text, syntax).is_none() && index < lines.len() {
+            text.push('\n'); text.push_str(lines[index]); index += 1;
+        }
+        let end = env_value_end(&text, syntax).unwrap_or(text.len());
+        let raw_value = text[..end].trim_end();
+        let suffix = text[raw_value.len()..].to_string();
+        let quoted = raw_value.len() >= 2 && ((raw_value.starts_with('"') && raw_value.ends_with('"'))
+            || (raw_value.starts_with('\'') && raw_value.ends_with('\'')));
+        let value = match syntax {
+            EnvSyntax::ThinkPhp if quoted && raw_value.starts_with('"') => raw_value[1..raw_value.len()-1].to_string(),
+            EnvSyntax::ThinkPhp => raw_value.to_string(),
+            EnvSyntax::CodeIgniter if quoted => raw_value[1..raw_value.len()-1]
+                .replace(&format!("\\{}", &raw_value[..1]), &raw_value[..1]).replace("\\\\", "\\"),
+            _ => unquote(raw_value),
+        };
+        let equals = raw.find('=').unwrap();
+        let key = section.map(|section| format!("{section}.{key}")).unwrap_or_else(|| key.into());
+        let comment = if syntax == EnvSyntax::ThinkPhp { ';' } else { '#' };
+        records.push(EnvRecord {
+            entry: EnvEntry { secret: is_secret_key(&key), key, value: value.clone(), commented,
+                line: start+1, needs_quote: !commented && !quoted && (needs_quoting(&value) || (end == raw_value.len() && text[end..].starts_with(comment))) },
+            start, end: index, prefix: raw[..=equals].into(),
+            valid: env_value_end(&text, syntax).is_some() && (suffix.trim().is_empty() || suffix.trim_start().starts_with(comment)),
+            suffix,
+        });
+    }
+    records
+}
+
+fn parse_env_using(content: &str, syntax: EnvSyntax) -> Vec<EnvEntry> {
+    env_records(content, syntax).into_iter().map(|record| record.entry).collect()
+}
+
+/// 更新所有同名的有效赋值；注释示例保持原样，新变量追加在文件末尾。
 pub fn apply_env_changes(original: &str, changes: &[(String, String)]) -> String {
-    apply_env_changes_using(original, changes, &quote_env_value)
+    apply_env_changes_using(original, changes, EnvSyntax::Dotenv, &quote_env_value)
 }
 
 fn apply_env_changes_using(
     original: &str,
     changes: &[(String, String)],
+    syntax: EnvSyntax,
     quote: &dyn Fn(&str) -> String,
 ) -> String {
-    let mut remaining: Vec<(String, String)> = changes.to_vec();
+    if changes.is_empty() { return original.into(); }
+    let lines: Vec<_> = original.lines().collect();
+    let records = env_records(original, syntax);
+    let mut applied = std::collections::HashSet::new();
     let mut out: Vec<String> = Vec::new();
-
-    for raw in original.lines() {
-        let t = raw.trim();
-        if t.is_empty() {
-            out.push(raw.to_string());
-            continue;
-        }
-        let body = match t.strip_prefix('#') {
-            Some(rest) => rest.trim_start(),
-            None => t,
-        };
-        let body = body.strip_prefix("export ").unwrap_or(body);
-        match body.split_once('=') {
-            Some((k, _)) => {
-                let key = k.trim();
-                if let Some(pos) = remaining.iter().position(|(ck, _)| ck == key) {
-                    let (_, v) = remaining.remove(pos);
-                    // 需要引号则加上；否则保持裸值
-                    let val = quote(&v);
-                    out.push(format!("{key}={val}"));
-                    continue;
-                }
-                out.push(raw.to_string());
+    let mut cursor = 0;
+    for record in records.iter().filter(|record| !record.entry.commented) {
+        let Some((key, value)) = changes.iter().find(|(key, _)| key == &record.entry.key) else { continue; };
+        out.extend(lines[cursor..record.start].iter().map(|line| line.to_string()));
+        out.push(format!("{}{}{}", record.prefix, quote(value), record.suffix));
+        applied.insert(key.as_str()); cursor = record.end;
+    }
+    out.extend(lines[cursor..].iter().map(|line| line.to_string()));
+    let remaining: Vec<_> = changes.iter().filter(|(key, _)| !applied.contains(key.as_str())).collect();
+    if !remaining.is_empty() && syntax == EnvSyntax::ThinkPhp {
+        // INI 的分节会持续到下一个分节；全局变量必须放在首个分节之前。
+        // 已有分节以 section.key 显示；新增同分节变量放入对应分节。
+        for (key, value) in &remaining {
+            if let Some(index) = out.iter().rposition(|line| env_section(line).is_some_and(|section| key.strip_prefix(section).is_some_and(|rest| rest.starts_with('.')))) {
+                let section = env_section(&out[index]).unwrap();
+                let member = &key[section.len() + 1..];
+                out.insert(index + 1, format!("{member}={}", quote(value))); continue;
             }
-            None => out.push(raw.to_string()),
+            let index = out.iter().position(|line| env_section(line).is_some()).unwrap_or(out.len());
+            out.insert(index, format!("{key}={}", quote(value)));
         }
+    } else if !remaining.is_empty() {
+        if out.last().is_some_and(|line| !line.trim().is_empty()) { out.push(String::new()); }
+        for (key, value) in &remaining { out.push(format!("{key}={}", quote(value))); }
     }
-
-    // 剩下的就是新键
-    if !remaining.is_empty() {
-        if !out.is_empty() && !out.last().map(|l| l.trim().is_empty()).unwrap_or(true) {
-            out.push(String::new());
-        }
-        for (k, v) in remaining {
-            let val = quote(&v);
-            out.push(format!("{k}={val}"));
-        }
-    }
-
-    let mut s = out.join("\n");
-    s.push('\n');
-    s
+    let newline = if original.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut content = out.join(newline);
+    if original.ends_with('\n') || !remaining.is_empty() { content.push_str(newline); }
+    content
 }
 
 /// 生成一组与站点绑定数据库对齐的 DB_* 变量（Laravel 命名约定）
@@ -468,23 +492,46 @@ pub fn env_variants(root: &Path) -> Vec<String> {
         .collect()
 }
 
-/// 读取某站点的 .env
-pub fn read_env(paths: &Paths, store: &crate::store::Store, site_id: &str) -> Result<EnvFileView> {
-    let site = crate::sites::list(store)?
-        .into_iter()
-        .find(|s| s.id == site_id)
-        .ok_or_else(|| AppError::new("SITE_NOT_FOUND", "找不到该站点"))?;
-    let root = project_root(Path::new(&site.root_dir));
-    let path = env_path(&root);
-    let exists = path.is_file();
-    let content = if exists {
-        std::fs::read_to_string(&path).map_err(|e| AppError::io("读取 .env", e))?
-    } else {
-        String::new()
-    };
-    let _ = paths;
+const MAX_ENV_BYTES: usize = 1024 * 1024;
 
-    // 站点绑了库就给补全提示
+fn read_env_file(path: &Path) -> Result<Option<String>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(AppError::io("读取环境文件", e)),
+    };
+    let mut linked = metadata.file_type().is_symlink();
+    #[cfg(windows)] {
+        use std::os::windows::fs::MetadataExt;
+        linked |= metadata.file_attributes() & 0x400 != 0;
+    }
+    if linked || !metadata.is_file() || metadata.len() > MAX_ENV_BYTES as u64 {
+        return Err(AppError::new("ENV_INVALID_FILE", "环境文件及其备份必须是小于 1 MiB 的普通文件，不能是链接或目录")
+            .with_hint(path.display().to_string()));
+    }
+    std::fs::read_to_string(path).map(Some).map_err(|e| AppError::io("读取 UTF-8 环境文件", e))
+}
+
+fn env_root(site: &crate::model::Site) -> Result<PathBuf> {
+    if !Path::new(&site.root_dir).is_dir() {
+        return Err(AppError::new("ROOT_MISSING", "站点根目录不存在")
+            .with_hint("站点目录可能被移动或删除，请到站点详情里修正路径"));
+    }
+    std::fs::canonicalize(project_root(Path::new(&site.root_dir))).map_err(|e| AppError::io("读取项目目录", e))
+}
+
+fn env_revision(site: &crate::model::Site, root: &Path, content: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    for value in [site.id.as_bytes(), site.root_dir.as_bytes(), root.to_string_lossy().as_bytes()] {
+        digest.update((value.len() as u64).to_le_bytes()); digest.update(value);
+    }
+    digest.update([project_syntax(root) as u8, u8::from(content.is_some())]);
+    digest.update(content.unwrap_or_default().as_bytes());
+    format!("{:x}", digest.finalize())
+}
+
+fn env_view(store: &crate::store::Store, site: &crate::model::Site, root: &Path, content: Option<&str>) -> EnvFileView {
     let db_hint = site.db.as_ref().filter(|d| d.enabled).map(|d| DbHint {
         database: d.database.clone(),
         username: d.username.clone(),
@@ -493,64 +540,104 @@ pub fn read_env(paths: &Paths, store: &crate::store::Store, site_id: &str) -> Re
             .or(d.port).unwrap_or_else(|| crate::services::PortsProfile::from_settings(store).mysql),
     });
 
-    Ok(EnvFileView {
+    EnvFileView {
         site_id: site.id.clone(),
         site_name: site.name.clone(),
-        path: path.to_string_lossy().to_string(),
-        exists,
-        entries: parse_env_using(&content, project_syntax(&root)),
+        path: env_path(root).to_string_lossy().to_string(),
+        exists: content.is_some(),
+        revision: env_revision(site, root, content),
+        entries: parse_env_using(content.unwrap_or_default(), project_syntax(root)),
         db_hint,
-        variants: env_variants(&root),
-    })
+        variants: env_variants(root),
+    }
 }
 
-/// 保存 .env：只改传进来的键，其余原样保留；写前备份
+/// 读取和保存与站点目录变更串行；编辑器的 revision 还会检查外部文件变更。
+pub fn read_env(_paths: &Paths, store: &crate::store::Store, site_id: &str) -> Result<EnvFileView> {
+    let _sites = crate::sites::SITE_CHANGES.lock();
+    let site = crate::sites::get(store, site_id)?;
+    let root = env_root(&site)?;
+    let content = read_env_file(&env_path(&root))?;
+    Ok(env_view(store, &site, &root, content.as_deref()))
+}
+
+fn env_changed() -> AppError {
+    AppError::new("ENV_CHANGED", "环境文件或站点目录已变化，未覆盖当前文件")
+        .with_hint("请重新读取文件并检查最新内容，草稿不会自动覆盖外部修改。")
+}
+
+fn replace_env_file(path: &Path, expected: Option<&str>, content: &str) -> Result<()> {
+    use std::io::Write;
+    if read_env_file(path)?.as_deref() != expected { return Err(env_changed()); }
+    let metadata = std::fs::metadata(path).ok();
+    if metadata.as_ref().is_some_and(|m| m.permissions().readonly()) {
+        return Err(AppError::new("ENV_READ_ONLY", "环境文件或备份是只读文件，未保存设置").with_hint(path.display().to_string()));
+    }
+    let mut pending = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
+    pending.write_all(content.as_bytes())?;
+    if let Some(metadata) = metadata { pending.as_file().set_permissions(metadata.permissions())?; }
+    pending.as_file().sync_all()?;
+    if read_env_file(path)?.as_deref() != expected { return Err(env_changed()); }
+    if expected.is_none() { pending.persist_noclobber(path).map_err(|e| AppError::io("创建环境文件", e.error))?; }
+    else { pending.persist(path).map_err(|e| AppError::io("保存环境文件", e.error))?; }
+    Ok(())
+}
+
+/// 保存 .env：校验读取版本，只修改指定键，原子替换并保留原文件备份。
 pub fn save_env(
     _paths: &Paths,
     store: &crate::store::Store,
     site_id: &str,
     changes: &[(String, String)],
-) -> Result<()> {
-    let site = crate::sites::list(store)?
-        .into_iter()
-        .find(|s| s.id == site_id)
-        .ok_or_else(|| AppError::new("SITE_NOT_FOUND", "找不到该站点"))?;
-    let root = project_root(Path::new(&site.root_dir));
-    if !root.is_dir() {
-        return Err(AppError::new("ROOT_MISSING", "站点根目录不存在")
-            .with_hint("站点目录可能被移动或删除，请到站点详情里修正路径"));
-    }
+    expected_revision: &str,
+) -> Result<EnvFileView> {
+    let _sites = crate::sites::SITE_CHANGES.lock();
+    let site = crate::sites::get(store, site_id)?;
+    let root = env_root(&site)?;
     let path = env_path(&root);
-    let original = if path.is_file() {
-        std::fs::read_to_string(&path).map_err(|e| AppError::io("读取 .env", e))?
-    } else {
-        String::new()
-    };
-    let next = apply_project_env_changes(&root, &original, changes)?;
-    // 就地备份：.env 不进全局备份目录，放在项目旁边更直观
-    if path.is_file() {
-        let bak = root.join(".env.nsb-backup");
-        std::fs::write(&bak, &original).map_err(|e| AppError::io("备份 .env", e))?;
+    let original = read_env_file(&path)?;
+    if env_revision(&site, &root, original.as_deref()) != expected_revision { return Err(env_changed()); }
+    let mut keys = std::collections::HashSet::new();
+    if changes.iter().any(|(key, _)| !keys.insert(key)) {
+        return Err(AppError::new("BAD_ENV_KEY", "同次保存不能提交重复变量名"));
     }
-    std::fs::write(&path, next).map_err(|e| AppError::io("写入 .env", e))?;
-    Ok(())
+    if changes.is_empty() { return Ok(env_view(store, &site, &root, original.as_deref())); }
+    let next = apply_project_env_changes(&root, original.as_deref().unwrap_or_default(), changes)?;
+    if next.len() > MAX_ENV_BYTES { return Err(AppError::new("ENV_TOO_LARGE", "保存后的环境文件不能超过 1 MiB")); }
+    let mut view = env_view(store, &site, &root, Some(&next));
+    if !view.variants.iter().any(|name| name == ".env") { view.variants.insert(0, ".env".into()); }
+    if original.as_deref() == Some(&next) { return Ok(view); }
+    if std::fs::metadata(&path).ok().is_some_and(|m| m.permissions().readonly()) {
+        return Err(AppError::new("ENV_READ_ONLY", ".env 是只读文件，未保存设置"));
+    }
+    // 就地备份：.env 不进全局备份目录，放在项目旁边更直观
+    if let Some(original) = &original {
+        let bak = root.join(".env.nsb-backup");
+        let previous = read_env_file(&bak)?;
+        replace_env_file(&bak, previous.as_deref(), original)?;
+    }
+    replace_env_file(&path, original.as_deref(), &next)?;
+    Ok(view)
 }
 
-/// 一键补全 DB_* 变量（返回写入了哪些键）
-pub fn apply_db_vars(
+/// 返回待填入草稿的数据库变量，不写文件；仍须与编辑器读取的文件版本一致。
+pub fn preview_db_vars(
     _paths: &Paths,
     store: &crate::store::Store,
     site_id: &str,
-) -> Result<Vec<String>> {
-    let view = read_env(_paths, store, site_id)?;
+    expected_revision: &str,
+) -> Result<Vec<(String, String)>> {
+    let _sites = crate::sites::SITE_CHANGES.lock();
+    let site = crate::sites::get(store, site_id)?;
+    let root = env_root(&site)?;
+    let content = read_env_file(&env_path(&root))?;
+    let view = env_view(store, &site, &root, content.as_deref());
+    if view.revision != expected_revision { return Err(env_changed()); }
     let hint = view.db_hint.ok_or_else(|| {
         AppError::new("NO_DB_BINDING", "该站点没有绑定数据库")
             .with_hint("先到站点详情里为它创建/绑定一个数据库")
     })?;
-    let root = Path::new(&view.path)
-        .parent()
-        .ok_or_else(|| AppError::new("ROOT_MISSING", "项目目录无效"))?;
-    let mut vars = project_db_env_vars(root, &hint)?;
+    let mut vars = project_db_env_vars(&root, &hint)?;
     // 老版本未持久化密码：补全其它字段，不能用未知的空密码覆盖项目现有凭据。
     if hint.password.is_empty() {
         vars.retain(|(key, _)| {
@@ -560,7 +647,15 @@ pub fn apply_db_vars(
             )
         });
     }
-    save_env(_paths, store, site_id, &vars)?;
+    if read_env_file(&env_path(&root))? != content { return Err(env_changed()); }
+    Ok(vars)
+}
+
+/// 保留内部补全入口，按读取版本保存，文件改变时明确报错。
+pub fn apply_db_vars(paths: &Paths, store: &crate::store::Store, site_id: &str) -> Result<Vec<String>> {
+    let view = read_env(paths, store, site_id)?;
+    let vars = preview_db_vars(paths, store, site_id, &view.revision)?;
+    save_env(paths, store, site_id, &vars, &view.revision)?;
     Ok(vars.into_iter().map(|(k, _)| k).collect())
 }
 
@@ -779,7 +874,7 @@ mod tests {
         let paths = Paths::new(t.clone());
         let store = crate::store::Store::open(t.join("s.sqlite")).unwrap();
         // 站点不存在
-        assert!(save_env(&paths, &store, "nope", &[]).is_err());
+        assert!(save_env(&paths, &store, "nope", &[], "missing").is_err());
         let _ = std::fs::remove_dir_all(&t);
     }
 
@@ -823,5 +918,140 @@ mod tests {
         // 只有单边引号时不剥
         assert_eq!(unquote("\"abc"), "\"abc");
         assert_eq!(unquote("\""), "\"");
+    }
+
+    #[test]
+    fn editor_preserves_comments_multiline_exports_and_line_endings() {
+        let root = tempfile::tempdir().unwrap();
+        let original = "# APP_NAME=example\r\nexport APP_NAME=old # project\r\nEMPTY=\r\nMULTI=\"first\r\nsecond\" # note\r\nAPP_NAME=last\r\nOTHER=keep\r\n";
+        let parsed = parse_env(original);
+        assert_eq!(parsed.iter().find(|entry| entry.key == "MULTI").unwrap().value, "first\nsecond");
+        assert_eq!(parsed.iter().find(|entry| entry.key == "EMPTY").unwrap().value, "");
+        let next = apply_project_env_changes(root.path(), original, &[("APP_NAME".into(), "new project".into()), ("MULTI".into(), "new\nlines".into())]).unwrap();
+        assert!(next.starts_with("# APP_NAME=example\r\nexport APP_NAME=\"new project\" # project\r\nEMPTY=\r\n"));
+        assert!(next.contains("MULTI=\"new\\nlines\" # note\r\n"));
+        assert!(next.ends_with("APP_NAME=\"new project\"\r\nOTHER=keep\r\n"));
+        let next = apply_env_changes("# API_TOKEN=example\r\n", &[("API_TOKEN".into(), "active".into())]);
+        assert_eq!(next, "# API_TOKEN=example\r\n\r\nAPI_TOKEN=active\r\n");
+        for invalid in ["MULTI=\"unfinished\nOTHER=keep\n", "NAME=\"value\"oops\n"] {
+            assert_eq!(apply_project_env_changes(root.path(), invalid, &[("OTHER".into(), "new".into())]).unwrap_err().code, "ENV_SYNTAX");
+        }
+        assert_eq!(apply_env_changes("NAME=old", &[("NAME".into(), "new".into())]), "NAME=new");
+        std::fs::write(root.path().join("think"), "").unwrap();
+        let ini = "# project\r\n[DATABASE]\r\nHOST=db-host\r\n[REDIS]\r\nHOST=redis-host\r\n";
+        let rows = parse_env_using(ini, EnvSyntax::ThinkPhp);
+        assert_eq!(rows[0].key, "DATABASE.HOST"); assert_eq!(rows[1].key, "REDIS.HOST");
+        let next = apply_project_env_changes(root.path(), ini, &[("DATABASE.HOST".into(), "database-new".into()), ("REDIS.PORT".into(), "6379".into()), ("DB_TYPE".into(), "mysql".into())]).unwrap();
+        assert!(next.starts_with("# project\r\nDB_TYPE=mysql\r\n[DATABASE]\r\nHOST=database-new\r\n"));
+        assert!(next.ends_with("[REDIS]\r\nPORT=6379\r\nHOST=redis-host\r\n"));
+    }
+
+    fn editor_site(root: &Path, store: &crate::store::Store) -> crate::model::Site {
+        let site = serde_json::from_value(serde_json::json!({
+            "id":"env-editor", "name":"Editor", "domains":["editor.test"], "rootDir":root,
+            "runtime":{"webServer":"nginx","kind":"php","phpVersion":"8.4.26"}, "https":false,
+            "rewrite":"none", "db":{"enabled":true,"database":"app","username":"app_user","password":"safe-password"},
+            "createdAt":1, "updatedAt":1
+        })).unwrap();
+        store.save_site(&site).unwrap(); site
+    }
+
+    #[test]
+    fn editor_preview_save_and_stale_directory_checks_are_real_file_operations() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().join("data"));
+        let store = crate::store::Store::open(paths.db()).unwrap();
+        let mut site = editor_site(temp.path(), &store);
+        let path = temp.path().join(".env");
+        let original = "# config\r\nAPP_NAME=before\r\nDB_PASSWORD=existing\r\n";
+        std::fs::write(&path, original).unwrap();
+        let view = read_env(&paths, &store, &site.id).unwrap();
+        let values = preview_db_vars(&paths, &store, &site.id, &view.revision).unwrap();
+        assert!(values.iter().any(|(key, value)| key == "DB_PASSWORD" && value == "safe-password"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert!(!temp.path().join(".env.nsb-backup").exists());
+        let changes = [("APP_NAME".into(), "after".into())];
+        let saved = save_env(&paths, &store, &site.id, &changes, &view.revision).unwrap();
+        assert_ne!(saved.revision, view.revision);
+        assert_eq!(std::fs::read_to_string(temp.path().join(".env.nsb-backup")).unwrap(), original);
+        assert_eq!(save_env(&paths, &store, &site.id, &changes, &view.revision).unwrap_err().code, "ENV_CHANGED");
+        std::fs::write(&path, "APP_NAME=external\n").unwrap();
+        assert_eq!(save_env(&paths, &store, &site.id, &changes, &saved.revision).unwrap_err().code, "ENV_CHANGED");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "APP_NAME=external\n");
+        let before_move = read_env(&paths, &store, &site.id).unwrap();
+        let next_root = temp.path().join("other"); std::fs::create_dir(&next_root).unwrap();
+        std::fs::write(next_root.join(".env"), "APP_NAME=external\n").unwrap();
+        site.root_dir = next_root.to_string_lossy().into(); store.save_site(&site).unwrap();
+        assert_eq!(save_env(&paths, &store, &site.id, &changes, &before_move.revision).unwrap_err().code, "ENV_CHANGED");
+        assert_eq!(preview_db_vars(&paths, &store, &site.id, &before_move.revision).unwrap_err().code, "ENV_CHANGED");
+        assert_eq!(std::fs::read_to_string(next_root.join(".env")).unwrap(), "APP_NAME=external\n");
+    }
+
+    #[test]
+    fn editor_rejects_unwritable_files_and_does_not_overwrite_new_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().join("data"));
+        let store = crate::store::Store::open(paths.db()).unwrap();
+        let site = editor_site(temp.path(), &store);
+        let changes = [("NAME".into(), "new".into())];
+        let missing = read_env(&paths, &store, &site.id).unwrap(); assert!(!missing.exists);
+        let path = temp.path().join(".env");
+        std::fs::write(&path, "NAME=external").unwrap();
+        assert_eq!(save_env(&paths, &store, &site.id, &changes, &missing.revision).unwrap_err().code, "ENV_CHANGED");
+        let view = read_env(&paths, &store, &site.id).unwrap();
+        let permissions = std::fs::metadata(&path).unwrap().permissions();
+        let mut readonly = permissions.clone(); readonly.set_readonly(true); std::fs::set_permissions(&path, readonly).unwrap();
+        let result = save_env(&paths, &store, &site.id, &changes, &view.revision);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        assert_eq!(result.unwrap_err().code, "ENV_READ_ONLY");
+        let backup = temp.path().join(".env.nsb-backup"); std::fs::create_dir(&backup).unwrap();
+        assert_eq!(save_env(&paths, &store, &site.id, &changes, &view.revision).unwrap_err().code, "ENV_INVALID_FILE");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "NAME=external");
+        std::fs::remove_dir(&backup).unwrap();
+        for key in ["1NAME", "NAME\nOTHER", "NAME=OTHER"] {
+            assert_eq!(save_env(&paths, &store, &site.id, &[(key.into(), "x".into())], &view.revision).unwrap_err().code, "BAD_ENV_KEY");
+        }
+        std::fs::remove_file(&path).unwrap();
+        let missing = read_env(&paths, &store, &site.id).unwrap();
+        let saved = save_env(&paths, &store, &site.id, &changes, &missing.revision).unwrap();
+        assert!(saved.exists); assert!(saved.variants.contains(&".env".to_string()));
+        assert!(!backup.exists());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "NAME=new\n");
+    }
+
+    #[test]
+    #[ignore = "requires NSB_ENV_PHP and NSB_ENV_LARAVEL with installed phpdotenv"]
+    fn native_env_editor_output_is_readable_by_phpdotenv() {
+        let php = std::env::var_os("NSB_ENV_PHP").expect("NSB_ENV_PHP");
+        let project = PathBuf::from(std::env::var_os("NSB_ENV_LARAVEL").expect("NSB_ENV_LARAVEL"));
+        assert!(project.join("vendor/autoload.php").is_file());
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().join("data"));
+        let store = crate::store::Store::open(paths.db()).unwrap();
+        let site = editor_site(temp.path(), &store);
+        let path = temp.path().join(".env");
+        std::fs::write(&path, "# NAME=example\r\nexport NAME=old # app\r\nEMPTY=\r\nMULTI=\"original\r\nlines\" # retain comment\r\nUNCHANGED=kept\r\n").unwrap();
+        let view = read_env(&paths, &store, &site.id).unwrap();
+        let password = r#"secret ${HOME} # 中文 \ "quote""#;
+        save_env(&paths, &store, &site.id, &[("NAME".into(), "My app".into()), ("DB_PASSWORD".into(), password.into()), ("MULTI".into(), "one\ntwo".into())], &view.revision).unwrap();
+        let output = std::process::Command::new(&php).arg("-n").arg("-r")
+            .arg(r#"require $argv[1]; echo json_encode(Dotenv\Dotenv::parse(file_get_contents($argv[2])), JSON_THROW_ON_ERROR);"#)
+            .arg(project.join("vendor/autoload.php")).arg(&path).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let values: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(values["NAME"], "My app"); assert_eq!(values["DB_PASSWORD"], password);
+        assert_eq!(values["MULTI"], "one\ntwo"); assert_eq!(values["EMPTY"], ""); assert_eq!(values["UNCHANGED"], "kept");
+        std::fs::write(temp.path().join("think"), "").unwrap();
+        std::fs::write(&path, "[DATABASE]\nHOST=db-host ; keep\n[REDIS]\nHOST=redis#host\n").unwrap();
+        let view = read_env(&paths, &store, &site.id).unwrap();
+        assert_eq!(view.entries.iter().find(|entry| entry.key == "REDIS.HOST").unwrap().value, "redis#host");
+        save_env(&paths, &store, &site.id, &[("DATABASE.HOST".into(), "database;new".into()), ("REDIS.PORT".into(), "6379".into()), ("DB_TYPE".into(), "mysql".into())], &view.revision).unwrap();
+        let output = std::process::Command::new(&php).arg("-n").arg("-r")
+            .arg("echo json_encode(parse_ini_file($argv[1], true, INI_SCANNER_RAW), JSON_THROW_ON_ERROR);")
+            .arg(&path).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let values: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(values["DATABASE"]["HOST"], "database;new"); assert_eq!(values["REDIS"]["HOST"], "redis#host");
+        assert_eq!(values["REDIS"]["PORT"], "6379"); assert_eq!(values["DB_TYPE"], "mysql");
     }
 }

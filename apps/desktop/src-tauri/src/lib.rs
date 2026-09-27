@@ -283,6 +283,7 @@ pub fn run() {
             env_read,
             env_save,
             env_apply_db,
+            env_preview_db,
             // 证书体检
             cert_health,
             cert_import,
@@ -3485,10 +3486,22 @@ fn env_save(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     site_id: String,
     changes: Vec<(String, String)>,
-) -> Result<bool, tauri::Error> {
+    expected_revision: String,
+) -> Result<nsb_core::envfile::EnvFileView, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     map_jh(
-        nsb_core::envfile::save_env(&state.paths, &state.store, &site_id, &changes).map(|_| true),
+        nsb_core::envfile::save_env(&state.paths, &state.store, &site_id, &changes, &expected_revision),
     )
+}
+
+/// 仅准备数据库变量供编辑器确认，保存草稿前不修改项目文件。
+#[tauri::command]
+fn env_preview_db(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    site_id: String,
+    expected_revision: String,
+) -> Result<Vec<(String, String)>, tauri::Error> {
+    map_jh(nsb_core::envfile::preview_db_vars(&state.paths, &state.store, &site_id, &expected_revision))
 }
 
 /// 一键把站点绑定的数据库信息写进 .env（DB_* 变量）
@@ -3497,6 +3510,7 @@ fn env_apply_db(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     site_id: String,
 ) -> Result<Vec<String>, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     map_jh(nsb_core::envfile::apply_db_vars(
         &state.paths,
         &state.store,

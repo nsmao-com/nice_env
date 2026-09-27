@@ -802,6 +802,7 @@ export const EnvFileView = z.object({
   siteName: z.string(),
   path: z.string(),
   exists: z.boolean(),
+  revision: z.string(),
   entries: z.array(EnvEntry),
   dbHint: z
     .object({

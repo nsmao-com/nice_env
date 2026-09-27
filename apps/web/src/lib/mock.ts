@@ -58,12 +58,12 @@ import type {
   CreateSiteInput,
 } from "@nsb/schema";
 import { emitLocal } from "./backend";
-import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSettingValid } from "./utils";
+import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSettingValid, isEnvSecretKey } from "./utils";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.69";
+const MOCK_APP_VERSION = "0.2.70";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -193,6 +193,34 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 
 const services = new Map<string, ServiceStatus>();
 const sites = new Map<string, Site>();
+const mockEnvFiles = new Map<string, EnvFileView>();
+let mockEnvRevision = 0;
+function mockEnvView(siteId: string): EnvFileView {
+  const site = sites.get(siteId);
+  if (!site) throw { code: "SITE_NOT_FOUND", message: "站点不存在，请刷新列表" };
+  const key = `${siteId}:${site.rootDir}`;
+  let view = mockEnvFiles.get(key);
+  if (!view) {
+    const root = site.rootDir.replace(/[\\/](public|out|dist|build)[\\/]?$/, "").replace(/[\\/]+$/, "");
+    const values = [["APP_NAME", site.name], ["APP_ENV", "local"], ["APP_KEY", "base64:preview-key"], ["APP_URL", `https://${site.domains[0]}`]];
+    if (site.db?.enabled) values.push(["DB_HOST", "127.0.0.1"], ["DB_PORT", "3306"], ["DB_DATABASE", site.db.database], ["DB_USERNAME", site.db.username], ["DB_PASSWORD", "preview-password"]);
+    view = { siteId, siteName: site.name, path: `${root}/.env`, exists: true, revision: `mock-env-${++mockEnvRevision}`,
+      entries: values.map(([key, value], index) => ({ key, value, commented: false, secret: isEnvSecretKey(key), line: index + 1, needsQuote: false })),
+      variants: [".env", ".env.example"] };
+    view.entries.push({ key: "REDIS_PASSWORD", value: "preview", commented: true, secret: true, line: 20, needsQuote: false });
+    mockEnvFiles.set(key, view);
+  }
+  view.dbHint = site.db?.enabled ? { database: site.db.database, username: site.db.username, password: site.db.password ?? "", port: site.db.port ?? 3306 } : null;
+  return view;
+}
+function mockEnvDbValues(view: EnvFileView): [string, string][] {
+  const hint = view.dbHint;
+  if (!hint) throw { code: "NO_DB_BINDING", message: "该站点没有绑定数据库" };
+  const values: [string, string][] = [["DB_CONNECTION", "mysql"], ["DB_HOST", "127.0.0.1"], ["DB_PORT", String(hint.port)], ["DB_DATABASE", hint.database], ["DB_USERNAME", hint.username]];
+  if (hint.password) values.push(["DB_PASSWORD", hint.password]);
+  return values;
+}
+
 const packages = new Map<string, PackageView>();
 
 /** 环境变量注入的 mock 状态（浏览器里不碰真实 PATH） */
@@ -1549,34 +1577,37 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (!bundle.markdown.trim() || new TextEncoder().encode(bundle.markdown).length > 2 * 1024 * 1024) throw { code: "DIAGNOSTICS_INVALID", message: "报告为空或超过 2 MiB，请重新生成" };
       return downloadPreviewText(bundle.markdown, `niceenv-diagnostics-${bundle.generatedAt}.md`) as T;
     }
-    case "env_read": {
-      return {
-        siteId: args!.siteId as string,
-        siteName: "laravel-shop",
-        path: "D:\code\laravel-shop\.env",
-        exists: true,
-        entries: [
-          { key: "APP_NAME", value: "Laravel", commented: false, secret: false, line: 1, needsQuote: false },
-          { key: "APP_ENV", value: "local", commented: false, secret: false, line: 2, needsQuote: false },
-          { key: "APP_KEY", value: "base64:abcdefghijklmnop=", commented: false, secret: true, line: 3, needsQuote: false },
-          { key: "APP_DEBUG", value: "true", commented: false, secret: false, line: 4, needsQuote: false },
-          { key: "APP_URL", value: "https://shop.test", commented: false, secret: false, line: 5, needsQuote: false },
-          { key: "DB_CONNECTION", value: "mysql", commented: false, secret: false, line: 7, needsQuote: false },
-          { key: "DB_HOST", value: "127.0.0.1", commented: false, secret: false, line: 8, needsQuote: false },
-          { key: "DB_PORT", value: "3306", commented: false, secret: false, line: 9, needsQuote: false },
-          { key: "DB_DATABASE", value: "laravel_shop", commented: false, secret: false, line: 10, needsQuote: false },
-          { key: "DB_USERNAME", value: "shop_user", commented: false, secret: false, line: 11, needsQuote: false },
-          { key: "DB_PASSWORD", value: "my secret pass", commented: false, secret: true, line: 12, needsQuote: true },
-          { key: "REDIS_PASSWORD", value: "abc", commented: true, secret: true, line: 14, needsQuote: false },
-        ],
-        dbHint: { database: "laravel_shop", username: "shop_user", password: "my secret pass", port: 3306 },
-        variants: [".env", ".env.example"],
-      } as EnvFileView as T;
+    case "env_read":
+      return structuredClone(mockEnvView(String(args!.siteId))) as T;
+    case "env_save": {
+      const view = mockEnvView(String(args!.siteId));
+      if (args!.expectedRevision !== view.revision) throw { code: "ENV_CHANGED", message: "环境文件或站点目录已变化，未覆盖当前文件", hint: "请重新读取文件并检查最新内容。" };
+      const changes = args!.changes as [string, string][];
+      if (new Set(changes.map(([key]) => key)).size !== changes.length || changes.some(([key, value]) => !/^[A-Za-z_][A-Za-z0-9_.]*$/.test(key) || value.includes("\0"))) {
+        throw { code: "BAD_ENV_KEY", message: "请检查变量名、重复项和无效字符" };
+      }
+      for (const [key, value] of changes) {
+        if (isEnvSecretKey(key) && /^(true|false|on|off|null|empty|\(true\)|\(false\)|\(null\)|\(empty\))$/i.test(value)) throw { code: "BAD_ENV_VALUE", message: "框架会把此密码或密钥识别为布尔值或空值" };
+      }
+      for (const [key, value] of changes) {
+        const matches = view.entries.filter((entry) => !entry.commented && entry.key === key);
+        if (matches.length) matches.forEach((entry) => { entry.value = value; entry.needsQuote = false; });
+        else view.entries.push({ key, value, commented: false, secret: isEnvSecretKey(key), line: view.entries.length + 1, needsQuote: false });
+      }
+      view.exists = true; view.revision = `mock-env-${++mockEnvRevision}`;
+      return structuredClone(view) as T;
     }
-    case "env_save":
-      return true as T;
-    case "env_apply_db":
-      return ["DB_CONNECTION", "DB_HOST", "DB_PORT", "DB_DATABASE", "DB_USERNAME", "DB_PASSWORD"] as string[] as T;
+    case "env_preview_db": {
+      const view = mockEnvView(String(args!.siteId));
+      if (args!.expectedRevision !== view.revision) throw { code: "ENV_CHANGED", message: "环境文件或站点目录已变化，请重新读取" };
+      return mockEnvDbValues(view) as T;
+    }
+    case "env_apply_db": {
+      const view = mockEnvView(String(args!.siteId));
+      const changes = mockEnvDbValues(view);
+      await mockInvoke("env_save", { siteId: args!.siteId, changes, expectedRevision: view.revision });
+      return changes.map(([key]) => key) as T;
+    }
     case "cert_health": {
       const now = Math.floor(Date.now() / 1000);
       const day = 86400;

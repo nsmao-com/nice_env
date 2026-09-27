@@ -22,7 +22,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { EnvEditor } from "./env-editor";
+import { EnvEditor, type EnvEditorHandle, type EnvEditorState } from "./env-editor";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -74,6 +74,8 @@ export function SiteDetailSheet({
   const [tab, setTab] = React.useState("general");
   const phpPanelRef = React.useRef<HTMLDivElement>(null);
   const phpFocusObserver = React.useRef<MutationObserver | null>(null);
+  const envEditorRef = React.useRef<EnvEditorHandle>(null);
+  const [envState, setEnvState] = React.useState<EnvEditorState>({ dirty: false, busy: false, canSave: false });
 
   const [draft, setDraft] = React.useState<Site | null>(site);
   const [baseline, setBaseline] = React.useState<Site | null>(site);
@@ -88,6 +90,7 @@ export function SiteDetailSheet({
     setDeleteError(null);
     setDiscardOpen(false);
     setTab("general");
+    setEnvState({ dirty: false, busy: false, canSave: false });
     return () => phpFocusObserver.current?.disconnect();
   }, [site?.id]);
   React.useEffect(() => {
@@ -105,24 +108,27 @@ export function SiteDetailSheet({
 
   const url = siteUrl(site);
 
-  const dirty = !!baseline && (
+  const siteDirty = !!baseline && (
     draft.name !== baseline.name || domainsInput !== baseline.domains.join(", ") ||
     draft.rootDir !== baseline.rootDir || draft.https !== baseline.https ||
     draft.rewrite !== baseline.rewrite || JSON.stringify(draft.runtime) !== JSON.stringify(baseline.runtime) ||
     JSON.stringify(draft.phpOverrides ?? {}) !== JSON.stringify(baseline.phpOverrides ?? {})
   );
-  const busy = saving || deleting || reloading;
+  const dirty = siteDirty || envState.dirty;
+  const siteBusy = saving || deleting || reloading;
+  const busy = siteBusy || envState.busy;
+  const directoryChanged = draft.rootDir.trim() !== baseline?.rootDir;
   const isProxy = draft.runtime.kind !== "php" && draft.runtime.kind !== "static";
   const normalizedProxyTarget = normalizeProxyTarget(draft.runtime.proxyTarget ?? "");
   const proxyInvalid = isProxy && !normalizedProxyTarget;
   const phpInvalid = draft.runtime.kind === "php" && Object.entries(draft.phpOverrides ?? {}).some(([key, value]) => !isPhpSiteSettingValid(key, value, baseline?.phpOverrides?.[key]));
   const requestClose = () => {
-    if (busy || savingRef.current || deletingRef.current || reloadingRef.current) return;
+    if (busy || savingRef.current || deletingRef.current || reloadingRef.current || envEditorRef.current?.isBusy()) return;
     if (dirty) setDiscardOpen(true);
     else onClose();
   };
   const save = async () => {
-    if (busy || savingRef.current || deletingRef.current || reloadingRef.current || proxyInvalid || phpInvalid || (draft.https && certificateSelection.problem)) return;
+    if (busy || savingRef.current || deletingRef.current || reloadingRef.current || envEditorRef.current?.isBusy() || (directoryChanged && envState.dirty) || proxyInvalid || phpInvalid || (draft.https && certificateSelection.problem)) return;
     const domains = [...new Set(domainsInput.split(/[,，\s]+/).filter(Boolean).map((d) => d.toLowerCase()))];
     if (!draft.name.trim() || !draft.rootDir.trim() || !domains.length) {
       setFormError({ code: "REQUIRED_FIELDS", message: t("detail.requiredFields") });
@@ -151,7 +157,7 @@ export function SiteDetailSheet({
   };
 
   const doDelete = async () => {
-    if (busy || savingRef.current || deletingRef.current || reloadingRef.current) return;
+    if (busy || savingRef.current || deletingRef.current || reloadingRef.current || envEditorRef.current?.isBusy()) return;
     deletingRef.current = true;
     setDeleting(true);
     setDeleteError(null);
@@ -197,7 +203,7 @@ export function SiteDetailSheet({
             <Button variant="secondary" size="sm" onClick={() => api.openInFolder(site.rootDir).catch(toastError)}>
               <FolderOpen className="h-3.5 w-3.5" /> {t("detail.dirBtn")}
             </Button>
-            <Button variant="secondary" size="sm" disabled={busy} onClick={() => router.push("/logs?service=" + encodeURIComponent(site.runtime.webServer === "apache" ? "apache" : "site:" + site.id))}>
+            <Button variant="secondary" size="sm" disabled={busy || dirty} onClick={() => router.push("/logs?service=" + encodeURIComponent(site.runtime.webServer === "apache" ? "apache" : "site:" + site.id))}>
               <ScrollText className="h-3.5 w-3.5" /> {t("detail.logs")}
             </Button>
             <Button
@@ -205,7 +211,7 @@ export function SiteDetailSheet({
               size="sm"
               disabled={busy || dirty}
               onClick={async () => {
-                if (busy || dirty || savingRef.current || deletingRef.current || reloadingRef.current) return;
+                if (busy || dirty || savingRef.current || deletingRef.current || reloadingRef.current || envEditorRef.current?.isBusy()) return;
                 reloadingRef.current = true;
                 setReloading(true);
                 try {
@@ -378,7 +384,8 @@ export function SiteDetailSheet({
 
             </TabsContent>
             <TabsContent value="environment" forceMount className="mt-0 data-[state=inactive]:hidden">
-              <EnvEditor siteId={site.id} />
+              <EnvEditor key={`${site.id}:${baseline?.rootDir}`} ref={envEditorRef} siteId={site.id} disabled={siteBusy}
+                directoryChanged={directoryChanged} onStateChange={setEnvState} />
             </TabsContent>
             {draft.runtime.kind === "php" && <TabsContent ref={phpPanelRef} value="php" forceMount className="mt-0 data-[state=inactive]:hidden">
               <SitePhpSettings values={draft.phpOverrides ?? {}} previousValues={baseline?.phpOverrides ?? {}} rootDir={draft.rootDir} disabled={busy}
@@ -422,6 +429,7 @@ export function SiteDetailSheet({
           </div>
         </div>
         <div className="mx-5 shrink-0 border-t border-dashed border-separator py-4 sm:mx-6">
+          {tab !== "environment" && envState.dirty && <button className="mb-2 text-left text-xs text-warn underline" onClick={() => setTab("environment")}>{t("env.pendingElsewhere")}</button>}
           {phpInvalid && <button className="mb-2 text-left text-xs text-error underline" onClick={() => {
             phpFocusObserver.current?.disconnect();
             const panel = phpPanelRef.current;
@@ -443,10 +451,11 @@ export function SiteDetailSheet({
             {formError.detail && <details><summary className="cursor-pointer">{t("sites.detail.deleteErrorDetail")}</summary><p className="mt-2 whitespace-pre-wrap font-mono">{formError.detail}</p></details>}
           </div>}
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <span className="text-xs text-muted">{dirty ? t("detail.unsaved") : t("detail.saved")}</span>
+            <span className="text-xs text-muted">{(tab === "environment" ? envState.dirty : siteDirty) ? t("detail.unsaved") : t(tab === "environment" ? "env.clean" : "detail.saved")}</span>
             <div className="flex gap-2">
               <Button variant="ghost" onClick={requestClose} disabled={busy}>{t("common.cancel")}</Button>
-              <Button onClick={save} disabled={busy || !dirty || proxyInvalid || phpInvalid || (draft.https && !!certificateSelection.problem)}>{saving ? t("detail.saveBusy") : t("common.save")}</Button>
+              {tab === "environment" ? <Button onClick={() => void envEditorRef.current?.save()} disabled={siteBusy || !envState.canSave}>{envState.busy ? t("detail.saveBusy") : t("env.saveFile")}</Button>
+                : <Button onClick={save} disabled={busy || !siteDirty || (directoryChanged && envState.dirty) || proxyInvalid || phpInvalid || (draft.https && !!certificateSelection.problem)}>{saving ? t("detail.saveBusy") : t("common.save")}</Button>}
             </div>
           </div>
         </div>

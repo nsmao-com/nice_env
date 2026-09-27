@@ -653,6 +653,60 @@ fn local_pair(cert: &str, key: &str, cert_pem: &str, key_pem: &str) -> Result<()
     local_pair_with_publish(cert, key, cert_pem, key_pem, |file, path| file.persist(path).map(|_| ()).map_err(|e| e.error))
 }
 
+/// 用实际文件位置识别共用输出；规范化已有父目录，未创建的文件也能参与互斥。
+pub(crate) fn local_output_resource(path: &str) -> Result<String> {
+    let path = local_path(path)?;
+    let mut parent = path.as_path();
+    let mut suffix = Vec::new();
+    let mut resolved = loop {
+        match std::fs::canonicalize(parent) {
+            Ok(path) => break path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                suffix.push(parent.file_name().ok_or_else(|| AppError::new("DEPLOY_PATH", "无法确认部署文件位置"))?.to_owned());
+                parent = parent.parent().ok_or_else(|| AppError::new("DEPLOY_PATH", "部署路径缺少父目录"))?;
+            }
+            Err(error) => return Err(AppError::io("确认部署文件位置", error)),
+        }
+    };
+    for part in suffix.into_iter().rev() { resolved.push(part); }
+    let mut path = resolved.to_string_lossy().replace('\\', "/");
+    if let Some(unc) = path.strip_prefix("//?/UNC/") { path = format!("//{unc}"); }
+    else if let Some(plain) = path.strip_prefix("//?/") { path = plain.into(); }
+    if cfg!(any(windows, target_os = "macos")) { path = path.to_lowercase(); }
+    Ok(format!("file:{path}"))
+}
+
+/// 只包含会覆盖已有内容的声明目标，不从用户脚本猜测其任意副作用。
+pub(crate) fn output_resources(target: &DeployTarget) -> Result<Vec<(String, String)>> {
+    let mut resources = Vec::new();
+    match target.kind.as_str() {
+        "local" => for key in ["certPath", "keyPath"] {
+            let path = cfg(target, key)?;
+            resources.push((local_output_resource(path)?, format!("本地文件 {path}")));
+        },
+        "ssh" => {
+            let (host, port) = ssh_endpoint(cfg(target, "host")?, ssh_port(target)?)?;
+            let host = host.parse::<std::net::IpAddr>().map(|ip| ip.to_string()).unwrap_or_else(|_| host.trim_end_matches('.').to_ascii_lowercase());
+            let fingerprint = cfg(target, "hostFingerprint")?;
+            for key in ["certPath", "keyPath"] {
+                let path = cfg(target, key)?; remote_path(path)?;
+                let label = format!("SSH {host}:{port} 的 {path}");
+                // 指纹覆盖同一主机的不同 DNS 别名；地址覆盖原地址更换主机密钥的情况。
+                resources.push((format!("ssh-key:{fingerprint}:{path}"), label.clone()));
+                resources.push((format!("ssh-host:{host}:{port}:{path}"), label));
+            }
+        }
+        "btpanel" => {
+            let url = reqwest::Url::parse(cfg(target, "url")?).map_err(|_| AppError::new("DEPLOY_CONFIG", "宝塔面板地址无效，请填写完整 HTTP/HTTPS 地址"))?;
+            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() { return Err(AppError::new("DEPLOY_CONFIG", "宝塔面板地址必须是 HTTP/HTTPS 地址")); }
+            let site = cfg(target, "siteName")?.trim().trim_end_matches('.').to_ascii_lowercase();
+            resources.push((format!("bt:{}:{}:{}:{site}", url.host_str().unwrap(), url.port_or_known_default().unwrap(), url.path().trim_end_matches('/')), format!("宝塔站点 {site}")));
+        }
+        _ => {} // 证书库上传创建独立条目，不覆写本地/远程输出文件。
+    }
+    Ok(resources)
+}
+
 fn local_pair_with_publish(cert: &str, key: &str, cert_pem: &str, key_pem: &str,
     mut publish: impl FnMut(tempfile::NamedTempFile, &std::path::Path) -> std::io::Result<()>) -> Result<()> {
     use std::io::{Read, Write};

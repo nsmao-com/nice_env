@@ -155,7 +155,8 @@ function useCertAutos() {
 }
 
 const isRunning = (a?: CertAutomation | null) => a?.state === "issuing" || a?.state === "manual_wait" || a?.state === "deploying";
-const canRetryDeploy = (a: CertAutomation) => Boolean(a.deploymentId && (a.expiresAt ?? 0) > Date.now() && ["deploy_error", "deploy_interrupted"].includes(a.state));
+const isWaiting = (a: CertAutomation) => a.state === "waiting" || a.state === "deploy_waiting";
+const canRetryDeploy = (a: CertAutomation) => Boolean(a.deploymentId && (a.expiresAt ?? 0) > Date.now() && ["deploy_error", "deploy_waiting", "deploy_interrupted"].includes(a.state));
 const actionErrorText = (error: unknown) => { const value = normalizeError(error); return [value.message, value.hint].filter(Boolean).join("\n"); };
 
 export function CertAutomationSection() {
@@ -382,7 +383,7 @@ function AutomationCard({
             ? `${t("certauto.lastRun")} ${new Date(a.lastRunAt).toLocaleString()}`
             : t("certauto.neverRun")}
           {a.enabled && a.nextRenewAt > 0 && a.nextRenewAt < 8_000_000_000_000
-            ? ` · ${t(a.state === "deploy_error" ? "certauto.nextDeploy" : "certauto.nextRenew")} ${new Date(a.nextRenewAt).toLocaleString()}`
+            ? ` · ${t(isWaiting(a) ? "certauto.nextCheck" : a.state === "deploy_error" ? "certauto.nextDeploy" : "certauto.nextRenew")} ${new Date(a.nextRenewAt).toLocaleString()}`
             : ""}
           {a.failCount > 0 ? ` · ${t("certauto.failCount")} ${a.failCount}` : ""}
         </p>
@@ -402,11 +403,16 @@ function AutomationCard({
         )}
 
         {/* 失败原因就地可见 */}
-        {(a.state === "error" || a.state.startsWith("deploy_")) && a.lastError && (
+        {!isWaiting(a) && (a.state === "error" || a.state.startsWith("deploy_")) && a.lastError && (
           <p className="rounded-lg border border-error/25 bg-error/10 px-2.5 py-1.5 text-[11px] text-error [overflow-wrap:anywhere]">
             {a.lastError}
           </p>
         )}
+
+        {isWaiting(a) && <div role="status" className="space-y-1 rounded-lg border border-warn/25 bg-warn-soft px-2.5 py-2 text-[11px] text-warn [overflow-wrap:anywhere]">
+          <p>{a.lastError || t("certauto.state.waiting")}</p>
+          <p>{t("certauto.waitingHint")}</p>
+        </div>}
 
         {/* 部署目标 + 各自最近一次结果 */}
         {(a.deployLocal || a.targets.length > 0) && (
@@ -510,6 +516,8 @@ function StateBadge({ state }: { state: string }) {
     deploying: { variant: "info", key: "certauto.state.deploying" },
     deploy_error: { variant: "error", key: "certauto.state.deployError" },
     deploy_interrupted: { variant: "warn", key: "certauto.state.deployInterrupted" },
+    waiting: { variant: "warn", key: "certauto.state.waiting" },
+    deploy_waiting: { variant: "warn", key: "certauto.state.waiting" },
     error: { variant: "error", key: "certauto.state.error" },
     idle: { variant: "muted", key: "certauto.state.idle" },
     manual_wait: { variant: "info", key: "certauto.state.manualWait" },

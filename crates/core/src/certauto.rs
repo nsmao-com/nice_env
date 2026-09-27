@@ -4,7 +4,7 @@
 //! 1. ACME 下单，DNS-01 验证（TXT 写入由 dnsprov 完成，验证完即清理）；
 //! 2. 拿到证书链后：本地部署（落 certs/sites/{主域名}.crt/.key，命中已开 HTTPS 的站点就重载 nginx）；
 //! 3. 逐个推送外部部署目标（宝塔 / 1Panel / 阿里云），单项失败不阻断其它；
-//! 4. nextRenewAt = 到期前 30 天；后台线程每小时 tick 一次，到点自动重签。
+//! 4. nextRenewAt = 到期前 30 天；每分钟检查到期任务，共用 DNS/输出资源时延后。
 //!
 //! 手动「立即签发」与调度器共用同一条 run_once 路径，避免两套行为。
 
@@ -20,7 +20,7 @@ use time::OffsetDateTime;
 
 /// 提前续签窗口（对齐 certd 默认）：到期前 30 天
 pub const RENEW_AHEAD_DAYS: i64 = 30;
-/// 失败后的重试间隔：6 小时（调度器每小时 tick，实际最多滞后 1 小时）
+/// 6 小时重试间隔常量；实际自动化按各任务的 retryIntervalMin 排期。
 pub const RETRY_AFTER_MS: i64 = 6 * 3600 * 1000;
 
 fn now_ms() -> i64 {
@@ -46,14 +46,85 @@ fn busy_error() -> AppError {
 /// 签发、修改、删除和恢复共用操作系统锁，跨窗口/进程互斥；进程退出自动释放。
 fn execution_lock(store: &crate::store::Store, id: &str) -> Result<std::fs::File> {
     validate_id(id)?;
-    let dir = store.path.parent().ok_or_else(|| AppError::new("CERT_AUTO_PATH", "证书数据目录无效"))?.join("certauto-locks");
-    std::fs::create_dir_all(&dir)?;
-    let file = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(dir.join(format!("{id}.lock")))?;
+    let base = store.path.parent().ok_or_else(|| AppError::new("CERT_AUTO_PATH", "证书数据目录无效"))?;
+    let path = crate::paths::checked_data_path(base, &format!("certauto-locks/{id}.lock"))?;
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(path)?;
     file.try_lock().map_err(|error| match error {
         std::fs::TryLockError::WouldBlock => busy_error(),
         std::fs::TryLockError::Error(error) => AppError::io("锁定证书自动化", error),
     })?;
     Ok(file)
+}
+
+/// 不同自动化也可能共用验证记录或输出文件。锁文件名仅含摘要，不落盘凭据/目标内容。
+fn work_resources(paths: &crate::paths::Paths, a: &CertAutomation, retry: bool) -> Result<std::collections::BTreeMap<String, String>> {
+    let mut resources = std::collections::BTreeMap::new();
+    if !retry {
+        for domain in crate::tls::normalize_domains(&a.domains)? {
+            let domain = domain.trim_start_matches("*.");
+            let alias = alias_for(&a.cname_target, domain).trim_end_matches('.').to_ascii_lowercase();
+            resources.insert(format!("dns:_acme-challenge.{alias}"), format!("DNS 验证记录 _acme-challenge.{alias}"));
+        }
+    }
+    if a.deploy_local && (!retry || !a.local_deploy_result.as_ref().is_some_and(|r| r.ok)) {
+        let primary = a.domains.first().ok_or_else(|| AppError::new("BAD_DOMAINS", "至少填写一个域名"))?;
+        let stem = primary.replace('*', "_wildcard");
+        for ext in ["crt", "key"] {
+            let path = crate::paths::checked_data_path(&paths.base, &format!("certs/sites/{stem}.{ext}"))?;
+            resources.insert(certdeploy::local_output_resource(&path.to_string_lossy())?, format!("本地站点证书 {primary}"));
+        }
+    }
+    for target in &a.targets {
+        if retry && target.last_result.as_ref().is_some_and(|r| r.ok) { continue; }
+        resources.extend(certdeploy::output_resources(target)?);
+    }
+    Ok(resources)
+}
+
+fn resource_locks(paths: &crate::paths::Paths, a: &CertAutomation, retry: bool) -> Result<Vec<std::fs::File>> {
+    use sha2::{Digest, Sha256};
+    let mut locks = Vec::new();
+    for (resource, description) in work_resources(paths, a, retry)? {
+        let digest = hex::encode(Sha256::digest(resource.as_bytes()));
+        let path = crate::paths::checked_data_path(&paths.base, &format!("certauto-locks/resources/{digest}.lock"))?;
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        let file = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(path)?;
+        file.try_lock().map_err(|error| match error {
+            std::fs::TryLockError::WouldBlock => AppError::new("CERT_AUTO_RESOURCE_BUSY", format!("{description} 正由另一条证书自动化使用，本次尚未签发或部署"))
+                .with_hint("自动任务会稍后重试；手动任务请等待另一任务结束后再试。等待期间可关闭自动续签或修改配置"),
+            std::fs::TryLockError::Error(error) => AppError::io("锁定共用证书资源", error),
+        })?;
+        locks.push(file);
+    }
+    // try_lock 不等待；失败会释放本次已取得的所有锁，不形成多资源死锁。
+    Ok(locks)
+}
+
+fn pause_before_run(store: &crate::store::Store, a: &mut CertAutomation, error: &AppError) -> Result<()> {
+    a.state = if a.deployment_id.is_empty() { "error" } else { "deploy_error" }.into();
+    a.enabled = false; a.next_renew_at = i64::MAX / 2;
+    a.last_error = format!("执行准备失败，自动执行已暂停：{error}");
+    a.updated_at = next_revision(a.updated_at);
+    a.runs.insert(0, CertRunRecord { at: a.updated_at, ok: false, message: a.last_error.clone(), log: Vec::new() });
+    a.runs.truncate(MAX_RUNS); store.save_cert_automation(a)
+}
+
+fn reserve_work(state: &CoreState, a: &mut CertAutomation, scheduled: bool, retry: bool) -> Result<Vec<std::fs::File>> {
+    match resource_locks(&state.paths, a, retry) {
+        Ok(locks) => Ok(locks),
+        Err(error) => {
+            if scheduled {
+                if error.code == "CERT_AUTO_RESOURCE_BUSY" {
+                    a.state = if retry { "deploy_waiting" } else { "waiting" }.into();
+                    a.last_error = error.message.clone(); a.next_renew_at = now_ms() + 60_000;
+                    a.updated_at = next_revision(a.updated_at); state.store.save_cert_automation(a)?;
+                    state.emit_event(Event::CertAuto { id: a.id.clone(), state: a.state.clone(), message: a.last_error.clone() });
+                } else { pause_before_run(&state.store, a, &error)?; }
+            }
+            Err(error)
+        }
+    }
 }
 
 fn is_running(a: &CertAutomation) -> bool { matches!(a.state.as_str(), "issuing" | "manual_wait" | "deploying") }
@@ -535,11 +606,17 @@ pub fn run_once(state: &CoreState, id: &str) -> Result<CertAutomation> {
 }
 
 /// 持执行锁后再次读取排期，防止调度快照过期导致关闭后仍签发或刚续完又续。
+#[cfg(test)]
 fn claim_run(store: &crate::store::Store, id: &str, scheduled: bool) -> Result<CertAutomation> {
     claim_work(store, id, scheduled, false)
 }
 
+#[cfg(test)]
 fn claim_work(store: &crate::store::Store, id: &str, scheduled: bool, retry: bool) -> Result<CertAutomation> {
+    start_work(store, prepare_work(store, id, scheduled, retry)?, retry)
+}
+
+fn prepare_work(store: &crate::store::Store, id: &str, scheduled: bool, retry: bool) -> Result<CertAutomation> {
     let mut a = load_automation(store, id)?;
     if is_running(&a) {
         let a = recover_locked(store, a)?;
@@ -559,16 +636,13 @@ fn claim_work(store: &crate::store::Store, id: &str, scheduled: bool, retry: boo
         validate(&a)
     });
     if let Err(error) = checked {
-        if scheduled {
-            a.state = if a.deployment_id.is_empty() { "error" } else { "deploy_error" }.into();
-            a.enabled = false; a.next_renew_at = i64::MAX / 2;
-            a.last_error = format!("配置检查失败，自动执行已暂停：{error}");
-            a.updated_at = next_revision(a.updated_at);
-            a.runs.insert(0, CertRunRecord { at: a.updated_at, ok: false, message: a.last_error.clone(), log: Vec::new() });
-            a.runs.truncate(MAX_RUNS); store.save_cert_automation(&a)?;
-        }
+        if scheduled { pause_before_run(store, &mut a, &error)?; }
         return Err(error);
     }
+    Ok(a)
+}
+
+fn start_work(store: &crate::store::Store, mut a: CertAutomation, retry: bool) -> Result<CertAutomation> {
     a.state = if retry { "deploying" } else { "issuing" }.into();
     a.last_error = String::new();
     a.last_run_at = now_ms();
@@ -581,8 +655,10 @@ fn claim_work(store: &crate::store::Store, id: &str, scheduled: bool, retry: boo
 fn run_once_registered(state: &CoreState, id: &str, _work: crate::BackgroundWork, scheduled: bool, retry: bool) -> Result<CertAutomation> {
     let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
     let _lock = execution_lock(&state.store, id)?;
-    let retry = retry || (scheduled && load_automation(&state.store, id)?.state == "deploy_error");
-    let mut a = if retry { claim_work(&state.store, id, scheduled, true)? } else { claim_run(&state.store, id, scheduled)? };
+    let retry = retry || (scheduled && matches!(load_automation(&state.store, id)?.state.as_str(), "deploy_error" | "deploy_waiting"));
+    let mut a = prepare_work(&state.store, id, scheduled, retry)?;
+    let _resources = reserve_work(state, &mut a, scheduled, retry)?;
+    let mut a = start_work(&state.store, a, retry)?;
     let mut log: Vec<String> = Vec::new();
     state.emit_event(Event::CertAuto {
         id: a.id.clone(),
@@ -730,7 +806,7 @@ pub fn tick(state: &Arc<CoreState>) -> Vec<String> {
         if a.next_renew_at <= now {
             // 手动模式的续期需要人加记录：调度只负责唤醒提示（发事件），
             // 不在这里占着调度线程等 1 小时 —— 用户在界面上点「立即续签」
-            if a.dns.kind == "manual" && a.issued_at.is_some() && a.state != "deploy_error" {
+            if a.dns.kind == "manual" && a.issued_at.is_some() && !matches!(a.state.as_str(), "deploy_error" | "deploy_waiting") {
                 let _ = a_emit_manual_due(state, &a.id);
                 continue;
             }
@@ -767,7 +843,7 @@ fn a_emit_manual_due(state: &CoreState, id: &str) -> Result<()> {
 }
 
 /// 后台调度线程：启动 30 秒后先跑一轮（覆盖「开应用就能续上」），
-/// 之后每小时 tick。桌面端在 CoreState 初始化后 spawn 一次。
+/// 此后每分钟检查到期/等待任务；证书监控仍每小时执行。
 pub fn spawn_scheduler(state: Arc<CoreState>) {
     spawn_scheduler_when_ready(state,None);
 }
@@ -778,10 +854,13 @@ pub fn spawn_scheduler_when_ready(state: Arc<CoreState>, gate: Option<std::sync:
         std::thread::sleep(std::time::Duration::from_secs(30));
         let _ = tick(&state);
         crate::certmonitor::tick_all(&state);
+        let mut last_monitor = std::time::Instant::now();
         loop {
-            std::thread::sleep(std::time::Duration::from_secs(3600));
+            std::thread::sleep(std::time::Duration::from_secs(60));
             let _ = tick(&state);
-            crate::certmonitor::tick_all(&state);
+            if last_monitor.elapsed() >= std::time::Duration::from_secs(3600) {
+                crate::certmonitor::tick_all(&state); last_monitor = std::time::Instant::now();
+            }
         }
     });
 }
@@ -898,10 +977,14 @@ impl CoreState {
         if enabled {
             validate(&a)?;
             if a.state == "deploy_interrupted" { return Err(AppError::new("CERT_AUTO_INTERRUPTED", "请先核对目标端并手动重试部署，完成后再启用自动续签")); }
-            if a.state == "deploy_error" && a.deployment_id.is_empty() { return Err(AppError::new("CERT_DEPLOY_MISSING", "旧记录缺少签发材料，请先重新签发，完成后再启用自动续签")); }
+            if matches!(a.state.as_str(), "deploy_error" | "deploy_waiting") && a.deployment_id.is_empty() { return Err(AppError::new("CERT_DEPLOY_MISSING", "旧记录缺少签发材料，请先重新签发，完成后再启用自动续签")); }
         }
         if a.enabled == enabled { return Ok(a); }
         a.enabled = enabled;
+        if !enabled && matches!(a.state.as_str(), "waiting" | "deploy_waiting") {
+            a.state = if a.state == "deploy_waiting" { "deploy_error" } else { "idle" }.into();
+            a.last_error = if a.state == "deploy_error" { "已取消等待；已签发证书仍可手动重试部署".into() } else { String::new() };
+        }
         a.updated_at = next_revision(a.updated_at);
         // 已部署成功的证书沿用真实有效期，重新开启不会立即重复申请。
         a.next_renew_at = if enabled {
@@ -951,6 +1034,178 @@ mod tests {
         model::DeployTarget { id: name.into(), name: name.into(), kind: "local".into(), last_result: None,
             config: [("certPath".into(), root.join(format!("{name}.crt")).to_string_lossy().into_owned()),
                 ("keyPath".into(), root.join(format!("{name}.key")).to_string_lossy().into_owned())].into() }
+    }
+
+    #[test]
+    fn shared_dns_resources_cover_wildcards_aliases_and_release_partial_claims() {
+        let (_dir, state, mut a) = fixture(); a.deploy_local = false; a.targets.clear();
+        a.domains = vec!["EXAMPLE.COM.".into(), "*.example.com".into()];
+        assert_eq!(work_resources(&state.paths, &a, false).unwrap().len(), 1);
+        let held = resource_locks(&state.paths, &a, false).unwrap();
+        let mut b = a.clone(); b.id = "second".into(); b.domains = vec!["example.com".into()];
+        assert_eq!(resource_locks(&state.paths, &b, false).unwrap_err().code, "CERT_AUTO_RESOURCE_BUSY");
+        b.domains = vec!["other.example.com".into()]; assert!(resource_locks(&state.paths, &b, false).is_ok());
+        drop(held);
+        a.cname_target = "Shared.Validation.Example.".into(); b.cname_target = "shared.validation.example".into();
+        let held = resource_locks(&state.paths, &a, false).unwrap();
+        assert_eq!(resource_locks(&state.paths, &b, false).unwrap_err().code, "CERT_AUTO_RESOURCE_BUSY"); drop(held);
+        a.cname_target.clear(); a.domains = vec!["z.example.com".into()];
+        let held = resource_locks(&state.paths, &a, false).unwrap();
+        b.cname_target.clear(); b.domains = vec!["a.example.com".into(), "z.example.com".into()];
+        assert!(resource_locks(&state.paths, &b, false).is_err());
+        b.domains.pop(); assert!(resource_locks(&state.paths, &b, false).is_ok(), "部分取得的锁必须释放");
+        drop(held); assert!(resource_locks(&state.paths, &a, false).is_ok());
+    }
+
+    #[test]
+    fn declared_output_conflicts_cover_site_files_and_ssh_aliases() {
+        let (_dir, state, mut a) = fixture(); a.targets.clear();
+        let held = resource_locks(&state.paths, &a, false).unwrap();
+        let mut b = a.clone(); b.id = "second".into(); b.domains = vec!["other.example.com".into()]; b.deploy_local = false;
+        b.targets = vec![local_target(&state.paths.certs().join("sites"), "a.com")];
+        assert_eq!(resource_locks(&state.paths, &b, false).unwrap_err().code, "CERT_AUTO_RESOURCE_BUSY");
+        if cfg!(windows) {
+            for value in b.targets[0].config.values_mut() { *value = value.replace('\\', "/").to_uppercase(); }
+            assert!(resource_locks(&state.paths, &b, false).is_err());
+        }
+        b.targets[0].last_result = Some(DeployResult { ok: true, message: "done".into(), at: 1 });
+        assert!(resource_locks(&state.paths, &b, true).is_ok(), "部署重试跳过已成功目标和 DNS 验证资源"); drop(held);
+        let target = model::DeployTarget { id: "ssh".into(), name: "ssh".into(), kind: "ssh".into(), last_result: None,
+            config: [("host", "EXAMPLE.COM."), ("port", "22"), ("hostFingerprint", "SHA256:fixture"),
+                ("certPath", "/ssl/cert.pem"), ("keyPath", "/ssl/key.pem")].map(|(k,v)| (k.into(),v.into())).into() };
+        a.deploy_local = false; a.targets = vec![target.clone()];
+        b.targets = vec![target]; b.targets[0].config.insert("host".into(), "alias.example.com".into());
+        let held = resource_locks(&state.paths, &a, true).unwrap();
+        assert!(resource_locks(&state.paths, &b, true).is_err(), "同一主机指纹的别名必须互斥");
+        b.targets[0].config.insert("host".into(), "example.com".into());
+        b.targets[0].config.insert("hostFingerprint".into(), "SHA256:changed".into());
+        assert!(resource_locks(&state.paths, &b, true).is_err(), "同一地址更换指纹仍占用同一路径");
+        b.targets[0].config.insert("certPath".into(), "/other/cert.pem".into());
+        b.targets[0].config.insert("keyPath".into(), "/other/key.pem".into());
+        assert!(resource_locks(&state.paths, &b, true).is_ok()); drop(held);
+        a.targets = sample().targets; b.targets = a.targets.clone();
+        b.targets[0].config.insert("url".into(), "http://X:80/".into());
+        b.targets[0].config.insert("apiSk".into(), "different-credential".into());
+        let held = resource_locks(&state.paths, &a, true).unwrap();
+        assert!(resource_locks(&state.paths, &b, true).is_err(), "凭据变化不能绕过同一面板站点的资源锁"); drop(held);
+    }
+
+    #[test]
+    fn waiting_work_preserves_history_and_can_be_edited_disabled_or_deleted() {
+        let (_dir, state, mut a) = fixture(); a.deploy_local = false; a.targets.clear();
+        state.store.save_cert_automation(&a).unwrap(); let held = resource_locks(&state.paths, &a, false).unwrap();
+        let before = serde_json::to_value(&a).unwrap();
+        assert_eq!(state.certauto_issue(&a.id).unwrap_err().code, "CERT_AUTO_RESOURCE_BUSY");
+        assert_eq!(serde_json::to_value(state.store.get_cert_automation(&a.id).unwrap().unwrap()).unwrap(), before);
+        assert!(!account_key_path(&state.paths, &a.id).exists());
+        let work = crate::BackgroundWork::begin("fixture queued issue").unwrap();
+        assert_eq!(run_once_registered(&state, &a.id, work, true, false).unwrap_err().code, "CERT_AUTO_RESOURCE_BUSY");
+        let mut waiting = state.certauto_list().unwrap().remove(0);
+        assert_eq!(waiting.state, "waiting"); assert!(waiting.enabled); assert_eq!(waiting.fail_count, a.fail_count);
+        assert_eq!(waiting.runs.len(), a.runs.len()); assert_eq!(waiting.last_run_at, a.last_run_at);
+        assert!(waiting.next_renew_at >= now_ms() + 55_000); assert!(tick(&state).is_empty());
+        waiting.name = "可编辑的等待任务".into(); let edited = state.certauto_save(waiting).unwrap();
+        assert_eq!(edited.name, "可编辑的等待任务");
+        let stopped = state.certauto_set_enabled(&a.id, false).unwrap();
+        assert_eq!(stopped.state, "idle"); assert!(!stopped.enabled); assert!(tick(&state).is_empty());
+        state.certauto_delete(&a.id).unwrap(); assert!(state.store.get_cert_automation(&a.id).unwrap().is_none());
+        drop(held);
+    }
+
+    #[test]
+    fn queued_deployment_resumes_saved_material_without_reissuing_or_replaying_success() {
+        let (dir, state, mut a) = fixture(); a.deploy_local = false; a.dns.kind = "manual".into();
+        a.targets = vec![local_target(dir.path(), "completed"), local_target(dir.path(), "pending")];
+        let material = material(&a, 50); retain_issued(&state, &mut a, &material).unwrap();
+        a.state = "deploy_error".into(); a.next_renew_at = 0;
+        a.targets[0].last_result = Some(DeployResult { ok: true, message: "already done".into(), at: 1 });
+        std::fs::write(dir.path().join("completed.crt"), "retained-marker").unwrap();
+        state.store.save_cert_automation(&a).unwrap();
+        let held = resource_locks(&state.paths, &a, true).unwrap();
+        let work = crate::BackgroundWork::begin("fixture queued deploy").unwrap();
+        assert_eq!(run_once_registered(&state, &a.id, work, true, false).unwrap_err().code, "CERT_AUTO_RESOURCE_BUSY");
+        let mut waiting = state.certauto_list().unwrap().remove(0); assert_eq!(waiting.state, "deploy_waiting");
+        assert_eq!(waiting.deployment_id, material.deployment_id); assert!(waiting.targets[0].last_result.as_ref().unwrap().ok);
+        let stopped = state.certauto_set_enabled(&a.id, false).unwrap(); assert_eq!(stopped.state, "deploy_error");
+        assert_eq!(stopped.deployment_id, material.deployment_id); assert!(tick(&state).is_empty());
+        // 恢复排期后资源释放，以保留的 deploy_waiting 状态走实际自动执行入口。
+        waiting.updated_at = stopped.updated_at + 1; waiting.next_renew_at = 0;
+        state.store.save_cert_automation(&waiting).unwrap(); drop(held);
+        assert_eq!(tick(&state), vec![a.id.clone()]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let done = loop {
+            let current = state.store.get_cert_automation(&a.id).unwrap().unwrap();
+            if current.state == "ok" { break current; }
+            assert!(std::time::Instant::now() < deadline, "部署等待未恢复：{}", current.state);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(done.state, "ok"); assert_eq!(done.deployment_id, material.deployment_id);
+        assert_eq!(std::fs::read_to_string(dir.path().join("pending.crt")).unwrap(), material.chain);
+        assert_eq!(std::fs::read_to_string(dir.path().join("completed.crt")).unwrap(), "retained-marker");
+        assert!(!account_key_path(&state.paths, &a.id).exists());
+        assert_eq!(done.runs.len(), 1); assert!(done.runs[0].log.iter().any(|v| v.contains("不请求 CA 或 DNS")));
+    }
+
+    #[test]
+    fn actual_deployment_holds_shared_output_until_script_finishes() {
+        let (dir, state, mut a) = fixture(); a.deploy_local = false; a.dns.kind = "manual".into();
+        a.targets = vec![local_target(dir.path(), "shared")];
+        let marker = dir.path().join("script-ready");
+        let script = if cfg!(windows) {
+            format!(r#"powershell.exe -NoProfile -NonInteractive -Command "[IO.File]::WriteAllText('{}','ready'); Start-Sleep -Milliseconds 1200""#, marker.to_string_lossy().replace('\'', "''"))
+        } else { format!("printf ready > '{}' && sleep 1", marker.to_string_lossy().replace('\'', "'\\''")) };
+        a.targets[0].config.insert("script".into(), script);
+        let first = material(&a, 40); retain_issued(&state, &mut a, &first).unwrap(); a.state = "deploy_error".into();
+        state.store.save_cert_automation(&a).unwrap();
+        let mut b = a.clone(); b.id = "other-auto".into(); b.targets[0].config.remove("script");
+        state.store.save_cert_automation(&b).unwrap();
+        let second = material(&b, 50); retain_issued(&state, &mut b, &second).unwrap(); b.state = "deploy_error".into();
+        state.store.save_cert_automation(&b).unwrap();
+        let background = state.clone(); let id = a.id.clone();
+        let worker = std::thread::spawn(move || background.certauto_retry_deploy(&id));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        while !marker.exists() { assert!(std::time::Instant::now() < deadline); std::thread::sleep(std::time::Duration::from_millis(10)); }
+        assert_eq!(state.certauto_retry_deploy(&b.id).unwrap_err().code, "CERT_AUTO_RESOURCE_BUSY");
+        assert_eq!(std::fs::read_to_string(dir.path().join("shared.crt")).unwrap(), first.chain);
+        assert_eq!(state.store.get_cert_automation(&b.id).unwrap().unwrap().state, "deploy_error");
+        assert_eq!(worker.join().unwrap().unwrap().state, "ok");
+        assert_eq!(state.certauto_retry_deploy(&b.id).unwrap().state, "ok");
+        assert_eq!(std::fs::read_to_string(dir.path().join("shared.crt")).unwrap(), second.chain);
+        assert!(!account_key_path(&state.paths, &a.id).exists()); assert!(!account_key_path(&state.paths, &b.id).exists());
+    }
+
+    #[test]
+    fn certificate_resource_lock_probe() {
+        let Some(root) = std::env::var_os("NSB_CERT_RESOURCE_PROBE") else { return; };
+        let paths = crate::paths::Paths::new(root.into());
+        let store = crate::store::Store::open(paths.db()).unwrap();
+        let a = store.get_cert_automation("auto-1").unwrap().unwrap();
+        let _held = resource_locks(&paths, &a, false).unwrap();
+        std::fs::write(paths.base.join("resource-ready"), "ready").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(8));
+    }
+
+    #[test]
+    fn resource_locks_block_other_processes_and_release_after_process_exit() {
+        let (dir, state, mut a) = fixture(); a.deploy_local = false; a.targets.clear();
+        state.store.save_cert_automation(&a).unwrap();
+        let mut child = platform::command(std::env::current_exe().unwrap())
+            .args(["--exact", "certauto::tests::certificate_resource_lock_probe", "--nocapture"])
+            .env("NSB_CERT_RESOURCE_PROBE", dir.path()).spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        while !dir.path().join("resource-ready").is_file() {
+            assert!(std::time::Instant::now() < deadline); assert!(child.try_wait().unwrap().is_none());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        a.id = "different-automation".into();
+        assert_eq!(resource_locks(&state.paths, &a, false).unwrap_err().code, "CERT_AUTO_RESOURCE_BUSY");
+        let mut independent = a.clone(); independent.domains = vec!["independent.example.com".into()];
+        assert!(resource_locks(&state.paths, &independent, false).is_ok());
+        child.kill().unwrap(); child.wait().unwrap();
+        assert!(resource_locks(&state.paths, &a, false).is_ok());
+        for entry in std::fs::read_dir(dir.path().join("certauto-locks/resources")).unwrap() {
+            assert_eq!(entry.unwrap().metadata().unwrap().len(), 0, "锁文件不保存凭据");
+        }
     }
 
     #[test]

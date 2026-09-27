@@ -540,7 +540,7 @@ pub struct CertAutomation {
     pub targets: Vec<DeployTarget>,
     #[serde(default = "default_true_fn")]
     pub enabled: bool,
-    /// idle | issuing | manual_wait | deploying | deploy_error | deploy_interrupted | ok | error
+    /// idle | waiting | issuing | manual_wait | deploying | deploy_waiting | deploy_error | deploy_interrupted | ok | error
     #[serde(default)]
     pub state: String,
     #[serde(default)]

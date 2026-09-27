@@ -1395,7 +1395,7 @@ export const CertAutomation = z.object({
   localDeployResult: DeployResult.nullable().default(null),
   targets: z.array(DeployTarget).default([]),
   enabled: z.boolean().default(true),
-  /** idle | issuing | manual_wait | deploying | deploy_error | deploy_interrupted | ok | error */
+  /** idle | waiting | issuing | manual_wait | deploying | deploy_waiting | deploy_error | deploy_interrupted | ok | error */
   state: z.string().default("idle"),
   lastError: z.string().default(""),
   certId: z.string().nullable().default(null),

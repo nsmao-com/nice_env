@@ -61,7 +61,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.37";
+const MOCK_APP_VERSION = "0.2.38";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -2362,6 +2362,13 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (["issuing", "manual_wait", "deploying"].includes(a0.state)) throw { code: "CERT_AUTO_BUSY", message: "该证书自动化正在执行，请等待当前任务结束" };
       if (args!.enabled && a0.state === "deploy_interrupted") throw { code: "CERT_AUTO_INTERRUPTED", message: "请先核对目标端并手动重试部署，完成后再启用自动续签" };
       const next = { ...a0, enabled: args!.enabled as boolean, updatedAt: Math.max(Date.now(), a0.updatedAt + 1) };
+      if (!next.enabled && ["waiting", "deploy_waiting"].includes(next.state)) {
+        next.state = next.state === "deploy_waiting" ? "deploy_error" : "idle";
+        next.lastError = next.state === "deploy_error" ? "已取消等待；已签发证书仍可手动重试部署" : "";
+      }
+      next.nextRenewAt = next.enabled
+        ? next.state === "ok" && next.expiresAt ? Math.max(Date.now(), next.expiresAt - next.renewDaysAhead * 86400_000) : Date.now()
+        : 0;
       certAutos.set(a0.id, next);
       return next as T;
     }

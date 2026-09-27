@@ -65,3 +65,13 @@
 -- 不改远程 certPath/keyPath/script；本地部署仍按原规则重写本机路径和命令。
 -- deploying 与 issuing/manual_wait 一样拒绝迁移。
 -- UPDATE cert_automations SET data=:value WHERE id=:id;
+
+-- v0.2.38：证书任务共用资源等待，沿用 SQLite cert_automations.data JSON。
+-- 没有表结构变更；以下仅记录应用现有参数化写入，不需手工执行。
+-- 自动任务拿不到 DNS/部署输出资源锁时，将 state 设置为 waiting/deploy_waiting，
+-- nextRenewAt 延后一分钟，保留批次、证书、目标结果、历史、lastRunAt 和 failCount。
+-- 不会把等待保存为一次失败或发起新的 CA 请求；资源锁本身是空的 OS 文件锁。
+-- 关闭自动续签时取消等待：waiting 回 idle，deploy_waiting 回 deploy_error，
+-- 已签发材料仍供手动重试。实际开始执行后清除等待原因并按原流程记录运行结果。
+-- INSERT INTO cert_automations(id,data,updated_at) VALUES(:id,:data,:updated_at)
+-- ON CONFLICT(id) DO UPDATE SET data=:data, updated_at=:updated_at;

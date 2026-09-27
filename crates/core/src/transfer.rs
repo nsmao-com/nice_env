@@ -196,6 +196,12 @@ pub fn import_from(
         imported.last_error = String::new();
         imported.fail_count = 0;
         imported.manual_records = Vec::new();
+        // 配置备份不含签发材料，不能把来源机器的部署结果当成本机可重试状态。
+        imported.deployment_id.clear();
+        imported.local_deploy_result = None;
+        imported.cert_id = None; imported.issued_at = None; imported.expires_at = None;
+        imported.last_run_at = 0; imported.next_renew_at = i64::MAX / 2;
+        for target in &mut imported.targets { target.last_result = None; }
         store.save_cert_automation(&imported)?;
         report.cert_automations += 1;
     }
@@ -323,6 +329,8 @@ mod tests {
                 secret: "SK".into(),
             },
             deploy_local: true,
+            deployment_id: "source-certificate-batch".into(),
+            local_deploy_result: Some(crate::model::DeployResult { ok: true, message: "source-deployed".into(), at: 1 }),
             targets: vec![],
             enabled: false,
             state: "idle".into(),
@@ -378,5 +386,14 @@ mod tests {
         assert_eq!(back.cert_automations.len(), 1);
         assert_eq!(back.cert_automations[0].dns.access_key, "AK");
         assert_eq!(back.cert_monitors[0].host, "h.com");
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().join("runtime")); paths.ensure_dirs().unwrap();
+        let store = Store::open(paths.db()).unwrap();
+        let file = temp.path().join("import.json"); std::fs::write(&file, json).unwrap();
+        import_from(&file, &paths, &store, &Arc::new(ServiceManager::new())).unwrap();
+        let imported = store.list_cert_automations().unwrap().remove(0);
+        assert!(!imported.enabled); assert_eq!(imported.state, "idle");
+        assert!(imported.deployment_id.is_empty()); assert!(imported.local_deploy_result.is_none());
+        assert!(imported.cert_id.is_none()); assert!(imported.issued_at.is_none()); assert!(imported.expires_at.is_none());
     }
 }

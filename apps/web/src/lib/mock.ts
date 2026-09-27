@@ -61,7 +61,7 @@ import { cmpVersionDesc, resolveStackService } from "./utils";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.35";
+const MOCK_APP_VERSION = "0.2.36";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 /** 本应用会占用的端口清单（按端口方案；与 Rust 侧 PortsProfile 对齐） */
@@ -197,6 +197,8 @@ function seedCertAutos() {
     ca: "letsencrypt",
     dns: { kind: "aliyun", accessKey: "AKID…", secret: "…" },
     deployLocal: true,
+    deploymentId: "preview-certificate",
+    localDeployResult: { ok: true, message: "预览：本地部署已完成", at: Date.now() },
     targets: [
       { id: "t1", kind: "btpanel", name: "我的宝塔",
         config: { url: "http://bt.example.com", apiSk: "…", siteName: "demo.example.com" },
@@ -206,14 +208,14 @@ function seedCertAutos() {
         lastResult: { ok: false, message: "mock 示例：目标失败不影响其它目标", at: Date.now() } },
     ],
     enabled: true,
-    state: "ok", lastError: "",
+    state: "deploy_error", lastError: "预览：一个部署目标未完成，可在桌面应用修正配置后重试部署。",
     keyAlg: "ec256", eabKid: "", eabHmacKey: "", cnameTarget: "",
     dnsWaitSec: 0, renewDaysAhead: 30, retryTimes: 3, retryIntervalMin: 30, failCount: 0,
     notifyKind: "dingtalk", notifyUrl: "https://oapi.dingtalk.com/robot/send?access_token=demo",
     notifySmtp: null,
     manualRecords: [],
     runs: [
-      { at: Date.now() - 86400_000 * 3, ok: true, message: "签发成功", log: ["开始处理：demo.example.com", "ACME 签发成功，开始部署", "本地部署完成：…/certs/sites/demo.example.com.crt", "已上传到阿里云 SSL 证书服务（单号 12345）"] },
+      { at: Date.now() - 86400_000 * 3, ok: false, message: "预览：证书已签发，部署未完成", log: ["预览：本地部署完成", "预览：宝塔目标成功，阿里云目标失败"] },
       { at: Date.now() - 86400_000 * 93, ok: true, message: "签发成功", log: ["开始处理：demo.example.com", "完成"] },
     ],
     certId: "acme-demo.example.com",
@@ -2322,39 +2324,48 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const a = args!.a as CertAutomation;
       const previous = a.id ? certAutos.get(a.id) : undefined;
       if (a.id && !previous) throw { code: "NOT_FOUND", message: "自动化不存在，可能已在其它窗口删除" };
-      if (previous && ["issuing", "manual_wait"].includes(previous.state)) throw { code: "CERT_AUTO_BUSY", message: "该证书自动化正在执行，请等待当前任务结束" };
+      if (previous && ["issuing", "manual_wait", "deploying"].includes(previous.state)) throw { code: "CERT_AUTO_BUSY", message: "该证书自动化正在执行，请等待当前任务结束" };
       if (previous && a.updatedAt !== previous.updatedAt) throw { code: "CERT_AUTO_CONFLICT", message: "自动化已更新，请重新打开编辑后重试" };
       const next: CertAutomation = {
         ...a, id: previous?.id || `auto-${uid()}`, updatedAt: Math.max(Date.now(), (previous?.updatedAt ?? 0) + 1),
         enabled: previous?.enabled ?? a.enabled, createdAt: previous?.createdAt ?? Date.now(),
         state: previous?.state ?? "idle", lastError: previous?.lastError ?? "", certId: previous?.certId ?? null,
         issuedAt: previous?.issuedAt ?? null, expiresAt: previous?.expiresAt ?? null,
+        deploymentId: previous?.deploymentId ?? "",
+        localDeployResult: previous?.deployLocal === a.deployLocal ? previous.localDeployResult : null,
         lastRunAt: previous?.lastRunAt ?? 0, nextRenewAt: previous?.nextRenewAt ?? 0,
         runs: previous?.runs ?? [], manualRecords: previous?.manualRecords ?? [], failCount: previous?.failCount ?? 0,
         targets: a.targets.map(target => ({ ...target, lastResult: previous?.targets.find(old => old.id === target.id && old.kind === target.kind && JSON.stringify(old.config) === JSON.stringify(target.config))?.lastResult ?? null })),
       };
       if (previous && (JSON.stringify(a.domains) !== JSON.stringify(previous.domains) || a.ca !== previous.ca || a.keyAlg !== previous.keyAlg)) {
         next.state = "idle"; next.lastError = ""; next.certId = null; next.issuedAt = null; next.expiresAt = null; next.failCount = 0;
+        next.deploymentId = ""; next.localDeployResult = null;
         next.nextRenewAt = 0; next.targets = next.targets.map(target => ({ ...target, lastResult: null }));
+      } else if (next.deploymentId && next.state !== "deploy_interrupted" && ((next.deployLocal && !next.localDeployResult) || next.targets.some(target => !target.lastResult))) {
+        next.state = "deploy_error"; next.lastError = "部署配置已更新，请重试部署以应用已签发证书";
+        next.nextRenewAt = next.enabled ? Date.now() : 0;
       }
+      if (previous && previous.deployLocal !== next.deployLocal) next.certId = null;
       certAutos.set(next.id, next);
       return next as T;
     }
     case "certauto_delete": {
       const previous = certAutos.get(args!.id as string);
       if (!previous) throw { code: "NOT_FOUND", message: "自动化不存在" };
-      if (["issuing", "manual_wait"].includes(previous.state)) throw { code: "CERT_AUTO_BUSY", message: "该证书自动化正在执行，请等待当前任务结束" };
+      if (["issuing", "manual_wait", "deploying"].includes(previous.state)) throw { code: "CERT_AUTO_BUSY", message: "该证书自动化正在执行，请等待当前任务结束" };
       certAutos.delete(args!.id as string);
       return true as T;
     }
     case "certauto_set_enabled": {
       const a0 = certAutos.get(args!.id as string);
       if (!a0) throw { code: "NOT_FOUND", message: "自动化不存在" };
-      if (["issuing", "manual_wait"].includes(a0.state)) throw { code: "CERT_AUTO_BUSY", message: "该证书自动化正在执行，请等待当前任务结束" };
+      if (["issuing", "manual_wait", "deploying"].includes(a0.state)) throw { code: "CERT_AUTO_BUSY", message: "该证书自动化正在执行，请等待当前任务结束" };
+      if (args!.enabled && a0.state === "deploy_interrupted") throw { code: "CERT_AUTO_INTERRUPTED", message: "请先核对目标端并手动重试部署，完成后再启用自动续签" };
       const next = { ...a0, enabled: args!.enabled as boolean, updatedAt: Math.max(Date.now(), a0.updatedAt + 1) };
       certAutos.set(a0.id, next);
       return next as T;
     }
+    case "certauto_retry_deploy":
     case "certauto_issue": {
       throw { code: "DESKTOP_ONLY", message: "证书签发需要在桌面应用中执行；网页预览不会申请或部署真实证书。" };
     }

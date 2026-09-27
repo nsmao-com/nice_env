@@ -129,6 +129,8 @@ export const certAutoSetEnabled = (id: string, enabled: boolean) =>
 /** 立即签发/续签：同步跑完整 ACME 流程（约 1–2 分钟），前端要提示等待 */
 export const certAutoIssue = (id: string) =>
   safe(invoke<CertAutomation>("certauto_issue", { id }));
+export const certAutoRetryDeploy = (id: string) =>
+  safe(invoke<CertAutomation>("certauto_retry_deploy", { id }));
 
 
 /* 网站证书监控 */

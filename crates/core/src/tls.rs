@@ -45,7 +45,7 @@ fn cert_stem(primary: &str) -> String {
 }
 
 /// 两份文件与记录一起提交；写入/入库失败时恢复旧文件，避免留下不匹配的证书和私钥。
-fn write_cert_pair(
+pub(crate) fn write_cert_pair(
     paths: &Paths, cert_path: &std::path::Path, key_path: &std::path::Path,
     cert_pem: &str, key_pem: &str, commit: impl FnOnce() -> Result<()>,
 ) -> Result<()> {

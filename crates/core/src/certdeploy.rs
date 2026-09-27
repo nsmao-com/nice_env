@@ -11,7 +11,6 @@
 use crate::dnsprov::{aliyun_percent_encode, aliyun_sign, USER_AGENT};
 use crate::error::{AppError, Result};
 use crate::model::DeployTarget;
-use base64::engine::general_purpose::STANDARD as B64;
 use base64::engine::general_purpose::URL_SAFE as B64URL_SAFE;
 use base64::Engine as _;
 use hmac::{Hmac, KeyInit, Mac};
@@ -33,6 +32,31 @@ fn http() -> reqwest::blocking::Client {
 
 fn md5_hex(s: &str) -> String {
     hex::encode(Md5::digest(s.as_bytes()))
+}
+
+fn cloud_http() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder().timeout(Duration::from_secs(30)).user_agent(USER_AGENT)
+        .redirect(reqwest::redirect::Policy::none()).build().expect("cloud http client")
+}
+
+/// HTTP 成功与有效对象都必须成立；不把网关错误、登录页或空响应当成部署成功。
+fn deployment_json(response: reqwest::blocking::Response, provider: &str) -> Result<serde_json::Value> {
+    let status = response.status();
+    if !status.is_success() {
+        return Err(AppError::new("DEPLOY_HTTP", format!("{provider} 返回 HTTP {status}，未确认部署成功")));
+    }
+    let body: serde_json::Value = response.json()
+        .map_err(|_| AppError::new("DEPLOY_RESPONSE", format!("{provider} 未返回有效 JSON，请检查面板地址与 API 设置")))?;
+    if !body.is_object() {
+        return Err(AppError::new("DEPLOY_RESPONSE", format!("{provider} 响应格式异常，未确认部署成功")));
+    }
+    Ok(body)
+}
+
+fn upload_id(value: &serde_json::Value, provider: &str) -> Result<String> {
+    let id = value.as_str().filter(|v| !v.trim().is_empty()).map(str::to_owned)
+        .or_else(|| value.as_u64().filter(|v| *v > 0).map(|v| v.to_string()));
+    id.ok_or_else(|| AppError::new("DEPLOY_RESPONSE", format!("{provider} 未返回证书标识，无法确认上传成功")))
 }
 
 fn sha1_hex(s: &str) -> String {
@@ -155,8 +179,7 @@ fn bt_post(
         .form(&form_vec)
         .send()
         .map_err(|e| AppError::new("DEPLOY_HTTP", format!("宝塔请求失败：{e}")))?;
-    let text = resp.text().unwrap_or_default();
-    let body: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+    let body = deployment_json(resp, "宝塔")?;
     // 宝塔错误返回 {status:false, msg:"..."}
     if body.get("status") == Some(&serde_json::Value::Bool(false)) {
         return Err(AppError::new(
@@ -165,7 +188,7 @@ fn bt_post(
                 "宝塔：{}",
                 body["msg"]
                     .as_str()
-                    .unwrap_or(&text.chars().take(200).collect::<String>())
+                    .unwrap_or("接口拒绝了请求")
             ),
         ));
     }
@@ -183,7 +206,7 @@ fn bt_deploy(target: &DeployTarget, cert_pem: &str, key_pem: &str) -> Result<Str
         "key": key_pem,
         "csr": cert_pem,
     });
-    bt_post(
+    let result = bt_post(
         target,
         "/site",
         "action=SetSSL",
@@ -200,6 +223,9 @@ fn bt_deploy(target: &DeployTarget, cert_pem: &str, key_pem: &str) -> Result<Str
             ),
         ],
     )?;
+    if result["status"].as_bool() != Some(true) {
+        return Err(AppError::new("DEPLOY_BT", "宝塔未明确确认站点证书配置成功，请检查站点与 API 响应"));
+    }
     Ok(format!("已将证书配置到宝塔站点 {site_name}"))
 }
 
@@ -241,7 +267,7 @@ fn onepanel_deploy(
         }))
         .send()
         .map_err(|e| AppError::new("DEPLOY_HTTP", format!("1Panel 请求失败：{e}")))?;
-    let body: serde_json::Value = resp.json().unwrap_or(serde_json::Value::Null);
+    let body = deployment_json(resp, "1Panel")?;
     // 1Panel 统一 {code:200, message, data}
     if body["code"].as_i64() != Some(200) {
         return Err(AppError::new(
@@ -269,10 +295,14 @@ fn aliyun_upload(target: &DeployTarget, cert_pem: &str, key_pem: &str) -> Result
         .map(|s| s.as_str())
         .filter(|s| !s.is_empty())
         .unwrap_or("NiceEnv");
+    // 同一账号的证书名称不能重复；续签新证书用新名称，重试同一证书保持幂等凭据。
+    let fingerprint = hex::encode(Sha256::digest(cert_pem.as_bytes()));
+    let name = format!("{}-{}", name.chars().take(50).collect::<String>(), &fingerprint[..12]);
+    let client_token = hex::encode(Sha256::digest(format!("{name}\n{cert_pem}").as_bytes()));
 
     let mut params: Vec<(String, String)> = vec![
         ("Format".into(), "JSON".into()),
-        ("Version".into(), "2018-07-13".into()),
+        ("Version".into(), "2020-04-07".into()),
         ("AccessKeyId".into(), ak.into()),
         ("SignatureMethod".into(), "HMAC-SHA1".into()),
         ("SignatureVersion".into(), "1.0".into()),
@@ -285,9 +315,10 @@ fn aliyun_upload(target: &DeployTarget, cert_pem: &str, key_pem: &str) -> Result
                 .replace("+00:00", "Z"),
         ),
         ("Action".into(), "UploadUserCertificate".into()),
-        ("Name".into(), name.into()),
-        ("Cert".into(), B64.encode(cert_pem)),
-        ("Key".into(), B64.encode(key_pem)),
+        ("Name".into(), name),
+        ("ClientToken".into(), client_token),
+        ("Cert".into(), cert_pem.into()),
+        ("Key".into(), key_pem.into()),
     ];
     params.sort();
     let query = params
@@ -296,19 +327,24 @@ fn aliyun_upload(target: &DeployTarget, cert_pem: &str, key_pem: &str) -> Result
         .collect::<Vec<_>>()
         .join("&");
     let string_to_sign = format!(
-        "GET&{}&{}",
+        "POST&{}&{}",
         aliyun_percent_encode("/"),
         aliyun_percent_encode(&query)
     );
-    let signature = aliyun_sign(sk, &string_to_sign);
+    let signature = aliyun_percent_encode(&aliyun_sign(sk, &string_to_sign));
 
-    let resp = http()
-        .post(format!("https://cas.{region}.aliyuncs.com/"))
+    // 与官方 CAS 2020-04-07 SDK 的区域映射一致；其余区域沿用 regional endpoint 规则。
+    let shared_endpoint = region.starts_with("cn-") || matches!(region,
+        "ap-northeast-2-pop" | "ap-southeast-3" | "ap-southeast-5" | "eu-west-1" | "eu-west-1-oxs"
+        | "rus-west-1-pop" | "us-east-1" | "us-west-1");
+    let endpoint = if shared_endpoint { "cas.aliyuncs.com".to_string() } else { format!("cas.{region}.aliyuncs.com") };
+    let resp = cloud_http()
+        .post(format!("https://{endpoint}/"))
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(format!("Signature={signature}&{query}"))
         .send()
         .map_err(|e| AppError::new("DEPLOY_HTTP", format!("阿里云 CAS 请求失败：{e}")))?;
-    let body: serde_json::Value = resp.json().unwrap_or(serde_json::Value::Null);
+    let body = deployment_json(resp, "阿里云 CAS")?;
     if let Some(code) = body.get("Code") {
         return Err(AppError::new(
             "DEPLOY_ALIYUN",
@@ -319,11 +355,8 @@ fn aliyun_upload(target: &DeployTarget, cert_pem: &str, key_pem: &str) -> Result
             ),
         ));
     }
-    let order_id = body["OrderId"]
-        .as_i64()
-        .map(|v| v.to_string())
-        .unwrap_or_default();
-    Ok(format!("已上传到阿里云 SSL 证书服务（单号 {order_id}）"))
+    let cert_id = upload_id(&body["CertId"], "阿里云 CAS")?;
+    Ok(format!("已上传到阿里云 SSL 证书服务（证书 {cert_id}）"))
 }
 
 fn uuid_v4() -> String {
@@ -553,17 +586,13 @@ fn local_deploy(
 
 /// 腾讯云 TC3 签名（可复用于腾讯云其它产品）
 pub fn tc3_signature(secret_key: &str, date: &str, service: &str, string_to_sign: &str) -> String {
-    let k_date = hmac_sha256_hex(format!("TC3{secret_key}").as_bytes(), date.as_bytes());
-    let k_region = hmac_sha256_hex(k_date.as_bytes(), service.as_bytes());
-    let k_signing = hmac_sha256_hex(k_region.as_bytes(), b"tc3_request");
+    let k_date = hmac_sha256_bytes(format!("TC3{secret_key}").as_bytes(), date.as_bytes());
+    let k_region = hmac_sha256_bytes(&k_date, service.as_bytes());
+    let k_signing = hmac_sha256_bytes(&k_region, b"tc3_request");
     hex::encode(hmac_sha256_bytes(
-        k_signing.as_bytes(),
+        &k_signing,
         string_to_sign.as_bytes(),
     ))
-}
-
-fn hmac_sha256_hex(key: &[u8], data: &[u8]) -> String {
-    hex::encode(hmac_sha256_bytes(key, data))
 }
 
 fn hmac_sha256_bytes(key: &[u8], data: &[u8]) -> [u8; 32] {
@@ -601,13 +630,16 @@ fn tencent_upload(
     let payload = serde_json::json!({
         "CertificatePublicKey": cert_pem,
         "CertificatePrivateKey": key_pem,
+        "CertificateType": "SVR",
+        "Repeatable": false,
         "Alias": name,
     })
     .to_string();
 
     // 1. 规范请求串（POST / 空查询 + content-type/host/x-tc-action 头）
     let canonical_request = format!(
-        "POST\n/\n\ncontent-type:application/json; charset=utf-8\nhost:{host}\nx-tc-action:{action}\n\ncontent-type;host;x-tc-action\n{}",
+        "POST\n/\n\ncontent-type:application/json; charset=utf-8\nhost:{host}\nx-tc-action:{}\n\ncontent-type;host;x-tc-action\n{}",
+        action.to_ascii_lowercase(),
         hex::encode(Sha256::digest(payload.as_bytes()))
     );
     // 2. 待签名串
@@ -621,7 +653,7 @@ fn tencent_upload(
         "TC3-HMAC-SHA256 Credential={ak}/{date}/{service}/tc3_request, SignedHeaders=content-type;host;x-tc-action, Signature={signature}"
     );
 
-    let resp = http()
+    let resp = cloud_http()
         .post(format!("https://{host}"))
         .header("X-TC-Action", action)
         .header("X-TC-Version", "2019-12-05")
@@ -635,7 +667,7 @@ fn tencent_upload(
         .body(payload)
         .send()
         .map_err(|e| AppError::new("DEPLOY_HTTP", format!("腾讯云请求失败：{e}")))?;
-    let body: serde_json::Value = resp.json().unwrap_or(serde_json::Value::Null);
+    let body = deployment_json(resp, "腾讯云")?;
     if body["Response"]["Error"].is_object() {
         return Err(AppError::new(
             "DEPLOY_TENCENT",
@@ -648,7 +680,7 @@ fn tencent_upload(
             ),
         ));
     }
-    let cert_id = body["Response"]["CertId"].as_str().unwrap_or("");
+    let cert_id = upload_id(&body["Response"]["CertificateId"], "腾讯云")?;
     let _ = domains;
     Ok(format!("已上传到腾讯云 SSL 证书服务（CertId {cert_id}）"))
 }
@@ -1031,6 +1063,73 @@ pub fn notify_email(
 mod tests {
     use super::*;
 
+    fn panel_fixture(replies: Vec<(u16, &'static str)>) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            for (status, body) in replies {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(std::time::Instant::now() < deadline, "fixture request timed out");
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(error) => panic!("{error}"),
+                    }
+                };
+                // Windows accepted sockets can inherit nonblocking mode from the listener.
+                stream.set_nonblocking(false).unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0u8; 4096]; let n = stream.read(&mut chunk).unwrap();
+                    assert!(n > 0); request.extend_from_slice(&chunk[..n]); assert!(request.len() < 128 * 1024);
+                    if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                        let len = headers.lines().find_map(|line| line.strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap())).unwrap_or(0);
+                        if request.len() >= end + 4 + len { break; }
+                    }
+                }
+                write!(stream, "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        (url, worker)
+    }
+
+    #[test]
+    fn panel_http_and_business_failures_never_report_success() {
+        for (status, body, ok) in [(500, r#"{"status":true}"#, false), (200, "<html>login</html>", false),
+            (200, "null", false), (200, "{}", false), (200, r#"{"status":false,"msg":"denied"}"#, false),
+            (200, r#"{"status":true}"#, true)] {
+            let (url, worker) = panel_fixture(vec![(200, "{}"), (status, body)]);
+            let target = DeployTarget { id: "fixture".into(), name: "fixture".into(), kind: "btpanel".into(), last_result: None,
+                config: [("url".into(), url), ("apiSk".into(), "fixture".into()), ("siteName".into(), "example.invalid".into())].into() };
+            assert_eq!(bt_deploy(&target, "fixture-cert", "fixture-key").is_ok(), ok, "{status}: {body}");
+            worker.join().unwrap();
+        }
+        for (status, body, ok) in [(503, r#"{"code":200}"#, false), (200, "<html>login</html>", false),
+            (200, "{}", false), (200, r#"{"code":401,"message":"denied"}"#, false), (200, r#"{"code":200}"#, true)] {
+            let (url, worker) = panel_fixture(vec![(status, body)]);
+            let target = DeployTarget { id: "fixture".into(), name: "fixture".into(), kind: "onepanel".into(), last_result: None,
+                config: [("url".into(), url), ("token".into(), "fixture".into())].into() };
+            assert_eq!(onepanel_deploy(&target, &["example.invalid".into()], "fixture-cert", "fixture-key").is_ok(), ok);
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn upload_requires_a_positive_certificate_identifier() {
+        for value in [serde_json::Value::Null, serde_json::json!(""), serde_json::json!("  "), serde_json::json!(0), serde_json::json!(-1), serde_json::json!({})] {
+            assert!(upload_id(&value, "fixture").is_err());
+        }
+        assert_eq!(upload_id(&serde_json::json!(123), "fixture").unwrap(), "123");
+        assert_eq!(upload_id(&serde_json::json!("cert-id"), "fixture").unwrap(), "cert-id");
+    }
+
     #[test]
     fn bt_token_matches_reference_algo() {
         // 固定向量自校验：md5(sha1(ts + md5(sk)))
@@ -1051,13 +1150,10 @@ mod tests {
     }
 
     #[test]
-    fn tc3_signature_chain_matches_manual_hmac() {
-        // 与手工分层 HMAC（TC3 标准）对拍
-        let k_date = hmac_sha256_hex(b"TC3sk", b"2024-01-01");
-        let k_region = hmac_sha256_hex(k_date.as_bytes(), b"ssl");
-        let k_signing = hmac_sha256_hex(k_region.as_bytes(), b"tc3_request");
-        let expect = hex::encode(hmac_sha256_bytes(k_signing.as_bytes(), b"sts"));
-        assert_eq!(tc3_signature("sk", "2024-01-01", "ssl", "sts"), expect);
+    fn tc3_signature_matches_independent_binary_hmac_vector() {
+        // 按官方 TC3 二进制派生规则，用 Node crypto 独立计算，避免测试重复实现同一错误。
+        assert_eq!(tc3_signature("sk", "2024-01-01", "ssl", "sts"),
+            "2cb6b1dc0394e022fc7feec630ca4be3b81119d14bcf234f1ad286d5d1aa0f69");
     }
 
     #[test]

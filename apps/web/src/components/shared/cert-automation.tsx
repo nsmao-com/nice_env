@@ -70,7 +70,7 @@ const DNS_KINDS = [
   { value: "manual", labelKey: "certauto.dns.manual" },
 ] as const;
 
-const TARGET_KINDS = ["btpanel", "onepanel", "aliyun", "tencent", "ssh", "local", "synology", "k8s", "qiniu", "hwssl"] as const;
+const TARGET_KINDS = ["btpanel", "onepanel", "aliyun", "tencent", "ssh", "local"] as const;
 
 /** 各部署目标需要的参数 */
 const TARGET_FIELDS: Record<string, { key: string; labelKey: string; secret?: boolean }[]> = {
@@ -156,7 +156,8 @@ function useCertAutos() {
   });
 }
 
-const isRunning = (a?: CertAutomation | null) => a?.state === "issuing" || a?.state === "manual_wait";
+const isRunning = (a?: CertAutomation | null) => a?.state === "issuing" || a?.state === "manual_wait" || a?.state === "deploying";
+const canRetryDeploy = (a: CertAutomation) => Boolean(a.deploymentId && (a.expiresAt ?? 0) > Date.now() && ["deploy_error", "deploy_interrupted"].includes(a.state));
 const actionErrorText = (error: unknown) => { const value = normalizeError(error); return [value.message, value.hint].filter(Boolean).join("\n"); };
 
 export function CertAutomationSection() {
@@ -169,6 +170,7 @@ export function CertAutomationSection() {
   const [issuingIds, setIssuingIds] = React.useState<Set<string>>(() => new Set());
   const issueRequests = React.useRef(new Set<string>());
   const [historyOf, setHistoryOf] = React.useState<CertAutomation | null>(null);
+  const [retrying, setRetrying] = React.useState<CertAutomation | null>(null);
   const [deleting, setDeleting] = React.useState(false);
   const deleteRequest = React.useRef(false);
   const [deleteError, setDeleteError] = React.useState<string | null>(null);
@@ -176,22 +178,22 @@ export function CertAutomationSection() {
   React.useEffect(() => { if (deleteError) deleteErrorRef.current?.focus(); }, [deleteError]);
 
   /** 手动立即签发：ACME 全流程要 1–2 分钟，按钮转圈并提示 */
-  const issueNow = async (a: CertAutomation) => {
+  const issueNow = async (a: CertAutomation, retry = false) => {
     if (issueRequests.current.has(a.id) || isRunning(a)) return;
     issueRequests.current.add(a.id);
     setIssuingIds(new Set(issueRequests.current));
     invalidate();
     try {
-      const result = await api.certAutoIssue(a.id);
+      const result = await (retry ? api.certAutoRetryDeploy(a.id) : api.certAutoIssue(a.id));
       if (result.state === "ok") {
         toast.success(t("certauto.issuedOk"), { description: result.domains.join(", ") });
       } else {
-        toast.error(t("certauto.issueFailed"), {
+        toast.error(t(result.state.startsWith("deploy_") ? "certauto.deployFailed" : "certauto.issueFailed"), {
           description: result.lastError || t("certauto.issueFailedHint"),
         });
       }
     } catch (e) {
-      toastError(e, t("certauto.issueFailed"));
+      toastError(e, t(retry ? "certauto.deployFailed" : "certauto.issueFailed"));
     } finally {
       issueRequests.current.delete(a.id);
       setIssuingIds(new Set(issueRequests.current));
@@ -235,6 +237,7 @@ export function CertAutomationSection() {
                 a={a}
                 busy={issuingIds.has(a.id) || isRunning(a)}
                 onIssue={() => issueNow(a)}
+                onRetry={() => a.state === "deploy_interrupted" ? setRetrying(a) : void issueNow(a, true)}
                 onEdit={() => setEditing(a)}
                 onRemove={() => { setDeleteError(null); setRemoving(a); }}
                 onHistory={() => setHistoryOf(a)}
@@ -257,6 +260,16 @@ export function CertAutomationSection() {
       />
 
       <RunHistoryDrawer automation={historyOf ? autos.find((a) => a.id === historyOf.id) ?? historyOf : null} onClose={() => setHistoryOf(null)} />
+
+      <ConfirmDialog
+        open={retrying !== null}
+        onOpenChange={(open) => !open && setRetrying(null)}
+        title={t("certauto.retryDeploy")}
+        description={t("certauto.retryInterruptedHint")}
+        confirmText={t("certauto.retryDeploy")}
+        confirmDisabled={Boolean(retrying && (issuingIds.has(retrying.id) || isRunning(autos.find((a) => a.id === retrying.id))))}
+        onConfirm={() => { if (retrying) void issueNow(retrying, true); setRetrying(null); }}
+      />
 
       <ConfirmDialog
         open={removing !== null}
@@ -293,6 +306,7 @@ function AutomationCard({
   a,
   busy,
   onIssue,
+  onRetry,
   onEdit,
   onRemove,
   onHistory,
@@ -300,6 +314,7 @@ function AutomationCard({
   a: CertAutomation;
   busy: boolean;
   onIssue: () => void;
+  onRetry: () => void;
   onEdit: () => void;
   onRemove: () => void;
   onHistory: () => void;
@@ -369,7 +384,7 @@ function AutomationCard({
             ? `${t("certauto.lastRun")} ${new Date(a.lastRunAt).toLocaleString()}`
             : t("certauto.neverRun")}
           {a.enabled && a.nextRenewAt > 0 && a.nextRenewAt < 8_000_000_000_000
-            ? ` · ${t("certauto.nextRenew")} ${new Date(a.nextRenewAt).toLocaleDateString()}`
+            ? ` · ${t(a.state === "deploy_error" ? "certauto.nextDeploy" : "certauto.nextRenew")} ${new Date(a.nextRenewAt).toLocaleString()}`
             : ""}
           {a.failCount > 0 ? ` · ${t("certauto.failCount")} ${a.failCount}` : ""}
         </p>
@@ -389,22 +404,26 @@ function AutomationCard({
         )}
 
         {/* 失败原因就地可见 */}
-        {a.state === "error" && a.lastError && (
+        {(a.state === "error" || a.state.startsWith("deploy_")) && a.lastError && (
           <p className="rounded-lg border border-error/25 bg-error/10 px-2.5 py-1.5 text-[11px] text-error [overflow-wrap:anywhere]">
             {a.lastError}
           </p>
         )}
 
         {/* 部署目标 + 各自最近一次结果 */}
-        {a.targets.length > 0 && (
+        {(a.deployLocal || a.targets.length > 0) && (
           <div className="flex flex-col gap-1">
+            {a.deployLocal && <div className="flex min-w-0 items-start gap-2 text-[11px]">
+              <TargetDot result={a.localDeployResult} />
+              <span className="min-w-0 text-secondary [overflow-wrap:anywhere]">{t("certauto.deployLocal")} · {a.localDeployResult?.message || t("certauto.deployPending")}</span>
+            </div>}
             {a.targets.map((tg) => (
-              <div key={tg.id} className="flex items-center gap-2 text-[11px]">
+              <div key={tg.id} className="flex min-w-0 flex-wrap items-start gap-x-2 gap-y-1 text-[11px]">
                 <TargetDot result={tg.lastResult} />
                 <span className="text-faint">{t(`certauto.target.${tg.kind}` as never)}</span>
-                <span className="truncate text-secondary">{tg.name}</span>
+                <span className="min-w-0 text-secondary [overflow-wrap:anywhere]">{tg.name}</span>
                 {tg.lastResult && !tg.lastResult.ok && (
-                  <span className="truncate text-error/80" title={tg.lastResult.message}>
+                  <span className="w-full pl-5 text-error/80 [overflow-wrap:anywhere]">
                     {tg.lastResult.message}
                   </span>
                 )}
@@ -415,10 +434,11 @@ function AutomationCard({
 
         {/* 操作 */}
         <div className="mt-auto flex flex-wrap items-center gap-2 border-t border-dashed border-border pt-3">
-          <Button size="sm" className="flex-1" disabled={busy || toggling} onClick={onIssue}>
+          <Button size="sm" className="flex-1" disabled={busy || toggling} onClick={canRetryDeploy(a) ? onRetry : onIssue}>
             {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Rocket className="h-3.5 w-3.5" />}
-            {a.issuedAt ? t("certauto.renewNow") : t("certauto.issueNow")}
+            {canRetryDeploy(a) ? t("certauto.retryDeploy") : a.issuedAt ? t("certauto.renewNow") : t("certauto.issueNow")}
           </Button>
+          {canRetryDeploy(a) && <Button size="sm" variant="ghost" disabled={busy || toggling} onClick={onIssue}>{t("certauto.reissue")}</Button>}
           <Button size="icon-sm" variant="ghost" title={t("certauto.history")} aria-label={t("certauto.history")} onClick={onHistory}>
             <History className="h-3.5 w-3.5" />
           </Button>
@@ -430,6 +450,7 @@ function AutomationCard({
           </Button>
         </div>
         {busy && <p className="text-[10.5px] text-faint">{t("certauto.issueBusyHint")}</p>}
+        {!busy && canRetryDeploy(a) && <p className="text-[10.5px] text-faint">{t("certauto.retryDeployHint")}</p>}
       </Card>
     </motion.div>
   );
@@ -488,6 +509,9 @@ function StateBadge({ state }: { state: string }) {
   const map: Record<string, { variant: "running" | "warn" | "error" | "muted" | "info"; key: string }> = {
     ok: { variant: "running", key: "certauto.state.ok" },
     issuing: { variant: "warn", key: "certauto.state.issuing" },
+    deploying: { variant: "info", key: "certauto.state.deploying" },
+    deploy_error: { variant: "error", key: "certauto.state.deployError" },
+    deploy_interrupted: { variant: "warn", key: "certauto.state.deployInterrupted" },
     error: { variant: "error", key: "certauto.state.error" },
     idle: { variant: "muted", key: "certauto.state.idle" },
     manual_wait: { variant: "info", key: "certauto.state.manualWait" },
@@ -521,6 +545,8 @@ function emptyAutomation(): CertAutomation {
     ca: "letsencrypt",
     dns: { kind: "aliyun", accessKey: "", secret: "" },
     deployLocal: true,
+    deploymentId: "",
+    localDeployResult: null,
     targets: [],
     enabled: true,
     state: "idle",

@@ -531,11 +531,16 @@ pub struct CertAutomation {
     /// 签发后写入本地站点证书（按主域名落 certs/sites/，命中站点即重载）
     #[serde(default)]
     pub deploy_local: bool,
+    /// 当前已签发材料的批次；私钥仅保存在受管证书目录，不进入配置导出。
+    #[serde(default)]
+    pub deployment_id: String,
+    #[serde(default)]
+    pub local_deploy_result: Option<DeployResult>,
     #[serde(default)]
     pub targets: Vec<DeployTarget>,
     #[serde(default = "default_true_fn")]
     pub enabled: bool,
-    /// idle | issuing | ok | error
+    /// idle | issuing | manual_wait | deploying | deploy_error | deploy_interrupted | ok | error
     #[serde(default)]
     pub state: String,
     #[serde(default)]

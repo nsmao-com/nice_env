@@ -290,6 +290,7 @@ pub fn run() {
             certauto_delete,
             certauto_set_enabled,
             certauto_issue,
+            certauto_retry_deploy,
             // 证书监控 + PFX 导出
             certmonitor_list,
             certmonitor_add,
@@ -1032,6 +1033,17 @@ async fn list_certs(
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::tls::list_certs(&st.paths, &st.store)))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn certauto_retry_deploy(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    id: String,
+) -> Result<nsb_core::model::CertAutomation, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.certauto_retry_deploy(&id)))
         .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

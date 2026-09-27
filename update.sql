@@ -37,3 +37,17 @@
 -- ON CONFLICT(id) DO UPDATE SET data=:data, updated_at=:updated_at;
 -- 删除入口先检查任务存在和执行锁；账号密钥删除失败保留记录，入库失败恢复密钥。
 -- DELETE FROM cert_automations WHERE id=:id;
+
+-- v0.2.36：证书签发与部署分阶段记录。沿用 SQLite cert_automations.data JSON，
+-- 不新增列或表；以下是应用运行时参数化语句的记录，不需手工执行。
+-- 新增 deploymentId / localDeployResult 使用默认值兼容旧数据；私钥材料只保存在
+-- certs/acme 的原子文件中，不放入 JSON 或配置导出。
+-- 持同一任务的独占锁逐目标保存结果，updated_at 单调递增。
+-- 部署中断恢复为 deploy_interrupted 并暂停；正常目标失败为 deploy_error。
+-- 旧版 ok 但有失败目标、或远程专用证书有效期未知的记录，在持锁复核后仅纠正一次。
+-- 导入配置时清空来源 deploymentId、localDeployResult、certId、issuedAt、expiresAt
+-- 及目标的 lastResult，保持关闭；没有原证书材料时不能声称可重试部署。
+-- INSERT INTO cert_automations(id,data,updated_at) VALUES(:id,:data,:updated_at)
+-- ON CONFLICT(id) DO UPDATE SET data=:data, updated_at=:updated_at;
+-- 删除前保存账号与材料原文，删除文件或记录失败则恢复，成功部署的站点证书不删除。
+-- DELETE FROM cert_automations WHERE id=:id;

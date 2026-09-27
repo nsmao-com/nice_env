@@ -1391,9 +1391,11 @@ export const CertAutomation = z.object({
   dns: DnsProvider.default({ kind: "aliyun", accessKey: "", secret: "" }),
   /** 签发后写入本地站点证书并按需重载 */
   deployLocal: z.boolean().default(true),
+  deploymentId: z.string().default(""),
+  localDeployResult: DeployResult.nullable().default(null),
   targets: z.array(DeployTarget).default([]),
   enabled: z.boolean().default(true),
-  /** idle | issuing | ok | error */
+  /** idle | issuing | manual_wait | deploying | deploy_error | deploy_interrupted | ok | error */
   state: z.string().default("idle"),
   lastError: z.string().default(""),
   certId: z.string().nullable().default(null),

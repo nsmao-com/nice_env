@@ -265,6 +265,25 @@ fn check_pair(cert_pem: &str, key_pem: &str) -> Result<()> {
     certified.keys_match().map_err(|_| AppError::new("CERT_KEY_MISMATCH", "证书与私钥不匹配"))
 }
 
+/// 部署前校验证书、私钥和域名，并直接从叶证书读取有效期（毫秒）。
+pub(crate) fn deployment_validity(cert_pem: &str, key_pem: &str, domains: &[String]) -> Result<(i64, i64)> {
+    check_pair(cert_pem, key_pem)?;
+    check_server_leaf(cert_pem)?;
+    let chain = parse_chain(cert_pem)?;
+    let (_, sans, before, after) = cert_info(chain[0].as_ref())?;
+    let mut expected = crate::tls::normalize_domains(domains)?;
+    let mut actual = crate::tls::normalize_domains(&sans)?;
+    expected.sort(); actual.sort();
+    if expected != actual {
+        return Err(AppError::new("CERT_DEPLOY_DOMAINS", "已签发证书的域名与当前自动化不一致，请重新签发"));
+    }
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    if before > now || after <= now {
+        return Err(AppError::new("CERT_DEPLOY_EXPIRED", "已签发证书已过期或尚未生效，请检查时间或重新签发"));
+    }
+    Ok((before * 1000, after * 1000))
+}
+
 fn read_pem(path: &Path) -> Result<String> {
     use std::io::Read;
     let file = std::fs::File::open(path).map_err(|e| AppError::io("读取证书或私钥文件", e))?;

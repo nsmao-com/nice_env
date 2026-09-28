@@ -279,6 +279,7 @@ pub fn run() {
             // 项目扫描
             scan_projects,
             project_php_compatibility,
+            project_platform_check,
             // 日志导出
             log_export,
             // 工具链镜像
@@ -3668,6 +3669,27 @@ async fn project_php_compatibility(
     tauri::async_runtime::spawn_blocking(move || {
         let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
         map_jh(nsb_core::scanner::project_php_compatibility(&st.paths, &st.store, std::path::Path::new(&project)))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn project_platform_check(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>, project: Option<String>,
+    site_id: Option<String>, version: String, include_dev: bool,
+) -> Result<nsb_core::php_platform::ProjectPlatformReport, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
+        let root = match (project, site_id) {
+            (Some(project), None) => std::path::PathBuf::from(project),
+            (None, Some(id)) => {
+                let site = map_jh(nsb_core::sites::get(&st.store, &id))?;
+                // 后端从已保存记录解析目录；前端目录草稿必须先保存。
+                nsb_core::php_platform::site_project_root(std::path::Path::new(&site.root_dir))
+            }
+            _ => return map_jh(Err(nsb_core::AppError::new("PHP_PLATFORM_TARGET", "请选择一个项目或已保存的站点"))),
+        };
+        map_jh(nsb_core::php_platform::check(&st.paths, &st.store, &root, &version, include_dev))
     }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

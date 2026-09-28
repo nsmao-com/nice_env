@@ -2684,3 +2684,23 @@ scanner 26 项与 sites 常规 33 项通过，两个依赖本机运行时的原�
 
 参考：https://support.servbay.com/php/set-different-php-for-each-project
 参考：https://getcomposer.org/doc/articles/versions.md
+
+## 第一百一十六轮：已有项目与站点的 PHP 平台环境检查（v0.2.104）
+
+沿用 ServBay 每项目独立 PHP 的配置方式，补齐前一轮只核对 require.php、无法检查项目扩展与间接依赖的缺口。通过 fast-context 定位扫描、建站及站点详情调用链；核对 Composer 官方 check-platform-reqs 文档与本机 Composer 2.10.3 phar 中的命令实现。继续沿用 UI/UX skill、本地 Next use-client 文档、现有 API/IPC 和扩展管理对话框，无新增依赖。
+
+新增只读平台检查，复用已安装 PHP/Composer 的入口解析和 PHP 托管配置，使用 Composer 自带 check-platform-reqs 检查真实 PHP、ext-*、lib-* 等平台要求，忽略项目 config.platform 的模拟值。优先检查 composer.lock；无锁文件时检查项目内 vendor-dir 的 installed.json；两者都没有时明确仅核对根 composer.json。用户可选择包含开发依赖，默认只核对生产要求。锁文件新旧通过 Composer Locker::getContentHash 判断；已安装元数据缺少开发分组、开发依赖覆盖不完整、缺少依赖 autoload 入口、没有平台要求及 PHP 运行提示均单独显示，不将其等同于网站已可运行。
+
+检查仅把必要清单字段复制到隔离临时目录；清单限制 512 KiB，锁定或已安装元数据限制 8 MiB，依赖数量最多 10000。拒绝元数据软链接、目录联接及项目外 vendor 路径；不复制项目仓库、脚本、安装器、autoload 或插件。临时 COMPOSER_HOME、缓存目录与网络禁用环境隔离全局配置，显式禁用 Composer 插件和脚本。使用真实 managed php.ini，但禁用 auto_prepend_file、auto_append_file 和 opcache.preload，避免检查触发项目 PHP 代码。为无 OpenSSL 的 PHP 设置仅限临时目录的 disable-tls，检查仍不联网，并可正常报告项目所需 ext-openssl 缺失。单次 PHP 内存 128 MiB、最多 15 秒，stdout/stderr 分离且分别有输出上限；保留 Composer 非零退出的结构化问题结果，检查结束回收整个自有进程组。后端同一时间只接受一个项目环境检查，防止快速切换产生大量进程。
+
+已有项目建站向导运行环境步骤，以及站点详情 PHP 页签，均可直接执行环境检查、查看缺失或版本不符的要求并打开现有扩展管理面板。每项展示实际版本、要求来源及约束；默认只显示问题，成功项可按需展开，每页 6 项。检查区保留左右留白，分割线使用虚线，长路径/约束换行，按钮可折行。目录草稿未保存时禁止检查，后端从已保存站点记录解析项目根；所选 PHP、项目或安装元数据变化后丢弃旧结果。异步返回不会覆盖已经切换的面板，重复点击不会重复启动；扩展弹窗打开/关闭后提示重检。浏览器示例明确要求在桌面应用执行，不伪造本机报告。此前建站的根 PHP 版本约束强制检查保持不变；本轮平台诊断作为用户可主动运行的只读检查，不自动安装依赖或开启扩展。
+
+在现有 sites.rs 原生验证函数中扩展验收，没有新增测试文件。真实 PHP 8.4.26 / Composer 2.10.3 验证通过，覆盖缺失扩展、真实 PHP 版本冲突、config.platform 模拟值不影响结果、根开发依赖、锁定间接依赖、开发锁定依赖、锁文件新旧、已安装依赖分组、Composer 1 无分组元数据的明确限制、开发范围不完整、根包提供的平台能力，以及 Windows fileinfo 扩展关闭/开启后的结果变化。确认项目脚本、autoload 和 ini 的自动 PHP 代码未执行，原 composer.json/composer.lock/installed.json/.env 内容保留。该验收仅使用隔离临时文件与 SQLite Store，不操作用户业务数据库或启动站点服务。
+
+64 项前端验证直接执行实际组件的状态与事件处理代码、schema 和翻译，覆盖加载、失败重试、双击防重、过期异步返回、输入/安装变化失效、开发依赖参数、结果筛选/分页、扩展弹窗后重检、桌面限定以及不完整范围提示。Web/schema TypeScript 与 Rust 工作区 all-targets 检查通过；最终真实原生校验 1 passed / 0 failed（10.02 秒），同时覆盖 ./vendor 与未声明版本的 self.version 边界。未运行前端 dev/build；没有桌面应用交互或浏览器桌面/窄屏视觉验收，不将组件验证算作实机验收。站点 .user.ini、Web SAPI 配置、依赖文件完整性与网站实际运行不在本次平台检查范围，界面已说明。
+
+开发期间远程新增 v0.2.103，已重新以该提交 f9bae10127b8eece748a738d7e1e4d67b8b70e15 建立独立发布树，保留其拖动排序和 Windows 授权改动。本轮同步 11 个版本文件到 0.2.104，包含上个版本遗留的界面兜底版本值；Cargo.lock 只更新本项目三个 crate。精确提交 22 个任务文件，保留本地生成目录和未跟踪文件。按 AGENTS.md 新增 annotated tag v0.2.104，并与 main 一次原子推送，推送后核对远程与 release.yml 实际状态。v0.2.102 的三平台 Release 已核对全部成功。本次没有业务数据库变更，未修改 update.sql。整体完善目标继续进行。
+
+参考：https://getcomposer.org/doc/03-cli.md#check-platform-reqs
+参考：https://github.com/composer/composer/blob/main/src/Composer/Command/CheckPlatformReqsCommand.php
+参考：https://support.servbay.com/php/set-different-php-for-each-project

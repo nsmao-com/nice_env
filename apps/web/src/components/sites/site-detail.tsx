@@ -31,6 +31,7 @@ import { ConfirmDialog } from "@/components/shared/misc";
 
 import { SiteCertificateSelect, useSiteCertificateSelection } from "./site-certificate-select";
 import { SitePhpSettings } from "./site-php-settings";
+import { ProjectPlatformCheck } from "./project-platform-check";
 import { SiteApplicationFields } from "./site-application-fields";
 import { SiteFileBackups } from "./site-file-backups";
 
@@ -443,7 +444,8 @@ export function SiteDetailSheet({
                   useUI.getState().openExistingProject(project);
                 }} />
             </TabsContent>
-            {draft.runtime.kind === "php" && <TabsContent ref={phpPanelRef} value="php" forceMount className="mt-0 data-[state=inactive]:hidden">
+            {draft.runtime.kind === "php" && <TabsContent ref={phpPanelRef} value="php" forceMount className="mt-0 space-y-5 data-[state=inactive]:hidden">
+              <ProjectPlatformCheck siteId={site.id} savedRoot={baseline?.rootDir} version={draft.runtime.phpVersion ?? ""} disabled={busy} directoryChanged={directoryChanged} />
               <SitePhpSettings values={draft.phpOverrides ?? {}} previousValues={baseline?.phpOverrides ?? {}} rootDir={draft.rootDir} disabled={busy}
                 onChange={(phpOverrides) => setDraft({ ...draft, phpOverrides })} />
             </TabsContent>}

@@ -1440,9 +1440,9 @@ fn validate_existing_php(input: &CreateSiteInput, project: &str, allow_unverifie
     }
 }
 
-struct ProjectPhp {
+pub(crate) struct ProjectPhp {
     php: std::path::PathBuf,
-    composer: std::path::PathBuf,
+    pub(crate) composer: std::path::PathBuf,
     ini: std::path::PathBuf,
     path: std::ffi::OsString,
 }
@@ -1483,7 +1483,7 @@ impl ProjectPhp {
         Ok((php_exe, composer_exe))
     }
 
-    fn resolve(paths: &Paths, store: &Store, version: &str) -> Result<Self> {
+    pub(crate) fn resolve(paths: &Paths, store: &Store, version: &str) -> Result<Self> {
         let (php_exe, composer_exe) = Self::binaries(paths, store, version)?;
         let ini = paths.php_ini(version);
         if !ini.is_file() {
@@ -1509,7 +1509,7 @@ impl ProjectPhp {
         })
     }
 
-    fn command(&self, cwd: &std::path::Path) -> std::process::Command {
+    pub(crate) fn command(&self, cwd: &std::path::Path) -> std::process::Command {
         let mut cmd = platform::command(&self.php);
         cmd.arg("-c")
             .arg(&self.ini)
@@ -2596,7 +2596,7 @@ mod scaffold_tests {
 
 
     #[test]
-    #[ignore = "requires NSB_ENV_PHP and NSB_ENV_COMPOSER; reads Composer semver without running project scripts"]
+    #[ignore = "requires NSB_ENV_PHP and NSB_ENV_COMPOSER; verifies PHP constraints and platform requirements without project scripts"]
     fn existing_php_requirements_native_verify_constraints_and_recheck_before_creation() {
         let php = PathBuf::from(std::env::var("NSB_ENV_PHP").expect("NSB_ENV_PHP"));
         let composer = PathBuf::from(std::env::var("NSB_ENV_COMPOSER").expect("NSB_ENV_COMPOSER"));
@@ -2658,6 +2658,77 @@ mod scaffold_tests {
         }
         std::fs::write(project.join("composer.json"), "{}").unwrap();
         assert_eq!(crate::scanner::project_php_compatibility(&paths, &unavailable, &project).unwrap().status, "unspecified");
+
+        // 同一个真实运行时验证项目平台检查；只读取清单，不执行项目代码或安装依赖。
+        let ini = paths.php_ini(&actual); std::fs::create_dir_all(ini.parent().unwrap()).unwrap();
+        let ini_text = format!("auto_prepend_file=\"{}\"\nauto_append_file=\"{}\"\n", crate::paths::portable_path_text(&project.join("evil.php")), crate::paths::portable_path_text(&project.join("evil.php")));
+        std::fs::write(&ini, &ini_text).unwrap();
+        let platform_manifest = serde_json::json!({"require":{"php":format!(">={actual}"),"ext-json":"*","ext-niceenv-missing":"*"},"require-dev":{"ext-niceenv-dev":"*"},"config":{"platform":{"php":"99.0.0"}},"autoload":{"files":["evil.php"]},"scripts":{"pre-command-run":"@php evil.php"},"repositories":[{"type":"composer","url":"http://127.0.0.1:1/never-connect"}]});
+        let platform_bytes = serde_json::to_vec(&platform_manifest).unwrap();
+        std::fs::write(project.join("composer.json"), &platform_bytes).unwrap();
+        let check = |dev| crate::php_platform::check(&paths,&store,&project,&actual,dev).unwrap();
+        let manifest_report = check(false);
+        assert_eq!(manifest_report.source,"manifest"); assert_eq!(manifest_report.php_version,actual);
+        assert_eq!(manifest_report.requirements.iter().find(|r|r.name=="ext-json").unwrap().status,"success");
+        assert_eq!(manifest_report.requirements.iter().find(|r|r.name=="ext-niceenv-missing").unwrap().status,"missing");
+        assert!(!manifest_report.requirements.iter().any(|r|r.name=="ext-niceenv-dev"));
+        assert!(check(true).requirements.iter().any(|r|r.name=="ext-niceenv-dev" && r.status=="missing"));
+        assert!(!project.join("executed").exists()); assert!(!project.join("composer.lock").exists()); assert!(!project.join("vendor").exists());
+        assert_eq!(std::fs::read(project.join("composer.json")).unwrap(),platform_bytes);
+        let mut mismatch=platform_manifest.clone(); mismatch["require"]["php"]=serde_json::json!(format!("<{actual}"));
+        std::fs::write(project.join("composer.json"),serde_json::to_vec(&mismatch).unwrap()).unwrap();
+        assert_eq!(check(false).requirements.iter().find(|r|r.name=="php").unwrap().status,"failed");
+        std::fs::write(project.join("composer.json"),&platform_bytes).unwrap();
+        let hash=std::process::Command::new(&php).args(["-n","-r",r#"require 'phar://'.$argv[1].'/vendor/autoload.php'; echo Composer\Package\Locker::getContentHash(file_get_contents($argv[2]));"#,"--"])
+            .arg(crate::paths::portable_path_text(&composer)).arg(project.join("composer.json")).output().unwrap();
+        assert!(hash.status.success(),"{}",String::from_utf8_lossy(&hash.stderr));
+        let lock=serde_json::json!({"content-hash":String::from_utf8(hash.stdout).unwrap(),"packages":[{"name":"fixture/main","version":"1.0.0","require":{"ext-niceenv-transitive":"*"}}],"packages-dev":[{"name":"fixture/dev","version":"1.0.0","require":{"ext-niceenv-lockdev":"*"}}]});
+        let lock_bytes=serde_json::to_vec(&lock).unwrap();std::fs::write(project.join("composer.lock"),&lock_bytes).unwrap();
+        let report=check(false); assert_eq!(report.source,"lock");assert_eq!(report.lock_fresh,Some(true));
+        assert!(report.requirements.iter().any(|r|r.name=="ext-niceenv-transitive" && r.status=="missing"));
+        assert!(!report.requirements.iter().any(|r|r.name=="ext-niceenv-lockdev"));
+        assert!(check(true).requirements.iter().any(|r|r.name=="ext-niceenv-lockdev" && r.status=="missing"));
+        std::fs::write(project.join("composer.json"),serde_json::to_vec(&mismatch).unwrap()).unwrap();
+        assert_eq!(check(false).lock_fresh,Some(false));
+        std::fs::write(project.join("composer.json"),&platform_bytes).unwrap();
+        assert_eq!(std::fs::read(project.join("composer.lock")).unwrap(),lock_bytes);
+        std::fs::remove_file(project.join("composer.lock")).unwrap();
+        std::fs::create_dir_all(project.join("vendor/composer")).unwrap();
+        let installed=serde_json::json!({"packages":[{"name":"fixture/main","version":"1.0.0","require":{"ext-niceenv-transitive":"*"}},{"name":"fixture/dev","version":"1.0.0","require":{"ext-niceenv-vendordev":"*"}}],"dev-package-names":["fixture/dev"]});
+        let installed_bytes=serde_json::to_vec(&installed).unwrap();std::fs::write(project.join("vendor/composer/installed.json"),&installed_bytes).unwrap();
+        std::fs::write(project.join("vendor/autoload.php"),"<?php file_put_contents(__DIR__.'/executed','bad');").unwrap();
+        let report=check(false);assert_eq!(report.source,"installed");assert!(report.autoload_present);
+        assert!(!report.requirements.iter().any(|r|r.name=="ext-niceenv-vendordev"));
+        assert!(check(true).requirements.iter().any(|r|r.name=="ext-niceenv-vendordev" && r.status=="missing"));
+        assert!(check(true).dev_incomplete); assert!(!check(false).dev_incomplete);
+        let mut local_vendor=platform_manifest.clone(); local_vendor["config"]["vendor-dir"]=serde_json::json!("./vendor");
+        std::fs::write(project.join("composer.json"),serde_json::to_vec(&local_vendor).unwrap()).unwrap();
+        assert_eq!(check(false).source,"installed"); assert!(check(false).autoload_present);
+        std::fs::write(project.join("composer.json"),&platform_bytes).unwrap();
+        assert_eq!(std::fs::read(project.join("vendor/composer/installed.json")).unwrap(),installed_bytes);
+        assert!(!project.join("vendor/executed").exists());assert!(!project.join("executed").exists());
+        // Composer 1 元数据缺少 dev 分组时不能静默误报生产依赖范围。
+        std::fs::write(project.join("vendor/composer/installed.json"),serde_json::to_vec(&installed["packages"]).unwrap()).unwrap();
+        assert_eq!(crate::php_platform::check(&paths,&store,&project,&actual,false).unwrap_err().code,"PHP_PLATFORM_METADATA");
+        assert_eq!(check(true).source,"installed");
+        std::fs::remove_file(project.join("vendor/composer/installed.json")).unwrap();
+        #[cfg(windows)] {
+            std::fs::write(project.join("composer.json"),r#"{"require":{"ext-fileinfo":"*"}}"#).unwrap();
+            assert_eq!(check(false).requirements[0].status,"missing");
+            std::fs::write(&ini,format!("{ini_text}extension_dir=\"{}\"\nextension=fileinfo\n",crate::paths::portable_path_text(&php.parent().unwrap().join("ext")))).unwrap();
+            assert_eq!(check(false).requirements[0].status,"success");
+        }
+        std::fs::write(project.join("composer.json"),r#"{"require":{"ext-niceenv-polyfill":"*"},"provide":{"ext-niceenv-polyfill":"1.0.0"}}"#).unwrap();
+        let provided=check(false); assert_eq!(provided.requirements[0].status,"success"); assert!(provided.requirements[0].provider.is_some());
+        std::fs::write(project.join("composer.json"),r#"{"provide":{"ext-fixture":"self.version"}}"#).unwrap();
+        assert_eq!(crate::php_platform::check(&paths,&store,&project,&actual,false).unwrap_err().code,"PHP_PLATFORM_METADATA");
+        std::fs::write(project.join("composer.json"),r#"{"require":[]}"#).unwrap();
+        assert_eq!(crate::php_platform::check(&paths,&store,&project,&actual,false).unwrap_err().code,"PHP_PLATFORM_METADATA");
+        std::fs::write(project.join("composer.json"),r#"{"config":{"vendor-dir":"../external"}}"#).unwrap();
+        assert_eq!(crate::php_platform::check(&paths,&store,&project,&actual,false).unwrap_err().code,"PHP_PLATFORM_METADATA");
+        std::fs::remove_file(project.join("composer.json")).unwrap();
+        assert_eq!(crate::php_platform::check(&paths,&store,&project,&actual,false).unwrap_err().code,"PHP_PLATFORM_NO_MANIFEST");
+        assert_eq!(std::fs::read_to_string(project.join(".env")).unwrap(),"KEEP=original\n");
     }
 
     fn input(kind: SiteKind) -> CreateSiteInput {

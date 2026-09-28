@@ -28,6 +28,7 @@ import type {
   ProcessRecoveryReport,
   ScannedProject,
   ProjectPhpCompatibility,
+  ProjectPlatformReport,
   ConfigFileInfo,
   ConfigValidation,
   ConfigBackup,
@@ -409,6 +410,8 @@ export const watchdogSetEnabled = (enabled: boolean) =>
 export const watchdogReset = (id: string) => safe(invoke<boolean>("watchdog_reset", { id }));
 
 /* 项目扫描 */
+export const projectPlatformCheck = (target: { project?: string; siteId?: string }, version: string, includeDev: boolean) =>
+  safe(invoke<ProjectPlatformReport>("project_platform_check", { ...target, version, includeDev }));
 export const projectPhpCompatibility = (project: string) =>
   safe(invoke<ProjectPhpCompatibility>("project_php_compatibility", { project }));
 export const scanProjects = (root: string) =>

@@ -957,6 +957,19 @@ export type ConfigBackup = z.infer<typeof ConfigBackup>;
 
 /* ============ 项目扫描 ============ */
 
+export const ProjectPlatformReport = z.object({
+  project: z.string(), phpVersion: z.string(), ini: z.string(),
+  source: z.enum(["lock", "installed", "manifest"]), includeDev: z.boolean(), devIncomplete: z.boolean(),
+  lockFresh: z.boolean().nullable(), autoloadPresent: z.boolean(),
+  requirements: z.array(z.object({
+    name: z.string(), version: z.string(), status: z.enum(["success", "failed", "missing"]),
+    failedRequirement: z.object({ source: z.string(), constraint: z.string() }).nullable(),
+    provider: z.string().nullable(),
+  })),
+  diagnostics: z.string().nullable(),
+});
+export type ProjectPlatformReport = z.infer<typeof ProjectPlatformReport>;
+
 export const ProjectPhpCompatibility = z.object({
   status: z.enum(["checked", "unspecified", "unavailable", "invalid"]),
   requirement: z.string().nullable(),

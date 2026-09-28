@@ -7,6 +7,7 @@ import { isSiteHostname } from "@/lib/utils";
 import * as React from "react";
 import type { ProjectPhpCompatibility } from "@nsb/schema";
 import { ProjectPhpCheck, projectPhpProblem, recommendedProjectPhp } from "./project-php-compatibility";
+import { ProjectPlatformCheck } from "./project-platform-check";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -596,6 +597,7 @@ export function SiteWizard({
                     )}
                   </div>
                 )}
+                {existingProject && kind === "php" && <ProjectPlatformCheck project={existingProject.path} version={phpVersion} disabled={creating} />}
                 <div className="flex flex-col gap-1.5">
                   <Label>{t("sites.wizard.webServer")}</Label>
                   <div className="flex gap-2">

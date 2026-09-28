@@ -37,6 +37,7 @@ pub mod backup_job;
 pub mod mcp;
 pub mod pathenv;
 pub mod phpext;
+pub mod php_platform;
 pub mod ports;
 pub mod proxy;
 pub mod scanner;

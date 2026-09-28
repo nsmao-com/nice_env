@@ -351,6 +351,7 @@ pub fn run() {
             xdebug_toggle,
             // 日志 / 诊断 / 统计
             tail_logs,
+            full_log,
             diagnose_port,
             scan_ports,
             scan_port_range,
@@ -365,6 +366,7 @@ pub fn run() {
             open_terminal,
             // 数据库
             db_list,
+            db_workspace,
             db_create,
             db_drop,
             db_users,
@@ -1995,6 +1997,12 @@ where
 }
 
 #[tauri::command]
+async fn db_workspace(state: State<'_, std::sync::Arc<CoreState>>, version: String, engine: nsb_core::dbadmin::DatabaseEngine, request: nsb_core::dbworkspace::Request) -> Result<Vec<nsb_core::dbworkspace::Grid>, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    run_database(&state, Some(version), Some(engine), move |_, _, client| nsb_core::dbworkspace::execute(client, request)).await
+}
+
+#[tauri::command]
 async fn db_list(
     state: State<'_, std::sync::Arc<CoreState>>,
     version: Option<String>,
@@ -2489,11 +2497,16 @@ fn ollama_cancel_pull(id: String) -> Result<bool, tauri::Error> {
 /// Adminer 的启动检查与进程回收运行在工作线程。
 #[tauri::command]
 async fn adminer_start(
+    package: Option<String>,
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<nsb_core::toolbox::AdminerStatus, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || map_jh(st.adminer_start())).await
+    tauri::async_runtime::spawn_blocking(move || {
+        let status = map_jh(nsb_core::toolbox::database_console_start(&st.store, &st.paths, &st.installer, &st.manager, package.as_deref().unwrap_or("adminer"), nsb_core::toolbox::ADMINER_PORT))?;
+        nsb_core::ops::save_pidfile(&st.paths, &st.manager);
+        Ok(status)
+    }).await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
@@ -2583,6 +2596,7 @@ fn get_settings(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> serde_
         .filter_map(|(k, v)| v.parse::<u16>().ok().map(|p| (k, serde_json::json!(p))))
         .collect();
     serde_json::json!({
+        "rewriteTemplates": state.store.get_setting("rewriteTemplates").and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).unwrap_or_else(|| serde_json::json!([])),
         "language": state.store.get_setting("language").unwrap_or_else(|| "zh".into()),
         "appearance": state.store.get_setting("appearance").unwrap_or_else(|| "light".into()),
         "accentHue": state.store.get_setting("accentHue").map(|v| v.parse::<i64>().unwrap_or(250)).unwrap_or(250),
@@ -2624,6 +2638,12 @@ fn set_setting(
     key: String,
     value: serde_json::Value,
 ) -> Result<bool, tauri::Error> {
+    if key == "rewriteTemplates" {
+        let templates: Vec<nsb_core::model::CustomRewrite> = serde_json::from_value(value.clone()).map_err(|_| box_err(nsb_core::AppError::new("BAD_REWRITE", "模板内容无效")))?;
+        if templates.len() > 100 { return Err(box_err(nsb_core::AppError::new("BAD_REWRITE", "最多保存 100 个模板"))); }
+        let mut names = std::collections::HashSet::new();
+        for template in templates { map_jh(nsb_core::sites::validate_custom_rewrite(&template, &template.server))?; if !names.insert((template.server, template.name)) { return Err(box_err(nsb_core::AppError::new("BAD_REWRITE", "同一服务器的模板名称不能重复"))); } }
+    }
     let mut val = match value {
         serde_json::Value::String(s) => s,
         other => other.to_string(),
@@ -4056,6 +4076,21 @@ fn m_setting_key(manager: &str) -> &'static str {
         "npm" => "npmRegistry",
         _ => "pipIndexUrl",
     }
+}
+
+#[tauri::command]
+async fn full_log(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: String) -> Result<String, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::Read;
+        let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
+        let path = map_jh(st.log_source_path(&id))?;
+        let file = std::fs::File::open(&path).map_err(|e| box_err(nsb_core::AppError::io("读取完整日志", e)))?;
+        let mut bytes = Vec::new();
+        file.take(64 * 1024 * 1024 + 1).read_to_end(&mut bytes).map_err(|e| box_err(nsb_core::AppError::io("读取完整日志", e)))?;
+        if bytes.len() > 64 * 1024 * 1024 { return Err(box_err(nsb_core::AppError::new("LOG_TOO_LARGE", "日志超过 64 MB，请在日志目录中打开原文件；未截断显示为完整日志"))); }
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /* ================= 日志导出 ================= */

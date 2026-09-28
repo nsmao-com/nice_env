@@ -1033,6 +1033,7 @@ pub const ADMINER_PORT: u16 = 8991;
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminerStatus {
+    pub package_id: String,
     pub port: u16,
     pub file: String,
     pub url: String,
@@ -1095,6 +1096,11 @@ pub(crate) fn adminer_start_on_port(
     manager: &crate::services::ServiceManager,
     port: u16,
 ) -> Result<AdminerStatus> {
+    database_console_start(store, paths, installer, manager, "adminer", port)
+}
+
+pub fn database_console_start(store: &Store, paths: &Paths, installer: &crate::install::Installer, manager: &crate::services::ServiceManager, package: &str, port: u16) -> Result<AdminerStatus> {
+    if !matches!(package, "adminer" | "phpmyadmin") { return Err(AppError::new("BAD_CONSOLE", "请选择 Adminer 或 phpMyAdmin")); }
     use std::io::Read;
     use std::path::PathBuf;
     use std::process::Stdio;
@@ -1110,12 +1116,13 @@ pub(crate) fn adminer_start_on_port(
         ));
     }
     if let Some(status) = adminer_status(manager)? {
+        if status.package_id != package { return Err(AppError::new("CONSOLE_RUNNING", "另一个数据库管理台正在运行，请先停止后再切换")); }
         return Ok(status);
     }
     let php = crate::ops::installed_by_choice(store, "php")
         .ok_or_else(|| AppError::not_installed("PHP").with_hint("先到套件页安装 PHP"))?;
-    let adm = crate::ops::installed_by_choice(store, "adminer")
-        .ok_or_else(|| AppError::not_installed("Adminer").with_hint("先到套件页安装 Adminer"))?;
+    let adm = crate::ops::installed_by_choice(store, package)
+        .ok_or_else(|| AppError::not_installed(package).with_hint("先到套件页安装所选管理台"))?;
     let php_entry = PathBuf::from(&php.install_path).join(crate::install::entry_relative_path(
         &installer.installed_entry(&php).entry,
     ));
@@ -1137,11 +1144,21 @@ pub(crate) fn adminer_start_on_port(
         )
     })?
     .canonicalize()?;
+    if package == "phpmyadmin" {
+        let parts: Vec<u32> = php.version.split('.').filter_map(|part| part.parse().ok()).collect();
+        if parts.first().copied().unwrap_or(0) < 7 || (parts.first() == Some(&7) && parts.get(1).copied().unwrap_or(0) < 2) || parts.first().copied().unwrap_or(0) > 8 || (parts.first() == Some(&8) && parts.get(1).copied().unwrap_or(0) >= 4) {
+            return Err(AppError::new("PHP_VERSION_REQUIRED", "phpMyAdmin 5.2 当前支持 PHP 7.2–8.3，请在套件页选择默认 PHP"));
+        }
+        for extension in ["mysqli", "mbstring"] {
+            let warnings = crate::phpext::set_extension(paths, &php.version, extension, true)?;
+            if !warnings.is_empty() { return Err(AppError::new("PHP_EXTENSION_WARNING", "PHP 扩展校验未通过，请在扩展面板修复后重试").with_detail(warnings.join("\n"))); }
+        }
+    }
     let ini = paths.php_ini(&php.version);
     if !ini.is_file() {
         return Err(AppError::new(
             "PHP_CONFIG_MISSING",
-            "所选 PHP 缺少配置文件，请在工具箱重置该版本的 PHP 配置后重试",
+            "所选 PHP 缺少配置文件，请在服务配置页修复该版本的 PHP 配置后重试",
         ));
     }
     let root = PathBuf::from(&adm.install_path).canonicalize()?;
@@ -1151,19 +1168,19 @@ pub(crate) fn adminer_start_on_port(
     if !entry.is_file() {
         return Err(AppError::new(
             "ADMINER_ENTRY_MISSING",
-            "所选 Adminer 的入口文件不存在，请修复该版本安装",
+            "所选数据库管理台的入口文件不存在，请修复该版本安装",
         ));
     }
     let entry = entry.canonicalize()?;
     if !entry.starts_with(&root) || entry.extension().is_none_or(|e| e != "php") {
         return Err(AppError::new(
             "ADMINER_ENTRY_INVALID",
-            "Adminer 入口必须是安装目录内的 PHP 文件",
+            "数据库管理台入口必须是安装目录内的 PHP 文件",
         ));
     }
     let dir = entry
         .parent()
-        .ok_or_else(|| AppError::new("ADMINER_ENTRY_INVALID", "Adminer 入口无效"))?;
+        .ok_or_else(|| AppError::new("ADMINER_ENTRY_INVALID", "数据库管理台入口无效"))?;
     // PHP 内置服务器不能加载 Windows canonicalize 产生的 verbatim 文档根目录。
     #[cfg(windows)]
     let dir = {
@@ -1174,6 +1191,22 @@ pub(crate) fn adminer_start_on_port(
             text.strip_prefix(r"\\?\").unwrap_or(&text).to_string()
         })
     };
+    if package == "phpmyadmin" {
+        let config = dir.join("config.inc.php");
+        let managed = "<?php\n// NiceEnv managed database console\n";
+        if !config.exists() || std::fs::read_to_string(&config)?.starts_with(managed) {
+            let secret = match store.get_setting("phpMyAdminCookieSecret") { Some(value) if value.len() == 32 => value, _ => { let value = hex::encode(rand::random::<[u8; 16]>()); store.set_setting("phpMyAdminCookieSecret", &value)?; value } };
+            let mut content = format!("{managed}$cfg['blowfish_secret'] = '{secret}';\n$cfg['AllowArbitraryServer'] = false;\n");
+            let mut servers: Vec<_> = manager.list_status().into_iter().filter(|s| (s.id.starts_with("mysql@") || s.id == "mariadb") && s.state == crate::model::ServiceState::Running && s.port.is_some()).collect();
+            servers.sort_by(|a,b| a.id.cmp(&b.id));
+            if servers.is_empty() { return Err(AppError::new("DATABASE_NOT_RUNNING", "请先启动 MySQL 或 MariaDB，再打开 phpMyAdmin")); }
+            for (index, server) in servers.iter().enumerate() {
+                let i = index + 1; let port = server.port.unwrap();
+                content.push_str(&format!("$cfg['Servers'][{i}]['auth_type'] = 'cookie';\n$cfg['Servers'][{i}]['host'] = '127.0.0.1';\n$cfg['Servers'][{i}]['port'] = '{port}';\n$cfg['Servers'][{i}]['verbose'] = '127.0.0.1:{port}';\n$cfg['Servers'][{i}]['AllowNoPassword'] = false;\n"));
+            }
+            crate::paths::write_with_backup(&config, &content, &paths.backup())?;
+        }
+    }
     let file = entry
         .file_name()
         .unwrap_or_default()
@@ -1191,13 +1224,14 @@ pub(crate) fn adminer_start_on_port(
         .map_err(|e| AppError::internal("管理台地址无效", e.to_string()))?;
     url.set_path(&format!("/{file}"));
     let status = AdminerStatus {
+        package_id: package.to_string(),
         port,
         file,
         url: url.to_string(),
         php_version: php.version,
         adminer_version: adm.version,
     };
-    let log_path = paths.service_log("adminer");
+    let log_path = paths.service_log(package);
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1233,7 +1267,7 @@ pub(crate) fn adminer_start_on_port(
     drop(listener);
     let mut child = command
         .spawn()
-        .map_err(|e| AppError::io("启动 Adminer", e))?;
+        .map_err(|e| AppError::io("启动数据库管理台", e))?;
     if let Err(error) = group.attach(child.id()) {
         let _ = child.kill();
         let _ = child.wait();
@@ -1253,7 +1287,7 @@ pub(crate) fn adminer_start_on_port(
             if response.status().is_success() {
                 let mut body = String::new();
                 if response.take(1024 * 1024).read_to_string(&mut body).is_ok()
-                    && body.to_ascii_lowercase().contains("adminer")
+                    && body.to_ascii_lowercase().contains(package)
                     && body.contains("<form")
                     && runtime.child.try_wait()?.is_none()
                     && crate::ports::listeners()?
@@ -1277,7 +1311,7 @@ pub(crate) fn adminer_start_on_port(
         })
         .unwrap_or_default();
     Err(
-        AppError::new("ADMINER_START_FAILED", "Adminer 页面未就绪，启动已取消")
+        AppError::new("ADMINER_START_FAILED", "数据库管理台页面未就绪，启动已取消")
             .with_hint(format!(
                 "检查 PHP 配置、数据库扩展与日志：{}",
                 log_path.display()

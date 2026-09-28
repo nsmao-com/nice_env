@@ -56,6 +56,7 @@ fn main() {
             .to_string_lossy()
             .to_string(),
         runtime: nsb_core::model::SiteRuntime {
+            custom_rewrite: None,
             application: None,
             acme_cert_id: None,
             imported_cert_id: None,

@@ -213,6 +213,7 @@ export function PhpExtensionsDialog({
 
   const enabledCount = view?.extensions.filter((e) => e.enabled).length ?? 0;
   const totalCount = view?.extensions.length ?? 0;
+  const legacyGd = version?.startsWith("7.") && view?.extensions.some((e) => e.name === "gd2") ? view?.extensions.find((e) => e.name === "gd" && e.enabled && !e.builtin) : undefined;
   const depsIssue = view?.extensions.filter((e) => e.enabled && e.missingDeps.length > 0) ?? [];
 
   const repairDependencies = async () => {
@@ -309,6 +310,7 @@ export function PhpExtensionsDialog({
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {loadError && <p role="alert" className="mb-4 rounded-lg bg-error-soft p-3 text-xs text-error">{loadError}</p>}
+          {legacyGd && <div className="mb-4 rounded-xl border border-warn/25 bg-warn-soft p-3 text-xs"><p>此 PHP 7 安装使用 gd2 扩展文件，但旧配置仍启用了 gd。可自动更正并校验加载结果。</p><Button className="mt-2" size="sm" variant="secondary" disabled={loading || busy !== null || !!loadError} onClick={() => void toggle(legacyGd, true)}>修复 GD 扩展名称</Button></div>}
           {/* 依赖缺失提示：比让用户去猜「为什么 redis 装上没用」友好得多 */}
           {depsIssue.length > 0 && (
             <div className="mb-4 flex items-start gap-2.5 rounded-xl border border-warn/25 bg-warn-soft p-3">

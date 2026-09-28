@@ -254,6 +254,8 @@ export function formatCode(code: string, lang: CodeLang): string {
 export function guessLang(hint?: string): CodeLang {
   if (!hint) return "plain";
   const h = hint.toLowerCase();
+  if (/\.(ini|cnf|toml)$/.test(h)) return "ini";
+  if (/\.(yaml|yml)$/.test(h)) return "yaml";
   if (h.includes("php")) return "php";
   if (h.includes("json")) return "json";
   if (h.includes("yaml") || h.includes("yml")) return "yaml";

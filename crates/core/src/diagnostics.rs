@@ -1117,14 +1117,7 @@ mod tests {
             Some(port),
             paths.service_log("fixture"),
         );
-        manager
-            .services
-            .lock()
-            .get("fixture")
-            .unwrap()
-            .pids
-            .lock()
-            .push(std::process::id());
+        manager.track_pid("fixture", std::process::id()).unwrap();
         manager.set_state("fixture", crate::model::ServiceState::Running);
         let report = diagnose_service(&paths, &store, &manager, "fixture").unwrap();
         assert_eq!(report.service.version.as_deref(), Some("2"));

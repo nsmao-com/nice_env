@@ -152,6 +152,8 @@ pub struct SiteApplication {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct SiteRuntime {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_rewrite: Option<CustomRewrite>,
     /// 明确开启的应用进程托管；历史 command/cwd 字段不会触发执行。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub application: Option<SiteApplication>,
@@ -171,6 +173,14 @@ pub struct SiteRuntime {
     pub command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomRewrite {
+    pub name: String,
+    pub server: String,
+    pub content: String,
 }
 
 impl SiteRuntime {

@@ -42,6 +42,15 @@ const PAGES: { href: string; icon: typeof LayoutDashboard; labelKey: string }[] 
   { href: "/databases", icon: Database, labelKey: "cmd.page.databases" },
   { href: "/tls", icon: ShieldCheck, labelKey: "cmd.page.tls" },
   { href: "/proxy", icon: Waypoints, labelKey: "cmd.page.proxy" },
+  { href: "/configuration", icon: FileCog, labelKey: "nav.configuration" },
+  { href: "/rewrites", icon: Wrench, labelKey: "nav.rewrites" },
+  { href: "/network", icon: Wrench, labelKey: "nav.network" },
+  { href: "/environment", icon: Wrench, labelKey: "nav.environment" },
+  { href: "/tasks", icon: Wrench, labelKey: "nav.tasks" },
+  { href: "/tunnels", icon: Wrench, labelKey: "nav.tunnels" },
+  { href: "/models", icon: Wrench, labelKey: "nav.models" },
+  { href: "/backups", icon: Wrench, labelKey: "nav.backups" },
+  { href: "/diagnostics", icon: Stethoscope, labelKey: "nav.diagnostics" },
   { href: "/tools", icon: Wrench, labelKey: "cmd.page.tools" },
   { href: "/logs", icon: ScrollText, labelKey: "cmd.page.logs" },
   { href: "/settings", icon: Settings, labelKey: "cmd.page.settings" },
@@ -58,6 +67,7 @@ export function CommandPalette() {
   const { data: stacks } = useStacks();
   const [confirmStopAll, setConfirmStopAll] = React.useState(false);
   const quick = useQuickServiceActions(services, stacks);
+  const quickStackId = useUI((s) => s.quickStackId);
   const busy = quick.busy;
 
   React.useEffect(() => {
@@ -76,7 +86,7 @@ export function CommandPalette() {
     Promise.resolve(fn()).catch((e) => toastError(e));
   };
 
-  const startStack = () => quick.start();
+  const startStack = () => quick.start(stacks?.find((stack) => stack.id === quickStackId) ?? stacks?.[0]);
   const stopAll = () => {
     quick.prepareStop();
     setOpen(false);
@@ -125,7 +135,7 @@ export function CommandPalette() {
             onSelect={() =>
               run(() => {
                 useUI.getState().requestTool("diagnostics");
-                router.push("/tools");
+                router.push("/diagnostics");
               })
             }
           >
@@ -136,8 +146,8 @@ export function CommandPalette() {
             value="config editor nginx php ini 配置"
             onSelect={() =>
               run(() => {
-                useUI.getState().requestTool("config");
-                router.push("/tools");
+
+                router.push("/configuration");
               })
             }
           >

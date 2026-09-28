@@ -1,8 +1,74 @@
 {
-  "revision": 7,
-  "updated": "2026-09-25",
+  "revision": 8,
+  "updated": "2026-09-28",
   "note": "macOS 清单（aarch64/x86_64；当前条目均为 arm64 构建，Intel Mac 的 x86_64 条目待补）。当前仅收录已在源头验证可达（HTTP 206/200）的二进制；PHP/Nginx/Redis 的 macOS 官方二进制不存在或需源码编译，候选源见 README「在 macOS 上构建」章节，待 mac 端验证后补入。",
   "packages": [
+    {
+      "id": "nats",
+      "version": "2.15.0",
+      "category": "other",
+      "displayName": "NATS",
+      "description": "轻量消息服务，启用 JetStream 持久化；默认仅监听本机",
+      "homepage": "https://nats.io",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/nats-io/nats-server/releases/download/v2.15.0/nats-server-v2.15.0-darwin-arm64.tar.gz",
+      "sha256": "e1c4e22d70bd44abfa0bcb3c16f7cf0c66f648c2e728c58924e8a1ce88913cc8",
+      "sizeBytes": 6732089,
+      "entry": "nats-server-v2.15.0-darwin-arm64/nats-server",
+      "defaultPort": 4222,
+      "run": {
+        "args": [
+          "--addr",
+          "127.0.0.1",
+          "--port",
+          "{port}",
+          "--jetstream",
+          "--store_dir",
+          "{data}"
+        ],
+        "singleInstance": true,
+        "defaultPort": 4222
+      },
+      "versionSource": {
+        "kind": "github",
+        "repo": "nats-io/nats-server",
+        "tagPrefix": "v",
+        "assetMatch": "^nats-server-v[\\d.]+-darwin-arm64\\.tar\\.gz$",
+        "entryTemplate": "nats-server-v{version}-darwin-arm64/nats-server"
+      }
+    },
+    {
+      "id": "mysql",
+      "version": "8.2.0",
+      "category": "database",
+      "displayName": "MySQL 8.2",
+      "description": "关系型数据库（utf8mb4），数据保存在应用数据目录，独立于系统（Apple Silicon，官方 macOS 13 构建）",
+      "homepage": "https://mysql.com",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "targz",
+      "url": "https://cdn.mysql.com/archives/mysql-8.2/mysql-8.2.0-macos13-arm64.tar.gz",
+      "mirrors": [],
+      "sha256": "",
+      "sizeBytes": 0,
+      "entry": "mysql-8.2.0-macos13-arm64/bin/mysqld",
+      "defaultPort": 23306,
+      "run": {
+        "args": [],
+        "singleInstance": false,
+        "dataDir": "mysql"
+      }
+    },
     {
       "id": "mysql",
       "version": "8.0.46",

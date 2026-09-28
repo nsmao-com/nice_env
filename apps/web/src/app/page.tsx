@@ -41,6 +41,7 @@ import { BulkActions, BulkResult } from "@/components/shared/bulk-actions";
 import { StatusLight } from "@/components/shared/status-light";
 import { CopyButton, EmptyState, SectionHeader, Sparkline, ConfirmDialog } from "@/components/shared/misc";
 import { PageHeader } from "@/components/layout/app-shell";
+import { Select, SelectTrigger, SelectContent, SelectItem, SelectValue } from "@/components/ui/select";
 import { HealthCard } from "@/components/shared/health-card";
 
 export default function DashboardPage() {
@@ -66,7 +67,10 @@ export default function DashboardPage() {
   const quick = useQuickServiceActions(services, stacks);
   const stackBusy = quick.busy;
 
-  const startStack = () => quick.start();
+  const quickStackId = useUI((s) => s.quickStackId);
+  const setQuickStackId = useUI((s) => s.setQuickStackId);
+  const selectedStack = stacks.find((s) => s.id === quickStackId) ?? stacks[0];
+  const startStack = () => quick.start(selectedStack);
   const stopAll = async () => {
     const report = await quick.stop(quick.stopReport?.failed.map((f) => f.serviceId));
     if (report && !report.failed.length) setConfirmStopAll(false);
@@ -96,9 +100,10 @@ export default function DashboardPage() {
                 <Square className="h-3.5 w-3.5" /> {t("dash.stopAll")}
               </Button>
             ) : null}
+            {stacks.length > 0 && <Select value={selectedStack?.id} onValueChange={setQuickStackId} disabled={stackBusy}><SelectTrigger className="w-44" aria-label={t("stack.title")}><SelectValue /></SelectTrigger><SelectContent>{stacks.map((stack) => <SelectItem key={stack.id} value={stack.id}>{stack.name}</SelectItem>)}</SelectContent></Select>}
             <Button onClick={startStack} disabled={stackBusy || !dashboardReady} title={t("dash.quickStartHint")}>
               <Rocket className="h-3.5 w-3.5" />{" "}
-              {stacks[0] ? `${t("dash.startStack")}「${stacks[0].name}」` : t("dash.quickStart")}
+              {selectedStack ? `${t("dash.startStack")}「${selectedStack.name}」` : t("dash.quickStart")}
             </Button>
             <Button variant="ghost" size="sm" asChild title={t("stack.title")}>
               <Link href="/stacks">

@@ -289,7 +289,9 @@ fn validate_site_fields(
     }
     for domain in domains {
         let hostname = domain.strip_prefix("*.").unwrap_or(domain);
+        if !domain.starts_with("*.") && (hostname.eq_ignore_ascii_case("localhost") || hostname.parse::<std::net::Ipv4Addr>().is_ok()) { continue; }
         if hostname.len() > 253
+            || hostname.chars().all(|c| c.is_ascii_digit() || c == '.')
             || !hostname.contains('.')
             || hostname.split('.').any(|label| {
                 label.is_empty()
@@ -330,6 +332,10 @@ fn validate_site_fields(
     }
     if !matches!(runtime.web_server.as_str(), "nginx" | "apache") {
         return Err(AppError::new("BAD_RUNTIME", "请选择 Nginx 或 Apache"));
+    }
+    if let Some(custom) = &runtime.custom_rewrite {
+        validate_custom_rewrite(custom, &runtime.web_server)?;
+        if !matches!(runtime.kind, SiteKind::Php | SiteKind::Static) { return Err(AppError::new("BAD_REWRITE", "自定义伪静态仅适用于 PHP 或静态站点")); }
     }
     if runtime.imported_cert_id.as_deref().is_some_and(|id| !crate::certs::valid_imported_id(id)) {
         return Err(AppError::new("BAD_CERT_ID", "请选择有效的导入证书"));
@@ -2363,6 +2369,7 @@ mod scaffold_tests {
             domains: vec!["t.test".into()],
             root_dir: String::new(),
             runtime: SiteRuntime {
+            custom_rewrite: None,
                 application: None,
                 acme_cert_id: None,
                 imported_cert_id: None,
@@ -4884,4 +4891,19 @@ pub fn read_project_pin(root_dir: &str) -> Option<(String, String)> {
         return None;
     }
     Some(("php".to_string(), ver))
+}
+
+/// Templates are server-level snippets; they cannot escape the generated virtual host.
+pub fn validate_custom_rewrite(template: &crate::model::CustomRewrite, server: &str) -> Result<()> {
+    if template.name.trim().is_empty() || template.name.len() > 240 || template.name.chars().any(char::is_control)
+        || template.server != server || !matches!(server, "nginx" | "apache")
+        || template.content.trim().is_empty() || template.content.len() > 65536 || template.content.contains('\0') {
+        return Err(AppError::new("BAD_REWRITE", "模板名称、服务器类型或内容无效（内容上限 64 KB）"));
+    }
+    if server == "nginx" {
+        configgen::nginx_directives(&template.content)?;
+    } else if template.content.lines().any(|line| { let line = line.trim(); !line.is_empty() && !line.starts_with('#') && !line.split_whitespace().next().is_some_and(|key| ["RewriteEngine", "RewriteCond", "RewriteRule", "RewriteBase"].iter().any(|allowed| key.eq_ignore_ascii_case(allowed))) }) {
+        return Err(AppError::new("BAD_REWRITE", "Apache 模板仅支持 RewriteEngine、RewriteCond、RewriteRule、RewriteBase 和注释"));
+    }
+    Ok(())
 }

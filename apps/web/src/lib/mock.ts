@@ -438,6 +438,7 @@ const mockDnsStatus = new Map<string, import("./api").DnsInterfaceStatus>(mockDn
 const activeDownloads = new Set<string>();
 const cancelledDownloads = new Set<string>();
 const settings: AppSettings = {
+  rewriteTemplates: [],
   language: "zh",
   appearance: "light",
   accentHue: 211,
@@ -2112,6 +2113,8 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (ca) ca.trusted = true;
       return true as T;
     }
+    case "db_workspace": throw { code: "DESKTOP_REQUIRED", message: "数据库工作台需要在桌面端连接实际实例；浏览器预览不执行 SQL。" };
+    case "full_log": return logLinesFor(args!.id as string).join("\n") as T;
     case "tail_logs": {
       const id = args!.id as string;
       const count = Math.max(1, Math.min(Number(args?.lines) || 200, 20000));

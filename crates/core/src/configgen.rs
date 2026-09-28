@@ -286,6 +286,86 @@ fn sync_nginx_config(current: &str, generated: &str, paths: &Paths) -> Result<St
     Ok(output)
 }
 
+/// 旧版托管站点使用 `listen 端口`，它会监听全部网卡并触发防火墙询问。
+/// 只补全这种默认写法，显式 IP、额外参数、注释和用户自建配置保持原样。
+fn localize_legacy_site_listeners(current: &str) -> Result<String> {
+    let header = current
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches('\u{feff}');
+    if !header.starts_with("# site: ") || !header.contains("NiceEnv 托管") {
+        return Ok(current.to_string());
+    }
+    let source = current.trim_start_matches('\u{feff}');
+    let prefix = current.len() - source.len();
+    let nodes = nginx_directives(source)?;
+    let mut inserts = Vec::new();
+    for server in nodes.iter().filter(|node| node.words[0] == "server") {
+        for node in server
+            .children
+            .iter()
+            .filter(|node| node.words[0] == "listen")
+        {
+            let Some(port) = node
+                .words
+                .get(1)
+                .filter(|word| word.parse::<u16>().is_ok_and(|port| port != 0))
+            else {
+                continue;
+            };
+            let Some(rest) = source[node.start..node.end].strip_prefix("listen") else {
+                continue;
+            };
+            let argument = rest.trim_start();
+            if argument.starts_with(port) {
+                inserts.push(prefix + node.start + "listen".len() + rest.len() - argument.len());
+            }
+        }
+    }
+    let mut output = current.to_string();
+    for at in inserts.into_iter().rev() {
+        output.insert_str(at, "127.0.0.1:");
+    }
+    Ok(output)
+}
+
+fn localize_legacy_nginx_sites(paths: &Paths) -> Result<()> {
+    let directory = crate::paths::checked_data_path(&paths.base, "etc/nginx/sites")?;
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(AppError::io("读取 Nginx 站点配置", error)),
+    };
+    let mut changes = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.ends_with(".conf") && !name.ends_with(".conf.disabled") {
+            continue;
+        }
+        let path =
+            crate::paths::checked_data_path(&paths.base, &format!("etc/nginx/sites/{name}"))?;
+        if !path.is_file() {
+            continue;
+        }
+        let previous = std::fs::read_to_string(&path)?;
+        let content = localize_legacy_site_listeners(&previous)?;
+        if content != previous {
+            changes.push((path, previous, content));
+        }
+    }
+    for (path, previous, content) in changes {
+        crate::paths::write_with_backup_expected(
+            &path,
+            &content,
+            &paths.backup(),
+            Some(Some(previous.as_bytes())),
+        )?;
+    }
+    Ok(())
+}
+
 pub fn render_nginx_conf(
     paths: &Paths,
     nginx_root: &std::path::Path,
@@ -358,8 +438,8 @@ http {{
 
     # 默认兜底：直接访问时给一个引导页
     server {{
-        listen {http_port};
-        listen {https_port} ssl;
+        listen 127.0.0.1:{http_port};
+        listen 127.0.0.1:{https_port} ssl;
         server_name _;
         ssl_certificate     "{certs}/fallback/localhost.crt";
         ssl_certificate_key "{certs}/fallback/localhost.key";
@@ -479,9 +559,9 @@ pub fn render_site_conf(
 ) -> String {
     let server_names = site.domains.join(" ");
     let listen = if site.https {
-        format!("listen {http_port};\n    listen {https_port} ssl")
+        format!("listen 127.0.0.1:{http_port};\n    listen 127.0.0.1:{https_port} ssl")
     } else {
-        format!("listen {http_port}")
+        format!("listen 127.0.0.1:{http_port}")
     };
     let ssl_lines = if site.https {
         let (certificate, key) = site_certificate_files(site, cert_dir);
@@ -498,8 +578,8 @@ pub fn render_site_conf(
         crate::model::SiteKind::Php => {
             let upstream =
                 nginx_upstream_name(site.runtime.php_version.as_deref().unwrap_or("8.3"));
-            let mut s = rewrite_snippet(&site.rewrite).to_string();
-            if matches!(site.rewrite, RewritePreset::None) {
+            let mut s = site.runtime.custom_rewrite.as_ref().filter(|r| r.server == "nginx").map(|r| r.content.clone()).unwrap_or_else(|| rewrite_snippet(&site.rewrite).to_string());
+            if site.runtime.custom_rewrite.is_none() && matches!(site.rewrite, RewritePreset::None) {
                 s.push_str("    location / {\n        try_files $uri $uri/ /index.php?$query_string;\n    }\n");
             }
             s.push_str(&format!(
@@ -509,8 +589,8 @@ pub fn render_site_conf(
             s
         }
         crate::model::SiteKind::Static => {
-            let mut s = rewrite_snippet(&site.rewrite).to_string();
-            if matches!(site.rewrite, RewritePreset::None) {
+            let mut s = site.runtime.custom_rewrite.as_ref().filter(|r| r.server == "nginx").map(|r| r.content.clone()).unwrap_or_else(|| rewrite_snippet(&site.rewrite).to_string());
+            if site.runtime.custom_rewrite.is_none() && matches!(site.rewrite, RewritePreset::None) {
                 s.push_str("    location / {\n        try_files $uri $uri/ =404;\n    }\n");
             }
             s
@@ -596,7 +676,7 @@ opcache.enable_cli=0
 [Extensions]
 extension=curl
 extension=fileinfo
-extension=gd
+extension={gd}
 extension=mbstring
 extension=mysqli
 extension=openssl
@@ -619,6 +699,7 @@ define_syslog_variables=Off
                 .join("php_errors.log")
         ),
         ext = nginx_path(&runtime_dir.join("ext")),
+        gd = crate::phpext::gd_extension_name(runtime_dir, version),
         sess = nginx_path(&paths.data().join("php").join(version).join("sess")),
     )
 }
@@ -682,6 +763,62 @@ fn sync_managed_lines(
     prefix + &output
 }
 
+/// 未显式配置监听地址的旧 my.ini 使用本机默认值；包含外部配置时不猜测其内容。
+fn mysql_local_defaults(current: &str, version: &str) -> String {
+    let mut section = String::new();
+    let mut bind = false;
+    let mut mysqlx_bind = false;
+    for line in current.lines().map(str::trim) {
+        if line.starts_with(['#', ';']) {
+            continue;
+        }
+        if line.starts_with('!') {
+            return current.to_string();
+        }
+        if let Some(rest) = line.strip_prefix('[') {
+            if let Some((name, _)) = rest.split_once(']') {
+                section = name.trim().to_ascii_lowercase();
+            }
+            continue;
+        }
+        if section != "mysqld" && section != "server" && !section.starts_with("mysqld-") {
+            continue;
+        }
+        let key = line
+            .split_once('=')
+            .map(|(key, _)| key.trim())
+            .unwrap_or(line)
+            .to_ascii_lowercase()
+            .replace('_', "-");
+        let key = key.strip_prefix("loose-").unwrap_or(&key);
+        bind |= key == "bind-address";
+        mysqlx_bind |= key == "mysqlx-bind-address";
+    }
+    let mut defaults = Vec::new();
+    if !bind {
+        defaults.push("bind-address=127.0.0.1");
+    }
+    if !mysqlx_bind
+        && version
+            .split('.')
+            .next()
+            .and_then(|v| v.parse::<u32>().ok())
+            .is_some_and(|v| v >= 8)
+    {
+        // X Plugin 可以被用户重新启用，也需避免再次监听全部网卡。
+        defaults.push("loose-mysqlx-bind-address=127.0.0.1");
+    }
+    if defaults.is_empty() {
+        return current.to_string();
+    }
+    let newline = if current.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    format!("{current}{newline}# NiceEnv: 默认仅供本机访问，可显式修改监听地址{newline}[mysqld]{newline}{}{newline}", defaults.join(newline))
+}
+
 fn sync_mysql_config(
     current: &str,
     paths: &Paths,
@@ -709,7 +846,7 @@ fn sync_mysql_config(
         })
         .collect();
     let mut section = String::new();
-    sync_managed_lines(current, &groups, &[], |line| {
+    let output = sync_managed_lines(current, &groups, &[], |line| {
         if line.starts_with(['#', ';', '!']) {
             return None;
         }
@@ -726,7 +863,8 @@ fn sync_mysql_config(
         options
             .iter()
             .position(|(group, option, _)| section == *group && key.eq_ignore_ascii_case(option))
-    })
+    });
+    mysql_local_defaults(&output, version)
 }
 
 fn sync_redis_config(current: &str, paths: &Paths, port: u16) -> String {
@@ -766,7 +904,7 @@ pub fn render_mysql_ini(
         .and_then(|v| v.parse::<u32>().ok())
         .is_some_and(|v| v >= 8)
     {
-        "mysqlx=OFF\n"
+        "mysqlx=OFF\nloose-mysqlx-bind-address=127.0.0.1\n"
     } else {
         ""
     };
@@ -777,6 +915,7 @@ pub fn render_mysql_ini(
 basedir="{basedir}"
 datadir="{datadir}"
 port={port}
+bind-address=127.0.0.1
 {mysqlx}character-set-server=utf8mb4
 collation-server=utf8mb4_unicode_ci
 default-storage-engine=INNODB
@@ -944,6 +1083,7 @@ pub fn write_nginx_conf(
         None => conf,
     };
     crate::tls::ensure_server_fallback(paths)?;
+    localize_legacy_nginx_sites(paths)?;
     publish_config(paths, "nginx-main", &path, &conf, previous.as_deref())?;
     let fp = paths.etc().join("nginx").join("fastcgi_params");
     if !fp.exists() {
@@ -958,6 +1098,10 @@ pub fn write_php_ini(paths: &Paths, version: &str) -> Result<()> {
     std::fs::create_dir_all(paths.data().join("php").join(version).join("sess"))?;
     // php.ini 是扩展开关与配置编辑器共同保存的用户配置，启动时不能重置。
     if paths.php_ini(version).is_file() {
+        let path = paths.php_ini(version);
+        let content = std::fs::read_to_string(&path)?;
+        let repaired = crate::phpext::repair_gd_directive(&content, &runtime_dir, version);
+        if repaired != content { write_with_backup(&path, &repaired, &paths.backup())?; }
         return Ok(());
     }
     let ini = render_php_ini(paths, version, &runtime_dir);
@@ -1219,7 +1363,7 @@ pub fn render_httpd_vhost(
                 );
             }
             s.push_str("    <Directory \"{root}\">\n        AllowOverride All\n        Require all granted\n    </Directory>\n");
-            s.push_str("    RewriteCond %{REQUEST_FILENAME} !-d\n    RewriteCond %{REQUEST_FILENAME} !-f\n    RewriteRule ^ index.php [QSA,L]\n");
+            if let Some(custom) = &site.runtime.custom_rewrite { s.push_str(&custom.content); s.push('\n'); } else { s.push_str("    RewriteCond %{REQUEST_FILENAME} !-d\n    RewriteCond %{REQUEST_FILENAME} !-f\n    RewriteRule ^ index.php [QSA,L]\n"); }
             s
         }
         crate::model::SiteKind::Static => {
@@ -1228,6 +1372,7 @@ pub fn render_httpd_vhost(
                 RewritePreset::SpaFallback => "        RewriteEngine On\n        RewriteCond %{REQUEST_FILENAME} !-f\n        RewriteCond %{REQUEST_FILENAME} !-d\n        RewriteRule ^ index.html [END]\n",
                 _ => "",
             };
+            let rewrite = site.runtime.custom_rewrite.as_ref().map(|r| format!("{}\n", r.content)).unwrap_or_else(|| rewrite.to_string());
             let error_page = if matches!(site.rewrite, RewritePreset::NextExport) {
                 "    ErrorDocument 404 /404.html\n"
             } else {
@@ -1457,8 +1602,8 @@ secret: fixture-secret
         assert!(output.contains(custom));
         assert!(output.contains("worker_processes  4; # user workers"));
         assert!(output.contains("gzip off; # custom compression"));
-        assert!(output.contains("listen 8081;"));
-        assert!(output.contains("listen 8444 ssl;"));
+        assert!(output.contains("listen 127.0.0.1:8081;"));
+        assert!(output.contains("listen 127.0.0.1:8444 ssl;"));
         assert!(output.contains("nsb_php_8_4_0"));
         assert!(!output.contains("nsb_php_8_2_0"));
         assert!(!output.contains("C:/old/conf-root"));
@@ -1468,6 +1613,21 @@ secret: fixture-secret
         );
         let crlf = output.replace('\n', "\r\n");
         assert_eq!(sync_nginx_config(&crlf, &generated, &paths).unwrap(), crlf);
+
+        let legacy = "# site: demo (fixture) — NiceEnv 托管\r\nserver {\r\n    listen 8080; # keep comment\r\n    listen 8443 ssl;\r\n    listen 0.0.0.0:9000;\r\n    listen [::1]:9001;\r\n    location / { return 200 'listen 9999;'; }\r\n}\r\n";
+        let localized = localize_legacy_site_listeners(legacy).unwrap();
+        assert_eq!(localized, legacy.replace("listen 8080;", "listen 127.0.0.1:8080;").replace("listen 8443 ssl;", "listen 127.0.0.1:8443 ssl;"));
+        assert_eq!(localize_legacy_site_listeners(&localized).unwrap(), localized);
+        let custom = legacy.replace("# site: demo (fixture) — NiceEnv 托管", "# custom site");
+        assert_eq!(localize_legacy_site_listeners(&custom).unwrap(), custom);
+        assert_eq!(localize_legacy_site_listeners(&format!("\u{feff}{legacy}")).unwrap(), format!("\u{feff}{localized}"));
+        std::fs::create_dir_all(paths.nginx_sites_dir()).unwrap();
+        let site_path = paths.nginx_sites_dir().join("fixture.conf");
+        std::fs::write(&site_path, legacy).unwrap();
+        localize_legacy_nginx_sites(&paths).unwrap();
+        assert_eq!(std::fs::read_to_string(&site_path).unwrap(), localized);
+        localize_legacy_nginx_sites(&paths).unwrap();
+        assert_eq!(std::fs::read_to_string(&site_path).unwrap(), localized);
     }
 
     #[test]
@@ -1525,6 +1685,21 @@ secret: fixture-secret
         assert!(
             !render_mysql_ini(&paths, "5.7.44", Path::new("C:/mysql"), 3306).contains("mysqlx=")
         );
+        assert!(!output.contains("bind-address="), "不能覆盖 include 中可能声明的监听地址");
+        let legacy = "[mysqld]\r\nport=3306\r\nmax_connections=321\r\n[client]\r\nport=3306\r\n";
+        let local = mysql_local_defaults(legacy, "8.0.46");
+        assert!(local.starts_with(legacy));
+        assert!(local.contains("\r\nbind-address=127.0.0.1\r\n"));
+        assert!(local.contains("\r\nloose-mysqlx-bind-address=127.0.0.1\r\n"));
+        assert_eq!(mysql_local_defaults(&local, "8.0.46"), local);
+        assert!(!mysql_local_defaults(legacy, "5.7.44").contains("mysqlx"));
+        let explicit = "[mysqld]\nbind_address=0.0.0.0\nmysqlx-bind-address=192.168.1.10\n";
+        assert_eq!(mysql_local_defaults(explicit, "8.0.46"), explicit);
+        for version in ["5.7.44", "8.0.46", "26.7.0"] {
+            let generated = render_mysql_ini(&paths, version, Path::new("C:/mysql"), 3306);
+            assert!(generated.contains("\nbind-address=127.0.0.1\n"));
+            assert_eq!(mysql_local_defaults(&generated, version), generated);
+        }
     }
 
     #[test]

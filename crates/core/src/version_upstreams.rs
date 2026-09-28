@@ -268,6 +268,18 @@ pub(super) async fn fetch(
                 }
             }
         }
+        "phpmyadmin" => {
+            let data = get_json(&client, "https://www.phpmyadmin.net/home_page/version.json").await?;
+            for item in rows(&data["releases"]) {
+                let Some(version) = item["version"].as_str().filter(|v| regex::Regex::new(r"^5\.2\.\d+$").unwrap().is_match(v)) else { continue; };
+                let url = format!("https://files.phpmyadmin.net/phpMyAdmin/{version}/phpMyAdmin-{version}-all-languages.zip");
+                let mut row = release(src, template, version, &url);
+                let checksum = get_text(&client, &format!("{url}.sha256")).await?;
+                row.sha256 = checksum.split_whitespace().next().filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())).map(str::to_string);
+                if row.sha256.is_none() { return Err(AppError::new("BAD_CHECKSUM", "phpMyAdmin 官方校验和无效")); }
+                out.push(row);
+            }
+        }
         "mysql" => {
             let os = if mac(template) { "33" } else { "3" };
             let first = mysql_html(
@@ -318,6 +330,11 @@ pub(super) async fn fetch(
                     out.push(r);
                 }
             }
+            let file = if mac(template) { "mysql-8.2.0-macos13-arm64.tar.gz" } else { "mysql-8.2.0-winx64.zip" };
+            let mut archived = release(src, template, "8.2.0", &format!("https://cdn.mysql.com/archives/mysql-8.2/{file}"));
+            archived.note = Some("Oracle 官方历史归档；8.2 为已结束支持的 Innovation 分支".into());
+            if mac(template) { archived.entry = "mysql-8.2.0-macos13-arm64/bin/mysqld".into(); }
+            out.push(archived);
         }
         "postgresql" => {
             let html = get_text(

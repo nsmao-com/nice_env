@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ExternalLink, FolderOpen, RefreshCw, Trash2, ScrollText, Square } from "lucide-react";
+import { CustomRewriteSelect } from "./custom-rewrite-select";
 import type { Site, RewritePreset } from "@nsb/schema";
 import { useT, useUI } from "@/lib/store";
 import { cn, cmpVersionDesc, normalizeProxyTarget, isPhpSiteSettingValid, APPLICATION_RUNTIMES, applicationRuntime, validApplication } from "@/lib/utils";
@@ -307,7 +308,7 @@ export function SiteDetailSheet({
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="site-edit-server">{t("sites.wizard.webServer")}</Label>
-            <Select value={draft.runtime.webServer} disabled={busy} onValueChange={(webServer: Site["runtime"]["webServer"]) => setDraft({ ...draft, runtime: { ...draft.runtime, webServer } })}>
+            <Select value={draft.runtime.webServer} disabled={busy} onValueChange={(webServer: Site["runtime"]["webServer"]) => setDraft({ ...draft, runtime: { ...draft.runtime, webServer, customRewrite: undefined } })}>
               <SelectTrigger id="site-edit-server"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="nginx">Nginx</SelectItem>
@@ -390,7 +391,7 @@ export function SiteDetailSheet({
             <Select
               value={draft.rewrite}
               disabled={busy}
-              onValueChange={(v) => setDraft({ ...draft, rewrite: v as RewritePreset })}
+              onValueChange={(v) => setDraft({ ...draft, rewrite: v as RewritePreset, runtime: { ...draft.runtime, customRewrite: undefined } })}
             >
               <SelectTrigger id="site-edit-rewrite">
                 <SelectValue />
@@ -403,6 +404,7 @@ export function SiteDetailSheet({
                 ))}
               </SelectContent>
             </Select>
+            {(draft.runtime.kind === "php" || draft.runtime.kind === "static") && <CustomRewriteSelect server={draft.runtime.webServer} value={draft.runtime.customRewrite} disabled={busy} onChange={(customRewrite) => setDraft({ ...draft, runtime: { ...draft.runtime, customRewrite } })} />}
           </div>
 
             </TabsContent>
@@ -410,7 +412,7 @@ export function SiteDetailSheet({
               <div className="space-y-1.5">
                 <Label htmlFor="site-edit-app-kind">{t("appProcess.runtime")}</Label>
                 <Select value={draft.runtime.kind} disabled={busy || applicationBusy}
-                  onValueChange={(kind: Site["runtime"]["kind"]) => setDraft({ ...draft, runtime: { ...draft.runtime, kind, application: undefined } })}>
+                  onValueChange={(kind: Site["runtime"]["kind"]) => setDraft({ ...draft, runtime: { ...draft.runtime, kind, customRewrite: undefined, application: undefined } })}>
                   <SelectTrigger id="site-edit-app-kind"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="reverse-proxy">{t("wz.kindProxy")}</SelectItem>

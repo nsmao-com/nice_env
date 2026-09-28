@@ -574,3 +574,12 @@
     transition-duration: 0.001s !important;
   }
 }
+
+/* Native disclosure elements animate their measured height in supporting webviews. */
+@supports (interpolate-size: allow-keywords) {
+  details { interpolate-size: allow-keywords; }
+  details::details-content { block-size: 0; overflow: clip; transition: block-size 200ms ease, content-visibility 200ms; transition-behavior: allow-discrete; }
+  details[open]::details-content { block-size: auto; }
+}
+.reduce-motion details::details-content { transition: none; }
+@media (prefers-reduced-motion: reduce) { details::details-content { transition: none; } }

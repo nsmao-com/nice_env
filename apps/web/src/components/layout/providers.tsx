@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { MotionConfig } from "motion/react";
 import { ThemeProvider, useTheme } from "next-themes";
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { DownloadProgress } from "@nsb/schema";
@@ -96,6 +97,11 @@ function InstallTasksBridge() {
   return null;
 }
 
+function MotionPreferences({ children }: { children: React.ReactNode }) {
+  const { data } = useQuery({ queryKey: ["settings"], queryFn: api.getSettings, staleTime: 30000 });
+  return <MotionConfig reducedMotion={data?.reduceMotion ? "always" : "user"}>{children}</MotionConfig>;
+}
+
 export function Providers({ children }: { children: React.ReactNode }) {
   const [client] = React.useState(
     () =>
@@ -115,10 +121,10 @@ export function Providers({ children }: { children: React.ReactNode }) {
       <QueryClientProvider client={client}>
         <AppearanceSync />
         <InstallTasksBridge />
-        <TooltipProvider delayDuration={300}>
+        <MotionPreferences><TooltipProvider delayDuration={300}>
           {children}
           <Toaster />
-        </TooltipProvider>
+        </TooltipProvider></MotionPreferences>
       </QueryClientProvider>
     </ThemeProvider>
   );

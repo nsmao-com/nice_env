@@ -14,6 +14,8 @@ export type ExistingProjectDefaults = {
 };
 
 interface UIState {
+  quickStackId: string;
+  setQuickStackId: (id: string) => void;
   sidebarCollapsed: boolean;
   toggleSidebar: () => void;
   commandOpen: boolean;
@@ -55,6 +57,8 @@ export type ServiceView = "card" | "list";
 export const useUI = create<UIState>()(
   persist(
     (set, get) => ({
+      quickStackId: "",
+      setQuickStackId: (id) => set({ quickStackId: id }),
       sidebarCollapsed: false,
       toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
       commandOpen: false,
@@ -84,6 +88,7 @@ export const useUI = create<UIState>()(
     {
       name: "nsb-ui",
       partialize: (s) => ({
+        quickStackId: s.quickStackId,
         sidebarCollapsed: s.sidebarCollapsed,
         lang: s.lang,
         serviceView: s.serviceView,

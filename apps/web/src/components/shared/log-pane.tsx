@@ -30,14 +30,15 @@ import {
   LEVEL_STYLE,
   parseLogLine,
   tokenClass,
-  type ParsedLogLine,
+  detectLevel,
+  type LogLevel,
 } from "@/lib/log-highlight";
 
 type LevelFilter = "all" | "error" | "warn";
 
 /**
  * 日志面板：级别高亮 + 关键字搜索 + 级别过滤 + 自动滚动 + 一键复制。
- * 长列表用 CSS contain + 限制渲染条数实现轻量虚拟化。
+ * 完整快照分页显示，实时尾部使用浏览器 content-visibility 延迟绘制。
  */
 export function LogPane({
   serviceId,
@@ -62,7 +63,26 @@ export function LogPane({
   React.useEffect(() => setPaused(!defaultAutoRefresh), [defaultAutoRefresh]);
   const [visibleLines, setVisibleLines] = React.useState(tailLines);
   const requestedLines = Math.min(20000, Math.max(1, visibleLines, tailLines));
-  const { lines, error, loading, refreshing, refresh } = useLogTail(serviceId, 1500, requestedLines, !paused);
+  const { lines: tail, error, loading, refreshing, refresh } = useLogTail(serviceId, 1500, requestedLines, !paused);
+  const [snapshot, setSnapshot] = React.useState<string[] | null>(null);
+  const [fullBusy, setFullBusy] = React.useState(false);
+  const [page, setPage] = React.useState(0);
+  const generation = React.useRef(0);
+  React.useEffect(() => { generation.current++; setSnapshot(null); setPage(0); setVisibleLines(tailLines); setFullBusy(false); return () => { generation.current++; }; }, [serviceId, tailLines]);
+  const lines = snapshot ?? tail;
+  const loadFull = async () => {
+    if (!serviceId || fullBusy) return;
+    const current = ++generation.current;
+    setFullBusy(true);
+    try {
+      const text = await api.fullLog(serviceId);
+      if (current !== generation.current) return;
+      const all = text.replace(/\r\n/g, "\n").split("\n");
+      if (all.at(-1) === "") all.pop();
+      setSnapshot(all); setPaused(true); setAutoScroll(false); setPage(0);
+    } catch (e) { if (current === generation.current) toastError(e); }
+    finally { if (current === generation.current) setFullBusy(false); }
+  };
   const [filter, setFilter] = React.useState<LevelFilter>("all");
   const [query, setQuery] = React.useState("");
   /** 命中关键字时高亮出来；不输入时不做二次渲染 */
@@ -71,16 +91,16 @@ export function LogPane({
   const [showLineNumbers, setShowLineNumbers] = React.useState(false);
   const boxRef = React.useRef<HTMLDivElement>(null);
 
-  /** 解析一次，过滤与渲染共用（避免每行解析两遍） */
-  const parsed = React.useMemo<ParsedLogLine[]>(
-    () => lines.map((l) => ({ ...parseLogLine(l), raw: l }) as ParsedLogLine & { raw: string }),
+  /** 只扫描等级用于过滤；语法 token 仅为当前页生成，避免完整日志展开数百万个 token。 */
+  const parsed = React.useMemo<{ raw: string; level: LogLevel }[]>(
+    () => lines.map((raw) => ({ raw, level: detectLevel(raw) })),
     [lines]
   );
 
   const filtered = React.useMemo(() => {
     const q = query.trim().toLowerCase();
     return parsed.filter((p) => {
-      const raw = (p as ParsedLogLine & { raw: string }).raw.toLowerCase();
+      const raw = p.raw.toLowerCase();
       if (filter === "error" && p.level !== "error") return false;
       if (filter === "warn" && p.level !== "warn") return false;
       if (q && !raw.includes(q)) return false;
@@ -88,6 +108,10 @@ export function LogPane({
     });
   }, [parsed, filter, query]);
 
+  React.useEffect(() => setPage(0), [query, filter]);
+  const pageCount = Math.max(1, Math.ceil(filtered.length / 500));
+  const activePage = Math.min(page, pageCount - 1);
+  const displayed = snapshot ? filtered.slice(activePage * 500, (activePage + 1) * 500) : filtered;
   /** 级别计数（给过滤按钮显示徽标） */
   const counts = React.useMemo(() => {
     let err = 0;
@@ -105,7 +129,21 @@ export function LogPane({
     }
   }, [filtered, autoScroll, paused]);
 
-  const joined = React.useMemo(() => filtered.map((p) => (p as ParsedLogLine & { raw: string }).raw).join("\n"), [filtered]);
+  const joined = React.useMemo(() => filtered.map((p) => p.raw).join("\n"), [filtered]);
+
+  const exportFull = async () => {
+    if (!serviceId || exportBusy.current) return;
+    exportBusy.current = true; setExporting(true);
+    try {
+      const name = serviceId.replace(/[^a-zA-Z0-9._-]/g, "_") + "-full.log";
+      let path: string | null = name;
+      if (isTauri) { const { save } = await import("@tauri-apps/plugin-dialog"); path = await save({ defaultPath: name, filters: [{ name: "Log", extensions: ["log", "txt"] }] }); }
+      if (!path) return;
+      const bytes = await api.exportLog(serviceId, path);
+      toast.success(t(isTauri ? "logs.exported" : "log.downloadStarted"), { description: bytes.toLocaleString() + " B · " + path });
+    } catch (error) { toastError(error); }
+    finally { exportBusy.current = false; setExporting(false); }
+  };
 
   /** 高亮查询命中：把 token 文本再切一层，命中的字串加背景 */
   const highlightQuery = (text: string): React.ReactNode => {
@@ -131,7 +169,7 @@ export function LogPane({
     return parts;
   };
 
-  /** 导出本次已加载的全部筛选结果，包含超过 3000 行渲染上限的匹配行。 */
+  /** 导出当前已加载的全部筛选结果，包含快照的所有分页。 */
   const doExport = async () => {
     if (!serviceId || filtered.length === 0 || exportBusy.current) return;
     exportBusy.current = true;
@@ -192,19 +230,19 @@ export function LogPane({
             )}
           </div>
           <Button size="icon-sm" variant="ghost" title={t("log.refresh")} aria-label={t("log.refresh")}
-            disabled={!serviceId || refreshing} onClick={() => void refresh()}>
+            disabled={!serviceId || refreshing || fullBusy} onClick={() => void (snapshot ? loadFull() : refresh())}>
             <RefreshCw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
           </Button>
           <Button
-            size="icon-sm"
+            size="sm"
             variant="ghost"
             title={paused ? t("log.resume") : t("log.pause")}
             aria-label={paused ? t("log.resume") : t("log.pause")}
-            aria-pressed={paused}
+            aria-pressed={!paused}
             className={cn(paused && "text-warn")}
-            onClick={() => setPaused((v) => !v)}
+            onClick={() => { setPaused((v) => !v); setSnapshot(null); }}
           >
-            {paused ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
+            {paused ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />} {t("log.autoRefreshToggle")} · {t(paused ? "log.off" : "log.on")}
           </Button>
           <Button
             size="icon-sm"
@@ -311,18 +349,16 @@ export function LogPane({
           <p className="text-[color:var(--code-muted)]">{error ? t("log.retryHint") : lines.length > 0 ? t("log.noMatch") : emptyHint ?? t("log.empty")}</p>
         ) : (
           <>
-            {filtered.length > 3000 && (
-              <p className="mb-1 text-[color:var(--code-muted)]">{t("log.truncated")}</p>
-            )}
-            {filtered.slice(-3000).map((p, i) => {
+            {displayed.map((entry, i) => {
+              const p = parseLogLine(entry.raw);
               const style = LEVEL_STYLE[p.level];
               // 行号：过滤后重新编号（用户看到的就是当前视图的第几行）
-              const lineNo = filtered.length - Math.min(3000, filtered.length) + i + 1;
+              const lineNo = (snapshot ? activePage * 500 : 0) + i + 1;
               return (
                 <div
                   key={i}
                   className={cn(
-                    "group flex gap-2 py-[1px]",
+                    "group flex gap-2 py-[1px] [content-visibility:auto] [contain-intrinsic-size:auto_20px]",
                     wrap ? "whitespace-pre-wrap break-all" : "whitespace-pre"
                   )}
                 >
@@ -355,16 +391,21 @@ export function LogPane({
 
       {/* 加载更多 */}
       <div className="flex flex-wrap items-center justify-between gap-2 text-[10.5px] text-faint">
-        <span>{t("log.tailHint")} {requestedLines}</span>
+        <span>{snapshot ? t("log.fullSnapshot") : `${t("log.tailHint")} ${requestedLines}`}</span>
         <Button
           size="sm"
           variant="ghost"
           className="h-6 text-[10.5px]"
-          disabled={refreshing || requestedLines >= 20000 || !serviceId}
+          disabled={!!snapshot || refreshing || requestedLines >= 20000 || !serviceId}
           onClick={() => setVisibleLines(Math.min(requestedLines + 1000, 20000))}
         >
           {t("log.loadMore")}
         </Button>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" variant="secondary" disabled={!serviceId || fullBusy} onClick={() => void loadFull()}>{fullBusy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}{t("log.loadFull")}</Button>
+        <Button size="sm" variant="ghost" disabled={!serviceId || exporting} onClick={() => void exportFull()}><Download className="h-3.5 w-3.5" />{t("logs.export")}</Button>
+        {snapshot && <><Button size="sm" variant="ghost" disabled={activePage === 0} onClick={() => setPage(activePage - 1)}>←</Button><span className="text-xs">{activePage + 1} / {pageCount}</span><Button size="sm" variant="ghost" disabled={activePage + 1 >= pageCount} onClick={() => setPage(activePage + 1)}>→</Button></>}
       </div>
       <p className="text-[10.5px] text-faint">{t("log.exportScope")}</p>
     </div>

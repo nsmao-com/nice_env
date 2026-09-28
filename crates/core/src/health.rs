@@ -223,8 +223,8 @@ pub fn check(
                     format!(
                         "缺少 {missing} 条映射，多出 {unexpected} 条映射，请核对域名与 IP 地址"
                     ),
-                    "到「工具箱 → 重建 hosts」同步",
-                    "/tools",
+                    "到「网络与域名」核对映射，或在「诊断与修复」重建 hosts",
+                    "/network",
                 );
             }
             r.coverage(
@@ -234,7 +234,7 @@ pub fn check(
                 "只比对托管记录；未测试系统 DNS 解析或浏览器访问",
             );
         }
-        Err(error) => r.unavailable("hosts", "hosts 托管映射", error, "/tools"),
+        Err(error) => r.unavailable("hosts", "hosts 托管映射", error, "/network"),
     }
     check_services(&mut r, &services, &installed);
     match probe_data_dir(&paths.base) {

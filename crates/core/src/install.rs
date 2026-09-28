@@ -818,8 +818,8 @@ impl Installer {
         ensure_safe_key(id, version)?;
         if let Some(console) = crate::toolbox::adminer_status(manager)? {
             if (id == "php" && *version == console.php_version)
-                || (id == "adminer" && *version == console.adminer_version) {
-                return Err(AppError::new("PACKAGE_IN_USE", "该版本正在运行数据库管理台，请先在工具箱停止 Adminer"));
+                || (id == &console.package_id && *version == console.adminer_version) {
+                return Err(AppError::new("PACKAGE_IN_USE", "该版本正在运行数据库管理台，请先在数据库页面停止管理台"));
             }
         }
         self.check_uninstall_references(store, &installed)?;

@@ -96,7 +96,7 @@ export type ServiceRunSpec = z.infer<typeof ServiceRunSpec>;
 export const VersionSource = z.object({
   /** github=Release API；其余动态源读取对应的官方发行索引或下载页。
    * static=仅用清单内固定版本。 */
-  kind: z.enum(["github", "nodejs", "php", "go", "nginx", "python", "composer", "consul", "gradle", "zig", "dotnet", "flutter", "mongodb", "mysql", "mariadb", "postgresql", "apache", "tomcat", "elasticsearch", "neo4j", "rustup", "static"]),
+  kind: z.enum(["github", "nodejs", "php", "go", "nginx", "python", "composer", "consul", "gradle", "zig", "dotnet", "flutter", "mongodb", "mysql", "mariadb", "postgresql", "apache", "tomcat", "elasticsearch", "neo4j", "rustup", "phpmyadmin", "static"]),
   /** github：owner/repo */
   repo: z.string().optional(),
   /** github：匹配发行包文件名的正则（每个 release 取第一个命中的 asset） */
@@ -359,7 +359,10 @@ export const RewritePreset = z.enum([
 ]);
 export type RewritePreset = z.infer<typeof RewritePreset>;
 
+export const CustomRewrite = z.object({ name: z.string().min(1).max(80), server: z.enum(["nginx", "apache"]), content: z.string().min(1).max(65536) });
+export type CustomRewrite = z.infer<typeof CustomRewrite>;
 export const SiteRuntime = z.object({
+  customRewrite: CustomRewrite.optional(),
   importedCertId: z.string().optional(),
   acmeCertId: z.string().optional(),
   webServer: z.enum(["nginx", "apache"]).default("nginx"),
@@ -1290,6 +1293,7 @@ export const ACCENT_PRESETS = [
 ] as const;
 
 export const AppSettings = z.object({
+  rewriteTemplates: z.array(CustomRewrite).default([]),
   language: z.enum(["zh", "en"]).default("zh"),
   appearance: z.enum(["dark", "light", "system"]).default("light"),
   accentHue: z.number().default(211),

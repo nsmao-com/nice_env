@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { motion } from "motion/react";
 import {
+  FileCog, Network, Terminal, DatabaseBackup, Stethoscope, CalendarClock, Radio, Brain, FileCode2,
   LayoutDashboard,
   Globe,
   Boxes,
@@ -32,6 +33,8 @@ const NAV = [
       { href: "/sites", icon: Globe, key: "nav.sites" as const },
       { href: "/packages", icon: Boxes, key: "nav.packages" as const },
       { href: "/stacks", icon: Layers, key: "nav.stacks" as const },
+      { href: "/configuration", icon: FileCog, key: "nav.configuration" as const },
+      { href: "/rewrites", icon: FileCode2, key: "nav.rewrites" as const },
     ],
   },
   {
@@ -40,6 +43,13 @@ const NAV = [
       { href: "/databases", icon: Database, key: "nav.databases" as const },
       { href: "/tls", icon: ShieldCheck, key: "nav.tls" as const },
       { href: "/proxy", icon: Waypoints, key: "nav.proxy" as const },
+      { href: "/network", icon: Network, key: "nav.network" as const },
+      { href: "/environment", icon: Terminal, key: "nav.environment" as const },
+      { href: "/tasks", icon: CalendarClock, key: "nav.tasks" as const },
+      { href: "/tunnels", icon: Radio, key: "nav.tunnels" as const },
+      { href: "/models", icon: Brain, key: "nav.models" as const },
+      { href: "/backups", icon: DatabaseBackup, key: "nav.backups" as const },
+      { href: "/diagnostics", icon: Stethoscope, key: "nav.diagnostics" as const },
       { href: "/tools", icon: Wrench, key: "nav.tools" as const },
       { href: "/logs", icon: ScrollText, key: "nav.logs" as const },
     ],

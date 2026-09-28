@@ -635,8 +635,8 @@ export const ollamaPull = (name: string) =>
 export const ollamaPullStatus = () => safe(invoke<OllamaPullStatus | null>("ollama_pull_status"));
 export const ollamaCancelPull = (id: string) => safe(invoke<boolean>("ollama_cancel_pull", { id }));
 
-export interface AdminerStatus { port: number; file: string; url: string; phpVersion: string; adminerVersion: string }
-export const adminerStart = () => safe(invoke<AdminerStatus>("adminer_start"));
+export interface AdminerStatus { packageId?: string; port: number; file: string; url: string; phpVersion: string; adminerVersion: string }
+export const adminerStart = (packageId: "adminer" | "phpmyadmin" = "adminer") => safe(invoke<AdminerStatus>("adminer_start", { package: packageId }));
 export const adminerStatus = () => safe(invoke<AdminerStatus | null>("adminer_status"));
 export const adminerStop = () => safe(invoke<boolean>("adminer_stop"));
 
@@ -757,3 +757,9 @@ export interface DnsInterfaceStatus { current: DnsConfiguration; backup: DnsConf
 export const dnsStatusOf = (name: string) => safe(invoke<DnsInterfaceStatus>("dns_status_of", { name }));
 export const dnsTakeover = (name: string) => safe(invoke<boolean>("dns_takeover", { name }));
 export const dnsRestore = (name: string, automatic = false) => safe(invoke<boolean>("dns_restore", { name, automatic }));
+
+export const fullLog = (id: string) => safe(invoke<string>("full_log", { id }));
+
+export interface DatabaseGrid { columns: string[]; rows: (string | null)[][] }
+export interface DatabaseWorkspaceRequest { database: string; action: "tables" | "schema" | "rows" | "sql" | "update"; table?: string; offset?: number; sql?: string; confirmed?: boolean; column?: string; value?: string | null; original?: (string | null)[] }
+export const databaseWorkspace = (engine: DatabaseEngine, version: string, request: DatabaseWorkspaceRequest) => safe(invoke<DatabaseGrid[]>("db_workspace", { engine, version, request }));

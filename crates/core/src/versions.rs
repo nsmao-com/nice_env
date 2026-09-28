@@ -148,6 +148,7 @@ fn builtin_source(id: &str) -> Option<VersionSource> {
             r"^mihomo-windows-amd64-v[\d.]+\.zip$",
             "mihomo-windows-amd64.exe",
         ),
+        "phpmyadmin" => ("phpmyadmin", "", "", "", "phpMyAdmin-{version}-all-languages/index.php"),
         "adminer" => (
             "github",
             "vrana/adminer",

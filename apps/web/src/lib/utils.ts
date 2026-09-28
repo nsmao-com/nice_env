@@ -222,3 +222,12 @@ export function isPlatformCompatible(osList: string[] | undefined, archList: str
   const archOk = !archList?.length || archList.includes(cur.arch);
   return osOk && archOk;
 }
+
+/** Hostname only: URLs and ports belong in separate fields. */
+export function isSiteHostname(value: string): boolean {
+  const host = value.trim().toLowerCase();
+  if (host === "localhost") return true;
+  if (/^[0-9.]+$/.test(host)) return host.split(".").length === 4 && host.split(".").every(part => /^(0|[1-9]\d{0,2})$/.test(part) && Number(part) <= 255);
+  const name = host.replace(/^\*\./, "");
+  return name.length <= 253 && name.includes(".") && name.split(".").every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label));
+}

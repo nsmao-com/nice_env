@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { Database, HardDrive, KeyRound, Play, Plus, Table2, Trash2, UserRound, ExternalLink, Loader2, Import } from "lucide-react";
 import { useT } from "@/lib/store";
 import { fmtBytes } from "@/lib/utils";
+import { DatabaseWorkspace } from "@/components/shared/database-workspace";
 import { useDatabases, useDbUsers, useInvalidate, toastError, useAdminer, useServices } from "@/lib/hooks";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as api from "@/lib/api";
@@ -193,6 +194,7 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
   const users = userQuery.data ?? [];
   const ready = running && dbQuery.isSuccess;
   const targetLabel = `${engineLabel} ${version} · 127.0.0.1:${service?.port ?? "—"}`;
+  const [workspaceLocked, setWorkspaceLocked] = React.useState(false);
   const [backupLocked, setBackupLocked] = React.useState(false);
   const [createOpen, setCreateOpen] = React.useState(false);
   const [userOpen, setUserOpen] = React.useState(false);
@@ -205,7 +207,7 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
   const [dropTarget, setDropTarget] = React.useState<string | null>(null);
   const [dropping, setDropping] = React.useState(false);
   const [dropTyped, setDropTyped] = React.useState("");
-  const locked = !!deleteUser || !!passwordUser || !!grantUser || backupLocked || createOpen || userOpen || rootOpen || importOpen || !!dropTarget;
+  const locked = workspaceLocked || !!deleteUser || !!passwordUser || !!grantUser || backupLocked || createOpen || userOpen || rootOpen || importOpen || !!dropTarget;
   React.useEffect(() => { onLockChange(locked); return () => onLockChange(false); }, [locked, onLockChange]);
 
   const systemDbs = new Set(["mysql", "sys", "information_schema", "performance_schema"]);
@@ -245,6 +247,7 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
         </div>
       </section>
 
+      <DatabaseWorkspace key={signature} engine={engine} version={version} databases={dbs.map((db) => db.name)} ready={ready} targetLabel={targetLabel} onLockChange={setWorkspaceLocked} />
       {/* 备份 / 还原 */}
       <section className="mb-6">
         <DbBackupCard key={selected} version={version} engine={engine} targetLabel={targetLabel} ready={ready} databases={dbs.filter((db) => !systemDbs.has(db.name.toLowerCase())).map((db) => db.name)} onLockChange={setBackupLocked} />
@@ -440,6 +443,7 @@ function InstanceStartButton({ base, version }: { base: string; version?: string
 function MySqlInstanceCard({ service, count, engine }: { service?: ServiceStatus; count?: number; engine: DatabaseEngine }) {
   const t = useT();
   const adminer = useAdminer();
+  const phpMyAdmin = useAdminer("phpmyadmin");
   const port = service?.port;
   return (
     <Card className="min-w-0 p-4">
@@ -474,10 +478,12 @@ function MySqlInstanceCard({ service, count, engine }: { service?: ServiceStatus
           </div>
         ))}
       </div>
-      <div className="mt-3 flex gap-2">
+      <div className="mt-3 flex flex-wrap gap-2">
         <Button variant="secondary" size="sm" disabled={adminer.busy} onClick={() => void adminer.open()}>
           {adminer.busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ExternalLink className="h-3.5 w-3.5" />} {t("db.openAdminer")}
         </Button>
+        <Button variant="secondary" size="sm" disabled={phpMyAdmin.busy || adminer.busy} onClick={() => void phpMyAdmin.open()}><ExternalLink className="h-3.5 w-3.5" />phpMyAdmin</Button>
+        {adminer.query.data && <Button size="sm" variant="ghost" disabled={adminer.busy || phpMyAdmin.busy} onClick={() => void adminer.stop()}>停止 {adminer.query.data.packageId === "phpmyadmin" ? "phpMyAdmin" : "Adminer"}</Button>}
       </div>
     </Card>
   );

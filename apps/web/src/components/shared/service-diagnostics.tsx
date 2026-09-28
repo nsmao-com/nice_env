@@ -84,7 +84,7 @@ export function ServiceDiagnostics({ service, open, onOpenChange }: {
             onClick={() => navigate(`/logs?service=${encodeURIComponent(service.id)}`)}>
             <ScrollText className="h-3.5 w-3.5 shrink-0" />{t("svc.diag.viewLogs")}
           </Button>
-          <Button variant="ghost" size="sm" className="min-h-9 h-auto whitespace-normal text-[11.5px]" onClick={() => navigate("/tools#nsb-tool-repair")}>
+          <Button variant="ghost" size="sm" className="min-h-9 h-auto whitespace-normal text-[11.5px]" onClick={() => navigate("/diagnostics")}>
             <Wrench className="h-3.5 w-3.5 shrink-0" />{t("svc.diag.repair")}
           </Button>
           {!!report?.service.pids.length && <Button variant="ghost" size="sm" className="min-h-9 h-auto whitespace-normal text-[11.5px] text-error" disabled={running || force.isPending} onClick={() => { force.reset(); setForceOpen(true); }}>

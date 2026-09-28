@@ -34,6 +34,25 @@ const EXT_DEPS: &[(&str, &[&str])] = &[
     ("mysqli", &["mysqlnd"]),
 ];
 
+/// Windows PHP 7 的文件叫 php_gd2.dll，但 php -m 始终报告模块名 gd。
+pub fn gd_extension_name(runtime: &Path, version: &str) -> &'static str {
+    if runtime.join("ext").join(dll_name("gd2")).is_file() { "gd2" }
+    else if runtime.join("ext").join(dll_name("gd")).is_file() { "gd" }
+    else if cfg!(windows) && version.split('.').next().and_then(|v| v.parse::<u32>().ok()).is_some_and(|v| v < 8) { "gd2" }
+    else { "gd" }
+}
+
+pub fn repair_gd_directive(content: &str, runtime: &Path, version: &str) -> String {
+    let actual = gd_extension_name(runtime, version);
+    let wrong = if actual == "gd2" { "gd" } else { "gd2" };
+    if !runtime.join("ext").join(dll_name(actual)).is_file() || runtime.join("ext").join(dll_name(wrong)).is_file() {
+        return content.to_string();
+    }
+    let state = IniExtState::parse(content);
+    if !state.enabled.contains(wrong) { return content.to_string(); }
+    IniExtState::parse(&state.with_disabled(wrong)).with_enabled(actual)
+}
+
 /// 展示名与分类：让面板不是一串裸文件名。
 struct Meta {
     label: &'static str,
@@ -518,6 +537,8 @@ pub fn set_extension(paths: &Paths, version: &str, ext: &str, enable: bool) -> R
         return Err(AppError::new("BAD_PHP_EXTENSION", "扩展名称无效"));
     }
     let name = ext.to_ascii_lowercase();
+    let runtime = paths.runtime_dir("php", version);
+    let name = if enable && matches!(name.as_str(), "gd" | "gd2") { gd_extension_name(&runtime, version).to_string() } else { name };
     let ext = name.as_str();
     let ini_path = paths.php_ini(version);
     if !ini_path.is_file() {
@@ -528,6 +549,8 @@ pub fn set_extension(paths: &Paths, version: &str, ext: &str, enable: bool) -> R
     }
     let content =
         std::fs::read_to_string(&ini_path).map_err(|e| AppError::io("读取 php.ini", e))?;
+    let original_content = content;
+    let content = if enable && matches!(ext, "gd" | "gd2") { repair_gd_directive(&original_content, &runtime, version) } else { original_content.clone() };
     let state = IniExtState::parse(&content);
     let builtins = builtin_modules(paths, version)?;
     let ext_file = paths
@@ -613,7 +636,7 @@ pub fn set_extension(paths: &Paths, version: &str, ext: &str, enable: bool) -> R
     } else {
         state.with_disabled(ext)
     };
-    if next != content {
+    if next != original_content {
         write_with_backup(&ini_path, &next, &paths.backup())
             .map_err(|e| AppError::io("写入 php.ini", e))?;
     }
@@ -644,7 +667,7 @@ pub fn set_extension(paths: &Paths, version: &str, ext: &str, enable: bool) -> R
                     }
                 }
                 if enable {
-                    let loaded = module_names(&output).contains(ext);
+                    let loaded = module_names(&output).contains(if ext == "gd2" { "gd" } else { ext });
                     if !loaded && warnings.is_empty() {
                         warnings.push(format!(
                             "PHP 未报告 {ext} 已加载；若扩展名与 DLL 不匹配，请确认 ext 目录下存在 {}",

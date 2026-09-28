@@ -1,7 +1,96 @@
 {
-  "revision": 41,
-  "updated": "2026-09-27",
+  "revision": 42,
+  "updated": "2026-09-28",
   "packages": [
+    {
+      "id": "nats",
+      "version": "2.15.0",
+      "category": "other",
+      "displayName": "NATS",
+      "description": "轻量消息服务，启用 JetStream 持久化；默认仅监听本机",
+      "homepage": "https://nats.io",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/nats-io/nats-server/releases/download/v2.15.0/nats-server-v2.15.0-windows-amd64.zip",
+      "sha256": "2d0861dc2ca3567d17f7d19611d7b346cc2ccbd7086a0a77cc957a2c71663200",
+      "sizeBytes": 7423380,
+      "entry": "nats-server-v2.15.0-windows-amd64/nats-server.exe",
+      "defaultPort": 4222,
+      "run": {
+        "args": [
+          "--addr",
+          "127.0.0.1",
+          "--port",
+          "{port}",
+          "--jetstream",
+          "--store_dir",
+          "{data}"
+        ],
+        "singleInstance": true,
+        "defaultPort": 4222
+      },
+      "versionSource": {
+        "kind": "github",
+        "repo": "nats-io/nats-server",
+        "tagPrefix": "v",
+        "assetMatch": "^nats-server-v[\\d.]+-windows-amd64\\.zip$",
+        "entryTemplate": "nats-server-v{version}-windows-amd64/nats-server.exe"
+      }
+    },
+    {
+      "id": "phpmyadmin",
+      "versionSource": { "kind": "phpmyadmin", "entryTemplate": "phpMyAdmin-{version}-all-languages/index.php" },
+      "version": "5.2.3",
+      "category": "tool",
+      "displayName": "phpMyAdmin",
+      "description": "MySQL / MariaDB 网页管理台，从数据库页启动；需要 PHP 7.2–8.3、mysqli 和 mbstring",
+      "homepage": "https://www.phpmyadmin.net",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://files.phpmyadmin.net/phpMyAdmin/5.2.3/phpMyAdmin-5.2.3-all-languages.zip",
+      "sha256": "2d2e13c735366d318425c78e4ee2cc8fc648d77faba3ddea2cd516e43885733f",
+      "sizeBytes": 0,
+      "entry": "phpMyAdmin-5.2.3-all-languages/index.php",
+      "requires": [
+        "php"
+      ]
+    },
+    {
+      "id": "mysql",
+      "version": "8.2.0",
+      "category": "database",
+      "displayName": "MySQL 8.2",
+      "description": "关系型数据库（utf8mb4），数据保存在应用数据目录，独立于系统",
+      "homepage": "https://mysql.com",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://cdn.mysql.com/archives/mysql-8.2/mysql-8.2.0-winx64.zip",
+      "mirrors": [],
+      "sha256": "",
+      "sizeBytes": 0,
+      "entry": "mysql-8.2.0-winx64/bin/mysqld.exe",
+      "defaultPort": 23306,
+      "run": {
+        "args": [],
+        "singleInstance": false,
+        "dataDir": "mysql"
+      }
+    },
     {
       "id": "nginx",
       "version": "1.26.3",

@@ -1,6 +1,8 @@
 "use client";
 
 import * as React from "react";
+import { CodeEditor, type CodeEditorHandle } from "./code-editor";
+import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import {
   FileCog,
@@ -43,8 +45,10 @@ import {
  */
 export function ConfigEditor() {
   const t = useT();
+  const [search, setSearch] = React.useState("");
   const [editing, setEditing] = React.useState<ConfigFileInfo | null>(null);
   const { data: files = [], isPending, error, refetch } = useQuery({ queryKey: ["config-files"], queryFn: api.configList });
+  const filteredFiles = files.filter((f) => `${f.label} ${f.path} ${f.kind}`.toLowerCase().includes(search.toLowerCase()));
 
   return (
     <>
@@ -59,6 +63,7 @@ export function ConfigEditor() {
           </div>
         </CardHeader>
         <CardContent>
+          <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={t("editor.findFile")} aria-label={t("editor.findFile")} className="mb-4" />
           {isPending ? (
             <p className="flex items-center justify-center gap-2 py-4 text-xs text-muted" role="status"><Loader2 className="h-4 w-4 animate-spin" />{t("common.loading")}</p>
           ) : error ? (
@@ -70,7 +75,8 @@ export function ConfigEditor() {
             <p className="py-4 text-center text-[12px] text-faint">{t("cfgeditor.empty")}</p>
           ) : (
             <div className="space-y-1.5">
-              {files.map((f) => (
+              {filteredFiles.length === 0 && <p className="py-6 text-center text-xs text-muted">{t("log.noMatch")}</p>}
+              {filteredFiles.map((f) => (
                 <button
                   key={f.kind}
                   type="button"
@@ -151,8 +157,8 @@ export function ConfigEditDialog({
   const [backups, setBackups] = React.useState<ConfigBackup[]>([]);
   const [confirmForce, setConfirmForce] = React.useState(false);
   const [confirmRollback, setConfirmRollback] = React.useState<ConfigBackup | null>(null);
-  const taRef = React.useRef<HTMLTextAreaElement>(null);
-  const gutterRef = React.useRef<HTMLDivElement>(null);
+  const editorRef = React.useRef<CodeEditorHandle>(null);
+
   const busy = saving || validating || rollingBack;
 
   const refreshHistory = React.useCallback(async () => {
@@ -212,13 +218,6 @@ export function ConfigEditDialog({
     return () => window.removeEventListener("beforeunload", guard);
   }, [dirty]);
   const lineCount = React.useMemo(() => content.split("\n").length, [content]);
-
-  // 同步行号槽的滚动位置（textarea 自己滚，行号得跟着）
-  const onScroll = () => {
-    if (gutterRef.current && taRef.current) {
-      gutterRef.current.scrollTop = taRef.current.scrollTop;
-    }
-  };
 
   const validate = async () => {
     if (actionRef.current) return;
@@ -297,18 +296,7 @@ export function ConfigEditDialog({
   const errors = validation?.issues.filter((i) => i.severity === "error") ?? [];
   const warnings = validation?.issues.filter((i) => i.severity === "warning") ?? [];
 
-  const jumpTo = (line: number) => {
-    const ta = taRef.current;
-    if (!ta || line <= 0) return;
-    const lines = content.split("\n");
-    let pos = 0;
-    for (let i = 0; i < line - 1 && i < lines.length; i++) pos += lines[i].length + 1;
-    ta.focus();
-    ta.setSelectionRange(pos, pos + (lines[line - 1]?.length ?? 0));
-    // 粗算滚动位置，让目标行进入视野
-    ta.scrollTop = Math.max(0, (line - 3) * 20);
-    onScroll();
-  };
+  const jumpTo = (line: number) => editorRef.current?.jumpToLine(line);
 
   return (
     <>
@@ -436,7 +424,7 @@ export function ConfigEditDialog({
               </details>
             )}
 
-            {/* 编辑器：行号槽 + textarea，共享滚动 */}
+            {/* 编辑器：搜索、语法高亮与可跳转行号 */}
             <div className="flex min-h-44 flex-1 overflow-hidden bg-card-2/20">
               {loading ? (
                 <div className="flex flex-1 items-center justify-center">
@@ -448,47 +436,7 @@ export function ConfigEditDialog({
                   <Button variant="secondary" onClick={() => void reload()}>{t("install.retry")}</Button>
                 </div>
               ) : (
-                <>
-                  <div
-                    ref={gutterRef}
-                    aria-hidden
-                    className="w-9 shrink-0 select-none overflow-hidden border-r border-border/60 bg-card-2/40 py-2 text-right font-mono text-[11.5px] leading-[20px] text-faint sm:w-12"
-                  >
-                    {Array.from({ length: lineCount }).map((_, i) => {
-                      const n = i + 1;
-                      const isErr = errors.some((e) => e.line === n);
-                      const isWarn = warnings.some((w) => w.line === n);
-                      return (
-                        <div
-                          key={n}
-                          className={cn(
-                            "pr-2 tabular",
-                            isErr && "bg-error/15 font-semibold text-error",
-                            !isErr && isWarn && "bg-warn/15 text-warn"
-                          )}
-                        >
-                          {n}
-                        </div>
-                      );
-                    })}
-                  </div>
-                  <textarea
-                    ref={taRef}
-                    value={content}
-                    aria-label={`${info.label} ${t("cfgeditor.content")}`}
-                    readOnly={busy}
-                    wrap="off"
-                    onChange={(e) => {
-                      setContent(e.target.value);
-                      setValidation(null);
-                      setNotice(null);
-                    }}
-                    onScroll={onScroll}
-                    spellCheck={false}
-                    className="min-h-0 min-w-0 flex-1 resize-none bg-transparent px-3 py-2 font-mono text-[11.5px] leading-[20px] text-foreground outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary"
-                    style={{ tabSize: 2 }}
-                  />
-                </>
+                <div className="min-w-0 flex-1 overflow-auto p-2"><CodeEditor ref={editorRef} value={content} label={info.label} language={info.kind.startsWith("apache") ? "apache" : info.kind.startsWith("php") || info.kind.startsWith("mysql") ? "ini" : info.path} readOnly={busy} height="min(52dvh, 520px)" onChange={(next) => { setContent(next); setValidation(null); setNotice(null); }} /></div>
               )}
             </div>
 

@@ -1,4 +1,8 @@
 "use client";
+import { CustomRewriteSelect } from "./custom-rewrite-select";
+import type { CustomRewrite } from "@nsb/schema";
+import { isSiteHostname } from "@/lib/utils";
+
 
 import * as React from "react";
 import { toast } from "sonner";
@@ -141,6 +145,8 @@ export function SiteWizard({
   const [dbName, setDbName] = React.useState("");
   const [dbUser, setDbUser] = React.useState("");
   const [dbPass, setDbPass] = React.useState("");
+  const [customRewrite, setCustomRewrite] = React.useState<CustomRewrite>();
+  React.useEffect(() => setCustomRewrite(undefined), [webServer, kind]);
   const [rewrite, setRewrite] = React.useState<RewritePreset>("none");
   const wasOpen = React.useRef(false);
   const domainEdited = React.useRef(false);
@@ -177,6 +183,7 @@ export function SiteWizard({
       setCertificate({});
       setDbEnabled(false);
       setRewrite(existingProject && !existingProject.needsDevServer ? RewriteSchema.safeParse(existingProject.rewrite).data ?? "none" : "none");
+      setCustomRewrite(undefined);
       setProxyTarget(existingDefaults?.proxyTarget ?? (existingProject?.needsDevServer ? "" : "127.0.0.1:3001"));
       setApplication(undefined);
       setDbName("");
@@ -211,7 +218,7 @@ export function SiteWizard({
     if (step >= 2 && isProxy && (!normalizedProxyTarget || !applicationValid)) return false;
     switch (step) {
       case 0:
-        return name.trim().length > 0 && /^(\*\.)?[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain.trim());
+        return name.trim().length > 0 && isSiteHostname(domain) && aliases.split(/[,，\s]+/).filter(Boolean).every(isSiteHostname);
       case 1:
         return rootDir.trim().length > 0 && (!composerTemplate || composerInstalled) && templateNodeCompatible;
       case 2:
@@ -222,7 +229,7 @@ export function SiteWizard({
       default:
         return true;
     }
-  }, [https, certificateSelection.problem, step, name, domain, rootDir, kind, phpVersion, phpVersions, webInstalled, normalizedProxyTarget, databaseValid, composerTemplate, composerInstalled, templatePhpCompatible, templateNodeCompatible, isProxy, applicationValid]);
+  }, [https, certificateSelection.problem, step, name, domain, aliases, rootDir, kind, phpVersion, phpVersions, webInstalled, normalizedProxyTarget, databaseValid, composerTemplate, composerInstalled, templatePhpCompatible, templateNodeCompatible, isProxy, applicationValid]);
 
   const pickFolder = async () => {
     if (isTauri) {
@@ -264,6 +271,7 @@ export function SiteWizard({
         rootDir: rootDir.trim(),
         runtime: {
           webServer,
+          customRewrite,
           kind,
           ...(kind === "php" ? { phpVersion } : {}),
           ...(isProxy ? { proxyTarget: normalizedProxyTarget! } : {}),
@@ -678,7 +686,7 @@ export function SiteWizard({
               <div className="flex flex-col gap-4">
                 <div className="flex flex-col gap-1.5">
                   <Label>{t("sites.wizard.rewrite")}</Label>
-                  <Select value={rewrite} onValueChange={(v) => setRewrite(v as RewritePreset)}>
+                  <Select value={rewrite} onValueChange={(v) => { setRewrite(v as RewritePreset); setCustomRewrite(undefined); }}>
                     <SelectTrigger>
                       <SelectValue />
                     </SelectTrigger>
@@ -691,6 +699,7 @@ export function SiteWizard({
                     </SelectContent>
                   </Select>
                 </div>
+                {(kind === "php" || kind === "static") && <CustomRewriteSelect server={webServer} value={customRewrite} onChange={setCustomRewrite} />}
                 {/* 摘要 */}
                 <div className="flex flex-col gap-2 rounded-xl bg-fill p-4 text-[12px]">
                   <SummaryRow label={t("wz.domain")} value={[domain, ...aliases.split(/[,，\s]+/).filter(Boolean)].join(" · ")} mono />
@@ -708,7 +717,7 @@ export function SiteWizard({
                   {appRuntime && <SummaryRow label={t("appProcess.title")} value={application ? `${appRuntime.label} ${application.version} · ${application.args.join(" · ")}` : t("appProcess.externalHint")} />}
                   <SummaryRow label="HTTPS" value={https ? certificateSelection.value === "local" ? t("wz.caAuto") : certificateSelection.selected?.subject ?? t("sites.detail.certUnavailableSelection") : t("detail.none")} />
                   <SummaryRow label={t("wz.db")} value={dbEnabled ? `${dbName}（${dbUser}）` : t("wz.noDb")} />
-                  <SummaryRow label={t("wz.rewrite")} value={rewrite === "none" ? t("wz.noneOpt") : REWRITES.find((r) => r.value === rewrite)?.label ?? ""} />
+                  <SummaryRow label={t("wz.rewrite")} value={customRewrite ? customRewrite.name : rewrite === "none" ? t("wz.noneOpt") : REWRITES.find((r) => r.value === rewrite)?.label ?? ""} />
                 </div>
                 <Badge variant="info" className="w-fit">
                   <ArrowRight className="h-3 w-3" /> {t("wz.createHint")}

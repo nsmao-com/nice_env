@@ -263,7 +263,7 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
                     key={item.version}
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
-                    className="group/item flex flex-wrap items-stretch"
+                    className={cn("group/item mx-2 mb-1.5 flex flex-wrap items-stretch overflow-hidden rounded-xl border border-transparent p-1 transition-colors hover:border-border hover:bg-fill", item.installed && "border-border/60 bg-card-2/30", statusKnown && item.running && "border-running/20 bg-running-soft/40")}
                   >
                     <button
                       onClick={() => pick(item)}
@@ -272,9 +272,9 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
                       title={item.incompatible && !item.installed ? t("versions.incompatible") : undefined}
                       className={cn(
                         "flex min-h-10 min-w-0 flex-1 items-center gap-2 px-2.5 py-1.5 text-left transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-primary",
-                        "hover:bg-fill disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent",
+                        "rounded-lg disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent",
                         !group.isService && item.installed && item.active && "disabled:cursor-default disabled:opacity-100",
-                        statusKnown && item.running && "bg-running-soft/40"
+                        statusKnown && item.running && "text-foreground"
                       )}
                     >
                       {/* 状态图标 */}
@@ -340,23 +340,9 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
                               : t("versions.switch")}
                       </span>
                     </button>
+
                     {item.installed && (
-                      <button
-                        aria-label={`${t("packages.uninstall")} ${item.version}`}
-                        disabled={disabled || pathBusy || busy !== null || item.installing}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          dialogHandoff.current = true;
-                          setOpen(false);
-                          onUninstall(item.version, triggerRef.current);
-                        }}
-                        className="flex w-10 shrink-0 items-center justify-center text-muted transition-colors hover:bg-error-soft hover:text-error focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-primary disabled:opacity-45"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    )}
-                    {item.installed && (
-                      <div className="flex w-full flex-wrap items-center gap-1.5 px-2.5 pb-2">
+                      <div className="flex w-full flex-wrap items-center gap-1.5 px-2.5 pb-1">
                         <PathEnvToggle pkgId={group.id} version={item.version} disabled={disabled || busy !== null || !!item.installing} />
                         {group.multiInstance && <button
                           type="button"
@@ -368,6 +354,22 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
                           {item.active ? <Check className="h-3 w-3" /> : <Pin className="h-3 w-3" />}
                           {t(item.active ? "versions.default" : "versions.setDefault")}
                         </button>}
+                        <span className="flex-1" />
+
+                      <button
+                        aria-label={`${t("packages.uninstall")} ${item.version}`}
+                        disabled={disabled || pathBusy || busy !== null || item.installing}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          dialogHandoff.current = true;
+                          setOpen(false);
+                          onUninstall(item.version, triggerRef.current);
+                        }}
+                        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted transition-colors hover:bg-error-soft hover:text-error focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-primary disabled:opacity-45"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+
                       </div>
                     )}
                   </motion.div>

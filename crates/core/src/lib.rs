@@ -11,6 +11,7 @@ pub mod cfgeditor;
 pub mod configgen;
 pub mod cron;
 pub mod dbadmin;
+pub mod dbworkspace;
 pub mod dbbackup;
 pub mod dbmigrate;
 pub mod diagnostics;

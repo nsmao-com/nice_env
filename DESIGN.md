@@ -2851,3 +2851,24 @@ Web/schema TypeScript、218 条清单的 Zod 解析、Rust 全工作区 all-targ
 参考：https://www.mongodb.com/docs/database-tools/installation/
 参考：https://api.github.com/repos/mongodb-js/mongosh/releases/latest
 参考：https://downloads.mongodb.org/tools/db/full.json
+
+## 第一百二十四轮：MongoDB 数据库、集合与文档浏览（v0.2.112）
+
+对照 ServBay MongoDB 管理与交互使用说明，补齐数据库页此前没有 MongoDB 工作区的缺口。本轮增加独立 MongoDB 页签；只有 MongoDB 已安装时默认进入该页签，已有 MySQL/MariaDB 和 PostgreSQL 选择顺序保持。复用 UI/UX、React Query、Radix、卡片与复制按钮，提供实际实例连接地址、运行版本、Shell 版本、数据库选择、集合名称搜索、集合/视图选择、文档分页和字段相等筛选。MongoDB 和官方 Shell 缺失、实例停止、查询失败均有明确提示与恢复入口。新增一个独立前端组件及一个 Rust MongoDB 模块以承载专属行为，没有引入依赖。
+
+后端复用官方 mongosh 与已安装快照，固定连接本机回环地址，端口来自当前托管实例，不能由调用方指定远程地址。请求须匹配运行版本；查询前后核对监听端口的进程归属，并在读取前核对 MongoDB 返回的数据目录与该版本的应用目录一致。持有数据目录活动守卫和服务生命周期锁，操作放入 Tauri 阻塞任务，不阻塞界面线程。临时脚本只包含序列化参数和固定只读操作，不接受自由 JavaScript；脚本、输出和 Shell 配置使用临时目录，关闭用户启动脚本加载，超时回收子进程并删除临时文件。
+
+集合列表使用 listCollections/getMore，并正确关闭尚未耗尽的命令游标；不使用 mongosh 不提供的旧版 DBCommandCursor 全局构造器。集合名称按字面量搜索，含引号、分号和正则特殊字符的合法名称可以使用。数据库与集合列表最多显示 1,000 项，集合可以继续缩小搜索；文档每页 10 条，接口上限 25 条，偏移上限 10,000，并设置查询及进程超时。支持文本、数字、布尔、空值/不存在、ObjectId 五种结构化筛选，校验字段、字节长度、数值精度和类型。文档保留 canonical Extended JSON 中的 ObjectId、日期、Int64、Decimal128 等类型；超过 65,536 个字符的文档明确标注预览并关闭完整文档复制，避免把截断内容当作完整记录。此轮为只读浏览，认证配置、数据编辑和图形备份恢复仍需继续完善。
+
+界面查询按实例进程、版本、端口、数据库、集合、筛选和分页隔离缓存；上游选择失效或实例改变时不继续展示旧范围文档，错误时隐藏旧结果并提供重试。数据库/集合采用真实下拉选项，布尔值和类型采用选择控件，筛选不要求输入 JSON。窄屏表单纵向排列，页签可横向滚动，长名称换行，文档内容换行并限制展开高度；卡片内虚线保留左右间距。浏览器演示在现有内存后端实现相同读取接口，也检查 MongoDB 与 Shell 的安装运行条件，没有冒充真实数据库。
+
+扩展既有 MongoDB 原生验收函数，没有新增测试文件。Windows MongoDB 8.0.4、mongosh 2.12.0 与 Database Tools 100.19.0 隔离验收最终通过（1 passed，41.33 秒）：实际安装、备份恢复和正常重启链路继续通过；数据库连接、分页、五种字段筛选、105 个用户集合的跨批次枚举、视图、特殊集合名称及字面量搜索可用。验证 Long 9007199254740993、Decimal128 12.50 和日期保留 BSON 类型；中文大文档正确截断。错误版本、缺失集合、非法字段/数字/偏移、错误数据目录和跨线程生命周期冲突均拒绝；改变设置端口与默认版本后仍连接实际运行的原实例。测试实例与临时文件已回收，用户实例和业务数据没有改动。结果代表本机 Windows，未声称 Mac 实机通过。
+
+离线 Chromium 使用实际数据库页函数、MongoDB 组件、React/Radix 与当前源码生成的验证样式，通过 37 项交互及状态检查，无 pageerror；核对 50 组中英文字段。1440px 中文、390px 中文、320px 英文截图已目检，长集合名、键盘展开、错误重试、分页、筛选、实例切换、缺失 Shell 和大文档复制限制均已检查。夹具隔离了其他数据库工作区、导航、剪贴板和 IPC，不将这些替代边界声称为完整桌面实机验收。Web/schema TypeScript、Rust 全工作区 all-targets 与 diff 检查通过，未启动前端 dev 或执行正式前端 build。
+
+十一处版本文件同步至 0.2.112，Cargo.lock 仅更新三个本项目 crate；发布范围为二十一个文件，保留用户原有未跟踪文件与本地产物。上一版 v0.2.111 的 Windows、macOS Apple Silicon、macOS Intel Release 均已确认 completed/success。本轮新增 annotated tag v0.2.112，与 main 一次原子推送，随后核对远程指向与 release.yml 实际状态。本次没有业务数据库变更，未修改 update.sql；整体产品完善目标继续进行。
+
+参考：https://support.servbay.com/database-management/getting-started/mongodb-management-and-usage
+参考：https://www.mongodb.com/docs/mongodb-shell/write-scripts/
+参考：https://www.mongodb.com/docs/manual/reference/method/db.getCollectionInfos/
+参考：https://www.mongodb.com/docs/mongodb-shell/reference/ejson/

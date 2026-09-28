@@ -635,6 +635,18 @@ export const DbUserInfo = z.object({
 });
 export type DbUserInfo = z.infer<typeof DbUserInfo>;
 
+export const MongoOverview = z.object({
+  kind: z.literal("overview"), version: z.string(), serverVersion: z.string(), port: z.number().int(), uri: z.string(),
+  shellVersion: z.string(), databases: z.array(z.string()), limited: z.boolean(),
+});
+export type MongoOverview = z.infer<typeof MongoOverview>;
+export const MongoCollections = z.object({ kind: z.literal("collections"), database: z.string(), entries: z.array(z.object({ name: z.string(), kind: z.string() })), limited: z.boolean() });
+export type MongoCollections = z.infer<typeof MongoCollections>;
+export const MongoDocuments = z.object({ kind: z.literal("documents"), database: z.string(), collection: z.string(), offset: z.number().int(), limit: z.number().int(), documents: z.array(z.object({ content: z.string(), truncated: z.boolean() })), hasMore: z.boolean() });
+export type MongoDocuments = z.infer<typeof MongoDocuments>;
+export const MongoFilter = z.object({ field: z.string(), value: z.string(), valueType: z.enum(["text", "number", "boolean", "null", "objectId"]) });
+export type MongoFilter = z.infer<typeof MongoFilter>;
+
 /* ============ PHP 扩展 ============ */
 
 export const PhpExtension = z.object({

@@ -80,7 +80,7 @@ function mockSiteFileScope(id: string, project: boolean, exclude: boolean): Site
 }
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.111";
+const MOCK_APP_VERSION = "0.2.112";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -2876,6 +2876,30 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return structuredClone(plan) as T;
     }
     case "postgres_backup_list": return structuredClone([...mockPostgresBackups.values()].map((entry) => entry.file).sort((a, b) => b.createdAt - a.createdAt)) as T;
+    case "mongodb_browse": {
+      const service = services.get("mongodb");
+      if (!service || !["running", "error"].includes(service.state) || !service.pids.length || service.version !== args!.version) throw { code: "MONGO_NOT_RUNNING", message: "所选 MongoDB 实例未运行或运行版本已变化" };
+      const shells = Array.from(packages.values()).filter(pkg => pkg.id === "mongosh" && pkg.install).sort((a,b) => cmpVersionDesc(a.version,b.version));
+      const shell = shells.find(pkg => pkg.active) ?? shells[0];
+      if (!shell) throw { code: "MONGO_SHELL_MISSING", message: "请先安装 MongoDB Shell，以启用数据库浏览" };
+      const request = args!.request as { action: string; database?: string; collection?: string; search?: string; offset?: number; limit?: number; filter?: import("@nsb/schema").MongoFilter | null };
+      if (request.action === "overview") return { kind: "overview", version: service.version, serverVersion: service.version, port: service.port, uri: `mongodb://127.0.0.1:${service.port}`, shellVersion: shell.version, databases: ["admin", "local", "niceenv_demo"], limited: false } as T;
+      if (request.action === "collections") return { kind: "collections", database: request.database, entries: request.database === "niceenv_demo" && "documents".includes((request.search ?? "").toLowerCase()) ? [{ name: "documents", kind: "collection" }] : [], limited: false } as T;
+      if (request.action !== "documents" || request.database !== "niceenv_demo" || request.collection !== "documents") throw { code: "MONGO_COLLECTION_MISSING", message: "所选集合已不存在，请刷新集合列表" };
+      let rows: Record<string, unknown>[] = Array.from({ length: 23 }, (_, i) => ({ _id: { $oid: (i+1).toString(16).padStart(24,"0") }, title: `预览文档 ${i+1}`, active: i%2 === 0, count: { $numberInt: String(i+1) }, createdAt: { $date: { $numberLong: "1790611200000" } } }));
+      const filter = request.filter;
+      if (filter) rows = rows.filter(row => {
+        let current: unknown = row;
+        for (const part of filter.field.split(".")) current = current && typeof current === "object" ? (current as Record<string,unknown>)[part] : undefined;
+        if (filter.valueType === "null") return current == null;
+        if (filter.valueType === "objectId") return !!current && typeof current === "object" && (current as Record<string,unknown>).$oid === filter.value.toLowerCase();
+        if (filter.valueType === "number") return !!current && typeof current === "object" && Number((current as Record<string,unknown>).$numberInt) === Number(filter.value);
+        if (filter.valueType === "boolean") return current === (filter.value === "true");
+        return current === filter.value;
+      });
+      const offset = request.offset ?? 0, limit = request.limit ?? 10;
+      return { kind: "documents", database: request.database, collection: request.collection, offset, limit, documents: rows.slice(offset,offset+limit).map(row => ({ content: JSON.stringify(row,null,2), truncated: false })), hasMore: offset+limit<rows.length } as T;
+    }
     case "postgres_backup_dir": return "C:/NiceEnv/backup/postgresql" as T;
     case "postgres_backup_delete": {
       if (!mockPostgresBackups.delete(args!.name as string)) throw { code: "FILE_NOT_FOUND", message: "备份文件已不存在" };

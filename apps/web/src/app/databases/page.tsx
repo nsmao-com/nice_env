@@ -37,6 +37,7 @@ import { PageHeader } from "@/components/layout/app-shell";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DatabaseGrantsSheet } from "@/components/shared/database-grants";
 import { PostgresManagement } from "@/components/shared/postgres-management";
+import { MongoManagement } from "@/components/shared/mongodb-management";
 import { RedisSettingsButton } from "@/components/shared/redis-settings";
 import { RedisPersistenceButton } from "@/components/shared/redis-persistence";
 import { RedisBackupsButton } from "@/components/shared/redis-backups";
@@ -47,17 +48,18 @@ export default function DatabasesPage() {
   const { data: services } = useServices();
   const [choice, setChoice] = React.useState<string | null>(null);
   const [locked, setLocked] = React.useState(false);
-  const selected = choice ?? (services.some((service) => service.id === "postgresql") && !services.some((service) => /^(mysql|mariadb)(@|$)/.test(service.id)) ? "postgresql" : "mysql");
+  const selected = choice ?? (services.some((service) => /^(mysql|mariadb)(@|$)/.test(service.id)) ? "mysql" : services.some((service) => service.id === "postgresql") ? "postgresql" : services.some((service) => service.id === "mongodb") ? "mongodb" : "mysql");
   const postgres = services.find((service) => service.id === "postgresql");
   return <div className="pb-8">
     <PageHeader title={t("db.title")} subtitle={t("db.subtitle")} />
     <Tabs value={selected} onValueChange={setChoice}>
-      <TabsList className="mb-5 flex w-fit max-w-full"><TabsTrigger value="mysql" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">MySQL / MariaDB</TabsTrigger><TabsTrigger value="postgresql" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">PostgreSQL</TabsTrigger></TabsList>
+      <div className="mb-5 max-w-full overflow-x-auto"><TabsList className="flex w-max"><TabsTrigger value="mysql" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">MySQL / MariaDB</TabsTrigger><TabsTrigger value="postgresql" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">PostgreSQL</TabsTrigger><TabsTrigger value="mongodb" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">MongoDB</TabsTrigger></TabsList></div>
       <TabsContent value="mysql"><MySqlWorkspace onLockChange={setLocked} /></TabsContent>
       <TabsContent value="postgresql">
         <div className="mb-5 grid grid-cols-1 gap-3 md:grid-cols-2"><PostgresInstanceCard /><RedisInstanceCard /></div>
         <PostgresManagement service={postgres} onLockChange={setLocked} />
       </TabsContent>
+      <TabsContent value="mongodb"><MongoManagement service={services.find(service => service.id === "mongodb")} /></TabsContent>
     </Tabs>
   </div>;
 }

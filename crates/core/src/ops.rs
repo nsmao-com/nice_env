@@ -4046,6 +4046,7 @@ const client = new MongoClient(`mongodb://127.0.0.1:${process.argv[2]}`, { direc
         client("write");
         // 可选真实官方工具包验收：安装管线、安装快照、管理终端及跨数据库备份恢复。
         if let Some(archives) = std::env::var_os("NSB_MONGO_TOOLS_ARCHIVES") {
+            assert_eq!(crate::mongodb::browse(&state, "8.0.4", crate::mongodb::BrowseRequest::Overview).unwrap_err().code, "MONGO_SHELL_MISSING");
             let archives = PathBuf::from(archives);
             let async_runtime = tokio::runtime::Runtime::new().unwrap();
             let mut bins = std::collections::HashMap::new();
@@ -4100,6 +4101,79 @@ const client = new MongoClient(`mongodb://127.0.0.1:${process.argv[2]}`, { direc
             let restore_uri = format!("mongodb://127.0.0.1:{port}/?directConnection=true&serverSelectionTimeoutMS=5000");
             run("mongodb-database-tools", "mongorestore", &["--uri", &restore_uri, &archive_arg, "--gzip", "--nsInclude=niceenv_fixture.*", "--nsFrom=niceenv_fixture.*", "--nsTo=niceenv_restored.*"]);
             client("restored");
+            use crate::mongodb::{BrowseRequest, BrowseResponse, DocumentFilter};
+            let overview = crate::mongodb::browse(&state, "8.0.4", BrowseRequest::Overview).unwrap();
+            match overview {
+                BrowseResponse::Overview { port: actual, databases, .. } => { assert_eq!(actual, port); assert!(databases.contains(&"niceenv_fixture".into())); assert!(databases.contains(&"niceenv_restored".into())); }
+                _ => panic!("wrong overview response"),
+            }
+            let collections = crate::mongodb::browse(&state, "8.0.4", BrowseRequest::Collections { database: "niceenv_fixture".into(), search: "doc".into() }).unwrap();
+            match collections { BrowseResponse::Collections { entries, .. } => assert_eq!(entries[0].name, "documents"), _ => panic!("wrong collections response") }
+            let page = |offset, filter| BrowseRequest::Documents { database: "niceenv_fixture".into(), collection: "documents".into(), offset, limit: 1, filter };
+            match crate::mongodb::browse(&state, "8.0.4", page(0, None)).unwrap() {
+                BrowseResponse::Documents { documents, has_more, .. } => { assert!(has_more); assert!(documents[0].content.contains("canary")); }
+                _ => panic!("wrong documents response"),
+            }
+            match crate::mongodb::browse(&state, "8.0.4", page(1, None)).unwrap() {
+                BrowseResponse::Documents { documents, has_more, .. } => { assert!(!has_more); assert!(documents[0].content.contains("工具链检查")); }
+                _ => panic!("wrong documents response"),
+            }
+            let equals = |field: &str, value: &str, kind: &str| Some(DocumentFilter { field: field.into(), value: value.into(), value_type: kind.into() });
+            for filter in [equals("count", "81", "number"), equals("value", "工具链检查", "text")] {
+                match crate::mongodb::browse(&state, "8.0.4", page(0, filter)).unwrap() {
+                    BrowseResponse::Documents { documents, has_more, .. } => { assert!(!has_more); assert_eq!(documents.len(), 1); assert!(!documents[0].truncated); }
+                    _ => panic!("wrong filtered response"),
+                }
+            }
+            assert_eq!(crate::mongodb::browse(&state, "99", BrowseRequest::Overview).unwrap_err().code, "MONGO_NOT_RUNNING");
+            assert_eq!(crate::mongodb::browse(&state, "8.0.4", page(0, equals("$where", "throw new Error('injection')", "text"))).unwrap_err().code, "MONGO_QUERY_INVALID");
+            assert_eq!(crate::mongodb::browse(&state, "8.0.4", page(0, equals("count", "NaN", "number"))).unwrap_err().code, "MONGO_QUERY_INVALID");
+            assert_eq!(crate::mongodb::browse(&state, "8.0.4", page(10_001, None)).unwrap_err().code, "MONGO_QUERY_INVALID");
+            let missing = BrowseRequest::Documents { database: "niceenv_fixture".into(), collection: "absent".into(), offset: 0, limit: 10, filter: None };
+            assert_eq!(crate::mongodb::browse(&state, "8.0.4", missing).unwrap_err().code, "MONGO_COLLECTION_MISSING");
+            run("mongosh", "mongosh", &[&uri, "--quiet", "--norc", "--eval", r#"
+const browse = db.getSiblingDB('niceenv_browse');
+for (let i=0;i<105;i++) browse.createCollection('collection_'+i);
+browse.getCollection("quotes'[];collection").insertOne({_id:ObjectId('0123456789abcdef01234567'), value:"'); db.dropDatabase();//", active:true, nothing:null, largeInteger:Long('9007199254740993'), precise:Decimal128('12.50'), date:new Date('2026-09-29T00:00:00Z')});
+browse.createView('view_documents', "quotes'[];collection", []);
+browse.large.insertOne({_id:'large', value:'中'.repeat(70000)});
+"#]);
+            match crate::mongodb::browse(&state, "8.0.4", BrowseRequest::Collections { database: "niceenv_browse".into(), search: String::new() }).unwrap() {
+                BrowseResponse::Collections { entries, limited, .. } => { assert_eq!(entries.iter().filter(|entry| entry.name.starts_with("collection_")).count(), 105); assert!(!limited); assert!(entries.iter().any(|entry| entry.kind == "view")); }
+                _ => panic!("wrong collections response"),
+            }
+            match crate::mongodb::browse(&state, "8.0.4", BrowseRequest::Collections { database: "niceenv_browse".into(), search: "[];".into() }).unwrap() {
+                BrowseResponse::Collections { entries, .. } => assert_eq!(entries.len(), 1), _ => panic!("wrong literal name search"),
+            }
+            let special = |collection: &str, filter| BrowseRequest::Documents { database: "niceenv_browse".into(), collection: collection.into(), offset: 0, limit: 10, filter };
+            for filter in [equals("value", "'); db.dropDatabase();//", "text"), equals("active", "true", "boolean"), equals("nothing", "", "null"), equals("_id", "0123456789abcdef01234567", "objectId")] {
+                match crate::mongodb::browse(&state, "8.0.4", special("quotes'[];collection", filter)).unwrap() {
+                    BrowseResponse::Documents { documents, .. } => {
+                        assert_eq!(documents.len(), 1);
+                        let data: serde_json::Value = serde_json::from_str(&documents[0].content).unwrap();
+                        assert_eq!(data["largeInteger"]["$numberLong"], "9007199254740993");
+                        assert_eq!(data["precise"]["$numberDecimal"], "12.50");
+                        assert!(data["date"]["$date"]["$numberLong"].is_string());
+                    }
+                    _ => panic!("wrong special document result"),
+                }
+            }
+            match crate::mongodb::browse(&state, "8.0.4", special("large", None)).unwrap() {
+                BrowseResponse::Documents { documents, .. } => { assert!(documents[0].truncated); assert_eq!(documents[0].content.chars().count(), 65_536); }
+                _ => panic!("wrong large document result"),
+            }
+            match crate::mongodb::browse(&state, "8.0.4", special("view_documents", None)).unwrap() {
+                BrowseResponse::Documents { documents, .. } => assert_eq!(documents.len(), 1), _ => panic!("wrong view result"),
+            }
+            let mut wrong_directory = isolated_state(Paths::new(temp.path().join("wrong mongo directory")));
+            wrong_directory.manager = state.manager.clone();
+            for package in state.store.list_installed().unwrap() { wrong_directory.store.upsert_installed(&package).unwrap(); }
+            assert_eq!(crate::mongodb::browse(&wrong_directory, "8.0.4", BrowseRequest::Overview).unwrap_err().code, "MONGO_INSTANCE_CHANGED");
+            let guard = state.manager.lifecycle.lock();
+            std::thread::scope(|scope| {
+                assert_eq!(scope.spawn(|| crate::mongodb::browse(&state, "8.0.4", BrowseRequest::Overview)).join().unwrap().unwrap_err().code, "SERVICE_BUSY");
+            });
+            drop(guard);
         }
         let preview = state.service_stop_preview("mongodb").unwrap();
         let entry = state
@@ -4141,6 +4215,12 @@ const client = new MongoClient(`mongodb://127.0.0.1:${process.argv[2]}`, { direc
             .store
             .set_port_override("mongodb", Some(unrelated.local_addr().unwrap().port()))
             .unwrap();
+        if std::env::var_os("NSB_MONGO_TOOLS_ARCHIVES").is_some() {
+            match crate::mongodb::browse(&state, "8.0.4", crate::mongodb::BrowseRequest::Overview).unwrap() {
+                crate::mongodb::BrowseResponse::Overview { port: actual, .. } => assert_eq!(actual, port),
+                _ => panic!("wrong instance response"),
+            }
+        }
         state.stop_service("mongodb").unwrap();
         assert!(!platform::process_alive(pid));
         let log = std::fs::read_to_string(state.paths.service_log("mongodb")).unwrap();

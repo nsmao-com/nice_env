@@ -1,4 +1,5 @@
 import type {
+  MongoOverview, MongoCollections, MongoDocuments, MongoFilter,
   ServiceStatus,
   ServiceStopPreview,
   SftpgoConfigDirectories,
@@ -366,6 +367,10 @@ export interface PostgresConnectionInfo {
   version: string; port: number; serverVersion: string; databaseCount: number; sizeBytes: number; passwordRequired: boolean;
 }
 export const postgresConnection = (version: string) => safe(invoke<PostgresConnectionInfo>("postgres_connection", { version }));
+export const mongoOverview = (version: string) => safe(invoke<MongoOverview>("mongodb_browse", { version, request: { action: "overview" } }));
+export const mongoCollections = (version: string, database: string, search: string) => safe(invoke<MongoCollections>("mongodb_browse", { version, request: { action: "collections", database, search } }));
+export const mongoDocuments = (version: string, database: string, collection: string, offset: number, limit: number, filter: MongoFilter | null) =>
+  safe(invoke<MongoDocuments>("mongodb_browse", { version, request: { action: "documents", database, collection, offset, limit, filter } }));
 export const postgresPassword = (version: string) => safe(invoke<string>("postgres_password", { version }));
 export const postgresSetPassword = (version: string, password: string, useExisting: boolean, enablePasswordAuth: boolean) =>
   safe(invoke<void>("postgres_set_password", { version, password, useExisting, enablePasswordAuth }));

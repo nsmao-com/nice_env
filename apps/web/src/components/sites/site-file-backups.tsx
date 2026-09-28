@@ -43,6 +43,7 @@ export function SiteFileBackups({ siteId, revision, active, disabled, dirty, onB
   const [deleting, setDeleting] = React.useState<api.SiteFileBackup | null>(null);
   const [parent, setParent] = React.useState<string | null>(null);
   const [trusted, setTrusted] = React.useState(false);
+  const [restorePreview, setRestorePreview] = React.useState<api.SiteFileRestorePreview | null>(null);
   const [restored, setRestored] = React.useState("");
   const [importOpen, setImportOpen] = React.useState(false);
   const [importPath, setImportPath] = React.useState("");
@@ -57,6 +58,7 @@ export function SiteFileBackups({ siteId, revision, active, disabled, dirty, onB
   const archives = useQuery({ queryKey, queryFn: () => api.siteFilesList(siteId), enabled: active && !busy, retry: false });
   React.useEffect(() => { setConfirmed(false); }, [project, exclude, revision, dirty, scope.data?.revision]);
   React.useEffect(() => { setImportConfirmed(false); setImportPreview(null); }, [revision, dirty]);
+  React.useEffect(() => { setRestorePreview(null); setTrusted(false); }, [revision, dirty, parent, restore?.name]);
   const locked = busy || planBusy || disabled || dirty;
   const filtered = (archives.data ?? []).filter((item) => `${item.name} ${item.root}`.toLowerCase().includes(search.trim().toLowerCase()));
   const pages = Math.max(1, Math.ceil(filtered.length / 5));
@@ -76,16 +78,18 @@ export function SiteFileBackups({ siteId, revision, active, disabled, dirty, onB
       const detail = normalizeError(failure);
       setError([detail.message, detail.hint].filter(Boolean).join(" · "));
       if (importOpen) { setImportPreview(null); setImportConfirmed(false); }
+      if (restore) { setRestorePreview(null); setTrusted(false); }
       if (detail.code === "SITE_BACKUP_CHANGED") { setConfirmed(false); void scope.refetch(); }
     } finally {
       unlisten?.(); setWorking(false); setProgress(null);
     }
   };
   const progressView = busy && <div role="status" className="space-y-1 rounded-lg bg-fill p-3 text-xs">
-    <p className="flex items-center gap-2"><RefreshCw className="size-3.5 shrink-0 animate-spin" />{t(progress?.phase === "inspect" ? "siteImport.inspect" : progress?.phase === "importRead" ? "siteImport.reading" : progress?.phase === "import" ? "siteImport.importing" : progress?.phase === "scan" ? "siteFiles.scan" : progress?.phase === "backup" ? "siteFiles.backup" : progress?.phase === "restore" ? "siteFiles.restoring" : progress?.phase === "complete" ? "siteFiles.complete" : "siteFiles.working")}</p>
+    <p className="flex items-center gap-2"><RefreshCw className="size-3.5 shrink-0 animate-spin" />{t(progress?.phase === "verifyRead" ? "siteVerify.reading" : progress?.phase === "verify" ? "siteVerify.verifying" : progress?.phase === "inspect" ? "siteImport.inspect" : progress?.phase === "importRead" ? "siteImport.reading" : progress?.phase === "import" ? "siteImport.importing" : progress?.phase === "scan" ? "siteFiles.scan" : progress?.phase === "backup" ? "siteFiles.backup" : progress?.phase === "restore" ? "siteFiles.restoring" : progress?.phase === "complete" ? "siteFiles.complete" : "siteFiles.working")}</p>
     {progress && <p className="tabular-nums text-muted">{t("siteFiles.files").replace("{count}", String(progress.files))} · {fmtBytes(progress.bytes)}</p>}
   </div>;
   const errorView = error && <p ref={errorRef} tabIndex={-1} role="alert" className="rounded-lg bg-error-soft p-3 text-xs leading-relaxed text-error outline-none focus-visible:ring-2 focus-visible:ring-error [overflow-wrap:anywhere]">{error}</p>;
+  const restoreArchive = restorePreview?.archive ?? restore;
   return <div className="min-w-0 space-y-5">
     <div className="space-y-2">
       <h3 className="text-sm font-semibold">{t("siteFiles.title")}</h3>
@@ -142,10 +146,11 @@ export function SiteFileBackups({ siteId, revision, active, disabled, dirty, onB
             {item.createdAt > 0 && <p className="text-xs text-muted">{new Date(item.createdAt).toLocaleString()}</p>}
             <p className="text-xs text-muted [overflow-wrap:anywhere]">{t("siteFiles.zip")} {fmtBytes(item.sizeBytes)} · {t("siteFiles.files").replace("{count}", String(item.files))} · {t("siteFiles.original")} {fmtBytes(item.originalBytes)}</p>
             <p className="font-mono text-xs text-muted [overflow-wrap:anywhere]">{item.root}</p>
+            {item.restorable && <p className="text-xs text-faint">{t("siteVerify.required")}</p>}
             {!item.restorable && <p className="text-xs text-error [overflow-wrap:anywhere]">{item.error || t("siteFiles.invalid")}</p>}
           </div>
           <div className="flex flex-wrap gap-2 border-t border-dashed border-separator pt-3">
-            <Button size="sm" variant="secondary" disabled={locked || !item.restorable} onClick={(event) => { restoreOpener.current = event.currentTarget; setError(null); setParent(null); setTrusted(false); setRestore(item); }}>{t("siteFiles.restore")}</Button>
+            <Button size="sm" variant="secondary" disabled={locked || !item.restorable} onClick={(event) => { restoreOpener.current = event.currentTarget; setError(null); setParent(null); setTrusted(false); setRestorePreview(null); setRestore(item); }}>{t("siteVerify.open")}</Button>
             <Button size="sm" variant="ghost" disabled={!isTauri || busy} onClick={() => api.openInFolder(item.path).catch(toastError)}><FolderOpen className="size-3.5" />{t("siteFiles.folder")}</Button>
             <Button size="sm" variant="ghost" className="text-error" disabled={locked} onClick={(event) => { deleteOpener.current = event.currentTarget; setError(null); setDeleting(item); }}><Trash2 className="size-3.5" />{t("common.delete")}</Button>
           </div>
@@ -201,8 +206,8 @@ export function SiteFileBackups({ siteId, revision, active, disabled, dirty, onB
     <Dialog open={!!restore} onOpenChange={(open) => { if (!open && !busyRef.current) { setRestore(null); setError(null); } }}>
       <DialogContent hideClose={busy} className="flex max-h-[85dvh] flex-col overflow-hidden" onCloseAutoFocus={(event) => { if (restoreOpener.current?.isConnected) { event.preventDefault(); restoreOpener.current.focus(); } }}>
         <div className="min-h-0 min-w-0 space-y-4 overflow-y-auto">
-          <DialogHeader><DialogTitle className="pr-5 leading-snug">{t("siteFiles.restore")}</DialogTitle><DialogDescription className="text-xs leading-relaxed">{t("siteFiles.restoreHint")}</DialogDescription></DialogHeader>
-          {restore && <div className="space-y-2 rounded-lg bg-fill p-3 text-xs [overflow-wrap:anywhere]"><p className="font-mono">{restore.name}</p><p className="font-mono text-muted">{restore.root}</p><p>{t("siteFiles.excluded")}: {restore.excluded.join(", ") || t("siteFiles.noExclusions")}</p></div>}
+          <DialogHeader><DialogTitle className="pr-5 leading-snug">{t("siteVerify.open")}</DialogTitle><DialogDescription className="text-xs leading-relaxed">{t("siteFiles.restoreHint")}</DialogDescription></DialogHeader>
+          {restoreArchive && <div className="space-y-2 rounded-lg bg-fill p-3 text-xs [overflow-wrap:anywhere]"><p className="font-mono">{restoreArchive.name}</p><p className="font-mono text-muted">{restoreArchive.root}</p><p>{t("siteFiles.excluded")}: {restoreArchive.excluded.join(", ") || t("siteFiles.noExclusions")}</p></div>}
           <div className="space-y-2"><p className="text-xs font-medium">{t("siteFiles.parent")}</p><p className="font-mono text-xs [overflow-wrap:anywhere]">{parent || t("siteFiles.defaultParent")}</p>
             <div className="flex flex-wrap gap-2"><Button size="sm" variant="secondary" disabled={locked || !isTauri} onClick={async () => {
               if (busyRef.current || planBusyRef.current || disabled || dirty) return;
@@ -213,15 +218,32 @@ export function SiteFileBackups({ siteId, revision, active, disabled, dirty, onB
             }}>{t("siteFiles.choose")}</Button>{parent && <Button size="sm" variant="ghost" disabled={locked} onClick={() => setParent(null)}>{t("siteFiles.default")}</Button>}</div>
             {!isTauri && <p className="text-xs text-muted">{t("siteFiles.desktopPicker")}</p>}
           </div>
-          <label className="flex items-start gap-2.5 border-t border-dashed border-separator pt-4 text-xs leading-relaxed"><input type="checkbox" className="mt-0.5 size-4 shrink-0 accent-primary" checked={trusted} disabled={locked} onChange={(event) => setTrusted(event.target.checked)} /><span>{t("siteFiles.trust")}</span></label>
+          {!isTauri && <p className="rounded-lg bg-warn-soft p-3 text-xs leading-relaxed text-warn">{t("siteFiles.preview")}</p>}
+          {!restorePreview ? <p className="text-xs leading-relaxed text-muted">{t("siteVerify.hint")}</p> : <section className="space-y-3 border-t border-dashed border-separator pt-4">
+            <div role="status" className="space-y-2 rounded-lg bg-running-soft p-3 text-xs [overflow-wrap:anywhere]">
+              <p className="font-medium text-running">{t(isTauri ? "siteVerify.passed" : "siteVerify.previewPassed")}</p>
+              <p>{t("siteFiles.files").replace("{count}", String(restorePreview.archive.files))} · {fmtBytes(restorePreview.archive.originalBytes)} · {new Date(restorePreview.verifiedAt).toLocaleString()}</p>
+              <p className="text-muted">{t("siteVerify.destination")}</p><p className="font-mono">{restorePreview.parent}</p>
+            </div>
+            <details className="text-xs"><summary className="cursor-pointer font-medium">{t("siteVerify.contents").replace("{shown}", String(restorePreview.entries.length)).replace("{total}", String(restorePreview.totalEntries))}</summary>
+              {restorePreview.entries.length ? <ul className="mt-3 max-h-48 space-y-2 overflow-y-auto rounded-lg bg-fill p-3">{restorePreview.entries.map((entry) => <li key={entry.path} className="flex min-w-0 items-start justify-between gap-3"><span className="min-w-0 font-mono [overflow-wrap:anywhere]">{entry.path}{entry.directory ? "/" : ""}</span><span className="shrink-0 text-muted">{entry.directory ? t("siteVerify.directory") : fmtBytes(entry.size)}</span></li>)}</ul> : <p className="mt-2 text-muted">{t("siteVerify.empty")}</p>}
+              <p className="mt-2 leading-relaxed text-muted">{t("siteVerify.allChecked")}</p>
+            </details>
+            {isTauri && <details className="text-xs text-muted"><summary className="cursor-pointer">ZIP SHA256</summary><div className="mt-2 flex items-start gap-2"><code className="min-w-0 flex-1 [overflow-wrap:anywhere]">{restorePreview.sha256}</code><CopyButton text={restorePreview.sha256} /></div></details>}
+            <label className="flex items-start gap-2.5 text-xs leading-relaxed"><input type="checkbox" className="mt-0.5 size-4 shrink-0 accent-primary" checked={trusted} disabled={locked} onChange={(event) => setTrusted(event.target.checked)} /><span>{t("siteFiles.trust")}</span></label>
+          </section>}
           {progressView}{errorView}
         </div>
         <DialogFooter className="shrink-0 flex-wrap border-t border-dashed border-separator pt-4">
           <Button variant="ghost" disabled={busy} onClick={() => { setRestore(null); setError(null); }}>{t("common.cancel")}</Button>
-          <Button className="h-auto min-h-9 whitespace-normal" disabled={locked || !trusted} onClick={() => restore && void run(async (operationId) => {
-            const path = await api.siteFilesRestore(siteId, restore.name, parent, trusted, operationId);
-            setRestored(path); setRestore(null); toast.success(t("siteFiles.restored"));
-          })}>{t("siteFiles.restore")}</Button>
+          <Button variant={restorePreview ? "secondary" : "default"} className="h-auto min-h-9 whitespace-normal" disabled={locked || !restore} onClick={() => restore && void run(async (operationId) => {
+            setRestorePreview(null); setTrusted(false);
+            setRestorePreview(await api.siteFilesInspectRestore(siteId, restore.name, parent, operationId));
+          })}>{t(restorePreview ? "siteVerify.recheck" : "siteVerify.check")}</Button>
+          {restorePreview && <Button className="h-auto min-h-9 whitespace-normal" disabled={locked || !trusted} onClick={() => restore && void run(async (operationId) => {
+            const path = await api.siteFilesRestore(siteId, restore.name, parent, restorePreview.revision, trusted, operationId);
+            setRestored(path); setRestorePreview(null); setRestore(null); toast.success(t("siteFiles.restored"));
+          })}>{t("siteFiles.restore")}</Button>}
         </DialogFooter>
       </DialogContent>
     </Dialog>

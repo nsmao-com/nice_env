@@ -75,6 +75,24 @@ pub struct ImportPreview {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RestoreEntry {
+    pub path: String,
+    pub directory: bool,
+    pub size: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestorePreview {
+    pub archive: BackupInfo,
+    pub parent: String,
+    pub revision: String,
+    pub sha256: String,
+    pub verified_at: i64,
+    pub entries: Vec<RestoreEntry>,
+    pub total_entries: usize,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Entry {
     path: String,
     directory: bool,
@@ -570,7 +588,7 @@ pub fn list(paths: &Paths, id: &str) -> Result<Vec<BackupInfo>> {
         let path = entry.path();
         let opened = archive_path(paths, id, &name)
             .and_then(|path| open_plain(&path))
-            .and_then(|file| zip::ZipArchive::new(file).map_err(archive_error))
+            .and_then(open_snapshot)
             .and_then(|mut zip| read_manifest(&mut zip, Some(id)));
         result.push(match opened {
             Ok(manifest) => info(&path, manifest),
@@ -906,25 +924,16 @@ pub fn import_archive(
         }
         let mut input = zip.by_name(&key).map_err(archive_error)?;
         output.start_file(key, options).map_err(archive_error)?;
-        let mut hash = Sha256::new();
-        let mut written = 0;
-        loop {
-            let count = input.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            written += count as u64;
-            if written > entry.size {
-                return Err(invalid("归档解压大小与清单不一致"));
-            }
-            output.write_all(&buffer[..count])?;
-            hash.update(&buffer[..count]);
-            bytes += count as u64;
-            progress("import", files, bytes);
-        }
-        if written != entry.size || hex::encode(hash.finalize()) != entry.sha256.to_lowercase() {
-            return Err(invalid("归档文件校验失败，未导入"));
-        }
+        copy_verified(
+            &mut input,
+            &mut output,
+            entry,
+            &mut buffer,
+            files,
+            &mut bytes,
+            "import",
+            progress,
+        )?;
         files += 1;
     }
     manifest.site_id = id.into();
@@ -959,28 +968,7 @@ pub fn import_archive(
     Ok(info(&destination, manifest))
 }
 
-pub fn restore(
-    state: &crate::CoreState,
-    id: &str,
-    name: &str,
-    parent: Option<&str>,
-    trusted: bool,
-    progress: &dyn Fn(&str, u64, u64),
-) -> Result<String> {
-    if !trusted {
-        return Err(invalid(
-            "请先确认归档来源可信；恢复的项目文件可能包含可执行代码和密钥",
-        ));
-    }
-    let _work = crate::BackgroundWork::begin("恢复站点文件")?;
-    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
-    let _lock = lock(&state.paths, id)?;
-    let path = archive_path(&state.paths, id, name)?;
-    let mut zip = zip::ZipArchive::new(open_plain(&path)?).map_err(archive_error)?;
-    let manifest = read_manifest(&mut zip, Some(id))?;
-    if zip.len() != manifest.entries.len() + 1 {
-        return Err(invalid("归档条目与清单不一致"));
-    }
+fn restore_parent(state: &crate::CoreState, id: &str, parent: Option<&str>) -> Result<PathBuf> {
     let parent = match parent {
         Some(path) if !path.is_empty() => plain_directory(Path::new(path))?,
         _ => {
@@ -1004,6 +992,174 @@ pub fn restore(
     if within(&parent, archive_dir.parent().unwrap_or(&state.paths.base)) {
         return Err(invalid("不能把项目恢复到归档目录内"));
     }
+    Ok(parent)
+}
+fn restore_revision(site: &Site, name: &str, digest: &str, parent: &Path) -> Result<String> {
+    Ok(hex::encode(Sha256::digest(
+        serde_json::to_vec(&(import_revision(site, digest)?, name, parent))
+            .map_err(|error| invalid(error.to_string()))?,
+    )))
+}
+fn restore_changed() -> AppError {
+    AppError::new(
+        "SITE_RESTORE_CHANGED",
+        "归档、站点或恢复目录已变化，请重新校验并确认",
+    )
+}
+
+// 同一流式内容校验用于预检、导入和恢复；读取到 EOF 才能核对 ZIP CRC。
+fn copy_verified(
+    input: &mut dyn Read,
+    output: &mut dyn Write,
+    entry: &Entry,
+    buffer: &mut [u8],
+    files: u64,
+    bytes: &mut u64,
+    phase: &str,
+    progress: &dyn Fn(&str, u64, u64),
+) -> Result<()> {
+    let mut digest = Sha256::new();
+    let mut written = 0;
+    loop {
+        let count = input.read(buffer).map_err(|error| {
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
+            ) {
+                invalid(format!("归档文件损坏或校验失败：{}", entry.path))
+                    .with_hint("请使用其它归档，或重新拷贝完整 ZIP 后再校验")
+                    .with_detail(error.to_string())
+            } else {
+                AppError::io("读取归档文件", error)
+            }
+        })?;
+        if count == 0 {
+            break;
+        }
+        written += count as u64;
+        if written > entry.size {
+            return Err(invalid("归档解压大小与清单不一致"));
+        }
+        output.write_all(&buffer[..count])?;
+        digest.update(&buffer[..count]);
+        *bytes += count as u64;
+        progress(phase, files, *bytes);
+    }
+    if written != entry.size || hex::encode(digest.finalize()) != entry.sha256.to_lowercase() {
+        return Err(invalid(format!("归档文件校验失败：{}", entry.path)));
+    }
+    progress(phase, files + 1, *bytes);
+    Ok(())
+}
+
+pub fn inspect_restore(
+    state: &crate::CoreState,
+    id: &str,
+    name: &str,
+    parent: Option<&str>,
+    progress: &dyn Fn(&str, u64, u64),
+) -> Result<RestorePreview> {
+    let _work = crate::BackgroundWork::begin("校验站点归档")?;
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    let _lock = lock(&state.paths, id)?;
+    let target = site(&state.store, id)?;
+    let parent = restore_parent(state, id, parent)?;
+    let path = archive_path(&state.paths, id, name)?;
+    let (snapshot, path, digest) = snapshot_source(
+        &state.paths,
+        &path.to_string_lossy(),
+        "verifyRead",
+        progress,
+    )?;
+    let mut zip = open_snapshot(snapshot.reopen()?)?;
+    let manifest = read_manifest(&mut zip, Some(id))?;
+    // 临时空目录同时核对目标可写和本机路径规则；预检不释放任何项目文件。
+    let scratch = tempfile::Builder::new()
+        .prefix(".site-restore-check-")
+        .tempdir_in(&parent)?;
+    validate_manifest(&mut zip, &manifest, scratch.path())?;
+    let (mut files, mut bytes) = (0, 0);
+    let mut buffer = vec![0; 256 * 1024];
+    progress("verify", 0, 0);
+    for entry in &manifest.entries {
+        if entry.directory {
+            continue;
+        }
+        let mut input = zip
+            .by_name(&format!("files/{}", entry.path))
+            .map_err(archive_error)?;
+        copy_verified(
+            &mut input,
+            &mut std::io::sink(),
+            entry,
+            &mut buffer,
+            files,
+            &mut bytes,
+            "verify",
+            progress,
+        )?;
+        files += 1;
+    }
+    let revision = restore_revision(&target, name, &digest, &parent)?;
+    let current_parent = restore_parent(state, id, Some(&parent.to_string_lossy()))?;
+    if restore_revision(&site(&state.store, id)?, name, &digest, &current_parent)? != revision {
+        return Err(restore_changed());
+    }
+    let total_entries = manifest.entries.len();
+    let entries = manifest
+        .entries
+        .iter()
+        .take(100)
+        .map(|entry| RestoreEntry {
+            path: entry.path.clone(),
+            directory: entry.directory,
+            size: entry.size,
+        })
+        .collect();
+    let mut archive = info(&path, manifest);
+    archive.size_bytes = snapshot.as_file().metadata()?.len();
+    progress("complete", files, bytes);
+    Ok(RestorePreview {
+        archive,
+        parent: parent.to_string_lossy().into(),
+        revision,
+        sha256: digest,
+        verified_at: crate::services::now_ms(),
+        entries,
+        total_entries,
+    })
+}
+
+pub fn restore(
+    state: &crate::CoreState,
+    id: &str,
+    name: &str,
+    parent: Option<&str>,
+    revision: &str,
+    trusted: bool,
+    progress: &dyn Fn(&str, u64, u64),
+) -> Result<String> {
+    if !trusted {
+        return Err(invalid(
+            "请先确认归档来源可信；恢复的项目文件可能包含可执行代码和密钥",
+        ));
+    }
+    let _work = crate::BackgroundWork::begin("恢复站点文件")?;
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    let _lock = lock(&state.paths, id)?;
+    let parent = restore_parent(state, id, parent)?;
+    let path = archive_path(&state.paths, id, name)?;
+    let (snapshot, _, digest) = snapshot_source(
+        &state.paths,
+        &path.to_string_lossy(),
+        "verifyRead",
+        progress,
+    )?;
+    if restore_revision(&site(&state.store, id)?, name, &digest, &parent)? != revision {
+        return Err(restore_changed());
+    }
+    let mut zip = open_snapshot(snapshot.reopen()?)?;
+    let manifest = read_manifest(&mut zip, Some(id))?;
     // 私有新目录由 tempfile 原子创建；不使用用户输入作为目标子目录名，不覆盖既有目录。
     let pending = tempfile::Builder::new()
         .prefix("restored-site-")
@@ -1027,25 +1183,16 @@ pub fn restore(
             .create_new(true)
             .write(true)
             .open(&target)?;
-        let mut digest = Sha256::new();
-        let mut written = 0;
-        loop {
-            let n = member.read(&mut buffer)?;
-            if n == 0 {
-                break;
-            }
-            written += n as u64;
-            if written > entry.size {
-                return Err(invalid("归档解压大小与清单不一致"));
-            }
-            output.write_all(&buffer[..n])?;
-            digest.update(&buffer[..n]);
-            bytes += n as u64;
-            progress("restore", files, bytes);
-        }
-        if written != entry.size || hex::encode(digest.finalize()) != entry.sha256.to_lowercase() {
-            return Err(invalid("归档校验失败，未保留恢复副本"));
-        }
+        copy_verified(
+            &mut member,
+            &mut output,
+            entry,
+            &mut buffer,
+            files,
+            &mut bytes,
+            "restore",
+            progress,
+        )?;
         output.sync_all()?;
         drop(output);
         files += 1;
@@ -1054,6 +1201,10 @@ pub fn restore(
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(target, fs::Permissions::from_mode(entry.mode & 0o777))?;
         }
+    }
+    let current_parent = restore_parent(state, id, Some(&parent.to_string_lossy()))?;
+    if restore_revision(&site(&state.store, id)?, name, &digest, &current_parent)? != revision {
+        return Err(restore_changed());
     }
     progress("complete", files, bytes);
     Ok(pending.keep().to_string_lossy().into())

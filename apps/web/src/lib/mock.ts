@@ -80,7 +80,7 @@ function mockSiteFileScope(id: string, project: boolean, exclude: boolean): Site
 }
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.96";
+const MOCK_APP_VERSION = "0.2.97";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -1929,10 +1929,23 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const info: SiteFileBackup = { name, path: `C:/NiceEnv/backup/sites/preview/${name}`, sizeBytes: 24576, createdAt: Date.now(), files: 12, originalBytes: 98304, root: scope.root, excluded: scope.excluded, restorable: true, error: null, automatic: false };
       siteFileArchives.set(id, [info, ...(siteFileArchives.get(id) ?? [])]); return structuredClone(info) as T;
     }
+    case "site_files_inspect_restore": {
+      const id = String(args!.id);
+      const archive = siteFileArchives.get(id)?.find((item) => item.name === args!.name && item.restorable);
+      if (!archive || !sites.has(id)) throw { code: "SITE_BACKUP_INVALID", message: "归档或站点已不存在，请刷新列表" };
+      const parent = String(args!.parent || "C:/NiceEnv/restored-sites");
+      for (const phase of ["verifyRead", "verify", "complete"]) { emitLocal("site-files://progress", { operationId: args!.operationId, siteId: id, phase, files: phase === "verifyRead" ? 0 : archive.files, bytes: phase === "verifyRead" ? archive.sizeBytes : archive.originalBytes }); await delay(400); }
+      const entries = Array.from({ length: Math.min(archive.files, 100) }, (_, index) => ({ path: `demo/file-${index + 1}.txt`, directory: false, size: Math.floor(archive.originalBytes / archive.files) }));
+      return { archive: structuredClone(archive), parent, sha256: "browser-preview", verifiedAt: Date.now(), entries, totalEntries: archive.files,
+        revision: JSON.stringify([id, archive, parent, sites.get(id)?.updatedAt]) } as T;
+    }
     case "site_files_restore": {
       const id = String(args!.id);
       if (!args!.trusted) throw { code: "SITE_BACKUP_INVALID", message: "请确认归档来源可信" };
-      if (!siteFileArchives.get(id)?.some((item) => item.name === args!.name && item.restorable)) throw { code: "SITE_BACKUP_INVALID", message: "归档已不存在或无法读取" };
+      const archive = siteFileArchives.get(id)?.find((item) => item.name === args!.name && item.restorable);
+      if (!archive || !sites.has(id)) throw { code: "SITE_BACKUP_INVALID", message: "归档或站点已不存在，请刷新列表" };
+      const parent = String(args!.parent || "C:/NiceEnv/restored-sites");
+      if (args!.revision !== JSON.stringify([id, archive, parent, sites.get(id)?.updatedAt])) throw { code: "SITE_RESTORE_CHANGED", message: "归档、站点或恢复目录已变化，请重新校验" };
       for (let count = 0; count <= 3; count++) { emitLocal("site-files://progress", { operationId: args!.operationId, siteId: id, phase: count === 3 ? "complete" : "restore", files: count * 4, bytes: count * 32768 }); await delay(350); }
       return `${args!.parent || "C:/NiceEnv/restored-sites"}/restored-site-${crypto.randomUUID().slice(0, 8)}` as T;
     }

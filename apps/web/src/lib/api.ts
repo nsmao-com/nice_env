@@ -450,8 +450,14 @@ export const siteFilesScope = (id: string, project: boolean, excludeGenerated: b
 export const siteFilesList = (id: string) => safe(invoke<SiteFileBackup[]>("site_files_list", { id }));
 export const siteFilesCreate = (id: string, project: boolean, excludeGenerated: boolean, revision: string, confirmed: boolean, operationId: string) =>
   safe(invoke<SiteFileBackup>("site_files_create", { id, project, excludeGenerated, revision, confirmed, operationId }));
-export const siteFilesRestore = (id: string, name: string, parent: string | null, trusted: boolean, operationId: string) =>
-  safe(invoke<string>("site_files_restore", { id, name, parent, trusted, operationId }));
+export interface SiteFileRestorePreview {
+  archive: SiteFileBackup; parent: string; revision: string; sha256: string; verifiedAt: number;
+  entries: { path: string; directory: boolean; size: number }[]; totalEntries: number;
+}
+export const siteFilesInspectRestore = (id: string, name: string, parent: string | null, operationId: string) =>
+  safe(invoke<SiteFileRestorePreview>("site_files_inspect_restore", { id, name, parent, operationId }));
+export const siteFilesRestore = (id: string, name: string, parent: string | null, revision: string, trusted: boolean, operationId: string) =>
+  safe(invoke<string>("site_files_restore", { id, name, parent, revision, trusted, operationId }));
 export const siteFilesDelete = (id: string, name: string) => safe(invoke<void>("site_files_delete", { id, name }));
 
 export interface SiteFileImportPreview {

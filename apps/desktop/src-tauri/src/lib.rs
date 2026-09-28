@@ -369,6 +369,8 @@ pub fn run() {
             postgres_set_password,
             postgres_databases,
             postgres_roles,
+            postgres_role_access,
+            postgres_role_access_save,
             postgres_create_database,
             postgres_drop_database,
             postgres_create_role,
@@ -1529,6 +1531,20 @@ async fn postgres_databases(state: State<'_, std::sync::Arc<nsb_core::CoreState>
 async fn postgres_roles(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String) -> Result<Vec<nsb_core::dbadmin::PostgresRoleInfo>, tauri::Error> {
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.with_postgres(&version, |client| client.list_roles()))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn postgres_role_access(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, name: String, oid: u32) -> Result<nsb_core::dbadmin::PostgresRoleAccess, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.with_postgres(&version, |client| client.role_access(&name, oid)))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn postgres_role_access_save(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, input: nsb_core::dbadmin::PostgresRoleAccessInput) -> Result<nsb_core::dbadmin::PostgresRoleAccess, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::dbadmin::update_postgres_role_access(&st, &version, &input))).await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

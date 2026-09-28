@@ -3429,6 +3429,78 @@ mod validate_tests {
         client.set_role_password(&role.name, role.oid, new_password).unwrap();
         assert!(!account_query(account_password, "SELECT 1;").status.success());
         assert!(account_query(new_password, "SELECT value FROM project_proof;").status.success());
+        // 普通账号连接控制：以真实登录、并存会话和连接池行为验收，不只核对目录值。
+        let access = client.role_access(&role.name, role.oid).unwrap();
+        assert!(access.can_login && access.connection_limit == -1 && access.active_connections == 0);
+        let mut access_input = crate::dbadmin::PostgresRoleAccessInput { name: role.name.clone(), oid: role.oid, can_login: true, connection_limit: 1, revision: access.revision.clone(), confirm_restriction: false };
+        let save_access = |input: &crate::dbadmin::PostgresRoleAccessInput| crate::dbadmin::update_postgres_role_access(&state, "16.6", input);
+        assert_eq!(save_access(&access_input).unwrap_err().code, "POSTGRES_CONFIRM_RESTRICTION");
+        assert_eq!(client.role_access(&role.name, role.oid).unwrap().connection_limit, -1);
+        access_input.confirm_restriction = true;
+        let limited = save_access(&access_input).unwrap();
+        assert_eq!(limited.connection_limit, 1);
+        assert_eq!(save_access(&access_input).unwrap_err().code, "POSTGRES_ACCESS_CHANGED");
+        access_input.revision = limited.revision.clone();
+        assert_eq!(save_access(&crate::dbadmin::PostgresRoleAccessInput { connection_limit: -2, ..access_input.clone() }).unwrap_err().code, "POSTGRES_BAD_LIMIT");
+        assert_eq!(save_access(&crate::dbadmin::PostgresRoleAccessInput { oid: role.oid + 1, ..access_input.clone() }).unwrap_err().code, "POSTGRES_TARGET_CHANGED");
+        let administrator = client.list_roles().unwrap().into_iter().find(|role| role.name == "postgres").unwrap();
+        let admin_access = client.role_access(&administrator.name, administrator.oid).unwrap();
+        assert!(admin_access.protected);
+        assert_eq!(save_access(&crate::dbadmin::PostgresRoleAccessInput { name: administrator.name, oid: administrator.oid, revision: admin_access.revision, ..access_input.clone() }).unwrap_err().code, "POSTGRES_PROTECTED");
+        struct AccessSession(Option<std::process::Child>);
+        impl Drop for AccessSession { fn drop(&mut self) { if let Some(child) = self.0.as_mut() { let _ = child.kill(); let _ = child.wait(); } } }
+        let (_account_private, mut live_command) = account_command(new_password);
+        let mut live = AccessSession(Some(live_command.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap()));
+        let mut live_input = live.0.as_mut().unwrap().stdin.take().unwrap();
+        std::io::Write::write_all(&mut live_input, b"SELECT 1;\n").unwrap();
+        std::io::Write::flush(&mut live_input).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while client.role_access(&role.name, role.oid).unwrap().active_connections == 0 {
+            assert!(std::time::Instant::now() < deadline, "account session did not connect");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(client.role_access(&role.name, role.oid).unwrap().revision, limited.revision);
+        let rejected = account_query(new_password, "SELECT 1;");
+        assert!(!rejected.status.success() && String::from_utf8_lossy(&rejected.stderr).contains("too many connections"));
+        access_input.can_login = false;
+        let paused = save_access(&access_input).unwrap();
+        assert!(!paused.can_login && paused.active_connections == 1);
+        let rejected = account_query(new_password, "SELECT 1;");
+        assert!(!rejected.status.success() && String::from_utf8_lossy(&rejected.stderr).contains("not permitted to log in"));
+        access_input.revision = paused.revision; access_input.can_login = true; access_input.connection_limit = 0;
+        let zero = save_access(&access_input).unwrap();
+        assert!(zero.can_login && zero.active_connections == 1 && zero.connection_limit == 0);
+        assert!(!account_query(new_password, "SELECT 1;").status.success());
+        std::io::Write::write_all(&mut live_input, b"SELECT value FROM project_proof;\n").unwrap();
+        drop(live_input);
+        let existing = live.0.take().unwrap().wait_with_output().unwrap();
+        assert!(existing.status.success() && String::from_utf8_lossy(&existing.stdout).contains("84"), "{}", String::from_utf8_lossy(&existing.stderr));
+        // 外部管理员改变属性会使旧快照失效，失败不得覆盖外部改动。
+        client.query("ALTER ROLE project_user CREATEDB;").unwrap();
+        access_input.revision = zero.revision; access_input.connection_limit = -1;
+        assert_eq!(save_access(&access_input).unwrap_err().code, "POSTGRES_ACCESS_CHANGED");
+        assert_eq!(client.role_access(&role.name, role.oid).unwrap().connection_limit, 0);
+        client.query("ALTER ROLE project_user NOCREATEDB;").unwrap();
+        access_input.revision = client.role_access(&role.name, role.oid).unwrap().revision;
+        let restored_access = save_access(&access_input).unwrap();
+        assert!(restored_access.can_login && restored_access.connection_limit == -1);
+        assert!(account_query(new_password, "SELECT value FROM project_proof;").status.success());
+        let after_access = client.list_roles().unwrap().into_iter().find(|entry| entry.oid == role.oid).unwrap();
+        assert!(!after_access.superuser && !after_access.create_db && !after_access.create_role && !after_access.replication && !after_access.bypass_rls);
+        assert_eq!(after_access.databases, vec!["project_data".to_string()]);
+        let unusual = "access'\"$role$中文";
+        let unusual_ident = crate::dbadmin::postgres_ident(unusual).unwrap();
+        client.query(&format!("CREATE ROLE {unusual_ident} LOGIN;")).unwrap();
+        let unusual_role = client.list_roles().unwrap().into_iter().find(|entry| entry.name == unusual).unwrap();
+        let unusual_access = client.role_access(unusual, unusual_role.oid).unwrap();
+        let unusual_input = crate::dbadmin::PostgresRoleAccessInput { name: unusual.into(), oid: unusual_role.oid, can_login: false, connection_limit: 2, revision: unusual_access.revision, confirm_restriction: true };
+        assert!(!save_access(&unusual_input).unwrap().can_login);
+        client.drop_role(unusual, unusual_role.oid).unwrap();
+        client.query(&format!("CREATE ROLE {unusual_ident} LOGIN;")).unwrap();
+        assert_eq!(save_access(&unusual_input).unwrap_err().code, "POSTGRES_TARGET_CHANGED");
+        let replacement = client.list_roles().unwrap().into_iter().find(|entry| entry.name == unusual).unwrap();
+        assert!(replacement.can_login && replacement.connection_limit == -1);
+        client.drop_role(unusual, replacement.oid).unwrap();
         // 归档必须能恢复真实结构、Unicode/二进制数据和序列；不依赖浏览器演示结果。
         let pg_query = |database: &str, sql: &str| {
             let (_private, mut command) = client.tool_command("psql", database, None).unwrap();

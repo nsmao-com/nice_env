@@ -331,7 +331,11 @@ export const postgresPassword = (version: string) => safe(invoke<string>("postgr
 export const postgresSetPassword = (version: string, password: string, useExisting: boolean, enablePasswordAuth: boolean) =>
   safe(invoke<void>("postgres_set_password", { version, password, useExisting, enablePasswordAuth }));
 export interface PostgresDatabaseInfo { oid: number; name: string; owner: string; encoding: string; sizeBytes: number; protected: boolean; allowConnections: boolean }
-export interface PostgresRoleInfo { oid: number; name: string; canLogin: boolean; superuser: boolean; createDb: boolean; createRole: boolean; replication: boolean; bypassRls: boolean; protected: boolean; databases: string[] }
+export interface PostgresRoleInfo { oid: number; name: string; canLogin: boolean; connectionLimit: number; superuser: boolean; createDb: boolean; createRole: boolean; replication: boolean; bypassRls: boolean; protected: boolean; databases: string[] }
+export interface PostgresRoleAccess { oid: number; name: string; canLogin: boolean; connectionLimit: number; activeConnections: number; protected: boolean; revision: string }
+export interface PostgresRoleAccessInput { oid: number; name: string; canLogin: boolean; connectionLimit: number; revision: string; confirmRestriction: boolean }
+export const postgresRoleAccess = (version: string, name: string, oid: number) => safe(invoke<PostgresRoleAccess>("postgres_role_access", { version, name, oid }));
+export const postgresRoleAccessSave = (version: string, input: PostgresRoleAccessInput) => safe(invoke<PostgresRoleAccess>("postgres_role_access_save", { version, input }));
 export const postgresDatabases = (version: string) => safe(invoke<PostgresDatabaseInfo[]>("postgres_databases", { version }));
 export const postgresRoles = (version: string) => safe(invoke<PostgresRoleInfo[]>("postgres_roles", { version }));
 export const postgresCreateDatabase = (version: string, name: string, owner: string) => safe(invoke<void>("postgres_create_database", { version, name, owner }));

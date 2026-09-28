@@ -2456,3 +2456,23 @@ Windows 原生 MySQL 8.0.46、MariaDB 11.4.8 验证尚未到期不执行、到�
 本次没有用户业务数据库结构或数据变更，未修改 update.sql；原生验证只使用隔离临时实例、账号、数据库和端口。未启动前端 dev，未执行本地前端 build。v0.2.89 Release 已确认 completed/success。本轮按根 AGENTS.md 使用新 annotated tag v0.2.90 并与 main 原子推送，发布结果及远程构建状态在完成验证后核对。Windows MySQL 8.0.46、MariaDB 11.4.8 是本轮原生验收范围；其它版本及 Linux/macOS 尚未实机验证，角色/全局/表/列/例程级完整权限管理仍待后续完善，整体目标保持进行。
 
 参考：https://support.servbay.com/database-management/getting-started/mysql-management-and-usage 、https://dev.mysql.com/doc/refman/8.0/en/grant.html 、https://dev.mysql.com/doc/refman/8.0/en/privilege-changes.html 、https://mariadb.com/docs/server/reference/sql-statements/account-management-sql-statements/grant
+
+## 第一百零五轮：PostgreSQL 账号登录控制与连接数限制（v0.2.91）
+
+参考 ServBay 的 PostgreSQL 账号管理与访问限制流程，通过 fast-context 追踪既有角色列表、改密、Tauri 命令和隔离原生验收；通过 Context7 核对 PostgreSQL 当前角色属性文档。既有界面只能创建、改密和删除账号，本轮补齐暂停/恢复新登录以及普通连接数上限，使账号暂停不必删除账号或其数据库。角色属性作用于整个实例，既有数据库所有权、密码、成员关系和权限保持原状。
+
+复用 pg_roles 读取 OID、名称、登录状态、连接数上限和保护状态，pg_stat_activity 只统计当前普通客户端连接，不向界面返回 SQL 内容或密码哈希。活动连接数是读取时的观察值，不参与编辑 revision；revision 包含角色属性与设置，外部修改会使旧表单失效。不限对应 -1，自定义支持 0–2147483647，0 阻止新的普通连接。系统账号、pg_ 角色和超级用户由服务端保护；界面可查看系统账号状态但不能修改。降低上限或暂停登录时前后端均要求确认。
+
+保存沿用实例版本、运行进程和数据目录校验，持有后台任务保护与生命周期锁。单次短事务先锁定 pg_authid 的 SHARE ROW EXCLUSIVE 锁，与普通 ALTER/DROP/CREATE ROLE 的目录写锁冲突，在锁内重新校验 OID、名称、受保护属性和 revision，再执行 ALTER ROLE LOGIN/NOLOGIN CONNECTION LIMIT 并读回核对后提交。系统目录只用于加锁，不直接更新目录行；标识符引用及 DO 块字符串分层转义，特殊字符不能截断语句。沿用锁等待与语句超时，失败保留输入并要求重新读取；提交附近连接中断时提示核对实际状态，不一律声称已回滚。
+
+沿用 UI/UX skill、Next 本地 use-client 文档与既有 Dialog、Select 和原生复选框。账号行显示连接数上限，长名称可换行；弹窗使用两个选择项和条件数字输入，当前连接数与限制说明就近展示。明确暂停登录不终止现有连接、不阻止其他账号通过成员关系使用权限；普通连接上限不约束复制连接或超级用户，不限仍受实例总连接数约束，PostgreSQL 对并发尝试按近似上限执行。忙时禁用关闭、重复保存与实例切换；失败保留选择，重新读取明确重置草稿。修复保存后立即重开时短暂显示旧缓存，成功返回立即写入查询缓存并刷新列表。
+
+浏览器在既有 localhost 演示环境完成账号创建、限制为 0、确认前不可保存、超出整数范围拒绝、重新读取重置草稿、暂停/恢复登录、保存后立即重开回显、系统账号只读，以及保存中取消禁用和 Escape 不关闭。1360px 中文桌面、390px 中文和 320px 英文弹窗截图已目检。窄屏弹窗左右各 12px，宽度与 scrollWidth 分别同为 366px/296px；正文独立滚动、底部保存按钮可见，分区使用左右有内边距的虚线。浏览器仅验证交互；真实连接行为由原生验证覆盖。只关闭本轮 QA 上下文，保留用户原有 packages/sites 页面。
+
+11 个版本文件同步到 0.2.91，Cargo.lock 仅更新三个本项目 crate。独立发布树包含 17 个代码/版本文件及本轮 DESIGN.md，共 18 个发布文件，排除用户原有 configgen.rs 的 178 additions / 9 deletions 与本地生成文件。独立 pnpm check 与 cargo check --workspace --all-targets --locked 通过；最后的缓存更新再次通过类型检查。未新增依赖、测试文件或 migration，验证扩展于已有 Rust 模块。
+
+最终独立发布树自动备份、数据库管理、备份恢复、导入、配置传输及 PostgreSQL 原生回归共 28 通过、0 失败、675 filtered out，耗时 162.72 秒。Windows PostgreSQL 16.6 真实账号验证连接上限 1 时第二个连接被拒绝，NOLOGIN 阻止新登录，连接上限 0 阻止新的普通连接，原有连接仍能读取 project_proof 的 84；恢复不限后新连接成功。未确认的限制不会写入，旧 revision、错误 OID、系统账号和负数非法上限被拒绝；外部 CREATEDB 修改使旧表单失效，失败不覆盖外部设置。含引号、美元标记和中文的角色可正确保存；同名角色删除重建后旧 OID 被拒绝。密码、普通权限和数据库所有权保留，既有备份、恢复、替换、认证与正常停机回归继续通过。
+
+本次没有用户业务数据库结构或数据变更，未修改 update.sql；仅复制已存在 PostgreSQL 16.6 的程序文件用于隔离临时实例，未连接原环境的业务数据库。未启动前端 dev，未执行本地前端 build。已确认 v0.2.90 Release completed/success；本轮新增 annotated tag v0.2.91，与 main 原子推送并核对实际 workflow 状态。Linux/macOS 和其它 PostgreSQL 版本尚未本轮实机验证；账号成员关系、对象授权、密码过期策略与活跃会话管理仍需后续补齐，整体目标保持进行。
+
+参考：https://support.servbay.com/database-management/getting-started/postgresql-management-and-usage 、https://www.postgresql.org/docs/current/role-attributes.html 、https://www.postgresql.org/docs/current/sql-createrole.html

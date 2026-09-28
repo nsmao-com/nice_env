@@ -740,6 +740,7 @@ pub struct PostgresRoleInfo {
     pub oid: u32,
     pub name: String,
     pub can_login: bool,
+    pub connection_limit: i32,
     pub superuser: bool,
     pub create_db: bool,
     pub create_role: bool,
@@ -747,6 +748,43 @@ pub struct PostgresRoleInfo {
     pub bypass_rls: bool,
     pub protected: bool,
     pub databases: Vec<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresRoleAccess {
+    pub oid: u32,
+    pub name: String,
+    pub can_login: bool,
+    pub connection_limit: i32,
+    pub active_connections: u32,
+    pub protected: bool,
+    pub revision: String,
+}
+
+#[derive(serde::Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresRoleAccessInput {
+    pub oid: u32,
+    pub name: String,
+    pub can_login: bool,
+    pub connection_limit: i32,
+    pub revision: String,
+    pub confirm_restriction: bool,
+}
+
+fn postgres_role_access_select(oid: u32) -> String {
+    // 不读取 rolpassword；活动连接数是即时观察值，不参与编辑版本比较。
+    format!("SELECT json_build_object('oid', r.oid::bigint, 'name', r.rolname, 'canLogin', r.rolcanlogin, 'connectionLimit', r.rolconnlimit,
+        'activeConnections', (SELECT count(*) FROM pg_stat_activity a WHERE a.usesysid = r.oid AND a.backend_type = 'client backend'),
+        'protected', (r.rolsuper OR r.rolname IN ('postgres', current_user, session_user) OR starts_with(r.rolname, 'pg_')),
+        'revision', md5(json_build_array(r.oid, r.rolname, r.rolcanlogin, r.rolconnlimit, r.rolsuper, r.rolcreatedb, r.rolcreaterole, r.rolreplication, r.rolbypassrls, r.rolinherit, r.rolvaliduntil, r.rolconfig)::text))
+        FROM pg_roles r WHERE r.oid = {oid}")
+}
+
+pub fn update_postgres_role_access(state: &crate::CoreState, version: &str, input: &PostgresRoleAccessInput) -> Result<PostgresRoleAccess> {
+    let _work = crate::BackgroundWork::begin("保存 PostgreSQL 账号连接设置")?;
+    state.with_postgres(version, |client| client.set_role_access(input))
 }
 
 pub(crate) fn postgres_ident(name: &str) -> Result<String> {
@@ -893,7 +931,7 @@ impl PostgresClient {
     }
 
     pub fn list_roles(&self) -> Result<Vec<PostgresRoleInfo>> {
-        let out = self.query("SELECT COALESCE(json_agg(row_to_json(r) ORDER BY r.name), '[]'::json) FROM (SELECT oid::bigint AS oid, rolname AS name, rolcanlogin AS \"canLogin\", rolsuper AS superuser, rolcreatedb AS \"createDb\", rolcreaterole AS \"createRole\", rolreplication AS replication, rolbypassrls AS \"bypassRls\", (rolsuper OR rolname IN ('postgres', current_user, session_user) OR starts_with(rolname, 'pg_')) AS protected, ARRAY(SELECT datname FROM pg_database WHERE datdba = pg_roles.oid ORDER BY datname) AS databases FROM pg_roles WHERE NOT starts_with(rolname, 'pg_')) r;")?;
+        let out = self.query("SELECT COALESCE(json_agg(row_to_json(r) ORDER BY r.name), '[]'::json) FROM (SELECT oid::bigint AS oid, rolname AS name, rolcanlogin AS \"canLogin\", rolconnlimit AS \"connectionLimit\", rolsuper AS superuser, rolcreatedb AS \"createDb\", rolcreaterole AS \"createRole\", rolreplication AS replication, rolbypassrls AS \"bypassRls\", (rolsuper OR rolname IN ('postgres', current_user, session_user) OR starts_with(rolname, 'pg_')) AS protected, ARRAY(SELECT datname FROM pg_database WHERE datdba = pg_roles.oid ORDER BY datname) AS databases FROM pg_roles WHERE NOT starts_with(rolname, 'pg_')) r;")?;
         serde_json::from_str(out.trim()).map_err(|error| AppError::new("POSTGRES_RESPONSE", "无法读取 PostgreSQL 账号列表").with_detail(error.to_string()))
     }
 
@@ -934,6 +972,61 @@ impl PostgresClient {
             .ok_or_else(|| AppError::new("POSTGRES_TARGET_CHANGED", "账号已删除或发生变化，请刷新列表后重新确认"))?;
         if role.protected { return Err(AppError::new("POSTGRES_PROTECTED", "此账号属于系统或超级用户，不能在普通账号管理中修改")); }
         Ok(role)
+    }
+
+    pub fn role_access(&self, name: &str, oid: u32) -> Result<PostgresRoleAccess> {
+        postgres_ident(name)?;
+        let out = self.query(&format!("{};", postgres_role_access_select(oid)))?;
+        if out.trim().is_empty() { return Err(AppError::new("POSTGRES_TARGET_CHANGED", "账号已删除或变化，请刷新列表")); }
+        let access: PostgresRoleAccess = serde_json::from_str(out.trim())
+            .map_err(|error| AppError::new("POSTGRES_RESPONSE", "无法读取账号连接设置").with_detail(error.to_string()))?;
+        if access.name != name { return Err(AppError::new("POSTGRES_TARGET_CHANGED", "账号已更名，请刷新列表")); }
+        Ok(access)
+    }
+
+    pub(crate) fn set_role_access(&self, input: &PostgresRoleAccessInput) -> Result<PostgresRoleAccess> {
+        let identifier = postgres_ident(&input.name)?;
+        if input.connection_limit < -1 {
+            return Err(AppError::new("POSTGRES_BAD_LIMIT", "连接数上限须为 0–2147483647，或选择不限"));
+        }
+        if input.revision.len() != 32 || !input.revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(AppError::new("POSTGRES_ACCESS_CHANGED", "账号设置版本无效，请重新读取"));
+        }
+        let literal = |value: &str| format!("E'{}'", value.replace('\\', "\\\\").replace('\'', "''"));
+        let query = postgres_role_access_select(input.oid);
+        let name = literal(&input.name);
+        let revision = literal(&input.revision);
+        let can_login = input.can_login;
+        let limit = input.connection_limit;
+        let confirmed = input.confirm_restriction;
+        let alter = literal(&format!("ALTER ROLE {identifier} {} CONNECTION LIMIT {limit}", if can_login { "LOGIN" } else { "NOLOGIN" }));
+        let block = format!("DECLARE snapshot json; BEGIN
+            snapshot := ({query});
+            IF snapshot IS NULL OR snapshot->>'name' <> {name} THEN RAISE EXCEPTION 'NSB_ROLE_TARGET_CHANGED'; END IF;
+            IF (snapshot->>'protected')::boolean THEN RAISE EXCEPTION 'NSB_ROLE_PROTECTED'; END IF;
+            IF snapshot->>'revision' <> {revision} THEN RAISE EXCEPTION 'NSB_ROLE_ACCESS_CHANGED'; END IF;
+            IF NOT {confirmed} AND (((snapshot->>'canLogin')::boolean AND NOT {can_login}) OR ({limit} >= 0 AND ((snapshot->>'connectionLimit')::int = -1 OR {limit} < (snapshot->>'connectionLimit')::int))) THEN RAISE EXCEPTION 'NSB_ROLE_CONFIRM_RESTRICTION'; END IF;
+            EXECUTE {alter};
+            snapshot := ({query});
+            IF snapshot IS NULL OR snapshot->>'name' <> {name} OR (snapshot->>'canLogin')::boolean <> {can_login} OR (snapshot->>'connectionLimit')::int <> {limit} THEN RAISE EXCEPTION 'NSB_ROLE_VERIFY_FAILED'; END IF;
+        END");
+        // ALTER ROLE 使用 pg_authid 的 RowExclusiveLock。短事务先取得冲突表锁，使外部
+        // ALTER/DROP/CREATE ROLE 也不能插入版本检查与写入之间；超时沿用客户端设置。
+        let sql = format!("BEGIN; LOCK TABLE pg_catalog.pg_authid IN SHARE ROW EXCLUSIVE MODE; DO {}; {query}; COMMIT;", literal(&block));
+        let out = self.query(&sql).map_err(|error| {
+            let detail = error.detail.as_deref().unwrap_or("");
+            for (marker, code, message) in [
+                ("NSB_ROLE_TARGET_CHANGED", "POSTGRES_TARGET_CHANGED", "账号已删除或更名，请刷新列表"),
+                ("NSB_ROLE_PROTECTED", "POSTGRES_PROTECTED", "系统账号或超级用户的连接设置受保护"),
+                ("NSB_ROLE_ACCESS_CHANGED", "POSTGRES_ACCESS_CHANGED", "账号已被其他操作修改，请重新读取后再保存"),
+                ("NSB_ROLE_CONFIRM_RESTRICTION", "POSTGRES_CONFIRM_RESTRICTION", "请先确认暂停登录或降低连接数上限的影响"),
+            ] { if detail.contains(marker) { return AppError::new(code, message); } }
+            AppError::new("POSTGRES_ACCESS_SAVE_FAILED", "未能确认账号连接设置已保存")
+                .with_hint("请重新读取确认实际状态后再试；连接中断时不能仅凭报错判断事务是否已提交。")
+                .with_detail(detail.to_string())
+        })?;
+        serde_json::from_str(out.lines().find(|line| line.starts_with('{')).unwrap_or(""))
+            .map_err(|error| AppError::new("POSTGRES_RESPONSE", "设置已提交，但返回结果无法识别，请重新读取确认").with_detail(error.to_string()))
     }
 
     pub fn set_role_password(&self, name: &str, oid: u32, password: &str) -> Result<()> {

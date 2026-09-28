@@ -74,7 +74,7 @@ function mockSiteFileScope(id: string, project: boolean, exclude: boolean): Site
 }
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.94";
+const MOCK_APP_VERSION = "0.2.95";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -1855,6 +1855,27 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const bundle = DiagnosticsBundleSchema.parse(args?.bundle);
       if (!bundle.markdown.trim() || new TextEncoder().encode(bundle.markdown).length > 2 * 1024 * 1024) throw { code: "DIAGNOSTICS_INVALID", message: "报告为空或超过 2 MiB，请重新生成" };
       return downloadPreviewText(bundle.markdown, `niceenv-diagnostics-${bundle.generatedAt}.md`) as T;
+    }
+    case "site_files_inspect_import": {
+      const id = String(args!.id);
+      const target = sites.get(id);
+      if (!target) throw { code: "SITE_NOT_FOUND", message: "目标站点已不存在" };
+      emitLocal("site-files://progress", { operationId: args!.operationId, siteId: id, phase: "inspect", files: 0, bytes: 24576 });
+      await delay(600);
+      return { sourcePath: String(args!.source), sourceSiteId: "demo-source-site", targetName: target.name, targetRoot: target.rootDir,
+        archive: { name: "sample-site.zip", path: String(args!.source), sizeBytes: 24576, createdAt: Date.now() - 86400000, files: 12, originalBytes: 98304, root: "C:/Demo/source-project", excluded: ["node_modules", ".git"], restorable: true, error: null },
+        revision: JSON.stringify([id, target.name, target.rootDir, target.updatedAt, args!.source]) } as T;
+    }
+    case "site_files_import": {
+      const id = String(args!.id);
+      const target = sites.get(id);
+      if (!target) throw { code: "SITE_NOT_FOUND", message: "目标站点已不存在" };
+      if (!args!.confirmed) throw { code: "SITE_BACKUP_INVALID", message: "请确认来源可信及目标站点" };
+      if (args!.revision !== JSON.stringify([id, target.name, target.rootDir, target.updatedAt, args!.source])) throw { code: "SITE_IMPORT_CHANGED", message: "源归档或目标站点已变化，请重新读取" };
+      for (const phase of ["importRead", "import", "complete"]) { emitLocal("site-files://progress", { operationId: args!.operationId, siteId: id, phase, files: phase === "importRead" ? 0 : 12, bytes: phase === "importRead" ? 24576 : 98304 }); await delay(400); }
+      const name = `site-${Date.now()}-${crypto.randomUUID().slice(0, 8)}.zip`;
+      const archive: SiteFileBackup = { name, path: `C:/NiceEnv/backup/sites/preview/${name}`, sizeBytes: 24576, createdAt: Date.now() - 86400000, files: 12, originalBytes: 98304, root: "C:/Demo/source-project", excluded: ["node_modules", ".git"], restorable: true, error: null };
+      siteFileArchives.set(id, [archive, ...(siteFileArchives.get(id) ?? [])]); return structuredClone(archive) as T;
     }
     case "site_files_scope": return mockSiteFileScope(String(args!.id), !!args!.project, !!args!.excludeGenerated) as T;
     case "site_files_list": return structuredClone(siteFileArchives.get(String(args!.id)) ?? []) as T;

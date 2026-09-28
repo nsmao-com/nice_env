@@ -449,6 +449,15 @@ export const siteFilesRestore = (id: string, name: string, parent: string | null
   safe(invoke<string>("site_files_restore", { id, name, parent, trusted, operationId }));
 export const siteFilesDelete = (id: string, name: string) => safe(invoke<void>("site_files_delete", { id, name }));
 
+export interface SiteFileImportPreview {
+  sourcePath: string; sourceSiteId: string; targetName: string; targetRoot: string;
+  archive: SiteFileBackup; revision: string;
+}
+export const siteFilesInspectImport = (id: string, source: string, operationId: string) =>
+  safe(invoke<SiteFileImportPreview>("site_files_inspect_import", { id, source, operationId }));
+export const siteFilesImport = (id: string, source: string, revision: string, confirmed: boolean, operationId: string) =>
+  safe(invoke<SiteFileBackup>("site_files_import", { id, source, revision, confirmed, operationId }));
+
 export const envRead = (siteId: string, fileName = ".env") => safe(invoke<EnvFileView>("env_read", { siteId, fileName }));
 export const envSave = (siteId: string, changes: [string, string][], expectedRevision: string, fileName = ".env") =>
   safe(invoke<EnvFileView>("env_save", { siteId, changes, expectedRevision, fileName }));

@@ -254,6 +254,8 @@ pub fn run() {
             site_files_create,
             site_files_restore,
             site_files_delete,
+            site_files_inspect_import,
+            site_files_import,
             site_access_url,
             create_site,
             update_site,
@@ -1016,6 +1018,15 @@ async fn site_files_restore(app:tauri::AppHandle,state: State<'_,std::sync::Arc<
 #[tauri::command]
 async fn site_files_delete(state: State<'_,std::sync::Arc<CoreState>>, id:String, name:String) -> Result<(),tauri::Error> {
     let st=state.inner().clone();tauri::async_runtime::spawn_blocking(move ||map_jh(nsb_core::sitebackup::delete(&st,&id,&name))).await.map_err(|e|tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn site_files_inspect_import(app:tauri::AppHandle,state:State<'_,std::sync::Arc<CoreState>>,id:String,source:String,operation_id:String)->Result<nsb_core::sitebackup::ImportPreview,tauri::Error> {
+    let st=state.inner().clone();tauri::async_runtime::spawn_blocking(move ||map_jh(nsb_core::sitebackup::inspect_import(&st,&id,&source,&site_files_progress(app,id.clone(),operation_id)))).await.map_err(|e|tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+#[tauri::command]
+async fn site_files_import(app:tauri::AppHandle,state:State<'_,std::sync::Arc<CoreState>>,id:String,source:String,revision:String,confirmed:bool,operation_id:String)->Result<nsb_core::sitebackup::BackupInfo,tauri::Error> {
+    let st=state.inner().clone();tauri::async_runtime::spawn_blocking(move ||map_jh(nsb_core::sitebackup::import_archive(&st,&id,&source,&revision,confirmed,&site_files_progress(app,id.clone(),operation_id)))).await.map_err(|e|tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]

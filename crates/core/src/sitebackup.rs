@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     fs::{self, File},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -19,6 +19,7 @@ const MANIFEST: &str = "niceenv-site-backup.json";
 const MAX_ENTRIES: usize = 100_000;
 const MAX_BYTES: u64 = 50 * 1024 * 1024 * 1024;
 const MAX_MANIFEST: u64 = 32 * 1024 * 1024;
+const MAX_ARCHIVE: u64 = MAX_BYTES + 1024 * 1024 * 1024;
 const EXCLUDED: &[&str] = &[
     ".git",
     "node_modules",
@@ -59,6 +60,16 @@ pub struct Progress {
     pub phase: String,
     pub files: u64,
     pub bytes: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPreview {
+    pub source_path: String,
+    pub source_site_id: String,
+    pub target_name: String,
+    pub target_root: String,
+    pub archive: BackupInfo,
+    pub revision: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -459,7 +470,7 @@ pub fn create(
     Ok(info(&dest, manifest))
 }
 
-fn read_manifest(zip: &mut zip::ZipArchive<File>, id: &str) -> Result<Manifest> {
+fn read_manifest(zip: &mut zip::ZipArchive<File>, id: Option<&str>) -> Result<Manifest> {
     let mut entry = zip.by_name(MANIFEST).map_err(archive_error)?;
     if entry.size() > MAX_MANIFEST {
         return Err(invalid("归档清单过大"));
@@ -475,7 +486,10 @@ fn read_manifest(zip: &mut zip::ZipArchive<File>, id: &str) -> Result<Manifest> 
     let manifest: Manifest =
         serde_json::from_slice(&bytes).map_err(|_| invalid("归档清单损坏或不受支持"))?;
     if manifest.format != FORMAT
-        || manifest.site_id != id
+        || id.is_some_and(|id| manifest.site_id != id)
+        || manifest.site_id.is_empty()
+        || manifest.site_id.len() > 256
+        || manifest.site_id.chars().any(char::is_control)
         || manifest.entries.len() > MAX_ENTRIES
         || zip.len() != manifest.entries.len() + 1
     {
@@ -530,7 +544,7 @@ pub fn list(paths: &Paths, id: &str) -> Result<Vec<BackupInfo>> {
         let opened = archive_path(paths, id, &name)
             .and_then(|path| open_plain(&path))
             .and_then(|file| zip::ZipArchive::new(file).map_err(archive_error))
-            .and_then(|mut zip| read_manifest(&mut zip, id));
+            .and_then(|mut zip| read_manifest(&mut zip, Some(id)));
         result.push(match opened {
             Ok(manifest) => info(&path, manifest),
             Err(error) => BackupInfo {
@@ -560,60 +574,16 @@ pub fn delete(state: &crate::CoreState, id: &str, name: &str) -> Result<()> {
     fs::remove_file(path)?;
     Ok(())
 }
-pub fn restore(
-    state: &crate::CoreState,
-    id: &str,
-    name: &str,
-    parent: Option<&str>,
-    trusted: bool,
-    progress: &dyn Fn(&str, u64, u64),
-) -> Result<String> {
-    if !trusted {
-        return Err(invalid(
-            "请先确认归档来源可信；恢复的项目文件可能包含可执行代码和密钥",
-        ));
-    }
-    let _work = crate::BackgroundWork::begin("恢复站点文件")?;
-    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
-    let _lock = lock(&state.paths, id)?;
-    let path = archive_path(&state.paths, id, name)?;
-    let mut zip = zip::ZipArchive::new(open_plain(&path)?).map_err(archive_error)?;
-    let manifest = read_manifest(&mut zip, id)?;
-    if zip.len() != manifest.entries.len() + 1 {
-        return Err(invalid("归档条目与清单不一致"));
-    }
-    let parent = match parent {
-        Some(path) if !path.is_empty() => plain_directory(Path::new(path))?,
-        _ => {
-            let path = crate::paths::checked_data_path(&state.paths.base, "restored-sites")?;
-            fs::create_dir_all(&path)?;
-            plain_directory(&path)?
-        }
-    };
-    for site in state.store.list_sites()? {
-        for project in [true, false] {
-            if let Ok(scope) = scope(&state.store, &site.id, project, false) {
-                if within(&parent, Path::new(&scope.root)) {
-                    return Err(invalid(
-                        "恢复父目录不能位于已登记站点的项目目录内，请选择独立目录",
-                    ));
-                }
-            }
-        }
-    }
-    let archive_dir = plain_directory(&directory(&state.paths, id)?)?;
-    if within(&parent, archive_dir.parent().unwrap_or(&state.paths.base)) {
-        return Err(invalid("不能把项目恢复到归档目录内"));
-    }
-    // 私有新目录由 tempfile 原子创建；不使用用户输入作为目标子目录名，不覆盖既有目录。
-    let pending = tempfile::Builder::new()
-        .prefix("restored-site-")
-        .tempdir_in(&parent)?;
+fn validate_manifest(
+    zip: &mut zip::ZipArchive<File>,
+    manifest: &Manifest,
+    root: &Path,
+) -> Result<()> {
     let mut names = BTreeSet::new();
     let mut aliases = std::collections::BTreeMap::new();
     let mut total = 0u64;
     for entry in &manifest.entries {
-        crate::paths::checked_data_path(pending.path(), &entry.path)?;
+        crate::paths::checked_data_path(root, &entry.path)?;
         if !names.insert(entry.path.to_lowercase())
             || entry.path.len() > 2048
             || entry.path.split('/').count() > 128
@@ -660,6 +630,351 @@ pub fn restore(
             return Err(invalid("归档文件缺少有效校验值"));
         }
     }
+    Ok(())
+}
+
+// NiceEnv 生成无注释、无前缀、单磁盘 ZIP。先限制中央目录，避免第三方输入在 ZipArchive::new 内大量分配。
+fn check_archive_directory(file: &mut File) -> Result<usize> {
+    let length = file.metadata()?.len();
+    if !(22..=MAX_ARCHIVE).contains(&length) {
+        return Err(invalid("归档为空或超过 51 GiB"));
+    }
+    file.seek(SeekFrom::End(-22))?;
+    let mut end = [0u8; 22];
+    file.read_exact(&mut end)?;
+    let u16_at = |bytes: &[u8], offset| {
+        u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap()) as u64
+    };
+    let u32_at = |bytes: &[u8], offset| {
+        u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as u64
+    };
+    let u64_at =
+        |bytes: &[u8], offset| u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    if &end[..4] != b"PK\x05\x06"
+        || u16_at(&end, 20) != 0
+        || u16_at(&end, 4) != 0
+        || u16_at(&end, 6) != 0
+        || u16_at(&end, 8) != u16_at(&end, 10)
+    {
+        return Err(invalid(
+            "请选择 NiceEnv 创建的完整站点 ZIP；不支持分卷、附加注释或自解压归档",
+        ));
+    }
+    let (mut count, mut size, mut offset, mut footer) = (
+        u16_at(&end, 10),
+        u32_at(&end, 12),
+        u32_at(&end, 16),
+        length - 22,
+    );
+    if count == u16::MAX as u64 || size == u32::MAX as u64 || offset == u32::MAX as u64 {
+        if length < 98 {
+            return Err(invalid("ZIP64 归档不完整"));
+        }
+        file.seek(SeekFrom::End(-42))?;
+        let mut locator = [0; 20];
+        file.read_exact(&mut locator)?;
+        if &locator[..4] != b"PK\x06\x07" || u32_at(&locator, 4) != 0 || u32_at(&locator, 16) != 1 {
+            return Err(invalid("ZIP64 定位记录无效"));
+        }
+        footer = u64_at(&locator, 8);
+        if footer.checked_add(56) != Some(length - 42) {
+            return Err(invalid("ZIP64 结束记录无效"));
+        }
+        file.seek(SeekFrom::Start(footer))?;
+        let mut record = [0; 56];
+        file.read_exact(&mut record)?;
+        if &record[..4] != b"PK\x06\x06"
+            || u64_at(&record, 4) != 44
+            || u32_at(&record, 16) != 0
+            || u32_at(&record, 20) != 0
+            || u64_at(&record, 24) != u64_at(&record, 32)
+        {
+            return Err(invalid("ZIP64 结束记录无效"));
+        }
+        count = u64_at(&record, 32);
+        size = u64_at(&record, 40);
+        offset = u64_at(&record, 48);
+    }
+    if count == 0
+        || count > MAX_ENTRIES as u64 + 1
+        || size > 256 * 1024 * 1024
+        || count.saturating_mul(46) > size
+        || offset.checked_add(size) != Some(footer)
+    {
+        return Err(invalid("归档中央目录不完整或超出站点备份限制"));
+    }
+    file.seek(SeekFrom::Start(0))?;
+    let mut signature = [0; 4];
+    file.read_exact(&mut signature)?;
+    if &signature != b"PK\x03\x04" {
+        return Err(invalid("不支持带前缀的归档，请选择 NiceEnv 原始 ZIP"));
+    }
+    file.seek(SeekFrom::Start(0))?;
+    Ok(count as usize)
+}
+
+fn open_snapshot(mut file: File) -> Result<zip::ZipArchive<File>> {
+    let count = check_archive_directory(&mut file)?;
+    let zip = zip::ZipArchive::new(file).map_err(archive_error)?;
+    if zip.len() != count {
+        return Err(invalid("归档存在重复或缺失的 ZIP 条目"));
+    }
+    Ok(zip)
+}
+
+fn snapshot_source(
+    paths: &Paths,
+    source: &str,
+    phase: &str,
+    progress: &dyn Fn(&str, u64, u64),
+) -> Result<(tempfile::NamedTempFile, PathBuf, String)> {
+    let source = Path::new(source);
+    let parent = source
+        .parent()
+        .ok_or_else(|| invalid("请选择本机的 ZIP 文件"))?;
+    let path =
+        plain_directory(parent)?.join(source.file_name().ok_or_else(|| invalid("归档路径无效"))?);
+    let mut input = open_plain(&path)?;
+    check_archive_directory(&mut input)?;
+    let before = input.metadata()?;
+    let mut snapshot = tempfile::Builder::new()
+        .prefix(".site-import-")
+        .tempfile_in(&paths.base)?;
+    let mut digest = Sha256::new();
+    let mut bytes = 0;
+    let mut buffer = vec![0; 256 * 1024];
+    progress(phase, 0, 0);
+    loop {
+        let count = input.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        bytes += count as u64;
+        if bytes > MAX_ARCHIVE {
+            return Err(invalid("归档超过 51 GiB"));
+        }
+        snapshot.write_all(&buffer[..count])?;
+        digest.update(&buffer[..count]);
+        progress(phase, 0, bytes);
+    }
+    let after = input.metadata()?;
+    if bytes != before.len()
+        || after.len() != before.len()
+        || after.modified()? != before.modified()?
+    {
+        return Err(AppError::new(
+            "SITE_IMPORT_CHANGED",
+            "源 ZIP 在读取期间发生变化，请重新选择",
+        ));
+    }
+    snapshot.flush()?;
+    check_archive_directory(snapshot.as_file_mut())?;
+    Ok((snapshot, path, hex::encode(digest.finalize())))
+}
+fn import_revision(site: &Site, digest: &str) -> Result<String> {
+    Ok(hex::encode(Sha256::digest(
+        serde_json::to_vec(&(
+            digest,
+            &site.id,
+            &site.name,
+            &site.root_dir,
+            site.updated_at,
+        ))
+        .map_err(|error| invalid(error.to_string()))?,
+    )))
+}
+
+pub fn inspect_import(
+    state: &crate::CoreState,
+    id: &str,
+    source: &str,
+    progress: &dyn Fn(&str, u64, u64),
+) -> Result<ImportPreview> {
+    let _work = crate::BackgroundWork::begin("检查外部站点归档")?;
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    let target = site(&state.store, id)?;
+    let (snapshot, path, digest) = snapshot_source(&state.paths, source, "inspect", progress)?;
+    let mut zip = open_snapshot(snapshot.reopen()?)?;
+    let manifest = read_manifest(&mut zip, None)?;
+    let scratch = tempfile::Builder::new()
+        .prefix(".site-import-check-")
+        .tempdir_in(&state.paths.base)?;
+    validate_manifest(&mut zip, &manifest, scratch.path())?;
+    let revision = import_revision(&target, &digest)?;
+    if import_revision(&site(&state.store, id)?, &digest)? != revision {
+        return Err(AppError::new(
+            "SITE_IMPORT_CHANGED",
+            "目标站点在检查期间变化，请重新读取",
+        ));
+    }
+    let source_site_id = manifest.site_id.clone();
+    let mut archive = info(&path, manifest);
+    archive.size_bytes = snapshot.as_file().metadata()?.len();
+    progress("complete", archive.files, archive.original_bytes);
+    Ok(ImportPreview {
+        source_path: path.to_string_lossy().into(),
+        source_site_id,
+        target_name: target.name,
+        target_root: target.root_dir,
+        archive,
+        revision,
+    })
+}
+
+pub fn import_archive(
+    state: &crate::CoreState,
+    id: &str,
+    source: &str,
+    revision: &str,
+    confirmed: bool,
+    progress: &dyn Fn(&str, u64, u64),
+) -> Result<BackupInfo> {
+    if !confirmed {
+        return Err(invalid(
+            "请确认归档来源可信，并同意将其作为此站点的备份副本导入",
+        ));
+    }
+    let _work = crate::BackgroundWork::begin("导入站点文件归档")?;
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    let _lock = lock(&state.paths, id)?;
+    let target = site(&state.store, id)?;
+    let (snapshot, _, digest) = snapshot_source(&state.paths, source, "importRead", progress)?;
+    if import_revision(&target, &digest)? != revision {
+        return Err(AppError::new(
+            "SITE_IMPORT_CHANGED",
+            "源 ZIP 或目标站点已变化，请重新读取并确认",
+        ));
+    }
+    let mut zip = open_snapshot(snapshot.reopen()?)?;
+    let mut manifest = read_manifest(&mut zip, None)?;
+    let dir = plain_directory(&directory(&state.paths, id)?)?;
+    let scratch = tempfile::Builder::new()
+        .prefix(".import-check-")
+        .tempdir_in(&dir)?;
+    validate_manifest(&mut zip, &manifest, scratch.path())?;
+    let mut pending = tempfile::Builder::new()
+        .prefix(".pending-")
+        .tempfile_in(&dir)?;
+    let mut output = zip::ZipWriter::new(pending.as_file_mut());
+    let mut buffer = vec![0; 256 * 1024];
+    let (mut files, mut bytes) = (0, 0);
+    for entry in &manifest.entries {
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .large_file(true)
+            .unix_permissions(entry.mode & 0o777);
+        let key = format!(
+            "files/{}{}",
+            entry.path,
+            if entry.directory { "/" } else { "" }
+        );
+        if entry.directory {
+            output.add_directory(key, options).map_err(archive_error)?;
+            continue;
+        }
+        let mut input = zip.by_name(&key).map_err(archive_error)?;
+        output.start_file(key, options).map_err(archive_error)?;
+        let mut hash = Sha256::new();
+        let mut written = 0;
+        loop {
+            let count = input.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            written += count as u64;
+            if written > entry.size {
+                return Err(invalid("归档解压大小与清单不一致"));
+            }
+            output.write_all(&buffer[..count])?;
+            hash.update(&buffer[..count]);
+            bytes += count as u64;
+            progress("import", files, bytes);
+        }
+        if written != entry.size || hex::encode(hash.finalize()) != entry.sha256.to_lowercase() {
+            return Err(invalid("归档文件校验失败，未导入"));
+        }
+        files += 1;
+    }
+    manifest.site_id = id.into();
+    let metadata = serde_json::to_vec(&manifest).map_err(|error| invalid(error.to_string()))?;
+    if metadata.len() as u64 > MAX_MANIFEST {
+        return Err(invalid("导入后的归档清单过大"));
+    }
+    output
+        .start_file(MANIFEST, zip::write::SimpleFileOptions::default())
+        .map_err(archive_error)?;
+    output.write_all(&metadata)?;
+    output.finish().map_err(archive_error)?;
+    pending.as_file().sync_all()?;
+    if import_revision(&site(&state.store, id)?, &digest)? != revision {
+        return Err(AppError::new(
+            "SITE_IMPORT_CHANGED",
+            "目标站点在导入期间变化，未发布归档，请重新读取",
+        ));
+    }
+    let name = format!(
+        "site-{}-{:016x}.zip",
+        chrono::Local::now().format("%Y%m%d-%H%M%S"),
+        rand::random::<u64>()
+    );
+    let destination = dir.join(name);
+    pending
+        .persist_noclobber(&destination)
+        .map_err(|error| AppError::io("发布导入的站点归档", error.error))?;
+    progress("complete", files, bytes);
+    Ok(info(&destination, manifest))
+}
+
+pub fn restore(
+    state: &crate::CoreState,
+    id: &str,
+    name: &str,
+    parent: Option<&str>,
+    trusted: bool,
+    progress: &dyn Fn(&str, u64, u64),
+) -> Result<String> {
+    if !trusted {
+        return Err(invalid(
+            "请先确认归档来源可信；恢复的项目文件可能包含可执行代码和密钥",
+        ));
+    }
+    let _work = crate::BackgroundWork::begin("恢复站点文件")?;
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    let _lock = lock(&state.paths, id)?;
+    let path = archive_path(&state.paths, id, name)?;
+    let mut zip = zip::ZipArchive::new(open_plain(&path)?).map_err(archive_error)?;
+    let manifest = read_manifest(&mut zip, Some(id))?;
+    if zip.len() != manifest.entries.len() + 1 {
+        return Err(invalid("归档条目与清单不一致"));
+    }
+    let parent = match parent {
+        Some(path) if !path.is_empty() => plain_directory(Path::new(path))?,
+        _ => {
+            let path = crate::paths::checked_data_path(&state.paths.base, "restored-sites")?;
+            fs::create_dir_all(&path)?;
+            plain_directory(&path)?
+        }
+    };
+    for site in state.store.list_sites()? {
+        for project in [true, false] {
+            if let Ok(scope) = scope(&state.store, &site.id, project, false) {
+                if within(&parent, Path::new(&scope.root)) {
+                    return Err(invalid(
+                        "恢复父目录不能位于已登记站点的项目目录内，请选择独立目录",
+                    ));
+                }
+            }
+        }
+    }
+    let archive_dir = plain_directory(&directory(&state.paths, id)?)?;
+    if within(&parent, archive_dir.parent().unwrap_or(&state.paths.base)) {
+        return Err(invalid("不能把项目恢复到归档目录内"));
+    }
+    // 私有新目录由 tempfile 原子创建；不使用用户输入作为目标子目录名，不覆盖既有目录。
+    let pending = tempfile::Builder::new()
+        .prefix("restored-site-")
+        .tempdir_in(&parent)?;
+    validate_manifest(&mut zip, &manifest, pending.path())?;
     let (mut files, mut bytes) = (0, 0);
     let mut buffer = vec![0; 256 * 1024];
     for entry in &manifest.entries {

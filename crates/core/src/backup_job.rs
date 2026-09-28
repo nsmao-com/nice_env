@@ -424,6 +424,34 @@ mod tests {
         assert_eq!(sitebackup::create(&state,&site.id,true,true,&scope.revision,false,&|_,_,_|{}).unwrap_err().code,"SITE_BACKUP_INVALID");
         let first=sitebackup::create(&state,&site.id,true,true,&scope.revision,true,&|_,_,_|{}).unwrap();
         assert_eq!(first.files,3);assert_eq!(first.original_bytes,31);
+        // 外部归档绑定到另一个站点时保留原 ZIP；确认和预览分别核对来源与目标。
+        let original_zip=std::fs::read(&first.path).unwrap();
+        let mut target=site.clone();target.id="import-target".into();target.name="导入目标".into();target.root_dir=temp.path().join("target-root").to_string_lossy().into();std::fs::create_dir(&target.root_dir).unwrap();state.store.save_site(&target).unwrap();
+        let preview=sitebackup::inspect_import(&state,&target.id,&first.path,&|_,_,_|{}).unwrap();
+        assert_eq!(preview.source_site_id,site.id);assert_eq!(preview.target_name,target.name);assert_eq!(preview.archive.files,3);
+        assert!(sitebackup::import_archive(&state,&target.id,&first.path,&preview.revision,false,&|_,_,_|{}).is_err());
+        let imported=sitebackup::import_archive(&state,&target.id,&first.path,&preview.revision,true,&|_,_,_|{}).unwrap();
+        let again=sitebackup::import_archive(&state,&target.id,&first.path,&preview.revision,true,&|_,_,_|{}).unwrap();assert_ne!(again.path,imported.path);
+        let restored_import=sitebackup::restore(&state,&target.id,&imported.name,None,true,&|_,_,_|{}).unwrap();
+        assert_eq!(std::fs::read(std::path::Path::new(&restored_import).join("public/中文.bin")).unwrap(),[0,1,2,255]);
+        assert_eq!(std::fs::read(&first.path).unwrap(),original_zip);assert_eq!(std::fs::read_dir(&target.root_dir).unwrap().count(),0);
+        assert!(sitebackup::restore(&state,&site.id,&imported.name,None,true,&|_,_,_|{}).is_err());
+        target.updated_at+=1;state.store.save_site(&target).unwrap();assert_eq!(sitebackup::import_archive(&state,&target.id,&first.path,&preview.revision,true,&|_,_,_|{}).unwrap_err().code,"SITE_IMPORT_CHANGED");
+        let refreshed=sitebackup::inspect_import(&state,&target.id,&first.path,&|_,_,_|{}).unwrap();assert_ne!(preview.revision,refreshed.revision);
+        // 用同一归档构造规范 ZIP64 尾部，覆盖大归档格式但不写入巨量数据。
+        let footer=original_zip[original_zip.len()-22..].to_vec();let mut zip64=original_zip[..original_zip.len()-22].to_vec();let end_offset=zip64.len() as u64;
+        let count=u16::from_le_bytes(footer[10..12].try_into().unwrap()) as u64;let cd_size=u32::from_le_bytes(footer[12..16].try_into().unwrap()) as u64;let cd_offset=u32::from_le_bytes(footer[16..20].try_into().unwrap()) as u64;
+        zip64.extend_from_slice(b"PK\x06\x06");zip64.extend_from_slice(&44u64.to_le_bytes());zip64.extend_from_slice(&45u16.to_le_bytes());zip64.extend_from_slice(&45u16.to_le_bytes());zip64.extend_from_slice(&[0;8]);zip64.extend_from_slice(&count.to_le_bytes());zip64.extend_from_slice(&count.to_le_bytes());zip64.extend_from_slice(&cd_size.to_le_bytes());zip64.extend_from_slice(&cd_offset.to_le_bytes());
+        zip64.extend_from_slice(b"PK\x06\x07");zip64.extend_from_slice(&[0;4]);zip64.extend_from_slice(&end_offset.to_le_bytes());zip64.extend_from_slice(&1u32.to_le_bytes());let mut footer64=footer;footer64[8..20].fill(255);zip64.extend_from_slice(&footer64);
+        let external=temp.path().join("外部 ZIP64.zip");std::fs::write(&external,&zip64).unwrap();let external_text=external.to_str().unwrap();
+        let checked64=sitebackup::inspect_import(&state,&target.id,external_text,&|_,_,_|{}).unwrap();let imported64=sitebackup::import_archive(&state,&target.id,external_text,&checked64.revision,true,&|_,_,_|{}).unwrap();assert_eq!(imported64.files,3);
+        let changed_once=std::sync::atomic::AtomicBool::new(false);
+        assert_eq!(sitebackup::import_archive(&state,&target.id,external_text,&checked64.revision,true,&|phase,_,_|{if phase=="import"&&!changed_once.swap(true,std::sync::atomic::Ordering::SeqCst){let mut changed=target.clone();changed.updated_at+=1;state.store.save_site(&changed).unwrap();}}).unwrap_err().code,"SITE_IMPORT_CHANGED");
+        assert_eq!(sitebackup::list(&state.paths,&target.id).unwrap().len(),3);
+        state.store.save_site(&target).unwrap();
+        let mut bad_prefix=zip64.clone();bad_prefix[0]=b'M';std::fs::write(&external,&bad_prefix).unwrap();assert!(sitebackup::inspect_import(&state,&target.id,external_text,&|_,_,_|{}).is_err());
+        let mut malicious=zip64.clone();malicious[end_offset as usize+24..end_offset as usize+32].copy_from_slice(&1_000_000_000u64.to_le_bytes());malicious[end_offset as usize+32..end_offset as usize+40].copy_from_slice(&1_000_000_000u64.to_le_bytes());std::fs::write(&external,&malicious).unwrap();assert!(sitebackup::inspect_import(&state,&target.id,external_text,&|_,_,_|{}).is_err());
+        assert_eq!(std::fs::read_dir(&target.root_dir).unwrap().count(),0);
         let second=sitebackup::create(&state,&site.id,true,true,&scope.revision,true,&|_,_,_|{}).unwrap();assert_ne!(first.name,second.name);
         let zip_file=std::fs::File::open(&first.path).unwrap();let mut archive=zip::ZipArchive::new(zip_file).unwrap();
         assert!(archive.by_name("files/.env").is_ok());assert!(archive.by_name("files/public/empty/").is_ok());assert!(archive.by_name("files/node_modules/ignored/data").is_err());drop(archive);
@@ -457,11 +485,17 @@ mod tests {
         for index in 0..zip.len(){let mut entry=zip.by_index(index).unwrap();let name=entry.name().to_string();let mut data=Vec::new();std::io::Read::read_to_end(&mut entry,&mut data).unwrap();entries.push((name,data));}drop(zip);
         let replace_archive=|entries:&[(String,Vec<u8>)]|{let mut zip=zip::ZipWriter::new(std::fs::File::create(&first.path).unwrap());for(name,data)in entries{if name.ends_with('/'){zip.add_directory(name,zip::write::SimpleFileOptions::default()).unwrap();}else{zip.start_file(name,zip::write::SimpleFileOptions::default()).unwrap();zip.write_all(data).unwrap();}}zip.finish().unwrap();};
         let mut corrupt=entries.clone();corrupt.iter_mut().find(|(name,_)|name=="files/public/中文.bin").unwrap().1=vec![9,9,9,9];replace_archive(&corrupt);
+        assert_eq!(sitebackup::import_archive(&state,&target.id,&first.path,&refreshed.revision,true,&|_,_,_|{}).unwrap_err().code,"SITE_IMPORT_CHANGED");
+        let corrupt_preview=sitebackup::inspect_import(&state,&target.id,&first.path,&|_,_,_|{}).unwrap();assert!(sitebackup::import_archive(&state,&target.id,&first.path,&corrupt_preview.revision,true,&|_,_,_|{}).is_err());assert_eq!(sitebackup::list(&state.paths,&target.id).unwrap().len(),3);
         let restore_dir=state.paths.base.join("restored-sites");let before=std::fs::read_dir(&restore_dir).unwrap().count();assert!(sitebackup::restore(&state,&site.id,&first.name,None,true,&|_,_,_|{}).is_err());assert_eq!(std::fs::read_dir(&restore_dir).unwrap().count(),before);
         let mut traversal=entries.clone();let metadata=traversal.iter_mut().find(|(name,_)|name=="niceenv-site-backup.json").unwrap();let mut manifest:serde_json::Value=serde_json::from_slice(&metadata.1).unwrap();manifest["entries"][0]["path"]="../escape".into();metadata.1=serde_json::to_vec(&manifest).unwrap();replace_archive(&traversal);
         assert!(sitebackup::restore(&state,&site.id,&first.name,None,true,&|_,_,_|{}).is_err());assert!(!state.paths.base.join("escape").exists());
+        assert!(sitebackup::inspect_import(&state,&target.id,&first.path,&|_,_,_|{}).is_err());
         let mut aliases=entries.clone();let metadata=aliases.iter_mut().find(|(name,_)|name=="niceenv-site-backup.json").unwrap();let mut manifest:serde_json::Value=serde_json::from_slice(&metadata.1).unwrap();let entries=manifest["entries"].as_array_mut().unwrap();let mut duplicate=entries.iter().find(|entry|entry["path"]=="public/中文.bin").unwrap().clone();duplicate["path"]="PUBLIC/中文.bin".into();entries.push(duplicate);metadata.1=serde_json::to_vec(&manifest).unwrap();aliases.push(("files/PUBLIC/中文.bin".into(),vec![0,1,2,255]));replace_archive(&aliases);
         assert!(sitebackup::restore(&state,&site.id,&first.name,None,true,&|_,_,_|{}).is_err());assert_eq!(std::fs::read_dir(&restore_dir).unwrap().count(),before);
+        assert!(sitebackup::inspect_import(&state,&target.id,&first.path,&|_,_,_|{}).is_err());
+        assert!(!std::fs::read_dir(&state.paths.base).unwrap().any(|entry|entry.unwrap().file_name().to_string_lossy().starts_with(".site-import-")));
+        assert!(!std::fs::read_dir(std::path::Path::new(&imported.path).parent().unwrap()).unwrap().any(|entry|{let name=entry.unwrap().file_name();let name=name.to_string_lossy();name.starts_with(".pending-")||name.starts_with(".import-check-")}));
         std::fs::write(&first.path,"broken zip").unwrap();let listed=sitebackup::list(&state.paths,&site.id).unwrap();assert!(listed.iter().any(|entry|entry.name==first.name&&!entry.restorable));sitebackup::delete(&state,&site.id,&first.name).unwrap();
         #[cfg(windows)]{let junction=project.join("external-link");let outside=temp.path().join("outside");std::fs::create_dir(&outside).unwrap();std::fs::write(outside.join("kept"),"outside").unwrap();let status=platform::command("cmd").args(["/c","mklink","/J"]).arg(&junction).arg(&outside).output().unwrap();assert!(status.status.success());let current=sitebackup::scope(&state.store,&site.id,true,true).unwrap();assert!(sitebackup::create(&state,&site.id,true,true,&current.revision,true,&|_,_,_|{}).is_err());std::fs::remove_dir(junction).unwrap();assert_eq!(std::fs::read_to_string(outside.join("kept")).unwrap(),"outside");}
     }

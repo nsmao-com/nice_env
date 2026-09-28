@@ -2794,3 +2794,23 @@ Web/schema TypeScript 与 Rust 全工作区 all-targets 检查通过。十一处
 参考：https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/
 参考：https://github.com/redis/redis/blob/5.0/src/rdb.c
 参考：https://github.com/tporadowski/redis/blob/v5.0.14.1/src/util.c
+
+## 第一百二十一轮：Redis 备份导出、清理与异常记录展示（v0.2.109）
+
+继续对照 ServBay Redis 持久化文件管理流程，在已有独立备份、外部 RDB 导入和停止实例恢复基础上，补充单份备份导出与删除。通过 fast-context 检查调用链，复用既有 React Query、Radix、Tauri 文件对话框、服务生命周期互斥及数据目录活动保护，无新增依赖。
+
+导出先选择新的 .rdb 文件路径，限制绝对路径、普通文件名和 NiceEnv 数据目录以外的位置，拒绝目录联接、符号链接和路径穿越。使用目标目录内临时文件流式校验 RDB 头、EOF、启用时的 CRC64 和 SHA-256，核对大小及备份元数据未变化，同步文件后以不覆盖方式发布；已有目标保持原样。默认文件名仅使用受检查的备份 id。取消另存为不执行导出，浏览器预览仅内存演示，不读写本机文件。这些检查不等同于完整 RDB 对象语法解析。
+
+删除先生成包含备份 id、文件大小和实际字节摘要的 revision，确认时重新核对；只管理 content.rdb 与 metadata.json，允许记录损坏或其中一个文件缺失，发现额外文件则拒绝自动清理。文件夹暂存改名后再次验证，逐个删除已知文件并移除空目录，不递归删除。变化或清理失败时尝试还原目录，失败提示保留内容的具体位置，不宣称成功。应用内导出、删除和恢复共用生命周期锁，后台工作和数据目录活动计数覆盖阻塞任务。当前 Redis 数据、其他备份和已导出的文件保持原样。
+
+列表使用独立的展示结构，保留损坏元数据、缺失 RDB 和大小不符的异常记录，展示具体问题并禁用恢复/导出。未知版本记录在当前版本筛选中也显示。列表只做基本可用性检查，完整性校验在导出或恢复时执行，避免每次列出都读取所有大文件。每行增加“更多备份操作”菜单，分隔线复用左右内缩的虚线组件。删除确认展示所选记录、时间、版本、大小及异常，恢复前副本另有无法再回退的提醒；失败保留上下文并提供重新检查，执行期间同步防重并禁止关闭。
+
+扩展既有原生验收函数，没有新增测试文件。Windows Redis 5.0.14.1 隔离验收通过（1 passed，98.79 秒）：导出逐字等于原生 RDB 且可重新导入检查完整版本；拒绝覆盖目标及向应用数据目录导出；损坏记录和缺失 RDB 可展示并清理；预检后文件变化使旧 revision 失效；额外文件被保留；损坏 RDB 导出失败且不留下目标文件；另一线程持有生命周期锁时删除和导出返回繁忙；路径越界拒绝。最终真实 GET 仍为原值 1，其他备份和导出文件保留，自有进程与端口已回收。原有认证、配置重启、快照、恢复和外部导入验收继续通过。结果仅代表本机 Windows 与该 Redis 运行时。
+
+离线 Chromium 使用实际 React/Radix 组件和现有 CSS，通过六十一项交互/状态检查、schema 断言及六十七组中英翻译核对，无 pageerror。桌面操作菜单、390px 中文异常记录删除确认和 320px 英文确认截图已目检：虚线留有左右间距，长内容换行，正文可滚动且按钮可见，没有横向溢出。受控 API 和文件对话框替代不代表桌面 IPC 或原生系统对话框实机验收。Web/schema TypeScript 和 Rust 全工作区 all-targets 检查通过，未运行前端 dev 或正式前端 build。
+
+十一处版本文件同步至 0.2.109，Cargo.lock 仅更新 niceservbay、nsb-core、platform 三个本项目 crate。精确提交二十个任务文件，保留用户已有未跟踪文件与本地产物。上一版 v0.2.108 的 Windows、macOS Apple Silicon、macOS Intel Release 均已确认 completed/success。本轮依照项目约定新增 annotated tag v0.2.109，与 main 一次原子推送，随后核对远程分支、标签目标和 release.yml 的实际状态。本次没有业务数据库变更，未修改 update.sql；整体产品完善目标继续进行。
+
+参考：https://support.servbay.com/database-management/getting-started/redis-management-and-usage
+参考：https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/
+参考：https://github.com/redis/redis/blob/5.0/src/rdb.c

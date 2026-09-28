@@ -80,7 +80,7 @@ function mockSiteFileScope(id: string, project: boolean, exclude: boolean): Site
 }
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.108";
+const MOCK_APP_VERSION = "0.2.109";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -3040,7 +3040,21 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       mockRedisConnections.set(version, { ...credentials });
       return await mockInvoke<T>("redis_stats");
     }
-    case "redis_backup_list": return { items: structuredClone(redisBackupsPreview), unreadable: 0, directory: "preview/backup/redis" } as T;
+    case "redis_backup_list": return { items: structuredClone(redisBackupsPreview.map(entry => ({ ...entry, problem: null }))), unreadable: 0, directory: "preview/backup/redis" } as T;
+    case "redis_backup_removal_preview": {
+      const entry = redisBackupsPreview.find(entry => entry.id === args!.id);
+      if (!entry) throw { code: "REDIS_BACKUP_INVALID", message: "演示备份已不存在，请刷新列表。" };
+      return { entry: { ...structuredClone(entry), problem: null }, revision: `${entry.id}:${entry.sha256}` } as T;
+    }
+    case "redis_backup_delete": {
+      const entry = redisBackupsPreview.find(entry => entry.id === args!.id);
+      if (!entry || args!.revision !== `${entry.id}:${entry.sha256}`) throw { code: "REDIS_BACKUP_CHANGED", message: "演示备份已变化，请重新检查。" };
+      redisBackupsPreview.splice(redisBackupsPreview.indexOf(entry), 1); return undefined as T;
+    }
+    case "redis_backup_export": {
+      if (!redisBackupsPreview.some(entry => entry.id === args!.id)) throw { code: "REDIS_BACKUP_INVALID", message: "演示备份已不存在。" };
+      return String(args!.destination) as T;
+    }
     case "redis_backup_inspect_import": return { source: String(args!.source), version: "5.0.14", rdbVersion: 9, sizeBytes: 4096, sha256: "a".repeat(64), revision: `preview:${String(args!.source)}` } as T;
     case "redis_backup_import": {
       const source = String(args!.source);

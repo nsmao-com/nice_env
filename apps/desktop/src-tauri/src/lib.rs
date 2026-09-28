@@ -392,6 +392,9 @@ pub fn run() {
             redis_backup_restore,
             redis_backup_inspect_import,
             redis_backup_import,
+            redis_backup_removal_preview,
+            redis_backup_delete,
+            redis_backup_export,
             redis_connection,
             redis_save_connection,
             postgres_connection,
@@ -1761,6 +1764,34 @@ async fn redis_backup_import(state: State<'_, std::sync::Arc<nsb_core::CoreState
     tauri::async_runtime::spawn_blocking(move || {
         let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
         map_jh(nsb_core::redis_backup::import_rdb(&st.paths, &source, &revision))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+/// 备份文件管理与恢复共用生命周期互斥，删除必须重新核对预检摘要。
+#[tauri::command]
+async fn redis_backup_removal_preview(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: String) -> Result<nsb_core::redis_backup::RedisBackupRemoval, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
+        map_jh(st.redis_backup_removal_preview(&id))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn redis_backup_delete(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: String, revision: String) -> Result<(), tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
+        map_jh(st.redis_backup_delete(&id, &revision))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn redis_backup_export(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: String, destination: String) -> Result<String, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
+        map_jh(st.redis_backup_export(&id, &destination))
     }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

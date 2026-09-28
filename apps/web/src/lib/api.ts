@@ -38,6 +38,7 @@ import type {
   RedisRestorePreview,
   RedisRestoreResult,
   RedisImportPreview,
+  RedisBackupRemoval,
   ConfigFileInfo,
   ConfigValidation,
   ConfigBackup,
@@ -347,6 +348,9 @@ export const redisBackupList = () => safe(invoke<RedisBackupList>("redis_backup_
 export const redisBackupCreate = (version: string) => safe(invoke<RedisBackup>("redis_backup_create", { version }));
 export const redisBackupInspectImport = (source: string) => safe(invoke<RedisImportPreview>("redis_backup_inspect_import", { source }));
 export const redisBackupImport = (source: string, revision: string) => safe(invoke<RedisBackup>("redis_backup_import", { source, revision }));
+export const redisBackupRemovalPreview = (id: string) => safe(invoke<RedisBackupRemoval>("redis_backup_removal_preview", { id }));
+export const redisBackupDelete = (id: string, revision: string) => safe(invoke<void>("redis_backup_delete", { id, revision }));
+export const redisBackupExport = (id: string, destination: string) => safe(invoke<string>("redis_backup_export", { id, destination }));
 export const redisRestorePreview = (version: string, id: string) => safe(invoke<RedisRestorePreview>("redis_restore_preview", { version, id }));
 export const redisBackupRestore = (version: string, id: string, revision: string, confirmation: string) => safe(invoke<RedisRestoreResult>("redis_backup_restore", { version, id, revision, confirmation }));
 export const redisSettingsSave = (version: string, revision: string, settings: RedisSettings, acknowledgeDisable: boolean) =>

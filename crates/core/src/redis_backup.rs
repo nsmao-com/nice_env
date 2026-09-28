@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RedisBackup {
     pub id: String,
@@ -26,9 +26,27 @@ pub struct RedisBackup {
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct RedisBackupList {
-    pub items: Vec<RedisBackup>,
+    pub items: Vec<RedisBackupEntry>,
     pub unreadable: usize,
     pub directory: String,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisBackupEntry {
+    pub id: String,
+    pub version: Option<String>,
+    pub created_at: Option<i64>,
+    pub size_bytes: Option<u64>,
+    pub kind: Option<String>,
+    pub problem: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisBackupRemoval {
+    pub entry: RedisBackupEntry,
+    pub revision: String,
 }
 
 #[derive(Serialize, Debug)]
@@ -271,6 +289,48 @@ fn verified(paths: &Paths, id: &str) -> Result<RedisBackup> {
     Ok(entry)
 }
 
+fn summary(paths: &Paths, id: &str) -> Result<RedisBackupEntry> {
+    let path = item_path(paths, id, "content.rdb")?;
+    let dir = path.parent().unwrap();
+    if !fs::symlink_metadata(dir)?.is_dir() {
+        return Err(invalid("备份路径不是目录"));
+    }
+    let record = metadata(paths, id);
+    let mut entry = match record {
+        Ok(record) => RedisBackupEntry {
+            id: id.into(),
+            version: Some(record.version),
+            created_at: Some(record.created_at),
+            size_bytes: Some(record.size_bytes),
+            kind: Some(record.kind),
+            problem: None,
+        },
+        Err(error) => RedisBackupEntry {
+            id: id.into(),
+            version: None,
+            created_at: None,
+            size_bytes: None,
+            kind: None,
+            problem: Some(format!("备份记录无法读取：{}", error.message)),
+        },
+    };
+    match fs::symlink_metadata(&path) {
+        Ok(meta) if !linked(&meta) && meta.is_file() => {
+            if entry.size_bytes.is_some_and(|size| size != meta.len()) {
+                entry.problem = Some("RDB 文件大小与备份记录不符，请保留文件并检查其他副本".into());
+            }
+            entry.size_bytes = Some(meta.len());
+        }
+        Ok(_) => entry.problem = Some("RDB 路径不是普通文件，无法恢复或导出".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            entry.size_bytes = None;
+            entry.problem = Some("RDB 文件已缺失，仅剩备份记录".into());
+        }
+        Err(_) => entry.problem = Some("RDB 文件无法读取，请检查权限或文件占用".into()),
+    }
+    Ok(entry)
+}
+
 pub fn list(paths: &Paths) -> Result<RedisBackupList> {
     let dir = directory(paths)?;
     fs::create_dir_all(&dir)?;
@@ -285,7 +345,7 @@ pub fn list(paths: &Paths) -> Result<RedisBackupList> {
         if name.starts_with('.') {
             continue;
         }
-        match metadata(paths, &name) {
+        match summary(paths, &name) {
             Ok(entry) => result.items.push(entry),
             Err(_) => result.unreadable += 1,
         }
@@ -296,6 +356,170 @@ pub fn list(paths: &Paths) -> Result<RedisBackupList> {
             .then_with(|| b.id.cmp(&a.id))
     });
     Ok(result)
+}
+
+/// 只核对两个受管文件；目录中有其他内容时不允许自动清理。
+fn removal_revision(dir: &Path, id: &str) -> Result<String> {
+    let metadata = fs::symlink_metadata(dir)?;
+    if linked(&metadata) || !metadata.is_dir() {
+        return Err(invalid("备份目录不能是链接或普通文件"));
+    }
+    for item in fs::read_dir(dir)? {
+        let name = item?.file_name();
+        if name != "content.rdb" && name != "metadata.json" {
+            return Err(AppError::new(
+                "REDIS_BACKUP_EXTRA_FILES",
+                "备份目录中包含其他文件，未执行删除",
+            )
+            .with_hint("请打开备份目录检查额外文件；此操作只管理 content.rdb 与 metadata.json"));
+        }
+    }
+    let content = existing(&dir.join("content.rdb"))?;
+    let record = existing(&dir.join("metadata.json"))?;
+    Ok(hex::encode(Sha256::digest(
+        serde_json::to_vec(&(id, content, record)).map_err(|_| invalid("备份范围序列化失败"))?,
+    )))
+}
+
+pub fn removal_preview(paths: &Paths, id: &str) -> Result<RedisBackupRemoval> {
+    let dir = item_path(paths, id, "content.rdb")?
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let revision = removal_revision(&dir, id)?;
+    let entry = summary(paths, id)?;
+    // 读取摘要期间文件可能变化，确认弹窗必须对应同一份内容。
+    if removal_revision(&dir, id)? != revision {
+        return Err(AppError::new(
+            "REDIS_BACKUP_CHANGED",
+            "备份已变化，请重新检查删除范围",
+        ));
+    }
+    Ok(RedisBackupRemoval { entry, revision })
+}
+
+/// 调用方持有服务生命周期锁，防止删除与应用内恢复/导出交错。
+pub(crate) fn remove(paths: &Paths, id: &str, revision: &str) -> Result<()> {
+    let _work = crate::BackgroundWork::begin("删除 Redis 备份副本")?;
+    let source = item_path(paths, id, "content.rdb")?
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    if removal_revision(&source, id)? != revision {
+        return Err(AppError::new(
+            "REDIS_BACKUP_CHANGED",
+            "备份已变化，未删除，请重新检查并确认",
+        ));
+    }
+    let staged = directory(paths)?.join(format!(".delete-{id}-{:016x}", rand::random::<u64>()));
+    if staged.exists() {
+        return Err(invalid("删除暂存目录冲突，请重试"));
+    }
+    fs::rename(&source, &staged)?;
+    let validation = removal_revision(&staged, id).and_then(|current| {
+        if current == revision {
+            Ok(())
+        } else {
+            Err(AppError::new(
+                "REDIS_BACKUP_CHANGED",
+                "备份在删除前发生变化，已中止",
+            ))
+        }
+    });
+    if let Err(error) = validation {
+        if source.exists() || fs::rename(&staged, &source).is_err() {
+            return Err(error.with_hint(format!(
+                "文件保留在 {}，请打开备份目录检查",
+                crate::paths::portable_path_text(&staged)
+            )));
+        }
+        return Err(error);
+    }
+    // 不递归删除；额外文件、链接或外部进程造成的变化不应扩展删除范围。
+    let cleanup = || -> std::io::Result<()> {
+        for name in ["content.rdb", "metadata.json"] {
+            match fs::remove_file(staged.join(name)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        fs::remove_dir(&staged)
+    };
+    cleanup().map_err(|error| {
+        let retained = if !source.exists() && fs::rename(&staged, &source).is_ok() {
+            &source
+        } else {
+            &staged
+        };
+        AppError::io("清理备份副本", error).with_hint(format!(
+            "清理未全部完成，剩余内容保留在 {}；当前 Redis 数据未改动",
+            crate::paths::portable_path_text(retained)
+        ))
+    })
+}
+
+pub(crate) fn export(paths: &Paths, id: &str, destination: &str) -> Result<String> {
+    let _work = crate::BackgroundWork::begin("导出 Redis RDB 副本")?;
+    let dest = Path::new(destination);
+    if !dest.is_absolute()
+        || dest
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(invalid("请选择完整的导出文件路径"));
+    }
+    if !dest
+        .extension()
+        .and_then(|part| part.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("rdb"))
+    {
+        return Err(invalid("导出文件名必须以 .rdb 结尾"));
+    }
+    let parent = dest.parent().ok_or_else(|| invalid("导出目录无效"))?;
+    for part in parent.ancestors() {
+        if linked(&fs::symlink_metadata(part)?) {
+            return Err(invalid("导出目录不能经过链接或目录联接，请选择原始目录"));
+        }
+    }
+    let parent = parent.canonicalize()?;
+    let base = paths.base.canonicalize()?;
+    #[cfg(windows)]
+    let inside = Path::new(&parent.to_string_lossy().to_lowercase())
+        .starts_with(base.to_string_lossy().to_lowercase());
+    #[cfg(not(windows))]
+    let inside = parent.starts_with(&base);
+    if inside {
+        return Err(invalid("请选择 NiceEnv 数据目录以外的位置保存导出文件"));
+    }
+    let dest = checked_data_path(
+        &parent,
+        dest.file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| invalid("导出文件名无效"))?,
+    )?;
+    if dest.exists() {
+        return Err(AppError::new(
+            "REDIS_EXPORT_EXISTS",
+            "目标文件已存在，请另选文件名；已有文件未覆盖",
+        ));
+    }
+    let record = metadata(paths, id)?;
+    let mut pending = tempfile::Builder::new()
+        .prefix(".redis-export-")
+        .tempfile_in(&parent)?;
+    let (size, hash) = copy_rdb(&item_path(paths, id, "content.rdb")?, &mut pending)?;
+    if record.size_bytes != size || record.sha256 != hash || record != metadata(paths, id)? {
+        return Err(AppError::new(
+            "REDIS_BACKUP_CHECKSUM",
+            "备份与记录不符，未导出文件，请检查备份副本",
+        ));
+    }
+    pending.as_file().sync_all()?;
+    pending
+        .persist_noclobber(&dest)
+        .map_err(|error| AppError::io("保存导出 RDB（不覆盖已有文件）", error.error))?;
+    Ok(crate::paths::portable_path_text(&dest))
 }
 
 pub fn archive(paths: &Paths, version: &str, source: &Path, kind: &str) -> Result<RedisBackup> {

@@ -4529,6 +4529,63 @@ const client = new MongoClient(`mongodb://127.0.0.1:${process.argv[2]}`, { direc
         state.start_service("redis").unwrap();
         assert_eq!(cli(&["GET", "isolated-fixture"]), "1");
         assert_eq!(state.redis_stats().unwrap().keys, Some(2));
+        // 文件管理只影响选中的备份；导出可再次导入，不覆盖已有目标或当前实例数据。
+        let exported_rdb = temp.path().join("exported snapshot.rdb");
+        state.redis_backup_export(&imported.id, exported_rdb.to_str().unwrap()).unwrap();
+        assert_eq!(std::fs::read(&exported_rdb).unwrap(), original_backup);
+        assert_eq!(state.redis_backup_export(&imported.id, exported_rdb.to_str().unwrap()).unwrap_err().code, "REDIS_EXPORT_EXISTS");
+        assert!(state.redis_backup_export(&imported.id, state.paths.base.join("not-an-export.rdb").to_str().unwrap()).is_err());
+        let exported_scope = crate::redis_backup::inspect_import(exported_rdb.to_str().unwrap()).unwrap();
+        assert_eq!(exported_scope.version, "5.0.14.1");
+        let make_copy = || crate::redis_backup::import_rdb(&state.paths, &exported_scope.source, &exported_scope.revision).unwrap();
+        let damaged = make_copy();
+        let damaged_dir = state.paths.backup().join("redis").join(&damaged.id);
+        std::fs::write(damaged_dir.join("metadata.json"), "broken record").unwrap();
+        let listed = crate::redis_backup::list(&state.paths).unwrap();
+        let listed = listed.items.iter().find(|entry| entry.id == damaged.id).unwrap();
+        assert!(listed.version.is_none() && listed.problem.is_some());
+        let scope = state.redis_backup_removal_preview(&damaged.id).unwrap();
+        std::fs::write(damaged_dir.join("content.rdb"), "changed after preview").unwrap();
+        assert_eq!(state.redis_backup_delete(&damaged.id, &scope.revision).unwrap_err().code, "REDIS_BACKUP_CHANGED");
+        assert!(damaged_dir.is_dir());
+        let scope = state.redis_backup_removal_preview(&damaged.id).unwrap();
+        state.redis_backup_delete(&damaged.id, &scope.revision).unwrap();
+        assert!(!damaged_dir.exists());
+        assert_eq!(cli(&["GET", "isolated-fixture"]), "1");
+        assert!(content_path.is_file() && exported_rdb.is_file());
+        let missing = make_copy();
+        let missing_dir = state.paths.backup().join("redis").join(&missing.id);
+        std::fs::remove_file(missing_dir.join("content.rdb")).unwrap();
+        let listed = crate::redis_backup::list(&state.paths).unwrap();
+        let listed = listed.items.iter().find(|entry| entry.id == missing.id).unwrap();
+        assert!(listed.size_bytes.is_none() && listed.problem.is_some());
+        let scope = state.redis_backup_removal_preview(&missing.id).unwrap();
+        state.redis_backup_delete(&missing.id, &scope.revision).unwrap();
+        assert!(!missing_dir.exists());
+        let extra = make_copy();
+        let extra_dir = state.paths.backup().join("redis").join(&extra.id);
+        std::fs::write(extra_dir.join("keep.txt"), "unrelated").unwrap();
+        assert_eq!(state.redis_backup_removal_preview(&extra.id).unwrap_err().code, "REDIS_BACKUP_EXTRA_FILES");
+        assert_eq!(std::fs::read_to_string(extra_dir.join("keep.txt")).unwrap(), "unrelated");
+        std::fs::remove_file(extra_dir.join("keep.txt")).unwrap();
+        std::fs::write(extra_dir.join("content.rdb"), &corrupt).unwrap();
+        let rejected_export = temp.path().join("not-published.rdb");
+        assert!(state.redis_backup_export(&extra.id, rejected_export.to_str().unwrap()).is_err());
+        assert!(!rejected_export.exists());
+        let scope = state.redis_backup_removal_preview(&extra.id).unwrap();
+        {
+            let _locked = state.manager.lifecycle.lock();
+            std::thread::scope(|threads| {
+                threads.spawn(|| {
+                    assert_eq!(state.redis_backup_delete(&extra.id, &scope.revision).unwrap_err().code, "SERVICE_BUSY");
+                    assert_eq!(state.redis_backup_export(&imported.id, rejected_export.to_str().unwrap()).unwrap_err().code, "SERVICE_BUSY");
+                }).join().unwrap();
+            });
+        }
+        state.redis_backup_delete(&extra.id, &scope.revision).unwrap();
+        assert!(state.redis_backup_removal_preview("../outside").is_err());
+        assert_eq!(std::fs::read(&exported_rdb).unwrap(), original_backup);
+        assert_eq!(cli(&["GET", "isolated-fixture"]), "1");
         let pids = state.manager.snapshot("redis").unwrap().pids;
         state.stop_service("redis").unwrap();
         assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));

@@ -944,6 +944,22 @@ impl CoreState {
         redis_backup::restore(&self.paths, &self.store, version, id, revision, confirmation)
     }
 
+    pub fn redis_backup_removal_preview(&self, id: &str) -> Result<redis_backup::RedisBackupRemoval> {
+        let _work = BackgroundWork::begin("检查 Redis 备份删除范围")?;
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后检查备份"))?;
+        redis_backup::removal_preview(&self.paths, id)
+    }
+
+    pub fn redis_backup_delete(&self, id: &str, revision: &str) -> Result<()> {
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后清理备份"))?;
+        redis_backup::remove(&self.paths, id, revision)
+    }
+
+    pub fn redis_backup_export(&self, id: &str, destination: &str) -> Result<String> {
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后导出备份"))?;
+        redis_backup::export(&self.paths, id, destination)
+    }
+
     pub fn save_redis_settings(&self, version: &str, revision: &str, settings: &redis_settings::RedisSettings, acknowledge_disable: bool) -> Result<redis_settings::RedisSettingsView> {
         let _operation = self.manager.lifecycle.lock();
         redis_settings::save(&self.paths, &self.store, version, revision, settings, acknowledge_disable)

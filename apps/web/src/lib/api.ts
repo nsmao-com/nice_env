@@ -39,6 +39,8 @@ import type {
   RedisRestoreResult,
   RedisImportPreview,
   RedisBackupRemoval,
+  RedisPasswordView,
+  RedisPasswordSave,
   ConfigFileInfo,
   ConfigValidation,
   ConfigBackup,
@@ -345,6 +347,9 @@ export const redisSettings = (version: string) => safe(invoke<RedisSettingsView>
 export const redisPersistence = (version: string) => safe(invoke<RedisPersistence>("redis_persistence", { version }));
 export const redisSnapshot = (version: string) => safe(invoke<RedisSnapshotReceipt>("redis_snapshot", { version }));
 export const redisBackupList = () => safe(invoke<RedisBackupList>("redis_backup_list"));
+export const redisPassword = (version: string) => safe(invoke<RedisPasswordView>("redis_password", { version }));
+export const redisPasswordStop = (version: string) => safe(invoke<void>("redis_password_stop", { version }));
+export const redisPasswordSave = (version: string, revision: string, password: string, acknowledgeDisable: boolean) => safe(invoke<RedisPasswordSave>("redis_password_save", { version, revision, password, acknowledgeDisable }));
 export const redisBackupCreate = (version: string) => safe(invoke<RedisBackup>("redis_backup_create", { version }));
 export const redisBackupInspectImport = (source: string) => safe(invoke<RedisImportPreview>("redis_backup_inspect_import", { source }));
 export const redisBackupImport = (source: string, revision: string) => safe(invoke<RedisBackup>("redis_backup_import", { source, revision }));

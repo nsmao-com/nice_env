@@ -2814,3 +2814,23 @@ Web/schema TypeScript 与 Rust 全工作区 all-targets 检查通过。十一处
 参考：https://support.servbay.com/database-management/getting-started/redis-management-and-usage
 参考：https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/
 参考：https://github.com/redis/redis/blob/5.0/src/rdb.c
+
+## 第一百二十二轮：Redis 服务密码设置与正常停机确认（v0.2.110）
+
+对照 ServBay 数据库密码设置说明，经 fast-context 复查现有 Redis 连接凭据、常用设置、认证停机和配置历史链路。此前“连接凭据”仅验证并保存客户端登录信息，不能设置 Redis 服务的 requirepass。本轮增加独立“服务密码”窗口，设置、更换默认用户的启动密码，并在明确确认后允许关闭认证。复用现有 UI/UX、React Query、Radix、配置编辑器和本机凭据结构，无新增依赖。
+
+读取只返回启动认证是否启用、完整配置 revision 和无法直接编辑的原因，不返回原密码。根据 Redis 官方 ACL 说明，Redis 6 起 requirepass 对应默认用户；配置包含用户规则、非空 aclfile 或 include 时，转入原有配置编辑器管理，不覆盖其认证规则。带引号的指令名、无法确认参数范围的密码行也明确拒绝。支持既有多条 requirepass 的最后值语义，保存时合并为一条，保留其他指令、注释和换行风格。新密码限制 1–512 UTF-8 字节，拒绝控制字符和纯空白，正确转义双引号和反斜杠，空格、井号和中文可保留。关闭认证需要后端独立检查确认参数。
+
+保存要求 Redis 已停止、默认版本仍与窗口一致，并持有生命周期互斥；使用完整配置 revision 和原配置再次核对防止覆盖外部编辑，复用配置历史和原子替换。保存后同步此版本默认用户的本机连接凭据，保持 Redis 停止，用户启动后生效。若配置已写入但本机凭据记录失败，返回明确的部分保存结果及新 revision，界面保留密码草稿供再次保存；不报告全部成功。密码输入默认隐藏，可同时显示两次输入，保存成功清空输入并恢复隐藏状态。界面提示项目、客户端和下游副本也需更新连接密码。
+
+运行中可在密码窗口内确认“停止 Redis 后继续”，后端在同一生命周期锁内重新确认运行版本，然后复用正常认证停机、进程归属核对、失败保留实例及 PID 文件流程，不强制结束进程。停机本身不保存密码，停机失败在确认框内展示原因并保留草稿；成功后更新服务状态，继续保存而无需跨页重新输入。执行期间同步防重、禁止关闭；版本改变立即禁用保存和停机。关闭、重新读取或进入原文编辑遇到草稿先确认，失败保留输入，模式切换保留密码草稿。浏览器为明确标注的内存演示，其连接验证对应演示服务密码。
+
+扩展既有 Rust 验证函数，没有新增测试文件。两项 Redis 配置解析验证通过，覆盖重复指令、CRLF 保留、空密码确认、引号/反斜杠/中文、512 字节边界、注入拒绝及 ACL/include 保护。Windows Redis 5.0.14.1 隔离原生验收最终通过（1 passed，130.79 秒）：运行中保存被拒绝，错误版本不能停机；窗口停机入口正常回收进程；含特殊字符的新密码重启后可真实认证，未认证和错误密码被拒绝，GET 仍读回原值 1、两个逻辑数据库的键保留。配置历史包含原文，外部修改使旧 revision 失效，关闭认证需确认且重启后可无密码访问；复杂认证配置不改文件或凭据。仅在隔离 SQLite 注入凭据写入失败，确认部分结果、新 revision 重试及再次启动正常；跨线程生命周期锁冲突返回繁忙。原有设置、快照、备份导入导出、恢复和清理验收继续通过，自有进程与端口已回收。结果仅代表本机 Windows 和该 Redis 运行时。
+
+离线 Chromium 装载实际 React/Radix 组件和现有 CSS，通过四十六项交互/状态检查、schema 断言及十七组中英翻译检查，无 pageerror。覆盖停机确认与取消、停机失败重试、草稿保留、防重复保存、实例变化禁用、部分保存、冲突重新读取、字节限制与密码确认、显隐同步和 ACL 编辑器交接。1440px 桌面、390px 中文关闭认证及 320px 英文密码表单截图已目检；虚线分隔保留左右间距，长文案换行、正文滚动、底部操作可见，没有横向溢出。配置编辑器在该夹具中仅验证交接和返回刷新，未将其替代界面作为完整原生编辑器验收；离线 API 验证不代表桌面 IPC 实机验收。
+
+Web/schema TypeScript、Rust 全工作区 all-targets 与 diff 检查通过，未运行前端 dev 或正式前端 build。十一处版本文件同步至 0.2.110，Cargo.lock 仅更新三个本项目 crate；精确提交二十二个任务文件并保留用户原有未跟踪文件及本地产物。上一版 v0.2.109 的 Windows、macOS Apple Silicon、macOS Intel Release 均已确认 completed/success。本轮依照项目约定新增 annotated tag v0.2.110，与 main 一次原子推送，随后核对远程指向及 release.yml 实际状态。本次没有业务数据库变更，未修改 update.sql；整体产品完善目标继续进行。
+
+参考：https://support.servbay.com/database-management/getting-started/reset-database-password
+参考：https://redis.io/docs/latest/operate/oss_and_stack/management/security/acl/
+参考：https://raw.githubusercontent.com/redis/redis/unstable/redis.conf

@@ -80,7 +80,7 @@ function mockSiteFileScope(id: string, project: boolean, exclude: boolean): Site
 }
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.109";
+const MOCK_APP_VERSION = "0.2.110";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -1068,6 +1068,8 @@ async function performServiceAction(action: "start_service" | "stop_service" | "
 }
 
 const redisSettingsPreview = new Map<string, import("@nsb/schema").RedisSettingsView>();
+const redisPasswordsPreview = new Map<string, import("@nsb/schema").RedisPasswordView>();
+const redisServerPasswordsPreview = new Map<string, string>();
 const redisPersistencePreview = new Map<string, { report: import("@nsb/schema").RedisPersistence; finishAt: number; minimumSaveTime: number }>();
 const redisBackupsPreview: import("@nsb/schema").RedisBackup[] = [];
 let redisRestoreRevisionPreview = 0;
@@ -3030,13 +3032,35 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const credentials = mockRedisConnections.get(version);
       return { version, username: credentials?.username ?? "", hasPassword: !!credentials?.password } as T;
     }
+    case "redis_password": {
+      const version = args!.version as string;
+      if (!redisPasswordsPreview.has(version)) redisPasswordsPreview.set(version, { version, revision: "preview-password-0", enabled: false, blockedReason: null });
+      return structuredClone(redisPasswordsPreview.get(version)) as T;
+    }
+    case "redis_password_save": {
+      const version = args!.version as string;
+      const previous = redisPasswordsPreview.get(version);
+      if (services.get("redis")?.state !== "stopped") throw { code: "REDIS_PASSWORD_RUNNING", message: "请先停止演示 Redis，再保存服务密码。" };
+      if (!previous || previous.revision !== args!.revision) throw { code: "CONFIG_CONFLICT", message: "配置已变化，请重新读取。" };
+      const password = args!.password as string;
+      if (new TextEncoder().encode(password).length > 512 || /[\x00-\x1f\x7f-\x9f]/.test(password) || (password.length > 0 && !password.trim())) throw { code: "REDIS_PASSWORD_INVALID", message: "密码须为 1–512 字节，不能仅为空白或包含控制字符。" };
+      if (!password && !args!.acknowledgeDisable) throw { code: "REDIS_PASSWORD_CONFIRM", message: "请先确认关闭密码认证的影响。" };
+      const view = { ...previous, enabled: !!password, revision: `preview-password-${Date.now()}` };
+      redisPasswordsPreview.set(version, view); redisServerPasswordsPreview.set(version, password); mockRedisConnections.set(version, { username: "", password });
+      return { view: structuredClone(view), connectionSaved: true } as T;
+    }
+    case "redis_password_stop": {
+      const service = services.get("redis");
+      if (service?.version !== args!.version) throw { code: "REDIS_INSTANCE_CHANGED", message: "演示 Redis 版本已变化，未停止。" };
+      return await mockInvoke<T>("stop_service", { id: "redis" });
+    }
     case "redis_save_connection": {
       const service = services.get("redis");
       const version = args!.version as string;
       if (service?.state !== "running" || service.version !== version) throw { code: "REDIS_INSTANCE_CHANGED", message: "运行中的 Redis 版本已变化，请重新打开连接设置" };
       const credentials = args!.credentials as { username: string; password: string };
-      // 预览实例为无认证模式，不能把任意输入的密码视为验证成功。
-      if (credentials.username || credentials.password) throw { code: "REDIS_AUTH_FAILED", message: "网页预览中的 Redis 无需认证，请选择无认证连接；真实凭据请在桌面应用中验证。" };
+      // 演示认证对应演示服务密码；真实凭据只在桌面应用中验证。
+      if ((credentials.username && credentials.username !== "default") || credentials.password !== (redisServerPasswordsPreview.get(version) ?? "")) throw { code: "REDIS_AUTH_FAILED", message: "连接凭据与演示 Redis 的服务密码不一致；真实凭据请在桌面应用中验证。" };
       mockRedisConnections.set(version, { ...credentials });
       return await mockInvoke<T>("redis_stats");
     }

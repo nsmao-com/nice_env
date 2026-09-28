@@ -2215,6 +2215,28 @@ mod tests {
         for invalid in ["include extra.conf\n", "\"maxmemory\" 12\n", "save 0 1\n", "save 900\n", "maxmemory 2mb # comment\n", "maxmemory 18446744073709551615gb\n"] { assert!(parse(invalid).is_err(),"{invalid}"); }
         let unknown="maxmemory-policy new-server-policy\n";let mut retained=parse(unknown).unwrap().0;retained.timeout_seconds=Some(5);assert!(merge(unknown,&retained,false).unwrap().contains("new-server-policy"));
         retained.eviction_policy=Some("noeviction\nrequirepass injected".into());assert!(merge(unknown,&retained,false).is_err());
+
+        use crate::redis_settings::{password_merge, password_state};
+        assert!(!password_state("# requirepass ignored\nrequirepass ''\n").unwrap());
+        assert!(password_state("requirepass first\nREQUIREPASS \"second # value\"\n").unwrap());
+        let password = "space # quote\" slash\\ 中文";
+        let original = "# kept\r\nrequirepass old\r\nmaxmemory 64mb\r\nrequirepass older\r\n";
+        let merged = password_merge(original, password, false).unwrap();
+        assert_eq!(merged.lines().filter(|l|l.starts_with("requirepass ")).count(),1);
+        assert!(merged.contains("requirepass \"space # quote\\\" slash\\\\ 中文\"\r\n"));
+        assert!(merged.contains("# kept\r\n") && merged.contains("maxmemory 64mb\r\n"));
+        assert!(password_state(&merged).unwrap());
+        assert_eq!(password_merge(&merged,"",false).unwrap_err().code,"REDIS_PASSWORD_CONFIRM");
+        assert!(!password_state(&password_merge(&merged,"",true).unwrap()).unwrap());
+        for invalid in ["include other.conf\n", "aclfile users.acl\n", "user default on nopass ~* +@all\n", "\"requirepass\" secret\n", "requirepass \"unclosed\n", "requirepass \"a\" extra\n", "requirepass a b\n", "requirepass \"\n"] {
+            assert!(password_state(invalid).is_err(),"invalid authentication configuration");
+            assert!(password_merge(invalid,"replacement",false).is_err());
+        }
+        assert!(!password_state("aclfile \"\"\n").unwrap());
+        for invalid in [" \t", "new\nport 0", "null\0", "ctrl\u{85}"] { assert!(password_merge("",invalid,false).is_err()); }
+        assert!(password_merge("",&"a".repeat(512),false).is_ok());
+        assert!(password_merge("",&"a".repeat(513),false).is_err());
+        assert!(password_merge("",&"中".repeat(171),false).is_err());
     }
 
     #[test]

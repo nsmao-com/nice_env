@@ -384,6 +384,9 @@ pub fn run() {
             redis_stats,
             redis_settings,
             redis_settings_save,
+            redis_password,
+            redis_password_save,
+            redis_password_stop,
             redis_persistence,
             redis_snapshot,
             redis_backup_list,
@@ -1679,6 +1682,33 @@ async fn redis_settings(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, v
     tauri::async_runtime::spawn_blocking(move || {
         let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
         map_jh(st.redis_settings(&version))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn redis_password(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String) -> Result<nsb_core::redis_settings::RedisPasswordView, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
+        map_jh(st.redis_password(&version))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn redis_password_save(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, revision: String, password: String, acknowledge_disable: bool) -> Result<nsb_core::redis_settings::RedisPasswordSave, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
+        map_jh(st.save_redis_password(&version, &revision, &password, acknowledge_disable))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn redis_password_stop(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String) -> Result<(), tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
+        map_jh(st.stop_redis_for_password(&version))
     }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

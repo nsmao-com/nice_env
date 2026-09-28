@@ -969,6 +969,11 @@ export const RedisSettingsView = z.object({
 });
 export type RedisSettingsView = z.infer<typeof RedisSettingsView>;
 
+export const RedisPasswordView = z.object({ version: z.string(), revision: z.string(), enabled: z.boolean(), blockedReason: z.string().nullable() });
+export type RedisPasswordView = z.infer<typeof RedisPasswordView>;
+export const RedisPasswordSave = z.object({ view: RedisPasswordView, connectionSaved: z.boolean() });
+export type RedisPasswordSave = z.infer<typeof RedisPasswordSave>;
+
 export const RedisPersistence = z.object({
   version: z.string(), runId: z.string(), processId: z.number().int().positive(), loading: z.boolean(), saving: z.boolean(),
   changesSinceSave: z.number().int().nonnegative(), lastSaveTime: z.number().int().nonnegative(),

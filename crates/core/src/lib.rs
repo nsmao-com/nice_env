@@ -971,6 +971,31 @@ impl CoreState {
         Ok(stats::RedisConnectionInfo { version: version.into(), username: credentials.username, has_password: !credentials.password.is_empty() })
     }
 
+    pub fn redis_password(&self, version: &str) -> Result<redis_settings::RedisPasswordView> {
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后读取密码设置"))?;
+        redis_settings::password_get(&self.paths, &self.store, version)
+    }
+
+    pub fn save_redis_password(&self, version: &str, revision: &str, password: &str, acknowledge_disable: bool) -> Result<redis_settings::RedisPasswordSave> {
+        let _work = BackgroundWork::begin("保存 Redis 服务密码")?;
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后保存密码"))?;
+        if self.manager.is_busy("redis") {
+            return Err(AppError::new("REDIS_PASSWORD_RUNNING", "请先停止 Redis，再保存服务密码")
+                .with_hint("运行中实例仍使用原密码；请先保存应用写入，再到套件页正常停止 Redis"));
+        }
+        if ops::installed_by_choice(&self.store, "redis").is_none_or(|package| package.version != version) {
+            return Err(AppError::new("REDIS_INSTANCE_CHANGED", "默认 Redis 版本已变化，请重新打开该版本的密码设置"));
+        }
+        redis_settings::password_save(&self.paths, &self.store, version, revision, password, acknowledge_disable)
+    }
+
+    pub fn stop_redis_for_password(&self, version: &str) -> Result<()> {
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后停止 Redis"))?;
+        self.running_redis(Some(version))?;
+        // 沿用认证停机与失败保留实例的完整流程，确认版本后才停止，不保存密码草稿。
+        self.stop_service("redis")
+    }
+
     pub fn save_redis_connection(&self, version: &str, credentials: stats::RedisCredentials) -> Result<stats::RedisStats> {
         let _operation = self.manager.lifecycle.lock();
         let service = self.running_redis(Some(version))?;

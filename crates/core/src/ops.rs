@@ -4586,6 +4586,68 @@ const client = new MongoClient(`mongodb://127.0.0.1:${process.argv[2]}`, { direc
         assert!(state.redis_backup_removal_preview("../outside").is_err());
         assert_eq!(std::fs::read(&exported_rdb).unwrap(), original_backup);
         assert_eq!(cli(&["GET", "isolated-fixture"]), "1");
+        let password_scope = state.redis_password("5.0.14.1").unwrap();
+        assert!(!password_scope.enabled && password_scope.blocked_reason.is_none());
+        assert_eq!(state.save_redis_password("5.0.14.1", &password_scope.revision, "new-password", false).unwrap_err().code, "REDIS_PASSWORD_RUNNING");
+        assert_eq!(state.stop_redis_for_password("7.4.0").unwrap_err().code, "REDIS_INSTANCE_CHANGED");
+        let pids = state.manager.snapshot("redis").unwrap().pids;
+        state.stop_redis_for_password("5.0.14.1").unwrap();
+        assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));
+        let original_config = std::fs::read_to_string(&config).unwrap();
+        let password = "fixture # quote\" and slash\\ value";
+        let saved = state.save_redis_password("5.0.14.1", &password_scope.revision, password, false).unwrap();
+        assert!(saved.connection_saved && saved.view.enabled);
+        assert_eq!(crate::stats::RedisCredentials::load(&state.store,"5.0.14.1").unwrap().password, password);
+        assert!(!serde_json::to_string(&saved).unwrap().contains(password));
+        assert_eq!(state.save_redis_password("5.0.14.1", &password_scope.revision, password, false).unwrap_err().code, "CONFIG_CONFLICT");
+        let history = crate::cfgeditor::list_config_backups_selected(&state.paths, &state.store, Some("redis-conf@5.0.14.1")).unwrap();
+        assert!(history.iter().any(|entry| std::fs::read_to_string(&entry.path).ok().as_deref() == Some(original_config.as_str())));
+        state.start_service("redis").unwrap();
+        assert_eq!(state.redis_stats().unwrap().keys,Some(2));
+        assert_eq!(crate::stats::redis_stats_authenticated(port,&credentials(""),None).unwrap_err().code,"REDIS_AUTH_REQUIRED");
+        assert_eq!(crate::stats::redis_stats_authenticated(port,&credentials("wrong"),None).unwrap_err().code,"REDIS_AUTH_FAILED");
+        let read_back = platform::command(root.join("redis-cli.exe")).env("REDISCLI_AUTH",password)
+            .args(["-p",&port.to_string(),"--raw","GET","isolated-fixture"]).output().unwrap();
+        assert!(read_back.status.success());
+        assert_eq!(String::from_utf8_lossy(&read_back.stdout).trim(),"1");
+        state.stop_service("redis").unwrap();
+        let scope = state.redis_password("5.0.14.1").unwrap();
+        let before = std::fs::read_to_string(&config).unwrap();
+        std::fs::write(&config,format!("{before}# external edit\n")).unwrap();
+        assert_eq!(state.save_redis_password("5.0.14.1",&scope.revision,"",true).unwrap_err().code,"CONFIG_CONFLICT");
+        let scope = state.redis_password("5.0.14.1").unwrap();
+        assert_eq!(state.save_redis_password("5.0.14.1",&scope.revision,"",false).unwrap_err().code,"REDIS_PASSWORD_CONFIRM");
+        let disabled = state.save_redis_password("5.0.14.1",&scope.revision,"",true).unwrap();
+        assert!(!disabled.view.enabled && disabled.connection_saved);
+        state.start_service("redis").unwrap();
+        assert_eq!(state.redis_stats().unwrap().keys,Some(2));
+        assert_eq!(cli(&["GET","isolated-fixture"]),"1");
+        state.stop_service("redis").unwrap();
+        let disabled_config = std::fs::read_to_string(&config).unwrap();
+        for extra in ["include extra.conf\n","aclfile users.acl\n","user default on nopass ~* +@all\n"] {
+            std::fs::write(&config,format!("{disabled_config}{extra}")).unwrap();
+            let view = state.redis_password("5.0.14.1").unwrap();
+            assert!(view.blocked_reason.is_some());
+            assert_eq!(state.save_redis_password("5.0.14.1",&view.revision,password,false).unwrap_err().code,"REDIS_PASSWORD_COMPLEX");
+            assert!(crate::stats::RedisCredentials::load(&state.store,"5.0.14.1").unwrap().password.is_empty());
+        }
+        std::fs::write(&config, &disabled_config).unwrap();
+        let view = state.redis_password("5.0.14.1").unwrap();
+        // 仅隔离 SQLite 夹具注入记录写入失败，确认不把部分保存报告为全部成功。
+        let db = rusqlite::Connection::open(state.paths.db()).unwrap();
+        db.execute_batch("CREATE TRIGGER reject_redis_credentials BEFORE INSERT ON settings WHEN NEW.key = 'redisConnection@5.0.14.1' BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END;").unwrap();
+        let partial = state.save_redis_password("5.0.14.1",&view.revision,password,false).unwrap();
+        assert!(partial.view.enabled && !partial.connection_saved);
+        db.execute_batch("DROP TRIGGER reject_redis_credentials;").unwrap();
+        assert!(state.save_redis_password("5.0.14.1",&partial.view.revision,password,false).unwrap().connection_saved);
+        {
+            let _locked = state.manager.lifecycle.lock();
+            std::thread::scope(|threads| threads.spawn(|| {
+                assert_eq!(state.save_redis_password("5.0.14.1",&partial.view.revision,password,false).unwrap_err().code,"SERVICE_BUSY");
+            }).join().unwrap());
+        }
+        state.start_service("redis").unwrap();
+        assert_eq!(state.redis_stats().unwrap().keys,Some(2));
         let pids = state.manager.snapshot("redis").unwrap().pids;
         state.stop_service("redis").unwrap();
         assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));

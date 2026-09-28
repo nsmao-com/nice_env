@@ -399,6 +399,116 @@ pub fn get(paths: &Paths, store: &Store, version: &str) -> Result<RedisSettingsV
     view(paths, version, &read(paths, store, version)?)
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisPasswordView {
+    pub version: String,
+    pub revision: String,
+    pub enabled: bool,
+    pub blocked_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisPasswordSave {
+    pub view: RedisPasswordView,
+    /// 配置已原子保存；连接记录失败时单独反馈，允许使用新 revision 重试。
+    pub connection_saved: bool,
+}
+
+/// 只判断现有密码是否为空，不向界面返回密码，也不把原文写入错误。
+pub(crate) fn password_state(content: &str) -> Result<bool> {
+    let mut enabled = false;
+    for (index, line) in content.lines().enumerate() {
+        let text = line.trim();
+        if text.is_empty() || text.starts_with('#') { continue; }
+        if text.starts_with(['\'', '"']) { return Err(unsupported(index + 1)); }
+        let key = text.split_ascii_whitespace().next().unwrap_or_default();
+        let value = text[key.len()..].trim();
+        if key.eq_ignore_ascii_case("include") || key.eq_ignore_ascii_case("user")
+            || (key.eq_ignore_ascii_case("aclfile") && !matches!(value, "\"\"" | "''")) {
+            return Err(AppError::new("REDIS_PASSWORD_COMPLEX", "配置包含 include 或 ACL 用户规则，请在配置编辑器中管理认证，避免覆盖现有权限"));
+        }
+        if !key.eq_ignore_ascii_case("requirepass") { continue; }
+        let bytes = value.as_bytes();
+        if bytes.is_empty() { return Err(unsupported(index + 1)); }
+        if matches!(bytes[0], b'\'' | b'"') {
+            let quote = bytes[0];
+            let mut i = 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' && (quote == b'"' || bytes.get(i + 1) == Some(&b'\'')) {
+                    i += 2; continue;
+                }
+                if bytes[i] == quote { break; }
+                i += 1;
+            }
+            if i != bytes.len() - 1 || bytes[i] != quote { return Err(unsupported(index + 1)); }
+            enabled = i > 1;
+        } else {
+            if value.chars().any(|c| c.is_whitespace() || matches!(c, '\'' | '"')) { return Err(unsupported(index + 1)); }
+            enabled = true;
+        }
+    }
+    Ok(enabled)
+}
+
+fn password_view(version: &str, content: &str) -> RedisPasswordView {
+    let parsed = password_state(content);
+    RedisPasswordView {
+        version: version.into(),
+        revision: hex::encode(Sha256::digest(content.as_bytes())),
+        enabled: parsed.as_ref().copied().unwrap_or(false),
+        blocked_reason: parsed.err().map(|error| error.message),
+    }
+}
+
+pub fn password_get(paths: &Paths, store: &Store, version: &str) -> Result<RedisPasswordView> {
+    Ok(password_view(version, &read(paths, store, version)?))
+}
+
+pub(crate) fn password_merge(content: &str, password: &str, acknowledge_disable: bool) -> Result<String> {
+    password_state(content)?;
+    if password.len() > 512 || password.chars().any(char::is_control)
+        || (!password.is_empty() && password.trim().is_empty()) {
+        return Err(AppError::new("REDIS_PASSWORD_INVALID", "密码须为 1–512 字节，不能仅为空白或包含控制字符"));
+    }
+    if password.is_empty() && !acknowledge_disable {
+        return Err(AppError::new("REDIS_PASSWORD_CONFIRM", "关闭密码认证前，请确认了解所有可连接到此实例的客户端都将能够访问数据"));
+    }
+    // Redis 双引号支持反斜杠转义；不经 shell 传参，保留空格、# 和非 ASCII 字符。
+    let quoted = password.replace('\\', "\\\\").replace('"', "\\\"");
+    let newline = if content.contains("\r\n") { "\r\n" } else { "\n" };
+    let replacement = format!("requirepass \"{quoted}\"{newline}");
+    let mut output = String::new();
+    let mut written = false;
+    for line in content.split_inclusive('\n') {
+        if line.split_ascii_whitespace().next().is_some_and(|key| key.eq_ignore_ascii_case("requirepass")) {
+            if !written { output.push_str(&replacement); written = true; }
+        } else { output.push_str(line); }
+    }
+    if !written {
+        if !output.is_empty() && !output.ends_with('\n') { output.push_str(newline); }
+        output.push_str(&replacement);
+    }
+    if password_state(&output)? != !password.is_empty() {
+        return Err(AppError::new("REDIS_PASSWORD_INVALID", "密码配置合并失败，文件未改动"));
+    }
+    Ok(output)
+}
+
+/// 调用方必须持有生命周期锁并确认 Redis 停止，避免覆盖运行中实例的停机凭据。
+pub(crate) fn password_save(paths: &Paths, store: &Store, version: &str, revision: &str, password: &str, acknowledge_disable: bool) -> Result<RedisPasswordSave> {
+    let content = read(paths, store, version)?;
+    if revision != hex::encode(Sha256::digest(content.as_bytes())) {
+        return Err(AppError::new("CONFIG_CONFLICT", "Redis 配置已变化，未保存密码，请重新读取后确认"));
+    }
+    let merged = password_merge(&content, password, acknowledge_disable)?;
+    cfgeditor::save_config_selected(paths, store, &format!("redis-conf@{version}"), &merged, false, Some(&content))?;
+    let credentials = crate::stats::RedisCredentials { username: String::new(), password: password.into() };
+    let connection_saved = store.set_setting_json(&crate::stats::RedisCredentials::key(version), &credentials).is_ok();
+    Ok(RedisPasswordSave { view: password_view(version, &merged), connection_saved })
+}
+
 /// 调用方持有服务生命周期锁，与原始配置编辑器、重启生成和历史还原互斥。
 pub fn save(
     paths: &Paths,

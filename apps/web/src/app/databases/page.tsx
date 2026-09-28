@@ -29,7 +29,7 @@ import {
   DialogFooter,
   DialogDescription,
 } from "@/components/ui/dialog";
-import type { ServiceStatus } from "@nsb/schema";
+import type { DatabaseEngine, ServiceStatus } from "@nsb/schema";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { PageHeader } from "@/components/layout/app-shell";
 
@@ -37,17 +37,23 @@ export default function DatabasesPage() {
   const t = useT();
   const invalidate = useInvalidate();
   const serviceQuery = useServices();
-  const mysqlServices = serviceQuery.data.filter((s) => s.id === "mysql" || s.id.startsWith("mysql@"));
-  const [selectedVersion, setSelectedVersion] = React.useState("");
-  const version = selectedVersion || mysqlServices.find((s) => s.state === "running")?.version || mysqlServices[0]?.version || "";
-  const service = mysqlServices.find((s) => s.version === version);
-  const running = !!version && service?.state === "running";
-  const dbQuery = useDatabases(version, running);
-  const userQuery = useDbUsers(version, running);
+  const databaseServices = serviceQuery.data.filter((s) => ["mysql", "mariadb"].includes(s.id.split("@")[0]));
+  const [selectedInstance, setSelectedInstance] = React.useState("");
+  const instanceKey = (s: ServiceStatus) => `${s.id}:${s.version}`;
+  const defaultService = databaseServices.find((s) => s.state === "running") ?? databaseServices[0];
+  const selected = selectedInstance || (defaultService ? instanceKey(defaultService) : "");
+  React.useEffect(() => { if (!selectedInstance && selected) setSelectedInstance(selected); }, [selectedInstance, selected]);
+  const service = databaseServices.find((s) => instanceKey(s) === selected);
+  const version = service?.version ?? "";
+  const engine: DatabaseEngine = service?.id.split("@")[0] === "mariadb" ? "mariadb" : "mysql";
+  const engineLabel = engine === "mariadb" ? "MariaDB" : "MySQL";
+  const running = !!version && (service?.state === "running" || (service?.state === "error" && service.pids.length > 0));
+  const dbQuery = useDatabases(version, running, engine);
+  const userQuery = useDbUsers(version, running, engine);
   const dbs = dbQuery.data ?? [];
   const users = userQuery.data ?? [];
   const ready = running && dbQuery.isSuccess;
-  const targetLabel = `MySQL ${version} · 127.0.0.1:${service?.port ?? "—"}`;
+  const targetLabel = `${engineLabel} ${version} · 127.0.0.1:${service?.port ?? "—"}`;
   const [backupLocked, setBackupLocked] = React.useState(false);
   const [createOpen, setCreateOpen] = React.useState(false);
   const [userOpen, setUserOpen] = React.useState(false);
@@ -61,7 +67,7 @@ export default function DatabasesPage() {
 
   return (
     <div className="pb-8">
-      <DbImportDialog key={`import-${version}`} open={importOpen} onOpenChange={setImportOpen} version={version} targetLabel={targetLabel} />
+      <DbImportDialog key={`import-${engine}-${version}`} open={importOpen} onOpenChange={setImportOpen} version={version} engine={engine} targetLabel={targetLabel} />
       <PageHeader
         title={t("db.title")}
         subtitle={t("db.subtitle")}
@@ -82,27 +88,27 @@ export default function DatabasesPage() {
 
       <div className="mb-5 flex flex-wrap items-end gap-3">
         <div className="w-full max-w-sm space-y-1.5">
-          <Label htmlFor="mysql-instance">{t("db.chooseInstance")}</Label>
-          <Select value={version} onValueChange={setSelectedVersion} disabled={createOpen || userOpen || rootOpen || importOpen || !!dropTarget || backupLocked || !mysqlServices.length}>
-            <SelectTrigger id="mysql-instance"><SelectValue placeholder={t("db.chooseInstance")} /></SelectTrigger>
-            <SelectContent>{mysqlServices.map((s) => <SelectItem key={s.id} value={s.version!}>MySQL {s.version} · {s.port ?? "—"} · {s.state === "running" ? t("common.running") : t("common.stopped")}</SelectItem>)}</SelectContent>
+          <Label htmlFor="database-instance">{t("db.chooseInstance")}</Label>
+          <Select value={selected} onValueChange={setSelectedInstance} disabled={createOpen || userOpen || rootOpen || importOpen || !!dropTarget || backupLocked || !databaseServices.length}>
+            <SelectTrigger id="database-instance"><SelectValue placeholder={t("db.chooseInstance")} /></SelectTrigger>
+            <SelectContent>{databaseServices.map((s) => <SelectItem key={s.id} value={instanceKey(s)}>{s.id.split("@")[0] === "mariadb" ? "MariaDB" : "MySQL"} {s.version} · {s.port ?? "—"} · {s.state === "running" ? t("common.running") : s.state === "error" ? t("common.error") : t("common.stopped")}</SelectItem>)}</SelectContent>
           </Select>
         </div>
         <Button variant="secondary" disabled={!running || dbQuery.isFetching || userQuery.isFetching} onClick={() => invalidate("databases", "db-users")}>{t("db.refresh")}</Button>
       </div>
-      {serviceQuery.isError ? <p role="alert" className="mb-4 text-sm text-error">{t("db.connectionFailed")} <Button variant="ghost" onClick={() => void serviceQuery.refetch()}>{t("db.retry")}</Button></p> : !mysqlServices.length ? <p className="mb-4 text-sm text-muted">{serviceQuery.isFetching ? t("db.loading") : t("db.noInstance")}</p> : null}
-      {/* 实例卡片：MySQL + Redis */}
+      {serviceQuery.isError ? <p role="alert" className="mb-4 text-sm text-error">{t("db.connectionFailed")} <Button variant="ghost" onClick={() => void serviceQuery.refetch()}>{t("db.retry")}</Button></p> : !databaseServices.length ? <p className="mb-4 text-sm text-muted">{serviceQuery.isFetching ? t("db.loading") : t("db.noInstance")}</p> : null}
+      {/* 所选 MySQL / MariaDB 实例与 Redis */}
       <section className="mb-6">
         <SectionHeader title={t("db.instance")} className="mb-3" />
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          <MySqlInstanceCard key={version} service={service} count={ready ? dbs.length : undefined} />
+          <MySqlInstanceCard key={selected} engine={engine} service={service} count={ready ? dbs.length : undefined} />
           <RedisInstanceCard />
         </div>
       </section>
 
       {/* 备份 / 还原 */}
       <section className="mb-6">
-        <DbBackupCard key={version} version={version} targetLabel={targetLabel} ready={ready} databases={dbs.filter((db) => !systemDbs.has(db.name.toLowerCase())).map((db) => db.name)} onLockChange={setBackupLocked} />
+        <DbBackupCard key={selected} version={version} engine={engine} targetLabel={targetLabel} ready={ready} databases={dbs.filter((db) => !systemDbs.has(db.name.toLowerCase())).map((db) => db.name)} onLockChange={setBackupLocked} />
       </section>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
@@ -186,9 +192,9 @@ export default function DatabasesPage() {
         </Card>
       </div>
 
-      <CreateDbDialog key={`create-db-${version}`} version={version} targetLabel={targetLabel} open={createOpen} onOpenChange={setCreateOpen} onDone={() => invalidate("databases")} />
-      <CreateUserDialog key={`create-user-${version}`} version={version} targetLabel={targetLabel} open={userOpen} onOpenChange={setUserOpen} onDone={() => invalidate("db-users")} />
-      <ResetRootDialog key={`root-${version}`} version={version} targetLabel={targetLabel} open={rootOpen} onOpenChange={setRootOpen} />
+      <CreateDbDialog key={`create-db-${engine}-${version}`} version={version} engine={engine} targetLabel={targetLabel} open={createOpen} onOpenChange={setCreateOpen} onDone={() => invalidate("databases")} />
+      <CreateUserDialog key={`create-user-${engine}-${version}`} version={version} engine={engine} targetLabel={targetLabel} open={userOpen} onOpenChange={setUserOpen} onDone={() => invalidate("db-users")} />
+      <ResetRootDialog key={`root-${engine}-${version}`} version={version} engine={engine} targetLabel={targetLabel} open={rootOpen} onOpenChange={setRootOpen} />
 
       {/* 删库不可恢复：要求用户把库名完整敲一遍才允许执行 */}
       <ConfirmDialog
@@ -204,7 +210,7 @@ export default function DatabasesPage() {
           if (dropping || !ready || !dropTarget || dropTyped !== dropTarget) return;
           setDropping(true);
           try {
-            await api.dbDrop(dropTarget, version);
+            await api.dbDrop(dropTarget, version, engine);
             setDropTarget(null);
             toast.success(`${t("db.droppedP1")} ${dropTarget} ${t("db.droppedP2")}`);
             invalidate("databases");
@@ -255,7 +261,7 @@ function InstanceStartButton({ base, version }: { base: string; version?: string
   const svc = useInstanceState(base, version);
   const [busy, setBusy] = React.useState(false);
   if (!svc) return null;
-  if (svc.state === "running") {
+  if (svc.state === "running" || (svc.state === "error" && svc.pids.length > 0)) {
     return <StatusLight state={svc.state} size={8} />;
   }
   const start = async () => {
@@ -288,22 +294,22 @@ function InstanceStartButton({ base, version }: { base: string; version?: string
   );
 }
 
-function MySqlInstanceCard({ service, count }: { service?: ServiceStatus; count?: number }) {
+function MySqlInstanceCard({ service, count, engine }: { service?: ServiceStatus; count?: number; engine: DatabaseEngine }) {
   const t = useT();
   const adminer = useAdminer();
   const port = service?.port;
   return (
-    <Card className="p-4">
-      <div className="mb-3 flex items-center gap-2">
+    <Card className="min-w-0 p-4">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
         <div className="flex h-9 w-9 items-center justify-center rounded-md bg-fill">
-          <ServiceIcon id="mysql" className="h-[18px] w-[18px]" />
+          <ServiceIcon id={engine} className="h-[18px] w-[18px]" />
         </div>
         <div>
-          <p className="text-[13px] font-medium">MySQL {service?.version}</p>
+          <p className="text-[13px] font-medium">{engine === "mariadb" ? "MariaDB" : "MySQL"} {service?.version}</p>
           <p className="text-[11px] text-faint">127.0.0.1:{port ?? "—"} · utf8mb4</p>
         </div>
         <div className="ml-auto">
-          <InstanceStartButton base="mysql" version={service?.version} />
+          {service && <InstanceStartButton base={engine} version={service.version} />}
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-1.5">
@@ -315,7 +321,7 @@ function MySqlInstanceCard({ service, count }: { service?: ServiceStatus; count?
         <p className="text-[11px] font-medium text-secondary">{t("db.connStrings")}</p>
         {[
           ["URL", `mysql://root@127.0.0.1:${port ?? "—"}/dbname`],
-          ["CLI", `mysql -u root -p -h 127.0.0.1 -P ${port ?? "—"}`],
+          ["CLI", `${engine === "mariadb" ? "mariadb" : "mysql"} -u root -p -h 127.0.0.1 -P ${port ?? "—"}`],
           ["PDO", `"mysql:host=127.0.0.1;port=${port ?? "—"};dbname=dbname"`],
         ].map(([k, v]) => (
           <div key={k} className="flex items-center gap-2 rounded-md bg-card-2/50 px-2.5 py-1.5">
@@ -432,11 +438,12 @@ type DatabaseDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   version: string;
+  engine: DatabaseEngine;
   targetLabel: string;
   onDone?: () => void;
 };
 
-function CreateDbDialog({ open, onOpenChange, onDone, version, targetLabel }: DatabaseDialogProps) {
+function CreateDbDialog({ open, onOpenChange, onDone, version, engine, targetLabel }: DatabaseDialogProps) {
   const t = useT();
   const [name, setName] = React.useState("");
   const [busy, setBusy] = React.useState(false);
@@ -445,7 +452,7 @@ function CreateDbDialog({ open, onOpenChange, onDone, version, targetLabel }: Da
     if (busy || !valid || !version) return;
     setBusy(true);
     try {
-      await api.dbCreate(name, version);
+      await api.dbCreate(name, version, engine);
       toast.success(`${t("db.createdP1")} ${name} ${t("db.createdP2")}`);
       onOpenChange(false); setName(""); onDone?.();
     } catch (error) { toastError(error); } finally { setBusy(false); }
@@ -462,18 +469,18 @@ function CreateDbDialog({ open, onOpenChange, onDone, version, targetLabel }: Da
   </Dialog>;
 }
 
-function CreateUserDialog({ open, onOpenChange, onDone, version, targetLabel }: DatabaseDialogProps) {
+function CreateUserDialog({ open, onOpenChange, onDone, version, engine, targetLabel }: DatabaseDialogProps) {
   const t = useT();
   const [form, setForm] = React.useState({ username: "", password: "", database: "" });
   const [busy, setBusy] = React.useState(false);
-  const query = useDatabases(version, open && !!version);
+  const query = useDatabases(version, open && !!version, engine);
   const dbs = (query.data ?? []).filter((db) => !["mysql", "sys", "information_schema", "performance_schema"].includes(db.name.toLowerCase()));
   const valid = /^[A-Za-z0-9_]{1,32}$/.test(form.username) && form.username.toLowerCase() !== "root" && !!form.password && !/[\x00-\x1f\x7f]/.test(form.password) && dbs.some((db) => db.name === form.database);
   const submit = async () => {
     if (busy || !valid || query.isError) return;
     setBusy(true);
     try {
-      await api.dbCreateUser(form.username, form.password, form.database, version);
+      await api.dbCreateUser(form.username, form.password, form.database, version, engine);
       toast.success(`${t("db.userCreatedP1")} ${form.username} ${t("db.userCreatedP2")}`);
       onOpenChange(false); setForm({ username: "", password: "", database: "" }); onDone?.();
     } catch (error) { toastError(error); } finally { setBusy(false); }
@@ -493,7 +500,7 @@ function CreateUserDialog({ open, onOpenChange, onDone, version, targetLabel }: 
   </Dialog>;
 }
 
-function ResetRootDialog({ open, onOpenChange, version, targetLabel }: DatabaseDialogProps) {
+function ResetRootDialog({ open, onOpenChange, version, engine, targetLabel }: DatabaseDialogProps) {
   const t = useT();
   const invalidate = useInvalidate();
   const [pass, setPass] = React.useState("");
@@ -506,7 +513,7 @@ function ResetRootDialog({ open, onOpenChange, version, targetLabel }: DatabaseD
     if (busy || !valid || !version) return;
     setBusy(true);
     try {
-      await api.dbResetRootPassword(pass, version, mode === "existing");
+      await api.dbResetRootPassword(pass, version, mode === "existing", engine);
       toast.success(t(mode === "existing" ? "db.rootSyncDone" : "db.rootUpdated"));
       setPass(""); setSaved(null); onOpenChange(false); invalidate("databases", "db-users");
     } catch (error) { toastError(error); } finally { setBusy(false); }
@@ -521,7 +528,7 @@ function ResetRootDialog({ open, onOpenChange, version, targetLabel }: DatabaseD
         <Button type="button" variant="secondary" disabled={busy} onClick={async () => {
           if (saved !== null) { setSaved(null); return; }
           setBusy(true);
-          try { setSaved(await api.dbRootPassword(version)); } catch (error) { toastError(error); } finally { setBusy(false); }
+          try { setSaved(await api.dbRootPassword(version, engine)); } catch (error) { toastError(error); } finally { setBusy(false); }
         }}>{t(saved !== null ? "db.hidePassword" : "db.showPassword")}</Button>
         {saved !== null && <div className="flex min-w-0 items-center gap-2 rounded-md bg-fill p-3"><code className="min-w-0 flex-1 break-all text-xs">{saved}</code><CopyButton text={saved} /></div>}
         <DialogFooter><Button type="button" variant="ghost" disabled={busy} onClick={() => close(false)}>{t("common.cancel")}</Button><Button type="submit" disabled={busy || !valid}>{busy ? t("confirm.busy") : t(mode === "existing" ? "db.rootSync" : "db.rootChange")}</Button></DialogFooter>

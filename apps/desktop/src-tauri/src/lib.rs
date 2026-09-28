@@ -1543,11 +1543,12 @@ async fn migrate_list_source(
     user: String,
     password: String,
     version: Option<String>,
+    engine: Option<nsb_core::dbadmin::DatabaseEngine>,
 ) -> Result<Vec<nsb_core::dbmigrate::SourceDb>, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        map_jh(st.migrate_list_source(host, port, user, password, version.as_deref()))
+        map_jh(st.migrate_list_source(host, port, user, password, version.as_deref(), engine.unwrap_or_default()))
     })
     .await
     .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -1562,12 +1563,13 @@ async fn migrate_import(
     user: String,
     password: String,
     version: Option<String>,
+    engine: Option<nsb_core::dbadmin::DatabaseEngine>,
     databases: Vec<String>,
 ) -> Result<nsb_core::dbmigrate::ImportReport, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        map_jh(st.migrate_import(host, port, user, password, databases, version.as_deref()))
+        map_jh(st.migrate_import(host, port, user, password, databases, version.as_deref(), engine.unwrap_or_default()))
     })
     .await
     .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
@@ -1787,9 +1789,10 @@ async fn open_terminal(state: State<'_, std::sync::Arc<CoreState>>, site_id: Opt
 
 /* ================= 数据库 ================= */
 
-async fn run_mysql<T, F>(
+async fn run_database<T, F>(
     state: &std::sync::Arc<CoreState>,
     version: Option<String>,
+    engine: Option<nsb_core::dbadmin::DatabaseEngine>,
     operation: F,
 ) -> Result<T, tauri::Error>
 where
@@ -1800,7 +1803,7 @@ where
 {
     let st = state.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        map_jh(st.with_mysql(version.as_deref(), |version, client| {
+        map_jh(st.with_database(engine.unwrap_or_default(), version.as_deref(), |version, client| {
             operation(&st, version, client)
         }))
     })
@@ -1812,9 +1815,10 @@ where
 async fn db_list(
     state: State<'_, std::sync::Arc<CoreState>>,
     version: Option<String>,
+    engine: Option<nsb_core::dbadmin::DatabaseEngine>,
 ) -> Result<Vec<nsb_core::model::DatabaseInfo>, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
-    run_mysql(&state, version, |_, _, client| client.list_databases()).await
+    run_database(&state, version, engine, |_, _, client| client.list_databases()).await
 }
 
 #[tauri::command]
@@ -1822,9 +1826,10 @@ async fn db_create(
     state: State<'_, std::sync::Arc<CoreState>>,
     name: String,
     version: Option<String>,
+    engine: Option<nsb_core::dbadmin::DatabaseEngine>,
 ) -> Result<bool, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
-    run_mysql(&state, version, move |_, _, client| {
+    run_database(&state, version, engine, move |_, _, client| {
         client.create_database(&name).map(|_| true)
     })
     .await
@@ -1835,9 +1840,10 @@ async fn db_drop(
     state: State<'_, std::sync::Arc<CoreState>>,
     name: String,
     version: Option<String>,
+    engine: Option<nsb_core::dbadmin::DatabaseEngine>,
 ) -> Result<bool, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
-    run_mysql(&state, version, move |_, _, client| {
+    run_database(&state, version, engine, move |_, _, client| {
         client.drop_database(&name).map(|_| true)
     })
     .await
@@ -1847,9 +1853,10 @@ async fn db_drop(
 async fn db_users(
     state: State<'_, std::sync::Arc<CoreState>>,
     version: Option<String>,
+    engine: Option<nsb_core::dbadmin::DatabaseEngine>,
 ) -> Result<Vec<nsb_core::model::DbUserInfo>, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
-    run_mysql(&state, version, |_, _, client| client.list_users()).await
+    run_database(&state, version, engine, |_, _, client| client.list_users()).await
 }
 
 #[tauri::command]
@@ -1859,9 +1866,10 @@ async fn db_create_user(
     password: String,
     database: String,
     version: Option<String>,
+    engine: Option<nsb_core::dbadmin::DatabaseEngine>,
 ) -> Result<bool, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
-    run_mysql(&state, version, move |_, _, client| {
+    run_database(&state, version, engine, move |_, _, client| {
         client
             .create_user_grant(&username, &password, &database)
             .map(|_| true)
@@ -1874,13 +1882,15 @@ async fn db_reset_root_password(
     state: State<'_, std::sync::Arc<CoreState>>,
     new_password: String,
     version: Option<String>,
+    engine: Option<nsb_core::dbadmin::DatabaseEngine>,
     use_existing: Option<bool>,
 ) -> Result<bool, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(
-            st.set_mysql_password(
+            st.set_database_password(
+                engine.unwrap_or_default(),
                 version.as_deref(),
                 &new_password,
                 use_existing.unwrap_or(false),
@@ -1896,9 +1906,10 @@ async fn db_reset_root_password(
 async fn db_root_password(
     state: State<'_, std::sync::Arc<CoreState>>,
     version: Option<String>,
+    engine: Option<nsb_core::dbadmin::DatabaseEngine>,
 ) -> Result<String, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
-    run_mysql(&state, version, |_, _, client| {
+    run_database(&state, version, engine, |_, _, client| {
         Ok(client.root_password.clone())
     })
     .await
@@ -3188,10 +3199,12 @@ fn xdebug_toggle(
 
 /// 复用既有连接信息（版本 / 端口 / root 密码）
 fn db_conn_of(
+    engine: nsb_core::dbadmin::DatabaseEngine,
     version: &str,
     client: &nsb_core::dbadmin::MySqlClient,
 ) -> nsb_core::dbbackup::ConnInfo {
     nsb_core::dbbackup::ConnInfo {
+        engine,
         version: version.into(),
         port: client.port,
         root_password: client.root_password.clone(),
@@ -3220,14 +3233,15 @@ async fn db_backup_dump(
     databases: Vec<String>,
     out_name: Option<String>,
     version: Option<String>,
+    engine: Option<nsb_core::dbadmin::DatabaseEngine>,
 ) -> Result<String, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
-    run_mysql(&state, version, move |st, version, client| {
-        let conn = db_conn_of(version, client);
+    run_database(&state, version, engine, move |st, version, client| {
+        let conn = db_conn_of(engine.unwrap_or_default(), version, client);
         let name = out_name
             .filter(|n| !n.trim().is_empty())
             .unwrap_or_else(|| nsb_core::dbbackup::default_dump_name(&databases));
-        let path = nsb_core::dbbackup::dump_path(&st.paths, version, &name)?;
+        let path = nsb_core::dbbackup::dump_path_for(&st.paths, conn.engine, version, &name)?;
         nsb_core::dbbackup::dump_databases(&st.paths, &conn, &databases, &path, &|prog| {
             (st.emit)(nsb_core::Event::DbBackup(prog))
         })?;
@@ -3243,11 +3257,12 @@ async fn db_backup_restore(
     path: String,
     safety_backup: Option<bool>,
     version: Option<String>,
+    engine: Option<nsb_core::dbadmin::DatabaseEngine>,
     database: Option<String>,
 ) -> Result<nsb_core::model::DbRestoreResult, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
-    run_mysql(&state, version, move |st, version, client| {
-        let conn = db_conn_of(version, client);
+    run_database(&state, version, engine, move |st, version, client| {
+        let conn = db_conn_of(engine.unwrap_or_default(), version, client);
         let safety = nsb_core::dbbackup::restore_from_file_into(
             &st.paths,
             &conn,

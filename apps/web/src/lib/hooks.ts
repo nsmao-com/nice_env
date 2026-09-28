@@ -1,5 +1,7 @@
 "use client";
 
+import type { DatabaseEngine } from "@nsb/schema";
+
 import * as React from "react";
 import { useEffect, useRef, useState } from "react";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -158,12 +160,12 @@ export function useSettings() {
   });
 }
 
-export function useDatabases(version?: string, enabled = true) {
-  return useQuery({ queryKey: ["databases", version], queryFn: () => api.dbList(version), enabled, retry: false });
+export function useDatabases(version?: string, enabled = true, engine: DatabaseEngine = "mysql") {
+  return useQuery({ queryKey: ["databases", engine, version], queryFn: () => api.dbList(version, engine), enabled, retry: false });
 }
 
-export function useDbUsers(version?: string, enabled = true) {
-  return useQuery({ queryKey: ["db-users", version], queryFn: () => api.dbUsers(version), enabled, retry: false });
+export function useDbUsers(version?: string, enabled = true, engine: DatabaseEngine = "mysql") {
+  return useQuery({ queryKey: ["db-users", engine, version], queryFn: () => api.dbUsers(version, engine), enabled, retry: false });
 }
 
 /* 日志按来源和行数隔离；暂停仅停止轮询，首次/切换/手动刷新仍可读取。 */

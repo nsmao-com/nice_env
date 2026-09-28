@@ -5,6 +5,7 @@
 //! 先完整导出、再保护性备份、最后恢复。密码经私有 defaults-file 传递。
 
 use crate::error::{AppError, Result};
+use crate::dbadmin::DatabaseEngine;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -42,13 +43,17 @@ pub fn filter_user_databases(all: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn mysql_bin(bin_dir: &Path, name: &str) -> PathBuf {
-    bin_dir.join(crate::ops::exe_name(name))
+fn mysql_bin(bin_dir: &Path, engine: DatabaseEngine, name: &str) -> PathBuf {
+    crate::dbadmin::database_tool(bin_dir, engine, name)
 }
 
 /// 列出源实例上的用户数据库，库名用 HEX 避免制表符等字符破坏响应格式。
 pub fn list_source_databases(bin_dir: &Path, src: &SourceConn) -> Result<Vec<SourceDb>> {
-    let out = source_query(bin_dir, src, "SELECT HEX(schema_name), COALESCE(SUM(data_length+index_length),0) FROM information_schema.schemata LEFT JOIN information_schema.tables ON table_schema=schema_name GROUP BY schema_name ORDER BY schema_name;")?;
+    list_source_databases_with_engine(bin_dir, DatabaseEngine::Mysql, src)
+}
+
+pub fn list_source_databases_with_engine(bin_dir: &Path, engine: DatabaseEngine, src: &SourceConn) -> Result<Vec<SourceDb>> {
+    let out = source_query(bin_dir, engine, src, "SELECT HEX(schema_name), COALESCE(SUM(data_length+index_length),0) FROM information_schema.schemata LEFT JOIN information_schema.tables ON table_schema=schema_name GROUP BY schema_name ORDER BY schema_name;")?;
     out.lines()
         .filter(|line| !line.is_empty())
         .map(|line| {
@@ -75,9 +80,9 @@ pub fn list_source_databases(bin_dir: &Path, src: &SourceConn) -> Result<Vec<Sou
         })
 }
 
-fn source_query(bin_dir: &Path, src: &SourceConn, sql: &str) -> Result<String> {
+fn source_query(bin_dir: &Path, engine: DatabaseEngine, src: &SourceConn, sql: &str) -> Result<String> {
     crate::dbadmin::query_client(
-        &mysql_bin(bin_dir, "mysql"),
+        &mysql_bin(bin_dir, engine, "mysql"),
         &src.host,
         src.port,
         &src.user,
@@ -100,20 +105,15 @@ pub fn import_databases(
     if databases.is_empty() {
         return Ok(report);
     }
-    let bin_dir = target.bin_dir.clone().unwrap_or_else(|| {
-        paths
-            .runtime_dir("mysql", &target.version)
-            .join(crate::ops::mysql_root_name(&target.version))
-            .join("bin")
-    });
-    let dump = mysql_bin(&bin_dir, "mysqldump");
+    let bin_dir = target.resolved_bin_dir(paths)?;
+    let dump = mysql_bin(&bin_dir, target.engine, "mysqldump");
     if !dump.is_file() {
         return Err(AppError::new(
             "MYSQL_TOOL_MISSING",
             "找不到 mysqldump，请检查所选 MySQL 安装",
         ));
     }
-    let source_dbs = list_source_databases(&bin_dir, src)?;
+    let source_dbs = list_source_databases_with_engine(&bin_dir, target.engine, src)?;
     if databases.iter().any(|db| {
         db.is_empty()
             || db.starts_with('-')
@@ -127,9 +127,9 @@ pub fn import_databases(
         ));
     }
     let identity = "SELECT HEX(CONCAT(@@hostname, CHAR(0), @@datadir, CHAR(0), @@port));";
-    let source_id = source_query(&bin_dir, src, identity)?;
+    let source_id = source_query(&bin_dir, target.engine, src, identity)?;
     let client = crate::dbadmin::MySqlClient {
-        exe: mysql_bin(&bin_dir, "mysql"),
+        exe: mysql_bin(&bin_dir, target.engine, "mysql"),
         port: target.port,
         root_password: target.root_password.clone(),
     };
@@ -146,7 +146,7 @@ pub fn import_databases(
     let mut error = tempfile::tempfile()?;
     let (_private, mut command) =
         crate::dbadmin::client_command(&dump, &src.host, src.port, &src.user, &src.password)?;
-    crate::dbbackup::dump_options(&mut command, &target.version);
+    crate::dbbackup::dump_options(&mut command, target.engine, &target.version);
     command
         .args(databases)
         .stdin(Stdio::null())
@@ -246,6 +246,7 @@ mod tests {
         // 不需要真实服务器：空列表直接返回空报告
         let paths = crate::paths::Paths::new(std::env::temp_dir().join("niceenv-empty-import"));
         let target = crate::dbbackup::ConnInfo {
+            engine: crate::dbadmin::DatabaseEngine::Mysql,
             version: "8.0.46".into(),
             port: 0,
             root_password: String::new(),

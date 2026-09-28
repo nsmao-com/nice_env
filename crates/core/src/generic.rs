@@ -213,9 +213,9 @@ fn resolve_with_sftpgo_directory(store: &Store, paths: &Paths, service_id: &str,
         .parent()
         .map(PathBuf::from)
         .unwrap_or_else(|| root_dir.clone());
-    let data = paths
-        .data()
-        .join(spec.data_dir.clone().unwrap_or_else(|| id.clone()));
+    let data = if id == "mariadb" { mariadb_data_dir(paths, &version)? } else {
+        paths.data().join(spec.data_dir.clone().unwrap_or_else(|| id.clone()))
+    };
     if managed_consul(&entry, &spec) { crate::paths::checked_data_path(&paths.base, "data/consul")?; }
     let preview = directory.is_some();
     let etc = if managed_sftpgo(&entry, &spec) {
@@ -1314,6 +1314,18 @@ fn prepare_config(paths: &Paths, r: &Resolved) -> Result<Vec<(String, String)>> 
             Err(e) => return Err(e.into()),
         };
         let mut content = match &previous { Some(current) => sync_config_ports(current, tpl, r)?, None => expand_config(tpl, r) };
+        if r.entry.id == "mariadb" {
+            // resolve 已确认仅为托管路径；同步旧空目录配置，避免下次启动仍指向共享目录。
+            let mut section = String::new();
+            content = content.split_inclusive('\n').map(|line| {
+                let trimmed = line.trim();
+                if trimmed.starts_with('[') && trimmed.ends_with(']') { section = trimmed[1..trimmed.len()-1].to_ascii_lowercase(); }
+                if ["mysqld", "server", "mariadb", "mariadbd"].contains(&section.as_str())
+                    && trimmed.split_once('=').is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case("datadir")) {
+                    format!("datadir={}{}", crate::paths::nginx_path(&r.data), if line.ends_with("\r\n") { "\r\n" } else if line.ends_with('\n') { "\n" } else { "" })
+                } else { line.to_string() }
+            }).collect();
+        }
         if managed_rnacos(r) {
             content = quote_legacy_rnacos_paths(&content, r);
             env = rnacos_config_env(&content, &r.etc)?;
@@ -1546,16 +1558,25 @@ pub fn start(
     }
 
     // 启动前自建的数据子目录（如 Temurin/Qdrant 的 storage、RabbitMQ 的 mnesia）
-    for d in &r.spec.init_dirs {
+    for d in r.spec.init_dirs.iter().filter(|_| r.entry.id != "mariadb") {
         std::fs::create_dir_all(r.data.join(d))?;
     }
 
     // 一次性初始化（MariaDB 的 install-db、Neo4j 的 set-initial-password 等）
-    run_init_if_needed(&r)?;
+    if r.entry.id == "mariadb" { initialize_mariadb(&r)?; } else { run_init_if_needed(&r)?; }
 
     if let Some(port) = r.port { store.save_generic_port(&r.service_id, port, planned != r.port)?; }
 
     let mut args: Vec<String> = r.spec.args.iter().map(|a| expand(a, &r)).collect();
+    if r.entry.id == "mariadb" {
+        args.extend([
+            format!("--basedir={}", r.root.parent().ok_or_else(|| AppError::new("MARIADB_PATH", "MariaDB 安装路径无效"))?.display()),
+            format!("--datadir={}", r.data.display()),
+            format!("--port={}", r.port.ok_or_else(|| AppError::new("DATABASE_PORT_UNKNOWN", "MariaDB 端口未配置"))?),
+            "--bind-address=127.0.0.1".into(),
+        ]);
+        if cfg!(windows) { args.push("--console".into()); }
+    }
     if let Some(config) = &sftpgo { args.extend(["--config-file".into(), config.file.to_string_lossy().into_owned()]); }
     let cwd = r
         .spec
@@ -1598,7 +1619,9 @@ pub fn start(
     spawn_tracked(manager, &r.service_id, &spec)?;
 
     let timeout = Duration::from_secs(r.spec.health_timeout_sec.max(3));
-    let healthy = if sftpgo.is_some() {
+    let healthy = if r.entry.id == "mariadb" {
+        r.port.is_some_and(|port| wait_owned_ports(manager, &r.service_id, &[port], timeout))
+    } else if sftpgo.is_some() {
         wait_sftpgo_healthy(manager, &r, timeout)
     } else if crate::install::official_qdrant(&r.entry) {
         r.port.and_then(|port| port.checked_add(1).map(|grpc| [port, grpc]))
@@ -1668,6 +1691,7 @@ pub fn start(
     if let Some(port) = r.port {
         manager.set_started_port(&r.service_id, port);
     }
+    if r.entry.id == "mariadb" { connect_mariadb(store, manager, &r)?; }
     if minio.as_ref().is_some_and(|settings| settings.destination.is_some()) {
         let probe = local_web_url("127.0.0.1", r.port.and_then(|port| port.checked_add(1)).ok_or_else(|| web_unavailable("MinIO 管理台端口无效。"))?, false, "/")?;
         manager.set_web_target_with_probe(&r.service_id, web_target, probe);
@@ -1698,7 +1722,138 @@ pub fn is_script(p: &std::path::Path) -> bool {
         .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "bat" | "cmd" | "ps1"))
 }
 
-/// 首次启动前执行一次性初始化（MariaDB install-db / Neo4j set-initial-password 等）。
+/// 新实例按版本隔离；保留旧 my.ini 所指向的共享目录，不移动用户数据库。
+pub(crate) fn mariadb_data_dir(paths: &Paths, version: &str) -> Result<PathBuf> {
+    let isolated = crate::paths::checked_data_path(&paths.base, &format!("data/mariadb-versions/{version}"))?;
+    let legacy = crate::paths::checked_data_path(&paths.base, "data/mariadb")?;
+    let config = crate::paths::checked_data_path(&paths.base, &format!("etc/mariadb/{version}/my.ini"))?;
+    let content = match std::fs::read_to_string(&config) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(isolated),
+        Err(error) => return Err(error.into()),
+    };
+    let normalize = |value: &str| {
+        let value = value.trim().trim_matches(['\'', '"']).replace('\\', "/").trim_end_matches('/').to_string();
+        if cfg!(windows) { value.to_lowercase() } else { value }
+    };
+    let mut section = String::new();
+    let mut data = None;
+    for line in content.lines().map(str::trim) {
+        if line.starts_with('[') && line.ends_with(']') { section = line[1..line.len()-1].to_ascii_lowercase(); }
+        if ["mysqld", "server", "mariadb", "mariadbd"].contains(&section.as_str()) {
+            if let Some((key, value)) = line.split_once('=') {
+                if key.trim().eq_ignore_ascii_case("datadir") { data = Some(normalize(value)); }
+            }
+        }
+    }
+    match data {
+        None => Ok(isolated),
+        Some(data) if data == normalize(&isolated.to_string_lossy()) => Ok(isolated),
+        Some(data) if data == normalize(&legacy.to_string_lossy()) => {
+            if legacy.join("mysql").is_dir() { Ok(legacy) } else {
+                // 旧配置可能在初始化失败前生成；不复用非空的未知目录。
+                let entries = match std::fs::read_dir(&legacy) {
+                    Ok(entries) => entries.collect::<std::io::Result<Vec<_>>>()?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                    Err(error) => return Err(error.into()),
+                };
+                if entries.iter().any(|e| e.file_name() != "data" || !e.path().is_dir() || std::fs::read_dir(e.path()).is_ok_and(|mut entries| entries.next().is_some())) {
+                    return Err(AppError::new("MARIADB_DATA_UNVERIFIED", "旧 MariaDB 数据目录不完整，未重新初始化或覆盖")
+                        .with_hint("请检查数据/mariadb 目录和日志，保留原文件后恢复有效备份。"));
+                }
+                Ok(isolated)
+            }
+        }
+        Some(_) => Err(AppError::new("MARIADB_DATA_UNMANAGED", "MariaDB 配置指向自定义数据目录，未自动初始化或启动")
+            .with_hint("请保留现有目录，通过原环境导出 SQL 后导入托管实例；不能将未知数据目录自动升级。")),
+    }
+}
+
+fn verify_mariadb_data_version(data: &std::path::Path, version: &str) -> Result<()> {
+    let marker = data.join(".niceenv-mariadb-version");
+    if let Ok(recorded) = std::fs::read_to_string(&marker) {
+        if recorded.trim() == version { return Ok(()); }
+    } else {
+        // 旧版没有版本标记；只接受日志中唯一、明确的原版本，不猜测升级关系。
+        use std::io::{Read, Seek, SeekFrom};
+        let pattern = regex::Regex::new(r"Starting MariaDB ([0-9]+\.[0-9]+\.[0-9]+)-MariaDB").unwrap();
+        let mut versions = std::collections::BTreeSet::new();
+        if let Ok(recorded) = std::fs::read_to_string(data.join("mysql_upgrade_info")) {
+            if let Some(value) = recorded.trim().split('-').next().filter(|s| s.split('.').count() == 3) { versions.insert(value.to_string()); }
+        }
+        for entry in std::fs::read_dir(data)? {
+            let path = entry?.path();
+            if path.extension().is_none_or(|extension| extension != "err") { continue; }
+            let mut file = std::fs::File::open(path)?;
+            let length = file.metadata()?.len();
+            file.seek(SeekFrom::Start(length.saturating_sub(2 * 1024 * 1024)))?;
+            let mut bytes = Vec::new(); file.take(2 * 1024 * 1024).read_to_end(&mut bytes)?;
+            for captures in pattern.captures_iter(&String::from_utf8_lossy(&bytes)) { versions.insert(captures[1].to_string()); }
+        }
+        if versions.len() == 1 && versions.contains(version) { return Ok(()); }
+    }
+    Err(AppError::new("MARIADB_DATA_VERSION", "MariaDB 数据目录的原版本与所选版本不一致或无法确认，未启动")
+        .with_hint("请使用原版本导出 SQL，再切换版本并导入；原数据目录已保留，未自动升级。"))
+}
+
+fn initialize_mariadb(r: &Resolved) -> Result<()> {
+    if r.data.join("mysql").is_dir() { return verify_mariadb_data_version(&r.data, &r.entry.version); }
+    if r.spec.init_bin.as_deref() != Some("mariadb-install-db.exe")
+        || r.spec.init_args.as_ref().is_none_or(|args| args != &["--datadir={data}", "--port={port}"]) {
+        return Err(AppError::new("MARIADB_INIT_CUSTOM", "MariaDB 使用自定义初始化配置，未自动执行")
+            .with_hint("请检查该套件的初始化程序和参数；托管实例不注册系统服务。"));
+    }
+    if std::fs::read_dir(&r.data)?.next().transpose()?.is_some() {
+        return Err(AppError::new("MARIADB_INIT_FAILED", "MariaDB 数据目录非空，未覆盖或重新初始化").with_hint("请检查已有文件和初始化日志，并从有效备份恢复。"));
+    }
+    if !cfg!(windows) {
+        return Err(AppError::new("MARIADB_INIT_UNSUPPORTED", "该平台尚未配置 MariaDB 初始化程序"));
+    }
+    let pending = tempfile::Builder::new().prefix(".mariadb-init-").tempdir_in(r.data.parent().ok_or_else(|| AppError::new("MARIADB_PATH", "数据目录无效"))?)?;
+    let mut output = tempfile::tempfile()?;
+    let mut command = platform::command(r.root.join("mariadb-install-db.exe"));
+    // 不传 --service 或命令行密码；隔离初始化成功后才发布数据目录。
+    command.arg(format!("--datadir={}", pending.path().display()))
+        .arg(format!("--port={}", r.port.unwrap_or(3306)))
+        .current_dir(&r.root).stdin(std::process::Stdio::null())
+        .stdout(output.try_clone()?).stderr(output.try_clone()?);
+    let status = crate::dbadmin::wait_client(&mut command, Duration::from_secs(180), || {})?;
+    if !status.success() || !pending.path().join("mysql").is_dir() {
+        return Err(AppError::new("MARIADB_INIT_FAILED", "MariaDB 初始化失败，原数据未覆盖")
+            .with_detail(crate::dbadmin::read_output(&mut output, 64 * 1024)?));
+    }
+    std::fs::write(pending.path().join(".niceenv-mariadb-version"), &r.entry.version)?;
+    std::fs::remove_dir(&r.data)?; // 只允许替换空目录。
+    std::fs::rename(pending.path(), &r.data)?;
+    Ok(())
+}
+
+fn connect_mariadb(store: &Store, manager: &Arc<ServiceManager>, r: &Resolved) -> Result<()> {
+    use crate::dbadmin::{DatabaseEngine, MySqlClient};
+    let engine = DatabaseEngine::Mariadb;
+    let port = r.port.ok_or_else(|| AppError::new("DATABASE_PORT_UNKNOWN", "MariaDB 端口未知"))?;
+    crate::ops::verify_database_listener(manager, &r.service_id, port)?;
+    let mut candidates = engine.saved_password(store, &r.entry.version).into_iter().collect::<Vec<_>>();
+    candidates.push(String::new()); candidates.dedup();
+    for password in candidates {
+        let client = MySqlClient { exe: crate::dbadmin::database_tool(&r.root, engine, "mysql"), port, root_password: password.clone() };
+        if client.verify_data_dir(&r.data).is_err() { continue; }
+        if password.is_empty() {
+            use rand::Rng;
+            let password: String = rand::thread_rng().sample_iter(&rand::distributions::Alphanumeric).take(24).map(char::from).collect();
+            store.set_setting(&engine.password_key(&r.entry.version), &password)?;
+            client.reset_root_password(&password)?;
+            MySqlClient { root_password: password, ..client }.verify_data_dir(&r.data)?;
+        } else { store.set_setting(&engine.password_key(&r.entry.version), &password)?; }
+        std::fs::write(r.data.join(".niceenv-mariadb-version"), &r.entry.version)?;
+        return Ok(());
+    }
+    // 旧实例凭据可能由用户修改，保留运行以便通过数据库页验证并更新。
+    manager.push_log(&r.service_id, "MariaDB 已启动；保存的 root 凭据无法认证，请在数据库页更新连接密码。");
+    Ok(())
+}
+
+/// 首次启动前执行一次性初始化（Neo4j set-initial-password 等）。
 /// 用 {data}/.nsb-initialized 标记防止重复执行；初始化失败即报错，不进入启动。
 fn run_init_if_needed(r: &Resolved) -> Result<()> {
     let Some(init_args) = &r.spec.init_args else {
@@ -1802,6 +1957,40 @@ pub fn register_services(paths: &Paths, store: &Store, manager: &Arc<ServiceMana
 mod startup_tests {
     use super::*;
 
+    #[test]
+    fn mariadb_legacy_data_is_preserved_and_unknown_versions_are_not_upgraded() {
+        let (_temp, state, r) = fixture_version("mariadb", Some("11.4.8"));
+        let legacy = state.paths.data().join("mariadb");
+        let config = r.etc.join("my.ini");
+        std::fs::create_dir_all(legacy.join("mysql")).unwrap();
+        std::fs::write(legacy.join("sentinel"), b"existing database").unwrap();
+        std::fs::write(&config, format!("[mysqld]\ndatadir={}\nport=3306\n", crate::paths::nginx_path(&legacy))).unwrap();
+        assert_eq!(mariadb_data_dir(&state.paths, "11.4.8").unwrap(), legacy);
+        assert_eq!(verify_mariadb_data_version(&legacy, "11.4.8").unwrap_err().code, "MARIADB_DATA_VERSION");
+        std::fs::write(legacy.join("old.err"), "[Note] Starting MariaDB 11.4.8-MariaDB source revision verified\n").unwrap();
+        verify_mariadb_data_version(&legacy, "11.4.8").unwrap();
+        assert!(verify_mariadb_data_version(&legacy, "10.11.13").is_err());
+        assert_eq!(mariadb_data_dir(&state.paths, "12.3.3").unwrap(), state.paths.data().join("mariadb-versions/12.3.3"));
+        assert_eq!(std::fs::read(legacy.join("sentinel")).unwrap(), b"existing database");
+    }
+
+    #[test]
+    fn mariadb_old_snapshot_removes_service_registration_and_preserves_custom_configuration() {
+        let (_temp, state, r) = fixture_version("mariadb", Some("11.4.8"));
+        let mut old = r.entry.clone();
+        let run = old.run.as_mut().unwrap();
+        run.init_args = Some(vec!["--datadir={data}".into(), "--service=MariaDB".into()]);
+        run.init_dirs = vec!["data".into()];
+        let snapshot = std::path::Path::new(&r.inst.install_path).join(".niceenv-package.json");
+        std::fs::write(&snapshot, serde_json::to_vec(&old).unwrap()).unwrap();
+        let upgraded = state.installer.installed_entry(&r.inst).run.unwrap();
+        assert_eq!(upgraded.init_args.unwrap(), ["--datadir={data}", "--port={port}"]);
+        assert!(upgraded.init_dirs.is_empty());
+        old.run.as_mut().unwrap().init_args.as_mut().unwrap().push("--custom-option".into());
+        std::fs::write(&snapshot, serde_json::to_vec(&old).unwrap()).unwrap();
+        assert_eq!(serde_json::to_value(state.installer.installed_entry(&r.inst).run).unwrap(), serde_json::to_value(old.run).unwrap());
+    }
+
     fn fixture(id: &str) -> (tempfile::TempDir, crate::CoreState, Resolved) {
         fixture_version(id, None)
     }
@@ -1889,7 +2078,13 @@ mod startup_tests {
     #[test]
     fn final_port_selection_covers_secondary_ports_and_never_commits_early() {
         let (_temp, state, mut r) = fixture("qdrant");
-        let secondary = std::net::TcpListener::bind(("::1", 0)).unwrap();
+        // OS 分配的临时端口的前一位可能被其他进程占用或由 Windows 保留。
+        // 先确认整组可用，再只占用副端口，才能验证副端口冲突这一前提。
+        let secondary = (40000..60000).find_map(|base| {
+            if tcp_port_bindable(base) && tcp_port_bindable(base + 1) {
+                std::net::TcpListener::bind(("::1", base + 1)).ok()
+            } else { None }
+        }).expect("an available primary and secondary port pair");
         let port = secondary.local_addr().unwrap().port(); r.port = Some(port - 1);
         state.store.set_setting("autoFallbackPort", "true").unwrap();
         let selected = select_port(&state.store, &r).unwrap().unwrap();

@@ -1,5 +1,6 @@
 "use client";
 
+import type { DatabaseEngine } from "@nsb/schema";
 import * as React from "react";
 import { toast } from "sonner";
 import { Download, Loader2 } from "lucide-react";
@@ -14,8 +15,8 @@ import { Label } from "@/components/ui/label";
 import { fmtBytes } from "@/lib/utils";
 
 /** 检测来源 → 选择业务库 → 确认目标 → 完整导出、保护性备份与还原。 */
-export function DbImportDialog({ open, onOpenChange, version, targetLabel }: {
-  open: boolean; onOpenChange: (open: boolean) => void; version: string; targetLabel: string;
+export function DbImportDialog({ open, onOpenChange, version, engine, targetLabel }: {
+  open: boolean; onOpenChange: (open: boolean) => void; version: string; engine: DatabaseEngine; targetLabel: string;
 }) {
   const t = useT();
   const invalidate = useInvalidate();
@@ -43,7 +44,7 @@ export function DbImportDialog({ open, onOpenChange, version, targetLabel }: {
     if (busyRef.current || !valid || !version) return;
     busyRef.current = true; setPhase("probing"); setDbs(null); setSelected(new Set()); setError(""); setReport(null); setConfirmed(false);
     try {
-      const list = await api.migrateListSource(source.host.trim(), Number(source.port), source.user.trim(), source.password, version);
+      const list = await api.migrateListSource(source.host.trim(), Number(source.port), source.user.trim(), source.password, version, engine);
       setDbs(list);
     } catch (error) { setError(normalizeError(error).message); toastError(error); }
     finally { busyRef.current = false; setPhase("idle"); }
@@ -52,7 +53,7 @@ export function DbImportDialog({ open, onOpenChange, version, targetLabel }: {
     if (busyRef.current || !confirmed || !dbs || !valid || !selected.size || !version) return;
     busyRef.current = true; setPhase("importing"); setError(""); setReport(null);
     try {
-      const result = await api.migrateImport(source.host.trim(), Number(source.port), source.user.trim(), source.password, [...selected], version);
+      const result = await api.migrateImport(source.host.trim(), Number(source.port), source.user.trim(), source.password, [...selected], version, engine);
       setReport(result); setConfirmed(false);
       if (!result.failed.length) {
         toast.success(`${t("dbImport.doneP1")} ${result.imported.length} ${t("dbImport.doneP2")}`);

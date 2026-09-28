@@ -31,6 +31,18 @@ pub(crate) fn official_qdrant(entry: &crate::model::PackageManifestEntry) -> boo
 
 /// 只升级曾随应用发布的原始运行描述；下载信息、实际入口及用户修改保持不变。
 fn upgrade_legacy_run(mut entry: crate::model::PackageManifestEntry) -> crate::model::PackageManifestEntry {
+    if entry.id == "mariadb" {
+        let bundled: crate::model::Manifest = serde_json::from_str(include_str!("../../../manifest/packages.win.json")).expect("内置清单合法");
+        if let Some(current) = bundled.packages.into_iter().find(|p| p.id == "mariadb").and_then(|p| p.run) {
+            let mut legacy = current.clone();
+            legacy.init_args = Some(vec!["--datadir={data}".into(), "--service=MariaDB".into()]);
+            legacy.init_dirs = vec!["data".into()];
+            if entry.run.as_ref().is_some_and(|run| serde_json::to_value(run).ok() == serde_json::to_value(&legacy).ok()) {
+                entry.run = Some(current);
+            }
+        }
+        return entry;
+    }
     if entry.id == "consul" {
         let legacy: crate::model::ServiceRunSpec = serde_json::from_value(serde_json::json!({
             "args": ["agent", "-dev", "-client", "127.0.0.1", "-http-port", "{port}"],

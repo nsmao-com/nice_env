@@ -18,6 +18,7 @@ use std::time::Duration;
 use crate::error::{AppError, Result};
 use crate::model::{DbBackupFile, DbBackupProgress};
 use crate::paths::Paths;
+use crate::dbadmin::DatabaseEngine;
 
 /// 备份文件的落盘目录：{base}/backup/db/
 pub fn backup_dir(paths: &Paths) -> PathBuf {
@@ -25,6 +26,10 @@ pub fn backup_dir(paths: &Paths) -> PathBuf {
 }
 
 pub fn dump_path(paths: &Paths, version: &str, name: &str) -> Result<PathBuf> {
+    dump_path_for(paths, DatabaseEngine::Mysql, version, name)
+}
+
+pub fn dump_path_for(paths: &Paths, engine: DatabaseEngine, version: &str, name: &str) -> Result<PathBuf> {
     if name.is_empty() || name.contains(['/', '\\']) || !name.to_ascii_lowercase().ends_with(".sql")
     {
         return Err(AppError::new(
@@ -32,7 +37,7 @@ pub fn dump_path(paths: &Paths, version: &str, name: &str) -> Result<PathBuf> {
             "备份名称必须是单个 SQL 文件名",
         ));
     }
-    crate::paths::checked_data_path(&paths.base, &format!("backup/db/mysql-{version}-{name}"))
+    crate::paths::checked_data_path(&paths.base, &format!("backup/db/{}-{version}-{name}", engine.id()))
         .map_err(Into::into)
 }
 
@@ -61,40 +66,44 @@ fn unique_stamp() -> String {
     )
 }
 
-fn tool_path(paths: &Paths, conn: &ConnInfo, tool: &str) -> PathBuf {
-    conn.bin_dir
-        .clone()
-        .unwrap_or_else(|| {
-            paths
-                .runtime_dir("mysql", &conn.version)
-                .join(crate::ops::mysql_root_name(&conn.version))
-                .join("bin")
-        })
-        .join(crate::ops::exe_name(tool))
+fn tool_path(paths: &Paths, conn: &ConnInfo, tool: &str) -> Result<PathBuf> {
+    let bin = conn.resolved_bin_dir(paths)?;
+    Ok(crate::dbadmin::database_tool(&bin, conn.engine, tool))
 }
 
 /// 备份/还原共用的参数
 #[derive(Debug, Clone)]
 pub struct ConnInfo {
+    pub engine: DatabaseEngine,
     pub version: String,
     pub port: u16,
     pub root_password: String,
     pub bin_dir: Option<PathBuf>,
 }
 
+impl ConnInfo {
+    pub(crate) fn resolved_bin_dir(&self, paths: &Paths) -> Result<PathBuf> {
+        if let Some(bin) = &self.bin_dir { return Ok(bin.clone()); }
+        if self.engine == DatabaseEngine::Mariadb {
+            return Err(AppError::new("DATABASE_TOOL_MISSING", "缺少所选 MariaDB 安装的客户端路径"));
+        }
+        Ok(paths.runtime_dir("mysql", &self.version).join(crate::ops::mysql_root_name(&self.version)).join("bin"))
+    }
+}
+
 /// MySQL 8+ 默认采集的直方图信息不适用于 5.7/MariaDB 来源。
 /// 5.7 客户端没有 column-statistics 选项，因此只为支持的客户端关闭它。
-pub(crate) fn dump_options(command: &mut std::process::Command, version: &str) {
+pub(crate) fn dump_options(command: &mut std::process::Command, engine: DatabaseEngine, version: &str) {
     command.args([
         "--single-transaction",
         "--routines",
         "--triggers",
         "--events",
         "--hex-blob",
-        "--set-gtid-purged=OFF",
         "--no-tablespaces",
     ]);
-    if version
+    if engine == DatabaseEngine::Mysql { command.arg("--set-gtid-purged=OFF"); }
+    if engine == DatabaseEngine::Mysql && version
         .split('.')
         .next()
         .and_then(|v| v.parse::<u32>().ok())
@@ -128,7 +137,7 @@ pub fn dump_databases(
     }) {
         return Err(AppError::new("BAD_DATABASE", "只能备份有效的业务数据库"));
     }
-    let dump = tool_path(paths, conn, "mysqldump");
+    let dump = tool_path(paths, conn, "mysqldump")?;
     if !dump.is_file() {
         return Err(AppError::new(
             "MYSQL_TOOL_MISSING",
@@ -136,7 +145,7 @@ pub fn dump_databases(
         ));
     }
     let client = crate::dbadmin::MySqlClient {
-        exe: tool_path(paths, conn, "mysql"),
+        exe: tool_path(paths, conn, "mysql")?,
         port: conn.port,
         root_password: conn.root_password.clone(),
     };
@@ -166,7 +175,7 @@ pub fn dump_databases(
     let mut error = tempfile::tempfile()?;
     let (_private, mut command) =
         crate::dbadmin::client_command(&dump, "127.0.0.1", conn.port, "root", &conn.root_password)?;
-    dump_options(&mut command, &conn.version);
+    dump_options(&mut command, conn.engine, &conn.version);
     command
         .args(databases)
         .stdin(Stdio::null())
@@ -249,7 +258,7 @@ pub fn restore_from_file_into(
     if total == 0 {
         return Err(AppError::new("EMPTY_BACKUP", "备份文件为空，未执行恢复"));
     }
-    let mysql = tool_path(paths, conn, "mysql");
+    let mysql = tool_path(paths, conn, "mysql")?;
     if !mysql.is_file() {
         return Err(AppError::new(
             "MYSQL_TOOL_MISSING",
@@ -269,8 +278,9 @@ pub fn restore_from_file_into(
     if safety_backup {
         let dbs = databases.into_iter().filter(|db| !is_system_db(&db.name)).map(|db| db.name).collect::<Vec<_>>();
         if !dbs.is_empty() {
-            let path = dump_path(
+            let path = dump_path_for(
                 paths,
+                conn.engine,
                 &conn.version,
                 &format!("pre-restore-{}.sql", unique_stamp()),
             )?;
@@ -546,6 +556,7 @@ mod tests {
     fn dump_without_databases_is_rejected_early() {
         let paths = Paths::new(std::env::temp_dir().join("nsb-dump-test"));
         let conn = ConnInfo {
+            engine: crate::dbadmin::DatabaseEngine::Mysql,
             version: "5.7.44".into(),
             port: 3306,
             root_password: String::new(),

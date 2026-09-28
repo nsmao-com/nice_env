@@ -25,6 +25,7 @@ import type {
   HostsEntry,
   LogLine,
   DatabaseInfo,
+  DatabaseEngine,
   DbUserInfo,
   PhpExtensionView,
   PhpExtension,
@@ -65,7 +66,7 @@ import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSet
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.82";
+const MOCK_APP_VERSION = "0.2.83";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -819,21 +820,21 @@ function refreshPackageSelection(id: string) {
 type PreviewMySql = { databases: Map<string, DatabaseInfo>; users: Map<string, DbUserInfo>; password: string; savedPassword: string };
 const previewMySql = new Map<string, PreviewMySql>();
 const systemDatabase = (name: string) => ["mysql", "sys", "information_schema", "performance_schema"].includes(name.toLowerCase());
-function mysqlPreview(version?: string, requireAuth = true) {
-  const service = Array.from(services.values()).find((s) => (s.id === "mysql" || s.id.startsWith("mysql@")) && (!version || s.version === version));
-  if (!service || service.state !== "running") throw { code: "MYSQL_NOT_RUNNING", message: "请先启动所选 MySQL 实例" };
-  const key = service.version!;
+function mysqlPreview(version?: string, requireAuth = true, engine: DatabaseEngine = "mysql") {
+  const service = Array.from(services.values()).find((s) => (s.id === engine || s.id.startsWith(`${engine}@`)) && (!version || s.version === version));
+  if (!service || !(service.state === "running" || (service.state === "error" && service.pids.length > 0))) throw { code: "MYSQL_NOT_RUNNING", message: "请先启动所选数据库实例" };
+  const key = `${engine}@${service.version}`;
   let state = previewMySql.get(key);
   if (!state) {
     const password = `preview-${uid()}-${uid()}`;
-    state = { databases: key === "8.0.46" ? databases : new Map([["mysql", { name: "mysql", tables: 37, sizeKb: 2411 }]]), users: key === "8.0.46" ? dbUsers : new Map([["root@localhost", { username: "root", host: "localhost" }]]), password, savedPassword: password };
+    state = { databases: key === "mysql@8.0.46" ? databases : new Map([["mysql", { name: "mysql", tables: 37, sizeKb: 2411 }]]), users: key === "mysql@8.0.46" ? dbUsers : new Map([["root@localhost", { username: "root", host: "localhost" }]]), password, savedPassword: password };
     previewMySql.set(key, state);
   }
   if (requireAuth && state.password !== state.savedPassword) throw { code: "MYSQL_AUTH_REQUIRED", message: "请更新本机连接密码" };
   return { service, state };
 }
-function previewBackup(version: string, data: DatabaseInfo[], label: string) {
-  const name = `mysql-${version}-${label}-${Date.now()}-${uid()}.sql`;
+function previewBackup(version: string, data: DatabaseInfo[], label: string, engine: DatabaseEngine = "mysql") {
+  const name = `${engine}-${version}-${label}-${Date.now()}-${uid()}.sql`;
   const path = `C:/NiceEnv/backup/db/${name}`;
   const file = { name, path, sizeBytes: Math.max(256, data.reduce((sum, db) => sum + (db.sizeKb ?? 0) * 1024, 0)), createdAt: Math.floor(Date.now() / 1000) };
   mockDbBackups.set(path, file); mockBackupContents.set(path, structuredClone(data));
@@ -2183,21 +2184,21 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return structuredClone(Array.from(mockDbBackups.values()).sort((a, b) => b.createdAt - a.createdAt)) as T;
     case "db_backup_dir": return "C:/NiceEnv/backup/db" as T;
     case "db_backup_dump": {
-      const { service, state } = mysqlPreview(args?.version as string | undefined);
+      const { service, state } = mysqlPreview(args?.version as string | undefined, true, args?.engine as DatabaseEngine | undefined);
       const names = args!.databases as string[];
       if (!names.length || names.some((name) => systemDatabase(name) || !state.databases.has(name))) throw { code: "BAD_DATABASE", message: "请选择有效的业务数据库" };
       emitLocal("db://backup", { database: names.join(", "), bytes: 0, state: "running" });
       await delay(600);
-      return previewBackup(service.version!, names.map((name) => state.databases.get(name)!), names.length === 1 ? names[0] : `${names.length}dbs`).path as T;
+      return previewBackup(service.version!, names.map((name) => state.databases.get(name)!), names.length === 1 ? names[0] : `${names.length}dbs`, args?.engine as DatabaseEngine | undefined).path as T;
     }
     case "db_backup_restore": {
-      const { state, service } = mysqlPreview(args?.version as string | undefined);
+      const { state, service } = mysqlPreview(args?.version as string | undefined, true, args?.engine as DatabaseEngine | undefined);
       const database = args?.database as string | undefined;
       if (database !== undefined && (systemDatabase(database) || !state.databases.has(database))) throw { code: "RESTORE_DATABASE_INVALID", message: "请选择当前实例中已存在的业务数据库" };
       const content = mockBackupContents.get(args!.path as string);
       if (!content) throw { code: "FILE_NOT_FOUND", message: "找不到有效的 SQL 备份" };
       const before = [...state.databases.values()].filter((db) => !systemDatabase(db.name));
-      const safety = args?.safetyBackup && before.length ? previewBackup(service.version!, before, "pre-restore") : undefined;
+      const safety = args?.safetyBackup && before.length ? previewBackup(service.version!, before, "pre-restore", args?.engine as DatabaseEngine | undefined) : undefined;
       emitLocal("db://backup", { database: args!.path, bytes: 0, state: "running", message: "正在执行 SQL" });
       await delay(700);
       for (const db of content) state.databases.set(db.name, structuredClone(db));
@@ -2209,17 +2210,17 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       mockBackupContents.delete(path); return true as T;
     }
     case "migrate_list_source": {
-      mysqlPreview(args?.version as string | undefined);
+      mysqlPreview(args?.version as string | undefined, true, args?.engine as DatabaseEngine | undefined);
       if (!args?.host || !args.user || !Number.isInteger(args.port) || Number(args.port) < 1 || Number(args.port) > 65535) throw { code: "BAD_CONNECTION", message: "请检查来源地址、端口和账号" };
       return structuredClone(previewSource) as T;
     }
     case "migrate_import": {
-      const { state, service } = mysqlPreview(args?.version as string | undefined);
+      const { state, service } = mysqlPreview(args?.version as string | undefined, true, args?.engine as DatabaseEngine | undefined);
       if (["localhost", "127.0.0.1"].includes(args!.host as string) && args!.port === service.port) throw { code: "SAME_MYSQL_INSTANCE", message: "源和目标是同一个实例" };
       const names = args!.databases as string[];
       if (!names.length || names.some((name) => !previewSource.some((db) => db.name === name))) throw { code: "BAD_DATABASE", message: "请重新检测源数据库" };
       const before = [...state.databases.values()].filter((db) => !systemDatabase(db.name));
-      if (before.length) previewBackup(service.version!, before, "pre-import");
+      if (before.length) previewBackup(service.version!, before, "pre-import", args?.engine as DatabaseEngine | undefined);
       await delay(800);
       for (const db of previewSource.filter((db) => names.includes(db.name))) state.databases.set(db.name, structuredClone(db));
       return { imported: names, failed: [] } as T;
@@ -2308,37 +2309,37 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       mockPhpToggleState.set(version, toggles);
       return true as T;
     }
-    case "db_list": return structuredClone([...mysqlPreview(args?.version as string | undefined).state.databases.values()]) as T;
+    case "db_list": return structuredClone([...mysqlPreview(args?.version as string | undefined, true, args?.engine as DatabaseEngine | undefined).state.databases.values()]) as T;
     case "db_create": {
-      const { state } = mysqlPreview(args?.version as string | undefined);
+      const { state } = mysqlPreview(args?.version as string | undefined, true, args?.engine as DatabaseEngine | undefined);
       const name = args!.name as string;
       if (!/^[A-Za-z0-9_]{1,64}$/.test(name)) throw { code: "BAD_IDENTIFIER", message: "数据库名只能包含字母、数字和下划线" };
       if (!state.databases.has(name)) state.databases.set(name, { name, tables: 0, sizeKb: 0 });
       return true as T;
     }
     case "db_drop": {
-      const { state } = mysqlPreview(args?.version as string | undefined);
+      const { state } = mysqlPreview(args?.version as string | undefined, true, args?.engine as DatabaseEngine | undefined);
       const name = args!.name as string;
       if (systemDatabase(name)) throw { code: "SYSTEM_DATABASE", message: "不能删除系统数据库" };
       state.databases.delete(name); return true as T;
     }
-    case "db_users": return structuredClone([...mysqlPreview(args?.version as string | undefined).state.users.values()]) as T;
+    case "db_users": return structuredClone([...mysqlPreview(args?.version as string | undefined, true, args?.engine as DatabaseEngine | undefined).state.users.values()]) as T;
     case "db_create_user": {
-      const { state } = mysqlPreview(args?.version as string | undefined);
+      const { state } = mysqlPreview(args?.version as string | undefined, true, args?.engine as DatabaseEngine | undefined);
       const username = args!.username as string; const database = args!.database as string;
       if (!/^[A-Za-z0-9_]{1,32}$/.test(username) || username.toLowerCase() === "root" || !args?.password || !state.databases.has(database) || systemDatabase(database)) throw { code: "BAD_IDENTIFIER", message: "请检查账号、密码和授权数据库" };
       if ([...state.users.values()].some((user) => user.username === username && ["localhost", "127.0.0.1"].includes(user.host))) throw { code: "DB_USER_EXISTS", message: "同名本地账号已存在，未修改密码或权限" };
       for (const host of ["localhost", "127.0.0.1"]) state.users.set(`${username}@${host}`, { username, host, grants: `ALL ON ${database}.*` });
       return true as T;
     }
-    case "db_root_password": return mysqlPreview(args?.version as string | undefined).state.savedPassword as T;
+    case "db_root_password": return mysqlPreview(args?.version as string | undefined, true, args?.engine as DatabaseEngine | undefined).state.savedPassword as T;
     case "db_reset_root_password": {
-      const { state } = mysqlPreview(args?.version as string | undefined, !args?.useExisting);
+      const { state, service } = mysqlPreview(args?.version as string | undefined, !args?.useExisting, args?.engine as DatabaseEngine | undefined);
       const password = args!.newPassword as string;
       if (!password || /[\x00-\x1f\x7f]/.test(password)) throw { code: "BAD_PASSWORD", message: "密码不能为空或包含控制字符" };
       if (args?.useExisting && password !== state.password) throw { code: "MYSQL_AUTH_REQUIRED", message: "密码验证失败，本机记录未修改" };
       if (!args?.useExisting) state.password = password;
-      state.savedPassword = password; return true as T;
+      state.savedPassword = password; service.state = "running"; return true as T;
     }
     case "proxy_status":
       return {

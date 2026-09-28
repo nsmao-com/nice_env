@@ -16,6 +16,7 @@ import type {
   HostsEntry,
   LogLine,
   DatabaseInfo,
+  DatabaseEngine,
   DbUserInfo,
   PhpExtensionView,
   PhpExtensionChange,
@@ -294,15 +295,15 @@ export const openTerminal = (expectedRevision: string, siteId?: string) =>
   safe(invoke<boolean>("open_terminal", { expectedRevision, siteId }));
 
 /* 数据库 */
-export const dbList = (version?: string) => safe(invoke<DatabaseInfo[]>("db_list", { version }));
-export const dbCreate = (name: string, version?: string) => safe(invoke<boolean>("db_create", { name, version }));
-export const dbDrop = (name: string, version?: string) => safe(invoke<boolean>("db_drop", { name, version }));
-export const dbUsers = (version?: string) => safe(invoke<DbUserInfo[]>("db_users", { version }));
-export const dbCreateUser = (username: string, password: string, database: string, version?: string) =>
-  safe(invoke<boolean>("db_create_user", { username, password, database, version }));
-export const dbResetRootPassword = (newPassword: string, version?: string, useExisting = false) =>
-  safe(invoke<boolean>("db_reset_root_password", { newPassword, version, useExisting }));
-export const dbRootPassword = (version?: string) => safe(invoke<string>("db_root_password", { version }));
+export const dbList = (version?: string, engine: DatabaseEngine = "mysql") => safe(invoke<DatabaseInfo[]>("db_list", { version, engine }));
+export const dbCreate = (name: string, version?: string, engine: DatabaseEngine = "mysql") => safe(invoke<boolean>("db_create", { name, version, engine }));
+export const dbDrop = (name: string, version?: string, engine: DatabaseEngine = "mysql") => safe(invoke<boolean>("db_drop", { name, version, engine }));
+export const dbUsers = (version?: string, engine: DatabaseEngine = "mysql") => safe(invoke<DbUserInfo[]>("db_users", { version, engine }));
+export const dbCreateUser = (username: string, password: string, database: string, version?: string, engine: DatabaseEngine = "mysql") =>
+  safe(invoke<boolean>("db_create_user", { username, password, database, version, engine }));
+export const dbResetRootPassword = (newPassword: string, version?: string, useExisting = false, engine: DatabaseEngine = "mysql") =>
+  safe(invoke<boolean>("db_reset_root_password", { newPassword, version, useExisting, engine }));
+export const dbRootPassword = (version?: string, engine: DatabaseEngine = "mysql") => safe(invoke<string>("db_root_password", { version, engine }));
 export interface RedisStats {
   reachable: boolean;
   port: number;
@@ -340,10 +341,10 @@ export const xdebugToggle = (version: string, enabled: boolean, mode: string, po
 /* 数据库备份 / 还原 */
 export const dbBackupList = () => safe(invoke<DbBackupFile[]>("db_backup_list"));
 export const dbBackupDir = () => safe(invoke<string>("db_backup_dir"));
-export const dbBackupDump = (databases: string[], outName?: string, version?: string) =>
-  safe(invoke<string>("db_backup_dump", { databases, outName: outName ?? null, version }));
-export const dbBackupRestore = (path: string, safetyBackup = true, version?: string, database?: string) =>
-  safe(invoke<DbRestoreResult>("db_backup_restore", { path, safetyBackup, version, database }));
+export const dbBackupDump = (databases: string[], outName?: string, version?: string, engine: DatabaseEngine = "mysql") =>
+  safe(invoke<string>("db_backup_dump", { databases, outName: outName ?? null, version, engine }));
+export const dbBackupRestore = (path: string, safetyBackup = true, version?: string, database?: string, engine: DatabaseEngine = "mysql") =>
+  safe(invoke<DbRestoreResult>("db_backup_restore", { path, safetyBackup, version, database, engine }));
 export const dbBackupDelete = (path: string) =>
   safe(invoke<boolean>("db_backup_delete", { path }));
 
@@ -655,11 +656,11 @@ export interface ImportReport {
   imported: string[];
   failed: [string, string][];
 }
-export const migrateListSource = (host: string, port: number, user: string, password: string, version?: string) =>
-  safe(invoke<SourceDb[]>("migrate_list_source", { host, port, user, password, version }));
+export const migrateListSource = (host: string, port: number, user: string, password: string, version?: string, engine: DatabaseEngine = "mysql") =>
+  safe(invoke<SourceDb[]>("migrate_list_source", { host, port, user, password, version, engine }));
 export const migrateImport = (
-  host: string, port: number, user: string, password: string, databases: string[], version?: string
-) => safe(invoke<ImportReport>("migrate_import", { host, port, user, password, databases, version }));
+  host: string, port: number, user: string, password: string, databases: string[], version?: string, engine: DatabaseEngine = "mysql"
+) => safe(invoke<ImportReport>("migrate_import", { host, port, user, password, databases, version, engine }));
 
 /* ===== DNS 一键接管（本地域名解析配套） ===== */
 export const dnsInterfaces = () => safe(invoke<string[]>("dns_interfaces"));

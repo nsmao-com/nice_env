@@ -1144,6 +1144,20 @@ fn stop_service_with_mode(store: &Store, paths: &Paths, manager: &Arc<ServiceMan
                 }
                 Ok(())
             }
+            "mariadb" => {
+                use crate::dbadmin::DatabaseEngine;
+                let service = manager.snapshot(id).ok_or_else(|| AppError::new("UNKNOWN_SERVICE", "MariaDB 服务已移除"))?;
+                let version = service.version.as_deref().ok_or_else(|| AppError::new("DATABASE_VERSION_UNKNOWN", "无法确认运行中的 MariaDB 版本"))?;
+                let package = store.find_installed("mariadb", Some(version)).ok_or_else(|| AppError::not_installed("MariaDB"))?;
+                let port = service.port.ok_or_else(|| AppError::new("DATABASE_PORT_UNKNOWN", "无法确认 MariaDB 实际端口"))?;
+                verify_database_listener(manager, id, port)?;
+                let pass = DatabaseEngine::Mariadb.saved_password(store, version).ok_or_else(|| AppError::new("MYSQL_AUTH_REQUIRED", "请先在数据库页更新 MariaDB 的 root 连接密码"))?;
+                let admin = crate::dbadmin::database_tool(&DatabaseEngine::Mariadb.bin_dir(&package)?, DatabaseEngine::Mariadb, "mysqladmin");
+                let (_private, mut command) = crate::dbadmin::client_command(&admin, "127.0.0.1", port, "root", &pass)?;
+                command.args(["--connect-timeout=5", "shutdown"]);
+                run_database_stop(&mut command, "MariaDB", Some(&pass))?;
+                wait_database_stopped(manager, id, "MariaDB")
+            }
             s if s.starts_with("mysql@") => {
                 let version = s.trim_start_matches("mysql@");
                 let (basedir, _) = mysql_paths(store, version)?;
@@ -1273,7 +1287,7 @@ fn stop_mongodb(store: &Store, manager: &Arc<ServiceManager>) -> Result<()> {
     Ok(())
 }
 
-fn verify_database_listener(manager: &Arc<ServiceManager>, id: &str, port: u16) -> Result<()> {
+pub(crate) fn verify_database_listener(manager: &Arc<ServiceManager>, id: &str, port: u16) -> Result<()> {
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let endpoints = crate::ports::listener_endpoints()?;
     let listeners: Vec<_> = endpoints
@@ -2757,6 +2771,98 @@ mod validate_tests {
     }
 
     #[test]
+    #[ignore = "requires NSB_MARIADB_ROOT and NSB_MYSQL_ROOT; isolated temporary databases and ephemeral ports"]
+    fn real_mariadb_management_isolation_and_graceful_shutdown() {
+        use crate::{dbadmin::{self, DatabaseEngine}, dbbackup, dbmigrate};
+        let engine = DatabaseEngine::Mariadb;
+        let root = PathBuf::from(std::env::var("NSB_MARIADB_ROOT").expect("NSB_MARIADB_ROOT"));
+        let mysql = PathBuf::from(std::env::var("NSB_MYSQL_ROOT").expect("NSB_MYSQL_ROOT"));
+        let temp = tempfile::tempdir().unwrap();
+        let state = isolated_state(Paths::new(temp.path().join("MariaDB with spaces")));
+        let before_service = platform::command("sc.exe").args(["query", "MariaDB"]).output().unwrap();
+        register_fixture(&state, "mariadb", "11.4.8", root.parent().unwrap());
+        register_fixture(&state, "mysql", "8.0.46", mysql.parent().unwrap());
+        crate::generic::register_services(&state.paths, &state.store, &state.manager);
+        struct Cleanup<'a>(&'a crate::CoreState);
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                for id in ["mariadb", "mysql@8.0.46"] {
+                    if self.0.stop_service(id).is_err() {
+                        if let Ok(preview) = self.0.service_stop_preview(id) { let _ = self.0.force_stop_service(id, &preview.revision); }
+                    }
+                }
+            }
+        }
+        let _cleanup = Cleanup(&state);
+        for id in ["mariadb", "mysql"] {
+            let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            state.store.set_port_override(id, Some(free.local_addr().unwrap().port())).unwrap(); drop(free);
+            state.start_service(if id == "mysql" { "mysql@8.0.46" } else { id }).unwrap_or_else(|error| panic!("{error:?}\n{:?}", state.manager.tail(id, 40)));
+        }
+        let after_service = platform::command("sc.exe").args(["query", "MariaDB"]).output().unwrap();
+        assert_eq!(before_service.status.code(), after_service.status.code());
+        assert_eq!(before_service.stdout, after_service.stdout);
+        let (_, mut client) = dbadmin::authenticated_client(&state, engine, Some("11.4.8"), None).unwrap();
+        let (_, mysql_client) = dbadmin::selected_client(&state, Some("8.0.46")).unwrap();
+        assert_ne!(client.port, mysql_client.port);
+        assert_eq!(client.root_password.len(), 24);
+        assert_ne!(client.root_password, mysql_client.root_password);
+        assert!(state.paths.data().join("mariadb-versions/11.4.8/mysql").is_dir());
+        assert!(!state.paths.data().join("mariadb/mysql").exists());
+        client.create_database("mariadb_fixture").unwrap();
+        assert!(client.drop_database("mysql").is_err());
+        assert!(!mysql_client.list_databases().unwrap().iter().any(|db| db.name == "mariadb_fixture"));
+        assert!(client.run("SHOW TABLES FROM mariadb_fixture;").unwrap().trim().is_empty());
+        client.run("CREATE TABLE mariadb_fixture.sample (id INT PRIMARY KEY, value VARCHAR(80)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;").unwrap();
+        assert!(client.run("SHOW CREATE TABLE mariadb_fixture.sample;").unwrap().contains("utf8mb4"));
+        client.run("INSERT INTO mariadb_fixture.sample VALUES (1, 'original');").unwrap();
+        let secret = "quote' slash\\ dollar$ # semi; 中文";
+        state.set_database_password(engine, Some("11.4.8"), secret, false).unwrap();
+        client.root_password = secret.into();
+        client.create_user_grant("maria_user", secret, "mariadb_fixture").unwrap();
+        dbadmin::query_client(&client.exe, "127.0.0.1", client.port, "maria_user", secret, "SELECT value FROM mariadb_fixture.sample;").unwrap();
+        state.store.set_setting(&engine.password_key("11.4.8"), "incorrect").unwrap();
+        let pid = state.manager.snapshot("mariadb").unwrap().pids;
+        assert_eq!(state.stop_service("mariadb").unwrap_err().code, "DATABASE_SHUTDOWN_FAILED");
+        assert!(pid.iter().all(|pid| platform::process_alive(*pid)));
+        assert!(state.restart_service("mariadb").is_err());
+        state.set_database_password(engine, Some("11.4.8"), secret, true).unwrap();
+        assert_eq!(state.manager.snapshot("mariadb").unwrap().state, ServiceState::Running);
+        assert_eq!(mysql_client.root_password, dbadmin::saved_password(&state.store, "8.0.46").unwrap());
+        let conn = dbbackup::ConnInfo { engine, version: "11.4.8".into(), port: client.port, root_password: secret.into(), bin_dir: Some(root.join("bin")) };
+        let backup = dbbackup::dump_path_for(&state.paths, engine, "11.4.8", "fixture.sql").unwrap();
+        dbbackup::dump_databases(&state.paths, &conn, &["mariadb_fixture".into()], &backup, &|_| {}).unwrap();
+        assert!(backup.file_name().unwrap().to_string_lossy().starts_with("mariadb-"));
+        client.run("UPDATE mariadb_fixture.sample SET value='changed';").unwrap();
+        let safety = dbbackup::restore_from_file(&state.paths, &conn, &backup, true, &|_| {}).unwrap().unwrap();
+        assert!(safety.is_file());
+        assert_eq!(client.run("SELECT value FROM mariadb_fixture.sample;").unwrap().trim(), "original");
+        mysql_client.create_database("mysql_source").unwrap();
+        assert!(mysql_client.run("SHOW TABLES FROM mysql_source;").unwrap().trim().is_empty());
+        mysql_client.run("CREATE TABLE mysql_source.sample (id INT PRIMARY KEY) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;").unwrap();
+        mysql_client.run("SHOW CREATE TABLE mysql_source.sample;").unwrap();
+        mysql_client.run("INSERT INTO mysql_source.sample VALUES (42);").unwrap();
+        let source = dbmigrate::SourceConn { host: "127.0.0.1".into(), port: mysql_client.port, user: "root".into(), password: mysql_client.root_password.clone() };
+        let report = dbmigrate::import_databases(&state.paths, &source, &["mysql_source".into()], &conn, |_, _| {}).unwrap();
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(client.run("SELECT id FROM mysql_source.sample;").unwrap().trim(), "42");
+        state.stop_service("mariadb").unwrap();
+        assert!(pid.iter().all(|pid| !platform::process_alive(*pid)));
+        state.start_service("mariadb").unwrap();
+        let (_, client) = dbadmin::authenticated_client(&state, engine, Some("11.4.8"), None).unwrap();
+        assert_eq!(client.run("SELECT value FROM mariadb_fixture.sample;").unwrap().trim(), "original");
+        state.stop_service("mariadb").unwrap();
+        assert!(state.manager.tail("mariadb", 400).join("\n").contains("Shutdown complete"));
+        // 旧共享目录只允许原版本重新打开；未知、跨版本不自动升级。
+        let isolated = state.paths.data().join("mariadb-versions/11.4.8");
+        std::fs::write(isolated.join(".niceenv-mariadb-version"), "10.11.13").unwrap();
+        assert_eq!(state.start_service("mariadb").unwrap_err().code, "MARIADB_DATA_VERSION");
+        assert!(state.manager.snapshot("mariadb").unwrap().pids.is_empty());
+        assert!(isolated.join("mariadb_fixture").is_dir());
+        std::fs::write(isolated.join(".niceenv-mariadb-version"), "11.4.8").unwrap();
+    }
+
+    #[test]
     #[ignore = "requires NSB_MYSQL_ROOT; uses two temporary isolated data directories and ephemeral ports"]
     fn real_mysql_auth_backup_restore_and_import() {
         use crate::{dbadmin, dbbackup, dbmigrate};
@@ -2873,6 +2979,7 @@ mod validate_tests {
             .run("INSERT INTO niceenv_fixture.sample VALUES (1, 'original');")
             .unwrap();
         let conn = dbbackup::ConnInfo {
+            engine: crate::dbadmin::DatabaseEngine::Mysql,
             version: "8.0.46".into(),
             port: client.port,
             root_password: special.into(),
@@ -2945,6 +3052,7 @@ mod validate_tests {
         );
         let (_, target_client) = dbadmin::selected_client(&target, Some("8.0.46")).unwrap();
         let target_conn = dbbackup::ConnInfo {
+            engine: crate::dbadmin::DatabaseEngine::Mysql,
             version: "8.0.46".into(),
             port: target_client.port,
             root_password: target_client.root_password.clone(),

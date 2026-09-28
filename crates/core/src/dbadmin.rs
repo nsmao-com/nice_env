@@ -8,8 +8,62 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DatabaseEngine {
+    #[default]
+    Mysql,
+    Mariadb,
+}
+
+impl DatabaseEngine {
+    pub fn id(self) -> &'static str {
+        match self { Self::Mysql => "mysql", Self::Mariadb => "mariadb" }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self { Self::Mysql => "MySQL", Self::Mariadb => "MariaDB" }
+    }
+
+    pub fn password_key(self, version: &str) -> String {
+        format!("{}RootPassword@{version}", self.id())
+    }
+
+    pub fn saved_password(self, store: &crate::store::Store, version: &str) -> Option<String> {
+        store.get_setting(&self.password_key(version)).or_else(|| {
+            (self == Self::Mysql).then(|| store.get_setting("mysqlRootPassword")).flatten()
+        })
+    }
+
+    pub fn data_dir(self, paths: &Paths, version: &str) -> Result<PathBuf> {
+        match self {
+            Self::Mysql => Ok(paths.mysql_data_dir(version)),
+            Self::Mariadb => crate::generic::mariadb_data_dir(paths, version),
+        }
+    }
+
+    pub fn bin_dir(self, package: &crate::model::InstalledPackage) -> Result<PathBuf> {
+        if self == Self::Mysql {
+            return Ok(Path::new(&package.install_path).join(crate::ops::mysql_root_name(&package.version)).join("bin"));
+        }
+        let entry = crate::install::Installer::bundled().installed_entry(package);
+        let exe = Path::new(&package.install_path).join(crate::install::entry_relative_path(&entry.entry));
+        exe.parent().map(Path::to_path_buf).ok_or_else(|| AppError::new("DATABASE_TOOL_MISSING", "数据库安装入口无效"))
+    }
+}
+
+/// 优先使用 MariaDB 的当前工具名，兼容仍保留 MySQL 别名的旧发行包。
+pub(crate) fn database_tool(bin_dir: &Path, engine: DatabaseEngine, name: &str) -> PathBuf {
+    if engine == DatabaseEngine::Mariadb {
+        let modern = match name { "mysql" => "mariadb", "mysqldump" => "mariadb-dump", "mysqladmin" => "mariadb-admin", other => other };
+        let path = bin_dir.join(crate::ops::exe_name(modern));
+        if path.is_file() { return path; }
+    }
+    bin_dir.join(crate::ops::exe_name(name))
+}
+
 pub fn password_key(version: &str) -> String {
-    format!("mysqlRootPassword@{version}")
+    DatabaseEngine::Mysql.password_key(version)
 }
 
 pub fn port_key(version: &str) -> String {
@@ -24,9 +78,7 @@ pub fn saved_port(store: &crate::store::Store, version: &str) -> Option<u16> {
 }
 
 pub fn saved_password(store: &crate::store::Store, version: &str) -> Option<String> {
-    store
-        .get_setting(&password_key(version))
-        .or_else(|| store.get_setting("mysqlRootPassword"))
+    DatabaseEngine::Mysql.saved_password(store, version)
 }
 
 /// 只连接已启动的准确版本；端口使用本次启动记录，避免设置变化后连到另一个实例。
@@ -34,43 +86,42 @@ pub fn selected_client(
     state: &crate::CoreState,
     version: Option<&str>,
 ) -> Result<(String, MySqlClient)> {
-    authenticated_client(state, version, None)
+    authenticated_client(state, DatabaseEngine::Mysql, version, None)
 }
 
 pub(crate) fn authenticated_client(
     state: &crate::CoreState,
+    engine: DatabaseEngine,
     version: Option<&str>,
     password: Option<String>,
 ) -> Result<(String, MySqlClient)> {
     let package = match version {
-        Some(version) => state.store.find_installed("mysql", Some(version)),
-        None => crate::ops::installed_by_choice(&state.store, "mysql"),
+        Some(version) => state.store.find_installed(engine.id(), Some(version)),
+        None => crate::ops::installed_by_choice(&state.store, engine.id()),
     }
-    .ok_or_else(|| AppError::not_installed("MySQL"))?;
-    let id = format!("mysql@{}", package.version);
+    .ok_or_else(|| AppError::not_installed(engine.label()))?;
+    let id = if engine == DatabaseEngine::Mysql { format!("mysql@{}", package.version) } else { "mariadb".into() };
     let service = state
         .manager
         .snapshot(&id)
-        .filter(|s| s.state == crate::model::ServiceState::Running)
+        .filter(|s| s.version.as_deref() == Some(&package.version)
+            && matches!(s.state, crate::model::ServiceState::Running | crate::model::ServiceState::Error)
+            && s.pids.iter().any(|pid| platform::process_alive(*pid)))
         .ok_or_else(|| {
             AppError::new(
                 "MYSQL_NOT_RUNNING",
-                format!("MySQL {} 尚未启动", package.version),
+                format!("{} {} 尚未启动", engine.label(), package.version),
             )
         })?;
     let port = service
         .port
-        .ok_or_else(|| AppError::new("MYSQL_NOT_RUNNING", "无法确定 MySQL 实际端口"))?;
+        .ok_or_else(|| AppError::new("MYSQL_NOT_RUNNING", "无法确定数据库实际端口"))?;
+    crate::ops::verify_database_listener(&state.manager, &id, port)?;
     let password = password
-        .or_else(|| saved_password(&state.store, &package.version))
+        .or_else(|| engine.saved_password(&state.store, &package.version))
         .ok_or_else(|| AppError::new("MYSQL_AUTH_REQUIRED", "请先更新该实例的 root 连接密码"))?;
-    let client = MySqlClient::from_install_dir(
-        Path::new(&package.install_path),
-        &package.version,
-        port,
-        password,
-    );
-    client.verify_data_dir(&state.paths.mysql_data_dir(&package.version))?;
+    let client = MySqlClient { exe: database_tool(&engine.bin_dir(&package)?, engine, "mysql"), port, root_password: password };
+    client.verify_data_dir(&engine.data_dir(&state.paths, &package.version)?)?;
     Ok((package.version, client))
 }
 
@@ -132,6 +183,11 @@ pub(crate) fn client_command(
             private.path().join("unused.mylogin.cnf"),
         )
         .env_remove("MYSQL_PWD");
+    // portable 客户端的默认插件目录可能指向构建机器；私有配置同时隔离了包内 my.ini。
+    // 指定本安装的插件目录，MariaDB 才能加载连接 MySQL 8 所需的 caching_sha2_password。
+    if let Some(plugins) = exe.parent().and_then(Path::parent).map(|root| root.join("lib/plugin")).filter(|path| path.is_dir()) {
+        command.arg(format!("--plugin-dir={}", plugins.display()));
+    }
     Ok((private, command))
 }
 
@@ -508,6 +564,9 @@ mod tests {
             Some("version-one")
         );
         assert_eq!(saved_password(&store, "8.4.8").as_deref(), Some("legacy"));
+        assert!(DatabaseEngine::Mariadb.saved_password(&store, "8.0.46").is_none());
+        store.set_setting(&DatabaseEngine::Mariadb.password_key("8.0.46"), "mariadb-only").unwrap();
+        assert_eq!(DatabaseEngine::Mariadb.saved_password(&store, "8.0.46").as_deref(), Some("mariadb-only"));
         store
             .set_setting(&password_key("8.4.8"), "version-two")
             .unwrap();

@@ -2282,3 +2282,23 @@ MySQL 先核对实际启动端口的本机监听者属于当前已记录实例�
 已确认 v0.2.81 Release completed/success；按根 AGENTS.md 创建新 annotated tag v0.2.82，与 main 原子推送并核对远程指向及实际 workflow 状态。没有修改用户现有数据库结构或数据，未修改 update.sql；未启动前端 dev、未执行本地前端 build。Windows 原生 MongoDB 8.0.4 已验收；macOS/Linux 的本轮信号代码只通过编译检查，macOS 的创建标识核对与 kill 仍不是同一原子系统调用。MariaDB 和其他清单驱动服务的普通停机策略尚需继续完善，整体目标保持进行。
 
 参考：https://www.mongodb.com/docs/manual/tutorial/manage-mongodb-processes/；https://github.com/mongodb/mongo/blob/v8.0/src/mongo/util/signal_win32.cpp；https://github.com/mongodb/mongo/blob/v8.0/src/mongo/util/signal_handlers.cpp。
+
+## 第九十七轮：MariaDB 初始化、管理、备份导入与正常停机（v0.2.83）
+
+沿用 ServBay 的实例管理和 stop/kill 分离思路，通过 fast-context 追踪清单、安装快照、通用服务、数据库客户端、备份导入和界面。核对 MariaDB 官方 mariadb-install-db.exe 文档及 11.4.8 原生帮助，确认原先 --service=MariaDB 会注册 Windows 系统服务。四个内置版本移除该参数和多余初始化子目录；仅对完全匹配旧默认描述的安装快照升级，不覆盖自定义运行描述。
+
+MariaDB 初始化在临时目录限时执行，成功后才替换空目标目录；不注册系统服务，密码不经命令行传递。新实例使用 data/mariadb-versions/<version>，与旧共享目录 data/mariadb 分开，避免把新实例嵌入旧数据库目录。旧 my.ini 指向共享目录时保留原位置，并用版本记录或唯一的历史启动日志核对原版本；未知、混合版本、非空残缺目录和自定义路径均明确报错，不自动升级或覆盖数据。首次认证后设置随机 root 密码；既有密码失效时保留实例供用户修复连接。启动端口、数据目录、basedir 和本机监听地址按托管实例约束。
+
+新增可选数据库引擎参数，默认 MySQL 以兼容现有调用。MySQL/MariaDB 的凭据、缓存、实例选择和备份文件名按引擎及版本隔离。复用现有建库、账号授权、改密、备份恢复及外部导入界面和 SQL 客户端，不新增依赖。MariaDB 优先使用 mariadb/mariadb-dump/mariadb-admin，排除 MySQL 专有导出选项；显式定位包内 lib/plugin，解决便携客户端连接 MySQL 8 时找不到 caching_sha2_password 插件的问题。
+
+数据库连接前核对版本、实际端口、托管监听进程以及 @@datadir。MariaDB 普通停止使用实际运行版本的 admin 客户端发送 shutdown，超时或认证失败保留进程与错误，不转为强杀；原有独立强制确认入口保持可用。MySQL/MariaDB 在 Error 且原进程存活时仍可验证并修正本机连接密码，成功后恢复运行状态。
+
+界面沿用 UI/UX skill 与项目现有组件，选择器显示引擎、版本、端口和状态，操作弹窗显示目标实例。浏览器演示数据同样按引擎隔离。1360px 桌面、390px/320px 窄屏检查了中英文、MariaDB 建库与账号、导出、实例切换和错误密码；确认没有横向溢出，错误后保留输入，导入目标和覆盖确认可见。浏览器验收为既有 localhost 演示环境；真实数据库能力另由 Rust 原生调用验收。
+
+独立发布目录排除了原有 configgen.rs 的 178 additions / 9 deletions 和未跟踪文件。最终 pnpm check、cargo check --workspace --all-targets --locked 通过。相关 Rust 库内回归串行执行 145 通过、0 失败、24 ignored、532 filtered out；并发执行曾发生端口互相占用，另修正一个既有用例对相邻临时端口可用性的错误假设，没有削弱产品端口检查。Windows 真实 MariaDB 11.4.8 与 MySQL 8.0.46 的独立验收两项均通过；最终调整数据目录后再次执行 MariaDB 用例通过，覆盖无系统服务副作用、密码隔离、建库授权、备份恢复、MySQL 到 MariaDB 导入、停机失败保留进程和阻止重启、凭据恢复、正常关闭、重启读回以及版本不符拒绝启动。
+
+没有新增测试文件，验证代码扩展于已有 Rust 模块。没有操作用户业务数据库，未修改 update.sql。未启动前端 dev，未执行本地前端 build。因 D 盘空间不足造成首次链接调试文件失败，确认无 Rust 编译进程后，将旧 nsb_core 增量缓存保留式转存 E:/CodexCacheBackup/nice_env-v0.2.83，没有删除用户文件。
+
+11 个版本文件同步到 0.2.83，Cargo.lock 仅更新三个本项目 crate。已确认 v0.2.82 Release completed/success，本轮按根 AGENTS.md 创建新 annotated tag v0.2.83，并与 main 原子推送、核对远程指向及实际 workflow 状态。MariaDB 原生验收范围是 Windows 11.4.8；自定义目录与无法确认版本的旧数据需先从原环境导出后导入，尚未增加原地跨大版本升级；其他服务缺口继续推进，整体目标保持进行。
+
+参考：https://mariadb.com/docs/server/server-management/install-and-upgrade-mariadb/installing-mariadb/installing-system-tables-mariadb-install-db/mariadb-install-db-exe

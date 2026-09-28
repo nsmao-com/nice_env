@@ -615,6 +615,9 @@ export type LogLine = z.infer<typeof LogLine>;
 
 /* ============ 数据库管理 ============ */
 
+export const DatabaseEngine = z.enum(["mysql", "mariadb"]);
+export type DatabaseEngine = z.infer<typeof DatabaseEngine>;
+
 export const DatabaseInfo = z.object({
   name: z.string(),
   tables: z.number().optional(),

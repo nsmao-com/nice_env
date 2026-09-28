@@ -1,5 +1,6 @@
 "use client";
 
+import type { DatabaseEngine } from "@nsb/schema";
 import * as React from "react";
 import { toast } from "sonner";
 import {
@@ -57,8 +58,8 @@ function fmtTime(sec: number): string {
  * 3. **只列本应用备份目录里的文件**——不做成「任意路径导入」，
  *    避免变成一个能读任意文件的接口（真要外部文件走导入按钮选）。
  */
-export function DbBackupCard({ version, targetLabel, ready, databases: dbs, onLockChange }: {
-  version: string; targetLabel: string; ready: boolean; databases: string[]; onLockChange: (locked: boolean) => void;
+export function DbBackupCard({ version, engine, targetLabel, ready, databases: dbs, onLockChange }: {
+  version: string; engine: DatabaseEngine; targetLabel: string; ready: boolean; databases: string[]; onLockChange: (locked: boolean) => void;
 }) {
   const t = useT();
   const invalidate = useInvalidate();
@@ -110,7 +111,7 @@ export function DbBackupCard({ version, targetLabel, ready, databases: dbs, onLo
   const doDump = async () => {
     if (!ready || picked.size === 0 || !begin()) return;
     try {
-      const path = await api.dbBackupDump(Array.from(picked), undefined, version);
+      const path = await api.dbBackupDump(Array.from(picked), undefined, version, engine);
       toast.success(t("dbBackup.done"), { description: path.split(/[\\/]/).pop() });
       setDumpOpen(false);
       setPicked(new Set());
@@ -144,7 +145,7 @@ export function DbBackupCard({ version, targetLabel, ready, databases: dbs, onLo
   const doRestore = async (f: Pick<DbBackupFile, "path" | "name">) => {
     if (!ready || !restoreDatabase || (restoreDatabase !== "file" && !dbs.includes(restoreDatabase.slice(3))) || !begin()) return;
     try {
-      const r = await api.dbBackupRestore(f.path, true, version, restoreDatabase === "file" ? undefined : restoreDatabase.slice(3));
+      const r = await api.dbBackupRestore(f.path, true, version, restoreDatabase === "file" ? undefined : restoreDatabase.slice(3), engine);
       toast.success(t("dbBackup.restored"), {
         description: r.safetyBackup
           ? t("dbBackup.safetyAt").replace("{p}", r.safetyBackup.split(/[\\/]/).pop() ?? "")

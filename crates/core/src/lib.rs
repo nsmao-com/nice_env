@@ -618,8 +618,17 @@ impl CoreState {
         version: Option<&str>,
         operation: impl FnOnce(&str, &dbadmin::MySqlClient) -> Result<T>,
     ) -> Result<T> {
+        self.with_database(dbadmin::DatabaseEngine::Mysql, version, operation)
+    }
+
+    pub fn with_database<T>(
+        &self,
+        engine: dbadmin::DatabaseEngine,
+        version: Option<&str>,
+        operation: impl FnOnce(&str, &dbadmin::MySqlClient) -> Result<T>,
+    ) -> Result<T> {
         let _operation = self.manager.lifecycle.lock();
-        let (version, client) = dbadmin::selected_client(self, version)?;
+        let (version, client) = dbadmin::authenticated_client(self, engine, version, None)?;
         operation(&version, &client)
     }
 
@@ -630,16 +639,28 @@ impl CoreState {
         password: &str,
         use_existing: bool,
     ) -> Result<()> {
+        self.set_database_password(dbadmin::DatabaseEngine::Mysql, version, password, use_existing)
+    }
+
+    pub fn set_database_password(
+        &self,
+        engine: dbadmin::DatabaseEngine,
+        version: Option<&str>,
+        password: &str,
+        use_existing: bool,
+    ) -> Result<()> {
         let _operation = self.manager.lifecycle.lock();
         if password.is_empty() || password.chars().any(char::is_control) {
             return Err(AppError::new("BAD_PASSWORD", "密码不能为空或包含控制字符"));
         }
         let (version, client) = dbadmin::authenticated_client(
             self,
+            engine,
             version,
             use_existing.then(|| password.to_string()),
         )?;
-        let key = dbadmin::password_key(&version);
+        let key = engine.password_key(&version);
+        let data = engine.data_dir(&self.paths, &version)?;
         self.store.set_setting(&key, password)?;
         if !use_existing {
             let new_client = dbadmin::MySqlClient {
@@ -650,13 +671,13 @@ impl CoreState {
             if let Err(error) = client.reset_root_password(password) {
                 // 网络中断可能发生在 ALTER 已成功后，先验证新凭据再决定回退本机记录。
                 if new_client
-                    .verify_data_dir(&self.paths.mysql_data_dir(&version))
+                    .verify_data_dir(&data)
                     .is_ok()
                 {
                     return Ok(());
                 }
                 if client
-                    .verify_data_dir(&self.paths.mysql_data_dir(&version))
+                    .verify_data_dir(&data)
                     .is_ok()
                 {
                     self.store.set_setting(&key, &client.root_password)?;
@@ -665,8 +686,10 @@ impl CoreState {
                     "请确认实例是否仍在运行；若连接中断，请用当前实例密码更新本机连接记录",
                 ));
             }
-            new_client.verify_data_dir(&self.paths.mysql_data_dir(&version))?;
+            new_client.verify_data_dir(&data)?;
         }
+        let id = if engine == dbadmin::DatabaseEngine::Mysql { format!("mysql@{version}") } else { "mariadb".into() };
+        self.manager.set_state(&id, model::ServiceState::Running);
         Ok(())
     }
 
@@ -677,11 +700,13 @@ impl CoreState {
         user: String,
         password: String,
         version: Option<&str>,
+        engine: dbadmin::DatabaseEngine,
     ) -> Result<Vec<dbmigrate::SourceDb>> {
         let _operation = self.manager.lifecycle.lock();
-        let bin = self.installed_mysql_bin_dir(version)?;
-        dbmigrate::list_source_databases(
+        let bin = self.installed_database_bin_dir(engine, version)?;
+        dbmigrate::list_source_databases_with_engine(
             &bin,
+            engine,
             &dbmigrate::SourceConn {
                 host,
                 port,
@@ -699,6 +724,7 @@ impl CoreState {
         password: String,
         databases: Vec<String>,
         version: Option<&str>,
+        engine: dbadmin::DatabaseEngine,
     ) -> Result<dbmigrate::ImportReport> {
         let src = dbmigrate::SourceConn {
             host,
@@ -706,8 +732,9 @@ impl CoreState {
             user,
             password,
         };
-        self.with_mysql(version, |version, client| {
+        self.with_database(engine, version, |version, client| {
             let target = dbbackup::ConnInfo {
+                engine,
                 version: version.into(),
                 port: client.port,
                 root_password: client.root_password.clone(),
@@ -727,15 +754,13 @@ impl CoreState {
     }
 
     /// 使用所选安装的真实路径，避免客户端版本与目标实例不一致。
-    fn installed_mysql_bin_dir(&self, version: Option<&str>) -> Result<std::path::PathBuf> {
+    fn installed_database_bin_dir(&self, engine: dbadmin::DatabaseEngine, version: Option<&str>) -> Result<std::path::PathBuf> {
         let package = match version {
-            Some(version) => self.store.find_installed("mysql", Some(version)),
-            None => crate::ops::installed_by_choice(&self.store, "mysql"),
+            Some(version) => self.store.find_installed(engine.id(), Some(version)),
+            None => crate::ops::installed_by_choice(&self.store, engine.id()),
         }
-        .ok_or_else(|| AppError::not_installed("MySQL"))?;
-        Ok(std::path::Path::new(&package.install_path)
-            .join(crate::ops::mysql_root_name(&package.version))
-            .join("bin"))
+        .ok_or_else(|| AppError::not_installed(engine.label()))?;
+        engine.bin_dir(&package)
     }
 
     fn running_redis(&self, version: Option<&str>) -> Result<model::ServiceStatus> {

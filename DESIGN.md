@@ -2262,3 +2262,23 @@ MySQL 先核对实际启动端口的本机监听者属于当前已记录实例�
 同一独立发布树显式运行真实 MySQL 8.0.46、PostgreSQL 16.6 及 Nginx/Node/Python/Go 应用生命周期验证，3 通过、0 失败、693 filtered out，耗时 146.69 秒。数据库仅使用临时目录与隔离端口，覆盖错误密码保留实例、缺失控制客户端、错误 pidfile、运行版本与默认版本不同、旧确认拒绝、强制停止及重新启动后可查询；应用回归覆盖实际访问、看门狗恢复和失败回滚。其余 ignored 项与未执行模块不计入验收。独立树 CLI 编译通过，在临时 NSB_HOME 验证缺少 --yes、缺少服务及多目标均退出 2，未知服务退出 1，帮助包含新命令。
 
 已确认 v0.2.80 Release completed/success；按根 AGENTS.md 新建 annotated tag v0.2.81，与 main 原子推送，核对远程提交、tag 及实际 Release 状态，不覆盖旧 tag。本次没有数据库结构或现有用户数据变更，未修改 update.sql；没有新增依赖、前端 dev 或本地前端 build。Windows 原生停机已验证，Linux/macOS 未做本轮实机验收。MongoDB 和其他通用服务的普通停止策略未在本轮更改，不宣称所有服务都已完成协议级优雅停机；整体完善目标继续进行。
+
+## 第九十六轮：MongoDB 正常停机与重启数据保留（v0.2.82）
+
+继续参考 ServBay 的 stop/kill 分离行为，通过 fast-context 追踪剩余数据库停止路径，发现 MongoDB 普通停止仍直接终止进程。本轮改为请求数据库正常退出，失败或超时保留实例与错误，继续通过上一轮服务诊断中的独立强制停止入口处理。查询 Context7 并核对 MongoDB 进程管理文档、v8.0 及 master 的 signal_win32.cpp / signal_handlers.cpp：Windows 上游线程监听 Global\Mongo_<pid> 事件后执行正常退出，Linux/macOS 支持 SIGTERM。
+
+平台新增针对 MongoDB 的正常停机请求。Windows 固定已核实的进程句柄，从句柄取得 PID，只打开既有事件并设置事件，不创建事件、不调用 TerminateProcess；打开和发送前后检查原进程是否已退出，事件缺失或权限失败返回错误。Linux 使用已核实 pidfd 发送 SIGTERM；macOS 在发送 SIGTERM 前重新核对创建标识。原强制停止实现保持独立，没有把正常停机超时升级为强杀。
+
+核心停机按服务当前运行版本定位安装记录，核对已记录可执行文件与该版本的 mongod 一致，再固定所有目标并发送正常退出请求，等待已记录进程消失后才报告停止。修改默认版本或端口配置不会改变正在操作的实例。失败仍保留 PID，重启在停止阶段失败时不会再启动。继续复用生命周期锁、恢复阻塞、PID 文件保存与看门狗主动停止处理，没有增加另一套服务状态。
+
+验证代码位于已有 Rust 源文件，没有新增测试文件。Windows 真实有限寿命子进程验证旧创建标识拒绝、事件缺失报错且进程保留、只设置事件不会强杀、不存在事件不被重新创建、原进程退出后正常返回。核心验证错误可执行文件不会收到信号，stop/restart 均保留原 PID 与 Error 状态。Unix 增加正常退出信号处理验证，本机只做交叉编译，不冒充实机运行。
+
+真实 MongoDB 验收使用官方 8.0.4 包并核对清单 SHA256，只将数据写入临时目录、监听隔离端口。通过独立验证目录里的官方 Node.js 驱动写入和读回文档，覆盖错误可执行文件拒绝后实例仍可查询、默认版本和端口变化不误操作、正常停止、旧强制确认拒绝、两次重新启动及三次正常关闭。日志要求包含 mongod shutdown complete 与 exitCode 0，Windows 还要求记录 shutdown event signaled，并确认没有 unclean shutdown。首次验证错误地要求看门狗列表为空，核对源码后改为检查主动停止意图以及开启看门狗后不再拉起；历史条目保留是既有设计，没有为满足断言更改产品行为。验证用驱动只安装在 E 盘隔离目录，没有增加产品依赖或改动 pnpm-lock.yaml。
+
+11 个版本文件同步到 0.2.82，Cargo.lock 只更新三个本项目 crate。按暂存索引导出独立发布树并核对 13 个代码/版本文件哈希，排除用户原有 configgen.rs 的 178 additions / 9 deletions 和未跟踪本地文件。D 盘空间不足前，确认没有 cargo/rustc 活动后，将三份早期 nsb_core 增量编译缓存保留式转存到 E:/CodexCacheBackup/nice_env-v0.2.82，没有删除用户文件。仅格式化新增片段，没有全仓格式化。
+
+最终独立发布树通过 cargo check --workspace --all-targets --locked；核心相关回归 154 通过、0 失败、17 ignored、527 filtered out，平台回归 13 通过、0 失败。独立树真实 MongoDB 文档保留用例另行显式执行，1 通过、0 失败、697 filtered out，耗时 7.20 秒；其余 ignored 项及未运行模块不计入验收。platform 的 aarch64-apple-darwin 与 x86_64-unknown-linux-gnu all-targets 编译检查通过，前端/schema 类型检查通过，git diff --check 通过。本轮没有新增界面，继续复用已验收的服务停止错误反馈和强制停止确认，不重复进行无变更的浏览器验收。
+
+已确认 v0.2.81 Release completed/success；按根 AGENTS.md 创建新 annotated tag v0.2.82，与 main 原子推送并核对远程指向及实际 workflow 状态。没有修改用户现有数据库结构或数据，未修改 update.sql；未启动前端 dev、未执行本地前端 build。Windows 原生 MongoDB 8.0.4 已验收；macOS/Linux 的本轮信号代码只通过编译检查，macOS 的创建标识核对与 kill 仍不是同一原子系统调用。MariaDB 和其他清单驱动服务的普通停机策略尚需继续完善，整体目标保持进行。
+
+参考：https://www.mongodb.com/docs/manual/tutorial/manage-mongodb-processes/；https://github.com/mongodb/mongo/blob/v8.0/src/mongo/util/signal_win32.cpp；https://github.com/mongodb/mongo/blob/v8.0/src/mongo/util/signal_handlers.cpp。

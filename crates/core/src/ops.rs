@@ -237,6 +237,10 @@ fn postgres_paths(store: &Store) -> Result<(PathBuf, PathBuf)> {
 fn mongodb_paths(store: &Store) -> Result<(PathBuf, PathBuf)> {
     let inst =
         installed_by_choice(store, "mongodb").ok_or_else(|| AppError::not_installed("MongoDB"))?;
+    mongodb_paths_for(&inst)
+}
+
+fn mongodb_paths_for(inst: &crate::model::InstalledPackage) -> Result<(PathBuf, PathBuf)> {
     let dir = PathBuf::from(&inst.install_path);
     // 官方 zip 根目录带版本号，向下一层找 bin/mongod
     let direct = dir.join("bin").join(exe_name("mongod"));
@@ -1128,9 +1132,8 @@ fn stop_service_with_mode(store: &Store, paths: &Paths, manager: &Arc<ServiceMan
                 wait_database_stopped(manager, id, "PostgreSQL")
             }
             "mongodb" => {
-                // mongod 对 SIGTERM/强杀均靠 journaling 恢复，直接终止组
-                terminate_group(manager, id)?;
-                Ok(())
+                stop_mongodb(store, manager)?;
+                wait_database_stopped(manager, id, "MongoDB")
             }
             "redis" => {
                 if let Some(service) = manager.snapshot(id) {
@@ -1204,6 +1207,70 @@ fn stop_service_with_mode(store: &Store, paths: &Paths, manager: &Arc<ServiceMan
         return Err(err);
     }
     result
+}
+
+fn stop_mongodb(store: &Store, manager: &Arc<ServiceManager>) -> Result<()> {
+    let service = manager
+        .snapshot("mongodb")
+        .ok_or_else(|| AppError::new("UNKNOWN_SERVICE", "MongoDB 服务已移除"))?;
+    let version = service.version.as_deref().ok_or_else(|| {
+        AppError::new(
+            "MONGO_VERSION_UNKNOWN",
+            "无法确认正在运行的 MongoDB 版本，未发送停机请求",
+        )
+    })?;
+    let installed = store
+        .find_installed("mongodb", Some(version))
+        .ok_or_else(|| AppError::not_installed("MongoDB"))?;
+    let (_, executable) = mongodb_paths_for(&installed)?;
+    let expected = executable.canonicalize()?;
+    let entry = manager
+        .services
+        .lock()
+        .get("mongodb")
+        .cloned()
+        .ok_or_else(|| AppError::new("UNKNOWN_SERVICE", "MongoDB 服务已移除"))?;
+    let identities = entry.identities.lock().clone();
+    let mut targets = Vec::new();
+    for pid in &service.pids {
+        let identity = identities
+            .get(pid)
+            .filter(|identity| {
+                identity.current() == Some(true)
+                    && identity
+                        .executable
+                        .canonicalize()
+                        .is_ok_and(|path| path == expected)
+            })
+            .ok_or_else(|| {
+                AppError::new(
+                    "MONGO_PROCESS_UNVERIFIED",
+                    "MongoDB 进程与正在运行的套件不一致，未发送停机请求",
+                )
+            })?;
+        if let Some(process) =
+            platform::VerifiedProcess::open(*pid, &identity.started).map_err(|error| {
+                AppError::new(
+                    "PROCESS_IDENTITY_UNAVAILABLE",
+                    "无法核实 MongoDB 进程或取得操作权限",
+                )
+                .with_detail(error.to_string())
+            })?
+        {
+            targets.push(process);
+        }
+    }
+    for process in targets {
+        process.request_mongodb_shutdown().map_err(|error| {
+            AppError::new(
+                "DATABASE_SHUTDOWN_FAILED",
+                "MongoDB 正常停机请求失败，未强制结束进程",
+            )
+            .with_hint("请检查服务日志和进程权限后重试；必要时在服务诊断中确认强制停止")
+            .with_detail(error.to_string())
+        })?;
+    }
+    Ok(())
 }
 
 fn verify_database_listener(manager: &Arc<ServiceManager>, id: &str, port: u16) -> Result<()> {
@@ -3058,6 +3125,146 @@ mod validate_tests {
         state.stop_service("postgresql").unwrap();
     }
 
+    #[test]
+    #[ignore = "requires NSB_MONGO_ROOT, NSB_ENV_NODE and NSB_MONGO_DRIVER; writes only to a temporary MongoDB instance"]
+    fn mongodb_native_stop_is_clean_and_preserves_documents_after_restart() {
+        let runtime = PathBuf::from(std::env::var("NSB_MONGO_ROOT").expect("NSB_MONGO_ROOT"));
+        let temp = tempfile::tempdir().unwrap();
+        let state = isolated_state(Paths::new(temp.path().join("isolated mongo data")));
+        register_fixture(&state, "mongodb", "8.0.4", &runtime);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        state
+            .store
+            .set_port_override("mongodb", Some(port))
+            .unwrap();
+        drop(listener);
+        struct Stop<'a>(&'a crate::CoreState);
+        impl Drop for Stop<'_> {
+            fn drop(&mut self) {
+                if self.0.stop_service("mongodb").is_err() {
+                    if let Ok(preview) = self.0.service_stop_preview("mongodb") {
+                        let _ = self.0.force_stop_service("mongodb", &preview.revision);
+                    }
+                }
+            }
+        }
+        let _stop = Stop(&state);
+        let client = |phase: &str| {
+            let code = r#"
+const { MongoClient } = require(process.argv[1]);
+const client = new MongoClient(`mongodb://127.0.0.1:${process.argv[2]}`, { directConnection: true, serverSelectionTimeoutMS: 5000, socketTimeoutMS: 5000 });
+(async () => {
+  try {
+    await client.connect();
+    const collection = client.db('niceenv_fixture').collection('documents');
+    if (process.argv[3] === 'write') await collection.insertOne({ _id: 'canary', value: '持久化检查', count: 81 });
+    const doc = await collection.findOne({ _id: 'canary' });
+    if (!doc || doc.value !== '持久化检查' || doc.count !== 81) throw new Error('Document did not survive shutdown');
+  } finally { await client.close(); }
+})().catch(error => { process.stderr.write(String(error)); process.exitCode = 1; });
+"#;
+            let mut command = platform::command(std::env::var("NSB_ENV_NODE").expect("NSB_ENV_NODE"));
+            command.args([
+                "-e",
+                code,
+                &std::env::var("NSB_MONGO_DRIVER").expect("NSB_MONGO_DRIVER"),
+                &port.to_string(),
+                phase,
+            ]);
+            assert!(
+                crate::dbadmin::wait_client(&mut command, Duration::from_secs(15), || {})
+                    .unwrap()
+                    .success()
+            );
+        };
+        state.start_service("mongodb").unwrap();
+        client("write");
+        let preview = state.service_stop_preview("mongodb").unwrap();
+        let entry = state
+            .manager
+            .services
+            .lock()
+            .get("mongodb")
+            .cloned()
+            .unwrap();
+        let pid = preview.service.pids[0];
+        let original_executable = entry
+            .identities
+            .lock()
+            .get(&pid)
+            .unwrap()
+            .executable
+            .clone();
+        entry.identities.lock().get_mut(&pid).unwrap().executable = std::env::current_exe().unwrap();
+        assert_eq!(
+            state.stop_service("mongodb").unwrap_err().code,
+            "MONGO_PROCESS_UNVERIFIED"
+        );
+        assert!(platform::process_alive(pid));
+        client("read");
+        entry.identities.lock().get_mut(&pid).unwrap().executable = original_executable;
+        register_fixture(
+            &state,
+            "mongodb",
+            "99",
+            &temp.path().join("missing other version"),
+        );
+        state
+            .store
+            .set_setting("activemongodbVersion", "99")
+            .unwrap();
+        // 默认版本和端口配置已经变化，停机仍必须只针对当前实例。
+        let unrelated = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        state
+            .store
+            .set_port_override("mongodb", Some(unrelated.local_addr().unwrap().port()))
+            .unwrap();
+        state.stop_service("mongodb").unwrap();
+        assert!(!platform::process_alive(pid));
+        let log = std::fs::read_to_string(state.paths.service_log("mongodb")).unwrap();
+        assert!(log.contains("mongod shutdown complete"), "{log}");
+        assert!(log.contains("\"exitCode\":0"), "{log}");
+        #[cfg(windows)]
+        assert!(log.contains("shutdown event signaled"), "{log}");
+        state
+            .store
+            .set_setting("activemongodbVersion", "8.0.4")
+            .unwrap();
+        state
+            .store
+            .set_port_override("mongodb", Some(port))
+            .unwrap();
+        state.start_service("mongodb").unwrap();
+        assert_eq!(
+            state
+                .force_stop_service("mongodb", &preview.revision)
+                .unwrap_err()
+                .code,
+            "SERVICE_TARGET_CHANGED"
+        );
+        client("read");
+        state.restart_service("mongodb").unwrap();
+        client("read");
+        state.stop_service("mongodb").unwrap();
+        let log = std::fs::read_to_string(state.paths.service_log("mongodb")).unwrap();
+        assert_eq!(log.matches("mongod shutdown complete").count(), 3);
+        assert!(!log.to_ascii_lowercase().contains("unclean shutdown"));
+        assert!(!state.manager.watchdog.should_restart(
+            "mongodb",
+            &crate::watchdog::WatchdogConfig {
+                enabled: true,
+                ..Default::default()
+            }
+        ));
+        state.store.set_setting("watchdogEnabled", "true").unwrap();
+        assert!(state.watchdog_tick().is_empty());
+        assert_eq!(
+            state.manager.snapshot("mongodb").unwrap().state,
+            ServiceState::Stopped
+        );
+    }
+
     fn http_response(port: u16) -> String {
         use std::io::{Read, Write};
         let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -3844,6 +4051,31 @@ mod validate_tests {
             }
             assert!(platform::process_alive(std::process::id()));
         }
+    }
+
+    #[test]
+    fn mongodb_normal_stop_rejects_other_executables_without_killing() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = isolated_state(Paths::new(temp.path().to_path_buf()));
+        let runtime = temp.path().join("runtime");
+        std::fs::create_dir_all(runtime.join("bin")).unwrap();
+        std::fs::write(runtime.join("bin").join(exe_name("mongod")), "not executed").unwrap();
+        register_fixture(&state, "mongodb", "8.0.4", &runtime);
+        register_services(&state.paths, &state.store, &state.manager);
+        // 使用当前验证进程证明失败后仍存活，路径核对必须在发送任何信号之前拒绝。
+        state.manager.adopt("mongodb", &[std::process::id()], None);
+        assert_eq!(
+            state.stop_service("mongodb").unwrap_err().code,
+            "MONGO_PROCESS_UNVERIFIED"
+        );
+        assert_eq!(
+            state.restart_service("mongodb").unwrap_err().code,
+            "MONGO_PROCESS_UNVERIFIED"
+        );
+        let snapshot = state.manager.snapshot("mongodb").unwrap();
+        assert_eq!(snapshot.pids, [std::process::id()]);
+        assert_eq!(snapshot.state, ServiceState::Error);
+        assert!(platform::process_alive(std::process::id()));
     }
 
     #[test]

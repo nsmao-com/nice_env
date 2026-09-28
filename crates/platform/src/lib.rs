@@ -235,6 +235,91 @@ impl VerifiedProcess {
         }
     }
 
+    /// MongoDB 的正常停机：Windows 使用上游监听的命名事件，Unix 只发送 SIGTERM。
+    /// 这里只请求正常退出；调用者等待结束，失败或超时不能自动升级为强杀。
+    pub fn request_mongodb_shutdown(&self) -> Result<()> {
+        if self.has_exited()? {
+            return Ok(());
+        }
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::Foundation::CloseHandle;
+            use windows_sys::Win32::System::Threading::{
+                GetProcessId, OpenEventW, SetEvent, EVENT_MODIFY_STATE,
+            };
+            // MongoDB signal_win32.cpp / eventProcessingThread 使用 Global\Mongo_<pid>。
+            // 持有已核实的进程句柄，避免退出后 PID 被复用；不创建不存在的事件。
+            let pid = GetProcessId(self.handle);
+            if pid == 0 {
+                return Err(io_err(std::io::Error::last_os_error()));
+            }
+            let name: Vec<u16> = format!("Global\\Mongo_{pid}")
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+            let event = OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr());
+            if event.is_null() {
+                let error = std::io::Error::last_os_error();
+                return if self.has_exited()? {
+                    Ok(())
+                } else {
+                    Err(io_err(error))
+                };
+            }
+            let result = (|| {
+                if self.has_exited()? {
+                    return Ok(());
+                }
+                if SetEvent(event) == 0 {
+                    return Err(io_err(std::io::Error::last_os_error()));
+                }
+                Ok(())
+            })();
+            CloseHandle(event);
+            return result;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+            if unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    self.fd.as_raw_fd(),
+                    libc::SIGTERM,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0,
+                )
+            } != 0
+            {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(io_err(error));
+                }
+            }
+            Ok(())
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
+        {
+            match process_start_marker(self.pid) {
+                Some(marker) if marker == self.started => {}
+                Some(_) => return Ok(()),
+                None if !process_alive(self.pid) => return Ok(()),
+                None => {
+                    return Err(PlatformError::Io(
+                        "进程身份暂时无法确认，未发送正常退出信号".into(),
+                    ))
+                }
+            }
+            if unsafe { libc::kill(self.pid as libc::pid_t, libc::SIGTERM) } != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(io_err(error));
+                }
+            }
+            Ok(())
+        }
+    }
+
     pub fn terminate(&self) -> Result<()> {
         #[cfg(windows)]
         unsafe {
@@ -1216,6 +1301,104 @@ pub fn set_dns_configuration_elevated(name: &str, config: &DnsConfiguration) -> 
         return Err(PlatformError::Io("设置命令已退出，但 DNS 配置未达到目标状态；请刷新核对后重试".into()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod process_tests {
+    use super::*;
+
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mongodb_event_requests_never_force_terminate_and_reject_stale_identity() {
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+        struct EventGuard(HANDLE);
+        impl Drop for EventGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    CloseHandle(self.0);
+                }
+            }
+        }
+        let mut child = ChildGuard(
+            command("powershell.exe")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "Start-Sleep -Seconds 30",
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let pid = child.0.id();
+        let marker = process_start_marker(pid).unwrap();
+        assert!(VerifiedProcess::open(pid, "win:1").unwrap().is_none());
+        let process = VerifiedProcess::open(pid, &marker).unwrap().unwrap();
+        assert!(process.request_mongodb_shutdown().is_err());
+        assert!(child.0.try_wait().unwrap().is_none());
+        let name: Vec<u16> = format!("Global\\Mongo_{pid}")
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        let event = EventGuard(unsafe { CreateEventW(std::ptr::null(), 1, 0, name.as_ptr()) });
+        assert!(!event.0.is_null());
+        process.request_mongodb_shutdown().unwrap();
+        assert_eq!(unsafe { WaitForSingleObject(event.0, 0) }, WAIT_OBJECT_0);
+        // 普通程序不会监听此事件；请求正常停机不能直接结束它。
+        assert!(child.0.try_wait().unwrap().is_none());
+        drop(event);
+        assert!(process.request_mongodb_shutdown().is_err());
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        assert!(process.has_exited().unwrap());
+        process.request_mongodb_shutdown().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mongodb_shutdown_uses_term_and_allows_handler_to_exit_cleanly() {
+        use std::io::BufRead;
+        let mut child = ChildGuard(
+            command("sh")
+                .args([
+                    "-c",
+                    "trap 'exit 0' TERM; echo ready; while :; do sleep 1; done",
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let mut ready = String::new();
+        std::io::BufReader::new(child.0.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready.trim(), "ready");
+        let pid = child.0.id();
+        let process = VerifiedProcess::open(pid, &process_start_marker(pid).unwrap())
+            .unwrap()
+            .unwrap();
+        process.request_mongodb_shutdown().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !process.has_exited().unwrap() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(process.has_exited().unwrap());
+        assert_eq!(child.0.wait().unwrap().code(), Some(0));
+    }
 }
 
 #[cfg(test)]

@@ -2222,3 +2222,25 @@ Windows 使用现有可见独立 PowerShell 启动方式，加入由后端生成
 同一独立发布树另行显式执行真实 Nginx/Node/Python/Go 应用生命周期、崩溃恢复及失败回滚用例，1 通过、0 失败、691 filtered out，耗时 85.26 秒。仅使用临时项目和隔离端口，跳过 hosts 写入；其余忽略项及未执行模块不计入验收。git diff --check 通过，没有全仓格式化。
 
 本次没有数据库变更，未修改 update.sql；没有新增依赖、前端 dev 或本地前端 build。Windows 原生交接已验证；Linux/macOS 本轮只编译平台代码，Java 和这些平台的完整应用生命周期仍未实机验收。恢复仅覆盖已经记录并核实的进程，启动成功落盘前崩溃、未记录后代及仍活着的另一实例的跨进程控制不宣称完整覆盖，整体目标保持进行。
+
+## 第九十四轮：将进程身份校验贯穿停止动作与端口处理（v0.2.80）
+
+继续参考 ServBay 服务管理及 servbayctl 的状态、停止与排障设计（https://support.servbay.com/basic-usage/command-line-tool-servbayctl）。通过 fast-context 追踪发现，上一轮快照和接管已经排除复用 PID，但停止兜底仍可使用旧组中的 PID，端口确认也仍以秒级启动时间判断身份。本轮把已经记录的原生身份传到实际终止动作，不在临终止时把变化后的 PID 当成原目标。
+
+平台新增 VerifiedProcess：Windows 取得包含查询、终止和同步权限的进程句柄，在同一句柄读取 GetProcessTimes 创建标识并执行 TerminateProcess，通过 WaitForSingleObject 确认退出；Linux 使用 pidfd_open 固定对象、pidfd_send_signal 发送信号及 poll 确认退出；macOS 发送信号前再次核对原生创建标识。Context7 本次查询网络失败后，核对 Microsoft TerminateProcess 官方文档及 Linux pidfd_open 手册。没有增加依赖。Windows 的存活检查改为等待进程对象，读取权限错误保留为可能存活，不再冒充退出。
+
+服务与端口共用已核实的进程树快照，逐项重新读取子进程的父 PID、创建标识和可执行文件；创建时间早于当前父进程的旧后代不认领，父子归属变化时不沿旧快照扩展目标。终止前固定可操作的对象，任何身份或权限不明均明确报错。服务停止先记录所发现后代的身份，以便部分终止失败后保留状态和重试对象；确认退出后清理对应记录，Linux 已退出但尚未回收的进程不再因 kill(pid, 0) 成功而被误报为运行中。
+
+Windows 自有 Job 继续使用内核对象收回已归组进程；没有 Job 的接管实例使用已固定的进程对象，服务路径不再回退到按旧 PID 调用 taskkill。Unix 自有组终止前剔除创建标识变化的根进程，保留同一会话原有的组清理行为。停止后的存活判断也核对缓存身份。已删除服务的历史记录清理接入同一套已核实终止逻辑。本轮保持原有各服务优雅停机策略，不把端口释放等同于数据库业务已安全提交。
+
+监听者模型新增 processStartMarker，保留旧 processStartedAt 供兼容读取，但操作必须携带本次扫描的原生创建标识。即使秒级时间、名称和命令行相同，创建标识变化也拒绝继续；缺失标识要求重新扫描。实际终止成功并确认退出后才纳入已处理数量，原目标已消失时不自动改为处理后来占用者。浏览器 mock 同步契约，仍明确只操作演示服务。
+
+端口确认框失败后禁用原确认按钮，给出关闭提示、重新扫描并核对当前占用者的说明；保留取消和刷新路径。结果文案改为已确认结束数量，中英文同步。沿用 UI/UX 技能及 Next 本地文档，在隔离浏览器验证失败、禁止重复提交、重新扫描后成功、结果更新及空列表。检查 1360px 桌面与 320px 中英文界面，确认框宽 296px、左右各 12px、clientWidth 与 scrollWidth 相同，页面内容区均为 228px；截图已目检。故障注入只在隔离浏览器缓存中，自建上下文已关闭，原有 packages/sites 页面保留。
+
+验证扩展放在现有 Rust 模块，未新增测试文件。真实 Windows 临时监听进程带一个有限寿命子进程，覆盖同秒旧标识拒绝、直接旧标识终止无动作、正确目标与子进程退出、另一个监听实例及其子进程保留。进一步把旧身份和真实运行实例放入同一服务、同时保留旧进程组根列表，验证停止仍只收回正确对象。补充 Windows/Linux/macOS 创建标识排序及不同 Linux boot ID 不互认。验证中发现 Windows 子进程已进入退出阶段时 TerminateProcess 可返回拒绝访问，改为等待既有句柄确认实际退出；超时或仍未退出仍报错。
+
+版本统一为 0.2.80，11 个版本文件逐项核对，Cargo.lock 仅更新三个本项目 crate。精确暂存内容导出独立发布树并核对文件哈希，排除原有 configgen.rs 的 178 additions / 9 deletions 与未跟踪文件。最终前端/schema 类型检查通过；独立发布树通过 cargo check --workspace --all-targets --locked，ports/services/ops/sites/bulk/install/paths/watchdog 回归 151 通过、0 失败、15 ignored、527 filtered out。platform 在 aarch64-apple-darwin 与 x86_64-unknown-linux-gnu 上通过编译检查。只格式化本轮新增代码片段，没有全仓格式化。
+
+同一独立发布树另行显式执行真实 Nginx/Node/Python/Go 应用生命周期、看门狗恢复和失败回滚用例，1 通过、0 失败、692 filtered out，耗时 86.30 秒。临时项目使用隔离端口并跳过 hosts 写入；其余忽略项和未执行模块不计入验收。最终 git diff --check 通过。
+
+已确认 v0.2.79 Release completed/success；本轮按根 AGENTS.md 新建 annotated tag v0.2.80，与 main 原子推送并核对远程指向及实际构建状态。本次没有数据库变更，未修改 update.sql，未启动前端 dev 或执行本地前端 build。Linux/macOS 本轮未做实机终止验证；macOS 的信号调用与创建标识检查并非同一个原子系统调用。未记录且在快照之后新产生或脱离归属的后代不宣称完整覆盖；计划任务、隧道等其他组使用路径及协议级优雅停机仍需继续审查，整体目标保持进行。

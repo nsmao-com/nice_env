@@ -1112,11 +1112,12 @@ pub fn stop_service(
     let mut survivors: Vec<u32> = Vec::new();
     if let Some(e) = manager.services.lock().get(id).cloned() {
         let pids = e.pids.lock().clone();
+        let identities = e.identities.lock().clone();
         for _ in 0..10 {
             survivors = pids
                 .iter()
                 .copied()
-                .filter(|p| platform::process_alive(*p))
+                .filter(|pid| identities.get(pid).is_none_or(|identity| identity.current() != Some(false)))
                 .collect();
             if survivors.is_empty() {
                 break;
@@ -1125,6 +1126,7 @@ pub fn stop_service(
         }
         if survivors.is_empty() {
             e.pids.lock().clear();
+            e.identities.lock().clear();
             *e.started_at.lock() = None;
             *e.started_port.lock() = None;
             *e.group.lock() = None;
@@ -1153,20 +1155,46 @@ pub fn stop_service(
 
 fn terminate_group(manager: &Arc<ServiceManager>, id: &str) -> Result<()> {
     if let Some(e) = manager.services.lock().get(id).cloned() {
-        let mut group = e.group.lock();
-        if let Some(g) = group.as_mut() {
-            g.terminate(true)?;
-        }
-        *group = None;
-        let alive: Vec<_> = e
+        let identities = e.identities.lock().clone();
+        let tracked: Vec<_> = e
             .pids
             .lock()
             .iter()
-            .copied()
-            .filter(|pid| platform::process_alive(*pid))
+            .filter_map(|pid| identities.get(pid).cloned())
             .collect();
-        if !alive.is_empty() {
-            platform::ProcessGroup::from_pids(alive).terminate(true)?;
+        let tree = crate::services::ProcessTree::capture(&tracked)?;
+        // 终止过程中任何一个后代失败，也必须保留其身份供状态显示和下次重试。
+        for identity in tree.identities() {
+            e.identities.lock().insert(identity.pid, identity.clone());
+            let mut pids = e.pids.lock();
+            if !pids.contains(&identity.pid) {
+                pids.push(identity.pid);
+            }
+        }
+        let mut group = e.group.lock();
+        if let Some(g) = group.as_mut() {
+            g.retain_roots(|pid| {
+                identities.get(&pid).is_some_and(|identity| {
+                    match platform::process_start_marker(pid) {
+                        Some(started) => started == identity.started,
+                        // 已创建的 Unix 组可在组长退出后继续存在；仍存活但身份不明则不发送信号。
+                        None => !platform::process_alive(pid),
+                    }
+                })
+            });
+            #[cfg(windows)]
+            if g.has_job() {
+                g.terminate(true)?;
+            }
+            #[cfg(not(windows))]
+            g.terminate(true)?;
+        }
+        *group = None;
+        tree.terminate()?;
+        // Linux pidfd 可确认已退出但尚未由父进程回收的僵尸；不要再用 kill(pid, 0) 把它报为运行中。
+        for identity in tree.identities() {
+            e.pids.lock().retain(|pid| *pid != identity.pid);
+            e.identities.lock().remove(&identity.pid);
         }
     }
     Ok(())
@@ -1763,7 +1791,7 @@ pub fn sweep_orphans(paths: &Paths, store: &Store, manager: &Arc<ServiceManager>
                     if process.current() != Some(true) {
                         continue;
                     }
-                    if let Err(error) = crate::ports::kill_pid(process.pid) {
+                    if let Err(error) = crate::services::terminate_processes(std::slice::from_ref(process)) {
                         report
                             .unresolved
                             .push(format!("{}：{}", record.id, error.message));

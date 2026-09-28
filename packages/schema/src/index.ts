@@ -497,6 +497,7 @@ export const ListenerInfo = z.object({
   ownedBySelf: z.boolean().default(false),
   serviceId: z.string().optional(),
   processStartedAt: z.number().optional(),
+  processStartMarker: z.string().optional(),
   ownership: z.enum(["self", "external", "unknown"]),
   canClose: z.boolean(),
   closeReason: z.string().optional(),

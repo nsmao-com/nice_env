@@ -71,6 +71,8 @@ impl ProcessSnapshot {
             });
         let process = self.system.process(sysinfo::Pid::from_u32(pid));
         let process_started_at = process.map(|p| p.start_time()).filter(|t| *t > 0);
+        let process_start_marker = process.and_then(|process| crate::services::ProcessIdentity::capture(pid)
+            .filter(|identity| process.exe() == Some(identity.executable.as_path()))).map(|identity| identity.started);
         let protected = pid <= 4
             || pid == std::process::id()
             || ownership(std::process::id(), &[pid], &self.parents) == Ownership::Own;
@@ -78,7 +80,7 @@ impl ProcessSnapshot {
             Some("系统进程或 NiceEnv 所在进程链不能从此处结束".into())
         } else if !known {
             Some("无法确认进程归属，请重新扫描或在系统工具中检查".into())
-        } else if process_started_at.is_none() {
+        } else if process_start_marker.is_none() {
             Some("无法读取进程身份，不能安全结束，请重新扫描".into())
         } else {
             None
@@ -97,6 +99,7 @@ impl ProcessSnapshot {
             owned_by_self: service.is_some(),
             service_id: service.map(|s| s.id.clone()),
             process_started_at,
+            process_start_marker,
             ownership: if service.is_some() {
                 "self"
             } else if known && process.is_some() {
@@ -193,8 +196,8 @@ fn validate_close_targets(
         let Some(now) = current.iter().find(|l| l.pid == target.pid) else {
             continue;
         };
-        if target.process_started_at.is_none()
-            || target.process_started_at != now.process_started_at
+        if target.process_start_marker.is_none()
+            || target.process_start_marker != now.process_start_marker
             || target.service_id != now.service_id
             || target.ownership != now.ownership
             || target.process_name != now.process_name
@@ -260,12 +263,14 @@ pub fn close_port_checked(
         let result = if let Some(id) = &target.service_id {
             crate::ops::stop_service(store, paths, manager, id).map(|()| {
                 stopped.insert(id.clone());
+                true
             })
         } else {
-            kill_pid(target.pid).map(|_| ())
+            kill_pid_checked(target.pid, target.process_start_marker.as_deref().unwrap_or_default())
         };
         match result {
-            Ok(()) => killed.push(target.pid),
+            Ok(true) => killed.push(target.pid),
+            Ok(false) => {},
             Err(e) => errors.push(e.message),
         }
     }
@@ -406,43 +411,37 @@ fn port_verdict(running: bool, owners: &[(u32, Ownership)]) -> (&'static str, Op
 
 /// 结束进程（用户确认后调用）
 pub fn kill_pid(pid: u32) -> Result<bool> {
+    let marker = platform::process_start_marker(pid).unwrap_or_default();
+    kill_pid_checked(pid, &marker)
+}
+
+fn kill_pid_checked(pid: u32, started: &str) -> Result<bool> {
     if pid <= 4 || pid == std::process::id() {
         return Err(AppError::new(
             "PROTECTED_PROCESS",
             "不能结束系统进程或 NiceEnv 自身",
         ));
     }
-    #[cfg(windows)]
-    {
-        let out = platform::command("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .output()
-            .map_err(|e| crate::error::AppError::io("结束进程", e))?;
-        if !out.status.success() {
-            return Err(AppError::new(
-                "KILL_FAILED",
-                format!("未能结束 PID {pid}，请确认进程状态和权限"),
-            )
-            .with_detail(platform::decode_command_output(&out.stderr)));
-        }
-        Ok(true)
+    if started.is_empty() {
+        return Err(AppError::new(
+            "PROCESS_IDENTITY_UNAVAILABLE",
+            "缺少进程身份，请重新扫描后再操作",
+        ));
     }
-    #[cfg(not(windows))]
-    {
-        let out = platform::command("kill")
-            .arg("-9")
-            .arg(pid.to_string())
-            .output()
-            .map_err(|e| crate::error::AppError::io("结束进程", e))?;
-        if !out.status.success() {
-            return Err(AppError::new(
-                "KILL_FAILED",
-                format!("未能结束 PID {pid}，请确认进程状态和权限"),
-            )
-            .with_detail(platform::decode_command_output(&out.stderr)));
-        }
-        Ok(true)
+    let Some(identity) = crate::services::ProcessIdentity::capture(pid) else {
+        return if platform::process_alive(pid) {
+            Err(AppError::new(
+                "PROCESS_IDENTITY_UNAVAILABLE",
+                "无法确认进程身份，未结束进程",
+            ))
+        } else {
+            Ok(false)
+        };
+    };
+    if identity.started != started {
+        return Ok(false);
     }
+    Ok(!crate::services::terminate_processes(&[identity])?.is_empty())
 }
 
 /// 保留监听地址以核实管理台确实属于本机进程，不能把同端口的远端 IP 当作本机。
@@ -616,6 +615,7 @@ mod tests {
             owned_by_self: false,
             service_id: None,
             process_started_at: Some(10),
+            process_start_marker: Some("win:10000001".into()),
             ownership: "external".into(),
             can_close: true,
             close_reason: None,
@@ -646,7 +646,8 @@ mod tests {
     fn changed_identity_ownership_and_protected_processes_cannot_be_closed() {
         let expected = row(500);
         let mut current = expected.clone();
-        current.process_started_at = Some(20);
+        // 秒级启动时间相同，原生创建标识不同也必须拒绝。
+        current.process_start_marker = Some("win:10000002".into());
         assert_eq!(
             validate_close_targets(8080, &[expected.clone()], &[current])
                 .unwrap_err()
@@ -668,7 +669,7 @@ mod tests {
         current.process_name = Some("reused-pid".into());
         assert!(validate_close_targets(8080, &[expected.clone()], &[current]).is_err());
         let mut unknown = expected.clone();
-        unknown.process_started_at = None;
+        unknown.process_start_marker = None;
         assert!(validate_close_targets(8080, &[unknown.clone()], &[unknown]).is_err());
     }
 
@@ -833,25 +834,28 @@ mod tests {
     #[test]
     fn closes_only_a_selected_temporary_listener_process() {
         use std::io::BufRead;
-        struct Fixture(std::process::Child, u16);
+        struct Fixture(std::process::Child, u16, Option<crate::services::ProcessIdentity>);
         impl Drop for Fixture {
             fn drop(&mut self) {
                 let _ = self.0.kill();
                 let _ = self.0.wait();
+                if let Some(child) = &self.2 { let _ = crate::services::terminate_processes(std::slice::from_ref(child)); }
             }
         }
         fn fixture() -> Fixture {
             // 有限的独立验证进程，仅监听临时 TCP 端口，30 秒后自行退出；不写系统配置。
             let mut child = platform::command("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command",
-                "$listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0); try { $listener.Start(); [Console]::WriteLine($listener.LocalEndpoint.Port); Start-Sleep -Seconds 30 } finally { $listener.Stop() }"])
+                "$listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0); try { $listener.Start(); $worker = Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile -NonInteractive -Command Start-Sleep -Seconds 30' -WindowStyle Hidden -PassThru; [Console]::WriteLine($listener.LocalEndpoint.Port); [Console]::WriteLine($worker.Id); Start-Sleep -Seconds 30 } finally { $listener.Stop() }"])
                 .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().unwrap();
             let stdout = child.stdout.take().unwrap();
-            let mut fixture = Fixture(child, 0);
+            let mut fixture = Fixture(child, 0, None);
             let mut line = String::new();
-            std::io::BufReader::new(stdout)
-                .read_line(&mut line)
-                .unwrap();
+            let mut reader = std::io::BufReader::new(stdout);
+            reader.read_line(&mut line).unwrap();
             fixture.1 = line.trim().parse().unwrap();
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            fixture.2 = Some(crate::services::ProcessIdentity::capture(line.trim().parse().unwrap()).unwrap());
             fixture
         }
         let first = fixture();
@@ -868,6 +872,14 @@ mod tests {
             .find(|row| row.pid == first.0.id())
             .unwrap();
         assert!(target.can_close, "{:?}", target);
+        assert!(platform::VerifiedProcess::open(target.pid, target.process_start_marker.as_deref().unwrap()).unwrap().is_some());
+        let mut stale = target.clone();
+        stale.process_start_marker = Some("win:1".into());
+        assert_eq!(stale.process_started_at, target.process_started_at);
+        assert_eq!(close_port_checked(&store, &paths, &manager, first.1, &[stale]).unwrap_err().code, "PORT_TARGET_CHANGED");
+        assert!(!kill_pid_checked(first.0.id(), "win:1").unwrap());
+        assert!(platform::process_alive(first.0.id()));
+        assert_eq!(first.2.as_ref().unwrap().current(), Some(true));
         let result = close_port_checked(
             &store,
             &paths,
@@ -877,13 +889,28 @@ mod tests {
         )
         .unwrap();
         assert!(result.port_free, "{:?}", result);
-        assert_eq!(result.killed_pids, [first.0.id()]);
-        assert!(result.errors.is_empty());
+        assert!(result.errors.is_empty(), "{result:?}");
+        assert_eq!(result.killed_pids, [first.0.id()], "{result:?}");
+        assert_eq!(first.2.as_ref().unwrap().current(), Some(false));
         assert!(other.0.try_wait().unwrap().is_none());
         assert!(scan_port_range(&manager, other.1, other.1)
             .unwrap()
             .listeners
             .iter()
             .any(|row| row.pid == other.0.id()));
+
+        // 同一服务同时有旧身份和仍有效的实例；旧进程组根列表不能绕过身份校验。
+        let mut managed = fixture();
+        manager.register("fixture", "Fixture", None, None, None, paths.service_log("fixture"));
+        manager.adopt("fixture", &[other.0.id(), managed.0.id()], None);
+        let entry = manager.services.lock().get("fixture").unwrap().clone();
+        entry.identities.lock().get_mut(&other.0.id()).unwrap().started = "win:1".into();
+        *entry.group.lock() = Some(platform::ProcessGroup::from_pids(vec![other.0.id(), managed.0.id()]));
+        crate::ops::stop_service(&store, &paths, &manager, "fixture").unwrap();
+        assert!(managed.0.try_wait().unwrap().is_some());
+        assert_eq!(managed.2.as_ref().unwrap().current(), Some(false));
+        assert!(other.0.try_wait().unwrap().is_none());
+        assert_eq!(other.2.as_ref().unwrap().current(), Some(true));
+        assert_eq!(manager.snapshot("fixture").unwrap().state, crate::model::ServiceState::Stopped);
     }
 }

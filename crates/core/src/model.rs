@@ -953,9 +953,12 @@ pub struct ListenerInfo {
     /// 属于本应用时对应的服务 id
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_id: Option<String>,
-    /// 用于操作前核对 PID 是否已经被另一个进程复用。
+    /// 兼容历史调用方的秒级启动时间，不能单独作为操作身份。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process_started_at: Option<u64>,
+    /// 操作必须携带扫描时的原生创建标识。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_start_marker: Option<String>,
     /// self / external / unknown；无法确认归属时不能结束进程。
     pub ownership: String,
     pub can_close: bool,

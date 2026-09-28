@@ -141,6 +141,202 @@ pub fn process_start_marker(pid: u32) -> Option<String> {
     None
 }
 
+/// 对历史 PID 的终止使用固定的进程对象，避免检查后 PID 被复用。
+pub struct VerifiedProcess {
+    #[cfg(windows)]
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    #[cfg(target_os = "linux")]
+    fd: std::os::fd::OwnedFd,
+    #[cfg(not(any(windows, target_os = "linux")))]
+    pid: u32,
+    #[cfg(not(any(windows, target_os = "linux")))]
+    started: String,
+}
+
+impl VerifiedProcess {
+    /// None 表示原进程已退出或 PID 已复用；无法读取身份则返回错误。
+    pub fn open(pid: u32, started: &str) -> Result<Option<Self>> {
+        if pid <= 4 || pid > i32::MAX as u32 || pid == std::process::id() || started.is_empty() {
+            return Err(PlatformError::Io(
+                "不能结束系统进程、当前进程或身份不明的进程".into(),
+            ));
+        }
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::Foundation::{
+                CloseHandle, ERROR_INVALID_PARAMETER, FILETIME, WAIT_OBJECT_0,
+            };
+            use windows_sys::Win32::System::Threading::{
+                GetProcessTimes, OpenProcess, WaitForSingleObject,
+                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+            };
+            let handle = OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | PROCESS_SYNCHRONIZE,
+                0,
+                pid,
+            );
+            if handle.is_null() {
+                let error = std::io::Error::last_os_error();
+                return if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
+                    Ok(None)
+                } else {
+                    Err(io_err(error))
+                };
+            }
+            let mut created: FILETIME = std::mem::zeroed();
+            let mut exited: FILETIME = std::mem::zeroed();
+            let mut kernel: FILETIME = std::mem::zeroed();
+            let mut user: FILETIME = std::mem::zeroed();
+            if GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) == 0 {
+                let error = std::io::Error::last_os_error();
+                CloseHandle(handle);
+                return Err(io_err(error));
+            }
+            let marker = format!(
+                "win:{}",
+                ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64
+            );
+            // 未退出进程的 exit time 未定义，必须等待进程对象判断存活。
+            if marker != started || WaitForSingleObject(handle, 0) == WAIT_OBJECT_0 {
+                CloseHandle(handle);
+                return Ok(None);
+            }
+            return Ok(Some(Self { handle }));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::FromRawFd;
+            let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+            if raw < 0 {
+                let error = std::io::Error::last_os_error();
+                return if error.raw_os_error() == Some(libc::ESRCH) {
+                    Ok(None)
+                } else {
+                    Err(io_err(error))
+                };
+            }
+            let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw as i32) };
+            return match process_start_marker(pid) {
+                Some(marker) if marker == started => Ok(Some(Self { fd })),
+                Some(_) => Ok(None),
+                None if !process_alive(pid) => Ok(None),
+                None => Err(PlatformError::Io(format!("无法核实进程 {pid} 的身份"))),
+            };
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
+        match process_start_marker(pid) {
+            Some(marker) if marker == started => Ok(Some(Self {
+                pid,
+                started: marker,
+            })),
+            Some(_) => Ok(None),
+            None if !process_alive(pid) => Ok(None),
+            None => Err(PlatformError::Io(format!("无法核实进程 {pid} 的身份"))),
+        }
+    }
+
+    pub fn terminate(&self) -> Result<()> {
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+            use windows_sys::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
+            if WaitForSingleObject(self.handle, 0) == WAIT_OBJECT_0 {
+                return Ok(());
+            }
+            if TerminateProcess(self.handle, 1) == 0 {
+                let error = std::io::Error::last_os_error();
+                // 父进程退出可能已带动此子进程进入终止阶段，此时会返回 ACCESS_DENIED。
+                if WaitForSingleObject(self.handle, 5000) != WAIT_OBJECT_0 {
+                    return Err(io_err(error));
+                }
+            }
+            if WaitForSingleObject(self.handle, 5000) != WAIT_OBJECT_0 {
+                return Err(PlatformError::Io("等待已确认进程退出超时".into()));
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+            if unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    self.fd.as_raw_fd(),
+                    libc::SIGKILL,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0,
+                )
+            } != 0
+            {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(io_err(error));
+                }
+            }
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
+        {
+            match process_start_marker(self.pid) {
+                Some(marker) if marker == self.started => {}
+                Some(_) => return Ok(()),
+                None if !process_alive(self.pid) => return Ok(()),
+                None => {
+                    return Err(PlatformError::Io(
+                        "进程身份暂时无法确认，未发送终止信号".into(),
+                    ))
+                }
+            }
+            if unsafe { libc::kill(self.pid as libc::pid_t, libc::SIGKILL) } != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(io_err(error));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn has_exited(&self) -> Result<bool> {
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+            return match windows_sys::Win32::System::Threading::WaitForSingleObject(self.handle, 0)
+            {
+                WAIT_OBJECT_0 => Ok(true),
+                WAIT_TIMEOUT => Ok(false),
+                _ => Err(io_err(std::io::Error::last_os_error())),
+            };
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+            let mut descriptor = libc::pollfd {
+                fd: self.fd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            if unsafe { libc::poll(&mut descriptor, 1, 0) } < 0 {
+                return Err(io_err(std::io::Error::last_os_error()));
+            }
+            return Ok(descriptor.revents & libc::POLLIN != 0);
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
+        match process_start_marker(self.pid) {
+            Some(marker) => Ok(marker != self.started || !process_alive(self.pid)),
+            None if !process_alive(self.pid) => Ok(true),
+            None => Err(PlatformError::Io("无法确认进程是否已经退出".into())),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for VerifiedProcess {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
+}
+
 /// 进程组句柄：Windows=Job Object(KILL_ON_JOB_CLOSE)，Unix=记录 pid 集合。
 pub struct ProcessGroup {
     #[cfg(windows)]
@@ -206,6 +402,14 @@ impl ProcessGroup {
     pub fn pids(&self) -> &[u32] {
         &self.pids
     }
+
+    /// 本会话持有的 Job 对象不受 PID 复用影响；其它组必须剔除身份已变化的根进程。
+    pub fn retain_roots(&mut self, mut keep: impl FnMut(u32) -> bool) {
+        self.pids.retain(|pid| keep(*pid));
+    }
+
+    #[cfg(windows)]
+    pub fn has_job(&self) -> bool { self.job.is_some() }
 
     /// 终止整组。force=true 直接 SIGKILL；force=false 先发 SIGTERM。
     /// Unix 下子进程在启动时被置为独立进程组（见 `spawn_pre_exec`），
@@ -296,6 +500,7 @@ pub fn spawn_pre_exec() -> std::io::Result<()> {
 
 /// 进程是否仍存活
 pub fn process_alive(pid: u32) -> bool {
+    if pid == 0 || pid > i32::MAX as u32 { return false; }
     #[cfg(windows)]
     {
         windows_job::process_alive(pid)
@@ -754,14 +959,16 @@ mod windows_job {
 
     pub fn process_alive(pid: u32) -> bool {
         unsafe {
-            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, WAIT_OBJECT_0};
+            use windows_sys::Win32::System::Threading::{PROCESS_SYNCHRONIZE, WaitForSingleObject};
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, 0, pid);
             if h.is_null() {
-                return false;
+                // 拒绝访问或其它读取错误不能冒充已退出。
+                return std::io::Error::last_os_error().raw_os_error() != Some(ERROR_INVALID_PARAMETER as i32);
             }
-            let mut code: u32 = 0;
-            let ok = windows_sys::Win32::System::Threading::GetExitCodeProcess(h, &mut code);
+            let exited = WaitForSingleObject(h, 0) == WAIT_OBJECT_0;
             CloseHandle(h);
-            ok != 0 && code == 259 /* STILL_ACTIVE */
+            !exited
         }
     }
 }

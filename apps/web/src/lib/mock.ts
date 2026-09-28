@@ -65,7 +65,7 @@ import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSet
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.79";
+const MOCK_APP_VERSION = "0.2.80";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -1112,7 +1112,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         if (service.state !== "running" || service.port == null || service.port < from || service.port > to) continue;
         listeners.push({ port: service.port, pid: service.pids[0] ?? 5000 + index,
           processName: service.label, cmdline: `${service.id} — 浏览器演示数据，非真实进程`,
-          ownedBySelf: true, serviceId: service.id, ownership: "self", processStartedAt: 1, canClose: true });
+          ownedBySelf: true, serviceId: service.id, ownership: "self", processStartedAt: 1, processStartMarker: `preview:${service.pids[0] ?? 5000 + index}`, canClose: true });
       }
       return { from, to, listeners, scannedAt: Date.now() } as PortRangeScan as T;
     }
@@ -1125,7 +1125,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       for (const target of expected) {
         const current = before.listeners.find((row) => row.pid === target.pid);
         if (!current) continue;
-        if (target.port !== port || current.processStartedAt !== target.processStartedAt || current.serviceId !== target.serviceId || current.ownership !== target.ownership) throw { code: "PORT_TARGET_CHANGED", message: "监听者已变化，请重新扫描" };
+        if (target.port !== port || !target.processStartMarker || current.processStartMarker !== target.processStartMarker || current.serviceId !== target.serviceId || current.ownership !== target.ownership) throw { code: "PORT_TARGET_CHANGED", message: "监听者已变化，请重新扫描" };
         selected.push(current);
       }
       for (const serviceId of new Set(selected.map((row) => row.serviceId))) await mockInvoke("stop_service", { id: serviceId });

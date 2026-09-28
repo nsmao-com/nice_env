@@ -55,26 +55,29 @@ pub(crate) struct ProcessIdentity {
 
 impl ProcessIdentity {
     pub(crate) fn capture(pid: u32) -> Option<Self> {
+        Self::capture_with_parent(pid).map(|(identity, _)| identity)
+    }
+
+    fn capture_with_parent(pid: u32) -> Option<(Self, Option<u32>)> {
         let started = platform::process_start_marker(pid)?;
         let mut system = sysinfo::System::new();
         system.refresh_processes(
             sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]),
             true,
         );
-        let executable = system
-            .process(sysinfo::Pid::from_u32(pid))?
-            .exe()?
-            .to_path_buf();
+        let process = system.process(sysinfo::Pid::from_u32(pid))?;
+        let executable = process.exe()?.to_path_buf();
+        let parent = process.parent().map(|pid| pid.as_u32());
         if !executable.is_absolute()
             || platform::process_start_marker(pid).as_deref() != Some(&started)
         {
             return None;
         }
-        Some(Self {
+        Some((Self {
             pid,
             started,
             executable,
-        })
+        }, parent))
     }
 
     /// None 表示存活但无权读取身份，不能当成已退出，也不能据此结束进程。
@@ -84,6 +87,153 @@ impl ProcessIdentity {
             None if !platform::process_alive(self.pid) => Some(false),
             None => None,
         }
+    }
+
+    fn no_earlier_than(&self, parent: &Self) -> bool {
+        // 防止旧子进程的 PPID 恰好等于被系统复用后的新父进程 PID。
+        if let (Some(child), Some(parent)) = (
+            self.started.strip_prefix("mac:"),
+            parent.started.strip_prefix("mac:"),
+        ) {
+            let parse = |value: &str| -> Option<(u64, u64)> {
+                let (sec, micros) = value.split_once(':')?;
+                Some((sec.parse().ok()?, micros.parse().ok()?))
+            };
+            return parse(child)
+                .zip(parse(parent))
+                .is_some_and(|(child, parent)| child >= parent);
+        }
+        fn parse(value: &str) -> Option<(&str, u64)> {
+            let (prefix, time) = value.rsplit_once(':')?;
+            Some((prefix, time.parse().ok()?))
+        }
+        parse(&self.started)
+            .zip(parse(&parent.started))
+            .is_some_and(|(child, parent)| child.0 == parent.0 && child.1 >= parent.1)
+    }
+}
+
+/// 先固定已核实的根进程及可读取的后代，再结束对应对象；不重新认领变化后的 PID。
+pub(crate) fn terminate_processes(processes: &[ProcessIdentity]) -> Result<Vec<u32>> {
+    let tree = ProcessTree::capture(processes)?;
+    tree.terminate()?;
+    Ok(processes
+        .iter()
+        .filter(|process| tree.targets.iter().any(|(target, _)| target == *process))
+        .map(|process| process.pid)
+        .collect())
+}
+
+pub(crate) struct ProcessTree {
+    targets: Vec<(ProcessIdentity, platform::VerifiedProcess)>,
+}
+
+impl ProcessTree {
+    pub(crate) fn identities(&self) -> impl Iterator<Item = &ProcessIdentity> {
+        self.targets.iter().map(|(identity, _)| identity)
+    }
+
+    pub(crate) fn capture(processes: &[ProcessIdentity]) -> Result<Self> {
+        let mut targets = Vec::new();
+        for process in processes {
+            if targets.iter().any(
+                |(known, _): &(ProcessIdentity, platform::VerifiedProcess)| {
+                    known.pid == process.pid
+                },
+            ) {
+                continue;
+            }
+            if let Some(handle) = platform::VerifiedProcess::open(process.pid, &process.started)
+                .map_err(|error| {
+                    AppError::new(
+                        "PROCESS_IDENTITY_UNAVAILABLE",
+                        format!(
+                            "无法核实进程 {} 或取得结束权限，未发送终止信号",
+                            process.pid
+                        ),
+                    )
+                    .with_detail(error.to_string())
+                })?
+            {
+                targets.push((process.clone(), handle));
+            }
+        }
+        if targets.is_empty() {
+            return Ok(Self { targets });
+        }
+        let mut system = sysinfo::System::new();
+        system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        let mut index = 0;
+        while index < targets.len() {
+            let parent = targets[index].0.clone();
+            for (pid, process) in system.processes() {
+                if process.parent().map(|pid| pid.as_u32()) != Some(parent.pid)
+                    || targets.iter().any(|(known, _)| known.pid == pid.as_u32())
+                {
+                    continue;
+                }
+                let Some((identity, actual_parent)) = ProcessIdentity::capture_with_parent(pid.as_u32()) else {
+                    if platform::process_alive(pid.as_u32()) {
+                        return Err(AppError::new(
+                            "PROCESS_IDENTITY_UNAVAILABLE",
+                            format!("无法确认子进程 {}，未结束进程树", pid.as_u32()),
+                        ));
+                    }
+                    continue;
+                };
+                if actual_parent != Some(parent.pid) || parent.current() != Some(true) || !identity.no_earlier_than(&parent) {
+                    continue;
+                }
+                if let Some(handle) =
+                    platform::VerifiedProcess::open(identity.pid, &identity.started).map_err(
+                        |error| {
+                            AppError::new(
+                                "PROCESS_IDENTITY_UNAVAILABLE",
+                                format!(
+                                    "无法核实子进程 {} 或取得结束权限，未结束进程树",
+                                    identity.pid
+                                ),
+                            )
+                            .with_detail(error.to_string())
+                        },
+                    )?
+                {
+                    targets.push((identity, handle));
+                }
+            }
+            index += 1;
+        }
+        Ok(Self { targets })
+    }
+
+    pub(crate) fn terminate(&self) -> Result<()> {
+        for (identity, handle) in &self.targets {
+            handle.terminate().map_err(|error| {
+                AppError::new(
+                    "STOP_FAILED",
+                    format!("未能结束已确认的进程 {}，请检查权限后重试", identity.pid),
+                )
+                .with_detail(error.to_string())
+            })?;
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while self
+            .targets
+            .iter()
+            .map(|(_, handle)| handle.has_exited())
+            .collect::<platform::Result<Vec<_>>>()?
+            .iter()
+            .any(|exited| !exited)
+        {
+            if Instant::now() >= deadline {
+                return Err(AppError::new(
+                    "STOP_FAILED",
+                    "已核实进程尚未全部退出，请检查权限与进程状态",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        Ok(())
     }
 }
 
@@ -947,6 +1097,21 @@ pub fn fallback_port_for(store: &Store, key: &str, desired: u16, avoid: &[u16]) 
 #[cfg(test)]
 mod fallback_tests {
     use super::*;
+
+    #[test]
+    fn process_tree_rejects_children_older_than_reused_parent_ids() {
+        let identity = |started: &str| ProcessIdentity { pid: 100, started: started.into(), executable: PathBuf::new() };
+        for (parent, before, after) in [
+            ("win:10000009", "win:10000008", "win:10000010"),
+            ("linux:boot-id:100", "linux:boot-id:99", "linux:boot-id:101"),
+            ("mac:100:900", "mac:100:899", "mac:101:1"),
+        ] {
+            assert!(!identity(before).no_earlier_than(&identity(parent)));
+            assert!(identity(after).no_earlier_than(&identity(parent)));
+        }
+        assert!(!identity("linux:other-boot:101").no_earlier_than(&identity("linux:boot-id:100")));
+        assert!(!identity("unknown").no_earlier_than(&identity("unknown")));
+    }
 
     #[test]
     fn checked_log_tail_handles_blocks_encoding_and_io_errors() {

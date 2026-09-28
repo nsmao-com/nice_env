@@ -28,13 +28,13 @@ function Failure({ error }: { error: unknown }) {
   return <div role="alert" className="min-w-0 space-y-2 text-sm text-error"><p className="break-words">{parsed.message}</p>{parsed.hint && <p className="break-words text-xs leading-5">{parsed.hint}</p>}{parsed.detail && <details className="text-muted"><summary className="cursor-pointer text-xs">{t("mongoBackup.details")}</summary><pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs">{parsed.detail}</pre></details>}</div>;
 }
 
-export function MongoBackupPanel({ service, signature }: { service?: ServiceStatus; signature: string }) {
+export function MongoBackupPanel({ service, signature, externalDisabled = false }: { service?: ServiceStatus; signature: string; externalDisabled?: boolean }) {
   const t = useT(); const client = useQueryClient();
   const running = !!service?.version && (service.state === "running" || (service.state === "error" && service.pids.length > 0));
   const version = service?.version ?? "";
   const [operationBusy, setBusy] = React.useState(false); const busyRef = React.useRef(false);
   const [planLocked, setPlanLocked] = React.useState(false);
-  const busy = operationBusy || planLocked;
+  const busy = operationBusy || planLocked || externalDisabled;
   const [error, setError] = React.useState<unknown>(null);
   const [database, setDatabase] = React.useState("");
   const [selected, setSelected] = React.useState<MongoBackup | null>(null);
@@ -58,7 +58,7 @@ export function MongoBackupPanel({ service, signature }: { service?: ServiceStat
   const databases = (overview.data?.databases ?? []).filter(validName);
   const ready = running && !!overview.data && !overview.isError && !overview.isFetching;
   const unchanged = signature === dialogSignature && running;
-  const begin = () => { if (busyRef.current || planLocked) return false; busyRef.current = true; setBusy(true); return true; };
+  const begin = () => { if (busyRef.current || planLocked || externalDisabled) return false; busyRef.current = true; setBusy(true); return true; };
   const end = () => { busyRef.current = false; setBusy(false); };
   const resetPreview = () => { setPreview(null); setConfirmation(""); setDialogError(null); };
   const refresh = async () => { await client.invalidateQueries({ queryKey: ["mongo-backups"] }); };
@@ -146,7 +146,7 @@ export function MongoBackupPanel({ service, signature }: { service?: ServiceStat
   return <Card>
     <CardHeader><div className="flex flex-wrap items-center justify-between gap-2"><CardTitle>{t("mongoBackup.title")}</CardTitle><Button variant="ghost" size="sm" disabled={busy || backups.isFetching} onClick={() => void backups.refetch()}><RefreshCw className="h-3.5 w-3.5" />{t("mongo.refresh")}</Button></div><CardDescription>{t("mongoBackup.intro")}</CardDescription></CardHeader>
     <CardContent className="min-w-0 space-y-4">
-      <DatabaseBackupPlan engine="mongodb" version={version} instanceKey={signature} targetLabel={`MongoDB ${version}`} ready={ready} disabled={operationBusy || !!selected || !!importPreview || !!removal} onLockChange={setPlanLocked} />
+      <DatabaseBackupPlan engine="mongodb" version={version} instanceKey={signature} targetLabel={`MongoDB ${version}`} ready={ready} disabled={operationBusy || externalDisabled || !!selected || !!importPreview || !!removal} onLockChange={setPlanLocked} />
       {!isTauri && <p className="text-xs text-warn">{t("mongoBackup.demo")}</p>}
       <p className="text-xs leading-5 text-muted">{t("mongoBackup.pauseWrites")} <Link href="/packages" className="underline underline-offset-4">{t("mongo.packages")}</Link></p>
       {!running && <p className="text-sm text-muted">{t("mongoBackup.stopped")}</p>}

@@ -2931,3 +2931,22 @@ Web/schema TypeScript、218 条清单的 Zod 解析、Rust 全工作区 all-targ
 
 参考：https://support.servbay.com/database-management/getting-started/mongodb-management-and-usage
 参考：https://github.com/mongodb/mongo-tools/blob/master/common/archive/spec.md
+
+## 第一百二十八轮：MongoDB 认证与本机账号管理（v0.2.116）
+
+参考 ServBay MongoDB 管理页面中对本机绑定、图形化参数、mongosh 和 Database Tools 的组织方式，以及 MongoDB 官方 access control、createUser、mongodump 配置文件文档，补齐 NiceEnv 之前缺少的 MongoDB 认证流程。面板按版本显示运行认证状态、启动配置、管理账号和异常；停止实例时只读显示并禁用修改，启动后支持验证连接、无用户实例初始化 admin root 管理员、开启认证、关闭认证和修改管理员密码。
+
+初始化管理员仅允许在尚未启用认证且没有用户的实例进行。管理员创建前后分别验证，成功后保存版本隔离的本机凭据，开启认证配置并按用户确认重启；已有用户或管理员不会被覆盖。开启、关闭认证和修改密码都要求修订号、当前实例版本、管理员权限和明确确认，关闭认证另需确认本机其他程序可能免密访问。重启失败保留已保存配置与凭据，不自动回退为无认证；运行状态与启动配置不一致时提示重新检查。
+
+mongosh 查询通过标准输入接收临时 JSON，固定脚本不再包含密码；认证错误只返回可修复的人话提示。mongodump/mongorestore 使用 MongoDB Database Tools 的临时配置文件传入密码，密码不进入进程参数、URI、环境或归档目录，临时文件在命令完成后清理。备份、恢复、计划备份和文档浏览统一复用当前版本凭据；无认证实例仍允许匿名连接，认证开启后匿名读取被拒绝。错误详情会脱敏，认证凭据、认证开关和 MongoDB 计划均视为本机设置，不进入配置导出或导入，也不能通过通用设置命令直接写入。
+
+共享 MongoDB 管理页增加认证卡片，并与备份卡片互斥；认证弹窗使用结构化账号、认证数据库、密码、重试和确认控件，不要求用户填写 JSON。密码字段默认隐藏，错误保留输入并支持重新检查；底部操作区保留虚线分隔和左右留白。中英文文案覆盖初始化、开启/关闭影响、密码规则、权限不足、认证失败、重启失败和浏览器演示说明。浏览器 mock 新增认证命令面，桌面端通过独立 Tauri 命令调用真实后端。
+
+没有新增测试文件，扩展既有 MongoDB 原生验收。Windows MongoDB 8.0.4、mongosh 2.12.0、Database Tools 100.19.0 验证了无认证初始状态、错误凭据不落盘、管理员初始化、认证后浏览/备份/恢复/计划备份、匿名拒绝、密码变更、旧密码拒绝、关闭认证、损坏本机记录修复、导出不包含凭据、生命周期互斥和停机清理。认证新增的受控重启使日志断言改为检查至少三次完整停机；不放宽进程身份和无损停机验证。离线 Chromium 验收覆盖停止态、初始化确认、密码长度、认证失败重试、关闭认证双确认和窄屏无溢出；未启动前端 dev 或正式 build，macOS 未实机验收。
+
+本次没有业务数据库变更，未修改 update.sql。发布时同步十一处版本文件并创建新的 annotated tag，保留用户已有未跟踪文件与本地产物。
+
+参考：https://support.servbay.com/database-management/getting-started/mongodb-management-and-usage
+参考：https://www.mongodb.com/docs/manual/core/authorization/
+参考：https://www.mongodb.com/docs/manual/reference/command/createUser/
+参考：https://www.mongodb.com/docs/database-tools/mongodump/

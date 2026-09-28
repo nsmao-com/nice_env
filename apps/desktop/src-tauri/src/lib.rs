@@ -427,6 +427,10 @@ pub fn run() {
             postgres_backup_dump,
             postgres_backup_restore,
             postgres_backup_replace,
+            mongodb_auth_status,
+            mongodb_auth_connection,
+            mongodb_auth_apply,
+            mongodb_auth_password,
             mongodb_backup_plan,
             mongodb_backup_plan_save,
             mongodb_backup_plan_run,
@@ -2881,6 +2885,9 @@ fn set_setting(
     key: String,
     value: serde_json::Value,
 ) -> Result<bool, tauri::Error> {
+    if nsb_core::mongodb_auth::local_setting(&key) {
+        return Err(box_err(nsb_core::AppError::new("SETTING_PROTECTED", "请通过 MongoDB 认证或计划备份界面修改此设置")));
+    }
     if key == "rewriteTemplates" {
         let templates: Vec<nsb_core::model::CustomRewrite> = serde_json::from_value(value.clone()).map_err(|_| box_err(nsb_core::AppError::new("BAD_REWRITE", "模板内容无效")))?;
         if templates.len() > 100 { return Err(box_err(nsb_core::AppError::new("BAD_REWRITE", "最多保存 100 个模板"))); }
@@ -3816,6 +3823,30 @@ async fn postgres_backup_replace(state: State<'_, std::sync::Arc<nsb_core::CoreS
             (st.emit)(nsb_core::Event::PostgresBackup(nsb_core::model::PostgresBackupProgress { operation_id: operation_id.clone(), progress }));
         })
     }))).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn mongodb_auth_status(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String) -> Result<nsb_core::mongodb_auth::AuthView, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::mongodb_auth::status(&st, &version))).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn mongodb_auth_connection(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, revision: String, credentials: nsb_core::mongodb_auth::Credentials) -> Result<nsb_core::mongodb_auth::AuthView, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::mongodb_auth::save_connection(&st, &version, &revision, credentials))).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn mongodb_auth_apply(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, input: nsb_core::mongodb_auth::ApplyAuth) -> Result<nsb_core::mongodb_auth::AuthView, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::mongodb_auth::apply(&st, &version, input))).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn mongodb_auth_password(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, revision: String, password: String) -> Result<nsb_core::mongodb_auth::AuthView, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::mongodb_auth::change_password(&st, &version, &revision, password))).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]

@@ -111,14 +111,24 @@ fn tool(state: &CoreState, name: &str, version: Option<&str>) -> Result<(PathBuf
     if !executable.is_file() { return Err(AppError::new("MONGO_TOOLS_MISSING", "所选工具包缺少备份或恢复命令，请重新安装")); }
     Ok((executable, installed.version))
 }
-fn run_tool(executable: &Path, uri: &str, args: &[String], home: &Path) -> Result<()> {
+fn run_tool(state: &CoreState, version: &str, executable: &Path, uri: &str, args: &[String], home: &Path) -> Result<()> {
+    let credentials = crate::mongodb_auth::Credentials::load(state, version)?;
     let mut output = tempfile::tempfile()?; let mut command = platform::command(executable);
+    // 官方工具的私有配置文件仅在本次调用期间存在，密码不进入进程参数或备份目录。
+    let mut config = tempfile::NamedTempFile::new()?;
+    #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; config.as_file().set_permissions(std::fs::Permissions::from_mode(0o600))?; }
+    if !credentials.username.is_empty() {
+        writeln!(config,"password: {}",serde_json::to_string(&credentials.password).map_err(|_|invalid("无法准备备份认证"))?)?;
+        config.flush()?;
+        command.arg(format!("--config={}",config.path().display())).arg(format!("--username={}",credentials.username))
+            .arg(format!("--authenticationDatabase={}",credentials.auth_database));
+    }
     command.arg(format!("--uri={uri}/?directConnection=true&serverSelectionTimeoutMS=5000&connectTimeoutMS=5000"))
         .args(args).current_dir(home).env("HOME", home).env("USERPROFILE", home)
         .stdin(Stdio::null()).stdout(output.try_clone()?).stderr(output.try_clone()?);
     let status = crate::dbadmin::wait_client(&mut command, Duration::from_secs(1800), || {})?;
     if !status.success() { return Err(AppError::new("MONGO_BACKUP_TOOL_FAILED", "MongoDB 备份工具执行失败")
-        .with_detail(crate::dbadmin::read_output(&mut output, 65536).unwrap_or_default())); }
+        .with_detail(credentials.redact(&crate::dbadmin::read_output(&mut output, 65536).unwrap_or_default()))); }
     Ok(())
 }
 fn create_inner(state: &CoreState, version: &str, database: &str, kind: &str) -> Result<MongoBackup> {
@@ -128,7 +138,7 @@ fn create_inner(state: &CoreState, version: &str, database: &str, kind: &str) ->
     let dir = directory(state)?; fs::create_dir_all(&dir)?;
     let pending = tempfile::Builder::new().prefix(".pending-").tempdir_in(&dir)?;
     let archive = pending.path().join("archive.gz");
-    run_tool(&exe, info["uri"].as_str().ok_or_else(|| invalid("实例地址无效"))?, &[format!("--db={database}"), format!("--archive={}", archive.display()), "--gzip".into()], pending.path())?;
+    run_tool(state, version, &exe, info["uri"].as_str().ok_or_else(|| invalid("实例地址无效"))?, &[format!("--db={database}"), format!("--archive={}", archive.display()), "--gzip".into()], pending.path())?;
     crate::ops::verify_database_listener(&state.manager, "mongodb", info["port"].as_u64().unwrap_or(0) as u16)?;
     let (size_bytes, sha256) = copy_hash(&archive, std::io::sink())?;
     if size_bytes == 0 { return Err(invalid("导出的备份为空")); }
@@ -233,7 +243,7 @@ pub fn restore(state: &CoreState, version: &str, id: &str, target: &str, revisio
     let uri = info["uri"].as_str().ok_or_else(|| invalid("实例地址无效"))?;
     let args = vec![format!("--archive={}", archive.display()), "--gzip".into(), "--stopOnError".into(),
         format!("--nsInclude={}.*", backup.database), format!("--nsFrom={}.*", backup.database), format!("--nsTo={target}.*")];
-    let mut dry = args.clone(); dry.push("--dryRun".into()); run_tool(&exe, uri, &dry, pending.path())?;
+    let mut dry = args.clone(); dry.push("--dryRun".into()); run_tool(state, version, &exe, uri, &dry, pending.path())?;
     let safety_backup = if current.exists { Some(create_inner(state, version, target, "before-restore")?) } else { None };
     // 保护备份期间目标结构或服务变化时不开始写入；外部应用须暂停写入（不宣称跨客户端事务）。
     if preview_inner(state, version, backup, target)?.revision != revision {
@@ -241,7 +251,7 @@ pub fn restore(state: &CoreState, version: &str, id: &str, target: &str, revisio
     }
     let write_result: Result<()> = (|| {
         if current.exists { inspect(state, version, target, true)?; }
-        run_tool(&exe, uri, &args, pending.path())?;
+        run_tool(state, version, &exe, uri, &args, pending.path())?;
         let after = inspect(state, version, target, false)?;
         if after["exists"] != true { return Err(invalid("恢复命令未创建目标数据库，请检查备份内容")); }
         Ok(())

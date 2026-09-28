@@ -80,12 +80,21 @@ function mockSiteFileScope(id: string, project: boolean, exclude: boolean): Site
 }
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.115";
+const MOCK_APP_VERSION = "0.2.116";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const mockMongoDatabases = new Map<string, Record<string, Record<string, unknown>[]>>([
   ["niceenv_demo", { documents: Array.from({ length: 23 }, (_, i) => ({ _id: { $oid: (i+1).toString(16).padStart(24,"0") }, title: `预览文档 ${i+1}`, active: i%2 === 0, count: { $numberInt: String(i+1) }, createdAt: { $date: { $numberLong: "1790611200000" } } })) }],
 ]);
+const mockMongoAuth = new Map<string, { view: import("@nsb/schema").MongoAuthView; password: string }>();
+function mongoAuthPreview(version: string) {
+  let item = mockMongoAuth.get(version);
+  if (!item) { item = { view: { version, username: "", authDatabase: "admin", hasPassword: false, configured: false, running: false, authorization: null, hasUsers: false, administrator: false, problem: null, revision: "preview-0" }, password: "" }; mockMongoAuth.set(version, item); }
+  const service = services.get("mongodb");
+  item.view.running = service?.version === version && !!service.pids.length && ["running", "error"].includes(service.state);
+  item.view.authorization = item.view.running ? item.view.configured : null;
+  return item;
+}
 const mockMongoBackups = new Map<string, { record: import("@nsb/schema").MongoBackup; data: Record<string, Record<string, unknown>[]> }>();
 let mockMongoBackupSequence = 0;
 function mockMongoBackup(database: string, version: string, toolsVersion: string, kind: "manual" | "before-restore") {
@@ -2837,6 +2846,38 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (!mockOllamaPull || mockOllamaPull.id !== args!.id) throw { code: "OLLAMA_PULL_NOT_FOUND", message: "拉取任务已变更，请刷新" };
       if (mockOllamaPull.state === "pulling") { mockOllamaPull.state = "cancelled"; mockOllamaPull.endedAt = Date.now(); }
       return true as T;
+    }
+    case "mongodb_auth_status": return structuredClone(mongoAuthPreview(String(args!.version)).view) as T;
+    case "mongodb_auth_connection":
+    case "mongodb_auth_apply":
+    case "mongodb_auth_password": {
+      const { view, password: saved } = mongoAuthPreview(String(args!.version));
+      const input = args!.input as import("@nsb/schema").MongoAuthApply | undefined;
+      if ((input?.revision ?? args!.revision) !== view.revision) throw { code: "MONGO_AUTH_CHANGED", message: "实例或认证已变化，请重新检查" };
+      if (!view.running) throw { code: "MONGO_NOT_RUNNING", message: "请先启动 MongoDB" };
+      const entry = mockMongoAuth.get(view.version)!;
+      if (cmd === "mongodb_auth_connection") {
+        const candidate = args!.credentials as import("@nsb/schema").MongoCredentials;
+        if (candidate.username ? candidate.username !== view.username || candidate.password !== saved || candidate.authDatabase !== view.authDatabase : view.configured) throw { code: "MONGO_ACCESS_DENIED", message: "用户名或密码未通过验证" };
+        view.administrator = !!candidate.username; view.hasPassword = !!candidate.password;
+      } else if (cmd === "mongodb_auth_password") {
+        if (!view.administrator) throw { code: "MONGO_ADMIN_REQUIRED", message: "请先验证管理员连接" };
+        const password = String(args!.password);
+        if (Array.from(password).length < 8) throw { code: "MONGO_PASSWORD_SHORT", message: "至少需要 8 个字符" };
+        entry.password = password;
+      } else {
+        if (!input!.acknowledgeRestart || (!input!.enabled && !input!.acknowledgeDisable)) throw { code: "MONGO_AUTH_CONFIRM", message: "请确认重启和关闭认证的影响" };
+        if (input!.administrator) {
+          const account = input!.administrator;
+          if (view.hasUsers || view.configured || !input!.enabled || !account.username.trim() || account.authDatabase !== "admin" || Array.from(account.password).length < 8) throw { code: "MONGO_ADMIN_EXISTS", message: "请验证现有管理账号" };
+          view.username = account.username; view.authDatabase = "admin"; entry.password = account.password;
+          view.hasUsers = true; view.hasPassword = true; view.administrator = true;
+        }
+        if (!view.administrator) throw { code: "MONGO_ADMIN_REQUIRED", message: "请先验证管理员连接" };
+        view.configured = input!.enabled; view.authorization = input!.enabled;
+      }
+      view.problem = null; view.revision = `preview-${Date.now()}`;
+      return structuredClone(view) as T;
     }
     case "mongodb_backup_plan":
     case "db_backup_plan":

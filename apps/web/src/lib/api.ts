@@ -1,5 +1,5 @@
 import type {
-  MongoOverview, MongoCollections, MongoDocuments, MongoFilter, MongoBackup, MongoBackupList, MongoRestorePreview, MongoRestoreResult, MongoImportPreview, MongoBackupRemoval,
+  MongoCredentials, MongoAuthView, MongoAuthApply, MongoOverview, MongoCollections, MongoDocuments, MongoFilter, MongoBackup, MongoBackupList, MongoRestorePreview, MongoRestoreResult, MongoImportPreview, MongoBackupRemoval,
   ServiceStatus,
   ServiceStopPreview,
   SftpgoConfigDirectories,
@@ -412,6 +412,10 @@ export type PostgresPlan = BackupPlan;
 export const dbBackupPlan = (engine: DatabaseEngine, version: string) => safe(invoke<BackupPlan>("db_backup_plan", { engine, version }));
 export const dbBackupPlanSave = (engine: DatabaseEngine, version: string, config: BackupPlanConfig) => safe(invoke<BackupPlan>("db_backup_plan_save", { engine, version, config }));
 export const dbBackupPlanRun = (engine: DatabaseEngine, version: string) => safe(invoke<BackupPlan>("db_backup_plan_run", { engine, version }));
+export const mongoAuthStatus = (version: string) => safe(invoke<MongoAuthView>("mongodb_auth_status", { version }));
+export const mongoAuthConnection = (version: string, revision: string, credentials: MongoCredentials) => safe(invoke<MongoAuthView>("mongodb_auth_connection", { version, revision, credentials }));
+export const mongoAuthApply = (version: string, input: MongoAuthApply) => safe(invoke<MongoAuthView>("mongodb_auth_apply", { version, input }));
+export const mongoAuthPassword = (version: string, revision: string, password: string) => safe(invoke<MongoAuthView>("mongodb_auth_password", { version, revision, password }));
 export const mongoBackupPlan = (version: string) => safe(invoke<BackupPlan>("mongodb_backup_plan", { version }));
 export const mongoBackupPlanSave = (version: string, config: BackupPlanConfig) => safe(invoke<BackupPlan>("mongodb_backup_plan_save", { version, config }));
 export const mongoBackupPlanRun = (version: string) => safe(invoke<BackupPlan>("mongodb_backup_plan_run", { version }));

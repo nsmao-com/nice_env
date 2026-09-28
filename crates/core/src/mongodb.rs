@@ -68,12 +68,15 @@ fn validate(request: &BrowseRequest) -> Result<()> {
     Ok(())
 }
 
-// 用户选择只作为 JSON 数据传入。没有自由脚本、任意命令、远程地址或写入操作入口。
+// 用户选择只作为 JSON 数据传入；只执行后端固定操作，不接受自由脚本或远程地址。
 const CONNECT: &str = r###"
 try {
   const connection = new Mongo(input.uri + '/?directConnection=true&serverSelectionTimeoutMS=4000&socketTimeoutMS=6000&appName=NiceEnv');
   const admin = connection.getDB('admin');
   const checked = result => { if (result.ok !== 1) throw Object.assign(new Error(result.errmsg || 'MongoDB query failed'), { code: result.code }); return result; };
+  if (input.credentials.username && !connection.getDB(input.credentials.authDatabase).auth({user:input.credentials.username,pwd:input.credentials.password})) {
+    throw Object.assign(new Error('Authentication failed'),{code:18});
+  }
   const options = checked(admin.runCommand({getCmdLineOpts:1}));
   const fs = require('fs');
   const normalize = path => { const resolved = fs.realpathSync(path); return process.platform === 'win32' ? resolved.toLowerCase() : resolved; };
@@ -148,6 +151,12 @@ pub fn browse(state: &CoreState, version: &str, request: BrowseRequest) -> Resul
 
 // 只接受后端固定脚本；Tauri 不暴露此函数。备份操作复用实例与数据目录核对。
 pub(crate) fn execute(state: &CoreState, version: &str, request: serde_json::Value, script_body: &str) -> Result<serde_json::Value> {
+    let credentials=crate::mongodb_auth::Credentials::load(state,version)?;
+    execute_as(state,version,request,script_body,&credentials)
+}
+
+pub(crate) fn execute_as(state: &CoreState, version: &str, request: serde_json::Value, script_body: &str, credentials: &crate::mongodb_auth::Credentials) -> Result<serde_json::Value> {
+    credentials.validate()?;
     let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
     let _operation = state.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重新读取"))?;
     let service = state.manager.snapshot("mongodb").filter(|service| service.version.as_deref() == Some(version)
@@ -165,21 +174,25 @@ pub(crate) fn execute(state: &CoreState, version: &str, request: serde_json::Val
     let executable = Path::new(&shell.install_path).join(crate::install::entry_relative_path(&entry.entry));
     let temp = tempfile::Builder::new().prefix(".mongo-browse-").tempdir_in(&state.paths.base)?;
     let input = serde_json::json!({"uri":format!("mongodb://127.0.0.1:{port}"),"port":port,"version":version,
-        "shellVersion":shell.version,"dataDir":state.paths.mongo_data_dir(version),"request":request});
+        "shellVersion":shell.version,"dataDir":state.paths.mongo_data_dir(version),"request":request,"credentials":credentials});
     let script = temp.path().join("query.js");
     let mut file = std::fs::File::create(&script)?;
-    write!(file, "const input = {};\n{}\n{}\n{}", serde_json::to_string(&input).map_err(|e| AppError::internal("准备 MongoDB 查询", e.to_string()))?, CONNECT, script_body, CATCH)?;
+    write!(file, "const input = JSON.parse(require('fs').readFileSync(0,'utf8'));\n{}\n{}\n{}", CONNECT, script_body, CATCH)?;
     drop(file);
+    // 凭据通过无名临时句柄传入 stdin，不进入脚本文件、环境或进程参数。
+    let mut input_file = tempfile::tempfile()?;
+    serde_json::to_writer(&mut input_file, &input).map_err(|e| AppError::internal("准备 MongoDB 查询", e.to_string()))?;
+    std::io::Seek::rewind(&mut input_file)?;
     let mut output = tempfile::tempfile()?;
     let mut error = tempfile::tempfile()?;
     let mut command = platform::command(executable);
     command.args(["--quiet", "--norc", "--nodb", "--file"]).arg(&script).current_dir(temp.path())
         .env("HOME", temp.path()).env("USERPROFILE", temp.path()).env("APPDATA", temp.path()).env("LOCALAPPDATA", temp.path())
-        .env("MONGOSH_LOG_DIR", temp.path()).stdin(Stdio::null()).stdout(output.try_clone()?).stderr(error.try_clone()?);
+        .env("MONGOSH_LOG_DIR", temp.path()).stdin(Stdio::from(input_file)).stdout(output.try_clone()?).stderr(error.try_clone()?);
     let status = crate::dbadmin::wait_client(&mut command, Duration::from_secs(20), || {})?;
     if !status.success() {
         return Err(AppError::new("MONGO_SHELL_FAILED", "MongoDB Shell 执行失败，请检查工具安装及实例状态")
-            .with_detail(crate::dbadmin::read_output(&mut error, 16 * 1024).unwrap_or_default()));
+            .with_detail(if request.get("password").is_some() { "认证操作失败，未显示可能包含密码的工具输出".into() } else { credentials.redact(&crate::dbadmin::read_output(&mut error, 16 * 1024).unwrap_or_default()) }));
     }
     let raw = crate::dbadmin::read_output(&mut output, 8 * 1024 * 1024)?;
     let value: serde_json::Value = serde_json::from_str(raw.trim())
@@ -190,9 +203,10 @@ pub(crate) fn execute(state: &CoreState, version: &str, request: serde_json::Val
             "50" => ("MONGO_QUERY_TIMEOUT", "MongoDB 查询超时，请缩小筛选范围后重试"),
             "MONGO_INSTANCE_CHANGED" => ("MONGO_INSTANCE_CHANGED", "MongoDB 数据目录与所选实例不一致，已停止读取"),
             "MONGO_COLLECTION_MISSING" => ("MONGO_COLLECTION_MISSING", "所选集合已不存在，请刷新集合列表"),
+            "MONGO_ADMIN_EXISTS" => ("MONGO_ADMIN_EXISTS", "实例已有账号，请验证现有管理账号，未创建新管理员"),
             _ => ("MONGO_QUERY_FAILED", "MongoDB 查询失败，请检查实例状态后重试"),
         };
-        return Err(AppError::new(code, message).with_detail(error["message"].as_str().unwrap_or_default()));
+        return Err(AppError::new(code, message).with_detail(if request.get("password").is_some() { "认证操作未完成，请刷新状态后检查".into() } else { credentials.redact(error["message"].as_str().unwrap_or_default()) }));
     }
     crate::ops::verify_database_listener(&state.manager, "mongodb", port)?;
     value.get("result").cloned().ok_or_else(|| AppError::new("MONGO_RESULT_INVALID", "MongoDB Shell 未返回有效结果"))

@@ -28,6 +28,7 @@ pub mod install;
 pub mod logs_export;
 pub mod model;
 pub mod mongodb;
+pub mod mongodb_auth;
 pub mod mongodb_backup;
 mod mongodb_archive;
 pub mod ops;

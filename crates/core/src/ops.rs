@@ -960,9 +960,11 @@ fn start_mongodb(
         std::fs::create_dir_all(parent)?;
     }
     precheck_port(ports.mongodb, "MongoDB")?;
+    let require_auth = crate::mongodb_auth::enabled(store, &version)?;
     let spec = SpawnSpec {
         program: exe.clone(),
-        args: vec![
+        args: {
+            let mut args = vec![
             "--dbpath".into(),
             dbpath.to_string_lossy().to_string(),
             "--port".into(),
@@ -972,7 +974,10 @@ fn start_mongodb(
             "--logpath".into(),
             logfile.to_string_lossy().to_string(),
             "--logappend".into(),
-        ],
+            ];
+            if require_auth { args.push("--auth".into()); }
+            args
+        },
         cwd: Some(dir.clone()),
         env: vec![],
         detached: None,
@@ -4364,6 +4369,53 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
                 assert_eq!(busy.state,"failed"); assert!(busy.message.contains("服务正在操作"));
             });
             drop(guard);
+            // 完整认证流程使用真实 mongod/mongosh/tools；结束后关闭认证以继续既有停机验收。
+            use crate::mongodb_auth as auth;
+            let initial=auth::status(&state,"8.0.4").unwrap();
+            assert_eq!(initial.authorization,Some(false)); assert_eq!(initial.has_users,Some(false));
+            let credentials=auth::Credentials { username:"manager'用户名".into(),password:"fixture\\quote'\"秘密:12345".into(),auth_database:"admin".into() };
+            assert!(auth::save_connection(&state,"8.0.4",&initial.revision,credentials.clone()).is_err());
+            assert!(state.store.get_setting("mongodbCredentials@8.0.4").is_none());
+            let request=|revision: String, enabled, acknowledge_restart, acknowledge_disable, administrator| auth::ApplyAuth {revision,enabled,acknowledge_restart,acknowledge_disable,administrator};
+            assert_eq!(auth::apply(&state,"8.0.4",request(initial.revision.clone(),true,false,false,Some(credentials.clone()))).unwrap_err().code,"MONGO_AUTH_CONFIRM");
+            assert_eq!(auth::apply(&state,"8.0.4",request("stale".into(),true,true,false,Some(credentials.clone()))).unwrap_err().code,"MONGO_AUTH_CHANGED");
+            let secured=auth::apply(&state,"8.0.4",request(initial.revision.clone(),true,true,false,Some(credentials.clone()))).unwrap();
+            assert!(secured.configured && secured.administrator && secured.has_password); assert_eq!(secured.authorization,Some(true));
+            assert!(!serde_json::to_string(&secured).unwrap().contains(&credentials.password));
+            let anonymous=auth::Credentials::default();
+            assert_eq!(crate::mongodb::execute_as(&state,"8.0.4",serde_json::json!({}),"print(JSON.stringify({result:true}));",&anonymous).unwrap_err().code,"MONGO_ACCESS_DENIED");
+            assert!(crate::mongodb::browse(&state,"8.0.4",BrowseRequest::Overview).is_ok());
+            let auth_backup=mb::create(&state,"8.0.4","niceenv_fixture").unwrap();
+            let auth_preview=mb::preview(&state,"8.0.4",&auth_backup.id,"niceenv_authenticated").unwrap();
+            mb::restore(&state,"8.0.4",&auth_backup.id,"niceenv_authenticated",&auth_preview.revision,"niceenv_authenticated").unwrap();
+            let authenticated_plan=schedule::run_mongodb_plan(&state,"8.0.4",true).unwrap();
+            assert_eq!(authenticated_plan.state,"partial","{}",authenticated_plan.message); assert!(!authenticated_plan.files.is_empty());
+            let stored=state.store.get_setting("mongodbCredentials@8.0.4").unwrap();
+            let mut wrong=credentials.clone(); wrong.password="wrong-secret-123".into();
+            assert!(auth::save_connection(&state,"8.0.4",&secured.revision,wrong).is_err());
+            assert_eq!(state.store.get_setting("mongodbCredentials@8.0.4").unwrap(),stored);
+            assert_eq!(auth::apply(&state,"8.0.4",request(secured.revision.clone(),false,true,false,None)).unwrap_err().code,"MONGO_AUTH_CONFIRM");
+            let new_password="next:密码'\"\\secret-67890".to_string();
+            let changed=auth::change_password(&state,"8.0.4",&secured.revision,new_password.clone()).unwrap();
+            assert!(changed.administrator && changed.has_password);
+            assert_eq!(crate::mongodb::execute_as(&state,"8.0.4",serde_json::json!({}),"print(JSON.stringify({result:true}));",&credentials).unwrap_err().code,"MONGO_ACCESS_DENIED");
+            let fresh=auth::Credentials {password:new_password.clone(),..credentials.clone()};
+            let connected=auth::save_connection(&state,"8.0.4",&changed.revision,fresh.clone()).unwrap();
+            assert!(connected.administrator);
+            // 本机连接记录损坏仍可从图形入口验证并修复，不回退为匿名访问。
+            state.store.set_setting("mongodbCredentials@8.0.4","broken").unwrap();
+            let damaged=auth::status(&state,"8.0.4").unwrap(); assert!(damaged.problem.is_some());
+            assert!(auth::save_connection(&state,"8.0.4",&damaged.revision,fresh.clone()).unwrap().administrator);
+            let (exported,_)=crate::transfer::encode_export(&state.store).unwrap();
+            let exported=String::from_utf8(exported).unwrap();
+            for needle in ["mongodbCredentials@","mongodbAuthEnabled@","mongodbBackupPlan@",&credentials.password,&new_password] { assert!(!exported.contains(needle)); }
+            assert!(crate::envfile::is_secret_key("mongodbCredentials@8.0.4"));
+            assert!(!fresh.redact(&format!("failure {new_password}")).contains(&new_password));
+            assert!(!std::fs::read_dir(&state.paths.base).unwrap().any(|item|item.unwrap().file_name().to_string_lossy().starts_with(".mongo-browse-")));
+            let unprotected=auth::apply(&state,"8.0.4",request(connected.revision,true,true,false,Some(credentials.clone()))).unwrap_err();
+            assert_eq!(unprotected.code,"MONGO_ADMIN_EXISTS");
+            let disabled=auth::apply(&state,"8.0.4",request(auth::status(&state,"8.0.4").unwrap().revision,false,true,true,None)).unwrap();
+            assert_eq!(disabled.authorization,Some(false)); assert!(!disabled.configured);
         }
         let preview = state.service_stop_preview("mongodb").unwrap();
         let entry = state
@@ -4440,7 +4492,7 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
         if std::env::var_os("NSB_MONGO_TOOLS_ARCHIVES").is_some() { client("restored"); }
         state.stop_service("mongodb").unwrap();
         let log = std::fs::read_to_string(state.paths.service_log("mongodb")).unwrap();
-        assert_eq!(log.matches("mongod shutdown complete").count(), 3);
+        assert!(log.matches("mongod shutdown complete").count() >= 3);
         assert!(!log.to_ascii_lowercase().contains("unclean shutdown"));
         assert!(!state.manager.watchdog.should_restart(
             "mongodb",

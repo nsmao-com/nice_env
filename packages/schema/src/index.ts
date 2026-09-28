@@ -647,6 +647,11 @@ export type MongoDocuments = z.infer<typeof MongoDocuments>;
 export const MongoFilter = z.object({ field: z.string(), value: z.string(), valueType: z.enum(["text", "number", "boolean", "null", "objectId"]) });
 export type MongoFilter = z.infer<typeof MongoFilter>;
 
+export const MongoCredentials = z.object({ username: z.string(), password: z.string(), authDatabase: z.string() });
+export type MongoCredentials = z.infer<typeof MongoCredentials>;
+export const MongoAuthView = z.object({ version: z.string(), username: z.string(), authDatabase: z.string(), hasPassword: z.boolean(), configured: z.boolean(), running: z.boolean(), authorization: z.boolean().nullable(), hasUsers: z.boolean().nullable(), administrator: z.boolean(), problem: z.object({ code: z.string(), message: z.string(), hint: z.string().optional(), detail: z.string().optional() }).nullable(), revision: z.string() });
+export type MongoAuthView = z.infer<typeof MongoAuthView>;
+export type MongoAuthApply = { revision: string; enabled: boolean; acknowledgeRestart: boolean; acknowledgeDisable: boolean; administrator: MongoCredentials | null };
 export const MongoBackup = z.object({ id: z.string(), database: z.string(), version: z.string(), toolsVersion: z.string(), createdAt: z.number(), sizeBytes: z.number(), sha256: z.string(), kind: z.enum(["manual", "before-restore", "imported", "automatic"]) });
 export type MongoBackup = z.infer<typeof MongoBackup>;
 export const MongoBackupList = z.object({ items: z.array(MongoBackup), issues: z.array(z.object({ id: z.string(), problem: z.string() })), unreadable: z.number().int(), directory: z.string() });

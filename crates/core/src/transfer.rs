@@ -63,7 +63,7 @@ pub(crate) fn encode_export(store: &Store) -> Result<(Vec<u8>, usize)> {
         app_version: env!("CARGO_PKG_VERSION").into(),
         exported_at: crate::services::now_ms(),
         // 本机连接凭据、数据库备份计划及 DNS 恢复记录不随配置导入导出。
-        settings: store.all_settings()?.into_iter().filter(|(key, _)| !key.starts_with("redisConnection@") && !key.starts_with("postgresPassword@") && !key.starts_with("postgresBackupPlan@") && !key.starts_with("mysqlBackupPlan@") && !key.starts_with("mariadbBackupPlan@") && !key.starts_with("dnsBackup.")).collect(),
+        settings: store.all_settings()?.into_iter().filter(|(key, _)| !key.starts_with("redisConnection@") && !key.starts_with("postgresPassword@") && !key.starts_with("postgresBackupPlan@") && !key.starts_with("mysqlBackupPlan@") && !key.starts_with("mariadbBackupPlan@") && !key.starts_with("siteFileBackupPlan@") && !key.starts_with("dnsBackup.")).collect(),
         packages: store
             .list_installed()?
             .into_iter()
@@ -120,7 +120,7 @@ pub fn import_from(
 
     // ---- 设置（逐项覆盖） ----
     for (k, v) in &bundle.settings {
-        if k.starts_with("redisConnection@") || k.starts_with("postgresPassword@") || k.starts_with("postgresBackupPlan@") || k.starts_with("mysqlBackupPlan@") || k.starts_with("mariadbBackupPlan@") || k.starts_with("dnsBackup.") { continue; }
+        if k.starts_with("redisConnection@") || k.starts_with("postgresPassword@") || k.starts_with("postgresBackupPlan@") || k.starts_with("mysqlBackupPlan@") || k.starts_with("mariadbBackupPlan@") || k.starts_with("siteFileBackupPlan@") || k.starts_with("dnsBackup.") { continue; }
         store.set_setting(k, v)?;
         report.settings += 1;
     }
@@ -293,7 +293,7 @@ mod tests {
         let postgres_key = crate::dbadmin::postgres_password_key("16.6");
         store.set_setting(&postgres_key, "local-postgres-secret").unwrap();
         store.set_setting("postgresBackupPlan@16.6", "local-backup-plan").unwrap();
-        for key in ["mysqlBackupPlan@8.0.46", "mariadbBackupPlan@11.4.8"] { store.set_setting(key, "local-backup-plan").unwrap(); }
+        for key in ["mysqlBackupPlan@8.0.46", "mariadbBackupPlan@11.4.8", "siteFileBackupPlan@fixture"] { store.set_setting(key, "local-backup-plan").unwrap(); }
         store.set_setting("language", "en").unwrap();
         let file = temp.path().join("config.json");
         export_to(&store, &file).unwrap();
@@ -307,14 +307,14 @@ mod tests {
         bundle.settings.push(("dnsBackup.Wi-Fi".into(), "foreign-dns-backup".into()));
         bundle.settings.push((postgres_key.clone(), "foreign-postgres-secret".into()));
         bundle.settings.push(("postgresBackupPlan@16.6".into(), "foreign-backup-plan".into()));
-        for key in ["mysqlBackupPlan@8.0.46", "mariadbBackupPlan@11.4.8"] { bundle.settings.push((key.into(), "foreign-backup-plan".into())); }
+        for key in ["mysqlBackupPlan@8.0.46", "mariadbBackupPlan@11.4.8", "siteFileBackupPlan@fixture"] { bundle.settings.push((key.into(), "foreign-backup-plan".into())); }
         std::fs::write(&file, serde_json::to_vec(&bundle).unwrap()).unwrap();
         import_from(&file, &paths, &store, &Arc::new(ServiceManager::new())).unwrap();
         assert_eq!(store.get_setting(&key).as_deref(), Some("local-secret"));
         assert_eq!(store.get_setting("dnsBackup.Wi-Fi").as_deref(), Some("local-dns-backup"));
         assert_eq!(store.get_setting(&postgres_key).as_deref(), Some("local-postgres-secret"));
         assert_eq!(store.get_setting("postgresBackupPlan@16.6").as_deref(), Some("local-backup-plan"));
-        for key in ["mysqlBackupPlan@8.0.46", "mariadbBackupPlan@11.4.8"] { assert_eq!(store.get_setting(key).as_deref(), Some("local-backup-plan")); }
+        for key in ["mysqlBackupPlan@8.0.46", "mariadbBackupPlan@11.4.8", "siteFileBackupPlan@fixture"] { assert_eq!(store.get_setting(key).as_deref(), Some("local-backup-plan")); }
         assert_eq!(store.get_setting("language").as_deref(), Some("en"));
     }
 

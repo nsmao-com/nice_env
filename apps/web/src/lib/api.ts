@@ -437,8 +437,13 @@ export const certImportedReplace = (id: string, certPath: string, keyPath: strin
 export interface SiteFileScope { root: string; revision: string; excluded: string[] }
 export interface SiteFileBackup {
   name: string; path: string; sizeBytes: number; createdAt: number; files: number;
-  originalBytes: number; root: string; excluded: string[]; restorable: boolean; error?: string | null;
+  originalBytes: number; root: string; excluded: string[]; restorable: boolean; error?: string | null; automatic: boolean;
 }
+export interface SiteFilePlan { status: BackupPlan; project: boolean; excludeGenerated: boolean; scope: SiteFileScope | null; revision: string }
+export const siteFilesPlan = (id: string) => safe(invoke<SiteFilePlan>("site_files_plan", { id }));
+export const siteFilesPlanSave = (id: string, config: BackupPlanConfig, project: boolean, excludeGenerated: boolean, expectedRevision: string, scopeRevision: string | null, confirmed: boolean) =>
+  safe(invoke<SiteFilePlan>("site_files_plan_save", { id, config, project, excludeGenerated, expectedRevision, scopeRevision, confirmed }));
+export const siteFilesPlanRun = (id: string, operationId: string) => safe(invoke<SiteFilePlan>("site_files_plan_run", { id, operationId }));
 export interface SiteFileProgress { operationId: string; siteId: string; phase: string; files: number; bytes: number }
 export const siteFilesScope = (id: string, project: boolean, excludeGenerated: boolean) =>
   safe(invoke<SiteFileScope>("site_files_scope", { id, project, excludeGenerated }));

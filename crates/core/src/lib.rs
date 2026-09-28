@@ -62,6 +62,7 @@ use std::sync::Arc;
 /// 事件：core → 前端。desktop 侧转 tauri emit；测试侧可打印。
 #[derive(Clone, Debug)]
 pub enum Event {
+    SiteBackupStatus { site_id: String, state: String, message: String },
     DownloadProgress(DownloadProgress),
     HostsDenied,
     /// 数据库备份 / 还原进度
@@ -84,6 +85,7 @@ pub enum Event {
 impl Event {
     pub fn channel(&self) -> &'static str {
         match self {
+            Event::SiteBackupStatus { .. } => "site-backup://status",
             Event::DownloadProgress(_) => "download://progress",
             Event::HostsDenied => "hosts://denied",
             Event::DbBackup(_) => "db://backup",
@@ -94,6 +96,7 @@ impl Event {
     }
     pub fn payload(&self) -> serde_json::Value {
         match self {
+            Event::SiteBackupStatus { site_id, state, message } => serde_json::json!({ "siteId": site_id, "state": state, "message": message }),
             Event::DownloadProgress(p) => serde_json::to_value(p).unwrap_or_default(),
             Event::HostsDenied => serde_json::json!({}),
             Event::DbBackup(p) => serde_json::to_value(p).unwrap_or_default(),

@@ -61,11 +61,17 @@ import type {
   CreateSiteInput,
 } from "@nsb/schema";
 import { emitLocal } from "./backend";
-import type { SiteFileBackup, SiteFileScope } from "./api";
+import type { SiteFileBackup, SiteFileScope, SiteFilePlan, BackupPlanConfig } from "./api";
 import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSettingValid, isEnvSecretKey, isEnvFileName, applicationRuntime, validApplication } from "./utils";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const siteFileArchives = new Map<string, SiteFileBackup[]>();
+const siteFilePlans = new Map<string, SiteFilePlan>();
+function mockSiteFilePlan(id: string): SiteFilePlan {
+  if (!sites.has(id)) throw { code: "SITE_NOT_FOUND", message: "站点已不存在" };
+  const plan = siteFilePlans.get(id) ?? { status: { config: { enabled: false, frequency: "daily", time: "03:00", weekday: 0, monthDay: 1, keep: 10 }, nextAt: null, lastRunAt: null, finishedAt: null, state: "idle", message: "", files: [] }, project: true, excludeGenerated: true, scope: null, revision: "initial" };
+  return structuredClone(plan);
+}
 function mockSiteFileScope(id: string, project: boolean, exclude: boolean): SiteFileScope {
   const site = sites.get(id);
   if (!site) throw { code: "SITE_NOT_FOUND", message: "站点已不存在，请刷新列表" };
@@ -74,7 +80,7 @@ function mockSiteFileScope(id: string, project: boolean, exclude: boolean): Site
 }
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.95";
+const MOCK_APP_VERSION = "0.2.96";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -1863,7 +1869,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       emitLocal("site-files://progress", { operationId: args!.operationId, siteId: id, phase: "inspect", files: 0, bytes: 24576 });
       await delay(600);
       return { sourcePath: String(args!.source), sourceSiteId: "demo-source-site", targetName: target.name, targetRoot: target.rootDir,
-        archive: { name: "sample-site.zip", path: String(args!.source), sizeBytes: 24576, createdAt: Date.now() - 86400000, files: 12, originalBytes: 98304, root: "C:/Demo/source-project", excluded: ["node_modules", ".git"], restorable: true, error: null },
+        archive: { name: "sample-site.zip", path: String(args!.source), sizeBytes: 24576, createdAt: Date.now() - 86400000, files: 12, originalBytes: 98304, root: "C:/Demo/source-project", excluded: ["node_modules", ".git"], restorable: true, error: null, automatic: false },
         revision: JSON.stringify([id, target.name, target.rootDir, target.updatedAt, args!.source]) } as T;
     }
     case "site_files_import": {
@@ -1874,8 +1880,42 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (args!.revision !== JSON.stringify([id, target.name, target.rootDir, target.updatedAt, args!.source])) throw { code: "SITE_IMPORT_CHANGED", message: "源归档或目标站点已变化，请重新读取" };
       for (const phase of ["importRead", "import", "complete"]) { emitLocal("site-files://progress", { operationId: args!.operationId, siteId: id, phase, files: phase === "importRead" ? 0 : 12, bytes: phase === "importRead" ? 24576 : 98304 }); await delay(400); }
       const name = `site-${Date.now()}-${crypto.randomUUID().slice(0, 8)}.zip`;
-      const archive: SiteFileBackup = { name, path: `C:/NiceEnv/backup/sites/preview/${name}`, sizeBytes: 24576, createdAt: Date.now() - 86400000, files: 12, originalBytes: 98304, root: "C:/Demo/source-project", excluded: ["node_modules", ".git"], restorable: true, error: null };
+      const archive: SiteFileBackup = { name, path: `C:/NiceEnv/backup/sites/preview/${name}`, sizeBytes: 24576, createdAt: Date.now() - 86400000, files: 12, originalBytes: 98304, root: "C:/Demo/source-project", excluded: ["node_modules", ".git"], restorable: true, error: null, automatic: false };
       siteFileArchives.set(id, [archive, ...(siteFileArchives.get(id) ?? [])]); return structuredClone(archive) as T;
+    }
+    case "site_files_plan": return mockSiteFilePlan(String(args!.id)) as T;
+    case "site_files_plan_save": {
+      const id = String(args!.id); const plan = mockSiteFilePlan(id); const config = args!.config as BackupPlanConfig;
+      if (plan.revision !== args!.expectedRevision) throw { code: "SITE_PLAN_CHANGED", message: "计划已变化，请重新读取" };
+      if (!["daily", "weekly", "monthly"].includes(config.frequency) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(config.time) || !Number.isInteger(config.keep) || config.keep < 0 || config.keep > 100) throw { code: "BAD_BACKUP_PLAN", message: "请检查计划时间和保留数量" };
+      if (config.enabled) {
+        if (!args!.confirmed) throw { code: "SITE_BACKUP_INVALID", message: "请确认范围与保留策略" };
+        const scope = mockSiteFileScope(id, !!args!.project, !!args!.excludeGenerated);
+        if (scope.revision !== args!.scopeRevision) throw { code: "SITE_BACKUP_CHANGED", message: "站点范围已变化，请重新读取" };
+        plan.scope = scope; plan.project = !!args!.project; plan.excludeGenerated = !!args!.excludeGenerated;
+      }
+      plan.status.config = { ...config }; plan.status.nextAt = null;
+      plan.status.state = "idle"; plan.status.message = "浏览器预览不会自动执行备份";
+      plan.revision = crypto.randomUUID(); siteFilePlans.set(id, plan); return structuredClone(plan) as T;
+    }
+    case "site_files_plan_run": {
+      const id = String(args!.id); const plan = mockSiteFilePlan(id);
+      const scope = mockSiteFileScope(id, plan.project, plan.excludeGenerated);
+      if (!plan.scope || scope.revision !== plan.scope.revision) {
+        plan.status.state = "needs-review"; plan.status.config.enabled = false; plan.status.nextAt = null;
+        plan.status.message = "站点范围已变化，请重新配置计划"; plan.revision = crypto.randomUUID();
+      } else {
+        for (const phase of ["scan", "backup", "complete"]) { emitLocal("site-files://progress", { operationId: args!.operationId, siteId: id, phase, files: phase === "scan" ? 0 : 12, bytes: phase === "scan" ? 0 : 98304 }); await delay(350); }
+        const name = `site-auto-${Date.now()}-${crypto.randomUUID().slice(0, 8)}.zip`;
+        const archive: SiteFileBackup = { name, path: `C:/NiceEnv/backup/sites/preview/${name}`, sizeBytes: 24576, createdAt: Date.now(), files: 12, originalBytes: 98304, root: scope.root, excluded: scope.excluded, restorable: true, error: null, automatic: true };
+        let archives = [archive, ...(siteFileArchives.get(id) ?? [])];
+        const retained = new Set(archives.filter((item) => item.automatic).slice(0, plan.status.config.keep).map((item) => item.name));
+        if (plan.status.config.keep) archives = archives.filter((item) => !item.automatic || retained.has(item.name));
+        siteFileArchives.set(id, archives); plan.status.files = [name]; plan.status.state = "success";
+        plan.status.message = "演示完成，未写入真实文件";
+      }
+      plan.status.lastRunAt = Date.now(); plan.status.finishedAt = Date.now(); siteFilePlans.set(id, plan);
+      emitLocal("site-backup://status", { siteId: id, state: plan.status.state, message: plan.status.message }); return structuredClone(plan) as T;
     }
     case "site_files_scope": return mockSiteFileScope(String(args!.id), !!args!.project, !!args!.excludeGenerated) as T;
     case "site_files_list": return structuredClone(siteFileArchives.get(String(args!.id)) ?? []) as T;
@@ -1886,7 +1926,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (scope.revision !== args!.revision) throw { code: "SITE_BACKUP_CHANGED", message: "站点目录或备份范围已变化，请重新检查" };
       for (const phase of ["scan", "backup", "complete"]) { emitLocal("site-files://progress", { operationId: args!.operationId, siteId: id, phase, files: phase === "scan" ? 0 : 12, bytes: phase === "scan" ? 0 : 98304 }); await delay(400); }
       const name = `site-${new Date().toISOString().replace(/[-:TZ.]/g, "")}-${crypto.randomUUID().slice(0, 8)}.zip`;
-      const info: SiteFileBackup = { name, path: `C:/NiceEnv/backup/sites/preview/${name}`, sizeBytes: 24576, createdAt: Date.now(), files: 12, originalBytes: 98304, root: scope.root, excluded: scope.excluded, restorable: true, error: null };
+      const info: SiteFileBackup = { name, path: `C:/NiceEnv/backup/sites/preview/${name}`, sizeBytes: 24576, createdAt: Date.now(), files: 12, originalBytes: 98304, root: scope.root, excluded: scope.excluded, restorable: true, error: null, automatic: false };
       siteFileArchives.set(id, [info, ...(siteFileArchives.get(id) ?? [])]); return structuredClone(info) as T;
     }
     case "site_files_restore": {

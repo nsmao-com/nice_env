@@ -51,6 +51,8 @@ pub struct BackupInfo {
     pub excluded: Vec<String>,
     pub restorable: bool,
     pub error: Option<String>,
+    #[serde(default)]
+    pub automatic: bool,
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -89,6 +91,8 @@ struct Manifest {
     created_at: i64,
     excluded: Vec<String>,
     entries: Vec<Entry>,
+    #[serde(default)]
+    automatic: bool,
 }
 
 fn invalid(message: impl Into<String>) -> AppError {
@@ -366,6 +370,26 @@ pub fn create(
     let _work = crate::BackgroundWork::begin("备份站点文件")?;
     let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
     let _lock = lock(&state.paths, id)?;
+    create_locked(
+        state,
+        id,
+        project,
+        exclude_generated,
+        revision,
+        false,
+        progress,
+    )
+}
+
+fn create_locked(
+    state: &crate::CoreState,
+    id: &str,
+    project: bool,
+    exclude_generated: bool,
+    revision: &str,
+    automatic: bool,
+    progress: &dyn Fn(&str, u64, u64),
+) -> Result<BackupInfo> {
     let scope = scope(&state.store, id, project, exclude_generated)?;
     if scope.revision != revision {
         return Err(AppError::new(
@@ -391,6 +415,7 @@ pub fn create(
         created_at: crate::services::now_ms(),
         excluded: scope.excluded.clone(),
         entries: Vec::new(),
+        automatic,
     };
     let (mut files, mut bytes) = (0, 0);
     let mut buffer = vec![0; 256 * 1024];
@@ -458,7 +483,8 @@ pub fn create(
     zip.finish().map_err(archive_error)?;
     pending.as_file().sync_all()?;
     let name = format!(
-        "site-{}-{:016x}.zip",
+        "site-{}{}-{:016x}.zip",
+        if automatic { "auto-" } else { "" },
         chrono::Local::now().format("%Y%m%d-%H%M%S"),
         rand::random::<u64>()
     );
@@ -499,6 +525,7 @@ fn read_manifest(zip: &mut zip::ZipArchive<File>, id: Option<&str>) -> Result<Ma
 }
 fn info(path: &Path, manifest: Manifest) -> BackupInfo {
     BackupInfo {
+        automatic: manifest.automatic,
         name: path
             .file_name()
             .unwrap_or_default()
@@ -548,6 +575,7 @@ pub fn list(paths: &Paths, id: &str) -> Result<Vec<BackupInfo>> {
         result.push(match opened {
             Ok(manifest) => info(&path, manifest),
             Err(error) => BackupInfo {
+                automatic: false,
                 name,
                 path: path.to_string_lossy().into(),
                 size_bytes: fs::symlink_metadata(&path)?.len(),
@@ -561,7 +589,11 @@ pub fn list(paths: &Paths, id: &str) -> Result<Vec<BackupInfo>> {
             },
         });
     }
-    result.sort_by(|a, b| b.name.cmp(&a.name));
+    result.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| b.name.cmp(&a.name))
+    });
     Ok(result)
 }
 pub fn delete(state: &crate::CoreState, id: &str, name: &str) -> Result<()> {
@@ -896,6 +928,8 @@ pub fn import_archive(
         files += 1;
     }
     manifest.site_id = id.into();
+    // 外部归档导入属于用户手动保存的副本，不纳入本机自动保留策略。
+    manifest.automatic = false;
     let metadata = serde_json::to_vec(&manifest).map_err(|error| invalid(error.to_string()))?;
     if metadata.len() as u64 > MAX_MANIFEST {
         return Err(invalid("导入后的归档清单过大"));
@@ -1023,4 +1057,317 @@ pub fn restore(
     }
     progress("complete", files, bytes);
     Ok(pending.keep().to_string_lossy().into())
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilePlan {
+    pub status: crate::backup_job::BackupPlan,
+    pub project: bool,
+    pub exclude_generated: bool,
+    pub scope: Option<Scope>,
+    #[serde(default)]
+    pub revision: String,
+}
+impl Default for FilePlan {
+    fn default() -> Self {
+        Self {
+            status: crate::backup_job::BackupPlan {
+                state: "idle".into(),
+                ..Default::default()
+            },
+            project: true,
+            exclude_generated: true,
+            scope: None,
+            revision: String::new(),
+        }
+    }
+}
+fn plan_key(id: &str) -> String {
+    format!(
+        "siteFileBackupPlan@{}",
+        hex::encode(Sha256::digest(id.as_bytes()))
+    )
+}
+fn plan_revision(plan: &FilePlan) -> Result<String> {
+    Ok(hex::encode(Sha256::digest(
+        serde_json::to_vec(&(
+            &plan.status.config,
+            plan.project,
+            plan.exclude_generated,
+            &plan.scope,
+        ))
+        .map_err(|error| invalid(error.to_string()))?,
+    )))
+}
+fn read_plan(store: &Store, id: &str) -> Result<FilePlan> {
+    let mut plan: FilePlan = match store.get_setting_checked(&plan_key(id))? {
+        None => FilePlan::default(),
+        Some(json) => serde_json::from_str(&json)
+            .map_err(|error| AppError::internal("读取站点自动备份计划", error.to_string()))?,
+    };
+    plan.revision = plan_revision(&plan)?;
+    Ok(plan)
+}
+fn write_plan(store: &Store, id: &str, plan: &mut FilePlan) -> Result<()> {
+    plan.revision = plan_revision(plan)?;
+    store.set_setting_json(&plan_key(id), plan)
+}
+pub fn file_plan(state: &crate::CoreState, id: &str) -> Result<FilePlan> {
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    site(&state.store, id)?;
+    let mut plan = read_plan(&state.store, id)?;
+    if plan.status.state == "running" {
+        match lock(&state.paths, id) {
+            Ok(_lock) => {
+                plan = read_plan(&state.store, id)?;
+                if plan.status.state == "running" {
+                    plan.status.state = "interrupted".into();
+                    plan.status.message =
+                        "上次执行中断，已生成的归档仍保留；请检查后立即执行计划".into();
+                }
+            }
+            Err(error) if error.code == "SITE_BACKUP_BUSY" => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(plan)
+}
+pub fn save_file_plan(
+    state: &crate::CoreState,
+    id: &str,
+    config: crate::backup_job::BackupPlanConfig,
+    project: bool,
+    exclude_generated: bool,
+    expected_revision: &str,
+    scope_revision: Option<&str>,
+    confirmed: bool,
+) -> Result<FilePlan> {
+    let _work = crate::BackgroundWork::begin("保存站点自动备份计划")?;
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    let _lock = lock(&state.paths, id)?;
+    site(&state.store, id)?;
+    crate::backup_job::validate_plan(&config)?;
+    let mut plan = read_plan(&state.store, id)?;
+    if plan.revision != expected_revision {
+        return Err(AppError::new(
+            "SITE_PLAN_CHANGED",
+            "备份计划已在其它窗口变化，请重新读取",
+        ));
+    }
+    if config.enabled {
+        if !confirmed {
+            return Err(invalid("请确认自动备份范围、敏感文件和历史保留策略"));
+        }
+        let current = scope(&state.store, id, project, exclude_generated)?;
+        if Some(current.revision.as_str()) != scope_revision {
+            return Err(AppError::new(
+                "SITE_BACKUP_CHANGED",
+                "站点范围已变化，请重新读取并确认",
+            ));
+        }
+        plan.scope = Some(current);
+        plan.project = project;
+        plan.exclude_generated = exclude_generated;
+    }
+    plan.status.next_at = if config.enabled {
+        Some(crate::backup_job::next_run(&config, chrono::Local::now())?)
+    } else {
+        None
+    };
+    plan.status.config = config;
+    if ["running", "needs-review"].contains(&plan.status.state.as_str()) {
+        plan.status.state = "idle".into();
+        plan.status.message.clear();
+    }
+    write_plan(&state.store, id, &mut plan)?;
+    Ok(plan)
+}
+fn rotate_automatic(paths: &Paths, id: &str, keep: usize, newest: &str) -> Result<()> {
+    if keep == 0 {
+        return Ok(());
+    }
+    let mut archives = list(paths, id)?
+        .into_iter()
+        .filter(|entry| entry.restorable && entry.automatic && entry.name.starts_with("site-auto-"))
+        .collect::<Vec<_>>();
+    archives.sort_by(|a, b| {
+        (b.name == newest)
+            .cmp(&(a.name == newest))
+            .then_with(|| b.created_at.cmp(&a.created_at))
+            .then_with(|| b.name.cmp(&a.name))
+    });
+    for archive in archives.into_iter().skip(keep) {
+        let path = archive_path(paths, id, &archive.name)?;
+        let file = open_plain(&path)?;
+        drop(file);
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+pub fn run_file_plan(
+    state: &crate::CoreState,
+    id: &str,
+    manual: bool,
+    progress: &dyn Fn(&str, u64, u64),
+) -> Result<FilePlan> {
+    let _work = crate::BackgroundWork::begin("执行站点自动备份")?;
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    let _lock = lock(&state.paths, id)?;
+    site(&state.store, id)?;
+    let mut plan = read_plan(&state.store, id)?;
+    let now = chrono::Local::now();
+    if !manual
+        && (!plan.status.config.enabled
+            || !plan
+                .status
+                .next_at
+                .is_some_and(|at| at <= now.timestamp_millis()))
+    {
+        return Ok(plan);
+    }
+    crate::backup_job::validate_plan(&plan.status.config)?;
+    plan.status.next_at = if plan.status.config.enabled {
+        Some(crate::backup_job::next_run(&plan.status.config, now)?)
+    } else {
+        None
+    };
+    plan.status.last_run_at = Some(now.timestamp_millis());
+    plan.status.finished_at = None;
+    plan.status.state = "running".into();
+    plan.status.message.clear();
+    plan.status.files.clear();
+    write_plan(&state.store, id, &mut plan)?;
+    let result = (|| -> Result<()> {
+        let approved = plan.scope.as_ref().ok_or_else(|| {
+            AppError::new("SITE_PLAN_SCOPE", "请先设置并确认此站点的自动备份范围")
+        })?;
+        let current = scope(&state.store, id, plan.project, plan.exclude_generated)?;
+        if current.revision != approved.revision {
+            return Err(AppError::new(
+                "SITE_PLAN_SCOPE",
+                "站点配置或源目录已变化，自动备份已暂停；请重新确认范围",
+            ));
+        }
+        let archive = create_locked(
+            state,
+            id,
+            plan.project,
+            plan.exclude_generated,
+            &approved.revision,
+            true,
+            progress,
+        )?;
+        plan.status.files.push(archive.name.clone());
+        write_plan(&state.store, id, &mut plan)?;
+        if let Err(error) =
+            rotate_automatic(&state.paths, id, plan.status.config.keep, &archive.name)
+        {
+            plan.status.state = "partial".into();
+            plan.status.message = format!("新归档已保留，清理旧自动备份失败：{}", error.message);
+        } else {
+            plan.status.state = "success".into();
+            plan.status.message = format!(
+                "已备份 {} 个文件，共 {} 字节",
+                archive.files, archive.original_bytes
+            );
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        // 普通文件写入造成快照失败仍在下一周期重试；仅批准的站点范围变化才暂停。
+        let scope_changed = error.code == "SITE_BACKUP_CHANGED"
+            && scope(&state.store, id, plan.project, plan.exclude_generated)
+                .ok()
+                .zip(plan.scope.as_ref())
+                .is_some_and(|(current, approved)| current.revision != approved.revision);
+        if error.code == "SITE_PLAN_SCOPE" || scope_changed {
+            plan.status.state = "needs-review".into();
+            plan.status.config.enabled = false;
+            plan.status.next_at = None;
+        } else {
+            plan.status.state = if plan.status.files.is_empty() {
+                "failed"
+            } else {
+                "partial"
+            }
+            .into();
+        }
+        plan.status.message = error.message;
+    }
+    plan.status.finished_at = Some(crate::services::now_ms());
+    // 长任务跨过多个时间点时不连续补跑；重新打开应用也只补执行一次。
+    if plan.status.config.enabled {
+        plan.status.next_at = Some(crate::backup_job::next_run(
+            &plan.status.config,
+            chrono::Local::now(),
+        )?);
+    }
+    write_plan(&state.store, id, &mut plan)?;
+    state.emit_event(crate::Event::SiteBackupStatus {
+        site_id: id.into(),
+        state: plan.status.state.clone(),
+        message: plan.status.message.clone(),
+    });
+    Ok(plan)
+}
+pub(crate) fn tick_file_plans(state: &crate::CoreState) -> Result<()> {
+    let _work = crate::BackgroundWork::begin("站点备份调度")?;
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    let mut failures = Vec::new();
+    for site in state.store.list_sites()? {
+        let result = read_plan(&state.store, &site.id).and_then(|plan| {
+            if plan.status.config.enabled
+                && plan
+                    .status
+                    .next_at
+                    .is_some_and(|at| at <= crate::services::now_ms())
+            {
+                run_file_plan(state, &site.id, false, &|_, _, _| {}).map(|_| ())
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(error) = result {
+            if error.code != "SITE_BACKUP_BUSY" {
+                failures.push(format!("{}：{}", site.name, error.message));
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::new("SITE_PLAN_SCHEDULER", failures.join("；")))
+    }
+}
+pub fn spawn_scheduler_when_ready(
+    state: std::sync::Arc<crate::CoreState>,
+    gate: std::sync::Arc<crate::restart::StartupGate>,
+) -> Result<()> {
+    std::thread::Builder::new()
+        .name("site-file-backup-scheduler".into())
+        .spawn(move || {
+            if !gate.wait() {
+                return;
+            }
+            let mut previous_error = String::new();
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                match tick_file_plans(&state) {
+                    Ok(()) => previous_error.clear(),
+                    Err(error) => {
+                        if error.message != previous_error {
+                            state.emit_event(crate::Event::SiteBackupStatus {
+                                site_id: String::new(),
+                                state: "failed".into(),
+                                message: error.message.clone(),
+                            });
+                            previous_error = error.message;
+                        }
+                    }
+                }
+            }
+        })
+        .map_err(|error| AppError::io("启动站点自动备份调度", error))?;
+    Ok(())
 }

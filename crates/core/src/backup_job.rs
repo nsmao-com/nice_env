@@ -183,7 +183,7 @@ fn read_plan(store: &Store, engine: &str, version: &str) -> Result<BackupPlan> {
     }
 }
 fn read_pg_plan(store: &Store, version: &str) -> Result<BackupPlan> { read_plan(store, "postgresql", version) }
-fn validate_plan(config: &BackupPlanConfig) -> Result<chrono::NaiveTime> {
+pub(crate) fn validate_plan(config: &BackupPlanConfig) -> Result<chrono::NaiveTime> {
     let time = chrono::NaiveTime::parse_from_str(&config.time, "%H:%M").ok();
     if !["daily", "weekly", "monthly"].contains(&config.frequency.as_str()) || config.time.len() != 5 || time.is_none()
         || config.weekday > 6 || !(1..=31).contains(&config.month_day) || config.keep > 100 {
@@ -192,7 +192,7 @@ fn validate_plan(config: &BackupPlanConfig) -> Result<chrono::NaiveTime> {
     time.ok_or_else(|| AppError::new("BAD_BACKUP_PLAN", "备份时间无效"))
 }
 /// 本地日历调度：短月份落在月末；夏令时跳时向后找有效分钟，重复时刻只取第一次。
-fn next_run<T: chrono::TimeZone>(config: &BackupPlanConfig, after: chrono::DateTime<T>) -> Result<i64> {
+pub(crate) fn next_run<T: chrono::TimeZone>(config: &BackupPlanConfig, after: chrono::DateTime<T>) -> Result<i64> {
     use chrono::Datelike;
     let time = validate_plan(config)?;
     let timezone = after.timezone();
@@ -403,6 +403,118 @@ pub fn spawn_database_scheduler_when_ready(state: std::sync::Arc<crate::CoreStat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn site_file_plans_run_due_once_and_preserve_manual_archives() {
+        use crate::sitebackup;
+        use sha2::{Digest, Sha256};
+        let temp = tempfile::tempdir().unwrap();
+        let state = crate::CoreState::init(Some(temp.path().join("home")), std::sync::Arc::new(|_| {})).unwrap();
+        let project = temp.path().join("scheduled project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("index.txt"), "first version").unwrap();
+        let mut site: crate::model::Site = serde_json::from_value(serde_json::json!({
+            "id":"schedule-fixture", "name":"自动备份验收", "domains":["schedule.test"], "rootDir":project,
+            "runtime":{"kind":"static","webServer":"nginx"}, "https":false, "rewrite":"none", "createdAt":1, "updatedAt":1
+        })).unwrap();
+        state.store.save_site(&site).unwrap();
+        let key = format!("siteFileBackupPlan@{}", hex::encode(Sha256::digest(site.id.as_bytes())));
+        let approved = sitebackup::scope(&state.store, &site.id, false, true).unwrap();
+        let initial = sitebackup::file_plan(&state, &site.id).unwrap();
+        assert!(!initial.status.config.enabled);
+        let mut config = BackupPlanConfig { enabled: true, keep: 1, ..Default::default() };
+        assert!(sitebackup::save_file_plan(&state, &site.id, config.clone(), false, true, &initial.revision, Some(&approved.revision), false).is_err());
+        assert!(sitebackup::save_file_plan(&state, &site.id, config.clone(), false, true, &initial.revision, Some("old-scope"), true).is_err());
+        let saved = sitebackup::save_file_plan(&state, &site.id, config.clone(), false, true, &initial.revision, Some(&approved.revision), true).unwrap();
+        assert!(saved.status.next_at.unwrap() > crate::services::now_ms());
+        assert_eq!(sitebackup::save_file_plan(&state, &site.id, config.clone(), false, true, &initial.revision, Some(&approved.revision), true).unwrap_err().code, "SITE_PLAN_CHANGED");
+        let manual = sitebackup::create(&state, &site.id, false, true, &approved.revision, true, &|_,_,_| {}).unwrap();
+        assert!(!manual.automatic);
+        let first = sitebackup::run_file_plan(&state, &site.id, true, &|_,_,_| {}).unwrap();
+        assert_eq!(first.status.state, "success");
+        assert_eq!(first.revision, saved.revision, "运行状态不会使编辑草稿失效");
+        let automatic = sitebackup::list(&state.paths, &site.id).unwrap().into_iter().find(|item| item.automatic).unwrap();
+        let preview = sitebackup::inspect_import(&state, &site.id, &automatic.path, &|_,_,_| {}).unwrap();
+        let imported = sitebackup::import_archive(&state, &site.id, &automatic.path, &preview.revision, true, &|_,_,_| {}).unwrap();
+        assert!(!imported.automatic, "外部自动归档导入后不纳入本机轮转");
+        let folder = std::path::Path::new(&manual.path).parent().unwrap();
+        let broken = folder.join("site-auto-broken.zip");
+        std::fs::write(&broken, "broken archive").unwrap();
+        let mut due = first.clone(); due.status.next_at = Some(1);
+        state.store.set_setting_json(&key, &due).unwrap();
+        sitebackup::tick_file_plans(&state).unwrap();
+        let after = sitebackup::file_plan(&state, &site.id).unwrap();
+        assert_eq!(after.status.state, "success");
+        assert!(!std::path::Path::new(&automatic.path).exists());
+        assert!(std::path::Path::new(&manual.path).is_file());
+        assert!(std::path::Path::new(&imported.path).is_file());
+        assert!(broken.is_file());
+        let archives = sitebackup::list(&state.paths, &site.id).unwrap();
+        assert_eq!(archives.iter().filter(|entry| entry.automatic).count(), 1);
+        let newest = archives.iter().find(|entry| entry.automatic).unwrap();
+        let restored = sitebackup::restore(&state, &site.id, &newest.name, None, true, &|_,_,_| {}).unwrap();
+        assert_eq!(std::fs::read_to_string(std::path::Path::new(&restored).join("index.txt")).unwrap(), "first version");
+        sitebackup::tick_file_plans(&state).unwrap();
+        assert_eq!(sitebackup::file_plan(&state, &site.id).unwrap().status.files, after.status.files);
+
+        // 持有同一站点锁时，界面可读 running，但其它执行和设置必须被拒绝。
+        let inspected = std::sync::atomic::AtomicBool::new(false);
+        let locked = sitebackup::run_file_plan(&state, &site.id, true, &|phase,_,_| {
+            if phase == "scan" && !inspected.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                assert_eq!(sitebackup::file_plan(&state, &site.id).unwrap().status.state, "running");
+                assert_eq!(sitebackup::run_file_plan(&state, &site.id, true, &|_,_,_| {}).unwrap_err().code, "SITE_BACKUP_BUSY");
+                assert_eq!(sitebackup::save_file_plan(&state, &site.id, config.clone(), false, true, &after.revision, Some(&approved.revision), true).unwrap_err().code, "SITE_BACKUP_BUSY");
+            }
+        }).unwrap();
+        assert!(inspected.load(std::sync::atomic::Ordering::SeqCst)); assert_eq!(locked.status.state, "success");
+        // 文件写入只使本次失败；站点范围不变时，计划保留以便下一周期重试。
+        let changed = std::sync::atomic::AtomicBool::new(false);
+        let failed = sitebackup::run_file_plan(&state, &site.id, true, &|phase,_,_| {
+            if phase == "backup" && !changed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                std::fs::write(project.join("new-file.txt"), "concurrent write").unwrap();
+            }
+        }).unwrap();
+        assert_eq!(failed.status.state, "failed"); assert!(failed.status.config.enabled); assert!(failed.status.next_at.is_some());
+        assert_eq!(sitebackup::list(&state.paths, &site.id).unwrap().len(), archives.len());
+        site.updated_at += 1;
+        state.store.save_site(&site).unwrap();
+        let mut due = failed; due.status.next_at = Some(1); state.store.set_setting_json(&key, &due).unwrap();
+        sitebackup::tick_file_plans(&state).unwrap();
+        let paused = sitebackup::file_plan(&state, &site.id).unwrap();
+        assert_eq!(paused.status.state, "needs-review"); assert!(!paused.status.config.enabled); assert!(paused.status.next_at.is_none());
+        assert_eq!(sitebackup::list(&state.paths, &site.id).unwrap().len(), archives.len());
+        // 源目录暂时离线仍可关闭计划。
+        let missing = temp.path().join("temporarily missing");
+        site.root_dir = missing.to_string_lossy().into(); state.store.save_site(&site).unwrap();
+        config.enabled = false;
+        let stopped = sitebackup::save_file_plan(&state, &site.id, config.clone(), false, true, &paused.revision, None, false).unwrap();
+        assert!(!stopped.status.config.enabled);
+        site.root_dir = project.to_string_lossy().into(); site.updated_at += 1; state.store.save_site(&site).unwrap();
+        let approved = sitebackup::scope(&state.store, &site.id, false, true).unwrap();
+        config.enabled = true; config.keep = 0;
+        let all = sitebackup::save_file_plan(&state, &site.id, config.clone(), false, true, &stopped.revision, Some(&approved.revision), true).unwrap();
+        sitebackup::run_file_plan(&state, &site.id, true, &|_,_,_| {}).unwrap();
+        let mut interrupted = sitebackup::run_file_plan(&state, &site.id, true, &|_,_,_| {}).unwrap();
+        assert_eq!(sitebackup::list(&state.paths, &site.id).unwrap().iter().filter(|entry| entry.automatic).count(), 3);
+        interrupted.status.state = "running".into(); state.store.set_setting_json(&key, &interrupted).unwrap();
+        assert_eq!(sitebackup::file_plan(&state, &site.id).unwrap().status.state, "interrupted");
+        assert_eq!(sitebackup::file_plan(&state, &site.id).unwrap().revision, all.revision);
+        #[cfg(windows)]
+        {
+            let entries = sitebackup::list(&state.paths, &site.id).unwrap();
+            use std::os::windows::fs::OpenOptionsExt;
+            let held = entries.iter().filter(|entry| entry.automatic).map(|entry| std::fs::OpenOptions::new().read(true).share_mode(1).open(&entry.path).unwrap()).collect::<Vec<_>>();
+            config.keep = 1;
+            sitebackup::save_file_plan(&state, &site.id, config.clone(), false, true, &all.revision, Some(&approved.revision), true).unwrap();
+            let partial = sitebackup::run_file_plan(&state, &site.id, true, &|_,_,_| {}).unwrap();
+            assert_eq!(partial.status.state, "partial"); assert_eq!(partial.status.files.len(), 1); assert!(folder.join(&partial.status.files[0]).is_file());
+            drop(held);
+            let recovered = sitebackup::run_file_plan(&state, &site.id, true, &|_,_,_| {}).unwrap(); assert_eq!(recovered.status.state, "success");
+        }
+        assert!(std::fs::read_dir(folder).unwrap().all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".pending-")));
+        assert_eq!(std::fs::read_to_string(project.join("index.txt")).unwrap(), "first version");
+    }
 
     #[test]
     fn site_file_archives_restore_verified_copies_and_preserve_sources() {

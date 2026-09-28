@@ -17,6 +17,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ConfirmDialog, CopyButton } from "@/components/shared/misc";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 
+import { SiteFileBackupPlan } from "./site-file-backup-plan";
+
 export function SiteFileBackups({ siteId, revision, active, disabled, dirty, onBusyChange }: {
   siteId: string; revision: number; active: boolean; disabled: boolean; dirty: boolean;
   onBusyChange: (busy: boolean) => void;
@@ -28,6 +30,9 @@ export function SiteFileBackups({ siteId, revision, active, disabled, dirty, onB
   const [confirmed, setConfirmed] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const busyRef = React.useRef(false);
+  const planBusyRef = React.useRef(false);
+  const [planBusy, setPlanBusy] = React.useState(false);
+  const onPlanBusyChange = React.useCallback((value: boolean) => { planBusyRef.current = value; setPlanBusy(value); onBusyChange(value || busyRef.current); }, [onBusyChange]);
   const [progress, setProgress] = React.useState<api.SiteFileProgress | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const errorRef = React.useRef<HTMLParagraphElement | null>(null);
@@ -52,13 +57,13 @@ export function SiteFileBackups({ siteId, revision, active, disabled, dirty, onB
   const archives = useQuery({ queryKey, queryFn: () => api.siteFilesList(siteId), enabled: active && !busy, retry: false });
   React.useEffect(() => { setConfirmed(false); }, [project, exclude, revision, dirty, scope.data?.revision]);
   React.useEffect(() => { setImportConfirmed(false); setImportPreview(null); }, [revision, dirty]);
-  const locked = busy || disabled || dirty;
+  const locked = busy || planBusy || disabled || dirty;
   const filtered = (archives.data ?? []).filter((item) => `${item.name} ${item.root}`.toLowerCase().includes(search.trim().toLowerCase()));
   const pages = Math.max(1, Math.ceil(filtered.length / 5));
   const currentPage = Math.min(page, pages);
-  const setWorking = (value: boolean) => { busyRef.current = value; setBusy(value); onBusyChange(value); };
+  const setWorking = (value: boolean) => { busyRef.current = value; setBusy(value); onBusyChange(value || planBusyRef.current); };
   const run = async (action: (operationId: string) => Promise<void>) => {
-    if (busyRef.current || disabled || dirty) return;
+    if (busyRef.current || planBusyRef.current || disabled || dirty) return;
     setWorking(true); setError(null); setProgress(null);
     const operationId = crypto.randomUUID();
     let unlisten: (() => void) | undefined;
@@ -88,6 +93,7 @@ export function SiteFileBackups({ siteId, revision, active, disabled, dirty, onB
       {!isTauri && <p className="rounded-lg bg-warn-soft p-3 text-xs leading-relaxed text-warn">{t("siteFiles.preview")}</p>}
       {dirty && <p role="status" className="text-xs leading-relaxed text-warn">{t("siteFiles.dirty")}</p>}
     </div>
+    <SiteFileBackupPlan siteId={siteId} revision={revision} active={active} disabled={busy || disabled || dirty || !!restore || !!deleting || importOpen} onBusyChange={onPlanBusyChange} />
     <div className="space-y-4 rounded-xl border border-border p-4">
       <div className="space-y-2">
         <Label htmlFor="site-files-scope">{t("siteFiles.source")}</Label>
@@ -132,6 +138,7 @@ export function SiteFileBackups({ siteId, revision, active, disabled, dirty, onB
         : !filtered.length ? <div className="rounded-xl bg-fill p-4 text-xs leading-relaxed text-muted"><p>{t(search ? "siteFiles.noResults" : "siteFiles.empty")}</p>{search && <Button className="mt-2" size="sm" variant="ghost" onClick={() => { setSearch(""); setPage(1); }}>{t("siteFiles.reset")}</Button>}</div>
         : <ul className="space-y-3">{filtered.slice((currentPage - 1) * 5, currentPage * 5).map((item) => <li key={item.name} className="space-y-3 rounded-xl border border-border p-3">
           <div className="space-y-1.5"><p className="font-mono text-xs [overflow-wrap:anywhere]">{item.name}</p>
+            {item.automatic && <p className="text-xs font-medium text-muted">{t("siteSchedule.automatic")}</p>}
             {item.createdAt > 0 && <p className="text-xs text-muted">{new Date(item.createdAt).toLocaleString()}</p>}
             <p className="text-xs text-muted [overflow-wrap:anywhere]">{t("siteFiles.zip")} {fmtBytes(item.sizeBytes)} · {t("siteFiles.files").replace("{count}", String(item.files))} · {t("siteFiles.original")} {fmtBytes(item.originalBytes)}</p>
             <p className="font-mono text-xs text-muted [overflow-wrap:anywhere]">{item.root}</p>
@@ -198,7 +205,7 @@ export function SiteFileBackups({ siteId, revision, active, disabled, dirty, onB
           {restore && <div className="space-y-2 rounded-lg bg-fill p-3 text-xs [overflow-wrap:anywhere]"><p className="font-mono">{restore.name}</p><p className="font-mono text-muted">{restore.root}</p><p>{t("siteFiles.excluded")}: {restore.excluded.join(", ") || t("siteFiles.noExclusions")}</p></div>}
           <div className="space-y-2"><p className="text-xs font-medium">{t("siteFiles.parent")}</p><p className="font-mono text-xs [overflow-wrap:anywhere]">{parent || t("siteFiles.defaultParent")}</p>
             <div className="flex flex-wrap gap-2"><Button size="sm" variant="secondary" disabled={locked || !isTauri} onClick={async () => {
-              if (busyRef.current || disabled || dirty) return;
+              if (busyRef.current || planBusyRef.current || disabled || dirty) return;
               setWorking(true);
               try { const { open } = await import("@tauri-apps/plugin-dialog"); const picked = await open({ directory: true }); if (typeof picked === "string") setParent(picked); }
               catch (failure) { setError(normalizeError(failure).message); }

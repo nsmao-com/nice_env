@@ -91,6 +91,7 @@ pub fn run() {
             nsb_core::cron::spawn_scheduler_when_ready(state.paths.clone(),Some(setup_startup.gate.clone()))?;
             nsb_core::backup_job::spawn_scheduler_when_ready(state.paths.clone(),Some(setup_startup.gate.clone()));
             nsb_core::backup_job::spawn_database_scheduler_when_ready(state.clone(), setup_startup.gate.clone())?;
+            nsb_core::sitebackup::spawn_scheduler_when_ready(state.clone(), setup_startup.gate.clone())?;
             app.manage(state);
 
             /* ---------- 证书自动化调度：启动 30s 后先补一轮，之后每小时检查到期 ---------- */
@@ -249,6 +250,9 @@ pub fn run() {
             stop_stack,
             // 站点
             list_sites,
+            site_files_plan,
+            site_files_plan_save,
+            site_files_plan_run,
             site_files_scope,
             site_files_list,
             site_files_create,
@@ -989,6 +993,19 @@ async fn stop_stack(
 }
 
 /* ================= 站点 ================= */
+
+#[tauri::command]
+async fn site_files_plan(state: State<'_,std::sync::Arc<CoreState>>, id:String) -> Result<nsb_core::sitebackup::FilePlan,tauri::Error> {
+    let st=state.inner().clone();tauri::async_runtime::spawn_blocking(move ||map_jh(nsb_core::sitebackup::file_plan(&st,&id))).await.map_err(|e|tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+#[tauri::command]
+async fn site_files_plan_save(state: State<'_,std::sync::Arc<CoreState>>, id:String, config:nsb_core::backup_job::BackupPlanConfig, project:bool, exclude_generated:bool, expected_revision:String, scope_revision:Option<String>, confirmed:bool) -> Result<nsb_core::sitebackup::FilePlan,tauri::Error> {
+    let st=state.inner().clone();tauri::async_runtime::spawn_blocking(move ||map_jh(nsb_core::sitebackup::save_file_plan(&st,&id,config,project,exclude_generated,&expected_revision,scope_revision.as_deref(),confirmed))).await.map_err(|e|tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+#[tauri::command]
+async fn site_files_plan_run(app:tauri::AppHandle,state: State<'_,std::sync::Arc<CoreState>>, id:String, operation_id:String) -> Result<nsb_core::sitebackup::FilePlan,tauri::Error> {
+    let st=state.inner().clone();tauri::async_runtime::spawn_blocking(move ||map_jh(nsb_core::sitebackup::run_file_plan(&st,&id,true,&site_files_progress(app,id.clone(),operation_id)))).await.map_err(|e|tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
 
 fn site_files_progress(app: tauri::AppHandle, id: String, operation_id: String) -> impl Fn(&str,u64,u64) {
     let last=std::sync::Mutex::new(None::<std::time::Instant>);

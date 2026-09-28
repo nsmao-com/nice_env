@@ -3401,6 +3401,50 @@ mod validate_tests {
         }
         let restore_owner = client.list_roles().unwrap().into_iter().find(|role| role.name == "restore_owner").unwrap();
         client.drop_role(&restore_owner.name, restore_owner.oid).unwrap();
+        // 自动备份经同一原生入口执行；到期判断、保留策略、部分失败与恢复可用性一起验证。
+        let schedule = crate::backup_job::PostgresPlanConfig { enabled: true, keep: 1, ..Default::default() };
+        let saved = crate::backup_job::save_postgres_plan(&state, "16.6", schedule.clone()).unwrap();
+        assert!(saved.next_at.unwrap() > now_ms());
+        assert_eq!(crate::backup_job::run_postgres_plan(&state, "16.6", false).unwrap().last_run_at, None);
+        let first = crate::backup_job::run_postgres_plan(&state, "16.6", true).unwrap();
+        assert_eq!(first.state, "success", "{}", first.message);
+        let auto_dir = crate::dbbackup::postgres_backup_dir(&state.paths).unwrap();
+        let auto_name = first.files.iter().find(|name| name.contains(&format!("-{}-project_data-", project.oid))).unwrap();
+        let first_path = auto_dir.join(auto_name);
+        let saved_key = crate::dbadmin::postgres_password_key("16.6");
+        let saved_auth = state.store.get_setting_checked(&saved_key).unwrap().unwrap();
+        state.store.set_setting(&saved_key, "invalid-scheduled-backup-password").unwrap();
+        let failed = crate::backup_job::run_postgres_plan(&state, "16.6", true).unwrap();
+        assert_eq!(failed.state, "failed"); assert!(failed.files.is_empty());
+        assert!(first_path.exists() && archive.exists(), "认证失败不能清理既有备份");
+        state.store.set_setting(&saved_key, &saved_auth).unwrap();
+        #[cfg(windows)]
+        {
+            // 阻止删除旧文件：新备份仍保留，结果必须为部分完成，不能假装轮转成功。
+            use std::os::windows::fs::OpenOptionsExt;
+            let held_archive = std::fs::OpenOptions::new().read(true).share_mode(3).open(&first_path).unwrap();
+            let partial = crate::backup_job::run_postgres_plan(&state, "16.6", true).unwrap();
+            assert_eq!(partial.state, "partial", "{}", partial.message);
+            assert!(first_path.exists()); drop(held_archive);
+        }
+        let mut due = crate::backup_job::postgres_plan(&state, "16.6").unwrap();
+        due.next_at = Some(now_ms() - 1);
+        state.store.set_setting_json("postgresBackupPlan@16.6", &due).unwrap();
+        crate::backup_job::tick_postgres(&state);
+        let done = crate::backup_job::postgres_plan(&state, "16.6").unwrap();
+        assert_eq!(done.state, "success", "{}", done.message);
+        assert!(!first_path.exists()); assert!(archive.exists(), "手动归档必须保留");
+        let completed_at = done.last_run_at;
+        assert_eq!(crate::backup_job::run_postgres_plan(&state, "16.6", false).unwrap().last_run_at, completed_at);
+        let latest = done.files.iter().find(|name| name.contains(&format!("-{}-project_data-", project.oid))).unwrap();
+        crate::dbbackup::postgres_restore(&state.paths, &client, &auto_dir.join(latest), "scheduled_verified", "postgres", true, &|_| {}).unwrap();
+        assert_eq!(String::from_utf8_lossy(&pg_query("scheduled_verified", "SELECT value FROM project_proof;").stdout).trim(), "84");
+        let verified = management().into_iter().find(|db| db.name == "scheduled_verified").unwrap(); client.drop_database(&verified.name, verified.oid).unwrap();
+        let disabled = crate::backup_job::save_postgres_plan(&state, "16.6", crate::backup_job::PostgresPlanConfig { enabled: false, ..schedule }).unwrap();
+        assert!(disabled.next_at.is_none());
+        for file in crate::dbbackup::postgres_list_backups(&state.paths).unwrap().into_iter().filter(|file| file.name.starts_with("auto-postgresql-")) {
+            crate::dbbackup::postgres_delete_backup(&state.paths, &file.name).unwrap();
+        }
         // 库名里的等号、引号不得被 libpq 解释成另一个连接目标。
         client.query("CREATE DATABASE \"name=host=invalid ' 中文\";").unwrap();
         let unusual = management().into_iter().find(|db| db.name == "name=host=invalid ' 中文").unwrap();

@@ -122,6 +122,196 @@ pub fn spawn_scheduler_when_ready(paths: Paths, gate: Option<std::sync::Arc<crat
     });
 }
 
+
+/// 原生 PostgreSQL 计划按安装版本隔离；状态与设置一次写入现有 settings，凭据不进入计划。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresPlanConfig {
+    pub enabled: bool,
+    pub frequency: String,
+    pub time: String,
+    pub weekday: u32,
+    pub month_day: u32,
+    pub keep: usize,
+}
+impl Default for PostgresPlanConfig {
+    fn default() -> Self { Self { enabled: false, frequency: "daily".into(), time: "03:00".into(), weekday: 0, month_day: 1, keep: 10 } }
+}
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresPlan {
+    pub config: PostgresPlanConfig,
+    pub next_at: Option<i64>,
+    pub last_run_at: Option<i64>,
+    pub finished_at: Option<i64>,
+    pub state: String,
+    pub message: String,
+    pub files: Vec<String>,
+}
+fn pg_key(version: &str) -> Result<String> {
+    if version.is_empty() || version.len() > 64 || !version.bytes().all(|c| c.is_ascii_alphanumeric() || b".-_".contains(&c)) {
+        return Err(AppError::new("BAD_VERSION", "PostgreSQL 版本无效"));
+    }
+    Ok(format!("postgresBackupPlan@{version}"))
+}
+fn pg_plan_lock(paths: &Paths, version: &str) -> Result<std::fs::File> {
+    pg_key(version)?;
+    let dir = crate::dbbackup::postgres_backup_dir(paths)?;
+    std::fs::create_dir_all(&dir)?;
+    let path = crate::paths::checked_data_path(&paths.base, &format!("backup/postgresql/.schedule-{version}.lock"))?;
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(path)?;
+    file.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => AppError::new("BACKUP_BUSY", "该版本的自动备份正在执行，请等待完成后再修改计划"),
+        std::fs::TryLockError::Error(error) => AppError::io("锁定自动备份计划", error),
+    })?;
+    Ok(file)
+}
+fn read_pg_plan(store: &Store, version: &str) -> Result<PostgresPlan> {
+    match store.get_setting_checked(&pg_key(version)?)? {
+        None => Ok(PostgresPlan { state: "idle".into(), ..Default::default() }),
+        Some(json) => serde_json::from_str(&json).map_err(|error| AppError::internal("读取 PostgreSQL 备份计划", error.to_string())),
+    }
+}
+fn validate_pg_plan(config: &PostgresPlanConfig) -> Result<chrono::NaiveTime> {
+    let time = chrono::NaiveTime::parse_from_str(&config.time, "%H:%M").ok();
+    if !["daily", "weekly", "monthly"].contains(&config.frequency.as_str()) || config.time.len() != 5 || time.is_none()
+        || config.weekday > 6 || !(1..=31).contains(&config.month_day) || config.keep > 100 {
+        return Err(AppError::new("BAD_BACKUP_PLAN", "请选择每天、每周或每月计划、有效时间及 0–100 份保留数量"));
+    }
+    time.ok_or_else(|| AppError::new("BAD_BACKUP_PLAN", "备份时间无效"))
+}
+/// 本地日历调度：短月份落在月末；夏令时跳时向后找有效分钟，重复时刻只取第一次。
+fn next_pg_run<T: chrono::TimeZone>(config: &PostgresPlanConfig, after: chrono::DateTime<T>) -> Result<i64> {
+    use chrono::Datelike;
+    let time = validate_pg_plan(config)?;
+    let timezone = after.timezone();
+    for day in 0..=370 {
+        let date = after.date_naive().checked_add_days(chrono::Days::new(day))
+            .ok_or_else(|| AppError::new("BAD_BACKUP_TIME", "无法计算下一次备份时间"))?;
+        if config.frequency == "weekly" && date.weekday().num_days_from_monday() != config.weekday { continue; }
+        if config.frequency == "monthly" && date.day() != config.month_day {
+            let tomorrow = date.succ_opt().ok_or_else(|| AppError::new("BAD_BACKUP_TIME", "备份日期超出范围"))?;
+            if date.day() >= config.month_day || tomorrow.month() == date.month() { continue; }
+        }
+        for offset in 0..180 {
+            let local = date.and_time(time) + chrono::Duration::minutes(offset);
+            if local.date() != date { break; }
+            if let Some(at) = timezone.from_local_datetime(&local).earliest() {
+                if at.timestamp_millis() > after.timestamp_millis() { return Ok(at.timestamp_millis()); }
+                break;
+            }
+        }
+    }
+    Err(AppError::new("BAD_BACKUP_TIME", "无法计算下一次备份时间，请检查系统时区"))
+}
+
+pub fn postgres_plan(state: &crate::CoreState, version: &str) -> Result<PostgresPlan> {
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    let mut plan = read_pg_plan(&state.store, version)?;
+    if plan.state == "running" {
+        match pg_plan_lock(&state.paths, version) {
+            Ok(_lock) => {
+                plan = read_pg_plan(&state.store, version)?;
+                if plan.state == "running" { plan.state = "interrupted".into(); plan.message = "上次备份未完成，已生成的归档仍保留；请检查后立即执行一次".into(); }
+            },
+            Err(error) if error.code == "BACKUP_BUSY" => {},
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(plan)
+}
+pub fn save_postgres_plan(state: &crate::CoreState, version: &str, config: PostgresPlanConfig) -> Result<PostgresPlan> {
+    let _work = crate::BackgroundWork::begin("保存 PostgreSQL 备份计划")?;
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    validate_pg_plan(&config)?;
+    if state.store.find_installed("postgresql", Some(version)).is_none() { return Err(AppError::not_installed("所选 PostgreSQL 版本")); }
+    let _lock = pg_plan_lock(&state.paths, version)?;
+    let mut plan = read_pg_plan(&state.store, version)?;
+    if plan.state == "running" { plan.state = "interrupted".into(); }
+    plan.next_at = if config.enabled { Some(next_pg_run(&config, chrono::Local::now())?) } else { None };
+    plan.config = config;
+    state.store.set_setting_json(&pg_key(version)?, &plan)?;
+    Ok(plan)
+}
+fn rotate_pg_backups(paths: &Paths, version: &str, oid: u32, keep: usize, newest: &std::path::Path) -> Result<()> {
+    use std::io::Read;
+    if keep == 0 { return Ok(()); }
+    static SUFFIX: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| regex::Regex::new(r"^.+-\d{8}-\d{6}-\d{1,20}\.dump$").unwrap());
+    let prefix = format!("auto-postgresql-{version}-{oid}-");
+    let mut files = Vec::new();
+    for file in crate::dbbackup::postgres_list_backups(paths)? {
+        if !file.name.strip_prefix(&prefix).is_some_and(|suffix| SUFFIX.is_match(suffix)) { continue; }
+        let mut magic = [0; 5];
+        if std::fs::File::open(&file.path)?.read_exact(&mut magic).is_ok() && &magic == b"PGDMP" { files.push(file); }
+    }
+    files.sort_by(|a,b| (std::path::Path::new(&b.path) == newest).cmp(&(std::path::Path::new(&a.path) == newest))
+        .then_with(|| b.created_at.cmp(&a.created_at)).then_with(|| b.name.cmp(&a.name)));
+    for file in files.into_iter().skip(keep) { crate::dbbackup::postgres_delete_backup(paths, &file.name)?; }
+    Ok(())
+}
+
+/// 手动验证与到期调度共用路径。先持有操作系统锁，再读取计划，防止多窗口重复运行。
+pub fn run_postgres_plan(state: &crate::CoreState, version: &str, manual: bool) -> Result<PostgresPlan> {
+    let _work = crate::BackgroundWork::begin("PostgreSQL 自动备份")?;
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    let _lock = pg_plan_lock(&state.paths, version)?;
+    let mut plan = read_pg_plan(&state.store, version)?;
+    let now = chrono::Local::now();
+    if !manual && (!plan.config.enabled || !plan.next_at.is_some_and(|at| at <= now.timestamp_millis())) { return Ok(plan); }
+    validate_pg_plan(&plan.config)?;
+    plan.next_at = if plan.config.enabled { Some(next_pg_run(&plan.config, now)?) } else { None };
+    plan.last_run_at = Some(now.timestamp_millis()); plan.finished_at = None;
+    plan.state = "running".into(); plan.message.clear(); plan.files.clear();
+    state.store.set_setting_json(&pg_key(version)?, &plan)?;
+    let result = state.with_postgres(version, |client| {
+        let databases = client.list_databases()?.into_iter().filter(|db| !db.protected && db.allow_connections).collect::<Vec<_>>();
+        if databases.is_empty() { plan.state = "skipped".into(); plan.message = "没有可备份的业务数据库".into(); return Ok(()); }
+        let mut errors = Vec::new();
+        for db in &databases {
+            match crate::dbbackup::postgres_dump_kind(&state.paths, client, version, &db.name, db.oid, true, &|_| {}) {
+                Ok(path) => {
+                    let name = path.file_name().ok_or_else(|| AppError::new("BAD_BACKUP_NAME", "备份文件名无效"))?.to_string_lossy().into_owned();
+                    plan.files.push(name);
+                    // 每生成一份即记录；进程中断后仍可查看已完成的归档。
+                    state.store.set_setting_json(&pg_key(version)?, &plan)?;
+                    if let Err(error) = rotate_pg_backups(&state.paths, version, db.oid, plan.config.keep, &path) {
+                        errors.push(format!("{}：新备份已保留，清理旧自动备份失败：{}", db.name, error.message));
+                    }
+                },
+                Err(error) => errors.push(format!("{}：{} {}", db.name, error.message, error.detail.unwrap_or_default())),
+            }
+        }
+        plan.state = if errors.is_empty() { "success" } else if plan.files.is_empty() { "failed" } else { "partial" }.into();
+        plan.message = format!("已备份 {} / {} 个业务数据库{}", plan.files.len(), databases.len(), if errors.is_empty() { String::new() } else { format!("。{}", errors.join("；")) });
+        Ok(())
+    });
+    if let Err(error) = result { plan.state = "failed".into(); plan.message = format!("{} {}", error.message, error.hint.unwrap_or_default()); }
+    plan.finished_at = Some(crate::services::now_ms());
+    state.store.set_setting_json(&pg_key(version)?, &plan)?;
+    Ok(plan)
+}
+
+pub(crate) fn tick_postgres(state: &crate::CoreState) {
+    let Ok(_activity) = crate::paths::DataDirActivity::shared(&state.paths.base) else { return; };
+    let Ok(installed) = state.store.list_installed() else { return; };
+    for package in installed.into_iter().filter(|package| package.id == "postgresql") {
+        if read_pg_plan(&state.store, &package.version).is_ok_and(|plan| plan.config.enabled && plan.next_at.is_some_and(|at| at <= crate::services::now_ms())) {
+            let _ = run_postgres_plan(state, &package.version, false);
+        }
+    }
+}
+
+pub fn spawn_postgres_scheduler_when_ready(state: std::sync::Arc<crate::CoreState>, gate: std::sync::Arc<crate::restart::StartupGate>) -> Result<()> {
+    std::thread::Builder::new().name("postgres-backup-scheduler".into()).spawn(move || {
+        if !gate.wait() { return; }
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            tick_postgres(&state);
+        }
+    }).map_err(|error| AppError::io("启动 PostgreSQL 备份调度", error))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,6 +385,50 @@ mod tests {
         assert!(copies.iter().all(|path| path.is_file()));
         drop(held);
         assert!(run_backup_now(&store, &paths).is_ok());
+    }
+
+    #[test]
+    fn postgres_calendar_retention_and_execution_locks() {
+        use chrono::TimeZone;
+        let mut config = PostgresPlanConfig { enabled: true, ..Default::default() };
+        let at = chrono::Utc.with_ymd_and_hms(2026, 1, 31, 3, 0, 0).unwrap();
+        assert_eq!(next_pg_run(&config, at).unwrap(), chrono::Utc.with_ymd_and_hms(2026, 2, 1, 3, 0, 0).unwrap().timestamp_millis());
+        config.frequency = "monthly".into(); config.month_day = 31;
+        assert_eq!(next_pg_run(&config, at).unwrap(), chrono::Utc.with_ymd_and_hms(2026, 2, 28, 3, 0, 0).unwrap().timestamp_millis());
+        let leap = chrono::Utc.with_ymd_and_hms(2028, 1, 31, 4, 0, 0).unwrap();
+        assert_eq!(next_pg_run(&config, leap).unwrap(), chrono::Utc.with_ymd_and_hms(2028, 2, 29, 3, 0, 0).unwrap().timestamp_millis());
+        config.frequency = "weekly".into(); config.weekday = 0;
+        assert_eq!(next_pg_run(&config, at).unwrap(), chrono::Utc.with_ymd_and_hms(2026, 2, 2, 3, 0, 0).unwrap().timestamp_millis());
+        config.time = "24:00".into(); assert!(validate_pg_plan(&config).is_err());
+        config.time = "03:00".into(); config.keep = 101; assert!(validate_pg_plan(&config).is_err());
+        assert!(pg_key("../../outside").is_err());
+        let temp = tempfile::tempdir().unwrap();
+        let state = crate::CoreState::init(Some(temp.path().to_path_buf()), std::sync::Arc::new(|_| {})).unwrap();
+        let dir = crate::dbbackup::postgres_backup_dir(&state.paths).unwrap(); std::fs::create_dir_all(&dir).unwrap();
+        for name in ["auto-postgresql-16.6-100-project-20260928-030000-0.dump", "auto-postgresql-16.6-100-project-20260928-030000-1.dump", "auto-postgresql-16.6-100-project-20260928-030000-2.dump", "auto-postgresql-16.6-100-notes.dump", "postgresql-16.6-project-manual.dump", "auto-postgresql-16.6-101-other.dump", "auto-postgresql-16.7-100-project.dump"] {
+            std::fs::write(dir.join(name), "PGDMPfixture").unwrap();
+        }
+        let corrupt = dir.join("auto-postgresql-16.6-100-corrupt.dump"); std::fs::write(&corrupt, "broken").unwrap();
+        let current = dir.join("auto-postgresql-16.6-100-project-20260928-030000-0.dump");
+        rotate_pg_backups(&state.paths, "16.6", 100, 1, &current).unwrap();
+        assert!(current.exists() && corrupt.exists());
+        assert!(dir.join("auto-postgresql-16.6-100-notes.dump").exists());
+        assert!(!dir.join("auto-postgresql-16.6-100-project-20260928-030000-1.dump").exists());
+        assert!(!dir.join("auto-postgresql-16.6-100-project-20260928-030000-2.dump").exists());
+        assert!(dir.join("postgresql-16.6-project-manual.dump").exists());
+        assert!(dir.join("auto-postgresql-16.6-101-other.dump").exists());
+        assert!(dir.join("auto-postgresql-16.7-100-project.dump").exists());
+        assert_eq!(run_postgres_plan(&state, "16.6", false).unwrap().last_run_at, None);
+        let plan = PostgresPlan { state: "running".into(), ..Default::default() };
+        state.store.set_setting_json(&pg_key("16.6").unwrap(), &plan).unwrap();
+        let held = pg_plan_lock(&state.paths, "16.6").unwrap();
+        assert_eq!(postgres_plan(&state, "16.6").unwrap().state, "running");
+        assert_eq!(run_postgres_plan(&state, "16.6", true).unwrap_err().code, "BACKUP_BUSY");
+        drop(held);
+        assert_eq!(postgres_plan(&state, "16.6").unwrap().state, "interrupted");
+        assert_eq!(run_postgres_plan(&state, "16.6", true).unwrap().state, "failed");
+        state.store.set_setting(&pg_key("16.6").unwrap(), "broken").unwrap();
+        assert!(postgres_plan(&state, "16.6").is_err());
     }
 
     #[test]

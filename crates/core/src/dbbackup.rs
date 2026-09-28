@@ -505,6 +505,13 @@ pub fn postgres_dump(
     paths: &Paths, client: &crate::dbadmin::PostgresClient, version: &str, database: &str, oid: u32,
     progress: &dyn Fn(DbBackupProgress),
 ) -> Result<PathBuf> {
+    postgres_dump_kind(paths, client, version, database, oid, false, progress)
+}
+
+pub(crate) fn postgres_dump_kind(
+    paths: &Paths, client: &crate::dbadmin::PostgresClient, version: &str, database: &str, oid: u32,
+    automatic: bool, progress: &dyn Fn(DbBackupProgress),
+) -> Result<PathBuf> {
     let target = client.list_databases()?.into_iter().find(|db| db.name == database && db.oid == oid)
         .ok_or_else(|| AppError::new("POSTGRES_TARGET_CHANGED", "数据库已变化，请刷新后重新选择"))?;
     if target.protected || !target.allow_connections {
@@ -512,7 +519,8 @@ pub fn postgres_dump(
     }
     let dir = postgres_backup_dir(paths)?;
     std::fs::create_dir_all(&dir)?;
-    let path = postgres_backup_path(paths, &format!("postgresql-{}-{}-{}.dump", sanitize(version), sanitize(database), unique_stamp()))?;
+    let prefix = if automatic { format!("auto-postgresql-{}-{oid}", sanitize(version)) } else { format!("postgresql-{}", sanitize(version)) };
+    let path = postgres_backup_path(paths, &format!("{prefix}-{}-{}.dump", sanitize(database), unique_stamp()))?;
     let pending = tempfile::Builder::new().prefix(".dump-").tempfile_in(&dir)?;
     let mut error = tempfile::tempfile()?;
     let (_private, mut command) = client.tool_command("pg_dump", database, None)?;

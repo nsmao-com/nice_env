@@ -1156,6 +1156,35 @@ mod tests {
         assert_eq!(v[2], "1.10.0-rc1");
         assert_eq!(v[3], "1.9.0");
         assert_eq!(v[4], "1.2.0");
+
+        // Database Tools 官方索引不是按新旧排序，还包含 99.0.0 占位发行。
+        let template = crate::install::Installer::bundled().template_for("mongodb-database-tools").unwrap();
+        for (os, arch, upstream_arch) in [("windows", "x64", "x86_64"), ("macos", "arm64", "arm64"), ("macos", "x64", "x86_64")] {
+            let mut template = template.clone();
+            template.os = vec![os.into()]; template.arch = vec![arch.into()];
+            let mut source = source_for(&template).unwrap();
+            source.entry_template = Some(format!("mongodb-database-tools-{os}-{upstream_arch}-{{version}}/bin/mongodump{}", if os == "windows" { ".exe" } else { "" }));
+            let row = |version: &str| {
+                let files: Vec<_> = [("windows", "x86_64"), ("macos", "arm64"), ("macos", "x86_64"), ("ubuntu2404", "x86_64")].into_iter().map(|(platform, cpu)| serde_json::json!({
+                    "name": platform, "arch": cpu,
+                    "archive": { "url": format!("https://fastdl.mongodb.org/tools/db/mongodb-database-tools-{platform}-{cpu}-{version}.zip"), "sha256": "a".repeat(64) },
+                    "package": { "url": "https://example.org/unwanted.msi" }
+                })).collect();
+                serde_json::json!({ "version": version, "downloads": files })
+            };
+            let mut broken = row("101.1.0");
+            for file in broken["downloads"].as_array_mut().unwrap() { file["archive"]["sha256"] = serde_json::json!("bad hash"); }
+            let mut development = row("101.2.0"); development["development_release"] = serde_json::json!(true);
+            let mut missing_archive = row("101.3.0");
+            for file in missing_archive["downloads"].as_array_mut().unwrap() { file.as_object_mut().unwrap().remove("archive"); }
+            let data = serde_json::json!({ "versions": [row("99.0.0"), row("100.9.0"), broken, development, missing_archive, row("100.19.0"), row("100.19.0-rc1"), row("invalid"), row("100.19.0")] });
+            let parsed = upstream::mongodb_tools_releases(&data, &source, &template);
+            assert_eq!(parsed.iter().map(|r| r.version.as_str()).collect::<Vec<_>>(), ["100.19.0", "100.9.0"]);
+            assert!(parsed.iter().all(|r| r.url.contains(&format!("-{os}-{upstream_arch}-")) && r.sha256.as_ref().unwrap().len() == 64));
+            assert_eq!(parsed[0].entry, source.entry_template.as_ref().unwrap().replace("{version}", "100.19.0"));
+            source.max_versions = Some(1);
+            assert_eq!(upstream::mongodb_tools_releases(&data, &source, &template).len(), 1);
+        }
     }
 
     /// 清单里 qdrant/etcd/mailpit 的版本串带 v 前缀，必须与无前缀版本可比较

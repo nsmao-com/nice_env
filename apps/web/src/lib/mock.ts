@@ -80,7 +80,7 @@ function mockSiteFileScope(id: string, project: boolean, exclude: boolean): Site
 }
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.110";
+const MOCK_APP_VERSION = "0.2.111";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();

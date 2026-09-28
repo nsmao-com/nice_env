@@ -4017,10 +4017,14 @@ const client = new MongoClient(`mongodb://127.0.0.1:${process.argv[2]}`, { direc
 (async () => {
   try {
     await client.connect();
-    const collection = client.db('niceenv_fixture').collection('documents');
+    const collection = client.db(process.argv[3] === 'restored' ? 'niceenv_restored' : 'niceenv_fixture').collection('documents');
     if (process.argv[3] === 'write') await collection.insertOne({ _id: 'canary', value: '持久化检查', count: 81 });
     const doc = await collection.findOne({ _id: 'canary' });
     if (!doc || doc.value !== '持久化检查' || doc.count !== 81) throw new Error('Document did not survive shutdown');
+    if (process.argv[3] === 'restored') {
+      const shell = await collection.findOne({ _id: 'shell' });
+      if (!shell || shell.value !== '工具链检查' || await collection.countDocuments() !== 2) throw new Error('Shell data did not survive archive restore');
+    }
   } finally { await client.close(); }
 })().catch(error => { process.stderr.write(String(error)); process.exitCode = 1; });
 "#;
@@ -4040,6 +4044,63 @@ const client = new MongoClient(`mongodb://127.0.0.1:${process.argv[2]}`, { direc
         };
         state.start_service("mongodb").unwrap();
         client("write");
+        // 可选真实官方工具包验收：安装管线、安装快照、管理终端及跨数据库备份恢复。
+        if let Some(archives) = std::env::var_os("NSB_MONGO_TOOLS_ARCHIVES") {
+            let archives = PathBuf::from(archives);
+            let async_runtime = tokio::runtime::Runtime::new().unwrap();
+            let mut bins = std::collections::HashMap::new();
+            state.store.set_setting("pathEnvEnabled", "0").unwrap();
+            state.store.set_setting("pathEnvSelected", r#"["mongosh","mongodb-database-tools"]"#).unwrap();
+            for id in ["mongosh", "mongodb-database-tools"] {
+                let template = state.installer.template_for(id).unwrap();
+                let key = format!("{id}@{}", template.version);
+                let archive = archives.join(template.url.rsplit('/').next().unwrap());
+                std::fs::copy(archive, state.paths.downloads().join(format!("{key}.pkg"))).unwrap();
+                let installed = async_runtime.block_on(state.installer.install(&key, &state.paths, &state.store, &state.downloader, &|_| {})).unwrap();
+                let binary = PathBuf::from(&installed.install_path).join(&template.entry);
+                assert!(binary.is_file());
+                assert_eq!(state.installer.installed_entry(&installed).entry, template.entry);
+                let again = async_runtime.block_on(state.installer.install(&key, &state.paths, &state.store, &state.downloader, &|_| {})).unwrap();
+                assert_eq!(again.install_path, installed.install_path);
+                assert_eq!(state.installer.package_views(&state.store.list_installed().unwrap()).iter().filter(|p| p.manifest.id == id && p.install.is_some()).count(), 1);
+                bins.insert(id, binary.parent().unwrap().to_path_buf());
+            }
+            let environment = crate::pathenv::terminal_environment(&state.store, &state.paths, &state.installer.manifest).unwrap();
+            assert!(environment.warnings.is_empty(), "{:?}", environment.warnings);
+            for id in ["mongosh", "mongodb-database-tools"] {
+                let entry = environment.entries.iter().find(|entry| entry.id == id).unwrap();
+                assert_eq!(PathBuf::from(&entry.bin_dir), bins[id]);
+            }
+            assert!(!crate::pathenv::is_enabled(&state.store));
+            let tool_home = temp.path().join("tool home");
+            std::fs::create_dir_all(&tool_home).unwrap();
+            let run = |id: &str, name: &str, args: &[&str]| {
+                let binary = bins[id].join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+                assert!(binary.is_file(), "{}", binary.display());
+                let output = tempfile::NamedTempFile::new_in(temp.path()).unwrap();
+                let mut command = platform::command(binary);
+                command.args(args).current_dir(temp.path())
+                    .env("HOME", &tool_home).env("USERPROFILE", &tool_home)
+                    .env("APPDATA", &tool_home).env("LOCALAPPDATA", &tool_home).env("MONGOSH_LOG_DIR", &tool_home)
+                    .stdout(output.reopen().unwrap()).stderr(output.reopen().unwrap());
+                assert!(crate::dbadmin::wait_client(&mut command, Duration::from_secs(30), || {}).unwrap().success(), "{name} failed: {}", std::fs::read_to_string(output.path()).unwrap());
+            };
+            run("mongosh", "mongosh", &["--version"]);
+            #[cfg(windows)]
+            assert!(bins["mongosh"].join("mongosh_crypt_v1.dll").is_file());
+            for name in ["bsondump", "mongodump", "mongoexport", "mongofiles", "mongoimport", "mongorestore", "mongostat", "mongotop"] {
+                run("mongodb-database-tools", name, &["--version"]);
+            }
+            let uri = format!("mongodb://127.0.0.1:{port}/niceenv_fixture?directConnection=true&serverSelectionTimeoutMS=5000");
+            run("mongosh", "mongosh", &[&uri, "--quiet", "--norc", "--eval", "if (db.documents.findOne({_id:'canary'}).count !== 81) throw new Error('wrong source'); db.documents.insertOne({_id:'shell',value:'工具链检查'});"]);
+            let archive = temp.path().join("mongo archive with spaces.gz");
+            let archive_arg = format!("--archive={}", archive.display());
+            run("mongodb-database-tools", "mongodump", &["--uri", &uri, &archive_arg, "--gzip"]);
+            assert!(std::fs::metadata(&archive).unwrap().len() > 0);
+            let restore_uri = format!("mongodb://127.0.0.1:{port}/?directConnection=true&serverSelectionTimeoutMS=5000");
+            run("mongodb-database-tools", "mongorestore", &["--uri", &restore_uri, &archive_arg, "--gzip", "--nsInclude=niceenv_fixture.*", "--nsFrom=niceenv_fixture.*", "--nsTo=niceenv_restored.*"]);
+            client("restored");
+        }
         let preview = state.service_stop_preview("mongodb").unwrap();
         let entry = state
             .manager
@@ -4106,6 +4167,7 @@ const client = new MongoClient(`mongodb://127.0.0.1:${process.argv[2]}`, { direc
         client("read");
         state.restart_service("mongodb").unwrap();
         client("read");
+        if std::env::var_os("NSB_MONGO_TOOLS_ARCHIVES").is_some() { client("restored"); }
         state.stop_service("mongodb").unwrap();
         let log = std::fs::read_to_string(state.paths.service_log("mongodb")).unwrap();
         assert_eq!(log.matches("mongod shutdown complete").count(), 3);

@@ -1,8 +1,114 @@
 {
-  "revision": 8,
-  "updated": "2026-09-28",
-  "note": "macOS 清单（aarch64/x86_64；当前条目均为 arm64 构建，Intel Mac 的 x86_64 条目待补）。当前仅收录已在源头验证可达（HTTP 206/200）的二进制；PHP/Nginx/Redis 的 macOS 官方二进制不存在或需源码编译，候选源见 README「在 macOS 上构建」章节，待 mac 端验证后补入。",
+  "revision": 9,
+  "updated": "2026-09-29",
+  "note": "macOS 清单（aarch64/x86_64；MongoDB Shell / Database Tools 提供双架构，其余条目为 arm64 构建）。当前仅收录已在源头验证可达（HTTP 206/200）的二进制；PHP/Nginx/Redis 的 macOS 官方二进制不存在或需源码编译，候选源见 README「在 macOS 上构建」章节，待 mac 端验证后补入。",
   "packages": [
+    {
+      "id": "mongosh",
+      "version": "2.12.0",
+      "category": "tool",
+      "displayName": "MongoDB Shell",
+      "description": "MongoDB 官方交互终端 mongosh；安装后可在管理终端连接本机或远程实例",
+      "homepage": "https://www.mongodb.com/docs/mongodb-shell/",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/mongodb-js/mongosh/releases/download/v2.12.0/mongosh-2.12.0-darwin-arm64.zip",
+      "sha256": "1b385d3dd6e29624e94616e6d1015bc8e17eb337a187cc6db8a8a8a1d60763fe",
+      "sizeBytes": 81385659,
+      "entry": "mongosh-2.12.0-darwin-arm64/bin/mongosh",
+      "versionSource": {
+        "kind": "github",
+        "entryTemplate": "mongosh-{version}-darwin-arm64/bin/mongosh",
+        "versionFilter": "^\\d+\\.\\d+\\.\\d+$",
+        "includePrerelease": false,
+        "repo": "mongodb-js/mongosh",
+        "tagPrefix": "v",
+        "assetMatch": "^mongosh-[\\d.]+-darwin-arm64\\.zip$"
+      }
+    },
+    {
+      "id": "mongodb-database-tools",
+      "version": "100.19.0",
+      "category": "tool",
+      "displayName": "MongoDB Database Tools",
+      "description": "MongoDB 官方备份、恢复、导入导出及监控命令；包含 mongodump、mongorestore 等 8 个工具",
+      "homepage": "https://www.mongodb.com/docs/database-tools/",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "archive",
+      "url": "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-macos-arm64-100.19.0.zip",
+      "sha256": "8a87276ecba707bf3c4a6f73146223ee0797c478c0ee15e7b851c63bf4299810",
+      "sizeBytes": 76420081,
+      "entry": "mongodb-database-tools-macos-arm64-100.19.0/bin/mongodump",
+      "versionSource": {
+        "kind": "mongodb-tools",
+        "entryTemplate": "mongodb-database-tools-macos-arm64-{version}/bin/mongodump",
+        "versionFilter": "^\\d+\\.\\d+\\.\\d+$",
+        "includePrerelease": false
+      }
+    },
+    {
+      "id": "mongosh",
+      "version": "2.12.0",
+      "category": "tool",
+      "displayName": "MongoDB Shell",
+      "description": "MongoDB 官方交互终端 mongosh；安装后可在管理终端连接本机或远程实例",
+      "homepage": "https://www.mongodb.com/docs/mongodb-shell/",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/mongodb-js/mongosh/releases/download/v2.12.0/mongosh-2.12.0-darwin-x64.zip",
+      "sha256": "7515f20dd08e900572d67610f22509fe0dc2f004a52f7f3d0c2d5e0166955b07",
+      "sizeBytes": 84405400,
+      "entry": "mongosh-2.12.0-darwin-x64/bin/mongosh",
+      "versionSource": {
+        "kind": "github",
+        "entryTemplate": "mongosh-{version}-darwin-x64/bin/mongosh",
+        "versionFilter": "^\\d+\\.\\d+\\.\\d+$",
+        "includePrerelease": false,
+        "repo": "mongodb-js/mongosh",
+        "tagPrefix": "v",
+        "assetMatch": "^mongosh-[\\d.]+-darwin-x64\\.zip$"
+      }
+    },
+    {
+      "id": "mongodb-database-tools",
+      "version": "100.19.0",
+      "category": "tool",
+      "displayName": "MongoDB Database Tools",
+      "description": "MongoDB 官方备份、恢复、导入导出及监控命令；包含 mongodump、mongorestore 等 8 个工具",
+      "homepage": "https://www.mongodb.com/docs/database-tools/",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-macos-x86_64-100.19.0.zip",
+      "sha256": "131ff4ffa3b1213590e2e226bba232b6ea2c245fdf1a695a4d83f114f707fc5b",
+      "sizeBytes": 84166935,
+      "entry": "mongodb-database-tools-macos-x86_64-100.19.0/bin/mongodump",
+      "versionSource": {
+        "kind": "mongodb-tools",
+        "entryTemplate": "mongodb-database-tools-macos-x86_64-{version}/bin/mongodump",
+        "versionFilter": "^\\d+\\.\\d+\\.\\d+$",
+        "includePrerelease": false
+      }
+    },
     {
       "id": "nats",
       "version": "2.15.0",

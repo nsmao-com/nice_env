@@ -2834,3 +2834,20 @@ Web/schema TypeScript、Rust 全工作区 all-targets 与 diff 检查通过，�
 参考：https://support.servbay.com/database-management/getting-started/reset-database-password
 参考：https://redis.io/docs/latest/operate/oss_and_stack/management/security/acl/
 参考：https://raw.githubusercontent.com/redis/redis/unstable/redis.conf
+
+## 第一百二十三轮：MongoDB 官方 Shell 与 Database Tools（v0.2.111）
+
+对照 ServBay 的 MongoDB 管理说明，补齐与服务器独立发布的 MongoDB Shell 和 Database Tools。清单新增 mongosh 2.12.0 与 mongodb-database-tools 100.19.0，归入工具分类，复用已有安装窗口、版本选择、安装记录和管理终端，不注册为常驻服务。Windows x64、macOS Apple Silicon、macOS Intel 各自使用精确的官方构建，六个压缩包均已实际下载并核对官方 SHA256、文件大小和归档内入口；Shell 同目录的加密库完整保留，Database Tools 包含备份、恢复、导入导出、文件和监控的八个命令。
+
+Shell 复用 GitHub Release 版本源，按平台、架构和 zip 文件名匹配，过滤预发布版本。Database Tools 新增官方 full.json 解析源；不复用 MongoDB 服务器版本，按数值排序并排除 99.0.0 占位发行、开发发行、缺失 archive 或有效 SHA256 的条目，选择对应平台压缩包而非 MSI。实际在线目录核对通过：Shell 三个平台各返回 60 个版本，Database Tools Windows、Apple Silicon、Intel 分别返回 45、26、42 个版本；最新版本、下载地址、入口和 SHA256 与内置清单一致。沿用现有缓存和安装合成路径，没有新增依赖。
+
+同时修复新增双架构条目会暴露的清单问题：远端快照叠加到内置清单，旧快照不能隐藏新内置套件；同 id/version 的不同架构条目可以共存，覆盖只影响声明范围，未限制平台的用户条目仍可覆盖全部变体。安装查找优先本机兼容版本，列表按 id/version 折叠为本机适用条目，已安装快照仍优先于可下载清单，不重复显示已安装版本。用户模块继续位于最后一层。
+
+扩展已有 Rust 验证函数，未创建测试文件。清单、安装及卸载相关 29 项、PATH 与终端相关 27 项、版本源相关 4 项回归通过；各模块未选用的既有原生网络验收保持 ignored。Windows MongoDB 8.0.4 隔离原生验收通过（1 passed，22.93 秒）：通过真实 Installer 校验缓存的官方压缩包、解压、注册安装记录及重复安装；核对安装快照和列表唯一性，管理终端包含两套工具的实际 bin 目录；mongosh 与八个 Database Tools 命令的版本检查成功。mongosh 连接随机回环端口，读取独立 Node 驱动写入的文档并新增中文文档；mongodump 导出 gzip archive，mongorestore 恢复到另一临时数据库，再由独立 Node 驱动读回两个文档。正常停机、重启后数据仍在，原有进程归属检查和停机回归继续通过，自有进程与临时数据已回收。未修改用户系统 PATH。macOS 的归档、校验值与在线目录已验证，尚未在 Mac 实机运行工具。
+
+Web/schema TypeScript、218 条清单的 Zod 解析、Rust 全工作区 all-targets 与 diff 检查通过。此次复用现有套件 UI，没有调整布局，未运行前端 dev 或正式前端 build，也未将浏览器预览视为原生验收。十一处版本文件同步至 0.2.111，Cargo.lock 仅更新 niceservbay、nsb-core、platform 三个本项目 crate；发布范围为十九个文件，保留用户原有未跟踪文件和本地产物。上一版 v0.2.110 的 Windows、macOS Apple Silicon、macOS Intel Release 均已确认 completed/success。本轮按项目约定新增 annotated tag v0.2.111，与 main 一次原子推送，并核对远程指向与 release.yml 的实际状态。本次没有业务数据库变更，未修改 update.sql；MongoDB 图形管理和整体产品完善目标继续进行。
+
+参考：https://support.servbay.com/database-management/getting-started/mongodb-management-and-usage
+参考：https://www.mongodb.com/docs/database-tools/installation/
+参考：https://api.github.com/repos/mongodb-js/mongosh/releases/latest
+参考：https://downloads.mongodb.org/tools/db/full.json

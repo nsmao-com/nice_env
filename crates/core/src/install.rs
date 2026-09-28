@@ -134,7 +134,11 @@ impl Installer {
         if snap.is_file() {
             if let Ok(raw) = std::fs::read_to_string(&snap) {
                 match parse_manifest_str(&raw) {
-                    Ok(m) => inst.manifest = m,
+                    Ok(m) => {
+                        // 快照只覆盖它包含的条目，不能隐藏应用升级后新增的内置套件。
+                        inst.manifest.revision = m.revision;
+                        inst.merge_manifest(m);
+                    }
                     Err(_) => { /* 损坏快照：忽略，继续用内置 */ }
                 }
             }
@@ -162,18 +166,17 @@ impl Installer {
         inst
     }
 
-    /// 把另一份清单合并进来：同 (id, version) 以新清单为准（用户覆盖内置），否则追加
+    /// 同 id/version 按平台范围覆盖；不同架构共存，未限制平台的用户条目覆盖全部变体。
     pub fn merge_manifest(&mut self, other: crate::model::Manifest) {
         for p in other.packages {
-            match self
-                .manifest
-                .packages
-                .iter_mut()
-                .find(|e| e.id == p.id && e.version == p.version)
-            {
-                Some(slot) => *slot = p,
-                None => self.manifest.packages.push(p),
-            }
+            let covers = |new: &[String], old: &[String]| {
+                new.is_empty() || !old.is_empty() && old.iter().all(|value| new.contains(value))
+            };
+            self.manifest.packages.retain(|e| {
+                !(e.id == p.id && e.version == p.version
+                    && covers(&p.os, &e.os) && covers(&p.arch, &e.arch))
+            });
+            self.manifest.packages.push(p);
         }
     }
 
@@ -191,7 +194,12 @@ impl Installer {
             .cloned()
             .collect();
         // 按版本号语义取最新：字符串比较会把 5.26.30 排在 2025.09.0 前、21.0.9 排在 21.0.12 前
-        candidates.sort_by(|a, b| crate::versions::cmp_version_desc(&a.version, &b.version));
+        candidates.sort_by(|a, b| {
+            Self::is_platform_compatible(b).cmp(&Self::is_platform_compatible(a))
+                .then_with(|| crate::versions::cmp_version_desc(&a.version, &b.version))
+                .then_with(|| a.arch.is_empty().cmp(&b.arch.is_empty()))
+                .then_with(|| a.os.is_empty().cmp(&b.os.is_empty()))
+        });
         candidates.into_iter().next().map(upgrade_available_entry)
     }
 
@@ -206,6 +214,8 @@ impl Installer {
         entries.sort_by(|a, b| {
             Self::is_platform_compatible(b)
                 .cmp(&Self::is_platform_compatible(a))
+                .then_with(|| a.arch.is_empty().cmp(&b.arch.is_empty()))
+                .then_with(|| a.os.is_empty().cmp(&b.os.is_empty()))
                 .then_with(|| b.version_source.is_some().cmp(&a.version_source.is_some()))
                 .then_with(|| crate::versions::cmp_version_desc(&a.version, &b.version))
         });
@@ -272,7 +282,12 @@ impl Installer {
     }
 
     pub fn package_views(&self, installed: &[InstalledPackage]) -> Vec<crate::model::PackageView> {
-        let mut entries: Vec<_> = self.manifest.packages.iter().cloned().map(upgrade_available_entry).collect();
+        // UI/安装记录使用 id@version 作为标识，同版本的多架构包只展示本机适用的一项。
+        let mut seen = std::collections::HashSet::new();
+        let mut entries: Vec<_> = self.manifest.packages.iter()
+            .filter(|p| seen.insert((p.id.clone(), p.version.clone())))
+            .filter_map(|p| self.find(&format!("{}@{}", p.id, p.version)))
+            .collect();
         for package in installed {
             let entry = self.installed_entry(package);
             if let Some(current) = entries
@@ -2093,6 +2108,39 @@ mod manifest_layer_tests {
 
         base.merge_manifest(manifest_with("bar", "2.0.0", "https://c/2"));
         assert_eq!(base.manifest.packages.len(), 2);
+
+        let mut native = manifest_with("foo", "1.0.0", "https://native/1");
+        native.packages[0].os = vec![current_os().into()];
+        native.packages[0].arch = vec![current_arch().into()];
+        let mut foreign = native.clone();
+        foreign.packages[0].arch = vec![if current_arch() == "x64" { "arm64" } else { "x64" }.into()];
+        foreign.packages[0].url = "https://foreign/1".into();
+        base.merge_manifest(foreign.clone());
+        base.merge_manifest(native.clone());
+        assert_eq!(base.find("foo@1.0.0").unwrap().url, "https://native/1");
+        assert_eq!(base.template_for("foo").unwrap().url, "https://native/1");
+        assert_eq!(base.package_views(&[]).iter().filter(|p| p.manifest.id == "foo").count(), 1);
+        assert_eq!(base.package_views(&[]).iter().find(|p| p.manifest.id == "foo").unwrap().manifest.url, "https://native/1");
+        native.packages[0].url = "https://native/updated".into();
+        base.merge_manifest(native);
+        assert_eq!(base.find("foo").unwrap().url, "https://native/updated");
+        assert!(base.manifest.packages.iter().any(|p| p.url == "https://foreign/1"));
+        base.merge_manifest(manifest_with("foo", "1.0.0", "https://custom/1"));
+        assert_eq!(base.manifest.packages.iter().filter(|p| p.id == "foo").count(), 1);
+        assert_eq!(base.find("foo").unwrap().url, "https://custom/1");
+
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().into());
+        paths.ensure_dirs().unwrap();
+        std::fs::write(paths.etc().join("manifest.json"), serde_json::to_vec(&foreign).unwrap()).unwrap();
+        let effective = Installer::effective(&paths);
+        assert!(effective.find("mongosh").is_some(), "旧快照不能隐藏新内置包");
+        assert!(effective.find("mongodb-database-tools").is_some());
+        assert_eq!(effective.find("foo").unwrap().url, "https://foreign/1");
+        std::fs::create_dir_all(paths.base.join("user-modules")).unwrap();
+        let custom = manifest_with("mongosh", "2.12.0", "https://custom/mongosh");
+        std::fs::write(paths.base.join("user-modules/custom.json"), serde_json::to_vec(&custom).unwrap()).unwrap();
+        assert_eq!(Installer::effective(&paths).find("mongosh@2.12.0").unwrap().url, "https://custom/mongosh");
     }
 }
 
@@ -2124,6 +2172,19 @@ mod find_latest_tests {
         assert_eq!(inst.find("jdk").unwrap().version, "21.0.12+8");
         // 显式指定版本不受影响
         assert_eq!(inst.find("neo4j@5.25.1").unwrap().version, "5.25.1");
+        let mut native = inst.find("jdk@21.0.9+10").unwrap();
+        native.os = vec![current_os().into()];
+        native.arch = vec![current_arch().into()];
+        let mut foreign = native.clone();
+        foreign.arch = vec![if current_arch() == "x64" { "arm64" } else { "x64" }.into()];
+        foreign.version = "99.0.0".into();
+        let mut inst = Installer { manifest: crate::model::Manifest { revision: 1, packages: vec![foreign, native.clone()] } };
+        assert_eq!(inst.find("jdk").unwrap().version, native.version);
+        let mut foreign_twin = native.clone();
+        foreign_twin.arch = vec!["unsupported".into()];
+        inst.manifest.packages.insert(0, foreign_twin);
+        assert_eq!(inst.find("jdk@21.0.9+10").unwrap().arch, native.arch);
+        assert_eq!(inst.package_views(&[]).len(), 2);
     }
 
     #[test]

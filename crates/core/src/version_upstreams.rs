@@ -36,6 +36,30 @@ fn mac(template: &PackageManifestEntry) -> bool {
     template.os.iter().any(|os| os == "macos")
 }
 
+pub(super) fn mongodb_tools_releases(data: &Value, src: &VersionSource, template: &PackageManifestEntry) -> Vec<RemoteVersion> {
+    let target = if mac(template) { "macos" } else { "windows" };
+    let arch = if template.arch.iter().any(|arch| arch == "arm64") { "arm64" } else { "x86_64" };
+    let stable = regex::Regex::new(r"^\d+\.\d+\.\d+$").expect("固定版本表达式合法");
+    let mut out = Vec::new();
+    for row in rows(&data["versions"]) {
+        let Some(version) = row["version"].as_str().filter(|v| stable.is_match(v)
+            && v.split('.').next().and_then(|n| n.parse::<u64>().ok()).is_some_and(|n| n >= 100)) else { continue; };
+        if row["development_release"] == true { continue; }
+        for file in rows(&row["downloads"]) {
+            if file["name"] != target || file["arch"] != arch { continue; }
+            let archive = &file["archive"];
+            let expected_url = format!("https://fastdl.mongodb.org/tools/db/mongodb-database-tools-{target}-{arch}-{version}.zip");
+            let Some(url) = archive["url"].as_str().filter(|url| *url == expected_url) else { continue; };
+            // 官方提供 SHA256；缺失或损坏的元数据不能退化成无校验安装。
+            let Some(sha256) = hash(&archive["sha256"]) else { continue; };
+            let mut item = release(src, template, version, url);
+            item.sha256 = Some(sha256);
+            out.push(item);
+        }
+    }
+    limit_and_sort(out, src)
+}
+
 async fn mysql_html(client: &reqwest::Client, url: &str) -> Result<String> {
     let response = client
         .get(url)
@@ -201,6 +225,10 @@ pub(super) async fn fetch(
                     out.push(r);
                 }
             }
+        }
+        "mongodb-tools" => {
+            let data = get_json(&client, "https://downloads.mongodb.org/tools/db/full.json").await?;
+            out = mongodb_tools_releases(&data, src, template);
         }
         "mongodb" => {
             // current.json 覆盖仍发布的各个分支；full.json 超过 50 MB，不用于首屏查询。

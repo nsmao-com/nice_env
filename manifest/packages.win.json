@@ -1,7 +1,60 @@
 {
-  "revision": 42,
-  "updated": "2026-09-28",
+  "revision": 43,
+  "updated": "2026-09-29",
   "packages": [
+    {
+      "id": "mongosh",
+      "version": "2.12.0",
+      "category": "tool",
+      "displayName": "MongoDB Shell",
+      "description": "MongoDB 官方交互终端 mongosh；安装后可在管理终端连接本机或远程实例",
+      "homepage": "https://www.mongodb.com/docs/mongodb-shell/",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/mongodb-js/mongosh/releases/download/v2.12.0/mongosh-2.12.0-win32-x64.zip",
+      "sha256": "d9dfc366a8a6b6771fcb05fe582d4b1bfe567f7a1ed7a72194dcf5b8202e9db3",
+      "sizeBytes": 63148693,
+      "entry": "mongosh-2.12.0-win32-x64/bin/mongosh.exe",
+      "versionSource": {
+        "kind": "github",
+        "entryTemplate": "mongosh-{version}-win32-x64/bin/mongosh.exe",
+        "versionFilter": "^\\d+\\.\\d+\\.\\d+$",
+        "includePrerelease": false,
+        "repo": "mongodb-js/mongosh",
+        "tagPrefix": "v",
+        "assetMatch": "^mongosh-[\\d.]+-win32-x64\\.zip$"
+      }
+    },
+    {
+      "id": "mongodb-database-tools",
+      "version": "100.19.0",
+      "category": "tool",
+      "displayName": "MongoDB Database Tools",
+      "description": "MongoDB 官方备份、恢复、导入导出及监控命令；包含 mongodump、mongorestore 等 8 个工具",
+      "homepage": "https://www.mongodb.com/docs/database-tools/",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-windows-x86_64-100.19.0.zip",
+      "sha256": "e3b9f3077374fc2bc4318f86ebf56268bac0f97f52383dc622b229bad5ba084a",
+      "sizeBytes": 43007592,
+      "entry": "mongodb-database-tools-windows-x86_64-100.19.0/bin/mongodump.exe",
+      "versionSource": {
+        "kind": "mongodb-tools",
+        "entryTemplate": "mongodb-database-tools-windows-x86_64-{version}/bin/mongodump.exe",
+        "versionFilter": "^\\d+\\.\\d+\\.\\d+$",
+        "includePrerelease": false
+      }
+    },
     {
       "id": "nats",
       "version": "2.15.0",

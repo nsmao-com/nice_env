@@ -222,6 +222,7 @@ struct RedisClient(std::io::BufReader<std::net::TcpStream>);
 enum RedisReply {
     Simple(String),
     Bulk(String),
+    Array(Vec<RedisReply>),
 }
 
 impl RedisClient {
@@ -273,19 +274,34 @@ impl RedisClient {
     }
 
     fn command(&mut self, args: &[&str]) -> crate::error::Result<RedisReply> {
-        use crate::error::AppError;
-        use std::io::{BufRead, Read, Write};
+        use std::io::Write;
         self.0.get_mut().write_all(resp_command(args).as_bytes())?;
+        self.reply(
+            args.first().copied().unwrap_or_default(),
+            0,
+            &mut (1024 * 1024),
+        )
+    }
+
+    fn reply(
+        &mut self,
+        command: &str,
+        depth: usize,
+        remaining: &mut usize,
+    ) -> crate::error::Result<RedisReply> {
+        use crate::error::AppError;
+        use std::io::{BufRead, Read};
         let mut header = Vec::new();
         (&mut self.0).take(1025).read_until(b'\n', &mut header)?;
         let invalid = || AppError::new("REDIS_PROTOCOL_ERROR", "Redis 响应格式无效，操作未完成");
         if header.len() > 1024 || !header.ends_with(b"\r\n") {
             return Err(invalid());
         }
+        *remaining = remaining.checked_sub(header.len()).ok_or_else(invalid)?;
         let header = std::str::from_utf8(&header[..header.len() - 2]).map_err(|_| invalid())?;
         if let Some(error) = header.strip_prefix('-') {
             // 不回显服务端错误正文，避免 AUTH 错误意外包含用户输入的凭据。
-            return Err(if args.first() == Some(&"AUTH") {
+            return Err(if command == "AUTH" {
                 AppError::new(
                     "REDIS_AUTH_FAILED",
                     "Redis 认证失败，请检查用户名、密码或选择无认证连接",
@@ -296,25 +312,42 @@ impl RedisClient {
                         "REDIS_AUTH_REQUIRED",
                         "Redis 需要认证，请设置连接认证后重试",
                     ),
-                    "NOPERM" => AppError::new(
+                    "NOPERM" if command == "INFO" => AppError::new(
                         "REDIS_INFO_DENIED",
                         "当前 Redis 账号没有 INFO 权限，无法读取统计数据",
                     ),
-                    _ => AppError::new(
+                    "NOPERM" => AppError::new("REDIS_COMMAND_DENIED", "当前 Redis 账号没有执行快照操作所需的权限")
+                        .with_hint("请检查 INFO、TIME、BGSAVE 权限或在连接认证中选择合适账号"),
+                    _ if command == "INFO" => AppError::new(
                         "REDIS_INFO_FAILED",
                         "Redis 拒绝请求，请检查服务日志与账号权限",
                     ),
+                    _ => AppError::new("REDIS_COMMAND_FAILED", "Redis 拒绝快照请求")
+                        .with_hint("请检查持久化状态、磁盘空间、目录权限和服务日志；没有改用同步保存或自动重试"),
                 }
             });
         }
         if let Some(value) = header.strip_prefix('+') {
             return Ok(RedisReply::Simple(value.to_string()));
         }
+        if let Some(length) = header.strip_prefix('*') {
+            let length: usize = length
+                .parse()
+                .ok()
+                .filter(|n| *n <= 16 && depth == 0)
+                .ok_or_else(invalid)?;
+            let mut values = Vec::with_capacity(length);
+            for _ in 0..length {
+                values.push(self.reply(command, depth + 1, remaining)?);
+            }
+            return Ok(RedisReply::Array(values));
+        }
         let length: usize = header
             .strip_prefix('$')
             .and_then(|v| v.parse().ok())
             .filter(|n| *n > 0 && *n <= 1024 * 1024)
             .ok_or_else(invalid)?;
+        *remaining = remaining.checked_sub(length + 2).ok_or_else(invalid)?;
         let mut payload = vec![0; length + 2];
         self.0.read_exact(&mut payload).map_err(|_| invalid())?;
         if &payload[length..] != b"\r\n" {
@@ -325,6 +358,204 @@ impl RedisClient {
                 .map_err(|_| invalid())?
                 .to_string(),
         ))
+    }
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisPersistence {
+    pub version: String,
+    pub run_id: String,
+    pub loading: bool,
+    pub saving: bool,
+    pub changes_since_save: u64,
+    pub last_save_time: u64,
+    pub last_save_status: String,
+    pub last_save_duration: Option<u64>,
+    pub aof_enabled: bool,
+    pub aof_rewriting: bool,
+    pub aof_rewrite_scheduled: Option<bool>,
+    pub aof_last_rewrite_status: Option<String>,
+    pub aof_last_write_status: Option<String>,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisSnapshotReceipt {
+    pub version: String,
+    pub run_id: String,
+    pub minimum_save_time: u64,
+}
+
+fn persistence_info(
+    info: &str,
+    version: &str,
+    expected_pids: &[u32],
+) -> crate::error::Result<RedisPersistence> {
+    use crate::error::AppError;
+    let invalid = || {
+        AppError::new(
+            "REDIS_PERSISTENCE_INVALID",
+            "Redis 持久化响应不完整，无法确认保存状态",
+        )
+    };
+    let get = |key: &str| {
+        info.lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| value.trim())
+    };
+    let number = |key: &str| {
+        get(key)
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(invalid)
+    };
+    let flag = |key: &str| match get(key) {
+        Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        _ => Err(invalid()),
+    };
+    let status = |key: &str| match get(key) {
+        Some("ok") => Ok(Some("ok".into())),
+        Some("err") => Ok(Some("err".into())),
+        None => Ok(None),
+        _ => Err(invalid()),
+    };
+    let process_id = get("process_id")
+        .and_then(|v| v.parse::<u32>().ok())
+        .ok_or_else(invalid)?;
+    if !expected_pids.contains(&process_id) {
+        return Err(AppError::new(
+            "REDIS_INSTANCE_MISMATCH",
+            "Redis 响应与托管进程不符，未执行快照操作",
+        ));
+    }
+    let run_id = get("run_id")
+        .filter(|v| v.len() == 40 && v.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(invalid)?;
+    Ok(RedisPersistence {
+        version: version.into(),
+        run_id: run_id.into(),
+        loading: flag("loading")?,
+        saving: flag("rdb_bgsave_in_progress")?,
+        changes_since_save: number("rdb_changes_since_last_save")?,
+        last_save_time: number("rdb_last_save_time")?,
+        last_save_status: status("rdb_last_bgsave_status")?.ok_or_else(invalid)?,
+        last_save_duration: match get("rdb_last_bgsave_time_sec") {
+            Some("-1") | None => None,
+            Some(value) => Some(value.parse().map_err(|_| invalid())?),
+        },
+        aof_enabled: flag("aof_enabled")?,
+        aof_rewriting: flag("aof_rewrite_in_progress")?,
+        aof_rewrite_scheduled: get("aof_rewrite_scheduled")
+            .map(|_| flag("aof_rewrite_scheduled"))
+            .transpose()?,
+        aof_last_rewrite_status: status("aof_last_bgrewrite_status")?,
+        aof_last_write_status: status("aof_last_write_status")?,
+    })
+}
+
+impl RedisClient {
+    fn persistence(
+        &mut self,
+        version: &str,
+        pids: &[u32],
+    ) -> crate::error::Result<RedisPersistence> {
+        if let RedisReply::Bulk(info) = self.command(&["INFO"])? {
+            return persistence_info(&info, version, pids);
+        }
+        Err(crate::error::AppError::new(
+            "REDIS_PROTOCOL_ERROR",
+            "Redis 未返回持久化状态",
+        ))
+    }
+
+    fn server_time(&mut self) -> crate::error::Result<u64> {
+        if let RedisReply::Array(values) = self.command(&["TIME"])? {
+            if let [RedisReply::Bulk(seconds), RedisReply::Bulk(micros)] = values.as_slice() {
+                if let (Ok(seconds), Ok(micros)) = (seconds.parse::<u64>(), micros.parse::<u32>()) {
+                    if micros < 1_000_000 {
+                        return Ok(seconds);
+                    }
+                }
+            }
+        }
+        Err(crate::error::AppError::new(
+            "REDIS_PROTOCOL_ERROR",
+            "Redis 未返回有效的服务器时间，未发送快照请求",
+        ))
+    }
+}
+
+pub(crate) fn redis_persistence(
+    port: u16,
+    credentials: &RedisCredentials,
+    pids: &[u32],
+    version: &str,
+) -> crate::error::Result<RedisPersistence> {
+    RedisClient::connect(port, credentials, Some(pids))?.persistence(version, pids)
+}
+
+/// 只提交异步保存；完成状态由同一 run_id 的 INFO 回读确认，不把 BGSAVE 接受当成已落盘。
+pub(crate) fn redis_snapshot(
+    port: u16,
+    credentials: &RedisCredentials,
+    pids: &[u32],
+    version: &str,
+) -> crate::error::Result<RedisSnapshotReceipt> {
+    use crate::error::AppError;
+    let mut client = RedisClient::connect(port, credentials, Some(pids))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let current = client.persistence(version, pids)?;
+        if current.loading
+            || current.saving
+            || current.aof_rewriting
+            || current.aof_rewrite_scheduled == Some(true)
+        {
+            return Err(AppError::new(
+                "REDIS_PERSISTENCE_BUSY",
+                "Redis 正在载入数据、生成快照或重写 AOF，请等待完成后再试",
+            ));
+        }
+        // LASTSAVE 只有秒级精度且启动时也会初始化；跨过服务器时间边界再请求，避免立即完成的小快照被误判。
+        let now = client.server_time()?;
+        if now > current.last_save_time {
+            match client.command(&["BGSAVE"]) {
+                Ok(RedisReply::Simple(message))
+                    if message == "Background saving started" || message == "OK" =>
+                {
+                    return Ok(RedisSnapshotReceipt {
+                        version: version.into(),
+                        run_id: current.run_id,
+                        minimum_save_time: now,
+                    });
+                }
+                Err(error)
+                    if matches!(
+                        error.code.as_str(),
+                        "REDIS_AUTH_REQUIRED" | "REDIS_COMMAND_DENIED" | "REDIS_COMMAND_FAILED"
+                    ) =>
+                {
+                    return Err(error)
+                }
+                _ => {
+                    return Err(AppError::new(
+                        "REDIS_SNAPSHOT_UNCONFIRMED",
+                        "快照请求的响应未确认，Redis 可能已开始保存",
+                    )
+                    .with_hint("请重新读取持久化状态并检查服务日志，不要连续重复提交"))
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(AppError::new(
+                "REDIS_SNAPSHOT_CLOCK",
+                "Redis 保存时间尚未越过确认边界，未发送快照请求",
+            )
+            .with_hint("请稍后再试；若持续出现，请检查服务器系统时间或其他客户端的频繁保存操作"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
 
@@ -453,6 +684,27 @@ mod redis_stats_tests {
             resp_command(&["SET", "k", "v"]),
             "*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n"
         );
+        for (reply, valid) in [
+            ("*2\r\n$10\r\n1790607430\r\n$6\r\n123456\r\n", true),
+            ("*2\r\n$10\r\n1790607430\r\n$7\r\n1000000\r\n", false),
+            ("*17\r\n", false), ("*1\r\n*1\r\n", false), ("*2\r\n$-1\r\n", false),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+                let mut bytes = vec![0; resp_command(&["TIME"]).len()];
+                stream.read_exact(&mut bytes).unwrap();
+                assert_eq!(bytes, resp_command(&["TIME"]).as_bytes());
+                stream.write_all(reply.as_bytes()).unwrap();
+            });
+            let result = RedisClient::connect(port, &RedisCredentials::default(), None).unwrap().server_time();
+            assert_eq!(result.is_ok(), valid);
+            if valid { assert_eq!(result.unwrap(), 1790607430); }
+            server.join().unwrap();
+        }
     }
 
     #[test]
@@ -493,6 +745,19 @@ mod redis_stats_tests {
         assert_eq!(st.keys, Some(42));
         assert_eq!(st.uptime_days, Some(12));
         assert_eq!(st.connected_clients, Some(3));
+        let info = "process_id:123\r\nrun_id:0123456789abcdef0123456789abcdef01234567\r\nloading:0\r\nrdb_bgsave_in_progress:0\r\nrdb_changes_since_last_save:12\r\nrdb_last_save_time:1790607430\r\nrdb_last_bgsave_status:ok\r\nrdb_last_bgsave_time_sec:-1\r\naof_enabled:0\r\naof_rewrite_in_progress:0\r\n";
+        let persistence = persistence_info(info, "5.0.14", &[123]).unwrap();
+        assert_eq!(persistence.last_save_duration, None);
+        assert_eq!(persistence.aof_last_write_status, None);
+        assert_eq!(persistence.changes_since_save, 12);
+        assert_eq!(persistence_info(info, "5.0.14", &[124]).unwrap_err().code, "REDIS_INSTANCE_MISMATCH");
+        for broken in [info.replace("loading:0", "loading:2"), info.replace("rdb_last_bgsave_status:ok", "rdb_last_bgsave_status:unknown"), info.replace("rdb_changes_since_last_save:12", ""), info.replace("rdb_last_bgsave_time_sec:-1", "rdb_last_bgsave_time_sec:-2")] {
+            assert_eq!(persistence_info(&broken, "5.0.14", &[123]).unwrap_err().code, "REDIS_PERSISTENCE_INVALID");
+        }
+        let failed = persistence_info(&(info.replace("rdb_last_bgsave_status:ok", "rdb_last_bgsave_status:err") + "aof_last_write_status:err\r\naof_rewrite_scheduled:1\r\n"), "5.0.14", &[123]).unwrap();
+        assert_eq!(failed.last_save_status, "err");
+        assert_eq!(failed.aof_last_write_status.as_deref(), Some("err"));
+        assert_eq!(failed.aof_rewrite_scheduled, Some(true));
     }
 
     #[test]

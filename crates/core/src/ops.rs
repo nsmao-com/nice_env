@@ -4295,6 +4295,7 @@ const client = new MongoClient(`mongodb://127.0.0.1:${process.argv[2]}`, { direc
         };
         drop(set_password("isolated-fixture-password"));
         assert_eq!(state.redis_stats().unwrap_err().code, "REDIS_AUTH_REQUIRED");
+        assert_eq!(state.redis_snapshot("5.0.14").unwrap_err().code, "REDIS_AUTH_REQUIRED");
         assert_eq!(state.stop_service("redis").unwrap_err().code, "REDIS_AUTH_REQUIRED");
         assert!(state.manager.snapshot("redis").unwrap().pids.iter().any(|pid| platform::process_alive(*pid)));
         let running_pids = state.manager.snapshot("redis").unwrap().pids;
@@ -4318,6 +4319,22 @@ const client = new MongoClient(`mongodb://127.0.0.1:${process.argv[2]}`, { direc
         assert!(state.store.get_setting(&crate::stats::RedisCredentials::key("5.0.14")).is_none());
         state.save_redis_connection("5.0.14", credentials("isolated-fixture-password")).unwrap();
         assert_eq!(state.redis_stats().unwrap().keys, Some(2));
+        let authenticated_snapshot = state.redis_snapshot("5.0.14").unwrap();
+        let wait_for_snapshot = |receipt: &crate::stats::RedisSnapshotReceipt, expected: &str| {
+            let started = std::time::Instant::now();
+            loop {
+                let persistence = state.redis_persistence("5.0.14").unwrap();
+                assert_eq!(persistence.run_id, receipt.run_id);
+                if !persistence.saving && persistence.last_save_status == expected
+                    && (expected == "err" || persistence.last_save_time >= receipt.minimum_save_time) {
+                    return persistence;
+                }
+                assert!(started.elapsed() < Duration::from_secs(20), "snapshot not confirmed: {persistence:?}");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        };
+        assert!(!wait_for_snapshot(&authenticated_snapshot, "ok").aof_enabled);
+        assert_eq!(state.redis_snapshot("7.0.0").unwrap_err().code, "REDIS_INSTANCE_CHANGED");
         assert_eq!(state.save_redis_connection("5.0.14", credentials("wrong")).unwrap_err().code, "REDIS_AUTH_FAILED");
         assert_eq!(crate::stats::RedisCredentials::load(&state.store, "5.0.14").unwrap().password, "isolated-fixture-password");
         assert!(crate::stats::RedisCredentials::load(&state.store, "7.0.0").unwrap().password.is_empty());
@@ -4369,6 +4386,46 @@ const client = new MongoClient(`mongodb://127.0.0.1:${process.argv[2]}`, { direc
         assert_eq!(state.save_redis_settings("5.0.14",&current.revision,&settings,false).unwrap_err().code,"CONFIG_CONFLICT");
         state.stop_service("redis").unwrap();state.start_service("redis").unwrap();
         assert_eq!(query("maxmemory"),"maxmemory\n67108864");assert_eq!(state.redis_stats().unwrap().keys,Some(2));
+        // 手动 RDB 快照需要在停止主实例之前回读独立文件，不能由 SHUTDOWN 的保存掩盖失败。
+        let cli = |args: &[&str]| {
+            let output = platform::command(root.join("redis-cli.exe")).args(["-p", &port.to_string(), "--raw"]).args(args).output().unwrap();
+            assert!(output.status.success());
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        let occupied_rdb = state.paths.redis_data_dir().join("occupied.rdb");
+        std::fs::create_dir(&occupied_rdb).unwrap();
+        assert_eq!(cli(&["CONFIG", "SET", "dbfilename", "occupied.rdb"]), "OK");
+        let failed_snapshot = state.redis_snapshot("5.0.14").unwrap();
+        assert_eq!(wait_for_snapshot(&failed_snapshot, "err").last_save_status, "err");
+        assert_eq!(state.redis_stats().unwrap().keys, Some(2));
+        assert_eq!(cli(&["CONFIG", "SET", "dbfilename", "dump.rdb"]), "OK");
+        let before_snapshot = state.redis_persistence("5.0.14").unwrap();
+        let manual_snapshot = state.redis_snapshot("5.0.14").unwrap();
+        assert!(manual_snapshot.minimum_save_time > before_snapshot.last_save_time);
+        let confirmed = wait_for_snapshot(&manual_snapshot, "ok");
+        assert_eq!(confirmed.changes_since_save, 0);
+        assert_ne!(manual_snapshot.run_id, authenticated_snapshot.run_id);
+        let restore_dir = temp.path().join("snapshot-reader");
+        std::fs::create_dir(&restore_dir).unwrap();
+        std::fs::copy(state.paths.redis_data_dir().join("dump.rdb"), restore_dir.join("dump.rdb")).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let reader_port = listener.local_addr().unwrap().port(); drop(listener);
+        struct SnapshotReader(std::process::Child);
+        impl Drop for SnapshotReader { fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); } }
+        let reader = platform::command(root.join("redis-server.exe"))
+            .args(["--bind", "127.0.0.1", "--port", &reader_port.to_string(), "--dir", restore_dir.to_str().unwrap(), "--save", "", "--appendonly", "no", "--databases", "32"])
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
+        let reader = SnapshotReader(reader);
+        let started = std::time::Instant::now();
+        while std::net::TcpStream::connect(("127.0.0.1", reader_port)).is_err() {
+            assert!(started.elapsed() < Duration::from_secs(10)); std::thread::sleep(Duration::from_millis(100));
+        }
+        for database in [0, 2] {
+            let output = platform::command(root.join("redis-cli.exe")).args(["-p", &reader_port.to_string(), "-n", &database.to_string(), "--raw", "GET", "isolated-fixture"]).output().unwrap();
+            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1");
+        }
+        drop(reader);
+        assert!(std::net::TcpStream::connect(("127.0.0.1", reader_port)).is_err());
         let pids = state.manager.snapshot("redis").unwrap().pids;
         state.stop_service("redis").unwrap();
         assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));

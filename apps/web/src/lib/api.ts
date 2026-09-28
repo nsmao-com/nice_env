@@ -31,6 +31,8 @@ import type {
   ProjectPlatformReport,
   RedisSettings,
   RedisSettingsView,
+  RedisPersistence,
+  RedisSnapshotReceipt,
   ConfigFileInfo,
   ConfigValidation,
   ConfigBackup,
@@ -334,6 +336,8 @@ export const redisConnection = (version: string) => safe(invoke<RedisConnectionI
 export const redisSaveConnection = (version: string, credentials: { username: string; password: string }) =>
   safe(invoke<RedisStats>("redis_save_connection", { version, credentials }));
 export const redisSettings = (version: string) => safe(invoke<RedisSettingsView>("redis_settings", { version }));
+export const redisPersistence = (version: string) => safe(invoke<RedisPersistence>("redis_persistence", { version }));
+export const redisSnapshot = (version: string) => safe(invoke<RedisSnapshotReceipt>("redis_snapshot", { version }));
 export const redisSettingsSave = (version: string, revision: string, settings: RedisSettings, acknowledgeDisable: boolean) =>
   safe(invoke<RedisSettingsView>("redis_settings_save", { version, revision, settings, acknowledgeDisable }));
 export const redisStats = () => safe(invoke<RedisStats>("redis_stats"));

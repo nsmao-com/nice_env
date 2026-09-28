@@ -969,6 +969,17 @@ export const RedisSettingsView = z.object({
 });
 export type RedisSettingsView = z.infer<typeof RedisSettingsView>;
 
+export const RedisPersistence = z.object({
+  version: z.string(), runId: z.string(), loading: z.boolean(), saving: z.boolean(),
+  changesSinceSave: z.number().int().nonnegative(), lastSaveTime: z.number().int().nonnegative(),
+  lastSaveStatus: z.enum(["ok", "err"]), lastSaveDuration: z.number().int().nonnegative().nullable(),
+  aofEnabled: z.boolean(), aofRewriting: z.boolean(), aofRewriteScheduled: z.boolean().nullable(),
+  aofLastRewriteStatus: z.enum(["ok", "err"]).nullable(), aofLastWriteStatus: z.enum(["ok", "err"]).nullable(),
+});
+export type RedisPersistence = z.infer<typeof RedisPersistence>;
+export const RedisSnapshotReceipt = z.object({ version: z.string(), runId: z.string(), minimumSaveTime: z.number().int().nonnegative() });
+export type RedisSnapshotReceipt = z.infer<typeof RedisSnapshotReceipt>;
+
 export const ProjectPlatformReport = z.object({
   project: z.string(), phpVersion: z.string(), ini: z.string(),
   source: z.enum(["lock", "installed", "manifest"]), includeDev: z.boolean(), devIncomplete: z.boolean(),

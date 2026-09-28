@@ -2724,3 +2724,26 @@ scanner 26 项与 sites 常规 33 项通过，两个依赖本机运行时的原�
 参考：https://support.servbay.com/database-management/getting-started/redis-management-and-usage
 参考：https://support.servbay.com/advanced-settings/modify-configurations/modify-redis-settings
 参考：https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/
+
+## 第一百一十八轮：Redis 实际持久化状态与可核实的手动快照（v0.2.106）
+
+对照 ServBay Redis 管理文档的持久化、手动 BGSAVE 与恢复流程，通过 fast-context 复查现有 Redis 卡片、原生 RESP、认证和备份链路。此前常用设置只编辑启动配置，无法查看运行时持久化状态或主动生成快照。本轮新增“持久化与快照”面板，继续复用 UI/UX skill、现有 React Query/Radix 控件与 Next 客户端组件规范，无新增依赖。
+
+运行中实例可查看数据载入、RDB 保存进度、保存后修改次数、最近后台保存结果/耗时，以及 AOF 实际启用、重写排队/执行、写入和重写结果。缺失的可选字段显示未报告，必要字段无效时明确拒绝，不将错误当作正常。界面解释 Redis 启动也会初始化保存时间，该时间不能独立证明已有备份。停止状态禁用入口，旧面板在实例停止或切换后显示当前读取错误。
+
+手动操作只发送异步 BGSAVE，不退回阻塞式 SAVE、不修改自动快照规则或 AOF。保存更新 Redis 当前配置指定的 RDB 文件，不创建独立备份副本，界面明确此范围。复用原生连接认证，先核对实际监听端口属于托管 PID，再核对 INFO process_id 与 run_id；凭据不发往未确认归属的监听者，错误正文不回显认证内容。生命周期 try_lock 防止请求和启动/停止交错，数据目录活动保护位于阻塞工作闭包内；只在短时请求阶段持锁，不在后台快照期间长时间阻塞其它服务操作。
+
+Redis 官方说明 BGSAVE 接受不代表落盘完成，LASTSAVE 只有秒级精度且启动时也会赋值。后端先读取同一连接的持久化信息和服务器 TIME，等待服务器时间超过上次保存秒数，再提交请求；等待有时限，无法建立确认边界时不发送 BGSAVE。载入、RDB 保存或 AOF 重写/排队期间拒绝新请求，服务端命令拒绝与请求响应不确定分别说明，均不自动重复写操作。扩展既有 RESP 读取支持受限数组，限制层数、元素数量和总字节，保留认证错误脱敏。
+
+请求回执绑定版本、run_id 和最早确认时间，前端每两秒读取状态，只有同一实例、非保存/载入中、保存结果正常且时间达到确认边界时显示成功。保存失败、实例重启、权限错误、读取失败与两分钟仍未确认均有独立反馈，不因超时停止 Redis 或伪报失败。重复点击同步防重；关闭窗口不取消 Redis 后台操作，重新打开仍可看到真实运行状态。查询使用本次请求接受之后才发起的读取判定结果，避免前次失败或在途旧读取误判重试；已核实结果不会被后续读取错误改写，新请求清除旧结果。
+
+扩展现有 Rust 验证函数，没有新增测试文件。六项原生 RESP/认证验证通过，覆盖 TIME 数组、越界微秒、嵌套/过大/无效响应、持久化字段缺失、未知结果、PID 不符、AOF 排队/错误及已有认证保护。Windows Redis 5.0.14.1 隔离原生验收显式执行通过（1 passed，58.65 秒），验证无认证拒绝、正确密码可保存、错误版本拒绝、RDB 目标被目录占用时后台保存报告失败、修复目标后成功及重启 run_id 变化。生成文件在主实例停机之前复制到另一份临时 Redis，数据库 0 和 2 的原有键均可读回，排除 SHUTDOWN 保存掩盖手动快照失败的可能。两个临时实例及端口已回收；同时保留上一轮配置重启、历史还原和原键保留验收。此结果仅代表本机 Windows 与上述 Redis 运行时，不代表新版 Redis 或其它平台实机验收。
+
+离线 Chromium 装载实际组件和现有 CSS，使用受控 API 检查十六项交互与状态，包含重复提交、旧保存时间不能成功、失败后重试不会沿用旧错误、实例重启、权限拒绝、长时间未确认、关闭后重新查看，以及确认成功后遇到读取错误。另有十项实际状态函数/schema 断言和三十八组中英文键/占位符核对，浏览器无 pageerror。1440px 中文桌面、390px 中文和 320px 英文截图已目检：桌面标签/值双列，窄屏纵向重排、正文滚动、页脚折行且主操作可见，没有横向页面溢出，虚线分隔保留左右间距。没有前端 dev 服务或正式前端 build，离线 API 交互不等同于桌面 IPC 实机验收。
+
+Web/schema TypeScript 与 Rust 全工作区 all-targets 检查通过。十一处版本文件同步至 0.2.106，Cargo.lock 只更新三个本项目 crate。精确提交二十一个任务文件，保留其它未跟踪文件和本地生成目录。上一版 v0.2.105 的 Windows、macOS Apple Silicon、macOS Intel Release 均已核对 completed/success。按项目约定新增 annotated tag v0.2.106，与 main 原子推送后核对远程指向和 release.yml 实际状态。本次没有业务数据库变更，未修改 update.sql。完整产品功能、稳定性和 UI 完善目标继续进行。
+
+参考：https://support.servbay.com/database-management/getting-started/redis-management-and-usage
+参考：https://redis.io/docs/latest/commands/bgsave/
+参考：https://redis.io/docs/latest/commands/lastsave/
+参考：https://redis.io/docs/latest/commands/time/

@@ -384,6 +384,8 @@ pub fn run() {
             redis_stats,
             redis_settings,
             redis_settings_save,
+            redis_persistence,
+            redis_snapshot,
             redis_connection,
             redis_save_connection,
             postgres_connection,
@@ -1679,6 +1681,24 @@ async fn redis_settings_save(state: State<'_, std::sync::Arc<nsb_core::CoreState
     tauri::async_runtime::spawn_blocking(move || {
         let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
         map_jh(st.save_redis_settings(&version, &revision, &settings, acknowledge_disable))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn redis_persistence(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String) -> Result<nsb_core::stats::RedisPersistence, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
+        map_jh(st.redis_persistence(&version))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn redis_snapshot(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String) -> Result<nsb_core::stats::RedisSnapshotReceipt, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
+        map_jh(st.redis_snapshot(&version))
     }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

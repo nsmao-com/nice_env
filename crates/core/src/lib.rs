@@ -880,6 +880,21 @@ impl CoreState {
         redis_settings::get(&self.paths, &self.store, version)
     }
 
+    pub fn redis_persistence(&self, version: &str) -> Result<stats::RedisPersistence> {
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后读取持久化状态"))?;
+        let service = self.running_redis(Some(version))?;
+        let port = service.port.ok_or_else(|| AppError::new("REDIS_PORT_UNKNOWN", "无法确认 Redis 实际端口"))?;
+        stats::redis_persistence(port, &stats::RedisCredentials::load(&self.store, version)?, &service.pids, version)
+    }
+
+    pub fn redis_snapshot(&self, version: &str) -> Result<stats::RedisSnapshotReceipt> {
+        let _work = BackgroundWork::begin("请求 Redis RDB 快照")?;
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "已有服务操作正在进行，请稍后重试"))?;
+        let service = self.running_redis(Some(version))?;
+        let port = service.port.ok_or_else(|| AppError::new("REDIS_PORT_UNKNOWN", "无法确认 Redis 实际端口"))?;
+        stats::redis_snapshot(port, &stats::RedisCredentials::load(&self.store, version)?, &service.pids, version)
+    }
+
     pub fn save_redis_settings(&self, version: &str, revision: &str, settings: &redis_settings::RedisSettings, acknowledge_disable: bool) -> Result<redis_settings::RedisSettingsView> {
         let _operation = self.manager.lifecycle.lock();
         redis_settings::save(&self.paths, &self.store, version, revision, settings, acknowledge_disable)

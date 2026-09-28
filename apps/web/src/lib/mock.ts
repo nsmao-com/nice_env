@@ -80,7 +80,7 @@ function mockSiteFileScope(id: string, project: boolean, exclude: boolean): Site
 }
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.105";
+const MOCK_APP_VERSION = "0.2.106";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -1068,6 +1068,7 @@ async function performServiceAction(action: "start_service" | "stop_service" | "
 }
 
 const redisSettingsPreview = new Map<string, import("@nsb/schema").RedisSettingsView>();
+const redisPersistencePreview = new Map<string, { report: import("@nsb/schema").RedisPersistence; finishAt: number; minimumSaveTime: number }>();
 
 export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   await delay(60 + Math.random() * 120);
@@ -3036,6 +3037,27 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (credentials.username || credentials.password) throw { code: "REDIS_AUTH_FAILED", message: "网页预览中的 Redis 无需认证，请选择无认证连接；真实凭据请在桌面应用中验证。" };
       mockRedisConnections.set(version, { ...credentials });
       return await mockInvoke<T>("redis_stats");
+    }
+    case "redis_persistence": {
+      const service = services.get("redis"), version = String(args!.version);
+      if (service?.state !== "running" || service.version !== version) throw { code: "REDIS_INSTANCE_CHANGED", message: "请启动所选 Redis 版本后重新读取。" };
+      const runId = `preview-${version}-${service.pids.join("-")}`;
+      let entry = redisPersistencePreview.get(version);
+      if (!entry || entry.report.runId !== runId) {
+        entry = { report: { version, runId, loading: false, saving: false, changesSinceSave: 0, lastSaveTime: Math.floor(Date.now() / 1000), lastSaveStatus: "ok", lastSaveDuration: null, aofEnabled: false, aofRewriting: false, aofRewriteScheduled: false, aofLastRewriteStatus: "ok", aofLastWriteStatus: null }, finishAt: 0, minimumSaveTime: 0 };
+        redisPersistencePreview.set(version, entry);
+      }
+      if (entry.report.saving && Date.now() >= entry.finishAt) Object.assign(entry.report, { saving: false, lastSaveTime: entry.minimumSaveTime, lastSaveStatus: "ok", lastSaveDuration: 1, changesSinceSave: 0 });
+      return structuredClone(entry.report) as T;
+    }
+    case "redis_snapshot": {
+      const version = String(args!.version);
+      await mockInvoke("redis_persistence", { version });
+      const entry = redisPersistencePreview.get(version)!;
+      if (entry.report.saving) throw { code: "REDIS_PERSISTENCE_BUSY", message: "演示快照仍在生成。" };
+      entry.minimumSaveTime = Math.max(Math.floor(Date.now() / 1000), entry.report.lastSaveTime + 1);
+      entry.report.saving = true; entry.finishAt = Date.now() + 1200;
+      return { version, runId: entry.report.runId, minimumSaveTime: entry.minimumSaveTime } as T;
     }
     case "redis_settings": {
       const version = String(args!.version);

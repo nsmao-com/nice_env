@@ -66,7 +66,7 @@ import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSet
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.91";
+const MOCK_APP_VERSION = "0.2.92";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -359,6 +359,7 @@ function seedCertAutos() {
 }
 const databases = new Map<string, DatabaseInfo>();
 const dbUsers = new Map<string, DbUserInfo>();
+const mockUserPasswordRevisions = new Map<string, string>();
 const proxyProfiles = new Map<string, ProxyProfile>();
 const cronJobs = new Map<string, { id: string; name: string; command: string; intervalMin: number; enabled: boolean; createdAt: number; lastRunAt: number | null; lastExit: string | null; lastOutput: string | null }>();
 const mockRedisConnections = new Map<string, { username: string; password: string }>();
@@ -2374,6 +2375,29 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       state.databases.delete(name); return true as T;
     }
     case "db_users": return structuredClone([...mysqlPreview(args?.version as string | undefined, true, args?.engine as DatabaseEngine | undefined).state.users.values()]) as T;
+    case "db_user_password_info":
+    case "db_user_password_save": {
+      const engine = args!.engine as DatabaseEngine; const version = args!.version as string;
+      const input = args!.input as import("./api").DatabaseUserPasswordInput | undefined;
+      const username = (input?.username ?? args!.username) as string; const host = (input?.host ?? args!.host) as string;
+      const { state } = mysqlPreview(version, true, engine);
+      const account = [...state.users.values()].find((user) => user.username === username && user.host === host);
+      if (!account) throw { code: "DB_USER_MISSING", message: "所选账号已不存在，请刷新列表" };
+      const key = JSON.stringify([engine, version, username, host]);
+      if (!mockUserPasswordRevisions.has(key)) mockUserPasswordRevisions.set(key, uid());
+      const protectedAccount = !username || !host || username.toLowerCase() === "root" || username.toLowerCase().startsWith("mysql.") || username.toLowerCase() === "mariadb.sys";
+      if (cmd === "db_user_password_save" && input) {
+        if (protectedAccount) throw { code: "SYSTEM_ACCOUNT", message: "系统账号受保护；root 密码请使用专用入口" };
+        if (!input.password || new TextEncoder().encode(input.password).length > 4096 || /[\x00-\x1f\x7f-\x9f]/.test(input.password)) throw { code: "BAD_PASSWORD", message: "密码不能为空、超过 4096 字节或包含控制字符" };
+        if (input.revision !== mockUserPasswordRevisions.get(key)) throw { code: "DB_PASSWORD_CHANGED", message: "账号认证信息已变化，请重新读取" };
+        await delay(700);
+        if (input.revision !== mockUserPasswordRevisions.get(key) || ![...state.users.values()].includes(account)) throw { code: "DB_PASSWORD_CHANGED", message: "账号已变化，请重新读取" };
+        mockUserPasswordRevisions.set(key, uid());
+      }
+      const plugin = engine === "mariadb" ? "mysql_native_password" : "caching_sha2_password";
+      const info: import("./api").DatabaseUserPasswordInfo = { username, host, plugins: [plugin], targetPlugin: plugin, protected: protectedAccount, supported: !protectedAccount, otherAuthentication: false, revision: mockUserPasswordRevisions.get(key)! };
+      return info as T;
+    }
     case "db_grants": return structuredClone(mysqlGrantsPreview(args!.engine as DatabaseEngine, args!.version as string, args!.username as string, args!.host as string)) as T;
     case "db_grants_save": {
       const input = args!.input as import("./api").DatabaseGrantInput;

@@ -2813,6 +2813,87 @@ mod validate_tests {
         assert_eq!(toolbox::adminer_start_on_port(&state.store, &state.paths, &state.installer, &state.manager, 0).unwrap_err().code, "ADMINER_ENTRY_MISSING");
     }
 
+    fn validate_native_database_passwords(state: &crate::CoreState, engine: crate::dbadmin::DatabaseEngine, version: &str, client: &crate::dbadmin::MySqlClient, username: &str, original_password: &str) {
+        use crate::dbadmin::{self, DatabaseUserPasswordInput};
+        let read = |name: &str, host: &str| client.user_password_info(name, host).unwrap();
+        let save = |info: &dbadmin::DatabaseUserPasswordInfo, password: &str| dbadmin::update_database_user_password(state, engine, version,
+            &DatabaseUserPasswordInput { username: info.username.clone(), host: info.host.clone(), password: password.into(), revision: info.revision.clone() });
+        let query = |name: &str, password: &str| dbadmin::query_client(&client.exe, "127.0.0.1", client.port, name, password, "SELECT CURRENT_USER();");
+        let before = read(username, "localhost");
+        assert!(before.supported && !before.protected && !before.other_authentication);
+        let original_grants = serde_json::to_string(&client.grants(username, "localhost").unwrap()).unwrap();
+        let alternate = format!("'{}'@'127.0.0.2'", username.replace('\'', "''"));
+        client.run(&format!("CREATE USER {alternate};")).unwrap();
+        let untouched = read(username, "127.0.0.2").revision;
+        assert_eq!(save(&before, "").unwrap_err().code, "BAD_PASSWORD");
+        assert_eq!(save(&before, &"界".repeat(1366)).unwrap_err().code, "BAD_PASSWORD");
+        assert_eq!(save(&read("root", "localhost"), "never-change-root").unwrap_err().code, "SYSTEM_ACCOUNT");
+        let secret = "new'quote \\semi; 中文密码 92";
+        client.run("SET GLOBAL log_output='TABLE'; SET GLOBAL general_log=ON;").unwrap();
+        let saved = save(&before, secret).unwrap();
+        client.run("SET GLOBAL general_log=OFF;").unwrap();
+        assert_eq!(client.run(&format!("SELECT COUNT(*) FROM mysql.general_log WHERE HEX(argument) LIKE '%{}%';", hex::encode_upper(secret))).unwrap().trim(), "0");
+        assert_eq!(saved.plugins, before.plugins);
+        assert_ne!(saved.revision, before.revision);
+        assert!(query(username, secret).unwrap().contains(username));
+        assert!(query(username, original_password).is_err());
+        assert_eq!(read(username, "127.0.0.2").revision, untouched);
+        assert_eq!(serde_json::to_string(&client.grants(username, "localhost").unwrap()).unwrap(), original_grants);
+        assert_eq!(save(&before, "outdated").unwrap_err().code, "DB_PASSWORD_CHANGED");
+        assert!(!serde_json::to_string(&saved).unwrap().contains(secret));
+        let account = format!("'{}'@'localhost'", username.replace('\'', "''"));
+        if engine == dbadmin::DatabaseEngine::Mysql {
+            // MySQL 保留的备用密码不会被 SET PASSWORD 撤销，界面必须如实提示。
+            client.run(&format!("SET PASSWORD FOR {account} = 'new-primary-before-ui' RETAIN CURRENT PASSWORD;")).unwrap();
+            let dual = read(username, "localhost");
+            assert!(dual.other_authentication);
+            save(&dual, "ui-primary-after-retain").unwrap();
+            assert!(query(username, "ui-primary-after-retain").is_ok());
+            assert!(query(username, secret).is_ok());
+            assert!(query(username, "new-primary-before-ui").is_err());
+            client.run(&format!("ALTER USER {account} DISCARD OLD PASSWORD;")).unwrap();
+            assert!(query(username, secret).is_err());
+        } else {
+            client.run("INSTALL SONAME 'auth_ed25519'; INSTALL SONAME 'auth_named_pipe';").unwrap();
+            client.run("CREATE USER 'password_ed'@'localhost' IDENTIFIED VIA ed25519 USING PASSWORD('ed-initial');").unwrap();
+            let ed = read("password_ed", "localhost");
+            assert_eq!(ed.target_plugin, "ed25519"); assert!(ed.supported);
+            save(&ed, "ed-updated-password").unwrap();
+            assert!(query("password_ed", "ed-updated-password").is_ok());
+            assert!(query("password_ed", "ed-initial").is_err());
+            // auth_or 的 {} 必须还原成主插件；只改变第一个支持密码的认证方式。
+            client.run("ALTER USER 'password_ed'@'localhost' IDENTIFIED VIA ed25519 USING PASSWORD('ed-original') OR mysql_native_password USING PASSWORD('native-alternative');").unwrap();
+            let multi = read("password_ed", "localhost");
+            assert_eq!(multi.plugins, ["ed25519", "mysql_native_password"]); assert!(multi.other_authentication);
+            let saved = save(&multi, "ed-new-primary").unwrap();
+            assert_eq!(saved.plugins, multi.plugins);
+            assert!(query("password_ed", "ed-new-primary").is_ok());
+            assert!(query("password_ed", "native-alternative").is_ok());
+            assert!(query("password_ed", "ed-original").is_err());
+            client.run("CREATE USER 'password_pipe'@'localhost' IDENTIFIED VIA named_pipe;").unwrap();
+            let pipe = read("password_pipe", "localhost"); assert!(!pipe.supported && !pipe.protected);
+            assert_eq!(save(&pipe, "do-not-switch-auth").unwrap_err().code, "DB_PASSWORD_UNSUPPORTED");
+            client.run("ALTER USER 'password_pipe'@'localhost' IDENTIFIED VIA named_pipe OR mysql_native_password USING PASSWORD('pipe-alternative');").unwrap();
+            let mixed = read("password_pipe", "localhost");
+            assert_eq!(mixed.plugins, ["named_pipe", "mysql_native_password"]); assert!(!mixed.supported && mixed.other_authentication);
+            assert_eq!(save(&mixed, "do-not-change-later-password").unwrap_err().code, "DB_PASSWORD_UNSUPPORTED");
+            assert_eq!(read("password_pipe", "localhost").revision, mixed.revision);
+            assert!(query("password_pipe", "pipe-alternative").is_ok());
+            assert!(query("password_pipe", "do-not-change-later-password").is_err());
+            // 密码插件在前的组合可以改密，后面的外部认证必须完整保留。
+            client.run("ALTER USER 'password_pipe'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('native-first') OR named_pipe;").unwrap();
+            let native_first = read("password_pipe", "localhost");
+            assert_eq!(native_first.plugins, ["mysql_native_password", "named_pipe"]); assert!(native_first.supported);
+            let saved = save(&native_first, "native-first-updated").unwrap();
+            assert_eq!(saved.plugins, native_first.plugins);
+            assert!(query("password_pipe", "native-first-updated").is_ok());
+            assert!(query("password_pipe", "native-first").is_err());
+            client.run("DROP USER 'password_ed'@'localhost', 'password_pipe'@'localhost'; UNINSTALL SONAME 'auth_ed25519'; UNINSTALL SONAME 'auth_named_pipe';").unwrap();
+        }
+        client.run(&format!("DROP USER {alternate};")).unwrap();
+        assert_eq!(client.user_password_info(username, "127.0.0.2").unwrap_err().code, "DB_USER_MISSING");
+    }
+
     fn validate_native_database_grants(state: &crate::CoreState, engine: crate::dbadmin::DatabaseEngine, version: &str, client: &crate::dbadmin::MySqlClient, username: &str, password: &str, database: &str) {
         use crate::dbadmin::{self, DatabaseGrantInput};
         let collision = database.replace('_', "X");
@@ -2908,6 +2989,7 @@ mod validate_tests {
         let input = DatabaseGrantInput { username: special_user.into(), host: "localhost".into(), target: special_db.into(), new_database: true, privileges: vec!["SELECT".into()], grant_option: false, revision: current.revision };
         dbadmin::update_database_grants(state, engine, version, &input).unwrap();
         assert_eq!(dbadmin::query_client(&client.exe, "127.0.0.1", client.port, special_user, password, "SELECT id FROM `grant``quote`.sample;").unwrap().trim(), "9");
+        validate_native_database_passwords(state, engine, version, client, special_user, password);
         client.run("SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'; DROP USER 'grant''quote'@'localhost'; DROP DATABASE `grant``quote`;").unwrap();
         client.drop_database(&collision).unwrap(); client.drop_database("grant_other").unwrap();
     }

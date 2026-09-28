@@ -328,6 +328,44 @@ pub struct DatabaseGrantInput {
     pub grant_option: bool,
     pub revision: String,
 }
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseUserPasswordInfo {
+    pub username: String,
+    pub host: String,
+    pub plugins: Vec<String>,
+    pub target_plugin: String,
+    pub supported: bool,
+    pub protected: bool,
+    pub other_authentication: bool,
+    pub revision: String,
+}
+
+// 不派生 Debug/Serialize，避免密码被当作普通请求内容输出。
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseUserPasswordInput {
+    pub username: String,
+    pub host: String,
+    pub password: String,
+    pub revision: String,
+}
+
+pub fn update_database_user_password(state: &crate::CoreState, engine: DatabaseEngine, version: &str, input: &DatabaseUserPasswordInput) -> Result<DatabaseUserPasswordInfo> {
+    let _work = crate::BackgroundWork::begin("修改数据库账号密码")?;
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    if version.is_empty() || version.len() > 64 || !version.bytes().all(|c| c.is_ascii_alphanumeric() || b".-_".contains(&c)) {
+        return Err(AppError::new("BAD_VERSION", "数据库版本无效"));
+    }
+    let path = crate::paths::checked_data_path(&state.paths.base, &format!("etc/.db-user-password-{}-{version}.lock", engine.id()))?;
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(path)?;
+    lock.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => AppError::new("DB_PASSWORD_BUSY", "此实例正在修改账号密码，请稍后再试"),
+        std::fs::TryLockError::Error(error) => AppError::io("锁定账号密码操作", error),
+    })?;
+    state.with_database(engine, Some(version), |_, client| client.set_user_password(input))
+}
+
 fn account_filter(username: &str, host: &str) -> Result<String> {
     if username.len() > 384 || host.len() > 1020 || username.chars().chain(host.chars()).any(char::is_control) {
         return Err(AppError::new("BAD_ACCOUNT", "账号名称或来源主机无效"));
@@ -556,6 +594,87 @@ impl MySqlClient {
             let (user, host) = line.split_once('\t').ok_or_else(|| AppError::new("MYSQL_RESPONSE", "账号列表响应不完整"))?;
             Ok(DbUserInfo { username: decode_hex_field(user)?, host: decode_hex_field(host)?, grants: None })
         }).collect()
+    }
+
+    pub fn user_password_info(&self, username: &str, host: &str) -> Result<DatabaseUserPasswordInfo> {
+        use sha2::{Digest, Sha256};
+        let filter = account_filter(username, host)?;
+        let server = self.run("SELECT @@version;")?;
+        let mariadb = server.to_ascii_lowercase().contains("mariadb");
+        let columns = self.run("SHOW COLUMNS FROM mysql.user;")?.lines().filter_map(|line| line.split('\t').next()).map(str::to_string).collect::<Vec<_>>();
+        if !columns.iter().any(|column| column == "plugin") || !columns.iter().any(|column| column == "authentication_string") {
+            return Err(AppError::new("DB_PASSWORD_UNSUPPORTED", "此服务器认证结构不支持账号密码编辑"));
+        }
+        let attributes = if columns.iter().any(|column| column == "User_attributes") { "COALESCE(User_attributes,'{}')" } else { "'{}'" };
+        // 原始认证串不离开数据库；后端仅接收服务器内计算的指纹，不将此指纹返回界面。
+        let rows = self.run(&format!("SELECT HEX(plugin), SHA2(CONCAT(COALESCE(authentication_string,''), {attributes}),256), JSON_CONTAINS_PATH({attributes}, 'one', '$.additional_password', '$.multi_factor_authentication') FROM mysql.user WHERE {filter};"))?;
+        let fields = rows.trim_end().split('\t').collect::<Vec<_>>();
+        if rows.trim().is_empty() { return Err(AppError::new("DB_USER_MISSING", "所选账号已不存在，请刷新列表")); }
+        if fields.len() != 3 { return Err(AppError::new("MYSQL_RESPONSE", "账号认证响应不完整")); }
+        let primary = decode_hex_field(fields[0])?;
+        let mut fingerprint = fields[1].to_string();
+        let mut plugins = vec![primary.clone()];
+        let mut other_authentication = fields[2] == "1";
+        if mariadb && self.run("SHOW TABLES FROM mysql LIKE 'global_priv';")?.trim() == "global_priv" {
+            let row = self.run(&format!("SELECT COALESCE(JSON_LENGTH(Priv,'$.auth_or'),0), SHA2(Priv,256) FROM mysql.global_priv WHERE {filter};"))?;
+            let (count, digest) = row.trim_end().split_once('\t').ok_or_else(|| AppError::new("DB_USER_MISSING", "账号已变化，请重新读取"))?;
+            let count = count.parse::<usize>().ok().filter(|count| *count <= 256).ok_or_else(|| AppError::new("MYSQL_RESPONSE", "账号认证方式数量无法识别"))?;
+            if count > 0 {
+                // 通配 JSON 路径会跳过 {} 占位项；逐项读取 plugin，保留主插件占位与认证顺序。
+                let values = (0..count).map(|index| format!("JSON_EXTRACT(Priv,'$.auth_or[{index}].plugin')")).collect::<Vec<_>>().join(",");
+                let encoded = self.run(&format!("SELECT HEX(JSON_ARRAY({values})) FROM mysql.global_priv WHERE {filter};"))?;
+                let alternatives: Vec<Option<String>> = serde_json::from_str(&decode_hex_field(encoded.trim())?)
+                    .map_err(|error| AppError::new("MYSQL_RESPONSE", "无法读取账号认证方式").with_detail(error.to_string()))?;
+                plugins = alternatives.into_iter().map(|plugin| plugin.unwrap_or_else(|| primary.clone())).collect();
+            }
+            fingerprint = digest.to_string();
+            other_authentication = plugins.len() > 1;
+        }
+        // MariaDB 11.4 的外部插件在前时，SET PASSWORD 可能返回错误但仍改动后续密码。
+        // 仅支持认证链首项就是已知密码插件的组合，不跳过外部或未知插件。
+        let target_plugin = if mariadb { plugins.first().cloned().unwrap_or_default() } else { primary };
+        let known = if mariadb { ["mysql_native_password", "mysql_old_password", "ed25519"].contains(&target_plugin.as_str()) }
+            else { ["mysql_native_password", "caching_sha2_password", "sha256_password"].contains(&target_plugin.as_str()) };
+        let protected = protected_account(username, host);
+        let mut info = DatabaseUserPasswordInfo { username: username.into(), host: host.into(), plugins, target_plugin, supported: known && !protected,
+            protected, other_authentication, revision: String::new() };
+        // 进程随机密钥使返回 token 不能用于离线猜测密码；应用重启后旧表单自然失效。
+        static SNAPSHOT_KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+        let key = SNAPSHOT_KEY.get_or_init(rand::random);
+        let mut digest = Sha256::new(); digest.update(key); digest.update(fingerprint.as_bytes()); digest.update(server.as_bytes());
+        digest.update(serde_json::to_vec(&info).map_err(|error| AppError::internal("记录认证版本", error.to_string()))?);
+        info.revision = hex::encode(digest.finalize());
+        Ok(info)
+    }
+
+    fn set_user_password(&self, input: &DatabaseUserPasswordInput) -> Result<DatabaseUserPasswordInfo> {
+        if input.password.is_empty() || input.password.len() > 4096 || input.password.chars().any(char::is_control) {
+            return Err(AppError::new("BAD_PASSWORD", "密码须为 1–4096 字节，不能包含换行或控制字符"));
+        }
+        let before = self.user_password_info(&input.username, &input.host)?;
+        if before.protected { return Err(AppError::new("SYSTEM_ACCOUNT", "系统账号受保护；root 密码请使用专用管理入口")); }
+        if !before.supported { return Err(AppError::new("DB_PASSWORD_UNSUPPORTED", "此认证方式或组合暂不支持在此改密，请在对应认证系统或数据库客户端中管理")); }
+        if before.revision != input.revision { return Err(AppError::new("DB_PASSWORD_CHANGED", "账号认证信息已变化，请重新读取后再保存")); }
+        let escaped = input.password.replace('\'', "''");
+        let account = format!("'{}'@'{}'", input.username.replace('\'', "''"), input.host.replace('\'', "''"));
+        let mariadb = self.run("SELECT @@version;")?.to_ascii_lowercase().contains("mariadb");
+        let mode = if mariadb { format!("SET SESSION old_passwords={};", if before.target_plugin == "mysql_old_password" { 1 } else { 0 }) } else { String::new() };
+        let value = if mariadb { format!("PASSWORD('{escaped}')") } else { format!("'{escaped}'") };
+        // SET PASSWORD 保留认证插件、其它认证方式及授权；不能用 IDENTIFIED BY 切到服务器默认插件。
+        // 禁止当前管理会话记录通用日志，密码经临时 stdin 传递，不进入 argv、环境或本机设置。
+        self.run(&format!("SET SESSION sql_log_off=ON; SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'; {mode} SET PASSWORD FOR {account} = {value};"))
+            .map_err(|mut error| {
+                error.message = "未能确认账号密码已修改".into();
+                error.hint = Some("密码策略可能拒绝此次修改；连接中断时修改也可能已经生效。请重新读取后确认，勿反复盲目重试。".into());
+                if let Some(detail) = error.detail.as_mut() { *detail = detail.replace(&input.password, "***").replace(&escaped, "***"); }
+                error
+            })?;
+        let after = self.user_password_info(&input.username, &input.host)
+            .map_err(|error| error.with_hint("密码语句已执行，但未能读取最新认证状态；请确认当前密码和实例状态后再操作。"))?;
+        if after.plugins != before.plugins || after.protected != before.protected {
+            return Err(AppError::new("DB_PASSWORD_CHANGED", "密码操作后账号认证配置发生变化，请重新读取并确认当前登录方式"));
+        }
+        Ok(after)
     }
 
     fn partial_revokes(&self) -> Result<bool> {

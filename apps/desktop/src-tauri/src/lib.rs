@@ -359,6 +359,8 @@ pub fn run() {
             db_grants,
             db_grants_save,
             db_create_user,
+            db_user_password_info,
+            db_user_password_save,
             db_reset_root_password,
             db_root_password,
             redis_stats,
@@ -1986,6 +1988,17 @@ async fn db_create_user(
             .map(|_| true)
     })
     .await
+}
+
+#[tauri::command]
+async fn db_user_password_info(state: State<'_, std::sync::Arc<CoreState>>, engine: nsb_core::dbadmin::DatabaseEngine, version: String, username: String, host: String) -> Result<nsb_core::dbadmin::DatabaseUserPasswordInfo, tauri::Error> {
+    run_database(&state, Some(version), Some(engine), move |_, _, client| client.user_password_info(&username, &host)).await
+}
+
+#[tauri::command]
+async fn db_user_password_save(state: State<'_, std::sync::Arc<CoreState>>, engine: nsb_core::dbadmin::DatabaseEngine, version: String, input: nsb_core::dbadmin::DatabaseUserPasswordInput) -> Result<nsb_core::dbadmin::DatabaseUserPasswordInfo, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::dbadmin::update_database_user_password(&st, engine, &version, &input))).await.map_err(|error| tauri::Error::Anyhow(anyhow::anyhow!("{error}")))?
 }
 
 #[tauri::command]

@@ -306,6 +306,10 @@ export const dbGrants = (engine: DatabaseEngine, version: string, username: stri
 export const dbGrantsSave = (engine: DatabaseEngine, version: string, input: DatabaseGrantInput) => safe(invoke<DatabaseGrants>("db_grants_save", { engine, version, input }));
 export const dbCreateUser = (username: string, password: string, database: string, version?: string, engine: DatabaseEngine = "mysql") =>
   safe(invoke<boolean>("db_create_user", { username, password, database, version, engine }));
+export interface DatabaseUserPasswordInfo { username: string; host: string; plugins: string[]; targetPlugin: string; supported: boolean; protected: boolean; otherAuthentication: boolean; revision: string }
+export interface DatabaseUserPasswordInput { username: string; host: string; password: string; revision: string }
+export const dbUserPasswordInfo = (engine: DatabaseEngine, version: string, username: string, host: string) => safe(invoke<DatabaseUserPasswordInfo>("db_user_password_info", { engine, version, username, host }));
+export const dbUserPasswordSave = (engine: DatabaseEngine, version: string, input: DatabaseUserPasswordInput) => safe(invoke<DatabaseUserPasswordInfo>("db_user_password_save", { engine, version, input }));
 export const dbResetRootPassword = (newPassword: string, version?: string, useExisting = false, engine: DatabaseEngine = "mysql") =>
   safe(invoke<boolean>("db_reset_root_password", { newPassword, version, useExisting, engine }));
 export const dbRootPassword = (version?: string, engine: DatabaseEngine = "mysql") => safe(invoke<string>("db_root_password", { version, engine }));

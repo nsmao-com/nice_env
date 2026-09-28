@@ -2476,3 +2476,25 @@ Windows 原生 MySQL 8.0.46、MariaDB 11.4.8 验证尚未到期不执行、到�
 本次没有用户业务数据库结构或数据变更，未修改 update.sql；仅复制已存在 PostgreSQL 16.6 的程序文件用于隔离临时实例，未连接原环境的业务数据库。未启动前端 dev，未执行本地前端 build。已确认 v0.2.90 Release completed/success；本轮新增 annotated tag v0.2.91，与 main 原子推送并核对实际 workflow 状态。Linux/macOS 和其它 PostgreSQL 版本尚未本轮实机验证；账号成员关系、对象授权、密码过期策略与活跃会话管理仍需后续补齐，整体目标保持进行。
 
 参考：https://support.servbay.com/database-management/getting-started/postgresql-management-and-usage 、https://www.postgresql.org/docs/current/role-attributes.html 、https://www.postgresql.org/docs/current/sql-createrole.html
+
+## 第一百零六轮：MySQL / MariaDB 业务账号改密与认证方式保护（v0.2.92）
+
+参考 ServBay 的 MySQL 业务账号管理流程，通过 fast-context 追踪数据库账号列表、原生客户端、实例身份核对与 Tauri 命令。原有界面支持创建账号及 root 密码管理，但不能修改普通业务账号密码。本轮按选定实例、用户名和来源主机提供独立改密入口，同名账号的其它来源不受影响，root、匿名及系统账号沿用保护规则。没有新增运行依赖。
+
+新增认证信息读取与保存命令。认证原文不离开数据库，服务器内部计算认证指纹，再由后端结合进程随机密钥、服务器版本和账号元数据生成不透明 revision；前端不接收服务器原始指纹，避免用返回值直接离线猜测密码。MariaDB 按 auth_or 顺序读取每项插件，保留空对象代表主插件的占位，不能用会跳过占位的通配 JSON 路径。保存前重新读取并比较 revision，拒绝旧表单；持有引擎与版本专属的操作系统文件锁、后台任务和数据目录活动保护，并通过现有数据库生命周期锁核对实例身份。外部管理员直接执行的账号操作不受本机锁约束，读取与写入之间仍存在外部并发窗口，不承诺服务器级比较并交换。
+
+使用 SET PASSWORD 保留现有认证插件和数据库授权。MySQL 支持 mysql_native_password、caching_sha2_password、sha256_password，已有备用密码及其它认证因素保持；MariaDB 支持以 mysql_native_password、mysql_old_password 或 ed25519 开头的认证链，仅修改首个密码插件，后续认证方式保留。MariaDB 按目标插件选择 old_passwords，避免 native 与 old 插件被隐式互换。真实 MariaDB 11.4.8 验证发现 named_pipe 在前、native 在后的组合会返回 1699；源码显示外部插件错误与后续密码更新可能同时发生，因此外部或未知插件在前的组合在执行 SQL 前拒绝，界面明确说明暂不支持，不删除或替换认证方式。
+
+密码限制为 1–4096 UTF-8 字节且不含控制字符。SQL 使用临时 stdin，当前短管理会话设置 NO_BACKSLASH_ESCAPES 并关闭通用日志；密码不进入命令参数、环境变量或本机连接记录，保存输入不派生 Debug/Serialize。返回的客户端错误对新密码及 SQL 转义形式脱敏。执行后读回认证元数据，插件变化或读取失败时要求确认实际状态；连接中断不一律解释为修改失败，避免盲目重复提交。
+
+沿用 UI/UX skill、Next 本地 use-client 文档和项目 Dialog、Input、Button 组件。弹窗显示实例、用户名、来源主机及认证方式，提供新密码、重复确认和显示密码；多认证或备用密码明确提示旧凭据可能仍有效。说明已有连接不会强制断开，项目与连接池需要更新密码，账号锁定和其它认证规则继续生效。保存防重入、处理中禁用关闭及实例切换；失败保留输入，重新读取认证信息后再试；成功更新查询缓存并清空输入。分隔线位于左右内边距内，使用虚线。
+
+浏览器在既有 localhost 演示环境验证 MySQL 与 MariaDB 独立账号和来源主机、密码不一致及超出字节限制、显示隐藏、root 只读、保存中 Cancel 与 Escape 保护、关闭后输入清空和成功反馈。1360px 中文桌面、390px 中文及 320px 英文截图已目检；窄屏弹窗宽度与 scrollWidth 同为 366px/296px，正文可滚动、底部操作可见，320px 英文保存成功。演示仅验证交互，真实行为由隔离原生实例验证。只关闭本轮 QA 上下文，保留用户原有 packages/sites 页面。
+
+11 个版本文件同步到 0.2.92，Cargo.lock 仅更新三个本项目 crate。独立发布树排除用户原有 configgen.rs 的 178 additions / 9 deletions 及本地生成文件，17 个代码与版本文件逐个核对一致，独立 configgen.rs 与 HEAD 一致；加入本记录后共 18 个发布文件。修复后独立 pnpm check 与 cargo check --workspace --all-targets --locked 均通过。最终自动备份、数据库管理、备份恢复、导入、配置传输及 MySQL/MariaDB 原生回归共 29 通过、0 失败、674 filtered out，耗时 298.13 秒。验证扩展于已有 Rust 模块，未新增测试文件或 migration。
+
+Windows MySQL 8.0.46 与 MariaDB 11.4.8 原生验收覆盖含引号、反斜杠、分号和中文的新密码登录成功、旧密码拒绝、其它来源主机与授权保留、旧 revision 拒绝、系统账号保护及通用日志未包含明文新密码。MySQL 备用密码在改密后仍可用，原主密码失效；显式清除备用密码后登录被拒绝。MariaDB 单一 ed25519 和 ed25519/native 组合改密通过，备用 native 密码保留；named_pipe 单插件及 named_pipe/native 组合在写入前拒绝，后者 revision 与原密码保持；native/named_pipe 顺序改密成功且外部插件保留。
+
+本次没有用户业务数据库结构或数据变更，未修改 update.sql；原生验收仅使用隔离临时目录、端口及账号。未启动前端 dev，未执行本地前端 build。已确认 v0.2.91 Release completed/success；本轮按根 AGENTS.md 新增 annotated tag v0.2.92，与 main 原子推送并核对远程指向及实际 workflow 状态。Linux/macOS、其它引擎版本及第三方认证插件未做本轮实机验收；完整账号生命周期、密码过期策略、活动连接和认证链编辑仍需后续完善，整体目标保持进行。
+
+参考：https://support.servbay.com/database-management/getting-started/mysql-management-and-usage 、https://dev.mysql.com/doc/refman/8.0/en/set-password.html 、https://mariadb.com/docs/server/reference/sql-statements/account-management-sql-statements/set-password 、https://raw.githubusercontent.com/MariaDB/server/11.4/sql/sql_acl.cc

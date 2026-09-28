@@ -6,7 +6,7 @@ import { Database, HardDrive, KeyRound, Play, Plus, Table2, Trash2, UserRound, E
 import { useT } from "@/lib/store";
 import { fmtBytes } from "@/lib/utils";
 import { useDatabases, useDbUsers, useInvalidate, toastError, useAdminer, useServices } from "@/lib/hooks";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as api from "@/lib/api";
 import { normalizeError } from "@/lib/backend";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -57,6 +57,60 @@ export default function DatabasesPage() {
   </div>;
 }
 
+function UserPasswordDialog({ engine, version, account, targetLabel, signature, changed, onClose }: {
+  engine: DatabaseEngine; version: string; account: DbUserInfo; targetLabel: string; signature: string; changed: boolean; onClose: () => void;
+}) {
+  const t = useT();
+  const queryClient = useQueryClient();
+  const queryKey = ["db-user-password-info", signature, account.username, account.host];
+  const query = useQuery({ queryKey, queryFn: () => api.dbUserPasswordInfo(engine, version, account.username, account.host), enabled: !changed, retry: false, refetchOnWindowFocus: false });
+  const info = query.data;
+  const [password, setPassword] = React.useState("");
+  const [confirmation, setConfirmation] = React.useState("");
+  const [showPassword, setShowPassword] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState("");
+  const [needsReload, setNeedsReload] = React.useState(false);
+  const lock = React.useRef(false);
+  const valid = !!password && new TextEncoder().encode(password).length <= 4096 && !/[\x00-\x1f\x7f-\x9f]/.test(password);
+  const disabled = busy || changed || query.isFetching || query.isError || needsReload || !info?.supported;
+  const close = () => { if (!lock.current) { setPassword(""); setConfirmation(""); onClose(); } };
+  const reload = async () => { if (lock.current) return; const result = await query.refetch(); if (!result.isError) { setNeedsReload(false); setError(""); } };
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault(); if (lock.current || disabled || !info || !valid || password !== confirmation) return;
+    lock.current = true; setBusy(true); setError("");
+    try {
+      const saved = await api.dbUserPasswordSave(engine, version, { username: account.username, host: account.host, password, revision: info.revision });
+      queryClient.setQueryData(queryKey, saved); setPassword(""); setConfirmation("");
+      toast.success(t("dbPassword.saved")); onClose();
+    } catch (cause) { const parsed = normalizeError(cause); setError([parsed.message, parsed.hint, parsed.detail].filter(Boolean).join(" ")); setNeedsReload(true); }
+    finally { lock.current = false; setBusy(false); }
+  };
+  return <Dialog open onOpenChange={(open) => !open && close()}><DialogContent hideClose={busy} className="flex max-w-lg max-h-[85dvh] flex-col overflow-hidden">
+    <DialogHeader><DialogTitle className="pr-6">{t("dbPassword.title")}</DialogTitle><DialogDescription className="break-words">{targetLabel}<span className="mt-1 block break-all font-mono text-foreground">{account.username || t("dbGrants.anonymous")} @ {account.host || "—"}</span></DialogDescription></DialogHeader>
+    <form onSubmit={submit} className="flex min-h-0 flex-col gap-4"><div className="min-h-0 space-y-4 overflow-y-auto px-0.5">
+      {changed && <p role="alert" className="text-sm text-error">{t("db.pgChanged")}</p>}
+      {query.isPending && <p role="status" className="text-sm text-muted">{t("db.loading")}</p>}
+      {query.isError && <p role="alert" className="break-words text-sm text-error">{normalizeError(query.error).message}</p>}
+      {info && <>
+        <p className="text-xs leading-5 text-muted">{t("dbPassword.scope")}</p>
+        <div className="text-xs text-muted"><span>{t("dbPassword.plugins")}: </span><span className="break-all font-mono">{info.plugins.join(" / ") || "—"}</span></div>
+        {info.protected ? <p className="rounded-md bg-warn-soft p-3 text-sm text-warn">{t("dbPassword.protected")}</p> : !info.supported ? <p className="text-sm text-warn">{t("dbPassword.unsupported")}</p> : <>
+          {info.otherAuthentication && <p className="rounded-md bg-warn-soft p-3 text-xs leading-5 text-warn">{t("dbPassword.otherAuth")} <span className="break-all font-mono">{info.targetPlugin}</span></p>}
+          <div className="space-y-4 border-t border-dashed border-border pt-4">
+            <div className="space-y-1.5"><Label htmlFor="db-user-password">{t("dbPassword.newPassword")}</Label><Input id="db-user-password" type={showPassword ? "text" : "password"} value={password} disabled={disabled} maxLength={4096} autoComplete="new-password" aria-invalid={!!password && !valid} aria-describedby="db-user-password-help" onChange={(event) => setPassword(event.target.value)} /><p id="db-user-password-help" className={`text-xs ${password && !valid ? "text-error" : "text-muted"}`}>{t("pg.passwordHint")}</p></div>
+            <div className="space-y-1.5"><Label htmlFor="db-user-password-confirm">{t("dbPassword.confirmPassword")}</Label><Input id="db-user-password-confirm" type={showPassword ? "text" : "password"} value={confirmation} disabled={disabled} maxLength={4096} autoComplete="new-password" aria-invalid={!!confirmation && confirmation !== password} onChange={(event) => setConfirmation(event.target.value)} />{confirmation && confirmation !== password && <p role="alert" className="text-xs text-error">{t("dbPassword.mismatch")}</p>}</div>
+            <label className="flex items-center gap-2 text-xs text-muted"><input type="checkbox" className="h-4 w-4 accent-[var(--primary)]" checked={showPassword} disabled={busy} onChange={(event) => setShowPassword(event.target.checked)} />{t("dbPassword.show")}</label>
+          </div>
+          <p className="text-xs leading-5 text-muted">{t("dbPassword.connections")}</p>
+        </>}
+      </>}
+      {error && <p role="alert" className="break-words text-sm text-error">{error}</p>}
+      {(query.isError || needsReload) && !changed && <Button type="button" size="sm" variant="secondary" disabled={busy || query.isFetching} onClick={reload}>{t("dbPassword.reload")}</Button>}
+    </div><DialogFooter className="shrink-0 flex-col-reverse sm:flex-row"><Button type="button" variant="ghost" disabled={busy} onClick={close}>{t("common.cancel")}</Button>{!info?.protected && info?.supported && <Button type="submit" disabled={disabled || !valid || password !== confirmation}>{busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}{t("pg.save")}</Button>}</DialogFooter></form>
+  </DialogContent></Dialog>;
+}
+
 function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => void }) {
   const t = useT();
   const invalidate = useInvalidate();
@@ -82,12 +136,14 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
   const [createOpen, setCreateOpen] = React.useState(false);
   const [userOpen, setUserOpen] = React.useState(false);
   const [grantUser, setGrantUser] = React.useState<DbUserInfo | null>(null);
+  const [passwordUser, setPasswordUser] = React.useState<{ account: DbUserInfo; signature: string } | null>(null);
+  const signature = `${engine}:${version}:${service?.port}:${service?.pids.join(",")}`;
   const [rootOpen, setRootOpen] = React.useState(false);
   const [importOpen, setImportOpen] = React.useState(false);
   const [dropTarget, setDropTarget] = React.useState<string | null>(null);
   const [dropping, setDropping] = React.useState(false);
   const [dropTyped, setDropTyped] = React.useState("");
-  const locked = !!grantUser || backupLocked || createOpen || userOpen || rootOpen || importOpen || !!dropTarget;
+  const locked = !!passwordUser || !!grantUser || backupLocked || createOpen || userOpen || rootOpen || importOpen || !!dropTarget;
   React.useEffect(() => { onLockChange(locked); return () => onLockChange(false); }, [locked, onLockChange]);
 
   const systemDbs = new Set(["mysql", "sys", "information_schema", "performance_schema"]);
@@ -206,7 +262,7 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
                     <span className="break-all text-[10px] text-faint">@{u.host}</span>
                   </div>
                   {u.grants && <p className="mt-0.5 break-words text-[10.5px] text-faint">{u.grants}</p>}
-                  <Button size="sm" variant="ghost" className="mt-1" disabled={!ready || locked} onClick={() => setGrantUser(u)}>{t("dbGrants.manage")}</Button>
+                  <div className="mt-1 flex flex-wrap gap-1"><Button size="sm" variant="ghost" disabled={!ready || locked} onClick={() => setGrantUser(u)}>{t("dbGrants.manage")}</Button><Button size="sm" variant="ghost" disabled={!ready || locked} onClick={() => setPasswordUser({ account: u, signature })}><KeyRound className="h-3.5 w-3.5" />{t("dbPassword.title")}</Button></div>
                 </div>
               ))
             )}
@@ -217,6 +273,7 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
       <CreateDbDialog key={`create-db-${engine}-${version}`} version={version} engine={engine} targetLabel={targetLabel} open={createOpen} onOpenChange={setCreateOpen} onDone={() => invalidate("databases")} />
       <CreateUserDialog key={`create-user-${engine}-${version}`} version={version} engine={engine} targetLabel={targetLabel} open={userOpen} onOpenChange={setUserOpen} onDone={() => invalidate("db-users")} />
       {grantUser && <DatabaseGrantsSheet key={JSON.stringify([engine, version, grantUser.username, grantUser.host])} engine={engine} version={version} account={grantUser} targetLabel={targetLabel} ready={ready} onClose={() => setGrantUser(null)} />}
+      {passwordUser && <UserPasswordDialog engine={engine} version={version} account={passwordUser.account} targetLabel={targetLabel} signature={passwordUser.signature} changed={!running || signature !== passwordUser.signature} onClose={() => setPasswordUser(null)} />}
       <ResetRootDialog key={`root-${engine}-${version}`} version={version} engine={engine} targetLabel={targetLabel} open={rootOpen} onOpenChange={setRootOpen} />
 
       {/* 删库不可恢复：要求用户把库名完整敲一遍才允许执行 */}

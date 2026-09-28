@@ -232,6 +232,12 @@ export default function PackagesPage() {
   const [category, setCategory] = React.useState("all");
   const [uninstallTarget, setUninstallTarget] = React.useState<{ id: string; version: string; name: string } | null>(null);
   const [installTarget, setInstallTarget] = React.useState<InstallTarget | null>(null);
+
+  // 服务卡片可以把缺失依赖直接带到套件页；只在首次挂载时读取，用户随后编辑搜索框不会被 URL 覆盖。
+  React.useEffect(() => {
+    const value = new URLSearchParams(window.location.search).get("search")?.trim();
+    if (value) setQuery(value);
+  }, []);
   const openInstall = (target: InstallTarget, trigger: HTMLButtonElement | null) => {
     installOpener.current = trigger;
     setInstallTarget(target);

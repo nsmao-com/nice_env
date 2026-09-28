@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { motion } from "motion/react";
@@ -125,9 +126,19 @@ export function ServiceCard({ service, dragHandle, dragPreview = false }: { serv
         {service.missingRequires.length > 0 && (
           <div className="flex items-start gap-2 rounded-lg border border-warn/25 bg-warn-soft px-2.5 py-1.5">
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warn" strokeWidth={2} />
-            <span className="text-[11px] leading-relaxed">
+            <span className="min-w-0 text-[11px] leading-relaxed">
               {t("svc.needDeps")}
-              <span className="font-mono">{service.missingRequires.join(", ")}</span>
+              <span className="ml-1 inline-flex flex-wrap gap-x-1.5 gap-y-0.5 align-baseline">
+                {service.missingRequires.map((dependency) => (
+                  <Link
+                    key={dependency}
+                    href={`/packages?search=${encodeURIComponent(dependency)}`}
+                    className="font-mono text-warn underline decoration-dashed underline-offset-2 hover:text-foreground"
+                  >
+                    {dependency}
+                  </Link>
+                ))}
+              </span>
             </span>
           </div>
         )}

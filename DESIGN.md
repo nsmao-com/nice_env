@@ -2974,3 +2974,9 @@ MongoDB 本机认证管理补充管理员密码恢复流程，旧密码无法验
 参考：https://docs.temporal.io/cli/command-reference/server
 参考：https://docs.temporal.io/develop/run-a-development-server
 参考：https://neo4j.com/docs/browser/operations/dbms-connection/
+
+## 第一百三十二轮：服务缺失依赖直达安装（v0.2.120）
+
+服务卡片和紧凑服务列表现在会把清单中缺失的依赖显示为可点击的套件链接，点击后直接打开套件页并按依赖 ID 初始化搜索，减少用户在服务页和套件页之间手动查找的步骤。列表布局对长依赖名和窄屏做了换行处理，保留警告状态与现有启停操作；套件页只在首次挂载时读取 URL 搜索参数，用户后续编辑搜索不会被覆盖。
+
+没有新增测试文件或业务数据库变更，未修改 update.sql；发布前执行 Web/schema 类型检查和 diff 检查，不运行前端 dev 或正式 build。按约定同步版本文件，新增 annotated tag v0.2.120，并用原子推送同步 main 与 tag，保留用户已有未跟踪文件与本地产物。

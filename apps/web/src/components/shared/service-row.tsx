@@ -1,10 +1,11 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { motion } from "motion/react";
-import { RotateCw, ScrollText, Server, ShieldAlert, Stethoscope } from "lucide-react";
+import { AlertTriangle, RotateCw, ScrollText, Server, ShieldAlert, Stethoscope } from "lucide-react";
 import type { ServiceStatus } from "@nsb/schema";
 import { cn, fmtUptime } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -120,6 +121,25 @@ export function ServiceRow({ service, dragHandle, dragPreview = false }: { servi
       )}
 
       <div className="col-span-full flex flex-wrap items-center gap-2 sm:contents">
+        {service.missingRequires.length > 0 && (
+          <div className="col-span-full flex min-w-0 items-start gap-1.5 rounded-md border border-warn/25 bg-warn-soft px-2 py-1.5 text-[10.5px] leading-relaxed text-warn sm:col-span-1 sm:order-last sm:max-w-[18rem]">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" strokeWidth={2} />
+            <span className="min-w-0">
+              {t("svc.needDeps")}
+              <span className="ml-1 inline-flex flex-wrap gap-x-1.5 gap-y-0.5 align-baseline">
+                {service.missingRequires.map((dependency) => (
+                  <Link
+                    key={dependency}
+                    href={`/packages?search=${encodeURIComponent(dependency)}`}
+                    className="font-mono underline decoration-dashed underline-offset-2 hover:text-foreground"
+                  >
+                    {dependency}
+                  </Link>
+                ))}
+              </span>
+            </span>
+          </div>
+        )}
         <span className={cn("shrink-0 text-[11px]", error ? "text-error" : "text-faint")}>
           {stateLabel[service.state]}
         </span>

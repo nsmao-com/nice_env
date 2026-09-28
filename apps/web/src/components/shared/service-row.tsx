@@ -22,7 +22,7 @@ import * as api from "@/lib/api";
  * 服务列表行：一屏能看更多服务。
  * 与 ServiceCard 共用同一套启停/端口冲突处理逻辑，只是把信息压成一行。
  */
-export function ServiceRow({ service }: { service: ServiceStatus }) {
+export function ServiceRow({ service, dragHandle, dragPreview = false }: { service: ServiceStatus; dragHandle?: React.ReactNode; dragPreview?: boolean }) {
   const t = useT();
   const router = useRouter();
   const invalidate = useInvalidate();
@@ -73,12 +73,12 @@ export function ServiceRow({ service }: { service: ServiceStatus }) {
 
   return (
     <motion.div
-      layout
-      initial={{ opacity: 0, y: 4 }}
+      initial={dragPreview ? false : { opacity: 0, y: 4 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0 }}
       className={cn(
-        "group/item grid grid-cols-[7px_16px_minmax(0,1fr)] items-center gap-2 rounded-lg border px-3 py-2 transition-colors sm:flex sm:gap-3",
+        "group/item grid items-center gap-2 rounded-lg border px-3 py-2 transition-colors sm:flex sm:gap-3",
+        dragHandle ? "grid-cols-[24px_7px_16px_minmax(0,1fr)]" : "grid-cols-[7px_16px_minmax(0,1fr)]",
         error
           ? "border-error/30 bg-error-soft/40"
           : running
@@ -86,6 +86,7 @@ export function ServiceRow({ service }: { service: ServiceStatus }) {
             : "border-border/60 bg-transparent hover:bg-card-2/40"
       )}
     >
+      {dragHandle}
       <StatusLight state={service.state} size={7} />
 
       <ServiceIcon id={service.id} className="h-4 w-4" />
@@ -117,7 +118,7 @@ export function ServiceRow({ service }: { service: ServiceStatus }) {
         </span>
       )}
 
-      <div className="col-span-3 flex flex-wrap items-center gap-2 sm:contents">
+      <div className="col-span-full flex flex-wrap items-center gap-2 sm:contents">
         <span className={cn("shrink-0 text-[11px]", error ? "text-error" : "text-faint")}>
           {stateLabel[service.state]}
         </span>

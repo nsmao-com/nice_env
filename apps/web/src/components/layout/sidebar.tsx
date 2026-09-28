@@ -81,14 +81,15 @@ export function Sidebar() {
       {/* 品牌行整行可拖动窗口；菜单按钮可点击，双击最大化走 Tauri 原生脚本 */}
       <div
         className={cn(
-          "nsb-sidebar-brand flex shrink-0 items-center gap-2.5 px-3.5",
+          "nsb-sidebar-brand flex shrink-0 items-center gap-2 px-4",
+          collapsed && "justify-center px-2",
           isDesktop && isMac && !collapsed && "pl-[78px]",
           isDesktop && isMac && collapsed && "px-0"
         )}
         data-tauri-drag-region="deep"
       >
         {!(isDesktop && isMac && collapsed) && <AppMenu collapsed={collapsed} />}
-        <div className="h-full min-w-2 flex-1 self-stretch" />
+        {!collapsed && <div className="h-full min-w-2 flex-1 self-stretch" />}
       </div>
 
       <nav className="nsb-no-drag flex flex-1 flex-col gap-4 overflow-y-auto overflow-x-hidden px-2.5 py-1.5 no-scrollbar">

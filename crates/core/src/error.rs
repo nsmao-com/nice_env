@@ -109,7 +109,7 @@ impl From<platform::PlatformError> for AppError {
         if msg.contains("管理员") || msg.contains("权限") {
             AppError::new("PERMISSION_DENIED", msg.clone())
                 .with_hint(
-                    "Windows：右键应用「以管理员身份运行」；macOS：首次写入 hosts 需输入密码。\
+                    "Windows：请确认系统弹出的管理员授权；取消后请核对当前操作状态再重试，无需关闭应用。macOS：首次写入 hosts 需管理员权限。\
                      你的项目文件不受影响。",
                 )
                 .with_detail(msg)

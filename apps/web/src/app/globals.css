@@ -109,7 +109,7 @@
 
   --workspace-radius: 22px; /* 分组容器 20–26pt 档 */
   --workspace-inset: 12px;
-  --caption-height: 36px;
+  --caption-height: 52px;
   --workspace-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 16px 48px -12px rgba(0, 0, 0, 0.14);
 }
 
@@ -316,7 +316,7 @@
 
   .nsb-sidebar-brand {
     height: var(--caption-height);
-    padding-top: 0;
+    padding-block: 8px;
   }
 
   .nsb-window-controls {
@@ -393,7 +393,7 @@
 
   .nsb-shell-maximized .nsb-sidebar-brand {
     height: var(--caption-height);
-    padding-top: 0;
+    padding-block: 8px;
   }
 
   .nsb-shell-desktop {

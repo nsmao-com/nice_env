@@ -55,7 +55,7 @@ fn normalize_entries(entries: &[(String, String)]) -> Result<Vec<(String, String
 
 fn site_entries(store: &Store) -> Result<Vec<(String, String)>> {
     let entries = store.list_sites()?.into_iter().flat_map(|site| site.domains)
-        .filter(|d| !d.starts_with("*.") && d.parse::<std::net::IpAddr>().is_err())
+        .filter(|d| !d.starts_with("*.") && !d.eq_ignore_ascii_case("localhost") && d.parse::<std::net::IpAddr>().is_err())
         .map(|d| ("127.0.0.1".into(), d)).collect::<Vec<_>>();
     normalize_entries(&entries)
 }

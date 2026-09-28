@@ -39,6 +39,7 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { useDesktopWindow } from "@/components/layout/titlebar";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -106,6 +107,7 @@ export function SiteWizard({
   existingDefaults?: ExistingProjectDefaults | null;
 }) {
   const t = useT();
+  const { isDesktop, isMac } = useDesktopWindow();
   const { data: packages, refetch: refreshPackages } = usePackages();
   const [step, setStep] = React.useState(0);
   const [creating, setCreating] = React.useState(false);
@@ -749,6 +751,7 @@ export function SiteWizard({
                 <Badge variant="info" className="w-fit">
                   <ArrowRight className="h-3 w-3" /> {t("wz.createHint")}
                 </Badge>
+                {isDesktop && !isMac && <p className="text-xs leading-relaxed text-faint">{t("wz.hostsAuthorization")}</p>}
               </div>
             )}
           </motion.div>
@@ -759,7 +762,10 @@ export function SiteWizard({
         {creating && progress && (
           <div role="status" aria-live="polite" className="flex shrink-0 items-center gap-2 rounded-lg bg-card-2 p-3 text-xs text-secondary">
             <Loader2 className="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none" />
-            <span>{t(`wz.progress.${progress.stage}`)}{progress.percent !== null ? ` ${progress.percent}%` : ""}</span>
+            <div className="space-y-1">
+              <span>{t(`wz.progress.${progress.stage}`)}{progress.percent !== null ? ` ${progress.percent}%` : ""}</span>
+              {isDesktop && !isMac && progress.stage === "starting" && <p className="text-faint">{t("wz.hostsAuthorization")}</p>}
+            </div>
           </div>
         )}
         {!creating && step > 2 && existingProject && kind === "php" && (phpChecking || existingPhpProblem || !phpVersions.includes(phpVersion)) &&

@@ -14,6 +14,8 @@ export type ExistingProjectDefaults = {
 };
 
 interface UIState {
+  displayOrder: Record<"packages" | "services", string[]>;
+  setDisplayOrder: (scope: "packages" | "services", ids: string[]) => void;
   quickStackId: string;
   setQuickStackId: (id: string) => void;
   sidebarCollapsed: boolean;
@@ -57,6 +59,8 @@ export type ServiceView = "card" | "list";
 export const useUI = create<UIState>()(
   persist(
     (set, get) => ({
+      displayOrder: { packages: [], services: [] },
+      setDisplayOrder: (scope, ids) => set((s) => ({ displayOrder: { ...s.displayOrder, [scope]: [...new Set(ids)] } })),
       quickStackId: "",
       setQuickStackId: (id) => set({ quickStackId: id }),
       sidebarCollapsed: false,
@@ -88,6 +92,7 @@ export const useUI = create<UIState>()(
     {
       name: "nsb-ui",
       partialize: (s) => ({
+        displayOrder: s.displayOrder,
         quickStackId: s.quickStackId,
         sidebarCollapsed: s.sidebarCollapsed,
         lang: s.lang,

@@ -72,6 +72,8 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
         flushChrome && "nsb-shell-maximized"
       )}
     >
+      {/* 工作区上方的留白也必须参与原生窗口拖动；侧栏和窗口按钮位于其上方。 */}
+      <div className={cn("absolute inset-x-0 top-0 z-10 select-none", isMac ? "h-[var(--workspace-inset)]" : "h-[var(--caption-height)]", isMac && maximized && "hidden")} data-tauri-drag-region="deep" aria-hidden="true" />
       <Sidebar />
       <div className="nsb-workspace relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-card">
         <Topbar />

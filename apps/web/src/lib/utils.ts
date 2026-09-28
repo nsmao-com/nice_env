@@ -223,6 +223,24 @@ export function isPlatformCompatible(osList: string[] | undefined, archList: str
   return osOk && archOk;
 }
 
+/** 保留仍存在的已保存顺序，新出现的项目按原顺序追加。 */
+export function orderedDisplayIds(ids: string[], saved: string[]): string[] {
+  const current = new Set(ids);
+  return [...new Set([...saved.filter((id) => current.has(id)), ...ids])];
+}
+
+/** 筛选中排序只替换可见项目所在的位置，不移动隐藏项目。 */
+export function reorderVisibleIds(order: string[], visible: string[], active: string, over: string): string[] {
+  const from = visible.indexOf(active);
+  const to = visible.indexOf(over);
+  if (from < 0 || to < 0 || from === to) return order;
+  const moved = [...visible];
+  moved.splice(to, 0, moved.splice(from, 1)[0]);
+  const selected = new Set(visible);
+  let index = 0;
+  return order.map((id) => selected.has(id) ? moved[index++] : id);
+}
+
 /** Hostname only: URLs and ports belong in separate fields. */
 export function isSiteHostname(value: string): boolean {
   const host = value.trim().toLowerCase();

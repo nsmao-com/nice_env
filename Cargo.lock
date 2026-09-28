@@ -3280,7 +3280,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "niceservbay"
-version = "0.2.102"
+version = "0.2.103"
 dependencies = [
  "anyhow",
  "nsb-core",
@@ -3330,7 +3330,7 @@ dependencies = [
 
 [[package]]
 name = "nsb-core"
-version = "0.2.102"
+version = "0.2.103"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -4113,11 +4113,12 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "platform"
-version = "0.2.102"
+version = "0.2.103"
 dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "windows-sys 0.59.0",
 ]

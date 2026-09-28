@@ -22,7 +22,7 @@ import { fmtUptime } from "@/lib/utils";
 import * as api from "@/lib/api";
 
 /** 服务卡片：运行=极弱呼吸光，错误=脉冲红；开关即启停 */
-export function ServiceCard({ service }: { service: ServiceStatus }) {
+export function ServiceCard({ service, dragHandle, dragPreview = false }: { service: ServiceStatus; dragHandle?: React.ReactNode; dragPreview?: boolean }) {
   const t = useT();
   const router = useRouter();
   const invalidate = useInvalidate();
@@ -76,7 +76,7 @@ export function ServiceCard({ service }: { service: ServiceStatus }) {
   // 不用 layout 动画：服务状态每 2s 轮询一次，每张卡片每次都会重渲染，
   // layout 会在每次渲染时测量 DOM（强制回流），卡片一多就明显掉帧
   return (
-    <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.98 }}>
+    <motion.div initial={dragPreview ? false : { opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.98 }}>
       <Card
         className={cn(
           "group flex flex-col gap-3 p-4 transition-[box-shadow,border-color,transform] duration-200 hover:-translate-y-0.5 hover:border-border-strong hover:shadow-[var(--shadow-raised)]",
@@ -86,6 +86,7 @@ export function ServiceCard({ service }: { service: ServiceStatus }) {
       >
         <div className="flex items-start justify-between gap-3">
           <div className="flex min-w-0 items-center gap-2.5">
+            {dragHandle}
             <div
               className={cn(
                 "flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border transition-colors",

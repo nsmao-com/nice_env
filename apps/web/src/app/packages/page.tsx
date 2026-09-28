@@ -57,6 +57,7 @@ import { InstallDialog, InstallTasksPanel, type InstallTarget } from "@/componen
 import { ServiceIcon } from "@/components/shared/service-icon";
 import { ServiceDiagnostics } from "@/components/shared/service-diagnostics";
 import { ServiceWebButton } from "@/components/shared/service-web-button";
+import { SortableCollection } from "@/components/shared/sortable-collection";
 import { PageHeader } from "@/components/layout/app-shell";
 import { cmpVersionDesc, isPrerelease } from "@/lib/utils";
 
@@ -458,6 +459,7 @@ export default function PackagesPage() {
 
         <TabsContent value="all" className="mt-4">
           <PackageRows
+            allIds={groups.map((group) => group.id)}
             list={filtered}
             services={services}
             runningServices={runningServices}
@@ -493,6 +495,7 @@ export default function PackagesPage() {
                   </TabsList>
                   <TabsContent value="__all__">
                     <PackageRows
+                      allIds={groups.map((group) => group.id)}
                       list={rows}
                       services={services}
                       runningServices={runningServices}
@@ -508,6 +511,7 @@ export default function PackagesPage() {
                   {g.subs.map((s) => (
                     <TabsContent key={s.value} value={s.value}>
                       <PackageRows
+                        allIds={groups.map((group) => group.id)}
                         list={filtered.filter((x) => x.category === s.value)}
                         services={services}
                         runningServices={runningServices}
@@ -524,6 +528,7 @@ export default function PackagesPage() {
                 </Tabs>
               ) : (
                 <PackageRows
+                  allIds={groups.map((group) => group.id)}
                   list={rows}
                   services={services}
                   runningServices={runningServices}
@@ -614,6 +619,7 @@ export default function PackagesPage() {
 /* ============ 服务条：一包一行，版本下拉点选安装/切换/启停 ============ */
 function PackageRow({
   group,
+  dragHandle,
   disabled,
   statusKnown,
   services,
@@ -624,6 +630,7 @@ function PackageRow({
   onInstall,
 }: {
   group: PackageGroup;
+  dragHandle?: React.ReactNode;
   disabled: boolean;
   statusKnown: boolean;
   services: ServiceStatus[];
@@ -783,6 +790,7 @@ function PackageRow({
       <Card className="flex flex-col gap-2.5 p-3.5 transition-colors hover:border-border-strong lg:flex-row lg:items-center">
         {/* 左：图标 + 名称/描述 */}
         <div className="flex min-w-0 flex-1 items-center gap-3">
+          {dragHandle}
           <div className="relative shrink-0">
             <div
               className={cn(
@@ -915,6 +923,7 @@ function PackageRow({
 /** 包组列表（大类/小类/全部 共用的渲染块） */
 function PackageRows({
   list,
+  allIds,
   disabled,
   statusKnown,
   services,
@@ -926,6 +935,7 @@ function PackageRows({
   empty,
 }: {
   list: PackageGroup[];
+  allIds: string[];
   disabled: boolean;
   statusKnown: boolean;
   services: ServiceStatus[];
@@ -938,10 +948,11 @@ function PackageRows({
 }) {
   return (
     <>
-      <div className="flex flex-col gap-2.5">
-        {list.map((g) => (
+      <SortableCollection items={list} allIds={allIds} scope="packages" label={(g) => g.displayName} disabled={disabled} className="flex flex-col gap-2.5">
+        {(g, handle) => (
           <PackageRow
             key={g.id}
+            dragHandle={handle}
             group={g}
             disabled={disabled}
             statusKnown={statusKnown}
@@ -952,8 +963,8 @@ function PackageRows({
             onUninstall={(v, trigger) => onUninstallTarget(g, v, trigger)}
             onInstall={onInstall}
           />
-        ))}
-      </div>
+        )}
+      </SortableCollection>
       {list.length === 0 && empty}
     </>
   );

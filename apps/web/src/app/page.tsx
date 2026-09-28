@@ -37,6 +37,7 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ServiceCard } from "@/components/shared/service-card";
 import { ServiceRow } from "@/components/shared/service-row";
+import { SortableCollection } from "@/components/shared/sortable-collection";
 import { BulkActions, BulkResult } from "@/components/shared/bulk-actions";
 import { StatusLight } from "@/components/shared/status-light";
 import { CopyButton, EmptyState, SectionHeader, Sparkline, ConfirmDialog } from "@/components/shared/misc";
@@ -197,23 +198,13 @@ export default function DashboardPage() {
                 }
               />
             ) : (
-              view === "card" ? (
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                  <AnimatePresence>
-                    {services.map((s) => (
-                      <ServiceCard key={s.id} service={s} />
-                    ))}
-                  </AnimatePresence>
-                </div>
-              ) : (
-                <div className="flex flex-col gap-1.5">
-                  <AnimatePresence>
-                    {services.map((s) => (
-                      <ServiceRow key={s.id} service={s} />
-                    ))}
-                  </AnimatePresence>
-                </div>
-              )
+              <SortableCollection items={services} scope="services" grid={view === "card"}
+                label={(s) => `${s.label}${s.version ? ` ${s.version}` : ""}`}
+                className={view === "card" ? "grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3" : "flex flex-col gap-1.5"}>
+                {(service, handle, preview) => view === "card"
+                  ? <ServiceCard service={service} dragHandle={handle} dragPreview={preview} />
+                  : <ServiceRow service={service} dragHandle={handle} dragPreview={preview} />}
+              </SortableCollection>
             )}
           </section>
 

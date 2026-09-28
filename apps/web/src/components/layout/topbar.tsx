@@ -40,7 +40,7 @@ export function Topbar() {
         <Kbd className="relative">Ctrl K</Kbd>
       </button>
 
-      <div className="h-px min-w-4 flex-1" />
+      <div className="min-w-4 flex-1 self-stretch" data-tauri-drag-region="deep" />
 
       <div className="hidden items-center gap-3 md:flex">
         <MicroBar label="CPU" pct={cpu} />

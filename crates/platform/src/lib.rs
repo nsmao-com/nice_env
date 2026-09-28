@@ -611,54 +611,149 @@ pub const HOSTS_END: &str = "# END NiceEnv (managed)";
 pub const HOSTS_BEGIN_LEGACY: &str = "# BEGIN NiceServBay (managed)";
 pub const HOSTS_END_LEGACY: &str = "# END NiceServBay (managed)";
 
-pub fn hosts_path() -> std::path::PathBuf {
-    if cfg!(windows) {
-        let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
-        std::path::PathBuf::from(sysroot).join("System32\\drivers\\etc\\hosts")
-    } else {
-        std::path::PathBuf::from("/etc/hosts")
+pub fn hosts_path() -> Result<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        // 提权进程不能信任调用方可修改的 SystemRoot 环境变量。
+        let mut buffer = vec![0u16; 32768];
+        let length = unsafe { windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+        if length == 0 || length >= buffer.len() { return Err(PlatformError::Win("无法定位 Windows 系统目录，未修改 hosts".into())); }
+        use std::os::windows::ffi::OsStringExt;
+        Ok(std::path::PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length])).join("drivers\\etc\\hosts"))
     }
+    #[cfg(not(windows))]
+    { Ok(std::path::PathBuf::from("/etc/hosts")) }
 }
 
 /// 读取 hosts 全文
 pub fn read_hosts_file() -> Result<String> {
-    std::fs::read_to_string(hosts_path()).map_err(io_err)
+    std::fs::read_to_string(hosts_path()?).map_err(io_err)
 }
 
 /// 以「标记块合并」方式写入托管条目；保留块外原有内容。
-/// 无权限时返回 Err（由上层转人话提示 + 指引）。
+/// Windows 桌面进程可注册专用 helper；仅权限不足时申请 UAC，主进程不提权。
 pub fn apply_managed_hosts(entries: &[(String, String)]) -> Result<()> {
-    let path = hosts_path();
-    let original = std::fs::read_to_string(&path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::PermissionDenied {
-            PlatformError::Io(format!(
-                "无权限写入 hosts（需要管理员/ root）。请以管理员身份运行本应用，或手动把域名指向 127.0.0.1。"
-            ))
-        } else {
-            io_err(e)
-        }
-    })?;
+    validate_hosts_entries(entries)?;
+    let path = hosts_path()?;
+    let original = std::fs::read_to_string(&path).map_err(io_err)?;
     let out = merge_hosts_content(&original, entries);
+    if hosts_unchanged(&original, &out, entries) { return Ok(()); }
+    match write_hosts_snapshot(&path, &original, &out) {
+        Ok(()) => Ok(()),
+        #[cfg(windows)]
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied && HOSTS_HELPER.get().is_some() => {
+            apply_hosts_elevated(entries, &original)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Err(PlatformError::Io("写入 hosts 需要管理员权限，请通过桌面应用重试并确认系统授权。".into())),
+        Err(error) => Err(io_err(error)),
+    }
+}
 
-    // 先完整写出临时文件（写不进去就不碰 hosts），再覆盖复制回 hosts。
-    // 注意这不是原子替换：用 copy 而非 rename 是为了保留 hosts 原有的属主/ACL。
-    let tmp = path.with_extension("hosts.tmp");
-    std::fs::write(&tmp, out).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::PermissionDenied {
-            PlatformError::Io("无权限写入 hosts（需要管理员权限）".into())
-        } else {
-            io_err(e)
+fn validate_hosts_entries(entries: &[(String, String)]) -> Result<()> {
+    for (ip, domain) in entries {
+        if ip.parse::<std::net::IpAddr>().is_err() || domain.is_empty() || domain.len() > 253
+            || domain.parse::<std::net::IpAddr>().is_ok()
+            || domain.split('.').any(|part| part.is_empty() || part.len() > 63 || part.starts_with('-') || part.ends_with('-')
+                || !part.bytes().all(|ch| ch.is_ascii_alphanumeric() || ch == b'-')) {
+            return Err(PlatformError::Io("hosts 条目格式无效，未修改系统文件".into()));
         }
-    })?;
-    std::fs::copy(&tmp, &path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        if e.kind() == std::io::ErrorKind::PermissionDenied {
-            PlatformError::Io("无权限替换 hosts 文件（需要管理员权限）".into())
-        } else {
-            io_err(e)
+    }
+    Ok(())
+}
+
+fn hosts_unchanged(original: &str, out: &str, entries: &[(String, String)]) -> bool {
+    original.replace("\r\n", "\n") == out
+        || (entries.is_empty() && !original.lines().any(|line| is_hosts_begin(line.trim()) || is_hosts_end(line.trim())))
+}
+
+/// 锁定原文件后重核快照并保存恢复副本；写原文件以保留其 ACL，不替换文件身份。
+fn write_hosts_snapshot(path: &std::path::Path, expected: &str, out: &str) -> std::io::Result<()> {
+    use std::io::{Read, Seek, Write};
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(1).custom_flags(0x0020_0000); // FILE_SHARE_READ / OPEN_REPARSE_POINT
+    }
+    let mut file = options.open(path)?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if file.metadata()?.file_attributes() & 0x400 != 0 {
+            return Err(std::io::Error::other("hosts 是重解析点，未修改其指向的文件"));
         }
-    })?;
-    let _ = std::fs::remove_file(&tmp);
+    }
+    let mut current = String::new();
+    file.read_to_string(&mut current)?;
+    if current != expected { return Err(std::io::Error::other("hosts 在授权期间发生变化，请刷新后重试；未覆盖其它程序的修改")); }
+    let mut backup = tempfile::Builder::new().prefix("niceenv-hosts-").suffix(".bak").tempfile_in(path.parent().ok_or_else(|| std::io::Error::other("hosts 路径无效"))?)?;
+    backup.write_all(current.as_bytes())?;
+    backup.as_file().sync_all()?;
+    let (backup_file, backup_path) = backup.keep().map_err(|error| error.error)?;
+    drop(backup_file);
+    let mut write = |bytes: &[u8]| -> std::io::Result<()> {
+        file.rewind()?;
+        file.write_all(bytes)?;
+        file.set_len(bytes.len() as u64)?;
+        file.sync_all()
+    };
+    if let Err(error) = write(out.as_bytes()) {
+        let recovery = write(current.as_bytes());
+        return Err(std::io::Error::other(format!("hosts 写入失败：{error}；恢复{}；原始副本：{}", if recovery.is_ok() { "成功" } else { "失败，请从副本恢复" }, backup_path.display())));
+    }
+    // 写入已成功；恢复副本清理失败不应把成功操作误报为失败。
+    let _ = std::fs::remove_file(backup_path);
+    Ok(())
+}
+
+#[cfg(windows)]
+pub const HOSTS_HELPER_ARG: &str = "--niceenv-apply-hosts";
+#[cfg(windows)]
+static HOSTS_HELPER: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+#[cfg(windows)]
+pub fn enable_hosts_elevation(executable: std::path::PathBuf) {
+    let _ = HOSTS_HELPER.set(executable);
+}
+
+#[cfg(windows)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostsRequest {
+    entries: Vec<(String, String)>,
+    expected: String,
+}
+
+/// 专用提权入口：只接受结构化映射，目标固定为系统 hosts，不启动 UI 或服务。
+#[cfg(windows)]
+pub fn run_hosts_elevation_helper(request_path: &std::path::Path) -> Result<()> {
+    use std::io::Read;
+    let mut request = String::new();
+    std::fs::File::open(request_path).map_err(io_err)?.take(1024 * 1024 + 1).read_to_string(&mut request).map_err(io_err)?;
+    if request.len() > 1024 * 1024 { return Err(PlatformError::Io("hosts 请求超过大小限制".into())); }
+    let request: HostsRequest = serde_json::from_str(&request).map_err(|_| PlatformError::Io("hosts 请求格式无效".into()))?;
+    validate_hosts_entries(&request.entries)?;
+    let out = merge_hosts_content(&request.expected, &request.entries);
+    write_hosts_snapshot(&hosts_path()?, &request.expected, &out).map_err(io_err)
+}
+
+#[cfg(windows)]
+fn apply_hosts_elevated(entries: &[(String, String)], expected: &str) -> Result<()> {
+    use std::io::Write;
+    let executable = HOSTS_HELPER.get().ok_or_else(|| PlatformError::Io("未配置 hosts 授权程序".into()))?;
+    let mut request_file = tempfile::Builder::new().prefix("niceenv-hosts-request-").suffix(".json").tempfile().map_err(io_err)?;
+    let request = serde_json::to_vec(&HostsRequest { entries: entries.to_vec(), expected: expected.into() })
+        .map_err(|_| PlatformError::Io("无法生成 hosts 请求".into()))?;
+    if request.len() > 1024 * 1024 { return Err(PlatformError::Io("hosts 请求超过大小限制".into())); }
+    request_file.write_all(&request).map_err(io_err)?;
+    request_file.as_file().sync_all().map_err(io_err)?;
+    run_elevated(&executable.to_string_lossy(), &[HOSTS_HELPER_ARG, &request_file.path().to_string_lossy()])
+        .map_err(|error| PlatformError::Win(format!("hosts 管理员授权未完成或写入失败，请确认 Windows 授权后重试；若已授权，请检查 hosts 是否被占用或修改。{error}")))?;
+    let actual = read_hosts_file()?;
+    if !hosts_unchanged(&actual, &merge_hosts_content(&actual, entries), entries) {
+        return Err(PlatformError::Io("授权程序已退出，但 hosts 内容未通过核对，请重试".into()));
+    }
     Ok(())
 }
 

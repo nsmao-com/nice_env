@@ -2872,3 +2872,22 @@ Web/schema TypeScript、218 条清单的 Zod 解析、Rust 全工作区 all-targ
 参考：https://www.mongodb.com/docs/mongodb-shell/write-scripts/
 参考：https://www.mongodb.com/docs/manual/reference/method/db.getCollectionInfos/
 参考：https://www.mongodb.com/docs/mongodb-shell/reference/ejson/
+
+## 第一百二十五轮：MongoDB 图形备份与整库恢复（v0.2.113）
+
+继续对照 ServBay 的 MongoDB 备份恢复说明，补齐官方 Database Tools 已可安装但数据库页没有操作入口的缺口。新增独立备份卡片，选择真实业务数据库创建 gzip BSON archive，查看时间、数据库、大小、来源服务器版本、工具版本及校验摘要；服务停止时仍可查看已有记录。恢复支持新数据库或替换已有数据库，已有目标从真实列表选择；先检查备份与目标，再输入目标名称确认暂停应用写入并执行恢复。复用 React Query、Radix、现有卡片与通知，无新增依赖。
+
+后端新模块复用 mongosh 的本机进程归属、实际运行端口、版本和真实数据目录核对。备份及恢复持有生命周期锁和数据目录活动守卫，官方工具使用固定参数，数据库名作为参数值传递，不接受脚本或任意主机。只支持业务数据库，拒绝系统库、控制字符、路径与命名空间通配符、超过 63 UTF-8 字节的名称；检测大小写冲突。归档与元信息先写入临时目录，成功后同步文件并发布备份记录，记录 SHA-256、大小及确切工具版本；失败的临时结果不作为成功备份展示。损坏或缺失记录在列表中计数提示，原文件保留。
+
+恢复先将归档复制到独立临时目录并再次校验摘要；要求相同 MongoDB 主版本，并使用创建归档时的已安装 Database Tools 版本。预览 revision 绑定备份记录、目标名、实际实例端口/PID、数据库存在状态及集合名称/类型/UUID。通过官方 mongorestore dry-run 后，为已有目标创建完整保护备份，再次确认目标结构后清空整库并恢复，包括删除归档中不存在的旧集合。保留索引、视图与 BSON 类型；恢复不是数据库事务，不冒充原子替换，中途失败提示可能存在部分数据并保留保护备份供再次恢复。普通 mongodump 不宣称跨集合一致性快照，界面明确要求应用暂停写入。当前入口处理本应用创建的归档，外部归档导入导出、备份删除、计划任务和认证配置仍待继续补齐。
+
+扩展既有 MongoDB 原生验收函数，未创建测试文件。Windows MongoDB 8.0.4、mongosh 2.12.0 与 Database Tools 100.19.0 最终通过（1 passed，81.57 秒）：实际安装/浏览/正常停机重启链路继续通过；新库恢复、已有库替换、保护备份再次恢复均由独立 Node MongoDB 驱动读取核对。覆盖 105 个空集合、特殊集合名、普通文档、大文档、Int64/Decimal128/日期、索引及视图；额外旧集合确实删除，保护备份保留恢复前数据。保护备份工具不可用及损坏归档 dry-run 失败均在清空目标前拒绝，目标内容保持；摘要篡改、不同主版本、缺少原工具版本、过期 revision、错误确认名、系统库、非法名称、路径穿越、错误 dataDir 和并发生命周期锁均被拒绝。修复实测发现的 mongosh UUID 直接 toString 不兼容，改用 EJSON 序列化。自有临时实例、端口与数据已回收；未对用户业务数据库写入，尚无 Mac 实机验收。
+
+离线 Chromium 装载实际数据库页、MongoDB 组件、React/Radix 与当前源码样式，通过 25 项交互/状态检查、33 组中英翻译核对和备份 schema 检查，无 pageerror。覆盖缺工具恢复、重复提交、新库重名拦截、字节限制、覆盖说明、确认名、失败保留草稿与重新检查、执行中禁止关闭、实例变化禁用、保护备份列表及服务停止状态。1440px 桌面、390px 中文与 320px 英文恢复弹窗已目检；虚线保留左右间距、正文滚动、底部按钮固定可达，检查完成后聚焦确认输入，无横向溢出。夹具控制 API、导航及剪贴板边界，不将该验证视作完整桌面 IPC 实机测试。
+
+十一处版本文件同步至 0.2.113，Cargo.lock 仅更新三个本项目 crate。发布前执行 Web/schema 类型检查、Rust 全工作区 all-targets 与 diff 检查；不运行前端 dev 或正式 build。上一版 v0.2.112 的 Windows、macOS Apple Silicon、macOS Intel Release 均已确认 completed/success。本轮按约定新增 annotated tag v0.2.113，与 main 原子推送并核对远程和 release.yml 状态，保留用户原有未跟踪文件与本地产物。本次没有业务数据库变更，未修改 update.sql；整体产品完善目标继续进行。
+
+参考：https://support.servbay.com/database-management/getting-started/mongodb-management-and-usage
+参考：https://www.mongodb.com/docs/database-tools/mongodump/mongodump-behavior/
+参考：https://www.mongodb.com/docs/database-tools/mongodump/
+参考：https://www.mongodb.com/docs/database-tools/mongorestore/mongorestore-examples/

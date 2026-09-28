@@ -80,8 +80,21 @@ function mockSiteFileScope(id: string, project: boolean, exclude: boolean): Site
 }
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.112";
+const MOCK_APP_VERSION = "0.2.113";
 const MOCK_NEXT_VERSION = "0.3.0";
+
+const mockMongoDatabases = new Map<string, Record<string, Record<string, unknown>[]>>([
+  ["niceenv_demo", { documents: Array.from({ length: 23 }, (_, i) => ({ _id: { $oid: (i+1).toString(16).padStart(24,"0") }, title: `预览文档 ${i+1}`, active: i%2 === 0, count: { $numberInt: String(i+1) }, createdAt: { $date: { $numberLong: "1790611200000" } } })) }],
+]);
+const mockMongoBackups = new Map<string, { record: import("@nsb/schema").MongoBackup; data: Record<string, Record<string, unknown>[]> }>();
+let mockMongoBackupSequence = 0;
+function mockMongoBackup(database: string, version: string, toolsVersion: string, kind: "manual" | "before-restore") {
+  const data = mockMongoDatabases.get(database);
+  if (!data) throw { code: "MONGO_BACKUP_INVALID", message: "数据库已不存在" };
+  const id = `preview-${Date.now()}-${++mockMongoBackupSequence}`;
+  const record: import("@nsb/schema").MongoBackup = { id, database, version, toolsVersion, createdAt: Date.now()/1000, sizeBytes: new TextEncoder().encode(JSON.stringify(data)).length, sha256: "0".repeat(64), kind };
+  mockMongoBackups.set(id, { record, data: structuredClone(data) }); return structuredClone(record);
+}
 
 const certMonitors = new Map<string, CertMonitor>();
 let monitorNotifications = { kind: "none", url: "" };
@@ -2876,6 +2889,29 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return structuredClone(plan) as T;
     }
     case "postgres_backup_list": return structuredClone([...mockPostgresBackups.values()].map((entry) => entry.file).sort((a, b) => b.createdAt - a.createdAt)) as T;
+    case "mongodb_backup_list": return { items: Array.from(mockMongoBackups.values()).map(entry => structuredClone(entry.record)).reverse(), unreadable: 0, directory: "preview/backup/mongodb" } as T;
+    case "mongodb_backup_create":
+    case "mongodb_restore_preview":
+    case "mongodb_backup_restore": {
+      const service = services.get("mongodb");
+      if (!service || !["running", "error"].includes(service.state) || !service.pids.length || service.version !== args!.version) throw { code: "MONGO_NOT_RUNNING", message: "所选 MongoDB 实例未运行或运行版本已变化" };
+      if (!Array.from(packages.values()).some(pkg => pkg.id === "mongosh" && pkg.install)) throw { code: "MONGO_SHELL_MISSING", message: "请先安装 MongoDB Shell" };
+      const tools = Array.from(packages.values()).filter(pkg => pkg.id === "mongodb-database-tools" && pkg.install);
+      const selectedTools = tools.find(pkg => pkg.active) ?? tools.sort((a,b) => cmpVersionDesc(a.version,b.version))[0];
+      if (!selectedTools) throw { code: "MONGO_TOOLS_MISSING", message: "请先安装 MongoDB Database Tools" };
+      const target = String(args!.database ?? args!.target ?? "");
+      if (!target || new TextEncoder().encode(target).length > 63 || /[\s\x00-\x1f\x7f-\x9f/\\."$*<>:|?]/.test(target) || ["admin","local","config"].includes(target.toLowerCase())) throw { code: "MONGO_BACKUP_INVALID", message: "数据库名称无效" };
+      if (cmd === "mongodb_backup_create") return mockMongoBackup(target,service.version!,selectedTools.version,"manual") as T;
+      const entry = mockMongoBackups.get(String(args!.id));
+      if (!entry) throw { code: "MONGO_BACKUP_INVALID", message: "备份已不存在" };
+      if (entry.record.version.split(".")[0] !== service.version!.split(".")[0]) throw { code: "MONGO_BACKUP_VERSION", message: "备份与目标 MongoDB 主版本不同" };
+      if (!tools.some(pkg => pkg.version === entry.record.toolsVersion)) throw { code: "MONGO_TOOLS_MISSING", message: "请安装创建备份时的 Database Tools 版本" };
+      const revision = JSON.stringify([entry.record,target,mockMongoDatabases.get(target),service.version,service.port,service.pids]);
+      if (cmd === "mongodb_restore_preview") return { backup: structuredClone(entry.record), target, exists: mockMongoDatabases.has(target), revision } as T;
+      if (args!.revision !== revision || args!.confirmation !== target) throw { code: "MONGO_RESTORE_CHANGED", message: "请重新检查并确认恢复" };
+      const safetyBackup = mockMongoDatabases.has(target) ? mockMongoBackup(target,service.version!,selectedTools.version,"before-restore") : null;
+      mockMongoDatabases.set(target,structuredClone(entry.data)); return { target, safetyBackup } as T;
+    }
     case "mongodb_browse": {
       const service = services.get("mongodb");
       if (!service || !["running", "error"].includes(service.state) || !service.pids.length || service.version !== args!.version) throw { code: "MONGO_NOT_RUNNING", message: "所选 MongoDB 实例未运行或运行版本已变化" };
@@ -2883,10 +2919,11 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const shell = shells.find(pkg => pkg.active) ?? shells[0];
       if (!shell) throw { code: "MONGO_SHELL_MISSING", message: "请先安装 MongoDB Shell，以启用数据库浏览" };
       const request = args!.request as { action: string; database?: string; collection?: string; search?: string; offset?: number; limit?: number; filter?: import("@nsb/schema").MongoFilter | null };
-      if (request.action === "overview") return { kind: "overview", version: service.version, serverVersion: service.version, port: service.port, uri: `mongodb://127.0.0.1:${service.port}`, shellVersion: shell.version, databases: ["admin", "local", "niceenv_demo"], limited: false } as T;
-      if (request.action === "collections") return { kind: "collections", database: request.database, entries: request.database === "niceenv_demo" && "documents".includes((request.search ?? "").toLowerCase()) ? [{ name: "documents", kind: "collection" }] : [], limited: false } as T;
-      if (request.action !== "documents" || request.database !== "niceenv_demo" || request.collection !== "documents") throw { code: "MONGO_COLLECTION_MISSING", message: "所选集合已不存在，请刷新集合列表" };
-      let rows: Record<string, unknown>[] = Array.from({ length: 23 }, (_, i) => ({ _id: { $oid: (i+1).toString(16).padStart(24,"0") }, title: `预览文档 ${i+1}`, active: i%2 === 0, count: { $numberInt: String(i+1) }, createdAt: { $date: { $numberLong: "1790611200000" } } }));
+      if (request.action === "overview") return { kind: "overview", version: service.version, serverVersion: service.version, port: service.port, uri: `mongodb://127.0.0.1:${service.port}`, shellVersion: shell.version, databases: ["admin", "local", ...mockMongoDatabases.keys()], limited: false } as T;
+      const collections = mockMongoDatabases.get(request.database ?? "") ?? {};
+      if (request.action === "collections") return { kind: "collections", database: request.database, entries: Object.keys(collections).filter(name => name.toLowerCase().includes((request.search ?? "").toLowerCase())).map(name => ({ name, kind: "collection" })), limited: false } as T;
+      if (request.action !== "documents" || !collections[request.collection ?? ""]) throw { code: "MONGO_COLLECTION_MISSING", message: "所选集合已不存在，请刷新集合列表" };
+      let rows = structuredClone(collections[request.collection!]);
       const filter = request.filter;
       if (filter) rows = rows.filter(row => {
         let current: unknown = row;

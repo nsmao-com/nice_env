@@ -1,5 +1,5 @@
 import type {
-  MongoOverview, MongoCollections, MongoDocuments, MongoFilter,
+  MongoOverview, MongoCollections, MongoDocuments, MongoFilter, MongoBackup, MongoBackupList, MongoRestorePreview, MongoRestoreResult,
   ServiceStatus,
   ServiceStopPreview,
   SftpgoConfigDirectories,
@@ -368,6 +368,10 @@ export interface PostgresConnectionInfo {
 }
 export const postgresConnection = (version: string) => safe(invoke<PostgresConnectionInfo>("postgres_connection", { version }));
 export const mongoOverview = (version: string) => safe(invoke<MongoOverview>("mongodb_browse", { version, request: { action: "overview" } }));
+export const mongoBackupList = () => safe(invoke<MongoBackupList>("mongodb_backup_list"));
+export const mongoBackupCreate = (version: string, database: string) => safe(invoke<MongoBackup>("mongodb_backup_create", { version, database }));
+export const mongoRestorePreview = (version: string, id: string, target: string) => safe(invoke<MongoRestorePreview>("mongodb_restore_preview", { version, id, target }));
+export const mongoBackupRestore = (version: string, id: string, target: string, revision: string, confirmation: string) => safe(invoke<MongoRestoreResult>("mongodb_backup_restore", { version, id, target, revision, confirmation }));
 export const mongoCollections = (version: string, database: string, search: string) => safe(invoke<MongoCollections>("mongodb_browse", { version, request: { action: "collections", database, search } }));
 export const mongoDocuments = (version: string, database: string, collection: string, offset: number, limit: number, filter: MongoFilter | null) =>
   safe(invoke<MongoDocuments>("mongodb_browse", { version, request: { action: "documents", database, collection, offset, limit, filter } }));

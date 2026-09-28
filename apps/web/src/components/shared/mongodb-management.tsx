@@ -15,6 +15,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { CopyButton } from "@/components/shared/misc";
+import { MongoBackupPanel } from "@/components/shared/mongodb-backup";
 
 const options = { retry: (count: number, error: unknown) => count < 2 && normalizeError(error).code === "SERVICE_BUSY", retryDelay: 700, refetchOnWindowFocus: false };
 const PAGE_SIZE = 10;
@@ -31,6 +32,7 @@ export function MongoManagement({ service }: { service?: ServiceStatus }) {
   return <div className="min-w-0 space-y-5">
     <div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><h2 className="text-base font-semibold">MongoDB {service?.version ?? ""}</h2><p className="mt-1 text-xs leading-5 text-muted">{t("mongo.intro")}</p></div><Button variant="secondary" size="sm" asChild><Link href="/packages">{t("mongo.packages")}</Link></Button></div>
     {!running ? <Card><CardContent className="py-8"><Database className="mb-3 h-6 w-6 text-muted" /><p className="text-sm">{t(service ? "mongo.stopped" : "mongo.notInstalled")}</p><p className="mt-2 text-xs leading-5 text-muted">{t("mongo.requireShell")}</p></CardContent></Card> : <MongoBrowser key={signature} version={service!.version!} signature={signature} />}
+    <MongoBackupPanel service={service} signature={signature} />
   </div>;
 }
 

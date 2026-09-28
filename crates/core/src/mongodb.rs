@@ -69,7 +69,7 @@ fn validate(request: &BrowseRequest) -> Result<()> {
 }
 
 // 用户选择只作为 JSON 数据传入。没有自由脚本、任意命令、远程地址或写入操作入口。
-const SCRIPT: &str = r###"
+const CONNECT: &str = r###"
 try {
   const connection = new Mongo(input.uri + '/?directConnection=true&serverSelectionTimeoutMS=4000&socketTimeoutMS=6000&appName=NiceEnv');
   const admin = connection.getDB('admin');
@@ -82,6 +82,8 @@ try {
   if (!sameDataDir) {
     throw Object.assign(new Error('MongoDB data directory changed'), { code: 'MONGO_INSTANCE_CHANGED' });
   }
+"###;
+const SCRIPT: &str = r###"
   const request = input.request;
   let result;
   if (request.action === 'overview') {
@@ -131,6 +133,8 @@ try {
     }
   }
   print(JSON.stringify({result}));
+"###;
+const CATCH: &str = r###"
 } catch (error) {
   print(JSON.stringify({error:{code:String(error.code || ''),message:String(error.message || 'MongoDB query failed').slice(0,2000)}}));
 }
@@ -138,6 +142,12 @@ try {
 
 pub fn browse(state: &CoreState, version: &str, request: BrowseRequest) -> Result<BrowseResponse> {
     validate(&request)?;
+    let value = execute(state, version, serde_json::to_value(request).map_err(|e| AppError::internal("准备 MongoDB 查询", e.to_string()))?, SCRIPT)?;
+    serde_json::from_value(value).map_err(|e| AppError::internal("解析 MongoDB 浏览结果", e.to_string()))
+}
+
+// 只接受后端固定脚本；Tauri 不暴露此函数。备份操作复用实例与数据目录核对。
+pub(crate) fn execute(state: &CoreState, version: &str, request: serde_json::Value, script_body: &str) -> Result<serde_json::Value> {
     let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
     let _operation = state.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重新读取"))?;
     let service = state.manager.snapshot("mongodb").filter(|service| service.version.as_deref() == Some(version)
@@ -158,7 +168,7 @@ pub fn browse(state: &CoreState, version: &str, request: BrowseRequest) -> Resul
         "shellVersion":shell.version,"dataDir":state.paths.mongo_data_dir(version),"request":request});
     let script = temp.path().join("query.js");
     let mut file = std::fs::File::create(&script)?;
-    write!(file, "const input = {};\n{}", serde_json::to_string(&input).map_err(|e| AppError::internal("准备 MongoDB 查询", e.to_string()))?, SCRIPT)?;
+    write!(file, "const input = {};\n{}\n{}\n{}", serde_json::to_string(&input).map_err(|e| AppError::internal("准备 MongoDB 查询", e.to_string()))?, CONNECT, script_body, CATCH)?;
     drop(file);
     let mut output = tempfile::tempfile()?;
     let mut error = tempfile::tempfile()?;
@@ -185,5 +195,5 @@ pub fn browse(state: &CoreState, version: &str, request: BrowseRequest) -> Resul
         return Err(AppError::new(code, message).with_detail(error["message"].as_str().unwrap_or_default()));
     }
     crate::ops::verify_database_listener(&state.manager, "mongodb", port)?;
-    serde_json::from_value(value["result"].clone()).map_err(|e| AppError::internal("解析 MongoDB 浏览结果", e.to_string()))
+    value.get("result").cloned().ok_or_else(|| AppError::new("MONGO_RESULT_INVALID", "MongoDB Shell 未返回有效结果"))
 }

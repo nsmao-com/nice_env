@@ -402,6 +402,10 @@ pub fn run() {
             redis_save_connection,
             postgres_connection,
             mongodb_browse,
+            mongodb_backup_list,
+            mongodb_backup_create,
+            mongodb_restore_preview,
+            mongodb_backup_restore,
             postgres_password,
             postgres_set_password,
             postgres_databases,
@@ -1604,6 +1608,31 @@ async fn postgres_connection(state: State<'_, std::sync::Arc<nsb_core::CoreState
 async fn mongodb_browse(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, request: nsb_core::mongodb::BrowseRequest) -> Result<nsb_core::mongodb::BrowseResponse, tauri::Error> {
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::mongodb::browse(&st, &version, request))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn mongodb_backup_list(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> Result<nsb_core::mongodb_backup::BackupList, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::mongodb_backup::list(&st))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+#[tauri::command]
+async fn mongodb_backup_create(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, database: String) -> Result<nsb_core::mongodb_backup::MongoBackup, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::mongodb_backup::create(&st, &version, &database))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+#[tauri::command]
+async fn mongodb_restore_preview(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, id: String, target: String) -> Result<nsb_core::mongodb_backup::RestorePreview, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::mongodb_backup::preview(&st, &version, &id, &target))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+#[tauri::command]
+async fn mongodb_backup_restore(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, id: String, target: String, revision: String, confirmation: String) -> Result<nsb_core::mongodb_backup::RestoreResult, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::mongodb_backup::restore(&st, &version, &id, &target, &revision, &confirmation))).await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

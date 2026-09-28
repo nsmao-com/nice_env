@@ -2769,3 +2769,28 @@ Web/schema TypeScript 与 Rust 全工作区 all-targets 检查通过。十一处
 参考：https://redis.io/docs/latest/commands/bgsave/
 参考：https://redis.io/docs/latest/commands/lastsave/
 参考：https://github.com/redis/redis/blob/5.0/src/crc64.c
+
+## 第一百二十轮：外部 Redis RDB 导入与启动数据来源核对（v0.2.108）
+
+继续对照 ServBay 的 Redis 持久化文件备份/恢复流程，经 fast-context 检查现有备份面板、文件选择器、路径保护和恢复链路。此前独立备份支持复制到外部磁盘，但没有导入外部 dump.rdb 的入口；本轮补上文件选择、预检、确认及独立副本保存，延续现有 UI/UX、React Query、Radix 和 Tauri 文件选择模式，无新增依赖。
+
+预检流式读取普通 .rdb 文件，检查 RDB 头、EOF 和启用时的 CRC64，并计算 SHA-256。只保留前 64 KiB 用于读取 AUX redis-ver 元信息，对字段长度、编码和读取范围设限，不解析键值对象、不执行 Redis 指令。接受常见三段版本以及 Windows 的四段版本号，保留文件标记的完整版本，不擅自截短或映射到当前版本。无法确定版本、旧格式、压缩版本字段或不支持的元信息明确拒绝。文件路径必须是绝对路径，拒绝目录联接、符号链接、路径穿越和特殊文件名。
+
+确认信息包含源文件路径、文件标记版本、大小和可展开的格式/摘要。预检 revision 绑定规范路径、版本、格式、文件大小和 SHA-256；提交时重新读取并核对，复制到临时备份目录时再次验证摘要，完整写入后才发布记录。导入不要求 Redis 停止，不覆盖当前实例或源文件，仅生成 kind=imported 的新备份，之后仍走已有停止实例恢复和同版本检查。界面如实说明元信息和完整性检查不代表模块兼容或完整数据可加载，恢复后仍需启动对应版本核对数据。
+
+导入其他版本后自动显示所有备份，列表标记外部来源；当前版本筛选无结果与完全没有备份分别提示，提供直接切换为全部版本的操作。取消文件选择不触发读取或写入，重复选择/提交同步防重；失败保留源文件预览，可重新检查后提交新 revision。确认按钮在读取、重检及提交期间统一禁用。浏览器使用明确标注的内存演示，不读取本机文件。
+
+根据 Redis 最新官方持久化说明，preload-file 可使启动跳过普通 RDB/AOF 数据位置；恢复预检增加对此类有效配置及 replicaof/slaveof 上游复制配置的拒绝，避免文件替换后又由其他数据来源覆盖。空的 preload-file 引号值不误拦截。此功能不会自动修改复制关系、预载路径或 AOF 开关。
+
+原生验收发现 Windows Redis 5.0.14.1 会写入四段版本标记，已修复导入解析并纠正既有验收的安装版本标记。一次多次重启验收还观察到 run_id 重复，故持久化报告、快照回执和前端完成判断增加 processId，后端独立备份等待也同时核对 PID 与 run_id；重启验收比较两者组成的实例标识，不再假定单独 run_id 一定不同。
+
+扩展已有 Rust 验证函数，没有新增测试文件。Windows Redis 5.0.14.1 隔离原生验收最终通过（1 passed，98.14 秒）：导入原生生成 RDB、源文件保留、运行中值 3 未被导入覆盖、停止后恢复并真实读回原值 1、两个逻辑数据库保留；正确 CRC 的内容变化使旧 revision 失效，损坏文件、缺失版本、超大声明长度、非 RDB 和目录联接被拒绝，预载/复制配置拒绝与空预载值允许均通过。既有认证、快照失败恢复、配置重启和恢复前副本回退验证继续通过，自有进程/端口已回收。六项 RESP/认证回归通过。以上仅代表本机 Windows 与该 Redis 运行时，不代表其他平台或新版 Redis 实机结果。
+
+离线 Chromium 使用实际组件、现有 CSS 和受控 API/文件选择器验证四十二项交互及状态判定，包含重复点击、取消选择、失败保留、重新检查、跨版本列表、同 run_id 不同 PID 的重启判断，以及缺失/零 PID 的 schema 拒绝；四十九组中英翻译核对通过，无 pageerror。1440px 桌面、390px 中文和 320px 英文导入确认截图已检查，长路径/摘要换行、正文滚动、底部按钮保持可见，无横向溢出。文件选择器在离线验收中为受控替代，不将其作为原生对话框或桌面 IPC 实机验收。Web/schema TypeScript 与 Rust 全工作区 all-targets 检查通过，未运行前端 dev 或正式前端 build。
+
+十一处版本文件同步 0.2.108，Cargo.lock 仅更新三个本项目 crate；精确提交二十二个任务文件并保留已有未跟踪文件与本地产物。上一版 v0.2.107 的 Windows、macOS Apple Silicon、macOS Intel Release 均已确认 completed/success。新增 annotated tag v0.2.108，与 main 一次原子推送后核对远程指向及 release.yml 的实际状态。本次没有业务数据库变更，未修改 update.sql；整体产品完善目标继续进行。
+
+参考：https://support.servbay.com/database-management/getting-started/redis-management-and-usage
+参考：https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/
+参考：https://github.com/redis/redis/blob/5.0/src/rdb.c
+参考：https://github.com/tporadowski/redis/blob/v5.0.14.1/src/util.c

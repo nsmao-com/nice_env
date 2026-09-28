@@ -80,7 +80,7 @@ function mockSiteFileScope(id: string, project: boolean, exclude: boolean): Site
 }
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.107";
+const MOCK_APP_VERSION = "0.2.108";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -3041,6 +3041,13 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return await mockInvoke<T>("redis_stats");
     }
     case "redis_backup_list": return { items: structuredClone(redisBackupsPreview), unreadable: 0, directory: "preview/backup/redis" } as T;
+    case "redis_backup_inspect_import": return { source: String(args!.source), version: "5.0.14", rdbVersion: 9, sizeBytes: 4096, sha256: "a".repeat(64), revision: `preview:${String(args!.source)}` } as T;
+    case "redis_backup_import": {
+      const source = String(args!.source);
+      if (args!.revision !== `preview:${source}`) throw { code: "REDIS_IMPORT_CHANGED", message: "演示文件已变化，请重新检查。" };
+      const entry = { id: `${Date.now()}-${Math.random().toString(16).slice(2)}`, version: "5.0.14", createdAt: Date.now(), sizeBytes: 4096, sha256: "a".repeat(64), kind: "imported" as const };
+      redisBackupsPreview.unshift(entry); return structuredClone(entry) as T;
+    }
     case "redis_backup_create": {
       const version = String(args!.version), service = services.get("redis");
       if (service?.state !== "running" || service.version !== version) throw { code: "REDIS_NOT_RUNNING", message: "请启动对应 Redis 版本后备份。" };
@@ -3070,7 +3077,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const runId = `preview-${version}-${service.pids.join("-")}`;
       let entry = redisPersistencePreview.get(version);
       if (!entry || entry.report.runId !== runId) {
-        entry = { report: { version, runId, loading: false, saving: false, changesSinceSave: 0, lastSaveTime: Math.floor(Date.now() / 1000), lastSaveStatus: "ok", lastSaveDuration: null, aofEnabled: false, aofRewriting: false, aofRewriteScheduled: false, aofLastRewriteStatus: "ok", aofLastWriteStatus: null }, finishAt: 0, minimumSaveTime: 0 };
+        entry = { report: { version, runId, processId: service.pids[0], loading: false, saving: false, changesSinceSave: 0, lastSaveTime: Math.floor(Date.now() / 1000), lastSaveStatus: "ok", lastSaveDuration: null, aofEnabled: false, aofRewriting: false, aofRewriteScheduled: false, aofLastRewriteStatus: "ok", aofLastWriteStatus: null }, finishAt: 0, minimumSaveTime: 0 };
         redisPersistencePreview.set(version, entry);
       }
       if (entry.report.saving && Date.now() >= entry.finishAt) Object.assign(entry.report, { saving: false, lastSaveTime: entry.minimumSaveTime, lastSaveStatus: "ok", lastSaveDuration: 1, changesSinceSave: 0 });
@@ -3083,7 +3090,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (entry.report.saving) throw { code: "REDIS_PERSISTENCE_BUSY", message: "演示快照仍在生成。" };
       entry.minimumSaveTime = Math.max(Math.floor(Date.now() / 1000), entry.report.lastSaveTime + 1);
       entry.report.saving = true; entry.finishAt = Date.now() + 1200;
-      return { version, runId: entry.report.runId, minimumSaveTime: entry.minimumSaveTime } as T;
+      return { version, runId: entry.report.runId, processId: entry.report.processId, minimumSaveTime: entry.minimumSaveTime } as T;
     }
     case "redis_settings": {
       const version = String(args!.version);

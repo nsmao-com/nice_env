@@ -4208,12 +4208,12 @@ const client = new MongoClient(`mongodb://127.0.0.1:${process.argv[2]}`, { direc
         let source = PathBuf::from(std::env::var("NSB_REDIS_ROOT").expect("NSB_REDIS_ROOT"));
         let temp = tempfile::tempdir().unwrap();
         let state = isolated_state(Paths::new(temp.path().join("redis with spaces")));
-        let root = state.paths.runtime_dir("redis", "5.0.14");
+        let root = state.paths.runtime_dir("redis", "5.0.14.1");
         std::fs::create_dir_all(&root).unwrap();
         for file in ["redis-server.exe", "redis-cli.exe", "EventLog.dll"] {
             std::fs::copy(source.join(file), root.join(file)).unwrap();
         }
-        register_fixture(&state, "redis", "5.0.14", &root);
+        register_fixture(&state, "redis", "5.0.14.1", &root);
         struct StopRedisOnDrop<'a>(&'a crate::CoreState);
         impl Drop for StopRedisOnDrop<'_> {
             fn drop(&mut self) {
@@ -4232,8 +4232,8 @@ const client = new MongoClient(`mongodb://127.0.0.1:${process.argv[2]}`, { direc
             .set_port_override("redis", Some(desired))
             .unwrap();
         state.store.set_setting("autoFallbackPort", "true").unwrap();
-        configgen::write_redis_conf(&state.paths, "5.0.14", desired).unwrap();
-        let config = state.paths.redis_conf("5.0.14");
+        configgen::write_redis_conf(&state.paths, "5.0.14.1", desired).unwrap();
+        let config = state.paths.redis_conf("5.0.14.1");
         let customized = std::fs::read_to_string(&config)
             .unwrap()
             .replace("maxmemory 256mb", "maxmemory 64mb")
@@ -4295,7 +4295,7 @@ const client = new MongoClient(`mongodb://127.0.0.1:${process.argv[2]}`, { direc
         };
         drop(set_password("isolated-fixture-password"));
         assert_eq!(state.redis_stats().unwrap_err().code, "REDIS_AUTH_REQUIRED");
-        assert_eq!(state.redis_snapshot("5.0.14").unwrap_err().code, "REDIS_AUTH_REQUIRED");
+        assert_eq!(state.redis_snapshot("5.0.14.1").unwrap_err().code, "REDIS_AUTH_REQUIRED");
         assert_eq!(state.stop_service("redis").unwrap_err().code, "REDIS_AUTH_REQUIRED");
         assert!(state.manager.snapshot("redis").unwrap().pids.iter().any(|pid| platform::process_alive(*pid)));
         let running_pids = state.manager.snapshot("redis").unwrap().pids;
@@ -4315,16 +4315,17 @@ const client = new MongoClient(`mongodb://127.0.0.1:${process.argv[2]}`, { direc
         assert!(stopped_stack.started.is_empty() && stopped_stack.already_running.is_empty());
         assert_eq!(state.manager.snapshot("redis").unwrap().pids, running_pids);
         let credentials = |password: &str| crate::stats::RedisCredentials { username: String::new(), password: password.into() };
-        assert_eq!(state.save_redis_connection("5.0.14", credentials("wrong")).unwrap_err().code, "REDIS_AUTH_FAILED");
-        assert!(state.store.get_setting(&crate::stats::RedisCredentials::key("5.0.14")).is_none());
-        state.save_redis_connection("5.0.14", credentials("isolated-fixture-password")).unwrap();
+        assert_eq!(state.save_redis_connection("5.0.14.1", credentials("wrong")).unwrap_err().code, "REDIS_AUTH_FAILED");
+        assert!(state.store.get_setting(&crate::stats::RedisCredentials::key("5.0.14.1")).is_none());
+        state.save_redis_connection("5.0.14.1", credentials("isolated-fixture-password")).unwrap();
         assert_eq!(state.redis_stats().unwrap().keys, Some(2));
-        let authenticated_snapshot = state.redis_snapshot("5.0.14").unwrap();
+        let authenticated_snapshot = state.redis_snapshot("5.0.14.1").unwrap();
         let wait_for_snapshot = |receipt: &crate::stats::RedisSnapshotReceipt, expected: &str| {
             let started = std::time::Instant::now();
             loop {
-                let persistence = state.redis_persistence("5.0.14").unwrap();
+                let persistence = state.redis_persistence("5.0.14.1").unwrap();
                 assert_eq!(persistence.run_id, receipt.run_id);
+                assert_eq!(persistence.process_id, receipt.process_id);
                 if !persistence.saving && persistence.last_save_status == expected
                     && (expected == "err" || persistence.last_save_time >= receipt.minimum_save_time) {
                     return persistence;
@@ -4334,15 +4335,15 @@ const client = new MongoClient(`mongodb://127.0.0.1:${process.argv[2]}`, { direc
             }
         };
         assert!(!wait_for_snapshot(&authenticated_snapshot, "ok").aof_enabled);
-        let authenticated_backup = state.redis_backup_create("5.0.14").unwrap();
+        let authenticated_backup = state.redis_backup_create("5.0.14.1").unwrap();
         assert_eq!(authenticated_backup.kind, "snapshot");
         assert!(crate::redis_backup::list(&state.paths).unwrap().items.iter().any(|item| item.id == authenticated_backup.id));
         assert_eq!(state.redis_snapshot("7.0.0").unwrap_err().code, "REDIS_INSTANCE_CHANGED");
-        assert_eq!(state.save_redis_connection("5.0.14", credentials("wrong")).unwrap_err().code, "REDIS_AUTH_FAILED");
-        assert_eq!(crate::stats::RedisCredentials::load(&state.store, "5.0.14").unwrap().password, "isolated-fixture-password");
+        assert_eq!(state.save_redis_connection("5.0.14.1", credentials("wrong")).unwrap_err().code, "REDIS_AUTH_FAILED");
+        assert_eq!(crate::stats::RedisCredentials::load(&state.store, "5.0.14.1").unwrap().password, "isolated-fixture-password");
         assert!(crate::stats::RedisCredentials::load(&state.store, "7.0.0").unwrap().password.is_empty());
         assert_eq!(state.save_redis_connection("7.0.0", credentials("isolated-fixture-password")).unwrap_err().code, "REDIS_INSTANCE_CHANGED");
-        let info = state.redis_connection("5.0.14").unwrap();
+        let info = state.redis_connection("5.0.14.1").unwrap();
         assert!(info.has_password);
         assert!(!serde_json::to_string(&info).unwrap().contains("isolated-fixture-password"));
         let exported = temp.path().join("config-backup.json");
@@ -4354,39 +4355,39 @@ const client = new MongoClient(`mongodb://127.0.0.1:${process.argv[2]}`, { direc
         state.start_service("redis").unwrap();
         // requirepass was a runtime-only change: restarted server is unauthenticated again.
         assert_eq!(state.redis_stats().unwrap_err().code, "REDIS_AUTH_FAILED");
-        state.save_redis_connection("5.0.14", crate::stats::RedisCredentials::default()).unwrap();
+        state.save_redis_connection("5.0.14.1", crate::stats::RedisCredentials::default()).unwrap();
         assert_eq!(state.redis_stats().unwrap().keys, Some(2));
-        assert!(!state.redis_connection("5.0.14").unwrap().has_password);
+        assert!(!state.redis_connection("5.0.14.1").unwrap().has_password);
         assert_eq!(state.manager.snapshot("redis").unwrap().port, Some(port));
         assert_eq!(PortsProfile::from_settings(&state.store).redis, port);
         assert_eq!(std::fs::read_to_string(&config).unwrap(), persisted);
         assert_eq!(query("maxmemory"), "maxmemory\n67108864");
 
         // 可视化配置保存通过原生 CONFIG GET 与实际 RDB 文件与键数回读验证。
-        let before_view=state.redis_settings("5.0.14").unwrap();
+        let before_view=state.redis_settings("5.0.14.1").unwrap();
         assert_eq!(before_view.settings.max_memory_bytes,Some(64*1024*1024));
         let mut settings=before_view.settings.clone();
         settings.max_memory_bytes=Some(96*1024*1024);settings.eviction_policy=Some("allkeys-random".into());
         settings.timeout_seconds=Some(42);settings.max_clients=Some(333);
         settings.save_rules=Some(vec![crate::redis_settings::SnapshotRule{seconds:60,changes:1},crate::redis_settings::SnapshotRule{seconds:300,changes:10}]);
         let before_file=std::fs::read_to_string(&config).unwrap();
-        let saved=state.save_redis_settings("5.0.14",&before_view.revision,&settings,false).unwrap();
+        let saved=state.save_redis_settings("5.0.14.1",&before_view.revision,&settings,false).unwrap();
         assert_eq!(saved.settings,settings);assert_ne!(saved.revision,before_view.revision);
         assert_eq!(query("maxmemory"),"maxmemory\n67108864","save must not change the running server");
         assert_eq!(query("databases"),"databases\n32","unrelated directives preserved");
-        let history=crate::cfgeditor::list_config_backups_selected(&state.paths,&state.store,Some("redis-conf@5.0.14")).unwrap();
+        let history=crate::cfgeditor::list_config_backups_selected(&state.paths,&state.store,Some("redis-conf@5.0.14.1")).unwrap();
         assert!(history.iter().any(|b|std::fs::read_to_string(&b.path).unwrap()==before_file));
-        assert_eq!(state.save_redis_settings("5.0.14",&before_view.revision,&settings,false).unwrap_err().code,"CONFIG_CONFLICT");
+        assert_eq!(state.save_redis_settings("5.0.14.1",&before_view.revision,&settings,false).unwrap_err().code,"CONFIG_CONFLICT");
         let mut disabled=settings.clone();disabled.save_rules=Some(vec![]);
-        assert_eq!(state.save_redis_settings("5.0.14",&saved.revision,&disabled,false).unwrap_err().code,"REDIS_SNAPSHOT_CONFIRM");
+        assert_eq!(state.save_redis_settings("5.0.14.1",&saved.revision,&disabled,false).unwrap_err().code,"REDIS_SNAPSHOT_CONFIRM");
         let customized=std::fs::read_to_string(&config).unwrap();assert!(customized.contains("databases 32"));assert!(customized.contains("appendonly no"));
         state.stop_service("redis").unwrap();state.start_service("redis").unwrap();
         assert_eq!(query("maxmemory"),"maxmemory\n100663296");assert_eq!(query("maxmemory-policy"),"maxmemory-policy\nallkeys-random");
         assert_eq!(query("timeout"),"timeout\n42");assert_eq!(query("maxclients"),"maxclients\n333");assert_eq!(query("save"),"save\n60 1 300 10");
         assert_eq!(state.redis_stats().unwrap().keys,Some(2));
-        let current=state.redis_settings("5.0.14").unwrap();let backup=history.iter().find(|b|std::fs::read_to_string(&b.path).unwrap()==before_file).unwrap();
-        state.rollback_config(&backup.name,Some("redis-conf@5.0.14"),Some(&std::fs::read_to_string(&config).unwrap())).unwrap();
-        assert_eq!(state.save_redis_settings("5.0.14",&current.revision,&settings,false).unwrap_err().code,"CONFIG_CONFLICT");
+        let current=state.redis_settings("5.0.14.1").unwrap();let backup=history.iter().find(|b|std::fs::read_to_string(&b.path).unwrap()==before_file).unwrap();
+        state.rollback_config(&backup.name,Some("redis-conf@5.0.14.1"),Some(&std::fs::read_to_string(&config).unwrap())).unwrap();
+        assert_eq!(state.save_redis_settings("5.0.14.1",&current.revision,&settings,false).unwrap_err().code,"CONFIG_CONFLICT");
         state.stop_service("redis").unwrap();state.start_service("redis").unwrap();
         assert_eq!(query("maxmemory"),"maxmemory\n67108864");assert_eq!(state.redis_stats().unwrap().keys,Some(2));
         // 手动 RDB 快照需要在停止主实例之前回读独立文件，不能由 SHUTDOWN 的保存掩盖失败。
@@ -4398,16 +4399,16 @@ const client = new MongoClient(`mongodb://127.0.0.1:${process.argv[2]}`, { direc
         let occupied_rdb = state.paths.redis_data_dir().join("occupied.rdb");
         std::fs::create_dir(&occupied_rdb).unwrap();
         assert_eq!(cli(&["CONFIG", "SET", "dbfilename", "occupied.rdb"]), "OK");
-        let failed_snapshot = state.redis_snapshot("5.0.14").unwrap();
+        let failed_snapshot = state.redis_snapshot("5.0.14.1").unwrap();
         assert_eq!(wait_for_snapshot(&failed_snapshot, "err").last_save_status, "err");
         assert_eq!(state.redis_stats().unwrap().keys, Some(2));
         assert_eq!(cli(&["CONFIG", "SET", "dbfilename", "dump.rdb"]), "OK");
-        let before_snapshot = state.redis_persistence("5.0.14").unwrap();
-        let manual_snapshot = state.redis_snapshot("5.0.14").unwrap();
+        let before_snapshot = state.redis_persistence("5.0.14.1").unwrap();
+        let manual_snapshot = state.redis_snapshot("5.0.14.1").unwrap();
         assert!(manual_snapshot.minimum_save_time > before_snapshot.last_save_time);
         let confirmed = wait_for_snapshot(&manual_snapshot, "ok");
         assert_eq!(confirmed.changes_since_save, 0);
-        assert_ne!(manual_snapshot.run_id, authenticated_snapshot.run_id);
+        assert_ne!((&manual_snapshot.run_id, manual_snapshot.process_id), (&authenticated_snapshot.run_id, authenticated_snapshot.process_id));
         let restore_dir = temp.path().join("snapshot-reader");
         std::fs::create_dir(&restore_dir).unwrap();
         std::fs::copy(state.paths.redis_data_dir().join("dump.rdb"), restore_dir.join("dump.rdb")).unwrap();
@@ -4430,27 +4431,27 @@ const client = new MongoClient(`mongodb://127.0.0.1:${process.argv[2]}`, { direc
         drop(reader);
         assert!(std::net::TcpStream::connect(("127.0.0.1", reader_port)).is_err());
         // 独立备份 -> 修改数据 -> 恢复 -> 回退，均用真实 Redis 读取逻辑数据库值。
-        let backup = state.redis_backup_create("5.0.14").unwrap();
-        assert_eq!(state.redis_restore_preview("5.0.14", &backup.id).unwrap_err().code, "REDIS_RESTORE_RUNNING");
+        let backup = state.redis_backup_create("5.0.14.1").unwrap();
+        assert_eq!(state.redis_restore_preview("5.0.14.1", &backup.id).unwrap_err().code, "REDIS_RESTORE_RUNNING");
         assert_eq!(cli(&["SET", "isolated-fixture", "2"]), "OK");
         state.stop_service("redis").unwrap();
-        let preview = state.redis_restore_preview("5.0.14", &backup.id).unwrap();
-        assert!(state.redis_backup_restore("5.0.14", &backup.id, &preview.revision, "Redis wrong").is_err());
+        let preview = state.redis_restore_preview("5.0.14.1", &backup.id).unwrap();
+        assert!(state.redis_backup_restore("5.0.14.1", &backup.id, &preview.revision, "Redis wrong").is_err());
         let original_config = std::fs::read_to_string(&config).unwrap();
         std::fs::write(&config, format!("{original_config}\n# external edit\n")).unwrap();
-        assert_eq!(state.redis_backup_restore("5.0.14", &backup.id, &preview.revision, "Redis 5.0.14").unwrap_err().code, "REDIS_RESTORE_CHANGED");
+        assert_eq!(state.redis_backup_restore("5.0.14.1", &backup.id, &preview.revision, "Redis 5.0.14.1").unwrap_err().code, "REDIS_RESTORE_CHANGED");
         std::fs::write(&config, original_config.replace("appendonly no", "appendonly yes")).unwrap();
-        assert_eq!(state.redis_restore_preview("5.0.14", &backup.id).unwrap_err().code, "REDIS_RESTORE_AOF");
+        assert_eq!(state.redis_restore_preview("5.0.14.1", &backup.id).unwrap_err().code, "REDIS_RESTORE_AOF");
         std::fs::write(&config, &original_config).unwrap();
         let content_path = state.paths.backup().join("redis").join(&backup.id).join("content.rdb");
         let original_backup = std::fs::read(&content_path).unwrap();
         let mut corrupt = original_backup.clone(); corrupt[10] ^= 1;
         std::fs::write(&content_path, &corrupt).unwrap();
-        assert_eq!(state.redis_restore_preview("5.0.14", &backup.id).unwrap_err().code, "REDIS_BACKUP_CHECKSUM");
+        assert_eq!(state.redis_restore_preview("5.0.14.1", &backup.id).unwrap_err().code, "REDIS_BACKUP_CHECKSUM");
         std::fs::write(&content_path, &original_backup).unwrap();
-        assert!(state.redis_restore_preview("5.0.14", "../escape").is_err());
-        let preview = state.redis_restore_preview("5.0.14", &backup.id).unwrap();
-        let restored = state.redis_backup_restore("5.0.14", &backup.id, &preview.revision, "Redis 5.0.14").unwrap();
+        assert!(state.redis_restore_preview("5.0.14.1", "../escape").is_err());
+        let preview = state.redis_restore_preview("5.0.14.1", &backup.id).unwrap();
+        let restored = state.redis_backup_restore("5.0.14.1", &backup.id, &preview.revision, "Redis 5.0.14.1").unwrap();
         let safety = restored.safety_backup.unwrap();
         assert_eq!(std::fs::read(state.paths.redis_data_dir().join("dump.rdb")).unwrap(), original_backup);
         assert!(!state.manager.is_busy("redis"));
@@ -4458,19 +4459,76 @@ const client = new MongoClient(`mongodb://127.0.0.1:${process.argv[2]}`, { direc
         assert_eq!(cli(&["GET", "isolated-fixture"]), "1");
         assert_eq!(state.redis_stats().unwrap().keys, Some(2));
         state.stop_service("redis").unwrap();
-        let preview = state.redis_restore_preview("5.0.14", &safety.id).unwrap();
-        state.redis_backup_restore("5.0.14", &safety.id, &preview.revision, "Redis 5.0.14").unwrap();
+        let preview = state.redis_restore_preview("5.0.14.1", &safety.id).unwrap();
+        state.redis_backup_restore("5.0.14.1", &safety.id, &preview.revision, "Redis 5.0.14.1").unwrap();
         state.start_service("redis").unwrap();
         assert_eq!(cli(&["GET", "isolated-fixture"]), "2");
         state.stop_service("redis").unwrap();
         std::fs::write(state.paths.redis_data_dir().join("dump.rdb"), b"damaged original").unwrap();
-        let preview = state.redis_restore_preview("5.0.14", &backup.id).unwrap();
-        let restored = state.redis_backup_restore("5.0.14", &backup.id, &preview.revision, "Redis 5.0.14").unwrap();
+        let preview = state.redis_restore_preview("5.0.14.1", &backup.id).unwrap();
+        let restored = state.redis_backup_restore("5.0.14.1", &backup.id, &preview.revision, "Redis 5.0.14.1").unwrap();
         let preserved = state.paths.backup().join("redis").join(restored.safety_backup.unwrap().id).join("content.rdb");
         assert_eq!(std::fs::read(preserved).unwrap(), b"damaged original");
         state.start_service("redis").unwrap();
         assert_eq!(cli(&["GET", "isolated-fixture"]), "1");
         assert_eq!(std::fs::read_to_string(&config).unwrap(), original_config);
+        // 外部 RDB 导入只保存副本，原文件与当前实例不变；恢复后用真实 Redis 读回。
+        let external = temp.path().join("external snapshot.RDB");
+        std::fs::write(&external, &original_backup).unwrap();
+        let before_import = crate::redis_backup::list(&state.paths).unwrap().items.len();
+        let import = crate::redis_backup::inspect_import(external.to_str().unwrap()).unwrap();
+        assert_eq!(import.version, "5.0.14.1"); assert_eq!(import.rdb_version, 9);
+        assert_eq!(import.size_bytes, original_backup.len() as u64);
+        assert_eq!(crate::redis_backup::list(&state.paths).unwrap().items.len(), before_import);
+        assert!(crate::redis_backup::import_rdb(&state.paths, &import.source, "stale").is_err());
+        assert_eq!(cli(&["SET", "isolated-fixture", "3"]), "OK");
+        let imported = crate::redis_backup::import_rdb(&state.paths, &import.source, &import.revision).unwrap();
+        assert_eq!(imported.kind, "imported"); assert_eq!(imported.sha256, import.sha256);
+        assert_eq!(std::fs::read(&external).unwrap(), original_backup);
+        assert_eq!(cli(&["GET", "isolated-fixture"]), "3");
+        assert_eq!(crate::redis_backup::list(&state.paths).unwrap().items.len(), before_import + 1);
+        let mut changed = original_backup.clone();
+        let source_version_at = changed.windows(8).position(|bytes| bytes == b"5.0.14.1").unwrap();
+        changed[source_version_at + 5] = b'5';
+        let checksum_at = changed.len() - 8;
+        let checksum = crate::redis_backup::rdb_checksum(0, &changed[..checksum_at]);
+        changed[checksum_at..].copy_from_slice(&checksum.to_le_bytes());
+        std::fs::write(&external, &changed).unwrap();
+        assert_eq!(crate::redis_backup::inspect_import(external.to_str().unwrap()).unwrap().version, "5.0.15.1");
+        assert_eq!(crate::redis_backup::import_rdb(&state.paths, &import.source, &import.revision).unwrap_err().code, "REDIS_IMPORT_CHANGED");
+        std::fs::write(&external, &corrupt).unwrap();
+        assert_eq!(crate::redis_backup::inspect_import(external.to_str().unwrap()).unwrap_err().code, "REDIS_BACKUP_CHECKSUM");
+        assert!(crate::redis_backup::import_rdb(&state.paths, &import.source, &import.revision).is_err());
+        // 无版本标记、超大声明长度、非 RDB 与目录联接均不能绕过导入检查。
+        for payload in [b"REDIS0009\xff".to_vec(), b"REDIS0009\xfa\x80\xff\xff\xff\xff".to_vec()] {
+            let mut bytes = payload; bytes.extend_from_slice(&[0; 8]);
+            std::fs::write(&external, bytes).unwrap();
+            assert!(crate::redis_backup::inspect_import(external.to_str().unwrap()).is_err());
+        }
+        assert!(crate::redis_backup::inspect_import(config.to_str().unwrap()).is_err());
+        std::fs::write(&external, &original_backup).unwrap();
+        #[cfg(windows)] {
+            let linked_dir = temp.path().join("rdb junction");
+            let outside = temp.path().join("outside import"); std::fs::create_dir(&outside).unwrap();
+            std::fs::write(outside.join("dump.rdb"), &original_backup).unwrap();
+            assert!(platform::command("cmd").args(["/c", "mklink", "/J"]).arg(&linked_dir).arg(&outside).output().unwrap().status.success());
+            assert!(crate::redis_backup::inspect_import(linked_dir.join("dump.rdb").to_str().unwrap()).is_err());
+            std::fs::remove_dir(linked_dir).unwrap();
+        }
+        state.stop_service("redis").unwrap();
+        for directive in ["preload-file rdb:/tmp/other.rdb", "replicaof 127.0.0.1 6379", "slaveof 127.0.0.1 6379"] {
+            std::fs::write(&config, format!("{original_config}\n{directive}\n")).unwrap();
+            assert_eq!(state.redis_restore_preview("5.0.14.1", &imported.id).unwrap_err().code, "REDIS_RESTORE_SOURCE");
+        }
+        std::fs::write(&config, format!("{original_config}\npreload-file \"\"\n")).unwrap();
+        assert!(state.redis_restore_preview("5.0.14.1", &imported.id).is_ok());
+        std::fs::write(&config, &original_config).unwrap();
+        let preview = state.redis_restore_preview("5.0.14.1", &imported.id).unwrap();
+        state.redis_backup_restore("5.0.14.1", &imported.id, &preview.revision, "Redis 5.0.14.1").unwrap();
+        assert!(!state.manager.is_busy("redis"));
+        state.start_service("redis").unwrap();
+        assert_eq!(cli(&["GET", "isolated-fixture"]), "1");
+        assert_eq!(state.redis_stats().unwrap().keys, Some(2));
         let pids = state.manager.snapshot("redis").unwrap().pids;
         state.stop_service("redis").unwrap();
         assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));

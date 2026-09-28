@@ -970,16 +970,16 @@ export const RedisSettingsView = z.object({
 export type RedisSettingsView = z.infer<typeof RedisSettingsView>;
 
 export const RedisPersistence = z.object({
-  version: z.string(), runId: z.string(), loading: z.boolean(), saving: z.boolean(),
+  version: z.string(), runId: z.string(), processId: z.number().int().positive(), loading: z.boolean(), saving: z.boolean(),
   changesSinceSave: z.number().int().nonnegative(), lastSaveTime: z.number().int().nonnegative(),
   lastSaveStatus: z.enum(["ok", "err"]), lastSaveDuration: z.number().int().nonnegative().nullable(),
   aofEnabled: z.boolean(), aofRewriting: z.boolean(), aofRewriteScheduled: z.boolean().nullable(),
   aofLastRewriteStatus: z.enum(["ok", "err"]).nullable(), aofLastWriteStatus: z.enum(["ok", "err"]).nullable(),
 });
 export type RedisPersistence = z.infer<typeof RedisPersistence>;
-export const RedisSnapshotReceipt = z.object({ version: z.string(), runId: z.string(), minimumSaveTime: z.number().int().nonnegative() });
+export const RedisSnapshotReceipt = z.object({ version: z.string(), runId: z.string(), processId: z.number().int().positive(), minimumSaveTime: z.number().int().nonnegative() });
 export type RedisSnapshotReceipt = z.infer<typeof RedisSnapshotReceipt>;
-export const RedisBackup = z.object({ id: z.string(), version: z.string(), createdAt: z.number(), sizeBytes: z.number().nonnegative(), sha256: z.string(), kind: z.enum(["snapshot", "before-restore"]) });
+export const RedisBackup = z.object({ id: z.string(), version: z.string(), createdAt: z.number(), sizeBytes: z.number().nonnegative(), sha256: z.string(), kind: z.enum(["snapshot", "before-restore", "imported"]) });
 export type RedisBackup = z.infer<typeof RedisBackup>;
 export const RedisBackupList = z.object({ items: z.array(RedisBackup), unreadable: z.number().int().nonnegative(), directory: z.string() });
 export type RedisBackupList = z.infer<typeof RedisBackupList>;
@@ -987,6 +987,8 @@ export const RedisRestorePreview = z.object({ backup: RedisBackup, target: z.str
 export type RedisRestorePreview = z.infer<typeof RedisRestorePreview>;
 export const RedisRestoreResult = z.object({ target: z.string(), safetyBackup: RedisBackup.nullable() });
 export type RedisRestoreResult = z.infer<typeof RedisRestoreResult>;
+export const RedisImportPreview = z.object({ source: z.string(), version: z.string(), rdbVersion: z.number().int().nonnegative(), sizeBytes: z.number().nonnegative(), sha256: z.string(), revision: z.string() });
+export type RedisImportPreview = z.infer<typeof RedisImportPreview>;
 
 export const ProjectPlatformReport = z.object({
   project: z.string(), phpVersion: z.string(), ini: z.string(),

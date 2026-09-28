@@ -37,6 +37,7 @@ import type {
   RedisBackupList,
   RedisRestorePreview,
   RedisRestoreResult,
+  RedisImportPreview,
   ConfigFileInfo,
   ConfigValidation,
   ConfigBackup,
@@ -344,6 +345,8 @@ export const redisPersistence = (version: string) => safe(invoke<RedisPersistenc
 export const redisSnapshot = (version: string) => safe(invoke<RedisSnapshotReceipt>("redis_snapshot", { version }));
 export const redisBackupList = () => safe(invoke<RedisBackupList>("redis_backup_list"));
 export const redisBackupCreate = (version: string) => safe(invoke<RedisBackup>("redis_backup_create", { version }));
+export const redisBackupInspectImport = (source: string) => safe(invoke<RedisImportPreview>("redis_backup_inspect_import", { source }));
+export const redisBackupImport = (source: string, revision: string) => safe(invoke<RedisBackup>("redis_backup_import", { source, revision }));
 export const redisRestorePreview = (version: string, id: string) => safe(invoke<RedisRestorePreview>("redis_restore_preview", { version, id }));
 export const redisBackupRestore = (version: string, id: string, revision: string, confirmation: string) => safe(invoke<RedisRestoreResult>("redis_backup_restore", { version, id, revision, confirmation }));
 export const redisSettingsSave = (version: string, revision: string, settings: RedisSettings, acknowledgeDisable: boolean) =>

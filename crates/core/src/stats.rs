@@ -366,6 +366,7 @@ impl RedisClient {
 pub struct RedisPersistence {
     pub version: String,
     pub run_id: String,
+    pub process_id: u32,
     pub loading: bool,
     pub saving: bool,
     pub changes_since_save: u64,
@@ -384,6 +385,7 @@ pub struct RedisPersistence {
 pub struct RedisSnapshotReceipt {
     pub version: String,
     pub run_id: String,
+    pub process_id: u32,
     pub minimum_save_time: u64,
 }
 
@@ -436,6 +438,7 @@ fn persistence_info(
     Ok(RedisPersistence {
         version: version.into(),
         run_id: run_id.into(),
+        process_id,
         loading: flag("loading")?,
         saving: flag("rdb_bgsave_in_progress")?,
         changes_since_save: number("rdb_changes_since_last_save")?,
@@ -524,7 +527,7 @@ pub(crate) fn redis_rdb_file(
     Ok(crate::paths::checked_data_path(&paths.base, &format!("data/redis/{name}"))?)
 }
 
-/// 只提交异步保存；完成状态由同一 run_id 的 INFO 回读确认，不把 BGSAVE 接受当成已落盘。
+/// 只提交异步保存；完成状态由同一 run_id + PID 的 INFO 回读确认，不把 BGSAVE 接受当成已落盘。
 pub(crate) fn redis_snapshot(
     port: u16,
     credentials: &RedisCredentials,
@@ -556,6 +559,7 @@ pub(crate) fn redis_snapshot(
                     return Ok(RedisSnapshotReceipt {
                         version: version.into(),
                         run_id: current.run_id,
+                        process_id: current.process_id,
                         minimum_save_time: now,
                     });
                 }

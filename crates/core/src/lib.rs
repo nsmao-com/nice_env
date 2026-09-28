@@ -908,7 +908,7 @@ impl CoreState {
         let started = std::time::Instant::now();
         loop {
             let current = stats::redis_persistence(port, &credentials, &service.pids, version)?;
-            if current.run_id != receipt.run_id { return Err(AppError::new("REDIS_INSTANCE_CHANGED", "Redis 实例已变化，未创建独立备份")); }
+            if current.run_id != receipt.run_id || current.process_id != receipt.process_id { return Err(AppError::new("REDIS_INSTANCE_CHANGED", "Redis 实例已变化，未创建独立备份")); }
             if !current.saving && current.last_save_status == "err" { return Err(AppError::new("REDIS_SAVE_FAILED", "Redis 快照失败，未创建独立备份，请检查日志与磁盘空间")); }
             if !current.loading && !current.saving && current.last_save_time >= receipt.minimum_save_time { break; }
             if started.elapsed() > std::time::Duration::from_secs(120) { return Err(AppError::new("REDIS_BACKUP_TIMEOUT", "尚未确认快照完成，未创建独立备份")

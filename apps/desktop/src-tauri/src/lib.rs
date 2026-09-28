@@ -390,6 +390,8 @@ pub fn run() {
             redis_backup_create,
             redis_restore_preview,
             redis_backup_restore,
+            redis_backup_inspect_import,
+            redis_backup_import,
             redis_connection,
             redis_save_connection,
             postgres_connection,
@@ -1740,6 +1742,25 @@ async fn redis_backup_restore(state: State<'_, std::sync::Arc<nsb_core::CoreStat
     tauri::async_runtime::spawn_blocking(move || {
         let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
         map_jh(st.redis_backup_restore(&version, &id, &revision, &confirmation))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+/// 外部 RDB 先核对来源版本和摘要，导入只保存新的副本，不覆盖运行实例。
+#[tauri::command]
+async fn redis_backup_inspect_import(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, source: String) -> Result<nsb_core::redis_backup::RedisImportPreview, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
+        map_jh(nsb_core::redis_backup::inspect_import(&source))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn redis_backup_import(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, source: String, revision: String) -> Result<nsb_core::redis_backup::RedisBackup, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
+        map_jh(nsb_core::redis_backup::import_rdb(&st.paths, &source, &revision))
     }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 
 export function redisSnapshotState(receipt: RedisSnapshotReceipt, current: RedisPersistence) {
-  if (receipt.version !== current.version || receipt.runId !== current.runId) return "restarted";
+  if (receipt.version !== current.version || receipt.runId !== current.runId || receipt.processId !== current.processId) return "restarted";
   if (current.loading || current.saving) return "waiting";
   if (current.lastSaveStatus === "err") return "failed";
   return current.lastSaveTime >= receipt.minimumSaveTime ? "complete" : "waiting";

@@ -47,6 +47,17 @@ pub struct RedisRestoreResult {
     pub safety_backup: Option<RedisBackup>,
 }
 
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisImportPreview {
+    pub source: String,
+    pub version: String,
+    pub rdb_version: u16,
+    pub size_bytes: u64,
+    pub sha256: String,
+    pub revision: String,
+}
+
 fn invalid(message: &str) -> AppError {
     AppError::new("REDIS_BACKUP_INVALID", message)
 }
@@ -142,6 +153,15 @@ pub(crate) fn rdb_checksum(mut value: u64, bytes: &[u8]) -> u64 {
 }
 
 fn copy_file(path: &Path, mut output: impl Write, require_rdb: bool) -> Result<(u64, String)> {
+    copy_file_with_prefix(path, &mut output, require_rdb, None)
+}
+
+fn copy_file_with_prefix(
+    path: &Path,
+    mut output: impl Write,
+    require_rdb: bool,
+    mut prefix: Option<&mut Vec<u8>>,
+) -> Result<(u64, String)> {
     let mut file = open_plain(path)?;
     let before = file.metadata()?;
     let mut hash = Sha256::new();
@@ -159,6 +179,9 @@ fn copy_file(path: &Path, mut output: impl Write, require_rdb: bool) -> Result<(
             return Err(invalid("文件不是有效的 RDB 快照头"));
         }
         hash.update(header);
+        if let Some(bytes) = prefix.as_deref_mut() {
+            bytes.extend_from_slice(&header);
+        }
         crc = rdb_checksum(crc, &header);
         output.write_all(&header)?;
         size = 9;
@@ -181,6 +204,10 @@ fn copy_file(path: &Path, mut output: impl Write, require_rdb: bool) -> Result<(
             }
         }
         size += n as u64;
+        if let Some(bytes) = prefix.as_deref_mut() {
+            let count = n.min((64 * 1024usize).saturating_sub(bytes.len()));
+            bytes.extend_from_slice(&buffer[..count]);
+        }
         hash.update(&buffer[..n]);
         output.write_all(&buffer[..n])?;
     }
@@ -220,7 +247,10 @@ fn metadata(paths: &Paths, id: &str) -> Result<RedisBackup> {
         || entry.created_at <= 0
         || entry.version.is_empty()
         || entry.version.len() > 128
-        || !matches!(entry.kind.as_str(), "snapshot" | "before-restore")
+        || !matches!(
+            entry.kind.as_str(),
+            "snapshot" | "before-restore" | "imported"
+        )
         || entry.sha256.len() != 64
         || !entry.sha256.bytes().all(|b| b.is_ascii_hexdigit())
     {
@@ -269,6 +299,16 @@ pub fn list(paths: &Paths) -> Result<RedisBackupList> {
 }
 
 pub fn archive(paths: &Paths, version: &str, source: &Path, kind: &str) -> Result<RedisBackup> {
+    archive_checked(paths, version, source, kind, None)
+}
+
+fn archive_checked(
+    paths: &Paths,
+    version: &str,
+    source: &Path,
+    kind: &str,
+    expected: Option<&str>,
+) -> Result<RedisBackup> {
     let dir = directory(paths)?;
     fs::create_dir_all(&dir)?;
     let id = format!(
@@ -280,7 +320,13 @@ pub fn archive(paths: &Paths, version: &str, source: &Path, kind: &str) -> Resul
         .prefix(".pending-")
         .tempdir_in(&dir)?;
     let mut content = File::create(pending.path().join("content.rdb"))?;
-    let (size_bytes, sha256) = copy_file(source, &mut content, kind == "snapshot")?;
+    let (size_bytes, sha256) = copy_file(source, &mut content, kind != "before-restore")?;
+    if expected.is_some_and(|hash| hash != sha256) {
+        return Err(AppError::new(
+            "REDIS_IMPORT_CHANGED",
+            "源 RDB 在导入期间发生变化，未保存备份，请重新选择",
+        ));
+    }
     content.sync_all()?;
     drop(content);
     let entry = RedisBackup {
@@ -304,6 +350,148 @@ pub fn archive(paths: &Paths, version: &str, source: &Path, kind: &str) -> Resul
     }
     fs::rename(pending.path(), &destination)?;
     Ok(entry)
+}
+
+fn import_source(source: &str) -> Result<PathBuf> {
+    let path = Path::new(source);
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(invalid("请选择本机 RDB 文件的完整路径"));
+    }
+    if !path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("rdb"))
+    {
+        return Err(invalid("请选择 .rdb 快照文件"));
+    }
+    for part in path.ancestors() {
+        if linked(&fs::symlink_metadata(part)?) {
+            return Err(invalid(
+                "导入路径不能经过符号链接或目录联接，请选择原始文件",
+            ));
+        }
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid("文件路径无效"))?
+        .canonicalize()?;
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| invalid("文件名无效"))?;
+    Ok(checked_data_path(&parent, name)?)
+}
+
+/// 仅读取开头 AUX 元信息，不解释键值对象或执行任何 Redis 指令。
+/// 编码依据 Redis RDB 长度/整数规范；总读取范围限制在已校验文件的前 64 KiB。
+fn source_version(prefix: &[u8]) -> Result<(u16, String)> {
+    let unknown = || {
+        AppError::new("REDIS_IMPORT_VERSION", "无法从此 RDB 自动识别来源 Redis 版本")
+        .with_hint("请选择由 Redis 生成、带 redis-ver 元信息的完整 RDB；旧格式、压缩版本字段或不明确的版本不支持自动导入")
+    };
+    fn take<'a>(data: &mut &'a [u8], count: usize) -> Option<&'a [u8]> {
+        if count > data.len() {
+            return None;
+        }
+        let (head, tail) = data.split_at(count);
+        *data = tail;
+        Some(head)
+    }
+    fn string(data: &mut &[u8]) -> Option<Vec<u8>> {
+        let first = *take(data, 1)?.first()?;
+        let length = match first >> 6 {
+            0 => u64::from(first),
+            1 => (u64::from(first & 63) << 8) | u64::from(take(data, 1)?[0]),
+            2 if first == 0x80 => u64::from(u32::from_be_bytes(take(data, 4)?.try_into().ok()?)),
+            2 if first == 0x81 => u64::from_be_bytes(take(data, 8)?.try_into().ok()?),
+            3 => {
+                let value = match first & 63 {
+                    0 => i64::from(take(data, 1)?[0] as i8),
+                    1 => i64::from(i16::from_le_bytes(take(data, 2)?.try_into().ok()?)),
+                    2 => i64::from(i32::from_le_bytes(take(data, 4)?.try_into().ok()?)),
+                    _ => return None,
+                };
+                return Some(value.to_string().into_bytes());
+            }
+            _ => return None,
+        };
+        if length > 4096 {
+            return None;
+        }
+        Some(take(data, length as usize)?.to_vec())
+    }
+    let header = prefix.get(..9).ok_or_else(unknown)?;
+    let format: u16 = std::str::from_utf8(&header[5..])
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(unknown)?;
+    let mut data = &prefix[9..];
+    for _ in 0..64 {
+        if data.first() != Some(&0xfa) {
+            break;
+        }
+        data = &data[1..];
+        let key = string(&mut data).ok_or_else(unknown)?;
+        let value = string(&mut data).ok_or_else(unknown)?;
+        if key == b"redis-ver" {
+            let value = String::from_utf8(value).map_err(|_| unknown())?;
+            let parts: Vec<_> = value.split('.').collect();
+            if !(3..=4).contains(&parts.len())
+                || parts.iter().any(|part| {
+                    part.is_empty() || part.len() > 5 || !part.bytes().all(|c| c.is_ascii_digit())
+                })
+            {
+                return Err(unknown());
+            }
+            return Ok((format, value));
+        }
+    }
+    Err(unknown())
+}
+
+pub fn inspect_import(source: &str) -> Result<RedisImportPreview> {
+    let _work = crate::BackgroundWork::begin("检查外部 Redis RDB")?;
+    let path = import_source(source)?;
+    let mut prefix = Vec::new();
+    let (size_bytes, sha256) =
+        copy_file_with_prefix(&path, std::io::sink(), true, Some(&mut prefix))?;
+    let (rdb_version, version) = source_version(&prefix)?;
+    let source = crate::paths::portable_path_text(&path);
+    let revision = hex::encode(Sha256::digest(
+        serde_json::to_vec(&(&source, &version, rdb_version, size_bytes, &sha256))
+            .map_err(|_| invalid("导入范围序列化失败"))?,
+    ));
+    Ok(RedisImportPreview {
+        source,
+        version,
+        rdb_version,
+        size_bytes,
+        sha256,
+        revision,
+    })
+}
+
+pub fn import_rdb(paths: &Paths, source: &str, revision: &str) -> Result<RedisBackup> {
+    let _work = crate::BackgroundWork::begin("导入外部 Redis RDB")?;
+    let preview = inspect_import(source)?;
+    if preview.revision != revision {
+        return Err(AppError::new(
+            "REDIS_IMPORT_CHANGED",
+            "源文件与预览不一致，请重新选择并确认",
+        ));
+    }
+    let path = import_source(&preview.source)?;
+    archive_checked(
+        paths,
+        &preview.version,
+        &path,
+        "imported",
+        Some(&preview.sha256),
+    )
 }
 
 fn target(paths: &Paths, store: &Store, version: &str) -> Result<(PathBuf, String)> {
@@ -333,6 +521,14 @@ fn target(paths: &Paths, store: &Store, version: &str) -> Result<(PathBuf, Strin
         .filter(|l| !l.starts_with('#'))
     {
         let key = line.split_ascii_whitespace().next().unwrap_or_default();
+        if (key.eq_ignore_ascii_case("preload-file")
+            && !matches!(line[key.len()..].trim(), "\"\"" | "''"))
+            || key.eq_ignore_ascii_case("replicaof")
+            || key.eq_ignore_ascii_case("slaveof")
+        {
+            return Err(AppError::new("REDIS_RESTORE_SOURCE", "启动配置指定了预载文件或上游复制，无法保证启动时使用恢复的 RDB")
+                .with_hint("请在配置编辑器核对 preload-file / replicaof / slaveof；此面板不会自动修改复制关系或启动数据来源"));
+        }
         if !key.eq_ignore_ascii_case("dbfilename") {
             continue;
         }

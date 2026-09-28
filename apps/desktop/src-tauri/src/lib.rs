@@ -90,7 +90,7 @@ pub fn run() {
             // 仅桌面应用启动计划任务；CLI/MCP 的只读调用不应触发用户命令。
             nsb_core::cron::spawn_scheduler_when_ready(state.paths.clone(),Some(setup_startup.gate.clone()))?;
             nsb_core::backup_job::spawn_scheduler_when_ready(state.paths.clone(),Some(setup_startup.gate.clone()));
-            nsb_core::backup_job::spawn_postgres_scheduler_when_ready(state.clone(), setup_startup.gate.clone())?;
+            nsb_core::backup_job::spawn_database_scheduler_when_ready(state.clone(), setup_startup.gate.clone())?;
             app.manage(state);
 
             /* ---------- 证书自动化调度：启动 30s 后先补一轮，之后每小时检查到期 ---------- */
@@ -382,6 +382,9 @@ pub fn run() {
             postgres_backup_plan_run,
             postgres_backup_delete,
             // 数据库备份 / 还原
+            db_backup_plan,
+            db_backup_plan_save,
+            db_backup_plan_run,
             db_backup_list,
             db_backup_dump,
             db_backup_restore,
@@ -3442,6 +3445,23 @@ async fn postgres_backup_plan_save(state: State<'_, std::sync::Arc<nsb_core::Cor
 async fn postgres_backup_plan_run(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String) -> Result<nsb_core::backup_job::PostgresPlan, tauri::Error> {
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::backup_job::run_postgres_plan(&st, &version, true))).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+fn db_backup_plan(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, engine: nsb_core::dbadmin::DatabaseEngine, version: String) -> Result<nsb_core::backup_job::BackupPlan, tauri::Error> {
+    map_jh(nsb_core::backup_job::database_plan(&state, engine, &version))
+}
+
+#[tauri::command]
+async fn db_backup_plan_save(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, engine: nsb_core::dbadmin::DatabaseEngine, version: String, config: nsb_core::backup_job::BackupPlanConfig) -> Result<nsb_core::backup_job::BackupPlan, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::backup_job::save_database_plan(&st, engine, &version, config))).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn db_backup_plan_run(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, engine: nsb_core::dbadmin::DatabaseEngine, version: String) -> Result<nsb_core::backup_job::BackupPlan, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::backup_job::run_database_plan(&st, engine, &version, true))).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /* ================= 服务看门狗 ================= */

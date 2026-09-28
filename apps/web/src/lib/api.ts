@@ -343,8 +343,13 @@ export const postgresBackupDelete = (name: string) => safe(invoke<void>("postgre
 export interface PostgresReplaceInput { path: string; name: string; oid: number; owner: string; confirmedName: string; trusted: boolean }
 export interface PostgresReplaceResult { database: string; previousDatabase: string; safetyBackup: string }
 export const postgresBackupReplace = (version: string, input: PostgresReplaceInput, operationId: string) => safe(invoke<PostgresReplaceResult>("postgres_backup_replace", { version, input, operationId }));
-export interface PostgresPlanConfig { enabled: boolean; frequency: "daily" | "weekly" | "monthly"; time: string; weekday: number; monthDay: number; keep: number }
-export interface PostgresPlan { config: PostgresPlanConfig; nextAt: number | null; lastRunAt: number | null; finishedAt: number | null; state: string; message: string; files: string[] }
+export interface BackupPlanConfig { enabled: boolean; frequency: "daily" | "weekly" | "monthly"; time: string; weekday: number; monthDay: number; keep: number }
+export interface BackupPlan { config: BackupPlanConfig; nextAt: number | null; lastRunAt: number | null; finishedAt: number | null; state: string; message: string; files: string[] }
+export type PostgresPlanConfig = BackupPlanConfig;
+export type PostgresPlan = BackupPlan;
+export const dbBackupPlan = (engine: DatabaseEngine, version: string) => safe(invoke<BackupPlan>("db_backup_plan", { engine, version }));
+export const dbBackupPlanSave = (engine: DatabaseEngine, version: string, config: BackupPlanConfig) => safe(invoke<BackupPlan>("db_backup_plan_save", { engine, version, config }));
+export const dbBackupPlanRun = (engine: DatabaseEngine, version: string) => safe(invoke<BackupPlan>("db_backup_plan_run", { engine, version }));
 export const postgresBackupPlan = (version: string) => safe(invoke<PostgresPlan>("postgres_backup_plan", { version }));
 export const postgresBackupPlanSave = (version: string, config: PostgresPlanConfig) => safe(invoke<PostgresPlan>("postgres_backup_plan_save", { version, config }));
 export const postgresBackupPlanRun = (version: string) => safe(invoke<PostgresPlan>("postgres_backup_plan_run", { version }));

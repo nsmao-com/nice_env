@@ -66,7 +66,7 @@ import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSet
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.88";
+const MOCK_APP_VERSION = "0.2.89";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -365,7 +365,8 @@ const mockRedisConnections = new Map<string, { username: string; password: strin
 const mockPostgresConnections = new Map<string, { password: string; saved: string; passwordRequired: boolean }>();
 const mockPostgresBackups = new Map<string, { file: DbBackupFile; database: import("./api").PostgresDatabaseInfo }>();
 const mockPostgresPlans = new Map<string, import("./api").PostgresPlan>();
-function previewPlan(version: string) {
+function previewPlan(version: string, engine = "postgresql") {
+  version = `${engine}@${version}`;
   let plan = mockPostgresPlans.get(version);
   if (!plan) { plan = { config: { enabled: false, frequency: "daily", time: "03:00", weekday: 0, monthDay: 1, keep: 10 }, nextAt: null, lastRunAt: null, finishedAt: null, state: "idle", message: "", files: [] }; mockPostgresPlans.set(version, plan); }
   return plan;
@@ -2604,24 +2605,41 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (mockOllamaPull.state === "pulling") { mockOllamaPull.state = "cancelled"; mockOllamaPull.endedAt = Date.now(); }
       return true as T;
     }
-    case "postgres_backup_plan": return structuredClone(previewPlan(args!.version as string)) as T;
+    case "db_backup_plan":
+    case "postgres_backup_plan": return structuredClone(previewPlan(args!.version as string, args?.engine as string | undefined)) as T;
+    case "db_backup_plan_save":
     case "postgres_backup_plan_save": {
       const version = args!.version as string;
-      const plan = previewPlan(version);
+      const plan = previewPlan(version, args?.engine as string | undefined);
       if (plan.state === "running") throw { code: "BACKUP_BUSY", message: "自动备份正在执行" };
       const config = args!.config as import("./api").PostgresPlanConfig;
       if (!["daily", "weekly", "monthly"].includes(config.frequency) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(config.time) || !Number.isInteger(config.keep) || config.keep < 0 || config.keep > 100 || config.weekday < 0 || config.weekday > 6 || config.monthDay < 1 || config.monthDay > 31) throw { code: "BAD_BACKUP_PLAN", message: "请检查计划时间与保留数量" };
       plan.config = { ...config }; plan.nextAt = config.enabled ? previewPlanNext(config) : null;
       return structuredClone(plan) as T;
     }
+    case "db_backup_plan_run":
     case "postgres_backup_plan_run": {
       const version = args!.version as string;
-      const plan = previewPlan(version);
+      const plan = previewPlan(version, args?.engine as string | undefined);
       if (plan.state === "running") throw { code: "BACKUP_BUSY", message: "自动备份正在执行" };
       plan.state = "running"; plan.lastRunAt = Date.now(); plan.finishedAt = null; plan.files = []; plan.message = "";
       plan.nextAt = plan.config.enabled ? previewPlanNext(plan.config) : null;
       await delay(1200);
       try {
+        if (args?.engine) {
+          const engine = args.engine as DatabaseEngine;
+          const { state } = mysqlPreview(version, true, engine);
+          const databases = [...state.databases.values()].filter((db) => !systemDatabase(db.name));
+          for (const db of databases) {
+            const hash = [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(db.name)))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+            const label = `auto-${hash}`;
+            const file = previewBackup(version, [db], `${label}-${db.name.replace(/[^\p{L}\p{N}_.-]/gu, "_").slice(0, 16)}`, engine); plan.files.push(file.name);
+            const prefix = `${engine}-${version}-${label}-`;
+            if (plan.config.keep) [...mockDbBackups.values()].filter((entry) => entry.name.startsWith(prefix)).reverse().slice(plan.config.keep).forEach((entry) => { mockDbBackups.delete(entry.path); mockBackupContents.delete(entry.path); });
+          }
+          plan.state = databases.length ? "success" : "skipped";
+          plan.message = databases.length ? `预览：已备份 ${databases.length} 个业务数据库` : "没有可备份的业务数据库";
+        } else {
         const databases = (await mockInvoke<import("./api").PostgresDatabaseInfo[]>("postgres_databases", { version })).filter((db) => !db.protected && db.allowConnections);
         for (const db of databases) {
           const prefix = `auto-postgresql-${version}-${db.oid}-`;
@@ -2632,6 +2650,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         }
         plan.state = databases.length ? "success" : "skipped";
         plan.message = databases.length ? `预览：已备份 ${databases.length} 个业务数据库` : "没有可备份的业务数据库";
+        }
       } catch (error) { plan.state = "failed"; plan.message = String((error as { message?: string }).message || error); }
       plan.finishedAt = Date.now();
       return structuredClone(plan) as T;

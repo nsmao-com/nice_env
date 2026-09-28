@@ -66,6 +66,22 @@ fn unique_stamp() -> String {
     )
 }
 
+/// 原始库名的完整摘要隔离轮转，避免字符清洗或大小写折叠合并不同数据库。
+pub(crate) fn automatic_database_id(database: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(database.as_bytes()))
+}
+pub(crate) fn automatic_marker(engine: DatabaseEngine, version: &str, database: &str) -> String {
+    format!("\n-- NiceEnv automatic backup v1 {} {version} {}\n", engine.id(), automatic_database_id(database))
+}
+pub(crate) fn dump_database_auto(paths: &Paths, conn: &ConnInfo, database: &str) -> Result<PathBuf> {
+    let label: String = sanitize(database).chars().take(16).collect();
+    let name = format!("auto-{}-{label}-{}.sql", automatic_database_id(database), unique_stamp());
+    let path = dump_path_for(paths, conn.engine, &conn.version, &name)?;
+    dump_databases_kind(paths, conn, &[database.into()], &path, true, &|_| {})?;
+    Ok(path)
+}
+
 fn tool_path(paths: &Paths, conn: &ConnInfo, tool: &str) -> Result<PathBuf> {
     let bin = conn.resolved_bin_dir(paths)?;
     Ok(crate::dbadmin::database_tool(&bin, conn.engine, tool))
@@ -126,6 +142,17 @@ pub fn dump_databases(
     out_path: &Path,
     progress: &dyn Fn(DbBackupProgress),
 ) -> Result<u64> {
+    dump_databases_kind(paths, conn, databases, out_path, false, progress)
+}
+
+fn dump_databases_kind(
+    paths: &Paths,
+    conn: &ConnInfo,
+    databases: &[String],
+    out_path: &Path,
+    automatic: bool,
+    progress: &dyn Fn(DbBackupProgress),
+) -> Result<u64> {
     if databases.is_empty() {
         return Err(AppError::new("NO_DATABASE", "没有选择要备份的数据库"));
     }
@@ -169,7 +196,7 @@ pub fn dump_databases(
             "同名备份已存在，未覆盖原文件",
         ));
     }
-    let pending = tempfile::Builder::new()
+    let mut pending = tempfile::Builder::new()
         .prefix(".dump-")
         .tempfile_in(parent)?;
     let mut error = tempfile::tempfile()?;
@@ -205,11 +232,17 @@ pub fn dump_databases(
             AppError::new("DUMP_FAILED", "导出失败，未发布不完整的备份文件").with_detail(detail),
         );
     }
-    pending.as_file().sync_all()?;
     let written = pending.as_file().metadata()?.len();
     if written == 0 {
         return Err(AppError::new("DUMP_FAILED", "导出内容为空，未发布备份文件"));
     }
+    if automatic {
+        use std::io::{Seek, SeekFrom, Write};
+        pending.as_file_mut().seek(SeekFrom::End(0))?;
+        pending.write_all(automatic_marker(conn.engine, &conn.version, &databases[0]).as_bytes())?;
+    }
+    pending.as_file().sync_all()?;
+    let written = pending.as_file().metadata()?.len();
     pending
         .persist_noclobber(out_path)
         .map_err(|e| AppError::io("发布数据库备份", e.error))?;

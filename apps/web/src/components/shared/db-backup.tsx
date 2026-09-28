@@ -26,6 +26,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { DatabaseBackupPlan } from "@/components/shared/database-backup-plan";
 import { ConfirmDialog } from "@/components/shared/misc";
 import {
   Dialog,
@@ -71,7 +72,9 @@ export function DbBackupCard({ version, engine, targetLabel, ready, databases: d
   const restoreOpener = React.useRef<HTMLButtonElement | null>(null);
   const [error, setError] = React.useState("");
   const [picked, setPicked] = React.useState<Set<string>>(new Set());
-  const [busy, setBusy] = React.useState(false);
+  const [manualBusy, setBusy] = React.useState(false);
+  const [planLocked, setPlanLocked] = React.useState(false);
+  const busy = manualBusy || planLocked;
   const [progress, setProgress] = React.useState<DbBackupProgress | null>(null);
   const [dumpOpen, setDumpOpen] = React.useState(false);
   const [confirmRestore, setConfirmRestore] = React.useState<Pick<DbBackupFile, "path" | "name"> | null>(null);
@@ -94,7 +97,7 @@ export function DbBackupCard({ version, engine, targetLabel, ready, databases: d
   }, []);
 
   const begin = () => {
-    if (busyRef.current) return false;
+    if (busyRef.current || planLocked) return false;
     busyRef.current = true; setBusy(true); setError(""); setProgress(null); return true;
   };
   const end = () => { busyRef.current = false; setBusy(false); setProgress(null); };
@@ -210,6 +213,7 @@ export function DbBackupCard({ version, engine, targetLabel, ready, databases: d
           </div>
         </CardHeader>
         <CardContent>
+          <DatabaseBackupPlan engine={engine} version={version} targetLabel={targetLabel} ready={ready} disabled={manualBusy || dumpOpen || !!confirmRestore || !!confirmDelete} onLockChange={setPlanLocked} />
           {/* 进度条：只在任务进行时出现，不占常驻空间 */}
           {progress && (
             <div className="mb-3 rounded-lg border border-info/25 bg-info-soft px-3 py-2">

@@ -2889,6 +2889,60 @@ mod validate_tests {
         let report = dbmigrate::import_databases(&state.paths, &source, &["mysql_source".into()], &conn, |_, _| {}).unwrap();
         assert!(report.failed.is_empty(), "{:?}", report.failed);
         assert_eq!(client.run("SELECT id FROM mysql_source.sample;").unwrap().trim(), "42");
+        // 原生计划走实际客户端、独立实例和现有 SQL 恢复链路。
+        for (plan_engine, version, database, credential) in [
+            (DatabaseEngine::Mysql, "8.0.46", "mysql_source", mysql_client.root_password.as_str()),
+            (DatabaseEngine::Mariadb, "11.4.8", "mariadb_fixture", secret),
+        ] {
+            use crate::backup_job::{self, BackupPlanConfig};
+            let config = BackupPlanConfig { enabled: true, keep: 1, ..Default::default() };
+            backup_job::save_database_plan(&state, plan_engine, version, config.clone()).unwrap();
+            assert_eq!(backup_job::run_database_plan(&state, plan_engine, version, false).unwrap().last_run_at, None);
+            let first = backup_job::run_database_plan(&state, plan_engine, version, true).unwrap();
+            assert_eq!(first.state, "success", "{}", first.message);
+            assert_eq!(first.files.len(), if plan_engine == DatabaseEngine::Mysql { 1 } else { 2 });
+            let dir = dbbackup::backup_dir(&state.paths);
+            assert!(first.files.iter().all(|file| dir.join(file).is_file()));
+            let key = format!("{}BackupPlan@{version}", plan_engine.id());
+            state.store.set_setting(&plan_engine.password_key(version), "incorrect").unwrap();
+            assert_eq!(backup_job::run_database_plan(&state, plan_engine, version, true).unwrap().state, "failed");
+            assert!(first.files.iter().all(|file| dir.join(file).is_file()));
+            state.store.set_setting(&plan_engine.password_key(version), credential).unwrap();
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                let held = std::fs::OpenOptions::new().read(true).share_mode(3).open(dir.join(&first.files[0])).unwrap();
+                let partial = backup_job::run_database_plan(&state, plan_engine, version, true).unwrap();
+                assert_eq!(partial.state, "partial", "{}", partial.message);
+                assert!(dir.join(&first.files[0]).is_file());
+                assert!(partial.files.iter().all(|file| dir.join(file).is_file()));
+                drop(held);
+            }
+            let mut due = backup_job::database_plan(&state, plan_engine, version).unwrap();
+            due.next_at = Some(1); state.store.set_setting_json(&key, &due).unwrap();
+            backup_job::tick_databases(&state);
+            let latest = backup_job::database_plan(&state, plan_engine, version).unwrap();
+            assert_eq!(latest.state, "success", "{}", latest.message);
+            assert!(latest.next_at.unwrap() > crate::services::now_ms());
+            assert!(first.files.iter().all(|file| !dir.join(file).exists()));
+            assert!(latest.files.iter().all(|file| dir.join(file).is_file()));
+            assert!(backup.is_file() && safety.is_file(), "手动和恢复前备份不参与轮转");
+            backup_job::tick_databases(&state);
+            assert_eq!(backup_job::database_plan(&state, plan_engine, version).unwrap().last_run_at, latest.last_run_at);
+            let hash = dbbackup::automatic_database_id(database);
+            let file = dir.join(latest.files.iter().find(|file| file.contains(&hash)).unwrap());
+            let text = std::fs::read_to_string(&file).unwrap();
+            assert!(text.ends_with(&dbbackup::automatic_marker(plan_engine, version, database)));
+            let native_client = if plan_engine == DatabaseEngine::Mysql { &mysql_client } else { &client };
+            if plan_engine == DatabaseEngine::Mysql { native_client.run("UPDATE mysql_source.sample SET id=99;").unwrap(); }
+            else { native_client.run("UPDATE mariadb_fixture.sample SET value='after schedule';").unwrap(); }
+            let restore_conn = dbbackup::ConnInfo { engine: plan_engine, version: version.into(), port: native_client.port, root_password: credential.into(), bin_dir: native_client.exe.parent().map(Path::to_path_buf) };
+            dbbackup::restore_from_file(&state.paths, &restore_conn, &file, false, &|_| {}).unwrap();
+            if plan_engine == DatabaseEngine::Mysql { assert_eq!(native_client.run("SELECT id FROM mysql_source.sample;").unwrap().trim(), "42"); }
+            else { assert_eq!(native_client.run("SELECT value FROM mariadb_fixture.sample;").unwrap().trim(), "original"); }
+            let disabled = backup_job::save_database_plan(&state, plan_engine, version, BackupPlanConfig { enabled: false, ..config }).unwrap();
+            assert_eq!(disabled.next_at, None);
+        }
         state.stop_service("mariadb").unwrap();
         assert!(pid.iter().all(|pid| !platform::process_alive(*pid)));
         state.start_service("mariadb").unwrap();

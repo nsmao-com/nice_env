@@ -283,6 +283,103 @@ pub(crate) fn query_client(
     read_output(&mut output, 16 * 1024 * 1024)
 }
 
+/// Database-level privileges supported by the installed server are discovered from mysql.db.
+const DATABASE_PRIVILEGES: &[(&str, &str)] = &[
+    ("Select_priv", "SELECT"), ("Insert_priv", "INSERT"), ("Update_priv", "UPDATE"), ("Delete_priv", "DELETE"),
+    ("Create_priv", "CREATE"), ("Drop_priv", "DROP"), ("References_priv", "REFERENCES"), ("Index_priv", "INDEX"),
+    ("Alter_priv", "ALTER"), ("Create_tmp_table_priv", "CREATE TEMPORARY TABLES"), ("Lock_tables_priv", "LOCK TABLES"),
+    ("Create_view_priv", "CREATE VIEW"), ("Show_view_priv", "SHOW VIEW"), ("Create_routine_priv", "CREATE ROUTINE"),
+    ("Alter_routine_priv", "ALTER ROUTINE"), ("Execute_priv", "EXECUTE"), ("Event_priv", "EVENT"),
+    ("Trigger_priv", "TRIGGER"), ("Delete_history_priv", "DELETE HISTORY"),
+];
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseGrantScope {
+    pub scope: String,
+    pub label: String,
+    pub pattern: bool,
+    pub protected: bool,
+    pub privileges: Vec<String>,
+    pub grant_option: bool,
+    pub extra_privileges: Vec<String>,
+}
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseGrants {
+    pub username: String,
+    pub host: String,
+    pub scopes: Vec<DatabaseGrantScope>,
+    pub databases: Vec<String>,
+    pub available: Vec<String>,
+    pub partial_revokes: bool,
+    pub mariadb: bool,
+    pub global_privileges: bool,
+    pub protected: bool,
+    pub revision: String,
+}
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseGrantInput {
+    pub username: String,
+    pub host: String,
+    pub target: String,
+    pub new_database: bool,
+    pub privileges: Vec<String>,
+    pub grant_option: bool,
+    pub revision: String,
+}
+fn account_filter(username: &str, host: &str) -> Result<String> {
+    if username.len() > 384 || host.len() > 1020 || username.chars().chain(host.chars()).any(char::is_control) {
+        return Err(AppError::new("BAD_ACCOUNT", "账号名称或来源主机无效"));
+    }
+    Ok(format!("HEX(User)='{}' AND HEX(Host)='{}'", hex::encode_upper(username), hex::encode_upper(host)))
+}
+fn protected_account(username: &str, host: &str) -> bool {
+    username.is_empty() || host.is_empty() || username.eq_ignore_ascii_case("root")
+        || username.to_ascii_lowercase().starts_with("mysql.") || username.eq_ignore_ascii_case("mariadb.sys")
+}
+fn grant_literal(database: &str, partial_revokes: bool) -> String {
+    if partial_revokes { database.into() } else { database.replace('\\', "\\\\").replace('_', "\\_").replace('%', "\\%") }
+}
+fn grant_scope_details(scope: &str, partial_revokes: bool) -> Result<(String, bool, bool)> {
+    let mut pattern = false;
+    let mut label = String::new();
+    let mut expression = String::from("(?i)^");
+    let mut chars = scope.chars();
+    while let Some(c) = chars.next() {
+        if !partial_revokes && c == '\\' {
+            let c = chars.next().unwrap_or('\\'); label.push(c); expression.push_str(&regex::escape(&c.to_string()));
+        } else if !partial_revokes && (c == '%' || c == '_') {
+            pattern = true; label.push(c); expression.push_str(if c == '%' { ".*" } else { "." });
+        } else { label.push(c); expression.push_str(&regex::escape(&c.to_string())); }
+    }
+    expression.push('$');
+    let matcher = regex::Regex::new(&expression).map_err(|e| AppError::internal("读取授权范围", e.to_string()))?;
+    let protected = ["mysql", "sys", "information_schema", "performance_schema"].iter().any(|name| matcher.is_match(name));
+    Ok((label, pattern, protected))
+}
+fn mysql_identifier(name: &str) -> String { format!("`{}`", name.replace('`', "``")) }
+fn decode_hex_field(value: &str) -> Result<String> {
+    String::from_utf8(hex::decode(value).map_err(|_| AppError::new("MYSQL_RESPONSE", "账号授权响应格式错误"))?)
+        .map_err(|_| AppError::new("MYSQL_RESPONSE", "账号授权响应编码无效"))
+}
+
+/// 同一实例的多窗口/多进程保存串行化；外部 SQL 修改通过 revision 检测，不宣称 GRANT 可事务回滚。
+pub fn update_database_grants(state: &crate::CoreState, engine: DatabaseEngine, version: &str, input: &DatabaseGrantInput) -> Result<DatabaseGrants> {
+    let _work = crate::BackgroundWork::begin("修改数据库授权")?;
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    if version.is_empty() || version.len() > 64 || !version.bytes().all(|c| c.is_ascii_alphanumeric() || b".-_".contains(&c)) {
+        return Err(AppError::new("BAD_VERSION", "数据库版本无效"));
+    }
+    let path = crate::paths::checked_data_path(&state.paths.base, &format!("etc/.db-grants-{}-{version}.lock", engine.id()))?;
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(path)?;
+    lock.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => AppError::new("DATABASE_GRANTS_BUSY", "此实例正在保存账号授权，请稍后重试"),
+        std::fs::TryLockError::Error(error) => AppError::io("锁定数据库授权", error),
+    })?;
+    state.with_database(engine, Some(version), |_, client| client.apply_grants(input))
+}
+
 pub struct MySqlClient {
     pub exe: PathBuf,
     pub port: u16,
@@ -407,7 +504,7 @@ impl MySqlClient {
     pub fn create_user_grant(&self, username: &str, password: &str, database: &str) -> Result<()> {
         validate_create_db(database, username, password)?;
         let u = sanitize_ident(username)?;
-        let d = sanitize_ident(database)?;
+        let d = mysql_identifier(&grant_literal(database, self.partial_revokes()?));
         if username.eq_ignore_ascii_case("root") || crate::dbbackup::is_system_db(database) {
             return Err(AppError::new(
                 "SYSTEM_ACCOUNT",
@@ -428,6 +525,8 @@ impl MySqlClient {
                 "同名本地账号已存在，未修改密码或权限，请使用其他用户名",
             ));
         }
+        let server = self.run("SELECT @@version;")?;
+        let grant_mode = if server.to_ascii_lowercase().contains("mariadb") || server.starts_with("5.") { "NO_BACKSLASH_ESCAPES,NO_AUTO_CREATE_USER" } else { "NO_BACKSLASH_ESCAPES" };
         let escaped = password.replace('\'', "''");
         // SQL 经 stdin 传入；只改变当前短连接的转义规则。
         self.run(&format!(
@@ -438,8 +537,8 @@ impl MySqlClient {
             error
         })?;
         if let Err(error) = self.run(&format!(
-            "GRANT ALL PRIVILEGES ON `{d}`.* TO '{u}'@'127.0.0.1'; \
-             GRANT ALL PRIVILEGES ON `{d}`.* TO '{u}'@'localhost';"
+            "SET SESSION sql_mode='{grant_mode}'; GRANT ALL PRIVILEGES ON {d}.* TO '{u}'@'127.0.0.1'; \
+             GRANT ALL PRIVILEGES ON {d}.* TO '{u}'@'localhost';"
         )) {
             let cleanup = self.run(&format!("DROP USER '{u}'@'127.0.0.1', '{u}'@'localhost';"));
             return Err(error.with_hint(if cleanup.is_ok() {
@@ -452,19 +551,95 @@ impl MySqlClient {
     }
 
     pub fn list_users(&self) -> Result<Vec<DbUserInfo>> {
-        let out = self.run("SELECT user, host FROM mysql.user ORDER BY user;")?;
-        let mut list = Vec::new();
-        for line in out.lines().filter(|l| !l.is_empty()) {
-            let mut parts = line.split('\t');
-            if let (Some(user), Some(host)) = (parts.next(), parts.next()) {
-                list.push(DbUserInfo {
-                    username: user.to_string(),
-                    host: host.to_string(),
-                    grants: None,
-                });
-            }
+        let out = self.run("SELECT HEX(user), HEX(host) FROM mysql.user ORDER BY user, host;")?;
+        out.lines().filter(|line| !line.is_empty()).map(|line| {
+            let (user, host) = line.split_once('\t').ok_or_else(|| AppError::new("MYSQL_RESPONSE", "账号列表响应不完整"))?;
+            Ok(DbUserInfo { username: decode_hex_field(user)?, host: decode_hex_field(host)?, grants: None })
+        }).collect()
+    }
+
+    fn partial_revokes(&self) -> Result<bool> {
+        Ok(self.run("SHOW VARIABLES LIKE 'partial_revokes';")?.lines().any(|line| line.split('\t').nth(1).is_some_and(|value| value.eq_ignore_ascii_case("ON"))))
+    }
+
+    pub fn grants(&self, username: &str, host: &str) -> Result<DatabaseGrants> {
+        use sha2::{Digest, Sha256};
+        let filter = account_filter(username, host)?;
+        if !self.list_users()?.iter().any(|account| account.username == username && account.host == host) {
+            return Err(AppError::new("DB_USER_MISSING", "所选账号已不存在，请刷新账号列表"));
         }
-        Ok(list)
+        let columns = self.run("SHOW COLUMNS FROM mysql.db;")?.lines().filter_map(|line| line.split('\t').next())
+            .filter(|column| column.ends_with("_priv") && column.bytes().all(|c| c.is_ascii_alphabetic() || c == b'_')).map(str::to_owned).collect::<Vec<_>>();
+        if columns.is_empty() || !columns.iter().any(|name| name == "Grant_priv") { return Err(AppError::new("DATABASE_GRANTS_UNSUPPORTED", "此版本的授权表结构尚不支持编辑")); }
+        let available = DATABASE_PRIVILEGES.iter().filter(|(column, _)| columns.iter().any(|name| name == column)).map(|(_, name)| name.to_string()).collect::<Vec<_>>();
+        let partial_revokes = self.partial_revokes()?;
+        let mariadb = self.run("SELECT @@version;")?.to_ascii_lowercase().contains("mariadb");
+        let rows = self.run(&format!("SELECT HEX(Db),{} FROM mysql.db WHERE {filter} ORDER BY HEX(Db);", columns.join(",")))?;
+        let mut scopes = Vec::new();
+        for row in rows.lines().filter(|line| !line.is_empty()) {
+            let fields = row.split('\t').collect::<Vec<_>>();
+            if fields.len() != columns.len() + 1 || fields[1..].iter().any(|value| !["Y", "N"].contains(value)) { return Err(AppError::new("MYSQL_RESPONSE", "数据库授权响应不完整")); }
+            let scope = decode_hex_field(fields[0])?;
+            let (label, pattern, protected) = grant_scope_details(&scope, partial_revokes)?;
+            let mut item = DatabaseGrantScope { scope, label, pattern, protected, privileges: Vec::new(), grant_option: false, extra_privileges: Vec::new() };
+            for (column, value) in columns.iter().zip(&fields[1..]) {
+                if *value != "Y" { continue; }
+                if column == "Grant_priv" { item.grant_option = true; }
+                else if let Some((_, privilege)) = DATABASE_PRIVILEGES.iter().find(|(name, _)| *name == column) { item.privileges.push(privilege.to_string()); }
+                else { item.extra_privileges.push(column.clone()); }
+            }
+            scopes.push(item);
+        }
+        // 只读权限标志，不读取密码哈希、认证插件配置或 SHOW GRANTS 的 IDENTIFIED 内容。
+        let global_columns = self.run("SHOW COLUMNS FROM mysql.user;")?.lines().filter_map(|line| line.split('\t').next())
+            .filter(|column| column.ends_with("_priv") && column.bytes().all(|c| c.is_ascii_alphabetic() || c == b'_')).map(|column| format!("{column}='Y'")).collect::<Vec<_>>();
+        let global_privileges = !global_columns.is_empty() && self.run(&format!("SELECT COUNT(*) FROM mysql.user WHERE {filter} AND ({});", global_columns.join(" OR ")))?.trim() != "0";
+        let databases = self.list_databases()?.into_iter().filter(|db| !crate::dbbackup::is_system_db(&db.name)).map(|db| db.name).collect();
+        let mut result = DatabaseGrants { username: username.into(), host: host.into(), scopes, databases, available, partial_revokes, mariadb, global_privileges, protected: protected_account(username, host), revision: String::new() };
+        result.revision = hex::encode(Sha256::digest(serde_json::to_vec(&result).map_err(|error| AppError::internal("记录授权版本", error.to_string()))?));
+        Ok(result)
+    }
+
+    fn apply_grants(&self, input: &DatabaseGrantInput) -> Result<DatabaseGrants> {
+        let before = self.grants(&input.username, &input.host)?;
+        if before.protected || (before.partial_revokes && before.global_privileges) {
+            return Err(AppError::new("DATABASE_GRANTS_PROTECTED", "系统账号，或同时使用全局授权与部分撤销的账号，不允许在此修改"));
+        }
+        if before.revision != input.revision { return Err(AppError::new("DATABASE_GRANTS_CHANGED", "授权或数据库列表已变化，请重新读取后再保存")); }
+        if input.privileges.len() > before.available.len() || input.privileges.iter().any(|name| !before.available.contains(name)) {
+            return Err(AppError::new("BAD_PRIVILEGE", "请选择当前实例支持的数据库权限"));
+        }
+        let target = if input.new_database {
+            if !before.databases.contains(&input.target) { return Err(AppError::new("NO_DATABASE", "所选业务数据库不存在")); }
+            grant_literal(&input.target, before.partial_revokes)
+        } else {
+            if !before.scopes.iter().any(|scope| scope.scope == input.target) { return Err(AppError::new("DATABASE_GRANTS_CHANGED", "所选授权范围已不存在，请重新读取")); }
+            input.target.clone()
+        };
+        let (_, _, protected) = grant_scope_details(&target, before.partial_revokes)?;
+        if protected { return Err(AppError::new("SYSTEM_DATABASE", "不能在此修改覆盖系统数据库的授权")); }
+        let current = before.scopes.iter().find(|scope| scope.scope == target);
+        let previous = current.map(|scope| scope.privileges.as_slice()).unwrap_or_default();
+        let mut wanted = input.privileges.clone(); wanted.sort(); wanted.dedup();
+        let remove = previous.iter().filter(|name| !wanted.contains(name)).cloned().collect::<Vec<_>>();
+        let add = wanted.iter().filter(|name| !previous.contains(name)).cloned().collect::<Vec<_>>();
+        let account = format!("'{}'@'{}'", input.username.replace('\'', "''"), input.host.replace('\'', "''"));
+        let target_sql = mysql_identifier(&target);
+        // MariaDB 禁止 GRANT 隐式重建被外部删除的账号；MySQL 8 已移除此模式和隐式创建。
+        let mode = if before.mariadb || self.run("SELECT @@version;")?.starts_with("5.") { "NO_BACKSLASH_ESCAPES,NO_AUTO_CREATE_USER" } else { "NO_BACKSLASH_ESCAPES" };
+        let mut sql = format!("SET SESSION sql_mode='{mode}';");
+        if current.is_some_and(|scope| scope.grant_option) && !input.grant_option { sql.push_str(&format!(" REVOKE GRANT OPTION ON {target_sql}.* FROM {account};")); }
+        if !remove.is_empty() { sql.push_str(&format!(" REVOKE {} ON {target_sql}.* FROM {account};", remove.join(", "))); }
+        if !add.is_empty() { sql.push_str(&format!(" GRANT {} ON {target_sql}.* TO {account};", add.join(", "))); }
+        if input.grant_option && !current.is_some_and(|scope| scope.grant_option) { sql.push_str(&format!(" GRANT USAGE ON {target_sql}.* TO {account} WITH GRANT OPTION;")); }
+        self.run(&sql).map_err(|error| error.with_hint("授权语句不能整体回滚，部分修改可能已生效。请重新读取当前授权后再保存；其它授权范围未主动修改"))?;
+        let after = self.grants(&input.username, &input.host)?;
+        let actual = after.scopes.iter().find(|scope| scope.scope == target);
+        let mut privileges = actual.map(|scope| scope.privileges.clone()).unwrap_or_default(); privileges.sort();
+        if after.partial_revokes != before.partial_revokes || privileges != wanted || actual.is_some_and(|scope| scope.grant_option) != input.grant_option {
+            return Err(AppError::new("DATABASE_GRANTS_VERIFY", "保存后读取的权限与选择不一致，请重新读取当前授权"));
+        }
+        Ok(after)
     }
 
     pub fn reset_root_password(&self, new_password: &str) -> Result<()> {
@@ -902,6 +1077,14 @@ mod tests {
 
     #[test]
     fn private_client_config_cleans_up_and_credentials_stay_out_of_arguments() {
+        assert!(grant_scope_details("information\\_schema", false).unwrap().2);
+        assert!(grant_scope_details("information_schema", true).unwrap().2);
+        assert_eq!(grant_scope_details("project\\_db", false).unwrap(), ("project_db".into(), false, false));
+        assert_eq!(grant_scope_details("project\\_db", true).unwrap(), ("project\\_db".into(), false, false));
+        assert!(grant_scope_details("%", false).unwrap().2);
+        assert!(!grant_scope_details("project_db", true).unwrap().1);
+        assert!(grant_scope_details("project_db", false).unwrap().1);
+        assert_eq!(mysql_identifier("quote`name"), "`quote``name`");
         let secret = "quote\" slash\\ # tab\tline\n";
         let example = render_env_example("app", "app_user", secret, 23306);
         let password = crate::envfile::parse_env(&example).into_iter().find(|entry| entry.key == "DB_PASSWORD").unwrap();

@@ -30,10 +30,11 @@ import {
   DialogFooter,
   DialogDescription,
 } from "@/components/ui/dialog";
-import type { DatabaseEngine, ServiceStatus } from "@nsb/schema";
+import type { DatabaseEngine, DbUserInfo, ServiceStatus } from "@nsb/schema";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { PageHeader } from "@/components/layout/app-shell";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { DatabaseGrantsSheet } from "@/components/shared/database-grants";
 import { PostgresManagement } from "@/components/shared/postgres-management";
 
 export default function DatabasesPage() {
@@ -80,12 +81,13 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
   const [backupLocked, setBackupLocked] = React.useState(false);
   const [createOpen, setCreateOpen] = React.useState(false);
   const [userOpen, setUserOpen] = React.useState(false);
+  const [grantUser, setGrantUser] = React.useState<DbUserInfo | null>(null);
   const [rootOpen, setRootOpen] = React.useState(false);
   const [importOpen, setImportOpen] = React.useState(false);
   const [dropTarget, setDropTarget] = React.useState<string | null>(null);
   const [dropping, setDropping] = React.useState(false);
   const [dropTyped, setDropTyped] = React.useState("");
-  const locked = backupLocked || createOpen || userOpen || rootOpen || importOpen || !!dropTarget;
+  const locked = !!grantUser || backupLocked || createOpen || userOpen || rootOpen || importOpen || !!dropTarget;
   React.useEffect(() => { onLockChange(locked); return () => onLockChange(false); }, [locked, onLockChange]);
 
   const systemDbs = new Set(["mysql", "sys", "information_schema", "performance_schema"]);
@@ -108,7 +110,7 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
       <div className="mb-5 flex flex-wrap items-end gap-3">
         <div className="w-full max-w-sm space-y-1.5">
           <Label htmlFor="database-instance">{t("db.chooseInstance")}</Label>
-          <Select value={selected} onValueChange={setSelectedInstance} disabled={createOpen || userOpen || rootOpen || importOpen || !!dropTarget || backupLocked || !databaseServices.length}>
+          <Select value={selected} onValueChange={setSelectedInstance} disabled={locked || !databaseServices.length}>
             <SelectTrigger id="database-instance"><SelectValue placeholder={t("db.chooseInstance")} /></SelectTrigger>
             <SelectContent>{databaseServices.map((s) => <SelectItem key={s.id} value={instanceKey(s)}>{s.id.split("@")[0] === "mariadb" ? "MariaDB" : "MySQL"} {s.version} · {s.port ?? "—"} · {s.state === "running" ? t("common.running") : s.state === "error" ? t("common.error") : t("common.stopped")}</SelectItem>)}</SelectContent>
           </Select>
@@ -198,12 +200,13 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
               <p className="text-xs text-faint">{t("db.noUsers")}</p>
             ) : (
               users.map((u) => (
-                <div key={`${u.username}@${u.host}`} className="rounded-md bg-fill px-3 py-2">
-                  <div className="flex items-center justify-between">
-                    <span className="font-mono text-[12px]">{u.username}</span>
-                    <span className="text-[10px] text-faint">@{u.host}</span>
+                <div key={JSON.stringify([u.username, u.host])} className="min-w-0 rounded-md bg-fill px-3 py-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="break-all font-mono text-[12px]">{u.username || t("dbGrants.anonymous")}</span>
+                    <span className="break-all text-[10px] text-faint">@{u.host}</span>
                   </div>
-                  {u.grants && <p className="mt-0.5 text-[10.5px] text-faint">{u.grants}</p>}
+                  {u.grants && <p className="mt-0.5 break-words text-[10.5px] text-faint">{u.grants}</p>}
+                  <Button size="sm" variant="ghost" className="mt-1" disabled={!ready || locked} onClick={() => setGrantUser(u)}>{t("dbGrants.manage")}</Button>
                 </div>
               ))
             )}
@@ -213,6 +216,7 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
 
       <CreateDbDialog key={`create-db-${engine}-${version}`} version={version} engine={engine} targetLabel={targetLabel} open={createOpen} onOpenChange={setCreateOpen} onDone={() => invalidate("databases")} />
       <CreateUserDialog key={`create-user-${engine}-${version}`} version={version} engine={engine} targetLabel={targetLabel} open={userOpen} onOpenChange={setUserOpen} onDone={() => invalidate("db-users")} />
+      {grantUser && <DatabaseGrantsSheet key={JSON.stringify([engine, version, grantUser.username, grantUser.host])} engine={engine} version={version} account={grantUser} targetLabel={targetLabel} ready={ready} onClose={() => setGrantUser(null)} />}
       <ResetRootDialog key={`root-${engine}-${version}`} version={version} engine={engine} targetLabel={targetLabel} open={rootOpen} onOpenChange={setRootOpen} />
 
       {/* 删库不可恢复：要求用户把库名完整敲一遍才允许执行 */}

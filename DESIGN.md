@@ -2434,3 +2434,25 @@ Windows 原生 MySQL 8.0.46、MariaDB 11.4.8 验证尚未到期不执行、到�
 本次没有用户业务数据库结构或数据变更，未修改 update.sql；所有原生验收使用隔离临时数据目录和端口。未启动前端 dev，未执行本地前端 build。已确认 v0.2.88 Release completed/success；本轮按根 AGENTS.md 新增 annotated tag v0.2.89，与 main 原子推送并核对远程指向，远程安装包构建按实际状态报告。Linux/macOS 未做实机验收；实例全局账号、远程备份目标、跨库与非事务表一致性备份等能力仍待后续完善，整体目标保持进行。
 
 参考：https://support.servbay.com/getting-started/backup-and-restore
+
+## 第一百零四轮：MySQL / MariaDB 按库账号权限编辑与授权范围修复（v0.2.90）
+
+参考 ServBay 官方 MySQL 管理文档关于业务账号和按需授权的流程，通过 fast-context 追踪账号列表、建号授权、Tauri 命令、前端数据库页与原生验证。既有界面仅能创建全库权限账号，不能调整已有权限；原生建号对含下划线的库名直接执行 GRANT，可能把下划线解释为通配符。本轮修复新增账号的授权范围，并补齐直接数据库级权限读取与编辑；不复制第三方文档中无必要的 FLUSH PRIVILEGES，使用服务端 GRANT/REVOKE 并读回核对。
+
+新增授权读取服务器 partial_revokes 模式：普通模式对反斜杠、下划线和百分号转义，使用具体数据库名；字面模式按实际库名授权。既有通配范围保留原始值并明确标注，不能被当作单个数据库悄悄收缩或扩大。原生验收确认 MySQL 切换 partial_revokes 后，原有反斜杠转义范围也按字面处理，可能不再覆盖原库；读取按真实服务器语义显示，模式变化会使旧编辑版本失效，界面提示检查历史范围，不自动改写旧授权。
+
+账号列表使用 HEX 编码读取用户名和来源主机，避免特殊字符破坏批量响应。授权读取先确认账号存在，查询 mysql.db 的实际列结构，只暴露已支持的数据库权限和转授权状态，额外服务器权限按原样保留；不读取认证字符串或密码哈希，不使用可能包含认证内容的 SHOW GRANTS 作为界面数据。用户名与来源主机按精确字节定位，SQL 标识符和账号分别引用，权限名必须来自服务端支持列表。内置 root、系统账号、匿名账号、角色及匹配系统库的范围不可在此修改；全局权限与 partial_revokes 组合只读，避免 REVOKE 改变全局权限限制。
+
+保存只对当前账号、来源主机及授权范围计算增减项，保留其它库、表、存储过程、角色与来源主机授权。支持数据查询/新增/修改/删除、表和视图、索引、例程、事件、触发器、服务器支持的 DELETE HISTORY，以及 GRANT OPTION。使用既有实例身份校验、私有 root 凭据、数据目录活动保护和生命周期锁；保存额外持有按引擎/版本隔离的操作系统文件锁。提交前比较授权快照 revision，保存后重新读取核对。MariaDB/MySQL 5.7 的授权语句启用 NO_AUTO_CREATE_USER，避免 GRANT 隐式创建消失的账号。多条授权语句不承诺整体事务回滚，失败时说明可能部分生效并要求重新读取；外部管理员绕过应用锁的 SQL 操作仍可能并发发生。
+
+沿用 UI/UX skill 和 Next 本地文档，复用现有 Sheet 构建宽侧栏。账号和主机来自列表，数据库或已有范围使用下拉选择；常用查询/读写预设与按操作分组的勾选项配合，高级权限和转授权可展开。减少权限需要明确确认，系统范围只读，错误保留当前选择并提供重新读取。界面解释这是直接授权，并非账号最终有效权限，全局、角色、其它主机和对象级授权仍可能生效。保存反馈补充已有应用连接可能需要重连，符合 MySQL 对数据库级权限生效时机的文档。编辑和保存期间锁定实例切换，处理中阻止关闭和重复提交。
+
+浏览器演示验收 MySQL 历史通配授权提示、减少权限确认、保存后重新打开、新增具体数据库范围，以及 root 全局权限提示和只读状态。MariaDB 新建账号的含下划线库名显示为具体范围，按 localhost 保存不影响 127.0.0.1 账号；清空可编辑权限后重新打开无勾选，保存中取消按钮禁用、Escape 不关闭。1360px 英文侧栏、390px 中文和 320px 英文窄屏截图已目检；窄屏宽度和 scrollWidth 同为 366px/296px，正文滚动、底部按钮可见，虚线分区保留左右内边距。浏览器只证明交互，真实权限另由原生账号连接验证。只关闭本轮 QA 上下文，用户原有 packages/sites 页面保持。
+
+11 个版本文件同步到 0.2.90，Cargo.lock 仅更新三个本项目 crate。独立发布树包含 18 个代码/版本文件及本轮 DESIGN.md，共 19 个发布文件，排除原有 configgen.rs 的 178 additions / 9 deletions 和未跟踪文件，并核对该文件与 HEAD 的换行正规化内容一致。pnpm check 与 cargo check --workspace --all-targets --locked 已通过。验证扩展于既有 Rust 模块，没有新增测试文件、依赖或 migration。
+
+最终独立发布树的自动备份、数据库管理、备份恢复、导入、配置传输及 MySQL/MariaDB 原生回归共 29 通过、0 失败、674 filtered out，耗时 261.92 秒。真实账号验证含下划线库名不授予相似库、localhost 与 127.0.0.1 分离、其它库授权保留、旧 revision 和非法权限拒绝、GRANT OPTION 开关、SELECT 允许而 INSERT 拒绝、全部撤销后查询拒绝，以及带引号用户名和反引号库名的授权查询。MariaDB 撤销全部权限后可能保留空 mysql.db 行，验证以权限为空且真实查询拒绝为准；MySQL 切换 partial_revokes 后旧转义范围按字面解释，验证历史账号查询拒绝、显示字面范围、旧 revision 拒绝及新字面范围授权可编辑。系统范围和全局权限保护、既有认证、备份、恢复、导入与正常停机回归均通过。
+
+本次没有用户业务数据库结构或数据变更，未修改 update.sql；原生验证只使用隔离临时实例、账号、数据库和端口。未启动前端 dev，未执行本地前端 build。v0.2.89 Release 已确认 completed/success。本轮按根 AGENTS.md 使用新 annotated tag v0.2.90 并与 main 原子推送，发布结果及远程构建状态在完成验证后核对。Windows MySQL 8.0.46、MariaDB 11.4.8 是本轮原生验收范围；其它版本及 Linux/macOS 尚未实机验证，角色/全局/表/列/例程级完整权限管理仍待后续完善，整体目标保持进行。
+
+参考：https://support.servbay.com/database-management/getting-started/mysql-management-and-usage 、https://dev.mysql.com/doc/refman/8.0/en/grant.html 、https://dev.mysql.com/doc/refman/8.0/en/privilege-changes.html 、https://mariadb.com/docs/server/reference/sql-statements/account-management-sql-statements/grant

@@ -66,7 +66,7 @@ import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSet
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.89";
+const MOCK_APP_VERSION = "0.2.90";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -862,6 +862,26 @@ function mysqlPreview(version?: string, requireAuth = true, engine: DatabaseEngi
   }
   if (requireAuth && state.password !== state.savedPassword) throw { code: "MYSQL_AUTH_REQUIRED", message: "请更新本机连接密码" };
   return { service, state };
+}
+const mockDatabaseGrants = new Map<string, import("./api").DatabaseGrants>();
+const mockGrantKey = (engine: DatabaseEngine, version: string, username: string, host: string) => JSON.stringify([engine, version, username, host]);
+const mockGrantPrivileges = ["SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "REFERENCES", "INDEX", "ALTER", "CREATE TEMPORARY TABLES", "LOCK TABLES", "CREATE VIEW", "SHOW VIEW", "CREATE ROUTINE", "ALTER ROUTINE", "EXECUTE", "EVENT", "TRIGGER"];
+const mockLiteralScope = (name: string) => name.replace(/\\/g, "\\\\").replace(/[_%]/g, "\\$&");
+function mysqlGrantsPreview(engine: DatabaseEngine, version: string, username: string, host: string) {
+  const { state } = mysqlPreview(version, true, engine);
+  const account = [...state.users.values()].find((item) => item.username === username && item.host === host);
+  if (!account) throw { code: "DB_USER_MISSING", message: "所选账号已不存在" };
+  const key = mockGrantKey(engine, version, username, host);
+  const databases = [...state.databases.keys()].filter((name) => !systemDatabase(name)).sort();
+  let data = mockDatabaseGrants.get(key);
+  if (!data) {
+    const database = account.grants?.match(/^ALL ON (.+)\.\*$/)?.[1];
+    const available = engine === "mariadb" ? [...mockGrantPrivileges, "DELETE HISTORY"] : [...mockGrantPrivileges];
+    data = { username, host, databases, available, scopes: database ? [{ scope: database, label: database, pattern: /[_%]/.test(database), protected: systemDatabase(database), privileges: [...available], grantOption: false, extraPrivileges: [] }] : [], mariadb: engine === "mariadb", partialRevokes: false, globalPrivileges: username === "root", protected: !username || !host || /^(root$|mysql\.|mariadb\.sys$)/i.test(username), revision: uid() };
+    mockDatabaseGrants.set(key, data);
+  }
+  if (data.databases.join("\n") !== databases.join("\n")) { data.databases = databases; data.revision = uid(); }
+  return data;
 }
 function previewBackup(version: string, data: DatabaseInfo[], label: string, engine: DatabaseEngine = "mysql") {
   const name = `${engine}-${version}-${label}-${Date.now()}-${uid()}.sql`;
@@ -2354,12 +2374,37 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       state.databases.delete(name); return true as T;
     }
     case "db_users": return structuredClone([...mysqlPreview(args?.version as string | undefined, true, args?.engine as DatabaseEngine | undefined).state.users.values()]) as T;
+    case "db_grants": return structuredClone(mysqlGrantsPreview(args!.engine as DatabaseEngine, args!.version as string, args!.username as string, args!.host as string)) as T;
+    case "db_grants_save": {
+      const input = args!.input as import("./api").DatabaseGrantInput;
+      const engine = args!.engine as DatabaseEngine; const version = args!.version as string;
+      const data = mysqlGrantsPreview(engine, version, input.username, input.host);
+      if (data.protected) throw { code: "DATABASE_GRANTS_PROTECTED", message: "系统账号不允许在此修改" };
+      if (input.revision !== data.revision) throw { code: "DATABASE_GRANTS_CHANGED", message: "授权已变化，请重新读取" };
+      if (input.privileges.some((name) => !data.available.includes(name))) throw { code: "BAD_PRIVILEGE", message: "请选择有效权限" };
+      const target = input.newDatabase ? mockLiteralScope(input.target) : input.target;
+      let scope = data.scopes.find((item) => item.scope === target);
+      if (scope?.protected || (input.newDatabase && !data.databases.includes(input.target)) || (!input.newDatabase && !scope)) throw { code: "BAD_DATABASE", message: "请选择有效的业务数据库授权范围" };
+      await delay(650);
+      if (!scope) { scope = { scope: target, label: input.target, pattern: false, protected: false, privileges: [], grantOption: false, extraPrivileges: [] }; data.scopes.push(scope); }
+      scope.privileges = [...new Set(input.privileges)]; scope.grantOption = input.grantOption;
+      data.scopes = data.scopes.filter((item) => engine === "mariadb" || item.privileges.length || item.grantOption || item.extraPrivileges.length);
+      data.revision = uid();
+      const { state } = mysqlPreview(version, true, engine);
+      const account = [...state.users.values()].find((item) => item.username === input.username && item.host === input.host)!;
+      account.grants = data.scopes.map((item) => `${item.privileges.join(", ")}${item.grantOption ? " + GRANT OPTION" : ""} ON ${item.label}.*`).join("; ");
+      return structuredClone(data) as T;
+    }
     case "db_create_user": {
       const { state } = mysqlPreview(args?.version as string | undefined, true, args?.engine as DatabaseEngine | undefined);
       const username = args!.username as string; const database = args!.database as string;
       if (!/^[A-Za-z0-9_]{1,32}$/.test(username) || username.toLowerCase() === "root" || !args?.password || !state.databases.has(database) || systemDatabase(database)) throw { code: "BAD_IDENTIFIER", message: "请检查账号、密码和授权数据库" };
       if ([...state.users.values()].some((user) => user.username === username && ["localhost", "127.0.0.1"].includes(user.host))) throw { code: "DB_USER_EXISTS", message: "同名本地账号已存在，未修改密码或权限" };
-      for (const host of ["localhost", "127.0.0.1"]) state.users.set(`${username}@${host}`, { username, host, grants: `ALL ON ${database}.*` });
+      for (const host of ["localhost", "127.0.0.1"]) {
+        state.users.set(`${username}@${host}`, { username, host, grants: `ALL ON ${database}.*` });
+        const data = mysqlGrantsPreview(args?.engine as DatabaseEngine ?? "mysql", args!.version as string, username, host);
+        data.scopes[0].scope = mockLiteralScope(database); data.scopes[0].pattern = false;
+      }
       return true as T;
     }
     case "db_root_password": return mysqlPreview(args?.version as string | undefined, true, args?.engine as DatabaseEngine | undefined).state.savedPassword as T;

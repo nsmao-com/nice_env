@@ -356,6 +356,8 @@ pub fn run() {
             db_create,
             db_drop,
             db_users,
+            db_grants,
+            db_grants_save,
             db_create_user,
             db_reset_root_password,
             db_root_password,
@@ -1968,6 +1970,18 @@ async fn db_create_user(
             .map(|_| true)
     })
     .await
+}
+
+#[tauri::command]
+async fn db_grants(state: State<'_, std::sync::Arc<CoreState>>, engine: nsb_core::dbadmin::DatabaseEngine, version: String, username: String, host: String) -> Result<nsb_core::dbadmin::DatabaseGrants, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    run_database(&state, Some(version), Some(engine), move |_, _, client| client.grants(&username, &host)).await
+}
+
+#[tauri::command]
+async fn db_grants_save(state: State<'_, std::sync::Arc<CoreState>>, engine: nsb_core::dbadmin::DatabaseEngine, version: String, input: nsb_core::dbadmin::DatabaseGrantInput) -> Result<nsb_core::dbadmin::DatabaseGrants, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::dbadmin::update_database_grants(&st, engine, &version, &input))).await.map_err(|error| tauri::Error::Anyhow(anyhow::anyhow!("{error}")))?
 }
 
 #[tauri::command]

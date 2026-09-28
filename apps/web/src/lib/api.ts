@@ -299,6 +299,11 @@ export const dbList = (version?: string, engine: DatabaseEngine = "mysql") => sa
 export const dbCreate = (name: string, version?: string, engine: DatabaseEngine = "mysql") => safe(invoke<boolean>("db_create", { name, version, engine }));
 export const dbDrop = (name: string, version?: string, engine: DatabaseEngine = "mysql") => safe(invoke<boolean>("db_drop", { name, version, engine }));
 export const dbUsers = (version?: string, engine: DatabaseEngine = "mysql") => safe(invoke<DbUserInfo[]>("db_users", { version, engine }));
+export interface DatabaseGrantScope { scope: string; label: string; pattern: boolean; protected: boolean; privileges: string[]; grantOption: boolean; extraPrivileges: string[] }
+export interface DatabaseGrants { username: string; host: string; scopes: DatabaseGrantScope[]; databases: string[]; available: string[]; partialRevokes: boolean; mariadb: boolean; globalPrivileges: boolean; protected: boolean; revision: string }
+export interface DatabaseGrantInput { username: string; host: string; target: string; newDatabase: boolean; privileges: string[]; grantOption: boolean; revision: string }
+export const dbGrants = (engine: DatabaseEngine, version: string, username: string, host: string) => safe(invoke<DatabaseGrants>("db_grants", { engine, version, username, host }));
+export const dbGrantsSave = (engine: DatabaseEngine, version: string, input: DatabaseGrantInput) => safe(invoke<DatabaseGrants>("db_grants_save", { engine, version, input }));
 export const dbCreateUser = (username: string, password: string, database: string, version?: string, engine: DatabaseEngine = "mysql") =>
   safe(invoke<boolean>("db_create_user", { username, password, database, version, engine }));
 export const dbResetRootPassword = (newPassword: string, version?: string, useExisting = false, engine: DatabaseEngine = "mysql") =>

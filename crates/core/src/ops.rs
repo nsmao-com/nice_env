@@ -2813,6 +2813,105 @@ mod validate_tests {
         assert_eq!(toolbox::adminer_start_on_port(&state.store, &state.paths, &state.installer, &state.manager, 0).unwrap_err().code, "ADMINER_ENTRY_MISSING");
     }
 
+    fn validate_native_database_grants(state: &crate::CoreState, engine: crate::dbadmin::DatabaseEngine, version: &str, client: &crate::dbadmin::MySqlClient, username: &str, password: &str, database: &str) {
+        use crate::dbadmin::{self, DatabaseGrantInput};
+        let collision = database.replace('_', "X");
+        client.create_database(&collision).unwrap();
+        client.create_database("grant_other").unwrap();
+        client.run("SHOW TABLES FROM grant_other;").unwrap();
+        client.run("CREATE TABLE grant_other.sample (id INT) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;").unwrap();
+        client.run("SHOW CREATE TABLE grant_other.sample;").unwrap();
+        client.run("INSERT INTO grant_other.sample VALUES (7);").unwrap();
+        let query = |sql: &str| dbadmin::query_client(&client.exe, "127.0.0.1", client.port, username, password, sql);
+        assert!(query(&format!("USE `{collision}`; SELECT 1;")).is_err(), "新建账号不能通过下划线通配访问相似库名");
+        let mut originals = Vec::new();
+        for host in ["localhost", "127.0.0.1"] {
+            let before = client.grants(username, host).unwrap();
+            let target = before.scopes.iter().find(|scope| scope.label == database).unwrap();
+            assert!(!target.pattern); assert!(!target.protected);
+            originals.push((host, target.clone()));
+            let add_other = DatabaseGrantInput { username: username.into(), host: host.into(), target: "grant_other".into(), new_database: true, privileges: vec!["SELECT".into()], grant_option: false, revision: before.revision.clone() };
+            let added = dbadmin::update_database_grants(state, engine, version, &add_other).unwrap();
+            assert_eq!(dbadmin::update_database_grants(state, engine, version, &add_other).unwrap_err().code, "DATABASE_GRANTS_CHANGED");
+            let mut input = DatabaseGrantInput { target: target.scope.clone(), new_database: false, privileges: vec!["SELECT".into()], grant_option: true, revision: added.revision, ..add_other };
+            let selected = dbadmin::update_database_grants(state, engine, version, &input).unwrap();
+            assert!(selected.scopes.iter().find(|scope| scope.scope == input.target).unwrap().grant_option);
+            assert_eq!(selected.scopes.iter().find(|scope| scope.label == "grant_other").unwrap().privileges, ["SELECT"]);
+            input.revision = selected.revision;
+            input.privileges = vec!["SELECT; DROP DATABASE mysql".into()];
+            assert_eq!(dbadmin::update_database_grants(state, engine, version, &input).unwrap_err().code, "BAD_PRIVILEGE");
+            input.privileges = vec!["SELECT".into()]; input.grant_option = false;
+            dbadmin::update_database_grants(state, engine, version, &input).unwrap();
+        }
+        assert_eq!(query(&format!("SELECT value FROM `{database}`.sample;")).unwrap().trim(), "original");
+        assert!(query(&format!("INSERT INTO `{database}`.sample VALUES (99, 'forbidden');")).is_err());
+        assert_eq!(query("SELECT id FROM grant_other.sample;").unwrap().trim(), "7");
+        for (host, original) in &originals {
+            let before = client.grants(username, host).unwrap();
+            let input = DatabaseGrantInput { username: username.into(), host: (*host).into(), target: original.scope.clone(), new_database: false, privileges: Vec::new(), grant_option: false, revision: before.revision };
+            let empty = dbadmin::update_database_grants(state, engine, version, &input).unwrap();
+            assert!(empty.scopes.iter().filter(|scope| scope.scope == original.scope).all(|scope| scope.privileges.is_empty() && !scope.grant_option));
+        }
+        assert!(query(&format!("SELECT value FROM `{database}`.sample;")).is_err());
+        assert_eq!(query("SELECT id FROM grant_other.sample;").unwrap().trim(), "7");
+        for (host, original) in originals {
+            let before = client.grants(username, host).unwrap();
+            let input = DatabaseGrantInput { username: username.into(), host: host.into(), target: database.into(), new_database: true, privileges: original.privileges, grant_option: original.grant_option, revision: before.revision };
+            dbadmin::update_database_grants(state, engine, version, &input).unwrap();
+        }
+        let root = client.grants("root", "localhost").unwrap();
+        let protected = DatabaseGrantInput { username: "root".into(), host: "localhost".into(), target: database.into(), new_database: true, privileges: vec!["SELECT".into()], grant_option: false, revision: root.revision };
+        assert_eq!(dbadmin::update_database_grants(state, engine, version, &protected).unwrap_err().code, "DATABASE_GRANTS_PROTECTED");
+        // 历史通配范围必须原样读取、显式编辑，不能误当作具体数据库。
+        client.run(&format!("GRANT SELECT ON `{database}`.* TO '{username}'@'localhost';")).unwrap();
+        let legacy = client.grants(username, "localhost").unwrap();
+        assert!(legacy.scopes.iter().any(|scope| scope.scope == database && scope.pattern));
+        let edit = DatabaseGrantInput { username: username.into(), host: "localhost".into(), target: database.into(), new_database: false, privileges: vec!["SELECT".into(), "INSERT".into()], grant_option: false, revision: legacy.revision };
+        let saved = dbadmin::update_database_grants(state, engine, version, &edit).unwrap();
+        assert_eq!(saved.scopes.iter().find(|scope| scope.scope == database).unwrap().privileges.len(), 2);
+        client.run(&format!("REVOKE SELECT, INSERT ON `{database}`.* FROM '{username}'@'localhost'; GRANT SELECT ON `%`.* TO '{username}'@'localhost';")).unwrap();
+        let protected_scope = client.grants(username, "localhost").unwrap();
+        assert!(protected_scope.scopes.iter().find(|scope| scope.scope == "%").unwrap().protected);
+        let edit = DatabaseGrantInput { target: "%".into(), revision: protected_scope.revision, ..edit };
+        assert_eq!(dbadmin::update_database_grants(state, engine, version, &edit).unwrap_err().code, "SYSTEM_DATABASE");
+        client.run(&format!("REVOKE SELECT ON `%`.* FROM '{username}'@'localhost';")).unwrap();
+        if engine == dbadmin::DatabaseEngine::Mysql {
+            let before_mode_change = client.grants(username, "localhost").unwrap();
+            client.run("SET GLOBAL partial_revokes=ON;").unwrap();
+            // MySQL 将既有转义范围也按字面处理：不能误报旧授权仍覆盖原库。
+            assert!(query(&format!("SELECT value FROM `{database}`.sample;")).is_err());
+            let changed_mode = client.grants(username, "localhost").unwrap();
+            assert!(changed_mode.scopes.iter().all(|scope| !scope.pattern && scope.label == scope.scope));
+            let stale = DatabaseGrantInput { username: username.into(), host: "localhost".into(), target: database.into(), new_database: true, privileges: vec!["SELECT".into()], grant_option: false, revision: before_mode_change.revision };
+            assert_eq!(dbadmin::update_database_grants(state, engine, version, &stale).unwrap_err().code, "DATABASE_GRANTS_CHANGED");
+            client.create_user_grant("partial_user", password, database).unwrap();
+            let literal = client.grants("partial_user", "localhost").unwrap();
+            assert!(literal.partial_revokes); assert!(!literal.scopes[0].pattern); assert_eq!(literal.scopes[0].scope, database);
+            let edit = DatabaseGrantInput { username: "partial_user".into(), host: "localhost".into(), target: database.into(), new_database: false, privileges: vec!["SELECT".into()], grant_option: false, revision: literal.revision };
+            dbadmin::update_database_grants(state, engine, version, &edit).unwrap();
+            client.run("GRANT SELECT ON *.* TO 'partial_user'@'localhost';").unwrap();
+            let global = client.grants("partial_user", "localhost").unwrap();
+            assert!(global.global_privileges);
+            assert_eq!(dbadmin::update_database_grants(state, engine, version, &DatabaseGrantInput { revision: global.revision, ..edit }).unwrap_err().code, "DATABASE_GRANTS_PROTECTED");
+            client.run("DROP USER 'partial_user'@'localhost', 'partial_user'@'127.0.0.1'; SET GLOBAL partial_revokes=OFF;").unwrap();
+        }
+        // 带引号的既有账号、带反引号的库名须精确寻址，不能改变 SQL 结构。
+        let special_user = "grant'quote";
+        let special_db = "grant`quote";
+        let password_sql = password.replace('\'', "''");
+        client.run(&format!("SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'; CREATE USER 'grant''quote'@'localhost' IDENTIFIED BY '{password_sql}'; CREATE DATABASE `grant``quote` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;")).unwrap();
+        client.run("SHOW TABLES FROM `grant``quote`;").unwrap();
+        client.run("CREATE TABLE `grant``quote`.sample (id INT) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;").unwrap();
+        client.run("SHOW CREATE TABLE `grant``quote`.sample;").unwrap();
+        client.run("INSERT INTO `grant``quote`.sample VALUES (9);").unwrap();
+        let current = client.grants(special_user, "localhost").unwrap();
+        let input = DatabaseGrantInput { username: special_user.into(), host: "localhost".into(), target: special_db.into(), new_database: true, privileges: vec!["SELECT".into()], grant_option: false, revision: current.revision };
+        dbadmin::update_database_grants(state, engine, version, &input).unwrap();
+        assert_eq!(dbadmin::query_client(&client.exe, "127.0.0.1", client.port, special_user, password, "SELECT id FROM `grant``quote`.sample;").unwrap().trim(), "9");
+        client.run("SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'; DROP USER 'grant''quote'@'localhost'; DROP DATABASE `grant``quote`;").unwrap();
+        client.drop_database(&collision).unwrap(); client.drop_database("grant_other").unwrap();
+    }
+
     #[test]
     #[ignore = "requires NSB_MARIADB_ROOT and NSB_MYSQL_ROOT; isolated temporary databases and ephemeral ports"]
     fn real_mariadb_management_isolation_and_graceful_shutdown() {
@@ -2864,6 +2963,7 @@ mod validate_tests {
         client.root_password = secret.into();
         client.create_user_grant("maria_user", secret, "mariadb_fixture").unwrap();
         dbadmin::query_client(&client.exe, "127.0.0.1", client.port, "maria_user", secret, "SELECT value FROM mariadb_fixture.sample;").unwrap();
+        validate_native_database_grants(&state, engine, "11.4.8", &client, "maria_user", secret, "mariadb_fixture");
         state.store.set_setting(&engine.password_key("11.4.8"), "incorrect").unwrap();
         let pid = state.manager.snapshot("mariadb").unwrap().pids;
         assert_eq!(state.stop_service("mariadb").unwrap_err().code, "DATABASE_SHUTDOWN_FAILED");
@@ -3075,6 +3175,7 @@ mod validate_tests {
         client
             .run("INSERT INTO niceenv_fixture.sample VALUES (1, 'original');")
             .unwrap();
+        validate_native_database_grants(&source, crate::dbadmin::DatabaseEngine::Mysql, "8.0.46", &client, "fixture_user", special, "niceenv_fixture");
         let conn = dbbackup::ConnInfo {
             engine: crate::dbadmin::DatabaseEngine::Mysql,
             version: "8.0.46".into(),

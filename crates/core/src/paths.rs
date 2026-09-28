@@ -381,7 +381,7 @@ pub(crate) struct DataPathRebase {
     replacements: Vec<String>,
 }
 
-fn portable_path_text(path: &Path) -> String {
+pub(crate) fn portable_path_text(path: &Path) -> String {
     let text = path.to_string_lossy().replace('\\', "/");
     if let Some(unc) = text.strip_prefix("//?/UNC/") { format!("//{unc}") }
     else { text.strip_prefix("//?/").unwrap_or(&text).to_string() }

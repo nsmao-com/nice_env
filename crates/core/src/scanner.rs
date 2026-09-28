@@ -152,7 +152,7 @@ pub struct ScannedProject {
     pub needs_dev_server: bool,
     /// 建议的站点名（取目录名，做域名安全化）
     pub suggested_domain: String,
-    /// 该项目是否已在本应用里建过站（按文档根匹配）
+    /// 该项目是否已在本应用里建过站（文档根，或应用源码目录匹配）
     pub already_configured: bool,
 }
 
@@ -168,9 +168,14 @@ pub fn scan_dir(
     if !plain_directory(root) {
         return Err(AppError::new("NOT_A_DIR", "指定的路径不是目录"));
     }
-    // 已配置站点的文档根集合，用于标记「已建过站」
-    let configured: Vec<String> = crate::sites::list(store)
-        .unwrap_or_default()
+    // 手动输入允许相对路径，扫描结果始终使用可直接建站的绝对路径。
+    let absolute = std::fs::canonicalize(root).map_err(|e| AppError::io("解析项目目录", e))?;
+    // Windows canonicalize 的扩展前缀不能直接交给 Nginx/PHP。
+    #[cfg(windows)]
+    let absolute = std::path::PathBuf::from(crate::paths::portable_path_text(&absolute));
+    let root = absolute.as_path();
+    // 读取失败时不能把全部项目误报为「未建站」。
+    let configured: Vec<String> = crate::sites::list(store)?
         .into_iter()
         .map(|s| normalize(&s.root_dir))
         .collect();
@@ -221,9 +226,10 @@ fn is_noise_dir(name: &str) -> bool {
 }
 
 fn normalize(p: &str) -> String {
-    p.replace('\\', "/")
-        .trim_end_matches('/')
-        .to_ascii_lowercase()
+    #[cfg(windows)]
+    { crate::paths::portable_path_text(Path::new(p)).trim_end_matches('/').to_ascii_lowercase() }
+    #[cfg(not(windows))]
+    { p.trim_end_matches('/').to_string() }
 }
 
 // 限制只读识别的内存用量，不读取软链接、目录联接和特殊文件。
@@ -417,9 +423,11 @@ pub fn detect_one(dir: &Path, configured: &[String]) -> Option<ScannedProject> {
         dir.to_path_buf()
     };
 
-    let already = configured
-        .iter()
-        .any(|c| *c == normalize(&doc_root.to_string_lossy()));
+    let document_key = normalize(&doc_root.to_string_lossy());
+    let source_key = normalize(&dir.to_string_lossy());
+    let already = configured.iter().any(|c| {
+        *c == document_key || (kind.needs_dev_server() && *c == source_key)
+    });
 
     Some(ScannedProject {
         path: dir.to_string_lossy().to_string(),
@@ -783,6 +791,77 @@ mod tests {
         let paths = crate::paths::Paths::new(t.0.clone());
         let store = crate::store::Store::open(t.0.join("test3.sqlite")).unwrap();
         assert!(scan_dir(&paths, &store, &f).is_err());
+    }
+
+    #[test]
+    fn application_source_and_static_output_both_match_existing_sites() {
+        for (marker, output) in [("next.config.js", "out"), ("vite.config.ts", "dist"), ("nuxt.config.ts", ".output/public")] {
+            let t = Tmp::new(&format!("configured-{output}").replace('/', "-"));
+            t.file(marker, "");
+            let source = normalize(&t.0.to_string_lossy());
+            assert!(detect_one(&t.0, &[source.clone()]).unwrap().already_configured);
+            t.file(&format!("{output}/index.html"), "<h1>export</h1>");
+            assert!(detect_one(&t.0, &[source]).unwrap().already_configured, "{marker}: producing output must not hide the existing application site");
+            let output = normalize(&t.0.join(output).to_string_lossy());
+            assert!(detect_one(&t.0, &[output]).unwrap().already_configured);
+            assert!(!detect_one(&t.0, &[normalize(&t.0.with_extension("other").to_string_lossy())]).unwrap().already_configured);
+        }
+        let php = Tmp::new("configured-php-public");
+        php.file("artisan", "").file("public/index.php", "<?php");
+        assert!(!detect_one(&php.0, &[normalize(&php.0.to_string_lossy())]).unwrap().already_configured);
+        assert!(detect_one(&php.0, &[normalize(&php.0.join("public").to_string_lossy())]).unwrap().already_configured);
+    }
+
+    #[test]
+    fn relative_scan_returns_absolute_project_and_document_roots() {
+        let current = std::env::current_dir().unwrap();
+        let temp = tempfile::Builder::new().prefix("nsb-relative-").tempdir_in(&current).unwrap();
+        let project = temp.path().join("project with spaces");
+        std::fs::create_dir_all(project.join("public")).unwrap();
+        std::fs::write(project.join("public/index.php"), "<?php").unwrap();
+        let paths = crate::paths::Paths::new(temp.path().to_path_buf());
+        let store = crate::store::Store::open(temp.path().join("scan.sqlite")).unwrap();
+        let relative = temp.path().strip_prefix(&current).unwrap();
+        for root in [relative.to_path_buf(), relative.join("project with spaces")] {
+            let found = scan_dir(&paths, &store, &root).unwrap();
+            assert_eq!(found.len(), 1);
+            assert!(Path::new(&found[0].path).is_absolute());
+            assert!(Path::new(&found[0].document_root).is_absolute());
+            assert_eq!(std::fs::canonicalize(&found[0].path).unwrap(), std::fs::canonicalize(&project).unwrap());
+            assert_eq!(std::fs::canonicalize(&found[0].document_root).unwrap(), std::fs::canonicalize(project.join("public")).unwrap());
+            #[cfg(windows)]
+            assert!(!found[0].path.starts_with(r"\\?\"));
+        }
+    }
+
+    #[test]
+    fn configured_path_normalization_respects_platform_paths() {
+        #[cfg(windows)]
+        {
+            assert_eq!(normalize(r"\\?\C:\Work\My App\"), normalize("c:/work/my app"));
+            assert_eq!(normalize(r"\\?\UNC\server\share\App"), normalize("//server/share/app"));
+        }
+        #[cfg(not(windows))]
+        {
+            assert_ne!(normalize("/projects/App"), normalize("/projects/app"));
+            assert_ne!(normalize(r"/projects/my\app"), normalize("/projects/my/app"));
+        }
+    }
+
+    #[test]
+    fn scan_does_not_treat_unreadable_site_records_as_unconfigured() {
+        let t = Tmp::new("unreadable-sites");
+        t.file("index.html", "<h1>project</h1>");
+        let paths = crate::paths::Paths::new(t.0.clone());
+        let mut store = crate::store::Store::open(t.0.join("scan.sqlite")).unwrap();
+        // 仅替换隔离样本的只读快照来源；空文件不包含站点表。
+        store.path = t.0.join("empty.sqlite");
+        std::fs::write(&store.path, b"").unwrap();
+        store.read_snapshot(|snapshot| {
+            let error = snapshot.list_sites().unwrap_err();
+            assert_eq!(scan_dir(&paths, snapshot, &t.0).unwrap_err().code, error.code);
+            Ok(())
+        }).unwrap();
     }
 
     #[test]

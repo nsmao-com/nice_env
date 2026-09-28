@@ -470,7 +470,7 @@ fn validate_existing_project(input: &CreateSiteInput, project: &str) -> Result<(
     }
     let path = std::path::Path::new(project);
     let detected = crate::scanner::detect_one(path, &[])
-        .ok_or_else(|| AppError::new("PROJECT_CHANGED", "项目目录已变化或无法识别，请返回恢复结果重新识别"))?;
+        .ok_or_else(|| AppError::new("PROJECT_CHANGED", "项目目录已变化或无法识别，请重新扫描项目目录"))?;
     let kind = serde_json::to_value(&input.runtime.kind)
         .map_err(|error| AppError::new("BAD_RUNTIME", format!("无法读取项目类型：{error}")))?;
     if kind.as_str() != Some(detected.site_kind.as_str())
@@ -481,7 +481,7 @@ fn validate_existing_project(input: &CreateSiteInput, project: &str) -> Result<(
     let root = std::path::Path::new(&input.root_dir);
     if !path.is_absolute() || !root.is_absolute() || !crate::scanner::plain_directory(root)
         || std::fs::canonicalize(root)? != std::fs::canonicalize(expected)? {
-        return Err(AppError::new("PROJECT_CHANGED", "建站目录与识别结果不一致，请重新识别恢复副本"));
+        return Err(AppError::new("PROJECT_CHANGED", "建站目录与识别结果不一致，请重新扫描项目目录"));
     }
     Ok(())
 }
@@ -2362,6 +2362,162 @@ mod scaffold_tests {
     use super::*;
     use crate::model::{CreateSiteInput, SiteKind, SiteRuntime};
     use std::path::PathBuf;
+
+    #[test]
+    #[ignore = "requires NSB_NGINX_ROOT, NSB_ENV_PHP and NSB_SKIP_HOSTS=1; isolated PHP/proxy HTTP verification"]
+    fn existing_projects_native_serve_php_proxy_and_preserve_copy_after_failures() {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+        assert_eq!(std::env::var("NSB_SKIP_HOSTS").as_deref(), Ok("1"));
+        let nginx = PathBuf::from(std::env::var("NSB_NGINX_ROOT").expect("NSB_NGINX_ROOT"));
+        let php = PathBuf::from(std::env::var("NSB_ENV_PHP").expect("NSB_ENV_PHP"));
+        let nginx_version = nginx.file_name().unwrap().to_str().unwrap().strip_prefix("nginx-").unwrap();
+        let php_version = String::from_utf8(std::process::Command::new(&php).args(["-n", "-r", "echo PHP_VERSION;"]).output().unwrap().stdout).unwrap();
+        let php_id = format!("php@{php_version}");
+        assert!(php.parent().unwrap().join(crate::ops::exe_name("php-cgi")).is_file());
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().join("environment")); paths.ensure_dirs().unwrap();
+        let store = Store::open(paths.db()).unwrap();
+        for (id, version, directory) in [("nginx", nginx_version, nginx.parent().unwrap()), ("php", php_version.as_str(), php.parent().unwrap())] {
+            store.upsert_installed(&crate::model::InstalledPackage {
+                id: id.into(), version: version.into(), category: if id == "nginx" { "web-server" } else { "runtime" }.into(),
+                install_path: directory.to_string_lossy().into(), config_path: String::new(), installed_at: 1,
+            }).unwrap();
+        }
+        let reserve_pool = || {
+            for _ in 0..100 {
+                let first = TcpListener::bind("127.0.0.1:0").unwrap();
+                let base = first.local_addr().unwrap().port();
+                if base.checked_add(configgen::PHP_POOL_WORKERS).is_none() { continue; }
+                let mut pool = vec![first];
+                for offset in 1..configgen::PHP_POOL_WORKERS {
+                    if let Ok(listener) = TcpListener::bind(("127.0.0.1", base + offset)) { pool.push(listener); } else { break; }
+                }
+                if pool.len() == configgen::PHP_POOL_WORKERS as usize { return pool; }
+            }
+            panic!("no free isolated PHP pool");
+        };
+        let pool = reserve_pool(); let php_port = pool[0].local_addr().unwrap().port();
+        store.set_port_assign(&php_id, php_port).unwrap();
+        let http = TcpListener::bind("127.0.0.1:0").unwrap(); let port = http.local_addr().unwrap().port();
+        let https = TcpListener::bind("127.0.0.1:0").unwrap();
+        store.set_port_override("http", Some(port)).unwrap();
+        store.set_port_override("https", Some(https.local_addr().unwrap().port())).unwrap();
+        let manager = Arc::new(ServiceManager::new());
+        struct Cleanup<'a> { store: &'a Store, paths: &'a Paths, manager: Arc<ServiceManager> }
+        impl Drop for Cleanup<'_> { fn drop(&mut self) { crate::ops::stop_all(self.store, self.paths, &self.manager); } }
+        let _cleanup = Cleanup { store: &store, paths: &paths, manager: manager.clone() };
+        drop(http); drop(https); drop(pool);
+
+        let project = temp.path().join("恢复项目 with spaces");
+        std::fs::create_dir_all(project.join("public")).unwrap();
+        let ini = b"; original project settings\nmemory_limit=96M\n";
+        std::fs::write(project.join("composer.json"), r#"{"require":{"php":"^8.4"}}"#).unwrap();
+        std::fs::write(project.join(".env"), "SECRET=fixture\n").unwrap();
+        std::fs::write(project.join(".env.example"), "KEEP=example\n").unwrap();
+        std::fs::write(project.join("private.txt"), "private-project-file").unwrap();
+        std::fs::write(project.join("public/.user.ini"), ini).unwrap();
+        std::fs::write(project.join("public/index.php"), "<?php echo 'native-copy|'.PHP_VERSION.'|'.ini_get('memory_limit');").unwrap();
+        let detected = crate::scanner::scan_dir(&paths, &store, &project).unwrap().remove(0);
+        assert!(detected.document_root_ready);
+        assert_eq!(PathBuf::from(&detected.document_root), project.join("public"));
+        let mut config = input(SiteKind::Php); config.name = "Recovered PHP".into();
+        config.root_dir = detected.document_root.clone(); config.domains = vec!["copy.native.test".into()];
+        config.runtime.php_version = Some(php_version.clone());
+        let php_site = create_existing_with_progress(&config, &detected.path, &paths, &store, &manager, &|_, _| {}).unwrap();
+        let client = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(5)).build().unwrap();
+        let response = |domain: &str, path: &str| client.get(format!("http://127.0.0.1:{port}{path}")).header("Host", domain).send().unwrap();
+        assert_eq!(response("copy.native.test", "/").text().unwrap(), format!("native-copy|{php_version}|96M"));
+        assert_ne!(response("copy.native.test", "/private.txt").text().unwrap(), "private-project-file");
+        assert_eq!(std::fs::read(project.join("public/.user.ini")).unwrap(), ini);
+        assert_eq!(std::fs::read_to_string(project.join(".env")).unwrap(), "SECRET=fixture\n");
+        assert_eq!(std::fs::read_to_string(project.join(".env.example")).unwrap(), "KEEP=example\n");
+        assert!(access_url(&paths, &store, &manager, &php_site.id).unwrap().contains(&format!(":{port}")));
+        let original_pids = manager.snapshot(&php_id).unwrap().pids;
+
+        // 前一个站点已正常运行，第二个失败仍保留副本并恢复原 Web 配置。
+        store.set_setting("extraHosts", "invalid native fixture").unwrap();
+        let mut failed = config.clone(); failed.domains = vec!["retry.native.test".into()];
+        let error = create_existing_with_progress(&failed, &detected.path, &paths, &store, &manager, &|_, _| {}).unwrap_err();
+        assert_eq!(error.code, "HOSTS_SETTINGS_INVALID");
+        assert_eq!(store.list_sites().unwrap().len(), 1);
+        assert_eq!(manager.snapshot(&php_id).unwrap().pids, original_pids);
+        assert_eq!(response("copy.native.test", "/").text().unwrap(), format!("native-copy|{php_version}|96M"));
+        assert_eq!(std::fs::read(project.join("public/.user.ini")).unwrap(), ini);
+        store.set_setting("extraHosts", "[]").unwrap();
+        let retried = create_existing_with_progress(&failed, &detected.path, &paths, &store, &manager, &|_, _| {}).unwrap();
+        assert_eq!(response("retry.native.test", "/").text().unwrap(), format!("native-copy|{php_version}|96M"));
+        assert!(create_existing_with_progress(&failed, &detected.path, &paths, &store, &manager, &|_, _| {}).is_err());
+        assert_eq!(store.list_sites().unwrap().len(), 2);
+
+        struct Upstream { address: std::net::SocketAddr, stop: Arc<AtomicBool>, worker: Option<std::thread::JoinHandle<()>> }
+        impl Drop for Upstream {
+            fn drop(&mut self) { self.stop.store(true, Ordering::Release); let _ = TcpStream::connect(self.address); if let Some(worker) = self.worker.take() { worker.join().unwrap(); } }
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap(); let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false)); let stopped = stop.clone();
+        let worker = std::thread::spawn(move || {
+            while !stopped.load(Ordering::Acquire) {
+                if let Ok((mut connection, _)) = listener.accept() {
+                    // Windows accept 可继承 listener 的非阻塞状态；完整读完请求再回复。
+                    connection.set_nonblocking(false).unwrap();
+                    connection.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                    connection.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+                    let mut request = Vec::new();
+                    let mut chunk = [0; 2048];
+                    while request.len() < 8192 && !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                        match connection.read(&mut chunk) {
+                            Ok(0) | Err(_) => break,
+                            Ok(size) => request.extend_from_slice(&chunk[..size]),
+                        }
+                    }
+                    if request.windows(4).any(|part| part == b"\r\n\r\n") {
+                        connection.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nnative-app").unwrap();
+                    }
+                } else { std::thread::sleep(Duration::from_millis(10)); }
+            }
+        });
+        let upstream = Upstream { address, stop, worker: Some(worker) };
+        let app_root = temp.path().join("application source"); std::fs::create_dir(&app_root).unwrap();
+        std::fs::write(app_root.join("next.config.js"), "module.exports={}").unwrap();
+        let app = crate::scanner::scan_dir(&paths, &store, &app_root).unwrap().remove(0);
+        assert!(app.needs_dev_server); assert!(!app.document_root_ready);
+        let mut app_input = input(SiteKind::Node); app_input.root_dir = app.path.clone();
+        app_input.name = "Application proxy".into(); app_input.domains = vec!["app.native.test".into()];
+        app_input.runtime.php_version = None; app_input.runtime.proxy_target = Some(format!("http://{address}"));
+        let app_site = create_existing_with_progress(&app_input, &app.path, &paths, &store, &manager, &|_, _| {}).unwrap();
+        assert_eq!(response("app.native.test", "/").text().unwrap(), "native-app", "{}",
+            std::fs::read_to_string(paths.logs().join("nginx").join(format!("{}.error.log", app_site.id))).unwrap_or_default());
+        assert!(access_url(&paths, &store, &manager, &app_site.id).is_ok());
+        assert!(!app_root.join("out").exists()); assert!(!app_root.join("index.html").exists());
+
+        // 生成静态产物后，扫描仍应识别已绑定源码目录的应用站点。
+        std::fs::create_dir(app_root.join("out")).unwrap();
+        std::fs::write(app_root.join("out/index.html"), "exported fixture").unwrap();
+        let rescanned = crate::scanner::scan_dir(&paths, &store, &app_root).unwrap();
+        assert!(rescanned.iter().find(|item| item.kind == crate::scanner::ProjectKind::NextJs).unwrap().already_configured);
+        assert_eq!(response("app.native.test", "/").text().unwrap(), "native-app", "{}",
+            std::fs::read_to_string(paths.logs().join("nginx").join(format!("{}.error.log", app_site.id))).unwrap_or_default());
+        assert!(crate::scanner::scan_dir(&paths, &store, &project).unwrap()[0].already_configured);
+
+        // 普通 UI 验证后目录被改动时，后端拒绝并保留已经创建的站点。
+        std::fs::remove_file(project.join("public/index.php")).unwrap();
+        let mut stale = config.clone(); stale.domains = vec!["stale.native.test".into()];
+        assert_eq!(create_existing_with_progress(&stale, &detected.path, &paths, &store, &manager, &|_, _| {}).unwrap_err().code, "PROJECT_CHANGED");
+        assert_eq!(store.list_sites().unwrap().len(), 3);
+        assert!(get(&store, &retried.id).is_ok());
+        assert_eq!(std::fs::read_to_string(project.join(".env")).unwrap(), "SECRET=fixture\n");
+        let pids: Vec<_> = ["nginx", php_id.as_str()].iter().flat_map(|id| manager.snapshot(id).unwrap().pids).collect();
+        crate::ops::stop_all(&store, &paths, &manager);
+        assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));
+        assert!(!crate::services::tcp_port_open(port));
+        assert!((0..configgen::PHP_POOL_WORKERS).all(|offset| !crate::services::tcp_port_open(php_port + offset)));
+        drop(upstream);
+        assert!(!crate::services::tcp_port_open(address.port()));
+    }
 
     fn input(kind: SiteKind) -> CreateSiteInput {
         CreateSiteInput {

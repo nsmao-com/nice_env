@@ -2647,3 +2647,19 @@ Windows 隔离临时目录验收覆盖中文和空格路径、.env、二进制�
 
 参考：https://support.servbay.com/php/set-different-php-for-each-project
 参考：https://support.servbay.com/basic-usage/websites/reverse-proxy-web-website
+
+## 第一百一十四轮：项目扫描路径修复与已有项目真实建站验收（v0.2.101）
+
+继续上一轮普通扫描与恢复副本建站流程，使用 fast-context 追踪 scanner、paths、sites 和 Nginx 代理配置。开始时核对到 main 与 annotated tag v0.2.100 已指向 a0e3736，因此本轮独立发布树基于该提交，使用新的补丁版本 v0.2.101。项目 AGENTS.md 已持久记录每次提交、push 或发布必须新增 annotated tag、禁止移动旧 tag、版本同步和原子推送的规则。
+
+修复四项可复现问题：Next/Vite/Nuxt 已绑定源码目录后，再生成 out/dist/.output/public 会被扫描误报为未建站；手动输入相对扫描目录返回相对项目路径，导致后续已有项目建站校验失败；Windows 扩展路径与普通路径无法匹配；读取站点记录失败被当作空列表，导致全部项目显示未配置。在既有 scanner 测试模块补充四项回归，旧实现为 22 passed / 4 failed，修复后 26 passed / 0 failed。
+
+扫描入口先保留普通目录检查，再解析为绝对目录；Windows 复用既有 portable_path_text 去掉扩展前缀，避免把 verbatim 路径交给 Nginx/PHP。路径匹配在 Windows 兼容分隔符、大小写及 UNC 扩展路径，在非 Windows 保留大小写和合法反斜杠字符。应用类型同时匹配源码目录与已有静态产物目录；PHP 仍按实际 Web 根匹配，避免误把暴露项目根的旧站点视为正确 public 绑定。读取站点记录错误向调用方传播。已有项目路径错误文案统一为重新扫描项目目录，适用于普通扫描和恢复副本两个入口。
+
+在既有 sites.rs 的测试模块纳入可显式执行的原生验收，无新增测试文件。使用隔离临时目录、临时 SQLite Store、随机 HTTP/HTTPS/PHP 池端口和 NSB_SKIP_HOSTS=1，运行本机已有 Nginx 1.28.1 / PHP 8.4.26。真实 HTTP 验证中文和空格路径、public 入口 PHP 执行、原 .user.ini 的 memory_limit=96M 生效、项目根私有文件不被 Web 根访问，.env/.env.example/.user.ini 字节保留。第二个站点在 hosts 配置校验阶段失败时原站点继续响应、共享 PHP PID 保持、站点记录回滚，修复配置后重试成功，重复域名被拒绝。
+
+应用源码站点通过真实 Nginx 代理到显式临时 HTTP upstream，不执行应用命令、不生成应用产物；样本随后生成 out/index.html，重新扫描仍正确标记已建站，代理继续响应。PHP 入口被移除后已有项目入口返回 PROJECT_CHANGED，站点记录与环境文件保留。验收最初第二次代理请求返回 502，定位并修正临时 HTTP upstream 的非阻塞接受连接和单次读取问题：接受后显式切回阻塞，限量读取完整请求头后响应；修正后的完整原生验收 1 passed / 0 failed（13.01 秒）。失败断言保留隔离 Nginx 错误日志作为诊断信息。退出时检查管理进程 PID、PHP 池及 HTTP/upstream 端口均已关闭。
+
+独立发布树验证：scanner 26 项、sites 常规 33 项、paths 19 项全部通过；sites 中需要外部运行环境的 7 项默认跳过，其中本轮新增原生验收已另行显式运行通过。Web/schema TypeScript 和 cargo check --workspace --all-targets --locked 通过。没有运行前端 dev/build，没有浏览器或窄屏视觉验收；原生验收仅代表本机 Windows 与上述已有运行时版本，不代表最新版运行时或跨平台验收。
+
+同步 11 个版本文件到 0.2.101，包含 v0.2.100 遗留的三处界面版本文件兜底值。Cargo.lock 只更新本项目三个 crate 的版本。AGENTS.md 同时补齐界面版本兜底值的发布核对要求。精确发布本轮 16 个文件，保留工作区内其它正在进行的导航、拖动排序、服务布局和依赖变更。发布时新增 annotated tag v0.2.101，与 main 原子推送并核对远程提交和 release.yml 的实际状态。没有业务数据库变更，未修改 update.sql。整体功能与 UI 完善目标继续进行。

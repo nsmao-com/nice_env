@@ -2891,3 +2891,24 @@ Web/schema TypeScript、218 条清单的 Zod 解析、Rust 全工作区 all-targ
 参考：https://www.mongodb.com/docs/database-tools/mongodump/mongodump-behavior/
 参考：https://www.mongodb.com/docs/database-tools/mongodump/
 参考：https://www.mongodb.com/docs/database-tools/mongorestore/mongorestore-examples/
+
+## 第一百二十六轮：MongoDB 外部归档导入导出与备份清理（v0.2.114）
+
+沿用 ServBay 的官方 MongoDB 工具链与文件备份流程，补齐备份只能留在应用目录、无法从外部归档迁入和清理旧记录的问题。备份列表新增原生文件选择导入、另存为导出、打开目录及更多操作菜单；正常备份和损坏/缺失记录均可预览删除范围。导入使用归档中的真实库名下拉选择，单库自动选中，多库要求选择；展示源路径、服务器和工具版本、集合数、大小及摘要，明确保存副本与实际恢复是两个步骤。浏览器演示明确标为内存操作，不冒充实际文件保存。
+
+新增专用 MongoDB archive v0.1 流式读取模块，按官方格式解析魔数、BSON 元信息、命名空间段、终止符与 CRC-64-ECMA。自动识别 gzip 和未压缩 archive，读取真实 server_version/tool_version，检查全部集合的结束状态及 CRC；限制单个 BSON 大小、元信息总量、集合数量和处理时长。不执行归档内容，不解析成 JavaScript，也不需要运行数据库。导入多库归档时按选中数据库提取原始 BSON 与元信息，并重新写入标准 gzip archive；其他数据库不会留在导入副本中。兼容视图与时间序列的命名空间规则，8.3 起的无视图时间序列按来源服务器版本判断；实际原生验收覆盖 MongoDB 8.0.4，未宣称已实测 8.3。
+
+导入预览 revision 绑定规范源路径、源文件大小、SHA-256 和归档元信息；提交时重新核对并将源文件复制到临时目录，再从固定副本提取。成功后同步归档与记录并发布，保留外部来源标记，导入过程中不修改运行数据库。导出前校验保存记录、归档结构、版本和 SHA-256，将标准 gzip archive 保存到应用数据目录以外，原子落盘且不覆盖已有文件。路径检查拒绝穿越、符号链接、目录联接及特殊文件名，流式读取检查普通文件及读前读后状态；文件动作无需已安装 MongoDB 或 Database Tools。
+
+删除预览绑定两个受管文件的实际摘要，可清理缺失归档或损坏记录；记录变化需重新确认，保护备份额外提示失去恢复前副本。删除前将已确认目录暂存并再次核对，仅删除 archive.gz、metadata.json 与空目录，不递归扩展范围；存在用户额外文件时拒绝删除，清理失败保留剩余内容与明确路径。导入、导出、删除以及原有创建/恢复操作加入应用后台任务登记和现有生命周期/数据目录守卫。恢复前还新增对归档内真实数据库、版本与记录的一致性检查，避免仅凭被修改的记录选择错误命名空间；复制出的恢复临时归档也再次检查。
+
+复用锁文件已有的 flate2 1.1.10 作为直接依赖，以流式处理 gzip；仅增加 nsb-core 的依赖关系，没有升级任何第三方包。没有新增测试文件，扩展既有 MongoDB 原生验收。Windows MongoDB 8.0.4、mongosh 2.12.0、Database Tools 100.19.0 最终通过（1 passed，86.32 秒）：实际导出、压缩/未压缩归档识别、多库选择提取、导入后新库恢复可用；独立 Node 驱动逐集合核对普通文档、大文档、BSON 类型、索引、视图和时间序列及底层集合。恢复前保护备份及原有生命周期验收继续通过。CRC 损坏、截断、附加无效数据、非法 BSON 长度、归档与记录版本不符、源文件变化、过期导入/删除确认、导出重名、应用目录内导出、额外用户文件与缺失记录均有对应拦截或清理验收。另用没有安装记录或运行服务的独立 CoreState 实测导入、导出和删除。临时实例、数据和端口已回收，未写入用户业务数据库；Mac 尚未实机验收。
+
+离线 Chromium 使用实际数据库页和组件、React/Radix 与当前源码样式，通过 28 项交互/状态检查及新增 21 组中英翻译检查，无 pageerror。原生文件对话框、IPC、导航和剪贴板由夹具控制，仅验证选择结果与命令参数交接，不冒充桌面实机验收。1440px 桌面、390px 中文导入和 320px 英文长名称截图已目检；长库名完整换行，正文可滚动，底部按钮可达，没有横向溢出。验证导入取消、源文件变化后重新检查、导出取消与重名提示、保护备份说明、取消优先聚焦、删除冲突重查、损坏记录清理和停止实例下文件操作；下拉分隔线为虚线且两侧留白。
+
+十一处版本文件同步至 0.2.114，Cargo.lock 仅含三个本项目 crate 的版本与上述直接依赖关系。发布前执行 Web/schema 类型检查、Rust 全工作区 all-targets 与 diff 检查，不运行前端 dev 或正式 build。上一版 v0.2.113 的三个平台 Release 均确认 completed/success；本轮按约定新增 annotated tag v0.2.114，与 main 原子推送并核对远程与 release.yml。保留用户原有未跟踪文件和本地产物。本次没有业务数据库变更，未修改 update.sql；MongoDB 计划备份、认证管理及整体产品完善目标继续进行。
+
+参考：https://support.servbay.com/database-management/getting-started/mongodb-management-and-usage
+参考：https://github.com/mongodb/mongo-tools/blob/master/common/archive/spec.md
+参考：https://github.com/mongodb/mongo-tools/blob/master/common/archive/archive.go
+参考：https://github.com/mongodb/mongo-tools/blob/master/common/archive/demultiplexer.go

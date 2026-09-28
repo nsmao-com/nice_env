@@ -406,6 +406,11 @@ pub fn run() {
             mongodb_backup_create,
             mongodb_restore_preview,
             mongodb_backup_restore,
+            mongodb_backup_inspect_import,
+            mongodb_backup_import,
+            mongodb_backup_export,
+            mongodb_backup_removal_preview,
+            mongodb_backup_delete,
             postgres_password,
             postgres_set_password,
             postgres_databases,
@@ -1633,6 +1638,36 @@ async fn mongodb_restore_preview(state: State<'_, std::sync::Arc<nsb_core::CoreS
 async fn mongodb_backup_restore(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, id: String, target: String, revision: String, confirmation: String) -> Result<nsb_core::mongodb_backup::RestoreResult, tauri::Error> {
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::mongodb_backup::restore(&st, &version, &id, &target, &revision, &confirmation))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn mongodb_backup_inspect_import(source: String) -> Result<nsb_core::mongodb_backup::ImportPreview, tauri::Error> {
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::mongodb_backup::inspect_import(&source))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+#[tauri::command]
+async fn mongodb_backup_import(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, source: String, database: String, revision: String) -> Result<nsb_core::mongodb_backup::MongoBackup, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::mongodb_backup::import_archive(&st, &source, &database, &revision))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+#[tauri::command]
+async fn mongodb_backup_export(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: String, destination: String) -> Result<String, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::mongodb_backup::export(&st, &id, &destination))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+#[tauri::command]
+async fn mongodb_backup_removal_preview(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: String) -> Result<nsb_core::mongodb_backup::BackupRemoval, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::mongodb_backup::removal_preview(&st, &id))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+#[tauri::command]
+async fn mongodb_backup_delete(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: String, revision: String) -> Result<(), tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::mongodb_backup::remove(&st, &id, &revision))).await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

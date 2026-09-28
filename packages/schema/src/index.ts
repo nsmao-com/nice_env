@@ -647,14 +647,18 @@ export type MongoDocuments = z.infer<typeof MongoDocuments>;
 export const MongoFilter = z.object({ field: z.string(), value: z.string(), valueType: z.enum(["text", "number", "boolean", "null", "objectId"]) });
 export type MongoFilter = z.infer<typeof MongoFilter>;
 
-export const MongoBackup = z.object({ id: z.string(), database: z.string(), version: z.string(), toolsVersion: z.string(), createdAt: z.number(), sizeBytes: z.number(), sha256: z.string(), kind: z.enum(["manual", "before-restore"]) });
+export const MongoBackup = z.object({ id: z.string(), database: z.string(), version: z.string(), toolsVersion: z.string(), createdAt: z.number(), sizeBytes: z.number(), sha256: z.string(), kind: z.enum(["manual", "before-restore", "imported"]) });
 export type MongoBackup = z.infer<typeof MongoBackup>;
-export const MongoBackupList = z.object({ items: z.array(MongoBackup), unreadable: z.number().int(), directory: z.string() });
+export const MongoBackupList = z.object({ items: z.array(MongoBackup), issues: z.array(z.object({ id: z.string(), problem: z.string() })), unreadable: z.number().int(), directory: z.string() });
 export type MongoBackupList = z.infer<typeof MongoBackupList>;
 export const MongoRestorePreview = z.object({ backup: MongoBackup, target: z.string(), exists: z.boolean(), revision: z.string() });
 export type MongoRestorePreview = z.infer<typeof MongoRestorePreview>;
 export const MongoRestoreResult = z.object({ target: z.string(), safetyBackup: MongoBackup.nullable() });
 export type MongoRestoreResult = z.infer<typeof MongoRestoreResult>;
+export const MongoImportPreview = z.object({ source: z.string(), info: z.object({ version: z.string(), toolsVersion: z.string(), compression: z.enum(["gzip", "none"]), databases: z.array(z.object({ name: z.string(), collections: z.number().int() })) }), sizeBytes: z.number(), sha256: z.string(), revision: z.string() });
+export type MongoImportPreview = z.infer<typeof MongoImportPreview>;
+export const MongoBackupRemoval = z.object({ id: z.string(), database: z.string().nullable(), kind: z.string().nullable(), sizeBytes: z.number().nullable(), revision: z.string() });
+export type MongoBackupRemoval = z.infer<typeof MongoBackupRemoval>;
 
 /* ============ PHP 扩展 ============ */
 

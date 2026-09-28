@@ -80,7 +80,7 @@ function mockSiteFileScope(id: string, project: boolean, exclude: boolean): Site
 }
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.113";
+const MOCK_APP_VERSION = "0.2.114";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const mockMongoDatabases = new Map<string, Record<string, Record<string, unknown>[]>>([
@@ -2889,7 +2889,28 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return structuredClone(plan) as T;
     }
     case "postgres_backup_list": return structuredClone([...mockPostgresBackups.values()].map((entry) => entry.file).sort((a, b) => b.createdAt - a.createdAt)) as T;
-    case "mongodb_backup_list": return { items: Array.from(mockMongoBackups.values()).map(entry => structuredClone(entry.record)).reverse(), unreadable: 0, directory: "preview/backup/mongodb" } as T;
+    case "mongodb_backup_list": return { items: Array.from(mockMongoBackups.values()).map(entry => structuredClone(entry.record)).reverse(), issues: [], unreadable: 0, directory: "preview/backup/mongodb" } as T;
+    case "mongodb_backup_inspect_import": return { source: String(args!.source), info: { version: "8.0.4", toolsVersion: "100.19.0", compression: "gzip", databases: [{ name: "demo_external", collections: 1 }, { name: "demo_second", collections: 1 }] }, sizeBytes: 4096, sha256: "a".repeat(64), revision: `preview:${String(args!.source)}` } as T;
+    case "mongodb_backup_import": {
+      if (args!.revision !== `preview:${String(args!.source)}` || !["demo_external", "demo_second"].includes(String(args!.database))) throw { code: "MONGO_IMPORT_CHANGED", message: "请重新检查归档并选择数据库" };
+      const data = { documents: [{ _id: { $oid: "0123456789abcdef01234567" }, title: "外部归档演示" }] };
+      const id = `preview-${Date.now()}-${++mockMongoBackupSequence}`;
+      const record: import("@nsb/schema").MongoBackup = { id, database: String(args!.database), version: "8.0.4", toolsVersion: "100.19.0", createdAt: Date.now()/1000, sizeBytes: 4096, sha256: "a".repeat(64), kind: "imported" };
+      mockMongoBackups.set(id, { record, data }); return structuredClone(record) as T;
+    }
+    case "mongodb_backup_export": {
+      if (!mockMongoBackups.has(String(args!.id))) throw { code: "MONGO_BACKUP_INVALID", message: "备份不存在" };
+      return String(args!.destination) as T;
+    }
+    case "mongodb_backup_removal_preview":
+    case "mongodb_backup_delete": {
+      const entry = mockMongoBackups.get(String(args!.id));
+      if (!entry) throw { code: "MONGO_BACKUP_INVALID", message: "备份不存在" };
+      const revision = JSON.stringify(entry);
+      if (cmd === "mongodb_backup_removal_preview") return { id:entry.record.id, database:entry.record.database, kind:entry.record.kind, sizeBytes:entry.record.sizeBytes, revision } as T;
+      if (args!.revision !== revision) throw { code: "MONGO_BACKUP_CHANGED", message: "备份已变化，请重新检查" };
+      mockMongoBackups.delete(entry.record.id); return undefined as T;
+    }
     case "mongodb_backup_create":
     case "mongodb_restore_preview":
     case "mongodb_backup_restore": {

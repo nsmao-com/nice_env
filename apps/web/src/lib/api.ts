@@ -1,5 +1,5 @@
 import type {
-  MongoOverview, MongoCollections, MongoDocuments, MongoFilter, MongoBackup, MongoBackupList, MongoRestorePreview, MongoRestoreResult,
+  MongoOverview, MongoCollections, MongoDocuments, MongoFilter, MongoBackup, MongoBackupList, MongoRestorePreview, MongoRestoreResult, MongoImportPreview, MongoBackupRemoval,
   ServiceStatus,
   ServiceStopPreview,
   SftpgoConfigDirectories,
@@ -368,6 +368,11 @@ export interface PostgresConnectionInfo {
 }
 export const postgresConnection = (version: string) => safe(invoke<PostgresConnectionInfo>("postgres_connection", { version }));
 export const mongoOverview = (version: string) => safe(invoke<MongoOverview>("mongodb_browse", { version, request: { action: "overview" } }));
+export const mongoBackupInspectImport = (source: string) => safe(invoke<MongoImportPreview>("mongodb_backup_inspect_import", { source }));
+export const mongoBackupImport = (source: string, database: string, revision: string) => safe(invoke<MongoBackup>("mongodb_backup_import", { source, database, revision }));
+export const mongoBackupExport = (id: string, destination: string) => safe(invoke<string>("mongodb_backup_export", { id, destination }));
+export const mongoBackupRemovalPreview = (id: string) => safe(invoke<MongoBackupRemoval>("mongodb_backup_removal_preview", { id }));
+export const mongoBackupDelete = (id: string, revision: string) => safe(invoke<void>("mongodb_backup_delete", { id, revision }));
 export const mongoBackupList = () => safe(invoke<MongoBackupList>("mongodb_backup_list"));
 export const mongoBackupCreate = (version: string, database: string) => safe(invoke<MongoBackup>("mongodb_backup_create", { version, database }));
 export const mongoRestorePreview = (version: string, id: string, target: string) => safe(invoke<MongoRestorePreview>("mongodb_restore_preview", { version, id, target }));

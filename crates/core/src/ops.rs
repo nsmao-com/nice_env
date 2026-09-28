@@ -4137,6 +4137,8 @@ for (let i=0;i<105;i++) browse.createCollection('collection_'+i);
 browse.getCollection("quotes'[];collection").insertOne({_id:ObjectId('0123456789abcdef01234567'), value:"'); db.dropDatabase();//", active:true, nothing:null, largeInteger:Long('9007199254740993'), precise:Decimal128('12.50'), date:new Date('2026-09-29T00:00:00Z')});
 browse.createView('view_documents', "quotes'[];collection", []);
 browse.large.insertOne({_id:'large', value:'中'.repeat(70000)});
+browse.createCollection('measurements', {timeseries:{timeField:'time',metaField:'sensor'}});
+browse.measurements.insertOne({_id:'measurement',time:new Date('2026-09-29T00:00:00Z'),sensor:'local',value:23});
 "#]);
             match crate::mongodb::browse(&state, "8.0.4", BrowseRequest::Collections { database: "niceenv_browse".into(), search: String::new() }).unwrap() {
                 BrowseResponse::Collections { entries, limited, .. } => { assert_eq!(entries.iter().filter(|entry| entry.name.starts_with("collection_")).count(), 105); assert!(!limited); assert!(entries.iter().any(|entry| entry.kind == "view")); }
@@ -4197,9 +4199,39 @@ browse.large.insertOne({_id:'large', value:'中'.repeat(70000)});
             let safety = replaced.safety_backup.unwrap(); assert_eq!(safety.kind, "before-restore");
             let safety_preview = mb::preview(&state, "8.0.4", &safety.id, "niceenv_safety_check").unwrap();
             mb::restore(&state, "8.0.4", &safety.id, &safety_preview.target, &safety_preview.revision, &safety_preview.target).unwrap();
+            let export_path = temp.path().join("external Mongo backup.gz");
+            mb::export(&state, &backup.id, export_path.to_str().unwrap()).unwrap();
+            assert_eq!(mb::export(&state, &backup.id, export_path.to_str().unwrap()).unwrap_err().code, "MONGO_EXPORT_EXISTS");
+            assert!(mb::export(&state, &backup.id, state.paths.base.join("bad.gz").to_str().unwrap()).is_err());
+            let exported = mb::inspect_import(export_path.to_str().unwrap()).unwrap();
+            assert_eq!(exported.info.version, "8.0.4"); assert_eq!(exported.info.compression, "gzip");
+            assert_eq!(exported.info.databases.len(), 1); assert_eq!(exported.info.databases[0].name, "niceenv_browse");
+            let multi_path = temp.path().join("multiple databases.archive");
+            run("mongodb-database-tools", "mongodump", &["--uri", &restore_uri, &format!("--archive={}",multi_path.display())]);
+            let multi = mb::inspect_import(multi_path.to_str().unwrap()).unwrap();
+            assert_eq!(multi.info.compression, "none"); assert!(multi.info.databases.len() > 1);
+            let raw_archive = std::fs::read(&multi_path).unwrap();
+            let inspect_bytes = |bytes: &[u8]| crate::mongodb_archive::inspect(bytes, None, std::io::sink());
+            assert!(inspect_bytes(&raw_archive[..raw_archive.len()-1]).is_err());
+            let mut trailing = raw_archive.clone(); trailing.extend_from_slice(&[0;4]); assert!(inspect_bytes(&trailing).is_err());
+            let mut bad_length = raw_archive.clone(); bad_length[4..8].copy_from_slice(&u32::MAX.to_le_bytes()); assert!(inspect_bytes(&bad_length).is_err());
+            let mut crc_error = raw_archive.clone();
+            let canary = crc_error.windows(7).position(|bytes|bytes==b"canary\0").unwrap(); crc_error[canary] ^= 1;
+            assert_eq!(inspect_bytes(&crc_error).unwrap_err().message, "MongoDB 归档集合 CRC 校验失败");
+            std::fs::write(&multi_path, &crc_error).unwrap(); assert!(mb::import_archive(&state, &multi.source, "niceenv_browse", &multi.revision).is_err());
+            std::fs::write(&multi_path, &raw_archive).unwrap();
+            assert!(mb::import_archive(&state, &multi.source, "missing", &multi.revision).is_err());
+            assert_eq!(mb::import_archive(&state, &multi.source, "niceenv_browse", "stale").unwrap_err().code, "MONGO_IMPORT_CHANGED");
+            let imported = mb::import_archive(&state, &multi.source, "niceenv_browse", &multi.revision).unwrap();
+            assert_eq!(imported.kind, "imported");
+            let imported_path = mb::directory(&state).unwrap().join(&imported.id).join("archive.gz");
+            let filtered = mb::inspect_import(imported_path.to_str().unwrap()).unwrap();
+            assert_eq!(filtered.info.databases.len(),1); assert_eq!(filtered.info.databases[0].name,"niceenv_browse");
+            let imported_preview = mb::preview(&state, "8.0.4", &imported.id, "niceenv_imported").unwrap();
+            mb::restore(&state, "8.0.4", &imported.id, &imported_preview.target, &imported_preview.revision, &imported_preview.target).unwrap();
             let oracle = r#"
 const {MongoClient,EJSON}=require(process.argv[1]); const c=new MongoClient(`mongodb://127.0.0.1:${process.argv[2]}`);
-(async()=>{try{await c.connect(); for(const name of ['niceenv_backup_new','niceenv_target']) {
+(async()=>{try{await c.connect(); for(const name of ['niceenv_backup_new','niceenv_target','niceenv_imported']) {
  const db=c.db(name),source=c.db('niceenv_browse');
  const collections=await source.listCollections().toArray();
  for(const item of collections.filter(v=>v.name!=='system.views')) {
@@ -4226,23 +4258,40 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
             let original_metadata = std::fs::read(&metadata_path).unwrap();
             let mut changed: serde_json::Value = serde_json::from_slice(&original_metadata).unwrap();
             changed["version"] = serde_json::json!("7.0.0"); std::fs::write(&metadata_path, serde_json::to_vec(&changed).unwrap()).unwrap();
-            assert_eq!(mb::preview(&state, "8.0.4", &backup.id, "niceenv_target").unwrap_err().code, "MONGO_BACKUP_VERSION");
+            assert_eq!(mb::preview(&state, "8.0.4", &backup.id, "niceenv_target").unwrap_err().code, "MONGO_BACKUP_METADATA");
             changed["version"] = serde_json::json!(backup.version); changed["toolsVersion"] = serde_json::json!("99.0.0");
             std::fs::write(&metadata_path, serde_json::to_vec(&changed).unwrap()).unwrap();
-            assert_eq!(mb::preview(&state, "8.0.4", &backup.id, "niceenv_target").unwrap_err().code, "MONGO_TOOLS_MISSING");
-            // 即使记录摘要对应损坏文件，官方 dry-run 也必须在清空目标前拒绝它。
+            assert_eq!(mb::preview(&state, "8.0.4", &backup.id, "niceenv_target").unwrap_err().code, "MONGO_BACKUP_METADATA");
+            // 即使记录摘要对应损坏文件，归档结构检查也必须在预览阶段拒绝它。
             use sha2::{Digest, Sha256};
             let malformed = b"not a MongoDB archive";
             changed["toolsVersion"] = serde_json::json!(backup.tools_version); changed["sizeBytes"] = serde_json::json!(malformed.len());
             changed["sha256"] = serde_json::json!(hex::encode(Sha256::digest(malformed)));
             std::fs::write(&archive_path, malformed).unwrap(); std::fs::write(&metadata_path, serde_json::to_vec(&changed).unwrap()).unwrap();
-            let bad_preview = mb::preview(&state, "8.0.4", &backup.id, "niceenv_target").unwrap();
-            assert_eq!(mb::restore(&state, "8.0.4", &backup.id, &bad_preview.target, &bad_preview.revision, &bad_preview.target).unwrap_err().code, "MONGO_BACKUP_TOOL_FAILED");
+            assert_eq!(mb::preview(&state, "8.0.4", &backup.id, "niceenv_target").unwrap_err().code, "MONGO_ARCHIVE_INVALID");
             run("mongosh", "mongosh", &[&uri, "--quiet", "--norc", "--eval", "if(db.getSiblingDB('niceenv_target').documents.findOne({_id:'canary'}).count!==81)throw Error('Preflight failure modified target');"]);
             std::fs::write(&archive_path, original_archive).unwrap(); std::fs::write(&metadata_path, original_metadata).unwrap();
             assert!(mb::preview(&state, "8.0.4", "../escape", "niceenv_target").is_err());
             std::fs::create_dir_all(mb::directory(&state).unwrap().join("broken-record")).unwrap();
             assert_eq!(mb::list(&state).unwrap().unreadable, 1);
+            assert_eq!(mb::list(&state).unwrap().issues[0].id, "broken-record");
+            let broken = mb::removal_preview(&state,"broken-record").unwrap();
+            mb::remove(&state,"broken-record",&broken.revision).unwrap();
+            let removal = mb::removal_preview(&state,&imported.id).unwrap();
+            std::fs::write(imported_path.parent().unwrap().join("user-note.txt"), "keep").unwrap();
+            assert_eq!(mb::remove(&state,&imported.id,&removal.revision).unwrap_err().code, "MONGO_BACKUP_EXTRA_FILES");
+            std::fs::remove_file(imported_path.parent().unwrap().join("user-note.txt")).unwrap();
+            let saved = std::fs::read(&imported_path).unwrap(); std::fs::write(&imported_path,b"changed").unwrap();
+            assert_eq!(mb::remove(&state,&imported.id,&removal.revision).unwrap_err().code, "MONGO_BACKUP_CHANGED");
+            std::fs::write(&imported_path,saved).unwrap(); mb::remove(&state,&imported.id,&removal.revision).unwrap();
+            assert!(!imported_path.exists()); assert!(export_path.exists());
+            // 独立 CoreState 验证纯文件功能无需安装数据库或工具，不改运行实例。
+            let file_only = isolated_state(Paths::new(temp.path().join("file only mongo workspace")));
+            let external = mb::inspect_import(export_path.to_str().unwrap()).unwrap();
+            let offline = mb::import_archive(&file_only, &external.source, "niceenv_browse", &external.revision).unwrap();
+            let offline_dest = temp.path().join("offline export.gz"); mb::export(&file_only,&offline.id,offline_dest.to_str().unwrap()).unwrap();
+            let offline_removal = mb::removal_preview(&file_only,&offline.id).unwrap(); mb::remove(&file_only,&offline.id,&offline_removal.revision).unwrap();
+            assert!(mb::list(&file_only).unwrap().items.is_empty());
             let mut wrong_directory = isolated_state(Paths::new(temp.path().join("wrong mongo directory")));
             wrong_directory.manager = state.manager.clone();
             for package in state.store.list_installed().unwrap() { wrong_directory.store.upsert_installed(&package).unwrap(); }

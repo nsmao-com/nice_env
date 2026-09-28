@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{fs, io::{Read, Write}, path::{Path, PathBuf}, process::Stdio, time::Duration};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MongoBackup {
     pub id: String, pub database: String, pub version: String, pub tools_version: String,
@@ -13,7 +13,17 @@ pub struct MongoBackup {
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BackupList { pub items: Vec<MongoBackup>, pub unreadable: usize, pub directory: String }
+pub struct BackupList { pub items: Vec<MongoBackup>, pub issues: Vec<BackupIssue>, pub unreadable: usize, pub directory: String }
+#[derive(Debug, Serialize)]
+pub struct BackupIssue { pub id: String, pub problem: String }
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPreview {
+    pub source: String, pub info: crate::mongodb_archive::ArchiveInfo, pub size_bytes: u64, pub sha256: String, pub revision: String,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupRemoval { pub id: String, pub database: Option<String>, pub kind: Option<String>, pub size_bytes: Option<u64>, pub revision: String }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RestorePreview { pub backup: MongoBackup, pub target: String, pub exists: bool, pub revision: String }
@@ -41,17 +51,20 @@ fn metadata(state: &CoreState, id: &str) -> Result<MongoBackup> {
     database_name(&record.database)?;
     if record.id != id || record.created_at <= 0 || record.version.len() > 128 || record.version.is_empty()
         || record.tools_version.len() > 128 || record.tools_version.is_empty() || record.sha256.len() != 64
-        || !record.sha256.bytes().all(|b| b.is_ascii_hexdigit()) || !matches!(record.kind.as_str(), "manual" | "before-restore") {
+        || !record.sha256.bytes().all(|b| b.is_ascii_hexdigit()) || !matches!(record.kind.as_str(), "manual" | "before-restore" | "imported") {
         return Err(invalid("备份记录字段无效"));
     }
     Ok(record)
 }
 fn copy_hash(path: &Path, mut output: impl Write) -> Result<(u64, String)> {
     let before = fs::symlink_metadata(path)?;
-    if !before.is_file() || before.file_type().is_symlink() { return Err(invalid("备份必须是普通文件")); }
+    if !before.is_file() || linked(&before) { return Err(invalid("备份必须是普通文件")); }
     let mut options = fs::OpenOptions::new(); options.read(true);
     #[cfg(windows)] { use std::os::windows::fs::OpenOptionsExt; options.share_mode(5).custom_flags(0x00200000); }
     let mut file = options.open(path)?;
+    let actual = file.metadata()?;
+    if linked(&actual) || !actual.is_file() || before.len() != actual.len() || before.modified()? != actual.modified()? { return Err(invalid("备份在打开时发生变化")); }
+    #[cfg(unix)] { use std::os::unix::fs::MetadataExt; if before.dev()!=actual.dev() || before.ino()!=actual.ino() { return Err(invalid("备份在打开时被替换")); } }
     let mut hash = Sha256::new(); let mut size = 0; let mut buffer = [0u8; 65536];
     loop { let n = file.read(&mut buffer)?; if n == 0 { break; } hash.update(&buffer[..n]); output.write_all(&buffer[..n])?; size += n as u64; }
     if before.len() != size || before.modified()? != file.metadata()?.modified()? { return Err(invalid("备份在读取时发生变化，请重试")); }
@@ -60,7 +73,7 @@ fn copy_hash(path: &Path, mut output: impl Write) -> Result<(u64, String)> {
 pub fn list(state: &CoreState) -> Result<BackupList> {
     let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
     let dir = directory(state)?; fs::create_dir_all(&dir)?;
-    let mut result = BackupList { items: vec![], unreadable: 0, directory: crate::paths::portable_path_text(&dir) };
+    let mut result = BackupList { items: vec![], issues: vec![], unreadable: 0, directory: crate::paths::portable_path_text(&dir) };
     for item in fs::read_dir(dir)? {
         let name = item?.file_name().to_string_lossy().into_owned(); if name.starts_with('.') { continue; }
         let record = metadata(state, &name).and_then(|record| {
@@ -68,7 +81,7 @@ pub fn list(state: &CoreState) -> Result<BackupList> {
             if !path.is_file() || fs::metadata(path)?.len() != record.size_bytes { return Err(invalid("备份文件缺失或大小变化")); }
             Ok(record)
         });
-        match record { Ok(record) => result.items.push(record), Err(_) => result.unreadable += 1 }
+        match record { Ok(record) => result.items.push(record), Err(error) => { result.unreadable += 1; result.issues.push(BackupIssue { id: name, problem: error.message }); } }
     }
     result.items.sort_by(|a,b| b.created_at.cmp(&a.created_at).then_with(|| b.id.cmp(&a.id))); Ok(result)
 }
@@ -131,6 +144,7 @@ fn create_inner(state: &CoreState, version: &str, database: &str, kind: &str) ->
     Ok(record)
 }
 pub fn create(state: &CoreState, version: &str, database: &str) -> Result<MongoBackup> {
+    let _work = crate::BackgroundWork::begin("创建 MongoDB 备份")?;
     let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
     let _lock = state.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重试"))?;
     create_inner(state, version, database, "manual")
@@ -139,6 +153,7 @@ fn verified(state: &CoreState, id: &str, output: impl Write) -> Result<MongoBack
     let record = metadata(state, id)?;
     let (size, hash) = copy_hash(&item_path(state, id, "archive.gz")?, output)?;
     if size != record.size_bytes || hash != record.sha256 { return Err(AppError::new("MONGO_BACKUP_CHECKSUM", "备份校验失败，未执行恢复")); }
+    validate_content(&record, &item_path(state, id, "archive.gz")?)?;
     Ok(record)
 }
 fn preview_inner(state: &CoreState, version: &str, backup: MongoBackup, target: &str) -> Result<RestorePreview> {
@@ -153,11 +168,13 @@ fn preview_inner(state: &CoreState, version: &str, backup: MongoBackup, target: 
     Ok(RestorePreview { backup, target: target.into(), exists: info["exists"] == true, revision })
 }
 pub fn preview(state: &CoreState, version: &str, id: &str, target: &str) -> Result<RestorePreview> {
+    let _work = crate::BackgroundWork::begin("检查 MongoDB 恢复范围")?;
     let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
     let _lock = state.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重试"))?;
     preview_inner(state, version, verified(state, id, std::io::sink())?, target)
 }
 pub fn restore(state: &CoreState, version: &str, id: &str, target: &str, revision: &str, confirmation: &str) -> Result<RestoreResult> {
+    let _work = crate::BackgroundWork::begin("恢复 MongoDB 数据库")?;
     let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
     let _lock = state.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重试"))?;
     database_name(target)?;
@@ -165,6 +182,7 @@ pub fn restore(state: &CoreState, version: &str, id: &str, target: &str, revisio
     let pending = tempfile::Builder::new().prefix(".mongo-restore-").tempdir_in(&state.paths.base)?;
     let archive = pending.path().join("archive.gz"); let mut file = fs::File::create(&archive)?;
     let backup = verified(state, id, &mut file)?; file.sync_all()?; drop(file);
+    validate_content(&backup, &archive)?;
     let current = preview_inner(state, version, backup.clone(), target)?;
     if current.revision != revision { return Err(AppError::new("MONGO_RESTORE_CHANGED", "实例、目标集合或备份已变化，请重新检查后确认恢复")); }
     let (exe, _) = tool(state, "mongorestore", Some(&backup.tools_version))?;
@@ -190,4 +208,139 @@ pub fn restore(state: &CoreState, version: &str, id: &str, target: &str, revisio
         return Err(AppError::new("MONGO_RESTORE_INCOMPLETE", "MongoDB 恢复未完成").with_hint(hint).with_detail(format!("{}\n{}", error.message, error.detail.unwrap_or_default())));
     }
     Ok(RestoreResult { target: target.into(), safety_backup })
+}
+
+fn validate_content(record: &MongoBackup, path: &Path) -> Result<()> {
+    let info = crate::mongodb_archive::inspect(fs::File::open(path)?, None, std::io::sink())?;
+    if info.version != record.version || info.tools_version != record.tools_version || info.compression != "gzip"
+        || info.databases.len() != 1 || info.databases[0].name != record.database {
+        return Err(AppError::new("MONGO_BACKUP_METADATA", "备份记录与归档中的真实数据库或版本不一致，未执行操作"));
+    }
+    Ok(())
+}
+fn linked(meta: &fs::Metadata) -> bool {
+    #[cfg(windows)] { use std::os::windows::fs::MetadataExt; if meta.file_attributes() & 0x400 != 0 { return true; } }
+    meta.file_type().is_symlink()
+}
+fn external_path(source: &str, exporting: bool) -> Result<PathBuf> {
+    let path = Path::new(source);
+    if !path.is_absolute() || path.components().any(|part| matches!(part, std::path::Component::ParentDir)) { return Err(invalid("请选择完整文件路径")); }
+    let parent = path.parent().ok_or_else(|| invalid("文件目录无效"))?;
+    for ancestor in if exporting { parent } else { path }.ancestors() {
+        if linked(&fs::symlink_metadata(ancestor)?) { return Err(invalid("文件路径不能经过链接或目录联接，请选择原始目录")); }
+    }
+    Ok(crate::paths::checked_data_path(&parent.canonicalize()?, path.file_name().and_then(|name|name.to_str()).ok_or_else(||invalid("文件名无效"))?)?)
+}
+fn inspect_source(path: &Path) -> Result<ImportPreview> {
+    let (size_bytes, sha256) = copy_hash(path, std::io::sink())?;
+    let info = crate::mongodb_archive::inspect(fs::File::open(path)?, None, std::io::sink())?;
+    if !info.databases.iter().any(|db| database_name(&db.name).is_ok()) { return Err(invalid("归档中没有可导入的业务数据库")); }
+    let source = crate::paths::portable_path_text(path);
+    let revision = hex::encode(Sha256::digest(serde_json::to_vec(&json!({"source":source,"size":size_bytes,"sha256":sha256,"info":info})).map_err(|e|AppError::internal("检查 MongoDB 导入",e.to_string()))?));
+    Ok(ImportPreview { source, info, size_bytes, sha256, revision })
+}
+pub fn inspect_import(source: &str) -> Result<ImportPreview> {
+    let _work = crate::BackgroundWork::begin("检查外部 MongoDB 归档")?;
+    let path = external_path(source, false)?;
+    let preview = inspect_source(&path)?;
+    let (size, hash) = copy_hash(&path, std::io::sink())?;
+    if size != preview.size_bytes || hash != preview.sha256 { return Err(AppError::new("MONGO_IMPORT_CHANGED", "归档在检查期间发生变化，请重新选择")); }
+    Ok(preview)
+}
+pub fn import_archive(state: &CoreState, source: &str, database: &str, revision: &str) -> Result<MongoBackup> {
+    let _work = crate::BackgroundWork::begin("导入 MongoDB 归档副本")?;
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    let _lock = state.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重试"))?;
+    database_name(database)?;
+    let source = external_path(source, false)?;
+    let preview = inspect_source(&source)?;
+    if preview.revision != revision { return Err(AppError::new("MONGO_IMPORT_CHANGED", "源归档与预览不一致，请重新检查并确认")); }
+    let dir = directory(state)?; fs::create_dir_all(&dir)?;
+    let pending = tempfile::Builder::new().prefix(".pending-").tempdir_in(&dir)?;
+    let staged = pending.path().join("source.archive"); let mut copied = fs::File::create(&staged)?;
+    let (size, hash) = copy_hash(&source, &mut copied)?; copied.sync_all()?; drop(copied);
+    if size != preview.size_bytes || hash != preview.sha256 { return Err(AppError::new("MONGO_IMPORT_CHANGED", "源归档在复制期间变化，未保存导入结果")); }
+    let archive = pending.path().join("archive.gz");
+    let mut encoder = flate2::write::GzEncoder::new(fs::File::create(&archive)?, flate2::Compression::default());
+    let info = crate::mongodb_archive::inspect(fs::File::open(&staged)?, Some(database), &mut encoder)?;
+    encoder.finish()?.sync_all()?; fs::remove_file(staged)?;
+    let (size_bytes, sha256) = copy_hash(&archive, std::io::sink())?;
+    let id = format!("{}-{:016x}", chrono::Utc::now().timestamp_millis(), rand::random::<u64>());
+    let record = MongoBackup { id:id.clone(), database:database.into(), version:info.version, tools_version:info.tools_version,
+        created_at:chrono::Utc::now().timestamp(), size_bytes, sha256, kind:"imported".into() };
+    validate_content(&record, &archive)?;
+    let mut file = fs::File::create(pending.path().join("metadata.json"))?;
+    file.write_all(&serde_json::to_vec(&record).map_err(|e|AppError::internal("保存导入记录",e.to_string()))?)?; file.sync_all()?; drop(file);
+    let dest = item_path(state, &id, "archive.gz")?.parent().unwrap().to_path_buf();
+    if dest.exists() { return Err(invalid("备份标识冲突，请重试")); }
+    fs::rename(pending.path(), dest)?; Ok(record)
+}
+pub fn export(state: &CoreState, id: &str, destination: &str) -> Result<String> {
+    let _work = crate::BackgroundWork::begin("导出 MongoDB 备份")?;
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    let _lock = state.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重试"))?;
+    let dest = external_path(destination, true)?; let parent = dest.parent().unwrap();
+    if !dest.extension().and_then(|s|s.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("gz")) { return Err(invalid("导出文件名须以 .gz 结尾")); }
+    let base = state.paths.base.canonicalize()?;
+    #[cfg(windows)] let inside = Path::new(&parent.to_string_lossy().to_lowercase()).starts_with(base.to_string_lossy().to_lowercase());
+    #[cfg(not(windows))] let inside = parent.starts_with(base);
+    if inside { return Err(invalid("请选择 NiceEnv 数据目录以外的位置")); }
+    if dest.exists() { return Err(AppError::new("MONGO_EXPORT_EXISTS", "目标文件已存在，请另选名称；已有文件未覆盖")); }
+    let mut pending = tempfile::Builder::new().prefix(".mongo-export-").tempfile_in(parent)?;
+    let record = verified(state, id, &mut pending)?;
+    validate_content(&record, pending.path())?;
+    if metadata(state, id)? != record { return Err(invalid("备份记录在导出期间发生变化")); }
+    pending.as_file().sync_all()?;
+    pending.persist_noclobber(&dest).map_err(|error| AppError::io("保存 MongoDB 导出文件", error.error))?;
+    Ok(crate::paths::portable_path_text(&dest))
+}
+fn removal_revision(dir: &Path, id: &str) -> Result<(String,Option<u64>)> {
+    let meta = fs::symlink_metadata(dir)?;
+    if linked(&meta) || !meta.is_dir() { return Err(invalid("备份目录不是普通目录")); }
+    for item in fs::read_dir(dir)? {
+        let name = item?.file_name();
+        if name != "archive.gz" && name != "metadata.json" { return Err(AppError::new("MONGO_BACKUP_EXTRA_FILES", "备份目录包含其他文件，请打开目录检查；未删除任何内容")); }
+    }
+    let mut files = Vec::new();
+    for name in ["archive.gz", "metadata.json"] {
+        let path = crate::paths::checked_data_path(dir, name)?;
+        match fs::symlink_metadata(&path) {
+            Ok(_)=>files.push(Some(copy_hash(&path, std::io::sink())?)),
+            Err(error) if error.kind()==std::io::ErrorKind::NotFound=>files.push(None),
+            Err(error)=>return Err(error.into()),
+        }
+    }
+    let size = files[0].as_ref().map(|(size,_)|*size);
+    Ok((hex::encode(Sha256::digest(serde_json::to_vec(&(id,files)).map_err(|_|invalid("备份删除范围无效"))?)),size))
+}
+pub fn removal_preview(state: &CoreState, id: &str) -> Result<BackupRemoval> {
+    let _work = crate::BackgroundWork::begin("检查 MongoDB 备份删除范围")?;
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    let _lock = state.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重试"))?;
+    let dir = item_path(state, id, "archive.gz")?.parent().unwrap().to_path_buf();
+    let (revision,size_bytes) = removal_revision(&dir,id)?; let record = metadata(state,id).ok();
+    if removal_revision(&dir,id)?.0 != revision { return Err(invalid("备份在检查期间发生变化，请重试")); }
+    Ok(BackupRemoval { id:id.into(), database:record.as_ref().map(|r|r.database.clone()), kind:record.map(|r|r.kind), size_bytes, revision })
+}
+pub fn remove(state: &CoreState, id: &str, revision: &str) -> Result<()> {
+    let _work = crate::BackgroundWork::begin("删除 MongoDB 备份副本")?;
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    let _lock = state.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重试"))?;
+    let source = item_path(state,id,"archive.gz")?.parent().unwrap().to_path_buf();
+    if removal_revision(&source,id)?.0 != revision { return Err(AppError::new("MONGO_BACKUP_CHANGED", "备份已变化，请重新检查删除范围")); }
+    let staged = directory(state)?.join(format!(".delete-{id}-{:016x}",rand::random::<u64>()));
+    if staged.exists() { return Err(invalid("删除暂存目录冲突，请重试")); }
+    fs::rename(&source,&staged)?;
+    let cleanup = (|| -> Result<()> {
+        if removal_revision(&staged,id)?.0 != revision { return Err(invalid("备份在删除前变化，已中止")); }
+        // 不递归清理；只处理两个受管文件，未知文件与用户额外内容必须保留。
+        for name in ["archive.gz","metadata.json"] {
+            match fs::remove_file(staged.join(name)) { Ok(())=>{},Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},Err(e)=>return Err(e.into()) }
+        }
+        fs::remove_dir(&staged)?; Ok(())
+    })();
+    cleanup.map_err(|error| {
+        let retained = if !source.exists() && fs::rename(&staged,&source).is_ok() { source } else { staged };
+        error.with_hint(format!("未清理完的内容保留在 {}；当前 MongoDB 数据没有改动",crate::paths::portable_path_text(&retained)))
+    })
 }

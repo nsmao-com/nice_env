@@ -12,7 +12,7 @@ import { useInstallTasks } from "@/lib/install-tasks";
 import { ConfirmDialog } from "./misc";
 import * as api from "@/lib/api";
 
-const CONSOLE_SERVICES = new Set(["sftpgo", "mailpit", "minio", "consul", "rnacos", "qdrant"]);
+const CONSOLE_SERVICES = new Set(["sftpgo", "mailpit", "minio", "consul", "rnacos", "qdrant", "temporal-cli", "neo4j"]);
 
 /** 总览卡片、列表及套件页共用；网址由后端按当前运行进程确认。 */
 export function ServiceWebButton({ service, disabled = false }: { service: ServiceStatus; disabled?: boolean }) {

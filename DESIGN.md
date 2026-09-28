@@ -2964,3 +2964,13 @@ MongoDB 本机认证管理补充管理员密码恢复流程，旧密码无法验
 补齐 MariaDB、PostgreSQL 和 MongoDB 的版本级配置编辑入口，配置路径、版本校验、历史备份、冲突检测、回滚目标和基础语法检查均接入现有配置编辑器。MongoDB 启动时自动创建并加载对应版本的 `mongod.conf`，端口、数据目录、日志路径、本机绑定和认证开关继续由 NiceEnv 的托管启动参数控制；无认证启动显式传 `--noauth`，避免用户 YAML 中残留的认证设置造成 UI 状态与实际实例不一致。服务卡片配置入口会带上实际版本，配置编辑器增加 ini/YAML 语法高亮，浏览器 mock 同步覆盖三类数据库配置。
 
 数据库页将 Redis 从 MySQL/MariaDB 与 PostgreSQL 的重复卡片中拆出独立工作区，保留原有统计、连接认证、持久化和备份能力；无其他数据库实例时可直接进入 Redis 页签。没有新增测试文件或数据库变更，未修改 update.sql；发布前执行 Web/schema 类型检查、Rust 全工作区 all-targets 与 diff 检查，不运行前端 dev 或正式 build。按约定同步版本文件，新增 annotated tag v0.2.118，并用原子推送同步 main 与 tag，保留用户已有未跟踪文件与本地产物。整体产品完善目标继续进行。
+
+## 第一百三十一轮：Temporal CLI 与 Neo4j 管理台入口（v0.2.119）
+
+服务管理台入口继续按清单和官方默认行为收紧：Temporal CLI 仅在启动参数明确托管 gRPC 端口与 Web UI 端口（`--port {port}`、`--ui-port {port+1000}`）时生成 `port+1000` 的本机 Web UI 地址；Neo4j 仅在 `console` 模式且使用默认 HTTP 端口 7474 时生成内置 Browser 地址 `/browser`。服务卡片、服务列表和套件页共享入口按钮，无法确认入口时仍由后端返回明确提示，不猜测用户自定义命令的端口。
+
+没有新增测试文件或业务数据库变更，未修改 update.sql；扩展既有 Rust 管理台目标测试，执行 Web/schema 类型检查、Rust 定向测试与全工作区检查、diff 检查，不运行前端 dev 或正式 build。按约定同步版本文件，新增 annotated tag v0.2.119，并用原子推送同步 main 与 tag，保留用户已有未跟踪文件与本地产物。
+
+参考：https://docs.temporal.io/cli/command-reference/server
+参考：https://docs.temporal.io/develop/run-a-development-server
+参考：https://neo4j.com/docs/browser/operations/dbms-connection/

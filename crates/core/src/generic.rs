@@ -850,6 +850,15 @@ fn generic_web_target(r: &Resolved, sftpgo: Option<&SftpgoConfig>) -> Result<Str
     let args_pair = |flag: &str, value: &str| r.spec.args.windows(2).any(|pair| pair[0] == flag && pair[1] == value);
     let (offset, path) = match r.entry.id.as_str() {
         "mailpit" if args_pair("--listen", "127.0.0.1:{port}") => (0, "/"),
+        // Temporal CLI 的开发服务把 Web UI 固定放在 gRPC 端口 + 1000；
+        // 只有同时确认官方启动参数仍由清单托管时才提供快捷入口。
+        "temporal-cli"
+            if args_pair("--port", "{port}") && args_pair("--ui-port", "{port+1000}") =>
+        {
+            (1000, "/")
+        }
+        // Neo4j Community 的 console 模式在默认 HTTP 端口提供内置 Browser。
+        "neo4j" if r.spec.args == ["console"] && r.port == Some(7474) => (0, "/browser"),
         "consul" if args_pair("-http-port", "{port}") && args_pair("-client", "127.0.0.1") => (0, "/ui/"),
         "qdrant" if args_pair("--config-path", "{etc}/config.yaml") => (0, "/dashboard/"),
         _ => return Err(web_unavailable("当前运行配置没有已知的管理台入口，请按服务配置访问。")),
@@ -2260,14 +2269,16 @@ mod startup_tests {
 
     #[test]
     fn console_targets_use_resolved_ports_and_preserve_sftpgo_web_configuration() {
-        for (id, offset, path) in [("mailpit", 0, "/"), ("minio", 1, "/"), ("consul", 0, "/ui"), ("qdrant", 0, "/dashboard")] {
-            let (_temp, state, mut r) = fixture(id); r.port = Some(31000);
+        for (id, offset, path) in [("mailpit", 0, "/"), ("minio", 1, "/"), ("consul", 0, "/ui"), ("qdrant", 0, "/dashboard"), ("temporal-cli", 1000, "/"), ("neo4j", 0, "/browser")] {
+            let (_temp, state, mut r) = fixture(id);
+            let base_port = if id == "neo4j" { 7474 } else { 31000 };
+            r.port = Some(base_port);
             if id == "qdrant" {
                 prepare_config(&state.paths, &r).unwrap();
                 std::fs::create_dir(r.root.join("static")).unwrap();
                 std::fs::write(r.root.join("static/index.html"), "<html></html>").unwrap();
             }
-            assert_eq!(generic_web_target(&r, None).unwrap(), format!("http://127.0.0.1:{}{path}", 31000 + offset));
+            assert_eq!(generic_web_target(&r, None).unwrap(), format!("http://127.0.0.1:{}{path}", base_port + offset));
             r.spec.args = vec!["custom".into()];
             assert_eq!(generic_web_target(&r, None).unwrap_err().code, "SERVICE_WEB_UNAVAILABLE");
         }

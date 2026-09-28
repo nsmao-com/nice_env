@@ -647,7 +647,7 @@ export type MongoDocuments = z.infer<typeof MongoDocuments>;
 export const MongoFilter = z.object({ field: z.string(), value: z.string(), valueType: z.enum(["text", "number", "boolean", "null", "objectId"]) });
 export type MongoFilter = z.infer<typeof MongoFilter>;
 
-export const MongoBackup = z.object({ id: z.string(), database: z.string(), version: z.string(), toolsVersion: z.string(), createdAt: z.number(), sizeBytes: z.number(), sha256: z.string(), kind: z.enum(["manual", "before-restore", "imported"]) });
+export const MongoBackup = z.object({ id: z.string(), database: z.string(), version: z.string(), toolsVersion: z.string(), createdAt: z.number(), sizeBytes: z.number(), sha256: z.string(), kind: z.enum(["manual", "before-restore", "imported", "automatic"]) });
 export type MongoBackup = z.infer<typeof MongoBackup>;
 export const MongoBackupList = z.object({ items: z.array(MongoBackup), issues: z.array(z.object({ id: z.string(), problem: z.string() })), unreadable: z.number().int(), directory: z.string() });
 export type MongoBackupList = z.infer<typeof MongoBackupList>;

@@ -162,7 +162,7 @@ fn plan_key(engine: &str, version: &str) -> Result<String> {
 fn pg_key(version: &str) -> Result<String> { plan_key("postgresql", version) }
 fn plan_lock(paths: &Paths, engine: &str, version: &str) -> Result<std::fs::File> {
     plan_key(engine, version)?;
-    let folder = if engine == "postgresql" { "postgresql" } else { "db" };
+    let folder = match engine { "postgresql" => "postgresql", "mongodb" => "mongodb", _ => "db" };
     let dir = crate::paths::checked_data_path(&paths.base, &format!("backup/{folder}"))?;
     std::fs::create_dir_all(&dir)?;
     // PostgreSQL 沿用原锁名，保证升级期间与已有实例互斥。
@@ -248,6 +248,8 @@ pub fn postgres_plan(state: &crate::CoreState, version: &str) -> Result<BackupPl
 pub fn save_postgres_plan(state: &crate::CoreState, version: &str, config: BackupPlanConfig) -> Result<BackupPlan> { save_plan(state, "postgresql", version, config) }
 pub fn database_plan(state: &crate::CoreState, engine: crate::dbadmin::DatabaseEngine, version: &str) -> Result<BackupPlan> { inspect_plan(state, engine.id(), version) }
 pub fn save_database_plan(state: &crate::CoreState, engine: crate::dbadmin::DatabaseEngine, version: &str, config: BackupPlanConfig) -> Result<BackupPlan> { save_plan(state, engine.id(), version, config) }
+pub fn mongodb_plan(state: &crate::CoreState, version: &str) -> Result<BackupPlan> { inspect_plan(state, "mongodb", version) }
+pub fn save_mongodb_plan(state: &crate::CoreState, version: &str, config: BackupPlanConfig) -> Result<BackupPlan> { save_plan(state, "mongodb", version, config) }
 fn rotate_pg_backups(paths: &Paths, version: &str, oid: u32, keep: usize, newest: &std::path::Path) -> Result<()> {
     use std::io::Read;
     if keep == 0 { return Ok(()); }
@@ -367,6 +369,59 @@ pub fn run_database_plan(state: &crate::CoreState, engine: crate::dbadmin::Datab
     Ok(plan)
 }
 
+pub fn run_mongodb_plan(state: &crate::CoreState, version: &str, manual: bool) -> Result<BackupPlan> {
+    let _work = crate::BackgroundWork::begin("MongoDB 自动备份")?;
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    let _lock = plan_lock(&state.paths, "mongodb", version)?;
+    let key = plan_key("mongodb", version)?;
+    let mut plan = read_plan(&state.store, "mongodb", version)?;
+    let now = chrono::Local::now();
+    if !manual && (!plan.config.enabled || !plan.next_at.is_some_and(|at| at <= now.timestamp_millis())) { return Ok(plan); }
+    validate_plan(&plan.config)?;
+    plan.next_at = if plan.config.enabled { Some(next_run(&plan.config, now)?) } else { None };
+    plan.last_run_at = Some(now.timestamp_millis()); plan.finished_at = None;
+    plan.state = "running".into(); plan.message.clear(); plan.files.clear();
+    state.store.set_setting_json(&key, &plan)?;
+    let result: Result<()> = (|| {
+        let _lifecycle = state.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后手动执行或等待下一周期"))?;
+        let databases = crate::mongodb_backup::automatic_databases(state, version)?;
+        if databases.is_empty() { plan.state = "skipped".into(); plan.message = "没有可备份的业务数据库".into(); return Ok(()); }
+        let mut errors = Vec::new();
+        for database in &databases {
+            match crate::mongodb_backup::create_automatic(state, version, database) {
+                Ok(backup) => {
+                    plan.files.push(backup.id.clone());
+                    state.store.set_setting_json(&key, &plan)?;
+                    if let Err(error) = crate::mongodb_backup::rotate_automatic(state, &backup, plan.config.keep) {
+                        errors.push(format!("{database}：新备份已保留。{} {}", error.message, error.detail.unwrap_or_default()));
+                    }
+                },
+                Err(error) => errors.push(format!("{database}：{} {}", error.message, error.detail.unwrap_or_default())),
+            }
+        }
+        plan.state = if errors.is_empty() { "success" } else if plan.files.is_empty() { "failed" } else { "partial" }.into();
+        plan.message = format!("已备份 {} / {} 个业务数据库{}", plan.files.len(), databases.len(), if errors.is_empty() { String::new() } else { format!("。{}", errors.join("；")) });
+        Ok(())
+    })();
+    if let Err(error) = result {
+        plan.state = if plan.files.is_empty() { "failed" } else { "partial" }.into();
+        plan.message = [Some(error.message), error.hint, error.detail].into_iter().flatten().collect::<Vec<_>>().join(" ");
+    }
+    plan.finished_at = Some(crate::services::now_ms());
+    state.store.set_setting_json(&key, &plan)?;
+    Ok(plan)
+}
+
+pub(crate) fn tick_mongodb(state: &crate::CoreState) {
+    let Ok(_activity) = crate::paths::DataDirActivity::shared(&state.paths.base) else { return; };
+    let Ok(installed) = state.store.list_installed() else { return; };
+    for package in installed.into_iter().filter(|package| package.id == "mongodb") {
+        if read_plan(&state.store, "mongodb", &package.version).is_ok_and(|plan| plan.config.enabled && plan.next_at.is_some_and(|at| at <= crate::services::now_ms())) {
+            let _ = run_mongodb_plan(state, &package.version, false);
+        }
+    }
+}
+
 pub(crate) fn tick_postgres(state: &crate::CoreState) {
     let Ok(_activity) = crate::paths::DataDirActivity::shared(&state.paths.base) else { return; };
     let Ok(installed) = state.store.list_installed() else { return; };
@@ -395,6 +450,7 @@ pub fn spawn_database_scheduler_when_ready(state: std::sync::Arc<crate::CoreStat
             std::thread::sleep(std::time::Duration::from_secs(30));
             tick_postgres(&state);
             tick_databases(&state);
+            tick_mongodb(&state);
         }
     }).map_err(|error| AppError::io("启动数据库备份调度", error))?;
     Ok(())
@@ -869,6 +925,21 @@ mod tests {
         }
         state.store.set_setting(&pg_key("16.6").unwrap(), "broken").unwrap();
         assert!(postgres_plan(&state, "16.6").is_err());
+        let mongo_key = plan_key("mongodb", "8.0.4").unwrap();
+        assert!(save_mongodb_plan(&state, "8.0.4", BackupPlanConfig::default()).is_err());
+        assert_eq!(run_mongodb_plan(&state, "8.0.4", false).unwrap().last_run_at, None);
+        state.store.set_setting_json(&mongo_key, &plan).unwrap();
+        let held = plan_lock(&state.paths, "mongodb", "8.0.4").unwrap();
+        assert_eq!(mongodb_plan(&state, "8.0.4").unwrap().state, "running");
+        assert_eq!(run_mongodb_plan(&state, "8.0.4", true).unwrap_err().code, "BACKUP_BUSY");
+        assert!(plan_lock(&state.paths, "mongodb", "8.0.5").is_ok());
+        assert!(plan_lock(&state.paths, "postgresql", "8.0.4").is_ok());
+        drop(held);
+        assert_eq!(mongodb_plan(&state, "8.0.4").unwrap().state, "interrupted");
+        let failed = run_mongodb_plan(&state, "8.0.4", true).unwrap();
+        assert_eq!(failed.state, "failed"); assert!(failed.finished_at.is_some()); assert!(failed.files.is_empty());
+        state.store.set_setting(&mongo_key, "broken").unwrap();
+        assert!(mongodb_plan(&state, "8.0.4").is_err());
     }
 
     #[test]

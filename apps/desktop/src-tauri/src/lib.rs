@@ -427,6 +427,9 @@ pub fn run() {
             postgres_backup_dump,
             postgres_backup_restore,
             postgres_backup_replace,
+            mongodb_backup_plan,
+            mongodb_backup_plan_save,
+            mongodb_backup_plan_run,
             postgres_backup_plan,
             postgres_backup_plan_save,
             postgres_backup_plan_run,
@@ -3813,6 +3816,23 @@ async fn postgres_backup_replace(state: State<'_, std::sync::Arc<nsb_core::CoreS
             (st.emit)(nsb_core::Event::PostgresBackup(nsb_core::model::PostgresBackupProgress { operation_id: operation_id.clone(), progress }));
         })
     }))).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+fn mongodb_backup_plan(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String) -> Result<nsb_core::backup_job::BackupPlan, tauri::Error> {
+    map_jh(nsb_core::backup_job::mongodb_plan(&state, &version))
+}
+
+#[tauri::command]
+async fn mongodb_backup_plan_save(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, config: nsb_core::backup_job::BackupPlanConfig) -> Result<nsb_core::backup_job::BackupPlan, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::backup_job::save_mongodb_plan(&st, &version, config))).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn mongodb_backup_plan_run(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String) -> Result<nsb_core::backup_job::BackupPlan, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::backup_job::run_mongodb_plan(&st, &version, true))).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]

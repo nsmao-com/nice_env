@@ -80,7 +80,7 @@ function mockSiteFileScope(id: string, project: boolean, exclude: boolean): Site
 }
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.114";
+const MOCK_APP_VERSION = "0.2.115";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const mockMongoDatabases = new Map<string, Record<string, Record<string, unknown>[]>>([
@@ -2838,28 +2838,45 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (mockOllamaPull.state === "pulling") { mockOllamaPull.state = "cancelled"; mockOllamaPull.endedAt = Date.now(); }
       return true as T;
     }
+    case "mongodb_backup_plan":
     case "db_backup_plan":
-    case "postgres_backup_plan": return structuredClone(previewPlan(args!.version as string, args?.engine as string | undefined)) as T;
+    case "postgres_backup_plan": return structuredClone(previewPlan(args!.version as string, cmd.startsWith("mongodb_") ? "mongodb" : args?.engine as string | undefined)) as T;
+    case "mongodb_backup_plan_save":
     case "db_backup_plan_save":
     case "postgres_backup_plan_save": {
       const version = args!.version as string;
-      const plan = previewPlan(version, args?.engine as string | undefined);
+      const plan = previewPlan(version, cmd.startsWith("mongodb_") ? "mongodb" : args?.engine as string | undefined);
       if (plan.state === "running") throw { code: "BACKUP_BUSY", message: "自动备份正在执行" };
       const config = args!.config as import("./api").PostgresPlanConfig;
       if (!["daily", "weekly", "monthly"].includes(config.frequency) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(config.time) || !Number.isInteger(config.keep) || config.keep < 0 || config.keep > 100 || config.weekday < 0 || config.weekday > 6 || config.monthDay < 1 || config.monthDay > 31) throw { code: "BAD_BACKUP_PLAN", message: "请检查计划时间与保留数量" };
       plan.config = { ...config }; plan.nextAt = config.enabled ? previewPlanNext(config) : null;
       return structuredClone(plan) as T;
     }
+    case "mongodb_backup_plan_run":
     case "db_backup_plan_run":
     case "postgres_backup_plan_run": {
       const version = args!.version as string;
-      const plan = previewPlan(version, args?.engine as string | undefined);
+      const plan = previewPlan(version, cmd.startsWith("mongodb_") ? "mongodb" : args?.engine as string | undefined);
       if (plan.state === "running") throw { code: "BACKUP_BUSY", message: "自动备份正在执行" };
       plan.state = "running"; plan.lastRunAt = Date.now(); plan.finishedAt = null; plan.files = []; plan.message = "";
       plan.nextAt = plan.config.enabled ? previewPlanNext(plan.config) : null;
       await delay(1200);
       try {
-        if (args?.engine) {
+        if (cmd === "mongodb_backup_plan_run") {
+          const service = services.get("mongodb");
+          if (!service || !service.pids.length || !["running", "error"].includes(service.state) || service.version !== version) throw { message: "所选 MongoDB 实例未运行或版本已变化" };
+          const databases = [...mockMongoDatabases.keys()].filter(name => !["admin", "local", "config"].includes(name.toLowerCase()));
+          const errors: string[] = [];
+          for (const database of databases) {
+            try {
+              const backup = await mockInvoke<import("@nsb/schema").MongoBackup>("mongodb_backup_create", { version, database });
+              mockMongoBackups.get(backup.id)!.record.kind = "automatic"; plan.files.push(backup.id);
+              if (plan.config.keep) [...mockMongoBackups.values()].filter(entry => entry.record.kind === "automatic" && entry.record.version === version && entry.record.database === database).reverse().slice(plan.config.keep).forEach(entry => mockMongoBackups.delete(entry.record.id));
+            } catch (error) { errors.push(`${database}: ${String((error as { message?: string }).message || error)}`); }
+          }
+          plan.state = errors.length ? (plan.files.length ? "partial" : "failed") : databases.length ? "success" : "skipped";
+          plan.message = `预览：已备份 ${plan.files.length} / ${databases.length} 个业务数据库${errors.length ? "。" + errors.join("；") : ""}`;
+        } else if (args?.engine) {
           const engine = args.engine as DatabaseEngine;
           const { state } = mysqlPreview(version, true, engine);
           const databases = [...state.databases.values()].filter((db) => !systemDatabase(db.name));

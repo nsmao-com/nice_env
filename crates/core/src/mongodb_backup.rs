@@ -51,7 +51,7 @@ fn metadata(state: &CoreState, id: &str) -> Result<MongoBackup> {
     database_name(&record.database)?;
     if record.id != id || record.created_at <= 0 || record.version.len() > 128 || record.version.is_empty()
         || record.tools_version.len() > 128 || record.tools_version.is_empty() || record.sha256.len() != 64
-        || !record.sha256.bytes().all(|b| b.is_ascii_hexdigit()) || !matches!(record.kind.as_str(), "manual" | "before-restore" | "imported") {
+        || !record.sha256.bytes().all(|b| b.is_ascii_hexdigit()) || !matches!(record.kind.as_str(), "manual" | "before-restore" | "imported" | "automatic") {
         return Err(invalid("备份记录字段无效"));
     }
     Ok(record)
@@ -136,6 +136,7 @@ fn create_inner(state: &CoreState, version: &str, database: &str, kind: &str) ->
     let id = format!("{}-{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(), pending.path().file_name().unwrap().to_string_lossy().trim_start_matches(".pending-"));
     let record = MongoBackup { id: id.clone(), database: database.into(), version: info["version"].as_str().unwrap_or(version).into(), tools_version,
         created_at: chrono::Utc::now().timestamp(), size_bytes, sha256, kind: kind.into() };
+    validate_content(&record, &archive)?;
     let mut meta = fs::File::create(pending.path().join("metadata.json"))?;
     meta.write_all(&serde_json::to_vec(&record).map_err(|e| AppError::internal("保存 MongoDB 备份记录", e.to_string()))?)?; meta.sync_all()?; drop(meta);
     let dest = item_path(state, &id, "archive.gz")?.parent().unwrap().to_path_buf();
@@ -148,6 +149,48 @@ pub fn create(state: &CoreState, version: &str, database: &str) -> Result<MongoB
     let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
     let _lock = state.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重试"))?;
     create_inner(state, version, database, "manual")
+}
+
+/// 调度器持有整个计划的生命周期锁；固定脚本取得完整库列表，不使用浏览器的分页上限。
+pub(crate) fn automatic_databases(state: &CoreState, version: &str) -> Result<Vec<String>> {
+    let value = crate::mongodb::execute(state, version, json!({}), r#"
+      const names = checked(admin.runCommand({listDatabases:1,nameOnly:true,maxTimeMS:5000})).databases.map(d=>d.name);
+      print(JSON.stringify({result:names.filter(n=>!['admin','local','config'].includes(n.toLowerCase())).sort()}));
+    "#)?;
+    serde_json::from_value(value).map_err(|error| AppError::internal("读取 MongoDB 计划备份范围", error.to_string()))
+}
+pub(crate) fn create_automatic(state: &CoreState, version: &str, database: &str) -> Result<MongoBackup> {
+    create_inner(state, version, database, "automatic")
+}
+
+/// 新副本完整校验后才轮转。同版本、同库的有效自动副本计入保留数；异常副本保留并报告。
+pub(crate) fn rotate_automatic(state: &CoreState, newest: &MongoBackup, keep: usize) -> Result<()> {
+    if keep == 0 { return Ok(()); }
+    if newest.kind != "automatic" || verified(state, &newest.id, std::io::sink())? != *newest {
+        return Err(invalid("新自动备份已变化，未清理旧备份"));
+    }
+    let mut candidates = Vec::new(); let mut problems = Vec::new();
+    for entry in fs::read_dir(directory(state)?)? {
+        let id = entry?.file_name().to_string_lossy().into_owned(); if id.starts_with('.') { continue; }
+        let record = match metadata(state, &id) {
+            Ok(record) => record,
+            Err(error) => { problems.push(format!("{id}：{}，已保留", error.message)); continue; }
+        };
+        if record.kind != "automatic" || record.database != newest.database || record.version != newest.version { continue; }
+        let checked = (|| -> Result<String> {
+            let preview = removal_preview(state, &id)?;
+            if verified(state, &id, std::io::sink())? != record { return Err(invalid("备份记录在检查期间变化")); }
+            Ok(preview.revision)
+        })();
+        match checked { Ok(revision) => candidates.push((record, revision)), Err(error) => problems.push(format!("{id}：{}，已保留", error.message)) }
+    }
+    if !candidates.iter().any(|(record,_)| record.id == newest.id) { return Err(invalid("新自动备份不可用，未清理旧备份")); }
+    candidates.sort_by(|(a,_),(b,_)| (b.id == newest.id).cmp(&(a.id == newest.id)).then_with(|| b.created_at.cmp(&a.created_at)).then_with(|| b.id.cmp(&a.id)));
+    for (record, revision) in candidates.into_iter().skip(keep) {
+        if let Err(error) = remove(state, &record.id, &revision) { problems.push(format!("{}：{}", record.id, error.message)); }
+    }
+    if !problems.is_empty() { return Err(AppError::new("MONGO_ROTATION_INCOMPLETE", "部分旧副本未清理，请检查备份列表").with_detail(problems.join("；"))); }
+    Ok(())
 }
 fn verified(state: &CoreState, id: &str, output: impl Write) -> Result<MongoBackup> {
     let record = metadata(state, id)?;

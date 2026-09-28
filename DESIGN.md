@@ -2912,3 +2912,22 @@ Web/schema TypeScript、218 条清单的 Zod 解析、Rust 全工作区 all-targ
 参考：https://github.com/mongodb/mongo-tools/blob/master/common/archive/spec.md
 参考：https://github.com/mongodb/mongo-tools/blob/master/common/archive/archive.go
 参考：https://github.com/mongodb/mongo-tools/blob/master/common/archive/demultiplexer.go
+
+## 第一百二十七轮：MongoDB 计划备份与安全轮转（v0.2.115）
+
+沿用前轮已核对的 ServBay MongoDB 管理指南与项目既有数据库计划流程，补齐 MongoDB 自动备份。支持按安装版本保存每日、每周、每月计划，本地时间执行、短月取月末、保留 0–100 份，以及关闭计划时立即执行。复用现有每 30 秒调度线程、启动交接、settings 存储、后台任务登记和数据目录守卫，没有新增调度线程或依赖。应用关闭期间不执行，重新打开后到期计划补执行一次；实例未运行、工具缺失或服务忙会记录失败，推进下一周期，不连续重复尝试。
+
+运行前持有该版本的操作系统文件锁并重新读取计划，防多窗口重复执行；整个备份阶段持有服务生命周期锁。固定 mongosh 脚本读取完整业务库列表，不使用浏览器 1000 库预览上限，排除 admin、local、config。逐库调用官方 mongodump 生成 gzip archive，发布前核对 SHA-256、归档结构、版本与数据库。每完成一份立即保存标识，最终记录完成时间、成功/部分完成/失败/跳过状态；中断通过文件锁状态判断，已生成文件仍可查看。
+
+自动副本使用独立 automatic 标记。新副本完整校验后，只轮转同来源版本、同数据库的有效自动副本，并优先保留本次文件，避免系统时钟回拨导致误删。0 表示保留全部；手动、恢复前和导入副本不受影响。损坏记录、摘要不符或含额外用户文件的目录保留并报告，不计入有效保留数量。清理沿用摘要确认和暂存机制，仅处理受管文件，不递归扩大删除范围；备份成功但清理失败显示部分完成，保留新副本。
+
+复用 DatabaseBackupPlan 和日历表单，加入 MongoDB API、Tauri 命令、schema 与浏览器内存预览。面板显示下一次执行、上次状态、保留份数和本次生成文件，列表区分自动副本。计划编辑或运行与文件操作互斥，独立管理父子锁状态，避免设置弹窗把自己的保存按钮禁用；版本、端口或 PID 变化后拒绝提交旧草稿。新增 MongoDB 中英文范围和保留说明，明确安装 Shell/Database Tools、暂停应用写入及逐库归档不保证跨集合/跨库一致快照。共享计划弹窗底部分隔线使用虚线且两侧留白。
+
+没有新增测试文件，扩展既有 Rust 验证。Windows MongoDB 8.0.4、mongosh 2.12.0、Database Tools 100.19.0 原生综合验收通过（1 passed，122.06 秒）：多业务库自动归档、未来计划不执行、到期仅执行一次、关闭后手动运行、自动归档实际恢复、保留 0/1、未来时间戳、按库和版本隔离、保留手动/保护/导入副本、损坏和额外内容保留、缺少工具、错误 dataDir 与生命周期冲突。现有日历/轮转/执行锁验证通过，扩展 MongoDB 文件锁、版本隔离、中断和无服务失败状态。临时实例与数据由既有 guard 回收，未写入用户业务数据库；macOS 未实机验收。
+
+离线 Chromium 使用实际页面和组件，通过 26 项计划交互检查及 28 项原有导入导出回归，无 pageerror。IPC 和原生文件对话框由受控夹具提供，界面验收不冒充桌面原生调用。核对停止实例配置、日周月联动、保留范围、失败后草稿保留、重复执行防护、实例变化、后台运行互斥、部分完成与中断提示、自动副本刷新及中英翻译；1440px 桌面和 320px 中英弹窗已目检，无横向溢出，正文滚动且操作可达。
+
+十一处版本文件同步至 0.2.115，Cargo.lock 仅更新三个本项目 crate 版本，无第三方依赖变化。发布前执行 Web/schema 类型检查、Rust 工作区 all-targets 和 diff 检查，未启动前端 dev 或正式 build。上一版 v0.2.114 的 Windows、macOS arm64/x64 Release 已确认 completed/success。本轮新增 annotated tag v0.2.115，与 main 原子推送并核对远程及 release.yml 实际状态；保留用户已有未跟踪文件与本地产物。本次没有业务数据库变更，未修改 update.sql。认证管理与整体产品完善目标继续进行。
+
+参考：https://support.servbay.com/database-management/getting-started/mongodb-management-and-usage
+参考：https://github.com/mongodb/mongo-tools/blob/master/common/archive/spec.md

@@ -4192,8 +4192,10 @@ browse.measurements.insertOne({_id:'measurement',time:new Date('2026-09-29T00:00
             let disabled_dump = dump_exe.with_extension("fixture-disabled");
             std::fs::rename(&dump_exe, &disabled_dump).unwrap();
             let safety_failure = mb::restore(&state, "8.0.4", &backup.id, &existing.target, &existing.revision, &existing.target);
+            let missing_tools_plan = crate::backup_job::run_mongodb_plan(&state, "8.0.4", true).unwrap();
             std::fs::rename(disabled_dump, dump_exe).unwrap();
             assert_eq!(safety_failure.unwrap_err().code, "MONGO_TOOLS_MISSING");
+            assert_eq!(missing_tools_plan.state, "failed"); assert!(missing_tools_plan.files.is_empty());
             run("mongosh", "mongosh", &[&uri, "--quiet", "--norc", "--eval", "if(db.getSiblingDB('niceenv_target').keep.findOne({_id:1}).value!=='保护原数据')throw Error('Safety backup failure modified target');"]);
             let replaced = mb::restore(&state, "8.0.4", &backup.id, &existing.target, &existing.revision, &existing.target).unwrap();
             let safety = replaced.safety_backup.unwrap(); assert_eq!(safety.kind, "before-restore");
@@ -4292,15 +4294,74 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
             let offline_dest = temp.path().join("offline export.gz"); mb::export(&file_only,&offline.id,offline_dest.to_str().unwrap()).unwrap();
             let offline_removal = mb::removal_preview(&file_only,&offline.id).unwrap(); mb::remove(&file_only,&offline.id,&offline_removal.revision).unwrap();
             assert!(mb::list(&file_only).unwrap().items.is_empty());
+            // 复用真实工具链验收 MongoDB 计划：到期仅执行一次，关闭后仍可立即执行。
+            use crate::backup_job as schedule;
+            let config = schedule::BackupPlanConfig { enabled: true, keep: 1, ..Default::default() };
+            let mut plan = schedule::save_mongodb_plan(&state, "8.0.4", config).unwrap();
+            assert!(plan.next_at.unwrap() > crate::services::now_ms());
+            let before = mb::list(&state).unwrap().items;
+            schedule::tick_mongodb(&state);
+            assert_eq!(mb::list(&state).unwrap().items, before);
+            plan.next_at = Some(1);
+            state.store.set_setting_json("mongodbBackupPlan@8.0.4", &plan).unwrap();
+            schedule::tick_mongodb(&state);
+            let first = schedule::mongodb_plan(&state, "8.0.4").unwrap();
+            assert_eq!(first.state, "success", "{}", first.message);
+            let names = mb::automatic_databases(&state,"8.0.4").unwrap();
+            assert_eq!(first.files.len(), names.len()); assert!(names.len() >= 3);
+            assert!(names.iter().all(|name| !["admin","local","config"].contains(&name.as_str())));
+            schedule::tick_mongodb(&state);
+            assert_eq!(schedule::mongodb_plan(&state,"8.0.4").unwrap().files, first.files);
+            let first_copies = mb::list(&state).unwrap().items;
+            let automatic = first_copies.iter().find(|r|r.kind=="automatic" && r.database=="niceenv_fixture").unwrap();
+            // 用真实归档复制受管样本，验证坏文件、额外内容及不同版本不会被自动删除。
+            let dir = mb::directory(&state).unwrap();
+            let copy = |id: &str, version: &str, kind: &str| {
+                let mut record = automatic.clone(); record.id=id.into(); record.version=version.into(); record.kind=kind.into(); record.created_at=4_000_000_000;
+                let dest=dir.join(id); std::fs::create_dir(&dest).unwrap();
+                std::fs::copy(dir.join(&automatic.id).join("archive.gz"),dest.join("archive.gz")).unwrap();
+                std::fs::write(dest.join("metadata.json"),serde_json::to_vec(&record).unwrap()).unwrap();
+                record
+            };
+            let old = copy("schedule-future", "8.0.4", "automatic");
+            let corrupt = copy("schedule-corrupt", "8.0.4", "automatic");
+            std::fs::write(dir.join(&corrupt.id).join("archive.gz"), b"bad archive").unwrap();
+            let extra = copy("schedule-extra", "8.0.4", "automatic");
+            std::fs::write(dir.join(&extra.id).join("note.txt"), "user content").unwrap();
+            let other = copy("schedule-other-version", "8.0.5", "automatic");
+            let imported_copy = copy("schedule-imported", "8.0.4", "imported");
+            mb::rotate_automatic(&state,automatic,0).unwrap(); assert!(dir.join(&old.id).exists());
+            assert_eq!(mb::rotate_automatic(&state,automatic,1).unwrap_err().code, "MONGO_ROTATION_INCOMPLETE");
+            assert!(dir.join(&automatic.id).exists()); assert!(!dir.join(&old.id).exists());
+            for record in [&corrupt,&extra,&other,&imported_copy] { assert!(dir.join(&record.id).exists()); }
+            let mut disabled = first.config.clone(); disabled.enabled=false;
+            schedule::save_mongodb_plan(&state,"8.0.4",disabled).unwrap();
+            let second = schedule::run_mongodb_plan(&state,"8.0.4",true).unwrap();
+            assert_eq!(second.state,"partial","{}",second.message); assert!(second.next_at.is_none());
+            assert_eq!(second.files.len(),names.len()); assert!(second.message.contains("清理"));
+            for id in first.files { assert!(!dir.join(id).exists()); }
+            let second_copies = mb::list(&state).unwrap();
+            for record in before { assert!(second_copies.items.contains(&record)); }
+            assert!(second_copies.items.contains(&imported_copy)); assert!(dir.join(&other.id).exists());
+            assert_eq!(std::fs::read_to_string(dir.join(&extra.id).join("note.txt")).unwrap(),"user content");
+            let scheduled = second_copies.items.iter().find(|r|r.kind=="automatic" && r.database=="niceenv_fixture" && second.files.contains(&r.id)).unwrap();
+            let preview = mb::preview(&state,"8.0.4",&scheduled.id,"niceenv_scheduled").unwrap();
+            mb::restore(&state,"8.0.4",&scheduled.id,"niceenv_scheduled",&preview.revision,"niceenv_scheduled").unwrap();
+            run("mongosh","mongosh",&[&uri,"--quiet","--norc","--eval","if(db.getSiblingDB('niceenv_scheduled').documents.countDocuments({})!==2)throw Error('Scheduled archive restore lost data');"]);
+            let unchanged = schedule::run_mongodb_plan(&state,"8.0.4",false).unwrap();
+            assert_eq!(unchanged.files,second.files);
             let mut wrong_directory = isolated_state(Paths::new(temp.path().join("wrong mongo directory")));
             wrong_directory.manager = state.manager.clone();
             for package in state.store.list_installed().unwrap() { wrong_directory.store.upsert_installed(&package).unwrap(); }
             assert_eq!(crate::mongodb::browse(&wrong_directory, "8.0.4", BrowseRequest::Overview).unwrap_err().code, "MONGO_INSTANCE_CHANGED");
             assert_eq!(mb::create(&wrong_directory, "8.0.4", "niceenv_fixture").unwrap_err().code, "MONGO_INSTANCE_CHANGED");
+            assert_eq!(schedule::run_mongodb_plan(&wrong_directory,"8.0.4",true).unwrap().state,"failed");
             let guard = state.manager.lifecycle.lock();
             std::thread::scope(|scope| {
                 assert_eq!(scope.spawn(|| crate::mongodb::browse(&state, "8.0.4", BrowseRequest::Overview)).join().unwrap().unwrap_err().code, "SERVICE_BUSY");
                 assert_eq!(scope.spawn(|| mb::create(&state, "8.0.4", "niceenv_fixture")).join().unwrap().unwrap_err().code, "SERVICE_BUSY");
+                let busy = scope.spawn(|| schedule::run_mongodb_plan(&state,"8.0.4",true)).join().unwrap().unwrap();
+                assert_eq!(busy.state,"failed"); assert!(busy.message.contains("服务正在操作"));
             });
             drop(guard);
         }

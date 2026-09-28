@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { ProjectPhpCheck, projectPhpProblem, recommendedProjectPhp } from "./project-php-compatibility";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -19,7 +20,7 @@ import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
-type ProjectDraft = { domain: string; phpVersion: string; proxyTarget: string; selected: boolean };
+type ProjectDraft = { domain: string; phpVersion: string; proxyTarget: string; selected: boolean; allowUnverifiedPhp?: boolean };
 type Outcome = { status: "creating" | "created" | "error"; message?: string; siteId?: string };
 const PAGE_SIZE = 5;
 
@@ -43,6 +44,10 @@ export function scannedProjectProblem(project: ScannedProject, draft: ProjectDra
   if (domain.length > 253 || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i.test(domain)) return "scanSetup.invalidDomain" as const;
   if (occupied.has(domain) || duplicate) return "scanSetup.domainUsed" as const;
   if (project.siteKind === "php" && !phpVersions.includes(draft.phpVersion)) return "scanSetup.phpRequired" as const;
+  if (project.siteKind === "php") {
+    const problem = projectPhpProblem(project.phpCompatibility, draft.phpVersion, !!draft.allowUnverifiedPhp);
+    if (problem) return problem;
+  }
   if (project.needsDevServer && !normalizeProxyTarget(draft.proxyTarget)) return "sites.proxy.invalidTarget" as const;
   return null;
 }
@@ -83,8 +88,9 @@ export function ProjectScannerDialog({ open, onOpenChange, onCreated }: {
   const [found, setFound] = React.useState<ScannedProject[] | null>(null);
   const [drafts, setDrafts] = React.useState<Record<string, ProjectDraft>>({});
   const [outcomes, setOutcomes] = React.useState<Record<string, Outcome>>({});
-  const [mode, setMode] = React.useState<"scanning" | "picking" | "creating" | null>(null);
+  const [mode, setMode] = React.useState<"scanning" | "picking" | "creating" | "checking" | null>(null);
   const busyRef = React.useRef(false);
+  const checkingPath = React.useRef<string | null>(null);
   const mounted = React.useRef(true);
   const handingOff = React.useRef(false);
   const [error, setError] = React.useState("");
@@ -138,7 +144,7 @@ export function ProjectScannerDialog({ open, onOpenChange, onCreated }: {
     const reserved = new Set(occupied);
     const next: Record<string, ProjectDraft> = {};
     for (const p of list) next[p.path] = {
-      domain: availableScanDomain(p.suggestedDomain, reserved), phpVersion: bulkPhp, proxyTarget: "",
+      domain: availableScanDomain(p.suggestedDomain, reserved), phpVersion: recommendedProjectPhp(p.phpCompatibility, phpVersions, bulkPhp), proxyTarget: "", allowUnverifiedPhp: false,
       selected: !p.alreadyConfigured && p.documentRootReady && !p.needsDevServer,
     };
     setFound(list); setDrafts(next);
@@ -160,6 +166,25 @@ export function ProjectScannerDialog({ open, onOpenChange, onCreated }: {
     } finally { setWorking(null); }
   };
 
+  const refreshPhp = async (project: ScannedProject) => {
+    if (busyRef.current) return;
+    checkingPath.current = project.path; setWorking("checking"); setError("");
+    setFound((old) => old?.map((item) => item.path === project.path ? { ...item, phpCompatibility: null } : item) ?? null);
+    setDrafts((old) => ({ ...old, [project.path]: { ...old[project.path], allowUnverifiedPhp: false } }));
+    try {
+      const report = await api.projectPhpCompatibility(project.path);
+      if (!mounted.current) return;
+      setFound((old) => old?.map((item) => item.path === project.path ? { ...item, phpCompatibility: report } : item) ?? null);
+      setDrafts((old) => ({ ...old, [project.path]: { ...old[project.path], phpVersion: old[project.path].phpVersion || recommendedProjectPhp(report, phpVersions) } }));
+    } catch (failure) {
+      if (mounted.current) {
+        const message = normalizeError(failure).message; setError(message);
+        setFound((old) => old?.map((item) => item.path === project.path ? { ...item, phpCompatibility: { status: "unavailable", requirement: null, versions: [], matchingVersions: [], message } as const } : item) ?? null);
+      }
+    }
+    finally { checkingPath.current = null; setWorking(null); }
+  };
+
   const createAll = async () => {
     if (busyRef.current || !selected.length || !webServer || !webServers.includes(webServer) || queryError) return;
     setAttempted(true);
@@ -168,16 +193,16 @@ export function ProjectScannerDialog({ open, onOpenChange, onCreated }: {
       const index = found!.indexOf(invalid); setQuery(""); setPage(Math.floor(index / PAGE_SIZE) + 1); setFocusIndex(index);
       return;
     }
-    const targets = selected.map((project) => ({ project, input: scannedSiteInput(project, drafts[project.path], webServer, https) }));
+    const targets = selected.map((project) => ({ project, input: scannedSiteInput(project, drafts[project.path], webServer, https), allowUnverifiedPhp: !!drafts[project.path].allowUnverifiedPhp }));
     setWorking("creating"); setError(""); setReport(null);
     let ok = 0; let fail = 0;
     try {
-      for (const [index, { project, input }] of targets.entries()) {
+      for (const [index, { project, input, allowUnverifiedPhp }] of targets.entries()) {
         if (!mounted.current) break;
         setProgress({ done: index, total: targets.length, name: project.name });
         setOutcomes((old) => ({ ...old, [project.path]: { status: "creating" } }));
         try {
-          const site = await api.createSite(input, project.path);
+          const site = await api.createSite(input, project.path, allowUnverifiedPhp);
           ok += 1;
           client.setQueryData<Site[]>(["sites"], (old) => [...(old ?? []).filter((item) => item.id !== site.id), site]);
           if (mounted.current) {
@@ -241,7 +266,7 @@ export function ProjectScannerDialog({ open, onOpenChange, onCreated }: {
               <div className="space-y-1.5"><Label htmlFor="scan-php-all">{t("scanSetup.bulkPhp")}</Label>
                 <Select value={bulkPhp} disabled={busy || !phpVersions.length} onValueChange={(value) => {
                   setBulkPhp(value); setDrafts((old) => Object.fromEntries(Object.entries(old).map(([path, draft]) => [path,
-                    draft.selected && found.some((p) => p.path === path && p.siteKind === "php") ? { ...draft, phpVersion: value } : draft])));
+                    draft.selected && found.some((p) => p.path === path && p.siteKind === "php") ? { ...draft, phpVersion: value, allowUnverifiedPhp: false } : draft])));
                 }}><SelectTrigger id="scan-php-all"><SelectValue placeholder={t("scanSetup.phpChoose")} /></SelectTrigger><SelectContent>{phpVersions.map((version) => <SelectItem key={version} value={version}>PHP {version}</SelectItem>)}</SelectContent></Select>
               </div>
             </div>
@@ -285,8 +310,8 @@ export function ProjectScannerDialog({ open, onOpenChange, onCreated }: {
                     onChange={(event) => patch(project.path, { domain: event.target.value })} className="font-mono text-xs" />
                 </div>
                 {project.siteKind === "php" && <div className="space-y-1.5"><Label htmlFor={`scan-php-${index}`}>{t("sites.wizard.phpVersion")}</Label>
-                  <Select value={draft.phpVersion} disabled={disabled || !phpVersions.length} onValueChange={(value) => patch(project.path, { phpVersion: value })}>
-                    <SelectTrigger id={`scan-php-${index}`} aria-invalid={issue === "scanSetup.phpRequired"} aria-describedby={issue ? `scan-error-${index}` : undefined}><SelectValue placeholder={t("scanSetup.phpChoose")} /></SelectTrigger><SelectContent>{phpVersions.map((version) => <SelectItem key={version} value={version}>PHP {version}</SelectItem>)}</SelectContent>
+                  <Select value={draft.phpVersion} disabled={disabled || !phpVersions.length} onValueChange={(value) => patch(project.path, { phpVersion: value, allowUnverifiedPhp: false })}>
+                    <SelectTrigger id={`scan-php-${index}`} aria-invalid={issue === "scanSetup.phpRequired" || issue?.startsWith("projectPhp.")} aria-describedby={issue ? `scan-error-${index}` : undefined}><SelectValue placeholder={t("scanSetup.phpChoose")} /></SelectTrigger><SelectContent>{phpVersions.map((version) => <SelectItem key={version} value={version}>PHP {version}</SelectItem>)}</SelectContent>
                   </Select>
                 </div>}
                 {project.needsDevServer && <div className="space-y-1.5"><Label htmlFor={`scan-proxy-${index}`}>{t("sites.wizard.proxyTarget")}</Label>
@@ -298,6 +323,8 @@ export function ProjectScannerDialog({ open, onOpenChange, onCreated }: {
                 <p className="min-w-0 font-mono text-xs [overflow-wrap:anywhere]">{draft.domain}</p>
                 <Button size="sm" variant="ghost" disabled={busy || !isTauri} onClick={() => { if (outcome.siteId) void api.openSite(outcome.siteId).catch(toastError); }}>{t("scanSetup.open")}</Button>
               </div>}
+              {project.siteKind === "php" && <ProjectPhpCheck report={project.phpCompatibility} version={draft.phpVersion} acknowledged={!!draft.allowUnverifiedPhp} disabled={disabled} loading={mode === "checking" && checkingPath.current === project.path}
+                onAcknowledge={(value) => patch(project.path, { allowUnverifiedPhp: value })} onRefresh={() => void refreshPhp(project)} />}
               {project.phpMinVersion && <p className="text-xs leading-relaxed text-muted">{t("siteResume.php").replace("{version}", project.phpMinVersion)}</p>}
               {project.needsDevServer && <p id={`scan-proxy-hint-${index}`} className="text-xs leading-relaxed text-muted">{t("scanSetup.proxyHint")}{normalizeProxyTarget(draft.proxyTarget) && <span className="block font-mono [overflow-wrap:anywhere]">{normalizeProxyTarget(draft.proxyTarget)}</span>}</p>}
               {issue && <p id={`scan-error-${index}`} tabIndex={-1} role="alert" className="text-xs leading-relaxed text-error">{t(issue)}</p>}

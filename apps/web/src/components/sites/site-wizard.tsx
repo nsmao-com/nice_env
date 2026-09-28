@@ -5,6 +5,8 @@ import { isSiteHostname } from "@/lib/utils";
 
 
 import * as React from "react";
+import type { ProjectPhpCompatibility } from "@nsb/schema";
+import { ProjectPhpCheck, projectPhpProblem, recommendedProjectPhp } from "./project-php-compatibility";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -130,6 +132,26 @@ export function SiteWizard({
   const [template, setTemplate] = React.useState<CreateSiteInput["template"]>("none");
   const [kind, setKind] = React.useState<SiteKind>("php");
   const [phpVersion, setPhpVersion] = React.useState("");
+  const [phpReport, setPhpReport] = React.useState<ProjectPhpCompatibility | null>(null);
+  const [phpChecking, setPhpChecking] = React.useState(false);
+  const [allowUnverifiedPhp, setAllowUnverifiedPhp] = React.useState(false);
+  const [phpCheckRevision, setPhpCheckRevision] = React.useState(0);
+  const phpInventory = packages.filter((p) => p.install && (p.id === "php" || p.id === "composer")).map((p) => `${p.id}@${p.version}`).sort().join(",");
+  const existingPhpProblem = existingProject && kind === "php" ? projectPhpProblem(phpReport, phpVersion, allowUnverifiedPhp) : null;
+  React.useEffect(() => {
+    if (!open || !existingProject || kind !== "php") { setPhpChecking(false); return; }
+    let cancelled = false;
+    setPhpChecking(true); setAllowUnverifiedPhp(false); setPhpReport(null);
+    void api.projectPhpCompatibility(existingProject.path).then((report) => {
+      if (cancelled) return;
+      setPhpReport(report);
+      setPhpVersion((current) => current || recommendedProjectPhp(report, phpVersions));
+    }).catch((failure) => {
+      if (!cancelled) setPhpReport({ status: "unavailable", requirement: existingProject.phpMinVersion ?? null, versions: [], matchingVersions: [], message: normalizeError(failure).message });
+    }).finally(() => { if (!cancelled) setPhpChecking(false); });
+    return () => { cancelled = true; };
+  // Inventory changes require a fresh result; unrelated package polling must not erase the draft.
+  }, [open, existingProject?.path, kind, phpInventory, phpCheckRevision]);
   const [webServer, setWebServer] = React.useState<"nginx" | "apache">("nginx");
   const [proxyTarget, setProxyTarget] = React.useState("127.0.0.1:3001");
   const [application, setApplication] = React.useState<CreateSiteInput["runtime"]["application"]>();
@@ -177,7 +199,8 @@ export function SiteWizard({
       setRootDir(existingProject ? (existingProject.needsDevServer ? existingProject.path : existingProject.documentRoot) : "");
       setTemplate("none");
       setKind(initialKind);
-      setPhpVersion(existingDefaults?.phpVersion || phpVersions[0] || "");
+      setPhpVersion(existingDefaults?.phpVersion || (existingProject ? recommendedProjectPhp(existingProject.phpCompatibility, phpVersions) : phpVersions[0]) || "");
+      setAllowUnverifiedPhp(false); setPhpReport(existingProject?.phpCompatibility ?? null);
       setWebServer(existingDefaults?.webServer ?? "nginx");
       setHttps(existingDefaults?.https ?? false);
       setCertificate({});
@@ -193,8 +216,8 @@ export function SiteWizard({
   }, [open, phpVersions, initialKind, existingProject, existingDefaults]);
 
   React.useEffect(() => {
-    if (open && !phpVersion && phpVersions[0]) setPhpVersion(phpVersions[0]);
-  }, [open, phpVersion, phpVersions]);
+    if (open && !existingProject && !phpVersion && phpVersions[0]) setPhpVersion(phpVersions[0]);
+  }, [open, existingProject, phpVersion, phpVersions]);
 
   /* 名称 → 域名联动 */
   React.useEffect(() => {
@@ -214,6 +237,7 @@ export function SiteWizard({
   }, [open]);
 
   const canNext = React.useMemo(() => {
+    if (step >= 2 && kind === "php" && (!phpVersions.includes(phpVersion) || (existingProject && (phpChecking || existingPhpProblem)))) return false;
     if (step >= 3 && https && certificateSelection.problem) return false;
     if (step >= 2 && isProxy && (!normalizedProxyTarget || !applicationValid)) return false;
     switch (step) {
@@ -229,7 +253,7 @@ export function SiteWizard({
       default:
         return true;
     }
-  }, [https, certificateSelection.problem, step, name, domain, aliases, rootDir, kind, phpVersion, phpVersions, webInstalled, normalizedProxyTarget, databaseValid, composerTemplate, composerInstalled, templatePhpCompatible, templateNodeCompatible, isProxy, applicationValid]);
+  }, [existingProject, phpChecking, existingPhpProblem, https, certificateSelection.problem, step, name, domain, aliases, rootDir, kind, phpVersion, phpVersions, webInstalled, normalizedProxyTarget, databaseValid, composerTemplate, composerInstalled, templatePhpCompatible, templateNodeCompatible, isProxy, applicationValid]);
 
   const pickFolder = async () => {
     if (isTauri) {
@@ -289,7 +313,7 @@ export function SiteWizard({
       unlisten = await listen<SiteCreateProgress>("site://create-progress", (event) => {
         if (event.rootDir === input.rootDir) setProgress(event);
       });
-      const site = await api.createSite(input, existingProject?.path);
+      const site = await api.createSite(input, existingProject?.path, allowUnverifiedPhp);
       toast.success(`${t("wz.createdP1")} ${site.name} ${t("wz.createdP2")}`, {
         description: template === "wordpress"
           ? t("wz.wordpressFinish")
@@ -507,6 +531,8 @@ export function SiteWizard({
 
             {step === 2 && (
               <div className="flex flex-col gap-4">
+                {existingProject && kind === "php" && <ProjectPhpCheck report={phpReport} version={phpVersion} acknowledged={allowUnverifiedPhp} loading={phpChecking} disabled={creating}
+                  onAcknowledge={setAllowUnverifiedPhp} onRefresh={() => setPhpCheckRevision((value) => value + 1)} />}
                 {existingProject?.phpMinVersion && <p className="rounded-lg bg-fill p-3 text-xs text-muted">{t("siteResume.php").replace("{version}", existingProject.phpMinVersion)}</p>}
                 {existingProject?.needsDevServer && <p className="rounded-lg bg-warn-soft p-3 text-xs leading-relaxed text-warn">{t("siteResume.application")}</p>}
                 {!templatePhpCompatible && <p role="alert" className="rounded-lg bg-warn-soft p-3 text-xs text-warn">{t("wz.templatePhpMinimum").replace("{version}", minimumPhp)}</p>}
@@ -552,7 +578,8 @@ export function SiteWizard({
                         {phpVersions.map((v) => (
                           <button
                             key={v}
-                            onClick={() => setPhpVersion(v)}
+                            onClick={() => { setPhpVersion(v); setAllowUnverifiedPhp(false); }}
+                            aria-pressed={phpVersion === v}
                             className={cn(
                               "rounded-lg border px-3 py-1.5 font-mono text-[12px] transition-all",
                               phpVersion === v
@@ -735,6 +762,11 @@ export function SiteWizard({
             <span>{t(`wz.progress.${progress.stage}`)}{progress.percent !== null ? ` ${progress.percent}%` : ""}</span>
           </div>
         )}
+        {!creating && step > 2 && existingProject && kind === "php" && (phpChecking || existingPhpProblem || !phpVersions.includes(phpVersion)) &&
+          <div role="alert" className="flex flex-wrap items-center gap-2 rounded-lg bg-warn-soft p-3 text-xs text-warn">
+            <span>{t(phpChecking ? "projectPhp.checking" : !phpVersions.includes(phpVersion) ? "scanSetup.phpRequired" : existingPhpProblem!)}</span>
+            <Button size="sm" variant="ghost" onClick={() => setStep(2)}>{t("projectPhp.configure")}</Button>
+          </div>}
         {!creating && createError && (
           <div className="max-h-40 shrink-0 overflow-y-auto break-words rounded-lg bg-error-soft p-3 text-xs leading-relaxed text-error">
             <p role="alert">{createError}</p>

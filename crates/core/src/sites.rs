@@ -460,7 +460,15 @@ pub fn create_existing_with_progress(
     manager: &Arc<ServiceManager>,
     progress: &dyn Fn(&str, Option<u8>),
 ) -> Result<Site> {
-    create_inner(input, paths, store, manager, progress, Some(project))
+    create_existing_confirmed_with_progress(input, project, false, paths, store, manager, progress)
+}
+
+/// 只有明确确认时才允许跳过不可用的校验；已知不兼容或无效约束始终拒绝。
+pub fn create_existing_confirmed_with_progress(
+    input: &CreateSiteInput, project: &str, allow_unverified_php: bool,
+    paths: &Paths, store: &Store, manager: &Arc<ServiceManager>, progress: &dyn Fn(&str, Option<u8>),
+) -> Result<Site> {
+    create_inner(input, paths, store, manager, progress, Some((project, allow_unverified_php)))
 }
 
 fn validate_existing_project(input: &CreateSiteInput, project: &str) -> Result<()> {
@@ -492,7 +500,7 @@ fn create_inner(
     store: &Store,
     manager: &Arc<ServiceManager>,
     progress: &dyn Fn(&str, Option<u8>),
-    existing_project: Option<&str>,
+    existing_project: Option<(&str, bool)>,
 ) -> Result<Site> {
     // ---- 校验 ----
     progress("preparing", None);
@@ -512,7 +520,10 @@ fn create_inner(
             read_project_pin(&normalized.root_dir).map(|(_, version)| version);
     }
     let input = &normalized;
-    if let Some(project) = existing_project { validate_existing_project(input, project)?; }
+    if let Some((project, allow_unverified)) = existing_project {
+        validate_existing_project(input, project)?;
+        validate_existing_php(input, project, allow_unverified, paths, store)?;
+    }
     if input.https {
         if let Some(id) = &input.runtime.imported_cert_id {
             crate::certs::validate_imported_domains(paths, id, &input.domains)?;
@@ -593,7 +604,7 @@ fn create_inner(
     drop(_change);
     // ---- 脚手架 ----
     let root = std::path::PathBuf::from(&input.root_dir);
-    if let Some(project) = existing_project {
+    if let Some((project, _)) = existing_project {
         validate_existing_project(input, project)?;
     } else if input.template == "wordpress" {
         scaffold_wordpress(&root, progress)?;
@@ -618,7 +629,7 @@ fn create_inner(
     )
     .map_err(|e| e.with_hint("项目文件已保留，请修改冲突的域名后重试"))?;
 
-    if let Some(project) = existing_project { validate_existing_project(input, project)?; }
+    if let Some((project, _)) = existing_project { validate_existing_project(input, project)?; }
 
     // ---- 数据库 ----
     let mut db_binding = None;
@@ -1371,6 +1382,64 @@ fn validate_template_php(template: &str, version: &str) -> Result<()> {
     Ok(())
 }
 
+
+// 只加载已安装 Composer 内的版本解析库；不加载项目 autoload、脚本、插件或 php.ini。
+const PHP_REQUIREMENT_PROBE: &str = r#"
+try {
+    require 'phar://'.$argv[1].'/vendor/autoload.php';
+    $input = json_decode(file_get_contents($argv[2]), true, 512, JSON_THROW_ON_ERROR);
+    $parser = new Composer\Semver\VersionParser();
+    try { $parser->parseConstraints($input['requirement']); }
+    catch (Throwable $e) { echo json_encode(['invalid' => $e->getMessage()]); exit(0); }
+    echo json_encode(['matching' => array_values(Composer\Semver\Semver::satisfiedBy($input['versions'], $input['requirement']))], JSON_THROW_ON_ERROR);
+} catch (Throwable $e) { echo json_encode(['error' => $e->getMessage()]); }
+"#;
+
+pub(crate) fn composer_matching_php_versions(paths: &Paths, store: &Store, requirement: &str, versions: &[String]) -> Result<Vec<String>> {
+    if versions.is_empty() { return Err(AppError::not_installed("PHP")); }
+    if versions.len() > 128 { return Err(AppError::new("PHP_CHECK_LIMIT", "已安装 PHP 版本过多，请手动确认项目版本要求")); }
+    let (php, composer) = ProjectPhp::binaries(paths, store, &versions[0])?;
+    match_php_with_composer(&php, &composer, requirement, versions)
+}
+
+fn match_php_with_composer(php: &std::path::Path, composer: &std::path::Path, requirement: &str, versions: &[String]) -> Result<Vec<String>> {
+    let temp = tempfile::tempdir()?;
+    let input = temp.path().join("requirements.json");
+    std::fs::write(&input, serde_json::to_vec(&serde_json::json!({"requirement":requirement,"versions":versions}))
+        .map_err(|e| AppError::internal("准备 PHP 版本校验", e.to_string()))?)?;
+    let mut command = platform::command(php);
+    #[cfg(windows)]
+    let composer_file = crate::paths::portable_path_text(composer);
+    #[cfg(not(windows))]
+    let composer_file = composer.to_string_lossy().into_owned();
+    command.args(["-n", "-d", "memory_limit=64M", "-d", "display_errors=stderr", "-r", PHP_REQUIREMENT_PROBE, "--"])
+        .arg(composer_file).arg(&input).current_dir(temp.path())
+        .env_remove("PHPRC").env("PHP_INI_SCAN_DIR", "");
+    let output = run_project_command(&mut command, "检查项目 PHP 版本要求", std::time::Duration::from_secs(10))?;
+    #[derive(serde::Deserialize)]
+    struct Reply { matching: Option<Vec<String>>, invalid: Option<String>, error: Option<String> }
+    let reply: Reply = serde_json::from_str(output.trim()).map_err(|e| AppError::new("PHP_CHECK_FAILED", "Composer 未返回有效的版本校验结果").with_detail(e.to_string()))?;
+    if let Some(error) = reply.invalid { return Err(AppError::new("PHP_REQUIREMENT_INVALID", "composer.json 中的 PHP 版本约束无法解析").with_detail(error)); }
+    if let Some(error) = reply.error { return Err(AppError::new("PHP_CHECK_FAILED", "无法使用已安装 Composer 检查版本，请修复 PHP 或 Composer").with_detail(error)); }
+    let matching = reply.matching.ok_or_else(|| AppError::new("PHP_CHECK_FAILED", "Composer 版本校验结果不完整"))?;
+    if matching.iter().any(|v| !versions.contains(v)) { return Err(AppError::new("PHP_CHECK_FAILED", "Composer 版本校验返回了未知版本")); }
+    Ok(matching)
+}
+
+fn validate_existing_php(input: &CreateSiteInput, project: &str, allow_unverified: bool, paths: &Paths, store: &Store) -> Result<()> {
+    if input.runtime.kind != SiteKind::Php { return Ok(()); }
+    let report = crate::scanner::project_php_compatibility(paths, store, std::path::Path::new(project))?;
+    match report.status.as_str() {
+        "invalid" => Err(AppError::new("PHP_REQUIREMENT_INVALID", report.message.unwrap_or_else(|| "项目 PHP 版本要求无效".into()))),
+        "checked" if !input.runtime.php_version.as_ref().is_some_and(|v| report.matching_versions.contains(v)) =>
+            Err(AppError::new("PHP_VERSION_MISMATCH", format!("所选 PHP 不符合项目要求 {}", report.requirement.unwrap_or_default()))
+                .with_hint("请重新检查并选择符合要求的已安装 PHP；没有兼容版本时到套件页安装")),
+        "unavailable" if !allow_unverified => Err(AppError::new("PHP_CHECK_UNAVAILABLE", report.message.unwrap_or_else(|| "暂时无法校验项目 PHP 版本".into()))
+            .with_hint("安装或修复 PHP、Composer 后重新检查；也可在建站界面明确确认自行核对后继续")),
+        _ => Ok(()),
+    }
+}
+
 struct ProjectPhp {
     php: std::path::PathBuf,
     composer: std::path::PathBuf,
@@ -1379,7 +1448,7 @@ struct ProjectPhp {
 }
 
 impl ProjectPhp {
-    fn resolve(paths: &Paths, store: &Store, version: &str) -> Result<Self> {
+    fn binaries(paths: &Paths, store: &Store, version: &str) -> Result<(std::path::PathBuf, std::path::PathBuf)> {
         let php = store
             .find_installed("php", Some(version))
             .ok_or_else(|| AppError::not_installed("PHP"))?;
@@ -1410,8 +1479,14 @@ impl ProjectPhp {
         let composer_exe = std::path::PathBuf::from(&composer.install_path).join(
             crate::install::entry_relative_path(&installer.installed_entry(&composer).entry),
         );
+        if !composer_exe.is_file() { return Err(AppError::new("BROKEN_INSTALL", "找不到 Composer 程序，请在套件页修复")); }
+        Ok((php_exe, composer_exe))
+    }
+
+    fn resolve(paths: &Paths, store: &Store, version: &str) -> Result<Self> {
+        let (php_exe, composer_exe) = Self::binaries(paths, store, version)?;
         let ini = paths.php_ini(version);
-        if !composer_exe.is_file() || !ini.is_file() {
+        if !ini.is_file() {
             return Err(
                 AppError::new("BROKEN_INSTALL", "缺少 Composer 程序或所选 PHP 的配置文件")
                     .with_hint("请在套件页修复 PHP 和 Composer 后重试"),
@@ -2426,7 +2501,7 @@ mod scaffold_tests {
         let mut config = input(SiteKind::Php); config.name = "Recovered PHP".into();
         config.root_dir = detected.document_root.clone(); config.domains = vec!["copy.native.test".into()];
         config.runtime.php_version = Some(php_version.clone());
-        let php_site = create_existing_with_progress(&config, &detected.path, &paths, &store, &manager, &|_, _| {}).unwrap();
+        let php_site = create_existing_confirmed_with_progress(&config, &detected.path, true, &paths, &store, &manager, &|_, _| {}).unwrap();
         let client = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(5)).build().unwrap();
         let response = |domain: &str, path: &str| client.get(format!("http://127.0.0.1:{port}{path}")).header("Host", domain).send().unwrap();
         assert_eq!(response("copy.native.test", "/").text().unwrap(), format!("native-copy|{php_version}|96M"));
@@ -2440,16 +2515,16 @@ mod scaffold_tests {
         // 前一个站点已正常运行，第二个失败仍保留副本并恢复原 Web 配置。
         store.set_setting("extraHosts", "invalid native fixture").unwrap();
         let mut failed = config.clone(); failed.domains = vec!["retry.native.test".into()];
-        let error = create_existing_with_progress(&failed, &detected.path, &paths, &store, &manager, &|_, _| {}).unwrap_err();
+        let error = create_existing_confirmed_with_progress(&failed, &detected.path, true, &paths, &store, &manager, &|_, _| {}).unwrap_err();
         assert_eq!(error.code, "HOSTS_SETTINGS_INVALID");
         assert_eq!(store.list_sites().unwrap().len(), 1);
         assert_eq!(manager.snapshot(&php_id).unwrap().pids, original_pids);
         assert_eq!(response("copy.native.test", "/").text().unwrap(), format!("native-copy|{php_version}|96M"));
         assert_eq!(std::fs::read(project.join("public/.user.ini")).unwrap(), ini);
         store.set_setting("extraHosts", "[]").unwrap();
-        let retried = create_existing_with_progress(&failed, &detected.path, &paths, &store, &manager, &|_, _| {}).unwrap();
+        let retried = create_existing_confirmed_with_progress(&failed, &detected.path, true, &paths, &store, &manager, &|_, _| {}).unwrap();
         assert_eq!(response("retry.native.test", "/").text().unwrap(), format!("native-copy|{php_version}|96M"));
-        assert!(create_existing_with_progress(&failed, &detected.path, &paths, &store, &manager, &|_, _| {}).is_err());
+        assert!(create_existing_confirmed_with_progress(&failed, &detected.path, true, &paths, &store, &manager, &|_, _| {}).is_err());
         assert_eq!(store.list_sites().unwrap().len(), 2);
 
         struct Upstream { address: std::net::SocketAddr, stop: Arc<AtomicBool>, worker: Option<std::thread::JoinHandle<()>> }
@@ -2488,7 +2563,7 @@ mod scaffold_tests {
         let mut app_input = input(SiteKind::Node); app_input.root_dir = app.path.clone();
         app_input.name = "Application proxy".into(); app_input.domains = vec!["app.native.test".into()];
         app_input.runtime.php_version = None; app_input.runtime.proxy_target = Some(format!("http://{address}"));
-        let app_site = create_existing_with_progress(&app_input, &app.path, &paths, &store, &manager, &|_, _| {}).unwrap();
+        let app_site = create_existing_confirmed_with_progress(&app_input, &app.path, true, &paths, &store, &manager, &|_, _| {}).unwrap();
         assert_eq!(response("app.native.test", "/").text().unwrap(), "native-app", "{}",
             std::fs::read_to_string(paths.logs().join("nginx").join(format!("{}.error.log", app_site.id))).unwrap_or_default());
         assert!(access_url(&paths, &store, &manager, &app_site.id).is_ok());
@@ -2506,7 +2581,7 @@ mod scaffold_tests {
         // 普通 UI 验证后目录被改动时，后端拒绝并保留已经创建的站点。
         std::fs::remove_file(project.join("public/index.php")).unwrap();
         let mut stale = config.clone(); stale.domains = vec!["stale.native.test".into()];
-        assert_eq!(create_existing_with_progress(&stale, &detected.path, &paths, &store, &manager, &|_, _| {}).unwrap_err().code, "PROJECT_CHANGED");
+        assert_eq!(create_existing_confirmed_with_progress(&stale, &detected.path, true, &paths, &store, &manager, &|_, _| {}).unwrap_err().code, "PROJECT_CHANGED");
         assert_eq!(store.list_sites().unwrap().len(), 3);
         assert!(get(&store, &retried.id).is_ok());
         assert_eq!(std::fs::read_to_string(project.join(".env")).unwrap(), "SECRET=fixture\n");
@@ -2517,6 +2592,72 @@ mod scaffold_tests {
         assert!((0..configgen::PHP_POOL_WORKERS).all(|offset| !crate::services::tcp_port_open(php_port + offset)));
         drop(upstream);
         assert!(!crate::services::tcp_port_open(address.port()));
+    }
+
+
+    #[test]
+    #[ignore = "requires NSB_ENV_PHP and NSB_ENV_COMPOSER; reads Composer semver without running project scripts"]
+    fn existing_php_requirements_native_verify_constraints_and_recheck_before_creation() {
+        let php = PathBuf::from(std::env::var("NSB_ENV_PHP").expect("NSB_ENV_PHP"));
+        let composer = PathBuf::from(std::env::var("NSB_ENV_COMPOSER").expect("NSB_ENV_COMPOSER"));
+        let candidates = ["7.4.33", "8.0.30", "8.1.34", "8.2.30", "8.3.29", "8.4.26", "8.5.0"].map(String::from).to_vec();
+        for (constraint, expected) in [
+            ("^7.4 || ^8.1", vec!["7.4.33", "8.1.34", "8.2.30", "8.3.29", "8.4.26", "8.5.0"]),
+            ("~8.2.0", vec!["8.2.30"]),
+            (">=8.1, <8.5, !=8.2.30", vec!["8.1.34", "8.3.29", "8.4.26"]),
+            ("8.1 - 8.3", vec!["8.1.34", "8.2.30", "8.3.29"]),
+            ("8.4.*", vec!["8.4.26"]),
+            ("8.4.26", vec!["8.4.26"]),
+        ] {
+            assert_eq!(match_php_with_composer(&php, &composer, constraint, &candidates).unwrap(), expected, "{constraint}");
+        }
+        assert_eq!(match_php_with_composer(&php, &composer, "^", &candidates).unwrap_err().code, "PHP_REQUIREMENT_INVALID");
+        assert_eq!(match_php_with_composer(&php, &composer, "!=8.2.*", &candidates).unwrap_err().code, "PHP_REQUIREMENT_INVALID");
+        let actual = String::from_utf8(std::process::Command::new(&php).args(["-n","-r","echo PHP_VERSION;"]).output().unwrap().stdout).unwrap();
+        let temp = tempfile::tempdir().unwrap(); let paths = Paths::new(temp.path().join("environment")); paths.ensure_dirs().unwrap();
+        let store = Store::open(paths.db()).unwrap();
+        for (id, version, directory) in [("php", actual.as_str(), php.parent().unwrap()), ("composer", "2.10.3", composer.parent().unwrap())] {
+            store.upsert_installed(&crate::model::InstalledPackage { id:id.into(), version:version.into(), category:"runtime".into(), install_path:directory.to_string_lossy().into(), config_path:String::new(), installed_at:1 }).unwrap();
+        }
+        let project = temp.path().join("已有 PHP project"); std::fs::create_dir_all(project.join("public")).unwrap();
+        std::fs::write(project.join("public/index.php"), "<?php echo 'ready';").unwrap();
+        std::fs::write(project.join(".env"), "KEEP=original\n").unwrap();
+        std::fs::write(project.join("evil.php"), "<?php file_put_contents(__DIR__.'/executed', 'bad');").unwrap();
+        let manifest = serde_json::json!({"require":{"php":format!(">={actual}")},"autoload":{"files":["evil.php"]},"scripts":{"pre-install-cmd":"@php evil.php"}});
+        let original = serde_json::to_vec(&manifest).unwrap(); std::fs::write(project.join("composer.json"), &original).unwrap();
+        let report = crate::scanner::project_php_compatibility(&paths, &store, &project).unwrap();
+        assert_eq!(report.status, "checked"); assert_eq!(report.matching_versions, vec![actual.clone()]);
+        let scanned = crate::scanner::scan_dir(&paths, &store, &project).unwrap();
+        assert_eq!(scanned[0].php_compatibility.as_ref().unwrap().status, "checked");
+        assert!(!project.join("executed").exists()); assert_eq!(std::fs::read(project.join("composer.json")).unwrap(), original);
+        let mut config = input(SiteKind::Php); config.runtime.php_version = Some(actual.clone()); config.root_dir = project.join("public").to_string_lossy().into();
+        validate_existing_php(&config, &project.to_string_lossy(), false, &paths, &store).unwrap();
+        // 预览后约束变化时，创建必须重新核对；人工确认不能覆盖已知不兼容。
+        std::fs::write(project.join("composer.json"), format!(r#"{{"require":{{"php":"<{actual}"}}}}"#)).unwrap();
+        for allow in [false, true] {
+            let result = create_existing_confirmed_with_progress(&config, &project.to_string_lossy(), allow, &paths, &store, &Arc::new(ServiceManager::new()), &|_,_|{});
+            assert_eq!(result.unwrap_err().code, "PHP_VERSION_MISMATCH");
+        }
+        assert!(store.list_sites().unwrap().is_empty()); assert!(!project.join("executed").exists());
+        assert_eq!(std::fs::read_to_string(project.join(".env")).unwrap(), "KEEP=original\n");
+        // 未安装解析器与无约束不是同一状态；跳过仅针对前者，且必须明确确认。
+        let unavailable = Store::open(temp.path().join("unavailable.sqlite")).unwrap();
+        assert_eq!(crate::scanner::project_php_compatibility(&paths, &unavailable, &project).unwrap().status, "unavailable");
+        unavailable.upsert_installed(&store.find_installed("php", Some(&actual)).unwrap()).unwrap();
+        let report = crate::scanner::project_php_compatibility(&paths, &unavailable, &project).unwrap();
+        assert_eq!(report.status, "unavailable");
+        assert_eq!(validate_existing_php(&config, &project.to_string_lossy(), false, &paths, &unavailable).unwrap_err().code, "PHP_CHECK_UNAVAILABLE");
+        validate_existing_php(&config, &project.to_string_lossy(), true, &paths, &unavailable).unwrap();
+        std::fs::write(project.join("composer.json"), r#"{"require":{"php":"^"}}"#).unwrap();
+        assert_eq!(validate_existing_php(&config, &project.to_string_lossy(), true, &paths, &store).unwrap_err().code, "PHP_REQUIREMENT_INVALID");
+        std::fs::write(project.join("composer.json"), r#"{"require":{"php":84}}"#).unwrap();
+        assert_eq!(crate::scanner::project_php_compatibility(&paths, &store, &project).unwrap().status, "invalid");
+        for malformed in ["[]", r#"{"require":null}"#, r#"{"require":[]}"#] {
+            std::fs::write(project.join("composer.json"), malformed).unwrap();
+            assert_eq!(crate::scanner::project_php_compatibility(&paths, &store, &project).unwrap().status, "invalid");
+        }
+        std::fs::write(project.join("composer.json"), "{}").unwrap();
+        assert_eq!(crate::scanner::project_php_compatibility(&paths, &unavailable, &project).unwrap().status, "unspecified");
     }
 
     fn input(kind: SiteKind) -> CreateSiteInput {

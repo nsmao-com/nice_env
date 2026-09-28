@@ -80,7 +80,7 @@ function mockSiteFileScope(id: string, project: boolean, exclude: boolean): Site
 }
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.101";
+const MOCK_APP_VERSION = "0.2.102";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -2273,6 +2273,8 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       await mockInvoke("config_save", { kind: backup.target, content: backup.content, force: true, expectedContent: args!.expectedContent });
       return true as T;
     }
+    case "project_php_compatibility":
+      return { status: "unavailable", requirement: null, versions: [], matchingVersions: [], message: "浏览器示例不会读取本机项目或运行 Composer，请在桌面应用中检查。" } as T;
     case "scan_projects": {
       const root = args!.root as string;
       return [

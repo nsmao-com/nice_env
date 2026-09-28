@@ -957,6 +957,15 @@ export type ConfigBackup = z.infer<typeof ConfigBackup>;
 
 /* ============ 项目扫描 ============ */
 
+export const ProjectPhpCompatibility = z.object({
+  status: z.enum(["checked", "unspecified", "unavailable", "invalid"]),
+  requirement: z.string().nullable(),
+  versions: z.array(z.string()),
+  matchingVersions: z.array(z.string()),
+  message: z.string().nullable(),
+});
+export type ProjectPhpCompatibility = z.infer<typeof ProjectPhpCompatibility>;
+
 export const ScannedProject = z.object({
   path: z.string(),
   name: z.string(),
@@ -967,6 +976,7 @@ export const ScannedProject = z.object({
   siteKind: z.string(),
   rewrite: z.string(),
   phpMinVersion: z.string().nullable().optional(),
+  phpCompatibility: ProjectPhpCompatibility.nullable().optional(),
   /** 识别依据，供用户核对 */
   evidence: z.array(z.string()).default([]),
   runHint: z.string(),

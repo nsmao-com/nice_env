@@ -27,6 +27,7 @@ import type {
   WatchdogStatus,
   ProcessRecoveryReport,
   ScannedProject,
+  ProjectPhpCompatibility,
   ConfigFileInfo,
   ConfigValidation,
   ConfigBackup,
@@ -114,8 +115,8 @@ export const versionCatalogs = (force = false) =>
 
 /* 站点 */
 export const listSites = () => safe(invoke<Site[]>("list_sites"));
-export const createSite = (input: CreateSiteInput, existingProject?: string) =>
-  safe(invoke<Site>("create_site", { input, existingProject }));
+export const createSite = (input: CreateSiteInput, existingProject?: string, allowUnverifiedPhp = false) =>
+  safe(invoke<Site>("create_site", { input, existingProject, allowUnverifiedPhp }));
 export const siteAccessUrl = (id: string) => safe(invoke<string>("site_access_url", { id }));
 export const openSite = (id: string) => openResolvedBrowserUrl(() => siteAccessUrl(id));
 export const updateSite = (site: Partial<Site> & { id: string }) =>
@@ -408,6 +409,8 @@ export const watchdogSetEnabled = (enabled: boolean) =>
 export const watchdogReset = (id: string) => safe(invoke<boolean>("watchdog_reset", { id }));
 
 /* 项目扫描 */
+export const projectPhpCompatibility = (project: string) =>
+  safe(invoke<ProjectPhpCompatibility>("project_php_compatibility", { project }));
 export const scanProjects = (root: string) =>
   safe(invoke<ScannedProject[]>("scan_projects", { root }));
 

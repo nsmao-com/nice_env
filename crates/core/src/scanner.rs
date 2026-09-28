@@ -146,6 +146,8 @@ pub struct ScannedProject {
     pub rewrite: String,
     /// 该项目可用的 PHP 版本（Laravel 等对 PHP 版本有下限要求）
     pub php_min_version: Option<String>,
+    #[serde(default)]
+    pub php_compatibility: Option<ProjectPhpCompatibility>,
     /// 识别依据（说明为什么判成这个类型），用户可据此判断识别对不对
     pub evidence: Vec<String>,
     pub run_hint: String,
@@ -201,8 +203,66 @@ pub fn scan_dir(
         }
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
-    let _ = paths; // 保留参数以便后续需要按版本探测
+    let mut checked = std::collections::HashMap::new();
+    let checking_started = std::time::Instant::now();
+    for project in &mut out {
+        if project.site_kind != "php" { continue; }
+        let key = project.php_min_version.clone();
+        // 同一批扫描中相同约束仅启动一次解析器，不执行项目代码。
+        let report = if let Some(report) = key.as_ref().and_then(|key| checked.get(key)).cloned() { report }
+            else if checking_started.elapsed() >= std::time::Duration::from_secs(5) && key.is_some() {
+                ProjectPhpCompatibility { status: "unavailable".into(), requirement: key.clone(), versions: vec![], matching_versions: vec![],
+                    message: Some("本次扫描的自动校验时间已达上限，请在该项目下点击重新检查".into()) }
+            } else { project_php_compatibility(paths, store, Path::new(&project.path))? };
+        if let Some(key) = key { checked.insert(key, report.clone()); }
+        project.php_compatibility = Some(report);
+    }
     Ok(out)
+}
+
+
+/// 仅检查根 composer.json 的 require.php；不代表扩展或 vendor 依赖均可运行。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPhpCompatibility {
+    pub status: String,
+    pub requirement: Option<String>,
+    pub versions: Vec<String>,
+    pub matching_versions: Vec<String>,
+    pub message: Option<String>,
+}
+
+pub fn project_php_compatibility(paths: &crate::paths::Paths, store: &crate::store::Store, project: &Path) -> Result<ProjectPhpCompatibility> {
+    if !plain_directory(project) { return Err(AppError::new("NOT_A_DIR", "项目目录不存在或无法安全读取")); }
+    let mut report = ProjectPhpCompatibility {
+        status: "unspecified".into(), requirement: None, versions: vec![], matching_versions: vec![], message: None,
+    };
+    let manifest = project.join("composer.json");
+    if std::fs::symlink_metadata(&manifest).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) { return Ok(report); }
+    let Some(composer) = read_manifest(project, "composer.json") else {
+        report.status = "invalid".into(); report.message = Some("composer.json 无法读取、无效或超过 512 KiB，请修复后重新检查".into()); return Ok(report);
+    };
+    if !composer.is_object() || composer.get("require").is_some_and(|value| !value.is_object()) {
+        report.status = "invalid".into(); report.message = Some("composer.json 及其 require 字段必须是对象，请修复后重新检查".into()); return Ok(report);
+    }
+    let requirement = match composer.get("require").and_then(|v| v.get("php")) {
+        None => return Ok(report),
+        Some(value) => value.as_str().filter(|s| !s.trim().is_empty() && s.len() <= 4096),
+    };
+    let Some(requirement) = requirement else {
+        report.status = "invalid".into(); report.message = Some("composer.json 的 require.php 必须是有效版本约束字符串（最多 4096 字节）".into()); return Ok(report);
+    };
+    report.requirement = Some(requirement.into());
+    report.versions = store.list_installed()?.into_iter().filter(|p| p.id == "php").map(|p| p.version).collect();
+    report.versions.sort_by(|a,b| crate::versions::cmp_version_desc(a,b)); report.versions.dedup();
+    match crate::sites::composer_matching_php_versions(paths, store, requirement, &report.versions) {
+        Ok(matching) => { report.status = "checked".into(); report.matching_versions = matching; }
+        Err(error) => {
+            report.status = if error.code == "PHP_REQUIREMENT_INVALID" { "invalid" } else { "unavailable" }.into();
+            report.message = Some(error.message);
+        }
+    }
+    Ok(report)
 }
 
 fn is_noise_dir(name: &str) -> bool {
@@ -438,6 +498,7 @@ pub fn detect_one(dir: &Path, configured: &[String]) -> Option<ScannedProject> {
         site_kind: kind.site_kind().to_string(),
         rewrite: kind.rewrite().to_string(),
         php_min_version: php_min,
+        php_compatibility: None,
         evidence,
         run_hint: kind.run_hint().to_string(),
         needs_dev_server: kind.needs_dev_server(),

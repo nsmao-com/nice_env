@@ -278,6 +278,7 @@ pub fn run() {
             trust_ca,
             // 项目扫描
             scan_projects,
+            project_php_compatibility,
             // 日志导出
             log_export,
             // 工具链镜像
@@ -1080,6 +1081,7 @@ async fn create_site(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     input: nsb_core::model::CreateSiteInput,
     existing_project: Option<String>,
+    allow_unverified_php: Option<bool>,
 ) -> Result<nsb_core::model::Site, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
@@ -1093,7 +1095,7 @@ async fn create_site(
             );
         };
         map_jh(if let Some(project) = existing_project {
-            nsb_core::sites::create_existing_with_progress(&input, &project, &st.paths, &st.store, &st.manager, &progress)
+            nsb_core::sites::create_existing_confirmed_with_progress(&input, &project, allow_unverified_php.unwrap_or(false), &st.paths, &st.store, &st.manager, &progress)
         } else {
             nsb_core::sites::create_with_progress(&input, &st.paths, &st.store, &st.manager, &progress)
         })
@@ -3648,15 +3650,25 @@ async fn recover_processes(state: State<'_, std::sync::Arc<nsb_core::CoreState>>
 
 /// 扫描一个目录，识别其中的项目并给出建站建议（只读，不改任何东西）
 #[tauri::command]
-fn scan_projects(
-    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
-    root: String,
+async fn scan_projects(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>, root: String,
 ) -> Result<Vec<nsb_core::scanner::ScannedProject>, tauri::Error> {
-    map_jh(nsb_core::scanner::scan_dir(
-        &state.paths,
-        &state.store,
-        std::path::Path::new(&root),
-    ))
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
+        map_jh(nsb_core::scanner::scan_dir(&st.paths, &st.store, std::path::Path::new(&root)))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn project_php_compatibility(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>, project: String,
+) -> Result<nsb_core::scanner::ProjectPhpCompatibility, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
+        map_jh(nsb_core::scanner::project_php_compatibility(&st.paths, &st.store, std::path::Path::new(&project)))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /* ================= 配置文件编辑 ================= */

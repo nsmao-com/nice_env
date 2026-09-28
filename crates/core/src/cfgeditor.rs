@@ -26,9 +26,12 @@ pub enum ConfigKind {
     NginxMain,
     PhpIni,
     MySqlIni,
+    MariaDbIni,
     RedisConf,
     ApacheConf,
     MihomoConfig,
+    PostgresConf,
+    MongoConf,
 }
 
 impl ConfigKind {
@@ -37,9 +40,12 @@ impl ConfigKind {
             "nginx-main" | "nginx" => Self::NginxMain,
             "php-ini" | "php" => Self::PhpIni,
             "mysql-ini" | "mysql" => Self::MySqlIni,
+            "mariadb-ini" | "mariadb" => Self::MariaDbIni,
             "redis-conf" | "redis" => Self::RedisConf,
             "apache-conf" | "apache" => Self::ApacheConf,
             "mihomo-config" | "mihomo" => Self::MihomoConfig,
+            "postgres-conf" | "postgresql-conf" | "postgresql" => Self::PostgresConf,
+            "mongo-conf" | "mongodb-conf" | "mongodb" => Self::MongoConf,
             _ => return None,
         })
     }
@@ -49,9 +55,12 @@ impl ConfigKind {
             Self::NginxMain => "nginx-main",
             Self::PhpIni => "php-ini",
             Self::MySqlIni => "mysql-ini",
+            Self::MariaDbIni => "mariadb-ini",
             Self::RedisConf => "redis-conf",
             Self::ApacheConf => "apache-conf",
             Self::MihomoConfig => "mihomo-config",
+            Self::PostgresConf => "postgres-conf",
+            Self::MongoConf => "mongo-conf",
         }
     }
 
@@ -62,8 +71,11 @@ impl ConfigKind {
             Self::ApacheConf => "apache",
             Self::PhpIni => "ini",
             Self::MySqlIni => "ini",
+            Self::MariaDbIni => "ini",
             Self::RedisConf => "conf",
             Self::MihomoConfig => "yaml",
+            Self::PostgresConf => "ini",
+            Self::MongoConf => "yaml",
         }
     }
 
@@ -89,7 +101,12 @@ impl ConfigTarget {
         if let Some(version) = version {
             if !matches!(
                 kind,
-                ConfigKind::PhpIni | ConfigKind::MySqlIni | ConfigKind::RedisConf
+                ConfigKind::PhpIni
+                    | ConfigKind::MySqlIni
+                    | ConfigKind::MariaDbIni
+                    | ConfigKind::RedisConf
+                    | ConfigKind::PostgresConf
+                    | ConfigKind::MongoConf
             ) || version.is_empty()
                 || version.ends_with('.')
                 || !version
@@ -108,7 +125,12 @@ impl ConfigTarget {
     fn selected(mut self, store: &crate::store::Store) -> Result<Self> {
         if matches!(
             self.kind,
-            ConfigKind::PhpIni | ConfigKind::MySqlIni | ConfigKind::RedisConf
+            ConfigKind::PhpIni
+                | ConfigKind::MySqlIni
+                | ConfigKind::MariaDbIni
+                | ConfigKind::RedisConf
+                | ConfigKind::PostgresConf
+                | ConfigKind::MongoConf
         ) {
             let id = label_of(self.kind).2.unwrap();
             let package = match &self.version {
@@ -135,6 +157,7 @@ impl ConfigTarget {
             ConfigKind::NginxMain => paths.nginx_conf(),
             ConfigKind::PhpIni => paths.php_ini(target.version.as_deref().unwrap()),
             ConfigKind::MySqlIni => paths.mysql_ini(target.version.as_deref().unwrap()),
+            ConfigKind::MariaDbIni => paths.mariadb_ini(target.version.as_deref().unwrap()),
             ConfigKind::RedisConf => paths.redis_conf(target.version.as_deref().unwrap()),
             ConfigKind::ApacheConf => paths.apache_conf(),
             ConfigKind::MihomoConfig => {
@@ -143,6 +166,8 @@ impl ConfigTarget {
                 }
                 paths.mihomo_config()
             }
+            ConfigKind::PostgresConf => paths.postgres_conf(target.version.as_deref().unwrap()),
+            ConfigKind::MongoConf => paths.mongo_conf(target.version.as_deref().unwrap()),
         })
     }
 }
@@ -222,6 +247,11 @@ fn label_of(kind: ConfigKind) -> (&'static str, &'static str, Option<&'static st
             "自定义参数在重启后保留；运行目录和数据目录由应用维护，端口请在设置页修改",
             Some("mysql"),
         ),
+        ConfigKind::MariaDbIni => (
+            "MariaDB my.ini",
+            "MariaDB 运行参数。数据目录和托管端口由应用维护，其余设置在重启后保留",
+            Some("mariadb"),
+        ),
         ConfigKind::RedisConf => (
             "redis.conf",
             "内存、持久化等设置在重启后保留；端口、数据目录和前台运行方式由应用维护",
@@ -237,6 +267,16 @@ fn label_of(kind: ConfigKind) -> (&'static str, &'static str, Option<&'static st
             "Clash / mihomo 配置。用「代理」页导入订阅会覆盖这里",
             Some("mihomo"),
         ),
+        ConfigKind::PostgresConf => (
+            "postgresql.conf",
+            "PostgreSQL 运行参数。配置保存在当前版本数据目录，端口和本机绑定由应用启动参数控制",
+            Some("postgresql"),
+        ),
+        ConfigKind::MongoConf => (
+            "mongod.conf",
+            "MongoDB YAML 配置。数据目录、端口、日志路径和本机绑定由应用启动参数控制",
+            Some("mongodb"),
+        ),
     }
 }
 
@@ -246,9 +286,12 @@ pub fn list_configs(paths: &Paths, store: &crate::store::Store) -> Vec<ConfigFil
         ConfigKind::NginxMain,
         ConfigKind::PhpIni,
         ConfigKind::MySqlIni,
+        ConfigKind::MariaDbIni,
         ConfigKind::RedisConf,
         ConfigKind::ApacheConf,
         ConfigKind::MihomoConfig,
+        ConfigKind::PostgresConf,
+        ConfigKind::MongoConf,
     ];
     let installed = store.list_installed().unwrap_or_default();
     kinds
@@ -256,7 +299,12 @@ pub fn list_configs(paths: &Paths, store: &crate::store::Store) -> Vec<ConfigFil
         .flat_map(|kind| {
             if matches!(
                 kind,
-                ConfigKind::PhpIni | ConfigKind::MySqlIni | ConfigKind::RedisConf
+                ConfigKind::PhpIni
+                    | ConfigKind::MySqlIni
+                    | ConfigKind::MariaDbIni
+                    | ConfigKind::RedisConf
+                    | ConfigKind::PostgresConf
+                    | ConfigKind::MongoConf
             ) {
                 let id = label_of(kind).2.unwrap();
                 let mut targets: Vec<_> = installed
@@ -302,14 +350,30 @@ pub fn list_configs(paths: &Paths, store: &crate::store::Store) -> Vec<ConfigFil
                     _ => false,
                 },
                 used_by_service: pkg.map(|s| match &target.version {
-                    Some(v) if matches!(target.kind, ConfigKind::PhpIni | ConfigKind::MySqlIni) => {
+                    Some(v)
+                        if matches!(
+                            target.kind,
+                            ConfigKind::PhpIni
+                                | ConfigKind::MySqlIni
+                                | ConfigKind::MariaDbIni
+                                | ConfigKind::RedisConf
+                                | ConfigKind::PostgresConf
+                                | ConfigKind::MongoConf
+                        ) => {
                         format!("{s}@{v}")
                     }
                     _ => s.to_string(),
                 }),
                 requires_package: pkg.map(|s| s.to_string()),
-                resettable: target.kind != ConfigKind::MihomoConfig
-                    && pkg.is_some_and(|id| installed.iter().any(|package| package.id == id)),
+                resettable: matches!(
+                    target.kind,
+                    ConfigKind::NginxMain
+                        | ConfigKind::PhpIni
+                        | ConfigKind::MySqlIni
+                        | ConfigKind::MariaDbIni
+                        | ConfigKind::RedisConf
+                        | ConfigKind::ApacheConf
+                ) && pkg.is_some_and(|id| installed.iter().any(|package| package.id == id)),
             })
         })
         .collect()
@@ -401,6 +465,12 @@ pub fn preview_config_reset(
             let root =
                 PathBuf::from(package.install_path).join(crate::ops::mysql_root_name(version));
             crate::configgen::render_mysql_ini(paths, version, &root, ports.mysql)
+        }
+        ConfigKind::MariaDbIni | ConfigKind::PostgresConf | ConfigKind::MongoConf => {
+            return Err(AppError::new(
+                "CONFIG_RESET_UNSUPPORTED",
+                "该数据库配置没有安全的默认重置模板，请直接编辑或从历史版本回滚",
+            ))
         }
         ConfigKind::RedisConf => crate::configgen::render_redis_conf(
             paths,
@@ -658,7 +728,7 @@ pub fn lint(kind: ConfigKind, content: &str) -> Vec<ConfigIssue> {
         ConfigKind::NginxMain => lint_nginx(content),
         // Apache 不使用分号或花括号；真实语法由 httpd -t 校验。
         ConfigKind::ApacheConf => Vec::new(),
-        ConfigKind::PhpIni | ConfigKind::MySqlIni => {
+        ConfigKind::PhpIni | ConfigKind::MySqlIni | ConfigKind::MariaDbIni | ConfigKind::PostgresConf => {
             let mut v = lint_ini(content);
             v.extend(lint_ini_comment_style(content));
             v
@@ -681,7 +751,7 @@ pub fn lint(kind: ConfigKind, content: &str) -> Vec<ConfigIssue> {
             }
             issues
         }
-        ConfigKind::MihomoConfig => lint_yaml(content),
+        ConfigKind::MihomoConfig | ConfigKind::MongoConf => lint_yaml(content),
     }
 }
 
@@ -1113,7 +1183,12 @@ fn backup_target(name: &str) -> Option<ConfigTarget> {
             if target.version.is_none()
                 && matches!(
                     target.kind,
-                    ConfigKind::PhpIni | ConfigKind::MySqlIni | ConfigKind::RedisConf
+                    ConfigKind::PhpIni
+                        | ConfigKind::MySqlIni
+                        | ConfigKind::MariaDbIni
+                        | ConfigKind::RedisConf
+                        | ConfigKind::PostgresConf
+                        | ConfigKind::MongoConf
                 )
             {
                 return None;
@@ -1145,7 +1220,10 @@ pub(crate) fn backup_relative_target(name: &str) -> Option<String> {
         ConfigKind::MihomoConfig => "etc/mihomo/config.yaml".into(),
         ConfigKind::PhpIni => format!("etc/php/{}/php.ini", target.version?),
         ConfigKind::MySqlIni => format!("etc/mysql/{}/my.ini", target.version?),
+        ConfigKind::MariaDbIni => format!("etc/mariadb/{}/my.ini", target.version?),
         ConfigKind::RedisConf => format!("etc/redis/{}/redis.conf", target.version?),
+        ConfigKind::PostgresConf => format!("data/postgresql/{}/postgresql.conf", target.version?),
+        ConfigKind::MongoConf => format!("etc/mongodb/{}/mongod.conf", target.version?),
     })
 }
 
@@ -1157,7 +1235,10 @@ fn config_key_for_relative(relative: &str) -> Option<String> {
         ["etc", "mihomo", "config.yaml"] => "mihomo-config".into(),
         ["etc", "php", version, "php.ini"] => format!("php-ini@{version}"),
         ["etc", "mysql", version, "my.ini"] => format!("mysql-ini@{version}"),
+        ["etc", "mariadb", version, "my.ini"] => format!("mariadb-ini@{version}"),
         ["etc", "redis", version, "redis.conf"] => format!("redis-conf@{version}"),
+        ["data", "postgresql", version, "postgresql.conf"] => format!("postgres-conf@{version}"),
+        ["etc", "mongodb", version, "mongod.conf"] => format!("mongo-conf@{version}"),
         _ => return None,
     };
     ConfigTarget::parse(&key).ok().map(|target| target.key())

@@ -10,7 +10,17 @@ import { useT } from "@/lib/store";
  * 只为已有真实配置编辑器的服务显示入口。
  * 版本号保留在 service id 中，配置页会据此打开对应版本的配置文件。
  */
-const CONFIGURABLE_SERVICES = new Set(["nginx", "php", "mysql", "redis", "apache", "mihomo"]);
+const CONFIGURABLE_SERVICES = new Set([
+  "nginx",
+  "php",
+  "mysql",
+  "mariadb",
+  "redis",
+  "apache",
+  "mihomo",
+  "postgresql",
+  "mongodb",
+]);
 
 export function ServiceConfigButton({ service, disabled = false }: { service: ServiceStatus; disabled?: boolean }) {
   const t = useT();
@@ -28,7 +38,10 @@ export function ServiceConfigButton({ service, disabled = false }: { service: Se
       disabled={disabled}
       aria-label={`${label} · ${service.label}`}
       title={label}
-      onClick={() => router.push(`/configuration?service=${encodeURIComponent(service.id)}`)}
+      onClick={() => {
+        const target = service.version && !service.id.includes("@") ? `${service.id}@${service.version}` : service.id;
+        router.push(`/configuration?service=${encodeURIComponent(target)}`);
+      }}
     >
       <Settings2 className="h-3.5 w-3.5 shrink-0" />
       {label}

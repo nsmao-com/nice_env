@@ -457,7 +457,7 @@ export function ConfigEditDialog({
                   <Button variant="secondary" onClick={() => void reload()}>{t("install.retry")}</Button>
                 </div>
               ) : (
-                <div className="min-w-0 flex-1 overflow-auto p-2"><CodeEditor ref={editorRef} value={content} label={info.label} language={info.kind.startsWith("apache") ? "apache" : info.kind.startsWith("php") || info.kind.startsWith("mysql") ? "ini" : info.path} readOnly={busy} height="min(52dvh, 520px)" onChange={(next) => { setContent(next); setValidation(null); setNotice(null); }} /></div>
+                <div className="min-w-0 flex-1 overflow-auto p-2"><CodeEditor ref={editorRef} value={content} label={info.label} language={info.kind.startsWith("apache") ? "apache" : info.kind.startsWith("php") || info.kind.startsWith("mysql") || info.kind.startsWith("mariadb") || info.kind.startsWith("postgres") ? "ini" : info.kind.startsWith("mongo") ? "yaml" : info.path} readOnly={busy} height="min(52dvh, 520px)" onChange={(next) => { setContent(next); setValidation(null); setNotice(null); }} /></div>
               )}
             </div>
 

@@ -1150,6 +1150,29 @@ pub fn write_redis_conf(paths: &Paths, version: &str, port: u16) -> Result<()> {
     Ok(())
 }
 
+/* ================= MongoDB mongod.conf ================= */
+
+/// MongoDB 的托管路径和认证开关由启动参数控制；此文件专门保存用户的其它 YAML 设置。
+/// 这样配置编辑器可以安全提供版本级入口，同时不会让端口或数据目录被用户误改后
+/// 影响应用对实例生命周期的核验。
+pub fn write_mongodb_conf(paths: &Paths, version: &str) -> Result<()> {
+    let path = paths.mongo_conf(version);
+    let previous = previous_config(&path)?;
+    let content = previous.clone().unwrap_or_else(|| {
+        format!(
+            "# NiceEnv MongoDB {version} config\n# storage.dbPath, systemLog.path, net.bindIp, net.port and security.authorization are supplied by NiceEnv at launch.\n# Add other mongod YAML options here; restart the service after saving.\n"
+        )
+    });
+    publish_config(
+        paths,
+        &format!("mongo-conf@{version}"),
+        &path,
+        &content,
+        previous.as_deref(),
+    )?;
+    Ok(())
+}
+
 pub fn write_mihomo_config(paths: &Paths, content: &str) -> Result<()> {
     std::fs::create_dir_all(paths.mihomo_dir().join("profiles"))?;
     write_with_backup(&paths.mihomo_config(), content, &paths.backup())?;

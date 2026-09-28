@@ -48,18 +48,19 @@ export default function DatabasesPage() {
   const { data: services } = useServices();
   const [choice, setChoice] = React.useState<string | null>(null);
   const [locked, setLocked] = React.useState(false);
-  const selected = choice ?? (services.some((service) => /^(mysql|mariadb)(@|$)/.test(service.id)) ? "mysql" : services.some((service) => service.id === "postgresql") ? "postgresql" : services.some((service) => service.id === "mongodb") ? "mongodb" : "mysql");
+  const selected = choice ?? (services.some((service) => /^(mysql|mariadb)(@|$)/.test(service.id)) ? "mysql" : services.some((service) => service.id === "postgresql") ? "postgresql" : services.some((service) => service.id === "mongodb") ? "mongodb" : services.some((service) => service.id === "redis") ? "redis" : "mysql");
   const postgres = services.find((service) => service.id === "postgresql");
   return <div className="pb-8">
     <PageHeader title={t("db.title")} subtitle={t("db.subtitle")} />
     <Tabs value={selected} onValueChange={setChoice}>
-      <div className="mb-5 max-w-full overflow-x-auto"><TabsList className="flex w-max"><TabsTrigger value="mysql" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">MySQL / MariaDB</TabsTrigger><TabsTrigger value="postgresql" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">PostgreSQL</TabsTrigger><TabsTrigger value="mongodb" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">MongoDB</TabsTrigger></TabsList></div>
+      <div className="mb-5 max-w-full overflow-x-auto"><TabsList className="flex w-max"><TabsTrigger value="mysql" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">MySQL / MariaDB</TabsTrigger><TabsTrigger value="postgresql" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">PostgreSQL</TabsTrigger><TabsTrigger value="mongodb" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">MongoDB</TabsTrigger><TabsTrigger value="redis" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">Redis</TabsTrigger></TabsList></div>
       <TabsContent value="mysql"><MySqlWorkspace onLockChange={setLocked} /></TabsContent>
       <TabsContent value="postgresql">
-        <div className="mb-5 grid grid-cols-1 gap-3 md:grid-cols-2"><PostgresInstanceCard /><RedisInstanceCard /></div>
+        <div className="mb-5"><PostgresInstanceCard /></div>
         <PostgresManagement service={postgres} onLockChange={setLocked} />
       </TabsContent>
       <TabsContent value="mongodb"><MongoManagement service={services.find(service => service.id === "mongodb")} /></TabsContent>
+      <TabsContent value="redis"><div className="max-w-3xl"><RedisInstanceCard /></div></TabsContent>
     </Tabs>
   </div>;
 }
@@ -244,12 +245,11 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
         <Button variant="secondary" disabled={!running || dbQuery.isFetching || userQuery.isFetching} onClick={() => invalidate("databases", "db-users")}>{t("db.refresh")}</Button>
       </div>
       {serviceQuery.isError ? <p role="alert" className="mb-4 text-sm text-error">{t("db.connectionFailed")} <Button variant="ghost" onClick={() => void serviceQuery.refetch()}>{t("db.retry")}</Button></p> : !databaseServices.length ? <p className="mb-4 text-sm text-muted">{serviceQuery.isFetching ? t("db.loading") : t("db.noInstance")}</p> : null}
-      {/* 所选 MySQL / MariaDB 实例与 Redis */}
+      {/* 所选 MySQL / MariaDB 实例 */}
       <section className="mb-6">
         <SectionHeader title={t("db.instance")} className="mb-3" />
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+        <div className="grid grid-cols-1 gap-3">
           <MySqlInstanceCard key={selected} engine={engine} service={service} count={ready ? dbs.length : undefined} />
-          <RedisInstanceCard />
         </div>
       </section>
 

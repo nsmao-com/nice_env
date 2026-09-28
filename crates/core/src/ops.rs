@@ -954,6 +954,7 @@ fn start_mongodb(
         .map(|p| p.version)
         .unwrap_or_default();
     let dbpath = paths.mongo_data_dir(&version);
+    crate::configgen::write_mongodb_conf(paths, &version)?;
     std::fs::create_dir_all(&dbpath)?;
     let logfile = paths.service_log("mongodb");
     if let Some(parent) = logfile.parent() {
@@ -965,6 +966,8 @@ fn start_mongodb(
         program: exe.clone(),
         args: {
             let mut args = vec![
+            "--config".into(),
+            paths.mongo_conf(&version).to_string_lossy().to_string(),
             "--dbpath".into(),
             dbpath.to_string_lossy().to_string(),
             "--port".into(),
@@ -975,7 +978,13 @@ fn start_mongodb(
             logfile.to_string_lossy().to_string(),
             "--logappend".into(),
             ];
-            if require_auth { args.push("--auth".into()); }
+            if require_auth {
+                args.push("--auth".into());
+            } else {
+                // 配置编辑器允许用户保留 security.authorization；显式传 --noauth
+                // 让应用托管的认证开关始终优先，避免 UI 状态与实际实例不一致。
+                args.push("--noauth".into());
+            }
             args
         },
         cwd: Some(dir.clone()),

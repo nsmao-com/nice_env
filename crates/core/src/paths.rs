@@ -165,6 +165,9 @@ impl Paths {
     pub fn redis_data_dir(&self) -> PathBuf {
         self.data().join("redis")
     }
+    pub fn mariadb_ini(&self, version: &str) -> PathBuf {
+        self.etc().join("mariadb").join(version).join("my.ini")
+    }
     pub fn mihomo_dir(&self) -> PathBuf {
         self.etc().join("mihomo")
     }
@@ -185,8 +188,14 @@ impl Paths {
     pub fn postgres_data_dir(&self, version: &str) -> PathBuf {
         self.data().join("postgresql").join(version)
     }
+    pub fn postgres_conf(&self, version: &str) -> PathBuf {
+        self.postgres_data_dir(version).join("postgresql.conf")
+    }
     pub fn mongo_data_dir(&self, version: &str) -> PathBuf {
         self.data().join("mongodb").join(version)
+    }
+    pub fn mongo_conf(&self, version: &str) -> PathBuf {
+        self.etc().join("mongodb").join(version).join("mongod.conf")
     }
     pub fn service_log(&self, service_id: &str) -> PathBuf {
         self.logs()

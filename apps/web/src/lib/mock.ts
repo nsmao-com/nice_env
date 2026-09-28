@@ -80,7 +80,7 @@ function mockSiteFileScope(id: string, project: boolean, exclude: boolean): Site
 }
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.117";
+const MOCK_APP_VERSION = "0.2.118";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const mockMongoDatabases = new Map<string, Record<string, Record<string, unknown>[]>>([
@@ -1004,8 +1004,23 @@ port=3306
 character-set-server=utf8mb4
 max_connections=200
 `;
+    case "mariadb-ini": return `[mysqld]
+port=3306
+character-set-server=utf8mb4
+max_connections=200
+`;
     case "redis-conf": return "bind 127.0.0.1\nport 6379\n";
     case "apache-conf": return 'ServerName localhost\nListen 8080\n';
+    case "postgres-conf": return `# PostgreSQL preview configuration
+listen_addresses = '127.0.0.1'
+port = 5432
+max_connections = 100
+`;
+    case "mongo-conf": return `# MongoDB preview configuration
+# NiceEnv supplies dbPath, port, bindIp, logpath and authorization at launch.
+operationProfiling:
+  mode: off
+`;
     default: throw { code: "BAD_KIND", message: "找不到对应配置" };
   }
 }
@@ -2244,7 +2259,10 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         ["apache", "apache-conf", "Apache 主配置", "httpd.conf", "apache"],
         ["php", "php-ini", "php.ini", "php.ini", "ini"],
         ["mysql", "mysql-ini", "my.ini", "my.ini", "ini"],
+        ["mariadb", "mariadb-ini", "MariaDB my.ini", "my.ini", "ini"],
         ["redis", "redis-conf", "redis.conf", "redis.conf", "conf"],
+        ["postgresql", "postgres-conf", "postgresql.conf", "postgresql.conf", "ini"],
+        ["mongodb", "mongo-conf", "mongod.conf", "mongod.conf", "yaml"],
       ];
       const installed = Array.from(packages.values()).filter((p) => p.install);
       const files: ConfigFileInfo[] = [];

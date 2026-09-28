@@ -39,6 +39,7 @@ import { DatabaseGrantsSheet } from "@/components/shared/database-grants";
 import { PostgresManagement } from "@/components/shared/postgres-management";
 import { RedisSettingsButton } from "@/components/shared/redis-settings";
 import { RedisPersistenceButton } from "@/components/shared/redis-persistence";
+import { RedisBackupsButton } from "@/components/shared/redis-backups";
 
 export default function DatabasesPage() {
   const t = useT();
@@ -599,7 +600,7 @@ function RedisInstanceCard() {
         </div>
         <InstanceStartButton base="redis" />
       </div>
-      <div className="mb-3 flex flex-wrap gap-2"><RedisSettingsButton version={service?.version} /><RedisPersistenceButton version={service?.version} running={running} /></div>
+      <div className="mb-3 flex flex-wrap gap-2"><RedisSettingsButton version={service?.version} /><RedisPersistenceButton version={service?.version} running={running} /><RedisBackupsButton version={service?.version} running={running} /></div>
       {!running ? <p className="text-xs text-muted">{t("db.redisStopped")}</p> : <>
         {query.isPending && <p role="status" className="mb-3 text-xs text-muted">{t("db.redisLoading")}</p>}
         {error && <div role="alert" className="mb-3 space-y-1 rounded-md bg-warning-soft p-2.5 text-xs text-muted">

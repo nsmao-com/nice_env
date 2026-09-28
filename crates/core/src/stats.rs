@@ -317,7 +317,7 @@ impl RedisClient {
                         "当前 Redis 账号没有 INFO 权限，无法读取统计数据",
                     ),
                     "NOPERM" => AppError::new("REDIS_COMMAND_DENIED", "当前 Redis 账号没有执行快照操作所需的权限")
-                        .with_hint("请检查 INFO、TIME、BGSAVE 权限或在连接认证中选择合适账号"),
+                        .with_hint("请检查 INFO、TIME、BGSAVE 权限；独立备份还需要 CONFIG GET 权限，或在连接认证中选择合适账号"),
                     _ if command == "INFO" => AppError::new(
                         "REDIS_INFO_FAILED",
                         "Redis 拒绝请求，请检查服务日志与账号权限",
@@ -494,6 +494,34 @@ pub(crate) fn redis_persistence(
     version: &str,
 ) -> crate::error::Result<RedisPersistence> {
     RedisClient::connect(port, credentials, Some(pids))?.persistence(version, pids)
+}
+
+pub(crate) fn redis_rdb_file(
+    paths: &crate::paths::Paths, port: u16, credentials: &RedisCredentials,
+    pids: &[u32], version: &str, run_id: &str,
+) -> crate::error::Result<std::path::PathBuf> {
+    use crate::error::AppError;
+    let mut client = RedisClient::connect(port, credentials, Some(pids))?;
+    let current = client.persistence(version, pids)?;
+    if current.run_id != run_id || current.loading || current.saving {
+        return Err(AppError::new("REDIS_BACKUP_CHANGED", "Redis 实例或快照状态已变化，请重新生成备份"));
+    }
+    let mut config = |name: &str| -> crate::error::Result<String> {
+        if let RedisReply::Array(values) = client.command(&["CONFIG", "GET", name])? {
+            if let [RedisReply::Bulk(key), RedisReply::Bulk(value)] = values.as_slice() {
+                if key == name { return Ok(value.clone()); }
+            }
+        }
+        Err(AppError::new("REDIS_STORAGE_UNKNOWN", "无法确认 Redis 实际 RDB 保存位置"))
+    };
+    let directory = std::path::PathBuf::from(config("dir")?);
+    let expected = crate::paths::checked_data_path(&paths.base, "data/redis")?;
+    if !directory.is_absolute() || directory.canonicalize()? != expected.canonicalize()? {
+        return Err(AppError::new("REDIS_STORAGE_UNMANAGED", "Redis 使用了非托管数据目录，请在外部管理该目录的备份"));
+    }
+    let name = config("dbfilename")?;
+    if name.contains(['/', '\\']) { return Err(AppError::new("REDIS_STORAGE_UNKNOWN", "RDB 文件名不是单个文件名")); }
+    Ok(crate::paths::checked_data_path(&paths.base, &format!("data/redis/{name}"))?)
 }
 
 /// 只提交异步保存；完成状态由同一 run_id 的 INFO 回读确认，不把 BGSAVE 接受当成已落盘。
@@ -679,6 +707,7 @@ mod redis_stats_tests {
 
     #[test]
     fn resp_encoding_matches_protocol() {
+        assert_eq!(crate::redis_backup::rdb_checksum(0, b"123456789"), 0xe9c6d914c4b8d9ca);
         assert_eq!(resp_command(&["INFO"]), "*1\r\n$4\r\nINFO\r\n");
         assert_eq!(
             resp_command(&["SET", "k", "v"]),

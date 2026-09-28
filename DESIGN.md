@@ -2747,3 +2747,25 @@ Web/schema TypeScript 与 Rust 全工作区 all-targets 检查通过。十一处
 参考：https://redis.io/docs/latest/commands/bgsave/
 参考：https://redis.io/docs/latest/commands/lastsave/
 参考：https://redis.io/docs/latest/commands/time/
+
+## 第一百一十九轮：Redis 独立 RDB 备份与停止实例恢复（v0.2.107）
+
+对照 ServBay Redis 管理文档和 Redis 官方持久化说明，通过 fast-context 复查数据库卡片、原生 RESP、配置和已有备份链路。本轮在“持久化与快照”之外增加“数据备份与恢复”：创建可单独保留的 RDB 副本，在 Redis 停止时预检并恢复该副本。复用现有 React Query、Radix、确认弹窗、路径保护和服务生命周期互斥，无新增依赖。
+
+独立备份先核对托管进程、实例 run_id、认证及 CONFIG GET 返回的实际 dir/dbfilename，提交 BGSAVE 后等待同一实例确认保存完成，再核对保存位置未变并复制 RDB。保存在 backup/redis/时间戳-随机标识/，包含 content.rdb 与 metadata.json；先在临时目录完整写入并同步文件，完成后重命名发布。采用流式复制、SHA-256、RDB 头部、EOF 和 CRC64/Jones 校验；Redis 关闭内置校验时允许零校验尾部，但仍记录并核对 SHA-256。这些检查不等同于完整 RDB 对象语法解析，也不宣称调用了本机 Redis 不支持的 --check-rdb。等待超时不终止 Redis 后台保存。
+
+恢复仅接受应用管理的备份，要求 Redis 已停止且无未确认接管进程，默认安装版本与备份版本相同。拒绝 AOF 已启用、include 覆盖及无法准确表达的配置，不自动关闭 AOF。各 Redis 版本共用 data/redis，界面明确恢复会替换全部逻辑数据库。预检 revision 绑定备份元数据/内容、完整配置和当前目标文件；用户输入 Redis 名称与版本后，执行端再次核对范围。使用同目录临时文件准备新 RDB，保留当前原文件，再核对 revision 并原子替换。损坏或空的原文件同样原样保留，损坏副本不能绕过校验用作恢复源。恢复结束保持停止，用户仍需启动对应版本并核对数据。
+
+新增备份列表、当前版本筛选、显示全部版本、每页五条、备份目录入口、恢复预检及恢复前副本反馈。目录入口可用于把整个备份文件夹复制到其他磁盘，本轮不提供外部 RDB 导入或删除备份。操作同步防重、执行中禁止关闭；失败保留确认输入，重新检查会清空旧确认。运行状态变化立即禁用恢复，后端仍独立校验。浏览器预览仅在内存模拟，明确不读写本机数据，文件夹入口禁用。
+
+扩展已有 Rust 验证函数，没有新增测试文件。六项 RESP/认证验证通过，包含 CRC64 官方检查向量。显式运行隔离 Windows Redis 5.0.14.1 原生验收通过（1 passed，92.17 秒）：验证认证后独立备份、运行中拒绝恢复、错误确认、配置变化、AOF、损坏备份、路径越界，以及恢复后真实 GET 读回原值 1、恢复前副本回退后读回修改值 2；损坏原文件逐字保留后仍可恢复有效备份。延续原有配置重启、端口回退、快照失败与修复、两个逻辑数据库读取验收，临时进程和端口已回收。此结果仅代表本机 Windows 和该 Redis 运行时，不代表新版 Redis 或其他平台实机验收。
+
+离线 Chromium 装载实际 React/Radix 组件与现有 CSS，受控 API 的二十项交互、实际 schema 断言及三十四组中英翻译核对通过，无 pageerror。1440px 桌面、390px 列表与确认、320px 英文空态截图已目检：长路径与摘要换行、正文滚动、页脚折行且操作可见、没有横向溢出，虚线分隔保留左右间距。离线 API 验证不等同于桌面 IPC 实机验收。Web/schema TypeScript 与 Rust 全工作区 all-targets 检查通过；未启动前端 dev 或执行正式前端 build。
+
+十一处版本文件同步至 0.2.107，Cargo.lock 只更新 niceservbay、nsb-core、platform 三个本项目 crate，精确提交二十二个任务文件，保留其他未跟踪文件和本地产物。上一版 v0.2.106 的 Windows、macOS Apple Silicon、macOS Intel Release 已核对全部 completed/success。本轮按项目约定新建 annotated tag v0.2.107，与 main 一次原子推送，并核对远程指向与 release.yml 实际状态。本次没有业务数据库变更，未修改 update.sql；整体功能、稳定性和 UI 完善目标继续进行。
+
+参考：https://support.servbay.com/database-management/getting-started/redis-management-and-usage
+参考：https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/
+参考：https://redis.io/docs/latest/commands/bgsave/
+参考：https://redis.io/docs/latest/commands/lastsave/
+参考：https://github.com/redis/redis/blob/5.0/src/crc64.c

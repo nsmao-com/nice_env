@@ -31,6 +31,7 @@ pub mod ops;
 pub mod paths;
 pub mod restart;
 pub mod redis_settings;
+pub mod redis_backup;
 pub mod toolbox;
 pub mod tunnel;
 use paths::write_with_backup;
@@ -893,6 +894,54 @@ impl CoreState {
         let service = self.running_redis(Some(version))?;
         let port = service.port.ok_or_else(|| AppError::new("REDIS_PORT_UNKNOWN", "无法确认 Redis 实际端口"))?;
         stats::redis_snapshot(port, &stats::RedisCredentials::load(&self.store, version)?, &service.pids, version)
+    }
+
+    pub fn redis_backup_create(&self, version: &str) -> Result<redis_backup::RedisBackup> {
+        let _work = BackgroundWork::begin("生成 Redis 独立备份")?;
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后备份"))?;
+        let service = self.running_redis(Some(version))?;
+        let port = service.port.ok_or_else(|| AppError::new("REDIS_PORT_UNKNOWN", "无法确认 Redis 实际端口"))?;
+        let credentials = stats::RedisCredentials::load(&self.store, version)?;
+        let before = stats::redis_persistence(port, &credentials, &service.pids, version)?;
+        let original_file = stats::redis_rdb_file(&self.paths, port, &credentials, &service.pids, version, &before.run_id)?;
+        let receipt = stats::redis_snapshot(port, &credentials, &service.pids, version)?;
+        let started = std::time::Instant::now();
+        loop {
+            let current = stats::redis_persistence(port, &credentials, &service.pids, version)?;
+            if current.run_id != receipt.run_id { return Err(AppError::new("REDIS_INSTANCE_CHANGED", "Redis 实例已变化，未创建独立备份")); }
+            if !current.saving && current.last_save_status == "err" { return Err(AppError::new("REDIS_SAVE_FAILED", "Redis 快照失败，未创建独立备份，请检查日志与磁盘空间")); }
+            if !current.loading && !current.saving && current.last_save_time >= receipt.minimum_save_time { break; }
+            if started.elapsed() > std::time::Duration::from_secs(120) { return Err(AppError::new("REDIS_BACKUP_TIMEOUT", "尚未确认快照完成，未创建独立备份")
+                .with_hint("Redis 后台保存没有被取消，请在持久化面板核对状态后重试")); }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let file = stats::redis_rdb_file(&self.paths, port, &credentials, &service.pids, version, &receipt.run_id)?;
+        if file != original_file { return Err(AppError::new("REDIS_BACKUP_CHANGED", "Redis 保存位置已变化，未创建独立备份")); }
+        redis_backup::archive(&self.paths, version, &file, "snapshot")
+    }
+
+    fn redis_restore_stopped(&self, version: &str) -> Result<()> {
+        if self.manager.is_busy("redis") {
+            return Err(AppError::new("REDIS_RESTORE_RUNNING", "请先停止 Redis，再检查和恢复备份")
+                .with_hint("恢复会替换共享数据目录中的全部逻辑数据库；请先停止应用写入并创建独立备份"));
+        }
+        if ops::installed_by_choice(&self.store, "redis").is_none_or(|package| package.version != version) {
+            return Err(AppError::new("REDIS_RESTORE_VERSION", "默认 Redis 版本已变化，请先选择备份对应版本，再重新打开恢复面板"));
+        }
+        Ok(())
+    }
+
+    pub fn redis_restore_preview(&self, version: &str, id: &str) -> Result<redis_backup::RedisRestorePreview> {
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后检查恢复范围"))?;
+        self.redis_restore_stopped(version)?;
+        redis_backup::preview(&self.paths, &self.store, version, id)
+    }
+
+    pub fn redis_backup_restore(&self, version: &str, id: &str, revision: &str, confirmation: &str) -> Result<redis_backup::RedisRestoreResult> {
+        let _work = BackgroundWork::begin("恢复 Redis RDB 文件")?;
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后恢复"))?;
+        self.redis_restore_stopped(version)?;
+        redis_backup::restore(&self.paths, &self.store, version, id, revision, confirmation)
     }
 
     pub fn save_redis_settings(&self, version: &str, revision: &str, settings: &redis_settings::RedisSettings, acknowledge_disable: bool) -> Result<redis_settings::RedisSettingsView> {

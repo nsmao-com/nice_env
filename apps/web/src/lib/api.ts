@@ -33,6 +33,10 @@ import type {
   RedisSettingsView,
   RedisPersistence,
   RedisSnapshotReceipt,
+  RedisBackup,
+  RedisBackupList,
+  RedisRestorePreview,
+  RedisRestoreResult,
   ConfigFileInfo,
   ConfigValidation,
   ConfigBackup,
@@ -338,6 +342,10 @@ export const redisSaveConnection = (version: string, credentials: { username: st
 export const redisSettings = (version: string) => safe(invoke<RedisSettingsView>("redis_settings", { version }));
 export const redisPersistence = (version: string) => safe(invoke<RedisPersistence>("redis_persistence", { version }));
 export const redisSnapshot = (version: string) => safe(invoke<RedisSnapshotReceipt>("redis_snapshot", { version }));
+export const redisBackupList = () => safe(invoke<RedisBackupList>("redis_backup_list"));
+export const redisBackupCreate = (version: string) => safe(invoke<RedisBackup>("redis_backup_create", { version }));
+export const redisRestorePreview = (version: string, id: string) => safe(invoke<RedisRestorePreview>("redis_restore_preview", { version, id }));
+export const redisBackupRestore = (version: string, id: string, revision: string, confirmation: string) => safe(invoke<RedisRestoreResult>("redis_backup_restore", { version, id, revision, confirmation }));
 export const redisSettingsSave = (version: string, revision: string, settings: RedisSettings, acknowledgeDisable: boolean) =>
   safe(invoke<RedisSettingsView>("redis_settings_save", { version, revision, settings, acknowledgeDisable }));
 export const redisStats = () => safe(invoke<RedisStats>("redis_stats"));

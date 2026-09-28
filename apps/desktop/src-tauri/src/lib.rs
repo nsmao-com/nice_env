@@ -386,6 +386,10 @@ pub fn run() {
             redis_settings_save,
             redis_persistence,
             redis_snapshot,
+            redis_backup_list,
+            redis_backup_create,
+            redis_restore_preview,
+            redis_backup_restore,
             redis_connection,
             redis_save_connection,
             postgres_connection,
@@ -1699,6 +1703,43 @@ async fn redis_snapshot(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, v
     tauri::async_runtime::spawn_blocking(move || {
         let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
         map_jh(st.redis_snapshot(&version))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+/// 独立 Redis RDB 副本；恢复执行前由核心重新检查停止状态和预览范围。
+#[tauri::command]
+async fn redis_backup_list(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> Result<nsb_core::redis_backup::RedisBackupList, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
+        map_jh(nsb_core::redis_backup::list(&st.paths))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn redis_backup_create(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String) -> Result<nsb_core::redis_backup::RedisBackup, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
+        map_jh(st.redis_backup_create(&version))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn redis_restore_preview(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, id: String) -> Result<nsb_core::redis_backup::RedisRestorePreview, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
+        map_jh(st.redis_restore_preview(&version, &id))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn redis_backup_restore(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, id: String, revision: String, confirmation: String) -> Result<nsb_core::redis_backup::RedisRestoreResult, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
+        map_jh(st.redis_backup_restore(&version, &id, &revision, &confirmation))
     }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

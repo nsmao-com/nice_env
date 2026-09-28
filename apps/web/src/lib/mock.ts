@@ -80,7 +80,7 @@ function mockSiteFileScope(id: string, project: boolean, exclude: boolean): Site
 }
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.106";
+const MOCK_APP_VERSION = "0.2.107";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -1069,6 +1069,8 @@ async function performServiceAction(action: "start_service" | "stop_service" | "
 
 const redisSettingsPreview = new Map<string, import("@nsb/schema").RedisSettingsView>();
 const redisPersistencePreview = new Map<string, { report: import("@nsb/schema").RedisPersistence; finishAt: number; minimumSaveTime: number }>();
+const redisBackupsPreview: import("@nsb/schema").RedisBackup[] = [];
+let redisRestoreRevisionPreview = 0;
 
 export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   await delay(60 + Math.random() * 120);
@@ -3037,6 +3039,30 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (credentials.username || credentials.password) throw { code: "REDIS_AUTH_FAILED", message: "网页预览中的 Redis 无需认证，请选择无认证连接；真实凭据请在桌面应用中验证。" };
       mockRedisConnections.set(version, { ...credentials });
       return await mockInvoke<T>("redis_stats");
+    }
+    case "redis_backup_list": return { items: structuredClone(redisBackupsPreview), unreadable: 0, directory: "preview/backup/redis" } as T;
+    case "redis_backup_create": {
+      const version = String(args!.version), service = services.get("redis");
+      if (service?.state !== "running" || service.version !== version) throw { code: "REDIS_NOT_RUNNING", message: "请启动对应 Redis 版本后备份。" };
+      const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const entry = { id, version, createdAt: Date.now(), sizeBytes: 1024, sha256: id.replaceAll("-", "").padEnd(64, "0").slice(0, 64), kind: "snapshot" as const };
+      redisBackupsPreview.unshift(entry); return structuredClone(entry) as T;
+    }
+    case "redis_restore_preview": {
+      const version = String(args!.version), service = services.get("redis");
+      if (service?.state !== "stopped") throw { code: "REDIS_RESTORE_RUNNING", message: "请先停止 Redis。" };
+      const backup = redisBackupsPreview.find(entry => entry.id === args!.id);
+      if (!backup || backup.version !== version || service.version !== version) throw { code: "REDIS_RESTORE_VERSION", message: "请选用备份对应的 Redis 版本。" };
+      return { backup: structuredClone(backup), target: "preview/data/redis/dump.rdb", existingSize: 1024, revision: `${backup.id}:${redisRestoreRevisionPreview}` } as T;
+    }
+    case "redis_backup_restore": {
+      const preview = await mockInvoke<import("@nsb/schema").RedisRestorePreview>("redis_restore_preview", args);
+      if (args!.confirmation !== `Redis ${args!.version}`) throw { code: "REDIS_RESTORE_CONFIRM", message: "请输入 Redis 名称和版本。" };
+      if (args!.revision !== preview.revision) throw { code: "REDIS_RESTORE_CHANGED", message: "演示恢复范围已变化，请重新检查。" };
+      const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const safetyBackup = { ...preview.backup, id, kind: "before-restore" as const, createdAt: Date.now() };
+      redisBackupsPreview.unshift(safetyBackup); redisRestoreRevisionPreview++;
+      return { target: preview.target, safetyBackup } as T;
     }
     case "redis_persistence": {
       const service = services.get("redis"), version = String(args!.version);

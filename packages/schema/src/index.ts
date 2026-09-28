@@ -979,6 +979,14 @@ export const RedisPersistence = z.object({
 export type RedisPersistence = z.infer<typeof RedisPersistence>;
 export const RedisSnapshotReceipt = z.object({ version: z.string(), runId: z.string(), minimumSaveTime: z.number().int().nonnegative() });
 export type RedisSnapshotReceipt = z.infer<typeof RedisSnapshotReceipt>;
+export const RedisBackup = z.object({ id: z.string(), version: z.string(), createdAt: z.number(), sizeBytes: z.number().nonnegative(), sha256: z.string(), kind: z.enum(["snapshot", "before-restore"]) });
+export type RedisBackup = z.infer<typeof RedisBackup>;
+export const RedisBackupList = z.object({ items: z.array(RedisBackup), unreadable: z.number().int().nonnegative(), directory: z.string() });
+export type RedisBackupList = z.infer<typeof RedisBackupList>;
+export const RedisRestorePreview = z.object({ backup: RedisBackup, target: z.string(), existingSize: z.number().nonnegative().nullable(), revision: z.string() });
+export type RedisRestorePreview = z.infer<typeof RedisRestorePreview>;
+export const RedisRestoreResult = z.object({ target: z.string(), safetyBackup: RedisBackup.nullable() });
+export type RedisRestoreResult = z.infer<typeof RedisRestoreResult>;
 
 export const ProjectPlatformReport = z.object({
   project: z.string(), phpVersion: z.string(), ini: z.string(),

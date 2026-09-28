@@ -111,7 +111,7 @@ export function ServiceCard({ service }: { service: ServiceStatus }) {
           </div>
           <ServiceSwitch
             label={service.label}
-            checked={running}
+            checked={running || service.pids.length > 0}
             busy={busy || service.state === "starting" || service.state === "stopping"}
             disabled={service.state === "starting" || service.state === "stopping"}
             onCheckedChange={toggle}

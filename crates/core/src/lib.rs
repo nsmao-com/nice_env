@@ -935,6 +935,21 @@ impl CoreState {
         r
     }
 
+    /// 强制停止须先展示当前实例，再用同一份进程身份修订号确认。
+    pub fn service_stop_preview(&self, id: &str) -> Result<model::ServiceStopPreview> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重新读取"))?;
+        ops::service_stop_preview(&self.manager, id)
+    }
+
+    pub fn force_stop_service(&self, id: &str, revision: &str) -> Result<()> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后停止"))?;
+        let result = ops::force_stop_service(&self.store, &self.paths, &self.manager, id, revision);
+        ops::save_pidfile(&self.paths, &self.manager);
+        result
+    }
+
     /// 一次用户重启是不可交错的停止与启动；失败阶段保留原错误码和诊断字段。
     pub fn restart_service(&self, id: &str) -> Result<()> {
         let _activity = paths::DataDirActivity::shared(&self.paths.base)?;

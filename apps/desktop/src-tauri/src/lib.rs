@@ -219,6 +219,8 @@ pub fn run() {
             select_sftpgo_config,
             start_service,
             stop_service,
+            service_stop_preview,
+            force_stop_service,
             restart_service,
             service_history,
             export_log,
@@ -864,6 +866,22 @@ async fn restart_service(
     .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?;
     crate::tray::refresh(&app);
     r
+}
+
+#[tauri::command]
+async fn service_stop_preview(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: String) -> Result<nsb_core::model::ServiceStopPreview, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.service_stop_preview(&id))).await
+        .map_err(|error| tauri::Error::Anyhow(anyhow::anyhow!("{error}")))?
+}
+
+#[tauri::command]
+async fn force_stop_service(app: tauri::AppHandle, state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: String, revision: String) -> Result<bool, tauri::Error> {
+    let st = state.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || map_jh(st.force_stop_service(&id, &revision).map(|()| true))).await
+        .map_err(|error| tauri::Error::Anyhow(anyhow::anyhow!("{error}")))?;
+    crate::tray::refresh(&app);
+    result
 }
 
 /* ================= 服务栈 ================= */

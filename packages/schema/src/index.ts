@@ -311,6 +311,9 @@ export const ServiceStatus = z.object({
 });
 export type ServiceStatus = z.infer<typeof ServiceStatus>;
 
+export const ServiceStopPreview = z.object({ service: ServiceStatus, revision: z.string() });
+export type ServiceStopPreview = z.infer<typeof ServiceStopPreview>;
+
 export const SftpgoConfigDirectory = z.object({
   directory: z.string(),
   label: z.string(),

@@ -960,12 +960,93 @@ fn running_php_pools(store: &Store, manager: &Arc<ServiceManager>) -> Vec<(Strin
 
 /* ================= 停止 ================= */
 
+pub(crate) fn service_stop_preview(
+    manager: &Arc<ServiceManager>,
+    id: &str,
+) -> Result<crate::model::ServiceStopPreview> {
+    use sha2::{Digest, Sha256};
+    let service = manager
+        .snapshot(id)
+        .ok_or_else(|| AppError::new("UNKNOWN_SERVICE", "服务未注册或已卸载"))?;
+    if matches!(
+        service.state,
+        ServiceState::Starting | ServiceState::Stopping
+    ) {
+        return Err(AppError::new(
+            "SERVICE_BUSY",
+            "服务正在切换状态，请稍后重新读取",
+        ));
+    }
+    if manager
+        .recovery
+        .lock()
+        .blocked_services
+        .iter()
+        .any(|blocked| blocked == id)
+    {
+        return Err(AppError::new(
+            "PROCESS_RECOVERY_UNVERIFIED",
+            "历史进程尚未确认，请先重新检查服务接管状态",
+        ));
+    }
+    let entry = manager
+        .services
+        .lock()
+        .get(id)
+        .cloned()
+        .ok_or_else(|| AppError::new("UNKNOWN_SERVICE", "服务已移除"))?;
+    let identities = entry.identities.lock();
+    let mut processes = Vec::new();
+    for pid in &service.pids {
+        let identity = identities
+            .get(pid)
+            .filter(|identity| identity.current() == Some(true))
+            .ok_or_else(|| {
+                AppError::new(
+                    "PROCESS_IDENTITY_UNAVAILABLE",
+                    "无法确认当前服务进程，未准备强制停止",
+                )
+            })?;
+        processes.push(identity.clone());
+    }
+    processes.sort_by_key(|identity| identity.pid);
+    let encoded =
+        serde_json::to_vec(&(id, &service.version, service.port, &processes)).map_err(|error| {
+            AppError::new("PROCESS_IDENTITY_UNAVAILABLE", "无法生成进程确认信息")
+                .with_detail(error.to_string())
+        })?;
+    let revision = hex::encode(Sha256::digest(encoded));
+    Ok(crate::model::ServiceStopPreview { service, revision })
+}
+
+pub(crate) fn force_stop_service(
+    store: &Store,
+    paths: &Paths,
+    manager: &Arc<ServiceManager>,
+    id: &str,
+    revision: &str,
+) -> Result<()> {
+    let _operation = manager.lifecycle.lock();
+    let current = service_stop_preview(manager, id)?;
+    if revision.is_empty() || current.revision != revision {
+        return Err(AppError::new(
+            "SERVICE_TARGET_CHANGED",
+            "服务进程或版本已变化，请重新读取状态并确认",
+        ));
+    }
+    stop_service_with_mode(store, paths, manager, id, true)
+}
+
 pub fn stop_service(
     store: &Store,
     paths: &Paths,
     manager: &Arc<ServiceManager>,
     id: &str,
 ) -> Result<()> {
+    stop_service_with_mode(store, paths, manager, id, false)
+}
+
+fn stop_service_with_mode(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, id: &str, force: bool) -> Result<()> {
     let _operation = manager.lifecycle.lock();
     if manager.recovery.lock().blocked_services.iter().any(|blocked| blocked == id) && !manager.is_process_busy(id) {
         return Err(AppError::new("PROCESS_RECOVERY_UNVERIFIED", "历史进程尚未确认，无法安全停止，请先检查端口占用并重新检查服务接管状态"));
@@ -990,10 +1071,11 @@ pub fn stop_service(
     manager.set_state(id, ServiceState::Stopping);
     let ports = PortsProfile::from_settings(store);
     // 停机命令要打向「启动时用的端口」：用户可能在运行期切换了端口方案，
-    // 用当前设置去 shutdown 会打到错误的端口，失败后只能强杀（MySQL 会脏关）
+    // 不向修改后的端口发送密码或 shutdown，避免误操作其他实例。
     let mysql_port = manager.started_port_or(id, ports.mysql);
     let redis_port = manager.started_port_or(id, ports.redis);
     let result = (|| -> Result<()> {
+        if force { return terminate_group(manager, id); }
         match id {
             "nginx" => {
                 if let Ok((root, exe)) = nginx_exe(store) {
@@ -1030,32 +1112,20 @@ pub fn stop_service(
                 Ok(())
             }
             "postgresql" => {
-                if let Ok((root, _)) = postgres_paths(store) {
-                    let pg_ctl = root.join("bin").join(exe_name("pg_ctl"));
-                    let version = installed_by_choice(store, "postgresql")
-                        .map(|p| p.version)
-                        .unwrap_or_default();
-                    let _ = platform::command(&pg_ctl)
-                        .args([
-                            "-D".into(),
-                            paths
-                                .postgres_data_dir(&version)
-                                .to_string_lossy()
-                                .to_string(),
-                            "-m".into(),
-                            "fast".into(),
-                            "stop".into(),
-                        ])
-                        .output();
-                    for _ in 0..16 {
-                        if !tcp_port_open(ports.postgres) {
-                            break;
-                        }
-                        std::thread::sleep(Duration::from_millis(500));
-                    }
+                let service = manager.snapshot(id).ok_or_else(|| AppError::new("UNKNOWN_SERVICE", "PostgreSQL 服务已移除"))?;
+                let version = service.version.as_deref().ok_or_else(|| AppError::new("POSTGRES_VERSION_UNKNOWN", "无法确认正在运行的 PostgreSQL 版本，未发送停机命令"))?;
+                let installed = store.find_installed("postgresql", Some(version)).ok_or_else(|| AppError::not_installed("PostgreSQL"))?;
+                let data = paths.postgres_data_dir(version);
+                let pid = std::fs::read_to_string(data.join("postmaster.pid"))?.lines().next().and_then(|line| line.trim().parse::<u32>().ok())
+                    .ok_or_else(|| AppError::new("POSTGRES_PID_UNVERIFIED", "PostgreSQL 进程记录无法识别，未发送停机命令"))?;
+                let entry = manager.services.lock().get(id).cloned().ok_or_else(|| AppError::new("UNKNOWN_SERVICE", "PostgreSQL 服务已移除"))?;
+                if !entry.identities.lock().get(&pid).is_some_and(|identity| identity.current() == Some(true)) {
+                    return Err(AppError::new("POSTGRES_PID_UNVERIFIED", "数据目录中的 PostgreSQL 进程与当前服务不一致，未发送停机命令"));
                 }
-                terminate_group(manager, id)?;
-                Ok(())
+                let mut command = platform::command(PathBuf::from(installed.install_path).join("pgsql/bin").join(exe_name("pg_ctl")));
+                command.arg("-D").arg(data).args(["-m", "fast", "-w", "-t", "10", "stop"]);
+                run_database_stop(&mut command, "PostgreSQL", None)?;
+                wait_database_stopped(manager, id, "PostgreSQL")
             }
             "mongodb" => {
                 // mongod 对 SIGTERM/强杀均靠 journaling 恢复，直接终止组
@@ -1067,37 +1137,20 @@ pub fn stop_service(
                     let version = service.version.as_deref().ok_or_else(|| AppError::new("REDIS_VERSION_UNKNOWN", "无法确认 Redis 版本，未发送停机命令"))?;
                     let credentials = crate::stats::RedisCredentials::load(store, version)?;
                     crate::stats::redis_shutdown(redis_port, &credentials, &service.pids)?;
-                    for _ in 0..100 {
-                        if service.pids.iter().all(|pid| !platform::process_alive(*pid)) { break; }
-                        std::thread::sleep(Duration::from_millis(100));
-                    }
-                    if service.pids.iter().any(|pid| platform::process_alive(*pid)) {
-                        return Err(AppError::new("REDIS_SHUTDOWN_TIMEOUT", "Redis 仍在运行，未强制结束进程，请检查保存进度和日志"));
-                    }
+                    wait_database_stopped(manager, id, "Redis")?;
                 }
-                terminate_group(manager, id)?;
                 Ok(())
             }
             s if s.starts_with("mysql@") => {
                 let version = s.trim_start_matches("mysql@");
-                if let Ok((basedir, _)) = mysql_paths(store, version) {
-                    let admin = basedir.join("bin").join(exe_name("mysqladmin"));
-                    let pass = crate::dbadmin::saved_password(store, version).unwrap_or_default();
-                    if let Ok((_private, mut command)) = crate::dbadmin::client_command(&admin, "127.0.0.1", mysql_port, "root", &pass) {
-                        command.args(["--connect-timeout=5", "shutdown"]).stdin(std::process::Stdio::null())
-                            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-                        let _ = crate::dbadmin::wait_client(&mut command, Duration::from_secs(10), || {});
-                    }
-                    // 优雅关闭最多等 10s
-                    for _ in 0..20 {
-                        if !tcp_port_open(mysql_port) {
-                            break;
-                        }
-                        std::thread::sleep(Duration::from_millis(500));
-                    }
-                }
-                terminate_group(manager, id)?;
-                Ok(())
+                let (basedir, _) = mysql_paths(store, version)?;
+                verify_database_listener(manager, id, mysql_port)?;
+                let admin = basedir.join("bin").join(exe_name("mysqladmin"));
+                let pass = crate::dbadmin::saved_password(store, version).unwrap_or_default();
+                let (_private, mut command) = crate::dbadmin::client_command(&admin, "127.0.0.1", mysql_port, "root", &pass)?;
+                command.args(["--connect-timeout=5", "shutdown"]);
+                run_database_stop(&mut command, "MySQL", Some(&pass))?;
+                wait_database_stopped(manager, id, "MySQL")
             }
             _ => {
                 // 清单驱动的通用服务：先试清单声明的优雅停止命令，再终止进程组
@@ -1151,6 +1204,80 @@ pub fn stop_service(
         return Err(err);
     }
     result
+}
+
+fn verify_database_listener(manager: &Arc<ServiceManager>, id: &str, port: u16) -> Result<()> {
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let endpoints = crate::ports::listener_endpoints()?;
+    let listeners: Vec<_> = endpoints
+        .iter()
+        .filter(|endpoint| endpoint.accepts(address))
+        .collect();
+    let scan = crate::ports::scan_port_range(manager, port, port)?;
+    if listeners.is_empty()
+        || listeners.iter().any(|listener| {
+            !scan.listeners.iter().any(|row| {
+                row.pid == listener.pid
+                    && row.service_id.as_deref() == Some(id)
+                    && row.process_start_marker.as_deref().is_some_and(|marker| {
+                        platform::process_start_marker(row.pid).as_deref() == Some(marker)
+                    })
+            })
+        })
+    {
+        return Err(AppError::new(
+            "DATABASE_OWNER_UNVERIFIED",
+            "数据库端口未确认属于当前服务，未发送密码或停机命令",
+        )
+        .with_hint("请检查端口占用及服务诊断，确认实际运行实例后重试"));
+    }
+    Ok(())
+}
+
+fn run_database_stop(
+    command: &mut std::process::Command,
+    name: &str,
+    password: Option<&str>,
+) -> Result<()> {
+    let mut error = tempfile::tempfile()?;
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(error.try_clone()?);
+    let result = crate::dbadmin::wait_client(command, Duration::from_secs(15), || {});
+    if result.as_ref().is_ok_and(|status| status.success()) {
+        return Ok(());
+    }
+    let mut detail = crate::dbadmin::read_output(&mut error, 16 * 1024).unwrap_or_default();
+    if let Err(error) = result {
+        detail.push_str(&error.message);
+    }
+    if let Some(password) = password.filter(|password| !password.is_empty()) {
+        detail = detail.replace(password, "***");
+    }
+    Err(AppError::new(
+        "DATABASE_SHUTDOWN_FAILED",
+        format!("{name} 未确认正常停止，未强制结束进程"),
+    )
+    .with_hint("请检查连接密码、权限和日志后重试；必要时在服务诊断中确认强制停止")
+    .with_detail(detail))
+}
+
+fn wait_database_stopped(manager: &Arc<ServiceManager>, id: &str, name: &str) -> Result<()> {
+    for _ in 0..100 {
+        if manager
+            .snapshot(id)
+            .is_none_or(|service| service.pids.is_empty())
+        {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(AppError::new(
+        "DATABASE_SHUTDOWN_TIMEOUT",
+        format!("{name} 仍在退出过程中，未强制结束进程"),
+    )
+    .with_hint("请等待数据保存并查看日志；必要时在服务诊断中确认强制停止"))
 }
 
 fn terminate_group(manager: &Arc<ServiceManager>, id: &str) -> Result<()> {
@@ -2573,7 +2700,9 @@ mod validate_tests {
         struct StopOnDrop<'a>(&'a crate::CoreState);
         impl Drop for StopOnDrop<'_> {
             fn drop(&mut self) {
-                let _ = self.0.stop_service("mysql@8.0.46");
+                if self.0.stop_service("mysql@8.0.46").is_err() {
+                    if let Ok(preview) = self.0.service_stop_preview("mysql@8.0.46") { let _ = self.0.force_stop_service("mysql@8.0.46", &preview.revision); }
+                }
             }
         }
         let _source_cleanup = StopOnDrop(&source);
@@ -2793,11 +2922,140 @@ mod validate_tests {
         let path = private.path().to_path_buf();
         drop((command, private));
         assert!(!path.exists());
+        let before = source.service_stop_preview("mysql@8.0.46").unwrap();
+        source.store.set_setting(&dbadmin::password_key("8.0.46"), "deliberately-incorrect-fixture-password").unwrap();
+        let denied = source.stop_service("mysql@8.0.46").unwrap_err();
+        assert_eq!(denied.code, "DATABASE_SHUTDOWN_FAILED");
+        assert!(!denied.detail.unwrap_or_default().contains("deliberately-incorrect-fixture-password"));
+        assert_eq!(source.manager.snapshot("mysql@8.0.46").unwrap().pids, before.service.pids);
+        assert_eq!(client.run("SELECT 1;").unwrap().trim(), "1");
+        assert_eq!(source.restart_service("mysql@8.0.46").unwrap_err().code, "DATABASE_SHUTDOWN_FAILED");
+        source.store.set_setting(&dbadmin::password_key("8.0.46"), special).unwrap();
         for state in [&source, &target] {
             let pids = state.manager.snapshot("mysql@8.0.46").unwrap().pids;
             state.stop_service("mysql@8.0.46").unwrap();
             assert!(pids.into_iter().all(|pid| !platform::process_alive(pid)));
         }
+        source.start_service("mysql@8.0.46").unwrap();
+        assert_eq!(source.force_stop_service("mysql@8.0.46", &before.revision).unwrap_err().code, "SERVICE_TARGET_CHANGED");
+        let current = source.service_stop_preview("mysql@8.0.46").unwrap();
+        source.force_stop_service("mysql@8.0.46", &current.revision).unwrap();
+        assert!(current.service.pids.iter().all(|pid| !platform::process_alive(*pid)));
+        source.start_service("mysql@8.0.46").unwrap();
+        assert_eq!(dbadmin::selected_client(&source, Some("8.0.46")).unwrap().1.run("SELECT 1;").unwrap().trim(), "1");
+        source.stop_service("mysql@8.0.46").unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires NSB_POSTGRES_ROOT; initializes only a temporary PostgreSQL cluster on a private port"]
+    fn postgres_native_stop_preserves_wrong_pid_and_uses_running_version() {
+        let source = PathBuf::from(std::env::var("NSB_POSTGRES_ROOT").expect("NSB_POSTGRES_ROOT"));
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = temp.path().join("runtime");
+        let root = runtime.join("pgsql");
+        fn copy_tree(source: &Path, destination: &Path) {
+            std::fs::create_dir_all(destination).unwrap();
+            for entry in std::fs::read_dir(source).unwrap() {
+                let entry = entry.unwrap();
+                let target = destination.join(entry.file_name());
+                if entry.file_type().unwrap().is_dir() {
+                    copy_tree(&entry.path(), &target);
+                } else {
+                    std::fs::copy(entry.path(), target).unwrap();
+                }
+            }
+        }
+        for folder in ["bin", "lib", "share"] {
+            copy_tree(&source.join(folder), &root.join(folder));
+        }
+        let state = isolated_state(Paths::new(temp.path().join("isolated data")));
+        register_fixture(&state, "postgresql", "16.6", &runtime);
+        state
+            .store
+            .set_setting("activepostgresqlVersion", "16.6")
+            .unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        state
+            .store
+            .set_port_override("postgres", Some(port))
+            .unwrap();
+        drop(listener);
+        struct Stop<'a>(&'a crate::CoreState);
+        impl Drop for Stop<'_> {
+            fn drop(&mut self) {
+                if let Ok(preview) = self.0.service_stop_preview("postgresql") {
+                    let _ = self.0.force_stop_service("postgresql", &preview.revision);
+                }
+            }
+        }
+        let _stop = Stop(&state);
+        state.start_service("postgresql").unwrap();
+        let preview = state.service_stop_preview("postgresql").unwrap();
+        let pidfile = state.paths.postgres_data_dir("16.6").join("postmaster.pid");
+        let original = std::fs::read_to_string(&pidfile).unwrap();
+        let changed = format!(
+            "{}\n{}",
+            std::process::id(),
+            original.split_once('\n').unwrap().1
+        );
+        std::fs::write(&pidfile, changed).unwrap();
+        let error = state.stop_service("postgresql").unwrap_err();
+        assert_eq!(error.code, "POSTGRES_PID_UNVERIFIED");
+        assert!(preview
+            .service
+            .pids
+            .iter()
+            .all(|pid| platform::process_alive(*pid)));
+        std::fs::write(&pidfile, original).unwrap();
+        let ctl = root.join("bin").join(exe_name("pg_ctl"));
+        let renamed = ctl.with_extension("fixture-disabled");
+        std::fs::rename(&ctl, &renamed).unwrap();
+        assert_eq!(
+            state.stop_service("postgresql").unwrap_err().code,
+            "DATABASE_SHUTDOWN_FAILED"
+        );
+        assert!(preview
+            .service
+            .pids
+            .iter()
+            .all(|pid| platform::process_alive(*pid)));
+        std::fs::rename(renamed, ctl).unwrap();
+        register_fixture(
+            &state,
+            "postgresql",
+            "99",
+            &temp.path().join("missing alternative"),
+        );
+        state
+            .store
+            .set_setting("activepostgresqlVersion", "99")
+            .unwrap();
+        state.stop_service("postgresql").unwrap();
+        assert!(preview
+            .service
+            .pids
+            .iter()
+            .all(|pid| !platform::process_alive(*pid)));
+        assert!(!pidfile.exists());
+        state
+            .store
+            .set_setting("activepostgresqlVersion", "16.6")
+            .unwrap();
+        state.start_service("postgresql").unwrap();
+        assert_eq!(
+            state
+                .force_stop_service("postgresql", &preview.revision)
+                .unwrap_err()
+                .code,
+            "SERVICE_TARGET_CHANGED"
+        );
+        let current = state.service_stop_preview("postgresql").unwrap();
+        state
+            .force_stop_service("postgresql", &current.revision)
+            .unwrap();
+        state.start_service("postgresql").unwrap();
+        state.stop_service("postgresql").unwrap();
     }
 
     fn http_response(port: u16) -> String {
@@ -3456,6 +3714,8 @@ mod validate_tests {
         std::thread::spawn(move || {
             assert_eq!(other.start_service("missing").unwrap_err().code, "SERVICE_BUSY");
             assert_eq!(other.stop_service("missing").unwrap_err().code, "SERVICE_BUSY");
+            assert_eq!(other.service_stop_preview("missing").unwrap_err().code, "SERVICE_BUSY");
+            assert_eq!(other.force_stop_service("missing", "stale").unwrap_err().code, "SERVICE_BUSY");
             assert_eq!(other.restart_service("missing").unwrap_err().code, "SERVICE_BUSY");
             assert_eq!(other.start_service_with_port_policy("missing", |_| panic!("must not free ports")).unwrap_err().code, "SERVICE_BUSY");
             assert_eq!(other.bulk_start(&[]).unwrap_err().code, "SERVICE_BUSY");
@@ -3499,6 +3759,184 @@ mod validate_tests {
         assert_eq!(state.migrate_data_dir(&target).unwrap_err().code, "SERVICES_STOP_FAILED");
         assert!(!target.exists());
         assert!(state.paths.data().join("run/pids.json").is_file());
+    }
+
+    #[test]
+    fn database_shutdown_failures_preserve_processes_and_block_restart() {
+        for (id, package) in [("mysql@8.0.46", "mysql"), ("postgresql", "postgresql")] {
+            let temp = tempfile::tempdir().unwrap();
+            let state = isolated_state(Paths::new(temp.path().to_path_buf()));
+            let runtime = state.paths.runtime_dir(package, "8.0.46");
+            let server = runtime
+                .join(if package == "mysql" {
+                    mysql_root_name("8.0.46")
+                } else {
+                    "pgsql".into()
+                })
+                .join("bin")
+                .join(exe_name(if package == "mysql" {
+                    "mysqld"
+                } else {
+                    "postgres"
+                }));
+            std::fs::create_dir_all(server.parent().unwrap()).unwrap();
+            std::fs::write(server, "unused server fixture").unwrap();
+            register_fixture(&state, package, "8.0.46", &runtime);
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            state.manager.register(
+                id,
+                package,
+                Some("8.0.46".into()),
+                Some("database".into()),
+                Some(port),
+                state.paths.service_log(id),
+            );
+            state.manager.adopt(id, &[std::process::id()], Some(port));
+            if package == "postgresql" {
+                let data = state.paths.postgres_data_dir("8.0.46");
+                std::fs::create_dir_all(&data).unwrap();
+                std::fs::write(
+                    data.join("postmaster.pid"),
+                    format!("{}\n", std::process::id()),
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                state.stop_service(id).unwrap_err().code,
+                "DATABASE_SHUTDOWN_FAILED"
+            );
+            assert_eq!(
+                state.manager.snapshot(id).unwrap().pids,
+                [std::process::id()]
+            );
+            assert!(platform::process_alive(std::process::id()));
+            assert_eq!(
+                state.restart_service(id).unwrap_err().code,
+                "DATABASE_SHUTDOWN_FAILED"
+            );
+            assert_eq!(
+                state.manager.snapshot(id).unwrap().state,
+                ServiceState::Error
+            );
+            assert!(state.watchdog_tick().is_empty());
+            if package == "postgresql" {
+                std::fs::write(
+                    state
+                        .paths
+                        .postgres_data_dir("8.0.46")
+                        .join("postmaster.pid"),
+                    "1\n",
+                )
+                .unwrap();
+                assert_eq!(
+                    state.stop_service(id).unwrap_err().code,
+                    "POSTGRES_PID_UNVERIFIED"
+                );
+            } else {
+                state
+                    .manager
+                    .set_started_port(id, port.checked_sub(1).unwrap());
+                assert_eq!(
+                    state.stop_service(id).unwrap_err().code,
+                    "DATABASE_OWNER_UNVERIFIED"
+                );
+            }
+            assert!(platform::process_alive(std::process::id()));
+        }
+    }
+
+    #[test]
+    fn force_stop_requires_current_preview_and_suppresses_watchdog() {
+        struct ChildGuard(std::process::Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let sleeper = || {
+            let mut command = if cfg!(windows) {
+                platform::command("powershell.exe")
+            } else {
+                platform::command("sh")
+            };
+            if cfg!(windows) {
+                command.args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "Start-Sleep -Seconds 30",
+                ]);
+            } else {
+                command.args(["-c", "sleep 30"]);
+            }
+            ChildGuard(
+                command
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            )
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let state = isolated_state(Paths::new(temp.path().to_path_buf()));
+        state.manager.register(
+            "fixture",
+            "Fixture",
+            Some("1".into()),
+            None,
+            None,
+            state.paths.service_log("fixture"),
+        );
+        let mut first = sleeper();
+        state.manager.adopt("fixture", &[first.0.id()], None);
+        let old = state.service_stop_preview("fixture").unwrap();
+        assert_eq!(old.service.pids, [first.0.id()]);
+        first.0.kill().unwrap();
+        first.0.wait().unwrap();
+        let mut next = sleeper();
+        state.manager.adopt("fixture", &[next.0.id()], None);
+        assert_eq!(
+            state
+                .force_stop_service("fixture", &old.revision)
+                .unwrap_err()
+                .code,
+            "SERVICE_TARGET_CHANGED"
+        );
+        assert!(next.0.try_wait().unwrap().is_none());
+        let preview = state.service_stop_preview("fixture").unwrap();
+        assert_ne!(preview.revision, old.revision);
+        assert_eq!(
+            state.force_stop_service("fixture", "").unwrap_err().code,
+            "SERVICE_TARGET_CHANGED"
+        );
+        state
+            .force_stop_service("fixture", &preview.revision)
+            .unwrap();
+        assert!(next.0.try_wait().unwrap().is_some());
+        assert_eq!(
+            state.manager.snapshot("fixture").unwrap().state,
+            ServiceState::Stopped
+        );
+        assert!(!state.manager.watchdog.should_restart(
+            "fixture",
+            &crate::watchdog::WatchdogConfig {
+                enabled: true,
+                ..Default::default()
+            }
+        ));
+        state
+            .manager
+            .recovery
+            .lock()
+            .blocked_services
+            .push("fixture".into());
+        assert_eq!(
+            state.service_stop_preview("fixture").unwrap_err().code,
+            "PROCESS_RECOVERY_UNVERIFIED"
+        );
     }
 
     #[test]

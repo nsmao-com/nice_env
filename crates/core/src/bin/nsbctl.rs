@@ -8,6 +8,7 @@
 //!   nsbctl status [--json]        服务状态总览
 //!   nsbctl start <service>        启动服务（nginx / php@8.3.33 / mysql@8.0.46 / …）
 //!   nsbctl stop <service>         停止服务
+//!   nsbctl kill <service> --yes   强制停止已核实的服务（可能丢失未保存数据）
 //!   nsbctl restart <service>      重启服务
 //!   nsbctl start-all              启动常用栈（与托盘「启动常用栈」一致）
 //!   nsbctl stop-all               停止全部服务
@@ -63,6 +64,16 @@ fn main() -> ExitCode {
         "packages" => cmd_packages(&state, json),
         "start" => one_service(&state, pos.first().copied(), |s, id| s.start_service(id)),
         "stop" => one_service(&state, pos.first().copied(), |s, id| s.stop_service(id)),
+        "kill" => {
+            if pos.len() != 1 || !rest.iter().any(|arg| arg == "--yes") {
+                eprintln!("nsbctl: 强制停止可能中断数据库写入；确认后使用 nsbctl kill <service> --yes");
+                return ExitCode::from(2);
+            }
+            one_service(&state, pos.first().copied(), |state, id| {
+                let preview = state.service_stop_preview(id)?;
+                state.force_stop_service(id, &preview.revision)
+            })
+        },
         "restart" => one_service(&state, pos.first().copied(), |s, id| s.restart_service(id)),
         "start-all" => stack(&state, true, json),
         "stop-all" => stack(&state, false, json),
@@ -86,6 +97,7 @@ fn usage() {
         "nsbctl — NiceEnv CLI\n\
          用法：nsbctl <命令>\n\
          \x20 status [--json] | start|stop|restart <service> | start-all | stop-all\n\
+         \x20 kill <service> --yes（强制停止，可能丢失未保存数据）\n\
          \x20 sites [--json] | open <site> | packages [--json] | logs <service> [n] | diagnose <port>"
     );
 }

@@ -4,7 +4,7 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { motion } from "motion/react";
-import { RotateCw, ScrollText, Server, ShieldAlert } from "lucide-react";
+import { RotateCw, ScrollText, Server, ShieldAlert, Stethoscope } from "lucide-react";
 import type { ServiceStatus } from "@nsb/schema";
 import { cn, fmtUptime } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,7 @@ import { ServiceSwitch } from "./service-switch";
 import { ServiceIcon } from "./service-icon";
 import { ServiceWebButton } from "./service-web-button";
 import { SftpgoConfigButton } from "./sftpgo-config-button";
+import { ServiceDiagnostics } from "./service-diagnostics";
 import { StatusLight } from "./status-light";
 import { useT } from "@/lib/store";
 import { useInvalidate, toastError, toastPortConflict } from "@/lib/hooks";
@@ -26,6 +27,7 @@ export function ServiceRow({ service }: { service: ServiceStatus }) {
   const router = useRouter();
   const invalidate = useInvalidate();
   const [busy, setBusy] = React.useState(false);
+  const [diagOpen, setDiagOpen] = React.useState(false);
   const running = service.state === "running";
   const error = service.state === "error";
   const conflict =
@@ -147,6 +149,9 @@ export function ServiceRow({ service }: { service: ServiceStatus }) {
 
         <ServiceWebButton service={service} disabled={busy} />
         <SftpgoConfigButton service={service} disabled={busy} />
+        <Button variant="ghost" size="icon-sm" className="shrink-0 text-faint" title={t("svc.diagnose")} aria-label={t("svc.diagnose")} onClick={() => setDiagOpen(true)}>
+          <Stethoscope className="h-3.5 w-3.5" />
+        </Button>
         {service.logFile && (
           <>
             <Button
@@ -174,13 +179,14 @@ export function ServiceRow({ service }: { service: ServiceStatus }) {
         <div className="ml-auto flex shrink-0 sm:ml-0">
           <ServiceSwitch
             label={service.label}
-            checked={running}
+            checked={running || service.pids.length > 0}
             busy={busy || service.state === "starting" || service.state === "stopping"}
             disabled={service.state === "starting" || service.state === "stopping"}
             onCheckedChange={toggle}
           />
         </div>
       </div>
+      <ServiceDiagnostics service={service} open={diagOpen} onOpenChange={setDiagOpen} />
     </motion.div>
   );
 }

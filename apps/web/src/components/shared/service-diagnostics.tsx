@@ -1,16 +1,19 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import * as React from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { useRouter } from "next/navigation";
 import { AlertTriangle, CheckCircle2, Info, Loader2, MinusCircle, RotateCw, ScrollText, Stethoscope, Wrench, XCircle } from "lucide-react";
 import type { ServiceCheck, ServiceStatus } from "@nsb/schema";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/store";
-import { normalizeError } from "@/lib/backend";
+import { isTauri, normalizeError } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/misc";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { ConfirmDialog } from "./misc";
 
 /** 每个服务独立缓存；关闭或切换对象不会把旧请求的结果写到另一个服务。 */
 export function ServiceDiagnostics({ service, open, onOpenChange }: {
@@ -18,6 +21,19 @@ export function ServiceDiagnostics({ service, open, onOpenChange }: {
 }) {
   const t = useT();
   const router = useRouter();
+  const client = useQueryClient();
+  const [forceOpen, setForceOpen] = React.useState(false);
+  const forceBusy = React.useRef(false);
+  const preview = useQuery({ queryKey: ["service-stop-preview", service.id], queryFn: () => api.serviceStopPreview(service.id), enabled: open && forceOpen, retry: false, networkMode: "always", staleTime: 0, refetchOnWindowFocus: false, refetchOnReconnect: false });
+  const force = useMutation({
+    mutationFn: (revision: string) => api.forceStopService(service.id, revision), networkMode: "always",
+    onSuccess: async () => {
+      setForceOpen(false);
+      toast.success(`${service.label} · ${t("common.stopped")}`);
+      await Promise.all(["services", "sites", "watchdog", "service-diagnostics", "process-recovery"].map((key) => client.invalidateQueries({ queryKey: [key] })));
+    },
+    onSettled: () => { forceBusy.current = false; },
+  });
   const query = useQuery({
     queryKey: ["service-diagnostics", service.id],
     queryFn: () => api.diagnoseService(service.id),
@@ -29,7 +45,7 @@ export function ServiceDiagnostics({ service, open, onOpenChange }: {
   const running = query.isFetching;
   const navigate = (route: string) => { onOpenChange(false); router.push(route); };
 
-  return <Dialog open={open} onOpenChange={onOpenChange}>
+  return <><Dialog open={open} onOpenChange={(next) => { if (!forceBusy.current) { if (!next) setForceOpen(false); onOpenChange(next); } }}>
     <DialogContent className="flex max-h-[calc(100dvh-2rem)] max-w-xl flex-col gap-0 overflow-hidden p-0">
       <DialogHeader className="shrink-0 px-4 py-4 pr-12 sm:px-5 sm:pr-12">
         <DialogTitle className="flex min-w-0 items-start gap-2 text-[14px] leading-relaxed [overflow-wrap:anywhere]">
@@ -71,13 +87,33 @@ export function ServiceDiagnostics({ service, open, onOpenChange }: {
           <Button variant="ghost" size="sm" className="min-h-9 h-auto whitespace-normal text-[11.5px]" onClick={() => navigate("/tools#nsb-tool-repair")}>
             <Wrench className="h-3.5 w-3.5 shrink-0" />{t("svc.diag.repair")}
           </Button>
+          {!!report?.service.pids.length && <Button variant="ghost" size="sm" className="min-h-9 h-auto whitespace-normal text-[11.5px] text-error" disabled={running || force.isPending} onClick={() => { force.reset(); setForceOpen(true); }}>
+            <XCircle className="h-3.5 w-3.5 shrink-0" />{t("svc.forceStop")}
+          </Button>}
         </div>
         <Button size="sm" variant="secondary" className="min-h-9 h-auto whitespace-normal" disabled={running} onClick={() => void query.refetch({ cancelRefetch: false })}>
           <RotateCw className={cn("h-3.5 w-3.5 shrink-0", running && "animate-spin motion-reduce:animate-none")} />{t("svc.diag.rerun")}
         </Button>
       </div>
     </DialogContent>
-  </Dialog>;
+  </Dialog>
+  <ConfirmDialog open={open && forceOpen} onOpenChange={(next) => { if (!forceBusy.current) setForceOpen(next); }} title={t("svc.forceStopTitle")} description={t("svc.forceStopHint")} danger loading={force.isPending} confirmText={t("svc.forceStop")}
+    confirmDisabled={preview.isFetching || preview.isError || !!force.error || !preview.data?.service.pids.length}
+    onConfirm={() => {
+      if (forceBusy.current || preview.isFetching || preview.isError || force.error || !preview.data?.service.pids.length) return;
+      forceBusy.current = true; force.mutate(preview.data.revision);
+    }}>
+    <div className="min-w-0 space-y-2 text-xs [overflow-wrap:anywhere]">
+      {!isTauri && <p className="text-warn">{t("svc.forceStopPreview")}</p>}
+      {preview.isFetching && <p role="status" className="text-muted">{t("svc.forceStopLoading")}</p>}
+      {preview.data && <div className="rounded-lg bg-card-2/50 p-3">
+        <p className="font-medium">{preview.data.service.label}{preview.data.service.version ? ` · ${preview.data.service.version}` : ""}</p>
+        <p className="mt-1 text-muted">{preview.data.service.pids.length ? `PID ${preview.data.service.pids.join(", ")}` : t("svc.forceStopEmpty")}</p>
+      </div>}
+      {(preview.error || force.error) && <p role="alert" className="text-error">{normalizeError(force.error || preview.error).message}</p>}
+      <Button variant="ghost" size="sm" disabled={preview.isFetching || force.isPending} onClick={() => { force.reset(); void preview.refetch({ cancelRefetch: false }); }}><RotateCw className="h-3.5 w-3.5" />{t("svc.forceStopReload")}</Button>
+    </div>
+  </ConfirmDialog></>;
 }
 
 function CheckRow({ item }: { item: ServiceCheck }) {

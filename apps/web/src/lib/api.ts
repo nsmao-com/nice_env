@@ -1,5 +1,6 @@
 import type {
   ServiceStatus,
+  ServiceStopPreview,
   SftpgoConfigDirectories,
   Site,
   PackageView,
@@ -72,6 +73,8 @@ export const startService = (id: string) =>
   safe(invoke<boolean>("start_service", { id }));
 export const stopService = (id: string) =>
   safe(invoke<boolean>("stop_service", { id }));
+export const serviceStopPreview = (id: string) => safe(invoke<ServiceStopPreview>("service_stop_preview", { id }));
+export const forceStopService = (id: string, revision: string) => safe(invoke<boolean>("force_stop_service", { id, revision }));
 export const restartService = (id: string) =>
   safe(invoke<boolean>("restart_service", { id }));
 export const sftpgoConfigDirectories = () =>

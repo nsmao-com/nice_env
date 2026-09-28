@@ -2244,3 +2244,21 @@ Windows 自有 Job 继续使用内核对象收回已归组进程；没有 Job �
 同一独立发布树另行显式执行真实 Nginx/Node/Python/Go 应用生命周期、看门狗恢复和失败回滚用例，1 通过、0 失败、692 filtered out，耗时 86.30 秒。临时项目使用隔离端口并跳过 hosts 写入；其余忽略项和未执行模块不计入验收。最终 git diff --check 通过。
 
 已确认 v0.2.79 Release completed/success；本轮按根 AGENTS.md 新建 annotated tag v0.2.80，与 main 原子推送并核对远程指向及实际构建状态。本次没有数据库变更，未修改 update.sql，未启动前端 dev 或执行本地前端 build。Linux/macOS 本轮未做实机终止验证；macOS 的信号调用与创建标识检查并非同一个原子系统调用。未记录且在快照之后新产生或脱离归属的后代不宣称完整覆盖；计划任务、隧道等其他组使用路径及协议级优雅停机仍需继续审查，整体目标保持进行。
+
+## 第九十五轮：数据库停机失败保留实例与显式强制停止（v0.2.81）
+
+参考 ServBay 的 servbayctl stop/kill 分离设计（https://support.servbay.com/basic-usage/command-line-tool-servbayctl），并核对 PostgreSQL pg_ctl 与 MySQL mysqladmin 官方文档。通过 fast-context 追踪服务停止、进程身份、实际运行版本、诊断与重启链路，发现 MySQL 和 PostgreSQL 的普通停止失败后仍会自动终止进程。本轮移除这两条失败兜底，让调用者收到错误并保留存活实例，重启在停止阶段失败时不会继续启动。
+
+MySQL 先核对实际启动端口的本机监听者属于当前已记录实例，再使用私有客户端配置文件发送 mysqladmin shutdown，失败和超时不自动强杀。PostgreSQL 按运行中的版本定位 pg_ctl，检查该数据目录 postmaster.pid 与当前已核实身份一致，执行 fast 模式并等待退出；默认版本变化不会打向另一个实例。控制命令限时执行，错误输出限量读取并脱敏。Redis 等待退出也改为核实已记录身份，避免仅按 PID 存活误判。
+
+新增服务停止预览和强制停止接口，以服务、版本、实际端口和已核实进程身份生成修订号。确认时在生命周期锁内重新核对，旧实例的确认不能用来停止后来启动的实例；恢复阻塞和身份不明时拒绝操作。强制停止复用已经核实的进程树终止与存活检查，保留 CoreDNS 还原保护、失败状态和 PID 保存，成功后取消看门狗运行意图。Tauri 命令使用 spawn_blocking。CLI 增加 nsbctl kill <service> --yes，缺少明确确认或目标不唯一时返回用法错误。
+
+服务诊断增加次要危险操作，必须显示当前服务、版本和 PID 并单独确认，说明数据库写入和未保存数据风险；不受跳过普通确认设置影响。补齐加载、读取失败、实例变化、停止失败、重新读取、无运行进程及处理中禁止重复提交和关闭。成功刷新服务、站点、看门狗、诊断及恢复状态。卡片和列表在 Error 但仍有 PID 时保持开关开启，用户可以重试停止；列表补充同一诊断入口。中英文同步，浏览器明确只演示状态变化，运行代次参与演示修订号。
+
+沿用 UI/UX 技能和既有组件，在隔离浏览器验收取消保留实例、确认后停止、错误禁用旧确认、重新读取恢复、处理中 Escape 不关闭且仅提交一次、空进程禁用确认，以及卡片与列表的 Error+PID 状态。检查中文及英文、1360/390/320px；320px 确认框宽 296px、左右各 12px，clientWidth 与 scrollWidth 相同，页面内容区均为 228px；390px 确认框宽 366px。截图已目检，隔离上下文已关闭，用户原有 packages/sites 页面保留。故障注入仅在隔离浏览器缓存，没有新增产品调试入口。
+
+版本统一为 0.2.81，11 个版本文件同步，Cargo.lock 仅更新三个本项目 crate。精确暂存内容导出独立发布树，核对 22 个发布文件的索引哈希，configgen.rs 保持 HEAD 内容，排除用户原有 178 additions / 9 deletions 及未跟踪本地文件。前端/schema 类型检查与独立发布树 cargo check --workspace --all-targets --locked 通过；ports/services/ops/sites/bulk/install/paths/watchdog 回归 153 通过、0 失败、16 ignored、527 filtered out。新增断言放在已有 Rust 模块，没有新增测试文件，只格式化新增代码片段。
+
+同一独立发布树显式运行真实 MySQL 8.0.46、PostgreSQL 16.6 及 Nginx/Node/Python/Go 应用生命周期验证，3 通过、0 失败、693 filtered out，耗时 146.69 秒。数据库仅使用临时目录与隔离端口，覆盖错误密码保留实例、缺失控制客户端、错误 pidfile、运行版本与默认版本不同、旧确认拒绝、强制停止及重新启动后可查询；应用回归覆盖实际访问、看门狗恢复和失败回滚。其余 ignored 项与未执行模块不计入验收。独立树 CLI 编译通过，在临时 NSB_HOME 验证缺少 --yes、缺少服务及多目标均退出 2，未知服务退出 1，帮助包含新命令。
+
+已确认 v0.2.80 Release completed/success；按根 AGENTS.md 新建 annotated tag v0.2.81，与 main 原子推送，核对远程提交、tag 及实际 Release 状态，不覆盖旧 tag。本次没有数据库结构或现有用户数据变更，未修改 update.sql；没有新增依赖、前端 dev 或本地前端 build。Windows 原生停机已验证，Linux/macOS 未做本轮实机验收。MongoDB 和其他通用服务的普通停止策略未在本轮更改，不宣称所有服务都已完成协议级优雅停机；整体完善目标继续进行。

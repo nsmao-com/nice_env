@@ -65,7 +65,7 @@ import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSet
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.80";
+const MOCK_APP_VERSION = "0.2.81";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -933,6 +933,14 @@ async function runServiceAction(action: "start_service" | "stop_service" | "rest
   return withServiceOperation(() => performServiceAction(action, id));
 }
 
+const serviceRunRevisions = new Map<string, number>();
+function stopPreview(id: string) {
+  const service = services.get(id);
+  if (!service) throw { code: "UNKNOWN_SERVICE", message: "服务未注册或已卸载" };
+  if (serviceActionInProgress || ["starting", "stopping"].includes(service.state)) throw { code: "SERVICE_BUSY", message: "服务正在操作，请稍后重新读取" };
+  return { service: structuredClone(service), revision: JSON.stringify([id, service.version, service.port, service.pids, serviceRunRevisions.get(id) ?? 0]) };
+}
+
 async function withServiceOperation<T>(operation: () => Promise<T>): Promise<T> {
   if (serviceActionInProgress) throw { code: "SERVICE_BUSY", message: "服务正在操作，请稍后重试" };
   serviceActionInProgress = true;
@@ -978,6 +986,7 @@ async function performServiceAction(action: "start_service" | "stop_service" | "
       service.lastError = undefined;
       await delay(700);
       service.state = "running";
+      serviceRunRevisions.set(id, (serviceRunRevisions.get(id) ?? 0) + 1);
       service.pids = [Math.floor(Math.random() * 40000) + 1000];
       service.uptimeSec = 0;
       if (id === "mihomo") proxyRunning = true;
@@ -1006,6 +1015,14 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "stop_service":
     case "restart_service":
       return await runServiceAction(cmd, String(args?.id ?? "")) as T;
+    case "service_stop_preview":
+      return stopPreview(String(args?.id ?? "")) as T;
+    case "force_stop_service": {
+      const id = String(args?.id ?? "");
+      const preview = stopPreview(id);
+      if (preview.revision !== args?.revision) throw { code: "SERVICE_TARGET_CHANGED", message: "服务进程或版本已变化，请重新读取状态并确认" };
+      return await runServiceAction("stop_service", id) as T;
+    }
 
     /* ---------- 服务栈 ---------- */
     case "list_stacks": {

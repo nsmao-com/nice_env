@@ -79,6 +79,13 @@ pub struct ServiceStatus {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
+pub struct ServiceStopPreview {
+    pub service: ServiceStatus,
+    pub revision: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct SftpgoConfigDirectory {
     pub directory: String,
     pub label: String,

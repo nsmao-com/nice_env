@@ -2813,6 +2813,75 @@ mod validate_tests {
         assert_eq!(toolbox::adminer_start_on_port(&state.store, &state.paths, &state.installer, &state.manager, 0).unwrap_err().code, "ADMINER_ENTRY_MISSING");
     }
 
+    fn validate_native_database_user_deletion(state: &crate::CoreState, engine: crate::dbadmin::DatabaseEngine, version: &str, client: &crate::dbadmin::MySqlClient) {
+        use crate::dbadmin::{self, DatabaseUserDropInput};
+        let username = "retire'quote;中文";
+        let account = "'retire''quote;中文'@'localhost'";
+        let alternate = "'retire''quote;中文'@'127.0.0.2'";
+        let read = || client.user_drop_info(username, "localhost").unwrap();
+        let drop_account = |info: &dbadmin::DatabaseUserDropInfo, confirmation: &str| dbadmin::drop_database_user(state, engine, version,
+            &DatabaseUserDropInput { username: info.username.clone(), host: info.host.clone(), confirmation: confirmation.into(), revision: info.revision.clone() });
+        let confirmation = format!("{username}@localhost");
+        client.run(&format!("SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'; CREATE DATABASE delete_fixture; CREATE TABLE delete_fixture.proof (id INT); INSERT INTO delete_fixture.proof VALUES (93); CREATE USER {account} IDENTIFIED BY 'delete-fixture-password', {alternate} IDENTIFIED BY 'other-host-kept'; GRANT SELECT ON delete_fixture.* TO {account};")).unwrap();
+        let before = read(); assert!(!before.protected && before.dependencies.is_empty());
+        assert_eq!(drop_account(&before, username).unwrap_err().code, "DB_USER_CONFIRM");
+        let root = client.user_drop_info("root", "localhost").unwrap(); assert!(root.protected);
+        assert_eq!(drop_account(&root, "root@localhost").unwrap_err().code, "SYSTEM_ACCOUNT");
+        client.run(&format!("SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'; GRANT CREATE USER ON *.* TO {account};")).unwrap();
+        assert!(read().protected);
+        assert_eq!(drop_account(&read(), &confirmation).unwrap_err().code, "SYSTEM_ACCOUNT");
+        client.run(&format!("SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'; REVOKE CREATE USER ON *.* FROM {account}; GRANT INSERT ON delete_fixture.proof TO {account};")).unwrap();
+        assert_eq!(drop_account(&before, &confirmation).unwrap_err().code, "DB_USER_CHANGED");
+        let without_dependencies = read();
+        client.run(&format!("SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'; CREATE DEFINER={account} VIEW delete_fixture.dependent_view AS SELECT id FROM delete_fixture.proof; CREATE DEFINER={account} PROCEDURE delete_fixture.dependent_procedure() SELECT 93; CREATE DEFINER={account} TRIGGER delete_fixture.dependent_trigger BEFORE INSERT ON delete_fixture.proof FOR EACH ROW SET NEW.id=NEW.id; CREATE DEFINER={account} EVENT delete_fixture.dependent_event ON SCHEDULE EVERY 1 DAY DISABLE DO SELECT 93;")).unwrap();
+        let dependency = read(); assert_eq!(dependency.dependencies.len(), 4);
+        for kind in ["view", "routine", "trigger", "event"] { assert!(dependency.dependencies.iter().any(|item| item.kind == kind && item.database == "delete_fixture")); }
+        assert_eq!(drop_account(&without_dependencies, &confirmation).unwrap_err().code, "DB_USER_DEPENDENCIES");
+        assert!(client.list_users().unwrap().iter().any(|user| user.username == username && user.host == "localhost"));
+        // 仅在隔离实例中暂撤元数据权限，确认不能把不可见的依赖误判为不存在。
+        let administrator = client.run("SELECT CURRENT_USER();").unwrap();
+        let (admin_user, admin_host) = administrator.trim().rsplit_once('@').unwrap();
+        let administrator = format!("'{}'@'{}'", admin_user.replace('\'', "''"), admin_host.replace('\'', "''"));
+        client.run(&format!("SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'; CREATE USER 'delete_metadata_admin'@'localhost' IDENTIFIED BY 'metadata-fixture-only'; GRANT ALL PRIVILEGES ON *.* TO 'delete_metadata_admin'@'localhost' WITH GRANT OPTION; REVOKE SHOW VIEW ON *.* FROM {administrator};")).unwrap();
+        assert_eq!(client.user_drop_info(username, "localhost").unwrap_err().code, "DB_USER_METADATA_ACCESS");
+        assert_eq!(drop_account(&without_dependencies, &confirmation).unwrap_err().code, "DB_USER_METADATA_ACCESS");
+        dbadmin::query_client(&client.exe, "127.0.0.1", client.port, "delete_metadata_admin", "metadata-fixture-only", &format!("SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'; GRANT SHOW VIEW ON *.* TO {administrator};")).unwrap();
+        client.run("DROP USER 'delete_metadata_admin'@'localhost';").unwrap();
+        assert_eq!(read().dependencies.len(), 4);
+        client.run("DROP VIEW delete_fixture.dependent_view; DROP PROCEDURE delete_fixture.dependent_procedure; DROP TRIGGER delete_fixture.dependent_trigger; DROP EVENT delete_fixture.dependent_event;").unwrap();
+        client.run(&format!("SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'; CREATE USER 'delete_proxy'@'localhost'; GRANT PROXY ON {account} TO 'delete_proxy'@'localhost';")).unwrap();
+        assert_eq!(read().proxy_dependents, 1);
+        assert_eq!(drop_account(&read(), &confirmation).unwrap_err().code, "DB_USER_DEPENDENCIES");
+        client.run(&format!("SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'; REVOKE PROXY ON {account} FROM 'delete_proxy'@'localhost';")).unwrap();
+        if engine == dbadmin::DatabaseEngine::Mysql {
+            client.run(&format!("SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'; GRANT {account} TO 'delete_proxy'@'localhost';")).unwrap();
+            assert_eq!(read().role_dependents, 1);
+            assert_eq!(drop_account(&read(), &confirmation).unwrap_err().code, "DB_USER_DEPENDENCIES");
+            client.run(&format!("SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'; REVOKE {account} FROM 'delete_proxy'@'localhost';")).unwrap();
+        }
+        let alternate_revision = client.user_drop_info(username, "127.0.0.2").unwrap().revision;
+        let ready = read();
+        struct LiveSession(Option<std::process::Child>);
+        impl Drop for LiveSession { fn drop(&mut self) { if let Some(child) = self.0.as_mut() { let _ = child.kill(); let _ = child.wait(); } } }
+        let (_private, mut command) = dbadmin::client_command(&client.exe, "127.0.0.1", client.port, username, "delete-fixture-password").unwrap();
+        let mut live = LiveSession(Some(command.args(["--batch", "--unbuffered", "--skip-column-names"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap()));
+        let mut stdin = live.0.as_mut().unwrap().stdin.take().unwrap();
+        std::io::Write::write_all(&mut stdin, b"USE delete_fixture; SELECT id FROM proof;\n").unwrap(); std::io::Write::flush(&mut stdin).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop { let active = read(); if active.username_connections > 0 { assert_eq!(active.revision, ready.revision); break; } assert!(std::time::Instant::now() < deadline, "fixture connection did not open"); }
+        drop_account(&ready, &confirmation).unwrap();
+        assert_eq!(client.user_drop_info(username, "localhost").unwrap_err().code, "DB_USER_MISSING");
+        assert!(dbadmin::query_client(&client.exe, "127.0.0.1", client.port, username, "delete-fixture-password", "SELECT 1;").is_err());
+        std::io::Write::write_all(&mut stdin, b"SELECT id FROM proof;\n").unwrap(); drop(stdin);
+        let existing = live.0.take().unwrap().wait_with_output().unwrap();
+        assert!(existing.status.success(), "{}", String::from_utf8_lossy(&existing.stderr));
+        assert_eq!(String::from_utf8_lossy(&existing.stdout).lines().filter(|line| *line == "93").count(), 2);
+        assert_eq!(client.user_drop_info(username, "127.0.0.2").unwrap().revision, alternate_revision);
+        assert_eq!(client.run("SELECT id FROM delete_fixture.proof;").unwrap().trim(), "93");
+        assert_eq!(client.run(&format!("SELECT COUNT(*) FROM mysql.tables_priv WHERE HEX(User)='{}' AND Host='localhost';", hex::encode_upper(username))).unwrap().trim(), "0");
+        client.run(&format!("SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'; DROP USER {alternate}, 'delete_proxy'@'localhost'; DROP DATABASE delete_fixture;")).unwrap();
+    }
+
     fn validate_native_database_passwords(state: &crate::CoreState, engine: crate::dbadmin::DatabaseEngine, version: &str, client: &crate::dbadmin::MySqlClient, username: &str, original_password: &str) {
         use crate::dbadmin::{self, DatabaseUserPasswordInput};
         let read = |name: &str, host: &str| client.user_password_info(name, host).unwrap();
@@ -2990,6 +3059,7 @@ mod validate_tests {
         dbadmin::update_database_grants(state, engine, version, &input).unwrap();
         assert_eq!(dbadmin::query_client(&client.exe, "127.0.0.1", client.port, special_user, password, "SELECT id FROM `grant``quote`.sample;").unwrap().trim(), "9");
         validate_native_database_passwords(state, engine, version, client, special_user, password);
+        validate_native_database_user_deletion(state, engine, version, client);
         client.run("SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'; DROP USER 'grant''quote'@'localhost'; DROP DATABASE `grant``quote`;").unwrap();
         client.drop_database(&collision).unwrap(); client.drop_database("grant_other").unwrap();
     }

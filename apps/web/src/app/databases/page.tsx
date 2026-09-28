@@ -111,6 +111,67 @@ function UserPasswordDialog({ engine, version, account, targetLabel, signature, 
   </DialogContent></Dialog>;
 }
 
+function UserDropDialog({ engine, version, account, targetLabel, signature, changed, onClose }: {
+  engine: DatabaseEngine; version: string; account: DbUserInfo; targetLabel: string; signature: string; changed: boolean; onClose: () => void;
+}) {
+  const t = useT();
+  const queryClient = useQueryClient();
+  const invalidate = useInvalidate();
+  const query = useQuery({ queryKey: ["db-user-drop-info", signature, account.username, account.host], queryFn: () => api.dbUserDropInfo(engine, version, account.username, account.host), enabled: !changed, retry: false, refetchOnWindowFocus: false, staleTime: 0 });
+  const info = query.data;
+  const [confirmation, setConfirmation] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState("");
+  const [needsReload, setNeedsReload] = React.useState(false);
+  const lock = React.useRef(false);
+  const accountLabel = `${account.username}@${account.host}`;
+  const queryError = query.isError ? normalizeError(query.error) : null;
+  const blocked = !info || info.protected || info.dependencies.length > 0 || info.roleDependents > 0 || info.proxyDependents > 0;
+  const disabled = busy || changed || query.isFetching || query.isError || needsReload;
+  const close = () => { if (!lock.current) onClose(); };
+  const reload = async () => {
+    if (lock.current) return;
+    const result = await query.refetch();
+    if (!result.isError) { setConfirmation(""); setError(""); setNeedsReload(false); }
+  };
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault(); if (lock.current || disabled || blocked || !info || confirmation !== accountLabel) return;
+    lock.current = true; setBusy(true); setError("");
+    try {
+      await api.dbUserDrop(engine, version, { username: account.username, host: account.host, confirmation, revision: info.revision });
+      queryClient.setQueryData<DbUserInfo[]>(["db-users", engine, version], (users) => users?.filter((user) => user.username !== account.username || user.host !== account.host));
+      invalidate("db-users", "db-grants", "db-user-password-info", "db-user-drop-info");
+      toast.success(t("dbUserDrop.saved")); onClose();
+    } catch (cause) { const parsed = normalizeError(cause); setError([parsed.message, parsed.hint, parsed.detail].filter(Boolean).join(" ")); setNeedsReload(true); }
+    finally { lock.current = false; setBusy(false); }
+  };
+  return <Dialog open onOpenChange={(open) => !open && close()}><DialogContent hideClose={busy} className="flex max-w-lg max-h-[85dvh] flex-col overflow-hidden">
+    <DialogHeader><DialogTitle className="pr-6">{t("dbUserDrop.title")}</DialogTitle><DialogDescription className="break-words">{targetLabel}<span className="mt-1 block break-all font-mono text-foreground">{accountLabel}</span></DialogDescription></DialogHeader>
+    <form onSubmit={submit} className="flex min-h-0 flex-col gap-4"><div className="min-h-0 space-y-4 overflow-y-auto px-0.5">
+      {changed && <p role="alert" className="text-sm text-error">{t("db.pgChanged")}</p>}
+      {query.isPending && <p role="status" className="text-sm text-muted">{t("dbUserDrop.loading")}</p>}
+      {queryError && <p role="alert" className="break-words text-sm text-error">{[queryError.message, queryError.hint].filter(Boolean).join(" ")}</p>}
+      {info && <>
+        <p className="text-sm leading-6 text-muted">{t("dbUserDrop.scope")}</p>
+        {info.protected ? <p className="rounded-md bg-warn-soft p-3 text-sm text-warn">{t("dbUserDrop.protected")}</p> : <>
+          {blocked && <div className="space-y-2 rounded-md bg-warn-soft p-3 text-xs leading-5 text-warn">
+            <p>{t("dbUserDrop.blocked")}</p>
+            {info.dependencies.length > 0 && <ul className="space-y-1">{info.dependencies.map((item, index) => <li key={`${item.kind}:${item.database}:${item.name}:${index}`} className="break-words">{t(`dbUserDrop.${item.kind}`)} · <span className="break-all font-mono">{item.database}.{item.name}</span></li>)}</ul>}
+            {info.moreDependencies && <p>{t("dbUserDrop.more")}</p>}
+            {info.roleDependents > 0 && <p>{t("dbUserDrop.roles")}: {info.roleDependents}</p>}
+            {info.proxyDependents > 0 && <p>{t("dbUserDrop.proxies")}: {info.proxyDependents}</p>}
+          </div>}
+          <div className="space-y-2 text-xs leading-5 text-muted"><p>{t("dbUserDrop.connections")}: {info.usernameConnections}</p><p>{t("dbUserDrop.sessionHint")}</p></div>
+          {!blocked && <div className="space-y-2 border-t border-dashed border-border pt-4"><Label htmlFor="db-user-drop-confirm">{t("dbUserDrop.confirm")}</Label><p className="break-all font-mono text-xs">{accountLabel}</p><Input id="db-user-drop-confirm" value={confirmation} autoComplete="off" disabled={disabled} onChange={(event) => setConfirmation(event.target.value)} /></div>}
+        </>}
+      </>}
+      {error && <p role="alert" className="break-words text-sm text-error">{error}</p>}
+      {(query.isError || needsReload || (!!info && blocked && !info.protected)) && !changed && <Button type="button" size="sm" variant="secondary" className="h-auto min-h-8 max-w-full whitespace-normal py-2" disabled={busy || query.isFetching} onClick={reload}>{t("dbUserDrop.reload")}</Button>}
+      {needsReload && <p className="text-xs text-muted">{t("dbUserDrop.reloadHint")}</p>}
+    </div><DialogFooter className="shrink-0 flex-col-reverse sm:flex-row"><Button type="button" variant="ghost" disabled={busy} onClick={close}>{t("common.cancel")}</Button>{!blocked && <Button type="submit" variant="destructive" disabled={disabled || confirmation !== accountLabel}>{busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}{t("dbUserDrop.title")}</Button>}</DialogFooter></form>
+  </DialogContent></Dialog>;
+}
+
 function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => void }) {
   const t = useT();
   const invalidate = useInvalidate();
@@ -137,13 +198,14 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
   const [userOpen, setUserOpen] = React.useState(false);
   const [grantUser, setGrantUser] = React.useState<DbUserInfo | null>(null);
   const [passwordUser, setPasswordUser] = React.useState<{ account: DbUserInfo; signature: string } | null>(null);
+  const [deleteUser, setDeleteUser] = React.useState<{ account: DbUserInfo; signature: string } | null>(null);
   const signature = `${engine}:${version}:${service?.port}:${service?.pids.join(",")}`;
   const [rootOpen, setRootOpen] = React.useState(false);
   const [importOpen, setImportOpen] = React.useState(false);
   const [dropTarget, setDropTarget] = React.useState<string | null>(null);
   const [dropping, setDropping] = React.useState(false);
   const [dropTyped, setDropTyped] = React.useState("");
-  const locked = !!passwordUser || !!grantUser || backupLocked || createOpen || userOpen || rootOpen || importOpen || !!dropTarget;
+  const locked = !!deleteUser || !!passwordUser || !!grantUser || backupLocked || createOpen || userOpen || rootOpen || importOpen || !!dropTarget;
   React.useEffect(() => { onLockChange(locked); return () => onLockChange(false); }, [locked, onLockChange]);
 
   const systemDbs = new Set(["mysql", "sys", "information_schema", "performance_schema"]);
@@ -262,7 +324,7 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
                     <span className="break-all text-[10px] text-faint">@{u.host}</span>
                   </div>
                   {u.grants && <p className="mt-0.5 break-words text-[10.5px] text-faint">{u.grants}</p>}
-                  <div className="mt-1 flex flex-wrap gap-1"><Button size="sm" variant="ghost" disabled={!ready || locked} onClick={() => setGrantUser(u)}>{t("dbGrants.manage")}</Button><Button size="sm" variant="ghost" disabled={!ready || locked} onClick={() => setPasswordUser({ account: u, signature })}><KeyRound className="h-3.5 w-3.5" />{t("dbPassword.title")}</Button></div>
+                  <div className="mt-1 flex flex-wrap items-center gap-1"><Button size="sm" variant="ghost" disabled={!ready || locked} onClick={() => setGrantUser(u)}>{t("dbGrants.manage")}</Button><Button size="sm" variant="ghost" disabled={!ready || locked} onClick={() => setPasswordUser({ account: u, signature })}><KeyRound className="h-3.5 w-3.5" />{t("dbPassword.title")}</Button><Button size="icon-sm" variant="ghost" className="ml-auto text-error" title={t("dbUserDrop.title")} aria-label={`${t("dbUserDrop.title")} ${u.username}@${u.host}`} disabled={!ready || locked} onClick={() => setDeleteUser({ account: u, signature })}><Trash2 className="h-3.5 w-3.5" /></Button></div>
                 </div>
               ))
             )}
@@ -274,6 +336,7 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
       <CreateUserDialog key={`create-user-${engine}-${version}`} version={version} engine={engine} targetLabel={targetLabel} open={userOpen} onOpenChange={setUserOpen} onDone={() => invalidate("db-users")} />
       {grantUser && <DatabaseGrantsSheet key={JSON.stringify([engine, version, grantUser.username, grantUser.host])} engine={engine} version={version} account={grantUser} targetLabel={targetLabel} ready={ready} onClose={() => setGrantUser(null)} />}
       {passwordUser && <UserPasswordDialog engine={engine} version={version} account={passwordUser.account} targetLabel={targetLabel} signature={passwordUser.signature} changed={!running || signature !== passwordUser.signature} onClose={() => setPasswordUser(null)} />}
+      {deleteUser && <UserDropDialog engine={engine} version={version} account={deleteUser.account} targetLabel={targetLabel} signature={deleteUser.signature} changed={!running || signature !== deleteUser.signature} onClose={() => setDeleteUser(null)} />}
       <ResetRootDialog key={`root-${engine}-${version}`} version={version} engine={engine} targetLabel={targetLabel} open={rootOpen} onOpenChange={setRootOpen} />
 
       {/* 删库不可恢复：要求用户把库名完整敲一遍才允许执行 */}

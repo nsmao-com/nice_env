@@ -2498,3 +2498,25 @@ Windows MySQL 8.0.46 与 MariaDB 11.4.8 原生验收覆盖含引号、反斜杠�
 本次没有用户业务数据库结构或数据变更，未修改 update.sql；原生验收仅使用隔离临时目录、端口及账号。未启动前端 dev，未执行本地前端 build。已确认 v0.2.91 Release completed/success；本轮按根 AGENTS.md 新增 annotated tag v0.2.92，与 main 原子推送并核对远程指向及实际 workflow 状态。Linux/macOS、其它引擎版本及第三方认证插件未做本轮实机验收；完整账号生命周期、密码过期策略、活动连接和认证链编辑仍需后续完善，整体目标保持进行。
 
 参考：https://support.servbay.com/database-management/getting-started/mysql-management-and-usage 、https://dev.mysql.com/doc/refman/8.0/en/set-password.html 、https://mariadb.com/docs/server/reference/sql-statements/account-management-sql-statements/set-password 、https://raw.githubusercontent.com/MariaDB/server/11.4/sql/sql_acl.cc
+
+## 第一百零七轮：MySQL / MariaDB 账号删除与依赖预检（v0.2.93）
+
+继续参考 ServBay 官方 MySQL 管理文档中的业务账号和可视化管理流程，通过 fast-context 对比 NiceEnv 的 PostgreSQL 与 MySQL/MariaDB 账号生命周期。PostgreSQL 已有删除入口，MySQL/MariaDB 仍只能创建、授权和改密；本轮补齐按用户名与来源主机精确删除普通业务账号。核对 MySQL 8.0 与 MariaDB 官方 DROP USER 文档：删除会移除账号授权，但不会关闭已有连接或自动删除业务对象，MariaDB 对多账号失败也不保证整体回滚，因此每次仅操作一个明确账号。
+
+新增删除预检和执行命令，复用已有实例身份、客户端私有凭据、后台任务、数据目录活动保护及数据库生命周期锁。删除执行另持有引擎与版本独立的操作系统文件锁。先列出 mysql 系统表并逐表确认结构，对账号、数据库级、表级、列级、存储程序、动态权限、默认角色、角色关系与代理授权计算服务器内 SHA-256 快照；二进制字段先 HEX，保留 NULL，认证原文不离开数据库。后端再用进程随机密钥、客户端路径、端口及服务器版本生成不透明 revision，避免把原始认证指纹交给前端；连接数不参与 revision，正常连接变化不会误判账号已被修改。
+
+预检列出以此账号为 DEFINER 的视图、存储程序、触发器和事件，并检查其它账号对它的角色及代理授权依赖。有依赖时禁止删除，展示前 50 个对象并注明还有更多，不自动转移定义者、撤销关联或删除数据。root、匿名、系统账号以及直接具有 SUPER、CREATE USER、SYSTEM_USER 或 ROLE_ADMIN 权限的账号受保护，未展开角色继承后的有效管理权限。要求当前管理连接直接具备全局 SELECT、SHOW VIEW、TRIGGER、EVENT，且没有部分撤销限制；权限不足时返回明确错误，避免把元数据不可见误判为没有依赖。
+
+提交要求完整输入用户名@来源主机，后端重复校验确认内容、保护状态、依赖及 revision，再执行单账号 DROP USER。当前短会话仅追加 NO_BACKSLASH_ESCAPES，保留其它 sql_mode，包括 MariaDB Oracle 模式的原有规则；不使用 IF EXISTS、FORCE 或 KILL。执行后查询精确账号是否仍存在：断连报错后若确认账号已不存在，可返回已完成；无法读回时提示刷新确认实际状态，不自动重试。外部管理员操作不受本机锁约束，预检和 DROP 之间仍有外部并发窗口，不承诺服务器级原子依赖预检或唯一账号世代标识。
+
+沿用已读 UI/UX skill、Next use-client 文档和现有 Dialog、Input、Button。账号行新增带完整可访问名称的删除入口，弹窗展示实例、账号、不可撤销范围、依赖列表及同用户名连接总数；PROCESSLIST 的来源地址不等于授权 Host，连接数明确包含其它来源。说明数据库和表数据保留、其它来源账号不受影响，已有连接可能保留原权限直到退出，提示先停用相关连接池。依赖或保护状态下不展示删除提交按钮；确认区使用左右留白的虚线，正文独立滚动、底部按钮固定。处理期间禁止关闭和切换实例，失败保留确认内容；重新检查成功后清空确认，防止沿用旧确认。成功立即更新账号列表缓存并刷新相关详情。
+
+浏览器在既有 localhost 演示环境验证完整账号确认、只填用户名拒绝、root 保护、忙时取消与 Escape 保护、账号从列表移除及数据库保留。创建同名 localhost 和 127.0.0.1 两个来源后，分别删除且另一来源保持。仅在本轮 QA 上下文临时注入旧 revision，验证后端演示拒绝、输入保留与重新检查后重新确认；临时依赖快照验证长对象名、四种依赖类别、角色和代理计数、更多对象提示及删除按钮隐藏，未向代码添加调试入口。1360px 中文桌面、390px 中文、320px 英文及窄屏依赖状态截图均已目检；弹窗左右各 12px，宽度与 scrollWidth 分别同为 366px/296px，长内容可滚动、操作可达。只关闭本轮 QA 上下文，保留用户原有 packages/sites 页面。
+
+11 个版本文件同步到 0.2.93，Cargo.lock 仅更新三个本项目 crate。独立发布树排除用户原有 configgen.rs 的 178 additions / 9 deletions 与本地生成文件，17 个代码和版本文件逐一核对一致；加入本记录后共 18 个发布文件。pnpm check 与最终独立 cargo check --workspace --all-targets --locked 通过。最终自动备份、数据库管理、备份恢复、导入、配置传输及 MySQL/MariaDB 原生回归共 29 通过、0 失败、674 filtered out，耗时 534.97 秒。只扩展既有 Rust 模块中的原生验收，未新增测试文件、依赖或 migration。
+
+Windows MySQL 8.0.46、MariaDB 11.4.8 隔离原生验收覆盖含引号、分号和中文的账号、精确来源、完整确认、root 与临时授予 CREATE USER 的账号保护、外部表级授权使旧 revision 失效，以及四类 DEFINER 对象和代理依赖阻止删除；MySQL 另验证账号被授予他人作为角色时拒绝删除。删除后新连接被拒绝，已有连接仍能读取值 93；同名其它来源账号的快照和业务表的值 93 保持，原账号的表级授权被移除。临时管理账号仅用于隔离实例内撤销和恢复原生管理连接的 SHOW VIEW 权限，以确认元数据权限不足时预检与删除均拒绝，恢复后四类对象重新可见。
+
+本次没有用户业务数据库结构或数据变更，未修改 update.sql；所有原生 SQL 仅作用于隔离临时目录、端口和验收账号。未启动前端 dev，未执行本地前端 build。v0.2.92 Release 已确认 completed/success；本轮按根 AGENTS.md 新增 annotated tag v0.2.93，与 main 原子推送并核对远程指向和实际构建状态。Linux/macOS、其它数据库版本未做本轮实机验收；账号改名、暂停登录、完整角色管理和活动连接管理等仍待完善，整体目标保持进行。
+
+参考：https://support.servbay.com/database-management/getting-started/mysql-management-and-usage 、https://dev.mysql.com/doc/refman/8.0/en/drop-user.html 、https://dev.mysql.com/doc/refman/8.0/en/stored-objects-security.html 、https://mariadb.com/docs/server/reference/sql-statements/account-management-sql-statements/drop-user

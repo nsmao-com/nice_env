@@ -66,7 +66,7 @@ import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSet
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.92";
+const MOCK_APP_VERSION = "0.2.93";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -2375,6 +2375,30 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       state.databases.delete(name); return true as T;
     }
     case "db_users": return structuredClone([...mysqlPreview(args?.version as string | undefined, true, args?.engine as DatabaseEngine | undefined).state.users.values()]) as T;
+    case "db_user_drop_info":
+    case "db_user_drop": {
+      const engine = args!.engine as DatabaseEngine; const version = args!.version as string;
+      const input = args!.input as import("./api").DatabaseUserDropInput | undefined;
+      const username = (input?.username ?? args!.username) as string; const host = (input?.host ?? args!.host) as string;
+      const { state } = mysqlPreview(version, true, engine);
+      const entry = [...state.users.entries()].find(([, user]) => user.username === username && user.host === host);
+      if (!entry) throw { code: "DB_USER_MISSING", message: "所选账号已不存在，请刷新列表" };
+      const key = mockGrantKey(engine, version, username, host);
+      if (!mockUserPasswordRevisions.has(key)) mockUserPasswordRevisions.set(key, uid());
+      const data = mysqlGrantsPreview(engine, version, username, host);
+      const revision = `${mockUserPasswordRevisions.get(key)}:${data.revision}`;
+      const info: import("./api").DatabaseUserDropInfo = { username, host, protected: data.protected, dependencies: [], moreDependencies: false, roleDependents: 0, proxyDependents: 0, usernameConnections: 0, revision };
+      if (cmd === "db_user_drop" && input) {
+        if (input.confirmation !== `${username}@${host}`) throw { code: "DB_USER_CONFIRM", message: "请完整输入账号及来源主机" };
+        if (info.protected) throw { code: "SYSTEM_ACCOUNT", message: "此系统账号受保护" };
+        if (input.revision !== revision) throw { code: "DB_USER_CHANGED", message: "账号已变化，请重新检查" };
+        await delay(700);
+        if (input.revision !== `${mockUserPasswordRevisions.get(key)}:${data.revision}` || state.users.get(entry[0]) !== entry[1]) throw { code: "DB_USER_CHANGED", message: "账号已变化，请重新检查" };
+        state.users.delete(entry[0]); mockDatabaseGrants.delete(key); mockUserPasswordRevisions.delete(key);
+        return undefined as T;
+      }
+      return info as T;
+    }
     case "db_user_password_info":
     case "db_user_password_save": {
       const engine = args!.engine as DatabaseEngine; const version = args!.version as string;

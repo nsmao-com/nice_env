@@ -351,6 +351,52 @@ pub struct DatabaseUserPasswordInput {
     pub revision: String,
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseUserDependency {
+    pub kind: String,
+    pub database: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseUserDropInfo {
+    pub username: String,
+    pub host: String,
+    pub protected: bool,
+    pub dependencies: Vec<DatabaseUserDependency>,
+    pub more_dependencies: bool,
+    pub role_dependents: u64,
+    pub proxy_dependents: u64,
+    pub username_connections: u64,
+    pub revision: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseUserDropInput {
+    pub username: String,
+    pub host: String,
+    pub confirmation: String,
+    pub revision: String,
+}
+
+pub fn drop_database_user(state: &crate::CoreState, engine: DatabaseEngine, version: &str, input: &DatabaseUserDropInput) -> Result<()> {
+    let _work = crate::BackgroundWork::begin("删除数据库账号")?;
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    if version.is_empty() || version.len() > 64 || !version.bytes().all(|c| c.is_ascii_alphanumeric() || b".-_".contains(&c)) {
+        return Err(AppError::new("BAD_VERSION", "数据库版本无效"));
+    }
+    let path = crate::paths::checked_data_path(&state.paths.base, &format!("etc/.db-user-drop-{}-{version}.lock", engine.id()))?;
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(path)?;
+    lock.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => AppError::new("DB_USER_DROP_BUSY", "此实例正在删除账号，请稍后再试"),
+        std::fs::TryLockError::Error(error) => AppError::io("锁定账号删除操作", error),
+    })?;
+    state.with_database(engine, Some(version), |_, client| client.drop_user(input))
+}
+
 pub fn update_database_user_password(state: &crate::CoreState, engine: DatabaseEngine, version: &str, input: &DatabaseUserPasswordInput) -> Result<DatabaseUserPasswordInfo> {
     let _work = crate::BackgroundWork::begin("修改数据库账号密码")?;
     let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
@@ -594,6 +640,111 @@ impl MySqlClient {
             let (user, host) = line.split_once('\t').ok_or_else(|| AppError::new("MYSQL_RESPONSE", "账号列表响应不完整"))?;
             Ok(DbUserInfo { username: decode_hex_field(user)?, host: decode_hex_field(host)?, grants: None })
         }).collect()
+    }
+
+    pub fn user_drop_info(&self, username: &str, host: &str) -> Result<DatabaseUserDropInfo> {
+        use sha2::{Digest, Sha256};
+        let filter = account_filter(username, host)?;
+        let user_hex = hex::encode_upper(username);
+        let host_hex = hex::encode_upper(host);
+        let tables = self.run("SHOW TABLES FROM mysql;")?.lines().map(str::to_string).collect::<Vec<_>>();
+        let count = |sql: &str| -> Result<u64> { self.run(sql)?.trim().parse().map_err(|_| AppError::new("MYSQL_RESPONSE", "账号依赖计数无法识别")) };
+        let mut snapshots = Vec::new();
+        let mut protected = protected_account(username, host);
+        // 账号与授权表逐表确认结构；认证原文只参与服务器内哈希，不返回本机。
+        for (table, columns, predicate) in [
+            ("user", vec!["User", "Host"], filter.clone()),
+            ("global_priv", vec!["User", "Host"], filter.clone()),
+            ("db", vec!["User", "Host"], filter.clone()),
+            ("tables_priv", vec!["User", "Host"], filter.clone()),
+            ("columns_priv", vec!["User", "Host"], filter.clone()),
+            ("procs_priv", vec!["User", "Host"], filter.clone()),
+            ("global_grants", vec!["User", "Host", "Priv"], filter.clone()),
+            ("default_roles", vec!["User", "Host"], filter.clone()),
+            ("role_edges", vec!["FROM_USER", "FROM_HOST", "TO_USER", "TO_HOST"], format!("(HEX(FROM_USER)='{user_hex}' AND HEX(FROM_HOST)='{host_hex}') OR (HEX(TO_USER)='{user_hex}' AND HEX(TO_HOST)='{host_hex}')")),
+            ("roles_mapping", vec!["User", "Host", "Role"], format!("({filter}) OR HEX(Role)='{user_hex}'")),
+            ("proxies_priv", vec!["User", "Host", "Proxied_user", "Proxied_host"], format!("({filter}) OR (HEX(Proxied_user)='{user_hex}' AND HEX(Proxied_host)='{host_hex}')")),
+        ] {
+            if !tables.iter().any(|name| name == table) {
+                if ["user", "db", "tables_priv", "columns_priv", "procs_priv", "proxies_priv"].contains(&table) { return Err(AppError::new("DB_USER_DROP_UNSUPPORTED", "授权表不完整，不能安全检查账号删除影响")); }
+                continue;
+            }
+            let fields = self.run(&format!("SHOW COLUMNS FROM mysql.{};", mysql_identifier(table)))?.lines().filter_map(|line| line.split('\t').next()).map(str::to_string).collect::<Vec<_>>();
+            if fields.is_empty() || columns.iter().any(|expected| !fields.iter().any(|field| field.eq_ignore_ascii_case(expected))) {
+                return Err(AppError::new("DB_USER_DROP_UNSUPPORTED", "当前授权表结构不支持账号删除检查"));
+            }
+            // HEX 同时保留 NULL，并避免 BLOB/二进制字符集被 JSON_ARRAY 拒绝。
+            let values = fields.iter().map(|field| format!("HEX({})", mysql_identifier(field))).collect::<Vec<_>>().join(",");
+            let digest = self.run(&format!("SELECT SHA2(JSON_ARRAY({values}),256) FROM mysql.{} WHERE {predicate} ORDER BY 1;", mysql_identifier(table)))?;
+            if table == "user" {
+                if digest.trim().is_empty() { return Err(AppError::new("DB_USER_MISSING", "所选账号已不存在，请刷新列表")); }
+                let metadata_privileges = ["Select_priv", "Show_view_priv", "Trigger_priv", "Event_priv"];
+                let restrictions = if fields.iter().any(|field| field.eq_ignore_ascii_case("User_attributes")) { " AND COALESCE(JSON_LENGTH(User_attributes,'$.Restrictions'),0)=0" } else { "" };
+                if metadata_privileges.iter().any(|required| !fields.iter().any(|field| field.eq_ignore_ascii_case(required)))
+                    || count(&format!("SELECT COUNT(*) FROM mysql.user WHERE HEX(CONCAT(User,'@',Host))=HEX(CURRENT_USER()) AND {}{restrictions};", metadata_privileges.iter().map(|name| format!("{name}='Y'")).collect::<Vec<_>>().join(" AND ")))? != 1 {
+                    return Err(AppError::new("DB_USER_METADATA_ACCESS", "当前管理连接缺少完整的对象查看权限，不能确认删除影响").with_hint("请用具备全局 SELECT、SHOW VIEW、TRIGGER、EVENT 权限的管理连接重新检查。"));
+                }
+                let admin = fields.iter().filter(|name| ["super_priv", "create_user_priv"].contains(&name.to_ascii_lowercase().as_str())).map(|name| format!("{}='Y'", mysql_identifier(name))).collect::<Vec<_>>();
+                if !admin.is_empty() { protected |= count(&format!("SELECT COUNT(*) FROM mysql.user WHERE {filter} AND ({});", admin.join(" OR ")))? > 0; }
+            } else if table == "global_grants" {
+                protected |= count(&format!("SELECT COUNT(*) FROM mysql.global_grants WHERE {filter} AND Priv IN ('SYSTEM_USER','ROLE_ADMIN');"))? > 0;
+            }
+            // 防止客户端输出上限导致不完整指纹被当成有效快照。
+            if digest.lines().any(|line| line.len() != 64 || !line.bytes().all(|c| c.is_ascii_hexdigit())) || digest.len() >= 16 * 1024 * 1024 {
+                return Err(AppError::new("MYSQL_RESPONSE", "账号授权快照不完整，请使用数据库客户端管理"));
+            }
+            snapshots.push((table, digest));
+        }
+        let definer = hex::encode_upper(format!("{username}@{host}"));
+        let mut queries = Vec::new();
+        for (kind, table, database, name) in [("view", "VIEWS", "TABLE_SCHEMA", "TABLE_NAME"), ("routine", "ROUTINES", "ROUTINE_SCHEMA", "ROUTINE_NAME"), ("trigger", "TRIGGERS", "TRIGGER_SCHEMA", "TRIGGER_NAME"), ("event", "EVENTS", "EVENT_SCHEMA", "EVENT_NAME")] {
+            let fields = self.run(&format!("SHOW COLUMNS FROM information_schema.{table};"))?;
+            let fields = fields.lines().filter_map(|line| line.split('\t').next()).collect::<Vec<_>>();
+            if [database, name, "DEFINER"].iter().any(|required| !fields.contains(required)) { return Err(AppError::new("DB_USER_DROP_UNSUPPORTED", "无法完整检查账号关联的数据库对象")); }
+            queries.push(format!("SELECT '{kind}' AS kind, HEX({database}) AS db_name, HEX({name}) AS object_name FROM information_schema.{table} WHERE HEX(DEFINER)='{definer}'"));
+        }
+        let rows = self.run(&format!("{} ORDER BY kind, db_name, object_name LIMIT 51;", queries.join(" UNION ALL ")))?;
+        let mut dependencies = Vec::new();
+        for line in rows.lines().filter(|line| !line.is_empty()) {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            if fields.len() != 3 { return Err(AppError::new("MYSQL_RESPONSE", "账号关联对象响应不完整")); }
+            dependencies.push(DatabaseUserDependency { kind: fields[0].into(), database: decode_hex_field(fields[1])?, name: decode_hex_field(fields[2])? });
+        }
+        let role_dependents = if tables.iter().any(|name| name == "role_edges") { count(&format!("SELECT COUNT(*) FROM mysql.role_edges WHERE HEX(FROM_USER)='{user_hex}' AND HEX(FROM_HOST)='{host_hex}';"))? }
+            else if tables.iter().any(|name| name == "roles_mapping") && host.is_empty() { count(&format!("SELECT COUNT(*) FROM mysql.roles_mapping WHERE HEX(Role)='{user_hex}';"))? } else { 0 };
+        let proxy_dependents = count(&format!("SELECT COUNT(*) FROM mysql.proxies_priv WHERE HEX(Proxied_user)='{user_hex}' AND HEX(Proxied_host)='{host_hex}' AND NOT ({filter});"))?;
+        let mut info = DatabaseUserDropInfo { username: username.into(), host: host.into(), protected, more_dependencies: dependencies.len() > 50, dependencies,
+            role_dependents, proxy_dependents, username_connections: 0, revision: String::new() };
+        info.dependencies.truncate(50);
+        static SNAPSHOT_KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+        let mut digest = Sha256::new(); digest.update(SNAPSHOT_KEY.get_or_init(rand::random));
+        digest.update(self.port.to_be_bytes()); digest.update(self.exe.to_string_lossy().as_bytes());
+        digest.update(self.run("SELECT @@version;")?.as_bytes());
+        digest.update(serde_json::to_vec(&(snapshots, &info)).map_err(|error| AppError::internal("记录账号删除版本", error.to_string()))?);
+        info.revision = hex::encode(digest.finalize());
+        // PROCESSLIST 的 Host 是客户端来源，不能等同授权账号的 Host；此处仅报告同用户名总数。
+        info.username_connections = count(&format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE HEX(USER)='{user_hex}';"))?;
+        Ok(info)
+    }
+
+    fn drop_user(&self, input: &DatabaseUserDropInput) -> Result<()> {
+        if input.confirmation != format!("{}@{}", input.username, input.host) { return Err(AppError::new("DB_USER_CONFIRM", "请完整输入要删除的账号及来源主机")); }
+        let before = self.user_drop_info(&input.username, &input.host)?;
+        if before.protected { return Err(AppError::new("SYSTEM_ACCOUNT", "系统账号或具有账号管理权限的账号受保护")); }
+        if !before.dependencies.is_empty() || before.role_dependents > 0 || before.proxy_dependents > 0 {
+            return Err(AppError::new("DB_USER_DEPENDENCIES", "账号仍被数据库对象、角色或代理授权使用，请先转移或解除依赖"));
+        }
+        if before.revision != input.revision { return Err(AppError::new("DB_USER_CHANGED", "账号、授权或依赖已变化，请重新读取并确认删除范围")); }
+        let account = format!("'{}'@'{}'", input.username.replace('\'', "''"), input.host.replace('\'', "''"));
+        // 单个精确账号，不使用 IF EXISTS、FORCE 或 KILL；不删除业务对象。
+        // 外部管理工具不受应用锁约束；服务器仍执行自己的权限和依赖校验。
+        let result = self.run(&format!("SET SESSION sql_mode=CONCAT_WS(',',NULLIF(@@SESSION.sql_mode,''),'NO_BACKSLASH_ESCAPES'); DROP USER {account};"));
+        let filter = account_filter(&input.username, &input.host)?;
+        let remains = self.run(&format!("SELECT COUNT(*) FROM mysql.user WHERE {filter};"))
+            .map_err(|error| error.with_hint("删除语句已发送，但无法确认当前状态；请刷新账号列表后再操作。"))?;
+        if remains.trim() == "0" { return Ok(()); }
+        result.map_err(|error| error.with_hint("未能确认账号已删除，请重新读取账号与依赖信息。已有连接不会被自动断开。"))?;
+        Err(AppError::new("DB_USER_DROP_VERIFY", "删除后仍读到同名账号，请重新读取确认，勿反复提交"))
     }
 
     pub fn user_password_info(&self, username: &str, host: &str) -> Result<DatabaseUserPasswordInfo> {

@@ -307,6 +307,10 @@ export const dbGrantsSave = (engine: DatabaseEngine, version: string, input: Dat
 export const dbCreateUser = (username: string, password: string, database: string, version?: string, engine: DatabaseEngine = "mysql") =>
   safe(invoke<boolean>("db_create_user", { username, password, database, version, engine }));
 export interface DatabaseUserPasswordInfo { username: string; host: string; plugins: string[]; targetPlugin: string; supported: boolean; protected: boolean; otherAuthentication: boolean; revision: string }
+export interface DatabaseUserDropInfo { username: string; host: string; protected: boolean; dependencies: { kind: "view" | "routine" | "trigger" | "event"; database: string; name: string }[]; moreDependencies: boolean; roleDependents: number; proxyDependents: number; usernameConnections: number; revision: string }
+export interface DatabaseUserDropInput { username: string; host: string; confirmation: string; revision: string }
+export const dbUserDropInfo = (engine: DatabaseEngine, version: string, username: string, host: string) => safe(invoke<DatabaseUserDropInfo>("db_user_drop_info", { engine, version, username, host }));
+export const dbUserDrop = (engine: DatabaseEngine, version: string, input: DatabaseUserDropInput) => safe(invoke<void>("db_user_drop", { engine, version, input }));
 export interface DatabaseUserPasswordInput { username: string; host: string; password: string; revision: string }
 export const dbUserPasswordInfo = (engine: DatabaseEngine, version: string, username: string, host: string) => safe(invoke<DatabaseUserPasswordInfo>("db_user_password_info", { engine, version, username, host }));
 export const dbUserPasswordSave = (engine: DatabaseEngine, version: string, input: DatabaseUserPasswordInput) => safe(invoke<DatabaseUserPasswordInfo>("db_user_password_save", { engine, version, input }));

@@ -3330,6 +3330,72 @@ mod validate_tests {
         assert!(denied.hint.unwrap_or_default().contains("archive_denied"));
         assert_eq!(String::from_utf8_lossy(&pg_query("archive_denied", "SELECT count(*) FROM pg_tables WHERE schemaname='public';").stdout).trim(), "0");
         assert!(pg_query("project_data", "DROP EVENT TRIGGER archive_event_probe; DROP FUNCTION archive_event_probe();").status.success());
+        // 替换必须保留原库和恢复前归档；多余旧表不能混入恢复后的数据库。
+        client.create_database("replace_target", "restore_owner").unwrap();
+        assert!(pg_query("replace_target", "CREATE TABLE only_before (value int); INSERT INTO only_before VALUES (87);").status.success());
+        let target = management().into_iter().find(|db| db.name == "replace_target").unwrap();
+        let replace_input = crate::dbbackup::PostgresReplaceInput { path: archive.to_string_lossy().into(), name: target.name.clone(), oid: target.oid,
+            owner: "restore_owner".into(), confirmed_name: target.name.clone(), trusted: true };
+        let replace = |input: &crate::dbbackup::PostgresReplaceInput| state.with_postgres("16.6", |client| crate::dbbackup::postgres_replace_from_file(&state.paths, client, "16.6", input, &|_| {}));
+        assert_eq!(replace(&crate::dbbackup::PostgresReplaceInput { confirmed_name: "wrong".into(), ..replace_input.clone() }).unwrap_err().code, "POSTGRES_CONFIRM_NAME");
+        assert_eq!(replace(&crate::dbbackup::PostgresReplaceInput { oid: target.oid + 1, ..replace_input.clone() }).unwrap_err().code, "POSTGRES_TARGET_CHANGED");
+        assert_eq!(replace(&crate::dbbackup::PostgresReplaceInput { trusted: false, ..replace_input.clone() }).unwrap_err().code, "POSTGRES_BACKUP_UNTRUSTED");
+        assert_eq!(replace(&crate::dbbackup::PostgresReplaceInput { name: "postgres".into(), confirmed_name: "postgres".into(), oid: system.oid, ..replace_input.clone() }).unwrap_err().code, "POSTGRES_PROTECTED");
+        assert!(pg_query("replace_target", "CREATE SUBSCRIPTION niceenv_replace_probe CONNECTION 'host=127.0.0.1 port=1 dbname=unused' PUBLICATION unused WITH (connect=false, slot_name=NONE);").status.success());
+        assert_eq!(replace(&replace_input).unwrap_err().code, "POSTGRES_REPLICATION_UNSUPPORTED");
+        assert!(pg_query("replace_target", "DROP SUBSCRIPTION niceenv_replace_probe;").status.success());
+        let denied = replace(&crate::dbbackup::PostgresReplaceInput { path: privileged.to_string_lossy().into(), ..replace_input.clone() }).unwrap_err();
+        assert!(denied.hint.as_deref().is_some_and(|hint| hint.contains(".dump")));
+        assert!(management().iter().any(|db| db.name == target.name && db.oid == target.oid));
+        assert_eq!(String::from_utf8_lossy(&pg_query("replace_target", "SELECT value FROM only_before;").stdout).trim(), "87");
+        let result = replace(&replace_input).unwrap();
+        assert!(Path::new(&result.safety_backup).is_file());
+        assert!(management().iter().any(|db| db.name == result.previous_database && db.oid == target.oid));
+        assert_eq!(String::from_utf8_lossy(&pg_query("replace_target", "SELECT value FROM project_proof;").stdout).trim(), "84");
+        assert!(!pg_query("replace_target", "SELECT * FROM only_before;").status.success());
+        assert_eq!(String::from_utf8_lossy(&pg_query(&result.previous_database, "SELECT value FROM only_before;").stdout).trim(), "87");
+        restore(Path::new(&result.safety_backup), "safety_verified", true).unwrap();
+        assert_eq!(String::from_utf8_lossy(&pg_query("safety_verified", "SELECT value FROM only_before;").stdout).trim(), "87");
+        // 第二次重命名后的 OID 核对失败时，第一次重命名也必须回滚。
+        client.create_database("swap_target", "restore_owner").unwrap();
+        client.create_database("swap_stage", "restore_owner").unwrap();
+        let swap_target = management().into_iter().find(|db| db.name == "swap_target").unwrap();
+        let mut swap_stage = management().into_iter().find(|db| db.name == "swap_stage").unwrap();
+        let stage_oid = swap_stage.oid;
+        swap_stage.oid += 1;
+        assert!(crate::dbbackup::postgres_swap_restored(&client, &swap_target, &swap_stage, "swap_previous").is_err());
+        assert!(management().iter().any(|db| db.name == swap_target.name && db.oid == swap_target.oid));
+        assert!(management().iter().any(|db| db.name == swap_stage.name && db.oid == stage_oid));
+        assert!(!management().iter().any(|db| db.name == "swap_previous"));
+        swap_stage.oid = stage_oid;
+        assert!(crate::dbbackup::postgres_swap_restored(&client, &swap_target, &swap_stage, "postgres").is_err());
+        let (_private_busy, mut busy_command) = client.tool_command("psql", "swap_target", None).unwrap();
+        busy_command.args(["-c", "SELECT pg_sleep(12);"]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        let mut busy_connection = Connection(busy_command.spawn().unwrap());
+        let deadline = std::time::Instant::now();
+        while client.query(&format!("SELECT count(*) FROM pg_stat_activity WHERE datid={};", swap_target.oid)).unwrap().trim() == "0" {
+            assert!(deadline.elapsed() < Duration::from_secs(5)); std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(replace(&crate::dbbackup::PostgresReplaceInput { name: swap_target.name.clone(), confirmed_name: swap_target.name.clone(), oid: swap_target.oid, ..replace_input.clone() }).unwrap_err().code, "POSTGRES_DATABASE_BUSY");
+        assert!(crate::dbbackup::postgres_swap_restored(&client, &swap_target, &swap_stage, "swap_previous").is_err());
+        assert!(busy_connection.0.try_wait().unwrap().is_none());
+        assert!(busy_connection.0.wait().unwrap().success());
+        drop(busy_connection);
+        assert!(management().iter().any(|db| db.name == swap_target.name && db.oid == swap_target.oid));
+        crate::dbbackup::postgres_swap_restored(&client, &swap_target, &swap_stage, "swap_previous").unwrap();
+        client.query("CREATE DATABASE \"swap$niceenv$'中文\";").unwrap();
+        client.create_database("quoted_stage", "restore_owner").unwrap();
+        let quoted_target = management().into_iter().find(|db| db.name == "swap$niceenv$'中文").unwrap();
+        let quoted_stage = management().into_iter().find(|db| db.name == "quoted_stage").unwrap();
+        crate::dbbackup::postgres_swap_restored(&client, &quoted_target, &quoted_stage, "quoted_previous").unwrap();
+        assert!(management().iter().any(|db| db.name == quoted_target.name && db.oid == quoted_stage.oid));
+        for db in management().into_iter().filter(|db| db.name.starts_with("niceenv_restore_") || db.name == result.previous_database
+            || ["replace_target", "safety_verified", "swap_target", "swap_previous", "swap$niceenv$'中文", "quoted_previous"].contains(&db.name.as_str())) {
+            client.drop_database(&db.name, db.oid).unwrap();
+        }
+        for file in crate::dbbackup::postgres_list_backups(&state.paths).unwrap().into_iter().filter(|file| file.name.contains("replace_target")) {
+            crate::dbbackup::postgres_delete_backup(&state.paths, &file.name).unwrap();
+        }
         for name in ["archive_restored", "archive_denied"] {
             let db = management().into_iter().find(|db| db.name == name).unwrap(); client.drop_database(name, db.oid).unwrap();
         }

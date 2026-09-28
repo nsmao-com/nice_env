@@ -340,6 +340,9 @@ export const postgresBackupDir = () => safe(invoke<string>("postgres_backup_dir"
 export const postgresBackupDump = (version: string, name: string, oid: number, operationId: string) => safe(invoke<string>("postgres_backup_dump", { version, name, oid, operationId }));
 export const postgresBackupRestore = (version: string, path: string, name: string, owner: string, trusted: boolean, operationId: string) => safe(invoke<void>("postgres_backup_restore", { version, path, name, owner, trusted, operationId }));
 export const postgresBackupDelete = (name: string) => safe(invoke<void>("postgres_backup_delete", { name }));
+export interface PostgresReplaceInput { path: string; name: string; oid: number; owner: string; confirmedName: string; trusted: boolean }
+export interface PostgresReplaceResult { database: string; previousDatabase: string; safetyBackup: string }
+export const postgresBackupReplace = (version: string, input: PostgresReplaceInput, operationId: string) => safe(invoke<PostgresReplaceResult>("postgres_backup_replace", { version, input, operationId }));
 
 /* PHP 扩展 */
 export const phpExtensions = (version: string) =>

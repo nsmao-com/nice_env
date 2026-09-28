@@ -539,6 +539,13 @@ pub fn postgres_restore(
     paths: &Paths, client: &crate::dbadmin::PostgresClient, source: &Path, database: &str, owner: &str, trusted: bool,
     progress: &dyn Fn(DbBackupProgress),
 ) -> Result<()> {
+    postgres_restore_staged(paths, client, source, database, owner, trusted, progress).map(|_| ())
+}
+
+fn postgres_restore_staged(
+    paths: &Paths, client: &crate::dbadmin::PostgresClient, source: &Path, database: &str, owner: &str, trusted: bool,
+    progress: &dyn Fn(DbBackupProgress),
+) -> Result<crate::dbadmin::PostgresDatabaseInfo> {
     use std::io::{Read, Seek};
     if !trusted { return Err(AppError::new("POSTGRES_BACKUP_UNTRUSTED", "请先确认备份来源可信；恢复会执行归档中的数据库代码")); }
     if !source.is_absolute() || !source.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("dump")) {
@@ -572,11 +579,99 @@ pub fn postgres_restore(
     command.stdin(snapshot.as_file().try_clone()?).stdout(Stdio::null()).stderr(error.try_clone()?);
     let bytes = snapshot.as_file().metadata()?.len();
     client.create_database(database, owner)?;
+    let staged = client.list_databases()?.into_iter().find(|db| db.name == database)
+        .ok_or_else(|| AppError::new("POSTGRES_TARGET_CHANGED", "新建的数据库已变化，未开始恢复"))?;
     progress(DbBackupProgress { database: database.into(), bytes: 0, total: None, state: "running".into(), message: Some("正在恢复到新数据库，耗时取决于数据量".into()) });
     postgres_tool_result(&mut command, &mut error, client, "PostgreSQL 恢复未完成", || {})
         .map_err(|error| error.with_hint(format!("新建数据库“{database}”已保留，请检查后处理。恢复使用单个事务，未自动删除数据库；重试时请选择另一个新库名称。")))?;
     progress(DbBackupProgress { database: database.into(), bytes, total: Some(bytes), state: "done".into(), message: None });
-    Ok(())
+    Ok(staged)
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresReplaceInput {
+    pub path: String,
+    pub name: String,
+    pub oid: u32,
+    pub owner: String,
+    pub confirmed_name: String,
+    pub trusted: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresReplaceResult {
+    pub database: String,
+    pub previous_database: String,
+    pub safety_backup: String,
+}
+
+/// 两次重命名在同一事务内完成。RENAME 持有数据库排他锁直到提交，随后核对 OID；
+/// 名称被外部 SQL 替换、目标被占用或第二次重命名失败都会使事务回滚。
+pub(crate) fn postgres_swap_restored(
+    client: &crate::dbadmin::PostgresClient, target: &crate::dbadmin::PostgresDatabaseInfo,
+    staged: &crate::dbadmin::PostgresDatabaseInfo, previous_name: &str,
+) -> Result<()> {
+    let ident = crate::dbadmin::postgres_ident;
+    let literal = |name: &str| format!("E'{}'", name.replace('\\', "\\\\").replace('\'', "''"));
+    let guard = |oid: u32, name: &str| format!("DO {};", literal(&format!("BEGIN IF NOT EXISTS (SELECT 1 FROM pg_database WHERE oid={oid} AND datname={} AND NOT datistemplate AND datallowconn) OR EXISTS (SELECT 1 FROM pg_subscription WHERE subdbid={oid}) OR EXISTS (SELECT 1 FROM pg_replication_slots WHERE datoid={oid}) THEN RAISE EXCEPTION 'NICEENV_TARGET_CHANGED_OR_REPLICATION'; END IF; END", literal(name))));
+    if target.protected || staged.protected || !target.allow_connections || !staged.allow_connections || target.oid == staged.oid {
+        return Err(AppError::new("POSTGRES_PROTECTED", "不能替换系统库、模板库或不可连接的数据库"));
+    }
+    let sql = format!(
+        "BEGIN;\nALTER DATABASE {} RENAME TO {};\n{}\nALTER DATABASE {} RENAME TO {};\n{}\nCOMMIT;",
+        ident(&target.name)?, ident(previous_name)?, guard(target.oid, previous_name),
+        ident(&staged.name)?, ident(&target.name)?, guard(staged.oid, &target.name),
+    );
+    let switched = client.query(&sql);
+    // 提交附近断连时不能凭客户端退出码断定回滚；重新读目录核实最终状态。
+    let databases = client.list_databases();
+    if databases.as_ref().is_ok_and(|dbs| dbs.iter().any(|db| db.name == target.name && db.oid == staged.oid)
+        && dbs.iter().any(|db| db.name == previous_name && db.oid == target.oid)) {
+        return Ok(());
+    }
+    let original_retained = databases.as_ref().is_ok_and(|dbs| dbs.iter().any(|db| db.name == target.name && db.oid == target.oid));
+    let detail = switched.err().or_else(|| databases.err()).map(|error| error.detail.unwrap_or(error.message)).unwrap_or_else(|| "数据库名称或标识与预期不一致".into());
+    Err(AppError::new(if original_retained { "POSTGRES_REPLACE_FAILED" } else { "POSTGRES_REPLACE_UNCONFIRMED" }, if original_retained { "数据库替换失败，已核对原数据库仍在原名称下" } else { "未能确认数据库替换结果，请刷新核对后再操作" })
+        .with_hint(format!("请先关闭业务连接；不会强制断开连接或自动删除数据库。请核对原名称“{}”、暂存库“{}”和保留库“{previous_name}”。", target.name, staged.name))
+        .with_detail(detail))
+}
+
+pub fn postgres_replace_from_file(
+    paths: &Paths, client: &crate::dbadmin::PostgresClient, version: &str, input: &PostgresReplaceInput,
+    progress: &dyn Fn(DbBackupProgress),
+) -> Result<PostgresReplaceResult> {
+    if !input.trusted { return Err(AppError::new("POSTGRES_BACKUP_UNTRUSTED", "请先确认备份来源可信")); }
+    if input.name != input.confirmed_name { return Err(AppError::new("POSTGRES_CONFIRM_NAME", "请输入要替换的完整数据库名称")); }
+    let target = client.list_databases()?.into_iter().find(|db| db.name == input.name && db.oid == input.oid)
+        .ok_or_else(|| AppError::new("POSTGRES_TARGET_CHANGED", "目标数据库已变化，请刷新后重新确认"))?;
+    if target.protected || !target.allow_connections { return Err(AppError::new("POSTGRES_PROTECTED", "只能替换可连接的业务数据库")); }
+    if !client.list_roles()?.iter().any(|role| role.name == input.owner && role.can_login) {
+        return Err(AppError::new("POSTGRES_OWNER_CHANGED", "所选所有者不存在或无法登录，请重新选择"));
+    }
+    let busy = client.query(&format!("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datid={}) OR EXISTS (SELECT 1 FROM pg_prepared_xacts WHERE database=(SELECT datname FROM pg_database WHERE oid={}));", target.oid, target.oid))?;
+    if busy.trim() != "f" { return Err(AppError::new("POSTGRES_DATABASE_BUSY", "目标数据库仍有连接或预备事务，请先处理后重试；不会强制断开连接")); }
+    let replication = client.query(&format!("SELECT EXISTS (SELECT 1 FROM pg_subscription WHERE subdbid={}) OR EXISTS (SELECT 1 FROM pg_replication_slots WHERE datoid={});", target.oid, target.oid))?;
+    if replication.trim() != "f" {
+        return Err(AppError::new("POSTGRES_REPLICATION_UNSUPPORTED", "此数据库含逻辑复制订阅或复制槽，不能自动替换")
+            .with_hint("可恢复到新数据库进行核对；现有复制关系需要由管理员手动处理。"));
+    }
+    let suffix = crate::dbadmin::random_database_password()[..16].to_ascii_lowercase();
+    let staged_name = format!("niceenv_restore_{suffix}");
+    let previous_name = format!("niceenv_previous_{suffix}");
+    let safety = postgres_dump(paths, client, version, &target.name, target.oid, &|mut state| {
+        state.state = "running".into(); state.message = Some("正在创建恢复前备份".into()); progress(state);
+    }).map_err(|error| AppError::new("SAFETY_BACKUP_FAILED", "恢复前备份失败，已中止替换").with_detail(error.detail.unwrap_or(error.message)))?;
+    let recovery = format!("恢复前备份：{}。暂存库：{staged_name}。保留库名称：{previous_name}。", safety.display());
+    let staged = postgres_restore_staged(paths, client, Path::new(&input.path), &staged_name, &input.owner, true, &|mut state| {
+        state.state = "running".into(); progress(state);
+    }).map_err(|error| error.with_hint(format!("尚未切换数据库名称，请保留现场检查。{recovery}")))?;
+    progress(DbBackupProgress { database: target.name.clone(), bytes: 0, total: None, state: "running".into(), message: Some("正在核对并切换数据库名称".into()) });
+    postgres_swap_restored(client, &target, &staged, &previous_name)
+        .map_err(|error| { let hint = format!("{} {recovery}", error.hint.as_deref().unwrap_or("")); error.with_hint(hint) })?;
+    progress(DbBackupProgress { database: target.name.clone(), bytes: 0, total: None, state: "done".into(), message: Some(recovery) });
+    Ok(PostgresReplaceResult { database: target.name, previous_database: previous_name, safety_backup: safety.to_string_lossy().into() })
 }
 
 #[cfg(test)]

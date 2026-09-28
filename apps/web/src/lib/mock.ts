@@ -66,7 +66,7 @@ import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSet
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.86";
+const MOCK_APP_VERSION = "0.2.87";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -2595,6 +2595,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "postgres_backup_dump":
     case "postgres_backup_restore":
+    case "postgres_backup_replace":
     case "postgres_connection":
     case "postgres_password":
     case "postgres_databases":
@@ -2636,6 +2637,27 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         return connection.saved as T;
       }
       const data = postgresPreview(version);
+      if (cmd === "postgres_backup_replace") {
+        const input = args!.input as import("./api").PostgresReplaceInput;
+        if (!input.trusted) throw { code: "POSTGRES_BACKUP_UNTRUSTED", message: "请先确认备份来源可信" };
+        if (input.confirmedName !== input.name) throw { code: "POSTGRES_CONFIRM_NAME", message: "请输入完整数据库名称" };
+        const target = data.databases.find((db) => db.name === input.name && db.oid === input.oid);
+        if (!target) throw { code: "POSTGRES_TARGET_CHANGED", message: "目标数据库已变化，请刷新后重新确认" };
+        if (target.protected || !target.allowConnections) throw { code: "POSTGRES_PROTECTED", message: "只能替换可连接的业务数据库" };
+        const backup = [...mockPostgresBackups.values()].find((entry) => entry.file.path === input.path);
+        if (!backup) throw { code: "BAD_BACKUP_FILE", message: "找不到有效的 PostgreSQL custom 归档" };
+        if (!data.roles.some((role) => role.name === input.owner && role.canLogin)) throw { code: "POSTGRES_OWNER_CHANGED", message: "所选所有者不存在或无法登录" };
+        const savedName = `postgresql-${version}-${target.name}-${Date.now()}.dump`;
+        const savedFile: DbBackupFile = { name: savedName, path: `C:/NiceEnv/backup/postgresql/${savedName}`, sizeBytes: 16384, createdAt: Math.floor(Date.now() / 1000) };
+        mockPostgresBackups.set(savedName, { file: savedFile, database: structuredClone(target) });
+        emitLocal("postgres://backup", { operationId: args!.operationId, database: target.name, bytes: 0, state: "running" });
+        await delay(1200);
+        if (!data.databases.some((db) => db.name === input.name && db.oid === input.oid)) throw { code: "POSTGRES_TARGET_CHANGED", message: "目标数据库已变化，未执行切换" };
+        const previousDatabase = `niceenv_previous_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
+        target.name = previousDatabase;
+        data.databases.push({ ...structuredClone(backup.database), oid: data.nextOid++, name: input.name, owner: input.owner });
+        return { database: input.name, previousDatabase, safetyBackup: savedFile.path } as T;
+      }
       if (cmd === "postgres_backup_dump") {
         const database = data.databases.find((db) => db.name === args!.name && db.oid === args!.oid);
         if (!database || database.protected || !database.allowConnections) throw { code: "POSTGRES_TARGET_CHANGED", message: "请选择当前实例中的业务数据库" };

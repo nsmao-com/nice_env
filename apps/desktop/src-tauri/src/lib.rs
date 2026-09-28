@@ -375,6 +375,7 @@ pub fn run() {
             postgres_backup_dir,
             postgres_backup_dump,
             postgres_backup_restore,
+            postgres_backup_replace,
             postgres_backup_delete,
             // 数据库备份 / 还原
             db_backup_list,
@@ -3410,6 +3411,16 @@ async fn postgres_backup_restore(state: State<'_, std::sync::Arc<nsb_core::CoreS
 fn postgres_backup_delete(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, name: String) -> Result<(), tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     map_jh(nsb_core::dbbackup::postgres_delete_backup(&state.paths, &name))
+}
+
+#[tauri::command]
+async fn postgres_backup_replace(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, input: nsb_core::dbbackup::PostgresReplaceInput, operation_id: String) -> Result<nsb_core::dbbackup::PostgresReplaceResult, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.with_postgres(&version, |client| {
+        nsb_core::dbbackup::postgres_replace_from_file(&st.paths, client, &version, &input, &|progress| {
+            (st.emit)(nsb_core::Event::PostgresBackup(nsb_core::model::PostgresBackupProgress { operation_id: operation_id.clone(), progress }));
+        })
+    }))).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /* ================= 服务看门狗 ================= */

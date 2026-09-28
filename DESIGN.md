@@ -2368,3 +2368,24 @@ MariaDB 初始化在临时目录限时执行，成功后才替换空目标目录
 本轮提供 custom 归档导出、文件导入和恢复到新库；原地覆盖恢复、实例账号全局备份、定时 PostgreSQL 备份、远程实例直接迁移及细粒度授权编辑仍需后续完善，整体目标保持进行。Windows PostgreSQL 16.6 为原生验收平台，Linux/macOS 未做本轮实机验收。
 
 参考：https://support.servbay.com/database-management/getting-started/postgresql-management-and-usage 、https://support.servbay.com/database-management/getting-started/import-data-from-existing-postgresql 、https://support.servbay.com/getting-started/backup-and-restore 、https://www.postgresql.org/docs/current/app-pgdump.html 、https://www.postgresql.org/docs/current/app-pgrestore.html
+
+
+## 第一百零一轮：PostgreSQL 恢复并替换已有数据库（v0.2.87）
+
+沿用 ServBay 的备份恢复入口，使用 fast-context 追踪数据库客户端、备份、Tauri 命令和界面；核对 PostgreSQL ALTER DATABASE 官方文档及 REL_16_STABLE 的 RenameDatabase 实现。新增恢复到已有数据库，避免逐表覆盖后混入目标库旧表。没有新增运行依赖。
+
+替换前要求可信归档、输入完整数据库名称、目标 OID 匹配和有效所有者，保护系统库与模板库。目标有活动连接或预备事务时拒绝，不强制断连；含逻辑复制订阅或数据库复制槽时拒绝自动替换，避免数据库内部标识改变后损坏复制关系。先自动导出恢复前 custom 归档，再将输入归档恢复到随机命名的独立暂存库，沿用文件快照、PGDMP 和 pg_restore --list 预检及单事务恢复。恢复失败保留现场、原库和恢复前归档，不自动删库。
+
+恢复成功后在同一事务中将原库改为 niceenv_previous_ 随机名称，再把暂存库改为目标名称。每次 RENAME 取得数据库排他锁后核对 OID、可连接状态和逻辑复制关系；任一重命名或核对失败均回滚。复用标识符引用函数，DO 块使用双层 E-string 转义，库名中的引号、中文或美元分隔符不能截断代码块。提交附近断连后重新读取目录，核实原名称和保留名称对应的实际 OID；无法确认结果时明确提示检查现场，不把客户端报错一律解释为回滚。成功返回原名称、保留库名称及恢复前归档路径。
+
+UI 沿用已读的 UI/UX skill 与项目组件，恢复方式默认创建新库；替换模式选择业务库、所有者并完整输入目标名称，切换目标重置确认。原所有者不可登录时要求重新选择，不静默换成其它账号。显示持续结果提示，保留库名称和备份路径可以查看；处理中锁定表单、关闭和页签，失败保留输入。中英文说明名称保留但内部标识改变、新库使用 UTF-8 默认配置、ACL/表空间/数据库级设置需核对，以及额外磁盘空间需求。归档必须可信，普通所有者和单事务不是恶意数据库代码的安全隔离。
+
+浏览器在既有 localhost 演示环境完成默认新库模式、完整名称校验、切换目标清空确认、替换成功后原库与恢复前备份可见、再次恢复到新库、忙时关闭与重复提交保护。1360px 桌面、390px 中文与 320px 英文截图已目检；320px 恢复弹窗宽度与 scrollWidth 均为 296px，正文可滚动、操作区固定。修复窄屏搜索框被刷新按钮挤压，改为上下排列；刷新验收页后输入宽度从 33px 变为 163px。结果提示的英文标签按词换行，长路径单独断行。只关闭本轮 QA 上下文，保留用户原有 packages/sites 页面。浏览器仅验交互，真实行为另由原生验收证明。
+
+11 个版本文件同步到 0.2.87，Cargo.lock 仅更新三个本项目 crate。独立发布树排除原有 configgen.rs 的 178 additions / 9 deletions 与用户未跟踪文件；原配置文件按换行正规化后与 HEAD 完全一致。pnpm check 和 cargo check --workspace --all-targets --locked 均通过。最终独立发布树数据库管理、备份、迁移、配置传输及 PostgreSQL 原生验收 23 通过、0 失败、679 filtered out，耗时 144.01 秒；验证扩展于已有 Rust 模块，未新增测试文件。
+
+Windows PostgreSQL 16.6 原生验收覆盖完整名称、可信来源、错误 OID 和系统库保护；禁用且不连接外部服务的逻辑订阅会阻止替换；含事件触发器的归档在普通所有者下失败，目标 OID 与原数据保持。成功替换后读回归档值 84，旧表不会混入新库；保留原库读回 87，恢复前归档再次导入也读回 87。第二次重命名后的 OID 校验失败会回滚第一次改名，保留名称冲突拒绝，活动查询未被强制结束，连接自然退出后切换成功。含中文、引号和美元分隔符的库名切换通过，并继续通过此前初始化、认证、备份和停机回归。
+
+本次没有业务数据库变更，未修改 update.sql；原生验收仅用隔离临时目录和端口。未启动前端 dev，未执行本地前端 build。v0.2.86 Release 已确认 completed/success；本轮按根 AGENTS.md 创建新 annotated tag v0.2.87，与 main 原子推送并核对远程指向和实际构建状态。Linux/macOS 未做原生实机验收；数据库级配置与复制关系需手动规划，实例全局账号备份、定时 PostgreSQL 备份及细粒度授权编辑仍需后续完善，整体目标保持进行。
+
+参考：https://support.servbay.com/getting-started/backup-and-restore 、https://www.postgresql.org/docs/current/sql-alterdatabase.html 、https://raw.githubusercontent.com/postgres/postgres/REL_16_STABLE/src/backend/commands/dbcommands.c

@@ -574,7 +574,7 @@ pub struct PostgresRoleInfo {
     pub databases: Vec<String>,
 }
 
-fn postgres_ident(name: &str) -> Result<String> {
+pub(crate) fn postgres_ident(name: &str) -> Result<String> {
     if name.is_empty() || name.len() > 63 || name.chars().any(char::is_control) {
         return Err(AppError::new("POSTGRES_BAD_NAME", "名称须为 1–63 字节且不能包含控制字符"));
     }

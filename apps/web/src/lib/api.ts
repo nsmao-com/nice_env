@@ -325,6 +325,15 @@ export const postgresConnection = (version: string) => safe(invoke<PostgresConne
 export const postgresPassword = (version: string) => safe(invoke<string>("postgres_password", { version }));
 export const postgresSetPassword = (version: string, password: string, useExisting: boolean, enablePasswordAuth: boolean) =>
   safe(invoke<void>("postgres_set_password", { version, password, useExisting, enablePasswordAuth }));
+export interface PostgresDatabaseInfo { oid: number; name: string; owner: string; encoding: string; sizeBytes: number; protected: boolean; allowConnections: boolean }
+export interface PostgresRoleInfo { oid: number; name: string; canLogin: boolean; superuser: boolean; createDb: boolean; createRole: boolean; replication: boolean; bypassRls: boolean; protected: boolean; databases: string[] }
+export const postgresDatabases = (version: string) => safe(invoke<PostgresDatabaseInfo[]>("postgres_databases", { version }));
+export const postgresRoles = (version: string) => safe(invoke<PostgresRoleInfo[]>("postgres_roles", { version }));
+export const postgresCreateDatabase = (version: string, name: string, owner: string) => safe(invoke<void>("postgres_create_database", { version, name, owner }));
+export const postgresDropDatabase = (version: string, name: string, oid: number) => safe(invoke<void>("postgres_drop_database", { version, name, oid }));
+export const postgresCreateRole = (version: string, name: string, password: string) => safe(invoke<void>("postgres_create_role", { version, name, password }));
+export const postgresSetRolePassword = (version: string, name: string, oid: number, password: string) => safe(invoke<void>("postgres_set_role_password", { version, name, oid, password }));
+export const postgresDropRole = (version: string, name: string, oid: number) => safe(invoke<void>("postgres_drop_role", { version, name, oid }));
 
 /* PHP 扩展 */
 export const phpExtensions = (version: string) =>

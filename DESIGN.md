@@ -2322,3 +2322,24 @@ MariaDB 初始化在临时目录限时执行，成功后才替换空目标目录
 未新增测试文件，验证扩展于既有 Rust 模块；未启动前端 dev，未执行本地前端 build。没有业务数据库变更，未修改 update.sql。v0.2.83 Release 已确认 completed/success。本轮继续按根 AGENTS.md 新建 annotated tag v0.2.84 并与 main 原子推送；安装包完成情况以远程 workflow 实际状态为准。PostgreSQL 建库、用户授权、备份恢复与外部导入仍待后续扩展，本轮仅完成初始化和连接密码管理，整体目标保持进行；Linux/macOS 未做本轮原生实机验收。
 
 参考：https://www.postgresql.org/docs/current/app-initdb.html 、https://www.postgresql.org/docs/current/libpq-pgpass.html 、https://www.postgresql.org/docs/current/app-psql.html 、https://www.postgresql.org/docs/current/sql-alterrole.html
+
+
+## 第九十九轮：PostgreSQL 数据库与普通账号管理（v0.2.85）
+
+参考 ServBay 的数据库和账号管理入口，通过 fast-context 追踪现有数据库页、Tauri 命令和 PostgreSQL 客户端；核对 PostgreSQL 官方 CREATE DATABASE / DROP ROLE 文档。沿用 PostgreSQL 独立 API，不将其套入 MySQL/MariaDB SQL 方言，未引入新依赖。
+
+新增数据库与账号列表，以及创建数据库、删除数据库、创建普通登录账号、账号改密和删除账号共七个命令。每次操作持有现有数据目录与生命周期锁，连接前核对运行版本、实际端口、监听进程与数据目录。数据库列表包含所有者、编码、大小、系统/模板保护及连接状态；账号列表包含登录能力、超级用户和额外权限、拥有的数据库。修复原生 PostgreSQL 将 OID 输出为 JSON 字符串导致列表无法反序列化的问题，查询中显式转换为 bigint。
+
+创建项目账号时关闭超级用户、创建数据库、创建角色、复制及绕过行级安全权限。建库从可登录账号中选择所有者，使用 template0 和 UTF8；同名对象不复用、不覆盖原密码或权限。新名字限制字母、数字、下划线并拒绝系统保留名，已有外部对象通过安全引用支持空格和引号。删除与改密核对列表 OID，拒绝对象已删除重建后的旧请求；此校验不承诺与外部 SQL 并发重命名/替换形成绝对原子操作。保护 postgres、模板库与超级用户，不自动终止活动连接，不执行 DROP OWNED，依赖由 PostgreSQL 拒绝后提示手动处理。密码限制按 UTF-8 字节计算，继续通过私有凭据文件与匿名输入文件传递、错误脱敏，并关闭当前会话的常规与抽样语句日志；第三方审计插件不在此保证范围。
+
+数据库页以 MySQL / MariaDB 与 PostgreSQL 分页签呈现。PostgreSQL 增加数据库和账号管理卡片、独立搜索、每页 10 条分页，以及短表单和完整名称删除确认。所有者从现有账号中选择，错误后保留输入，处理中防重复提交，实例版本/端口/PID 改变时禁止继续提交。MySQL 弹窗与备份选择期间也锁定页签，保留原有管理界面。沿用现有组件和 UI/UX skill，列表分隔线为带卡片内边距的虚线，窄屏表单按钮纵向排列。说明账号属于整个 PostgreSQL 实例，数据库所有者可以建表，但其他库的现有 PUBLIC 授权仍可能允许访问；不声称普通账号只可访问自己的库。
+
+使用既有 localhost 演示环境检查了 1360px 桌面、390px 中文与 320px 英文，覆盖建库选所有者、创建与修改账号、同名错误保留输入、依赖删除拒绝、完整名称确认、先删库再删账号、搜索空结果、12 个账号分页与长账号名。320px 英文表单宽度与 scrollWidth 均为 296px，页面没有横向溢出；截图已目检。MySQL 创建弹窗、备份选择及页签锁定已检查。演示数据仅模拟 UI 行为，真实数据库能力依据隔离原生验收；只关闭本轮 QA 浏览器上下文，保留用户原有页面。
+
+11 个版本文件同步到 0.2.85，Cargo.lock 只更新三个项目 crate。独立发布树排除用户原有 configgen.rs 的 178 additions / 9 deletions 与未跟踪文件，19 个代码/版本文件经换行正规化后逐项核对。pnpm check 和 cargo check --workspace --all-targets --locked 通过；数据库管理、备份、导入及配置传输相关回归 22 通过、0 失败、680 filtered out。验证扩展于已有 Rust 模块，未新增测试文件。原生验收曾发现客户端被结束后服务端查询仍在执行，改为等待验收连接正常结束再检验删除，没有削弱产品对活动连接的保护。
+
+最终独立发布树 PostgreSQL 16.6 原生验收 1 通过、0 失败、701 filtered out，耗时 65.74 秒。覆盖普通账号真实登录、建表与读写、无法创建超级角色、改密后旧密码失效、系统对象保护、同名对象不覆盖、错误 OID/删除重建后的旧 OID 拒绝、有依赖的账号拒绝删除、活动查询保持连接并拒绝删库、查询正常退出后删库再删账号成功、带空格和引号的外部库名安全删除，以及上轮初始化、trust 转换、停机、重启数据保留和端口回落场景。
+
+没有业务数据库变更，未修改 update.sql；临时 PostgreSQL 数据库仅在隔离目录与端口验收。未启动前端 dev，未执行本地前端 build。v0.2.84 Release 已确认 completed/success。本轮按根 AGENTS.md 新增 annotated tag v0.2.85，并与 main 原子推送；安装包状态以远程 workflow 实际结果为准。PostgreSQL 对象授权编辑、所有权转移、备份恢复与外部导入尚待后续扩展，整体目标保持进行。Windows PostgreSQL 16.6 为本轮原生验收平台，Linux/macOS 未做本轮实机验收。
+
+参考：https://support.servbay.com/database-management/getting-started/postgresql-management-and-usage 、https://support.servbay.com/database-management/management/using-adminer-to-manage-database 、https://www.postgresql.org/docs/current/sql-createdatabase.html 、https://www.postgresql.org/docs/current/sql-droprole.html

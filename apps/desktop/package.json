@@ -1,6 +1,6 @@
 {
   "name": "@nsb/desktop",
-  "version": "0.2.84",
+  "version": "0.2.85",
   "private": true,
   "scripts": {
     "tauri": "tauri"

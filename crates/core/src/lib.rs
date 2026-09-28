@@ -763,6 +763,13 @@ impl CoreState {
         engine.bin_dir(&package)
     }
 
+    pub fn with_postgres<T>(&self, version: &str, operation: impl FnOnce(&dbadmin::PostgresClient) -> Result<T>) -> Result<T> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
+        let _operation = self.manager.lifecycle.lock();
+        let client = dbadmin::selected_postgres(self, version, None)?;
+        operation(&client)
+    }
+
     pub fn postgres_connection(&self, version: &str) -> Result<dbadmin::PostgresConnectionInfo> {
         let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
         let _operation = self.manager.lifecycle.lock();
@@ -782,8 +789,8 @@ impl CoreState {
     pub fn set_postgres_password(&self, version: &str, password: &str, use_existing: bool, enable_password_auth: bool) -> Result<()> {
         let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
         let _operation = self.manager.lifecycle.lock();
-        if password.is_empty() || password.chars().any(char::is_control) {
-            return Err(AppError::new("BAD_PASSWORD", "密码不能为空或包含控制字符"));
+        if password.is_empty() || password.len() > 4096 || password.chars().any(char::is_control) {
+            return Err(AppError::new("BAD_PASSWORD", "密码须为 1–4096 字节且不能包含控制字符"));
         }
         let client = dbadmin::selected_postgres(self, version, use_existing.then(|| password.to_string()))?;
         let requires_password = client.password_required()?;

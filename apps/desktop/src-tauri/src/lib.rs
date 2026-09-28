@@ -364,6 +364,13 @@ pub fn run() {
             postgres_connection,
             postgres_password,
             postgres_set_password,
+            postgres_databases,
+            postgres_roles,
+            postgres_create_database,
+            postgres_drop_database,
+            postgres_create_role,
+            postgres_set_role_password,
+            postgres_drop_role,
             // 数据库备份 / 还原
             db_backup_list,
             db_backup_dump,
@@ -1493,6 +1500,55 @@ async fn postgres_password(state: State<'_, std::sync::Arc<nsb_core::CoreState>>
 async fn postgres_set_password(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, password: String, use_existing: bool, enable_password_auth: bool) -> Result<(), tauri::Error> {
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.set_postgres_password(&version, &password, use_existing, enable_password_auth))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn postgres_databases(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String) -> Result<Vec<nsb_core::dbadmin::PostgresDatabaseInfo>, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.with_postgres(&version, |client| client.list_databases()))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn postgres_roles(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String) -> Result<Vec<nsb_core::dbadmin::PostgresRoleInfo>, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.with_postgres(&version, |client| client.list_roles()))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn postgres_create_database(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, name: String, owner: String) -> Result<(), tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.with_postgres(&version, |client| client.create_database(&name, &owner)))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn postgres_drop_database(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, name: String, oid: u32) -> Result<(), tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.with_postgres(&version, |client| client.drop_database(&name, oid)))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn postgres_create_role(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, name: String, password: String) -> Result<(), tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.with_postgres(&version, |client| client.create_role(&name, &password)))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn postgres_set_role_password(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, name: String, oid: u32, password: String) -> Result<(), tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.with_postgres(&version, |client| client.set_role_password(&name, oid, &password)))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn postgres_drop_role(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, name: String, oid: u32) -> Result<(), tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.with_postgres(&version, |client| client.drop_role(&name, oid)))).await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

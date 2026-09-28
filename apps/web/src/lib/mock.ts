@@ -66,7 +66,7 @@ import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSet
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.84";
+const MOCK_APP_VERSION = "0.2.85";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -363,6 +363,16 @@ const proxyProfiles = new Map<string, ProxyProfile>();
 const cronJobs = new Map<string, { id: string; name: string; command: string; intervalMin: number; enabled: boolean; createdAt: number; lastRunAt: number | null; lastExit: string | null; lastOutput: string | null }>();
 const mockRedisConnections = new Map<string, { username: string; password: string }>();
 const mockPostgresConnections = new Map<string, { password: string; saved: string; passwordRequired: boolean }>();
+const mockPostgresManagement = new Map<string, { nextOid: number; databases: import("./api").PostgresDatabaseInfo[]; roles: import("./api").PostgresRoleInfo[]; passwords: Map<string, string> }>();
+function postgresPreview(version: string) {
+  let data = mockPostgresManagement.get(version);
+  if (!data) {
+    data = { nextOid: 100, databases: ["postgres", "template0", "template1"].map((name, index) => ({ oid: index + 1, name, owner: "postgres", encoding: "UTF8", sizeBytes: 8_388_608, protected: true, allowConnections: name !== "template0" })),
+      roles: [{ oid: 10, name: "postgres", canLogin: true, superuser: true, createDb: true, createRole: true, replication: true, bypassRls: true, protected: true, databases: [] }], passwords: new Map() };
+    mockPostgresManagement.set(version, data);
+  }
+  return data;
+}
 let mockAdminer: import("./api").AdminerStatus | null = null;
 const mockTunnels = new Map<string, TunnelInfo>();
 const mockOllamaModels = new Map<string, OllamaModelRow>([
@@ -2578,6 +2588,13 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "postgres_connection":
     case "postgres_password":
+    case "postgres_databases":
+    case "postgres_roles":
+    case "postgres_create_database":
+    case "postgres_drop_database":
+    case "postgres_create_role":
+    case "postgres_set_role_password":
+    case "postgres_drop_role":
     case "postgres_set_password": {
       const version = args!.version as string;
       const service = services.get("postgresql");
@@ -2592,7 +2609,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       }
       if (cmd === "postgres_set_password") {
         const password = args!.password as string;
-        if (!password || /[\x00-\x1f\x7f]/.test(password)) throw { code: "BAD_PASSWORD", message: "密码不能为空或包含控制字符" };
+        if (!password || new TextEncoder().encode(password).length > 4096 || /[\x00-\x1f\x7f-\x9f]/.test(password)) throw { code: "BAD_PASSWORD", message: "密码须为 1–4096 字节且不能包含控制字符" };
         if (args!.useExisting) {
           if (!connection.passwordRequired) throw { code: "POSTGRES_AUTH_DISABLED", message: "本机连接无需密码，无法验证输入的密码" };
           if (password !== connection.password) throw { code: "POSTGRES_CONNECTION_FAILED", message: "密码不正确，请输入当前 PostgreSQL 实例的 postgres 密码。" };
@@ -2609,7 +2626,44 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         if (!connection.passwordRequired) throw { code: "POSTGRES_AUTH_DISABLED", message: "本机连接无需密码，无法验证保存的密码" };
         return connection.saved as T;
       }
-      return { version, port: service.port, serverVersion: version, databaseCount: 1, sizeBytes: 8_388_608, passwordRequired: connection.passwordRequired } as T;
+      const data = postgresPreview(version);
+      if (cmd === "postgres_databases") return structuredClone(data.databases) as T;
+      if (cmd === "postgres_roles") return structuredClone(data.roles.map((role) => ({ ...role, databases: data.databases.filter((db) => db.owner === role.name).map((db) => db.name) }))) as T;
+      const name = args?.name as string;
+      if (cmd === "postgres_create_database" || cmd === "postgres_create_role") {
+        if (!/^[A-Za-z0-9_]{1,63}$/.test(name) || /^pg_/i.test(name) || /^(postgres|template0|template1)$/i.test(name)) throw { code: "POSTGRES_BAD_NAME", message: "名称无效或为系统保留名称" };
+      }
+      if (cmd === "postgres_create_database") {
+        if (data.databases.some((db) => db.name === name)) throw { code: "POSTGRES_DATABASE_EXISTS", message: "同名数据库已存在，请更换名称" };
+        const owner = args!.owner as string;
+        if (!data.roles.some((role) => role.name === owner && role.canLogin)) throw { code: "POSTGRES_OWNER_CHANGED", message: "所选所有者不存在或无法登录" };
+        data.databases.push({ oid: data.nextOid++, name, owner, encoding: "UTF8", sizeBytes: 8_388_608, protected: false, allowConnections: true });
+        return undefined as T;
+      }
+      if (cmd === "postgres_drop_database") {
+        const db = data.databases.find((db) => db.name === name && db.oid === args!.oid);
+        if (!db) throw { code: "POSTGRES_TARGET_CHANGED", message: "数据库已变化，请刷新后重试" };
+        if (db.protected) throw { code: "POSTGRES_PROTECTED", message: "不能删除系统数据库" };
+        data.databases = data.databases.filter((row) => row !== db); return undefined as T;
+      }
+      if (["postgres_create_role", "postgres_set_role_password", "postgres_drop_role"].includes(cmd)) {
+        const role = data.roles.find((role) => role.name === name && role.oid === args!.oid);
+        if (cmd !== "postgres_create_role" && !role) throw { code: "POSTGRES_TARGET_CHANGED", message: "账号已变化，请刷新后重试" };
+        if (role?.protected) throw { code: "POSTGRES_PROTECTED", message: "系统账号受保护" };
+        if (cmd === "postgres_drop_role") {
+          if (data.databases.some((db) => db.owner === name)) throw { code: "POSTGRES_ROLE_DEPENDENCY", message: "账号仍拥有数据库，请先处理依赖。账号与数据均已保留。" };
+          data.roles = data.roles.filter((row) => row !== role); data.passwords.delete(name); return undefined as T;
+        }
+        const password = args!.password as string;
+        if (!password || new TextEncoder().encode(password).length > 4096 || /[\x00-\x1f\x7f-\x9f]/.test(password)) throw { code: "BAD_PASSWORD", message: "密码须为 1–4096 字节且不能包含控制字符" };
+        if (cmd === "postgres_create_role") {
+          if (data.roles.some((row) => row.name === name)) throw { code: "POSTGRES_ROLE_EXISTS", message: "同名账号已存在，未修改密码" };
+          data.roles.push({ oid: data.nextOid++, name, canLogin: true, superuser: false, createDb: false, createRole: false, replication: false, bypassRls: false, protected: false, databases: [] });
+        } else if (!role?.canLogin) { throw { code: "POSTGRES_ROLE_NOLOGIN", message: "此角色未启用登录" }; }
+        data.passwords.set(name, password); return undefined as T;
+      }
+      const databases = data.databases.filter((db) => !["template0", "template1"].includes(db.name));
+      return { version, port: service.port, serverVersion: version, databaseCount: databases.length, sizeBytes: databases.reduce((sum, db) => sum + db.sizeBytes, 0), passwordRequired: connection.passwordRequired } as T;
     }
     case "redis_connection": {
       const version = args!.version as string;

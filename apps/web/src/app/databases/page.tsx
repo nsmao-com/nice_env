@@ -33,8 +33,30 @@ import {
 import type { DatabaseEngine, ServiceStatus } from "@nsb/schema";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { PageHeader } from "@/components/layout/app-shell";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { PostgresManagement } from "@/components/shared/postgres-management";
 
 export default function DatabasesPage() {
+  const t = useT();
+  const { data: services } = useServices();
+  const [choice, setChoice] = React.useState<string | null>(null);
+  const [locked, setLocked] = React.useState(false);
+  const selected = choice ?? (services.some((service) => service.id === "postgresql") && !services.some((service) => /^(mysql|mariadb)(@|$)/.test(service.id)) ? "postgresql" : "mysql");
+  const postgres = services.find((service) => service.id === "postgresql");
+  return <div className="pb-8">
+    <PageHeader title={t("db.title")} subtitle={t("db.subtitle")} />
+    <Tabs value={selected} onValueChange={setChoice}>
+      <TabsList className="mb-5 flex w-fit max-w-full"><TabsTrigger value="mysql" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">MySQL / MariaDB</TabsTrigger><TabsTrigger value="postgresql" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">PostgreSQL</TabsTrigger></TabsList>
+      <TabsContent value="mysql"><MySqlWorkspace onLockChange={setLocked} /></TabsContent>
+      <TabsContent value="postgresql">
+        <div className="mb-5 grid grid-cols-1 gap-3 md:grid-cols-2"><PostgresInstanceCard /><RedisInstanceCard /></div>
+        <PostgresManagement service={postgres} onLockChange={setLocked} />
+      </TabsContent>
+    </Tabs>
+  </div>;
+}
+
+function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => void }) {
   const t = useT();
   const invalidate = useInvalidate();
   const serviceQuery = useServices();
@@ -63,17 +85,15 @@ export default function DatabasesPage() {
   const [dropTarget, setDropTarget] = React.useState<string | null>(null);
   const [dropping, setDropping] = React.useState(false);
   const [dropTyped, setDropTyped] = React.useState("");
+  const locked = backupLocked || createOpen || userOpen || rootOpen || importOpen || !!dropTarget;
+  React.useEffect(() => { onLockChange(locked); return () => onLockChange(false); }, [locked, onLockChange]);
 
   const systemDbs = new Set(["mysql", "sys", "information_schema", "performance_schema"]);
 
   return (
     <div className="pb-8">
       <DbImportDialog key={`import-${engine}-${version}`} open={importOpen} onOpenChange={setImportOpen} version={version} engine={engine} targetLabel={targetLabel} />
-      <PageHeader
-        title={t("db.title")}
-        subtitle={t("db.subtitle")}
-        actions={
-          <>
+      <div className="mb-5 flex flex-wrap justify-end gap-2">
             <Button variant="secondary" disabled={!running} onClick={() => setRootOpen(true)}>
               <KeyRound className="h-3.5 w-3.5" /> {t("db.rootManage")}
             </Button>
@@ -83,9 +103,7 @@ export default function DatabasesPage() {
             <Button disabled={!ready} onClick={() => setCreateOpen(true)}>
               <Plus className="h-3.5 w-3.5" /> {t("db.createDb")}
             </Button>
-          </>
-        }
-      />
+      </div>
 
       <div className="mb-5 flex flex-wrap items-end gap-3">
         <div className="w-full max-w-sm space-y-1.5">
@@ -98,12 +116,11 @@ export default function DatabasesPage() {
         <Button variant="secondary" disabled={!running || dbQuery.isFetching || userQuery.isFetching} onClick={() => invalidate("databases", "db-users")}>{t("db.refresh")}</Button>
       </div>
       {serviceQuery.isError ? <p role="alert" className="mb-4 text-sm text-error">{t("db.connectionFailed")} <Button variant="ghost" onClick={() => void serviceQuery.refetch()}>{t("db.retry")}</Button></p> : !databaseServices.length ? <p className="mb-4 text-sm text-muted">{serviceQuery.isFetching ? t("db.loading") : t("db.noInstance")}</p> : null}
-      {/* 所选 MySQL / MariaDB 实例、PostgreSQL 与 Redis */}
+      {/* 所选 MySQL / MariaDB 实例与 Redis */}
       <section className="mb-6">
         <SectionHeader title={t("db.instance")} className="mb-3" />
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
           <MySqlInstanceCard key={selected} engine={engine} service={service} count={ready ? dbs.length : undefined} />
-          <PostgresInstanceCard />
           <RedisInstanceCard />
         </div>
       </section>

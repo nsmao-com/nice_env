@@ -3235,6 +3235,78 @@ mod validate_tests {
         assert_eq!(state.postgres_password("16.6").unwrap(), password);
         let client = crate::dbadmin::selected_postgres(&state, "16.6", None).unwrap();
         assert!(crate::dbadmin::PostgresClient { exe: client.exe.clone(), port, password: initial_password }.query("SELECT 1").is_err());
+        let management = || state.with_postgres("16.6", |client| client.list_databases()).unwrap();
+        let system = management().into_iter().find(|db| db.name == "postgres").unwrap();
+        assert!(system.protected);
+        assert_eq!(client.drop_database("postgres", system.oid).unwrap_err().code, "POSTGRES_PROTECTED");
+        assert_eq!(client.create_database("bad; DROP DATABASE postgres", "postgres").unwrap_err().code, "POSTGRES_BAD_NAME");
+        assert_eq!(client.create_role("pg_reserved", "unused").unwrap_err().code, "POSTGRES_PROTECTED");
+        let account_password = "project:slash\\quote' 密码";
+        state.with_postgres("16.6", |client| client.create_role("project_user", account_password)).unwrap();
+        assert_eq!(client.create_role("project_user", "different").unwrap_err().code, "POSTGRES_ROLE_EXISTS");
+        let role = client.list_roles().unwrap().into_iter().find(|role| role.name == "project_user").unwrap();
+        assert!(role.can_login && !role.superuser && !role.create_db && !role.create_role && !role.replication && !role.bypass_rls && !role.protected);
+        state.with_postgres("16.6", |client| client.create_database("project_data", "project_user")).unwrap();
+        assert_eq!(client.create_database("project_data", "postgres").unwrap_err().code, "POSTGRES_DATABASE_EXISTS");
+        let project = management().into_iter().find(|db| db.name == "project_data").unwrap();
+        assert_eq!(project.owner, "project_user"); assert_eq!(project.encoding, "UTF8"); assert!(!project.protected);
+        let account_command = |password: &str| {
+            let (private, mut command) = client.command().unwrap();
+            std::fs::write(private.path().join("pgpass"), format!("127.0.0.1:{port}:project_data:project_user:{}\n", password.replace('\\', "\\\\").replace(':', "\\:"))).unwrap();
+            command.args(["--username=project_user", "--dbname=project_data"]);
+            (private, command)
+        };
+        let account_query = |password: &str, sql: &str| {
+            let (_private, mut command) = account_command(password);
+            command.args(["-c", sql]).output().unwrap()
+        };
+        let account = account_query(account_password, "SELECT current_user; CREATE TABLE project_proof (value int); INSERT INTO project_proof VALUES (84); SELECT value FROM project_proof;");
+        assert!(account.status.success(), "{}", String::from_utf8_lossy(&account.stderr));
+        assert!(String::from_utf8_lossy(&account.stdout).contains("project_user"));
+        assert!(!account_query(account_password, "CREATE ROLE cannot_escalate SUPERUSER;").status.success());
+        assert!(client.drop_role(&role.name, role.oid).is_err());
+        assert_eq!(client.drop_database(&project.name, project.oid + 1).unwrap_err().code, "POSTGRES_TARGET_CHANGED");
+        let new_password = "changed:quote'\\密码";
+        assert_eq!(client.set_role_password(&role.name, role.oid + 1, new_password).unwrap_err().code, "POSTGRES_TARGET_CHANGED");
+        client.set_role_password(&role.name, role.oid, new_password).unwrap();
+        assert!(!account_query(account_password, "SELECT 1;").status.success());
+        assert!(account_query(new_password, "SELECT value FROM project_proof;").status.success());
+        // 有真实业务连接时，删除不得强制断开它。
+        let (_private_connection, mut connection) = account_command(new_password);
+        connection.args(["-c", "SELECT pg_sleep(15);"]).env("PGOPTIONS", "-c statement_timeout=30000")
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        struct Connection(std::process::Child);
+        impl Drop for Connection { fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); } }
+        let mut connection = Connection(connection.spawn().unwrap());
+        let deadline = std::time::Instant::now();
+        while client.query("SELECT COUNT(*) FROM pg_stat_activity WHERE datname='project_data';").unwrap().trim() == "0" {
+            assert!(deadline.elapsed() < Duration::from_secs(5)); std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(client.drop_database(&project.name, project.oid).is_err());
+        assert!(connection.0.try_wait().unwrap().is_none());
+        assert!(connection.0.wait().unwrap().success());
+        drop(connection);
+        let deadline = std::time::Instant::now();
+        while client.query("SELECT COUNT(*) FROM pg_stat_activity WHERE datname='project_data';").unwrap().trim() != "0" {
+            assert!(deadline.elapsed() < Duration::from_secs(5)); std::thread::sleep(Duration::from_millis(100));
+        }
+        client.drop_database(&project.name, project.oid).unwrap();
+        client.create_database(&project.name, &role.name).unwrap();
+        assert_eq!(client.drop_database(&project.name, project.oid).unwrap_err().code, "POSTGRES_TARGET_CHANGED");
+        let recreated = management().into_iter().find(|db| db.name == project.name).unwrap();
+        client.drop_database(&recreated.name, recreated.oid).unwrap();
+        client.drop_role(&role.name, role.oid).unwrap();
+        assert!(!client.list_roles().unwrap().iter().any(|row| row.name == role.name));
+        client.create_role(&role.name, new_password).unwrap();
+        assert_eq!(client.drop_role(&role.name, role.oid).unwrap_err().code, "POSTGRES_TARGET_CHANGED");
+        let recreated_role = client.list_roles().unwrap().into_iter().find(|row| row.name == role.name).unwrap();
+        client.drop_role(&recreated_role.name, recreated_role.oid).unwrap();
+        let admin = client.list_roles().unwrap().into_iter().find(|row| row.name == "postgres").unwrap();
+        assert_eq!(client.drop_role(&admin.name, admin.oid).unwrap_err().code, "POSTGRES_PROTECTED");
+        assert_eq!(client.set_role_password(&admin.name, admin.oid, "blocked").unwrap_err().code, "POSTGRES_PROTECTED");
+        client.query("CREATE DATABASE \"quoted ' db\";").unwrap();
+        let quoted = management().into_iter().find(|db| db.name == "quoted ' db").unwrap();
+        client.drop_database(&quoted.name, quoted.oid).unwrap();
         client.query("CREATE TABLE niceenv_probe AS SELECT 42 AS value;").unwrap();
         let exported = temp.path().join("config-export.json");
         crate::transfer::export_to(&state.store, &exported).unwrap();

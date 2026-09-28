@@ -547,6 +547,51 @@ pub struct PostgresConnectionInfo {
     pub password_required: bool,
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresDatabaseInfo {
+    pub oid: u32,
+    pub name: String,
+    pub owner: String,
+    pub encoding: String,
+    pub size_bytes: u64,
+    pub protected: bool,
+    pub allow_connections: bool,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresRoleInfo {
+    pub oid: u32,
+    pub name: String,
+    pub can_login: bool,
+    pub superuser: bool,
+    pub create_db: bool,
+    pub create_role: bool,
+    pub replication: bool,
+    pub bypass_rls: bool,
+    pub protected: bool,
+    pub databases: Vec<String>,
+}
+
+fn postgres_ident(name: &str) -> Result<String> {
+    if name.is_empty() || name.len() > 63 || name.chars().any(char::is_control) {
+        return Err(AppError::new("POSTGRES_BAD_NAME", "名称须为 1–63 字节且不能包含控制字符"));
+    }
+    Ok(format!("\"{}\"", name.replace('"', "\"\"")))
+}
+
+fn postgres_new_name(name: &str) -> Result<String> {
+    if !name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        return Err(AppError::new("POSTGRES_BAD_NAME", "新名称仅支持字母、数字和下划线，最多 63 字符"));
+    }
+    let reserved = name.to_ascii_lowercase();
+    if reserved.starts_with("pg_") || ["postgres", "template0", "template1"].contains(&reserved.as_str()) {
+        return Err(AppError::new("POSTGRES_PROTECTED", "此名称保留给系统使用，请换一个名称"));
+    }
+    postgres_ident(name)
+}
+
 pub struct PostgresClient {
     pub exe: PathBuf,
     pub port: u16,
@@ -633,13 +678,83 @@ impl PostgresClient {
         if password.is_empty() || password.chars().any(char::is_control) {
             return Err(AppError::new("BAD_PASSWORD", "密码不能为空或包含控制字符"));
         }
+        self.password_statement("ALTER ROLE postgres", password)
+    }
+
+    fn password_statement(&self, prefix: &str, password: &str) -> Result<()> {
+        if password.is_empty() || password.len() > 4096 || password.chars().any(char::is_control) {
+            return Err(AppError::new("BAD_PASSWORD", "密码须为 1–4096 字节且不能包含控制字符"));
+        }
         let literal = password.replace('\\', "\\\\").replace('\'', "''");
         // psql 逐条提交语句，先关闭本会话的语句记录，再发送改密语句。
-        let sql = format!("SET log_statement='none';\nSET log_min_error_statement='panic';\nSET log_min_duration_statement=-1;\nSET log_duration=off;\nSET password_encryption='scram-sha-256';\nALTER ROLE postgres PASSWORD E'{literal}';\n");
+        let sql = format!("SET log_statement='none';\nSET log_min_error_statement='panic';\nSET log_min_duration_statement=-1;\nSET log_duration=off;\nSELECT set_config('log_min_duration_sample','-1',false) WHERE current_setting('log_min_duration_sample',true) IS NOT NULL;\nSELECT set_config('log_transaction_sample_rate','0',false) WHERE current_setting('log_transaction_sample_rate',true) IS NOT NULL;\nSET password_encryption='scram-sha-256';\n{prefix} PASSWORD E'{literal}';\n");
         self.query(&sql).map(|_| ()).map_err(|mut error| {
             if let Some(detail) = error.detail.as_mut() { *detail = detail.replace(password, "***").replace(&literal, "***"); }
             error
         })
+    }
+
+    pub fn list_databases(&self) -> Result<Vec<PostgresDatabaseInfo>> {
+        let out = self.query("SELECT COALESCE(json_agg(row_to_json(d) ORDER BY d.name), '[]'::json) FROM (SELECT oid::bigint AS oid, datname AS name, pg_get_userbyid(datdba) AS owner, pg_encoding_to_char(encoding) AS encoding, pg_database_size(oid) AS \"sizeBytes\", (datistemplate OR datname IN ('postgres', 'template0', 'template1') OR datname = current_database()) AS protected, datallowconn AS \"allowConnections\" FROM pg_database) d;")?;
+        serde_json::from_str(out.trim()).map_err(|error| AppError::new("POSTGRES_RESPONSE", "无法读取 PostgreSQL 数据库列表").with_detail(error.to_string()))
+    }
+
+    pub fn list_roles(&self) -> Result<Vec<PostgresRoleInfo>> {
+        let out = self.query("SELECT COALESCE(json_agg(row_to_json(r) ORDER BY r.name), '[]'::json) FROM (SELECT oid::bigint AS oid, rolname AS name, rolcanlogin AS \"canLogin\", rolsuper AS superuser, rolcreatedb AS \"createDb\", rolcreaterole AS \"createRole\", rolreplication AS replication, rolbypassrls AS \"bypassRls\", (rolsuper OR rolname IN ('postgres', current_user, session_user) OR starts_with(rolname, 'pg_')) AS protected, ARRAY(SELECT datname FROM pg_database WHERE datdba = pg_roles.oid ORDER BY datname) AS databases FROM pg_roles WHERE NOT starts_with(rolname, 'pg_')) r;")?;
+        serde_json::from_str(out.trim()).map_err(|error| AppError::new("POSTGRES_RESPONSE", "无法读取 PostgreSQL 账号列表").with_detail(error.to_string()))
+    }
+
+    pub fn create_database(&self, name: &str, owner: &str) -> Result<()> {
+        let identifier = postgres_new_name(name)?;
+        let owner_identifier = postgres_ident(owner)?;
+        if self.list_databases()?.iter().any(|db| db.name == name) {
+            return Err(AppError::new("POSTGRES_DATABASE_EXISTS", "同名数据库已存在，请刷新列表或更换名称"));
+        }
+        if !self.list_roles()?.iter().any(|role| role.name == owner && role.can_login) {
+            return Err(AppError::new("POSTGRES_OWNER_CHANGED", "所选数据库所有者不存在或无法登录，请重新选择"));
+        }
+        // CREATE DATABASE 不能置于事务中；不复制 template1 的用户对象，也不悄悄复用同名库。
+        self.query(&format!("CREATE DATABASE {identifier} OWNER {owner_identifier} TEMPLATE template0 ENCODING 'UTF8';"))?;
+        Ok(())
+    }
+
+    pub fn drop_database(&self, name: &str, oid: u32) -> Result<()> {
+        let identifier = postgres_ident(name)?;
+        let target = self.list_databases()?.into_iter().find(|db| db.name == name && db.oid == oid)
+            .ok_or_else(|| AppError::new("POSTGRES_TARGET_CHANGED", "数据库已删除或发生变化，请刷新列表后重新确认"))?;
+        if target.protected { return Err(AppError::new("POSTGRES_PROTECTED", "不能删除 PostgreSQL 系统库或模板库")); }
+        // 不使用 FORCE，也不终止连接；数据库仍被使用时由服务器拒绝删除。
+        self.query(&format!("DROP DATABASE {identifier};")).map_err(|error| error.with_hint("请刷新确认数据库状态；仍有连接时需先关闭应用连接，不会自动强制断开连接。"))?;
+        Ok(())
+    }
+
+    pub fn create_role(&self, name: &str, password: &str) -> Result<()> {
+        let identifier = postgres_new_name(name)?;
+        if self.list_roles()?.iter().any(|role| role.name == name) {
+            return Err(AppError::new("POSTGRES_ROLE_EXISTS", "同名账号已存在，未修改其密码或权限"));
+        }
+        self.password_statement(&format!("CREATE ROLE {identifier} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"), password)
+    }
+
+    fn ordinary_role(&self, name: &str, oid: u32) -> Result<PostgresRoleInfo> {
+        let role = self.list_roles()?.into_iter().find(|role| role.name == name && role.oid == oid)
+            .ok_or_else(|| AppError::new("POSTGRES_TARGET_CHANGED", "账号已删除或发生变化，请刷新列表后重新确认"))?;
+        if role.protected { return Err(AppError::new("POSTGRES_PROTECTED", "此账号属于系统或超级用户，不能在普通账号管理中修改")); }
+        Ok(role)
+    }
+
+    pub fn set_role_password(&self, name: &str, oid: u32, password: &str) -> Result<()> {
+        let identifier = postgres_ident(name)?;
+        let role = self.ordinary_role(name, oid)?;
+        if !role.can_login { return Err(AppError::new("POSTGRES_ROLE_NOLOGIN", "该角色未启用登录，不能设置登录密码")); }
+        self.password_statement(&format!("ALTER ROLE {identifier}"), password)
+    }
+
+    pub fn drop_role(&self, name: &str, oid: u32) -> Result<()> {
+        let identifier = postgres_ident(name)?;
+        self.ordinary_role(name, oid)?;
+        self.query(&format!("DROP ROLE {identifier};")).map_err(|error| error.with_hint("账号如仍拥有数据库、对象或权限依赖，需先手动转移或解除依赖；不会删除它拥有的数据。"))?;
+        Ok(())
     }
 
     pub(crate) fn local_auth_update(&self, paths: &Paths, version: &str) -> Result<(PathBuf, String, String)> {
@@ -719,6 +834,10 @@ mod tests {
 
     #[test]
     fn postgres_private_credentials_and_default_auth_rules() {
+        assert!(postgres_new_name(&"a".repeat(64)).is_err());
+        assert!(postgres_new_name("pg_monitor").is_err());
+        assert!(postgres_new_name("bad\nname").is_err());
+        assert_eq!(postgres_ident("quote\";sql").unwrap(), "\"quote\"\";sql\"");
         let client = PostgresClient { exe: PathBuf::from("psql"), port: 25432, password: "colon:slash\\quote'密码".into() };
         let (private, command) = client.command().unwrap();
         assert!(command.get_args().all(|value| !value.to_string_lossy().contains(&client.password)));

@@ -4402,17 +4402,28 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
             let fresh=auth::Credentials {password:new_password.clone(),..credentials.clone()};
             let connected=auth::save_connection(&state,"8.0.4",&changed.revision,fresh.clone()).unwrap();
             assert!(connected.administrator);
+            // 外部客户端改密后，本机旧凭据失效；恢复入口应在受管无认证短窗口内更新账号并重新开启认证。
+            let externally_changed=auth::Credentials {password:"external-expired-123".into(),..fresh.clone()};
+            crate::mongodb::execute_as(&state,"8.0.4",serde_json::json!({"password":externally_changed.password}),r#"
+      checked(connection.getDB(input.credentials.authDatabase).runCommand({updateUser:input.credentials.username,pwd:input.request.password}));
+      print(JSON.stringify({result:true}));
+    "#,&fresh).unwrap();
+            let expired=auth::status(&state,"8.0.4").unwrap(); assert!(expired.problem.is_some()); assert_eq!(expired.username,fresh.username);
+            let recovered_password="recovered:password-123".to_string();
+            let recovered=auth::reset_password(&state,"8.0.4",&expired.revision,recovered_password.clone()).unwrap();
+            assert!(recovered.administrator && recovered.authorization==Some(true));
+            let recovered_credentials=auth::Credentials {password:recovered_password.clone(),..fresh.clone()};
             // 本机连接记录损坏仍可从图形入口验证并修复，不回退为匿名访问。
             state.store.set_setting("mongodbCredentials@8.0.4","broken").unwrap();
             let damaged=auth::status(&state,"8.0.4").unwrap(); assert!(damaged.problem.is_some());
-            assert!(auth::save_connection(&state,"8.0.4",&damaged.revision,fresh.clone()).unwrap().administrator);
+            assert!(auth::save_connection(&state,"8.0.4",&damaged.revision,recovered_credentials.clone()).unwrap().administrator);
             let (exported,_)=crate::transfer::encode_export(&state.store).unwrap();
             let exported=String::from_utf8(exported).unwrap();
             for needle in ["mongodbCredentials@","mongodbAuthEnabled@","mongodbBackupPlan@",&credentials.password,&new_password] { assert!(!exported.contains(needle)); }
             assert!(crate::envfile::is_secret_key("mongodbCredentials@8.0.4"));
-            assert!(!fresh.redact(&format!("failure {new_password}")).contains(&new_password));
+            assert!(!recovered_credentials.redact(&format!("failure {recovered_password}")).contains(&recovered_password));
             assert!(!std::fs::read_dir(&state.paths.base).unwrap().any(|item|item.unwrap().file_name().to_string_lossy().starts_with(".mongo-browse-")));
-            let unprotected=auth::apply(&state,"8.0.4",request(connected.revision,true,true,false,Some(credentials.clone()))).unwrap_err();
+            let unprotected=auth::apply(&state,"8.0.4",request(auth::status(&state,"8.0.4").unwrap().revision,true,true,false,Some(credentials.clone()))).unwrap_err();
             assert_eq!(unprotected.code,"MONGO_ADMIN_EXISTS");
             let disabled=auth::apply(&state,"8.0.4",request(auth::status(&state,"8.0.4").unwrap().revision,false,true,true,None)).unwrap();
             assert_eq!(disabled.authorization,Some(false)); assert!(!disabled.configured);

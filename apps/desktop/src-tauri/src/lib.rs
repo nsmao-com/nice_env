@@ -431,6 +431,7 @@ pub fn run() {
             mongodb_auth_connection,
             mongodb_auth_apply,
             mongodb_auth_password,
+            mongodb_auth_reset,
             mongodb_backup_plan,
             mongodb_backup_plan_save,
             mongodb_backup_plan_run,
@@ -3847,6 +3848,12 @@ async fn mongodb_auth_apply(state: State<'_, std::sync::Arc<nsb_core::CoreState>
 async fn mongodb_auth_password(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, revision: String, password: String) -> Result<nsb_core::mongodb_auth::AuthView, tauri::Error> {
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::mongodb_auth::change_password(&st, &version, &revision, password))).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn mongodb_auth_reset(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, revision: String, password: String) -> Result<nsb_core::mongodb_auth::AuthView, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::mongodb_auth::reset_password(&st, &version, &revision, password))).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]

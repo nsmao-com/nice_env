@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { ServiceSwitch } from "./service-switch";
 import { ServiceIcon } from "./service-icon";
 import { ServiceWebButton } from "./service-web-button";
+import { ServiceConfigButton } from "./service-config-button";
 import { SftpgoConfigButton } from "./sftpgo-config-button";
 import { ServiceDiagnostics } from "./service-diagnostics";
 import { StatusLight } from "./status-light";
@@ -148,6 +149,7 @@ export function ServiceRow({ service, dragHandle, dragPreview = false }: { servi
           </Button>
         )}
 
+        <ServiceConfigButton service={service} disabled={busy} />
         <ServiceWebButton service={service} disabled={busy} />
         <SftpgoConfigButton service={service} disabled={busy} />
         <Button variant="ghost" size="icon-sm" className="shrink-0 text-faint" title={t("svc.diagnose")} aria-label={t("svc.diagnose")} onClick={() => setDiagOpen(true)}>

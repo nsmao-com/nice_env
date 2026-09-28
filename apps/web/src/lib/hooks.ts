@@ -82,7 +82,11 @@ export function useVersionCatalogs(packageIds: string[]) {
       toastError(error);
     }
   }, [qc]);
-  return { byId, refresh };
+  const refreshAll = React.useCallback(async () => {
+    const catalogs = await api.versionCatalogs(true);
+    catalogs.forEach((catalog) => qc.setQueryData(["version-catalogs", catalog.id], catalog));
+  }, [qc]);
+  return { byId, refresh, refreshAll };
 }
 
 export function useSites() {

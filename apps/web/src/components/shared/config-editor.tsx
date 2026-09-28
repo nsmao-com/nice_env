@@ -47,8 +47,29 @@ export function ConfigEditor() {
   const t = useT();
   const [search, setSearch] = React.useState("");
   const [editing, setEditing] = React.useState<ConfigFileInfo | null>(null);
+  const [requestedService, setRequestedService] = React.useState<string | null>(null);
+  const autoOpened = React.useRef(false);
   const { data: files = [], isPending, error, refetch } = useQuery({ queryKey: ["config-files"], queryFn: api.configList });
   const filteredFiles = files.filter((f) => `${f.label} ${f.path} ${f.kind}`.toLowerCase().includes(search.toLowerCase()));
+
+  // 服务卡片通过 query 参数直达配置；在 effect 中读取可避免静态导出引入
+  // useSearchParams 的 Suspense 要求，同时不会在服务端读取 window。
+  React.useEffect(() => {
+    const service = new URLSearchParams(window.location.search).get("service");
+    if (service) setRequestedService(service);
+  }, []);
+
+  React.useEffect(() => {
+    if (!requestedService || autoOpened.current || editing || isPending || error || files.length === 0) return;
+    const exact = files.find((file) => file.exists && file.usedByService === requestedService);
+    const base = requestedService.split("@")[0];
+    const fallback = files.find((file) => file.exists && (file.usedByService === base || file.kind.startsWith(`${base}-`)));
+    const target = exact ?? fallback;
+    if (target) {
+      autoOpened.current = true;
+      setEditing(target);
+    }
+  }, [requestedService, editing, isPending, error, files]);
 
   return (
     <>

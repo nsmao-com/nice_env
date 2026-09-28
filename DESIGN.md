@@ -2950,3 +2950,11 @@ mongosh 查询通过标准输入接收临时 JSON，固定脚本不再包含密�
 参考：https://www.mongodb.com/docs/manual/core/authorization/
 参考：https://www.mongodb.com/docs/manual/reference/command/createUser/
 参考：https://www.mongodb.com/docs/database-tools/mongodump/
+
+## 第一百二十九轮：服务配置直达、状态历史与清单状态（v0.2.117）
+
+补齐服务管理和套件管理中几个影响日常操作的缺口：服务卡片和紧凑列表为 Nginx、PHP、MySQL、Redis、Apache 与 mihomo 提供配置直达入口，按服务版本匹配真实配置文件并复用已有配置读取、校验、备份和回滚流程；日志页增加当前应用会话内的服务状态历史，支持服务筛选、关键词搜索、刷新和失败原因查看；套件页增加从官方上游刷新可安装版本目录的入口，设置页展示当前生效的内置或远端清单、修订号、条目数和用户模块解析状态。
+
+MongoDB 本机认证管理补充管理员密码恢复流程，旧密码无法验证时由受管实例执行受控的无认证更新、恢复认证并重启，保留版本隔离、生命周期锁和敏感信息不进入命令行的约束。桌面端新增状态历史和清单状态命令的前端接入，浏览器预览同步提供对应的可操作反馈；所有新增文案覆盖中英文，窄屏弹窗和下拉分隔线沿用统一的左右留白与虚线样式。
+
+没有新增测试文件，发布前执行 Web/schema 类型检查、Rust 全工作区 all-targets 与 diff 检查；未运行前端 dev 或正式 build。本次没有业务数据库变更，未修改 update.sql。按约定同步版本文件并新增 annotated tag v0.2.117，保留用户已有未跟踪文件与本地产物。

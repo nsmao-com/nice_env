@@ -79,6 +79,13 @@ export const processRecoveryStatus = () => safe(invoke<ProcessRecoveryReport>("p
 export const recoverProcesses = () => safe(invoke<ProcessRecoveryReport>("recover_processes"));
 export const listServiceStatus = () =>
   safe(invoke<ServiceStatus[]>("list_service_status"));
+export interface ServiceHistoryEntry {
+  ts: number;
+  serviceId: string;
+  detail: string;
+}
+export const serviceHistory = (limit = 200) =>
+  safe(invoke<ServiceHistoryEntry[]>("service_history", { n: limit }));
 export const serviceWebUrl = (id: string) =>
   safe(invoke<string>("service_web_url", { id }));
 export const repairServiceWebUi = (id: string, version: string) =>
@@ -416,6 +423,7 @@ export const mongoAuthStatus = (version: string) => safe(invoke<MongoAuthView>("
 export const mongoAuthConnection = (version: string, revision: string, credentials: MongoCredentials) => safe(invoke<MongoAuthView>("mongodb_auth_connection", { version, revision, credentials }));
 export const mongoAuthApply = (version: string, input: MongoAuthApply) => safe(invoke<MongoAuthView>("mongodb_auth_apply", { version, input }));
 export const mongoAuthPassword = (version: string, revision: string, password: string) => safe(invoke<MongoAuthView>("mongodb_auth_password", { version, revision, password }));
+export const mongoAuthReset = (version: string, revision: string, password: string) => safe(invoke<MongoAuthView>("mongodb_auth_reset", { version, revision, password }));
 export const mongoBackupPlan = (version: string) => safe(invoke<BackupPlan>("mongodb_backup_plan", { version }));
 export const mongoBackupPlanSave = (version: string, config: BackupPlanConfig) => safe(invoke<BackupPlan>("mongodb_backup_plan_save", { version, config }));
 export const mongoBackupPlanRun = (version: string) => safe(invoke<BackupPlan>("mongodb_backup_plan_run", { version }));
@@ -741,6 +749,15 @@ export const refreshRemoteManifest = (url?: string) =>
       { url: url ?? null }
     )
   );
+export interface ManifestStatus {
+  bundledRevision: number;
+  bundledPackages: number;
+  effectiveRevision: number;
+  effectivePackages: number;
+  remoteActive: boolean;
+  userModules: { file: string; valid: boolean }[];
+}
+export const manifestStatus = () => safe(invoke<ManifestStatus>("manifest_status"));
 /** 删除远端清单快照，回退到内置清单；下次启动生效 */
 export const resetRemoteManifest = () => safe(invoke<boolean>("reset_remote_manifest"));
 

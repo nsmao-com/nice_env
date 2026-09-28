@@ -182,3 +182,56 @@ pub fn change_password(state: &CoreState, version: &str, revision: &str, passwor
     if probe(state,version,&previous).is_ok() { state.store.set_setting_json(&credential_key,&previous)?; }
     Err(changed.err().unwrap_or_else(||AppError::new("MONGO_PASSWORD_UNVERIFIED","密码修改结果尚未确认，请使用当前密码重新验证连接")))
 }
+
+/// 在认证开启但本机旧密码失效时，使用 MongoDB 的本机托管实例边界执行密码恢复。
+///
+/// 过程会短暂停止实例、以明确的无认证配置启动，仅在同一个受管生命周期锁内执行
+/// `updateUser`，随后无论更新成功与否都恢复认证配置并重启。新密码不会进入命令参数、
+/// 环境变量或错误详情；恢复前会保留旧记录，更新失败时回滚本机记录。
+pub fn reset_password(state: &CoreState, version: &str, revision: &str, password: String) -> Result<AuthView> {
+    let _work=crate::BackgroundWork::begin("恢复 MongoDB 管理密码")?;
+    let _activity=crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    let _lock=state.manager.lifecycle.try_lock().ok_or_else(||AppError::new("SERVICE_BUSY","服务正在操作，请稍后恢复密码"))?;
+    let before=current(state,version,revision)?;
+    if !before.configured || before.username.trim().is_empty() {
+        return Err(AppError::new("MONGO_RESET_UNAVAILABLE","没有可恢复的本机管理账号记录，请先验证现有连接"));
+    }
+    let previous=Credentials::load(state,version)?;
+    let candidate=Credentials { password,..previous.clone() };
+    candidate.validate()?;
+    if candidate.password.chars().count()<8 { return Err(AppError::new("MONGO_PASSWORD_SHORT","新密码至少需要 8 个字符")); }
+    let auth_key=key("mongodbAuthEnabled",version)?;
+    let credential_key=key("mongodbCredentials",version)?;
+    let restore_auth = |state: &CoreState| -> Result<()> {
+        state.store.set_setting(&auth_key,"true")?;
+        state.restart_service("mongodb").map_err(|error|error.with_hint("恢复认证配置失败；请检查 MongoDB 状态后重试"))
+    };
+
+    // 先保存候选记录，避免 updateUser 成功后进程异常退出造成旧密码永久失效。
+    state.store.set_setting_json(&credential_key,&candidate)?;
+    state.store.set_setting(&auth_key,"false")?;
+    if let Err(error)=state.restart_service("mongodb") {
+        let _=state.store.set_setting_json(&credential_key,&previous);
+        let _=restore_auth(state);
+        return Err(error.with_hint("未执行密码恢复；认证配置已尝试恢复，请检查 MongoDB 日志"));
+    }
+
+    let anonymous=Credentials::default();
+    let updated=crate::mongodb::execute_as(state,version,json!({"username":candidate.username,"password":candidate.password}),r#"
+      checked(admin.runCommand({updateUser:input.request.username,pwd:input.request.password}));
+      print(JSON.stringify({result:true}));
+    "#,&anonymous);
+    if let Err(error)=updated {
+        let _=state.store.set_setting_json(&credential_key,&previous);
+        let restore=restore_auth(state);
+        return Err(error.with_hint(if restore.is_ok() { "密码未修改，认证已恢复；请检查账号名后重试" } else { "密码恢复失败且认证重启未确认，请检查 MongoDB 日志" }));
+    }
+    if let Err(error)=restore_auth(state) {
+        return Err(error.with_hint("密码已写入 MongoDB，本机新凭据已保留；请检查服务状态并重新启动"));
+    }
+    let after=status(state,version)?;
+    if after.problem.is_some() || after.authorization!=Some(true) || !after.administrator {
+        return Err(AppError::new("MONGO_RESET_UNVERIFIED","密码已更新，但恢复后的认证状态尚未确认，请刷新状态并用新密码验证连接"));
+    }
+    Ok(after)
+}

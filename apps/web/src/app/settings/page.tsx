@@ -200,6 +200,13 @@ export default function SettingsPage() {
   React.useEffect(() => { if (migrationError) migrationErrorRef.current?.focus(); }, [migrationError]);
   const [localFonts, setLocalFonts] = React.useState<string[]>([]);
   const { data: stacks } = useStacks();
+  const manifestQuery = useQuery({
+    queryKey: ["manifest-status"],
+    queryFn: api.manifestStatus,
+    enabled: active === "updates",
+    staleTime: 0,
+    retry: false,
+  });
 
   const load = React.useCallback(async () => {
     try {
@@ -1244,7 +1251,7 @@ export default function SettingsPage() {
                     <div className="flex flex-col">
                       <span className="text-[12.5px] text-secondary">
                         {t("settings.currentVersion")}{" "}
-                        <code className="font-mono text-foreground">v{appVersion || "0.2.116"}</code>
+                        <code className="font-mono text-foreground">v{appVersion || "0.2.117"}</code>
                       </span>
                       <span className="text-[10.5px] text-faint">{t("settings.manifestHint")}</span>
                     </div>
@@ -1293,12 +1300,29 @@ export default function SettingsPage() {
                     onClick={() =>
                       api
                         .resetRemoteManifest()
-                        .then(() => toast.success(t("settings.resetManifestDone")))
+                        .then(() => { void manifestQuery.refetch(); toast.success(t("settings.resetManifestDone")); })
                         .catch(toastError)
                     }
                   >
                     <RotateCcw className="h-3 w-3" /> {t("settings.resetManifest")}
                   </Button>
+                </div>
+                <div className="flex flex-col gap-2 rounded-xl border border-border/60 bg-card-2/20 px-3.5 py-3 text-[11px]" role="status">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-medium text-secondary">{t("settings.manifestStatus.title")}</span>
+                    <Button variant="ghost" size="sm" className="h-7 text-[11px]" disabled={manifestQuery.isFetching} onClick={() => void manifestQuery.refetch()}>
+                      <RefreshCw className={cn("h-3 w-3", manifestQuery.isFetching && "animate-spin")} />
+                      {t("settings.manifestStatus.refresh")}
+                    </Button>
+                  </div>
+                  {manifestQuery.isPending ? <p className="text-faint">{t("common.loading")}</p> : manifestQuery.error ? <p className="text-error [overflow-wrap:anywhere]">{normalizeError(manifestQuery.error).message}</p> : manifestQuery.data && <>
+                    <p className="text-muted">{manifestQuery.data.remoteActive ? t("settings.manifestStatus.remote") : t("settings.manifestStatus.bundled")}</p>
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono text-[10.5px] text-faint">
+                      <span>{t("settings.manifestStatus.effective")} r{manifestQuery.data.effectiveRevision} · {manifestQuery.data.effectivePackages}</span>
+                      <span>{t("settings.manifestStatus.bundled")} r{manifestQuery.data.bundledRevision} · {manifestQuery.data.bundledPackages}</span>
+                    </div>
+                    {manifestQuery.data.userModules.some((module) => !module.valid) && <p className="text-warn">{t("settings.manifestStatus.invalidModule")}</p>}
+                  </>}
                 </div>
               </CardContent>
             </Card>
@@ -1318,7 +1342,7 @@ export default function SettingsPage() {
                   <div className="flex flex-col gap-0.5">
                     <span className="text-[12.5px] text-secondary">{t("about.desc")}</span>
                     <span className="text-[10.5px] text-faint">
-                      {t("settings.currentVersion")} v{appVersion || "0.2.116"}
+                      {t("settings.currentVersion")} v{appVersion || "0.2.117"}
                     </span>
                   </div>
                   <div className="flex gap-2">

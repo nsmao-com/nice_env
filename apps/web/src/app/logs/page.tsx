@@ -14,6 +14,7 @@ import { Card } from "@/components/ui/card";
 import { LogPane } from "@/components/shared/log-pane";
 import { StatusLight } from "@/components/shared/status-light";
 import { PageHeader } from "@/components/layout/app-shell";
+import { ServiceHistoryDialog } from "@/components/shared/service-history-dialog";
 
 export default function LogsPage() {
   // 静态导出时 useSearchParams 需要 Suspense 边界
@@ -112,6 +113,7 @@ function LogsPageInner() {
             <span className="text-[11.5px] text-faint">
               {servicesError ? t("logs.servicesFailed") : !servicesQuery.dataUpdatedAt ? t("common.loading") : `${runningCount}/${services.length} ${t("logs.runningCount")}`}
             </span>
+            <ServiceHistoryDialog services={services} />
             {/* 导出当前选中服务的完整日志文件 */}
             <Button
               variant="ghost"

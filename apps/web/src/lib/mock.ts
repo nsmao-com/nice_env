@@ -80,7 +80,7 @@ function mockSiteFileScope(id: string, project: boolean, exclude: boolean): Site
 }
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.116";
+const MOCK_APP_VERSION = "0.2.117";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const mockMongoDatabases = new Map<string, Record<string, Record<string, unknown>[]>>([
@@ -549,6 +549,11 @@ function seedStacks() {
 seedStacks();
 
 const serviceLogLines = new Map<string, string[]>();
+const mockServiceHistory: import("./api").ServiceHistoryEntry[] = [];
+function pushMockServiceHistory(serviceId: string, detail: string) {
+  mockServiceHistory.unshift({ ts: Date.now(), serviceId, detail });
+  mockServiceHistory.splice(200);
+}
 
 function logLinesFor(id: string): string[] {
   if (id.startsWith("site:")) {
@@ -796,6 +801,9 @@ function seed() {
   ]);
 }
 seed();
+for (const service of services.values()) {
+  if (service.state === "running") pushMockServiceHistory(service.id, "Stopped → Running");
+}
 
 // 浏览器预览也保留上次加载的站点端口，修改设置本身不会替换运行中入口。
 function mockSiteUrl(site: Site) {
@@ -1041,6 +1049,7 @@ async function performServiceAction(action: "start_service" | "stop_service" | "
   const service = services.get(id);
   if (!service) throw { code: "UNKNOWN_SERVICE", message: `服务 ${id} 未注册或已卸载` };
   if (["starting", "stopping"].includes(service.state)) throw { code: "SERVICE_BUSY", message: "服务正在切换状态，请稍后重试" };
+  const beforeState = service.state;
   let stopping = true;
   try {
     if (action !== "start_service" && (service.state !== "stopped" || service.pids.length)) {
@@ -1080,11 +1089,15 @@ async function performServiceAction(action: "start_service" | "stop_service" | "
       service.uptimeSec = 0;
       if (id === "mihomo") proxyRunning = true;
     }
+    if (action === "restart_service" || beforeState !== service.state) {
+      pushMockServiceHistory(id, action === "restart_service" ? "Restarted" : action === "start_service" ? "Stopped → Running" : "Running → Stopped");
+    }
     return true;
   } catch (failure) {
     const error = normalizeError(failure);
     if (action === "restart_service") error.message = `${stopping ? "重启中止，停止阶段失败" : "服务已停止，但重新启动失败"}：${error.message}`;
     service.state = "error"; service.lastError = error;
+    pushMockServiceHistory(id, `Error · ${error.message}`);
     throw error;
   }
 }
@@ -1101,6 +1114,8 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
   switch (cmd) {
     case "list_service_status":
       return structuredClone(Array.from(services.values())) as T;
+    case "service_history":
+      return structuredClone(mockServiceHistory.slice(0, Math.min(200, Number(args?.n) || 200))) as T;
     case "service_web_url":
     case "repair_service_web_ui":
       throw { code: "DESKTOP_ONLY", message: "浏览器预览不能确认本机服务的管理台地址，请使用桌面端" };
@@ -2850,7 +2865,8 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "mongodb_auth_status": return structuredClone(mongoAuthPreview(String(args!.version)).view) as T;
     case "mongodb_auth_connection":
     case "mongodb_auth_apply":
-    case "mongodb_auth_password": {
+    case "mongodb_auth_password":
+    case "mongodb_auth_reset": {
       const { view, password: saved } = mongoAuthPreview(String(args!.version));
       const input = args!.input as import("@nsb/schema").MongoAuthApply | undefined;
       if ((input?.revision ?? args!.revision) !== view.revision) throw { code: "MONGO_AUTH_CHANGED", message: "实例或认证已变化，请重新检查" };
@@ -2865,6 +2881,11 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         const password = String(args!.password);
         if (Array.from(password).length < 8) throw { code: "MONGO_PASSWORD_SHORT", message: "至少需要 8 个字符" };
         entry.password = password;
+      } else if (cmd === "mongodb_auth_reset") {
+        if (!view.configured || !view.username) throw { code: "MONGO_RESET_UNAVAILABLE", message: "没有可恢复的本机管理账号记录" };
+        const password = String(args!.password);
+        if (Array.from(password).length < 8) throw { code: "MONGO_PASSWORD_SHORT", message: "至少需要 8 个字符" };
+        entry.password = password; view.hasPassword = true; view.administrator = true; view.authorization = true; view.problem = null;
       } else {
         if (!input!.acknowledgeRestart || (!input!.enabled && !input!.acknowledgeDisable)) throw { code: "MONGO_AUTH_CONFIRM", message: "请确认重启和关闭认证的影响" };
         if (input!.administrator) {
@@ -3386,6 +3407,15 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       throw { code: "DESKTOP_ONLY", message: "浏览器无法打开本机终端，请使用桌面端" };
     case "refresh_remote_manifest":
       return { revision: 2, packages: 160, path: "C:\\Users\\Demo\\AppData\\Local\\NiceEnv\\etc\\manifest.json", takesEffect: "restart" } as T;
+    case "manifest_status":
+      return {
+        bundledRevision: bundledManifest.revision,
+        bundledPackages: bundledManifest.packages.length,
+        effectiveRevision: bundledManifest.revision,
+        effectivePackages: bundledManifest.packages.length,
+        remoteActive: false,
+        userModules: [],
+      } as T;
     case "reset_remote_manifest":
       return true as T;
     case "check_updates":

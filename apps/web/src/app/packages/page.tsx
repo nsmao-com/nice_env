@@ -30,13 +30,14 @@ import {
   FolderArchive,
   HardDrive,
   Stethoscope,
+  RefreshCw,
 } from "lucide-react";
 import type { PackageView, PackageCategory, ServiceStatus, BulkReport } from "@nsb/schema";
 import { PACKAGE_CATEGORY_ORDER } from "@nsb/schema";
 import { cn, fmtBytes, fmtSpeed, isPlatformCompatible } from "@/lib/utils";
 import { useUI, useT } from "@/lib/store";
 import { usePackages, useServices, useSettings, useVersionCatalogs, serviceHasProcess } from "@/lib/hooks";
-import { normalizeError, type AppErrorShape } from "@/lib/backend";
+import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { useInstallTasks, activeProgressFor } from "@/lib/install-tasks";
 import * as api from "@/lib/api";
 import { Card } from "@/components/ui/card";
@@ -223,7 +224,9 @@ export default function PackagesPage() {
   const {
     byId: catalogById,
     refresh: refreshCatalogs,
+    refreshAll: refreshAllCatalogs,
   } = useVersionCatalogs(packages.map((p) => p.id));
+  const [catalogRefreshing, setCatalogRefreshing] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const [packageFilter, setPackageFilter] = React.useState<PackageFilter>("all");
   const [category, setCategory] = React.useState("all");
@@ -244,6 +247,18 @@ export default function PackagesPage() {
   const filterUnavailable = packageFilter === "running" && !statusKnown;
   const hasFilters = !!query.trim() || packageFilter !== "all" || category !== "all";
   const resetFilters = () => { setQuery(""); setPackageFilter("all"); setCategory("all"); };
+  const refreshAllVersions = async () => {
+    if (!isTauri || catalogRefreshing || packages.length === 0) return;
+    setCatalogRefreshing(true);
+    try {
+      await refreshAllCatalogs();
+      toast.success(t("packages.versionsRefreshed"));
+    } catch (error) {
+      toast.error(normalizeError(error).message);
+    } finally {
+      setCatalogRefreshing(false);
+    }
+  };
   const filtered = React.useMemo(() => {
     if (filterUnavailable) return [];
     const q = query.trim().toLowerCase();
@@ -426,6 +441,9 @@ export default function PackagesPage() {
               </SelectContent>
             </Select>
             {hasFilters && <Button variant="ghost" size="sm" onClick={resetFilters}>{t("packages.resetFilters")}</Button>}
+            <Button variant="ghost" size="sm" disabled={!isTauri || !dataReady || catalogRefreshing} onClick={() => void refreshAllVersions()} title={t("packages.refreshVersionsHint")}>
+              <RefreshCw className={cn("h-3.5 w-3.5", catalogRefreshing && "animate-spin")} /> {t("packages.refreshVersions")}
+            </Button>
             <Button variant="outline" size="sm" disabled={actionsDisabled} onClick={() => openBulk("start")}>
               <Play className="h-3.5 w-3.5" /> {t("packages.startAll")}
             </Button>

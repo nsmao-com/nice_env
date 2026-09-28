@@ -16,9 +16,9 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
-type Mode = "connect" | "setup" | "enable" | "disable" | "password";
+type Mode = "connect" | "setup" | "enable" | "disable" | "password" | "reset";
 type Draft = { mode: Mode; view: MongoAuthView; signature: string };
-const titles = { connect: "mongoAuth.connect", setup: "mongoAuth.setup", enable: "mongoAuth.enable", disable: "mongoAuth.disable", password: "mongoAuth.password" } as const;
+const titles = { connect: "mongoAuth.connect", setup: "mongoAuth.setup", enable: "mongoAuth.enable", disable: "mongoAuth.disable", password: "mongoAuth.password", reset: "mongoAuth.reset" } as const;
 const validText = (s: string, max: number) => !!s.trim() && new TextEncoder().encode(s).length <= max && !/[\x00-\x1f\x7f-\x9f]/.test(s);
 
 export function MongoAuthPanel({ version, signature, onLockChange }: { version: string; signature: string; onLockChange: (locked: boolean) => void }) {
@@ -53,15 +53,16 @@ export function MongoAuthPanel({ version, signature, onLockChange }: { version: 
     client.setQueryData(queryKey, view);
     setDraft({ mode: draft.mode === "setup" && view.administrator ? "enable" : draft.mode, view, signature }); setRestart(false); setDisable(false);
   });
-  const changingPassword = draft?.mode === "setup" || draft?.mode === "password";
+  const changingPassword = draft?.mode === "setup" || draft?.mode === "password" || draft?.mode === "reset";
   const needsPassword = changingPassword || (draft?.mode === "connect" && method === "password");
-  const needsRestart = !!draft && ["setup", "enable", "disable"].includes(draft.mode);
+  const needsRestart = !!draft && ["setup", "enable", "disable", "reset"].includes(draft.mode);
   const credentialsValid = validText(username, 256) && validText(authDatabase, 63) && !/[\s/\\."$*<>:|?]/.test(authDatabase) && validText(password, 4096);
   const canSave = !!draft && !busy && draft.signature === signature && draft.view.running &&
-    (draft.mode === "connect" ? method === "none" || credentialsValid : !draft.view.problem) &&
+    (draft.mode === "connect" ? method === "none" || credentialsValid : draft.mode === "reset" ? true : !draft.view.problem) &&
     (!changingPassword || (validText(password, 4096) && Array.from(password).length >= 8 && password === repeat)) &&
     (draft.mode !== "setup" || (credentialsValid && draft.view.hasUsers === false && draft.view.authorization === false)) &&
     (!["enable", "disable", "password"].includes(draft.mode) || draft.view.administrator) &&
+    (draft.mode !== "reset" || (draft.view.configured && !!draft.view.username && !!draft.view.problem)) &&
     (!needsRestart || restart) && (draft.mode !== "disable" || disable);
   const submit = (event: React.FormEvent) => {
     event.preventDefault(); if (!canSave || !draft) return;
@@ -70,6 +71,7 @@ export function MongoAuthPanel({ version, signature, onLockChange }: { version: 
       let result: MongoAuthView;
       if (current.mode === "connect") result = await api.mongoAuthConnection(version, current.view.revision, method === "none" ? { username: "", password: "", authDatabase: "admin" } : { username, password, authDatabase });
       else if (current.mode === "password") result = await api.mongoAuthPassword(version, current.view.revision, password);
+      else if (current.mode === "reset") result = await api.mongoAuthReset(version, current.view.revision, password);
       else result = await api.mongoAuthApply(version, { revision: current.view.revision, enabled: current.mode !== "disable", acknowledgeRestart: restart, acknowledgeDisable: disable, administrator: current.mode === "setup" ? { username, password, authDatabase: "admin" } : null });
       client.setQueryData(queryKey, result); clear(); toast.success(t("mongoAuth.saved"));
     });
@@ -93,6 +95,7 @@ export function MongoAuthPanel({ version, signature, onLockChange }: { version: 
           {view.hasUsers === false && view.authorization === false ? <Button size="sm" disabled={busy || !view.running || !!view.problem} onClick={() => open("setup")}>{t("mongoAuth.setup")}</Button> : <>
             <Button size="sm" variant="secondary" disabled={busy || !view.running || !view.administrator} onClick={() => open(view.authorization ? "disable" : "enable")}>{t(view.authorization ? "mongoAuth.disable" : "mongoAuth.enable")}</Button>
             <Button size="sm" variant="ghost" disabled={busy || !view.running || !view.administrator} onClick={() => open("password")}>{t("mongoAuth.password")}</Button>
+            {view.configured && !!view.username && !!view.problem && <Button size="sm" variant="secondary" disabled={busy || !view.running} onClick={() => open("reset")}>{t("mongoAuth.reset")}</Button>}
           </>}
         </div>
         {view.hasUsers && !view.administrator && <p className="text-xs leading-5 text-muted">{t("mongoAuth.requireAdmin")}</p>}
@@ -101,12 +104,13 @@ export function MongoAuthPanel({ version, signature, onLockChange }: { version: 
     <Dialog open={!!draft} onOpenChange={open => { if (!open && !lock.current) clear(); }}><DialogContent hideClose={busy} className="flex max-h-[85dvh] max-w-xl flex-col overflow-hidden p-5 sm:p-6" onInteractOutside={e => e.preventDefault()}>
       <DialogHeader className="shrink-0 pr-6"><DialogTitle>{draft && t(titles[draft.mode])}</DialogTitle><DialogDescription>MongoDB {version}</DialogDescription></DialogHeader>
       {draft && <form onSubmit={submit} className="flex min-h-0 flex-col gap-4"><div className="min-h-0 space-y-4 overflow-y-auto px-0.5">
-        <p className="text-xs leading-5 text-muted">{t(draft.mode === "connect" ? "mongoAuth.connectionHint" : draft.mode === "password" ? "mongoAuth.passwordHint" : draft.mode === "setup" ? "mongoAuth.setupHint" : "mongoAuth.restartHint")}</p>
+        <p className="text-xs leading-5 text-muted">{t(draft.mode === "connect" ? "mongoAuth.connectionHint" : draft.mode === "password" ? "mongoAuth.passwordHint" : draft.mode === "reset" ? "mongoAuth.resetHint" : draft.mode === "setup" ? "mongoAuth.setupHint" : "mongoAuth.restartHint")}</p>
         {draft.mode === "connect" && <div className="space-y-1.5"><Label htmlFor={`${id}-method`}>{t("mongoAuth.method")}</Label><Select value={method} disabled={busy} onValueChange={value => { setMethod(value); setPassword(""); }}><SelectTrigger id={`${id}-method`}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="password">{t("mongoAuth.passwordMethod")}</SelectItem><SelectItem value="none">{t("mongoAuth.anonymous")}</SelectItem></SelectContent></Select></div>}
         {(draft.mode === "setup" || (draft.mode === "connect" && method === "password")) && <>
           <div className="space-y-1.5"><Label htmlFor={`${id}-username`}>{t("mongoAuth.username")}</Label><Input id={`${id}-username`} autoComplete="username" value={username} onChange={e => setUsername(e.target.value)} disabled={busy} /></div>
           {draft.mode === "connect" && <div className="space-y-1.5"><Label htmlFor={`${id}-database`}>{t("mongoAuth.authDatabase")}</Label><Input id={`${id}-database`} value={authDatabase} onChange={e => setAuthDatabase(e.target.value)} disabled={busy} /><p className="text-xs text-muted">{t("mongoAuth.databaseHint")}</p></div>}
         </>}
+        {draft.mode === "reset" && <div className="space-y-1.5"><Label>{t("mongoAuth.username")}</Label><p className="rounded-md border border-border bg-fill px-3 py-2 font-mono text-sm text-secondary [overflow-wrap:anywhere]">{draft.view.username} @ {draft.view.authDatabase}</p></div>}
         {needsPassword && <div className="space-y-1.5"><Label htmlFor={`${id}-password`}>{t(changingPassword ? "mongoAuth.newPassword" : "mongoAuth.loginPassword")}</Label><div className="flex gap-2"><Input id={`${id}-password`} className="min-w-0" type={visible ? "text" : "password"} autoComplete={changingPassword ? "new-password" : "current-password"} value={password} onChange={e => setPassword(e.target.value)} disabled={busy} /><Button type="button" size="icon" variant="ghost" aria-label={t(visible ? "mongoAuth.hide" : "mongoAuth.show")} disabled={busy} onClick={() => setVisible(!visible)}>{visible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}</Button></div>{changingPassword && <p className="text-xs text-muted">{t("mongoAuth.minimum")}</p>}</div>}
         {changingPassword && <div className="space-y-1.5"><Label htmlFor={`${id}-repeat`}>{t("mongoAuth.repeat")}</Label><Input id={`${id}-repeat`} type={visible ? "text" : "password"} autoComplete="new-password" value={repeat} onChange={e => setRepeat(e.target.value)} disabled={busy} />{repeat && repeat !== password && <p role="alert" className="text-xs text-error">{t("mongoAuth.mismatch")}</p>}</div>}
         {draft.mode === "disable" && <label className="flex items-start gap-3 text-sm leading-6"><Switch checked={disable} disabled={busy} onCheckedChange={setDisable} /><span>{t("mongoAuth.disableConfirm")}</span></label>}

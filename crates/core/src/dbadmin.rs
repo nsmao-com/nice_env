@@ -601,6 +601,17 @@ pub struct PostgresClient {
 impl PostgresClient {
     /// 密码仅写入私有 pgpass；不继承 PGHOST/PGSERVICE/PGOPTIONS 等外部连接配置。
     pub(crate) fn command(&self) -> Result<(tempfile::TempDir, Command)> {
+        let (private, mut command) = self.tool_command("psql", "postgres", None)?;
+        command.args(["--no-psqlrc", "--no-align", "--tuples-only", "--set=ON_ERROR_STOP=1"])
+            .env("PGOPTIONS", "-c statement_timeout=10000 -c lock_timeout=5000");
+        Ok((private, command))
+    }
+
+    pub(crate) fn tool_command(&self, tool: &str, database: &str, options: Option<&str>) -> Result<(tempfile::TempDir, Command)> {
+        postgres_ident(database)?;
+        if !["psql", "pg_dump", "pg_restore"].contains(&tool) {
+            return Err(AppError::new("POSTGRES_TOOL", "不支持的 PostgreSQL 客户端"));
+        }
         if self.port == 0 || self.password.chars().any(char::is_control) {
             return Err(AppError::new("BAD_CONNECTION", "PostgreSQL 连接参数无效"));
         }
@@ -612,14 +623,21 @@ impl PostgresClient {
             file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         }
         let escaped = self.password.replace('\\', "\\\\").replace(':', "\\:");
-        writeln!(file, "127.0.0.1:{}:postgres:postgres:{escaped}", self.port)?;
+        let pass_database = database.replace('\\', "\\\\").replace(':', "\\:");
+        writeln!(file, "127.0.0.1:{}:{pass_database}:postgres:{escaped}", self.port)?;
         file.sync_all()?;
-        let mut command = platform::command(&self.exe);
+        let exe = self.exe.with_file_name(crate::ops::exe_name(tool));
+        let mut command = platform::command(&exe);
         for (name, _) in std::env::vars_os().filter(|(name, _)| name.to_string_lossy().to_ascii_uppercase().starts_with("PG")) { command.env_remove(name); }
-        command.args(["--no-psqlrc", "--no-password", "--no-align", "--tuples-only", "--set=ON_ERROR_STOP=1", "--host=127.0.0.1", "--username=postgres", "--dbname=postgres"])
+        // 用 ASCII URI 传递 UTF-8 库名：既阻止 conninfo 注入，也避开 Windows 客户端 argv 的本地编码。
+        let encode = |value: &str| value.as_bytes().iter().map(|byte| format!("%{byte:02X}")).collect::<String>();
+        let database = encode(database);
+        let options = options.map(|value| format!("?options={}", encode(value))).unwrap_or_default();
+        command.args(["--no-password", "--host=127.0.0.1", "--username=postgres"])
+            .arg(format!("--dbname=postgresql://postgres@127.0.0.1:{}/{database}{options}", self.port))
             .arg(format!("--port={}", self.port))
             .env("PGPASSFILE", passfile).env("PGCONNECT_TIMEOUT", "5").env("PGCLIENTENCODING", "UTF8")
-            .env("PGAPPNAME", "NiceEnv").env("LC_ALL", "C").env("PGOPTIONS", "-c statement_timeout=10000 -c lock_timeout=5000");
+            .env("PGAPPNAME", "NiceEnv").env("LC_ALL", "C");
         Ok((private, command))
     }
 

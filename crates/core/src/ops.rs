@@ -3258,7 +3258,10 @@ mod validate_tests {
         };
         let account_query = |password: &str, sql: &str| {
             let (_private, mut command) = account_command(password);
-            command.args(["-c", sql]).output().unwrap()
+            let mut input = tempfile::tempfile().unwrap();
+            std::io::Write::write_all(&mut input, sql.as_bytes()).unwrap();
+            std::io::Seek::rewind(&mut input).unwrap();
+            command.stdin(input).output().unwrap()
         };
         let account = account_query(account_password, "SELECT current_user; CREATE TABLE project_proof (value int); INSERT INTO project_proof VALUES (84); SELECT value FROM project_proof;");
         assert!(account.status.success(), "{}", String::from_utf8_lossy(&account.stderr));
@@ -3271,6 +3274,79 @@ mod validate_tests {
         client.set_role_password(&role.name, role.oid, new_password).unwrap();
         assert!(!account_query(account_password, "SELECT 1;").status.success());
         assert!(account_query(new_password, "SELECT value FROM project_proof;").status.success());
+        // 归档必须能恢复真实结构、Unicode/二进制数据和序列；不依赖浏览器演示结果。
+        let pg_query = |database: &str, sql: &str| {
+            let (_private, mut command) = client.tool_command("psql", database, None).unwrap();
+            let mut input = tempfile::tempfile().unwrap();
+            std::io::Write::write_all(&mut input, sql.as_bytes()).unwrap();
+            std::io::Seek::rewind(&mut input).unwrap();
+            command.args(["--no-psqlrc", "--no-align", "--tuples-only", "--set=ON_ERROR_STOP=1"]).stdin(input).output().unwrap()
+        };
+        let created = account_query(new_password, "CREATE TABLE archive_payload (id serial PRIMARY KEY, label text NOT NULL, bytes bytea); INSERT INTO archive_payload (label, bytes) VALUES ('备份内容', decode('00ff1020','hex')); CREATE INDEX archive_label_idx ON archive_payload(label);");
+        assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+        let large_object = account_query(new_password, "SELECT lo_from_bytea(0, decode('0123456789abcdef','hex'));");
+        assert!(large_object.status.success());
+        let large_object: u32 = String::from_utf8_lossy(&large_object.stdout).trim().parse().unwrap();
+        assert_eq!(crate::dbbackup::postgres_dump(&state.paths, &client, "16.6", &project.name, project.oid + 1, &|_| {}).unwrap_err().code, "POSTGRES_TARGET_CHANGED");
+        assert!(crate::dbbackup::postgres_dump(&state.paths, &client, "16.6", "postgres", system.oid, &|_| {}).is_err());
+        let archive = state.with_postgres("16.6", |client| crate::dbbackup::postgres_dump(&state.paths, client, "16.6", &project.name, project.oid, &|_| {})).unwrap();
+        assert!(std::fs::read(&archive).unwrap().starts_with(b"PGDMP"));
+        assert!(crate::dbbackup::postgres_list_backups(&state.paths).unwrap().iter().any(|file| Path::new(&file.path) == archive));
+        assert!(crate::dbbackup::list_backups(&state.paths).unwrap().is_empty());
+        client.create_role("restore_owner", "restore-account-password").unwrap();
+        let restore = |path: &Path, name: &str, trusted: bool| state.with_postgres("16.6", |client| crate::dbbackup::postgres_restore(&state.paths, client, path, name, "restore_owner", trusted, &|_| {}));
+        assert_eq!(restore(&archive, "archive_restored", false).unwrap_err().code, "POSTGRES_BACKUP_UNTRUSTED");
+        let invalid = temp.path().join("invalid.dump");
+        std::fs::write(&invalid, "not a PostgreSQL archive").unwrap();
+        assert_eq!(restore(&invalid, "archive_restored", true).unwrap_err().code, "BAD_BACKUP_FILE");
+        std::fs::write(&invalid, "PGDMPbroken").unwrap();
+        assert!(restore(&invalid, "archive_restored", true).is_err());
+        assert!(!management().iter().any(|db| db.name == "archive_restored"));
+        let external_archive = temp.path().join("external 中文 archive.dump");
+        std::fs::copy(&archive, &external_archive).unwrap();
+        restore(&external_archive, "archive_restored", true).unwrap();
+        let restored = management().into_iter().find(|db| db.name == "archive_restored").unwrap();
+        assert_eq!(restored.owner, "restore_owner");
+        let restored_query = pg_query("archive_restored", "SELECT value FROM project_proof; SELECT label, encode(bytes,'hex') FROM archive_payload; SELECT pg_get_userbyid(relowner) FROM pg_class WHERE relname='archive_payload'; INSERT INTO archive_payload(label) VALUES ('second') RETURNING id;");
+        assert!(restored_query.status.success(), "{}", String::from_utf8_lossy(&restored_query.stderr));
+        let restored_text = String::from_utf8_lossy(&restored_query.stdout);
+        assert!(restored_text.contains("84") && restored_text.contains("备份内容|00ff1020") && restored_text.contains("restore_owner") && restored_text.contains('2'));
+        assert_eq!(String::from_utf8_lossy(&pg_query("archive_restored", &format!("SELECT encode(lo_get({large_object}), 'hex');")).stdout).trim(), "0123456789abcdef");
+        assert_eq!(restore(&archive, "archive_restored", true).unwrap_err().code, "POSTGRES_DATABASE_EXISTS");
+        assert!(String::from_utf8_lossy(&pg_query("archive_restored", "SELECT count(*) FROM archive_payload;").stdout).trim() == "2");
+        client.query("CREATE ROLE \"恢复 所有者\" LOGIN;").unwrap();
+        crate::dbbackup::postgres_restore(&state.paths, &client, &archive, "archive_unicode", "恢复 所有者", true, &|_| {}).unwrap();
+        assert_eq!(String::from_utf8_lossy(&pg_query("archive_unicode", "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE relname='archive_payload';").stdout).trim(), "恢复 所有者");
+        let unicode_db = management().into_iter().find(|db| db.name == "archive_unicode").unwrap();
+        client.drop_database(&unicode_db.name, unicode_db.oid).unwrap();
+        let unicode_owner = client.list_roles().unwrap().into_iter().find(|role| role.name == "恢复 所有者").unwrap();
+        client.drop_role(&unicode_owner.name, unicode_owner.oid).unwrap();
+        // 非超级用户不能恢复事件触发器；失败必须回滚同一事务中的表和数据。
+        let trigger = pg_query("project_data", "CREATE FUNCTION archive_event_probe() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN RETURN; END; $$; CREATE EVENT TRIGGER archive_event_probe ON ddl_command_end EXECUTE FUNCTION archive_event_probe();");
+        assert!(trigger.status.success(), "{}", String::from_utf8_lossy(&trigger.stderr));
+        let privileged = crate::dbbackup::postgres_dump(&state.paths, &client, "16.6", &project.name, project.oid, &|_| {}).unwrap();
+        let denied = restore(&privileged, "archive_denied", true).unwrap_err();
+        assert_eq!(denied.code, "POSTGRES_BACKUP_FAILED");
+        assert!(denied.hint.unwrap_or_default().contains("archive_denied"));
+        assert_eq!(String::from_utf8_lossy(&pg_query("archive_denied", "SELECT count(*) FROM pg_tables WHERE schemaname='public';").stdout).trim(), "0");
+        assert!(pg_query("project_data", "DROP EVENT TRIGGER archive_event_probe; DROP FUNCTION archive_event_probe();").status.success());
+        for name in ["archive_restored", "archive_denied"] {
+            let db = management().into_iter().find(|db| db.name == name).unwrap(); client.drop_database(name, db.oid).unwrap();
+        }
+        let restore_owner = client.list_roles().unwrap().into_iter().find(|role| role.name == "restore_owner").unwrap();
+        client.drop_role(&restore_owner.name, restore_owner.oid).unwrap();
+        // 库名里的等号、引号不得被 libpq 解释成另一个连接目标。
+        client.query("CREATE DATABASE \"name=host=invalid ' 中文\";").unwrap();
+        let unusual = management().into_iter().find(|db| db.name == "name=host=invalid ' 中文").unwrap();
+        assert!(pg_query(&unusual.name, "CREATE TABLE retained (value int); INSERT INTO retained VALUES (86);").status.success());
+        let unusual_archive = crate::dbbackup::postgres_dump(&state.paths, &client, "16.6", &unusual.name, unusual.oid, &|_| {}).unwrap();
+        assert!(std::fs::metadata(&unusual_archive).unwrap().len() > 5);
+        client.drop_database(&unusual.name, unusual.oid).unwrap();
+        for archive in [archive, privileged, unusual_archive] {
+            let name = archive.file_name().unwrap().to_str().unwrap();
+            crate::dbbackup::postgres_delete_backup(&state.paths, name).unwrap(); assert!(!archive.exists());
+        }
+        assert!(crate::dbbackup::postgres_list_backups(&state.paths).unwrap().is_empty());
         // 有真实业务连接时，删除不得强制断开它。
         let (_private_connection, mut connection) = account_command(new_password);
         connection.args(["-c", "SELECT pg_sleep(15);"]).env("PGOPTIONS", "-c statement_timeout=30000")

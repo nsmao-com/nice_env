@@ -334,6 +334,12 @@ export const postgresDropDatabase = (version: string, name: string, oid: number)
 export const postgresCreateRole = (version: string, name: string, password: string) => safe(invoke<void>("postgres_create_role", { version, name, password }));
 export const postgresSetRolePassword = (version: string, name: string, oid: number, password: string) => safe(invoke<void>("postgres_set_role_password", { version, name, oid, password }));
 export const postgresDropRole = (version: string, name: string, oid: number) => safe(invoke<void>("postgres_drop_role", { version, name, oid }));
+export type PostgresBackupProgress = import("@nsb/schema").DbBackupProgress & { operationId: string };
+export const postgresBackupList = () => safe(invoke<DbBackupFile[]>("postgres_backup_list"));
+export const postgresBackupDir = () => safe(invoke<string>("postgres_backup_dir"));
+export const postgresBackupDump = (version: string, name: string, oid: number, operationId: string) => safe(invoke<string>("postgres_backup_dump", { version, name, oid, operationId }));
+export const postgresBackupRestore = (version: string, path: string, name: string, owner: string, trusted: boolean, operationId: string) => safe(invoke<void>("postgres_backup_restore", { version, path, name, owner, trusted, operationId }));
+export const postgresBackupDelete = (name: string) => safe(invoke<void>("postgres_backup_delete", { name }));
 
 /* PHP 扩展 */
 export const phpExtensions = (version: string) =>

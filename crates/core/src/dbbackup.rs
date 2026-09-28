@@ -445,6 +445,140 @@ pub fn default_dump_name(databases: &[String]) -> String {
     format!("{label}-{}.sql", unique_stamp())
 }
 
+/// PostgreSQL 使用独立目录与 custom archive，不混入 MySQL/MariaDB 的 SQL 列表。
+pub fn postgres_backup_dir(paths: &Paths) -> Result<PathBuf> {
+    Ok(crate::paths::checked_data_path(&paths.base, "backup/postgresql")?)
+}
+
+fn postgres_backup_path(paths: &Paths, name: &str) -> Result<PathBuf> {
+    if name.is_empty() || name.contains(['/', '\\']) || !name.ends_with(".dump") {
+        return Err(AppError::new("BAD_BACKUP_NAME", "请选择 PostgreSQL 备份目录内的 .dump 文件"));
+    }
+    Ok(crate::paths::checked_data_path(&paths.base, &format!("backup/postgresql/{name}"))?)
+}
+
+pub fn postgres_list_backups(paths: &Paths) -> Result<Vec<DbBackupFile>> {
+    let dir = postgres_backup_dir(paths)?;
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() { continue; }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".dump") { continue; }
+        let path = postgres_backup_path(paths, &name)?;
+        let metadata = entry.metadata()?;
+        files.push(DbBackupFile { name, path: path.to_string_lossy().into(), size_bytes: metadata.len(),
+            created_at: metadata.modified().ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|time| time.as_secs() as i64).unwrap_or(0) });
+    }
+    files.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.name.cmp(&b.name)));
+    Ok(files)
+}
+
+pub fn postgres_delete_backup(paths: &Paths, name: &str) -> Result<()> {
+    let path = postgres_backup_path(paths, name)?;
+    if !std::fs::symlink_metadata(&path)?.file_type().is_file() {
+        return Err(AppError::new("BAD_BACKUP_FILE", "只能删除普通 PostgreSQL 备份文件"));
+    }
+    std::fs::remove_file(path).map_err(Into::into)
+}
+
+fn postgres_tool_result(
+    command: &mut std::process::Command, error: &mut std::fs::File, client: &crate::dbadmin::PostgresClient,
+    message: &str, progress: impl FnMut(),
+) -> Result<()> {
+    let result = crate::dbadmin::wait_client(command, Duration::from_secs(1800), progress);
+    if result.as_ref().is_ok_and(|status| status.success()) { return Ok(()); }
+    let detail = match result {
+        Ok(_) => crate::dbadmin::read_output(error, 64 * 1024)?,
+        Err(error) => error.message,
+    };
+    let detail = if client.password.is_empty() { detail } else { detail.replace(&client.password, "***") };
+    Err(AppError::new("POSTGRES_BACKUP_FAILED", message).with_detail(detail))
+}
+
+pub fn postgres_dump(
+    paths: &Paths, client: &crate::dbadmin::PostgresClient, version: &str, database: &str, oid: u32,
+    progress: &dyn Fn(DbBackupProgress),
+) -> Result<PathBuf> {
+    let target = client.list_databases()?.into_iter().find(|db| db.name == database && db.oid == oid)
+        .ok_or_else(|| AppError::new("POSTGRES_TARGET_CHANGED", "数据库已变化，请刷新后重新选择"))?;
+    if target.protected || !target.allow_connections {
+        return Err(AppError::new("POSTGRES_PROTECTED", "请选择可连接的业务数据库进行备份"));
+    }
+    let dir = postgres_backup_dir(paths)?;
+    std::fs::create_dir_all(&dir)?;
+    let path = postgres_backup_path(paths, &format!("postgresql-{}-{}-{}.dump", sanitize(version), sanitize(database), unique_stamp()))?;
+    let pending = tempfile::Builder::new().prefix(".dump-").tempfile_in(&dir)?;
+    let mut error = tempfile::tempfile()?;
+    let (_private, mut command) = client.tool_command("pg_dump", database, None)?;
+    command.args(["--format=custom", "--lock-wait-timeout=5000"])
+        .env("PGOPTIONS", "-c statement_timeout=1800000 -c lock_timeout=5000")
+        .stdin(Stdio::null()).stdout(pending.as_file().try_clone()?).stderr(error.try_clone()?);
+    let mut last = std::time::Instant::now();
+    postgres_tool_result(&mut command, &mut error, client, "PostgreSQL 导出失败，未发布不完整的备份文件", || {
+        if last.elapsed() >= Duration::from_millis(250) {
+            progress(DbBackupProgress { database: database.into(), bytes: pending.as_file().metadata().map(|m| m.len()).unwrap_or(0), total: None, state: "running".into(), message: None });
+            last = std::time::Instant::now();
+        }
+    })?;
+    pending.as_file().sync_all()?;
+    let bytes = pending.as_file().metadata()?.len();
+    if bytes < 5 { return Err(AppError::new("POSTGRES_BACKUP_FAILED", "导出内容为空，未发布备份文件")); }
+    pending.persist_noclobber(&path).map_err(|error| AppError::io("发布 PostgreSQL 备份", error.error))?;
+    progress(DbBackupProgress { database: database.into(), bytes, total: Some(bytes), state: "done".into(), message: None });
+    Ok(path)
+}
+
+/// 使用选中文件的同一份快照进行预检与恢复，避免选择后被替换；只创建新库。
+pub fn postgres_restore(
+    paths: &Paths, client: &crate::dbadmin::PostgresClient, source: &Path, database: &str, owner: &str, trusted: bool,
+    progress: &dyn Fn(DbBackupProgress),
+) -> Result<()> {
+    use std::io::{Read, Seek};
+    if !trusted { return Err(AppError::new("POSTGRES_BACKUP_UNTRUSTED", "请先确认备份来源可信；恢复会执行归档中的数据库代码")); }
+    if !source.is_absolute() || !source.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("dump")) {
+        return Err(AppError::new("BAD_BACKUP_FILE", "请选择 pg_dump custom 格式的 .dump 文件"));
+    }
+    let mut input = std::fs::File::open(source)?;
+    if !input.metadata()?.is_file() { return Err(AppError::new("BAD_BACKUP_FILE", "备份必须是普通文件")); }
+    let dir = postgres_backup_dir(paths)?;
+    std::fs::create_dir_all(&dir)?;
+    let mut snapshot = tempfile::Builder::new().prefix(".restore-").tempfile_in(&dir)?;
+    progress(DbBackupProgress { database: database.into(), bytes: 0, total: None, state: "running".into(), message: Some("正在读取并校验备份".into()) });
+    std::io::copy(&mut input, snapshot.as_file_mut())?;
+    snapshot.as_file_mut().rewind()?;
+    let mut magic = [0u8; 5];
+    if snapshot.as_file_mut().read_exact(&mut magic).is_err() || magic != *b"PGDMP" {
+        return Err(AppError::new("BAD_BACKUP_FILE", "文件不是 PostgreSQL custom 归档；未创建或修改数据库"));
+    }
+    snapshot.as_file_mut().rewind()?;
+    let mut error = tempfile::tempfile()?;
+    let mut preflight = platform::command(client.exe.with_file_name(crate::ops::exe_name("pg_restore")));
+    preflight.args(["--list", "--format=custom"]).stdin(snapshot.as_file().try_clone()?).stdout(Stdio::null()).stderr(error.try_clone()?);
+    postgres_tool_result(&mut preflight, &mut error, client, "备份无法由当前版本读取，未创建数据库；请检查文件及 PostgreSQL 版本", || {})?;
+    // 将角色作为 UTF-8 连接选项传递，避免 Windows pg_restore 的 --role 参数经本地编码损坏。
+    let role = owner.replace('\\', "\\\\").replace(' ', "\\ ");
+    let options = format!("-c statement_timeout=1800000 -c lock_timeout=5000 -c role={role}");
+    let (_private, mut command) = client.tool_command("pg_restore", database, Some(&options))?;
+    // 不恢复源账号、ACL 或表空间；对象由选择的所有者拥有。归档仍必须来自可信来源。
+    command.args(["--format=custom", "--single-transaction", "--exit-on-error", "--no-owner", "--no-privileges", "--no-tablespaces"]);
+    snapshot.as_file_mut().rewind()?;
+    let mut error = tempfile::tempfile()?;
+    command.stdin(snapshot.as_file().try_clone()?).stdout(Stdio::null()).stderr(error.try_clone()?);
+    let bytes = snapshot.as_file().metadata()?.len();
+    client.create_database(database, owner)?;
+    progress(DbBackupProgress { database: database.into(), bytes: 0, total: None, state: "running".into(), message: Some("正在恢复到新数据库，耗时取决于数据量".into()) });
+    postgres_tool_result(&mut command, &mut error, client, "PostgreSQL 恢复未完成", || {})
+        .map_err(|error| error.with_hint(format!("新建数据库“{database}”已保留，请检查后处理。恢复使用单个事务，未自动删除数据库；重试时请选择另一个新库名称。")))?;
+    progress(DbBackupProgress { database: database.into(), bytes, total: Some(bytes), state: "done".into(), message: None });
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,6 +596,17 @@ mod tests {
             assert!(dump_path(&paths, "8.0.46", name).is_err(), "{name}");
         }
         assert!(dump_path(&paths, "../outside", "backup.sql").is_err());
+        for name in ["../outside.dump", "sub/file.dump", "bad:stream.dump", "backup.sql"] {
+            assert!(postgres_backup_path(&paths, name).is_err(), "{name}");
+            assert!(postgres_delete_backup(&paths, name).is_err(), "{name}");
+        }
+        assert!(postgres_list_backups(&paths).unwrap().is_empty());
+        let archived = postgres_backup_path(&paths, "example.dump").unwrap();
+        std::fs::create_dir_all(archived.parent().unwrap()).unwrap();
+        std::fs::write(&archived, b"PGDMPfixture").unwrap();
+        assert_eq!(postgres_list_backups(&paths).unwrap().len(), 1);
+        postgres_delete_backup(&paths, "example.dump").unwrap();
+        assert!(!archived.exists());
         assert_ne!(
             default_dump_name(&["app".into()]),
             default_dump_name(&["app".into()])

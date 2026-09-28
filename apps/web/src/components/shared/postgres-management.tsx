@@ -18,6 +18,7 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { CopyButton } from "@/components/shared/misc";
+import { PostgresBackupCard } from "@/components/shared/postgres-backup";
 
 type Action = { kind: "create-database" | "create-role" | "password" | "drop-database" | "drop-role"; signature: string; name?: string; oid?: number };
 const validName = (name: string) => /^[A-Za-z0-9_]{1,63}$/.test(name) && !/^pg_/i.test(name) && !/^(postgres|template0|template1)$/i.test(name);
@@ -34,7 +35,8 @@ export function PostgresManagement({ service, onLockChange }: { service?: Servic
   const roleQuery = useQuery({ queryKey: ["postgres-roles", signature], queryFn: () => api.postgresRoles(version), enabled: running, retry: false });
   const dbs = running && !databases.isError ? databases.data ?? [] : [];
   const roles = running && !roleQuery.isError ? roleQuery.data ?? [] : [];
-  const ready = running && databases.isSuccess && roleQuery.isSuccess;
+  const [backupLocked, setBackupLocked] = React.useState(false);
+  const ready = running && databases.isSuccess && roleQuery.isSuccess && !backupLocked;
   const [dbSearch, setDbSearch] = React.useState("");
   const [roleSearch, setRoleSearch] = React.useState("");
   const [dbPage, setDbPage] = React.useState(1);
@@ -55,7 +57,7 @@ export function PostgresManagement({ service, onLockChange }: { service?: Servic
   const rolePages = Math.max(1, Math.ceil(filteredRoles.length / PAGE_SIZE));
   const currentDbPage = Math.min(dbPage, dbPages);
   const currentRolePage = Math.min(rolePage, rolePages);
-  React.useEffect(() => { onLockChange(!!action); return () => onLockChange(false); }, [action, onLockChange]);
+  React.useEffect(() => { onLockChange(!!action || backupLocked); return () => onLockChange(false); }, [action, backupLocked, onLockChange]);
   React.useEffect(() => { setDbPage(1); setRolePage(1); }, [signature]);
   const refresh = () => invalidate("postgres-databases", "postgres-roles", "postgres-connection");
   const begin = (kind: Action["kind"], target?: { name: string; oid: number }) => {
@@ -83,6 +85,7 @@ export function PostgresManagement({ service, onLockChange }: { service?: Servic
   const stateMessage = (query: typeof databases | typeof roleQuery) => !running ? t("db.pgStopped") : query.isPending ? t("db.loading") : query.isError ? normalizeError(query.error).message : null;
 
   return <div className="space-y-4">
+    <PostgresBackupCard version={version} port={service?.port} signature={signature} ready={running && databases.isSuccess && roleQuery.isSuccess && !action} databases={dbs} roles={roles} onLockChange={setBackupLocked} />
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div className="min-w-0"><h2 className="text-sm font-semibold">{t("pg.manage")}</h2><p className="mt-1 break-words text-xs text-muted">PostgreSQL {version || "—"} · 127.0.0.1:{service?.port ?? "—"}</p></div>
       <div className="flex flex-wrap gap-2"><Button variant="secondary" disabled={!running || databases.isFetching || roleQuery.isFetching} onClick={refresh}>{t("db.refresh")}</Button><Button variant="secondary" disabled={!ready} onClick={() => begin("create-role")}><UserRound className="h-3.5 w-3.5" />{t("db.createUser")}</Button><Button disabled={!ready} onClick={() => begin("create-database")}><Plus className="h-3.5 w-3.5" />{t("db.createDb")}</Button></div>

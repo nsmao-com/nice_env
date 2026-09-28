@@ -66,7 +66,7 @@ import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSet
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.85";
+const MOCK_APP_VERSION = "0.2.86";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -363,6 +363,7 @@ const proxyProfiles = new Map<string, ProxyProfile>();
 const cronJobs = new Map<string, { id: string; name: string; command: string; intervalMin: number; enabled: boolean; createdAt: number; lastRunAt: number | null; lastExit: string | null; lastOutput: string | null }>();
 const mockRedisConnections = new Map<string, { username: string; password: string }>();
 const mockPostgresConnections = new Map<string, { password: string; saved: string; passwordRequired: boolean }>();
+const mockPostgresBackups = new Map<string, { file: DbBackupFile; database: import("./api").PostgresDatabaseInfo }>();
 const mockPostgresManagement = new Map<string, { nextOid: number; databases: import("./api").PostgresDatabaseInfo[]; roles: import("./api").PostgresRoleInfo[]; passwords: Map<string, string> }>();
 function postgresPreview(version: string) {
   let data = mockPostgresManagement.get(version);
@@ -2586,6 +2587,14 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (mockOllamaPull.state === "pulling") { mockOllamaPull.state = "cancelled"; mockOllamaPull.endedAt = Date.now(); }
       return true as T;
     }
+    case "postgres_backup_list": return structuredClone([...mockPostgresBackups.values()].map((entry) => entry.file).sort((a, b) => b.createdAt - a.createdAt)) as T;
+    case "postgres_backup_dir": return "C:/NiceEnv/backup/postgresql" as T;
+    case "postgres_backup_delete": {
+      if (!mockPostgresBackups.delete(args!.name as string)) throw { code: "FILE_NOT_FOUND", message: "备份文件已不存在" };
+      return undefined as T;
+    }
+    case "postgres_backup_dump":
+    case "postgres_backup_restore":
     case "postgres_connection":
     case "postgres_password":
     case "postgres_databases":
@@ -2627,6 +2636,29 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         return connection.saved as T;
       }
       const data = postgresPreview(version);
+      if (cmd === "postgres_backup_dump") {
+        const database = data.databases.find((db) => db.name === args!.name && db.oid === args!.oid);
+        if (!database || database.protected || !database.allowConnections) throw { code: "POSTGRES_TARGET_CHANGED", message: "请选择当前实例中的业务数据库" };
+        emitLocal("postgres://backup", { operationId: args!.operationId, database: database.name, bytes: 0, state: "running" });
+        await delay(700);
+        const name = `postgresql-${version}-${database.name}-${Date.now()}.dump`;
+        const file: DbBackupFile = { name, path: `C:/NiceEnv/backup/postgresql/${name}`, sizeBytes: 16384, createdAt: Math.floor(Date.now() / 1000) };
+        mockPostgresBackups.set(name, { file, database: structuredClone(database) });
+        return file.path as T;
+      }
+      if (cmd === "postgres_backup_restore") {
+        if (!args!.trusted) throw { code: "POSTGRES_BACKUP_UNTRUSTED", message: "请先确认备份来源可信" };
+        const backup = [...mockPostgresBackups.values()].find((entry) => entry.file.path === args!.path);
+        if (!backup) throw { code: "BAD_BACKUP_FILE", message: "找不到有效的 PostgreSQL custom 归档" };
+        const name = args!.name as string;
+        if (!/^[A-Za-z0-9_]{1,63}$/.test(name) || /^pg_/i.test(name) || /^(postgres|template0|template1)$/i.test(name)) throw { code: "POSTGRES_BAD_NAME", message: "名称无效或为系统保留名称" };
+        if (data.databases.some((db) => db.name === name)) throw { code: "POSTGRES_DATABASE_EXISTS", message: "此数据库已存在，请更换新名称" };
+        if (!data.roles.some((role) => role.name === args!.owner && role.canLogin)) throw { code: "POSTGRES_OWNER_CHANGED", message: "所选所有者不存在或无法登录" };
+        emitLocal("postgres://backup", { operationId: args!.operationId, database: name, bytes: 0, state: "running" });
+        await delay(900);
+        data.databases.push({ ...structuredClone(backup.database), oid: data.nextOid++, name, owner: args!.owner as string });
+        return undefined as T;
+      }
       if (cmd === "postgres_databases") return structuredClone(data.databases) as T;
       if (cmd === "postgres_roles") return structuredClone(data.roles.map((role) => ({ ...role, databases: data.databases.filter((db) => db.owner === role.name).map((db) => db.name) }))) as T;
       const name = args?.name as string;

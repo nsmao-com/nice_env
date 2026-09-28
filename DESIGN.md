@@ -2343,3 +2343,28 @@ MariaDB 初始化在临时目录限时执行，成功后才替换空目标目录
 没有业务数据库变更，未修改 update.sql；临时 PostgreSQL 数据库仅在隔离目录与端口验收。未启动前端 dev，未执行本地前端 build。v0.2.84 Release 已确认 completed/success。本轮按根 AGENTS.md 新增 annotated tag v0.2.85，并与 main 原子推送；安装包状态以远程 workflow 实际结果为准。PostgreSQL 对象授权编辑、所有权转移、备份恢复与外部导入尚待后续扩展，整体目标保持进行。Windows PostgreSQL 16.6 为本轮原生验收平台，Linux/macOS 未做本轮实机验收。
 
 参考：https://support.servbay.com/database-management/getting-started/postgresql-management-and-usage 、https://support.servbay.com/database-management/management/using-adminer-to-manage-database 、https://www.postgresql.org/docs/current/sql-createdatabase.html 、https://www.postgresql.org/docs/current/sql-droprole.html
+
+
+## 第一百轮：PostgreSQL 原生备份与恢复到新数据库（v0.2.86）
+
+继续参考 ServBay 的 PostgreSQL 备份目录、归档列表及 pg_dump / pg_restore 导入流程，使用 fast-context 定位现有数据库备份模块、Tauri 命令、进度事件及页面组件，查询 PostgreSQL 官方 custom archive 与单事务恢复文档。沿用 UI/UX skill 和现有组件，不新增运行依赖。
+
+新增 PostgreSQL 独立备份目录 backup/postgresql，使用所选安装内的 pg_dump 导出 custom 格式 .dump。导出前核对运行版本、真实监听进程、数据目录和所选数据库 OID，排除系统库与不可连接的库。备份使用临时文件，成功且同步后才无覆盖发布；失败不留下可误认为成功的归档。进度显示实际写出的字节，独立事件携带 operationId，避免其它操作的事件混入。目录与文件名沿用受控路径校验，拒绝路径穿越、Windows ADS、软链接和目录联接；删除仅接受本目录内的 .dump 文件名。
+
+支持从本机备份列表或文件选择器选取可信 custom 归档，选择新库名称及现有所有者。先读取到私有临时快照，校验 PGDMP 标记并通过 pg_restore --list 预检，再创建 UTF-8 新库；预检与恢复使用同一快照。恢复启用单事务与遇错退出，将对象归给所选所有者，不恢复源账号、ACL 或表空间位置。同名库拒绝创建。恢复失败时保留新建库并明确提示检查与重试方法，不自动删除可能已有外部活动的库；预检失败则不建库。归档可能含可执行数据库代码，界面需明确确认来源可信，不能把单事务或普通所有者当成任意恶意归档的隔离保证。
+
+复用私有 pgpass、环境隔离和有限执行时间。真实 Windows 验收发现 psql 的命令行 SQL 会被本地编码转换，验收查询改为 UTF-8 文件输入；客户端库名使用逐字节编码的 ASCII URI，兼顾中文和包含等号/引号的外部库名，避免 conninfo 注入。恢复角色通过编码后的连接选项传递，绕开 Windows --role 的本地编码，并处理空格和反斜杠；已核对中文且含空格的所有者及恢复对象实际归属。密码仍不出现在命令行，失败详情脱敏。
+
+数据库页增加 PostgreSQL 备份卡片、搜索、每页 10 条分页、大小与时间、打开目录、导出、恢复和删除。短表单显示实际版本及端口，所有者使用下拉选择，禁止同名新库、未确认来源与实例变化后的提交；处理中防重复并保持弹窗，关联页签锁定。中英文文案明确 custom 格式、单库范围、账号和外部文件不包含在内，以及扩展/版本兼容限制。列表使用带内边距的虚线，窄屏按钮纵向排列，错误信息保留在表单中。
+
+浏览器使用既有 localhost 演示环境，覆盖未安装/未运行、导出、恢复后库与所有者列表更新、同名与可信来源校验、处理中不能关闭、搜索空结果、11 份备份分页、删除最后一页后页码回落及原数据库保留。1360px 桌面、390px 中文和 320px 英文已截图目检；恢复弹窗宽度分别适配为 366px / 296px，clientWidth 与 scrollWidth 一致，操作按钮保持可见。另核对了窄屏原生复选框的选中状态、尺寸与渲染。仅关闭本轮 QA 上下文，保留用户原有页面。浏览器仅验证演示交互，真实数据库行为以原生验收为准。
+
+11 个版本文件同步到 0.2.86，Cargo.lock 仅更新三个本项目 crate。独立发布树核对 21 个代码/版本文件，排除原有 configgen.rs 的 178 additions / 9 deletions 以及用户未跟踪文件。独立目录 pnpm check 与 cargo check --workspace --all-targets --locked 通过。未新增测试文件，验证扩展于既有 Rust 模块。
+
+最终独立发布树数据库管理、备份、导入、配置传输与 PostgreSQL 原生验收共 23 通过、0 失败、679 filtered out，耗时 86.98 秒。真实归档覆盖表、索引、序列、Unicode 文本、bytea 与大对象，以及带中文/空格路径的外部文件导入、中文所有者、包含等号/引号/中文的外部库名。损坏归档与未确认来源不建库，同名库不覆盖；普通所有者恢复含事件触发器的归档时权限失败，已确认新库保留且事务内创建的表回滚。备份删除不影响源库，MySQL SQL 列表不混入 PostgreSQL 归档；同时通过既有初始化、密码、停机和重启数据保留场景。
+
+没有业务数据库变更，未修改 update.sql；原生数据库操作仅使用隔离临时目录与端口。未启动前端 dev，未执行本地前端 build。v0.2.85 Release 已确认 completed/success，继续按根 AGENTS.md 新增 annotated tag v0.2.86，并与 main 原子推送。安装包完成状态以远程 workflow 实际结果为准。
+
+本轮提供 custom 归档导出、文件导入和恢复到新库；原地覆盖恢复、实例账号全局备份、定时 PostgreSQL 备份、远程实例直接迁移及细粒度授权编辑仍需后续完善，整体目标保持进行。Windows PostgreSQL 16.6 为原生验收平台，Linux/macOS 未做本轮实机验收。
+
+参考：https://support.servbay.com/database-management/getting-started/postgresql-management-and-usage 、https://support.servbay.com/database-management/getting-started/import-data-from-existing-postgresql 、https://support.servbay.com/getting-started/backup-and-restore 、https://www.postgresql.org/docs/current/app-pgdump.html 、https://www.postgresql.org/docs/current/app-pgrestore.html

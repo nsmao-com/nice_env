@@ -1066,7 +1066,7 @@ pub struct XdebugSetupResult {
 
 /* ================= 数据库备份 ================= */
 
-/// 备份目录里的一个 .sql 文件
+/// 备份目录里的数据库文件（MySQL SQL 或 PostgreSQL custom archive）
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct DbBackupFile {
@@ -1089,6 +1089,14 @@ pub struct DbBackupProgress {
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresBackupProgress {
+    pub operation_id: String,
+    #[serde(flatten)]
+    pub progress: DbBackupProgress,
 }
 
 /// 还原结果：带回「还原前自动备份」的位置

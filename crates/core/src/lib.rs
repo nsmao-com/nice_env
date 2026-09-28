@@ -65,6 +65,7 @@ pub enum Event {
     HostsDenied,
     /// 数据库备份 / 还原进度
     DbBackup(model::DbBackupProgress),
+    PostgresBackup(model::PostgresBackupProgress),
     /// 证书自动化状态变化（签发中 / 成功 / 失败），前端可在任意页面监听
     CertAuto {
         id: String,
@@ -85,6 +86,7 @@ impl Event {
             Event::DownloadProgress(_) => "download://progress",
             Event::HostsDenied => "hosts://denied",
             Event::DbBackup(_) => "db://backup",
+            Event::PostgresBackup(_) => "postgres://backup",
             Event::CertAuto { .. } => "certauto://status",
             Event::CertMonitorAlert { .. } => "certmonitor://alert",
         }
@@ -94,6 +96,7 @@ impl Event {
             Event::DownloadProgress(p) => serde_json::to_value(p).unwrap_or_default(),
             Event::HostsDenied => serde_json::json!({}),
             Event::DbBackup(p) => serde_json::to_value(p).unwrap_or_default(),
+            Event::PostgresBackup(p) => serde_json::to_value(p).unwrap_or_default(),
             Event::CertAuto { id, state, message } => {
                 serde_json::json!({ "id": id, "state": state, "message": message })
             }

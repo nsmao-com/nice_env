@@ -371,6 +371,11 @@ pub fn run() {
             postgres_create_role,
             postgres_set_role_password,
             postgres_drop_role,
+            postgres_backup_list,
+            postgres_backup_dir,
+            postgres_backup_dump,
+            postgres_backup_restore,
+            postgres_backup_delete,
             // 数据库备份 / 还原
             db_backup_list,
             db_backup_dump,
@@ -3365,6 +3370,46 @@ fn db_backup_delete(
     path: String,
 ) -> Result<bool, tauri::Error> {
     map_jh(nsb_core::dbbackup::delete_backup(&state.paths, &path).map(|_| true))
+}
+
+/* ================= PostgreSQL 备份 / 还原 ================= */
+
+#[tauri::command]
+fn postgres_backup_list(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> Result<Vec<nsb_core::model::DbBackupFile>, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    map_jh(nsb_core::dbbackup::postgres_list_backups(&state.paths))
+}
+
+#[tauri::command]
+fn postgres_backup_dir(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> Result<String, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    map_jh((|| { let dir = nsb_core::dbbackup::postgres_backup_dir(&state.paths)?; std::fs::create_dir_all(&dir)?; Ok(dir.to_string_lossy().into()) })())
+}
+
+#[tauri::command]
+async fn postgres_backup_dump(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, name: String, oid: u32, operation_id: String) -> Result<String, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.with_postgres(&version, |client| {
+        nsb_core::dbbackup::postgres_dump(&st.paths, client, &version, &name, oid, &|progress| {
+            (st.emit)(nsb_core::Event::PostgresBackup(nsb_core::model::PostgresBackupProgress { operation_id: operation_id.clone(), progress }));
+        }).map(|path| path.to_string_lossy().into())
+    }))).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn postgres_backup_restore(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, path: String, name: String, owner: String, trusted: bool, operation_id: String) -> Result<(), tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.with_postgres(&version, |client| {
+        nsb_core::dbbackup::postgres_restore(&st.paths, client, std::path::Path::new(&path), &name, &owner, trusted, &|progress| {
+            (st.emit)(nsb_core::Event::PostgresBackup(nsb_core::model::PostgresBackupProgress { operation_id: operation_id.clone(), progress }));
+        })
+    }))).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+fn postgres_backup_delete(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, name: String) -> Result<(), tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    map_jh(nsb_core::dbbackup::postgres_delete_backup(&state.paths, &name))
 }
 
 /* ================= 服务看门狗 ================= */

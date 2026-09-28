@@ -361,6 +361,9 @@ pub fn run() {
             redis_stats,
             redis_connection,
             redis_save_connection,
+            postgres_connection,
+            postgres_password,
+            postgres_set_password,
             // 数据库备份 / 还原
             db_backup_list,
             db_backup_dump,
@@ -1470,6 +1473,27 @@ async fn validate_configs(
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(state.validate_configs(only.as_deref())))
         .await.map_err(|e| box_err(nsb_core::AppError::internal("检查配置", e.to_string())))?
+}
+
+#[tauri::command]
+async fn postgres_connection(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String) -> Result<nsb_core::dbadmin::PostgresConnectionInfo, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.postgres_connection(&version))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn postgres_password(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String) -> Result<String, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.postgres_password(&version))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn postgres_set_password(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, password: String, use_existing: bool, enable_password_auth: bool) -> Result<(), tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.set_postgres_password(&version, &password, use_existing, enable_password_auth))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /// Redis 运行统计（内存 / 键数 / 连接数 / 运行天数）

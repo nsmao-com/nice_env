@@ -527,6 +527,172 @@ fn sanitize_ident(s: &str) -> Result<String> {
     Ok(s.to_string())
 }
 
+pub fn postgres_password_key(version: &str) -> String {
+    format!("postgresPassword@{version}")
+}
+
+pub(crate) fn random_database_password() -> String {
+    use rand::Rng;
+    rand::thread_rng().sample_iter(&rand::distributions::Alphanumeric).take(32).map(char::from).collect()
+}
+
+#[derive(serde::Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresConnectionInfo {
+    pub version: String,
+    pub port: u16,
+    pub server_version: String,
+    pub database_count: u32,
+    pub size_bytes: u64,
+    pub password_required: bool,
+}
+
+pub struct PostgresClient {
+    pub exe: PathBuf,
+    pub port: u16,
+    pub password: String,
+}
+
+impl PostgresClient {
+    /// 密码仅写入私有 pgpass；不继承 PGHOST/PGSERVICE/PGOPTIONS 等外部连接配置。
+    pub(crate) fn command(&self) -> Result<(tempfile::TempDir, Command)> {
+        if self.port == 0 || self.password.chars().any(char::is_control) {
+            return Err(AppError::new("BAD_CONNECTION", "PostgreSQL 连接参数无效"));
+        }
+        let private = tempfile::Builder::new().prefix("niceenv-postgres-").tempdir()?;
+        let passfile = private.path().join("pgpass");
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&passfile)?;
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        let escaped = self.password.replace('\\', "\\\\").replace(':', "\\:");
+        writeln!(file, "127.0.0.1:{}:postgres:postgres:{escaped}", self.port)?;
+        file.sync_all()?;
+        let mut command = platform::command(&self.exe);
+        for (name, _) in std::env::vars_os().filter(|(name, _)| name.to_string_lossy().to_ascii_uppercase().starts_with("PG")) { command.env_remove(name); }
+        command.args(["--no-psqlrc", "--no-password", "--no-align", "--tuples-only", "--set=ON_ERROR_STOP=1", "--host=127.0.0.1", "--username=postgres", "--dbname=postgres"])
+            .arg(format!("--port={}", self.port))
+            .env("PGPASSFILE", passfile).env("PGCONNECT_TIMEOUT", "5").env("PGCLIENTENCODING", "UTF8")
+            .env("PGAPPNAME", "NiceEnv").env("LC_ALL", "C").env("PGOPTIONS", "-c statement_timeout=10000 -c lock_timeout=5000");
+        Ok((private, command))
+    }
+
+    pub(crate) fn query(&self, sql: &str) -> Result<String> {
+        let (_private, mut command) = self.command()?;
+        let mut input = tempfile::tempfile()?;
+        input.write_all(sql.as_bytes())?; input.rewind()?;
+        let mut output = tempfile::tempfile()?; let mut error = tempfile::tempfile()?;
+        command.stdin(Stdio::from(input)).stdout(output.try_clone()?).stderr(error.try_clone()?);
+        let status = wait_client(&mut command, Duration::from_secs(20), || {})?;
+        if !status.success() {
+            let mut detail = read_output(&mut error, 16 * 1024)?;
+            if !self.password.is_empty() { detail = detail.replace(&self.password, "***"); }
+            return Err(AppError::new("POSTGRES_CONNECTION_FAILED", "无法连接或操作 PostgreSQL 实例")
+                .with_hint("请确认实例正在运行，并在连接设置中更新 postgres 账号密码。")
+                .with_detail(detail));
+        }
+        read_output(&mut output, 1024 * 1024)
+    }
+
+    pub(crate) fn verify_data_dir(&self, expected: &Path) -> Result<()> {
+        let path = self.query("SHOW data_directory;")?;
+        let canonical = |path: &Path| path.canonicalize().map_err(|error| AppError::io("核对 PostgreSQL 数据目录", error));
+        if canonical(Path::new(path.trim()))? != canonical(expected)? {
+            return Err(AppError::new("POSTGRES_INSTANCE_MISMATCH", "端口上的 PostgreSQL 与所选数据目录不一致，操作已中止"));
+        }
+        Ok(())
+    }
+
+    /// trust 等免密规则下，不能把任意输入密码声称为已验证。
+    pub(crate) fn password_required(&self) -> Result<bool> {
+        self.query("SELECT 1;")?;
+        let probe = Self { exe: self.exe.clone(), port: self.port, password: random_database_password() };
+        match probe.query("SELECT 1;") {
+            Ok(_) => Ok(false),
+            Err(error) if error.code == "POSTGRES_CONNECTION_FAILED"
+                && error.detail.as_deref().is_some_and(|detail| detail.contains("password authentication failed for user")) => {
+                self.query("SELECT 1;")?; Ok(true)
+            }
+            Err(error) => Err(AppError::new("POSTGRES_AUTH_UNCONFIRMED", "未能确认 PostgreSQL 是否强制要求密码")
+                .with_hint("请检查连接稳定性和实例认证日志；不会把网络故障或无法识别的认证错误当作密码验证成功。")
+                .with_detail(error.detail.unwrap_or(error.message))),
+        }
+    }
+
+    pub(crate) fn info(&self, version: &str) -> Result<PostgresConnectionInfo> {
+        #[derive(serde::Deserialize)]
+        struct Summary { server_version: String, database_count: u32, size_bytes: u64 }
+        let out = self.query("SELECT json_build_object('server_version', current_setting('server_version'), 'database_count', COUNT(*), 'size_bytes', COALESCE(SUM(pg_database_size(oid)), 0)) FROM pg_database WHERE NOT datistemplate;")?;
+        let summary: Summary = serde_json::from_str(out.trim()).map_err(|error| AppError::new("POSTGRES_RESPONSE", "PostgreSQL 统计响应无法识别").with_detail(error.to_string()))?;
+        Ok(PostgresConnectionInfo { version: version.into(), port: self.port, server_version: summary.server_version,
+            database_count: summary.database_count, size_bytes: summary.size_bytes, password_required: self.password_required()? })
+    }
+
+    pub(crate) fn change_password(&self, password: &str) -> Result<()> {
+        if password.is_empty() || password.chars().any(char::is_control) {
+            return Err(AppError::new("BAD_PASSWORD", "密码不能为空或包含控制字符"));
+        }
+        let literal = password.replace('\\', "\\\\").replace('\'', "''");
+        // psql 逐条提交语句，先关闭本会话的语句记录，再发送改密语句。
+        let sql = format!("SET log_statement='none';\nSET log_min_error_statement='panic';\nSET log_min_duration_statement=-1;\nSET log_duration=off;\nSET password_encryption='scram-sha-256';\nALTER ROLE postgres PASSWORD E'{literal}';\n");
+        self.query(&sql).map(|_| ()).map_err(|mut error| {
+            if let Some(detail) = error.detail.as_mut() { *detail = detail.replace(password, "***").replace(&literal, "***"); }
+            error
+        })
+    }
+
+    pub(crate) fn local_auth_update(&self, paths: &Paths, version: &str) -> Result<(PathBuf, String, String)> {
+        let file = crate::paths::checked_data_path(&paths.base, &format!("data/postgresql/{version}/pg_hba.conf"))?;
+        let actual = self.query("SHOW hba_file;")?;
+        if Path::new(actual.trim()).canonicalize()? != file.canonicalize()? {
+            return Err(AppError::new("POSTGRES_AUTH_CUSTOM", "实例使用自定义认证配置文件，未自动修改"));
+        }
+        let previous = std::fs::read_to_string(&file)?;
+        let updated = postgres_local_password_rules(&previous)?;
+        Ok((file, previous, updated))
+    }
+}
+
+pub(crate) fn selected_postgres(state: &crate::CoreState, version: &str, password: Option<String>) -> Result<PostgresClient> {
+    let package = state.store.find_installed("postgresql", Some(version)).ok_or_else(|| AppError::not_installed("PostgreSQL"))?;
+    let service = state.manager.snapshot("postgresql").filter(|service| service.version.as_deref() == Some(version)
+        && matches!(service.state, crate::model::ServiceState::Running | crate::model::ServiceState::Error)
+        && service.pids.iter().any(|pid| platform::process_alive(*pid)))
+        .ok_or_else(|| AppError::new("POSTGRES_NOT_RUNNING", "所选 PostgreSQL 实例未运行或运行版本已变化"))?;
+    let port = service.port.ok_or_else(|| AppError::new("POSTGRES_PORT_UNKNOWN", "无法确认 PostgreSQL 实际端口"))?;
+    crate::ops::verify_database_listener(&state.manager, "postgresql", port)?;
+    let client = PostgresClient {
+        exe: Path::new(&package.install_path).join("pgsql/bin").join(crate::ops::exe_name("psql")), port,
+        password: match password { Some(value) => value, None => state.store.get_setting_checked(&postgres_password_key(version))?.unwrap_or_default() },
+    };
+    client.verify_data_dir(&state.paths.postgres_data_dir(version))?;
+    Ok(client)
+}
+
+/// 只转换 initdb 生成的本机默认 trust 规则，保留注释；复杂/自定义规则交由用户维护。
+pub(crate) fn postgres_local_password_rules(content: &str) -> Result<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for line in content.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#')) {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        let key = match fields.as_slice() {
+            ["local", database @ ("all" | "replication"), "all", "trust"] => format!("local:{database}"),
+            ["host", database @ ("all" | "replication"), "all", address @ ("127.0.0.1/32" | "::1/128"), "trust"] => format!("host:{database}:{address}"),
+            _ => return Err(AppError::new("POSTGRES_AUTH_CUSTOM", "pg_hba.conf 包含自定义认证规则，未自动修改")
+                .with_hint("请在原配置中检查本机连接的认证方式，再用现有密码更新本机连接记录。")),
+        };
+        if !seen.insert(key) { return Err(AppError::new("POSTGRES_AUTH_CUSTOM", "pg_hba.conf 存在重复规则，未自动修改")); }
+    }
+    if !seen.contains("host:all:127.0.0.1/32") || !seen.contains("host:all:::1/128") {
+        return Err(AppError::new("POSTGRES_AUTH_CUSTOM", "未找到完整的默认本机认证规则，未自动修改"));
+    }
+    Ok(content.split_inclusive('\n').map(|line| {
+        if line.trim_start().starts_with('#') { line.into() } else {
+            line.rfind("trust").map_or_else(|| line.to_string(), |at| format!("{}scram-sha-256{}", &line[..at], &line[at + 5..]))
+        }
+    }).collect())
+}
+
 /// 生成 .env.example 内容
 pub fn render_env_example(db: &str, user: &str, pass: &str, port: u16) -> String {
     let template = format!(
@@ -550,6 +716,27 @@ REDIS_PASSWORD=null
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn postgres_private_credentials_and_default_auth_rules() {
+        let client = PostgresClient { exe: PathBuf::from("psql"), port: 25432, password: "colon:slash\\quote'密码".into() };
+        let (private, command) = client.command().unwrap();
+        assert!(command.get_args().all(|value| !value.to_string_lossy().contains(&client.password)));
+        assert_eq!(std::fs::read_to_string(private.path().join("pgpass")).unwrap(), "127.0.0.1:25432:postgres:postgres:colon\\:slash\\\\quote'密码\n");
+        assert!(command.get_args().any(|value| value == "--no-psqlrc"));
+        assert!(command.get_args().any(|value| value == "--no-password"));
+        assert!(command.get_envs().any(|(key, value)| key == "PGPASSFILE" && value.is_some()));
+        let directory = private.path().to_path_buf(); drop(private);
+        assert!(!directory.exists());
+        let default = "# trust comments stay\nlocal all all trust\nhost all all 127.0.0.1/32 trust\nhost all all ::1/128 trust\nlocal replication all trust\nhost replication all 127.0.0.1/32 trust\nhost replication all ::1/128 trust\n";
+        let updated = postgres_local_password_rules(default).unwrap();
+        assert_eq!(updated.matches("scram-sha-256").count(), 6);
+        assert!(updated.starts_with("# trust comments stay"));
+        for custom in [format!("{default}host all all 0.0.0.0/0 trust\n"), format!("{default}include other.conf\n"), format!("{default}local all all trust\n"), "host all all 127.0.0.1/32 trust".into()] {
+            assert_eq!(postgres_local_password_rules(&custom).unwrap_err().code, "POSTGRES_AUTH_CUSTOM");
+        }
+        assert_eq!(PostgresClient { password: "bad\npass".into(), ..client }.command().unwrap_err().code, "BAD_CONNECTION");
+    }
 
     #[test]
     fn version_passwords_override_legacy_without_affecting_other_instances() {

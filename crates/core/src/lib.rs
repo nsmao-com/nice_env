@@ -763,6 +763,75 @@ impl CoreState {
         engine.bin_dir(&package)
     }
 
+    pub fn postgres_connection(&self, version: &str) -> Result<dbadmin::PostgresConnectionInfo> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
+        let _operation = self.manager.lifecycle.lock();
+        dbadmin::selected_postgres(self, version, None)?.info(version)
+    }
+
+    pub fn postgres_password(&self, version: &str) -> Result<String> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
+        let _operation = self.manager.lifecycle.lock();
+        let client = dbadmin::selected_postgres(self, version, None)?;
+        if !client.password_required()? {
+            return Err(AppError::new("POSTGRES_AUTH_DISABLED", "本机连接未要求密码，无法验证保存的密码；请先设置密码并启用认证"));
+        }
+        Ok(client.password)
+    }
+
+    pub fn set_postgres_password(&self, version: &str, password: &str, use_existing: bool, enable_password_auth: bool) -> Result<()> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
+        let _operation = self.manager.lifecycle.lock();
+        if password.is_empty() || password.chars().any(char::is_control) {
+            return Err(AppError::new("BAD_PASSWORD", "密码不能为空或包含控制字符"));
+        }
+        let client = dbadmin::selected_postgres(self, version, use_existing.then(|| password.to_string()))?;
+        let requires_password = client.password_required()?;
+        if use_existing && !requires_password {
+            return Err(AppError::new("POSTGRES_AUTH_DISABLED", "当前本机连接无需密码，无法验证输入的密码")
+                .with_hint("请选择修改 postgres 密码，并同时启用本机密码认证。"));
+        }
+        // 在改密前验证可转换的规则，不能先改密码再发现用户配置不受支持。
+        let auth_update = if !use_existing && enable_password_auth && !requires_password {
+            Some(client.local_auth_update(&self.paths, version)?)
+        } else { None };
+        let key = dbadmin::postgres_password_key(version);
+        self.store.set_setting(&key, password)?;
+        if !use_existing {
+            let new_client = dbadmin::PostgresClient { exe: client.exe.clone(), port: client.port, password: password.into() };
+            let data = self.paths.postgres_data_dir(version);
+            if let Err(error) = client.change_password(password) {
+                // 仅密码认证可证明新凭据已生效；trust 下不能靠查询成功推断改密成功。
+                if !requires_password || new_client.verify_data_dir(&data).is_err() {
+                    if requires_password && client.verify_data_dir(&data).is_ok() {
+                        self.store.set_setting(&key, &client.password)?;
+                        return Err(error.with_hint("新密码未通过验证，本机记录已恢复为仍可连接的原密码；请检查实例日志后重试。"));
+                    }
+                    return Err(error.with_hint("改密结果未确认，已保留新的本机凭据；请检查实例日志并验证当前密码。"));
+                }
+            }
+            if let Some((file, previous, updated)) = auth_update {
+                let apply = || -> Result<()> {
+                    paths::write_with_backup_expected(&file, &updated, &self.paths.backup(), Some(Some(previous.as_bytes())))?;
+                    if new_client.query("SELECT pg_reload_conf();")?.trim() != "t" {
+                        return Err(AppError::new("POSTGRES_AUTH_RELOAD", "PostgreSQL 未接受认证配置重载"));
+                    }
+                    let started = std::time::Instant::now();
+                    loop {
+                        if new_client.password_required()? { return Ok(()); }
+                        if started.elapsed() >= std::time::Duration::from_secs(5) { break; }
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    }
+                    Err(AppError::new("POSTGRES_AUTH_RELOAD", "未确认本机密码认证生效"))
+                };
+                apply().map_err(|error| error.with_hint("账号密码已修改并保存，但认证配置应用未确认。请检查 pg_hba.conf 和实例日志；旧配置如已被替换，可在配置备份中恢复。"))?;
+            }
+            new_client.verify_data_dir(&data)?;
+        }
+        self.manager.set_state("postgresql", model::ServiceState::Running);
+        Ok(())
+    }
+
     fn running_redis(&self, version: Option<&str>) -> Result<model::ServiceStatus> {
         let service = self.manager.snapshot("redis")
             .filter(|s| matches!(s.state, model::ServiceState::Running | model::ServiceState::Error) && s.pids.iter().any(|pid| platform::process_alive(*pid)))

@@ -358,7 +358,7 @@ fn start_service_inner(
                 "nginx" => Some(ports.http),
                 "apache" => Some(ports.apache_http),
                 "redis" => Some(effective_ports.redis),
-                "postgresql" => Some(ports.postgres),
+                "postgresql" => Some(effective_ports.postgres),
                 "mongodb" => Some(ports.mongodb),
                 "mihomo" => Some(configgen::MIHOMO_MIXED_PORT),
                 s if s.starts_with("mysql@") => Some(effective_ports.mysql),
@@ -835,56 +835,64 @@ fn start_postgresql(
     let version = installed_by_choice(store, "postgresql")
         .map(|p| p.version)
         .unwrap_or_default();
-    let datadir = paths.postgres_data_dir(&version);
-    let initdb = root.join("bin").join(exe_name("initdb"));
-    let needs_init = !datadir.exists()
-        || std::fs::read_dir(&datadir)
-            .map(|mut d| d.next().is_none())
-            .unwrap_or(true);
+    let datadir = crate::paths::checked_data_path(&paths.base, &format!("data/postgresql/{version}"))?;
+    let needs_init = match std::fs::read_dir(&datadir) {
+        Ok(mut entries) => entries.next().transpose()?.is_none(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => return Err(AppError::io("读取 PostgreSQL 数据目录", error)),
+    };
+    if !needs_init { verify_postgres_data_version(&datadir, &version)?; }
+    let port = crate::services::fallback_port_for(store, "postgres", ports.postgres, &[]).unwrap_or(ports.postgres);
+    precheck_port(port, "PostgreSQL")?;
     if needs_init {
-        std::fs::create_dir_all(&datadir)?;
-        // macOS 的 initdb 拒绝以 root 用户运行，且 -U 指定的是数据库超级用户；
-        // 两端统一用 postgres（Windows 上 pg_ctl 也不认 root 以外的惯例名）
-        let out = platform::command(&initdb)
-            .args([
-                "-D".to_string(),
-                datadir.to_string_lossy().to_string(),
-                "-U".into(),
-                "postgres".into(),
-                "-A".into(),
-                "trust".into(),
-                "-E".into(),
-                "UTF8".into(),
-                "--no-locale".into(),
-            ])
-            .output()
-            .map_err(|e| AppError::io("初始化 PostgreSQL 数据目录", e))?;
-        if !out.status.success() {
-            let _ = std::fs::remove_dir_all(&datadir);
-            return Err(
-                AppError::new("PG_INIT_FAILED", "PostgreSQL 数据目录初始化失败")
-                    .with_detail(String::from_utf8_lossy(&out.stderr).to_string()),
-            );
+        use std::io::Write;
+        let parent = datadir.parent().ok_or_else(|| AppError::new("PG_INIT_FAILED", "数据目录无效"))?;
+        std::fs::create_dir_all(parent)?;
+        let pending = tempfile::Builder::new().prefix(".postgres-init-").tempdir_in(parent)?;
+        let private = tempfile::Builder::new().prefix("niceenv-initdb-").tempdir()?;
+        let password = crate::dbadmin::random_database_password();
+        let passfile = private.path().join("password");
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&passfile)?;
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         }
+        writeln!(file, "{password}")?; file.sync_all()?; drop(file);
+        // 初始化前保存凭据，异常退出后仍可连接；密码不进入命令行或日志。
+        store.set_setting(&crate::dbadmin::postgres_password_key(&version), &password)?;
+        let mut output = tempfile::tempfile()?;
+        let mut command = platform::command(root.join("bin").join(exe_name("initdb")));
+        command.arg("-D").arg(pending.path()).args(["-U", "postgres", "-A", "scram-sha-256", "-E", "UTF8", "--no-locale"])
+            .arg("--pwfile").arg(&passfile).current_dir(&root)
+            .stdin(std::process::Stdio::null()).stdout(output.try_clone()?).stderr(output.try_clone()?);
+        let status = crate::dbadmin::wait_client(&mut command, Duration::from_secs(180), || {})?;
+        if !status.success() {
+            return Err(AppError::new("PG_INIT_FAILED", "PostgreSQL 初始化失败，原数据目录未覆盖")
+                .with_detail(crate::dbadmin::read_output(&mut output, 64 * 1024)?.replace(&password, "***")));
+        }
+        verify_postgres_data_version(pending.path(), &version)?;
+        crate::paths::checked_data_path(&paths.base, &format!("data/postgresql/{version}"))?;
+        if datadir.try_exists()? { std::fs::remove_dir(&datadir)?; } // 只允许替换空目录。
+        std::fs::rename(pending.path(), &datadir)?;
     }
 
-    precheck_port(ports.postgres, "PostgreSQL")?;
+    precheck_port(port, "PostgreSQL")?;
     let postgres = root.join("bin").join(exe_name("postgres"));
     #[allow(unused_mut)]
     let mut pg_args: Vec<String> = vec![
         "-D".into(),
         datadir.to_string_lossy().to_string(),
         "-p".into(),
-        ports.postgres.to_string(),
+        port.to_string(),
         "-c".into(),
         "listen_addresses=127.0.0.1".into(),
     ];
     // unix socket 目录只在类 Unix 有意义；Windows 仅 TCP
     #[cfg(not(windows))]
-    pg_args.push(format!(
-        "unix_socket_directories={}",
-        paths.apache_run_dir().to_string_lossy()
-    ));
+    {
+        std::fs::create_dir_all(paths.apache_run_dir())?;
+        pg_args.extend(["-c".into(), format!("unix_socket_directories={}", paths.apache_run_dir().to_string_lossy())]);
+    }
     let spec = SpawnSpec {
         program: postgres.clone(),
         args: pg_args,
@@ -893,12 +901,44 @@ fn start_postgresql(
         detached: None,
     };
     spawn_tracked(manager, "postgresql", &spec)?;
-    if !wait_healthy(ports.postgres, Duration::from_secs(20)) {
-        return Err(AppError::new(
-            "PG_START_TIMEOUT",
-            "PostgreSQL 启动超时（20s 内端口未就绪）",
-        )
-        .with_hint("查看日志页 postgresql 输出；首次初始化可能较慢"));
+    manager.set_started_port("postgresql", port);
+    // 回落端口可能位于系统临时端口范围；先等真实监听者，避免主动探测占用待绑定端口。
+    let waiting = std::time::Instant::now();
+    loop {
+        match verify_database_listener(manager, "postgresql", port) {
+            Ok(()) => break,
+            Err(error) => {
+                if waiting.elapsed() >= Duration::from_secs(20)
+                    || manager.snapshot("postgresql").is_none_or(|service| service.pids.is_empty()) {
+                    return Err(error.with_hint("PostgreSQL 未在预期端口建立可核实的监听，请检查实例日志。")
+                        .with_detail(manager.tail("postgresql", 40).join("\n")));
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+    }
+    let client = crate::dbadmin::PostgresClient {
+        exe: root.join("bin").join(exe_name("psql")), port,
+        password: store.get_setting_checked(&crate::dbadmin::postgres_password_key(&version))?.unwrap_or_default(),
+    };
+    if let Err(error) = client.verify_data_dir(&datadir) {
+        if needs_init || error.code != "POSTGRES_CONNECTION_FAILED" { return Err(error); }
+        // 旧实例保留运行，允许在数据库页验证并恢复连接凭据。
+        manager.push_log("postgresql", "PostgreSQL 已启动；保存的凭据无法连接，请在数据库页更新 postgres 密码。");
+    }
+    Ok(())
+}
+
+fn verify_postgres_data_version(data: &Path, version: &str) -> Result<()> {
+    let expected = if version.starts_with("9.") { version.split('.').take(2).collect::<Vec<_>>().join(".") }
+        else { version.split('.').next().unwrap_or_default().to_string() };
+    let actual = std::fs::read_to_string(data.join("PG_VERSION")).map_err(|_| AppError::new("POSTGRES_DATA_INVALID", "PostgreSQL 数据目录非空但缺少可读的 PG_VERSION，未重新初始化"))?;
+    if expected.is_empty() || actual.trim() != expected {
+        return Err(AppError::new("POSTGRES_DATA_VERSION", "数据目录与所选 PostgreSQL 主版本不一致，未自动升级")
+            .with_hint("请用原版本导出数据，再通过新版本导入；原目录保持不变。"));
+    }
+    if !data.join("global/pg_control").is_file() || !data.join("base").is_dir() {
+        return Err(AppError::new("POSTGRES_DATA_INVALID", "PostgreSQL 数据目录不完整，请恢复有效备份；未重新初始化"));
     }
     Ok(())
 }
@@ -1310,7 +1350,10 @@ pub(crate) fn verify_database_listener(manager: &Arc<ServiceManager>, id: &str, 
             "DATABASE_OWNER_UNVERIFIED",
             "数据库端口未确认属于当前服务，未发送密码或停机命令",
         )
-        .with_hint("请检查端口占用及服务诊断，确认实际运行实例后重试"));
+        .with_hint("请检查端口占用及服务诊断，确认实际运行实例后重试")
+        .with_detail(format!("目标 {id}:{port}，服务 PID {:?}，监听 PID {:?}，扫描归属 {:?}",
+            manager.snapshot(id).map(|service| service.pids), listeners.iter().map(|entry| entry.pid).collect::<Vec<_>>(),
+            scan.listeners.iter().map(|row| (row.pid, &row.service_id, &row.process_start_marker)).collect::<Vec<_>>())));
     }
     Ok(())
 }
@@ -3165,7 +3208,64 @@ mod validate_tests {
             }
         }
         let _stop = Stop(&state);
+        let data = state.paths.postgres_data_dir("16.6");
+        std::fs::create_dir_all(&data).unwrap();
+        let sentinel = data.join("keep.txt");
+        std::fs::write(&sentinel, "existing data").unwrap();
+        assert_eq!(state.start_service("postgresql").unwrap_err().code, "POSTGRES_DATA_INVALID");
+        assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "existing data");
+        std::fs::write(data.join("PG_VERSION"), "15\n").unwrap();
+        assert_eq!(state.start_service("postgresql").unwrap_err().code, "POSTGRES_DATA_VERSION");
+        std::fs::remove_file(data.join("PG_VERSION")).unwrap();
+        std::fs::remove_file(sentinel).unwrap();
+        let initializer = root.join("bin").join(exe_name("initdb"));
+        let unavailable = initializer.with_extension("fixture-disabled");
+        std::fs::rename(&initializer, &unavailable).unwrap();
+        assert!(state.start_service("postgresql").is_err());
+        assert!(data.is_dir() && std::fs::read_dir(&data).unwrap().next().is_none());
+        std::fs::rename(unavailable, initializer).unwrap();
         state.start_service("postgresql").unwrap();
+        let info = state.postgres_connection("16.6").unwrap();
+        assert_eq!(info.port, port); assert_eq!(info.database_count, 1); assert!(info.size_bytes > 0 && info.password_required);
+        let initial_password = state.postgres_password("16.6").unwrap();
+        assert_eq!(initial_password.len(), 32);
+        assert!(state.set_postgres_password("16.6", "wrong", true, false).is_err());
+        let password = "safe:slash\\quote' 密码";
+        state.set_postgres_password("16.6", password, false, true).unwrap();
+        assert_eq!(state.postgres_password("16.6").unwrap(), password);
+        let client = crate::dbadmin::selected_postgres(&state, "16.6", None).unwrap();
+        assert!(crate::dbadmin::PostgresClient { exe: client.exe.clone(), port, password: initial_password }.query("SELECT 1").is_err());
+        client.query("CREATE TABLE niceenv_probe AS SELECT 42 AS value;").unwrap();
+        let exported = temp.path().join("config-export.json");
+        crate::transfer::export_to(&state.store, &exported).unwrap();
+        assert!(!std::fs::read_to_string(exported).unwrap().contains("postgresPassword@"));
+        // 旧默认 trust 只能通过明确的改密操作转换；自定义规则在改密前拒绝。
+        let hba = data.join("pg_hba.conf");
+        let original_hba = std::fs::read_to_string(&hba).unwrap();
+        let trust_hba = original_hba.replace("scram-sha-256", "trust");
+        std::fs::write(&hba, &trust_hba).unwrap();
+        client.query("SELECT pg_reload_conf();").unwrap();
+        for _ in 0..30 { if !client.password_required().unwrap() { break; } std::thread::sleep(Duration::from_millis(100)); }
+        assert!(!state.postgres_connection("16.6").unwrap().password_required);
+        assert_eq!(state.postgres_password("16.6").unwrap_err().code, "POSTGRES_AUTH_DISABLED");
+        assert_eq!(state.set_postgres_password("16.6", "arbitrary", true, false).unwrap_err().code, "POSTGRES_AUTH_DISABLED");
+        let custom = format!("{trust_hba}\nhost all all 192.0.2.0/24 scram-sha-256\n");
+        std::fs::write(&hba, &custom).unwrap();
+        assert_eq!(state.set_postgres_password("16.6", "changed", false, true).unwrap_err().code, "POSTGRES_AUTH_CUSTOM");
+        assert_eq!(std::fs::read_to_string(&hba).unwrap(), custom);
+        assert_eq!(state.store.get_setting(&crate::dbadmin::postgres_password_key("16.6")).as_deref(), Some(password));
+        std::fs::write(&hba, &trust_hba).unwrap();
+        state.set_postgres_password("16.6", password, false, true).unwrap();
+        assert!(state.postgres_connection("16.6").unwrap().password_required);
+        assert!(state.paths.backup().join("files").is_dir());
+        state.store.set_setting(&crate::dbadmin::postgres_password_key("16.6"), "outdated").unwrap();
+        state.manager.set_error("postgresql", AppError::new("CONNECTION", "fixture"));
+        state.set_postgres_password("16.6", password, true, false).unwrap();
+        assert_eq!(state.manager.snapshot("postgresql").unwrap().state, ServiceState::Running);
+        let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        state.store.set_port_override("postgres", Some(other.local_addr().unwrap().port())).unwrap();
+        assert_eq!(state.postgres_connection("16.6").unwrap().port, port);
+        state.store.set_port_override("postgres", Some(port)).unwrap();
         let preview = state.service_stop_preview("postgresql").unwrap();
         let pidfile = state.paths.postgres_data_dir("16.6").join("postmaster.pid");
         let original = std::fs::read_to_string(&pidfile).unwrap();
@@ -3218,6 +3318,7 @@ mod validate_tests {
             .set_setting("activepostgresqlVersion", "16.6")
             .unwrap();
         state.start_service("postgresql").unwrap();
+        assert_eq!(crate::dbadmin::selected_postgres(&state, "16.6", None).unwrap().query("SELECT value FROM niceenv_probe;").unwrap().trim(), "42");
         assert_eq!(
             state
                 .force_stop_service("postgresql", &preview.revision)
@@ -3230,6 +3331,20 @@ mod validate_tests {
             .force_stop_service("postgresql", &current.revision)
             .unwrap();
         state.start_service("postgresql").unwrap();
+        state.stop_service("postgresql").unwrap();
+        state.store.set_setting(&crate::dbadmin::postgres_password_key("16.6"), "outdated").unwrap();
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let requested = occupied.local_addr().unwrap().port();
+        state.store.set_port_override("postgres", Some(requested)).unwrap();
+        state.store.set_setting("autoFallbackPort", "true").unwrap();
+        state.start_service("postgresql").unwrap();
+        let actual = state.manager.snapshot("postgresql").unwrap().port.unwrap();
+        assert_ne!(actual, requested);
+        assert_eq!(PortsProfile::from_settings(&state.store).postgres, actual);
+        assert!(state.postgres_connection("16.6").is_err());
+        state.set_postgres_password("16.6", password, true, false).unwrap();
+        assert_eq!(state.postgres_connection("16.6").unwrap().port, actual);
+        assert_eq!(crate::dbadmin::selected_postgres(&state, "16.6", None).unwrap().query("SELECT value FROM niceenv_probe;").unwrap().trim(), "42");
         state.stop_service("postgresql").unwrap();
     }
 

@@ -318,6 +318,14 @@ export const redisSaveConnection = (version: string, credentials: { username: st
   safe(invoke<RedisStats>("redis_save_connection", { version, credentials }));
 export const redisStats = () => safe(invoke<RedisStats>("redis_stats"));
 
+export interface PostgresConnectionInfo {
+  version: string; port: number; serverVersion: string; databaseCount: number; sizeBytes: number; passwordRequired: boolean;
+}
+export const postgresConnection = (version: string) => safe(invoke<PostgresConnectionInfo>("postgres_connection", { version }));
+export const postgresPassword = (version: string) => safe(invoke<string>("postgres_password", { version }));
+export const postgresSetPassword = (version: string, password: string, useExisting: boolean, enablePasswordAuth: boolean) =>
+  safe(invoke<void>("postgres_set_password", { version, password, useExisting, enablePasswordAuth }));
+
 /* PHP 扩展 */
 export const phpExtensions = (version: string) =>
   safe(invoke<PhpExtensionView>("php_extensions", { version }));

@@ -66,7 +66,7 @@ import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSet
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.83";
+const MOCK_APP_VERSION = "0.2.84";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -362,6 +362,7 @@ const dbUsers = new Map<string, DbUserInfo>();
 const proxyProfiles = new Map<string, ProxyProfile>();
 const cronJobs = new Map<string, { id: string; name: string; command: string; intervalMin: number; enabled: boolean; createdAt: number; lastRunAt: number | null; lastExit: string | null; lastOutput: string | null }>();
 const mockRedisConnections = new Map<string, { username: string; password: string }>();
+const mockPostgresConnections = new Map<string, { password: string; saved: string; passwordRequired: boolean }>();
 let mockAdminer: import("./api").AdminerStatus | null = null;
 const mockTunnels = new Map<string, TunnelInfo>();
 const mockOllamaModels = new Map<string, OllamaModelRow>([
@@ -2574,6 +2575,41 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (!mockOllamaPull || mockOllamaPull.id !== args!.id) throw { code: "OLLAMA_PULL_NOT_FOUND", message: "拉取任务已变更，请刷新" };
       if (mockOllamaPull.state === "pulling") { mockOllamaPull.state = "cancelled"; mockOllamaPull.endedAt = Date.now(); }
       return true as T;
+    }
+    case "postgres_connection":
+    case "postgres_password":
+    case "postgres_set_password": {
+      const version = args!.version as string;
+      const service = services.get("postgresql");
+      if (!service || !["running", "error"].includes(service.state) || !service.pids.length || service.version !== version) {
+        throw { code: "POSTGRES_NOT_RUNNING", message: "所选 PostgreSQL 实例未运行或版本已变化" };
+      }
+      let connection = mockPostgresConnections.get(version);
+      if (!connection) {
+        const password = `preview-${crypto.randomUUID()}`;
+        connection = { password, saved: password, passwordRequired: true };
+        mockPostgresConnections.set(version, connection);
+      }
+      if (cmd === "postgres_set_password") {
+        const password = args!.password as string;
+        if (!password || /[\x00-\x1f\x7f]/.test(password)) throw { code: "BAD_PASSWORD", message: "密码不能为空或包含控制字符" };
+        if (args!.useExisting) {
+          if (!connection.passwordRequired) throw { code: "POSTGRES_AUTH_DISABLED", message: "本机连接无需密码，无法验证输入的密码" };
+          if (password !== connection.password) throw { code: "POSTGRES_CONNECTION_FAILED", message: "密码不正确，请输入当前 PostgreSQL 实例的 postgres 密码。" };
+        } else {
+          if (connection.passwordRequired && connection.saved !== connection.password) throw { code: "POSTGRES_CONNECTION_FAILED", message: "请先更新本机连接密码" };
+          connection.password = password;
+          if (args!.enablePasswordAuth) connection.passwordRequired = true;
+        }
+        connection.saved = password;
+        return undefined as T;
+      }
+      if (connection.passwordRequired && connection.saved !== connection.password) throw { code: "POSTGRES_CONNECTION_FAILED", message: "请先更新本机连接密码" };
+      if (cmd === "postgres_password") {
+        if (!connection.passwordRequired) throw { code: "POSTGRES_AUTH_DISABLED", message: "本机连接无需密码，无法验证保存的密码" };
+        return connection.saved as T;
+      }
+      return { version, port: service.port, serverVersion: version, databaseCount: 1, sizeBytes: 8_388_608, passwordRequired: connection.passwordRequired } as T;
     }
     case "redis_connection": {
       const version = args!.version as string;

@@ -16,6 +16,7 @@ import { ServiceIcon } from "@/components/shared/service-icon";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/misc";
 import { CopyButton, SectionHeader, ConfirmDialog } from "@/components/shared/misc";
@@ -97,11 +98,12 @@ export default function DatabasesPage() {
         <Button variant="secondary" disabled={!running || dbQuery.isFetching || userQuery.isFetching} onClick={() => invalidate("databases", "db-users")}>{t("db.refresh")}</Button>
       </div>
       {serviceQuery.isError ? <p role="alert" className="mb-4 text-sm text-error">{t("db.connectionFailed")} <Button variant="ghost" onClick={() => void serviceQuery.refetch()}>{t("db.retry")}</Button></p> : !databaseServices.length ? <p className="mb-4 text-sm text-muted">{serviceQuery.isFetching ? t("db.loading") : t("db.noInstance")}</p> : null}
-      {/* 所选 MySQL / MariaDB 实例与 Redis */}
+      {/* 所选 MySQL / MariaDB 实例、PostgreSQL 与 Redis */}
       <section className="mb-6">
         <SectionHeader title={t("db.instance")} className="mb-3" />
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
           <MySqlInstanceCard key={selected} engine={engine} service={service} count={ready ? dbs.length : undefined} />
+          <PostgresInstanceCard />
           <RedisInstanceCard />
         </div>
       </section>
@@ -338,6 +340,91 @@ function MySqlInstanceCard({ service, count, engine }: { service?: ServiceStatus
       </div>
     </Card>
   );
+}
+
+function PostgresInstanceCard() {
+  const t = useT();
+  const service = useInstanceState("postgresql");
+  const running = !!service?.version && (service.state === "running" || (service.state === "error" && service.pids.length > 0));
+  const [target, setTarget] = React.useState<ServiceStatus | null>(null);
+  const query = useQuery({ queryKey: ["postgres-connection", service?.version, service?.port, service?.pids.join(",")],
+    queryFn: () => api.postgresConnection(service!.version!), enabled: running, retry: false, staleTime: 15000, refetchOnWindowFocus: false });
+  const info = running && !query.isError ? query.data : undefined;
+  const error = query.error ? normalizeError(query.error) : null;
+  return <>
+    <Card className="min-w-0 p-4">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-fill"><ServiceIcon id="postgresql" className="h-[18px] w-[18px]" /></div>
+        <div className="min-w-0 flex-1"><p className="text-[13px] font-medium">PostgreSQL {service?.version}</p><p className="text-[11px] text-faint">127.0.0.1:{service?.port ?? "—"} · postgres</p></div>
+        {service && <InstanceStartButton base="postgresql" />}
+      </div>
+      {!running ? <p className="text-xs text-muted">{t(service ? "db.pgStopped" : "db.pgNotInstalled")}</p> : <>
+        {query.isPending && <p role="status" className="mb-3 text-xs text-muted">{t("db.loading")}</p>}
+        {error && <div role="alert" className="mb-3 space-y-1 rounded-md bg-warning-soft p-2.5 text-xs text-muted"><p className="break-words">{error.message}</p>{error.hint && <p className="break-words">{error.hint}</p>}</div>}
+        {info && <>
+          <div className="mb-2 flex flex-wrap gap-1.5"><StatChip icon={Database}>{info.databaseCount} {t("db.dbs")}</StatChip><StatChip icon={HardDrive}>{fmtBytes(info.sizeBytes)}</StatChip></div>
+          <p className={`mb-3 text-xs ${info.passwordRequired ? "text-success" : "text-warning"}`}>{t(info.passwordRequired ? "db.pgAuthenticated" : "db.pgTrust")}</p>
+        </>}
+        <div className="mb-3 flex flex-wrap gap-2"><Button size="sm" variant="secondary" onClick={() => service && setTarget(service)}><KeyRound className="h-3.5 w-3.5" />{t("db.pgPassword")}</Button><Button size="sm" variant="ghost" disabled={query.isFetching || !!target} onClick={() => void query.refetch()}>{t(query.isError ? "db.retry" : "db.refresh")}</Button></div>
+        {info && <div className="space-y-1.5"><p className="text-[11px] font-medium text-secondary">{t("db.connStrings")}</p>
+          {[["URL", `postgresql://postgres@127.0.0.1:${info.port}/postgres`], ["CLI", `psql -h 127.0.0.1 -p ${info.port} -U postgres -d postgres -W`]].map(([label, value]) => <div key={label} className="flex min-w-0 items-center gap-2 rounded-md bg-card-2/50 px-2.5 py-1.5"><span className="w-7 shrink-0 text-[10px] font-medium text-faint">{label}</span><code className="min-w-0 flex-1 truncate font-mono text-[11px] text-secondary" title={value}>{value}</code><CopyButton text={value} /></div>)}
+        </div>}
+      </>}
+    </Card>
+    {target?.version && <PostgresPasswordDialog key={`${target.version}-${target.pids.join(",")}`} service={target} passwordRequired={info?.passwordRequired} onClose={() => setTarget(null)} />}
+  </>;
+}
+
+function PostgresPasswordDialog({ service, passwordRequired, onClose }: { service: ServiceStatus; passwordRequired?: boolean; onClose: () => void }) {
+  const t = useT();
+  const invalidate = useInvalidate();
+  const version = service.version!;
+  const current = useInstanceState("postgresql");
+  const changed = !current || current.version !== version || current.port !== service.port || current.pids.join(",") !== service.pids.join(",") || !["running", "error"].includes(current.state);
+  const [mode, setMode] = React.useState(passwordRequired === false ? "change" : "existing");
+  const [password, setPassword] = React.useState("");
+  const [enableAuth, setEnableAuth] = React.useState(true);
+  const [saved, setSaved] = React.useState<string | null>(null);
+  const [busy, setBusy] = React.useState(false);
+  const lock = React.useRef(false);
+  const [error, setError] = React.useState("");
+  const valid = !!password && !/[\x00-\x1f\x7f-\x9f]/.test(password);
+  React.useEffect(() => { if (changed) setSaved(null); }, [changed]);
+  const report = (error: unknown) => { const detail = normalizeError(error); setError([detail.message, detail.hint].filter(Boolean).join(" ")); };
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (lock.current || changed || !valid) return;
+    lock.current = true; setBusy(true); setError(""); setSaved(null);
+    try {
+      await api.postgresSetPassword(version, password, mode === "existing", enableAuth);
+      setPassword(""); toast.success(t(mode === "existing" ? "db.rootSyncDone" : "db.pgUpdated")); onClose();
+    } catch (error) { report(error); }
+    finally { lock.current = false; setBusy(false); invalidate("postgres-connection", "services"); }
+  };
+  return <Dialog open onOpenChange={(value) => !value && !lock.current && onClose()}>
+    <DialogContent hideClose={busy} className="flex max-w-lg max-h-[85dvh] flex-col overflow-hidden">
+      <DialogHeader><DialogTitle>{t("db.pgPassword")}</DialogTitle><DialogDescription>PostgreSQL {version} · 127.0.0.1:{service.port}</DialogDescription></DialogHeader>
+      <form onSubmit={submit} className="flex min-h-0 flex-col gap-4">
+        <div className="min-h-0 space-y-4 overflow-y-auto px-0.5">
+          {changed && <p role="alert" className="text-sm text-error">{t("db.pgChanged")}</p>}
+          <div className="space-y-1.5"><Label htmlFor="pg-password-mode">{t("db.operation")}</Label><Select value={mode} disabled={busy || changed} onValueChange={(value) => { setMode(value); setPassword(""); setSaved(null); setError(""); }}><SelectTrigger id="pg-password-mode"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="existing">{t("db.rootSync")}</SelectItem><SelectItem value="change">{t("db.rootChange")}</SelectItem></SelectContent></Select></div>
+          <p className="text-xs text-muted">{t(mode === "existing" ? "db.pgSyncHint" : "db.rootChangeHint")}</p>
+          <div className="space-y-1.5"><Label htmlFor="pg-password">{t("db.pgPassword")}</Label><Input id="pg-password" type="password" disabled={busy || changed} value={password} autoComplete={mode === "existing" ? "current-password" : "new-password"} onChange={(event) => setPassword(event.target.value)} />{password && !valid && <p role="alert" className="text-xs text-error">{t("db.pgPasswordInvalid")}</p>}</div>
+          {mode === "change" && <div className="space-y-2 rounded-md border border-border p-3"><div className="flex items-center justify-between gap-3"><Label htmlFor="pg-enable-auth" className="leading-5">{t("db.pgEnableAuth")}</Label><Switch id="pg-enable-auth" checked={enableAuth} disabled={busy || changed} onCheckedChange={setEnableAuth} /></div><p className="text-xs text-muted">{t(enableAuth ? "db.pgEnableAuthHint" : "db.pgAuthUnchanged")}</p></div>}
+          <Button type="button" variant="secondary" disabled={busy || changed} onClick={async () => {
+            if (lock.current) return;
+            if (saved !== null) { setSaved(null); return; }
+            lock.current = true; setBusy(true); setError("");
+            try { setSaved(await api.postgresPassword(version)); } catch (error) { report(error); }
+            finally { lock.current = false; setBusy(false); }
+          }}>{t(saved === null ? "db.showPassword" : "db.hidePassword")}</Button>
+          {!changed && saved !== null && <div className="flex min-w-0 items-center gap-2 rounded-md bg-fill p-3"><code className="min-w-0 flex-1 break-all text-xs">{saved}</code><CopyButton text={saved} /></div>}
+          {error && <p role="alert" className="break-words text-sm text-error">{error}</p>}
+        </div>
+        <DialogFooter className="shrink-0 flex-col-reverse sm:flex-row"><Button type="button" variant="ghost" disabled={busy} onClick={onClose}>{t("common.cancel")}</Button><Button type="submit" disabled={busy || changed || !valid}>{busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}{t(mode === "existing" ? "db.redisVerifySave" : "db.rootChange")}</Button></DialogFooter>
+      </form>
+    </DialogContent>
+  </Dialog>;
 }
 
 function RedisInstanceCard() {

@@ -2302,3 +2302,23 @@ MariaDB 初始化在临时目录限时执行，成功后才替换空目标目录
 11 个版本文件同步到 0.2.83，Cargo.lock 仅更新三个本项目 crate。已确认 v0.2.82 Release completed/success，本轮按根 AGENTS.md 创建新 annotated tag v0.2.83，并与 main 原子推送、核对远程指向及实际 workflow 状态。MariaDB 原生验收范围是 Windows 11.4.8；自定义目录与无法确认版本的旧数据需先从原环境导出后导入，尚未增加原地跨大版本升级；其他服务缺口继续推进，整体目标保持进行。
 
 参考：https://mariadb.com/docs/server/server-management/install-and-upgrade-mariadb/installing-mariadb/installing-system-tables-mariadb-install-db/mariadb-install-db-exe
+
+## 第九十八轮：PostgreSQL 安全初始化与连接密码管理（v0.2.84）
+
+通过 fast-context 追踪 PostgreSQL 启动、数据路径、数据库管理、Tauri 命令与前端预览，并核对 PostgreSQL 官方 initdb、pgpass、psql、ALTER ROLE 文档。修复原先直接在最终目录使用 trust 初始化、读目录错误被当作空目录、初始化无超时及失败后递归删除数据目录的问题。
+
+首次初始化改为私有临时密码文件、32 位随机密码及 SCRAM-SHA-256，本机凭据先持久保存。初始化在同级临时目录限时执行，通过 PG_VERSION、base 与 pg_control 校验后才替换空目标目录。既有数据先核对主版本和完整性，残缺、非空未知目录和跨主版本启动明确拒绝。修复 Unix socket 参数缺失 -c，并创建对应目录。正常停机继续使用此前的 pg_ctl 身份校验与 fast 停机流程。
+
+端口遵循现有自动回落设置，并保存实际端口。真实验收发现系统临时端口范围内的主动 TCP 探测会与服务绑定产生竞争，改为先限时等待可核实的 PostgreSQL 监听进程，再发送凭据。连接同时核对当前版本、实际端口、进程身份及 SHOW data_directory；旧密码失效时保留运行实例，允许在数据库页恢复本机凭据。数据库归属错误补充目标端口与扫描 PID 详情。
+
+新增 PostgreSQL 连接信息、按需查看保存密码及修改/同步密码接口。psql 禁用启动配置，清除继承的 PG 环境变量，使用私有 pgpass、匿名输入文件和有限执行时间；冒号、反斜杠、引号与 Unicode 密码已实测。认证检测要求正确凭据成功、随机错误密码出现明确的密码认证拒绝，再次正确连接成功；网络故障或无法识别的本地化认证错误不会冒充密码验证成功。新凭据按版本隔离，并排除配置导入、导出，避免覆盖另一台机器的实例密码。
+
+旧默认 trust 实例不能通过“验证现有密码”保存任意输入。改密时可明确选择同时启用本机认证，仅转换可识别的 initdb 默认本机规则，预先拒绝自定义规则与自定义 hba 文件。配置写入前检查原内容，保留备份，重载后核对正确/错误密码行为；部分成功时说明账号、配置与备份状态。改密 SQL 通过文件输入并关闭本会话的常规语句记录，错误详情脱敏；不承诺第三方审计插件不会记录 SQL。
+
+数据库页增加独立 PostgreSQL 卡片，展示版本、实际端口、非模板库数量、大小、认证状态与可复制连接串；复用现有组件提供密码弹窗、加载、重试、错误后保留输入、实例变化保护与防重复提交。浏览器演示按版本隔离，仅模拟操作。1360px 桌面、390px 中文及 320px 英文验收了连接、错误密码、查看密码、同步和改密。修复英文窄屏按钮挤出边距，改为窄屏纵向排列；最终弹窗宽度分别 366px、296px，页面与弹窗无横向溢出，截图已目检，独立验收浏览器已关闭。
+
+精确发布树排除用户原有 configgen.rs 的 178 additions / 9 deletions 及未跟踪文件，11 个版本文件同步到 0.2.84，Cargo.lock 仅更新三个项目 crate。pnpm check 与独立树 cargo check --workspace --all-targets --locked 通过；相关回归串行执行 61 通过、0 失败、11 ignored、630 filtered。最终 PostgreSQL 与配置导入导出回归 7 通过、0 失败、695 filtered。PostgreSQL 原生验收在 Windows PostgreSQL 16.6 的隔离目录和端口执行，覆盖初始化失败保留目录、错误主版本拒绝、随机初始密码、特殊字符密码、旧 trust 转换、自定义规则保护、凭据恢复、实际端口隔离、自动回落、错误 PID 停机保护以及多次重启后读回原数据。
+
+未新增测试文件，验证扩展于既有 Rust 模块；未启动前端 dev，未执行本地前端 build。没有业务数据库变更，未修改 update.sql。v0.2.83 Release 已确认 completed/success。本轮继续按根 AGENTS.md 新建 annotated tag v0.2.84 并与 main 原子推送；安装包完成情况以远程 workflow 实际状态为准。PostgreSQL 建库、用户授权、备份恢复与外部导入仍待后续扩展，本轮仅完成初始化和连接密码管理，整体目标保持进行；Linux/macOS 未做本轮原生实机验收。
+
+参考：https://www.postgresql.org/docs/current/app-initdb.html 、https://www.postgresql.org/docs/current/libpq-pgpass.html 、https://www.postgresql.org/docs/current/app-psql.html 、https://www.postgresql.org/docs/current/sql-alterrole.html

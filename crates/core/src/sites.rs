@@ -442,6 +442,52 @@ pub fn create_with_progress(
     manager: &Arc<ServiceManager>,
     progress: &dyn Fn(&str, Option<u8>),
 ) -> Result<Site> {
+    create_inner(input, paths, store, manager, progress, None)
+}
+
+/// 恢复副本的建站入口：复用普通建站事务，但禁止脚手架与配置文件写入。
+pub fn create_existing_with_progress(
+    input: &CreateSiteInput,
+    project: &str,
+    paths: &Paths,
+    store: &Store,
+    manager: &Arc<ServiceManager>,
+    progress: &dyn Fn(&str, Option<u8>),
+) -> Result<Site> {
+    create_inner(input, paths, store, manager, progress, Some(project))
+}
+
+fn validate_existing_project(input: &CreateSiteInput, project: &str) -> Result<()> {
+    if input.template != "none" || input.write_env_example
+        || input.php_overrides.is_some() {
+        return Err(AppError::new("EXISTING_PROJECT_WRITE", "使用已有项目时不能生成模板或改写项目配置"));
+    }
+    let path = std::path::Path::new(project);
+    let detected = crate::scanner::detect_one(path, &[])
+        .ok_or_else(|| AppError::new("PROJECT_CHANGED", "项目目录已变化或无法识别，请返回恢复结果重新识别"))?;
+    let kind = serde_json::to_value(&input.runtime.kind)
+        .map_err(|error| AppError::new("BAD_RUNTIME", format!("无法读取项目类型：{error}")))?;
+    if kind.as_str() != Some(detected.site_kind.as_str())
+        || (!detected.needs_dev_server && !detected.document_root_ready) {
+        return Err(AppError::new("PROJECT_CHANGED", "项目类型或入口已变化，请补齐入口后重新识别"));
+    }
+    let expected = if detected.needs_dev_server { &detected.path } else { &detected.document_root };
+    let root = std::path::Path::new(&input.root_dir);
+    if !path.is_absolute() || !root.is_absolute() || !crate::scanner::plain_directory(root)
+        || std::fs::canonicalize(root)? != std::fs::canonicalize(expected)? {
+        return Err(AppError::new("PROJECT_CHANGED", "建站目录与识别结果不一致，请重新识别恢复副本"));
+    }
+    Ok(())
+}
+
+fn create_inner(
+    input: &CreateSiteInput,
+    paths: &Paths,
+    store: &Store,
+    manager: &Arc<ServiceManager>,
+    progress: &dyn Fn(&str, Option<u8>),
+    existing_project: Option<&str>,
+) -> Result<Site> {
     // ---- 校验 ----
     progress("preparing", None);
     let _change = SITE_CHANGES.lock();
@@ -460,6 +506,7 @@ pub fn create_with_progress(
             read_project_pin(&normalized.root_dir).map(|(_, version)| version);
     }
     let input = &normalized;
+    if let Some(project) = existing_project { validate_existing_project(input, project)?; }
     if input.https {
         if let Some(id) = &input.runtime.imported_cert_id {
             crate::certs::validate_imported_domains(paths, id, &input.domains)?;
@@ -540,7 +587,9 @@ pub fn create_with_progress(
     drop(_change);
     // ---- 脚手架 ----
     let root = std::path::PathBuf::from(&input.root_dir);
-    if input.template == "wordpress" {
+    if let Some(project) = existing_project {
+        validate_existing_project(input, project)?;
+    } else if input.template == "wordpress" {
         scaffold_wordpress(&root, progress)?;
     } else if let Some(package) = composer_package(&input.template) {
         scaffold_composer(&root, input, package, paths, store, progress)?;
@@ -562,6 +611,8 @@ pub fn create_with_progress(
         None,
     )
     .map_err(|e| e.with_hint("项目文件已保留，请修改冲突的域名后重试"))?;
+
+    if let Some(project) = existing_project { validate_existing_project(input, project)?; }
 
     // ---- 数据库 ----
     let mut db_binding = None;
@@ -2359,6 +2410,48 @@ mod scaffold_tests {
     /// 每个模板都必须把入口文件写在**该框架实际要求的位置**。
     /// 这是最容易写错、又最难自查的地方 —— 写错位置站点直接 404，
     /// 而用户会以为是服务器配置问题。
+    #[test]
+    fn recovered_project_requires_verified_entry_and_preserves_files() {
+        let t = Tmp::new("recovered");
+        std::fs::create_dir_all(t.0.join("public")).unwrap();
+        std::fs::write(t.0.join("artisan"), "").unwrap();
+        std::fs::write(t.0.join("public/index.php"), "<?php echo 'copy';").unwrap();
+        std::fs::write(t.0.join(".env"), "APP_KEY=preserved").unwrap();
+        std::fs::write(t.0.join(".env.example"), "DB_DATABASE=preserved").unwrap();
+        let mut config = input(SiteKind::Php);
+        config.root_dir = t.0.join("public").to_string_lossy().into();
+        let project = t.0.to_string_lossy();
+        validate_existing_project(&config, &project).unwrap();
+        config.template = "blank-php".into();
+        assert_eq!(validate_existing_project(&config, &project).unwrap_err().code, "EXISTING_PROJECT_WRITE");
+        config.template = "none".into();
+        config.write_env_example = true;
+        assert!(validate_existing_project(&config, &project).is_err());
+        config.write_env_example = false;
+        config.root_dir = project.to_string();
+        assert!(validate_existing_project(&config, &project).is_err());
+        config.root_dir = t.0.join("public").to_string_lossy().into();
+        std::fs::remove_file(t.0.join("public/index.php")).unwrap();
+        assert!(validate_existing_project(&config, &project).is_err());
+        assert_eq!(std::fs::read_to_string(t.0.join(".env")).unwrap(), "APP_KEY=preserved");
+        assert_eq!(std::fs::read_to_string(t.0.join(".env.example")).unwrap(), "DB_DATABASE=preserved");
+        let missing = t.0.join("missing");
+        assert!(validate_existing_project(&config, &missing.to_string_lossy()).is_err());
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn recovered_application_uses_source_directory_and_explicit_runtime() {
+        let t = Tmp::new("recovered-node");
+        std::fs::write(t.0.join("next.config.js"), "module.exports={}").unwrap();
+        std::fs::create_dir_all(t.0.join("out")).unwrap();
+        let mut config = input(SiteKind::Node);
+        config.root_dir = t.0.to_string_lossy().into();
+        validate_existing_project(&config, &config.root_dir).unwrap();
+        config.runtime.kind = SiteKind::Static;
+        assert!(validate_existing_project(&config, &config.root_dir).is_err());
+    }
+
     #[test]
     fn each_template_writes_entry_at_framework_correct_path() {
         let cases: &[(&str, SiteKind, &str)] = &[

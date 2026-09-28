@@ -13,7 +13,7 @@
 //! 只做**只读扫描**：不修改、不写入、不执行项目里的任何东西。
 //! 扫描结果交给用户确认后才用于建站。
 
-use std::path::Path;
+use std::{io::Read, path::Path};
 
 use serde::{Deserialize, Serialize};
 
@@ -66,7 +66,9 @@ impl ProjectKind {
     /// 建议的伪静态预设（与 Site 的 rewrite 字段对齐）
     pub fn rewrite(&self) -> &'static str {
         match self {
-            ProjectKind::Laravel | ProjectKind::Symfony => "laravel",
+            ProjectKind::Laravel => "laravel",
+            ProjectKind::Symfony => "symfony",
+            ProjectKind::CodeIgniter => "codeigniter",
             ProjectKind::ThinkPhp => "thinkphp",
             ProjectKind::WordPress => "wordpress",
             ProjectKind::NextJs
@@ -81,7 +83,7 @@ impl ProjectKind {
     pub fn document_root(&self) -> Option<&'static str> {
         match self {
             // Laravel / Symfony / ThinkPHP 5+ 的入口都在 public/
-            ProjectKind::Laravel | ProjectKind::Symfony => Some("public"),
+            ProjectKind::Laravel | ProjectKind::Symfony | ProjectKind::CodeIgniter => Some("public"),
             ProjectKind::ThinkPhp => Some("public"),
             // Next.js 静态导出产物
             ProjectKind::NextJs => Some("out"),
@@ -101,10 +103,10 @@ impl ProjectKind {
             ProjectKind::CodeIgniter => "需要 PHP；入口在 public/index.php",
             ProjectKind::GenericPhp => "需要 PHP",
             ProjectKind::StaticHtml => "纯静态，无需运行时",
-            ProjectKind::NextJs => "需要 Node；开发用 npm run dev（本应用可按 Node 站点代理），静态导出用 npm run build + out 目录",
-            ProjectKind::Vite => "需要 Node；开发用 npm run dev（代理），构建产物在 dist",
-            ProjectKind::NuxtJs => "需要 Node；开发用 npm run dev（代理），构建产物在 .output/public",
-            ProjectKind::NodeGeneric => "需要 Node；建议用「反向代理」模式指向 npm run dev 的端口",
+            ProjectKind::NextJs => "需要 Node；开发用 pnpm dev（本应用可按 Node 站点代理），静态导出用 pnpm build + out 目录",
+            ProjectKind::Vite => "需要 Node；开发用 pnpm dev（代理），构建产物在 dist",
+            ProjectKind::NuxtJs => "需要 Node；开发用 pnpm dev（代理），构建产物在 .output/public",
+            ProjectKind::NodeGeneric => "需要 Node；建议用「反向代理」模式指向 pnpm dev 的端口",
             ProjectKind::Python => "需要 Python；建议用「反向代理」模式指向 dev server 端口",
             ProjectKind::Go => "需要 Go；建议先用 go run 起服务，再用反向代理指向它",
             ProjectKind::Java => "需要 JDK；建议用反向代理指向应用端口",
@@ -137,6 +139,8 @@ pub struct ScannedProject {
     pub kind: ProjectKind,
     /// 建议的文档根（已拼成绝对路径）
     pub document_root: String,
+    /// 预期入口可用；false 时禁止把回退目录直接用来建站。
+    pub document_root_ready: bool,
     /// 站点类型 / 伪静态预设，直接可填进建站表单
     pub site_kind: String,
     pub rewrite: String,
@@ -161,7 +165,7 @@ pub fn scan_dir(
     store: &crate::store::Store,
     root: &Path,
 ) -> Result<Vec<ScannedProject>> {
-    if !root.is_dir() {
+    if !plain_directory(root) {
         return Err(AppError::new("NOT_A_DIR", "指定的路径不是目录"));
     }
     // 已配置站点的文档根集合，用于标记「已建过站」
@@ -179,7 +183,7 @@ pub fn scan_dir(
     let rd = std::fs::read_dir(root).map_err(|e| AppError::io("读取目录", e))?;
     for e in rd.flatten() {
         let child = e.path();
-        if !child.is_dir() {
+        if !plain_directory(&child) || out.iter().any(|p| Path::new(&p.document_root) == child && p.path != p.document_root) {
             continue;
         }
         let name = e.file_name().to_string_lossy().to_string();
@@ -222,14 +226,46 @@ fn normalize(p: &str) -> String {
         .to_ascii_lowercase()
 }
 
+// 限制只读识别的内存用量，不读取软链接、目录联接和特殊文件。
+const MANIFEST_LIMIT: u64 = 512 * 1024;
+
+pub(crate) fn plain_directory(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if metadata.file_attributes() & 0x400 != 0 { return false; }
+        }
+        metadata.is_dir() && !metadata.file_type().is_symlink()
+    })
+}
+
+fn project_member(dir: &Path, relative: &str) -> Option<std::path::PathBuf> {
+    if !plain_directory(dir) { return None; }
+    crate::paths::checked_data_path(dir, relative).ok()
+}
+
+fn read_manifest(dir: &Path, relative: &str) -> Option<serde_json::Value> {
+    let path = project_member(dir, relative)?;
+    let metadata = std::fs::symlink_metadata(&path).ok()?;
+    if !metadata.is_file() || metadata.len() > MANIFEST_LIMIT { return None; }
+    let file = std::fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MANIFEST_LIMIT + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > MANIFEST_LIMIT { return None; }
+    serde_json::from_slice(&bytes).ok()
+}
+
 /// 判断单个目录是什么项目
 pub fn detect_one(dir: &Path, configured: &[String]) -> Option<ScannedProject> {
-    let has = |rel: &str| dir.join(rel).exists();
-    let read = |rel: &str| {
-        std::fs::read_to_string(dir.join(rel))
-            .ok()
-            .unwrap_or_default()
-    };
+    if !plain_directory(dir) { return None; }
+    let has = |rel: &str| project_member(dir, rel).is_some_and(|path| {
+        if rel == "app" { plain_directory(&path) } else { path.is_file() }
+    });
+    let composer = has("composer.json").then(|| read_manifest(dir, "composer.json")).flatten();
+    let package = has("package.json").then(|| read_manifest(dir, "package.json")).flatten();
+    let manifest_unreadable = (has("composer.json") && composer.is_none())
+        || (has("package.json") && package.is_none());
 
     let mut evidence: Vec<String> = Vec::new();
     let mut kind = ProjectKind::Unknown;
@@ -273,17 +309,18 @@ pub fn detect_one(dir: &Path, configured: &[String]) -> Option<ScannedProject> {
 
     // ---- 2) 依赖清单里的框架 ----
     if kind == ProjectKind::Unknown && has("composer.json") {
-        let c = read("composer.json").to_ascii_lowercase();
-        if c.contains("laravel/framework") {
+        let requires = composer.as_ref().and_then(|v| v.get("require")).and_then(|v| v.as_object());
+        let dependency = |name: &str| requires.is_some_and(|deps| deps.contains_key(name));
+        if dependency("laravel/framework") {
             kind = ProjectKind::Laravel;
             evidence.push("composer.json 依赖 laravel/framework".into());
-        } else if c.contains("symfony/framework-bundle") {
+        } else if dependency("symfony/framework-bundle") {
             kind = ProjectKind::Symfony;
             evidence.push("composer.json 依赖 symfony/framework-bundle".into());
-        } else if c.contains("topthink/framework") {
+        } else if dependency("topthink/framework") {
             kind = ProjectKind::ThinkPhp;
             evidence.push("composer.json 依赖 topthink/framework".into());
-        } else if c.contains("codeigniter4/framework") {
+        } else if dependency("codeigniter4/framework") {
             kind = ProjectKind::CodeIgniter;
             evidence.push("composer.json 依赖 codeigniter4/framework".into());
         } else {
@@ -292,14 +329,17 @@ pub fn detect_one(dir: &Path, configured: &[String]) -> Option<ScannedProject> {
         }
     }
     if kind == ProjectKind::Unknown && has("package.json") {
-        let p = read("package.json").to_ascii_lowercase();
-        if p.contains("\"next\"") {
+        let dependency = |name: &str| package.as_ref().is_some_and(|value| {
+            ["dependencies", "devDependencies"].iter().any(|key| value.get(key)
+                .and_then(|v| v.as_object()).is_some_and(|deps| deps.contains_key(name)))
+        });
+        if dependency("next") {
             kind = ProjectKind::NextJs;
             evidence.push("package.json 依赖 next".into());
-        } else if p.contains("\"nuxt\"") {
+        } else if dependency("nuxt") {
             kind = ProjectKind::NuxtJs;
             evidence.push("package.json 依赖 nuxt".into());
-        } else if p.contains("\"vite\"") {
+        } else if dependency("vite") {
             kind = ProjectKind::Vite;
             evidence.push("package.json 依赖 vite".into());
         } else {
@@ -309,9 +349,9 @@ pub fn detect_one(dir: &Path, configured: &[String]) -> Option<ScannedProject> {
     }
 
     // ---- 3) Laravel 等对 PHP 版本有下限：从 composer.json 的 require 里读 ----
-    if matches!(kind, ProjectKind::Laravel | ProjectKind::Symfony) && has("composer.json") {
-        let c = read("composer.json");
-        if let Some(v) = extract_php_requirement(&c) {
+    if kind.site_kind() == "php" {
+        if let Some(v) = composer.as_ref().and_then(|c| c.get("require"))
+            .and_then(|r| r.get("php")).and_then(|v| v.as_str()).map(str::to_owned) {
             evidence.push(format!("composer.json 要求 php {v}"));
             php_min = Some(v);
         }
@@ -353,12 +393,25 @@ pub fn detect_one(dir: &Path, configured: &[String]) -> Option<ScannedProject> {
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| dir.to_string_lossy().to_string());
 
-    let doc_root = match kind.document_root() {
-        Some(sub) => dir.join(sub),
-        None => dir.to_path_buf(),
-    };
-    // 文档根不存在时退回项目根，免得建出一个指向空目录的站点
-    let doc_root = if doc_root.is_dir() {
+    let relative_root = if kind == ProjectKind::GenericPhp && has("public/index.php") {
+        Some("public")
+    } else { kind.document_root() };
+    let doc_root = relative_root.map(|sub| dir.join(sub)).unwrap_or_else(|| dir.to_path_buf());
+    let document_root_ready = !manifest_unreadable && plain_directory(&doc_root)
+        && relative_root.is_none_or(|sub| project_member(dir, sub).is_some())
+        && (kind.site_kind() != "php" || if relative_root.is_some() {
+            has("public/index.php")
+        } else if kind == ProjectKind::GenericPhp {
+            dir_has_extension(dir, "php")
+        } else { has("index.php") });
+    if manifest_unreadable {
+        evidence.push("依赖清单无法解析或超过 512 KiB；请检查文件后重新识别".into());
+    }
+    if !document_root_ready && !kind.needs_dev_server() {
+        evidence.push("预期入口缺失或无法安全读取，不能直接使用项目根目录建站".into());
+    }
+    // 保留旧客户端的回退展示，新客户端必须检查 document_root_ready。
+    let doc_root = if plain_directory(&doc_root) {
         doc_root
     } else {
         dir.to_path_buf()
@@ -373,6 +426,7 @@ pub fn detect_one(dir: &Path, configured: &[String]) -> Option<ScannedProject> {
         name: name.clone(),
         kind,
         document_root: doc_root.to_string_lossy().to_string(),
+        document_root_ready,
         site_kind: kind.site_kind().to_string(),
         rewrite: kind.rewrite().to_string(),
         php_min_version: php_min,
@@ -428,7 +482,9 @@ fn dir_has_extension(dir: &Path, ext: &str) -> bool {
     };
     rd.flatten()
         .take(200)
-        .any(|e| e.path().extension().and_then(|s| s.to_str()) == Some(ext))
+        .any(|e| e.path().extension().and_then(|s| s.to_str()) == Some(ext)
+            && e.file_type().is_ok_and(|kind| kind.is_file())
+            && project_member(dir, &e.file_name().to_string_lossy()).is_some())
 }
 
 #[cfg(test)]
@@ -603,6 +659,70 @@ mod tests {
             normalize(&t.0.to_string_lossy()),
             "public 不存在时应退回项目根"
         );
+        assert!(!p.document_root_ready, "回退根目录不能直接建站");
+    }
+
+    #[test]
+    fn public_entries_and_framework_rewrites_are_recommended_correctly() {
+        for (marker, kind, rewrite) in [("composer.json", ProjectKind::GenericPhp, "none"), ("spark", ProjectKind::CodeIgniter, "codeigniter"), ("symfony.lock", ProjectKind::Symfony, "symfony")] {
+            let t = Tmp::new(&format!("public-{rewrite}"));
+            t.file(marker, "{}").file("public/index.php", "<?php");
+            if marker == "symfony.lock" { t.file("bin/console", ""); }
+            let p = detect(&t).unwrap();
+            assert_eq!(p.kind, kind);
+            assert_eq!(p.rewrite, rewrite);
+            assert_eq!(Path::new(&p.document_root), t.0.join("public"));
+            assert!(p.document_root_ready);
+        }
+    }
+
+    #[test]
+    fn detection_bounds_manifests_and_ignores_package_names_and_descriptions() {
+        let t = Tmp::new("bounded");
+        t.file("composer.json", &" ".repeat(MANIFEST_LIMIT as usize + 1));
+        assert!(read_manifest(&t.0, "composer.json").is_none());
+        assert!(!detect(&t).unwrap().document_root_ready);
+        t.file("composer.json", r#"{"description":"laravel/framework","require":{"php":"^8.3"}}"#);
+        let p = detect(&t).unwrap();
+        assert_eq!(p.kind, ProjectKind::GenericPhp);
+        assert_eq!(p.php_min_version.as_deref(), Some("^8.3"));
+        std::fs::remove_file(t.0.join("composer.json")).unwrap();
+        t.file("package.json", r#"{"name":"next","description":"vite"}"#);
+        assert_eq!(detect(&t).unwrap().kind, ProjectKind::NodeGeneric);
+        t.file("package.json", r#"{"devDependencies":{"vite":"6"}}"#);
+        assert_eq!(detect(&t).unwrap().kind, ProjectKind::Vite);
+    }
+
+    #[test]
+    fn scan_does_not_list_the_project_document_root_twice() {
+        let t = Tmp::new("dedup");
+        t.file("artisan", "").file("public/index.php", "<?php");
+        let paths = crate::paths::Paths::new(t.0.clone());
+        let store = crate::store::Store::open(t.0.join("scan.sqlite")).unwrap();
+        let found = scan_dir(&paths, &store, &t.0).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].kind, ProjectKind::Laravel);
+    }
+
+    #[test]
+    fn linked_public_directory_is_not_a_ready_entry() {
+        let t = Tmp::new("linked-entry");
+        let outside = Tmp::new("linked-outside");
+        t.file("artisan", "");
+        outside.file("index.php", "<?php");
+        let link = t.0.join("public");
+        #[cfg(windows)]
+        assert!(std::process::Command::new("cmd").args(["/C", "mklink", "/J"])
+            .arg(&link).arg(&outside.0).output().unwrap().status.success());
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside.0, &link).unwrap();
+        assert!(!detect(&t).unwrap().document_root_ready);
+        assert!(detect_one(&link, &[]).is_none());
+        #[cfg(windows)]
+        std::fs::remove_dir(&link).unwrap();
+        #[cfg(unix)]
+        std::fs::remove_file(&link).unwrap();
+        assert!(outside.0.join("index.php").exists());
     }
 
     #[test]

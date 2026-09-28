@@ -114,8 +114,8 @@ export const versionCatalogs = (force = false) =>
 
 /* 站点 */
 export const listSites = () => safe(invoke<Site[]>("list_sites"));
-export const createSite = (input: CreateSiteInput) =>
-  safe(invoke<Site>("create_site", { input }));
+export const createSite = (input: CreateSiteInput, existingProject?: string) =>
+  safe(invoke<Site>("create_site", { input, existingProject }));
 export const siteAccessUrl = (id: string) => safe(invoke<string>("site_access_url", { id }));
 export const openSite = (id: string) => openResolvedBrowserUrl(() => siteAccessUrl(id));
 export const updateSite = (site: Partial<Site> & { id: string }) =>

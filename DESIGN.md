@@ -2606,3 +2606,23 @@ Windows 隔离临时目录验收覆盖中文和空格路径、.env、二进制�
 11 个版本文件同步到 0.2.97，Cargo.lock 仅更新三个本项目 crate。独立发布树基于 v0.2.96，精确发布 18 个任务文件，保留其它正在进行的导航、CodeMirror、数据库工作区、rewrite、日志和上游版本改动。v0.2.96 Release 三个平台均已核对 completed/success。本轮按项目规则新增 annotated tag v0.2.97，与 main 原子推送并核对远程及实际构建状态。没有业务数据库变更，未修改 update.sql。原位覆盖恢复、恢复副本直接接入站点及完整 UI 实机验收仍待后续完善，整体目标保持进行。
 
 参考：https://support.servbay.com/getting-started/backup-and-restore
+
+## 第一百一十二轮：恢复副本识别项目并接入建站向导（v0.2.98）
+
+继续补齐 ServBay 备份恢复之后核对项目入口、运行时及数据库的流程。通过 fast-context 定位既有扫描器、全局建站向导与站点恢复结果，沿用 UI/UX skill、本地 Next use-client 文档和现有组件，没有新增依赖或测试文件。
+
+恢复成功卡片增加“识别恢复副本”：只读识别根目录及一层项目，展示类型、实际 Web 根或应用源目录、识别依据、PHP 版本约束和运行提示。多个项目使用下拉选择；空结果说明检查入口和归档范围，识别失败可重试。识别与文件备份计划、归档操作及站点编辑互斥。选择项目后关闭站点详情并打开现有六步向导，抑制旧抽屉恢复焦点，避免与新窗口抢焦点。识别期间不执行项目脚本。
+
+向导预填名称、项目路径、类型和合适的伪静态规则，要求单独填写新域名。固定“使用已有文件”，保持项目路径和识别类型，证书与数据库默认关闭；数据库可选新建，但 .env、.env.example 和 .user.ini 保持原样，数据库数据需单独恢复并明确更新连接信息。应用项目使用源码目录，代理端口留空由用户确认，进程托管需主动启用，不能把恢复源码误报为已运行。项目意图只保存在非持久化 UI 状态，普通建站入口清除此预填。
+
+桌面 create_site 增加兼容的可选 existingProject 参数，普通调用保持原流程；已有项目模式复用建站校验、配置与回滚链路，跳过目录创建和全部脚手架。后端在初始校验及生成站点前重新识别项目，校验类型、预期入口与真实目录，拒绝模板、环境示例和 PHP 覆盖设置，目录消失或替换为链接时失败，不创建空目录。现有批量扫描建站也使用该保护入口。
+
+扫描器修正通用 PHP 的 public/index.php、CodeIgniter 4 的 public 根及伪静态、Symfony 的伪静态推荐。依赖清单每份最多读取 512 KiB，按实际 dependencies/devDependencies/require 字段识别，避免名称或描述中的框架字样误判。跳过软链接、Windows 目录联接与特殊文件，PHP 项目提取 composer require.php。documentRootReady 区分可用入口和旧接口的目录回退；配置/资源归档没有代码入口、框架 public 入口缺失或清单无效时不能直接建站，界面提供说明与重试。扫描根项目后不再把它的 public 当作第二个项目。相关运行提示统一使用 pnpm。
+
+恢复结果的分割线在卡片内保留左右间距并使用虚线；详情折叠、长路径换行、操作可折行，复用向导的正文滚动与固定底部按钮。中英文文案同步，浏览器模式明确为演示，不宣称读写真实文件。本轮确认 3000 端口没有监听，未运行前端 dev/build，尚未进行浏览器交互、桌面与窄屏截图验收；macOS/Linux 路径和原生选择器仍需实机验证。
+
+独立发布树基于 v0.2.97，schema/Web TypeScript 检查与 cargo check --workspace --all-targets --locked 通过。scanner、sites scaffold、backup_job、paths、envfile、transfer 原有 Rust 模块回归结果为 116 passed、0 failed、7 ignored、589 filtered out。忽略项需要外部 PHP/运行时、实际服务或官方模板下载，本轮未将其计为通过。新增的既有模块验收覆盖 512 KiB 限制、依赖字段识别、public 推荐、Symfony/CodeIgniter 规则、Windows 目录联接拒绝、入口重复去除、缺失目录/入口、已有项目禁止模板/环境文件写入、应用源目录选择，以及真实 ZIP 恢复副本在补齐入口前后的识别与原项目保留。验证仅使用隔离临时目录、测试数据库及配置，不操作用户站点或 hosts。
+
+11 个版本文件同步至 0.2.98，Cargo.lock 只更新三个本项目 crate。精确发布 25 个任务文件，保留工作区其他导航、编辑器、数据库工作区、rewrite、日志和上游版本修改。v0.2.97 的 Windows、macOS Apple Silicon、macOS Intel Release 已核对均为 completed/success。本轮按项目约定新增 annotated tag v0.2.98，与 main 原子推送后核对远程提交及 Release 工作流实际状态。没有业务数据库变更，未修改 update.sql。完整 UI 实机验收和其他功能完善仍待后续继续，整体目标保持进行。
+
+参考：https://support.servbay.com/getting-started/backup-and-restore

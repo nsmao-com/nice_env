@@ -25,6 +25,7 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const wizardOpen = useUI((s) => s.wizardOpen);
   const wizardKind = useUI((s) => s.wizardKind);
+  const wizardProject = useUI((s) => s.wizardProject);
   const setWizardOpen = useUI((s) => s.setWizardOpen);
   const invalidate = useInvalidate();
   const t = useT();
@@ -86,6 +87,7 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
       <SiteWizard
         open={wizardOpen}
         initialKind={wizardKind}
+        existingProject={wizardProject}
         onOpenChange={setWizardOpen}
         onCreated={() => invalidate("sites", "hosts", "certs", "databases")}
       />

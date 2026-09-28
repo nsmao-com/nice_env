@@ -1077,24 +1077,24 @@ async fn create_site(
     app: tauri::AppHandle,
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     input: nsb_core::model::CreateSiteInput,
+    existing_project: Option<String>,
 ) -> Result<nsb_core::model::Site, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        map_jh(nsb_core::sites::create_with_progress(
-            &input,
-            &st.paths,
-            &st.store,
-            &st.manager,
-            &|stage, percent| {
-                let _ = app.emit(
-                    "site://create-progress",
-                    serde_json::json!({
-                        "rootDir": input.root_dir.trim(), "stage": stage, "percent": percent,
-                    }),
-                );
-            },
-        ))
+        let progress = |stage: &str, percent: Option<u8>| {
+            let _ = app.emit(
+                "site://create-progress",
+                serde_json::json!({
+                    "rootDir": input.root_dir.trim(), "stage": stage, "percent": percent,
+                }),
+            );
+        };
+        map_jh(if let Some(project) = existing_project {
+            nsb_core::sites::create_existing_with_progress(&input, &project, &st.paths, &st.store, &st.manager, &progress)
+        } else {
+            nsb_core::sites::create_with_progress(&input, &st.paths, &st.store, &st.manager, &progress)
+        })
     })
     .await
     .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?

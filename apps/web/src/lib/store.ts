@@ -5,7 +5,7 @@ import * as React from "react";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { Lang, TKey } from "./i18n";
-import type { SiteKind } from "@nsb/schema";
+import { SiteKind, type ScannedProject } from "@nsb/schema";
 import { translate } from "./i18n";
 
 interface UIState {
@@ -15,6 +15,8 @@ interface UIState {
   setCommandOpen: (open: boolean) => void;
   wizardOpen: boolean;
   wizardKind: SiteKind;
+  wizardProject: ScannedProject | null;
+  openExistingProject: (project: ScannedProject) => void;
   setWizardOpen: (open: boolean, kind?: SiteKind) => void;
   onboardingOpen: boolean;
   setOnboardingOpen: (open: boolean) => void;
@@ -53,7 +55,9 @@ export const useUI = create<UIState>()(
       setCommandOpen: (open) => set({ commandOpen: open }),
       wizardOpen: false,
       wizardKind: "php",
-      setWizardOpen: (open, kind) => set({ wizardOpen: open, ...(open ? { wizardKind: kind ?? "php" } : {}) }),
+      wizardProject: null,
+      openExistingProject: (project) => set({ wizardOpen: true, wizardProject: project, wizardKind: SiteKind.parse(project.siteKind) }),
+      setWizardOpen: (open, kind) => set({ wizardOpen: open, ...(open ? { wizardKind: kind ?? "php", wizardProject: null } : {}) }),
       onboardingOpen: false,
       setOnboardingOpen: (open) => set({ onboardingOpen: open }),
       serviceView: "card",

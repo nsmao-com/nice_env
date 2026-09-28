@@ -18,7 +18,7 @@ import {
   ArrowRight,
   Loader2,
 } from "lucide-react";
-import type { CreateSiteInput, RewritePreset, SiteKind, SiteCreateProgress } from "@nsb/schema";
+import { RewritePreset as RewriteSchema, type ScannedProject, type CreateSiteInput, type RewritePreset, type SiteKind, type SiteCreateProgress } from "@nsb/schema";
 import { cn, cmpVersionDesc, normalizeProxyTarget } from "@/lib/utils";
 import { useT } from "@/lib/store";
 import { isTauri, listen, normalizeError } from "@/lib/backend";
@@ -89,11 +89,13 @@ export function SiteWizard({
   onOpenChange,
   onCreated,
   initialKind = "php",
+  existingProject = null,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onCreated?: () => void;
   initialKind?: SiteKind;
+  existingProject?: ScannedProject | null;
 }) {
   const t = useT();
   const { data: packages, refetch: refreshPackages } = usePackages();
@@ -156,15 +158,15 @@ export function SiteWizard({
 
   React.useEffect(() => {
     if (open && !wasOpen.current) {
-      domainEdited.current = false;
+      domainEdited.current = !!existingProject;
       setStep(0);
       setProgress(null);
       setCreateError("");
       setCreateErrorDetail("");
-      setName("");
+      setName(existingProject?.name ?? "");
       setDomain("");
       setAliases("");
-      setRootDir("");
+      setRootDir(existingProject ? (existingProject.needsDevServer ? existingProject.path : existingProject.documentRoot) : "");
       setTemplate("none");
       setKind(initialKind);
       setPhpVersion(phpVersions[0] ?? "");
@@ -172,14 +174,14 @@ export function SiteWizard({
       setHttps(false);
       setCertificate({});
       setDbEnabled(false);
-      setRewrite("none");
-      setProxyTarget("127.0.0.1:3001");
+      setRewrite(existingProject && !existingProject.needsDevServer ? RewriteSchema.safeParse(existingProject.rewrite).data ?? "none" : "none");
+      setProxyTarget(existingProject?.needsDevServer ? "" : "127.0.0.1:3001");
       setApplication(undefined);
       setDbName("");
       setDbUser("");
     }
     wasOpen.current = open;
-  }, [open, phpVersions, initialKind]);
+  }, [open, phpVersions, initialKind, existingProject]);
 
   React.useEffect(() => {
     if (open && !phpVersion && phpVersions[0]) setPhpVersion(phpVersions[0]);
@@ -271,13 +273,13 @@ export function SiteWizard({
         ...(dbEnabled && dbName
           ? { createDb: { database: dbName, username: dbUser, password: dbPass } }
           : {}),
-        writeEnvExample: dbEnabled,
-        template,
+        writeEnvExample: !existingProject && dbEnabled,
+        template: existingProject ? "none" : template,
       };
       unlisten = await listen<SiteCreateProgress>("site://create-progress", (event) => {
         if (event.rootDir === input.rootDir) setProgress(event);
       });
-      const site = await api.createSite(input);
+      const site = await api.createSite(input, existingProject?.path);
       toast.success(`${t("wz.createdP1")} ${site.name} ${t("wz.createdP2")}`, {
         description: template === "wordpress"
           ? t("wz.wordpressFinish")
@@ -316,7 +318,7 @@ export function SiteWizard({
     <Dialog open={open} onOpenChange={(o) => !creating && onOpenChange(o)}>
       <DialogContent className="flex w-[calc(100vw_-_1.5rem)] max-w-[640px] max-h-[86vh] flex-col overflow-hidden">
         <DialogHeader>
-          <DialogTitle>{t("sites.create")}</DialogTitle>
+          <DialogTitle>{t(existingProject ? "siteResume.create" : "sites.create")}</DialogTitle>
           <DialogDescription>
             {t("sites.wizard.step")} {step + 1}/6 · {t(STEPS[step].key)}
           </DialogDescription>
@@ -346,6 +348,7 @@ export function SiteWizard({
         </div>
 
         <div className="min-h-0 min-w-0 flex-1 overflow-y-auto pr-1">
+        {existingProject && <p className="mb-4 rounded-lg bg-fill p-3 text-xs leading-relaxed text-muted">{t("siteResume.preserve")}</p>}
         <fieldset disabled={creating} className="m-0 min-w-0 border-0 p-0">
         <AnimatePresence mode="wait">
           <motion.div
@@ -377,7 +380,7 @@ export function SiteWizard({
                     onChange={(e) => { domainEdited.current = true; setDomain(e.target.value); }}
                     className="font-mono text-[13px]"
                   />
-                  <p className="text-[11px] text-faint">{t("sites.wizard.domainHint")}</p>
+                  <p className="text-[11px] text-faint">{t(existingProject ? "siteResume.domain" : "sites.wizard.domainHint")}</p>
                 </div>
                 <div className="flex flex-col gap-1.5">
                   <Label htmlFor="sw-aliases">{t("sites.wizard.aliases")}</Label>
@@ -398,12 +401,13 @@ export function SiteWizard({
                   <div className="flex gap-2">
                     <Input
                       id="sw-root"
+                      readOnly={!!existingProject}
                       value={rootDir}
                       onChange={(e) => setRootDir(e.target.value)}
                       placeholder="D:/code/my-site"
                       className="flex-1 font-mono text-[13px]"
                     />
-                    <Button variant="secondary" onClick={pickFolder} className="shrink-0">
+                    <Button variant="secondary" onClick={pickFolder} disabled={!!existingProject} className="shrink-0">
                       <FolderOpen className="h-3.5 w-3.5" /> {t("sites.wizard.pick")}
                     </Button>
                   </div>
@@ -424,9 +428,10 @@ export function SiteWizard({
                         { v: "spa", labelKey: "wz.tplSpa", hintKey: "wz.tplSpaHint" },
                         { v: "next-export", labelKey: "wz.tplNextExport", hintKey: "wz.tplNextExportHint" },
                       ] as const
-                    ).map((opt) => (
+                    ).filter((opt) => !existingProject || opt.v === "none").map((opt) => (
                       <button
                         key={opt.v}
+                        disabled={!!existingProject}
                         onClick={() => {
                           setTemplate(opt.v);
                           if (opt.v === "next-export") setDbEnabled(false);
@@ -492,6 +497,8 @@ export function SiteWizard({
 
             {step === 2 && (
               <div className="flex flex-col gap-4">
+                {existingProject?.phpMinVersion && <p className="rounded-lg bg-fill p-3 text-xs text-muted">{t("siteResume.php").replace("{version}", existingProject.phpMinVersion)}</p>}
+                {existingProject?.needsDevServer && <p className="rounded-lg bg-warn-soft p-3 text-xs leading-relaxed text-warn">{t("siteResume.application")}</p>}
                 {!templatePhpCompatible && <p role="alert" className="rounded-lg bg-warn-soft p-3 text-xs text-warn">{t("wz.templatePhpMinimum").replace("{version}", minimumPhp)}</p>}
                 {!webInstalled && <p role="alert" className="rounded-lg bg-warn-soft p-3 text-xs text-warn">{t("wz.installWebFirst")}</p>}
                 <div className="flex flex-col gap-1.5">
@@ -501,6 +508,7 @@ export function SiteWizard({
                       <button
                         key={k.value}
                         aria-pressed={kind === k.value}
+                        disabled={!!existingProject && k.value !== initialKind}
                         onClick={() => {
                           setKind(k.value);
                           if (k.value !== kind) setApplication(undefined);
@@ -626,7 +634,7 @@ export function SiteWizard({
                     <span className="flex items-center gap-2 text-[13px] font-medium">
                       <Database className="h-3.5 w-3.5 text-primary" /> {t("sites.wizard.db")}
                     </span>
-                    <span className="text-[11.5px] text-faint">{t("sites.wizard.envHint")}</span>
+                    <span className="text-[11.5px] text-faint">{t(existingProject ? "siteResume.database" : "sites.wizard.envHint")}</span>
                   </div>
                   <Switch checked={dbEnabled} onCheckedChange={setDbEnabled} aria-label={t("sites.wizard.db")} />
                 </div>

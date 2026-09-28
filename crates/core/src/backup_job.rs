@@ -676,6 +676,15 @@ mod tests {
         let restored=std::path::Path::new(&restored);
         assert_eq!(std::fs::read(restored.join("public/中文.bin")).unwrap(),[0,1,2,255]);
         assert_eq!(std::fs::read_to_string(restored.join(".env")).unwrap(),"FIXTURE_SECRET=local-only");assert!(restored.join("public/empty").is_dir());assert!(!restored.join("node_modules").exists());
+        // 恢复副本可被扫描；只有配置与资源时不能误认为入口已就绪。
+        let detected = crate::scanner::detect_one(restored, &[]).unwrap();
+        assert!(!detected.document_root_ready);
+        std::fs::write(restored.join("public/index.php"), "<?php echo 'restored';").unwrap();
+        let detected = crate::scanner::detect_one(restored, &[]).unwrap();
+        assert!(detected.document_root_ready);
+        assert_eq!(std::path::Path::new(&detected.document_root), restored.join("public"));
+        assert!(!project.join("public/index.php").exists());
+        assert_eq!(std::fs::read_to_string(restored.join(".env")).unwrap(), "FIXTURE_SECRET=local-only");
         let copy=restore_site_fixture(&state,&site.id,&first.name,None,true,&|_,_,_|{}).unwrap();assert_ne!(std::path::Path::new(&copy),restored);
         let archive_parent=std::path::Path::new(&first.path).parent().unwrap();
         assert!(restore_site_fixture(&state,&site.id,&first.name,Some(archive_parent.to_str().unwrap()),true,&|_,_,_|{}).is_err());

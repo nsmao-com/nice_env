@@ -960,6 +960,7 @@ export const ScannedProject = z.object({
   /** laravel / think-php / wordpress / next-js / vite / go / python … */
   kind: z.string(),
   documentRoot: z.string(),
+  documentRootReady: z.boolean(),
   siteKind: z.string(),
   rewrite: z.string(),
   phpMinVersion: z.string().nullable().optional(),

@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import type { ScannedProject } from "@nsb/schema";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Archive, FolderOpen, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -19,9 +20,10 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 
 import { SiteFileBackupPlan } from "./site-file-backup-plan";
 
-export function SiteFileBackups({ siteId, revision, active, disabled, dirty, onBusyChange }: {
+export function SiteFileBackups({ siteId, revision, active, disabled, dirty, onBusyChange, onCreateFromRestored }: {
   siteId: string; revision: number; active: boolean; disabled: boolean; dirty: boolean;
   onBusyChange: (busy: boolean) => void;
+  onCreateFromRestored: (project: ScannedProject) => void;
 }) {
   const t = useT();
   const client = useQueryClient();
@@ -45,6 +47,10 @@ export function SiteFileBackups({ siteId, revision, active, disabled, dirty, onB
   const [trusted, setTrusted] = React.useState(false);
   const [restorePreview, setRestorePreview] = React.useState<api.SiteFileRestorePreview | null>(null);
   const [restored, setRestored] = React.useState("");
+  const [projects, setProjects] = React.useState<ScannedProject[] | null>(null);
+  const [selectedProject, setSelectedProject] = React.useState("");
+  const restoredProject = projects?.find((item) => item.path === selectedProject);
+  const projectReady = !!restoredProject && (restoredProject.needsDevServer || restoredProject.documentRootReady);
   const [importOpen, setImportOpen] = React.useState(false);
   const [importPath, setImportPath] = React.useState("");
   const [importPreview, setImportPreview] = React.useState<api.SiteFileImportPreview | null>(null);
@@ -128,10 +134,45 @@ export function SiteFileBackups({ siteId, revision, active, disabled, dirty, onB
       })}><Archive className="size-4" />{t("siteFiles.create")}</Button>
     </div>
     {!restore && !deleting && !importOpen && <>{progressView}{errorView}</>}
-    {restored && <div role="status" className="space-y-2 rounded-xl bg-running-soft p-3">
+    {restored && <div className="space-y-2 rounded-xl bg-running-soft p-3">
       <p className="text-xs font-medium text-running">{t("siteFiles.restored")}</p>
       <p className="font-mono text-xs [overflow-wrap:anywhere]">{restored}</p>
       <div className="flex flex-wrap gap-2"><Button size="sm" variant="secondary" disabled={!isTauri} onClick={() => api.openInFolder(restored).catch(toastError)}><FolderOpen className="size-3.5" />{t("siteFiles.folder")}</Button><CopyButton text={restored} /></div>
+      <div className="space-y-3 border-t border-dashed border-separator pt-3">
+        <p className="text-xs leading-relaxed text-muted">{t("siteResume.hint")}</p>
+        {!isTauri && <p className="text-xs leading-relaxed text-muted">{t("siteFiles.preview")}</p>}
+        <Button size="sm" variant="secondary" disabled={locked} onClick={() => void run(async () => {
+          setProjects(null); setSelectedProject("");
+          const found = await api.scanProjects(restored);
+          setProjects(found);
+          setSelectedProject(found.find((item) => item.documentRootReady || item.needsDevServer)?.path ?? found[0]?.path ?? "");
+        })}>{t(projects ? "siteResume.rescan" : "siteResume.scan")}</Button>
+        {projects?.length === 0 && <p role="status" className="text-xs leading-relaxed text-muted">{t("siteResume.empty")}</p>}
+        {!!projects?.length && <>
+          <div className="space-y-2">
+            <Label htmlFor="restored-project">{t("siteResume.project")}</Label>
+            <Select value={selectedProject} onValueChange={setSelectedProject} disabled={locked}>
+              <SelectTrigger id="restored-project" className="w-full min-w-0"><SelectValue /></SelectTrigger>
+              <SelectContent>{projects.map((item) => <SelectItem key={item.path} value={item.path}>{item.name} · {item.kind}</SelectItem>)}</SelectContent>
+            </Select>
+          </div>
+          {restoredProject && <div className="space-y-2 text-xs [overflow-wrap:anywhere]">
+            <p className="text-muted">{t(restoredProject.needsDevServer ? "siteResume.source" : "sites.wizard.root")}</p>
+            <p className="font-mono">{restoredProject.needsDevServer ? restoredProject.path : restoredProject.documentRoot}</p>
+            {!projectReady && <p role="alert" className="leading-relaxed text-error">{t("siteResume.missing")}</p>}
+            {restoredProject.alreadyConfigured && <p className="text-warn">{t("siteResume.already")}</p>}
+            <details><summary className="cursor-pointer text-muted">{t("siteResume.evidence")}</summary>
+              <ul className="mt-2 space-y-1 text-muted">{restoredProject.evidence.map((value, index) => <li key={index}>{value}</li>)}</ul>
+            </details>
+            <p className="leading-relaxed text-muted">{restoredProject.runHint}</p>
+            {restoredProject.needsDevServer && <p className="leading-relaxed text-warn">{t("siteResume.application")}</p>}
+          </div>}
+          <Button size="sm" className="h-auto min-h-9 whitespace-normal" disabled={locked || !projectReady} onClick={() => {
+            if (busyRef.current || planBusyRef.current || disabled || dirty || !projectReady || !restoredProject) return;
+            onCreateFromRestored(restoredProject);
+          }}>{t("siteResume.create")}</Button>
+        </>}
+      </div>
     </div>}
     <section className="space-y-3 border-t border-dashed border-separator pt-4">
       <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold">{t("siteFiles.history")} · {archives.data?.length ?? 0}</h3>
@@ -242,7 +283,7 @@ export function SiteFileBackups({ siteId, revision, active, disabled, dirty, onB
           })}>{t(restorePreview ? "siteVerify.recheck" : "siteVerify.check")}</Button>
           {restorePreview && <Button className="h-auto min-h-9 whitespace-normal" disabled={locked || !trusted} onClick={() => restore && void run(async (operationId) => {
             const path = await api.siteFilesRestore(siteId, restore.name, parent, restorePreview.revision, trusted, operationId);
-            setRestored(path); setRestorePreview(null); setRestore(null); toast.success(t("siteFiles.restored"));
+            setRestored(path); setProjects(null); setSelectedProject(""); setRestorePreview(null); setRestore(null); toast.success(t("siteFiles.restored"));
           })}>{t("siteFiles.restore")}</Button>}
         </DialogFooter>
       </DialogContent>

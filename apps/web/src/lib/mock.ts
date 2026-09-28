@@ -80,7 +80,7 @@ function mockSiteFileScope(id: string, project: boolean, exclude: boolean): Site
 }
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.97";
+const MOCK_APP_VERSION = "0.2.98";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -1470,6 +1470,9 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "create_site": {
       return withServiceOperation(async () => {
       const input = args!.input as CreateSiteInput;
+      if (args?.existingProject && (input.template !== "none" || input.writeEnvExample)) {
+        throw { code: "EXISTING_PROJECT_WRITE", message: "使用已有项目时不能生成模板或改写项目配置" };
+      }
       if (input.runtime.kind !== "php" && input.runtime.kind !== "static" && !normalizeProxyTarget(input.runtime.proxyTarget ?? "")) {
         throw { code: "BAD_PROXY_TARGET", message: "请填写有效的 HTTP/HTTPS 代理地址，不能包含账号、查询参数或片段" };
       }
@@ -2275,6 +2278,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           name: "my-shop",
           kind: "laravel",
           documentRoot: `${root}\my-shop\public`,
+          documentRootReady: true,
           siteKind: "php",
           rewrite: "laravel",
           phpMinVersion: ">=8.2",
@@ -2289,11 +2293,12 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           name: "admin-ui",
           kind: "next-js",
           documentRoot: `${root}\admin-ui\out`,
+          documentRootReady: true,
           siteKind: "node",
           rewrite: "spa-fallback",
           phpMinVersion: null,
           evidence: ["存在 next.config.js（Next.js）"],
-          runHint: "需要 Node；开发用 npm run dev（本应用可按 Node 站点代理），静态导出用 npm run build + out 目录",
+          runHint: "需要 Node；开发用 pnpm dev（本应用可按 Node 站点代理），静态导出用 pnpm build + out 目录",
           needsDevServer: true,
           suggestedDomain: "admin-ui.test",
           alreadyConfigured: false,
@@ -2303,6 +2308,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           name: "landing",
           kind: "static-html",
           documentRoot: `${root}\landing`,
+          documentRootReady: true,
           siteKind: "static",
           rewrite: "none",
           phpMinVersion: null,

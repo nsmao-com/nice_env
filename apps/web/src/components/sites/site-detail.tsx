@@ -6,7 +6,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ExternalLink, FolderOpen, RefreshCw, Trash2, ScrollText, Square } from "lucide-react";
 import type { Site, RewritePreset } from "@nsb/schema";
-import { useT } from "@/lib/store";
+import { useT, useUI } from "@/lib/store";
 import { cn, cmpVersionDesc, normalizeProxyTarget, isPhpSiteSettingValid, APPLICATION_RUNTIMES, applicationRuntime, validApplication } from "@/lib/utils";
 import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { usePackages, useService, useInvalidate, toastError, siteUrl } from "@/lib/hooks";
@@ -81,6 +81,7 @@ export function SiteDetailSheet({
   const [envState, setEnvState] = React.useState<EnvEditorState>({ dirty: false, busy: false, canSave: false, fileName: ".env" });
   const [filesBusy, setFilesBusy] = React.useState(false);
   const filesBusyRef = React.useRef(false);
+  const openingRestored = React.useRef(false);
   const onFilesBusyChange = React.useCallback((value: boolean) => { filesBusyRef.current = value; setFilesBusy(value); }, []);
 
   const [draft, setDraft] = React.useState<Site | null>(site);
@@ -88,6 +89,7 @@ export function SiteDetailSheet({
   const [domainsInput, setDomainsInput] = React.useState(site?.domains.join(", ") ?? "");
   React.useEffect(() => {
     // 状态轮询不能清空正在编辑的表单；仅切换站点时载入草稿。
+    if (site) openingRestored.current = false;
     setDraft(site);
     setBaseline(site);
     setDomainsInput(site?.domains.join(", ") ?? "");
@@ -189,7 +191,7 @@ export function SiteDetailSheet({
 
   return (
     <Sheet open={!!site} onOpenChange={(o) => !o && requestClose()}>
-      <SheetContent className="flex w-[calc(100vw_-_1.5rem)] flex-col gap-0 overflow-hidden sm:max-w-[640px]">
+      <SheetContent onCloseAutoFocus={(event) => { if (openingRestored.current) event.preventDefault(); }} className="flex w-[calc(100vw_-_1.5rem)] flex-col gap-0 overflow-hidden sm:max-w-[640px]">
         <SheetHeader className="shrink-0 pr-14 pb-4">
           <SheetTitle className="flex min-w-0 items-center gap-2">
             <span className="truncate">{site.name}</span>
@@ -431,7 +433,13 @@ export function SiteDetailSheet({
             </TabsContent>
             <TabsContent value="files" forceMount className="mt-0 data-[state=inactive]:hidden">
               <SiteFileBackups key={site.id} siteId={site.id} revision={baseline?.updatedAt ?? site.updatedAt} active={tab === "files"}
-                disabled={siteBusy || envState.busy} dirty={dirty} onBusyChange={onFilesBusyChange} />
+                disabled={siteBusy || envState.busy} dirty={dirty} onBusyChange={onFilesBusyChange}
+                onCreateFromRestored={(project) => {
+                  if (dirty || busy || filesBusyRef.current || savingRef.current || deletingRef.current || reloadingRef.current || envEditorRef.current?.isBusy()) return;
+                  openingRestored.current = true;
+                  onClose();
+                  useUI.getState().openExistingProject(project);
+                }} />
             </TabsContent>
             {draft.runtime.kind === "php" && <TabsContent ref={phpPanelRef} value="php" forceMount className="mt-0 data-[state=inactive]:hidden">
               <SitePhpSettings values={draft.phpOverrides ?? {}} previousValues={baseline?.phpOverrides ?? {}} rootDir={draft.rootDir} disabled={busy}

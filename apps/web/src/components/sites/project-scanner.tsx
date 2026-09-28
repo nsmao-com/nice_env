@@ -69,7 +69,7 @@ export function ProjectScannerDialog({
       const list = await api.scanProjects(dir);
       setFound(list);
       // 默认勾选「还没建过站」的，已建过的让用户自己决定
-      setPicked(new Set(list.filter((p) => !p.alreadyConfigured).map((p) => p.path)));
+      setPicked(new Set(list.filter((p) => !p.alreadyConfigured && p.documentRootReady).map((p) => p.path)));
       if (list.length === 0) toast.info(t("scanner.noneFound"));
     } catch (e) {
       toastError(e);
@@ -93,7 +93,7 @@ export function ProjectScannerDialog({
   };
 
   const createAll = async () => {
-    const targets = (found ?? []).filter((p) => picked.has(p.path));
+    const targets = (found ?? []).filter((p) => picked.has(p.path) && p.documentRootReady);
     if (targets.length === 0) return;
     setCreating(true);
     let ok = 0;
@@ -111,7 +111,7 @@ export function ProjectScannerDialog({
           template: "none",
           // 也不写 .env.example —— 用户的 .env 配置不该被我们碰
           writeEnvExample: false,
-        });
+        }, p.path);
         ok += 1;
       } catch {
         failed.push(p.name);
@@ -197,6 +197,7 @@ export function ProjectScannerDialog({
                 <button
                   key={p.path}
                   type="button"
+                  disabled={!p.documentRootReady || scanning || creating}
                   onClick={() => toggle(p.path)}
                   className={cn(
                     "group flex w-full items-start gap-3 rounded-xl border p-3 text-left transition-colors",
@@ -233,6 +234,7 @@ export function ProjectScannerDialog({
                       {p.documentRoot}
                     </p>
 
+                    {!p.documentRootReady && <p className="mt-2 text-xs leading-relaxed text-error">{t("siteResume.missing")}</p>}
                     {/* 识别依据：让用户能判断识别对不对，而不是盲信 */}
                     <ul className="mt-1.5 space-y-0.5">
                       {p.evidence.slice(0, 3).map((e, i) => (
@@ -281,11 +283,11 @@ export function ProjectScannerDialog({
                 size="sm"
                 onClick={() =>
                   setPicked(
-                    picked.size === found.length ? new Set() : new Set(found.map((p) => p.path))
+                    picked.size === found.filter((p) => p.documentRootReady).length ? new Set() : new Set(found.filter((p) => p.documentRootReady).map((p) => p.path))
                   )
                 }
               >
-                {picked.size === found.length ? t("scanner.clearAll") : t("scanner.selectAll")}
+                {picked.size === found.filter((p) => p.documentRootReady).length ? t("scanner.clearAll") : t("scanner.selectAll")}
               </Button>
               <Button size="sm" onClick={() => void createAll()} disabled={picked.size === 0 || creating}>
                 {creating ? (

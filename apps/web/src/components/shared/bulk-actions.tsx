@@ -55,6 +55,10 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
     () => services.filter((s) => !serviceHasProcess(s)).map((s) => s.id),
     [services]
   );
+  const selectedMissingDependencies = React.useMemo(
+    () => services.filter((service) => picked.has(service.id) && service.missingRequires.length > 0),
+    [services, picked]
+  );
 
   React.useEffect(() => {
     if (!open) {
@@ -173,6 +177,16 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
                         {stateLabel[s.state] ?? s.state}
                       </span>
                     </div>
+                    {s.missingRequires.length > 0 && (
+                      <p className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10.5px] text-warn">
+                        <span>{t("svc.needDeps")}</span>
+                        {s.missingRequires.map((dependency) => (
+                          <Link key={dependency} href={`/packages?search=${encodeURIComponent(dependency)}`} className="font-mono underline decoration-dashed underline-offset-2">
+                            {dependency}
+                          </Link>
+                        ))}
+                      </p>
+                    )}
                   </div>
                 </label>
               ))}
@@ -191,6 +205,11 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
 
           <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-3 sm:px-5">
             <div className="flex flex-wrap items-center gap-1.5">
+              {selectedMissingDependencies.length > 0 && (
+                <p role="status" className="w-full break-words text-[11px] text-warn">
+                  {t("bulk.dependenciesBlocked")}
+                </p>
+              )}
               <Button
                 variant="ghost"
                 size="sm"
@@ -242,7 +261,7 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
                 size="sm"
                 variant="secondary"
                 className="h-8"
-                disabled={busy != null || picked.size === 0}
+                disabled={busy != null || picked.size === 0 || selectedMissingDependencies.length > 0}
                 onClick={() => void run("restart")}
               >
                 {busy === "restart" ? (

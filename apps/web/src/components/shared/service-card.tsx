@@ -32,6 +32,8 @@ export function ServiceCard({ service, dragHandle, dragPreview = false }: { serv
   const [diagOpen, setDiagOpen] = React.useState(false);
   const running = service.state === "running";
   const error = service.state === "error";
+  const hasProcess = running || service.pids.length > 0;
+  const dependencyBlocked = !hasProcess && service.missingRequires.length > 0;
   /** 端口冲突时后端会带上端口与占用 pid：卡片上直接给「结束占用并重试」 */
   const conflict =
     service.lastError?.code === "PORT_IN_USE" && service.lastError.port != null
@@ -39,6 +41,10 @@ export function ServiceCard({ service, dragHandle, dragPreview = false }: { serv
       : null;
 
   const toggle = async (next: boolean) => {
+    if (next && dependencyBlocked) {
+      toast.warning(t("svc.needDepsHint"));
+      return;
+    }
     setBusy(true);
     try {
       if (next) await api.startService(service.id);
@@ -54,6 +60,10 @@ export function ServiceCard({ service, dragHandle, dragPreview = false }: { serv
 
   /** 改完配置/出错后的高频动作：就地重启，不用先停再启两步 */
   const restart = async () => {
+    if (service.missingRequires.length > 0) {
+      toast.warning(t("svc.needDepsHint"));
+      return;
+    }
     setBusy(true);
     try {
       await api.restartService(service.id);
@@ -114,9 +124,10 @@ export function ServiceCard({ service, dragHandle, dragPreview = false }: { serv
           </div>
           <ServiceSwitch
             label={service.label}
-            checked={running || service.pids.length > 0}
+            checked={hasProcess}
             busy={busy || service.state === "starting" || service.state === "stopping"}
-            disabled={service.state === "starting" || service.state === "stopping"}
+            disabled={service.state === "starting" || service.state === "stopping" || dependencyBlocked}
+            title={dependencyBlocked ? t("svc.needDepsHint") : undefined}
             onCheckedChange={toggle}
           />
         </div>
@@ -219,6 +230,10 @@ export function ServiceCard({ service, dragHandle, dragPreview = false }: { serv
                 className="mt-2 h-7 gap-1.5 border-error/30 text-error hover:text-error"
                 disabled={busy}
                 onClick={async () => {
+                  if (service.missingRequires.length > 0) {
+                    toast.warning(t("svc.needDepsHint"));
+                    return;
+                  }
                   setBusy(true);
                   try {
                     await api.resolvePortConflict(conflict.port, conflict.pid);

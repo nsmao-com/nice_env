@@ -15,6 +15,7 @@ export function ServiceSwitch({
   onCheckedChange,
   disabled,
   busy,
+  title,
   className,
 }: {
   label: string;
@@ -22,6 +23,7 @@ export function ServiceSwitch({
   onCheckedChange: (next: boolean) => void;
   disabled?: boolean;
   busy?: boolean;
+  title?: string;
   className?: string;
 }) {
   const [showCheck, setShowCheck] = React.useState(false);
@@ -33,6 +35,7 @@ export function ServiceSwitch({
       aria-label={label}
       aria-checked={checked}
       aria-busy={busy || undefined}
+      title={title}
       disabled={disabled || busy}
       onClick={(e) => {
         e.preventDefault();

@@ -32,12 +32,18 @@ export function ServiceRow({ service, dragHandle, dragPreview = false }: { servi
   const [diagOpen, setDiagOpen] = React.useState(false);
   const running = service.state === "running";
   const error = service.state === "error";
+  const hasProcess = running || service.pids.length > 0;
+  const dependencyBlocked = !hasProcess && service.missingRequires.length > 0;
   const conflict =
     service.lastError?.code === "PORT_IN_USE" && service.lastError.port != null
       ? { port: service.lastError.port, pid: service.lastError.pid, holder: service.lastError.holder }
       : null;
 
   const toggle = async (next: boolean) => {
+    if (next && dependencyBlocked) {
+      toast.warning(t("svc.needDepsHint"));
+      return;
+    }
     setBusy(true);
     try {
       if (next) await api.startService(service.id);
@@ -52,6 +58,10 @@ export function ServiceRow({ service, dragHandle, dragPreview = false }: { servi
 
   /** 就地重启：改配置 / 出错后的高频动作，省去先停再启两步 */
   const restart = async () => {
+    if (service.missingRequires.length > 0) {
+      toast.warning(t("svc.needDepsHint"));
+      return;
+    }
     setBusy(true);
     try {
       await api.restartService(service.id);
@@ -153,6 +163,10 @@ export function ServiceRow({ service, dragHandle, dragPreview = false }: { servi
             disabled={busy}
             title={conflict.holder ? `被 ${conflict.holder} 占用` : undefined}
             onClick={async () => {
+              if (service.missingRequires.length > 0) {
+                toast.warning(t("svc.needDepsHint"));
+                return;
+              }
               setBusy(true);
               try {
                 await api.resolvePortConflict(conflict.port, conflict.pid);
@@ -202,9 +216,10 @@ export function ServiceRow({ service, dragHandle, dragPreview = false }: { servi
         <div className="ml-auto flex shrink-0 sm:ml-0">
           <ServiceSwitch
             label={service.label}
-            checked={running || service.pids.length > 0}
+            checked={hasProcess}
             busy={busy || service.state === "starting" || service.state === "stopping"}
-            disabled={service.state === "starting" || service.state === "stopping"}
+            disabled={service.state === "starting" || service.state === "stopping" || dependencyBlocked}
+            title={dependencyBlocked ? t("svc.needDepsHint") : undefined}
             onCheckedChange={toggle}
           />
         </div>

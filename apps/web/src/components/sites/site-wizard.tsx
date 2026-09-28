@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import { RewritePreset as RewriteSchema, type ScannedProject, type CreateSiteInput, type RewritePreset, type SiteKind, type SiteCreateProgress } from "@nsb/schema";
 import { cn, cmpVersionDesc, normalizeProxyTarget } from "@/lib/utils";
-import { useT } from "@/lib/store";
+import { useT, type ExistingProjectDefaults } from "@/lib/store";
 import { isTauri, listen, normalizeError } from "@/lib/backend";
 import { usePackages, siteUrl, toastError } from "@/lib/hooks";
 import { useInstallTasks } from "@/lib/install-tasks";
@@ -90,12 +90,14 @@ export function SiteWizard({
   onCreated,
   initialKind = "php",
   existingProject = null,
+  existingDefaults = null,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onCreated?: () => void;
   initialKind?: SiteKind;
   existingProject?: ScannedProject | null;
+  existingDefaults?: ExistingProjectDefaults | null;
 }) {
   const t = useT();
   const { data: packages, refetch: refreshPackages } = usePackages();
@@ -164,24 +166,24 @@ export function SiteWizard({
       setCreateError("");
       setCreateErrorDetail("");
       setName(existingProject?.name ?? "");
-      setDomain("");
+      setDomain(existingDefaults?.domain ?? "");
       setAliases("");
       setRootDir(existingProject ? (existingProject.needsDevServer ? existingProject.path : existingProject.documentRoot) : "");
       setTemplate("none");
       setKind(initialKind);
-      setPhpVersion(phpVersions[0] ?? "");
-      setWebServer("nginx");
-      setHttps(false);
+      setPhpVersion(existingDefaults?.phpVersion || phpVersions[0] || "");
+      setWebServer(existingDefaults?.webServer ?? "nginx");
+      setHttps(existingDefaults?.https ?? false);
       setCertificate({});
       setDbEnabled(false);
       setRewrite(existingProject && !existingProject.needsDevServer ? RewriteSchema.safeParse(existingProject.rewrite).data ?? "none" : "none");
-      setProxyTarget(existingProject?.needsDevServer ? "" : "127.0.0.1:3001");
+      setProxyTarget(existingDefaults?.proxyTarget ?? (existingProject?.needsDevServer ? "" : "127.0.0.1:3001"));
       setApplication(undefined);
       setDbName("");
       setDbUser("");
     }
     wasOpen.current = open;
-  }, [open, phpVersions, initialKind, existingProject]);
+  }, [open, phpVersions, initialKind, existingProject, existingDefaults]);
 
   React.useEffect(() => {
     if (open && !phpVersion && phpVersions[0]) setPhpVersion(phpVersions[0]);
@@ -318,7 +320,7 @@ export function SiteWizard({
     <Dialog open={open} onOpenChange={(o) => !creating && onOpenChange(o)}>
       <DialogContent className="flex w-[calc(100vw_-_1.5rem)] max-w-[640px] max-h-[86vh] flex-col overflow-hidden">
         <DialogHeader>
-          <DialogTitle>{t(existingProject ? "siteResume.create" : "sites.create")}</DialogTitle>
+          <DialogTitle>{t(existingProject ? "scanSetup.configureTitle" : "sites.create")}</DialogTitle>
           <DialogDescription>
             {t("sites.wizard.step")} {step + 1}/6 · {t(STEPS[step].key)}
           </DialogDescription>

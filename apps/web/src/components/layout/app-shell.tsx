@@ -26,6 +26,7 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
   const wizardOpen = useUI((s) => s.wizardOpen);
   const wizardKind = useUI((s) => s.wizardKind);
   const wizardProject = useUI((s) => s.wizardProject);
+  const wizardProjectDefaults = useUI((s) => s.wizardProjectDefaults);
   const setWizardOpen = useUI((s) => s.setWizardOpen);
   const invalidate = useInvalidate();
   const t = useT();
@@ -88,6 +89,7 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
         open={wizardOpen}
         initialKind={wizardKind}
         existingProject={wizardProject}
+        existingDefaults={wizardProjectDefaults}
         onOpenChange={setWizardOpen}
         onCreated={() => invalidate("sites", "hosts", "certs", "databases")}
       />

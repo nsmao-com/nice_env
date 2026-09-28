@@ -8,6 +8,11 @@ import type { Lang, TKey } from "./i18n";
 import { SiteKind, type ScannedProject } from "@nsb/schema";
 import { translate } from "./i18n";
 
+export type ExistingProjectDefaults = {
+  domain?: string; phpVersion?: string; proxyTarget?: string;
+  webServer?: "nginx" | "apache"; https?: boolean;
+};
+
 interface UIState {
   sidebarCollapsed: boolean;
   toggleSidebar: () => void;
@@ -16,7 +21,8 @@ interface UIState {
   wizardOpen: boolean;
   wizardKind: SiteKind;
   wizardProject: ScannedProject | null;
-  openExistingProject: (project: ScannedProject) => void;
+  wizardProjectDefaults: ExistingProjectDefaults | null;
+  openExistingProject: (project: ScannedProject, defaults?: ExistingProjectDefaults) => void;
   setWizardOpen: (open: boolean, kind?: SiteKind) => void;
   onboardingOpen: boolean;
   setOnboardingOpen: (open: boolean) => void;
@@ -56,8 +62,9 @@ export const useUI = create<UIState>()(
       wizardOpen: false,
       wizardKind: "php",
       wizardProject: null,
-      openExistingProject: (project) => set({ wizardOpen: true, wizardProject: project, wizardKind: SiteKind.parse(project.siteKind) }),
-      setWizardOpen: (open, kind) => set({ wizardOpen: open, ...(open ? { wizardKind: kind ?? "php", wizardProject: null } : {}) }),
+      wizardProjectDefaults: null,
+      openExistingProject: (project, defaults) => set({ wizardOpen: true, wizardProject: project, wizardProjectDefaults: defaults ?? null, wizardKind: SiteKind.parse(project.siteKind) }),
+      setWizardOpen: (open, kind) => set({ wizardOpen: open, ...(open ? { wizardKind: kind ?? "php", wizardProject: null, wizardProjectDefaults: null } : {}) }),
       onboardingOpen: false,
       setOnboardingOpen: (open) => set({ onboardingOpen: open }),
       serviceView: "card",

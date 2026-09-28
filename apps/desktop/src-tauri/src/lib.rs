@@ -249,6 +249,11 @@ pub fn run() {
             stop_stack,
             // 站点
             list_sites,
+            site_files_scope,
+            site_files_list,
+            site_files_create,
+            site_files_restore,
+            site_files_delete,
             site_access_url,
             create_site,
             update_site,
@@ -982,6 +987,36 @@ async fn stop_stack(
 }
 
 /* ================= 站点 ================= */
+
+fn site_files_progress(app: tauri::AppHandle, id: String, operation_id: String) -> impl Fn(&str,u64,u64) {
+    let last=std::sync::Mutex::new(None::<std::time::Instant>);
+    move |phase,files,bytes| {
+        let Ok(mut last)=last.lock() else {return;};
+        if phase!="complete" && last.is_some_and(|time|time.elapsed()<std::time::Duration::from_millis(120)){return;}
+        *last=Some(std::time::Instant::now());
+        let _=app.emit("site-files://progress",nsb_core::sitebackup::Progress {operation_id:operation_id.clone(),site_id:id.clone(),phase:phase.into(),files,bytes});
+    }
+}
+#[tauri::command]
+async fn site_files_scope(state: State<'_,std::sync::Arc<CoreState>>, id:String, project:bool, exclude_generated:bool) -> Result<nsb_core::sitebackup::Scope,tauri::Error> {
+    let st=state.inner().clone();tauri::async_runtime::spawn_blocking(move || {let _activity=map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;map_jh(nsb_core::sitebackup::scope(&st.store,&id,project,exclude_generated))}).await.map_err(|e|tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+#[tauri::command]
+async fn site_files_list(state: State<'_,std::sync::Arc<CoreState>>, id:String) -> Result<Vec<nsb_core::sitebackup::BackupInfo>,tauri::Error> {
+    let st=state.inner().clone();tauri::async_runtime::spawn_blocking(move || {let _activity=map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;map_jh(nsb_core::sitebackup::list(&st.paths,&id))}).await.map_err(|e|tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+#[tauri::command]
+async fn site_files_create(app:tauri::AppHandle,state: State<'_,std::sync::Arc<CoreState>>, id:String, project:bool, exclude_generated:bool, revision:String, confirmed:bool, operation_id:String) -> Result<nsb_core::sitebackup::BackupInfo,tauri::Error> {
+    let st=state.inner().clone();tauri::async_runtime::spawn_blocking(move ||map_jh(nsb_core::sitebackup::create(&st,&id,project,exclude_generated,&revision,confirmed,&site_files_progress(app,id.clone(),operation_id)))).await.map_err(|e|tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+#[tauri::command]
+async fn site_files_restore(app:tauri::AppHandle,state: State<'_,std::sync::Arc<CoreState>>, id:String, name:String, parent:Option<String>, trusted:bool, operation_id:String) -> Result<String,tauri::Error> {
+    let st=state.inner().clone();tauri::async_runtime::spawn_blocking(move ||map_jh(nsb_core::sitebackup::restore(&st,&id,&name,parent.as_deref(),trusted,&site_files_progress(app,id.clone(),operation_id)))).await.map_err(|e|tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+#[tauri::command]
+async fn site_files_delete(state: State<'_,std::sync::Arc<CoreState>>, id:String, name:String) -> Result<(),tauri::Error> {
+    let st=state.inner().clone();tauri::async_runtime::spawn_blocking(move ||map_jh(nsb_core::sitebackup::delete(&st,&id,&name))).await.map_err(|e|tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
 
 #[tauri::command]
 fn list_sites(

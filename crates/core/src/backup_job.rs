@@ -405,6 +405,68 @@ mod tests {
     use super::*;
 
     #[test]
+    fn site_file_archives_restore_verified_copies_and_preserve_sources() {
+        use crate::sitebackup;
+        let temp=tempfile::tempdir().unwrap();
+        let base=temp.path().join("NiceEnv home");
+        let state=crate::CoreState::init(Some(base),std::sync::Arc::new(|_|{})).unwrap();
+        let project=temp.path().join("项目 with spaces");
+        std::fs::create_dir_all(project.join("public/empty")).unwrap();
+        std::fs::create_dir_all(project.join("node_modules/ignored")).unwrap();
+        std::fs::write(project.join("composer.json"),"{}").unwrap();
+        std::fs::write(project.join(".env"),"FIXTURE_SECRET=local-only").unwrap();
+        std::fs::write(project.join("public/中文.bin"),[0,1,2,255]).unwrap();
+        std::fs::write(project.join("node_modules/ignored/data"),"excluded").unwrap();
+        let mut site:crate::model::Site=serde_json::from_value(serde_json::json!({"id":"archive-fixture","name":"归档项目","domains":["archive.test"],"rootDir":project.join("public"),"runtime":{"kind":"php","phpVersion":"8.4","webServer":"nginx"},"https":false,"rewrite":"none","createdAt":1,"updatedAt":1})).unwrap();
+        state.store.save_site(&site).unwrap();
+        let scope=sitebackup::scope(&state.store,&site.id,true,true).unwrap();
+        assert_eq!(std::path::Path::new(&scope.root),project.canonicalize().unwrap());
+        assert_eq!(sitebackup::create(&state,&site.id,true,true,&scope.revision,false,&|_,_,_|{}).unwrap_err().code,"SITE_BACKUP_INVALID");
+        let first=sitebackup::create(&state,&site.id,true,true,&scope.revision,true,&|_,_,_|{}).unwrap();
+        assert_eq!(first.files,3);assert_eq!(first.original_bytes,31);
+        let second=sitebackup::create(&state,&site.id,true,true,&scope.revision,true,&|_,_,_|{}).unwrap();assert_ne!(first.name,second.name);
+        let zip_file=std::fs::File::open(&first.path).unwrap();let mut archive=zip::ZipArchive::new(zip_file).unwrap();
+        assert!(archive.by_name("files/.env").is_ok());assert!(archive.by_name("files/public/empty/").is_ok());assert!(archive.by_name("files/node_modules/ignored/data").is_err());drop(archive);
+        assert!(sitebackup::restore(&state,&site.id,&first.name,None,false,&|_,_,_|{}).is_err());
+        assert!(sitebackup::restore(&state,&site.id,&first.name,Some(project.to_str().unwrap()),true,&|_,_,_|{}).is_err());
+        let restored=sitebackup::restore(&state,&site.id,&first.name,None,true,&|_,_,_|{}).unwrap();
+        let restored=std::path::Path::new(&restored);
+        assert_eq!(std::fs::read(restored.join("public/中文.bin")).unwrap(),[0,1,2,255]);
+        assert_eq!(std::fs::read_to_string(restored.join(".env")).unwrap(),"FIXTURE_SECRET=local-only");assert!(restored.join("public/empty").is_dir());assert!(!restored.join("node_modules").exists());
+        let copy=sitebackup::restore(&state,&site.id,&first.name,None,true,&|_,_,_|{}).unwrap();assert_ne!(std::path::Path::new(&copy),restored);
+        let archive_parent=std::path::Path::new(&first.path).parent().unwrap();
+        assert!(sitebackup::restore(&state,&site.id,&first.name,Some(archive_parent.to_str().unwrap()),true,&|_,_,_|{}).is_err());
+        let independent=temp.path().join("selected parent");std::fs::create_dir(&independent).unwrap();
+        let selected=sitebackup::restore(&state,&site.id,&first.name,Some(independent.to_str().unwrap()),true,&|_,_,_|{}).unwrap();
+        assert!(std::path::Path::new(&selected).starts_with(independent.canonicalize().unwrap()));
+        let lock_checked=std::sync::atomic::AtomicBool::new(false);
+        let locked=sitebackup::create(&state,&site.id,true,true,&scope.revision,true,&|_,_,_|{if !lock_checked.swap(true,std::sync::atomic::Ordering::SeqCst){assert_eq!(sitebackup::delete(&state,&site.id,&first.name).unwrap_err().code,"SITE_BACKUP_BUSY");}}).unwrap();
+        sitebackup::delete(&state,&site.id,&locked.name).unwrap();
+        let all=sitebackup::scope(&state.store,&site.id,true,false).unwrap();let inclusive=sitebackup::create(&state,&site.id,true,false,&all.revision,true,&|_,_,_|{}).unwrap();assert_eq!(inclusive.files,4);
+        let web=sitebackup::scope(&state.store,&site.id,false,true).unwrap();let web_backup=sitebackup::create(&state,&site.id,false,true,&web.revision,true,&|_,_,_|{}).unwrap();assert_eq!(web_backup.files,1);
+        assert!(sitebackup::restore(&state,"another-site",&first.name,None,true,&|_,_,_|{}).is_err());
+        let write_once=std::sync::atomic::AtomicBool::new(false);
+        assert!(sitebackup::create(&state,&site.id,true,true,&scope.revision,true,&|phase,_,_|{if phase=="backup"&&!write_once.swap(true,std::sync::atomic::Ordering::SeqCst){std::fs::write(project.join("late.txt"),"new file during archive").unwrap();}}).is_err());
+        assert_eq!(sitebackup::list(&state.paths,&site.id).unwrap().len(),4);
+        site.updated_at=2;state.store.save_site(&site).unwrap();assert_eq!(sitebackup::create(&state,&site.id,true,true,&scope.revision,true,&|_,_,_|{}).unwrap_err().code,"SITE_BACKUP_CHANGED");
+        assert!(sitebackup::delete(&state,&site.id,"../outside.zip").is_err());
+        sitebackup::delete(&state,&site.id,&second.name).unwrap();assert!(std::path::Path::new(&first.path).exists());assert!(!std::path::Path::new(&second.path).exists());assert!(project.join(".env").exists());
+        // 损坏内容与清单不一致时清理刚创建的恢复目录，不影响之前已恢复的目录。
+        let original=std::fs::File::open(&first.path).unwrap();let mut zip=zip::ZipArchive::new(original).unwrap();
+        let mut entries=Vec::new();
+        for index in 0..zip.len(){let mut entry=zip.by_index(index).unwrap();let name=entry.name().to_string();let mut data=Vec::new();std::io::Read::read_to_end(&mut entry,&mut data).unwrap();entries.push((name,data));}drop(zip);
+        let replace_archive=|entries:&[(String,Vec<u8>)]|{let mut zip=zip::ZipWriter::new(std::fs::File::create(&first.path).unwrap());for(name,data)in entries{if name.ends_with('/'){zip.add_directory(name,zip::write::SimpleFileOptions::default()).unwrap();}else{zip.start_file(name,zip::write::SimpleFileOptions::default()).unwrap();zip.write_all(data).unwrap();}}zip.finish().unwrap();};
+        let mut corrupt=entries.clone();corrupt.iter_mut().find(|(name,_)|name=="files/public/中文.bin").unwrap().1=vec![9,9,9,9];replace_archive(&corrupt);
+        let restore_dir=state.paths.base.join("restored-sites");let before=std::fs::read_dir(&restore_dir).unwrap().count();assert!(sitebackup::restore(&state,&site.id,&first.name,None,true,&|_,_,_|{}).is_err());assert_eq!(std::fs::read_dir(&restore_dir).unwrap().count(),before);
+        let mut traversal=entries.clone();let metadata=traversal.iter_mut().find(|(name,_)|name=="niceenv-site-backup.json").unwrap();let mut manifest:serde_json::Value=serde_json::from_slice(&metadata.1).unwrap();manifest["entries"][0]["path"]="../escape".into();metadata.1=serde_json::to_vec(&manifest).unwrap();replace_archive(&traversal);
+        assert!(sitebackup::restore(&state,&site.id,&first.name,None,true,&|_,_,_|{}).is_err());assert!(!state.paths.base.join("escape").exists());
+        let mut aliases=entries.clone();let metadata=aliases.iter_mut().find(|(name,_)|name=="niceenv-site-backup.json").unwrap();let mut manifest:serde_json::Value=serde_json::from_slice(&metadata.1).unwrap();let entries=manifest["entries"].as_array_mut().unwrap();let mut duplicate=entries.iter().find(|entry|entry["path"]=="public/中文.bin").unwrap().clone();duplicate["path"]="PUBLIC/中文.bin".into();entries.push(duplicate);metadata.1=serde_json::to_vec(&manifest).unwrap();aliases.push(("files/PUBLIC/中文.bin".into(),vec![0,1,2,255]));replace_archive(&aliases);
+        assert!(sitebackup::restore(&state,&site.id,&first.name,None,true,&|_,_,_|{}).is_err());assert_eq!(std::fs::read_dir(&restore_dir).unwrap().count(),before);
+        std::fs::write(&first.path,"broken zip").unwrap();let listed=sitebackup::list(&state.paths,&site.id).unwrap();assert!(listed.iter().any(|entry|entry.name==first.name&&!entry.restorable));sitebackup::delete(&state,&site.id,&first.name).unwrap();
+        #[cfg(windows)]{let junction=project.join("external-link");let outside=temp.path().join("outside");std::fs::create_dir(&outside).unwrap();std::fs::write(outside.join("kept"),"outside").unwrap();let status=platform::command("cmd").args(["/c","mklink","/J"]).arg(&junction).arg(&outside).output().unwrap();assert!(status.status.success());let current=sitebackup::scope(&state.store,&site.id,true,true).unwrap();assert!(sitebackup::create(&state,&site.id,true,true,&current.revision,true,&|_,_,_|{}).is_err());std::fs::remove_dir(junction).unwrap();assert_eq!(std::fs::read_to_string(outside.join("kept")).unwrap(),"outside");}
+    }
+
+    #[test]
     fn backup_creates_timestamped_file_and_rotates() {
         let base = tempfile::tempdir().unwrap();
         let paths = Paths::new(base.path().to_path_buf());

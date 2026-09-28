@@ -61,12 +61,20 @@ import type {
   CreateSiteInput,
 } from "@nsb/schema";
 import { emitLocal } from "./backend";
+import type { SiteFileBackup, SiteFileScope } from "./api";
 import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSettingValid, isEnvSecretKey, isEnvFileName, applicationRuntime, validApplication } from "./utils";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const siteFileArchives = new Map<string, SiteFileBackup[]>();
+function mockSiteFileScope(id: string, project: boolean, exclude: boolean): SiteFileScope {
+  const site = sites.get(id);
+  if (!site) throw { code: "SITE_NOT_FOUND", message: "站点已不存在，请刷新列表" };
+  const root = project ? site.runtime.application?.cwd || site.rootDir.replace(/[/\\](public|out|dist|build)[/\\]?$/, "") : site.rootDir;
+  return { root, revision: JSON.stringify([id, root, site.updatedAt, project, exclude]), excluded: exclude ? [".git", "node_modules", ".next", ".nuxt", ".venv", "venv", "__pycache__", "target"] : [] };
+}
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.93";
+const MOCK_APP_VERSION = "0.2.94";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -1847,6 +1855,31 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const bundle = DiagnosticsBundleSchema.parse(args?.bundle);
       if (!bundle.markdown.trim() || new TextEncoder().encode(bundle.markdown).length > 2 * 1024 * 1024) throw { code: "DIAGNOSTICS_INVALID", message: "报告为空或超过 2 MiB，请重新生成" };
       return downloadPreviewText(bundle.markdown, `niceenv-diagnostics-${bundle.generatedAt}.md`) as T;
+    }
+    case "site_files_scope": return mockSiteFileScope(String(args!.id), !!args!.project, !!args!.excludeGenerated) as T;
+    case "site_files_list": return structuredClone(siteFileArchives.get(String(args!.id)) ?? []) as T;
+    case "site_files_create": {
+      const id = String(args!.id);
+      const scope = mockSiteFileScope(id, !!args!.project, !!args!.excludeGenerated);
+      if (!args!.confirmed) throw { code: "SITE_BACKUP_INVALID", message: "请先确认备份范围与敏感文件提示" };
+      if (scope.revision !== args!.revision) throw { code: "SITE_BACKUP_CHANGED", message: "站点目录或备份范围已变化，请重新检查" };
+      for (const phase of ["scan", "backup", "complete"]) { emitLocal("site-files://progress", { operationId: args!.operationId, siteId: id, phase, files: phase === "scan" ? 0 : 12, bytes: phase === "scan" ? 0 : 98304 }); await delay(400); }
+      const name = `site-${new Date().toISOString().replace(/[-:TZ.]/g, "")}-${crypto.randomUUID().slice(0, 8)}.zip`;
+      const info: SiteFileBackup = { name, path: `C:/NiceEnv/backup/sites/preview/${name}`, sizeBytes: 24576, createdAt: Date.now(), files: 12, originalBytes: 98304, root: scope.root, excluded: scope.excluded, restorable: true, error: null };
+      siteFileArchives.set(id, [info, ...(siteFileArchives.get(id) ?? [])]); return structuredClone(info) as T;
+    }
+    case "site_files_restore": {
+      const id = String(args!.id);
+      if (!args!.trusted) throw { code: "SITE_BACKUP_INVALID", message: "请确认归档来源可信" };
+      if (!siteFileArchives.get(id)?.some((item) => item.name === args!.name && item.restorable)) throw { code: "SITE_BACKUP_INVALID", message: "归档已不存在或无法读取" };
+      for (let count = 0; count <= 3; count++) { emitLocal("site-files://progress", { operationId: args!.operationId, siteId: id, phase: count === 3 ? "complete" : "restore", files: count * 4, bytes: count * 32768 }); await delay(350); }
+      return `${args!.parent || "C:/NiceEnv/restored-sites"}/restored-site-${crypto.randomUUID().slice(0, 8)}` as T;
+    }
+    case "site_files_delete": {
+      const id = String(args!.id);
+      const existing = siteFileArchives.get(id) ?? [];
+      if (!existing.some((item) => item.name === args!.name)) throw { code: "SITE_BACKUP_INVALID", message: "归档已不存在，请刷新列表" };
+      siteFileArchives.set(id, existing.filter((item) => item.name !== args!.name)); return undefined as T;
     }
     case "env_read":
       return structuredClone(mockEnvView(String(args!.siteId), args?.fileName as string | undefined)) as T;

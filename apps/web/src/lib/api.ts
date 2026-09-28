@@ -434,6 +434,21 @@ export const certImportedReplace = (id: string, certPath: string, keyPath: strin
   safe(invoke<ImportedCert>("cert_imported_replace", { id, certPath, keyPath }));
 
 /* 站点 .env */
+export interface SiteFileScope { root: string; revision: string; excluded: string[] }
+export interface SiteFileBackup {
+  name: string; path: string; sizeBytes: number; createdAt: number; files: number;
+  originalBytes: number; root: string; excluded: string[]; restorable: boolean; error?: string | null;
+}
+export interface SiteFileProgress { operationId: string; siteId: string; phase: string; files: number; bytes: number }
+export const siteFilesScope = (id: string, project: boolean, excludeGenerated: boolean) =>
+  safe(invoke<SiteFileScope>("site_files_scope", { id, project, excludeGenerated }));
+export const siteFilesList = (id: string) => safe(invoke<SiteFileBackup[]>("site_files_list", { id }));
+export const siteFilesCreate = (id: string, project: boolean, excludeGenerated: boolean, revision: string, confirmed: boolean, operationId: string) =>
+  safe(invoke<SiteFileBackup>("site_files_create", { id, project, excludeGenerated, revision, confirmed, operationId }));
+export const siteFilesRestore = (id: string, name: string, parent: string | null, trusted: boolean, operationId: string) =>
+  safe(invoke<string>("site_files_restore", { id, name, parent, trusted, operationId }));
+export const siteFilesDelete = (id: string, name: string) => safe(invoke<void>("site_files_delete", { id, name }));
+
 export const envRead = (siteId: string, fileName = ".env") => safe(invoke<EnvFileView>("env_read", { siteId, fileName }));
 export const envSave = (siteId: string, changes: [string, string][], expectedRevision: string, fileName = ".env") =>
   safe(invoke<EnvFileView>("env_save", { siteId, changes, expectedRevision, fileName }));

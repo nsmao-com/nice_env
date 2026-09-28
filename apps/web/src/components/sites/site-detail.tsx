@@ -31,6 +31,7 @@ import { ConfirmDialog } from "@/components/shared/misc";
 import { SiteCertificateSelect, useSiteCertificateSelection } from "./site-certificate-select";
 import { SitePhpSettings } from "./site-php-settings";
 import { SiteApplicationFields } from "./site-application-fields";
+import { SiteFileBackups } from "./site-file-backups";
 
 const REWRITE_OPTIONS: { value: RewritePreset; label?: string; labelKey?: string }[] = [
   { value: "none", labelKey: "detail.none" },
@@ -78,6 +79,9 @@ export function SiteDetailSheet({
   const phpFocusObserver = React.useRef<MutationObserver | null>(null);
   const envEditorRef = React.useRef<EnvEditorHandle>(null);
   const [envState, setEnvState] = React.useState<EnvEditorState>({ dirty: false, busy: false, canSave: false, fileName: ".env" });
+  const [filesBusy, setFilesBusy] = React.useState(false);
+  const filesBusyRef = React.useRef(false);
+  const onFilesBusyChange = React.useCallback((value: boolean) => { filesBusyRef.current = value; setFilesBusy(value); }, []);
 
   const [draft, setDraft] = React.useState<Site | null>(site);
   const [baseline, setBaseline] = React.useState<Site | null>(site);
@@ -118,7 +122,7 @@ export function SiteDetailSheet({
   );
   const dirty = siteDirty || envState.dirty;
   const siteBusy = saving || deleting || reloading;
-  const busy = siteBusy || envState.busy;
+  const busy = siteBusy || envState.busy || filesBusy;
   const directoryChanged = draft.rootDir.trim() !== baseline?.rootDir;
   const isProxy = draft.runtime.kind !== "php" && draft.runtime.kind !== "static";
   const normalizedProxyTarget = normalizeProxyTarget(draft.runtime.proxyTarget ?? "");
@@ -129,12 +133,12 @@ export function SiteDetailSheet({
   const applicationBusy = !!applicationStatus && (!!applicationStatus.pids.length || ["running", "starting", "stopping"].includes(applicationStatus.state));
   const phpInvalid = draft.runtime.kind === "php" && Object.entries(draft.phpOverrides ?? {}).some(([key, value]) => !isPhpSiteSettingValid(key, value, baseline?.phpOverrides?.[key]));
   const requestClose = () => {
-    if (busy || savingRef.current || deletingRef.current || reloadingRef.current || envEditorRef.current?.isBusy()) return;
+    if (busy || savingRef.current || deletingRef.current || reloadingRef.current || filesBusyRef.current || envEditorRef.current?.isBusy()) return;
     if (dirty) setDiscardOpen(true);
     else onClose();
   };
   const save = async () => {
-    if (busy || savingRef.current || deletingRef.current || reloadingRef.current || envEditorRef.current?.isBusy() || (directoryChanged && envState.dirty) || proxyInvalid || applicationInvalid || phpInvalid || (draft.https && certificateSelection.problem)) return;
+    if (busy || savingRef.current || deletingRef.current || reloadingRef.current || filesBusyRef.current || envEditorRef.current?.isBusy() || (directoryChanged && envState.dirty) || proxyInvalid || applicationInvalid || phpInvalid || (draft.https && certificateSelection.problem)) return;
     const domains = [...new Set(domainsInput.split(/[,，\s]+/).filter(Boolean).map((d) => d.toLowerCase()))];
     if (!draft.name.trim() || !draft.rootDir.trim() || !domains.length) {
       setFormError({ code: "REQUIRED_FIELDS", message: t("detail.requiredFields") });
@@ -163,7 +167,7 @@ export function SiteDetailSheet({
   };
 
   const doDelete = async () => {
-    if (busy || savingRef.current || deletingRef.current || reloadingRef.current || envEditorRef.current?.isBusy()) return;
+    if (busy || savingRef.current || deletingRef.current || reloadingRef.current || filesBusyRef.current || envEditorRef.current?.isBusy()) return;
     deletingRef.current = true;
     setDeleting(true);
     setDeleteError(null);
@@ -217,7 +221,7 @@ export function SiteDetailSheet({
               size="sm"
               disabled={busy || dirty}
               onClick={async () => {
-                if (busy || dirty || savingRef.current || deletingRef.current || reloadingRef.current || envEditorRef.current?.isBusy()) return;
+                if (busy || dirty || savingRef.current || deletingRef.current || reloadingRef.current || filesBusyRef.current || envEditorRef.current?.isBusy()) return;
                 reloadingRef.current = true;
                 setReloading(true);
                 try {
@@ -236,7 +240,7 @@ export function SiteDetailSheet({
             </Button>
             {site.runtime.application && <Button variant="secondary" size="sm" disabled={busy || (!applicationBusy && site.status === "stopped")}
               onClick={async () => {
-                if (busy || savingRef.current || deletingRef.current || reloadingRef.current || envEditorRef.current?.isBusy()) return;
+                if (busy || savingRef.current || deletingRef.current || reloadingRef.current || filesBusyRef.current || envEditorRef.current?.isBusy()) return;
                 reloadingRef.current = true; setReloading(true);
                 try { await api.stopSite(site.id); }
                 catch (error) { toastError(error); }
@@ -246,11 +250,12 @@ export function SiteDetailSheet({
           <p className="text-xs leading-relaxed text-faint">{t("detail.reloadHint").replace("{server}", site.runtime.webServer === "apache" ? "Apache" : "Nginx")}</p>
 
           <Tabs value={tab} onValueChange={setTab}>
-            <TabsList className="mb-5 max-w-full">
-              <TabsTrigger value="general" className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("detail.general")}</TabsTrigger>
-              <TabsTrigger value="environment" className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("env.title")}</TabsTrigger>
-              {isProxy && <TabsTrigger value="application" className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("appProcess.title")}{applicationInvalid && <span className="text-error" aria-label={t("appProcess.invalid")}>!</span>}</TabsTrigger>}
-              {draft.runtime.kind === "php" && <TabsTrigger value="php" className="px-2 text-[11px] sm:px-3 sm:text-[13px]">PHP{phpInvalid && <span className="text-error" aria-label={t("sites.php.review")}>!</span>}</TabsTrigger>}
+            <TabsList className="mb-5 grid w-full grid-cols-2 gap-1 rounded-2xl sm:inline-flex sm:w-auto sm:rounded-full">
+              <TabsTrigger value="general" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("detail.general")}</TabsTrigger>
+              <TabsTrigger value="environment" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("env.title")}</TabsTrigger>
+              <TabsTrigger value="files" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("siteFiles.title")}</TabsTrigger>
+              {isProxy && <TabsTrigger value="application" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("appProcess.title")}{applicationInvalid && <span className="text-error" aria-label={t("appProcess.invalid")}>!</span>}</TabsTrigger>}
+              {draft.runtime.kind === "php" && <TabsTrigger value="php" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">PHP{phpInvalid && <span className="text-error" aria-label={t("sites.php.review")}>!</span>}</TabsTrigger>}
             </TabsList>
             <TabsContent value="general" forceMount className="mt-0 space-y-5 data-[state=inactive]:hidden">
           <div className="flex flex-col gap-1.5">
@@ -421,8 +426,12 @@ export function SiteDetailSheet({
               {applicationInvalid && <p role="alert" className="text-xs leading-relaxed text-error">{t("appProcess.invalid")}</p>}
             </TabsContent>}
             <TabsContent value="environment" forceMount className="mt-0 data-[state=inactive]:hidden">
-              <EnvEditor key={`${site.id}:${baseline?.rootDir}`} ref={envEditorRef} siteId={site.id} disabled={siteBusy}
+              <EnvEditor key={`${site.id}:${baseline?.rootDir}`} ref={envEditorRef} siteId={site.id} disabled={siteBusy || filesBusy}
                 directoryChanged={directoryChanged} onStateChange={setEnvState} />
+            </TabsContent>
+            <TabsContent value="files" forceMount className="mt-0 data-[state=inactive]:hidden">
+              <SiteFileBackups key={site.id} siteId={site.id} revision={baseline?.updatedAt ?? site.updatedAt} active={tab === "files"}
+                disabled={siteBusy || envState.busy} dirty={dirty} onBusyChange={onFilesBusyChange} />
             </TabsContent>
             {draft.runtime.kind === "php" && <TabsContent ref={phpPanelRef} value="php" forceMount className="mt-0 data-[state=inactive]:hidden">
               <SitePhpSettings values={draft.phpOverrides ?? {}} previousValues={baseline?.phpOverrides ?? {}} rootDir={draft.rootDir} disabled={busy}
@@ -490,9 +499,9 @@ export function SiteDetailSheet({
           <div className="flex flex-wrap items-center justify-between gap-3">
             <span className="text-xs text-muted">{(tab === "environment" ? envState.dirty : siteDirty) ? t("detail.unsaved") : t(tab === "environment" ? "env.clean" : "detail.saved")}</span>
             <div className="flex min-w-0 max-w-full gap-2">
-              <Button variant="ghost" onClick={requestClose} disabled={busy}>{t("common.cancel")}</Button>
-              {tab === "environment" ? <Button className="min-w-0" title={t("env.saveNamed").replace("{file}", envState.fileName)} onClick={() => void envEditorRef.current?.save()} disabled={siteBusy || !envState.canSave}><span className="truncate">{envState.busy ? t("detail.saveBusy") : t("env.saveNamed").replace("{file}", envState.fileName)}</span></Button>
-                : <Button onClick={save} disabled={busy || !siteDirty || (directoryChanged && envState.dirty) || proxyInvalid || applicationInvalid || phpInvalid || (draft.https && !!certificateSelection.problem)}>{saving ? t("detail.saveBusy") : t("common.save")}</Button>}
+              <Button variant="ghost" onClick={requestClose} disabled={busy}>{t(tab === "files" ? "common.close" : "common.cancel")}</Button>
+              {tab === "environment" ? <Button className="min-w-0" title={t("env.saveNamed").replace("{file}", envState.fileName)} onClick={() => void envEditorRef.current?.save()} disabled={siteBusy || filesBusy || !envState.canSave}><span className="truncate">{envState.busy ? t("detail.saveBusy") : t("env.saveNamed").replace("{file}", envState.fileName)}</span></Button>
+                : tab !== "files" && <Button onClick={save} disabled={busy || !siteDirty || (directoryChanged && envState.dirty) || proxyInvalid || applicationInvalid || phpInvalid || (draft.https && !!certificateSelection.problem)}>{saving ? t("detail.saveBusy") : t("common.save")}</Button>}
             </div>
           </div>
         </div>

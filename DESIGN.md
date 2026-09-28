@@ -2520,3 +2520,23 @@ Windows MySQL 8.0.46、MariaDB 11.4.8 隔离原生验收覆盖含引号、分号
 本次没有用户业务数据库结构或数据变更，未修改 update.sql；所有原生 SQL 仅作用于隔离临时目录、端口和验收账号。未启动前端 dev，未执行本地前端 build。v0.2.92 Release 已确认 completed/success；本轮按根 AGENTS.md 新增 annotated tag v0.2.93，与 main 原子推送并核对远程指向和实际构建状态。Linux/macOS、其它数据库版本未做本轮实机验收；账号改名、暂停登录、完整角色管理和活动连接管理等仍待完善，整体目标保持进行。
 
 参考：https://support.servbay.com/database-management/getting-started/mysql-management-and-usage 、https://dev.mysql.com/doc/refman/8.0/en/drop-user.html 、https://dev.mysql.com/doc/refman/8.0/en/stored-objects-security.html 、https://mariadb.com/docs/server/reference/sql-statements/account-management-sql-statements/drop-user
+
+## 第一百零八轮：站点文件 ZIP 备份与恢复副本（v0.2.94）
+
+参考 ServBay 将网站文件与配置、数据库分别备份的流程，补齐 NiceEnv 过去只能导出站点配置、不能备份项目代码和上传文件的缺口。通过 fast-context 定位站点详情、项目目录识别、配置备份和路径保护；沿用 UI/UX skill、Next 本地 use-client 文档以及现有 zip 2 依赖，没有新增依赖。
+
+站点详情新增“文件备份”页签。用户选择项目目录或 Web 根目录，先显示后端实际识别的绝对路径；默认排除 .git、node_modules、.next、.nuxt、.venv、venv、__pycache__、target，可关闭排除。归档包含普通文件、隐藏文件和空目录，不包含外部数据库；未排除的链接、junction、特殊文件、不可移植路径及大小写冲突会明确拒绝。单份上限 100,000 个条目、50 GiB 原始文件，清单上限 32 MiB。创建前要求确认暂停修改，并说明归档可能包含 .env、密码和密钥。
+
+归档使用 ZIP64、流式压缩和逐文件 SHA256，写入每个站点独立的 SHA256 目录。临时归档完整写入、同步后以不覆盖方式发布；同秒连续备份有随机名称，不替换旧归档。写操作持后台工作保护、数据目录活动锁和站点文件锁。创建前后核对文件列表、大小、修改时间、权限及站点范围 revision，拒绝备份目录与源目录相互包含；Windows 打开文件时拒绝 reparse point，Unix 额外核对设备与 inode。它不是文件系统事务快照，不能保证外部并发写入的完整隔离，仍需用户暂停文件修改。
+
+支持归档搜索、分页、刷新、打开所在目录、删除确认，以及恢复到默认 restored-sites 或自选父目录。恢复先确认来源可信，严格核对站点归属、清单、ZIP 条目类型和尺寸，拒绝路径穿越、设备名、ADS、大小写别名及文件/目录冲突；逐文件验证 SHA256 和 ZIP CRC。每次恢复创建独立新目录，失败由临时目录清理，不覆盖原项目、不改变站点绑定、不启动项目代码。恢复父目录不能位于已登记站点的项目/Web 目录或归档树内。成功后保留副本路径和打开目录/复制路径操作。Unix 普通文件恢复权限位，不恢复所有者、ACL、原始时间或目录权限；Windows 不承诺恢复只读属性。
+
+界面沿用中英文文案、Select、Switch 和现有确认弹窗。进度按 operationId 隔离，显示真实处理阶段、文件数和字节数；处理中禁止重复操作、切换页签和关闭详情，监听在操作结束后清理。未保存站点或环境变量修改时提示先处理草稿；失败保留输入，过期范围要求重新读取。窄屏页签使用两列布局，长路径可换行，归档操作可折行，恢复弹窗正文滚动、底部操作固定，分区采用左右留白的虚线。浏览器 mock 明确标记为交互预览，不表示真实文件已备份。
+
+Windows 隔离临时目录验收覆盖中文和空格路径、.env、二进制、空目录、依赖排除开关、Web/项目范围、连续归档、多次恢复、自选父目录、未确认拒绝、原项目和归档目录保护、并发锁、旧 revision、备份中源目录变化、错误站点、删除路径穿越、内容损坏、清单穿越、大小写别名、损坏 ZIP 列表与删除及 junction 拒绝。源项目、外部文件和已有副本保留。独立发布树 pnpm check 和 cargo check --workspace --all-targets --locked 通过；备份、路径、环境文件及配置传输相关回归共 59 通过、0 失败、1 忽略、644 filtered out。忽略项需要外部 PHP/phpdotenv 环境，不计入本轮验收。只扩展既有 Rust 模块中的验收，未新增测试文件。
+
+本轮尝试访问现有 localhost:3000，浏览器返回 ERR_CONNECTION_REFUSED，本机也确认没有端口监听；按用户要求未启动前端 dev、未执行本地前端 build。因此本轮没有完成浏览器交互及桌面/390px/320px 截图目检，不将源码布局检查视为视觉验收。已关闭仅本轮创建的失败 QA 上下文。macOS/Linux 原生文件操作和桌面文件选择器也尚未实机验收。
+
+11 个版本文件同步到 0.2.94，Cargo.lock 仅更新三个本项目 crate；独立发布树共 20 个任务文件，排除用户原有 configgen.rs 的 178 additions / 9 deletions 和本地生成文件。提交前发现工作区另有导航拆分和 CodeMirror 依赖改动，包含 package.json、i18n.ts 的重叠编辑；提交内容取已验证独立树中的精确文件版本，保留这些其它改动在工作区。本次没有业务数据库变更，未修改 update.sql。v0.2.93 Release 已核对 completed/success。本轮使用新 annotated tag v0.2.94，与 main 原子推送并在推送后核对远程及 Release 实际状态。自动计划、覆盖恢复、外部归档导入及后续 UI 实机验收仍待完善，整体目标保持进行。
+
+参考：https://support.servbay.com/getting-started/backup-and-restore

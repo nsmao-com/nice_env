@@ -2704,3 +2704,23 @@ scanner 26 项与 sites 常规 33 项通过，两个依赖本机运行时的原�
 参考：https://getcomposer.org/doc/03-cli.md#check-platform-reqs
 参考：https://github.com/composer/composer/blob/main/src/Composer/Command/CheckPlatformReqsCommand.php
 参考：https://support.servbay.com/php/set-different-php-for-each-project
+
+## 第一百一十七轮：Redis 常用设置、配置冲突保护与持久化核对（v0.2.105）
+
+参考 ServBay 的 Redis 管理与配置说明，通过 fast-context 复查数据库页、Redis 状态/连接认证、配置编辑器及服务生命周期调用链。NiceEnv 已有原始配置和历史入口，但缺少常用设置表单。本轮沿用 UI/UX skill、现有 React/Radix 控件与 Next 客户端组件规范，在 Redis 实例卡片增加常用设置；已生成配置的停止实例也可编辑。
+
+设置分为内存与连接、持久化两组。内存支持版本默认、不限制或明确大小，单位为 B/KiB/MiB/GiB；八种淘汰策略使用中文说明，连接超时与最大连接数可留空沿用版本默认。RDB 自动快照支持默认、关闭及最多十六条时间/修改次数规则。关闭原本启用或默认的快照须明确勾选数据丢失风险，后端再次检查。AOF 仅显示启动配置状态，已启用时可编辑同步策略；不把单纯改文件重启当成已有数据的 AOF 启停迁移。Redis 官方要求在线切换、等待重写完成并核对落盘，本轮不在普通表单提供该开关。
+
+后端只编辑实际变化的受管指令，处理重复单值指令、save 重置及 Redis 十进制/二进制内存后缀，保留其它配置、认证信息、注释、空行与换行风格。无法准确表达的配置、include 覆盖关系或带引号指令名明确转到原始编辑器，不猜测结果。保留新版未知的现有策略，但拒绝提交未知新策略或注入值。读取限制安装版本对应的受管理普通 UTF-8 文件、最大 1 MiB，复用路径链接保护。保存使用文件 SHA-256 revision、服务生命周期互斥及现有配置编辑器的再次冲突检测、备份历史和原子替换。配置尚未生成时提示先启动对应版本。修复旧 Redis 引号结构检查误拒绝带转义双引号密码的问题，该检查仍不代表完整 Redis 原生语法验证。
+
+保存仅影响启动配置，不自动重启；界面明确原进程仍使用旧设置，保存快照规则也不会立即生成数据备份。按 Redis 版本隔离查询和草稿，焦点/网络恢复不自动覆盖输入；重复提交使用同步锁。关闭、重新读取或进入原文编辑遇到未保存修改先确认，失败保留草稿；回到表单重新读取。等值内存单位转换不误判为改动；保存成功同步查询缓存，清除先前读取错误。配置原文与历史复用现有编辑器。浏览器预览明确使用模拟数据，不宣称读写本机。
+
+离线 Chromium 直接装载实际 React/Radix 设置组件及现有 CSS，未启动服务器或执行项目 dev/build。桌面 1440×960、窄屏 390×844 中英文截图已检查，窄屏没有横向溢出、连接与快照字段纵向排列、正文滚动、底部按钮保持可见；虚线分隔留在内容内边距内，长路径换行。受控 API 交互通过双击防重、快照关闭确认、保存提示、冲突保留、取消/确认丢弃草稿、版本隔离、读取错误重试、保存后旧错误清除、等值单位不产生改动等场景。原文编辑器在此离线页面只验证交接和返回刷新，未将替代界面作为真实编辑器验收。十三项实际 schema/草稿转换/边界断言及五十六组中英文键和占位符核对通过，浏览器无 pageerror。
+
+现有 Rust 验证函数中扩展解析与合并检查，redis_lint 两项通过；没有新增测试文件。已有 ignored 原生 Redis 验收显式运行通过（1 passed，49.20 秒），使用 SHA-256 已核对的 Windows Redis 5.0.14.1 运行时和隔离临时目录。原生 CONFIG GET 确认保存后当前进程保持 64 MiB，重启后内存 96 MiB、淘汰策略、timeout 42、maxclients 333 和两条快照规则真实生效；两个原有键保留。原配置进入历史，过期 revision 与未确认关闭快照被拒绝；历史还原后旧草稿失效，再次重启恢复 64 MiB 且原键仍在。自有进程已停止。此验收不代表新版 Redis 或 macOS/Linux 实机结果。Web/schema TypeScript 与 Rust 全工作区 all-targets 检查通过。
+
+十一处版本文件同步 0.2.105，Cargo.lock 仅更新 niceservbay、nsb-core、platform 三个本项目 crate。按 AGENTS.md 新增 annotated tag v0.2.105，与 main 一次原子推送，随后核对远程分支、标签目标和 release.yml 的实际状态。上一版 v0.2.104 的 Windows、macOS Apple Silicon、macOS Intel Release 均已确认 completed/success。本次没有业务数据库变更，未修改 update.sql；保留已有未跟踪文件和本地生成目录。整体功能、稳定性和 UI 完善目标继续进行。
+
+参考：https://support.servbay.com/database-management/getting-started/redis-management-and-usage
+参考：https://support.servbay.com/advanced-settings/modify-configurations/modify-redis-settings
+参考：https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/

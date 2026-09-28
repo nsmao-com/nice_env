@@ -29,6 +29,8 @@ import type {
   ScannedProject,
   ProjectPhpCompatibility,
   ProjectPlatformReport,
+  RedisSettings,
+  RedisSettingsView,
   ConfigFileInfo,
   ConfigValidation,
   ConfigBackup,
@@ -331,6 +333,9 @@ export interface RedisConnectionInfo { version: string; username: string; hasPas
 export const redisConnection = (version: string) => safe(invoke<RedisConnectionInfo>("redis_connection", { version }));
 export const redisSaveConnection = (version: string, credentials: { username: string; password: string }) =>
   safe(invoke<RedisStats>("redis_save_connection", { version, credentials }));
+export const redisSettings = (version: string) => safe(invoke<RedisSettingsView>("redis_settings", { version }));
+export const redisSettingsSave = (version: string, revision: string, settings: RedisSettings, acknowledgeDisable: boolean) =>
+  safe(invoke<RedisSettingsView>("redis_settings_save", { version, revision, settings, acknowledgeDisable }));
 export const redisStats = () => safe(invoke<RedisStats>("redis_stats"));
 
 export interface PostgresConnectionInfo {

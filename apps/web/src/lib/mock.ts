@@ -80,7 +80,7 @@ function mockSiteFileScope(id: string, project: boolean, exclude: boolean): Site
 }
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.104";
+const MOCK_APP_VERSION = "0.2.105";
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const certMonitors = new Map<string, CertMonitor>();
@@ -1066,6 +1066,8 @@ async function performServiceAction(action: "start_service" | "stop_service" | "
     throw error;
   }
 }
+
+const redisSettingsPreview = new Map<string, import("@nsb/schema").RedisSettingsView>();
 
 export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   await delay(60 + Math.random() * 120);
@@ -3034,6 +3036,22 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (credentials.username || credentials.password) throw { code: "REDIS_AUTH_FAILED", message: "网页预览中的 Redis 无需认证，请选择无认证连接；真实凭据请在桌面应用中验证。" };
       mockRedisConnections.set(version, { ...credentials });
       return await mockInvoke<T>("redis_stats");
+    }
+    case "redis_settings": {
+      const version = String(args!.version);
+      if (!redisSettingsPreview.has(version)) redisSettingsPreview.set(version, { version, path: `preview/etc/redis/${version}/redis.conf`, revision: "preview-0", appendOnly: false,
+        settings: { maxMemoryBytes: 268435456, evictionPolicy: "allkeys-lru", timeoutSeconds: 0, maxClients: null, saveRules: [], appendFsync: null } });
+      return structuredClone(redisSettingsPreview.get(version)) as T;
+    }
+    case "redis_settings_save": {
+      const version = String(args!.version);
+      const previous = redisSettingsPreview.get(version);
+      if (!previous || previous.revision !== args!.revision) throw { code: "CONFIG_CONFLICT", message: "演示配置已变化，请重新读取。" };
+      const settings = structuredClone(args!.settings) as import("@nsb/schema").RedisSettings;
+      if (settings.saveRules?.length === 0 && previous.settings.saveRules?.length !== 0 && !args!.acknowledgeDisable) throw { code: "REDIS_SNAPSHOT_CONFIRM", message: "请确认关闭自动快照。" };
+      const view = { ...previous, settings, revision: `preview-${Date.now()}-${Math.random()}` };
+      redisSettingsPreview.set(version, view);
+      return structuredClone(view) as T;
     }
     case "redis_stats": {
       const service = services.get("redis");

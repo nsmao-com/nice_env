@@ -635,6 +635,23 @@ pub fn lint_yaml(content: &str) -> Vec<ConfigIssue> {
     issues
 }
 
+// Redis 双引号内支持反斜杠转义，单引号内仅 \' 转义单引号；不能用引号个数判断合法密码。
+fn redis_quotes_valid(line: &str) -> bool {
+    let bytes=line.as_bytes(); let mut quote=0; let mut i=0;
+    while i<bytes.len() {
+        let c=bytes[i];
+        if quote==0 { if c==b'"' || c==b'\'' { quote=c; } }
+        else if (quote==b'"' && c==b'\\') || (quote==b'\'' && c==b'\\' && bytes.get(i+1)==Some(&b'\'')) {
+            if i+1==bytes.len() { return false; } i+=1;
+        } else if c==quote {
+            quote=0;
+            if bytes.get(i+1).is_some_and(|c|!c.is_ascii_whitespace()) { return false; }
+        }
+        i+=1;
+    }
+    quote==0
+}
+
 /// 按种类选择自检器
 pub fn lint(kind: ConfigKind, content: &str) -> Vec<ConfigIssue> {
     match kind {
@@ -654,11 +671,11 @@ pub fn lint(kind: ConfigKind, content: &str) -> Vec<ConfigIssue> {
                 if t.is_empty() || t.starts_with('#') {
                     continue;
                 }
-                if t.matches('"').count() % 2 != 0 {
+                if !redis_quotes_valid(t) {
                     issues.push(ConfigIssue {
                         line: i + 1,
                         severity: "error".into(),
-                        message: "双引号没有闭合".into(),
+                        message: "配置引号没有闭合，或引号后的参数缺少空格".into(),
                     });
                 }
             }
@@ -2163,7 +2180,11 @@ mod tests {
     #[test]
     fn redis_lint_catches_unclosed_quote() {
         let issues = lint(ConfigKind::RedisConf, "port 6379\nrequirepass \"abc\n");
-        assert!(issues.iter().any(|i| i.message.contains("双引号")));
+        assert!(issues.iter().any(|i| i.message.contains("引号")));
+        assert!(lint(ConfigKind::RedisConf, r#"requirepass "a\"quoted-password""#).is_empty());
+        assert!(lint(ConfigKind::RedisConf, "requirepass 'single quoted'\n").is_empty());
+        assert!(!lint(ConfigKind::RedisConf, "requirepass 'unclosed\n").is_empty());
+        assert!(!lint(ConfigKind::RedisConf, "requirepass \"closed\"extra\n").is_empty());
     }
 
     #[test]
@@ -2174,6 +2195,26 @@ mod tests {
             "port 6379\nmaxmemory 256mb\nsave 900 1\n",
         );
         assert!(issues.is_empty(), "{issues:?}");
+
+        use crate::redis_settings::{parse, merge, SnapshotRule};
+        let text = "# keep\r\nrequirepass \"secret\\\"value\"\r\nmaxmemory 2m\r\nmaxmemory 3KB\r\nmaxmemory-policy noeviction\r\nsave 900 1\r\nsave \"\"\r\nsave 300 10\r\nappendonly yes\r\nappendfsync everysec\r\ntimeout 0\r\nmaxclients 100\r\nrename-command CONFIG \"private-command\"\r\n";
+        let (before, aof) = parse(text).unwrap();
+        assert_eq!(before.max_memory_bytes,Some(3072));assert_eq!(aof,Some(true));
+        assert_eq!(before.save_rules,Some(vec![SnapshotRule { seconds:300,changes:10 }]));
+        assert_eq!(merge(text,&before,false).unwrap(),text);
+        for (value,bytes) in [("1k",1000),("1kb",1024),("2M",2_000_000),("2mb",2_097_152),("1g",1_000_000_000),("1gb",1_073_741_824),("0",0)] {
+            assert_eq!(parse(&format!("maxmemory {value}\n")).unwrap().0.max_memory_bytes,Some(bytes));
+        }
+        let mut next=before.clone();next.max_memory_bytes=Some(64*1024*1024);next.timeout_seconds=Some(30);next.save_rules=Some(vec![SnapshotRule{seconds:60,changes:2},SnapshotRule{seconds:300,changes:0}]);
+        let merged=merge(text,&next,false).unwrap();assert_eq!(parse(&merged).unwrap(),(next.clone(),aof));
+        assert!(merged.contains("requirepass \"secret\\\"value\"\r\n"));assert!(merged.contains("rename-command CONFIG \"private-command\"\r\n"));assert!(merged.starts_with("# keep\r\n"));
+        assert_eq!(merged.lines().filter(|line|line.starts_with("maxmemory ")).count(),1);
+        next.save_rules=Some(vec![]);assert_eq!(merge(text,&next,false).unwrap_err().code,"REDIS_SNAPSHOT_CONFIRM");assert!(merge(text,&next,true).unwrap().contains("save \"\"\r\n"));
+        next.max_memory_bytes=None;next.save_rules=None;let reset=merge(text,&next,false).unwrap();assert!(!reset.lines().any(|line|line.starts_with("maxmemory ")||line.starts_with("save ")));
+        next.max_clients=Some(0);assert!(merge(text,&next,false).is_err());
+        for invalid in ["include extra.conf\n", "\"maxmemory\" 12\n", "save 0 1\n", "save 900\n", "maxmemory 2mb # comment\n", "maxmemory 18446744073709551615gb\n"] { assert!(parse(invalid).is_err(),"{invalid}"); }
+        let unknown="maxmemory-policy new-server-policy\n";let mut retained=parse(unknown).unwrap().0;retained.timeout_seconds=Some(5);assert!(merge(unknown,&retained,false).unwrap().contains("new-server-policy"));
+        retained.eviction_policy=Some("noeviction\nrequirepass injected".into());assert!(merge(unknown,&retained,false).is_err());
     }
 
     #[test]

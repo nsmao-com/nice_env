@@ -957,6 +957,18 @@ export type ConfigBackup = z.infer<typeof ConfigBackup>;
 
 /* ============ 项目扫描 ============ */
 
+export const RedisSettings = z.object({
+  maxMemoryBytes: z.number().int().nonnegative().nullable(), evictionPolicy: z.string().nullable(),
+  timeoutSeconds: z.number().int().nonnegative().nullable(), maxClients: z.number().int().positive().nullable(),
+  saveRules: z.array(z.object({ seconds: z.number().int().positive(), changes: z.number().int().nonnegative() })).max(16).nullable(),
+  appendFsync: z.string().nullable(),
+});
+export type RedisSettings = z.infer<typeof RedisSettings>;
+export const RedisSettingsView = z.object({
+  version: z.string(), path: z.string(), revision: z.string(), settings: RedisSettings, appendOnly: z.boolean().nullable(),
+});
+export type RedisSettingsView = z.infer<typeof RedisSettingsView>;
+
 export const ProjectPlatformReport = z.object({
   project: z.string(), phpVersion: z.string(), ini: z.string(),
   source: z.enum(["lock", "installed", "manifest"]), includeDev: z.boolean(), devIncomplete: z.boolean(),

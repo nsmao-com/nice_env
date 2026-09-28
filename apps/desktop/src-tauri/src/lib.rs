@@ -382,6 +382,8 @@ pub fn run() {
             db_reset_root_password,
             db_root_password,
             redis_stats,
+            redis_settings,
+            redis_settings_save,
             redis_connection,
             redis_save_connection,
             postgres_connection,
@@ -1658,6 +1660,26 @@ async fn postgres_drop_role(state: State<'_, std::sync::Arc<nsb_core::CoreState>
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.with_postgres(&version, |client| client.drop_role(&name, oid)))).await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn redis_settings(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String) -> Result<nsb_core::redis_settings::RedisSettingsView, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
+        map_jh(st.redis_settings(&version))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn redis_settings_save(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, revision: String,
+    settings: nsb_core::redis_settings::RedisSettings, acknowledge_disable: bool,
+) -> Result<nsb_core::redis_settings::RedisSettingsView, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&st.paths.base))?;
+        map_jh(st.save_redis_settings(&version, &revision, &settings, acknowledge_disable))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /// Redis 运行统计（内存 / 键数 / 连接数 / 运行天数）

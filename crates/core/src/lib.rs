@@ -30,6 +30,7 @@ pub mod model;
 pub mod ops;
 pub mod paths;
 pub mod restart;
+pub mod redis_settings;
 pub mod toolbox;
 pub mod tunnel;
 use paths::write_with_backup;
@@ -872,6 +873,16 @@ impl CoreState {
         let service = self.running_redis(None)?;
         let version = service.version.as_deref().ok_or_else(|| AppError::new("REDIS_VERSION_UNKNOWN", "无法确认 Redis 运行版本"))?;
         self.verify_redis(&service, &stats::RedisCredentials::load(&self.store, version)?)
+    }
+
+    pub fn redis_settings(&self, version: &str) -> Result<redis_settings::RedisSettingsView> {
+        let _operation = self.manager.lifecycle.lock();
+        redis_settings::get(&self.paths, &self.store, version)
+    }
+
+    pub fn save_redis_settings(&self, version: &str, revision: &str, settings: &redis_settings::RedisSettings, acknowledge_disable: bool) -> Result<redis_settings::RedisSettingsView> {
+        let _operation = self.manager.lifecycle.lock();
+        redis_settings::save(&self.paths, &self.store, version, revision, settings, acknowledge_disable)
     }
 
     pub fn redis_connection(&self, version: &str) -> Result<stats::RedisConnectionInfo> {

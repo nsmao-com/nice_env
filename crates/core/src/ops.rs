@@ -4341,6 +4341,34 @@ const client = new MongoClient(`mongodb://127.0.0.1:${process.argv[2]}`, { direc
         assert_eq!(PortsProfile::from_settings(&state.store).redis, port);
         assert_eq!(std::fs::read_to_string(&config).unwrap(), persisted);
         assert_eq!(query("maxmemory"), "maxmemory\n67108864");
+
+        // 可视化配置保存通过原生 CONFIG GET 与实际 RDB 文件与键数回读验证。
+        let before_view=state.redis_settings("5.0.14").unwrap();
+        assert_eq!(before_view.settings.max_memory_bytes,Some(64*1024*1024));
+        let mut settings=before_view.settings.clone();
+        settings.max_memory_bytes=Some(96*1024*1024);settings.eviction_policy=Some("allkeys-random".into());
+        settings.timeout_seconds=Some(42);settings.max_clients=Some(333);
+        settings.save_rules=Some(vec![crate::redis_settings::SnapshotRule{seconds:60,changes:1},crate::redis_settings::SnapshotRule{seconds:300,changes:10}]);
+        let before_file=std::fs::read_to_string(&config).unwrap();
+        let saved=state.save_redis_settings("5.0.14",&before_view.revision,&settings,false).unwrap();
+        assert_eq!(saved.settings,settings);assert_ne!(saved.revision,before_view.revision);
+        assert_eq!(query("maxmemory"),"maxmemory\n67108864","save must not change the running server");
+        assert_eq!(query("databases"),"databases\n32","unrelated directives preserved");
+        let history=crate::cfgeditor::list_config_backups_selected(&state.paths,&state.store,Some("redis-conf@5.0.14")).unwrap();
+        assert!(history.iter().any(|b|std::fs::read_to_string(&b.path).unwrap()==before_file));
+        assert_eq!(state.save_redis_settings("5.0.14",&before_view.revision,&settings,false).unwrap_err().code,"CONFIG_CONFLICT");
+        let mut disabled=settings.clone();disabled.save_rules=Some(vec![]);
+        assert_eq!(state.save_redis_settings("5.0.14",&saved.revision,&disabled,false).unwrap_err().code,"REDIS_SNAPSHOT_CONFIRM");
+        let customized=std::fs::read_to_string(&config).unwrap();assert!(customized.contains("databases 32"));assert!(customized.contains("appendonly no"));
+        state.stop_service("redis").unwrap();state.start_service("redis").unwrap();
+        assert_eq!(query("maxmemory"),"maxmemory\n100663296");assert_eq!(query("maxmemory-policy"),"maxmemory-policy\nallkeys-random");
+        assert_eq!(query("timeout"),"timeout\n42");assert_eq!(query("maxclients"),"maxclients\n333");assert_eq!(query("save"),"save\n60 1 300 10");
+        assert_eq!(state.redis_stats().unwrap().keys,Some(2));
+        let current=state.redis_settings("5.0.14").unwrap();let backup=history.iter().find(|b|std::fs::read_to_string(&b.path).unwrap()==before_file).unwrap();
+        state.rollback_config(&backup.name,Some("redis-conf@5.0.14"),Some(&std::fs::read_to_string(&config).unwrap())).unwrap();
+        assert_eq!(state.save_redis_settings("5.0.14",&current.revision,&settings,false).unwrap_err().code,"CONFIG_CONFLICT");
+        state.stop_service("redis").unwrap();state.start_service("redis").unwrap();
+        assert_eq!(query("maxmemory"),"maxmemory\n67108864");assert_eq!(state.redis_stats().unwrap().keys,Some(2));
         let pids = state.manager.snapshot("redis").unwrap().pids;
         state.stop_service("redis").unwrap();
         assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));

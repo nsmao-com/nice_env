@@ -64,7 +64,7 @@ import type {
 } from "@nsb/schema";
 import { emitLocal } from "./backend";
 import type { SiteFileBackup, SiteFileScope, SiteFilePlan, BackupPlanConfig } from "./api";
-import { cmpVersionDesc, resolveStackService, normalizeProxyTarget, isPhpSiteSettingValid, isEnvSecretKey, isEnvFileName, applicationRuntime, validApplication } from "./utils";
+import { cmpVersionDesc, resolvedStackItems, stackVersionConflicts, normalizeProxyTarget, isPhpSiteSettingValid, isEnvSecretKey, isEnvFileName, applicationRuntime, validApplication } from "./utils";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const siteFileArchives = new Map<string, SiteFileBackup[]>();
@@ -1228,18 +1228,27 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         skipped: [],
         failed: [],
       };
-      // 演示模式：按启动顺序逐个改状态（停栈时逆序）
-      const items = [...stack.items].sort((a, b) => a.order - b.order);
+      // 先核对完整计划，冲突时不能已经操作了前面的服务。
+      const serviceList = [...services.values()], packageList = [...packages.values()];
+      const conflicts = stackVersionConflicts(stack.items, serviceList, packageList);
+      if (conflicts.length) throw { code: "STACK_VERSION_CONFLICT", message: `服务栈为单实例服务 ${conflicts.join(", ")} 选择了不同版本`, hint: "请编辑服务栈，为此服务保留一个版本规则后再操作" };
+      const items = resolvedStackItems(stack.items, serviceList, packageList);
+      if (starting && !items.some((item) => item.target)) throw { code: "STACK_EMPTY", message: `「${stack.name}」里没有可启动的服务，请先安装所需套件` };
       const ordered = starting ? items : items.reverse();
-      const seen = new Set<string>();
-      for (const item of ordered) {
-        const found = resolveStackService(item.serviceId, [...services.values()], [...packages.values()]);
-        if (!found) {
+      for (const { item, target } of ordered) {
+        if (!target) {
           report.skipped.push(item.serviceId);
           continue;
         }
-        if (seen.has(found.id)) continue;
-        seen.add(found.id);
+        const found = target.service;
+        if (found.version !== target.expectedVersion) {
+          report.failed.push({ serviceId: found.id, error: { code: "SERVICE_TARGET_CHANGED", message: `${found.id} 要求版本 ${target.expectedVersion ?? "未知"}，当前服务版本为 ${found.version ?? "未知"}`, hint: "请在套件页选择要求的版本，或编辑服务栈的版本规则后再操作" } });
+          continue;
+        }
+        if (found.state === "unknown") {
+          report.failed.push({ serviceId: found.id, error: { code: "SERVICE_STATE_UNKNOWN", message: "无法确认服务状态，请先重新检查" } });
+          continue;
+        }
         if (["starting", "stopping"].includes(found.state)) {
           report.failed.push({ serviceId: found.id, error: { code: "SERVICE_BUSY", message: `服务 ${found.id} 正在切换状态，请稍后重试` } });
           continue;
@@ -1258,7 +1267,6 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           report.started.push(found.id);
         } catch (error) { report.failed.push({ serviceId: found.id, error: normalizeError(error) }); }
       }
-      if (starting && !seen.size) throw { code: "STACK_EMPTY", message: `「${stack.name}」里没有可启动的服务，请先安装所需套件` };
       return report as T;
       });
     }

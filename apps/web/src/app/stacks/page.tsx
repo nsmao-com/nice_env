@@ -20,7 +20,7 @@ import {
   CheckCircle2,
 } from "lucide-react";
 import type { Stack, StackItem, PackageView, ServiceStatus } from "@nsb/schema";
-import { cn, cmpVersionDesc, resolveStackService, resolvedStackItems } from "@/lib/utils";
+import { cn, cmpVersionDesc, resolveStackService, resolvedStackItems, stackServiceTarget, stackVersionConflicts } from "@/lib/utils";
 import { useT } from "@/lib/store";
 import { useInvalidate, useServices, useStacks, usePackages, toastError, toastPortConflict, toastStackReport, serviceHasProcess } from "@/lib/hooks";
 import * as api from "@/lib/api";
@@ -147,6 +147,8 @@ export default function StacksPage() {
                 service && !serviceHasProcess(service) ? service.missingRequires : []
               ))];
               const dependenciesBlocked = missingDependencies.length > 0;
+              const versionConflicts = stateReady ? stackVersionConflicts(stack.items, services, packages) : [];
+              const mismatched = stateReady ? [...new Set(resolved.flatMap(({ target, service }) => target && !service ? [target.service.id] : []))] : [];
               return (
                 <motion.div
                   key={stack.id}
@@ -188,17 +190,22 @@ export default function StacksPage() {
                           <span
                             key={item.serviceId}
                             className="flex max-w-full min-w-0 items-start gap-1.5 rounded-md bg-fill px-2 py-1 text-[11px]"
-                            title={svc ? `${svc.label} · ${t(`state.${svc.state}`)}` : t(stateReady ? "stack.notInstalled" : "stack.statusPending")}
+                            title={stackItemHint(item.serviceId, svc, packages, services, t, stateReady)}
                           >
                             <StatusLight className="mt-1.5 shrink-0" state={svc?.state ?? "unknown"} size={5} />
                             <span className="min-w-0 [overflow-wrap:anywhere]">
-                              <span className={cn(!svc && stateReady && "text-faint")}>{item.label || serviceFamilyName(item.serviceId.split("@")[0], packages, services)}</span>
+                              <span className={cn(!svc && stateReady && "text-faint")}>{item.label || serviceFamilyName(stackItemBase(item.serviceId), packages, services)}</span>
                               <span className="block text-[10px] text-muted">{stackItemHint(item.serviceId, svc, packages, services, t, stateReady)}</span>
                             </span>
                           </span>
                         );
                       })}
                     </div>
+                    {versionConflicts.length > 0 && <p role="alert" className="text-xs text-error [overflow-wrap:anywhere]">{t("stack.versionConflict")} {versionConflicts.join(", ")}</p>}
+                    {mismatched.length > 0 && <p className="flex flex-wrap gap-x-2 gap-y-1 text-xs text-warn">
+                      <span>{t("stack.singleVersionHint")}</span>
+                      {mismatched.map((id) => <Link key={id} href={`/packages?search=${encodeURIComponent(id)}`} className="underline decoration-dashed underline-offset-2">{serviceFamilyName(id, packages, services)}</Link>)}
+                    </p>}
                     {dependenciesBlocked && (
                       <p role="status" className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-warn">
                         <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
@@ -215,7 +222,7 @@ export default function StacksPage() {
                       <Button
                         size="sm"
                         className="flex-1 basis-full sm:basis-auto"
-                        disabled={busyId !== null || !stateReady || dependenciesBlocked}
+                        disabled={busyId !== null || !stateReady || dependenciesBlocked || versionConflicts.length > 0}
                         title={dependenciesBlocked ? t("stack.dependenciesBlocked") : undefined}
                         onClick={() => startStack(stack)}
                       >
@@ -229,7 +236,7 @@ export default function StacksPage() {
                       <Button
                         size="sm"
                         variant="secondary"
-                        disabled={busyId !== null || !stack.items.some((item) => { const service = stateOf(item.serviceId); return service && serviceHasProcess(service); })}
+                        disabled={busyId !== null || versionConflicts.length > 0 || !stack.items.some((item) => { const service = stateOf(item.serviceId); return service && serviceHasProcess(service); })}
                         onClick={() => stopStack(stack)}
                       >
                         <Square className="h-3.5 w-3.5" /> {t("stack.stopAll")}
@@ -330,6 +337,10 @@ export default function StacksPage() {
   );
 }
 
+function stackItemBase(id: string) {
+  return id.startsWith("site-app:") ? id : id.split("@")[0];
+}
+
 function serviceFamilyName(base: string, packages: PackageView[], services: ServiceStatus[]) {
   if (base === "php") return "PHP";
   if (base === "mysql") return "MySQL";
@@ -338,12 +349,16 @@ function serviceFamilyName(base: string, packages: PackageView[], services: Serv
 
 function stackItemHint(id: string, service: ServiceStatus | undefined, packages: PackageView[], services: ServiceStatus[], t: ReturnType<typeof useT>, ready = true) {
   if (!ready) return t("stack.statusPending");
-  const base = id.split("@")[0];
-  const pinned = id.includes("@");
+  const base = stackItemBase(id);
+  const pinned = base !== id;
   const multi = pinned || services.some((s) => s.id.startsWith(`${base}@`)) || packages.some((p) => p.id === base && p.run?.singleInstance === false);
   const mode = pinned ? t("stack.fixedVersion") : multi ? t("stack.followVersion") : t("stack.currentVersion");
   const version = pinned ? id.slice(base.length + 1) : service?.version;
-  return `${mode}${version ? ` · ${version}` : ""}${!service ? ` · ${t("stack.notInstalled")}` : ""}`;
+  const target = stackServiceTarget(id, services, packages);
+  const installed = packages.some((p) => p.id === base && p.install && (!pinned || p.version === version));
+  const unavailable = target ? `${t("stack.versionMismatch")} ${target.service.version ?? "—"}`
+    : installed ? t("stack.serviceUnavailable") : t("stack.notInstalled");
+  return `${mode}${version ? ` · ${version}` : ""}${!service ? ` · ${unavailable}` : ""}`;
 }
 
 /* ============ 编辑器 ============ */
@@ -380,11 +395,15 @@ function StackEditor({ open, stack, services, packages, ready, loadError, retryL
     setError(null);
   }, [open, stack]);
 
-  const groups = React.useMemo(() => [...new Set(services.map((s) => s.id.split("@")[0]))].sort().map((base) => {
-    const versions = services.filter((s) => s.id.startsWith(`${base}@`)).sort((a, b) => cmpVersionDesc(a.version ?? "", b.version ?? ""));
-    return { base, versions, label: serviceFamilyName(base, packages, services) };
+  const groups = React.useMemo(() => [...new Set(services.map((s) => stackItemBase(s.id)))].sort().map((base) => {
+    const multi = !services.some((s) => s.id === base);
+    const versions = (multi ? services.filter((s) => stackItemBase(s.id) === base).map((s) => ({ id: s.id, version: s.version }))
+      : packages.filter((p) => p.id === base && p.install).map((p) => ({ id: `${base}@${p.version}`, version: p.version })))
+      .sort((a, b) => cmpVersionDesc(a.version ?? "", b.version ?? ""));
+    return { base, versions, multi, label: serviceFamilyName(base, packages, services) };
   }), [services, packages]);
-  const runtimeOnly = [...new Set(packages.filter((p) => p.install && !p.run && !services.some((s) => s.id.split("@")[0] === p.id)).map((p) => p.displayName))];
+  const runtimeOnly = [...new Set(packages.filter((p) => p.install && !p.run && !services.some((s) => stackItemBase(s.id) === p.id)).map((p) => p.displayName))];
+  const versionConflicts = ready ? stackVersionConflicts(items, services, packages) : [];
   const requestClose = (next: boolean) => { if (!busyRef.current) onOpenChange(next); };
   const move = (index: number, direction: -1 | 1) => {
     if (busyRef.current) return;
@@ -398,8 +417,10 @@ function StackEditor({ open, stack, services, packages, ready, loadError, retryL
   };
   const save = async () => {
     if (busyRef.current) return;
+    if (!ready) { setError(t("stack.statusPending")); return; }
     if (!name.trim()) { setError(t("stack.nameRequired")); return; }
     if (!items.length) { setError(t("stack.itemsRequired")); return; }
+    if (versionConflicts.length) { setError(t("stack.versionConflict")); return; }
     busyRef.current = true; setBusy(true); setError(null);
     try {
       await api.saveStack({ id: stack && !stack.builtin ? stack.id : undefined,
@@ -436,12 +457,12 @@ function StackEditor({ open, stack, services, packages, ready, loadError, retryL
               {!items.length && <p className="rounded-lg border border-dashed border-border p-4 text-center text-xs text-faint">{t("stack.noItems")}</p>}
               <ol className="space-y-2">
                 {items.map((item, index) => {
-                  const base = item.serviceId.split("@")[0];
+                  const base = stackItemBase(item.serviceId);
                   const group = groups.find((g) => g.base === base);
                   const service = resolveStackService(item.serviceId, services, packages);
                   const label = item.label || serviceFamilyName(base, packages, services);
-                  const multi = !!group?.versions.length || item.serviceId.includes("@");
-                  const selectedMissing = item.serviceId.includes("@") && !services.some((s) => s.id === item.serviceId);
+                  const showVersions = !!group?.versions.length || base !== item.serviceId;
+                  const selectedMissing = base !== item.serviceId && !group?.versions.some((v) => v.id === item.serviceId);
                   return (
                     <li key={item.editorKey} className="min-w-0 rounded-xl border border-border bg-fill/40 p-3">
                       <div className="flex min-w-0 items-center gap-2">
@@ -453,31 +474,34 @@ function StackEditor({ open, stack, services, packages, ready, loadError, retryL
                           <Button type="button" size="icon-sm" variant="ghost" title={`${t("stack.removeItem")} ${label}`} onClick={() => setItems((current) => current.filter((_, i) => i !== index))} disabled={busy}><X className="h-3.5 w-3.5" /></Button>
                         </div>
                       </div>
-                      {multi && (
+                      {showVersions && (
                         <Select value={item.serviceId} disabled={busy || !ready} onValueChange={(serviceId) => setItems((current) => current.some((other, i) => i !== index && other.serviceId === serviceId) ? current : current.map((other, i) => i === index ? { ...other, serviceId } : other))}>
                           <SelectTrigger className="mt-2 min-w-0 text-xs" aria-label={`${label} ${t("stack.versionRule")}`}><SelectValue /></SelectTrigger>
                           <SelectContent className="max-w-[calc(100vw-2rem)]">
                             <SelectItem value={base} disabled={items.some((other, i) => i !== index && other.serviceId === base)}>{t("stack.followVersion")}</SelectItem>
                             <SelectSeparator />
                             {group?.versions.map((version) => <SelectItem key={version.id} value={version.id} disabled={items.some((other, i) => i !== index && other.serviceId === version.id)}>{t("stack.fixedVersion")} {version.version}</SelectItem>)}
-                            {selectedMissing && <SelectItem value={item.serviceId}>{t("stack.fixedVersion")} {item.serviceId.slice(base.length + 1)} · {t("stack.notInstalled")}</SelectItem>}
+                            {selectedMissing && <SelectItem value={item.serviceId}>{stackItemHint(item.serviceId, service, packages, services, t, ready)}</SelectItem>}
                           </SelectContent>
                         </Select>
                       )}
                       <p className={cn("mt-2 text-[11px] [overflow-wrap:anywhere]", ready && !service ? "text-warn" : "text-muted")}>{stackItemHint(item.serviceId, service, packages, services, t, ready)}</p>
+                      {ready && !service && <Link href={`/packages?search=${encodeURIComponent(base)}`} className="mt-1 inline-block text-[11px] text-accent underline decoration-dashed underline-offset-2">{t("stack.openPackages")}</Link>}
                     </li>
                   );
                 })}
               </ol>
               <p className="text-[11px] text-faint">{t("stack.orderHint")}</p>
               <p className="text-[11px] text-muted">{t("stack.versionHint")}</p>
+              {versionConflicts.length > 0 && <p role="alert" className="text-xs text-error [overflow-wrap:anywhere]">{t("stack.versionConflict")} {versionConflicts.join(", ")}</p>}
             </div>
             <div className="space-y-2">
               <h3 className="text-xs font-medium">{t("stack.addService")}</h3>
               {!ready ? <p className="text-xs text-muted">{t(loadError ? "stack.statusPending" : "common.loading")}</p> : !groups.length ? <p className="text-xs text-faint">{t("stack.noCandidates")}</p> : (
                 <div className="flex flex-wrap gap-2">
                   {groups.map((group) => {
-                    const candidate = [group.base, ...group.versions.map((v) => v.id)].find((id) => !items.some((item) => item.serviceId === id));
+                    const candidate = !group.multi && items.some((item) => stackItemBase(item.serviceId) === group.base) ? undefined
+                      : [group.base, ...group.versions.map((v) => v.id)].find((id) => !items.some((item) => item.serviceId === id));
                     return <Button key={group.base} type="button" size="sm" variant="secondary" disabled={busy || !candidate} onClick={() => {
                       if (!candidate) return;
                       const editorKey = `added-${itemSequence.current++}`;
@@ -493,7 +517,7 @@ function StackEditor({ open, stack, services, packages, ready, loadError, retryL
         {error && <p role="alert" className="mx-4 mb-3 max-h-24 shrink-0 overflow-y-auto rounded-lg bg-error-soft p-3 text-xs text-error [overflow-wrap:anywhere] sm:mx-6">{error}</p>}
         <DialogFooter className="shrink-0 border-t border-border px-4 py-3 sm:px-6">
           <Button type="button" variant="ghost" onClick={() => requestClose(false)} disabled={busy}>{t("common.cancel")}</Button>
-          <Button form={formId} type="submit" disabled={busy}>
+          <Button form={formId} type="submit" disabled={busy || !ready || versionConflicts.length > 0}>
             {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}{t("common.save")}
           </Button>
         </DialogFooter>

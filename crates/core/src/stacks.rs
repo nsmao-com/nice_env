@@ -162,25 +162,34 @@ fn normalized_items(mut items: Vec<StackItem>) -> Vec<StackItem> {
 /// 把栈里的 id 展开成「实际存在、能启动的服务 id」。
 /// - 无版本的通用 id（mysql/php/nginx）→ 当前「使用中版本」对应的 service id
 /// - 未安装 / 非服务的项直接跳过，并在报告里说明
+struct ResolvedStackItem {
+    service_id: String,
+    expected_version: Option<String>,
+}
+
 fn resolve_items(
     store: &Store,
     manager: &Arc<ServiceManager>,
     stack: &Stack,
-) -> (Vec<StackItem>, Vec<String>) {
+) -> (Vec<ResolvedStackItem>, Vec<String>) {
     let known: Vec<String> = manager.list_status().into_iter().map(|s| s.id).collect();
     let mut runnable = Vec::new();
     let mut skipped = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for item in normalized_items(stack.items.clone()) {
         let sid = resolve_service_id(store, &known, &item.service_id);
-        match sid {
-            Some(sid) if seen.insert(sid.clone()) => runnable.push(StackItem {
-                service_id: sid,
-                label: item.label,
-                order: item.order,
-            }),
-            Some(_) => {},
-            None => skipped.push(item.service_id),
+        if let Some(sid) = sid {
+            // 精确注册 ID 可能是站点应用等不透明标识；只有别名才从 @ 后读取固定版本。
+            let expected_version = if sid != item.service_id && item.service_id.contains('@') {
+                item.service_id.split_once('@').map(|(_, version)| version.to_string())
+            } else {
+                manager.snapshot(&sid).and_then(|status| status.version)
+            };
+            if seen.insert((sid.clone(), expected_version.clone())) {
+                runnable.push(ResolvedStackItem { service_id: sid, expected_version });
+            }
+        } else {
+            skipped.push(item.service_id);
         }
     }
     (runnable, skipped)
@@ -192,7 +201,11 @@ fn resolve_service_id(store: &Store, known: &[String], wanted: &str) -> Option<S
         return Some(wanted.to_string());
     }
     // 显式固定的版本不存在时必须报告缺失，不能悄悄换成另一个版本。
-    if wanted.contains('@') {
+    if let Some((base, version)) = wanted.split_once('@') {
+        // 单实例仍以包 ID 注册；已安装的固定版本可解析，但执行前必须核对实际版本。
+        if known.iter().any(|id| id == base) && store.find_installed(base, Some(version)).is_some() {
+            return Some(base.to_string());
+        }
         return None;
     }
     // 所有按版本注册的服务都跟随已选择版本，不能取 HashMap 中的第一项。
@@ -203,6 +216,32 @@ fn resolve_service_id(store: &Store, known: &[String], wanted: &str) -> Option<S
         }
     }
     None
+}
+
+fn check_version_conflicts(items: &[ResolvedStackItem]) -> Result<()> {
+    let mut versions = std::collections::HashMap::new();
+    for item in items {
+        if let Some(previous) = versions.insert(&item.service_id, &item.expected_version) {
+            if previous != &item.expected_version {
+                return Err(AppError::new("STACK_VERSION_CONFLICT", format!("服务栈为单实例服务 {} 选择了不同版本", item.service_id))
+                    .with_hint("请编辑服务栈，为此服务保留一个版本规则后再操作"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_target_version(manager: &ServiceManager, item: &ResolvedStackItem) -> Result<()> {
+    let status = manager.snapshot(&item.service_id).ok_or_else(|| AppError::new("UNKNOWN_SERVICE", "服务已移除，请重新读取服务栈"))?;
+    if status.version != item.expected_version {
+        return Err(AppError::new("SERVICE_TARGET_CHANGED", format!("{} 要求版本 {}，当前服务版本为 {}", item.service_id,
+            item.expected_version.as_deref().unwrap_or("未知"), status.version.as_deref().unwrap_or("未知")))
+            .with_hint("请在套件页选择要求的版本，或编辑服务栈的版本规则后再操作"));
+    }
+    if status.state == ServiceState::Unknown {
+        return Err(AppError::new("SERVICE_STATE_UNKNOWN", "无法确认服务状态，请先重新检查"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -314,12 +353,12 @@ pub fn start(
     manager: &Arc<ServiceManager>,
     id: &str,
 ) -> Result<StackStartReport> {
-    start_with(store, paths, manager, id, |sid| crate::ops::start_service(store, paths, manager, sid))
+    start_with(store, paths, manager, id, |sid, _| crate::ops::start_service(store, paths, manager, sid))
 }
 
 pub(crate) fn start_with(
     store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, id: &str,
-    mut start: impl FnMut(&str) -> Result<()>,
+    mut start: impl FnMut(&str, Option<&str>) -> Result<()>,
 ) -> Result<StackStartReport> {
     let _operation = manager.lifecycle.try_lock()
         .ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后启动服务栈"))?;
@@ -329,7 +368,10 @@ pub(crate) fn start_with(
     let stack = store
         .get_stack(id)?
         .ok_or_else(|| AppError::new("STACK_NOT_FOUND", format!("找不到服务栈 {id}")))?;
+    crate::ops::register_services(paths, store, manager);
+    crate::generic::register_services(paths, store, manager);
     let (items, skipped) = resolve_items(store, manager, &stack);
+    check_version_conflicts(&items)?;
     if items.is_empty() {
         return Err(AppError::new(
             "STACK_EMPTY",
@@ -350,6 +392,10 @@ pub(crate) fn start_with(
     };
 
     for item in items {
+        if let Err(error) = check_target_version(manager, &item) {
+            report.failed.push(StackItemFailure { service_id: item.service_id, error: AppErrorInfo::from(error) });
+            continue;
+        }
         if manager.snapshot(&item.service_id).is_some_and(|s| matches!(s.state, ServiceState::Starting | ServiceState::Stopping)) {
             report.failed.push(StackItemFailure {
                 service_id: item.service_id.clone(),
@@ -361,7 +407,7 @@ pub(crate) fn start_with(
             .snapshot(&item.service_id)
             .map(|s| s.state == ServiceState::Running)
             .unwrap_or(false);
-        match start(&item.service_id) {
+        match start(&item.service_id, item.expected_version.as_deref()) {
             Ok(()) if running => report.already_running.push(item.service_id),
             Ok(()) => report.started.push(item.service_id),
             Err(e) => report.failed.push(StackItemFailure {
@@ -381,12 +427,12 @@ pub fn stop(
     manager: &Arc<ServiceManager>,
     id: &str,
 ) -> Result<StackStartReport> {
-    stop_with(store, paths, manager, id, |sid| crate::ops::stop_service(store, paths, manager, sid))
+    stop_with(store, paths, manager, id, |sid, _| crate::ops::stop_service(store, paths, manager, sid))
 }
 
 pub(crate) fn stop_with(
     store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, id: &str,
-    mut stop: impl FnMut(&str) -> Result<()>,
+    mut stop: impl FnMut(&str, Option<&str>) -> Result<()>,
 ) -> Result<StackStartReport> {
     let _operation = manager.lifecycle.try_lock()
         .ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后停止服务栈"))?;
@@ -394,7 +440,10 @@ pub(crate) fn stop_with(
     let stack = store
         .get_stack(id)?
         .ok_or_else(|| AppError::new("STACK_NOT_FOUND", format!("找不到服务栈 {id}")))?;
+    crate::ops::register_services(paths, store, manager);
+    crate::generic::register_services(paths, store, manager);
     let (mut items, skipped) = resolve_items(store, manager, &stack);
+    check_version_conflicts(&items)?;
     // 逆序：nginx 先停，数据库最后停
     items.reverse();
 
@@ -406,6 +455,10 @@ pub(crate) fn stop_with(
         failed: Vec::new(),
     };
     for item in items {
+        if let Err(error) = check_target_version(manager, &item) {
+            report.failed.push(StackItemFailure { service_id: item.service_id, error: AppErrorInfo::from(error) });
+            continue;
+        }
         // 认证停机失败后可以处于 Error 且仍持有进程，继续尝试真实停机。
         if manager.snapshot(&item.service_id).is_some_and(|s| matches!(s.state, ServiceState::Starting | ServiceState::Stopping)) {
             report.failed.push(StackItemFailure {
@@ -415,7 +468,7 @@ pub(crate) fn stop_with(
             continue;
         }
         let stopped = !manager.is_busy(&item.service_id);
-        match stop(&item.service_id) {
+        match stop(&item.service_id, item.expected_version.as_deref()) {
             Ok(()) if stopped => report.already_running.push(item.service_id),
             Ok(()) => report.started.push(item.service_id),
             Err(e) => report.failed.push(StackItemFailure {
@@ -433,7 +486,7 @@ pub fn status_of(store: &Store, manager: &Arc<ServiceManager>, stack: &Stack) ->
     let (items, skipped) = resolve_items(store, manager, stack);
     let total = items.len() + skipped.len();
     let running = items.iter().filter(|item| {
-        manager.snapshot(&item.service_id).is_some_and(|s| s.state == ServiceState::Running)
+        manager.snapshot(&item.service_id).is_some_and(|s| s.state == ServiceState::Running && s.version == item.expected_version)
     }).count();
     (running, total)
 }

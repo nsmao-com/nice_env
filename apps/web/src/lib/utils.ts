@@ -108,25 +108,53 @@ export function certificateCoversDomain(sans: string[], input: string): boolean 
   });
 }
 
-/** 与后端 stacks::resolve_service_id 一致：精确 ID 优先，固定版本缺失不替换。 */
-export function resolveStackService(id: string, services: ServiceStatus[], packages: PackageView[]) {
+/** 与后端 stacks::resolve_items 一致；保留实际实例和版本约束，供执行前核对。 */
+export function stackServiceTarget(id: string, services: ServiceStatus[], packages: PackageView[]) {
   const exact = services.find((service) => service.id === id);
-  if (exact || id.includes("@")) return exact;
+  if (exact) return { service: exact, expectedVersion: exact.version };
+  const separator = id.indexOf("@");
+  if (separator !== -1) {
+    const base = id.slice(0, separator), version = id.slice(separator + 1);
+    const service = services.find((service) => service.id === base);
+    return service && packages.some((p) => p.id === base && p.version === version && p.install)
+      ? { service, expectedVersion: version } : undefined;
+  }
   const installed = packages.filter((p) => p.id === id && p.install)
     .sort((a, b) => cmpVersionDesc(a.version, b.version));
   const active = installed.find((p) => p.active) ?? installed[0];
-  return active ? services.find((service) => service.id === `${id}@${active.version}`) : undefined;
+  const service = active ? services.find((service) => service.id === `${id}@${active.version}`) : undefined;
+  return service ? { service, expectedVersion: service.version } : undefined;
+}
+
+/** 状态只归属于符合版本约束的实例，不能把另一版本计为已运行。 */
+export function resolveStackService(id: string, services: ServiceStatus[], packages: PackageView[]) {
+  const target = stackServiceTarget(id, services, packages);
+  return target && target.service.version === target.expectedVersion ? target.service : undefined;
+}
+
+export function stackVersionConflicts(items: StackItem[], services: ServiceStatus[], packages: PackageView[]) {
+  const versions = new Map<string, string | null | undefined>();
+  const conflicts = new Set<string>();
+  for (const item of items) {
+    const target = stackServiceTarget(item.serviceId, services, packages);
+    if (!target) continue;
+    const { service, expectedVersion } = target;
+    if (versions.has(service.id) && versions.get(service.id) !== expectedVersion) conflicts.add(service.id);
+    versions.set(service.id, expectedVersion);
+  }
+  return [...conflicts];
 }
 
 /** 同一实例被“跟随版本”和固定版本重复引用时只计一次；缺失项仍计入总数。 */
 export function resolvedStackItems(items: StackItem[], services: ServiceStatus[], packages: PackageView[]) {
   const seen = new Set<string>();
   return [...items].sort((a, b) => a.order - b.order).flatMap((item) => {
-    const service = resolveStackService(item.serviceId, services, packages);
-    const key = service?.id ?? item.serviceId;
+    const target = stackServiceTarget(item.serviceId, services, packages);
+    const service = target && target.service.version === target.expectedVersion ? target.service : undefined;
+    const key = target ? JSON.stringify([target.service.id, target.expectedVersion]) : item.serviceId;
     if (seen.has(key)) return [];
     seen.add(key);
-    return [{ item, service }];
+    return [{ item, service, target }];
   });
 }
 

@@ -1202,6 +1202,16 @@ impl CoreState {
         self.stop_service(id)
     }
 
+    pub fn start_service_version(&self, id: &str, expected_version: &str) -> Result<()> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后启动"))?;
+        ensure_application_accepts_work()?;
+        ops::register_services(&self.paths, &self.store, &self.manager);
+        generic::register_services(&self.paths, &self.store, &self.manager);
+        self.check_service_version(id, expected_version)?;
+        self.start_service(id)
+    }
+
     pub fn restart_service_version(&self, id: &str, expected_version: &str) -> Result<()> {
         let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
         let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重启"))?;
@@ -1424,12 +1434,18 @@ impl CoreState {
     /// 一键启动整栈；单项失败不阻断其它项，结果逐项回报
     pub fn start_stack(&self, id: &str) -> Result<model::StackStartReport> {
         let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
-        stacks::start_with(&self.store, &self.paths, &self.manager, id, |sid| self.start_service(sid))
+        stacks::start_with(&self.store, &self.paths, &self.manager, id, |sid, version| match version {
+            Some(version) => self.start_service_version(sid, version),
+            None => self.start_service(sid),
+        })
     }
 
     pub fn stop_stack(&self, id: &str) -> Result<model::StackStartReport> {
         let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
-        stacks::stop_with(&self.store, &self.paths, &self.manager, id, |sid| self.stop_service(sid))
+        stacks::stop_with(&self.store, &self.paths, &self.manager, id, |sid, version| match version {
+            Some(version) => self.stop_service_version(sid, version),
+            None => self.stop_service(sid),
+        })
     }
 
     pub fn bulk_start(&self, ids: &[String]) -> Result<bulk::BulkReport> {

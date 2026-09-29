@@ -201,7 +201,6 @@ export default function SettingsPage() {
   const migrationErrorRef = React.useRef<HTMLDivElement>(null);
   React.useEffect(() => { if (migrationError) migrationErrorRef.current?.focus(); }, [migrationError]);
   const [localFonts, setLocalFonts] = React.useState<string[]>([]);
-  const { data: stacks } = useStacks();
   const manifestQuery = useQuery({
     queryKey: ["manifest-status"],
     queryFn: api.manifestStatus,
@@ -913,24 +912,7 @@ export default function SettingsPage() {
                 <SettingRow label={t("settings.minimizeToTray")}>
                   <Switch checked={settings.minimizeToTray} onCheckedChange={(v) => update("minimizeToTray", v)} />
                 </SettingRow>
-                <SettingRow label={t("settings.startStack")}>
-                  <Select
-                    value={settings.startStackOnLaunch || "__none__"}
-                    onValueChange={(v) => update("startStackOnLaunch", v === "__none__" ? "" : v)}
-                  >
-                    <SelectTrigger className="h-8 w-52 text-xs">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__none__">{t("settings.startStackNone")}</SelectItem>
-                      {stacks.map((s) => (
-                        <SelectItem key={s.id} value={s.id}>
-                          {s.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </SettingRow>
+                <StartupStackSetting />
               </CardContent>
             </Card>
           )}
@@ -1489,6 +1471,69 @@ function WatchdogPanel({ enabled, onChange }: { enabled: boolean; onChange: (val
       )}
     </div>
   );
+}
+
+function StartupStackSetting() {
+  const t = useT();
+  const client = useQueryClient();
+  const stacks = useStacks();
+  const busyRef = React.useRef(false);
+  const mounted = React.useRef(true);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState<ReturnType<typeof normalizeError> | null>(null);
+  React.useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const options = { queryKey: ["startup-stack-setting"], queryFn: async () => {
+    const value = await api.getStartStackOnLaunch();
+    if (typeof value !== "string") throw { code: "STARTUP_SETTING_INVALID", message: t("settings.startStackReadFailed") };
+    return value;
+  }, networkMode: "always" as const, staleTime: 0, retry: false };
+  const query = useQuery(options);
+  const ready = typeof query.data === "string" && !query.error;
+  const stacksReady = stacks.dataUpdatedAt > 0 && !stacks.error;
+  const missing = ready && query.data !== "" && stacksReady && !stacks.data.some((stack) => stack.id === query.data);
+  const problem = error ?? (query.error ? normalizeError(query.error) : stacks.error ? normalizeError(stacks.error) : null);
+  const run = async (id?: string) => {
+    if (busyRef.current || (id !== undefined && (!ready || query.isFetching || (id !== "" && (!stacksReady || !stacks.data.some((stack) => stack.id === id)))))) return;
+    busyRef.current = true; setBusy(true); setError(null);
+    let failure: ReturnType<typeof normalizeError> | null = null;
+    try {
+      if (id !== undefined) {
+        try { await api.setSetting("startStackOnLaunch", id); }
+        catch (error) { failure = normalizeError(error); }
+      }
+      await client.cancelQueries({ queryKey: options.queryKey });
+      try {
+        const actual = await client.fetchQuery(options);
+        client.setQueryData<AppSettings>(["settings"], (previous) => previous ? { ...previous, startStackOnLaunch: actual } : previous);
+        if (!failure && id !== undefined && actual !== id) failure = { code: "STARTUP_SETTING_CHANGED", message: t("settings.startStackChanged") };
+      } catch (error) { failure ??= normalizeError(error); }
+      await stacks.refetch();
+      if (mounted.current) {
+        setError(failure);
+        if (failure) toast.error(failure.message);
+        else if (id !== undefined) toast.success(t("settings.saved"));
+      }
+    } finally { busyRef.current = false; if (mounted.current) setBusy(false); }
+  };
+  return <div className="space-y-2">
+    <SettingRow label={t("settings.startStack")}>
+      {ready ? <Select value={query.data || "__none__"} disabled={busy || query.isFetching} onValueChange={(value) => void run(value === "__none__" ? "" : value)}>
+        <SelectTrigger className="h-auto min-h-8 w-full text-xs sm:w-60" aria-label={t("settings.startStack")}><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="__none__">{t("settings.startStackNone")}</SelectItem>
+          {query.data && !stacks.data.some((stack) => stack.id === query.data) && <SelectItem value={query.data} disabled>{t(stacks.error ? "packages.statusUnknown" : stacksReady ? "settings.startStackUnavailable" : "common.loading")}</SelectItem>}
+          {stacks.data.map((stack) => <SelectItem key={stack.id} value={stack.id} disabled={!stacksReady}>{stack.name}</SelectItem>)}
+        </SelectContent>
+      </Select> : <span role="status" className="text-xs text-muted">{t(query.isFetching ? "common.loading" : "packages.statusUnknown")}</span>}
+    </SettingRow>
+    <p className="text-[11.5px] leading-relaxed text-faint">{t("settings.startStackHint")}</p>
+    {busy && <p role="status" className="text-xs text-muted">{t("common.loading")}</p>}
+    {missing && <p role="alert" className="text-xs text-warn">{t("settings.startStackMissing")}</p>}
+    {problem && <div role="alert" className="space-y-2 rounded-lg bg-error-soft p-3 text-xs text-error [overflow-wrap:anywhere]">
+      <p>{problem.message}</p>{problem.hint && <p>{problem.hint}</p>}
+      <Button size="sm" variant="secondary" disabled={busy || query.isFetching} onClick={() => void run()}>{t("packages.reload")}</Button>
+    </div>}
+  </div>;
 }
 
 function AutostartSetting() {

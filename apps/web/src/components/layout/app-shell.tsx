@@ -3,7 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, RefreshCw } from "lucide-react";
+import { AlertTriangle, RefreshCw, Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useUI } from "@/lib/store";
 import { Sidebar } from "./sidebar";
@@ -58,7 +58,7 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
 
   /* 导入配置后端口/栈/站点都可能变，统一让相关查询失效 */
   React.useEffect(() => {
-    const onImported = () => invalidate("settings", "stacks", "sites", "hosts", "certs", "services", "packages");
+    const onImported = () => invalidate("settings", "startup-stack-setting", "stacks", "sites", "hosts", "certs", "services", "packages");
     window.addEventListener("nsb:config-imported", onImported);
     return () => window.removeEventListener("nsb:config-imported", onImported);
   }, [invalidate]);
@@ -81,6 +81,7 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
           {/* 路由内容由 Next 管理；避免退出动画保留旧树或让返回页面停留在透明状态。 */}
           <div className="mx-auto h-full w-full max-w-[1240px] px-3 py-4 sm:px-6 sm:py-6">
             <RecoveryAlert />
+            <StartupStackAlert />
             {children}
           </div>
         </main>
@@ -100,6 +101,51 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
       <WindowControls />
     </div>
   );
+}
+
+function StartupStackAlert() {
+  const t = useT();
+  const [dismissed, setDismissed] = React.useState(false);
+  const query = useQuery({
+    queryKey: ["startup-stack-status"], queryFn: api.startupStackStatus, enabled: isTauri,
+    networkMode: "always", retry: false,
+    refetchInterval: (state) => ["waiting", "running"].includes(state.state.data?.phase ?? "waiting") && !state.state.error ? 1000 : false,
+  });
+  const status = query.data;
+  const running = status?.phase === "running";
+  if (!isTauri || dismissed || (!query.error && !running && status?.phase !== "partial" && status?.phase !== "failed")) return null;
+  const problem = query.error ? t("startupStack.readFailed") : status?.error?.message;
+  const report = status?.report;
+  return <section role={running && !query.error ? "status" : "alert"} className="mb-5 min-w-0 space-y-3 rounded-xl border border-warn/25 bg-warn-soft px-4 py-3 [overflow-wrap:anywhere]">
+    <div className="flex items-start gap-2 text-warn">
+      {running && !query.error ? <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none" /> : <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />}
+      <div className="min-w-0 flex-1">
+        <h2 className="text-[13px] font-medium">{t(query.error ? "startupStack.unknown" : running ? "startupStack.running" : "startupStack.incomplete")}</h2>
+        {(status?.stackName || status?.stackId) && <p className="mt-1 text-xs text-secondary">{status.stackName ?? status.stackId}</p>}
+      </div>
+    </div>
+    {problem && <p className="text-xs text-error">{problem}</p>}
+    {!query.error && status?.error?.hint && <p className="text-xs text-muted">{status.error.hint}</p>}
+    {report && <>
+      <p className="text-xs text-secondary">{t("bulk.resultSummary").replace("{ok}", String(report.started.length)).replace("{already}", String(report.alreadyRunning.length)).replace("{fail}", String(report.failed.length))}</p>
+      <ul className="max-h-40 space-y-2 overflow-y-auto text-xs leading-relaxed">
+        {report.failed.map(({ serviceId, error }) => <li key={serviceId} className="space-y-1">
+          <p className="text-error">{serviceId} · {error.message}</p>
+          {error.hint && <p className="text-muted">{error.hint}</p>}
+          <Link className="inline-block underline underline-offset-2" href={`/logs?service=${encodeURIComponent(serviceId)}`}>{t("logs.title")}</Link>
+        </li>)}
+        {report.skipped.map((id) => <li key={`missing:${id}`} className="text-warn">
+          {id} · {t("bulk.unavailable")} · <Link className="underline underline-offset-2" href={`/packages?search=${encodeURIComponent(id.split("@")[0])}`}>{t("nav.packages")}</Link>
+        </li>)}
+      </ul>
+    </>}
+    {!running && <p className="text-xs text-muted">{t("startupStack.recoveryHint")}</p>}
+    <div className="flex flex-wrap items-center gap-2">
+      {query.error && <Button size="sm" variant="outline" disabled={query.isFetching} onClick={() => void query.refetch()}>{t("packages.reload")}</Button>}
+      <Button size="sm" variant="outline" asChild><Link href="/stacks">{t("stack.title")}</Link></Button>
+      {(!running || query.error) && <Button size="sm" variant="ghost" onClick={() => setDismissed(true)}>{t("common.close")}</Button>}
+    </div>
+  </section>;
 }
 
 function RecoveryAlert() {

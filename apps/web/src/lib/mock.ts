@@ -1212,6 +1212,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (!s) throw { code: "STACK_NOT_FOUND", message: "找不到服务栈" };
       if (s.builtin) throw { code: "STACK_BUILTIN", message: "内置预设不能删除" };
       stacks.delete(args!.id as string);
+      if (settings.startStackOnLaunch === s.id) settings.startStackOnLaunch = "";
       return true as T;
     }
     case "start_stack":
@@ -3415,8 +3416,16 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return { ...settings } as T;
     case "get_autostart_status":
       throw { code: "DESKTOP_ONLY", message: "请在桌面应用中读取系统的开机自启动状态。" };
+    case "startup_stack_status":
+      return { phase: "disabled", stackId: null, stackName: null, report: null, error: null } as T;
+    case "get_start_stack_on_launch":
+      return settings.startStackOnLaunch as T;
     case "set_setting": {
       if (args?.key === "autostart") throw { code: "DESKTOP_ONLY", message: "请在桌面应用中修改开机自启动，网页预览不能修改系统登录项。" };
+      if (args?.key === "startStackOnLaunch") {
+        if (typeof args.value !== "string") throw { code: "INVALID_STARTUP_STACK", message: "请选择要在启动时运行的服务栈" };
+        if (args.value !== "" && !stacks.has(args.value)) throw { code: "STACK_NOT_FOUND", message: "所选服务栈已删除，请重新选择" };
+      }
       Object.assign(settings, { [args!.key as string]: args!.value });
       return true as T;
     }

@@ -516,6 +516,16 @@ export const StackStartReport = z.object({
 });
 export type StackStartReport = z.infer<typeof StackStartReport>;
 
+/** 本次桌面启动的服务栈结果；查询不会再次启动服务。 */
+export const StartupStackStatus = z.object({
+  phase: z.enum(["waiting", "disabled", "running", "complete", "partial", "failed"]),
+  stackId: z.string().nullable(),
+  stackName: z.string().nullable(),
+  report: StackStartReport.nullable(),
+  error: AppErrorInfo.nullable(),
+});
+export type StartupStackStatus = z.infer<typeof StartupStackStatus>;
+
 /* ============ 端口监听者（工具箱：扫描端口 → 结束进程） ============ */
 
 export const ListenerInfo = z.object({

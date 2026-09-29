@@ -18,6 +18,22 @@ struct DesktopStartup {
     child: std::sync::Mutex<Option<nsb_core::restart::RestartChild>>,
     gate: Arc<nsb_core::restart::StartupGate>,
     frontend: nsb_core::restart::StartupGate,
+    stack: std::sync::Mutex<StartupStackStatus>,
+}
+
+#[derive(Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+enum StartupStackPhase { #[default] Waiting, Disabled, Running, Complete, Partial, Failed }
+
+/// 保留本次应用启动结果，前端晚加载或刷新时也能读取；不重新执行启动动作。
+#[derive(Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartupStackStatus {
+    phase: StartupStackPhase,
+    stack_id: Option<String>,
+    stack_name: Option<String>,
+    report: Option<nsb_core::model::StackStartReport>,
+    error: Option<AppError>,
 }
 struct PendingDataDir {
     result: nsb_core::paths::DataDirMigration,
@@ -63,6 +79,7 @@ pub fn run() {
         child: std::sync::Mutex::new(child),
         gate: Arc::new(nsb_core::restart::StartupGate::default()),
         frontend: nsb_core::restart::StartupGate::default(),
+        stack: std::sync::Mutex::new(StartupStackStatus::default()),
     });
     let setup_startup = startup.clone();
     tauri::Builder::default()
@@ -105,19 +122,46 @@ pub fn run() {
             tray::build(app.handle(), tray_state.clone())?;
 
             /* ---------- 启动时自动拉起指定服务栈（设置里可配） ---------- */
-            if let Some(stack_id) = tray_state
-                .store
-                .get_setting("startStackOnLaunch")
-                .filter(|s| !s.trim().is_empty())
             {
                 let st = tray_state.clone();
                 let handle_for_stack = app.handle().clone();
-                let gate = setup_startup.gate.clone();
-                std::thread::spawn(move || {
-                    if !gate.wait() { return; }
-                    let _ = st.start_stack(&stack_id);
+                let startup_for_stack = setup_startup.clone();
+                let spawned = std::thread::Builder::new().name("startup-stack".into()).spawn(move || {
+                    if !startup_for_stack.gate.wait() {
+                        *startup_for_stack.stack.lock().unwrap_or_else(|e| e.into_inner()) = StartupStackStatus {
+                            phase: StartupStackPhase::Failed,
+                            error: Some(AppError::new("STARTUP_CANCELLED", "本次应用启动已中止，未执行服务栈自动启动")),
+                            ..Default::default()
+                        };
+                        return;
+                    }
+                    let mut status = StartupStackStatus::default();
+                    let result = (|| -> nsb_core::error::Result<()> {
+                        let id = st.store.get_setting_checked("startStackOnLaunch")?.unwrap_or_default();
+                        if id.trim().is_empty() { status.phase = StartupStackPhase::Disabled; return Ok(()); }
+                        status.stack_id = Some(id.clone());
+                        let stack = st.list_stacks()?.into_iter().find(|stack| stack.id == id)
+                            .ok_or_else(|| AppError::new("STACK_NOT_FOUND", "启动时使用的服务栈已不存在")
+                                .with_hint("请到设置中重新选择启动服务栈，或关闭自动启动服务"))?;
+                        status.stack_name = Some(stack.name);
+                        status.phase = StartupStackPhase::Running;
+                        *startup_for_stack.stack.lock().unwrap_or_else(|e| e.into_inner()) = status.clone();
+                        let report = st.start_stack(&id)?;
+                        status.phase = if report.failed.is_empty() && report.skipped.is_empty() { StartupStackPhase::Complete } else { StartupStackPhase::Partial };
+                        status.report = Some(report);
+                        Ok(())
+                    })();
+                    if let Err(error) = result { status.phase = StartupStackPhase::Failed; status.error = Some(error); }
+                    *startup_for_stack.stack.lock().unwrap_or_else(|e| e.into_inner()) = status;
                     tray::refresh(&handle_for_stack);
                 });
+                if let Err(error) = spawned {
+                    *setup_startup.stack.lock().unwrap_or_else(|e| e.into_inner()) = StartupStackStatus {
+                        phase: StartupStackPhase::Failed,
+                        error: Some(AppError::internal("创建服务栈启动任务", error.to_string())),
+                        ..Default::default()
+                    };
+                }
             }
 
             /* ---------- 服务看门狗：意外退出自动拉起 ---------- */
@@ -249,6 +293,8 @@ pub fn run() {
             delete_stack,
             start_stack,
             stop_stack,
+            startup_stack_status,
+            get_start_stack_on_launch,
             // 站点
             list_sites,
             site_files_plan,
@@ -2986,6 +3032,12 @@ fn set_setting(
         let enabled = value.as_bool().ok_or_else(|| box_err(AppError::new("INVALID_AUTOSTART", "开机自启动开关值无效")))?;
         return save_autostart(&app, &state.store, enabled);
     }
+    if key == "startStackOnLaunch" {
+        let id = value.as_str().ok_or_else(|| box_err(AppError::new("INVALID_STARTUP_STACK", "请选择要在启动时运行的服务栈")))?;
+        if !id.is_empty() { map_jh(nsb_core::stacks::ensure_presets(&state.store))?; }
+        map_jh(state.store.set_start_stack_on_launch(id))?;
+        return Ok(true);
+    }
     if nsb_core::mongodb_auth::local_setting(&key) {
         return Err(box_err(nsb_core::AppError::new("SETTING_PROTECTED", "请通过 MongoDB 认证或计划备份界面修改此设置")));
     }
@@ -3002,6 +3054,16 @@ fn set_setting(
     if key == "defaultTld" { val = nsb_core::dns::normalize_tld(&val).map_err(box_err)?; }
     state.store.set_setting(&key, &val).map_err(box_err)?;
     Ok(true)
+}
+
+#[tauri::command]
+fn startup_stack_status(startup: State<'_, Arc<DesktopStartup>>) -> StartupStackStatus {
+    startup.stack.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+#[tauri::command]
+fn get_start_stack_on_launch(state: State<'_, Arc<CoreState>>) -> Result<String, tauri::Error> {
+    map_jh(state.store.get_setting_checked("startStackOnLaunch").map(|value| value.unwrap_or_default()))
 }
 
 #[tauri::command]

@@ -844,8 +844,25 @@ impl Store {
     }
 
     pub fn delete_stack(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock();
-        conn.execute("DELETE FROM stacks WHERE id=?1 AND builtin=0", params![id])?;
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let removed = tx.execute("DELETE FROM stacks WHERE id=?1 AND builtin=0", params![id])?;
+        if removed > 0 {
+            tx.execute("UPDATE settings SET value='' WHERE key='startStackOnLaunch' AND value=?1", params![id])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 选择与删除共用事务边界，避免保存刚被删除的启动服务栈。
+    pub fn set_start_stack_on_launch(&self, id: &str) -> Result<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if !id.is_empty() && !tx.query_row("SELECT EXISTS(SELECT 1 FROM stacks WHERE id=?1)", params![id], |row| row.get::<_, bool>(0))? {
+            return Err(AppError::new("STACK_NOT_FOUND", "所选服务栈已删除，请重新选择"));
+        }
+        Self::write_setting(&tx, "startStackOnLaunch", id)?;
+        tx.commit()?;
         Ok(())
     }
 

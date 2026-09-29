@@ -16,6 +16,7 @@ import type {
   Stack,
   StackInput,
   StackStartReport,
+  StartupStackStatus,
   HostsEntry,
   LogLine,
   DatabaseInfo,
@@ -734,6 +735,8 @@ export const pathenvReapply = () => safe(invoke<PathEnvStatus>("pathenv_reapply"
 /* 设置 */
 export const getSettings = () => safe(invoke<AppSettings>("get_settings"));
 export const getAutostartStatus = () => safe(invoke<boolean>("get_autostart_status"));
+export const startupStackStatus = () => safe(invoke<StartupStackStatus>("startup_stack_status"));
+export const getStartStackOnLaunch = () => safe(invoke<string>("get_start_stack_on_launch"));
 export const setSetting = (key: string, value: unknown) =>
   safe(invoke<boolean>("set_setting", { key, value }));
 /** 覆盖单个端口；port = null 表示恢复档位默认 */

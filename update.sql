@@ -165,3 +165,20 @@
 -- ON CONFLICT(key) DO UPDATE SET value=:value;
 -- :value 为已由操作系统确认的 'true' 或 'false'；读取/修改/确认失败不执行写入。
 -- 本机记录写入失败时恢复原系统状态，并向界面返回错误；界面重新读取真实状态。
+
+-- v0.2.147：启动服务栈选择与删除保持一致；本次启动报告仅保留在桌面进程内存中。
+-- 已核对 Store::open 的 SQLite 全部表及 settings/stacks 定义；无表结构变更或 migration。
+-- 以下为运行时参数化语句记录，不需要手工执行；本轮不操作真实用户数据库。
+-- 保存前在同一事务内确认 :stack_id 存在；空字符串表示关闭，不要求存在对应栈。
+-- BEGIN IMMEDIATE;
+-- SELECT EXISTS(SELECT 1 FROM stacks WHERE id=:stack_id);
+-- 确认存在或 :stack_id 为空后执行；不存在时回滚，不覆盖原选择。
+-- INSERT INTO settings(key,value) VALUES('startStackOnLaunch',:stack_id)
+-- ON CONFLICT(key) DO UPDATE SET value=:stack_id;
+-- COMMIT;
+-- 删除自定义栈时，只清理仍指向该栈的启动选择，两个操作同事务提交。
+-- BEGIN IMMEDIATE;
+-- DELETE FROM stacks WHERE id=:stack_id AND builtin=0;
+-- 仅上一条确实删除记录时执行；其他栈的启动选择保持不变。
+-- UPDATE settings SET value='' WHERE key='startStackOnLaunch' AND value=:stack_id;
+-- COMMIT;

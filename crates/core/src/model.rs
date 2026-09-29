@@ -153,6 +153,8 @@ pub struct SiteApplication {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct SiteRuntime {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proxy_rules: Vec<SiteProxyRule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cors: Option<SiteCors>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -197,6 +199,14 @@ pub struct SiteCors {
     pub exposed_headers: Vec<String>,
     pub credentials: bool,
     pub max_age: u32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteProxyRule {
+    pub path: String,
+    pub target: String,
+    pub strip_prefix: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

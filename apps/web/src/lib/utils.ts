@@ -94,6 +94,32 @@ export function siteRedirectTarget(redirect: SiteRuntime["redirect"], domains: s
   } catch { return bad; }
 }
 
+export function proxyRulePath(value: string): string | null {
+  const raw = value.trim(), path = raw.replace(/\/+$/, "");
+  return path && path.length <= 256 && /^\/[A-Za-z0-9/._~-]+$/.test(raw) && !raw.includes("//")
+    && !path.split("/").some((part) => part === "." || part === "..") ? path : null;
+}
+
+export function siteProxyProblem(runtime: SiteRuntime): "proxyRules.pathInvalid" | "proxyRules.targetInvalid" | "proxyRules.duplicate" | "proxyRules.limit" | "proxyRules.redirectInvalid" | null {
+  const rules = runtime.proxyRules ?? [];
+  if (rules.length > 16) return "proxyRules.limit";
+  if (rules.length && runtime.kind === "redirect") return "proxyRules.redirectInvalid";
+  const seen = new Set<string>();
+  for (const rule of rules) {
+    const path = proxyRulePath(rule.path);
+    if (!path) return "proxyRules.pathInvalid";
+    if (seen.has(path)) return "proxyRules.duplicate";
+    seen.add(path);
+    if (new TextEncoder().encode(rule.target).length > 8192 || !normalizeProxyTarget(rule.target)) return "proxyRules.targetInvalid";
+  }
+  return null;
+}
+
+export function proxyRuleExample(rule: NonNullable<SiteRuntime["proxyRules"]>[number]): string | null {
+  const path = proxyRulePath(rule.path), target = normalizeProxyTarget(rule.target);
+  return path && target ? `${target}${rule.stripPrefix ? "" : `${path.slice(1)}/`}users?limit=10` : null;
+}
+
 export const CORS_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
 
 export function corsOrigin(input: string): string | null {

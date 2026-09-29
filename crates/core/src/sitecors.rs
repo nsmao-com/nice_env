@@ -161,6 +161,7 @@ mod tests {
         let worker = std::thread::spawn(move || {
             while !stopping.load(Ordering::Relaxed) {
                 let Ok((mut stream, _)) = source.accept() else { std::thread::sleep(std::time::Duration::from_millis(10)); continue; };
+                stream.set_nonblocking(false).unwrap();
                 stream.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
                 let mut request = Vec::new(); let mut chunk = [0; 4096];
                 // 读完头和请求体再关闭连接，避免拆包或 PUT 请求留下未读数据而触发 TCP reset。

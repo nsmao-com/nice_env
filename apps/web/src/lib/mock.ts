@@ -64,7 +64,7 @@ import type {
 } from "@nsb/schema";
 import { emitLocal } from "./backend";
 import type { SiteFileBackup, SiteFileScope, SiteFilePlan, BackupPlanConfig } from "./api";
-import { cmpVersionDesc, resolvedStackItems, stackVersionConflicts, normalizeProxyTarget, siteRedirectTarget, siteCorsProblem, isPhpSiteSettingValid, isEnvSecretKey, isEnvFileName, applicationRuntime, validApplication } from "./utils";
+import { cmpVersionDesc, resolvedStackItems, stackVersionConflicts, normalizeProxyTarget, siteRedirectTarget, siteCorsProblem, siteProxyProblem, isPhpSiteSettingValid, isEnvSecretKey, isEnvFileName, applicationRuntime, validApplication } from "./utils";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const siteFileArchives = new Map<string, SiteFileBackup[]>();
@@ -1607,6 +1607,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (input.runtime.kind === "redirect" && siteRedirectTarget(input.runtime.redirect, input.domains).error) throw { code: "BAD_REDIRECT", message: "跳转地址无效，或目标指向本站域名" };
       if (input.runtime.kind === "redirect" && (input.template !== "none" || input.createDb || input.writeEnvExample || input.rewrite !== "none" || args?.existingProject)) throw { code: "BAD_REDIRECT", message: "跳转站点不使用项目模板、目录、伪静态或数据库绑定" };
       if (input.runtime.kind !== "redirect" && !input.rootDir.trim()) throw { code: "BAD_ROOT_DIR", message: "请选择项目目录" };
+      if (siteProxyProblem(input.runtime)) throw { code: "BAD_PROXY_RULE", message: "路径代理规则无效，请检查匹配路径和目标地址" };
       if (siteCorsProblem(input.runtime.cors)) throw { code: "BAD_CORS", message: "跨域设置无效，请检查来源、方法和请求头" };
       validateMockApplication(input.runtime);
       const id = `site-${uid()}`;
@@ -1651,6 +1652,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         if (next.rewrite !== "none" || next.db?.enabled) throw { code: "BAD_REDIRECT", message: "跳转站点不使用伪静态或数据库绑定" };
         next.rootDir = "";
       } else if (!next.rootDir.trim()) throw { code: "BAD_ROOT_DIR", message: "请选择项目目录" };
+      if (siteProxyProblem(next.runtime)) throw { code: "BAD_PROXY_RULE", message: "路径代理规则无效，请检查匹配路径和目标地址" };
       if (siteCorsProblem(next.runtime.cors)) throw { code: "BAD_CORS", message: "跨域设置无效，请检查来源、方法和请求头" };
       validateMockApplication(next.runtime);
       if (next.runtime.kind === "php" && Object.entries(next.phpOverrides ?? {}).some(([key, value]) => !isPhpSiteSettingValid(key, value, s.phpOverrides?.[key]))) {

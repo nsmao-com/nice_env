@@ -633,6 +633,7 @@ server {{
 {cors_headers}
 {cors_preflight}
 
+{proxy_rules}
 {body}}}
 "#,
         name = site.name,
@@ -649,6 +650,7 @@ server {{
         cors_maps = cors.as_ref().map_or("", |cors| cors.maps.as_str()),
         cors_headers = cors.as_ref().map_or("", |cors| cors.headers.as_str()),
         cors_preflight = cors.as_ref().map_or("", |cors| cors.before_content.as_str()),
+        proxy_rules = crate::siteproxy::nginx(&site.runtime),
     )
 }
 
@@ -1515,6 +1517,7 @@ pub fn render_httpd_vhost(
     </DirectoryMatch>
 
 {cors}
+{proxy_rules}
 {body}
 </VirtualHost>
 "#,
@@ -1525,6 +1528,7 @@ pub fn render_httpd_vhost(
         server_names = server_names,
         document_root = if site.runtime.kind == crate::model::SiteKind::Redirect { String::new() } else { format!("DocumentRoot \"{root}\"") },
         cors = site.runtime.cors.as_ref().map(crate::sitecors::apache).unwrap_or_default(),
+        proxy_rules = crate::siteproxy::apache(&site.runtime),
         ssl_lines = ssl_lines,
         body = body,
     )

@@ -56,6 +56,7 @@ fn main() {
             .to_string_lossy()
             .to_string(),
         runtime: nsb_core::model::SiteRuntime {
+            proxy_rules: Vec::new(),
             cors: None,
             redirect: None,
             custom_rewrite: None,

@@ -396,7 +396,10 @@ export const SiteCors = z.object({
   maxAge: z.number().int().min(0).max(86400),
 });
 export type SiteCors = z.infer<typeof SiteCors>;
+export const SiteProxyRule = z.object({ path: z.string(), target: z.string(), stripPrefix: z.boolean() });
+export type SiteProxyRule = z.infer<typeof SiteProxyRule>;
 export const SiteRuntime = z.object({
+  proxyRules: z.array(SiteProxyRule).max(16).optional(),
   cors: SiteCors.optional(),
   redirect: SiteRedirect.optional(),
   customRewrite: CustomRewrite.optional(),

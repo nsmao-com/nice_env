@@ -1175,6 +1175,7 @@ mod tests {
             id: id.into(), name: name.into(), domains: domains.iter().map(|v| (*v).into()).collect(),
             root_dir: root.to_string_lossy().into(),
             runtime: model::SiteRuntime {
+            proxy_rules: Vec::new(),
             cors: None,
             redirect: None,
             custom_rewrite: None,

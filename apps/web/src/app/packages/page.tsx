@@ -230,6 +230,8 @@ export default function PackagesPage() {
     refreshAll: refreshAllCatalogs,
   } = useVersionCatalogs(packages.map((p) => p.id));
   const [catalogRefreshing, setCatalogRefreshing] = React.useState(false);
+  const catalogRefreshRef = React.useRef(false);
+  const [catalogRefreshIssue, setCatalogRefreshIssue] = React.useState<{ message: string; hint?: string; failures: { id: string; error: string }[] } | null>(null);
   const [query, setQuery] = React.useState("");
   const [packageFilter, setPackageFilter] = React.useState<PackageFilter>("all");
   const [category, setCategory] = React.useState("all");
@@ -276,14 +278,26 @@ export default function PackagesPage() {
   const hasFilters = !!query.trim() || packageFilter !== "all" || category !== "all";
   const resetFilters = () => { setQuery(""); setPackageFilter("all"); setCategory("all"); };
   const refreshAllVersions = async () => {
-    if (!isTauri || catalogRefreshing || packages.length === 0) return;
+    if (!isTauri || catalogRefreshRef.current || packages.length === 0) return;
+    catalogRefreshRef.current = true;
     setCatalogRefreshing(true);
+    setCatalogRefreshIssue(null);
     try {
-      await refreshAllCatalogs();
-      toast.success(t("packages.versionsRefreshed"));
+      const catalogs = await refreshAllCatalogs();
+      const failures = catalogs.filter((catalog) => !!catalog.error).map((catalog) => ({ id: catalog.id, error: catalog.error! }));
+      const succeeded = catalogs.filter((catalog) => catalog.online && !catalog.error).length;
+      if (failures.length > 0) {
+        const message = t("packages.versionsPartiallyRefreshed").replace("{ok}", String(succeeded)).replace("{failed}", String(failures.length));
+        setCatalogRefreshIssue({ message, failures });
+        if (succeeded > 0) toast.warning(message); else toast.error(message);
+      } else if (succeeded > 0) toast.success(t("packages.versionsRefreshed"));
+      else toast.info(t("packages.noRemoteVersions"));
     } catch (error) {
-      toast.error(normalizeError(error).message);
+      const problem = normalizeError(error);
+      setCatalogRefreshIssue({ message: problem.message, hint: problem.hint, failures: [] });
+      toast.error(problem.message);
     } finally {
+      catalogRefreshRef.current = false;
       setCatalogRefreshing(false);
     }
   };
@@ -492,6 +506,22 @@ export default function PackagesPage() {
       />
 
       {readStatus}
+
+      {catalogRefreshIssue && <div role="alert" className="mb-4 space-y-2 rounded-xl border border-warn/30 bg-warn-soft p-3 text-xs leading-relaxed [overflow-wrap:anywhere]">
+        <p className="font-medium text-foreground">{catalogRefreshIssue.message}</p>
+        {catalogRefreshIssue.hint && <p className="text-secondary">{catalogRefreshIssue.hint}</p>}
+        {catalogRefreshIssue.failures.length > 0 && <>
+          <p className="text-secondary">{t("packages.versionsRefreshRecovery")}</p>
+          <details><summary className="cursor-pointer text-secondary">{t("packages.failedVersionSources")}</summary>
+            <ul className="mt-2 max-h-52 space-y-2 overflow-y-auto pr-2">
+              {catalogRefreshIssue.failures.map((failure) => <li key={failure.id}>
+                <p className="font-medium">{groups.find((group) => group.id === failure.id)?.displayName ?? failure.id}</p>
+                <p className="text-secondary">{failure.error}</p>
+              </li>)}
+            </ul>
+          </details>
+        </>}
+      </div>}
 
       <InstallTasksPanel onInspect={openInstall} />
 

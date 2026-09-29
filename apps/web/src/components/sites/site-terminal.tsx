@@ -7,6 +7,7 @@ import type { Site, ProjectRuntimeVersions } from "@nsb/schema";
 import * as api from "@/lib/api";
 import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { useT } from "@/lib/store";
+import { refreshVersionCatalog } from "@/lib/hooks";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -82,8 +83,7 @@ export function SiteTerminalButton({ site }: { site: Pick<Site, "id" | "name"> }
     if (running.current || project.isFetching) return;
     running.current = true; setBusy("lts"); setSaveError(null); setSaved(false); setLtsRefreshed(false);
     try {
-      const catalog = await api.versionCatalog("node", true);
-      qc.setQueryData(["version-catalogs", "node"], catalog);
+      const catalog = await refreshVersionCatalog(qc, "node");
       if (!catalog.online || catalog.error) throw { code: "NODE_LTS_REFRESH_FAILED", message: t("sites.project.ltsFailed"), hint: catalog.error || t("sites.project.ltsOffline") };
       const view = await api.projectRuntimeVersions(site.id);
       setDraft({ base: view, versions: { ...view.versions } }); qc.setQueryData(["project-runtimes", site.id], view);

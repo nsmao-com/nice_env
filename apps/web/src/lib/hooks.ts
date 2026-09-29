@@ -4,7 +4,7 @@ import type { DatabaseEngine } from "@nsb/schema";
 
 import * as React from "react";
 import { useEffect, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import * as api from "./api";
 import type { DownloadProgress, VersionCatalog, Site, ServiceStatus, Stack, StackStartReport, BulkReport } from "@nsb/schema";
 import { normalizeError, type AppErrorShape } from "./backend";
@@ -47,6 +47,31 @@ export function usePackages() {
   });
 }
 
+/** 同步所有套件列表缓存；较早返回的批量目录不能覆盖已刷新的单项。 */
+async function publishVersionCatalogs(qc: QueryClient, incoming: VersionCatalog[], replace: boolean) {
+  const filters = { queryKey: ["version-catalogs"], predicate: (query: { queryKey: readonly unknown[] }) => Array.isArray(query.queryKey[1]) };
+  await qc.cancelQueries(filters, { silent: true });
+  qc.setQueriesData<VersionCatalog[]>(filters, (previous) => {
+    // 单项结果不能冒充完整的首次加载；下方重新读取仍为空的活动列表。
+    if (!previous && !replace) return undefined;
+    const old = new Map((previous ?? []).map((catalog) => [catalog.id, catalog]));
+    const next = replace ? new Map<string, VersionCatalog>() : new Map(old);
+    for (const catalog of incoming) {
+      const current = old.get(catalog.id);
+      next.set(catalog.id, current?.cachedAt != null && catalog.cachedAt != null && current.cachedAt > catalog.cachedAt ? current : catalog);
+    }
+    return [...next.values()].sort((a, b) => a.id.localeCompare(b.id));
+  });
+  await qc.refetchQueries({ ...filters, type: "active", predicate: (query) => filters.predicate(query) && query.state.data === undefined });
+}
+
+/** 项目 LTS 刷新与套件菜单使用同一入口，不创建旧的单项缓存键。 */
+export async function refreshVersionCatalog(qc: QueryClient, id: string) {
+  const catalog = await api.versionCatalog(id, true);
+  await publishVersionCatalogs(qc, [catalog], false);
+  return catalog;
+}
+
 /**
  * 远程版本目录：返回 id → 该包从上游枚举到的完整版本列表。
  * 后端带 6 小时缓存，这里 staleTime 设长一些避免重复请求；
@@ -79,20 +104,16 @@ export function useVersionCatalogs(packageIds: string[]) {
   });
   const refresh = React.useCallback(async (id: string) => {
     try {
-      const catalog = await api.versionCatalog(id, true);
-      qc.setQueryData<VersionCatalog[]>(queryKey, (previous = []) => {
-        const next = new Map(previous.map((item) => [item.id, item]));
-        next.set(catalog.id, catalog);
-        return [...next.values()].sort((a, b) => a.id.localeCompare(b.id));
-      });
+      await refreshVersionCatalog(qc, id);
     } catch (error) {
       toastError(error);
     }
-  }, [qc, queryKey]);
+  }, [qc]);
   const refreshAll = React.useCallback(async () => {
     const catalogs = await api.versionCatalogs(true);
-    qc.setQueryData<VersionCatalog[]>(queryKey, catalogs);
-  }, [qc, queryKey]);
+    await publishVersionCatalogs(qc, catalogs, true);
+    return catalogs;
+  }, [qc]);
   return { byId, refresh, refreshAll };
 }
 

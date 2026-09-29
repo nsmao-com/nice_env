@@ -55,6 +55,7 @@ pub mod serde_proxy;
 pub mod services;
 pub mod sites;
 pub mod sitecors;
+pub mod siteaccess;
 pub mod siteproxy;
 pub mod sitebackup;
 pub mod stacks;

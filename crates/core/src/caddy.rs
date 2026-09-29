@@ -778,8 +778,10 @@ fn render_block(
         ))
     ));
     if !secure && site.https && site.runtime.https_redirect.is_some() {
+        out.push_str("\troute {\n");
+        out.push_str(&crate::siteaccess::caddy(site.runtime.access.as_ref())?);
         out.push_str(&https_redirect_line(site, https_port));
-        out.push_str("}\n");
+        out.push_str("\t}\n}\n");
         return Ok(out);
     }
     if site.runtime.kind != SiteKind::Redirect {
@@ -788,8 +790,9 @@ fn render_block(
             quoted(&nginx_path(Path::new(&site.root_dir)))
         ));
     }
-    // 显式 route 顺序：跨域 → 私有文件保护 → 路径代理 → 站点主体。
+    // 显式 route 顺序：来源限制 → 跨域 → 私有文件保护 → 路径代理 → 站点主体。
     out.push_str("\troute {\n");
+    out.push_str(&crate::siteaccess::caddy(site.runtime.access.as_ref())?);
     if let Some(policy) = &site.runtime.cors {
         out.push_str(&cors(policy)?);
     }

@@ -111,6 +111,7 @@ pub fn import_from(
     let current_domains: Vec<_> = store.list_sites()?.into_iter().flat_map(|site| site.domains).collect();
     for site in bundle.sites.iter().filter(|site| !site.domains.iter().any(|d| current_domains.contains(d))) {
         crate::sites::validate_https_redirect(site.https, &site.runtime)?;
+        if let Some(access) = &site.runtime.access { crate::siteaccess::normalize(access)?; }
         if let Some(cors) = &site.runtime.cors { crate::sitecors::normalize(cors)?; }
         crate::siteproxy::normalize(&site.runtime)?;
         if site.runtime.kind == crate::model::SiteKind::Redirect {
@@ -183,6 +184,7 @@ pub fn import_from(
             .ok();
         }
         let mut imported = site.clone();
+        imported.runtime.access = site.runtime.access.as_ref().map(crate::siteaccess::normalize).transpose()?;
         imported.runtime.cors = site.runtime.cors.as_ref().map(crate::sitecors::normalize).transpose()?;
         imported.runtime.proxy_rules = crate::siteproxy::normalize(&site.runtime)?;
         if imported.runtime.kind == crate::model::SiteKind::Redirect { imported.root_dir.clear(); }

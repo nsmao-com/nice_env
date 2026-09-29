@@ -396,9 +396,12 @@ export const SiteCors = z.object({
   maxAge: z.number().int().min(0).max(86400),
 });
 export type SiteCors = z.infer<typeof SiteCors>;
+export const SiteAccess = z.object({ mode: z.enum(["allow", "deny"]), addresses: z.array(z.string()).min(1).max(32) });
+export type SiteAccess = z.infer<typeof SiteAccess>;
 export const SiteProxyRule = z.object({ path: z.string(), target: z.string(), stripPrefix: z.boolean() });
 export type SiteProxyRule = z.infer<typeof SiteProxyRule>;
 export const SiteRuntime = z.object({
+  access: SiteAccess.optional(),
   httpsRedirect: z.union([z.literal(307), z.literal(308)]).optional(),
   proxyRules: z.array(SiteProxyRule).max(16).optional(),
   cors: SiteCors.optional(),

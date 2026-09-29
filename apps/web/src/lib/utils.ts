@@ -9,6 +9,29 @@ export const APPLICATION_RUNTIMES = [
   { kind: "go", id: "go", label: "Go", args: ["run", "."] },
 ] as const;
 
+/** 地址格式与原生访问限制一致；网段规范化由后端统一完成。 */
+export function validSiteAccessAddress(value: string): boolean {
+  const parts = value.trim().split("/");
+  if (!parts[0] || value.trim().length > 64 || parts.length > 2 || (parts.length === 2 && !/^\d+$/.test(parts[1]))) return false;
+  const [host, mask] = parts;
+  if (host.includes(":")) {
+    if (!/^[\da-fA-F:.]+$/.test(host)) return false;
+    try {
+      const normalized = new URL(`http://[${host}]/`).hostname;
+      const mapped = normalized.startsWith("[::ffff:");
+      return mask === undefined || (Number(mask) <= 128 && (!mapped || Number(mask) >= 96));
+    } catch { return false; }
+  }
+  return /^(?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3}$/.test(host)
+    && host.split(".").every((part) => Number(part) <= 255) && (mask === undefined || Number(mask) <= 32);
+}
+
+export function siteAccessProblem(access: SiteRuntime["access"]): "siteAccess.invalid" | "siteAccess.count" | null {
+  if (!access) return null;
+  if (!access.addresses.length || access.addresses.length > 32) return "siteAccess.count";
+  return !["allow", "deny"].includes(access.mode) || access.addresses.some((value) => !validSiteAccessAddress(value)) ? "siteAccess.invalid" : null;
+}
+
 export function applicationRuntime(kind: SiteRuntime["kind"]) {
   return APPLICATION_RUNTIMES.find((runtime) => runtime.kind === kind);
 }

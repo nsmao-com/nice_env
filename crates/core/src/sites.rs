@@ -352,6 +352,7 @@ fn validate_site_fields(
     if !matches!(runtime.web_server.as_str(), "nginx" | "apache" | "caddy") {
         return Err(AppError::new("BAD_RUNTIME", "请选择 Nginx、Apache 或 Caddy"));
     }
+    if let Some(access) = &runtime.access { crate::siteaccess::normalize(access)?; }
     if let Some(cors) = &runtime.cors { crate::sitecors::normalize(cors)?; }
     crate::siteproxy::normalize(runtime)?;
     if let Some(custom) = &runtime.custom_rewrite {
@@ -553,6 +554,7 @@ fn create_inner(
     normalized.domains = normalize_domains(&input.domains);
     normalized.root_dir = input.root_dir.trim().to_string();
     normalized.runtime.cors = input.runtime.cors.as_ref().map(crate::sitecors::normalize).transpose()?;
+    normalized.runtime.access = input.runtime.access.as_ref().map(crate::siteaccess::normalize).transpose()?;
     normalized.runtime.proxy_rules = crate::siteproxy::normalize(&input.runtime)?;
     if normalized.runtime.kind == SiteKind::Redirect { normalized.root_dir.clear(); }
     if normalized.runtime.kind == SiteKind::Php
@@ -822,6 +824,7 @@ pub fn update(
     current.root_dir = site_patch.root_dir.trim().to_string();
     current.runtime = site_patch.runtime.clone();
     current.runtime.cors = site_patch.runtime.cors.as_ref().map(crate::sitecors::normalize).transpose()?;
+    current.runtime.access = site_patch.runtime.access.as_ref().map(crate::siteaccess::normalize).transpose()?;
     current.runtime.proxy_rules = crate::siteproxy::normalize(&site_patch.runtime)?;
     if current.runtime.kind == SiteKind::Redirect { current.root_dir.clear(); }
     let certificate_changed =
@@ -2810,6 +2813,7 @@ mod scaffold_tests {
             domains: vec!["t.test".into()],
             root_dir: String::new(),
             runtime: SiteRuntime {
+            access: None,
             https_redirect: None,
             proxy_rules: Vec::new(),
             cors: None,

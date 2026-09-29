@@ -619,6 +619,7 @@ pub fn render_site_conf(
         String::new()
     };
 
+    let (access_maps, access_gate) = crate::siteaccess::nginx(&site.id, site.runtime.access.as_ref());
     let cors = site.runtime.cors.as_ref().map(|cors| crate::sitecors::nginx(&site.id, cors));
     let body = match &site.runtime.kind {
         crate::model::SiteKind::Redirect => redirect_directives(site, false),
@@ -662,6 +663,7 @@ pub fn render_site_conf(
 
     format!(
         r#"# site: {name} ({id}) — NiceEnv 托管
+{access_maps}
 {cors_maps}
 {http_redirect}
 server {{
@@ -677,6 +679,7 @@ server {{
 
     location ~ /\.(?!well-known(?:/|$)) {{ deny all; }}
 {cors_headers}
+{access_gate}
 {cors_preflight}
 
 {proxy_rules}
@@ -697,7 +700,7 @@ server {{
         http_redirect = https_redirect.map(|status| {
             let suffix = https_port_suffix(https_port);
             let hosts = https_redirect_hosts(site);
-            format!("server {{\n    listen 127.0.0.1:{http_port};\n    server_name {server_names};\n    access_log \"{}\";\n    error_log \"{}\" warn;\n    if ($host !~* \"^(?:{hosts})$\") {{ return 421; }}\n    return {status} \"https://$host{suffix}$request_uri\";\n}}\n", nginx_path(&log_dir.join(format!("{}.access.log", site.id))), nginx_path(&log_dir.join(format!("{}.error.log", site.id))))
+            format!("server {{\n    listen 127.0.0.1:{http_port};\n    server_name {server_names};\n    access_log \"{}\";\n    error_log \"{}\" warn;\n{access_gate}    if ($host !~* \"^(?:{hosts})$\") {{ return 421; }}\n    return {status} \"https://$host{suffix}$request_uri\";\n}}\n", nginx_path(&log_dir.join(format!("{}.access.log", site.id))), nginx_path(&log_dir.join(format!("{}.error.log", site.id))))
         }).unwrap_or_default(),
         cors_headers = cors.as_ref().map_or("", |cors| cors.headers.as_str()),
         cors_preflight = cors.as_ref().map_or("", |cors| cors.before_content.as_str()),
@@ -1474,6 +1477,7 @@ pub fn render_httpd_vhost(
     php_pool: Option<u16>,
 ) -> String {
     let server_names = site.domains.join(" ");
+    let access = crate::siteaccess::apache(site.runtime.access.as_ref());
     let primary = site
         .domains
         .first()
@@ -1579,6 +1583,7 @@ pub fn render_httpd_vhost(
         Require all denied
     </DirectoryMatch>
 
+{access}
 {cors}
 {proxy_rules}
 {body}
@@ -1600,7 +1605,7 @@ pub fn render_httpd_vhost(
         if let Some(status) = site.runtime.https_redirect {
             let suffix = https_port_suffix(https_port);
             let hosts = https_redirect_hosts(site);
-            let http = format!("# NiceEnv HTTP to HTTPS\n<VirtualHost *:{http_port}>\n    ServerName {primary}\n    ServerAlias {server_names}\n    CustomLog \"${{NSB_ETC}}/logs/{}.access.log\" \"%h %l %u %t \\\"%r\\\" %>s %b\"\n    ErrorLog \"${{NSB_ETC}}/logs/{}.error.log\"\n    AllowEncodedSlashes NoDecode\n    RewriteEngine On\n    RewriteCond %{{THE_REQUEST}} \"\\s(/[^\\s?]*)(?:\\?[^\\s]*)?\\s\"\n    RewriteRule ^ - [E=NSB_HTTPS_URI:%1]\n    RewriteCond %{{ENV:NSB_HTTPS_URI}} !^/\n    RewriteRule ^ - [R=400,L]\n    RewriteCond %{{HTTP_HOST}} \"^({hosts})(?::[0-9]+)?$\" [NC]\n    RewriteRule ^ \"https://%1{suffix}%{{ENV:NSB_HTTPS_URI}}\" [R={status},L,NE]\n    RewriteRule ^ - [R=421,L]\n</VirtualHost>\n", site.id, site.id);
+            let http = format!("# NiceEnv HTTP to HTTPS\n<VirtualHost *:{http_port}>\n    ServerName {primary}\n    ServerAlias {server_names}\n    CustomLog \"${{NSB_ETC}}/logs/{}.access.log\" \"%h %l %u %t \\\"%r\\\" %>s %b\"\n    ErrorLog \"${{NSB_ETC}}/logs/{}.error.log\"\n    AllowEncodedSlashes NoDecode\n    RewriteEngine On\n{access}    RewriteCond %{{THE_REQUEST}} \"\\s(/[^\\s?]*)(?:\\?[^\\s]*)?\\s\"\n    RewriteRule ^ - [E=NSB_HTTPS_URI:%1]\n    RewriteCond %{{ENV:NSB_HTTPS_URI}} !^/\n    RewriteRule ^ - [R=400,L]\n    RewriteCond %{{HTTP_HOST}} \"^({hosts})(?::[0-9]+)?$\" [NC]\n    RewriteRule ^ \"https://%1{suffix}%{{ENV:NSB_HTTPS_URI}}\" [R={status},L,NE]\n    RewriteRule ^ - [R=421,L]\n</VirtualHost>\n", site.id, site.id);
             return format!("{http}\n{vhost}");
         }
         let http = vhost

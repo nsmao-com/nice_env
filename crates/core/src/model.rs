@@ -153,6 +153,8 @@ pub struct SiteApplication {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct SiteRuntime {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<SiteAccess>,
     /// HTTP 入口转到本站 HTTPS；仅支持保留请求方法的 307 / 308，旧站点默认关闭。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub https_redirect: Option<u16>,
@@ -202,6 +204,17 @@ pub struct SiteCors {
     pub exposed_headers: Vec<String>,
     pub credentials: bool,
     pub max_age: u32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SiteAccessMode { Allow, Deny }
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteAccess {
+    pub mode: SiteAccessMode,
+    pub addresses: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

@@ -3550,6 +3550,8 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "get_data_dir":
       return "C:\\Users\\Demo\\AppData\\Local\\NiceEnv" as T;
     case "get_integration_tools":
+    case "get_mcp_clients":
+    case "configure_mcp_client":
       throw { code: "DESKTOP_ONLY", message: "请在 NiceEnv 桌面应用中检查 CLI 与 MCP 工具" };
     case "migrate_data_dir":
       throw { code: "DESKTOP_ONLY", message: "数据目录迁移需要在桌面应用中执行" };

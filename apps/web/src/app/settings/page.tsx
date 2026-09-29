@@ -1403,17 +1403,19 @@ function integrationCliCommand(tools: api.IntegrationTools): string | null {
   return `NSB_HOME=${quote(tools.dataDir)} ${quote(tools.cli.path)} status`;
 }
 
-function integrationMcpConfig(tools: api.IntegrationTools): string | null {
+function integrationMcpConfig(tools: api.IntegrationTools, format: "standard" | "vscode" = "standard"): string | null {
   if (!tools.mcp.available) return null;
-  return JSON.stringify({ mcpServers: { niceenv: {
+  const server = {
     command: tools.mcp.path,
     args: [],
     env: { NSB_HOME: tools.dataDir },
-  } } }, null, 2);
+  };
+  return JSON.stringify(format === "vscode" ? { servers: { niceenv: { type: "stdio", ...server } } } : { mcpServers: { niceenv: server } }, null, 2);
 }
 
 function IntegrationToolsPanel() {
   const t = useT();
+  const [mcpFormat, setMcpFormat] = React.useState<"standard" | "vscode">("standard");
   const query = useQuery({
     queryKey: ["integration-tools"],
     queryFn: api.getIntegrationTools,
@@ -1425,7 +1427,7 @@ function IntegrationToolsPanel() {
   const data = query.isError ? undefined : query.data;
   const problem = query.isError ? normalizeError(query.error) : null;
   const cliCommand = data ? integrationCliCommand(data) : null;
-  const mcpConfig = data ? integrationMcpConfig(data) : null;
+  const mcpConfig = data ? integrationMcpConfig(data, mcpFormat) : null;
   return <Card className="min-w-0">
     <CardHeader className="flex-row flex-wrap items-center gap-3">
       <Terminal className="h-4 w-4 shrink-0 text-primary" />
@@ -1468,12 +1470,24 @@ function IntegrationToolsPanel() {
                 {tool.error && <p className="text-error">{tool.error.message}</p>}
                 <p>{t("settings.integration.missingHint")}</p>
               </div>}
+              {kind === "mcp" && <McpClientsPanel toolAvailable={tool.available} />}
               {code && <>
-                <p className="text-[11.5px] leading-relaxed text-faint">{t(kind === "cli"
-                  ? data.platform === "windows" ? "settings.integration.powershellHint" : "settings.integration.shellHint"
-                  : "settings.integration.configHint")}</p>
-                <CodeBlock code={code} lang={kind === "cli" ? "shell" : "json"} wrap showLineNumbers={false}
-                  title={kind === "cli" ? data.platform === "windows" ? "PowerShell" : "sh / bash / zsh" : "Claude Desktop / Cursor · mcpServers"} />
+                {kind === "mcp" ? <details className="min-w-0 space-y-3">
+                  <summary className="cursor-pointer rounded-md py-1 text-xs text-secondary focus-visible:outline-2 focus-visible:outline-primary">{t("settings.integration.manual")}</summary>
+                  <Select value={mcpFormat} onValueChange={(value) => setMcpFormat(value === "vscode" ? "vscode" : "standard")}>
+                    <SelectTrigger aria-label={t("settings.integration.configFormat")} className="h-8 w-full max-w-72 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="standard">Claude Desktop / Cursor</SelectItem>
+                      <SelectItem value="vscode">VS Code</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-[11.5px] leading-relaxed text-faint">{t("settings.integration.configHint")}</p>
+                  <CodeBlock code={code} lang="json" wrap showLineNumbers={false} title={mcpFormat === "vscode" ? "VS Code · servers" : "Claude Desktop / Cursor · mcpServers"} />
+                </details> : <>
+                <p className="text-[11.5px] leading-relaxed text-faint">{t(data.platform === "windows" ? "settings.integration.powershellHint" : "settings.integration.shellHint")}</p>
+                <CodeBlock code={code} lang="shell" wrap showLineNumbers={false}
+                  title={data.platform === "windows" ? "PowerShell" : "sh / bash / zsh"} />
+                </>}
               </>}
             </section>;
           })}
@@ -1481,6 +1495,84 @@ function IntegrationToolsPanel() {
         </>}
     </CardContent>
   </Card>;
+}
+
+function McpClientsPanel({ toolAvailable }: { toolAvailable: boolean }) {
+  const t = useT();
+  const client = useQueryClient();
+  const [busy, setBusy] = React.useState<string | null>(null);
+  const busyRef = React.useRef(false);
+  const [replaceTarget, setReplaceTarget] = React.useState<api.McpClientStatus | null>(null);
+  const [failure, setFailure] = React.useState<{ id: string; message: string; hint?: string } | null>(null);
+  const [backupPath, setBackupPath] = React.useState<string | null>(null);
+  const query = useQuery({ queryKey: ["mcp-clients"], queryFn: api.getMcpClients, enabled: isTauri, networkMode: "always", staleTime: 0, retry: false });
+  const run = async (row: api.McpClientStatus, action: "connect" | "remove", replace = false) => {
+    if (busyRef.current || !row.revision) return;
+    busyRef.current = true;
+    setBusy(row.id);
+    setFailure(null);
+    try {
+      const result = await api.configureMcpClient(row.id, action, row.revision, replace);
+      client.setQueryData<api.McpClientStatus[]>(["mcp-clients"], (rows) => rows?.map((existing) => existing.id === row.id ? result.client : existing));
+      setBackupPath(result.backupPath);
+      if (result.client.status !== (action === "connect" ? "connected" : "missing")) {
+        setFailure({ id: row.id, message: t("settings.integration.stateChanged"), hint: result.client.error?.message });
+        setReplaceTarget(null);
+        return;
+      }
+      toast.success(t(action === "connect" ? "settings.integration.connectedDone" : "settings.integration.removedDone"));
+      setReplaceTarget(null);
+    } catch (error) {
+      const problem = normalizeError(error);
+      setFailure({ id: row.id, message: problem.message, hint: problem.hint });
+      setReplaceTarget(null);
+    } finally { busyRef.current = false; setBusy(null); }
+  };
+  return <div className="min-w-0 space-y-3">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <h4 className="text-xs font-medium">{t("settings.integration.clients")}</h4>
+      <Button variant="ghost" size="sm" disabled={query.isFetching || busy !== null} onClick={() => { setFailure(null); void query.refetch(); }}>
+        <RefreshCw className={cn("h-3 w-3", query.isFetching && "animate-spin")} />{t("settings.integration.refresh")}
+      </Button>
+    </div>
+    <p className="text-[11px] leading-relaxed text-faint">{t("settings.integration.clientsHint")}</p>
+    {query.isPending ? <p role="status" className="text-xs text-faint">{t("common.loading")}</p>
+      : query.isError ? <p role="alert" className="text-xs text-error [overflow-wrap:anywhere]">{normalizeError(query.error).message}</p>
+      : <ul className="min-w-0 space-y-3">
+        {query.data?.map((row) => <li key={row.id} className="min-w-0 rounded-lg bg-fill/50 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <span className="text-xs font-medium">{row.name}</span>
+              <Badge variant={row.status === "connected" ? "running" : row.status === "error" ? "error" : row.status === "different" ? "warn" : "muted"}>
+                {t(`settings.integration.client.${row.status}`)}
+              </Badge>
+            </div>
+            {row.revision && row.status !== "error" && row.status !== "unavailable" && <Button size="sm" variant={row.status === "connected" ? "outline" : "secondary"}
+              disabled={busy !== null || query.isFetching || (row.status !== "connected" && !toolAvailable)}
+              onClick={() => row.status === "different" ? setReplaceTarget(row) : void run(row, row.status === "connected" ? "remove" : "connect")}>
+              {busy === row.id && <RefreshCw className="h-3 w-3 animate-spin" />}
+              {t(row.status === "connected" ? "settings.integration.remove" : row.status === "different" ? "settings.integration.replace" : "settings.integration.connect")}
+            </Button>}
+          </div>
+          <p className="mt-2 font-mono text-[10.5px] text-faint [overflow-wrap:anywhere]">{row.path}</p>
+          {row.status === "unavailable" && <p className="mt-2 text-[11px] leading-relaxed text-muted">{t("settings.integration.clientMissingHint")}</p>}
+          {row.error && <p role="alert" className="mt-2 text-xs text-error [overflow-wrap:anywhere]">{row.error.message}{row.error.hint && ` ${row.error.hint}`}</p>}
+          {failure?.id === row.id && <div role="alert" className="mt-2 space-y-1 text-xs text-error [overflow-wrap:anywhere]">
+            <p>{failure.message}</p>{failure.hint && <p>{failure.hint}</p>}
+          </div>}
+        </li>)}
+      </ul>}
+    {backupPath && <div role="status" className="flex flex-wrap items-center gap-2 text-[11px] text-muted">
+      <span>{t("settings.integration.backupSaved")}</span>
+      <Button variant="ghost" size="sm" onClick={() => api.openInFolder(backupPath).catch(toastError)}>{t("settings.integration.showBackup")}</Button>
+    </div>}
+    <ConfirmDialog open={replaceTarget !== null} onOpenChange={(open) => { if (!open && !busyRef.current) setReplaceTarget(null); }}
+      title={t("settings.integration.replaceTitle")} description={t("settings.integration.replaceHint")}
+      confirmText={t("settings.integration.replace")} loading={busy !== null}
+      onConfirm={() => { if (replaceTarget) void run(replaceTarget, "connect", true); }}>
+      <p className="font-mono text-xs text-muted [overflow-wrap:anywhere]">{replaceTarget?.path}</p>
+    </ConfirmDialog>
+  </div>;
 }
 
 function WatchdogPanel({ enabled, onChange }: { enabled: boolean; onChange: (value: boolean) => void }) {

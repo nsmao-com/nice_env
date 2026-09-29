@@ -42,6 +42,7 @@ pub mod tunnel;
 use paths::write_with_backup;
 pub mod backup_job;
 pub mod mcp;
+pub mod mcp_clients;
 pub mod pathenv;
 pub mod phpext;
 pub mod php_platform;

@@ -548,6 +548,8 @@ pub fn run() {
             set_port_override,
             get_app_version,
             get_integration_tools,
+            get_mcp_clients,
+            configure_mcp_client,
             check_updates,
             // 套件清单：远端刷新 / 恢复内置 / 状态
             refresh_remote_manifest,
@@ -3172,6 +3174,22 @@ fn get_integration_tools(state: State<'_, Arc<CoreState>>) -> Result<Integration
             mcp: inspect_integration_tool(dir, "nsb-mcp")?,
         })
     })())
+}
+
+#[tauri::command]
+fn get_mcp_clients(state: State<'_, Arc<CoreState>>) -> Result<Vec<nsb_core::mcp_clients::ClientStatus>, tauri::Error> {
+    let tools = get_integration_tools(state)?;
+    map_jh(nsb_core::mcp_clients::list(std::path::Path::new(&tools.mcp.path), std::path::Path::new(&tools.data_dir)))
+}
+
+#[tauri::command]
+fn configure_mcp_client(state: State<'_, Arc<CoreState>>, id: String, action: String, revision: String, replace: bool) -> Result<nsb_core::mcp_clients::ClientUpdate, tauri::Error> {
+    let tools = get_integration_tools(state)?;
+    if action == "connect" && !tools.mcp.available {
+        return Err(box_err(tools.mcp.error.unwrap_or_else(|| AppError::new("MCP_TOOL_MISSING", "未找到 MCP 工具，请重新安装完整的 NiceEnv 安装包"))));
+    }
+    map_jh(nsb_core::mcp_clients::configure(&id, &action, &revision, replace,
+        std::path::Path::new(&tools.mcp.path), std::path::Path::new(&tools.data_dir)))
 }
 
 /// 停止受管服务并复制完整数据目录，当前进程仍使用原目录。

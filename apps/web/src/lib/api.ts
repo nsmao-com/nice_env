@@ -760,6 +760,22 @@ export interface IntegrationTools {
   mcp: IntegrationTool;
 }
 export const getIntegrationTools = () => safe(invoke<IntegrationTools>("get_integration_tools"));
+export interface McpClientStatus {
+  id: string;
+  name: string;
+  path: string;
+  status: "unavailable" | "missing" | "connected" | "different" | "error";
+  revision: string | null;
+  error: IntegrationTool["error"];
+}
+export interface McpClientUpdate {
+  client: McpClientStatus;
+  changed: boolean;
+  backupPath: string | null;
+}
+export const getMcpClients = () => safe(invoke<McpClientStatus[]>("get_mcp_clients"));
+export const configureMcpClient = (id: string, action: "connect" | "remove", revision: string, replace = false) =>
+  safe(invoke<McpClientUpdate>("configure_mcp_client", { id, action, revision, replace }));
 export interface DataDirMigration {
   path: string;
   files: number;

@@ -158,7 +158,13 @@ Corefile 每次启动按当前 TLD 设置自动重建。
 会先按目标架构编译 `nsbctl` / `nsb-mcp`，再附带到安装包：Windows 位于应用安装目录，
 macOS 位于 `NiceEnv.app/Contents/MacOS`。无需额外安装 Node.js 或 Rust 来使用这些工具。
 桌面端「设置 → 高级 → 命令行与 AI 集成」会检查这些文件，并提供可复制的 CLI 状态查询
-命令和 Claude Desktop / Cursor MCP 配置，自动填入绝对路径与当前 `NSB_HOME` 数据目录。
+命令，以及 Cursor、Claude Desktop、VS Code 的一键接入和移除入口，自动填入绝对路径与当前
+`NSB_HOME` 数据目录。VS Code 使用默认用户配置；便携版或其他配置目录可展开「手动接入」，
+选择客户端格式后复制配置。
+一键接入只修改 `niceenv` 条目，保留其他服务、设置和 JSONC 注释；修改已有文件前保存仅当前
+用户可读取的原文备份，完成后可打开备份位置。配置损坏、重复字段、文件已变化或其他实例占用
+时不覆盖；已有条目指向其他环境时需在界面确认更换。接入状态表示配置已就绪，仍需重启客户端
+并查询服务状态确认实际连接。
 缺少工具或无法读取时会显示原因和重新检查入口；迁移数据或更改安装位置后需重新复制配置。
 开发时也可用 `cargo build -p nsb-core --bin nsbctl --bin nsb-mcp --locked` 单独编译到
 `target/debug`；`pnpm --filter @nsb/desktop prepare:tools --debug` 仅准备 Rust 工具，不打包前端。

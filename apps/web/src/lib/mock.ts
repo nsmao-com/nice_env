@@ -1795,11 +1795,15 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "bulk_start":
     case "bulk_stop":
+    case "tray_stop_all":
     case "bulk_restart": {
       return withServiceOperation(async () => {
-      const ids = [...new Set(args!.ids as string[])];
-      const action = cmd.slice(5) as "start" | "stop" | "restart";
+      const stopAll = cmd === "tray_stop_all";
+      const targets = args?.ids as string[] | undefined;
+      const ids = [...new Set(targets ?? (stopAll ? [...services.keys(), ...(mockAdminer ? ["adminer-console"] : [])] : []))];
+      const action = stopAll ? "stop" : cmd.slice(5) as "start" | "stop" | "restart";
       const tier = (id: string) => {
+        if (stopAll && id === "adminer-console") return 4;
         if (id.startsWith("site-app:")) return 1;
         const base = id.split("@")[0];
         if (["mysql", "mariadb", "redis", "postgresql", "mongodb", "memcached", "qdrant", "neo4j", "rabbitmq", "elasticsearch", "meilisearch", "zincsearch", "minio", "rustfs", "consul", "etcd", "r-nacos", "temporal"].includes(base)) return 0;
@@ -1810,6 +1814,11 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const order = [...ids].sort((a, b) => action === "stop" ? tier(b) - tier(a) : tier(a) - tier(b));
       const report: BulkReport = { action, succeeded: [], already: [], failed: [], order };
       const execute = async (id: string, operation: "start" | "stop") => {
+        if (stopAll && id === "adminer-console") {
+          const already = mockAdminer === null;
+          mockAdminer = null;
+          return already;
+        }
         const service = services.get(id);
         if (!service) throw { code: "UNKNOWN_SERVICE", message: `服务 ${id} 未注册或已卸载` };
         if (["starting", "stopping"].includes(service.state)) {

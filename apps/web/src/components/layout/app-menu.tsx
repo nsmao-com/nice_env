@@ -18,7 +18,7 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { useUI, useT } from "@/lib/store";
-import { useServices, useStacks, toastError, useQuickServiceActions, serviceHasProcess } from "@/lib/hooks";
+import { useServices, useStacks, toastError, useQuickServiceActions } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import { isTauri, listen, normalizeError } from "@/lib/backend";
 import { cn } from "@/lib/utils";
@@ -176,7 +176,7 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
           <DropdownMenuItem disabled={busy || quick.busy || !startReady} onSelect={() => run(startStack)}>
             <Rocket /><span className="min-w-0 [overflow-wrap:anywhere]">{selectedStack ? `${t("dash.startStack")}「${selectedStack.name}」` : t("appmenu.startStack")}</span>
           </DropdownMenuItem>
-          <DropdownMenuItem disabled={busy || quick.busy || !servicesReady || !services.some(serviceHasProcess)} onSelect={() => { quick.prepareStop(); setConfirm("stopAll"); }}>
+          <DropdownMenuItem disabled={busy || quick.busy || !servicesReady || !quick.hasStopTargets} onSelect={async () => { if (await quick.prepareStop()) setConfirm("stopAll"); }}>
             <Square /> {t("appmenu.stopAll")}
           </DropdownMenuItem>
           {(serviceQuery.error || stackQuery.error) && <>
@@ -231,10 +231,7 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
         open={confirm === "stopAll"}
         onOpenChange={(o) => { if (!o && !quick.busy) setConfirm(null); }}
         title={t("confirm.stopAll")}
-        description={t(quick.stopReport?.failed.length ? "bulk.retryStopHint" : "confirm.stopAllDesc").replace(
-          "{count}",
-          String(quick.stopTargetCount)
-        )}
+        description={quick.stopDescription}
         confirmText={t(quick.stopReport?.failed.length ? "bulk.retryFailed" : "dash.stopAll")}
         danger
         loading={quick.busy}

@@ -340,7 +340,7 @@ async function runServiceOperation(key, command, args) {
       title: single ? `${nameOf(args.id)}已${stop ? "停止" : "启动"}` : failed.length || skipped.length ? "部分服务未完成" : `服务${stop ? "停止" : "启动"}操作完成`,
       summary: single ? (TAURI ? "已读取实际操作结果。" : "演示状态已更新，本机服务未改变。") : `成功 ${succeeded.length} · 已在目标状态 ${already.length} · 失败 ${failed.length}`,
       failed, skipped, retry: failed.length ? command === "tray_stop_all"
-        ? {key, command, args, label:"再次停止全部"}
+        ? {key, command, args:{ids:failed.map((f) => f.serviceId)}, label:"重试失败项"}
         : {key:"retry-action", command:stop ? "bulk_stop" : "bulk_start", args:{ids:failed.map((f) => f.serviceId)}, label:"重试失败项"} : null,
     };
   } catch (error) {

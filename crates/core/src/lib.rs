@@ -1395,19 +1395,36 @@ impl CoreState {
 
     /// 全部停止包含独立管理台；任何失败都保留结果及剩余 PID。
     pub fn stop_all_services(&self) -> Result<bulk::BulkReport> {
+        self.stop_services_with_console(None)
+    }
+
+    /// 确认框与失败重试传入固定目标；None 供托盘和退出流程停止全部。
+    pub fn stop_services_with_console(&self, targets: Option<&[String]>) -> Result<bulk::BulkReport> {
         let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
         let _operation = self.manager.lifecycle.try_lock()
             .ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后停止全部服务"))?;
-        let mut ids = self.manager.list_status().into_iter().map(|s| s.id).collect::<Vec<_>>();
-        ids.sort();
+        let mut ids = match targets {
+            Some(ids) => ids.to_vec(),
+            None => {
+                let mut ids = self.manager.list_status().into_iter().map(|s| s.id).collect::<Vec<_>>();
+                ids.sort();
+                if self.manager.adminer.lock().is_some() {
+                    ids.push("adminer-console".to_string());
+                }
+                ids
+            }
+        };
+        let stop_adminer = ids.iter().any(|id| id == "adminer-console");
+        ids.retain(|id| id != "adminer-console");
         // 先停管理台，避免关闭数据库时仍有来自管理台的新请求。
         let has_adminer = self.manager.adminer.lock().is_some();
-        let adminer_result = has_adminer.then(|| toolbox::adminer_stop(&self.manager));
+        let adminer_result = stop_adminer.then(|| toolbox::adminer_stop(&self.manager));
         let mut report = self.bulk_stop(&ids)?;
         if let Some(adminer_result) = adminer_result {
             let id = "adminer-console".to_string();
             report.order.insert(0, id.clone());
             match adminer_result {
+                Ok(()) if !has_adminer => report.already.push(id),
                 Ok(()) => report.succeeded.push(id),
                 Err(error) => report.failed.push(bulk::BulkFailure {
                     service_id: id, error: model::AppErrorInfo::from(error),

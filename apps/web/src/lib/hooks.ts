@@ -292,18 +292,39 @@ export function toastStackReport(
   if (conflict) toastPortConflict(conflict.error, { onResolved: retry });
 }
 
-/** 总览和命令面板共享启停流程，保留真实报告并在失败后刷新状态。 */
+/** 总览、应用菜单和命令面板共享启停流程，包含独立数据库管理台。 */
 export function useQuickServiceActions(services: ServiceStatus[], stacks: Stack[]) {
   const t = useT();
   const invalidate = useInvalidate();
+  const qc = useQueryClient();
+  const adminerQuery = useAdminerStatus();
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const [stopReport, setStopReport] = useState<BulkReport | null>(null);
   const [stopError, setStopError] = useState<AppErrorShape | null>(null);
   const [stopTargets, setStopTargets] = useState<string[]>([]);
-  const prepareStop = () => {
+  const prepareStop = async () => {
+    if (busyRef.current) return false;
+    busyRef.current = true; setBusy(true);
     setStopReport(null); setStopError(null);
-    setStopTargets(services.filter(serviceHasProcess).map((s) => s.id));
+    setStopTargets([]);
+    try {
+      // 两类进程都读取成功才允许确认；失败不能用空列表伪装为全部停止。
+      const [currentServices, consoleStatus] = await Promise.all([
+        qc.fetchQuery({ queryKey: ["services"], queryFn: api.listServiceStatus, staleTime: 0 }),
+        qc.fetchQuery({ queryKey: ["adminer"], queryFn: api.adminerStatus, staleTime: 0, retry: false }),
+      ]);
+      const ids = currentServices.filter(serviceHasProcess).map((service) => service.id);
+      if (consoleStatus) ids.push(api.ADMINER_CONSOLE_ID);
+      setStopTargets(ids);
+      if (!ids.length) { toast.info(t("bulk.noRunning")); return false; }
+      return true;
+    } catch (error) {
+      toastError(error);
+      return false;
+    } finally {
+      busyRef.current = false; setBusy(false);
+    }
   };
 
   const start = async (stack: Stack | undefined = stacks[0]) => {
@@ -341,7 +362,7 @@ export function useQuickServiceActions(services: ServiceStatus[], stacks: Stack[
     if (busyRef.current) return null;
     busyRef.current = true; setBusy(true); setStopError(null);
     try {
-      const report = await api.bulkStop(ids);
+      const report = await api.stopAllServices(ids);
       setStopReport(report);
       if (!report.failed.length) toast.success(t("bulk.done").replace("{action}", t("bulk.stop")).replace("{n}", String(report.succeeded.length + report.already.length)));
       return report;
@@ -349,10 +370,15 @@ export function useQuickServiceActions(services: ServiceStatus[], stacks: Stack[
       setStopError(normalizeError(error));
       return null;
     } finally {
-      busyRef.current = false; setBusy(false); invalidate("services", "stacks");
+      busyRef.current = false; setBusy(false); invalidate("services", "stacks", "adminer");
     }
   };
-  return { busy, start, stop, stopReport, stopError, prepareStop, stopTargetCount: stopReport?.failed.length ?? stopTargets.length };
+  const pendingTargets = stopReport ? stopReport.failed.map((failure) => failure.serviceId) : stopTargets;
+  const stopDescription = t(stopReport?.failed.length ? "bulk.retryStopHint" : "confirm.stopAllDesc")
+    .replace("{count}", String(pendingTargets.length))
+    + (pendingTargets.includes(api.ADMINER_CONSOLE_ID) ? ` ${t("confirm.stopAllConsoleHint")}` : "");
+  const hasStopTargets = services.some(serviceHasProcess) || Boolean(adminerQuery.data) || !adminerQuery.isSuccess;
+  return { busy, start, stop, stopReport, stopError, prepareStop, stopDescription, hasStopTargets };
 }
 
 /* 端口方案 → 期望端口 */
@@ -391,11 +417,15 @@ export function useInterval(fn: () => void, ms: number | null) {
 }
 
 /** 数据库页与工具箱共享真实管理台状态，换页后仍能打开或停止原进程。 */
+function useAdminerStatus() {
+  return useQuery({ queryKey: ["adminer"], queryFn: api.adminerStatus, refetchInterval: 5000, retry: false });
+}
+
 export function useAdminer(packageId: "adminer" | "phpmyadmin" = "adminer", targetServiceId?: string) {
   const qc = useQueryClient();
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
-  const query = useQuery({ queryKey: ["adminer"], queryFn: api.adminerStatus, refetchInterval: 5000, retry: false });
+  const query = useAdminerStatus();
   const run = async (action: "open" | "stop") => {
     if (busyRef.current) return;
     busyRef.current = true; setBusy(true);

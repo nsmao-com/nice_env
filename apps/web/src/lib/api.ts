@@ -555,6 +555,8 @@ export const healthCheck = () => safe(invoke<HealthReport>("health_check"));
 /* 批量服务操作 */
 export const bulkStart = (ids: string[]) => safe(invoke<BulkReport>("bulk_start", { ids }));
 export const bulkStop = (ids: string[]) => safe(invoke<BulkReport>("bulk_stop", { ids }));
+export const ADMINER_CONSOLE_ID = "adminer-console";
+export const stopAllServices = (ids: string[]) => safe(invoke<BulkReport>("tray_stop_all", { ids }));
 export const bulkRestart = (ids: string[]) => safe(invoke<BulkReport>("bulk_restart", { ids }));
 export const bulkSummary = (ids: string[]) =>
   safe(invoke<BulkSelectionSummary>("bulk_summary", { ids }));

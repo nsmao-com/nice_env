@@ -25,7 +25,6 @@ import {
   useSystemStats,
   toastError,
   useQuickServiceActions,
-  serviceHasProcess,
   siteUrl,
   useStacks,
 } from "@/lib/hooks";
@@ -63,8 +62,6 @@ export default function DashboardPage() {
     void Promise.all([servicesQuery.refetch(), sitesQuery.refetch(), stacksQuery.refetch()]);
   };
   const runningCount = services.filter((s) => s.state === "running").length;
-  const activeServices = services.filter(serviceHasProcess);
-  const anyRunning = activeServices.length > 0;
   const quick = useQuickServiceActions(services, stacks);
   const stackBusy = quick.busy;
 
@@ -91,10 +88,10 @@ export default function DashboardPage() {
         subtitle={t("dash.subtitle")}
         actions={
           <>
-            {anyRunning ? (
+            {quick.hasStopTargets ? (
               <Button
                 variant="secondary"
-                onClick={() => { quick.prepareStop(); setConfirmStopAll(true); }}
+                onClick={async () => { if (await quick.prepareStop()) setConfirmStopAll(true); }}
                 disabled={stackBusy}
                 title={t("dash.stopAllHint")}
               >
@@ -324,10 +321,7 @@ export default function DashboardPage() {
         open={confirmStopAll}
         onOpenChange={(open) => { if (!stackBusy) setConfirmStopAll(open); }}
         title={t("confirm.stopAll")}
-        description={t(quick.stopReport?.failed.length ? "bulk.retryStopHint" : "confirm.stopAllDesc").replace(
-          "{count}",
-          String(quick.stopTargetCount)
-        )}
+        description={quick.stopDescription}
         confirmText={t(quick.stopReport?.failed.length ? "bulk.retryFailed" : "dash.stopAll")}
         danger
         loading={stackBusy}

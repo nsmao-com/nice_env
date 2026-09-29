@@ -87,10 +87,9 @@ export function CommandPalette() {
   };
 
   const startStack = () => quick.start(stacks?.find((stack) => stack.id === quickStackId) ?? stacks?.[0]);
-  const stopAll = () => {
-    quick.prepareStop();
+  const stopAll = async () => {
     setOpen(false);
-    setConfirmStopAll(true);
+    if (await quick.prepareStop()) setConfirmStopAll(true);
   };
   const doStopAll = async () => {
     const report = await quick.stop(quick.stopReport?.failed.map((f) => f.serviceId));
@@ -251,10 +250,7 @@ export function CommandPalette() {
       open={confirmStopAll}
       onOpenChange={(open) => { if (!busy) setConfirmStopAll(open); }}
       title={t("confirm.stopAll")}
-      description={t(quick.stopReport?.failed.length ? "bulk.retryStopHint" : "confirm.stopAllDesc").replace(
-        "{count}",
-        String(quick.stopTargetCount)
-      )}
+      description={quick.stopDescription}
       confirmText={t(quick.stopReport?.failed.length ? "bulk.retryFailed" : "dash.stopAll")}
       danger
       loading={busy}

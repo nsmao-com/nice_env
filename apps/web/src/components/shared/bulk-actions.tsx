@@ -314,6 +314,7 @@ export function BulkResult({ report, error, services, busy = false }: {
           {report.action === "restart" && <p className="mt-1 text-[11px] text-muted">{t("bulk.restartOrder")}</p>}
           <ol className="mt-2 space-y-2">
             {report.order.map((id, index) => {
+              const isConsole = id === api.ADMINER_CONSOLE_ID;
               const failure = report.failed.find((f) => f.serviceId === id);
               const ok = !failure && report.succeeded.includes(id);
               const already = !failure && report.already.includes(id);
@@ -321,7 +322,7 @@ export function BulkResult({ report, error, services, busy = false }: {
                 <li key={id} className="min-w-0 text-xs">
                   <div className="flex items-start gap-2">
                     <span className="shrink-0 text-faint">{index + 1}.</span>
-                    <span className="min-w-0 flex-1">{services.find((s) => s.id === id)?.label ?? id}</span>
+                    <span className="min-w-0 flex-1">{isConsole ? t("tools.adminer.title") : services.find((s) => s.id === id)?.label ?? id}</span>
                     <span className={cn("shrink-0", failure ? "text-error" : ok ? "text-running" : "text-faint")}>
                       {t(failure ? "bulk.rFail" : ok ? "bulk.rOk" : already ? "bulk.rSkipped" : "bulk.rUnknown")}
                     </span>
@@ -330,7 +331,7 @@ export function BulkResult({ report, error, services, busy = false }: {
                     <div className="mt-1 pl-5 text-[11px] text-error">
                       <p>{failure.error.message}</p>
                       {failure.error.hint && <p className="mt-1 text-muted">{failure.error.hint}</p>}
-                      <Link aria-disabled={busy} tabIndex={busy ? -1 : undefined} onClick={(event) => { if (busy) event.preventDefault(); }} className="mt-1 inline-block text-primary underline underline-offset-2 aria-disabled:opacity-50" href={`/logs?service=${encodeURIComponent(id)}`}>{t("logs.title")}</Link>
+                      <Link aria-disabled={busy} tabIndex={busy ? -1 : undefined} onClick={(event) => { if (busy) event.preventDefault(); }} className="mt-1 inline-block text-primary underline underline-offset-2 aria-disabled:opacity-50" href={isConsole ? "/databases" : `/logs?service=${encodeURIComponent(id)}`}>{t(isConsole ? "nav.databases" : "logs.title")}</Link>
                     </div>
                   )}
                 </li>

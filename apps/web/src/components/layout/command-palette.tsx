@@ -23,6 +23,7 @@ import {
   Stethoscope,
   FileCog,
   Loader2,
+  X,
 } from "lucide-react";
 import { CommandDialog, CommandGroup, CommandInput, CommandItem, CommandList, CommandEmpty } from "@/components/ui/command";
 import { useUI, useT } from "@/lib/store";
@@ -79,6 +80,10 @@ export function CommandPalette() {
   const quickStackId = useUI((s) => s.quickStackId);
   const selectedStack = stacks.find((stack) => stack.id === quickStackId) ?? stacks[0];
   const busy = quick.busy;
+  const failure = quick.serviceFailure;
+  const failedService = failure && services.find((service) => service.id === failure.service.id);
+  const retryUnavailable = quick.serviceTargetChanged || !failedService || ["unknown", "starting", "stopping"].includes(failedService.state)
+    || (failure?.action !== "stop" && failedService.missingRequires.length > 0);
 
   React.useEffect(() => {
     const down = (e: KeyboardEvent) => {
@@ -110,6 +115,32 @@ export function CommandPalette() {
     <>
     <CommandDialog open={open} onOpenChange={setOpen}>
       <CommandInput placeholder={t("cmd.placeholder")} />
+      {failure && (
+        <div role="alert" className="mx-3 mt-2 max-h-[40dvh] shrink-0 overflow-y-auto rounded-lg border border-error/25 bg-error-soft p-3 text-xs [overflow-wrap:anywhere]">
+          <div className="flex items-start gap-2">
+            <div className="min-w-0 flex-1">
+              <p className="font-medium text-error">{t("cmd.serviceActionFailed")}</p>
+              <p className="mt-1 text-muted">{failure.service.label}{failure.service.version ? ` · ${failure.service.version}` : ""} · {t(`common.${failure.action}`)}</p>
+            </div>
+            <Button variant="ghost" size="icon-sm" className="shrink-0" aria-label={t("cmd.dismissError")} title={t("cmd.dismissError")} disabled={busy} onClick={quick.dismissServiceFailure}>
+              <X className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+          <p className="mt-2 text-error">{failure.error.message}</p>
+          {failure.error.hint && <p className="mt-1 text-muted">{failure.error.hint}</p>}
+          {quick.serviceTargetChanged && <p className="mt-1 text-muted">{t("versions.serviceChanged")}</p>}
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <Button size="sm" variant="secondary" className="h-auto min-h-8 max-w-full whitespace-normal" disabled={busy || !servicesReady || retryUnavailable}
+              onClick={failure.resolve ?? failure.retry}>
+              <RotateCw className="h-3.5 w-3.5 shrink-0" />
+              {failure.resolve ? t("svc.freePortAndRetry") : `${t("bulk.retry")} · ${t(`common.${failure.action}`)}`}
+            </Button>
+            <Button size="sm" variant="ghost" className="h-auto min-h-8" disabled={busy} onClick={() => run(() => router.push(`/logs?service=${encodeURIComponent(failure.service.id)}`))}>
+              <ScrollText className="h-3.5 w-3.5" />{t("logs.title")}
+            </Button>
+          </div>
+        </div>
+      )}
       {readError ? <div role="alert" className="mx-3 mt-2 flex shrink-0 items-start gap-2 rounded-lg bg-error-soft px-3 py-2 text-xs text-error">
         <p className="min-w-0 flex-1 [overflow-wrap:anywhere]">{t("cmd.readFailed")}</p>
         <Button size="sm" variant="ghost" className="h-auto shrink-0 px-2 py-1 text-xs" disabled={refreshing} onClick={retryRead}>{t("packages.reload")}</Button>
@@ -226,21 +257,22 @@ export function CommandPalette() {
             {services.map((s) => {
               const hasProcess = serviceHasProcess(s);
               const transitioning = s.state === "starting" || s.state === "stopping";
+              const unknown = s.state === "unknown";
               const needsDependencies = s.missingRequires.length > 0;
               const action = hasProcess ? "stop" : "start";
-              const actionLabel = transitioning ? t(s.state === "starting" ? "state.starting" : "state.stopping") : t(hasProcess ? "common.stop" : "common.start");
+              const actionLabel = unknown ? t("state.unknown") : transitioning ? t(s.state === "starting" ? "state.starting" : "state.stopping") : t(hasProcess ? "common.stop" : "common.start");
               return (
               <React.Fragment key={s.id}>
                 <CommandItem
-                  value={`service ${action} ${s.label} ${s.id}`}
+                  value={`service ${action} ${s.label} ${s.id} ${s.version ?? ""}`}
                   keywords={[t("cmd.services"), actionLabel]}
-                  disabled={busy || !servicesReady || transitioning || (!hasProcess && needsDependencies)}
-                  onSelect={() => run(() => quick.serviceAction(s.id, action))}
+                  disabled={busy || !servicesReady || transitioning || unknown || (!hasProcess && needsDependencies)}
+                  onSelect={() => run(() => quick.serviceAction(s, action))}
                 >
                   <StatusLight state={s.state} size={7} />
                   <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">
                     {s.label}
-                    <span className="block text-[10px] text-faint">{s.id}{s.state === "error" ? ` · ${t("state.error")}` : ""}</span>
+                    <span className="block text-[10px] text-faint">{s.id}{s.version ? ` · ${s.version}` : ""} · {t(`state.${s.state}`)}</span>
                     {needsDependencies && <span className="block text-[10px] text-warn">{t("svc.needDeps")}{s.missingRequires.join(", ")}</span>}
                   </span>
                   <span className="shrink-0 text-[10px] text-faint">{actionLabel}</span>
@@ -248,14 +280,15 @@ export function CommandPalette() {
                 {/* 重启是日常里比「先停再启」更常用的一步，单独给一条 */}
                 {(hasProcess || s.state === "error") && (
                   <CommandItem
-                    value={`service restart ${s.label} ${s.id} 重启`}
+                    value={`service restart ${s.label} ${s.id} ${s.version ?? ""} 重启`}
                     keywords={[t("cmd.services"), t("cmd.restart")]}
-                    disabled={busy || !servicesReady || transitioning || needsDependencies}
-                    onSelect={() => run(() => quick.serviceAction(s.id, "restart"))}
+                    disabled={busy || !servicesReady || transitioning || unknown || needsDependencies}
+                    onSelect={() => run(() => quick.serviceAction(s, "restart"))}
                   >
                     <RotateCw />
                     <span className="min-w-0 flex-1 pl-1 [overflow-wrap:anywhere]">
                       {t("cmd.restart")} · {s.label}
+                      {s.version && <span className="block text-[10px] text-faint">{s.version}</span>}
                     </span>
                   </CommandItem>
                 )}

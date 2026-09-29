@@ -300,6 +300,50 @@ export function serviceHasProcess(service: ServiceStatus) {
   return service.pids.length > 0 || ["running", "starting", "stopping"].includes(service.state);
 }
 
+type ServiceAction = "start" | "stop" | "restart";
+type ServiceConflict = AppErrorShape & { port?: number; pid?: number; holder?: string };
+type ServiceTarget = Pick<ServiceStatus, "id" | "version" | "label">;
+
+/** 卡片、列表和命令面板复用版本、状态和冲突核对，入口仅负责进度及反馈。 */
+async function performServiceAction(
+  { id, version }: ServiceTarget, action: ServiceAction, t: ReturnType<typeof useT>,
+  current: () => boolean, conflict?: ServiceConflict, onPortResolved?: () => void,
+): Promise<ServiceStatus | undefined> {
+  const read = async () => {
+    // 独立读取，不能复用点击前已发出的轮询请求。
+    const list = await api.listServiceStatus();
+    if (!current()) return;
+    const target = list.find((item) => item.id === id);
+    if (!target) throw { code: "UNKNOWN_SERVICE", message: t("svc.notFound") };
+    if (target.version !== version) throw { code: "SERVICE_TARGET_CHANGED", message: t("versions.serviceChanged") };
+    if (["starting", "stopping"].includes(target.state)) throw { code: "SERVICE_BUSY", message: t(`state.${target.state}`) };
+    if (target.state === "unknown") throw { code: "SERVICE_STATE_UNKNOWN", message: t("packages.statusUnknown") };
+    if (action !== "stop" && target.missingRequires.length) throw { code: "MISSING_DEPENDENCIES", message: t("svc.needDepsHint") };
+    if (action === "start" && target.state !== "running" && serviceHasProcess(target)) throw { code: "SERVICE_BUSY", message: t("svc.processStillRunning") };
+    return target;
+  };
+  if (!current()) return;
+  let target = await read();
+  if (!target || !current()) return;
+  if (conflict) {
+    const actual = target.lastError;
+    if (conflict.port == null || serviceHasProcess(target) || actual?.code !== "PORT_IN_USE"
+      || actual.port !== conflict.port || actual.pid !== conflict.pid) {
+      throw { code: "PORT_CONFLICT_CHANGED", message: t("svc.portConflictChanged") };
+    }
+    await api.resolvePortConflict(conflict.port, conflict.pid);
+    onPortResolved?.();
+    if (!current()) return;
+    target = await read();
+    if (!target || !current()) return;
+  }
+  if (action === "stop") {
+    if (serviceHasProcess(target)) await api.stopService(id, version);
+  } else if (action === "restart") await api.restartService(id, version);
+  else if (target.state !== "running") await api.startService(id, version);
+  return target;
+}
+
 /** 服务栈入口共用报告，缺失套件不能被全成功提示掩盖。 */
 export function toastStackReport(
   t: ReturnType<typeof useT>, report: StackStartReport, action: "start" | "stop",
@@ -334,6 +378,23 @@ export function useQuickServiceActions(services: ServiceStatus[], stacks: Stack[
   const [stopReport, setStopReport] = useState<BulkReport | null>(null);
   const [stopError, setStopError] = useState<AppErrorShape | null>(null);
   const [stopTargets, setStopTargets] = useState<string[]>([]);
+  const mounted = useRef(true);
+  const serviceRequest = useRef<object | null>(null);
+  const serviceIdentities = useRef(new Map<string, { version?: string }>());
+  const present = new Set(services.map((service) => service.id));
+  for (const service of services) {
+    const previous = serviceIdentities.current.get(service.id);
+    if (!previous || previous.version !== service.version) serviceIdentities.current.set(service.id, { version: service.version });
+  }
+  for (const id of serviceIdentities.current.keys()) if (!present.has(id)) serviceIdentities.current.delete(id);
+  const [serviceFailure, setServiceFailure] = useState<{
+    service: ServiceTarget; action: ServiceAction; error: ServiceConflict; identity: object | undefined;
+    retry: () => Promise<void>; resolve: (() => Promise<void>) | null;
+  } | null>(null);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; serviceRequest.current = null; };
+  }, []);
   const prepareStop = async () => {
     if (busyRef.current) return false;
     busyRef.current = true; setBusy(true);
@@ -404,44 +465,60 @@ export function useQuickServiceActions(services: ServiceStatus[], stacks: Stack[
       busyRef.current = false; setBusy(false); invalidate("services", "stacks", "adminer");
     }
   };
-  const serviceAction = async (id: string, action: "start" | "stop" | "restart"): Promise<void> => {
-    if (busyRef.current) return;
-    busyRef.current = true; setBusy(true);
-    const pending = toast.loading(t("common.loading"));
-    try {
-      // 固定用户选择的动作，执行和冲突重试前重新读取状态，不能按旧状态反转动作。
-      const current = await qc.fetchQuery({ queryKey: ["services"], queryFn: api.listServiceStatus, staleTime: 0, retry: false, networkMode: "always" });
-      const service = current.find((item) => item.id === id);
-      if (!service) { toast.error(t("svc.notFound")); return; }
-      if (service.state === "starting" || service.state === "stopping") {
-        toast.info(`${service.label} · ${t(service.state === "starting" ? "state.starting" : "state.stopping")}`);
-        return;
+  const serviceAction = async (selected: ServiceTarget, action: ServiceAction): Promise<void> => {
+    if (!mounted.current || busyRef.current) return;
+    const service = { id: selected.id, version: selected.version, label: selected.label };
+    const identity = serviceIdentities.current.get(service.id);
+    const request = {};
+    serviceRequest.current = request;
+    const active = () => mounted.current && serviceRequest.current === request;
+    const current = () => active() && identity !== undefined
+      && serviceIdentities.current.get(service.id) === identity && identity.version === service.version;
+    const execute = async (conflict?: ServiceConflict): Promise<void> => {
+      if (!active() || busyRef.current) return;
+      busyRef.current = true; setBusy(true); setServiceFailure(null);
+      const pending = toast.loading(`${service.label}${service.version ? ` ${service.version}` : ""} · ${t(`common.${action}`)}`);
+      let pendingConflict = conflict;
+      try {
+        const result = await performServiceAction(service, action, t, current, conflict, () => { pendingConflict = undefined; });
+        if (!active()) return;
+        if (!current()) throw { code: "SERVICE_TARGET_CHANGED", message: t("versions.serviceChanged") };
+        if (result) {
+          toast.success(`${result.label} · ${t(action === "stop" ? "common.stopped" : "common.running")}`);
+          serviceRequest.current = null;
+        }
+      } catch (error) {
+        if (!active()) return;
+        const problem: ServiceConflict = normalizeError(error);
+        const retry = () => execute(pendingConflict);
+        const resolve = action !== "stop" && problem.code === "PORT_IN_USE" && problem.port != null ? () => execute(problem) : null;
+        setServiceFailure({ service, action, error: problem, identity, retry, resolve });
+        if (!resolve || !toastPortConflict(problem, { retryLabel: t("svc.freePortAndRetry"), resolve })) {
+          toast.error(problem.message, { description: problem.hint, action: { label: `${t("bulk.retry")} · ${t(`common.${action}`)}`, onClick: retry } });
+        }
+      } finally {
+        toast.dismiss(pending);
+        busyRef.current = false;
+        if (mounted.current) setBusy(false);
+        invalidate("services", "stacks", "sites");
       }
-      if (action !== "stop" && service.missingRequires.length) {
-        toast.warning(t("svc.needDepsHint"));
-        return;
-      }
-      if (action === "start" && service.state !== "running" && serviceHasProcess(service)) {
-        toast.warning(t("svc.processStillRunning"));
-        return;
-      }
-      if (action === "stop") await api.stopService(id);
-      else if (action === "restart") await api.restartService(id);
-      else await api.startService(id);
-      toast.success(`${service.label} · ${t(action === "stop" ? "common.stopped" : "common.running")}`);
-    } catch (error) {
-      if (action === "stop" || !toastPortConflict(error, { onResolved: () => serviceAction(id, action) })) toastError(error);
-    } finally {
-      toast.dismiss(pending);
-      busyRef.current = false; setBusy(false); invalidate("services", "stacks", "sites");
-    }
+    };
+    await execute();
   };
+  const dismissServiceFailure = () => {
+    if (busyRef.current) return;
+    serviceRequest.current = null;
+    setServiceFailure(null);
+  };
+  const serviceTargetChanged = Boolean(serviceFailure && (!serviceFailure.identity || serviceFailure.identity !== serviceIdentities.current.get(serviceFailure.service.id)
+    || serviceFailure.service.version !== serviceIdentities.current.get(serviceFailure.service.id)?.version));
   const pendingTargets = stopReport ? stopReport.failed.map((failure) => failure.serviceId) : stopTargets;
   const stopDescription = t(stopReport?.failed.length ? "bulk.retryStopHint" : "confirm.stopAllDesc")
     .replace("{count}", String(pendingTargets.length))
     + (pendingTargets.includes(api.ADMINER_CONSOLE_ID) ? ` ${t("confirm.stopAllConsoleHint")}` : "");
   const hasStopTargets = services.some(serviceHasProcess) || Boolean(adminerQuery.data) || !adminerQuery.isSuccess;
-  return { busy, start, stop, serviceAction, stopReport, stopError, prepareStop, stopDescription, hasStopTargets };
+  return { busy, start, stop, serviceAction, serviceFailure, serviceTargetChanged, dismissServiceFailure,
+    stopReport, stopError, prepareStop, stopDescription, hasStopTargets };
 }
 
 /* 端口方案 → 期望端口 */
@@ -498,9 +575,7 @@ export function useServiceActions(service: ServiceStatus, disabled = false) {
   const mounted = useRef(true);
   const operationRef = useRef<object | null>(null);
   const [busy, setBusy] = useState(false);
-  type Action = "start" | "stop" | "restart";
-  type Conflict = AppErrorShape & { port?: number; pid?: number; holder?: string };
-  const [failure, setFailure] = useState<{ action: Action; error: Conflict; conflict?: Conflict } | null>(null);
+  const [failure, setFailure] = useState<{ action: ServiceAction; error: ServiceConflict; conflict?: ServiceConflict } | null>(null);
   useEffect(() => {
     mounted.current = true;
     operationRef.current = null;
@@ -508,7 +583,7 @@ export function useServiceActions(service: ServiceStatus, disabled = false) {
     setFailure(null);
     return () => { mounted.current = false; operationRef.current = null; };
   }, [service.id, service.version]);
-  const execute = async (action: Action, conflict?: Conflict): Promise<void> => {
+  const execute = async (action: ServiceAction, conflict?: ServiceConflict): Promise<void> => {
     if (!mounted.current || disabledRef.current || operationRef.current) return;
     const { id, version } = service;
     if (latestIdentity.current !== identity || latest.current.id !== id || latest.current.version !== version) {
@@ -522,39 +597,10 @@ export function useServiceActions(service: ServiceStatus, disabled = false) {
     setBusy(true);
     setFailure(null);
     let pendingConflict = conflict;
-    const read = async () => {
-      // 独立读取，不能复用点击前已发出的轮询请求。
-      const list = await api.listServiceStatus();
-      if (!current()) return;
-      const target = list.find((item) => item.id === id);
-      if (!target) throw { code: "UNKNOWN_SERVICE", message: t("svc.notFound") };
-      if (target.version !== version) throw { code: "SERVICE_TARGET_CHANGED", message: t("versions.serviceChanged") };
-      if (["starting", "stopping"].includes(target.state)) throw { code: "SERVICE_BUSY", message: t(`state.${target.state}`) };
-      if (target.state === "unknown") throw { code: "SERVICE_STATE_UNKNOWN", message: t("packages.statusUnknown") };
-      if (action !== "stop" && target.missingRequires.length) throw { code: "MISSING_DEPENDENCIES", message: t("svc.needDepsHint") };
-      if (action === "start" && target.state !== "running" && serviceHasProcess(target)) throw { code: "SERVICE_BUSY", message: t("svc.processStillRunning") };
-      return target;
-    };
     try {
-      let target = await read();
+      const target = await performServiceAction(service, action, t, current, conflict, () => { pendingConflict = undefined; });
       if (!target || !current()) return;
-      if (conflict) {
-        const actual = target.lastError;
-        if (conflict.port == null || serviceHasProcess(target) || actual?.code !== "PORT_IN_USE"
-          || actual.port !== conflict.port || actual.pid !== conflict.pid) {
-          throw { code: "PORT_CONFLICT_CHANGED", message: t("svc.portConflictChanged") };
-        }
-        await api.resolvePortConflict(conflict.port, conflict.pid);
-        pendingConflict = undefined;
-        if (!current()) return;
-        target = await read();
-        if (!target || !current()) return;
-      }
-      if (action === "stop") {
-        if (serviceHasProcess(target)) await api.stopService(id, version);
-      } else if (action === "restart") await api.restartService(id, version);
-      else if (target.state !== "running") await api.startService(id, version);
-      if (current()) toast.success(`${target.label} · ${t(action === "stop" ? "common.stopped" : "common.running")}`);
+      toast.success(`${target.label} · ${t(action === "stop" ? "common.stopped" : "common.running")}`);
     } catch (error) {
       if (!current()) return;
       const problem = normalizeError(error);

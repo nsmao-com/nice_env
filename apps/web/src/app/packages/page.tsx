@@ -48,7 +48,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { RingProgress } from "@/components/shared/ring-progress";
-import { VersionPicker, type VersionItem } from "@/components/shared/version-picker";
+import { VersionPicker, type VersionItem, type VersionAction } from "@/components/shared/version-picker";
 import { PhpExtensionsDialog, PhpExtBadge } from "@/components/shared/php-extensions";
 import { LogPane } from "@/components/shared/log-pane";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -764,58 +764,66 @@ function PackageRow({
     : t("install.stage.download");
   const activeVersion = task ? task.taskId.slice(group.id.length + 1) : null;
 
-  const setDefaultVersion = async (item: VersionItem) => {
+  const clickVersion = async (item: VersionItem, action: VersionAction, trigger: HTMLButtonElement | null) => {
     if (disabled || item.installing) return;
+    const { version } = item;
     try {
-      await api.setActiveVersion(group.id, item.version);
-      toast.success(`${group.displayName} ${t(group.multiInstance || !group.isService ? "versions.defaultSaved" : "packages.switchedTo")} ${item.version}`);
-    } finally {
-      // PATH 同步失败时版本选择可能已保存，必须重新读取实际结果。
-      await Promise.all(["packages", "services", "stacks", "pathenv", "databases", "db-users"].map(
-        (key) => queryClient.invalidateQueries({ queryKey: [key] })
-      ));
-    }
-  };
-
-  const clickVersion = async (item: VersionItem, trigger: HTMLButtonElement | null) => {
-    if (disabled || item.installing) return;
-    const { version, installed } = item;
-    const v = group.versions.find((x) => x.version === version);
-    const sid = v?.serviceId ?? null;
-    const isSingle = !group.multiInstance;
-    const current = services.find((service) => service.id === sid);
-    // 选择默认版本不触发多实例服务启停；单实例切换仍要求先停止。
-    if (installed && (!sid || (isSingle && !v?.active))) {
-      if (sid && current && serviceHasProcess(current)) {
-        throw { code: "SERVICE_BUSY", message: `${group.displayName} ${t("packages.switchRunning")}` };
+      // 首次执行和失败重试都读取最新状态，但始终保持原来的动作和版本。
+      const [packages, services] = await Promise.all([
+        queryClient.fetchQuery({ queryKey: ["packages"], queryFn: api.listPackages, staleTime: 0, retry: false, networkMode: "always" }),
+        queryClient.fetchQuery({ queryKey: ["services"], queryFn: api.listServiceStatus, staleTime: 0, retry: false, networkMode: "always" }),
+      ]);
+      if (Object.values(useInstallTasks.getState().tasks).some((task) => task.status === "running"
+        && task.id === group.id && (!task.version || task.version === version))) {
+        throw { code: "PACKAGE_BUSY", message: t("packages.installing") };
       }
-      if (!item.active) await setDefaultVersion(item);
-      return;
-    }
-    try {
-      if (!installed) {
+      const target = packages.find((pkg) => pkg.id === group.id && pkg.version === version);
+      if (action === "install") {
+        if (target?.install) throw { code: "VERSION_STATE_CHANGED", message: t("versions.alreadyInstalled") };
         // 安装走向导弹窗（阶段时间线 + 实时进度 + 完成后可直接启动）
         onInstall({
           id: group.id,
           displayName: group.displayName,
           version,
-          sizeBytes: item.sizeBytes,
+          sizeBytes: target?.sizeBytes ?? item.sizeBytes,
           reinstall: false,
         }, trigger);
         return;
       }
-      if (sid) {
-        if (current && serviceHasProcess(current)) {
-          await api.stopService(sid);
-          toast.success(`${group.displayName} ${version} ${t("common.stopped")}`);
-        } else {
-          toast.info(`${t("packages.starting")} ${group.displayName} ${version}`);
-          await api.startService(sid);
-          toast.success(`${group.displayName} ${version} ${t("common.running")}`);
+      if (!target?.install) throw { code: "NOT_INSTALLED", message: t("versions.noLongerInstalled") };
+      const sid = serviceIdOf(target);
+      const current = services.find((service) => service.id === sid);
+      if (action === "active") {
+        // 选择默认版本不触发多实例服务启停；单实例切换仍要求先停止。
+        if (current && target.run?.singleInstance !== false && current.version !== version && serviceHasProcess(current)) {
+          throw { code: "SERVICE_BUSY", message: `${group.displayName} ${t("packages.switchRunning")}` };
         }
+        // 即使默认选择已保存，仍需重试 PATH 同步失败的后续步骤。
+        await api.setActiveVersion(group.id, version);
+        toast.success(`${group.displayName} ${t(group.multiInstance || !group.isService ? "versions.defaultSaved" : "packages.switchedTo")} ${version}`);
+        return;
+      }
+      if (!sid || !current) throw { code: "UNKNOWN_SERVICE", message: t("svc.notFound") };
+      if (current.version !== version) throw { code: "SERVICE_TARGET_CHANGED", message: t("versions.serviceChanged") };
+      if (current.state === "starting" || current.state === "stopping") {
+        throw { code: "SERVICE_BUSY", message: t(current.state === "starting" ? "state.starting" : "state.stopping") };
+      }
+      if (current.state === "unknown") throw { code: "SERVICE_STATE_UNKNOWN", message: t("packages.statusUnknown") };
+      if (action === "stop") {
+        if (serviceHasProcess(current)) await api.stopService(sid, version);
+        toast.success(`${group.displayName} ${version} ${t("common.stopped")}`);
+      } else {
+        if (current.state !== "running") {
+          if (serviceHasProcess(current)) throw { code: "SERVICE_BUSY", message: t("svc.processStillRunning") };
+          if (current.missingRequires.length) throw { code: "MISSING_DEPENDENCIES", message: t("svc.needDepsHint") };
+          toast.info(`${t("packages.starting")} ${group.displayName} ${version}`);
+          await api.startService(sid, version);
+        }
+        toast.success(`${group.displayName} ${version} ${t("common.running")}`);
       }
     } finally {
-      await Promise.all(["packages", "services", "pathenv"].map(
+      // PATH 同步失败时版本选择可能已保存，必须重新读取实际结果。
+      await Promise.all(["packages", "services", "stacks", "pathenv", "databases", "db-users"].map(
         (key) => queryClient.invalidateQueries({ queryKey: [key] })
       ));
     }
@@ -918,7 +926,6 @@ function PackageRow({
           }
           onRefresh={onRefresh}
           onPick={clickVersion}
-          onSetActive={setDefaultVersion}
           onOpenFolder={openInstallFolder}
           onUninstall={onUninstall}
         />

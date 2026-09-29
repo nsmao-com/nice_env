@@ -92,10 +92,10 @@ export const repairServiceWebUi = (id: string, version: string) =>
   safe(invoke<string>("repair_service_web_ui", { id, version }));
 export const diagnoseService = (id: string) =>
   safe(invoke<ServiceDiagnosticReport>("diagnose_service", { id }));
-export const startService = (id: string) =>
-  safe(invoke<boolean>("start_service", { id }));
-export const stopService = (id: string) =>
-  safe(invoke<boolean>("stop_service", { id }));
+export const startService = (id: string, expectedVersion?: string) =>
+  safe(invoke<boolean>("start_service", { id, expectedVersion }));
+export const stopService = (id: string, expectedVersion?: string) =>
+  safe(invoke<boolean>("stop_service", { id, expectedVersion }));
 export const serviceStopPreview = (id: string) => safe(invoke<ServiceStopPreview>("service_stop_preview", { id }));
 export const forceStopService = (id: string, revision: string) => safe(invoke<boolean>("force_stop_service", { id, revision }));
 export const restartService = (id: string) =>

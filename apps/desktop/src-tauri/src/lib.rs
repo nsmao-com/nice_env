@@ -902,13 +902,17 @@ async fn start_service(
     app: tauri::AppHandle,
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
+    expected_version: Option<String>,
 ) -> Result<bool, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     let service_id = id.clone();
     let (result, freed) = tauri::async_runtime::spawn_blocking(move || {
         let mut freed = Vec::new();
-        let result = st.start_service_with_port_policy(&id, |port| freed.push(port));
+        let result = match expected_version.as_deref() {
+            Some(version) => st.start_service_version_with_port_policy(&id, version, |port| freed.push(port)),
+            None => st.start_service_with_port_policy(&id, |port| freed.push(port)),
+        };
         (result, freed)
     }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?;
     if !freed.is_empty() {
@@ -924,11 +928,18 @@ async fn stop_service(
     app: tauri::AppHandle,
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
+    expected_version: Option<String>,
 ) -> Result<bool, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     let r =
-        tauri::async_runtime::spawn_blocking(move || map_jh(st.stop_service(&id).map(|_| true)))
+        tauri::async_runtime::spawn_blocking(move || {
+            let result = match expected_version.as_deref() {
+                Some(version) => st.stop_service_version(&id, version),
+                None => st.stop_service(&id),
+            };
+            map_jh(result.map(|_| true))
+        })
             .await
             .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?;
     crate::tray::refresh(&app);

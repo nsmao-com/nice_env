@@ -1165,6 +1165,39 @@ impl CoreState {
         r
     }
 
+    /// 版本列表的操作不能在读取状态后被默认版本切换重定向到另一个实例。
+    fn check_service_version(&self, id: &str, expected_version: &str) -> Result<()> {
+        let status = self.manager.snapshot(id)
+            .ok_or_else(|| AppError::new("UNKNOWN_SERVICE", format!("服务 {id} 未注册或已卸载")))?;
+        if expected_version.is_empty() || status.version.as_deref() != Some(expected_version) {
+            return Err(AppError::new("SERVICE_TARGET_CHANGED", "服务已切换到其他版本，请重新选择要操作的版本"));
+        }
+        if matches!(status.state, model::ServiceState::Starting | model::ServiceState::Stopping) {
+            return Err(AppError::new("SERVICE_BUSY", "服务正在切换状态，请稍后重试"));
+        }
+        if status.state == model::ServiceState::Unknown {
+            return Err(AppError::new("SERVICE_STATE_UNKNOWN", "无法确认服务状态，请先重新检查服务状态"));
+        }
+        Ok(())
+    }
+
+    pub fn stop_service_version(&self, id: &str, expected_version: &str) -> Result<()> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后停止"))?;
+        self.check_service_version(id, expected_version)?;
+        self.stop_service(id)
+    }
+
+    pub fn start_service_version_with_port_policy(&self, id: &str, expected_version: &str, on_freed: impl FnMut(u16)) -> Result<()> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后启动"))?;
+        ensure_application_accepts_work()?;
+        ops::register_services(&self.paths, &self.store, &self.manager);
+        generic::register_services(&self.paths, &self.store, &self.manager);
+        self.check_service_version(id, expected_version)?;
+        self.start_service_with_port_policy(id, on_freed)
+    }
+
     /// 强制停止须先展示当前实例，再用同一份进程身份修订号确认。
     pub fn service_stop_preview(&self, id: &str) -> Result<model::ServiceStopPreview> {
         let _activity = paths::DataDirActivity::shared(&self.paths.base)?;

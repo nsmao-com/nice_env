@@ -33,6 +33,8 @@ export interface VersionItem {
   incompatible?: boolean;
 }
 
+export type VersionAction = "install" | "active" | "start" | "stop";
+
 interface Props {
   disabled?: boolean;
   statusKnown?: boolean;
@@ -52,8 +54,7 @@ interface Props {
     loading: boolean;
   };
   onRefresh: () => Promise<void> | void;
-  onPick: (item: VersionItem, trigger: HTMLButtonElement | null) => Promise<void> | void;
-  onSetActive: (item: VersionItem) => Promise<void>;
+  onPick: (item: VersionItem, action: VersionAction, trigger: HTMLButtonElement | null) => Promise<void> | void;
   onOpenFolder: (item: VersionItem) => Promise<void> | void;
   onUninstall: (version: string, trigger: HTMLButtonElement | null) => void;
 }
@@ -79,7 +80,7 @@ function summarise(items: VersionItem[], countLabel: string) {
   };
 }
 
-export function VersionPicker({ group, items, catalog, disabled = false, statusKnown = true, onRefresh, onPick, onSetActive, onOpenFolder, onUninstall }: Props) {
+export function VersionPicker({ group, items, catalog, disabled = false, statusKnown = true, onRefresh, onPick, onOpenFolder, onUninstall }: Props) {
   const t = useT();
   const pathBusy = useIsMutating({ mutationKey: ["pathenv-change"] }) > 0;
   const [open, setOpen] = React.useState(false);
@@ -91,7 +92,7 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
   const dialogHandoff = React.useRef(false);
   const refreshRef = React.useRef(false);
   const [refreshing, setRefreshing] = React.useState(false);
-  const [failure, setFailure] = React.useState<{ item: VersionItem; action: "pick" | "active"; error: AppErrorShape } | null>(null);
+  const [failure, setFailure] = React.useState<{ version: string; action: VersionAction; error: AppErrorShape } | null>(null);
   const failureRef = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {
@@ -122,28 +123,33 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
     ].filter((g) => g.items.length > 0);
   }, [filtered, t]);
 
-  const pick = async (item: VersionItem, action: "pick" | "active" = "pick") => {
-    if (busyRef.current || pathBusy || disabled || item.installing) return;
+  const actionOf = (item: VersionItem): VersionAction => !item.installed ? "install"
+    : !group.isService ? "active"
+    : item.canStop || item.running ? "stop"
+    : item.active || group.multiInstance ? "start" : "active";
+  const actionLabel = (action: VersionAction) => action === "active"
+    ? t(group.multiInstance ? "versions.setDefault" : "versions.switch") : t(`versions.${action}`);
+  const retryItem = failure ? items.find((item) => item.version === failure.version) : undefined;
+
+  const pick = async (item: VersionItem, action: VersionAction = actionOf(item)) => {
+    if (busyRef.current || pathBusy || disabled || !statusKnown || item.installing || item.transitioning) return;
     if (item.incompatible && !item.installed) {
       return; // UI 已明确标注；真正拦截在后端（PLATFORM_UNSUPPORTED）
     }
     busyRef.current = true;
     setBusy(item.version);
     setFailure(null);
-    const opensInstall = action === "pick" && !item.installed;
+    const opensInstall = action === "install" && !item.installed;
     try {
-      if (action === "active") await onSetActive(item);
-      else {
-        if (opensInstall) {
-          dialogHandoff.current = true;
-          setOpen(false);
-        }
-        await onPick(item, triggerRef.current);
+      if (opensInstall) {
+        dialogHandoff.current = true;
+        setOpen(false);
       }
+      await onPick(item, action, triggerRef.current);
       // 切换/启停保持打开；安装交给独立弹窗，避免两个浮层争抢焦点。
     } catch (error) {
       if (opensInstall) { dialogHandoff.current = false; setOpen(true); }
-      setFailure({ item, action, error: normalizeError(error) });
+      setFailure({ version: item.version, action, error: normalizeError(error) });
     } finally {
       busyRef.current = false;
       setBusy(null);
@@ -270,7 +276,7 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
                   >
                     <button
                       onClick={() => pick(item)}
-                      disabled={disabled || pathBusy || busy !== null || item.installing || item.transitioning || (!!item.incompatible && !item.installed)
+                      disabled={disabled || !statusKnown || pathBusy || busy !== null || item.installing || item.transitioning || (!!item.incompatible && !item.installed)
                         || (!group.isService && item.installed && item.active)}
                       title={item.incompatible && !item.installed ? t("versions.incompatible") : undefined}
                       className={cn(
@@ -350,7 +356,7 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
                         {group.multiInstance && <button
                           type="button"
                           aria-label={`${t("versions.setDefault")} ${group.displayName} ${item.version}`}
-                          disabled={disabled || pathBusy || busy !== null || item.installing || item.active}
+                          disabled={disabled || !statusKnown || pathBusy || busy !== null || item.installing || item.transitioning || item.active}
                           onClick={() => void pick(item, "active")}
                           className="inline-flex min-h-7 items-center gap-1.5 rounded-md px-2 text-[11px] text-muted transition-colors hover:bg-fill hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary disabled:opacity-50"
                         >
@@ -397,9 +403,11 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
 
         {failure && (
           <div ref={failureRef} role="alert" className="mx-2.5 mb-2 rounded-lg bg-error-soft p-2 text-[11px] text-error [overflow-wrap:anywhere]">
+            <p className="mb-1 font-medium">{actionLabel(failure.action)} · {failure.version}</p>
             <p>{failure.error.message}</p>
             {failure.error.hint && <p className="mt-1">{failure.error.hint}</p>}
-            <button type="button" disabled={disabled || busy !== null || items.find((i) => i.version === failure.item.version)?.installing} onClick={() => void pick(failure.item, failure.action)} className="mt-1.5 rounded-md border border-error/30 px-2 py-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">{t("bulk.retry")}</button>
+            {!retryItem && <p className="mt-1">{t("versions.unavailable")}</p>}
+            <button type="button" disabled={disabled || !statusKnown || pathBusy || busy !== null || !retryItem || retryItem.installing || retryItem.transitioning || (!!retryItem.incompatible && !retryItem.installed)} onClick={() => { if (retryItem) void pick(retryItem, failure.action); }} className="mt-1.5 rounded-md border border-error/30 px-2 py-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary disabled:opacity-50">{t("bulk.retry")} · {actionLabel(failure.action)}</button>
           </div>
         )}
         {installedCount > 0 && (

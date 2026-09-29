@@ -1042,8 +1042,16 @@ function savePreviewConfig(kind: string, content: string, expected?: string) {
 let serviceActionInProgress = false;
 
 /** 演示启停也保持操作互斥和重启的停止/启动顺序。 */
-async function runServiceAction(action: "start_service" | "stop_service" | "restart_service", id: string) {
-  return withServiceOperation(() => performServiceAction(action, id));
+async function runServiceAction(action: "start_service" | "stop_service" | "restart_service", id: string, expectedVersion?: string) {
+  return withServiceOperation(() => {
+    if (expectedVersion !== undefined) {
+      const service = services.get(id);
+      if (!service) throw { code: "UNKNOWN_SERVICE", message: "服务未注册或已卸载" };
+      if (!expectedVersion || service.version !== expectedVersion) throw { code: "SERVICE_TARGET_CHANGED", message: "服务已切换到其他版本，请重新选择要操作的版本" };
+      if (service.state === "unknown") throw { code: "SERVICE_STATE_UNKNOWN", message: "无法确认服务状态，请先重新检查服务状态" };
+    }
+    return performServiceAction(action, id);
+  });
 }
 
 const serviceRunRevisions = new Map<string, number>();
@@ -1141,7 +1149,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "start_service":
     case "stop_service":
     case "restart_service":
-      return await runServiceAction(cmd, String(args?.id ?? "")) as T;
+      return await runServiceAction(cmd, String(args?.id ?? ""), args?.expectedVersion as string | undefined) as T;
     case "service_stop_preview":
       return stopPreview(String(args?.id ?? "")) as T;
     case "force_stop_service": {

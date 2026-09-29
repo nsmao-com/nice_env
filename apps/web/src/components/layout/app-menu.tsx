@@ -24,7 +24,7 @@ import { isTauri, listen, normalizeError } from "@/lib/backend";
 import { cn } from "@/lib/utils";
 import { ConfirmDialog } from "@/components/shared/misc";
 import { UpdateDialog } from "@/components/shared/update-dialog";
-import { BulkResult } from "@/components/shared/bulk-actions";
+import { BulkResult, BulkTargetList } from "@/components/shared/bulk-actions";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -237,7 +237,8 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
         loading={quick.busy}
         onConfirm={doStopAll}
       >
-        <BulkResult report={quick.stopReport} error={quick.stopError} services={services} busy={quick.busy} />
+        {!quick.stopReport && <BulkTargetList targets={quick.stopTargets} />}
+        <BulkResult report={quick.stopReport} error={quick.stopError} services={services} targets={quick.stopTargets} busy={quick.busy} />
       </ConfirmDialog>
 
       <ConfirmDialog

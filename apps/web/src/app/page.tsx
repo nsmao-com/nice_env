@@ -37,7 +37,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ServiceCard } from "@/components/shared/service-card";
 import { ServiceRow } from "@/components/shared/service-row";
 import { SortableCollection } from "@/components/shared/sortable-collection";
-import { BulkActions, BulkResult } from "@/components/shared/bulk-actions";
+import { BulkActions, BulkResult, BulkTargetList } from "@/components/shared/bulk-actions";
 import { StatusLight } from "@/components/shared/status-light";
 import { CopyButton, EmptyState, SectionHeader, Sparkline, ConfirmDialog } from "@/components/shared/misc";
 import { PageHeader } from "@/components/layout/app-shell";
@@ -327,7 +327,8 @@ export default function DashboardPage() {
         loading={stackBusy}
         onConfirm={stopAll}
       >
-        <BulkResult report={quick.stopReport} error={quick.stopError} services={services} busy={quick.busy} />
+        {!quick.stopReport && <BulkTargetList targets={quick.stopTargets} />}
+        <BulkResult report={quick.stopReport} error={quick.stopError} services={services} targets={quick.stopTargets} busy={quick.busy} />
       </ConfirmDialog>
     </div>
   );

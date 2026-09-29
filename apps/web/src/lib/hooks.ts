@@ -7,7 +7,8 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import * as api from "./api";
-import type { DownloadProgress, VersionCatalog, Site, ServiceStatus, Stack, StackStartReport, BulkReport } from "@nsb/schema";
+import type { DownloadProgress, VersionCatalog, Site, ServiceStatus, Stack, StackStartReport, BulkReport, BulkTarget } from "@nsb/schema";
+import { bulkTarget, mergeBulkReport } from "./utils";
 import { normalizeError, type AppErrorShape } from "./backend";
 import { toast } from "sonner";
 import { useInstallTasks } from "./install-tasks";
@@ -440,14 +441,13 @@ export function useStackActions() {
 export function useQuickServiceActions(services: ServiceStatus[], stacks: Stack[]) {
   const t = useT();
   const invalidate = useInvalidate();
-  const qc = useQueryClient();
   const stackActions = useStackActions();
   const adminerQuery = useAdminerStatus();
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const [stopReport, setStopReport] = useState<BulkReport | null>(null);
   const [stopError, setStopError] = useState<AppErrorShape | null>(null);
-  const [stopTargets, setStopTargets] = useState<string[]>([]);
+  const [stopTargets, setStopTargets] = useState<BulkTarget[]>([]);
   const mounted = useRef(true);
   const serviceRequest = useRef<object | null>(null);
   const serviceIdentities = useRef(new Map<string, { version?: string }>());
@@ -466,26 +466,31 @@ export function useQuickServiceActions(services: ServiceStatus[], stacks: Stack[
     return () => { mounted.current = false; serviceRequest.current = null; };
   }, []);
   const prepareStop = async () => {
-    if (busyRef.current || stackActions.isBusy()) return false;
+    if (!mounted.current || busyRef.current || stackActions.isBusy()) return false;
     busyRef.current = true; setBusy(true);
     setStopReport(null); setStopError(null);
     setStopTargets([]);
     try {
       // 两类进程都读取成功才允许确认；失败不能用空列表伪装为全部停止。
       const [currentServices, consoleStatus] = await Promise.all([
-        qc.fetchQuery({ queryKey: ["services"], queryFn: api.listServiceStatus, staleTime: 0, networkMode: "always" }),
-        qc.fetchQuery({ queryKey: ["adminer"], queryFn: api.adminerStatus, staleTime: 0, retry: false, networkMode: "always" }),
+        api.listServiceStatus(),
+        api.adminerStatus(),
       ]);
-      const ids = currentServices.filter(serviceHasProcess).map((service) => service.id);
-      if (consoleStatus) ids.push(api.ADMINER_CONSOLE_ID);
-      setStopTargets(ids);
-      if (!ids.length) { toast.info(t("bulk.noRunning")); return false; }
+      if (!mounted.current) return false;
+      const targets = currentServices.filter(serviceHasProcess).map(bulkTarget);
+      if (consoleStatus) {
+        if (!consoleStatus.revision) throw { code: "SERVICE_TARGET_CHANGED", message: t("bulk.consoleChanged") };
+        targets.push({ id: api.ADMINER_CONSOLE_ID, version: null, revision: consoleStatus.revision,
+          label: `${t("tools.adminer.title")} · ${consoleStatus.packageId ?? "adminer"} ${consoleStatus.adminerVersion} · PHP ${consoleStatus.phpVersion}` });
+      }
+      setStopTargets(targets);
+      if (!targets.length) { toast.info(t("bulk.noRunning")); return false; }
       return true;
     } catch (error) {
       toastError(error);
       return false;
     } finally {
-      busyRef.current = false; setBusy(false);
+      busyRef.current = false; if (mounted.current) setBusy(false);
     }
   };
 
@@ -493,12 +498,12 @@ export function useQuickServiceActions(services: ServiceStatus[], stacks: Stack[
     if (busyRef.current || stackActions.isBusy()) return;
     if (stack) { await stackActions.run(stack, "start"); return; }
     // 尚无服务栈时保留首次使用的快速启动入口。
-    const ids = services.filter((s) => ["nginx", "redis", "php", "mysql"].includes(s.id.split("@")[0])).map((s) => s.id);
-    if (!ids.length) { toast.error(t("bulk.noServices")); return; }
+    const targets = services.filter((s) => ["nginx", "redis", "php", "mysql"].includes(s.id.split("@")[0])).map(bulkTarget);
+    if (!targets.length) { toast.error(t("bulk.noServices")); return; }
     busyRef.current = true; setBusy(true);
     const pending = toast.loading(t("dashboard.startingStack"));
     try {
-      const report = await api.bulkStart(ids);
+      const report = await api.bulkStart(targets);
       toast.dismiss(pending);
       toastStackReport(t, {
         stackId: "", revision: "", order: report.order, started: report.succeeded, alreadyRunning: report.already,
@@ -512,19 +517,21 @@ export function useQuickServiceActions(services: ServiceStatus[], stacks: Stack[
     }
   };
 
-  const stop = async (ids = stopTargets) => {
-    if (busyRef.current || stackActions.isBusy()) return null;
+  const stop = async (ids = stopReport ? stopReport.failed.map((failure) => failure.serviceId) : stopTargets.map((target) => target.id)) => {
+    if (!mounted.current || busyRef.current || stackActions.isBusy()) return null;
+    const targets = stopTargets.filter((target) => ids.includes(target.id));
+    if (!targets.length || ids.some((id) => !targets.some((target) => target.id === id))) return null;
     busyRef.current = true; setBusy(true); setStopError(null);
     try {
-      const report = await api.stopAllServices(ids);
-      setStopReport(report);
+      const report = await api.stopAllServices(targets);
+      if (mounted.current) setStopReport((previous) => previous ? mergeBulkReport(previous, report) : report);
       if (!report.failed.length) toast.success(t("bulk.done").replace("{action}", t("bulk.stop")).replace("{n}", String(report.succeeded.length + report.already.length)));
       return report;
     } catch (error) {
-      setStopError(normalizeError(error));
+      if (mounted.current) setStopError(normalizeError(error));
       return null;
     } finally {
-      busyRef.current = false; setBusy(false); invalidate("services", "stacks", "adminer");
+      busyRef.current = false; if (mounted.current) setBusy(false); invalidate("services", "stacks", "adminer");
     }
   };
   const serviceAction = async (selected: ServiceTarget, action: ServiceAction): Promise<void> => {
@@ -574,13 +581,13 @@ export function useQuickServiceActions(services: ServiceStatus[], stacks: Stack[
   };
   const serviceTargetChanged = Boolean(serviceFailure && (!serviceFailure.identity || serviceFailure.identity !== serviceIdentities.current.get(serviceFailure.service.id)
     || serviceFailure.service.version !== serviceIdentities.current.get(serviceFailure.service.id)?.version));
-  const pendingTargets = stopReport ? stopReport.failed.map((failure) => failure.serviceId) : stopTargets;
+  const pendingTargets = stopReport ? stopReport.failed.map((failure) => failure.serviceId) : stopTargets.map((target) => target.id);
   const stopDescription = t(stopReport?.failed.length ? "bulk.retryStopHint" : "confirm.stopAllDesc")
     .replace("{count}", String(pendingTargets.length))
     + (pendingTargets.includes(api.ADMINER_CONSOLE_ID) ? ` ${t("confirm.stopAllConsoleHint")}` : "");
   const hasStopTargets = services.some(serviceHasProcess) || Boolean(adminerQuery.data) || !adminerQuery.isSuccess;
   return { busy: busy || stackActions.busyId !== null, start, stop, serviceAction, serviceFailure, serviceTargetChanged, dismissServiceFailure,
-    stopReport, stopError, prepareStop, stopDescription, hasStopTargets };
+    stopReport, stopError, stopTargets, prepareStop, stopDescription, hasStopTargets };
 }
 
 /* 端口方案 → 期望端口 */

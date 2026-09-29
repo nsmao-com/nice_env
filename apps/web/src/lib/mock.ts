@@ -1864,9 +1864,32 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "bulk_restart": {
       return withServiceOperation(async () => {
       const stopAll = cmd === "tray_stop_all";
-      const targets = args?.ids as string[] | undefined;
-      const ids = [...new Set(targets ?? (stopAll ? [...services.keys(), ...(mockAdminer ? ["adminer-console"] : [])] : []))];
+      const targets = args?.targets as import("@nsb/schema").BulkTarget[] | undefined;
+      if ((!targets && (!stopAll || args?.ids != null)) || (targets && (!Array.isArray(targets) || !targets.length || targets.length > 1024
+        || targets.some((target) => !target || typeof target.id !== "string" || !target.id) || new Set(targets.map((target) => target.id)).size !== targets.length))) {
+        throw { code: "BAD_BULK_TARGETS", message: "请重新选择有效且不重复的服务，并确认其版本" };
+      }
+      const ids = targets ? targets.map((target) => target.id) : [...services.keys(), ...(mockAdminer ? ["adminer-console"] : [])];
       const action = stopAll ? "stop" : cmd.slice(5) as "start" | "stop" | "restart";
+      // 整批预检必须先于停止管理台或任何服务。
+      for (const target of targets ?? []) {
+        if (target.id === "adminer-console") {
+          if (!stopAll || target.version != null || !target.revision) throw { code: "BAD_BULK_TARGETS", message: "请重新确认数据库管理台后再停止" };
+          if (mockAdminer && mockAdminer.revision !== target.revision) throw { code: "SERVICE_TARGET_CHANGED", message: "数据库管理台已重新启动，请重新确认停止目标" };
+          continue;
+        }
+        const service = services.get(target.id);
+        if (!service) throw { code: "UNKNOWN_SERVICE", message: `服务 ${target.id} 已移除，请重新选择` };
+        if ((service.version ?? null) !== target.version || target.version === "") throw { code: "SERVICE_TARGET_CHANGED", message: `服务 ${target.id} 已切换版本，请重新选择要操作的版本` };
+        if (["starting", "stopping"].includes(service.state)) throw { code: "SERVICE_BUSY", message: `服务 ${target.id} 正在切换状态，请稍后重试` };
+        if (service.state === "unknown") throw { code: "SERVICE_STATE_UNKNOWN", message: `无法确认服务 ${target.id} 的状态，请先重新检查` };
+        if (action === "restart") {
+          if (service.missingRequires.length) throw { code: "MISSING_DEPENDENCIES", message: "请先安装服务依赖后再重启" };
+          const installed = [...packages.values()].filter((p) => p.id === target.id && p.install).sort((a, b) => cmpVersionDesc(a.version, b.version));
+          const selected = installed.find((p) => p.active) ?? installed[0];
+          if (selected && selected.version !== target.version) throw { code: "SERVICE_TARGET_CHANGED", message: `服务 ${target.id} 的默认版本与当前版本不一致，请先确认后再重启` };
+        }
+      }
       const tier = (id: string) => {
         if (stopAll && id === "adminer-console") return 4;
         if (id.startsWith("site-app:")) return 1;
@@ -1886,6 +1909,10 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         }
         const service = services.get(id);
         if (!service) throw { code: "UNKNOWN_SERVICE", message: `服务 ${id} 未注册或已卸载` };
+        const expected = targets?.find((target) => target.id === id);
+        if (expected && (service.version ?? null) !== expected.version) throw { code: "SERVICE_TARGET_CHANGED", message: "服务已切换版本，请重新选择" };
+        if (service.state === "unknown") throw { code: "SERVICE_STATE_UNKNOWN", message: "无法确认服务状态，请先重新检查" };
+        if (operation === "start" && service.missingRequires.length) throw { code: "MISSING_DEPENDENCIES", message: "请先安装服务依赖" };
         if (["starting", "stopping"].includes(service.state)) {
           throw { code: "SERVICE_BUSY", message: `服务 ${id} 正在切换状态，请稍后重试` };
         }

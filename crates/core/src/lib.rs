@@ -1471,11 +1471,99 @@ impl CoreState {
 
     pub fn bulk_restart(&self, ids: &[String]) -> Result<bulk::BulkReport> {
         let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后批量重启"))?;
         for id in ids {
             generic::ensure_dependencies(&self.store, id)?;
+            if let Some(version) = self.manager.snapshot(id).and_then(|s| s.version) {
+                if ops::installed_by_choice(&self.store, id).is_some_and(|selected| selected.version != version) {
+                    return Err(AppError::new("SERVICE_TARGET_CHANGED", format!("服务 {id} 的默认版本与当前版本不一致，请先确认后再重启")));
+                }
+            }
         }
         bulk::restart_many_with(&self.paths, &self.manager, ids,
             |id| self.start_service(id), |id| self.stop_service(id))
+    }
+
+    fn check_bulk_target(&self, target: &bulk::BulkTarget) -> Result<()> {
+        let status = self.manager.snapshot(&target.id)
+            .ok_or_else(|| AppError::new("UNKNOWN_SERVICE", format!("服务 {} 已移除，请重新选择", target.id)))?;
+        if status.version != target.version || target.version.as_deref() == Some("") {
+            return Err(AppError::new("SERVICE_TARGET_CHANGED", format!("服务 {} 已切换版本，请重新选择要操作的版本", target.id)));
+        }
+        if matches!(status.state, model::ServiceState::Starting | model::ServiceState::Stopping) {
+            return Err(AppError::new("SERVICE_BUSY", format!("服务 {} 正在切换状态，请稍后重试", target.id)));
+        }
+        if status.state == model::ServiceState::Unknown {
+            return Err(AppError::new("SERVICE_STATE_UNKNOWN", format!("无法确认服务 {} 的状态，请先重新检查", target.id)));
+        }
+        Ok(())
+    }
+
+    /// 先核对整批实例，再执行启停；版本变化时不能在发现问题前已经停止其它服务。
+    pub fn bulk_targets(&self, action: &str, targets: &[bulk::BulkTarget], allow_console: bool) -> Result<bulk::BulkReport> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后批量操作"))?;
+        if !matches!(action, "start" | "stop" | "restart") {
+            return Err(AppError::new("BAD_BULK_ACTION", "批量操作无效"));
+        }
+        if action != "stop" { ensure_application_accepts_work()?; }
+        let mut seen = std::collections::HashSet::new();
+        if targets.is_empty() || targets.len() > 1024 || targets.iter().any(|target| target.id.is_empty() || !seen.insert(&target.id)) {
+            return Err(AppError::new("BAD_BULK_TARGETS", "请重新选择有效且不重复的服务"));
+        }
+        ops::register_services(&self.paths, &self.store, &self.manager);
+        generic::register_services(&self.paths, &self.store, &self.manager);
+        let mut console = None;
+        for target in targets {
+            if target.id == "adminer-console" {
+                if !allow_console || action != "stop" || target.version.is_some() || target.revision.as_deref().is_none_or(str::is_empty) {
+                    return Err(AppError::new("BAD_BULK_TARGETS", "请重新确认数据库管理台后再停止"));
+                }
+                let current = self.adminer_status()?;
+                if current.as_ref().is_some_and(|status| Some(&status.revision) != target.revision.as_ref()) {
+                    return Err(AppError::new("SERVICE_TARGET_CHANGED", "数据库管理台已重新启动，请重新确认停止目标"));
+                }
+                console = Some(current.is_some());
+                continue;
+            }
+            self.check_bulk_target(target)?;
+            if action == "restart" {
+                generic::ensure_dependencies(&self.store, &target.id)?;
+                if ops::installed_by_choice(&self.store, &target.id).is_some_and(|active| Some(active.version) != target.version) {
+                    return Err(AppError::new("SERVICE_TARGET_CHANGED", format!("服务 {} 的默认版本与当前版本不一致，请先确认后再重启", target.id)));
+                }
+            }
+        }
+        let ids = targets.iter().filter(|target| target.id != "adminer-console").map(|target| target.id.clone()).collect::<Vec<_>>();
+        let target_for = |id: &str| targets.iter().find(|target| target.id == id)
+            .ok_or_else(|| AppError::new("BAD_BULK_TARGETS", "批量目标已变化"));
+        let start = |id: &str| {
+            let target = target_for(id)?;
+            self.check_bulk_target(target)?;
+            self.start_service(id)
+        };
+        let stop = |id: &str| {
+            self.check_bulk_target(target_for(id)?)?;
+            self.stop_service(id)
+        };
+        // 所有服务通过预检后才允许停止管理台。
+        let console_result = console.map(|_| toolbox::adminer_stop(&self.manager));
+        let mut report = match action {
+            "start" => bulk::start_many_with(&self.paths, &self.manager, &ids, start)?,
+            "restart" => bulk::restart_many_with(&self.paths, &self.manager, &ids, start, stop)?,
+            _ => bulk::stop_many_with(&self.paths, &self.manager, &ids, stop)?,
+        };
+        if let Some(result) = console_result {
+            let id = "adminer-console".to_string();
+            report.order.insert(0, id.clone());
+            match result {
+                Ok(()) if console == Some(false) => report.already.push(id),
+                Ok(()) => report.succeeded.push(id),
+                Err(error) => report.failed.push(bulk::BulkFailure { service_id: id, error: model::AppErrorInfo::from(error) }),
+            }
+        }
+        ops::save_pidfile(&self.paths, &self.manager);
+        Ok(report)
     }
 
     /// 全部停止包含独立管理台；任何失败都保留结果及剩余 PID。

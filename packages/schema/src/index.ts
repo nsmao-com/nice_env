@@ -812,6 +812,15 @@ export const BulkReport = z.object({
 });
 export type BulkReport = z.infer<typeof BulkReport>;
 
+/** 勾选或确认时的版本；revision 用于每次启动都有独立身份的管理台。 */
+export const BulkTarget = z.object({
+  id: z.string().min(1),
+  version: z.string().min(1).nullable(),
+  label: z.string().optional(),
+  revision: z.string().min(1).optional(),
+});
+export type BulkTarget = z.infer<typeof BulkTarget>;
+
 export const BulkSelectionSummary = z.object({
   total: z.number(),
   running: z.number(),

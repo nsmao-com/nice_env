@@ -58,6 +58,7 @@ import type {
   HealthReport,
   ServiceDiagnosticReport,
   BulkReport,
+  BulkTarget,
   BulkSelectionSummary,
   SiteBulkReport,
   ToolMirrorStatus,
@@ -568,11 +569,11 @@ export const diagnosticsSave = (bundle: DiagnosticsBundle) => safe(invoke<string
 export const healthCheck = () => safe(invoke<HealthReport>("health_check"));
 
 /* 批量服务操作 */
-export const bulkStart = (ids: string[]) => safe(invoke<BulkReport>("bulk_start", { ids }));
-export const bulkStop = (ids: string[]) => safe(invoke<BulkReport>("bulk_stop", { ids }));
+export const bulkStart = (targets: BulkTarget[]) => safe(invoke<BulkReport>("bulk_start", { targets }));
+export const bulkStop = (targets: BulkTarget[]) => safe(invoke<BulkReport>("bulk_stop", { targets }));
 export const ADMINER_CONSOLE_ID = "adminer-console";
-export const stopAllServices = (ids: string[]) => safe(invoke<BulkReport>("tray_stop_all", { ids }));
-export const bulkRestart = (ids: string[]) => safe(invoke<BulkReport>("bulk_restart", { ids }));
+export const stopAllServices = (targets: BulkTarget[]) => safe(invoke<BulkReport>("tray_stop_all", { targets }));
+export const bulkRestart = (targets: BulkTarget[]) => safe(invoke<BulkReport>("bulk_restart", { targets }));
 export const bulkSummary = (ids: string[]) =>
   safe(invoke<BulkSelectionSummary>("bulk_summary", { ids }));
 
@@ -716,7 +717,7 @@ export const ollamaPull = (name: string) =>
 export const ollamaPullStatus = () => safe(invoke<OllamaPullStatus | null>("ollama_pull_status"));
 export const ollamaCancelPull = (id: string) => safe(invoke<boolean>("ollama_cancel_pull", { id }));
 
-export interface AdminerStatus { packageId?: string; databaseServiceId?: string | null; port: number; file: string; url: string; phpVersion: string; adminerVersion: string }
+export interface AdminerStatus { revision: string; packageId?: string; databaseServiceId?: string | null; port: number; file: string; url: string; phpVersion: string; adminerVersion: string }
 export const adminerStart = (packageId: "adminer" | "phpmyadmin" = "adminer", targetServiceId?: string) => safe(invoke<AdminerStatus>("adminer_start", { package: packageId, targetServiceId }));
 export const adminerStatus = () => safe(invoke<AdminerStatus | null>("adminer_status"));
 export const adminerStop = () => safe(invoke<boolean>("adminer_stop"));

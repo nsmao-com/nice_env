@@ -11,12 +11,12 @@ import {
   X,
   ListChecks,
 } from "lucide-react";
-import type { ServiceStatus, BulkReport } from "@nsb/schema";
+import type { ServiceStatus, BulkReport, BulkTarget } from "@nsb/schema";
 import { useT } from "@/lib/store";
 import { useInvalidate, serviceHasProcess } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import { normalizeError, type AppErrorShape } from "@/lib/backend";
-import { cn } from "@/lib/utils";
+import { cn, bulkTarget, mergeBulkReport } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -40,7 +40,8 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
   const t = useT();
   const invalidate = useInvalidate();
   const [open, setOpen] = React.useState(false);
-  const [picked, setPicked] = React.useState<Set<string>>(new Set());
+  const [picked, setPicked] = React.useState<Map<string, BulkTarget>>(new Map());
+  const [attemptTargets, setAttemptTargets] = React.useState<BulkTarget[]>([]);
   const [busy, setBusy] = React.useState<string | null>(null);
   const [report, setReport] = React.useState<BulkReport | null>(null);
   const [error, setError] = React.useState<AppErrorShape | null>(null);
@@ -48,47 +49,51 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
   const resultRef = React.useRef<HTMLDivElement>(null);
 
   const running = React.useMemo(
-    () => services.filter(serviceHasProcess).map((s) => s.id),
+    () => services.filter((s) => serviceHasProcess(s) && !["unknown", "starting", "stopping"].includes(s.state)),
     [services]
   );
   const stopped = React.useMemo(
-    () => services.filter((s) => !serviceHasProcess(s)).map((s) => s.id),
+    () => services.filter((s) => !serviceHasProcess(s) && s.state !== "unknown"),
     [services]
   );
   const selectedMissingDependencies = React.useMemo(
     () => services.filter((service) => picked.has(service.id) && service.missingRequires.length > 0),
     [services, picked]
   );
+  const changed = [...picked.values()].filter((target) => !services.some((s) => s.id === target.id && (s.version ?? null) === target.version));
+  const unavailable = services.some((s) => picked.has(s.id) && ["unknown", "starting", "stopping"].includes(s.state));
 
   React.useEffect(() => {
     if (!open) {
       setReport(null);
       setError(null);
-      setPicked(new Set());
+      setPicked(new Map()); setAttemptTargets([]);
     }
   }, [open]);
 
-  const toggle = (id: string) =>
+  const toggle = (service: ServiceStatus) =>
     setPicked((s) => {
-      const n = new Set(s);
-      if (n.has(id)) n.delete(id);
-      else n.add(id);
+      const n = new Map(s);
+      if (n.has(service.id)) n.delete(service.id);
+      else n.set(service.id, bulkTarget(service));
       return n;
     });
 
-  const run = async (action: "start" | "stop" | "restart", ids = Array.from(picked)) => {
-    if (ids.length === 0 || busyRef.current) return;
+  const run = async (action: "start" | "stop" | "restart", retry = false) => {
+    const targets = retry ? attemptTargets.filter((target) => report?.failed.some((f) => f.serviceId === target.id)) : [...picked.values()];
+    if (targets.length === 0 || busyRef.current || (!retry && (changed.length > 0 || unavailable))) return;
     busyRef.current = true;
     setBusy(action);
     setError(null);
+    if (!retry) { setReport(null); setAttemptTargets(targets); }
     try {
       const r =
         action === "start"
-          ? await api.bulkStart(ids)
+          ? await api.bulkStart(targets)
           : action === "stop"
-            ? await api.bulkStop(ids)
-            : await api.bulkRestart(ids);
-      setReport(r);
+            ? await api.bulkStop(targets)
+            : await api.bulkRestart(targets);
+      setReport((previous) => retry && previous ? mergeBulkReport(previous, r) : r);
     } catch (e) {
       setError(normalizeError(e));
     } finally {
@@ -158,9 +163,9 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
                     type="checkbox"
                     className="h-3.5 w-3.5 shrink-0 accent-[var(--primary)]"
                     checked={picked.has(s.id)}
-                    onChange={() => toggle(s.id)}
-                    disabled={busy !== null}
-                    aria-label={s.label}
+                    onChange={() => toggle(s)}
+                    disabled={busy !== null || (!picked.has(s.id) && ["unknown", "starting", "stopping"].includes(s.state))}
+                    aria-label={`${s.label}${s.version ? ` ${s.version}` : ""}`}
                   />
                   <div className="min-w-0 flex-1">
                     <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
@@ -192,11 +197,16 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
               ))}
             </div>
 
+            {changed.length > 0 && <div role="alert" className="mt-3 rounded-lg bg-warn/10 p-3 text-xs text-warn">
+              <p>{t("bulk.selectionChanged")}</p><BulkTargetList targets={changed} />
+            </div>}
+            {unavailable && <p role="status" className="mt-3 text-xs text-warn">{t("bulk.selectionUnavailable")}</p>}
+
             <div ref={resultRef}>
-              <BulkResult report={report} error={error} services={services} busy={busy !== null} />
+              <BulkResult report={report} error={error} services={services} targets={attemptTargets} busy={busy !== null} />
               {report && report.failed.length > 0 && (
                 <Button variant="secondary" size="sm" className="mt-2" disabled={busy !== null}
-                  onClick={() => void run(report.action as "start" | "stop" | "restart", report.failed.map((f) => f.serviceId))}>
+                  onClick={() => void run(report.action as "start" | "stop" | "restart", true)}>
                   <RotateCw className="h-3.5 w-3.5" /> {t("bulk.retryFailed")}
                 </Button>
               )}
@@ -214,7 +224,7 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
                 variant="ghost"
                 size="sm"
                 className="h-7 text-[11.5px]"
-                onClick={() => setPicked(new Set(running))}
+                onClick={() => setPicked(new Map(running.map((s) => [s.id, bulkTarget(s)])))}
                 disabled={busy !== null || running.length === 0}
               >
                 {t("bulk.selectRunning")}
@@ -223,7 +233,7 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
                 variant="ghost"
                 size="sm"
                 className="h-7 text-[11.5px]"
-                onClick={() => setPicked(new Set(stopped))}
+                onClick={() => setPicked(new Map(stopped.map((s) => [s.id, bulkTarget(s)])))}
                 disabled={busy !== null || stopped.length === 0}
               >
                 {t("bulk.selectStopped")}
@@ -234,7 +244,7 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
                   size="sm"
                   className="h-7 text-[11.5px]"
                   disabled={busy !== null}
-                  onClick={() => setPicked(new Set())}
+                  onClick={() => setPicked(new Map())}
                 >
                   <X className="h-3 w-3" />
                   <span className="ml-1">{t("bulk.clear")}</span>
@@ -247,7 +257,7 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
                 size="sm"
                 variant="secondary"
                 className="h-8"
-                disabled={busy != null || picked.size === 0}
+                disabled={busy != null || picked.size === 0 || changed.length > 0 || unavailable}
                 onClick={() => void run("stop")}
               >
                 {busy === "stop" ? (
@@ -261,7 +271,7 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
                 size="sm"
                 variant="secondary"
                 className="h-8"
-                disabled={busy != null || picked.size === 0 || selectedMissingDependencies.length > 0}
+                disabled={busy != null || picked.size === 0 || changed.length > 0 || unavailable || selectedMissingDependencies.length > 0}
                 onClick={() => void run("restart")}
               >
                 {busy === "restart" ? (
@@ -274,7 +284,7 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
               <Button
                 size="sm"
                 className="h-8"
-                disabled={busy != null || picked.size === 0 || selectedMissingDependencies.length > 0}
+                disabled={busy != null || picked.size === 0 || changed.length > 0 || unavailable || selectedMissingDependencies.length > 0}
                 title={selectedMissingDependencies.length > 0 ? t("bulk.dependenciesBlocked") : undefined}
                 onClick={() => void run("start")}
               >
@@ -293,12 +303,20 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
   );
 }
 
+/** 确认时的名称和版本，不能被后续轮询中的另一版本替换。 */
+export function BulkTargetList({ targets }: { targets: BulkTarget[] }) {
+  return <ul className="mt-2 max-h-40 space-y-1 overflow-y-auto text-xs text-muted [overflow-wrap:anywhere]">
+    {targets.map((target) => <li key={target.id}>{target.label ?? target.id}{target.version && <span className="ml-1.5 font-mono text-faint">{target.version}</span>}</li>)}
+  </ul>;
+}
+
 /** 所有批量入口使用相同的逐项结果，长错误换行且失败优先于成功标记。 */
-export function BulkResult({ report, error, services, busy = false }: {
+export function BulkResult({ report, error, services, targets, busy = false }: {
   report: BulkReport | null;
   error?: AppErrorShape | null;
   busy?: boolean;
   services: ServiceStatus[];
+  targets?: BulkTarget[];
 }) {
   const t = useT();
   return (
@@ -318,11 +336,14 @@ export function BulkResult({ report, error, services, busy = false }: {
               const failure = report.failed.find((f) => f.serviceId === id);
               const ok = !failure && report.succeeded.includes(id);
               const already = !failure && report.already.includes(id);
+              const target = targets?.find((item) => item.id === id);
               return (
                 <li key={id} className="min-w-0 text-xs">
                   <div className="flex items-start gap-2">
                     <span className="shrink-0 text-faint">{index + 1}.</span>
-                    <span className="min-w-0 flex-1">{isConsole ? t("tools.adminer.title") : services.find((s) => s.id === id)?.label ?? id}</span>
+                    <span className="min-w-0 flex-1">{target?.label ?? (isConsole ? t("tools.adminer.title") : services.find((s) => s.id === id)?.label ?? id)}
+                      {target?.version && <span className="ml-1 font-mono text-faint">{target.version}</span>}
+                    </span>
                     <span className={cn("shrink-0", failure ? "text-error" : ok ? "text-running" : "text-faint")}>
                       {t(failure ? "bulk.rFail" : ok ? "bulk.rOk" : already ? "bulk.rSkipped" : "bulk.rUnknown")}
                     </span>

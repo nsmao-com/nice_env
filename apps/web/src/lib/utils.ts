@@ -1,6 +1,6 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
-import type { PackageView, ServiceStatus, StackItem, SiteRuntime } from "@nsb/schema";
+import type { PackageView, ServiceStatus, StackItem, SiteRuntime, BulkTarget, BulkReport } from "@nsb/schema";
 
 export const APPLICATION_RUNTIMES = [
   { kind: "node", id: "node", label: "Node.js", args: ["server.js"] },
@@ -33,6 +33,20 @@ export function validApplication(application: SiteRuntime["application"], proxyT
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
+}
+
+export function bulkTarget(service: ServiceStatus): BulkTarget {
+  return { id: service.id, version: service.version ?? null, label: service.label };
+}
+
+/** 重试保留原报告的成功项，避免一次失败重试使已完成的服务从结果中消失。 */
+export function mergeBulkReport(previous: BulkReport, next: BulkReport): BulkReport {
+  const retried = new Set(next.order);
+  return { ...next, order: previous.order,
+    succeeded: [...previous.succeeded.filter((id) => !retried.has(id)), ...next.succeeded],
+    already: [...previous.already.filter((id) => !retried.has(id)), ...next.already],
+    failed: [...previous.failed.filter((failure) => !retried.has(failure.serviceId)), ...next.failed],
+  };
 }
 
 /** 与 envfile::is_secret_key 一致，新变量在落盘前也需要隐藏敏感值。 */

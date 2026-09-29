@@ -33,9 +33,9 @@ import {
   Stethoscope,
   RefreshCw,
 } from "lucide-react";
-import type { PackageView, PackageCategory, ServiceStatus, BulkReport, VersionCatalog } from "@nsb/schema";
+import type { PackageView, PackageCategory, ServiceStatus, BulkReport, BulkTarget, VersionCatalog } from "@nsb/schema";
 import { PACKAGE_CATEGORY_ORDER, PackageUninstallPreview } from "@nsb/schema";
-import { cn, fmtBytes, fmtSpeed, isPlatformCompatible } from "@/lib/utils";
+import { cn, fmtBytes, fmtSpeed, isPlatformCompatible, bulkTarget, mergeBulkReport } from "@/lib/utils";
 import { useUI, useT } from "@/lib/store";
 import { usePackages, useServices, useSettings, useVersionCatalogs, serviceHasProcess } from "@/lib/hooks";
 import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
@@ -54,7 +54,7 @@ import { LogPane } from "@/components/shared/log-pane";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ConfirmDialog } from "@/components/shared/misc";
 import { SftpgoConfigButton } from "@/components/shared/sftpgo-config-button";
-import { BulkResult } from "@/components/shared/bulk-actions";
+import { BulkResult, BulkTargetList } from "@/components/shared/bulk-actions";
 import { InstallDialog, InstallTasksPanel, type InstallTarget } from "@/components/shared/install-dialog";
 import { ServiceIcon } from "@/components/shared/service-icon";
 import { ServiceDiagnostics } from "@/components/shared/service-diagnostics";
@@ -246,7 +246,7 @@ export default function PackagesPage() {
   );
   const statusKnown = serviceQuery.dataUpdatedAt > 0 && !serviceQuery.error;
   const dataReady = packageQuery.dataUpdatedAt > 0 && !packageQuery.error && statusKnown;
-  const [bulkTarget, setBulkTarget] = React.useState<{ action: "start" | "stop" | "restart"; ids: string[] } | null>(null);
+  const [bulkSelection, setBulkTarget] = React.useState<{ action: "start" | "stop" | "restart"; targets: BulkTarget[] } | null>(null);
   const [bulkBusy, setBulkBusy] = React.useState(false);
   const bulkRef = React.useRef(false);
   const [bulkReport, setBulkReport] = React.useState<BulkReport | null>(null);
@@ -404,33 +404,30 @@ export default function PackagesPage() {
     }
     setBulkReport(null);
     setBulkError(null);
-    setBulkTarget({ action, ids });
+    const targets = ids.map((id) => services.find((s) => s.id === id)).filter((s): s is ServiceStatus => !!s).map(bulkTarget);
+    if (targets.length !== ids.length) { toast.error(t("bulk.selectionUnavailable")); void refreshState(); return; }
+    setBulkTarget({ action, targets });
   };
 
   const runBulk = async () => {
-    if (!bulkTarget || bulkRef.current || !dataReady) return;
-    const ids = bulkReport ? bulkReport.failed.map((item) => item.serviceId) : bulkTarget.ids;
-    if (ids.length === 0) return;
+    if (!bulkSelection || bulkRef.current || !dataReady) return;
+    const targets = bulkReport ? bulkSelection.targets.filter((target) => bulkReport.failed.some((item) => item.serviceId === target.id)) : bulkSelection.targets;
+    if (targets.length === 0) return;
     bulkRef.current = true;
     setBulkBusy(true);
     setBulkError(null);
     try {
       const result = await (
-        bulkTarget.action === "start"
-          ? api.bulkStart(ids)
-          : bulkTarget.action === "restart"
-            ? api.bulkRestart(ids)
-            : api.bulkStop(ids)
+        bulkSelection.action === "start"
+          ? api.bulkStart(targets)
+          : bulkSelection.action === "restart"
+            ? api.bulkRestart(targets)
+            : api.bulkStop(targets)
       );
-      setBulkReport((previous) => previous ? {
-        ...result,
-        order: previous.order,
-        succeeded: [...new Set([...previous.succeeded, ...result.succeeded])],
-        already: [...new Set([...previous.already, ...result.already])],
-      } : result);
+      setBulkReport((previous) => previous ? mergeBulkReport(previous, result) : result);
       if (result.failed.length === 0) {
-        toast.success(t("bulk.done").replace("{action}", t(`bulk.${bulkTarget.action}` as never))
-          .replace("{n}", String(bulkTarget.ids.length)));
+        toast.success(t("bulk.done").replace("{action}", t(`bulk.${bulkSelection.action}` as never))
+          .replace("{n}", String(bulkSelection.targets.length)));
         setBulkTarget(null);
       }
     } catch (error) {
@@ -669,22 +666,20 @@ export default function PackagesPage() {
       </Tabs>}
 
       <ConfirmDialog
-        open={!!bulkTarget}
+        open={!!bulkSelection}
         onOpenChange={(open) => { if (!open && !bulkRef.current) setBulkTarget(null); }}
-        title={t(bulkTarget?.action === "stop" ? "packages.stopAll" : bulkTarget?.action === "restart" ? "packages.restartAll" : "packages.startAll")}
-        description={t(bulkTarget?.action === "stop" ? "packages.bulkStopConfirm" : bulkTarget?.action === "restart" ? "packages.bulkRestartConfirm" : "packages.bulkStartConfirm")
-          .replace("{count}", String(bulkTarget?.ids.length ?? 0))}
-        confirmText={t(bulkReport?.failed.length ? "bulk.retryFailed" : bulkTarget?.action === "stop" ? "bulk.stop" : bulkTarget?.action === "restart" ? "bulk.restart" : "bulk.start")}
-        danger={bulkTarget?.action === "stop"}
+        title={t(bulkSelection?.action === "stop" ? "packages.stopAll" : bulkSelection?.action === "restart" ? "packages.restartAll" : "packages.startAll")}
+        description={t(bulkSelection?.action === "stop" ? "packages.bulkStopConfirm" : bulkSelection?.action === "restart" ? "packages.bulkRestartConfirm" : "packages.bulkStartConfirm")
+          .replace("{count}", String(bulkSelection?.targets.length ?? 0))}
+        confirmText={t(bulkReport?.failed.length ? "bulk.retryFailed" : bulkSelection?.action === "stop" ? "bulk.stop" : bulkSelection?.action === "restart" ? "bulk.restart" : "bulk.start")}
+        danger={bulkSelection?.action === "stop"}
         loading={bulkBusy}
         confirmDisabled={!dataReady}
         onConfirm={() => void runBulk()}
       >
-        {!bulkReport && <ul className="space-y-1 text-xs text-muted [overflow-wrap:anywhere]">
-          {bulkTarget?.ids.map((id) => <li key={id}>{services.find((s) => s.id === id)?.label ?? id} <span className="font-mono text-faint">{id}</span></li>)}
-        </ul>}
+        {!bulkReport && <BulkTargetList targets={bulkSelection?.targets ?? []} />}
         {readStatus}
-        <BulkResult report={bulkReport} error={bulkError} services={services} busy={bulkBusy} />
+        <BulkResult report={bulkReport} error={bulkError} services={services} targets={bulkSelection?.targets} busy={bulkBusy} />
       </ConfirmDialog>
 
       <ConfirmDialog

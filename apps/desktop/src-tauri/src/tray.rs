@@ -485,12 +485,19 @@ pub fn tray_panel_state(
 #[tauri::command]
 pub async fn tray_stop_all(
     app: tauri::AppHandle, state: State<'_, Arc<CoreState>>,
+    targets: Option<Vec<nsb_core::bulk::BulkTarget>>,
     ids: Option<Vec<String>>,
 ) -> Result<nsb_core::bulk::BulkReport, tauri::Error> {
     let _activity = crate::map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    if targets.is_none() && ids.is_some() {
+        return Err(crate::box_err(nsb_core::AppError::new("BAD_BULK_TARGETS", "请重新打开界面并确认停止目标的版本")));
+    }
     let st = state.inner().clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        crate::map_jh(st.stop_services_with_console(ids.as_deref()))
+        crate::map_jh(match targets {
+            Some(targets) => st.bulk_targets("stop", &targets, true),
+            None => st.stop_all_services(),
+        })
     }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?;
     refresh(&app);
     result

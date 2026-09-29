@@ -4501,12 +4501,12 @@ async fn diagnose_service(
 async fn bulk_start(
     app: tauri::AppHandle,
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
-    ids: Vec<String>,
+    targets: Vec<nsb_core::bulk::BulkTarget>,
 ) -> Result<nsb_core::bulk::BulkReport, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     let report = tauri::async_runtime::spawn_blocking(move || {
-        map_jh(st.bulk_start(&ids))
+        map_jh(st.bulk_targets("start", &targets, false))
     }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))??;
     crate::tray::refresh(&app);
     Ok(report)
@@ -4516,12 +4516,12 @@ async fn bulk_start(
 async fn bulk_stop(
     app: tauri::AppHandle,
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
-    ids: Vec<String>,
+    targets: Vec<nsb_core::bulk::BulkTarget>,
 ) -> Result<nsb_core::bulk::BulkReport, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     let report = tauri::async_runtime::spawn_blocking(move || {
-        map_jh(st.bulk_stop(&ids))
+        map_jh(st.bulk_targets("stop", &targets, false))
     }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))??;
     crate::tray::refresh(&app);
     Ok(report)
@@ -4531,12 +4531,12 @@ async fn bulk_stop(
 async fn bulk_restart(
     app: tauri::AppHandle,
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
-    ids: Vec<String>,
+    targets: Vec<nsb_core::bulk::BulkTarget>,
 ) -> Result<nsb_core::bulk::BulkReport, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     let report = tauri::async_runtime::spawn_blocking(move || {
-        map_jh(st.bulk_restart(&ids))
+        map_jh(st.bulk_targets("restart", &targets, false))
     }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))??;
     crate::tray::refresh(&app);
     Ok(report)

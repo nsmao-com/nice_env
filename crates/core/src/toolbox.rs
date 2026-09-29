@@ -1033,6 +1033,7 @@ pub const ADMINER_PORT: u16 = 8991;
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminerStatus {
+    pub revision: String,
     pub package_id: String,
     /// 启动入口指定的受管数据库实例；为空表示允许管理台列出全部可用实例。
     pub database_service_id: Option<String>,
@@ -1266,6 +1267,7 @@ pub fn database_console_start_for(
         url.query_pairs_mut().append_pair("server", &format!("127.0.0.1:{}", server.port.unwrap()));
     }
     let status = AdminerStatus {
+        revision: format!("{:032x}", rand::random::<u128>()),
         package_id: package.to_string(),
         database_service_id: database_service_id.map(str::to_owned),
         port,

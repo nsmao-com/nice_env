@@ -30,7 +30,7 @@ import { useUI, useT } from "@/lib/store";
 import { useServices, useSites, useStacks, toastError, useQuickServiceActions, serviceHasProcess } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import { StatusLight } from "@/components/shared/status-light";
-import { BulkResult } from "@/components/shared/bulk-actions";
+import { BulkResult, BulkTargetList } from "@/components/shared/bulk-actions";
 import { ConfirmDialog } from "@/components/shared/misc";
 import { Button } from "@/components/ui/button";
 
@@ -310,7 +310,8 @@ export function CommandPalette() {
       loading={busy}
       onConfirm={doStopAll}
     >
-      <BulkResult report={quick.stopReport} error={quick.stopError} services={services} busy={quick.busy} />
+      {!quick.stopReport && <BulkTargetList targets={quick.stopTargets} />}
+      <BulkResult report={quick.stopReport} error={quick.stopError} services={services} targets={quick.stopTargets} busy={quick.busy} />
     </ConfirmDialog>
     </>
   );

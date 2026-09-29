@@ -20,6 +20,17 @@ use crate::paths::Paths;
 use crate::services::ServiceManager;
 use std::sync::Arc;
 
+/// 面板中确认的实例身份；单实例服务的 ID 本身不包含版本。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkTarget {
+    pub id: String,
+    pub version: Option<String>,
+    /// 独立数据库管理台每次启动的身份，防止旧确认关闭后来启动的管理台。
+    #[serde(default)]
+    pub revision: Option<String>,
+}
+
 /// 批量操作结果（与 StackStartReport 同形，便于前端复用同一套展示）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

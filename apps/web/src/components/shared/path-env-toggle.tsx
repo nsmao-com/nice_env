@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useIsMutating, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Loader2, Terminal } from "lucide-react";
+import { Loader2, RefreshCw, Terminal } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/store";
 import { usePathEnv, toastError } from "@/lib/hooks";
@@ -19,7 +19,9 @@ import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip
  */
 export function PathEnvToggle({ pkgId, version, disabled = false }: { pkgId: string; version: string; disabled?: boolean }) {
   const t = useT();
-  const { data, isLoading } = usePathEnv();
+  const query = usePathEnv();
+  const { data } = query;
+  const ready = !!data && !query.error;
   const queryClient = useQueryClient();
   const busyRef = React.useRef(false);
   const pending = useIsMutating({ mutationKey: ["pathenv-change"] }) > 0;
@@ -34,12 +36,16 @@ export function PathEnvToggle({ pkgId, version, disabled = false }: { pkgId: str
   const selected = entry?.selected ?? false;
   const enabled = data?.enabled ?? false;
   const inPath = enabled && selected && !!entry?.inPath;
+  const actionLabel = t(query.error ? "tools.pathEnvRetry" : !ready ? "common.loading" : inPath ? "tools.pathEnvRemove" : "tools.pathEnvAdd");
+  const statusLabel = t(query.error ? "tools.pathEnvRetry" : !ready ? "common.loading" : inPath ? "tools.pathEnvInPath" : "tools.pathEnvAdd");
+  const tooltipLabel = query.error ? t("tools.pathEnvReadFailed") : actionLabel;
+  const loading = mutation.isPending || query.isPending || (query.isFetching && !!query.error);
 
   /** 后端没列出这个包（纯数据包 / 无可执行命令）：不显示，避免无效开关 */
-  if (!isLoading && !entry) return null;
+  if (ready && !entry) return null;
 
   const toggle = async () => {
-    if (disabled || busyRef.current || queryClient.isMutating({ mutationKey: ["pathenv-change"] }) || !entry) return;
+    if (!ready || disabled || busyRef.current || queryClient.isMutating({ mutationKey: ["pathenv-change"] }) || !entry) return;
     busyRef.current = true;
     try {
       const result = await mutation.mutateAsync(!inPath);
@@ -58,24 +64,24 @@ export function PathEnvToggle({ pkgId, version, disabled = false }: { pkgId: str
       <TooltipTrigger asChild>
         <button
           type="button"
-          disabled={disabled || pending || isLoading}
-          aria-label={`${t(inPath ? "tools.pathEnvRemove" : "tools.pathEnvAdd")} ${pkgId} ${entry?.version ?? ""}`}
-          aria-pressed={inPath}
-          onClick={toggle}
+          disabled={disabled || pending || (query.error ? query.isFetching : !ready)}
+          aria-label={`${actionLabel} ${pkgId} ${version}`}
+          aria-pressed={ready ? inPath : undefined}
+          onClick={query.error ? () => { void query.refetch({ cancelRefetch: false }); } : toggle}
           className={cn(
             "inline-flex shrink-0 items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10.5px] transition-colors disabled:opacity-50",
-            inPath
+            query.error ? "border-error/30 bg-error-soft text-error" : inPath
               ? "border-primary/40 bg-primary-soft text-primary"
               : "border-border/70 bg-card-2/50 text-muted hover:border-border-strong hover:text-foreground"
           )}
         >
-          {mutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Terminal className="h-3 w-3" />}
-          {t(inPath ? "tools.pathEnvInPath" : "tools.pathEnvAdd")}
+          {loading ? <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none" /> : query.error ? <RefreshCw className="h-3 w-3" /> : <Terminal className="h-3 w-3" />}
+          {statusLabel}
         </button>
       </TooltipTrigger>
       <TooltipContent side="top" className="max-w-64">
-        <span className="font-medium">{t(inPath ? "tools.pathEnvRemove" : "tools.pathEnvAdd")} {entry?.version}</span>
-        {entry && entry.commands.length > 0 && (
+        <span className="font-medium">{tooltipLabel} {ready ? entry?.version : ""}</span>
+        {ready && entry && entry.commands.length > 0 && (
           <span className="block text-[10.5px] opacity-70">
             {t("tools.pathEnvCommands")}：{entry.commands.slice(0, 4).join(" · ")}
           </span>

@@ -7,6 +7,7 @@ import { Terminal, RefreshCw, CheckCircle2, AlertTriangle, FolderX } from "lucid
 import type { PathEnvEntry, PathEnvStatus } from "@nsb/schema";
 import { useT } from "@/lib/store";
 import { usePathEnv, toastError } from "@/lib/hooks";
+import { normalizeError } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
@@ -27,7 +28,10 @@ import { Switch } from "@/components/ui/switch";
  */
 export function PathEnvCard() {
   const t = useT();
-  const { data, isLoading } = usePathEnv();
+  const query = usePathEnv();
+  const { data } = query;
+  const ready = !!data && !query.error;
+  const readError = query.error ? normalizeError(query.error) : null;
   const queryClient = useQueryClient();
   const [busy, setBusy] = React.useState(false);
   const busyRef = React.useRef(false);
@@ -40,7 +44,7 @@ export function PathEnvCard() {
   });
 
   const run = async (fn: () => Promise<PathEnvStatus>, okMsg: string) => {
-    if (busyRef.current || queryClient.isMutating({ mutationKey: ["pathenv-change"] })) return;
+    if (!ready || busyRef.current || queryClient.isMutating({ mutationKey: ["pathenv-change"] })) return;
     busyRef.current = true;
     setBusy(true);
     try {
@@ -62,21 +66,22 @@ export function PathEnvCard() {
 
   return (
     <Card>
-      <CardHeader className="flex-row items-center gap-3">
-        <div className="flex h-9 w-9 items-center justify-center rounded-md bg-fill">
+      <CardHeader className="flex-row flex-wrap items-center gap-3">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-fill">
           <Terminal className="h-4 w-4 text-primary" strokeWidth={1.8} />
         </div>
         <div className="min-w-0 flex-1">
           <CardTitle className="text-[13px]">{t("tools.pathEnv")}</CardTitle>
           <CardDescription className="text-[11px]">{t("tools.pathEnvHint")}</CardDescription>
         </div>
-        <div className="flex items-center gap-2">
-          <Badge variant={enabled ? "running" : "muted"} className="text-[10px]">
-            {enabled ? t("tools.pathEnvOn") : t("tools.pathEnvOff")}
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          <Badge variant={ready && enabled ? "running" : "muted"} className="text-[10px]">
+            {t(ready ? enabled ? "tools.pathEnvOn" : "tools.pathEnvOff" : readError ? "state.unknown" : "common.loading")}
           </Badge>
           <Switch
             checked={enabled}
-            disabled={busy || pathBusy || isLoading}
+            aria-label={t("tools.pathEnvEnable")}
+            disabled={busy || pathBusy || !ready}
             onCheckedChange={(v) =>
               run(
                 () => api.pathenvSetEnabled(v),
@@ -87,9 +92,17 @@ export function PathEnvCard() {
         </div>
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
-        {isLoading && <p className="py-4 text-center text-[12px] text-faint">…</p>}
+        {readError && <div role="alert" className="space-y-2 rounded-lg border border-error/25 bg-error-soft px-3 py-2.5 text-xs text-error [overflow-wrap:anywhere]">
+          <p>{t("tools.pathEnvReadFailed")}</p>
+          <p>{readError.message}</p>
+          {readError.hint && <p>{readError.hint}</p>}
+          <Button size="sm" variant="secondary" disabled={busy || pathBusy || query.isFetching} onClick={() => void query.refetch({ cancelRefetch: false })}>
+            <RefreshCw className={cn("h-3.5 w-3.5", query.isFetching && "animate-spin motion-reduce:animate-none")} />{t("tools.pathEnvRetry")}
+          </Button>
+        </div>}
+        {query.isPending && !readError && <p role="status" className="py-4 text-center text-[12px] text-faint">{t("common.loading")}</p>}
 
-        {!isLoading && entries.length === 0 && (
+        {ready && entries.length === 0 && (
           <p className="py-4 text-center text-[12px] text-faint">{t("tools.pathEnvEmpty")}</p>
         )}
 
@@ -99,7 +112,7 @@ export function PathEnvCard() {
               <PathEnvRow
                 key={`${e.id}@${e.version}`}
                 entry={e}
-                disabled={busy || pathBusy || !enabled}
+                disabled={busy || pathBusy || !ready || !enabled}
                 onToggle={(next) => toggleEntry(e, next)}
               />
             ))}
@@ -108,13 +121,13 @@ export function PathEnvCard() {
 
         {/* 漂移提示：PATH 被外部改过时给一键修复 */}
         {data?.drift && (
-          <div className="flex items-center gap-2 rounded-lg border border-warn/30 bg-warn/10 px-2.5 py-2">
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-warn/30 bg-warn/10 px-2.5 py-2">
             <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-warn" />
-            <span className="flex-1 text-[11px] text-secondary">{t("tools.pathEnvDrift")}</span>
+            <span className="min-w-0 flex-1 text-[11px] text-secondary [overflow-wrap:anywhere]">{t("tools.pathEnvDrift")}</span>
             <Button
               size="sm"
               variant="outline"
-              disabled={busy || pathBusy}
+              disabled={busy || pathBusy || !ready}
               onClick={() => run(() => api.pathenvReapply(), t("tools.pathEnvReapply"))}
             >
               <RefreshCw className={cn("h-3 w-3", busy && "animate-spin")} />

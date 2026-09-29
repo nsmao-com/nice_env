@@ -108,10 +108,15 @@ export function Providers({ children }: { children: React.ReactNode }) {
       new QueryClient({
         defaultOptions: {
           queries: {
+            // 请求经本地 IPC（浏览器预览走内存后端）；断网不能暂停设置、配置或数据库读取。
+            networkMode: "always",
             staleTime: 1500,
             retry: 1,
             refetchOnWindowFocus: false,
+            refetchOnReconnect: true,
           },
+          // PATH 等写入必须在用户操作时执行并返回结果，不能排队等联网后再执行。
+          mutations: { networkMode: "always", retry: false },
         },
       })
   );

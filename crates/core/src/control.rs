@@ -137,6 +137,12 @@ impl Client {
             return Ok(Self { base, backend: Backend::Local { state, _lease: lease } });
         }
         // 控制者已存在时只连接该会话；连接错误不能退回本地执行同一个动作。
+        Self::connect_existing(Some(base))
+    }
+
+    /// 桌面连接检查只使用现存控制者，不能取得控制权或初始化另一份环境。
+    pub fn connect_existing(base: Option<PathBuf>) -> Result<Self> {
+        let base = Paths::resolve(base)?;
         let file = File::open(base.join(ENDPOINT_FILE)).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound { busy() } else { AppError::io("读取控制通道", error) }
         })?;

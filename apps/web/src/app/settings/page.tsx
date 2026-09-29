@@ -1470,7 +1470,10 @@ function IntegrationToolsPanel() {
                 {tool.error && <p className="text-error">{tool.error.message}</p>}
                 <p>{t("settings.integration.missingHint")}</p>
               </div>}
-              {kind === "mcp" && <McpClientsPanel toolAvailable={tool.available} />}
+              {kind === "mcp" && <>
+                {tool.available && <McpConnectionCheck key={`${tool.path}:${data.dataDir}:${query.dataUpdatedAt}`} />}
+                <McpClientsPanel toolAvailable={tool.available} />
+              </>}
               {code && <>
                 {kind === "mcp" ? <details className="min-w-0 space-y-3">
                   <summary className="cursor-pointer rounded-md py-1 text-xs text-secondary focus-visible:outline-2 focus-visible:outline-primary">{t("settings.integration.manual")}</summary>
@@ -1495,6 +1498,57 @@ function IntegrationToolsPanel() {
         </>}
     </CardContent>
   </Card>;
+}
+
+function McpConnectionCheck() {
+  const t = useT();
+  const [busy, setBusy] = React.useState(false);
+  const busyRef = React.useRef(false);
+  const mounted = React.useRef(true);
+  const [report, setReport] = React.useState<api.McpConnectionReport | null>(null);
+  const [error, setError] = React.useState<ReturnType<typeof normalizeError> | null>(null);
+  React.useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const check = async () => {
+    if (busyRef.current || !isTauri) return;
+    busyRef.current = true;
+    setBusy(true); setReport(null); setError(null);
+    try {
+      const result = await api.checkMcpConnection();
+      if (mounted.current) setReport(result);
+    } catch (failure) {
+      if (mounted.current) setError(normalizeError(failure));
+    } finally {
+      busyRef.current = false;
+      if (mounted.current) setBusy(false);
+    }
+  };
+  return <div className="min-w-0 space-y-3 rounded-lg bg-fill/50 p-3">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <h4 className="text-xs font-medium">{t("settings.integration.checkTitle")}</h4>
+      <Button size="sm" variant="secondary" disabled={busy || !isTauri} onClick={() => void check()}>
+        <RefreshCw className={cn("h-3.5 w-3.5", busy && "animate-spin motion-reduce:animate-none")} />
+        {t(busy ? "settings.integration.checking" : report || error ? "settings.integration.checkAgain" : "settings.integration.checkAction")}
+      </Button>
+    </div>
+    <p className="text-[11px] leading-relaxed text-faint">{t("settings.integration.checkHint")}</p>
+    {busy && <p role="status" className="text-xs text-muted">{t("settings.integration.checkPending")}</p>}
+    {error && <div role="alert" className="space-y-1 text-xs text-error [overflow-wrap:anywhere]">
+      <p>{error.message}</p>{error.hint && <p>{error.hint}</p>}
+    </div>}
+    {report && <div role="status" className="space-y-2 text-xs">
+      <p className="font-medium text-running">{t("settings.integration.checkPassed")}</p>
+      <dl className="grid min-w-0 grid-cols-1 gap-3 text-[11px] sm:grid-cols-2">
+        {[
+          [t("settings.integration.checkVersion"), report.version],
+          [t("settings.integration.checkProtocol"), report.protocol],
+          [t("settings.integration.checkTools"), String(report.toolCount)],
+          [t("settings.integration.checkServices"), String(report.serviceCount)],
+        ].map(([label, value]) => <div key={label} className="flex min-w-0 flex-wrap justify-between gap-2">
+          <dt className="text-muted">{label}</dt><dd className="font-mono text-secondary [overflow-wrap:anywhere]">{value}</dd>
+        </div>)}
+      </dl>
+    </div>}
+  </div>;
 }
 
 function McpClientsPanel({ toolAvailable }: { toolAvailable: boolean }) {

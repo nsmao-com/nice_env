@@ -6,7 +6,13 @@ use std::io::{BufRead, Write};
 use nsb_core::{control::{Client, Request}, error::AppError};
 
 fn execute(name: &str, arguments: &serde_json::Value) -> serde_json::Value {
-    match Client::connect(None).and_then(|client| client.call(Request::Mcp { name: name.into(), arguments: arguments.clone() })) {
+    let client = if std::env::var_os("NSB_MCP_CHECK").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        if name != "list_services" {
+            return nsb_core::mcp::tool_error(AppError::new("MCP_CHECK_READ_ONLY", "连接检查仅允许查询服务状态"));
+        }
+        Client::connect_existing(None)
+    } else { Client::connect(None) };
+    match client.and_then(|client| client.call(Request::Mcp { name: name.into(), arguments: arguments.clone() })) {
         Ok(result) => result,
         Err(error) => nsb_core::mcp::tool_error(error),
     }

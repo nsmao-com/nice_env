@@ -548,6 +548,7 @@ pub fn run() {
             set_port_override,
             get_app_version,
             get_integration_tools,
+            check_mcp_connection,
             get_mcp_clients,
             configure_mcp_client,
             check_updates,
@@ -3174,6 +3175,16 @@ fn get_integration_tools(state: State<'_, Arc<CoreState>>) -> Result<Integration
             mcp: inspect_integration_tool(dir, "nsb-mcp")?,
         })
     })())
+}
+
+#[tauri::command]
+async fn check_mcp_connection(state: State<'_, Arc<CoreState>>) -> Result<nsb_core::mcp_check::ConnectionReport, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    let tools = get_integration_tools(state)?;
+    if !tools.mcp.available {
+        return Err(box_err(tools.mcp.error.unwrap_or_else(|| AppError::new("MCP_TOOL_MISSING", "未找到 MCP 工具，请重新安装完整的 NiceEnv 安装包"))));
+    }
+    map_jh(nsb_core::mcp_check::check_connection(std::path::Path::new(&tools.mcp.path), std::path::Path::new(&tools.data_dir)).await)
 }
 
 #[tauri::command]

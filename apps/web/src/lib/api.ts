@@ -760,6 +760,14 @@ export interface IntegrationTools {
   mcp: IntegrationTool;
 }
 export const getIntegrationTools = () => safe(invoke<IntegrationTools>("get_integration_tools"));
+export interface McpConnectionReport {
+  version: string;
+  protocol: string;
+  toolCount: number;
+  serviceCount: number;
+  elapsedMs: number;
+}
+export const checkMcpConnection = () => safe(invoke<McpConnectionReport>("check_mcp_connection"));
 export interface McpClientStatus {
   id: string;
   name: string;

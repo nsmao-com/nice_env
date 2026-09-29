@@ -103,12 +103,14 @@ const UI_SCALES = [0.85, 0.9, 0.95, 1, 1.05, 1.1, 1.15, 1.25];
  * 本机字体以 `local:<字体族名>` 存进设置（见 appearance.ts），无权限时也能手填。
  */
 function FontSelect({
+  label,
   value,
   presets,
   localFonts,
   onChange,
   customLabel,
 }: {
+  label: string;
   value: string;
   presets: readonly { id: string; label: string }[];
   localFonts: string[];
@@ -117,6 +119,8 @@ function FontSelect({
 }) {
   const isLocal = value.startsWith("local:");
   const [customOpen, setCustomOpen] = React.useState(false);
+  const [customDraft, setCustomDraft] = React.useState(isLocal ? value.slice("local:".length) : "");
+  React.useEffect(() => { setCustomDraft(isLocal ? value.slice("local:".length) : ""); }, [value, isLocal]);
   const t = useT();
   // 重启应用后扫描列表还没回来：把当前值临时注入，保证下拉框显示不空
   const known = localFonts.some((f) => `local:${f}` === value);
@@ -128,6 +132,8 @@ function FontSelect({
   return (
     <div className="flex max-w-full flex-col gap-1.5">
       <Select
+        searchable
+        searchPlaceholder={t("appearance.searchFonts")}
         value={customOpen ? "__custom__" : value}
         onValueChange={(v) => {
           if (v === "__custom__") {
@@ -138,20 +144,20 @@ function FontSelect({
           onChange(v);
         }}
       >
-        <SelectTrigger className="h-8 w-52 max-w-full text-xs">
+        <SelectTrigger aria-label={label} className="h-8 w-52 max-w-full text-xs">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          {presets.map((f) => (
+          <SelectGroup><SelectLabel>{t("appearance.fontPresets")}</SelectLabel>{presets.map((f) => (
             <SelectItem key={f.id} value={f.id}>
               {f.label}
             </SelectItem>
-          ))}
+          ))}</SelectGroup>
           {locals.length > 0 && (
             <SelectGroup>
               <SelectSeparator />
               <SelectLabel>{t("appearance.localFonts")}</SelectLabel>
-              {locals.slice(0, 400).map((f) => (
+              {locals.map((f) => (
                 <SelectItem key={f} value={`local:${f}`}>
                   {f}
                 </SelectItem>
@@ -165,7 +171,9 @@ function FontSelect({
       {(customOpen || isLocal) && (
         <Input
           autoFocus={customOpen}
-          defaultValue={isLocal ? value.slice("local:".length) : ""}
+          value={customDraft}
+          onChange={(event) => setCustomDraft(event.target.value)}
+          aria-label={`${label} · ${customLabel}`}
           placeholder={customLabel}
           className="h-7 w-52 max-w-full font-mono text-[11px]"
           onKeyDown={(e) => {
@@ -173,7 +181,10 @@ function FontSelect({
           }}
           onBlur={(e) => {
             const fam = e.target.value.trim().replace(/"/g, "");
-            if (fam) onChange(`local:${fam}`);
+            if (fam) {
+              if (`local:${fam}` !== value) onChange(`local:${fam}`);
+              setCustomOpen(false);
+            }
           }}
         />
       )}
@@ -701,6 +712,7 @@ export default function SettingsPage() {
                     </div>
                     <SettingRow label={t("appearance.uiFont")}>
                       <FontSelect
+                        label={t("appearance.uiFont")}
                         value={settings.uiFont}
                         presets={UI_FONT_OPTIONS}
                         localFonts={localFonts}
@@ -724,6 +736,7 @@ export default function SettingsPage() {
                     </SettingRow>
                     <SettingRow label={t("appearance.codeFont")}>
                       <FontSelect
+                        label={t("appearance.codeFont")}
                         value={settings.codeFont}
                         presets={MONO_FONT_OPTIONS}
                         localFonts={localFonts}

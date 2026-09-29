@@ -4,8 +4,8 @@ import * as React from "react";
 import * as SelectPrimitive from "@radix-ui/react-select";
 import { Check, ChevronDown, ChevronUp } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { SearchableSelect, type SearchableOption } from "./searchable-select";
 
-const Select = SelectPrimitive.Root;
 const SelectGroup = SelectPrimitive.Group;
 const SelectValue = SelectPrimitive.Value;
 
@@ -110,6 +110,68 @@ const SelectSeparator = React.forwardRef<
   />
 ));
 SelectSeparator.displayName = "SelectSeparator";
+
+function textOf(node: React.ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(textOf).join(" ");
+  return React.isValidElement<{ children?: React.ReactNode }>(node) ? textOf(node.props.children) : "";
+}
+
+/** Read the existing declarative options without changing their labels or stored values. */
+function searchableOptions(children: React.ReactNode, group = ""): SearchableOption[] | null {
+  const options: SearchableOption[] = [];
+  let supported = true;
+  React.Children.forEach(children, child => {
+    if (child == null || typeof child === "boolean") return;
+    if (!React.isValidElement<{ children?: React.ReactNode }>(child)) { supported = false; return; }
+    if (child.type === SelectItem) {
+      const props = (child as React.ReactElement<React.ComponentProps<typeof SelectItem>>).props;
+      const searchText = props.textValue ?? textOf(props.children);
+      if (!searchText) { supported = false; return; }
+      options.push({ value: props.value, label: props.children, searchText, group, disabled: props.disabled, className: props.className, style: props.style });
+    } else if (child.type === SelectGroup || child.type === React.Fragment) {
+      const label = React.Children.toArray(child.props.children).find(item => React.isValidElement(item) && item.type === SelectLabel);
+      const nested = searchableOptions(child.props.children, label ? textOf(label) : group);
+      if (nested) options.push(...nested); else supported = false;
+    } else if (child.type !== SelectLabel && child.type !== SelectSeparator) {
+      // Custom option components keep Radix behavior unless they expose ordinary SelectItems.
+      supported = false;
+    }
+  });
+  return supported ? options : null;
+}
+
+function Select({ children, searchable, searchPlaceholder, ...props }: React.ComponentProps<typeof SelectPrimitive.Root> & {
+  /** Long lists are searchable automatically; true also enables search for a short list. */
+  searchable?: boolean;
+  searchPlaceholder?: string;
+}) {
+  const [localValue, setLocalValue] = React.useState(props.defaultValue);
+  const [localOpen, setLocalOpen] = React.useState(props.defaultOpen ?? false);
+  const value = props.value !== undefined ? props.value : localValue;
+  const open = props.open !== undefined ? props.open : localOpen;
+  const onValueChange = (next: string) => { setLocalValue(next); props.onValueChange?.(next); };
+  const onOpenChange = (next: boolean) => { setLocalOpen(next); props.onOpenChange?.(next); };
+  const nodes = React.Children.toArray(children);
+  const trigger = nodes.find(child => React.isValidElement(child) && child.type === SelectTrigger) as React.ReactElement<React.ComponentProps<typeof SelectTrigger>> | undefined;
+  const content = nodes.find(child => React.isValidElement(child) && child.type === SelectContent) as React.ReactElement<React.ComponentProps<typeof SelectContent>> | undefined;
+  const selection = trigger && React.Children.toArray(trigger.props.children);
+  const display = selection?.length === 1 && React.isValidElement(selection[0]) && selection[0].type === SelectValue
+    ? selection[0] as React.ReactElement<React.ComponentProps<typeof SelectValue>> : undefined;
+  const options = content ? searchableOptions(content.props.children) : null;
+  // Keep native form integration and custom trigger/content contracts on the Radix path.
+  const supported = trigger && content && display && !display.props.children && !trigger.props.asChild && !trigger.props.ref
+    && !content.props.asChild && !content.props.ref && !content.props.onCloseAutoFocus && !content.props.onEscapeKeyDown
+    && Object.keys(content.props).every(key => ["children", "className", "position"].includes(key))
+    && !props.name && !props.form && !props.required;
+  if (supported && options && (searchable ?? options.length >= 8)) {
+    return <SearchableSelect options={options} value={value} onValueChange={onValueChange} open={open}
+      onOpenChange={onOpenChange} disabled={props.disabled || trigger.props.disabled} dir={props.dir}
+      placeholder={display.props.placeholder} searchPlaceholder={searchPlaceholder}
+      triggerProps={trigger.props} contentClassName={content.props.className} />;
+  }
+  return <SelectPrimitive.Root {...props} value={value} open={open} onValueChange={onValueChange} onOpenChange={onOpenChange}>{children}</SelectPrimitive.Root>;
+}
 
 export {
   Select,

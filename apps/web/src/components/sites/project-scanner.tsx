@@ -21,7 +21,13 @@ import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 type ProjectDraft = { domain: string; phpVersion: string; proxyTarget: string; selected: boolean; allowUnverifiedPhp?: boolean };
-type Outcome = { status: "creating" | "created" | "error"; message?: string; siteId?: string };
+type Outcome = {
+  status: "creating" | "created" | "error";
+  message?: string;
+  siteId?: string;
+  startState?: "started" | "skipped" | "error";
+  startMessage?: string;
+};
 const PAGE_SIZE = 5;
 
 /** 扫描建议只填入未占用的本地域名；用户后续编辑不会被轮询覆盖。 */
@@ -99,6 +105,7 @@ export function ProjectScannerDialog({ open, onOpenChange, onCreated }: {
   const [webServer, setWebServer] = React.useState<"nginx" | "apache" | "caddy" | "">("");
   const [bulkPhp, setBulkPhp] = React.useState("");
   const [https, setHttps] = React.useState(false);
+  const [startAfterCreate, setStartAfterCreate] = React.useState(true);
   const [attempted, setAttempted] = React.useState(false);
   const [focusIndex, setFocusIndex] = React.useState<number | null>(null);
   const [progress, setProgress] = React.useState<{ done: number; total: number; name: string } | null>(null);
@@ -195,7 +202,7 @@ export function ProjectScannerDialog({ open, onOpenChange, onCreated }: {
     }
     const targets = selected.map((project) => ({ project, input: scannedSiteInput(project, drafts[project.path], webServer, https), allowUnverifiedPhp: !!drafts[project.path].allowUnverifiedPhp }));
     setWorking("creating"); setError(""); setReport(null);
-    let ok = 0; let fail = 0;
+    let ok = 0; let fail = 0; let startFail = 0;
     try {
       for (const [index, { project, input, allowUnverifiedPhp }] of targets.entries()) {
         if (!mounted.current) break;
@@ -209,6 +216,20 @@ export function ProjectScannerDialog({ open, onOpenChange, onCreated }: {
             setOutcomes((old) => ({ ...old, [project.path]: { status: "created", siteId: site.id } }));
             setDrafts((old) => ({ ...old, [project.path]: { ...old[project.path], selected: false } }));
           }
+          // 纯静态/PHP 站点可以在创建后直接交给已安装的 Web Server；
+          // 需要外部 dev server 的项目仍保留为代理站点，避免误以为应用进程已被托管。
+          if (startAfterCreate && !project.needsDevServer) {
+            try {
+              await api.startSite(site.id);
+              if (mounted.current) setOutcomes((old) => ({ ...old, [project.path]: { ...old[project.path], startState: "started" } }));
+            } catch (startError) {
+              startFail += 1;
+              const detail = normalizeError(startError);
+              if (mounted.current) setOutcomes((old) => ({ ...old, [project.path]: { ...old[project.path], startState: "error", startMessage: [detail.message, detail.hint].filter(Boolean).join(" · ") } }));
+            }
+          } else if (mounted.current) {
+            setOutcomes((old) => ({ ...old, [project.path]: { ...old[project.path], startState: "skipped" } }));
+          }
         } catch (failure) {
           fail += 1;
           const detail = normalizeError(failure);
@@ -219,6 +240,7 @@ export function ProjectScannerDialog({ open, onOpenChange, onCreated }: {
         setReport({ ok, fail });
         const message = fail ? t("scanner.createdPartial").replace("{ok}", String(ok)).replace("{fail}", String(fail)) : t("scanner.createdN").replace("{n}", String(ok));
         (fail ? toast.warning : toast.success)(message);
+        if (startFail) toast.warning(t("scanSetup.startPartial").replace("{n}", String(startFail)));
       }
       if (ok && mounted.current) onCreated?.();
     } finally { invalidate("sites", "hosts", "certs", "services"); if (mounted.current) setProgress(null); setWorking(null); }
@@ -273,6 +295,10 @@ export function ProjectScannerDialog({ open, onOpenChange, onCreated }: {
             <p className="text-xs leading-relaxed text-muted">{t("scanSetup.phpHint")}</p>
             <label className="flex items-center justify-between gap-3 text-xs"><span>{t("sites.wizard.https")}</span><Switch checked={https} disabled={busy} onCheckedChange={setHttps} /></label>
             <p className="text-xs leading-relaxed text-muted">{t(https ? "scanSetup.httpsHint" : "scanSetup.preserve")}</p>
+            <label className="flex items-start justify-between gap-3 border-t border-dashed border-separator pt-3 text-xs">
+              <span className="min-w-0 leading-relaxed"><span className="font-medium">{t("scanSetup.startAfterCreate")}</span><span className="mt-0.5 block text-muted">{t("scanSetup.startAfterCreateHint")}</span></span>
+              <Switch checked={startAfterCreate} disabled={busy} onCheckedChange={setStartAfterCreate} />
+            </label>
             {(queryError || missingPhp || !webServers.length || !webServers.includes(webServer as "nginx" | "apache" | "caddy")) && <div role="alert" className="space-y-2 text-xs text-error">
               <p className="[overflow-wrap:anywhere]">{queryError ? normalizeError(queryError).message : t(missingPhp && webServers.length ? "scanSetup.phpRequired" : "scanSetup.webRequired")}</p>
               <div className="flex flex-wrap gap-2"><Button size="sm" variant="secondary" disabled={busy} onClick={() => { void packageQuery.refetch(); void siteQuery.refetch(); }}>{t("siteFiles.retry")}</Button>
@@ -332,6 +358,9 @@ export function ProjectScannerDialog({ open, onOpenChange, onCreated }: {
                 {outcome.status === "created" && <BadgeCheck className="size-4 shrink-0" />}{outcome.status === "creating" && <Loader2 className="size-4 shrink-0 animate-spin motion-reduce:animate-none" />}
                 {outcome.status === "error" ? outcome.message : t(outcome.status === "created" ? "scanSetup.created" : "sites.wizard.creating")}
               </p>}
+              {outcome?.status === "created" && outcome.startState === "started" && <p role="status" className="text-xs text-running">{t("scanSetup.started")}</p>}
+              {outcome?.status === "created" && outcome.startState === "skipped" && project.needsDevServer && <p className="text-xs text-muted">{t("scanSetup.startSkipped")}</p>}
+              {outcome?.status === "created" && outcome.startState === "error" && <p role="alert" className="text-xs leading-relaxed text-warn">{t("scanSetup.startFailed")}{outcome.startMessage ? ` · ${outcome.startMessage}` : ""}</p>}
               <div className="flex flex-wrap items-center justify-between gap-3 border-t border-dashed border-separator pt-3">
                 <details className="min-w-0 text-xs text-muted"><summary className="cursor-pointer">{t("siteResume.evidence")}</summary>
                   <ul className="mt-2 space-y-1 [overflow-wrap:anywhere]">{project.evidence.map((value, i) => <li key={i}>{value}</li>)}</ul><p className="mt-2 leading-relaxed">{project.runHint}</p>

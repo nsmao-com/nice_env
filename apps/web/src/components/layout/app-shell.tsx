@@ -268,7 +268,7 @@ export function PageHeader({
             aria-hidden
             className="h-[18px] w-[3px] shrink-0 rounded-full bg-primary"
           />
-          <span className="truncate">{title}</span>
+          <span className="min-w-0 break-words">{title}</span>
         </h1>
         {subtitle && <p className="mt-1.5 pl-[11px] text-[13px] text-muted">{subtitle}</p>}
       </div>

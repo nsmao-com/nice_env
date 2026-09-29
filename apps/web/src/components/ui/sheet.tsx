@@ -33,8 +33,8 @@ const sheetVariants = cva(
     variants: {
       side: {
         right:
-          "inset-y-3 right-3 h-[calc(100%-24px)] w-3/4 data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right sm:max-w-xl",
-        left: "inset-y-3 left-3 h-[calc(100%-24px)] w-3/4 data-[state=closed]:slide-out-to-left data-[state=open]:slide-in-from-left sm:max-w-sm",
+          "inset-y-3 right-3 h-[calc(100%-24px)] w-[calc(100vw-1.5rem)] data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right sm:w-3/4 sm:max-w-xl",
+        left: "inset-y-3 left-3 h-[calc(100%-24px)] w-[calc(100vw-1.5rem)] data-[state=closed]:slide-out-to-left data-[state=open]:slide-in-from-left sm:w-3/4 sm:max-w-sm",
         top: "inset-x-3 top-3 data-[state=closed]:slide-out-to-top data-[state=open]:slide-in-from-top",
         bottom:
           "inset-x-3 bottom-3 data-[state=closed]:slide-out-to-bottom data-[state=open]:slide-in-from-bottom",

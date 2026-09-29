@@ -127,6 +127,7 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
 
   const checkUpdate = async () => {
     // 统一走更新弹窗（含在线下载与安装），不再只弹一个 toast
+    setChecking(true);
     setUpdateOpen(true);
   };
 
@@ -225,7 +226,7 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
         </DropdownMenuContent>
       </DropdownMenu>
 
-      <UpdateDialog open={updateOpen} onOpenChange={setUpdateOpen} />
+      <UpdateDialog open={updateOpen} onOpenChange={(open) => { setUpdateOpen(open); if (!open) setChecking(false); }} />
 
       <ConfirmDialog
         open={confirm === "stopAll"}

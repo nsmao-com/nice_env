@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
 
       # package.json 没有 packageManager 字段，锁文件为 pnpm 10 的 lockfileVersion 9.0
       - name: Setup pnpm
@@ -54,6 +56,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
 
       # Tauri 2 在 Linux 上的系统依赖。
       # 用 libayatana-appindicator3-dev 而不是 libappindicator3-dev：
@@ -83,9 +87,21 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # 格式不对直接失败，最先跑（秒级）；本地 `cargo fmt --all` 即可修复
+      # 只检查本次提交改动的 Rust 文件。仓库历史包含大量未按当前 stable
+      # rustfmt 排版的存量文件，不能因一次提交把无关文件全部重排。
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        shell: bash
+        run: |
+          files=$(git diff --name-only HEAD^ HEAD -- '*.rs')
+          if [ -z "$files" ]; then
+            echo "No Rust files changed; formatting check skipped."
+            exit 0
+          fi
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            echo "Checking $file"
+            rustfmt --check "$file"
+          done <<< "$files"
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2

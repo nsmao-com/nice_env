@@ -547,6 +547,7 @@ pub fn run() {
             set_setting,
             set_port_override,
             get_app_version,
+            get_integration_tools,
             check_updates,
             // 套件清单：远端刷新 / 恢复内置 / 状态
             refresh_remote_manifest,
@@ -3110,6 +3111,67 @@ fn get_app_version() -> String {
 #[tauri::command]
 fn get_data_dir(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> String {
     state.paths.base.to_string_lossy().to_string()
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IntegrationTool {
+    path: String,
+    available: bool,
+    error: Option<AppError>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IntegrationTools {
+    platform: &'static str,
+    data_dir: String,
+    cli: IntegrationTool,
+    mcp: IntegrationTool,
+}
+
+/// 仅检查当前应用随包分发的工具，不从 PATH 挑选另一版本，也不执行工具。
+fn inspect_integration_tool(dir: &std::path::Path, name: &str) -> nsb_core::error::Result<IntegrationTool> {
+    let path = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    let display = path.to_str().ok_or_else(|| AppError::new("TOOL_PATH_ENCODING", "工具路径包含无法显示的字符"))?.to_owned();
+    let result = (|| -> nsb_core::error::Result<bool> {
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(AppError::internal("读取工具文件信息失败", error.to_string())),
+        };
+        if !metadata.is_file() || metadata.len() == 0 {
+            return Err(AppError::new("TOOL_FILE_INVALID", "工具文件无效，请重新安装当前版本的 NiceEnv"));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                return Err(AppError::new("TOOL_NOT_EXECUTABLE", "工具缺少执行权限，请重新安装当前版本的 NiceEnv"));
+            }
+        }
+        std::fs::File::open(&path).map_err(|error| AppError::internal("无法读取工具文件", error.to_string()))?;
+        Ok(true)
+    })();
+    Ok(match result {
+        Ok(available) => IntegrationTool { path: display, available, error: None },
+        Err(error) => IntegrationTool { path: display, available: false, error: Some(error) },
+    })
+}
+
+#[tauri::command]
+fn get_integration_tools(state: State<'_, Arc<CoreState>>) -> Result<IntegrationTools, tauri::Error> {
+    map_jh((|| {
+        let exe = std::env::current_exe().map_err(|error| AppError::internal("读取应用安装位置失败", error.to_string()))?;
+        let dir = exe.parent().ok_or_else(|| AppError::new("TOOL_PATH_INVALID", "无法确定应用安装目录"))?;
+        let data_dir = state.paths.base.to_str().ok_or_else(|| AppError::new("TOOL_PATH_ENCODING", "数据目录包含无法显示的字符"))?.to_owned();
+        Ok(IntegrationTools {
+            platform: std::env::consts::OS,
+            data_dir,
+            cli: inspect_integration_tool(dir, "nsbctl")?,
+            mcp: inspect_integration_tool(dir, "nsb-mcp")?,
+        })
+    })())
 }
 
 /// 停止受管服务并复制完整数据目录，当前进程仍使用原目录。

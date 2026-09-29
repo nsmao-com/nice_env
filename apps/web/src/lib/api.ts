@@ -748,6 +748,18 @@ export const setPortOverride = (key: string, port: number | null) =>
   safe(invoke<boolean>("set_port_override", { key, port }));
 export const getAppVersion = () => safe(invoke<string>("get_app_version"));
 export const getDataDir = () => safe(invoke<string>("get_data_dir"));
+export interface IntegrationTool {
+  path: string;
+  available: boolean;
+  error: { code: string; message: string; hint?: string; detail?: string } | null;
+}
+export interface IntegrationTools {
+  platform: "windows" | "macos" | "linux";
+  dataDir: string;
+  cli: IntegrationTool;
+  mcp: IntegrationTool;
+}
+export const getIntegrationTools = () => safe(invoke<IntegrationTools>("get_integration_tools"));
 export interface DataDirMigration {
   path: string;
   files: number;

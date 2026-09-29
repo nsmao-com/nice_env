@@ -33,6 +33,7 @@ import {
   Check,
   Globe,
   Activity,
+  Terminal,
 } from "lucide-react";
 import { isTauri, listen, normalizeError } from "@/lib/backend";
 import {
@@ -1312,6 +1313,7 @@ export default function SettingsPage() {
 
           {/* ==================== 高级 ==================== */}
           {active === "advanced" && (
+            <>
             <Card>
               <CardHeader className="flex-row items-center gap-3">
                 <SlidersHorizontal className="h-4 w-4 text-primary" />
@@ -1339,6 +1341,8 @@ export default function SettingsPage() {
                 </div>
               </CardContent>
             </Card>
+            <IntegrationToolsPanel />
+            </>
           )}
         </div>
       </div>
@@ -1387,6 +1391,97 @@ export default function SettingsPage() {
 }
 
 /* ---------- 小组件 ---------- */
+
+function integrationCliCommand(tools: api.IntegrationTools): string | null {
+  if (!tools.cli.available) return null;
+  if (tools.platform === "windows") {
+    // PowerShell 也把弯单引号视为字符串边界，必须一并转义。
+    const quote = (value: string) => `'${value.replace(/['\u2018\u2019\u201a\u201b]/g, "$&$&")}'`;
+    return `$env:NSB_HOME = ${quote(tools.dataDir)}; & ${quote(tools.cli.path)} status`;
+  }
+  const quote = (value: string) => `'${value.replace(/'/g, `'"'"'`)}'`;
+  return `NSB_HOME=${quote(tools.dataDir)} ${quote(tools.cli.path)} status`;
+}
+
+function integrationMcpConfig(tools: api.IntegrationTools): string | null {
+  if (!tools.mcp.available) return null;
+  return JSON.stringify({ mcpServers: { niceenv: {
+    command: tools.mcp.path,
+    args: [],
+    env: { NSB_HOME: tools.dataDir },
+  } } }, null, 2);
+}
+
+function IntegrationToolsPanel() {
+  const t = useT();
+  const query = useQuery({
+    queryKey: ["integration-tools"],
+    queryFn: api.getIntegrationTools,
+    enabled: isTauri,
+    networkMode: "always",
+    staleTime: 0,
+    retry: false,
+  });
+  const data = query.isError ? undefined : query.data;
+  const problem = query.isError ? normalizeError(query.error) : null;
+  const cliCommand = data ? integrationCliCommand(data) : null;
+  const mcpConfig = data ? integrationMcpConfig(data) : null;
+  return <Card className="min-w-0">
+    <CardHeader className="flex-row flex-wrap items-center gap-3">
+      <Terminal className="h-4 w-4 shrink-0 text-primary" />
+      <CardTitle className="min-w-0 flex-1 text-[13px]">{t("settings.integration.title")}</CardTitle>
+      {isTauri && <Button size="sm" variant="secondary" disabled={query.isFetching} onClick={() => void query.refetch()}>
+        <RefreshCw className={cn("h-3.5 w-3.5", query.isFetching && "animate-spin")} />{t("settings.integration.refresh")}
+      </Button>}
+    </CardHeader>
+    <CardContent className="min-w-0 space-y-4">
+      <p className="text-[11.5px] leading-relaxed text-faint">{t("settings.integration.hint")}</p>
+      {!isTauri ? <p role="status" className="rounded-lg bg-fill p-3 text-xs leading-relaxed text-muted">{t("settings.integration.preview")}</p>
+        : query.isPending ? <p role="status" className="text-xs text-faint">{t("common.loading")}</p>
+        : problem ? <div role="alert" className="space-y-1 text-xs text-error [overflow-wrap:anywhere]">
+          <p>{t("settings.integration.failed")}</p><p>{problem.message}</p>
+          {problem.hint && <p>{problem.hint}</p>}
+        </div>
+        : data && <>
+          <div className="space-y-1">
+            <p className="text-xs text-secondary">{t("settings.integration.dataDir")}</p>
+            <p className="font-mono text-[11px] text-muted [overflow-wrap:anywhere]">{data.dataDir}</p>
+          </div>
+          {(["cli", "mcp"] as const).map((kind) => {
+            const tool = data[kind];
+            const code = kind === "cli" ? cliCommand : mcpConfig;
+            return <section key={kind} className="min-w-0 space-y-3 border-t border-dashed border-border pt-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="text-[12.5px] font-medium">{kind === "cli" ? "nsbctl · CLI" : "nsb-mcp · MCP"}</h3>
+                <Badge variant={tool.error ? "error" : tool.available ? "running" : "warn"}>
+                  {t(tool.error ? "settings.integration.unavailable" : tool.available ? "settings.integration.found" : "settings.integration.missing")}
+                </Badge>
+              </div>
+              <p className="text-[11.5px] leading-relaxed text-faint">{t(kind === "cli" ? "settings.integration.cliHint" : "settings.integration.mcpHint")}</p>
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <p className="min-w-0 flex-1 basis-60 font-mono text-[11px] text-muted [overflow-wrap:anywhere]">{tool.path}</p>
+                {tool.available && <Button size="sm" variant="ghost" onClick={() => api.openInFolder(tool.path).catch(toastError)}>
+                  <FolderTree className="h-3.5 w-3.5" />{t("settings.integration.openFolder")}
+                </Button>}
+              </div>
+              {!tool.available && <div role="status" className="space-y-1 text-xs leading-relaxed text-muted [overflow-wrap:anywhere]">
+                {tool.error && <p className="text-error">{tool.error.message}</p>}
+                <p>{t("settings.integration.missingHint")}</p>
+              </div>}
+              {code && <>
+                <p className="text-[11.5px] leading-relaxed text-faint">{t(kind === "cli"
+                  ? data.platform === "windows" ? "settings.integration.powershellHint" : "settings.integration.shellHint"
+                  : "settings.integration.configHint")}</p>
+                <CodeBlock code={code} lang={kind === "cli" ? "shell" : "json"} wrap showLineNumbers={false}
+                  title={kind === "cli" ? data.platform === "windows" ? "PowerShell" : "sh / bash / zsh" : "Claude Desktop / Cursor · mcpServers"} />
+              </>}
+            </section>;
+          })}
+          <p className="text-[11px] leading-relaxed text-faint">{t("settings.integration.changedPath")}</p>
+        </>}
+    </CardContent>
+  </Card>;
+}
 
 function WatchdogPanel({ enabled, onChange }: { enabled: boolean; onChange: (value: boolean) => void }) {
   const t = useT();

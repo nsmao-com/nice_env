@@ -157,6 +157,9 @@ Corefile 每次启动按当前 TLD 设置自动重建。
 **nsbctl**：与桌面端共用数据目录的命令行工具。`pnpm tauri build` 和 Release 工作流
 会先按目标架构编译 `nsbctl` / `nsb-mcp`，再附带到安装包：Windows 位于应用安装目录，
 macOS 位于 `NiceEnv.app/Contents/MacOS`。无需额外安装 Node.js 或 Rust 来使用这些工具。
+桌面端「设置 → 高级 → 命令行与 AI 集成」会检查这些文件，并提供可复制的 CLI 状态查询
+命令和 Claude Desktop / Cursor MCP 配置，自动填入绝对路径与当前 `NSB_HOME` 数据目录。
+缺少工具或无法读取时会显示原因和重新检查入口；迁移数据或更改安装位置后需重新复制配置。
 开发时也可用 `cargo build -p nsb-core --bin nsbctl --bin nsb-mcp --locked` 单独编译到
 `target/debug`；`pnpm --filter @nsb/desktop prepare:tools --debug` 仅准备 Rust 工具，不打包前端。
 
@@ -190,7 +193,9 @@ Cursor 等 AI 客户端加上即可用自然语言操作本地环境——列服
 { "mcpServers": { "niceservbay": { "command": "nsb-mcp" } } }
 ```
 
-将 `command` 改为实际编译出的 `nsb-mcp` 绝对路径（Windows 为 `nsb-mcp.exe`）。
+推荐直接从设置页复制包含实际路径和 `NSB_HOME` 的配置。手动配置时，将 `command` 改为
+实际编译出的 `nsb-mcp` 绝对路径（Windows 为 `nsb-mcp.exe`），并通过 `env.NSB_HOME`
+指定与桌面相同的数据目录；已有其它 MCP 服务时只合并 NiceEnv 条目，不覆盖其它配置。
 MCP 握手与工具列表不初始化环境；无请求 ID 或参数不合法的调用不会执行服务操作。
 操作失败返回 `isError: true`，并保留错误码、原因和可用的处理提示。
 AI 客户端的长期连接不会占住服务控制权；每次调用重新连接当前桌面进程，桌面关闭时

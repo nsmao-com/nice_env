@@ -33,7 +33,7 @@ import {
   Stethoscope,
   RefreshCw,
 } from "lucide-react";
-import type { PackageView, PackageCategory, ServiceStatus, BulkReport } from "@nsb/schema";
+import type { PackageView, PackageCategory, ServiceStatus, BulkReport, VersionCatalog } from "@nsb/schema";
 import { PACKAGE_CATEGORY_ORDER, PackageUninstallPreview } from "@nsb/schema";
 import { cn, fmtBytes, fmtSpeed, isPlatformCompatible } from "@/lib/utils";
 import { useUI, useT } from "@/lib/store";
@@ -150,7 +150,35 @@ interface PackageGroup {
   }[];
 }
 
-type PackageFilter = "all" | "installed" | "running";
+type PackageFilter = "all" | "installed" | "running" | "updates";
+
+/** 筛选、更新入口和下拉共用同一份版本元数据，本地平台限制不能被远程重复项覆盖。 */
+function packageVersionItems(group: PackageGroup, catalog?: Pick<VersionCatalog, "remote">): VersionItem[] {
+  const versions = new Map<string, VersionItem>();
+  for (const version of group.versions) {
+    const key = version.version.replace(/^[vV]/, "");
+    const existing = versions.get(key);
+    if (existing && (existing.installed || !version.installed)) continue;
+    versions.set(key, { ...version, running: false, prerelease: isPrerelease(version.version) });
+  }
+  for (const remote of catalog?.remote ?? []) {
+    const key = remote.version.replace(/^[vV]/, "");
+    if (versions.has(key)) continue;
+    versions.set(key, {
+      version: remote.version, installed: false, active: false, running: false,
+      remote, sizeBytes: remote.sizeBytes, note: remote.note,
+      prerelease: remote.prerelease || isPrerelease(remote.version),
+    });
+  }
+  return [...versions.values()].sort((a, b) => cmpVersionDesc(a.version, b.version));
+}
+
+function packageUpdate(items: VersionItem[]): VersionItem | undefined {
+  const installed = items.find((item) => item.installed);
+  if (!installed) return;
+  return items.find((item) => !item.installed && !item.incompatible && !item.prerelease
+    && cmpVersionDesc(item.version, installed.version) < 0);
+}
 
 function packageServices(group: PackageGroup, services: ServiceStatus[]) {
   const ids = new Set(group.versions.filter((version) => version.installed).map((version) => version.serviceId));
@@ -274,6 +302,11 @@ export default function PackagesPage() {
 
   const defaultTld = settings.error ? undefined : settings.data?.defaultTld;
   const groups = React.useMemo(() => groupPackages(packages, defaultTld), [packages, defaultTld]);
+  const updates = React.useMemo(() => new Map(groups.flatMap((group) => {
+    const update = packageUpdate(packageVersionItems(group, catalogById.get(group.id)));
+    return update ? [[group.id, update] as const] : [];
+  })), [groups, catalogById]);
+  const updatesLoading = packageFilter === "updates" && [...catalogById.values()].some((catalog) => catalog.loading);
   const filterUnavailable = packageFilter === "running" && !statusKnown;
   const hasFilters = !!query.trim() || packageFilter !== "all" || category !== "all";
   const resetFilters = () => { setQuery(""); setPackageFilter("all"); setCategory("all"); };
@@ -307,10 +340,11 @@ export default function PackagesPage() {
     return groups.filter((g) => {
       if (packageFilter === "installed" && !g.versions.some((version) => version.installed)) return false;
       if (packageFilter === "running" && !packageServices(g, services).some((service) => service.state === "running")) return false;
+      if (packageFilter === "updates" && !updates.has(g.id)) return false;
       return !q || g.displayName.toLowerCase().includes(q) || g.id.toLowerCase().includes(q)
         || g.description.toLowerCase().includes(q) || g.versions.some((version) => version.version.toLowerCase().includes(q));
     });
-  }, [groups, query, packageFilter, services, filterUnavailable]);
+  }, [groups, query, packageFilter, services, filterUnavailable, updates]);
 
   const runningServices = React.useMemo(
     () => new Set(services.filter((s) => statusKnown && s.state === "running").map((s) => s.id)),
@@ -459,7 +493,7 @@ export default function PackagesPage() {
   );
 
   const empty = <div className="flex flex-col items-center gap-3 px-3 py-10 text-center text-[13px] text-muted">
-    <p role="status">{filterUnavailable ? t("packages.runningUnavailable") : t("packages.noMatches")}</p>
+    <p role="status">{filterUnavailable ? t("packages.runningUnavailable") : t(updatesLoading ? "common.loading" : packageFilter === "updates" ? "packages.noUpdates" : "packages.noMatches")}</p>
     {hasFilters && <Button variant="secondary" size="sm" onClick={resetFilters}>{t("packages.resetFilters")}</Button>}
   </div>;
 
@@ -486,6 +520,7 @@ export default function PackagesPage() {
                 <SelectItem value="all">{t("packages.filterAll")}</SelectItem>
                 <SelectItem value="installed">{t("versions.installed")}</SelectItem>
                 <SelectItem value="running">{t("state.running")}</SelectItem>
+                <SelectItem value="updates">{t("packages.hasNewer")}</SelectItem>
               </SelectContent>
             </Select>
             {hasFilters && <Button variant="ghost" size="sm" onClick={resetFilters}>{t("packages.resetFilters")}</Button>}
@@ -506,6 +541,8 @@ export default function PackagesPage() {
       />
 
       {readStatus}
+
+      {packageFilter === "updates" && <p className="mb-4 text-xs leading-relaxed text-muted [overflow-wrap:anywhere]">{t("packages.updatesHint")}</p>}
 
       {catalogRefreshIssue && <div role="alert" className="mb-4 space-y-2 rounded-xl border border-warn/30 bg-warn-soft p-3 text-xs leading-relaxed [overflow-wrap:anywhere]">
         <p className="font-medium text-foreground">{catalogRefreshIssue.message}</p>
@@ -769,21 +806,15 @@ function PackageRow({
   const [extVersion, setExtVersion] = React.useState<string | null>(null);
   const [logService, setLogService] = React.useState<ServiceStatus | null>(null);
   const [diagnosticService, setDiagnosticService] = React.useState<ServiceStatus | null>(null);
+  const actionRef = React.useRef(false);
+  const [actionBusy, setActionBusy] = React.useState(false);
+  const [updateError, setUpdateError] = React.useState<AppErrorShape | null>(null);
 
   const installedCount = group.versions.filter((v) => v.installed).length;
   const svc = group.isService;
   const currentServices = packageServices(group, services);
   // 该包任一版本运行中 → 行首状态灯
   const anyRunning = group.versions.some((v) => (v.serviceId ? runningServices.has(v.serviceId) : false));
-  // 已装版本之外还有更高正式版：同时检查内置与上游目录。
-  const hasNewer = React.useMemo(() => {
-    const installedVers = group.versions.filter((v) => v.installed).map((v) => v.version);
-    if (installedVers.length === 0) return false;
-    const maxInstalled = installedVers.reduce((a, b) => (cmpVersionDesc(a, b) < 0 ? a : b));
-    return group.versions.some(
-      (v) => !v.installed && !v.incompatible && !isPrerelease(v.version) && cmpVersionDesc(v.version, maxInstalled) < 0
-    ) || (catalog?.remote ?? []).some((v) => !v.prerelease && cmpVersionDesc(v.version, maxInstalled) < 0);
-  }, [group.versions, catalog]);
   /** 扩展面板作用的版本：优先「使用中」，其次任一已装版本 */
   const phpActiveVersion = React.useMemo(() => {
     const active = group.versions.find((v) => v.installed && v.active);
@@ -791,51 +822,22 @@ function PackageRow({
     return active?.version ?? fallback?.version ?? null;
   }, [group.versions]);
 
-  /** 合并「清单内置版本」与「远程枚举版本」为统一下拉项。
-   *  已装/已内置的优先用本地元数据；远程独有的版本标 remote。 */
-  const items = React.useMemo<VersionItem[]>(() => {
-    const seen = new Set<string>();
-    const list: VersionItem[] = [];
-    for (const v of group.versions) {
-      seen.add(v.version.replace(/^[vV]/, ""));
-      list.push({
-        version: v.version,
-        installed: v.installed,
-        installPath: v.installPath,
-        installing: Object.values(installTasks).some((task) => task.status === "running"
-          && task.id === group.id && (!task.version || task.version === v.version)),
-        active: v.active,
-        running: v.installed && services.some((s) => s.id === v.serviceId
-          && s.version === v.version && s.state === "running"),
-        canStop: v.installed && services.some((s) => s.id === v.serviceId
-          && s.version === v.version && serviceHasProcess(s)),
-        transitioning: v.installed && services.some((s) => s.id === v.serviceId
-          && ["starting", "stopping"].includes(s.state)),
-        sizeBytes: v.sizeBytes,
-        incompatible: v.incompatible,
-        prerelease: isPrerelease(v.version),
-      });
-    }
-    for (const r of catalog?.remote ?? []) {
-      if (seen.has(r.version.replace(/^[vV]/, ""))) continue;
-      seen.add(r.version.replace(/^[vV]/, ""));
-      list.push({
-        version: r.version,
-        installed: false,
-        installing: Object.values(installTasks).some((task) => task.status === "running"
-          && task.id === group.id && (!task.version || task.version === r.version)),
-        active: false,
-        running: false,
-        remote: r,
-        sizeBytes: r.sizeBytes,
-        note: r.note,
-        prerelease: r.prerelease,
-      });
-    }
-    // 版本降序：统一走 cmpVersionDesc（处理 v 前缀与预发布）
-    list.sort((a, b) => cmpVersionDesc(a.version, b.version));
-    return list;
-  }, [group, catalog, services, installTasks]);
+  const items = React.useMemo(() => packageVersionItems(group, catalog).map((item) => {
+    const version = group.versions.find((version) => version.version === item.version);
+    const service = version?.installed ? services.find((service) => service.id === version.serviceId
+      && service.version === version.version) : undefined;
+    return {
+      ...item,
+      installing: Object.values(installTasks).some((task) => task.status === "running"
+        && task.id === group.id && (!task.version || task.version === item.version)),
+      running: service?.state === "running",
+      canStop: !!service && serviceHasProcess(service),
+      transitioning: !!version?.installed && services.some((service) => service.id === version.serviceId
+        && ["starting", "stopping"].includes(service.state)),
+    };
+  }), [group, catalog, services, installTasks]);
+  const update = packageUpdate(items);
+  const packageInstalling = Object.values(installTasks).some((task) => task.id === group.id && task.status === "running");
 
   const pct = task && task.total > 0 ? Math.min(100, (task.received / task.total) * 100) : 0;
   const downloading = task?.state === "downloading";
@@ -848,7 +850,9 @@ function PackageRow({
   const activeVersion = task ? task.taskId.slice(group.id.length + 1) : null;
 
   const clickVersion = async (item: VersionItem, action: VersionAction, trigger: HTMLButtonElement | null) => {
-    if (disabled || item.installing) return;
+    if (disabled || item.installing || actionRef.current) return;
+    actionRef.current = true;
+    setActionBusy(true);
     const { version } = item;
     try {
       // 首次执行和失败重试都读取最新状态，但始终保持原来的动作和版本。
@@ -857,12 +861,16 @@ function PackageRow({
         queryClient.fetchQuery({ queryKey: ["services"], queryFn: api.listServiceStatus, staleTime: 0, retry: false, networkMode: "always" }),
       ]);
       if (Object.values(useInstallTasks.getState().tasks).some((task) => task.status === "running"
-        && task.id === group.id && (!task.version || task.version === version))) {
+        && task.id === group.id && (action === "install" || !task.version || task.version === version))) {
         throw { code: "PACKAGE_BUSY", message: t("packages.installing") };
       }
-      const target = packages.find((pkg) => pkg.id === group.id && pkg.version === version);
+      const targets = packages.filter((pkg) => pkg.id === group.id && pkg.version.replace(/^[vV]/, "") === version.replace(/^[vV]/, ""));
+      const target = targets.find((pkg) => pkg.install) ?? targets.find((pkg) => pkg.version === version) ?? targets[0];
       if (action === "install") {
         if (target?.install) throw { code: "VERSION_STATE_CHANGED", message: t("versions.alreadyInstalled") };
+        if (item.incompatible || (target && !isPlatformCompatible(target.os, target.arch))) {
+          throw { code: "PLATFORM_UNSUPPORTED", message: t("versions.incompatible") };
+        }
         // 安装走向导弹窗（阶段时间线 + 实时进度 + 完成后可直接启动）
         onInstall({
           id: group.id,
@@ -906,9 +914,27 @@ function PackageRow({
       }
     } finally {
       // PATH 同步失败时版本选择可能已保存，必须重新读取实际结果。
-      await Promise.all(["packages", "services", "stacks", "pathenv", "databases", "db-users"].map(
-        (key) => queryClient.invalidateQueries({ queryKey: [key] })
-      ));
+      try {
+        await Promise.all(["packages", "services", "stacks", "pathenv", "databases", "db-users"].map(
+          (key) => queryClient.invalidateQueries({ queryKey: [key] })
+        ));
+      } finally {
+        actionRef.current = false;
+        setActionBusy(false);
+      }
+    }
+  };
+
+  const installUpdate = async (trigger: HTMLButtonElement) => {
+    if (!update || disabled || actionRef.current || packageInstalling) return;
+    setUpdateError(null);
+    try {
+      await clickVersion(update, "install", trigger);
+    } catch (error) {
+      const problem = normalizeError(error);
+      setUpdateError(problem);
+      // 状态重读可能使该行退出“可更新”筛选，仍需给出失败反馈。
+      toast.error(problem.message);
     }
   };
 
@@ -947,7 +973,7 @@ function PackageRow({
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <span className="break-words text-[13.5px] font-medium [overflow-wrap:anywhere]">{group.displayName}</span>
-              {hasNewer && (
+              {update && (
                 <span
                   className="rounded-full border border-info/40 px-1.5 py-px text-[9px] text-info"
                   title={t("packages.hasNewer")}
@@ -964,6 +990,22 @@ function PackageRow({
             <p className="mt-1 break-words text-[11.5px] leading-relaxed text-faint [overflow-wrap:anywhere]">
               {group.description}
             </p>
+            {update && <div className="mt-2 space-y-1.5">
+              <Button type="button" size="sm" variant="secondary"
+                className="h-auto min-h-8 max-w-full py-1.5 text-left text-xs whitespace-normal [overflow-wrap:anywhere]"
+                disabled={disabled || actionBusy || packageInstalling}
+                aria-label={`${group.displayName} · ${t("packages.installUpdate")} ${update.version}`}
+                onClick={(event) => void installUpdate(event.currentTarget)}>
+                {actionBusy ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> : <Download className="h-3.5 w-3.5 shrink-0" />}
+                <span className="min-w-0">{t("packages.installUpdate")} <span className="font-mono">{update.version}</span></span>
+              </Button>
+              <p className="text-[11px] leading-relaxed text-muted [overflow-wrap:anywhere]">{t("packages.installUpdateHint")}</p>
+              {update.remote && (!catalog?.online || catalog.error) && <p className="text-[11px] text-warn">{t("packages.updateFromCache")}</p>}
+            </div>}
+            {updateError && <div role="alert" className="mt-2 text-xs text-error [overflow-wrap:anywhere]">
+              <p>{updateError.message}</p>
+              {updateError.hint && <p className="mt-1">{updateError.hint}</p>}
+            </div>}
             {svc && installedCount > 0 ? (
               <div className="mt-2 space-y-1 text-[11px]">
                 {!statusKnown || currentServices.length === 0 ? <p className="text-muted">{t("packages.statusUnknown")}</p>
@@ -995,7 +1037,7 @@ function PackageRow({
         <VersionPicker
           group={{ id: group.id, displayName: group.displayName, multiInstance: group.multiInstance, isService: svc }}
           items={items}
-          disabled={disabled}
+          disabled={disabled || actionBusy}
           statusKnown={statusKnown}
           catalog={
             catalog

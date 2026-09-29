@@ -8,12 +8,13 @@
 
 use crate::error::{AppError, Result};
 use crate::model::{
-    AppErrorInfo, ServiceState, Stack, StackInput, StackItem, StackItemFailure, StackStartReport,
+    AppErrorInfo, ServiceState, Stack, StackInput, StackItem, StackItemFailure, StackStartReport, StackRetry,
 };
 use crate::paths::Paths;
 use crate::services::ServiceManager;
 use crate::store::Store;
 use std::sync::Arc;
+use sha2::{Digest, Sha256};
 
 /// 内置预设：id 固定、builtin=true（不可删）
 fn presets(now: i64) -> Vec<Stack> {
@@ -162,6 +163,7 @@ fn normalized_items(mut items: Vec<StackItem>) -> Vec<StackItem> {
 /// 把栈里的 id 展开成「实际存在、能启动的服务 id」。
 /// - 无版本的通用 id（mysql/php/nginx）→ 当前「使用中版本」对应的 service id
 /// - 未安装 / 非服务的项直接跳过，并在报告里说明
+#[derive(serde::Serialize)]
 struct ResolvedStackItem {
     service_id: String,
     expected_version: Option<String>,
@@ -242,6 +244,38 @@ fn check_target_version(manager: &ServiceManager, item: &ResolvedStackItem) -> R
         return Err(AppError::new("SERVICE_STATE_UNKNOWN", "无法确认服务状态，请先重新检查"));
     }
     Ok(())
+}
+
+fn prepare_execution(
+    store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, id: &str, action: &str,
+    retry: Option<&StackRetry>,
+) -> Result<(Stack, Vec<ResolvedStackItem>, Vec<String>, String)> {
+    // 首次从托盘等入口启动时也需要初始化预设。
+    ensure_presets(store)?;
+    let stack = store.get_stack(id)?
+        .ok_or_else(|| AppError::new("STACK_NOT_FOUND", format!("找不到服务栈 {id}")))?;
+    crate::ops::register_services(paths, store, manager);
+    crate::generic::register_services(paths, store, manager);
+    let (mut items, skipped) = resolve_items(store, manager, &stack);
+    check_version_conflicts(&items)?;
+    // 状态/PID 不参与：一次正常启停不能使其它失败项失去重试资格。
+    let targets: Vec<_> = items.iter().map(|item| manager.snapshot(&item.service_id).map(|s| (s.version, s.port))).collect();
+    let signature = serde_json::to_vec(&(action, &stack, &items, &skipped, targets))
+        .map_err(|error| AppError::new("STACK_PLAN_FAILED", error.to_string()))?;
+    let revision = hex::encode(Sha256::digest(signature));
+    if let Some(retry) = retry {
+        if retry.revision != revision {
+            return Err(AppError::new("STACK_TARGET_CHANGED", "服务栈配置、版本或端口已变化，旧的重试已失效")
+                .with_hint("请查看当前服务栈，重新选择启动或停止操作"));
+        }
+        let selected: std::collections::HashSet<_> = retry.service_ids.iter().collect();
+        if selected.is_empty() || selected.len() != retry.service_ids.len()
+            || selected.iter().any(|id| !items.iter().any(|item| &item.service_id == *id)) {
+            return Err(AppError::new("BAD_STACK_RETRY", "重试目标无效，请重新读取服务栈执行结果"));
+        }
+        items.retain(|item| selected.contains(&item.service_id));
+    }
+    Ok((stack, items, skipped, revision))
 }
 
 #[cfg(test)]
@@ -353,25 +387,17 @@ pub fn start(
     manager: &Arc<ServiceManager>,
     id: &str,
 ) -> Result<StackStartReport> {
-    start_with(store, paths, manager, id, |sid, _| crate::ops::start_service(store, paths, manager, sid))
+    start_with(store, paths, manager, id, None, |sid, _| crate::ops::start_service(store, paths, manager, sid))
 }
 
 pub(crate) fn start_with(
     store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, id: &str,
+    retry: Option<&StackRetry>,
     mut start: impl FnMut(&str, Option<&str>) -> Result<()>,
 ) -> Result<StackStartReport> {
     let _operation = manager.lifecycle.try_lock()
         .ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后启动服务栈"))?;
-    // 预设只在「首次列出」时写入；启动路径也要保证它存在，
-    // 否则全新环境下点托盘的预设栈会报「找不到服务栈」
-    ensure_presets(store)?;
-    let stack = store
-        .get_stack(id)?
-        .ok_or_else(|| AppError::new("STACK_NOT_FOUND", format!("找不到服务栈 {id}")))?;
-    crate::ops::register_services(paths, store, manager);
-    crate::generic::register_services(paths, store, manager);
-    let (items, skipped) = resolve_items(store, manager, &stack);
-    check_version_conflicts(&items)?;
+    let (stack, items, skipped, revision) = prepare_execution(store, paths, manager, id, "start", retry)?;
     if items.is_empty() {
         return Err(AppError::new(
             "STACK_EMPTY",
@@ -385,6 +411,8 @@ pub(crate) fn start_with(
 
     let mut report = StackStartReport {
         stack_id: stack.id.clone(),
+        revision,
+        order: items.iter().map(|item| item.service_id.clone()).collect(),
         started: Vec::new(),
         already_running: Vec::new(),
         skipped,
@@ -427,28 +455,24 @@ pub fn stop(
     manager: &Arc<ServiceManager>,
     id: &str,
 ) -> Result<StackStartReport> {
-    stop_with(store, paths, manager, id, |sid, _| crate::ops::stop_service(store, paths, manager, sid))
+    stop_with(store, paths, manager, id, None, |sid, _| crate::ops::stop_service(store, paths, manager, sid))
 }
 
 pub(crate) fn stop_with(
     store: &Store, paths: &Paths, manager: &Arc<ServiceManager>, id: &str,
+    retry: Option<&StackRetry>,
     mut stop: impl FnMut(&str, Option<&str>) -> Result<()>,
 ) -> Result<StackStartReport> {
     let _operation = manager.lifecycle.try_lock()
         .ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后停止服务栈"))?;
-    ensure_presets(store)?;
-    let stack = store
-        .get_stack(id)?
-        .ok_or_else(|| AppError::new("STACK_NOT_FOUND", format!("找不到服务栈 {id}")))?;
-    crate::ops::register_services(paths, store, manager);
-    crate::generic::register_services(paths, store, manager);
-    let (mut items, skipped) = resolve_items(store, manager, &stack);
-    check_version_conflicts(&items)?;
+    let (stack, mut items, skipped, revision) = prepare_execution(store, paths, manager, id, "stop", retry)?;
     // 逆序：nginx 先停，数据库最后停
     items.reverse();
 
     let mut report = StackStartReport {
         stack_id: stack.id.clone(),
+        revision,
+        order: items.iter().map(|item| item.service_id.clone()).collect(),
         started: Vec::new(),
         already_running: Vec::new(),
         skipped,

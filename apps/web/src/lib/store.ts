@@ -52,6 +52,10 @@ interface UIState {
   pendingTool: "diagnostics" | "config" | null;
   requestTool: (which: "diagnostics" | "config") => void;
   consumeTool: () => void;
+  /** 工具箱页：带入需要检查的端口，只读取当前占用信息。 */
+  pendingPort: number | null;
+  requestPort: (port: number) => void;
+  consumePort: () => void;
 }
 
 export type ServiceView = "card" | "list";
@@ -86,8 +90,11 @@ export const useUI = create<UIState>()(
       requestScan: () => set({ pendingScan: true }),
       consumeScan: () => set({ pendingScan: false }),
       pendingTool: null,
-      requestTool: (which) => set({ pendingTool: which }),
+      requestTool: (which) => set({ pendingTool: which, pendingPort: null }),
       consumeTool: () => set({ pendingTool: null }),
+      pendingPort: null,
+      requestPort: (port) => { if (Number.isInteger(port) && port >= 1 && port <= 65535) set({ pendingPort: port, pendingTool: null }); },
+      consumePort: () => set({ pendingPort: null }),
     }),
     {
       name: "nsb-ui",

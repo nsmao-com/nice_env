@@ -61,6 +61,15 @@ export function UtilityWorkspace({ section = "tools" }: { section?: "tools" | "n
   const router = useRouter();
   const pendingTool = useUI((st) => st.pendingTool);
   const consumeTool = useUI((st) => st.consumeTool);
+  const pendingPort = useUI((st) => st.pendingPort);
+  const consumePort = useUI((st) => st.consumePort);
+
+  React.useEffect(() => {
+    if (section !== "tools" || pendingPort == null) return;
+    setPortRequest({ port: pendingPort, at: Date.now() });
+    consumePort();
+    document.getElementById("nsb-tool-ports")?.scrollIntoView({ block: "start" });
+  }, [section, pendingPort, consumePort]);
 
   React.useEffect(() => {
     if (pendingTool) { consumeTool(); router.replace(pendingTool === "config" ? "/configuration" : "/diagnostics"); }

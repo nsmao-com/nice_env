@@ -3,6 +3,7 @@
 import type { DatabaseEngine } from "@nsb/schema";
 
 import * as React from "react";
+import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import * as api from "./api";
@@ -347,7 +348,7 @@ async function performServiceAction(
 /** 服务栈入口共用报告，缺失套件不能被全成功提示掩盖。 */
 export function toastStackReport(
   t: ReturnType<typeof useT>, report: StackStartReport, action: "start" | "stop",
-  retry?: () => Promise<void>
+  showDetails?: () => void
 ) {
   const details = [
     t("bulk.resultSummary").replace("{ok}", String(report.started.length))
@@ -361,10 +362,78 @@ export function toastStackReport(
   }
   toast.warning(t("bulk.incomplete"), {
     description: details, duration: 12000,
-    action: retry ? { label: t("bulk.retry"), onClick: () => void retry() } : undefined,
+    action: showDetails ? { label: t("stack.viewResult"), onClick: showDetails } : undefined,
   });
-  const conflict = action === "start" && report.failed.find((f) => f.error.code === "PORT_IN_USE");
-  if (conflict) toastPortConflict(conflict.error, { onResolved: retry });
+}
+
+export type StackActionResult = {
+  sequence: number;
+  name: string;
+  action: "start" | "stop";
+  report: StackStartReport | null;
+  error: AppErrorShape | null;
+};
+type StackActionState = { sequence: number; busyId: string | null; results: Record<string, StackActionResult> };
+const STACK_ACTION_KEY = ["stack-actions"];
+const emptyStackActions = (): StackActionState => ({ sequence: 0, busyId: null, results: {} });
+
+/** 会话内共享结果：快捷入口完成后换到服务栈页面，仍能查看并重试原失败项。 */
+export function useStackActions() {
+  const t = useT();
+  const qc = useQueryClient();
+  const router = useRouter();
+  const invalidate = useInvalidate();
+  const { data } = useQuery<StackActionState>({
+    queryKey: STACK_ACTION_KEY, queryFn: emptyStackActions, initialData: emptyStackActions,
+    enabled: false, staleTime: Infinity, gcTime: Infinity,
+  });
+  const current = () => qc.getQueryData<StackActionState>(STACK_ACTION_KEY) ?? emptyStackActions();
+  const execute = async (id: string, name: string, action: "start" | "stop", previous?: StackActionResult) => {
+    const state = current();
+    if (state.busyId !== null || (previous && state.results[id]?.sequence !== previous.sequence)) return;
+    const original = previous?.report;
+    if (previous && (!original?.revision || !original.failed.length)) return;
+    const selected = original?.failed.map((failure) => failure.serviceId);
+    const sequence = state.sequence + 1;
+    const result: StackActionResult = { sequence, name, action, report: original ?? null, error: null };
+    qc.setQueryData<StackActionState>(STACK_ACTION_KEY, { sequence, busyId: id, results: { ...state.results, [id]: { ...result } } });
+    const pending = toast.loading(`${name} · ${t(`common.${action}`)}`);
+    try {
+      const report = original && selected
+        ? await api.retryStack(id, action, { revision: original.revision, serviceIds: selected })
+        : await (action === "start" ? api.startStack(id) : api.stopStack(id));
+      if (original && selected) {
+        // 合并失败项的新结果，保留先前成功项和缺失项；不会再次操作成功服务。
+        result.report = { ...report, order: original.order,
+          started: [...original.started.filter((sid) => !selected.includes(sid)), ...report.started],
+          alreadyRunning: [...original.alreadyRunning.filter((sid) => !selected.includes(sid)), ...report.alreadyRunning],
+          failed: [...original.failed.filter((failure) => !selected.includes(failure.serviceId)), ...report.failed],
+          skipped: [...new Set([...original.skipped, ...report.skipped])],
+        };
+      } else result.report = report;
+      toastStackReport(t, result.report, action, () => router.push("/stacks"));
+    } catch (error) {
+      result.error = normalizeError(error);
+      toast.error(result.error.message, { description: result.error.hint,
+        action: { label: t("stack.viewResult"), onClick: () => router.push("/stacks") } });
+    } finally {
+      qc.setQueryData<StackActionState>(STACK_ACTION_KEY, (latest) => latest?.results[id]?.sequence === sequence
+        ? { ...latest, busyId: null, results: { ...latest.results, [id]: { ...result } } } : latest);
+      toast.dismiss(pending);
+      invalidate("services", "stacks");
+    }
+  };
+  return {
+    results: data.results, busyId: data.busyId, isBusy: () => current().busyId !== null,
+    run: (stack: Stack, action: "start" | "stop") => execute(stack.id, stack.name, action),
+    retry: (id: string, result: StackActionResult) => execute(id, result.name, result.action, result),
+    dismiss: (id: string) => {
+      const state = current();
+      if (state.busyId !== null) return;
+      const results = { ...state.results }; delete results[id];
+      qc.setQueryData(STACK_ACTION_KEY, { ...state, results });
+    },
+  };
 }
 
 /** 总览、应用菜单和命令面板共享启停流程，包含独立数据库管理台。 */
@@ -372,6 +441,7 @@ export function useQuickServiceActions(services: ServiceStatus[], stacks: Stack[
   const t = useT();
   const invalidate = useInvalidate();
   const qc = useQueryClient();
+  const stackActions = useStackActions();
   const adminerQuery = useAdminerStatus();
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
@@ -396,7 +466,7 @@ export function useQuickServiceActions(services: ServiceStatus[], stacks: Stack[
     return () => { mounted.current = false; serviceRequest.current = null; };
   }, []);
   const prepareStop = async () => {
-    if (busyRef.current) return false;
+    if (busyRef.current || stackActions.isBusy()) return false;
     busyRef.current = true; setBusy(true);
     setStopReport(null); setStopError(null);
     setStopTargets([]);
@@ -420,38 +490,30 @@ export function useQuickServiceActions(services: ServiceStatus[], stacks: Stack[
   };
 
   const start = async (stack: Stack | undefined = stacks[0]) => {
-    // 固定本次目标；通知稍后重试时不能误用新选择的栈或服务列表。
+    if (busyRef.current || stackActions.isBusy()) return;
+    if (stack) { await stackActions.run(stack, "start"); return; }
+    // 尚无服务栈时保留首次使用的快速启动入口。
     const ids = services.filter((s) => ["nginx", "redis", "php", "mysql"].includes(s.id.split("@")[0])).map((s) => s.id);
-    const execute = async () => {
-      if (busyRef.current) return;
-      if (!stack && !ids.length) { toast.error(t("bulk.noServices")); return; }
-      busyRef.current = true; setBusy(true);
-      const pending = toast.loading(t("dashboard.startingStack"));
-      try {
-        if (stack) {
-          const report = await api.startStack(stack.id);
-          toast.dismiss(pending);
-          toastStackReport(t, report, "start", execute);
-        } else {
-          const report = await api.bulkStart(ids);
-          toast.dismiss(pending);
-          toastStackReport(t, {
-            stackId: "", started: report.succeeded, alreadyRunning: report.already,
-            failed: report.failed, skipped: [],
-          }, "start", execute);
-        }
-      } catch (error) {
-        toast.dismiss(pending);
-        if (!toastPortConflict(error, { onResolved: execute })) toastError(error);
-      } finally {
-        busyRef.current = false; setBusy(false); invalidate("services", "stacks");
-      }
-    };
-    await execute();
+    if (!ids.length) { toast.error(t("bulk.noServices")); return; }
+    busyRef.current = true; setBusy(true);
+    const pending = toast.loading(t("dashboard.startingStack"));
+    try {
+      const report = await api.bulkStart(ids);
+      toast.dismiss(pending);
+      toastStackReport(t, {
+        stackId: "", revision: "", order: report.order, started: report.succeeded, alreadyRunning: report.already,
+        failed: report.failed, skipped: [],
+      }, "start");
+    } catch (error) {
+      toast.dismiss(pending);
+      toastError(error);
+    } finally {
+      busyRef.current = false; setBusy(false); invalidate("services", "stacks");
+    }
   };
 
   const stop = async (ids = stopTargets) => {
-    if (busyRef.current) return null;
+    if (busyRef.current || stackActions.isBusy()) return null;
     busyRef.current = true; setBusy(true); setStopError(null);
     try {
       const report = await api.stopAllServices(ids);
@@ -466,7 +528,7 @@ export function useQuickServiceActions(services: ServiceStatus[], stacks: Stack[
     }
   };
   const serviceAction = async (selected: ServiceTarget, action: ServiceAction): Promise<void> => {
-    if (!mounted.current || busyRef.current) return;
+    if (!mounted.current || busyRef.current || stackActions.isBusy()) return;
     const service = { id: selected.id, version: selected.version, label: selected.label };
     const identity = serviceIdentities.current.get(service.id);
     const request = {};
@@ -475,7 +537,7 @@ export function useQuickServiceActions(services: ServiceStatus[], stacks: Stack[
     const current = () => active() && identity !== undefined
       && serviceIdentities.current.get(service.id) === identity && identity.version === service.version;
     const execute = async (conflict?: ServiceConflict): Promise<void> => {
-      if (!active() || busyRef.current) return;
+      if (!active() || busyRef.current || stackActions.isBusy()) return;
       busyRef.current = true; setBusy(true); setServiceFailure(null);
       const pending = toast.loading(`${service.label}${service.version ? ` ${service.version}` : ""} · ${t(`common.${action}`)}`);
       let pendingConflict = conflict;
@@ -517,7 +579,7 @@ export function useQuickServiceActions(services: ServiceStatus[], stacks: Stack[
     .replace("{count}", String(pendingTargets.length))
     + (pendingTargets.includes(api.ADMINER_CONSOLE_ID) ? ` ${t("confirm.stopAllConsoleHint")}` : "");
   const hasStopTargets = services.some(serviceHasProcess) || Boolean(adminerQuery.data) || !adminerQuery.isSuccess;
-  return { busy, start, stop, serviceAction, serviceFailure, serviceTargetChanged, dismissServiceFailure,
+  return { busy: busy || stackActions.busyId !== null, start, stop, serviceAction, serviceFailure, serviceTargetChanged, dismissServiceFailure,
     stopReport, stopError, prepareStop, stopDescription, hasStopTargets };
 }
 

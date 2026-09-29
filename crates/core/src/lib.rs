@@ -1433,16 +1433,27 @@ impl CoreState {
 
     /// 一键启动整栈；单项失败不阻断其它项，结果逐项回报
     pub fn start_stack(&self, id: &str) -> Result<model::StackStartReport> {
-        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
-        stacks::start_with(&self.store, &self.paths, &self.manager, id, |sid, version| match version {
-            Some(version) => self.start_service_version(sid, version),
-            None => self.start_service(sid),
-        })
+        self.execute_stack(id, "start", None)
     }
 
     pub fn stop_stack(&self, id: &str) -> Result<model::StackStartReport> {
+        self.execute_stack(id, "stop", None)
+    }
+
+    pub fn retry_stack(&self, id: &str, action: &str, retry: &model::StackRetry) -> Result<model::StackStartReport> {
+        self.execute_stack(id, action, Some(retry))
+    }
+
+    fn execute_stack(&self, id: &str, action: &str, retry: Option<&model::StackRetry>) -> Result<model::StackStartReport> {
         let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
-        stacks::stop_with(&self.store, &self.paths, &self.manager, id, |sid, version| match version {
+        if action == "start" {
+            return stacks::start_with(&self.store, &self.paths, &self.manager, id, retry, |sid, version| match version {
+                Some(version) => self.start_service_version(sid, version),
+                None => self.start_service(sid),
+            });
+        }
+        if action != "stop" { return Err(AppError::new("BAD_STACK_ACTION", "服务栈操作无效")); }
+        stacks::stop_with(&self.store, &self.paths, &self.manager, id, retry, |sid, version| match version {
             Some(version) => self.stop_service_version(sid, version),
             None => self.stop_service(sid),
         })

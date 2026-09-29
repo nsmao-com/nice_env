@@ -1215,14 +1215,19 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (settings.startStackOnLaunch === s.id) settings.startStackOnLaunch = "";
       return true as T;
     }
+    case "retry_stack":
     case "start_stack":
     case "stop_stack": {
       return withServiceOperation(async () => {
       const stack = stacks.get(args!.id as string);
       if (!stack) throw { code: "STACK_NOT_FOUND", message: "找不到服务栈" };
-      const starting = cmd === "start_stack";
+      const action = cmd === "retry_stack" ? args?.action : cmd === "start_stack" ? "start" : "stop";
+      if (action !== "start" && action !== "stop") throw { code: "BAD_STACK_ACTION", message: "服务栈操作无效" };
+      const starting = action === "start";
       const report: StackStartReport = {
         stackId: stack.id,
+        revision: "",
+        order: [],
         started: [],
         alreadyRunning: [],
         skipped: [],
@@ -1232,9 +1237,22 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const serviceList = [...services.values()], packageList = [...packages.values()];
       const conflicts = stackVersionConflicts(stack.items, serviceList, packageList);
       if (conflicts.length) throw { code: "STACK_VERSION_CONFLICT", message: `服务栈为单实例服务 ${conflicts.join(", ")} 选择了不同版本`, hint: "请编辑服务栈，为此服务保留一个版本规则后再操作" };
-      const items = resolvedStackItems(stack.items, serviceList, packageList);
+      let items = resolvedStackItems(stack.items, serviceList, packageList);
+      // 与原生计划相同的组成部分；预览令牌只用于当前演示会话。
+      report.revision = JSON.stringify([action, stack, items.map(({ item, target }) => target
+        ? [target.service.id, target.expectedVersion, target.service.version, target.service.port] : [item.serviceId])]);
+      if (cmd === "retry_stack") {
+        const retry = args?.retry as { revision?: string; serviceIds?: string[] } | undefined;
+        if (!retry || retry.revision !== report.revision) throw { code: "STACK_TARGET_CHANGED", message: "服务栈配置、版本或端口已变化，旧的重试已失效", hint: "请查看当前服务栈，重新选择启动或停止操作" };
+        const ids = retry.serviceIds;
+        if (!Array.isArray(ids) || !ids.length || new Set(ids).size !== ids.length || ids.some((id) => !items.some(({ target }) => target?.service.id === id))) {
+          throw { code: "BAD_STACK_RETRY", message: "重试目标无效，请重新读取服务栈执行结果" };
+        }
+        items = items.filter(({ target }) => !target || ids.includes(target.service.id));
+      }
       if (starting && !items.some((item) => item.target)) throw { code: "STACK_EMPTY", message: `「${stack.name}」里没有可启动的服务，请先安装所需套件` };
       const ordered = starting ? items : items.reverse();
+      report.order = ordered.flatMap(({ target }) => target ? [target.service.id] : []);
       for (const { item, target } of ordered) {
         if (!target) {
           report.skipped.push(item.serviceId);

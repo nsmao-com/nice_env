@@ -18,11 +18,13 @@ import {
   Rocket,
   AlertTriangle,
   CheckCircle2,
+  RotateCw,
 } from "lucide-react";
 import type { Stack, StackItem, PackageView, ServiceStatus } from "@nsb/schema";
 import { cn, cmpVersionDesc, resolveStackService, resolvedStackItems, stackServiceTarget, stackVersionConflicts } from "@/lib/utils";
-import { useT } from "@/lib/store";
-import { useInvalidate, useServices, useStacks, usePackages, toastError, toastPortConflict, toastStackReport, serviceHasProcess } from "@/lib/hooks";
+import { useT, useUI } from "@/lib/store";
+import { useInvalidate, useServices, useStacks, usePackages, toastError, useStackActions, type StackActionResult, serviceHasProcess } from "@/lib/hooks";
+import { BulkResult } from "@/components/shared/bulk-actions";
 import * as api from "@/lib/api";
 import { normalizeError } from "@/lib/backend";
 import { Card } from "@/components/ui/card";
@@ -64,44 +66,23 @@ export default function StacksPage() {
   const [editing, setEditing] = React.useState<Stack | null>(null);
   const [creating, setCreating] = React.useState(false);
   const [removing, setRemoving] = React.useState<Stack | null>(null);
-  const [busyId, setBusyId] = React.useState<string | null>(null);
+  const [localBusyId, setBusyId] = React.useState<string | null>(null);
+  const stackActions = useStackActions();
+  const busyId = stackActions.busyId ?? localBusyId;
   const busyRef = React.useRef(false);
   const [deleteError, setDeleteError] = React.useState<string | null>(null);
 
   const stateOf = (id: string) => stateReady ? resolveStackService(id, services, packages) : undefined;
 
-  /** 一键启动：逐项结果回报，失败项单独提示（带「结束占用并重试」） */
+  /** 所有入口共用会话内结果和操作锁，重试由后端核对原计划。 */
   const startStack = async (stack: Stack) => {
     if (busyRef.current) return;
-    busyRef.current = true;
-    setBusyId(stack.id);
-    try {
-      const report = await api.startStack(stack.id);
-      toastStackReport(t, report, "start", () => startStack(stack));
-    } catch (e) {
-      // 栈本身起不来（没装/为空）或首个端口冲突
-      if (!toastPortConflict(e, { onResolved: () => startStack(stack) })) toastError(e);
-    } finally {
-      busyRef.current = false;
-      setBusyId(null);
-      invalidate("services", "stacks");
-    }
+    await stackActions.run(stack, "start");
   };
 
   const stopStack = async (stack: Stack) => {
     if (busyRef.current) return;
-    busyRef.current = true;
-    setBusyId(stack.id);
-    try {
-      const report = await api.stopStack(stack.id);
-      toastStackReport(t, report, "stop", () => stopStack(stack));
-    } catch (e) {
-      toastError(e);
-    } finally {
-      busyRef.current = false;
-      setBusyId(null);
-      invalidate("services", "stacks");
-    }
+    await stackActions.run(stack, "stop");
   };
 
   return (
@@ -122,6 +103,14 @@ export default function StacksPage() {
           <Button size="sm" variant="secondary" onClick={retryLoad}>{t("bulk.retry")}</Button>
         </div>
       )}
+      {stackQuery.dataUpdatedAt > 0 && !stackQuery.error && Object.entries(stackActions.results).filter(([id]) => !stacks.some((stack) => stack.id === id)).map(([id, result]) => (
+        <Card key={id} className="mb-4 p-4">
+          <p className="text-sm font-medium [overflow-wrap:anywhere]">{result.name}</p>
+          <p className="mt-1 text-xs text-muted">{t("stack.resultRemoved")}</p>
+          <StackExecutionResult result={result} services={services} busy={busyId !== null} running={stackActions.busyId === id}
+            canRetry={false} onRetry={() => {}} onDismiss={() => stackActions.dismiss(id)} />
+        </Card>
+      ))}
       {stackQuery.dataUpdatedAt === 0 && stackQuery.isFetching ? (
         <p role="status" className="py-8 text-center text-sm text-muted">{t("common.loading")}</p>
       ) : stacks.length === 0 && !loadError ? (
@@ -282,6 +271,10 @@ export default function StacksPage() {
                         </Button>
                       )}
                     </div>
+                    {stackActions.results[stack.id] && <StackExecutionResult result={stackActions.results[stack.id]} services={services}
+                      busy={busyId !== null} running={stackActions.busyId === stack.id} canRetry={stateReady}
+                      onRetry={() => { if (!busyRef.current) void stackActions.retry(stack.id, stackActions.results[stack.id]); }}
+                      onDismiss={() => stackActions.dismiss(stack.id)} />}
                   </Card>
                 </motion.div>
               );
@@ -335,6 +328,43 @@ export default function StacksPage() {
       </ConfirmDialog>
     </div>
   );
+}
+
+function StackExecutionResult({ result, services, busy, running, canRetry, onRetry, onDismiss }: {
+  result: StackActionResult; services: ServiceStatus[]; busy: boolean; running: boolean; canRetry: boolean;
+  onRetry: () => void; onDismiss: () => void;
+}) {
+  const t = useT();
+  const report = result.report;
+  const stale = ["STACK_TARGET_CHANGED", "STACK_NOT_FOUND", "BAD_STACK_RETRY"].includes(result.error?.code ?? "");
+  return <section className="min-w-0 border-t border-dashed border-border pt-3" aria-label={t("stack.lastResult")} aria-busy={running}>
+    <div className="flex items-start gap-2">
+      <div className="min-w-0 flex-1">
+        <p className="text-xs font-medium">{t("stack.lastResult")} · {t(`common.${result.action}`)}</p>
+        <p className="mt-1 text-[11px] text-muted">{t("stack.resultSessionHint")}</p>
+      </div>
+      <Button type="button" variant="ghost" size="icon-sm" disabled={busy} onClick={onDismiss} aria-label={t("stack.dismissResult")} title={t("stack.dismissResult")}><X className="h-3.5 w-3.5" /></Button>
+    </div>
+    {running && <p role="status" className="mt-2 flex items-center gap-2 text-xs text-muted"><Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />{t("stack.executing")}</p>}
+    <BulkResult services={services} busy={busy} error={result.error} report={report ? {
+      action: result.action, order: report.order, succeeded: report.started, already: report.alreadyRunning, failed: report.failed,
+    } : null} />
+    {!!report?.skipped.length && <div className="mt-3 text-xs text-warn [overflow-wrap:anywhere]">
+      <p>{t("stack.resultSkippedHint")}</p>
+      <ul className="mt-1 flex flex-wrap gap-x-3 gap-y-1">{report.skipped.map((id) => <li key={id}>
+        <Link className="underline decoration-dashed underline-offset-2" href={`/packages?search=${encodeURIComponent(stackItemBase(id))}`}>{id}</Link>
+      </li>)}</ul>
+    </div>}
+    {report?.failed.some((failure) => failure.error.code === "PORT_IN_USE") && <p className="mt-3 text-xs text-muted [overflow-wrap:anywhere]">
+      {t("stack.portRecoveryHint")} {[...new Set(report.failed.filter((failure) => failure.error.code === "PORT_IN_USE").map((failure) => failure.error.port))].map((port) =>
+        <Link key={port ?? "unknown"} href="/tools" onClick={() => { if (port != null) useUI.getState().requestPort(port); }}
+          className="ml-2 inline-block text-primary underline decoration-dashed underline-offset-2">{t("stack.checkPorts")}{port != null ? ` ${port}` : ""}</Link>)}
+    </p>}
+    {!!report?.failed.length && <Button type="button" size="sm" variant="secondary" className="mt-3 h-auto min-h-8 max-w-full whitespace-normal"
+      disabled={busy || !canRetry || !report.revision || stale} onClick={onRetry}>
+      <RotateCw className="h-3.5 w-3.5 shrink-0" />{t("stack.retryFailed")} · {t(`common.${result.action}`)}
+    </Button>}
+  </section>;
 }
 
 function stackItemBase(id: string) {

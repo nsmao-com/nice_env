@@ -293,6 +293,7 @@ pub fn run() {
             delete_stack,
             start_stack,
             stop_stack,
+            retry_stack,
             startup_stack_status,
             get_start_stack_on_launch,
             // 站点
@@ -1112,6 +1113,22 @@ async fn stop_stack(
 }
 
 /* ================= 站点 ================= */
+
+#[tauri::command]
+async fn retry_stack(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<CoreState>>,
+    id: String,
+    action: String,
+    retry: nsb_core::model::StackRetry,
+) -> Result<nsb_core::model::StackStartReport, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    let st = state.inner().clone();
+    let report = tauri::async_runtime::spawn_blocking(move || map_jh(st.retry_stack(&id, &action, &retry)))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))??;
+    crate::tray::refresh(&app);
+    Ok(report)
+}
 
 #[tauri::command]
 async fn site_files_plan(state: State<'_,std::sync::Arc<CoreState>>, id:String) -> Result<nsb_core::sitebackup::FilePlan,tauri::Error> {

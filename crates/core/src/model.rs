@@ -969,10 +969,22 @@ pub struct StackInput {
 #[serde(rename_all = "camelCase")]
 pub struct StackStartReport {
     pub stack_id: String,
+    #[serde(default)]
+    pub revision: String,
+    #[serde(default)]
+    pub order: Vec<String>,
     pub started: Vec<String>,
     pub already_running: Vec<String>,
     pub skipped: Vec<String>,
     pub failed: Vec<StackItemFailure>,
+}
+
+/// 重试只允许沿用原执行计划中的明确实例，不能重新展开为其它版本。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StackRetry {
+    pub revision: String,
+    pub service_ids: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

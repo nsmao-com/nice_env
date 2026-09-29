@@ -509,12 +509,20 @@ export type StackItemFailure = z.infer<typeof StackItemFailure>;
 /** 一键启动/停止整栈的逐项结果（单项失败不阻断其它项） */
 export const StackStartReport = z.object({
   stackId: z.string(),
+  revision: z.string().default(""),
+  order: z.array(z.string()).default([]),
   started: z.array(z.string()).default([]),
   alreadyRunning: z.array(z.string()).default([]),
   skipped: z.array(z.string()).default([]),
   failed: z.array(StackItemFailure).default([]),
 });
 export type StackStartReport = z.infer<typeof StackStartReport>;
+
+export const StackRetry = z.object({
+  revision: z.string().min(1),
+  serviceIds: z.array(z.string().min(1)).min(1),
+});
+export type StackRetry = z.infer<typeof StackRetry>;
 
 /** 本次桌面启动的服务栈结果；查询不会再次启动服务。 */
 export const StartupStackStatus = z.object({

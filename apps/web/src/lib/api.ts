@@ -16,6 +16,7 @@ import type {
   Stack,
   StackInput,
   StackStartReport,
+  StackRetry,
   StartupStackStatus,
   HostsEntry,
   LogLine,
@@ -119,6 +120,8 @@ export const startStack = (id: string) =>
   safe(invoke<StackStartReport>("start_stack", { id }));
 export const stopStack = (id: string) =>
   safe(invoke<StackStartReport>("stop_stack", { id }));
+export const retryStack = (id: string, action: "start" | "stop", retry: StackRetry) =>
+  safe(invoke<StackStartReport>("retry_stack", { id, action, retry }));
 
 /* 套件 */
 export const listPackages = () => safe(invoke<PackageView[]>("list_packages"));

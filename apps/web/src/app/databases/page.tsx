@@ -42,6 +42,7 @@ import { RedisSettingsButton } from "@/components/shared/redis-settings";
 import { RedisPersistenceButton } from "@/components/shared/redis-persistence";
 import { RedisBackupsButton } from "@/components/shared/redis-backups";
 import { RedisPasswordButton } from "@/components/shared/redis-password";
+import { RedisKeyBrowser } from "@/components/shared/redis-key-browser";
 
 export default function DatabasesPage() {
   const t = useT();
@@ -627,6 +628,7 @@ function RedisInstanceCard() {
         </div>
       </>}
     </Card>
+    {running && service?.version && <div className="mt-5"><RedisKeyBrowser version={service.version} running={running} signature={`${service.version}:${service.port}:${service.pids.join(",")}`} /></div>}
     {connectionTarget?.version && <RedisConnectionDialog key={connectionTarget.version} service={connectionTarget} open onOpenChange={(open) => !open && setConnectionTarget(null)} />}
     </>
   );

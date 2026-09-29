@@ -217,11 +217,71 @@ pub struct RedisConnectionInfo {
     pub has_password: bool,
 }
 
+/// Redis 键空间浏览请求。浏览只使用 SCAN 和只读元数据命令，不提供删除或修改入口。
+#[derive(serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisKeyRequest {
+    pub version: String,
+    #[serde(default)]
+    pub database: u8,
+    #[serde(default)]
+    pub cursor: String,
+    #[serde(default)]
+    pub pattern: String,
+    #[serde(default)]
+    pub count: u16,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisKeyInfo {
+    pub key: String,
+    pub key_type: String,
+    /// -1 表示没有过期时间，-2 表示读取期间已经过期或不存在。
+    pub ttl_ms: i64,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisKeyPage {
+    pub version: String,
+    pub database: u8,
+    pub cursor: String,
+    pub next_cursor: String,
+    pub pattern: String,
+    pub items: Vec<RedisKeyInfo>,
+}
+
+#[derive(serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisKeyPreviewRequest {
+    pub version: String,
+    #[serde(default)]
+    pub database: u8,
+    pub key: String,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisKeyPreview {
+    pub version: String,
+    pub database: u8,
+    pub key: String,
+    pub key_type: String,
+    pub ttl_ms: i64,
+    pub memory_bytes: Option<u64>,
+    pub elements: Option<u64>,
+    pub value: Option<String>,
+    pub value_truncated: bool,
+}
+
 struct RedisClient(std::io::BufReader<std::net::TcpStream>, Option<u32>);
 
 enum RedisReply {
     Simple(String),
+    Integer(i64),
     Bulk(String),
+    Nil,
     Array(Vec<RedisReply>),
 }
 
@@ -337,8 +397,12 @@ impl RedisClient {
                         "REDIS_INFO_DENIED",
                         "当前 Redis 账号没有 INFO 权限，无法读取统计数据",
                     ),
+                    "NOPERM" if matches!(command, "SCAN" | "TYPE" | "PTTL" | "GET" | "MEMORY" | "SELECT") =>
+                        AppError::new("REDIS_KEY_BROWSE_DENIED", "当前 Redis 账号没有读取键空间所需的权限"),
                     "NOPERM" => AppError::new("REDIS_COMMAND_DENIED", "当前 Redis 账号没有执行快照操作所需的权限")
                         .with_hint("请检查 INFO、TIME、BGSAVE 权限；独立备份还需要 CONFIG GET 权限，或在连接认证中选择合适账号"),
+                    _ if matches!(command, "SCAN" | "TYPE" | "PTTL" | "GET" | "MEMORY" | "SELECT") =>
+                        AppError::new("REDIS_KEY_BROWSE_FAILED", "Redis 拒绝读取键空间，请检查账号权限和服务日志"),
                     _ if command == "INFO" => AppError::new(
                         "REDIS_INFO_FAILED",
                         "Redis 拒绝请求，请检查服务日志与账号权限",
@@ -351,11 +415,17 @@ impl RedisClient {
         if let Some(value) = header.strip_prefix('+') {
             return Ok(RedisReply::Simple(value.to_string()));
         }
+        if let Some(value) = header.strip_prefix(':') {
+            return value
+                .parse::<i64>()
+                .map(RedisReply::Integer)
+                .map_err(|_| invalid());
+        }
         if let Some(length) = header.strip_prefix('*') {
             let length: usize = length
                 .parse()
                 .ok()
-                .filter(|n| *n <= 16 && depth == 0)
+                .filter(|n| *n <= 128 && depth <= 4)
                 .ok_or_else(invalid)?;
             let mut values = Vec::with_capacity(length);
             for _ in 0..length {
@@ -363,10 +433,17 @@ impl RedisClient {
             }
             return Ok(RedisReply::Array(values));
         }
-        let length: usize = header
+        let length = header
             .strip_prefix('$')
-            .and_then(|v| v.parse().ok())
-            .filter(|n| *n > 0 && *n <= 1024 * 1024)
+            .and_then(|v| v.parse::<isize>().ok())
+            .ok_or_else(invalid)?;
+        if length == -1 {
+            return Ok(RedisReply::Nil);
+        }
+        let length: usize = length
+            .try_into()
+            .ok()
+            .filter(|n: &usize| *n <= 1024 * 1024)
             .ok_or_else(invalid)?;
         *remaining = remaining.checked_sub(length + 2).ok_or_else(invalid)?;
         let mut payload = vec![0; length + 2];
@@ -380,6 +457,201 @@ impl RedisClient {
                 .to_string(),
         ))
     }
+
+    fn select_database(&mut self, database: u8) -> crate::error::Result<()> {
+        if database == 0 {
+            return Ok(());
+        }
+        let value = database.to_string();
+        match self.command(&["SELECT", value.as_str()])? {
+            RedisReply::Simple(message) if message == "OK" => Ok(()),
+            _ => Err(crate::error::AppError::new(
+                "REDIS_DATABASE_FAILED",
+                "无法选择 Redis 逻辑数据库，请检查数据库编号和账号权限",
+            )),
+        }
+    }
+
+    fn key_type(&mut self, key: &str) -> crate::error::Result<String> {
+        match self.command(&["TYPE", key])? {
+            RedisReply::Simple(value) | RedisReply::Bulk(value) => Ok(value),
+            _ => Err(crate::error::AppError::new(
+                "REDIS_PROTOCOL_ERROR",
+                "Redis 未返回有效的键类型",
+            )),
+        }
+    }
+
+    fn key_ttl(&mut self, key: &str) -> crate::error::Result<i64> {
+        match self.command(&["PTTL", key])? {
+            RedisReply::Integer(value) => Ok(value),
+            RedisReply::Bulk(value) => value.parse().map_err(|_| {
+                crate::error::AppError::new("REDIS_PROTOCOL_ERROR", "Redis 未返回有效的键过期时间")
+            }),
+            _ => Err(crate::error::AppError::new(
+                "REDIS_PROTOCOL_ERROR",
+                "Redis 未返回有效的键过期时间",
+            )),
+        }
+    }
+}
+
+fn validate_key_pattern(pattern: &str) -> crate::error::Result<String> {
+    use crate::error::AppError;
+    if pattern.as_bytes().len() > 256 || pattern.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
+        return Err(AppError::new(
+            "REDIS_KEY_QUERY_INVALID",
+            "键名筛选不能超过 256 字节，也不能包含控制字符",
+        ));
+    }
+    Ok(if pattern.is_empty() { "*".to_string() } else { pattern.to_string() })
+}
+
+fn validate_key_name(key: &str) -> crate::error::Result<()> {
+    use crate::error::AppError;
+    if key.is_empty()
+        || key.as_bytes().len() > 16 * 1024
+        || key.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
+    {
+        return Err(AppError::new(
+            "REDIS_KEY_INVALID",
+            "键名为空、过长或包含不支持的控制字符",
+        ));
+    }
+    Ok(())
+}
+
+fn truncate_preview(value: String, max_bytes: usize) -> (String, bool) {
+    if value.len() <= max_bytes {
+        return (value, false);
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (format!("{}…", &value[..end]), true)
+}
+
+fn redis_cardinality(client: &mut RedisClient, key_type: &str, key: &str) -> Option<u64> {
+    let command = match key_type {
+        "list" => "LLEN",
+        "set" => "SCARD",
+        "hash" => "HLEN",
+        "zset" => "ZCARD",
+        "stream" => "XLEN",
+        _ => return None,
+    };
+    match client.command(&[command, key]).ok()? {
+        RedisReply::Integer(value) if value >= 0 => u64::try_from(value).ok(),
+        RedisReply::Bulk(value) => value.parse().ok(),
+        _ => None,
+    }
+}
+
+pub(crate) fn redis_keys(
+    port: u16,
+    credentials: &RedisCredentials,
+    pids: &[u32],
+    request: &RedisKeyRequest,
+) -> crate::error::Result<RedisKeyPage> {
+    use crate::error::AppError;
+    let pattern = validate_key_pattern(&request.pattern)?;
+    let cursor = if request.cursor.is_empty() { "0" } else { request.cursor.as_str() };
+    if cursor.parse::<u64>().is_err() {
+        return Err(AppError::new("REDIS_KEY_QUERY_INVALID", "键空间游标无效，请重新刷新列表"));
+    }
+    let count = match request.count {
+        0 => 40,
+        1..=100 => request.count,
+        _ => return Err(AppError::new("REDIS_KEY_QUERY_INVALID", "单页最多读取 100 个键")),
+    };
+    let mut client = RedisClient::connect(port, credentials, Some(pids))?;
+    client.select_database(request.database)?;
+    let count_text = count.to_string();
+    let response = client.command(&["SCAN", cursor, "MATCH", pattern.as_str(), "COUNT", count_text.as_str()])?;
+    let RedisReply::Array(mut envelope) = response else {
+        return Err(AppError::new("REDIS_PROTOCOL_ERROR", "Redis 未返回有效的键空间列表"));
+    };
+    if envelope.len() != 2 {
+        return Err(AppError::new("REDIS_PROTOCOL_ERROR", "Redis 键空间列表格式无效"));
+    }
+    let next_cursor = match envelope.remove(0) {
+        RedisReply::Bulk(value) | RedisReply::Simple(value) => value,
+        _ => return Err(AppError::new("REDIS_PROTOCOL_ERROR", "Redis 键空间游标格式无效")),
+    };
+    if next_cursor.parse::<u64>().is_err() {
+        return Err(AppError::new("REDIS_PROTOCOL_ERROR", "Redis 键空间游标格式无效"));
+    }
+    let RedisReply::Array(keys) = envelope.remove(0) else {
+        return Err(AppError::new("REDIS_PROTOCOL_ERROR", "Redis 键空间条目格式无效"));
+    };
+    let mut items = Vec::with_capacity(keys.len());
+    for key_reply in keys {
+        let key = match key_reply {
+            RedisReply::Bulk(value) | RedisReply::Simple(value) => value,
+            _ => return Err(AppError::new("REDIS_PROTOCOL_ERROR", "Redis 键名格式无效")),
+        };
+        let key_type = client.key_type(&key)?;
+        if key_type == "none" {
+            continue;
+        }
+        let ttl_ms = client.key_ttl(&key)?;
+        items.push(RedisKeyInfo { key, key_type, ttl_ms });
+    }
+    Ok(RedisKeyPage {
+        version: request.version.clone(),
+        database: request.database,
+        cursor: cursor.to_string(),
+        next_cursor,
+        pattern,
+        items,
+    })
+}
+
+pub(crate) fn redis_key_preview(
+    port: u16,
+    credentials: &RedisCredentials,
+    pids: &[u32],
+    request: &RedisKeyPreviewRequest,
+) -> crate::error::Result<RedisKeyPreview> {
+    use crate::error::AppError;
+    validate_key_name(&request.key)?;
+    let mut client = RedisClient::connect(port, credentials, Some(pids))?;
+    client.select_database(request.database)?;
+    let key_type = client.key_type(&request.key)?;
+    let ttl_ms = client.key_ttl(&request.key)?;
+    if key_type == "none" {
+        return Err(AppError::new("REDIS_KEY_GONE", "这个键已不存在，请刷新键空间列表"));
+    }
+    let memory_bytes = match client.command(&["MEMORY", "USAGE", request.key.as_str()]) {
+        Ok(RedisReply::Integer(value)) if value >= 0 => u64::try_from(value).ok(),
+        Ok(RedisReply::Bulk(value)) => value.parse().ok(),
+        _ => None,
+    };
+    let elements = redis_cardinality(&mut client, &key_type, &request.key);
+    let (value, value_truncated) = if key_type == "string" {
+        match client.command(&["GET", request.key.as_str()])? {
+            RedisReply::Bulk(value) => {
+                let (value, truncated) = truncate_preview(value, 64 * 1024);
+                (Some(value), truncated)
+            }
+            RedisReply::Nil => (None, false),
+            _ => return Err(AppError::new("REDIS_PROTOCOL_ERROR", "Redis 字符串值格式无效")),
+        }
+    } else {
+        (None, false)
+    };
+    Ok(RedisKeyPreview {
+        version: request.version.clone(),
+        database: request.database,
+        key: request.key.clone(),
+        key_type,
+        ttl_ms,
+        memory_bytes,
+        elements,
+        value,
+        value_truncated,
+    })
 }
 
 #[derive(serde::Serialize, Clone, Debug)]

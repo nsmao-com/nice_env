@@ -378,10 +378,17 @@ export interface RedisStats {
   uptimeDays?: number;
   connectedClients?: number;
 }
+export interface RedisKeyRequest { version: string; database: number; cursor: string; pattern: string; count: number }
+export interface RedisKeyInfo { key: string; keyType: string; ttlMs: number }
+export interface RedisKeyPage { version: string; database: number; cursor: string; nextCursor: string; pattern: string; items: RedisKeyInfo[] }
+export interface RedisKeyPreviewRequest { version: string; database: number; key: string }
+export interface RedisKeyPreview { version: string; database: number; key: string; keyType: string; ttlMs: number; memoryBytes?: number; elements?: number; value?: string; valueTruncated: boolean }
 export interface RedisConnectionInfo { version: string; username: string; hasPassword: boolean }
 export const redisConnection = (version: string) => safe(invoke<RedisConnectionInfo>("redis_connection", { version }));
 export const redisSaveConnection = (version: string, credentials: { username: string; password: string }) =>
   safe(invoke<RedisStats>("redis_save_connection", { version, credentials }));
+export const redisKeys = (request: RedisKeyRequest) => safe(invoke<RedisKeyPage>("redis_keys", { request }));
+export const redisKeyPreview = (request: RedisKeyPreviewRequest) => safe(invoke<RedisKeyPreview>("redis_key_preview", { request }));
 export const redisSettings = (version: string) => safe(invoke<RedisSettingsView>("redis_settings", { version }));
 export const redisPersistence = (version: string) => safe(invoke<RedisPersistence>("redis_persistence", { version }));
 export const redisSnapshot = (version: string) => safe(invoke<RedisSnapshotReceipt>("redis_snapshot", { version }));

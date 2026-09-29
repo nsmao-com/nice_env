@@ -447,6 +447,8 @@ pub fn run() {
             db_reset_root_password,
             db_root_password,
             redis_stats,
+            redis_keys,
+            redis_key_preview,
             redis_settings,
             redis_settings_save,
             redis_password,
@@ -2105,6 +2107,28 @@ async fn redis_stats(
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.redis_stats())).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn redis_keys(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    request: nsb_core::stats::RedisKeyRequest,
+) -> Result<nsb_core::stats::RedisKeyPage, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.redis_keys(request))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn redis_key_preview(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    request: nsb_core::stats::RedisKeyPreviewRequest,
+) -> Result<nsb_core::stats::RedisKeyPreview, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.redis_key_preview(request))).await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

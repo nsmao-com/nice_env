@@ -904,6 +904,20 @@ impl CoreState {
         self.verify_redis(&service, &stats::RedisCredentials::load(&self.store, version)?)
     }
 
+    pub fn redis_keys(&self, request: stats::RedisKeyRequest) -> Result<stats::RedisKeyPage> {
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后读取 Redis 键空间"))?;
+        let service = self.running_redis(Some(&request.version))?;
+        let port = service.port.ok_or_else(|| AppError::new("REDIS_PORT_UNKNOWN", "无法确认 Redis 实际端口"))?;
+        stats::redis_keys(port, &stats::RedisCredentials::load(&self.store, &request.version)?, &service.pids, &request)
+    }
+
+    pub fn redis_key_preview(&self, request: stats::RedisKeyPreviewRequest) -> Result<stats::RedisKeyPreview> {
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后读取 Redis 键详情"))?;
+        let service = self.running_redis(Some(&request.version))?;
+        let port = service.port.ok_or_else(|| AppError::new("REDIS_PORT_UNKNOWN", "无法确认 Redis 实际端口"))?;
+        stats::redis_key_preview(port, &stats::RedisCredentials::load(&self.store, &request.version)?, &service.pids, &request)
+    }
+
     pub fn redis_settings(&self, version: &str) -> Result<redis_settings::RedisSettingsView> {
         let _operation = self.manager.lifecycle.lock();
         redis_settings::get(&self.paths, &self.store, version)

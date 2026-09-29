@@ -154,17 +154,25 @@ Corefile 每次启动按当前 TLD 设置自动重建。
 
 ## CLI 与 AI 集成（nsbctl / nsb-mcp）
 
-**nsbctl**：随应用分发的命令行工具（与桌面端共用数据目录）。
+**nsbctl**：仓库中的命令行工具（与桌面端共用数据目录）。当前安装包尚未包含
+`nsbctl` / `nsb-mcp`，可通过 `cargo build -p nsb-core --bin nsbctl --bin nsb-mcp --locked`
+编译，程序位于 `target/debug`。工具目前使用独立的服务状态，暂不支持与桌面端或
+另一个工具会话同时管理服务。
 
 ```
+nsbctl --version         查看工具版本
 nsbctl status [--json]    服务状态总览
 nsbctl start <service>    启动（nginx / php@8.3.33 / mysql@8.0.46 / …）
 nsbctl stop <service>     停止
 nsbctl restart <service>  重启
 nsbctl start-all          启动常用栈（与托盘一致）
 nsbctl sites / open <站点> / packages / logs <服务> [n] / diagnose <端口>
-nsbctl pin php@8.3.33 <项目目录>   # 项目级运行时锁定（写入 .nsb.json，向导「跟随项目」时自动采用）
+nsbctl pin php@8.3.33 <项目目录>   # 站点 PHP 版本（更新 .nsb.json，保留其它字段，向导「跟随项目」时采用）
 ```
+
+`help`、`--version` 和参数错误不会初始化数据目录。`pin` 只设置站点 PHP 版本，
+项目终端使用的 `.niceenv.json` 配置独立管理。站点列表只显示已确认加载的访问地址，
+`open` 会再次检查站点运行状态及端口归属。
 
 CLI 启动的服务走**分离模式**：CLI 退出服务不退；桌面 App 下次启动会**自动收养**
 这些进程（恢复 pid/端口/运行态显示），而不是把终端里起的服务当孤儿杀掉。
@@ -175,6 +183,10 @@ Cursor 等 AI 客户端加上即可用自然语言操作本地环境——列服
 ```json
 { "mcpServers": { "niceservbay": { "command": "nsb-mcp" } } }
 ```
+
+将 `command` 改为实际编译出的 `nsb-mcp` 绝对路径（Windows 为 `nsb-mcp.exe`）。
+MCP 握手与工具列表不初始化环境；无请求 ID 或参数不合法的调用不会执行服务操作。
+操作失败返回 `isError: true`，并保留错误码、原因和可用的处理提示。
 
 ## 套件与运维增强
 

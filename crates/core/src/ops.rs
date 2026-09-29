@@ -5822,7 +5822,7 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
     #[test]
     fn service_lifecycle_real_restart_and_port_policy_update_watchdog_and_pids() {
         let temp = tempfile::tempdir().unwrap();
-        let state = isolated_state(Paths::new(temp.path().to_path_buf()));
+        let state = std::sync::Arc::new(isolated_state(Paths::new(temp.path().to_path_buf())));
         let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = reservation.local_addr().unwrap().port(); drop(reservation);
         for id in ["fixture-a", "fixture-b"] {
@@ -5849,7 +5849,8 @@ powershell.exe -NoProfile -NonInteractive -Command "$listener = [System.Net.Sock
         assert_eq!(state.manager.snapshot("fixture-a").unwrap().state, ServiceState::Stopped);
         assert!(!state.manager.watchdog.should_restart("fixture-a", &cfg));
         let before = state.manager.snapshot("fixture-b").unwrap().pids;
-        state.restart_service("fixture-b").unwrap();
+        let restarted = crate::mcp::handle_tool_call(&state, "restart_service", &serde_json::json!({"id":"fixture-b"}));
+        assert_eq!(restarted["isError"], false, "{restarted}");
         let after = state.manager.snapshot("fixture-b").unwrap();
         assert_eq!(after.state, ServiceState::Running);
         assert_ne!(before, after.pids);

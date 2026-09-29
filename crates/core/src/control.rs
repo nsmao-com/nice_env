@@ -344,6 +344,9 @@ mod tests {
         assert_eq!(status.pids.len(), 1);
         let logs: Vec<crate::model::LogLine> = client.call(Request::Logs { id: "control-probe".into(), lines: 50 }).unwrap();
         assert!(logs.iter().any(|line| line.line.contains("controller-log")));
+        let logs: Value = client.call(Request::Mcp { name: "read_logs".into(), arguments: serde_json::json!({"id":"control-probe","lines":50}) }).unwrap();
+        assert_eq!(logs["isError"], false);
+        assert!(logs["content"][0]["text"].as_str().unwrap().contains("controller-log"));
         let result: Value = client.call(Request::Mcp { name: "list_services".into(), arguments: serde_json::json!({}) }).unwrap();
         assert_eq!(result["isError"], false);
         assert!(result["content"][0]["text"].as_str().unwrap().contains("control-probe"));

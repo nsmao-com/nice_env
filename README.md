@@ -187,7 +187,7 @@ CLI 启动的服务走**分离模式**：CLI 退出服务不退；桌面 App 下
 这些进程（恢复 pid/端口/运行态显示），而不是把终端里起的服务当孤儿杀掉。
 
 **nsb-mcp**：Model Context Protocol 服务器（stdio JSON-RPC）。给 Claude Desktop /
-Cursor 等 AI 客户端加上即可用自然语言操作本地环境——列服务/起停服务/列站点/查端口占用：
+Cursor 等 AI 客户端加上即可用自然语言查询已安装版本、读取服务和站点日志、启停或重启服务：
 
 ```json
 { "mcpServers": { "niceservbay": { "command": "nsb-mcp" } } }
@@ -201,6 +201,13 @@ MCP 握手与工具列表不初始化环境；无请求 ID 或参数不合法的
 AI 客户端的长期连接不会占住服务控制权；每次调用重新连接当前桌面进程，桌面关闭时
 使用独立短会话执行，之后仍可打开桌面接管服务。可通过 `NSB_HOME` 让工具与桌面使用
 指定数据目录；控制通道凭据不会随数据目录迁移复制。
+
+可用 MCP 工具：`list_services`、`list_packages`（已安装的全部版本及当前选用版本）、
+`list_sites`、`start_service`、`stop_service`、`restart_service`、`read_logs`、`diagnose_port`。
+先查询服务或站点列表，再使用返回的标识操作；站点访问日志的标识为 `site:<站点 id>`。
+`read_logs` 默认返回最后 50 行，允许 1–1000 行。正文超过 128 KiB 时保留最新内容并返回
+`truncated: true`，超长行按 UTF-8 字符边界截断；不存在的来源和读取错误会明确报错。
+重启复用桌面端逻辑，停止或启动阶段失败会保留原错误，不能把失败结果当成已重启。
 
 ## 套件与运维增强
 

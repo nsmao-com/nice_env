@@ -387,7 +387,7 @@ function ConfigEditSession({
     }
   };
 
-  const rollback = async (b: ConfigBackup) => {
+  const rollback = async (b: ConfigBackup, preview: api.BackupPreview) => {
     if (actionRef.current || reading.current || !hasLoaded || loadError) return;
     actionRef.current = true;
     const discardedDraft = configDrafts.get(draftKey);
@@ -396,7 +396,7 @@ function ConfigEditSession({
     try {
       await verifyTarget();
       if (!alive.current) return;
-      await api.configRollback(b.name, info.kind, original);
+      await api.configRollback(b.name, info.kind, original, preview);
       forgetDraft(draftKey, discardedDraft);
       toast.success(t("cfgeditor.rolledBack"));
       if (alive.current) {
@@ -617,7 +617,10 @@ function ConfigEditSession({
             </div>
 
             {/* 备份历史 */}
-            {historyError && <p role="status" className="shrink-0 px-4 py-2 text-[11px] text-warn">{t("cfgeditor.historyError")}</p>}
+            {historyError && <div role="status" className="flex shrink-0 flex-wrap items-center gap-2 px-4 py-2 text-[11px] text-warn sm:px-5">
+              <p>{t("cfgeditor.historyError")}</p><Button size="sm" variant="secondary" disabled={busy || loading} onClick={() => void refreshHistory()}>{t("install.retry")}</Button>
+            </div>}
+            {!historyError && !loading && backups.length === 0 && <p className="shrink-0 px-4 py-2 text-[11px] text-muted sm:px-5">{t("cfgeditor.noBackups")}</p>}
             {backups.length > 0 && (
               <details className="max-h-28 shrink-0 overflow-y-auto border-t border-border px-4 py-2.5 sm:px-5">
                 <summary className="cursor-pointer text-[11px] text-muted">
@@ -688,19 +691,64 @@ function ConfigEditSession({
         }}
       />
 
-      <ConfirmDialog
-        open={confirmRollback != null}
-        onOpenChange={(v) => !v && setConfirmRollback(null)}
-        title={t("cfgeditor.rollbackTitle")}
-        description={`${t("cfgeditor.rollbackDesc").replace("{n}", confirmRollback ? `${info.label} · ${new Date(confirmRollback.createdAt * 1000).toLocaleString()}` : "")}${dirty ? ` ${t("cfgeditor.discardDesc")}` : ""}`}
-        confirmText={t("cfgeditor.rollback")}
-        danger
-        onConfirm={() => {
-          const b = confirmRollback;
+      {confirmRollback && <ConfigRollbackDialog key={confirmRollback.name} info={info} backup={confirmRollback} original={original} dirty={dirty}
+        onClose={() => setConfirmRollback(null)} onConfirm={(preview) => {
+          const backup = confirmRollback;
           setConfirmRollback(null);
-          if (b) void rollback(b);
+          void rollback(backup, preview);
         }}
-      />
+      />}
     </>
   );
+}
+
+/** 恢复前对照磁盘快照；文本只在当前弹窗内展示，不写浏览器存储。 */
+export function BackupComparison({ preview }: { preview: api.BackupPreview }) {
+  const t = useT();
+  const panes = [
+    { label: t("cfgeditor.currentVersion"), content: preview.currentContent, size: preview.currentSizeBytes, missing: !preview.currentExists },
+    { label: t("cfgeditor.backupVersion"), content: preview.backupContent, size: preview.backupSizeBytes, missing: false },
+  ];
+  return <div className="space-y-3">
+    {!preview.changed && <p role="status" className="rounded-md bg-fill p-3 text-xs text-muted">{t("cfgeditor.backupUnchanged")}</p>}
+    <div className="grid min-w-0 gap-4 lg:grid-cols-2">
+      {panes.map((pane) => <section key={pane.label} className="min-w-0 space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs"><h3 className="font-medium">{pane.label}</h3><span className="text-muted">{(pane.size / 1024).toFixed(1)} KB</span></div>
+        {pane.missing ? <p className="rounded-lg bg-fill p-4 text-xs text-muted">{t("cfgeditor.currentMissing")}</p>
+          : pane.content === null ? <p className="rounded-lg bg-warn-soft p-4 text-xs text-warn">{t("cfgeditor.previewUnavailable")}</p>
+            : <CodeEditor value={pane.content} onChange={() => {}} label={pane.label} language={preview.targetRelative} readOnly height="min(34dvh, 340px)" />}
+      </section>)}
+    </div>
+  </div>;
+}
+
+function ConfigRollbackDialog({ info, backup, original, dirty, onClose, onConfirm }: {
+  info: ConfigFileInfo; backup: ConfigBackup; original: string; dirty: boolean;
+  onClose: () => void; onConfirm: (preview: api.BackupPreview) => void;
+}) {
+  const t = useT();
+  const name = backup.name.startsWith("legacy/") ? backup.name.slice(7) : backup.name.startsWith("files/") ? backup.name : `config/${backup.name}`;
+  const preview = useQuery({ queryKey: ["backup-preview", name, info.path], queryFn: () => api.previewBackup(name), retry: false, staleTime: 0, gcTime: 0, refetchOnWindowFocus: false, refetchOnReconnect: false });
+  const data = preview.data;
+  const mismatch = data && (data.targetPath !== info.path || data.currentContent !== null && data.currentContent !== original);
+  const canRestore = !!data?.changed && !preview.isFetching && !preview.error && !mismatch;
+  const submitted = React.useRef(false);
+  return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+    <DialogContent className="flex max-h-[calc(100dvh-1.5rem)] max-w-5xl flex-col overflow-hidden p-4 sm:p-6">
+      <DialogHeader className="shrink-0 pr-7"><DialogTitle>{t("cfgeditor.rollbackTitle")}</DialogTitle>
+        <DialogDescription>{t("cfgeditor.rollbackDesc").replace("{n}", `${info.label} · ${new Date(backup.createdAt * 1000).toLocaleString()}`)}</DialogDescription>
+      </DialogHeader>
+      <div className="min-h-0 space-y-4 overflow-y-auto">
+        <p className="text-xs text-muted [overflow-wrap:anywhere]">{info.path}</p>
+        {dirty && <p role="status" className="rounded-lg bg-warn-soft p-3 text-xs text-warn">{t("cfgeditor.discardDesc")}</p>}
+        {preview.isFetching ? <p role="status" className="py-5 text-center text-xs text-muted">{t("common.loading")}</p> : preview.error ? <p role="alert" className="text-xs text-error [overflow-wrap:anywhere]">{normalizeError(preview.error).message}</p> : data && <BackupComparison preview={data} />}
+        {mismatch && <p role="alert" className="text-xs text-error">{t("cfgeditor.rollbackMismatch")}</p>}
+      </div>
+      <DialogFooter className="shrink-0 flex-wrap pt-2">
+        <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
+        <Button variant="secondary" disabled={preview.isFetching} onClick={() => void preview.refetch({ cancelRefetch: false })}>{t("tools.retryPreview")}</Button>
+        <Button variant="destructive" disabled={!canRestore} onClick={() => { if (canRestore && data && !submitted.current) { submitted.current = true; onConfirm(data); } }}>{t("cfgeditor.rollback")}</Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>;
 }

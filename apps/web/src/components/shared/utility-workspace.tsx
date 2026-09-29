@@ -42,7 +42,7 @@ import { PathEnvCard } from "@/components/shared/path-env-card";
 import { ServiceDiagnostics } from "@/components/shared/service-diagnostics";
 import { PhpExtensionsDialog } from "@/components/shared/php-extensions";
 import { CodeEditor } from "@/components/shared/code-editor";
-import { ConfigEditDialog } from "@/components/shared/config-editor";
+import { ConfigEditDialog, BackupComparison } from "@/components/shared/config-editor";
 import { DiagnosticsCard } from "@/components/shared/diagnostics-card";
 import { PageHeader } from "@/components/layout/app-shell";
 import {
@@ -624,7 +624,7 @@ function BackupRestoreDialog({ name, onClose }: { name: string; onClose: () => v
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const restore = async () => {
-    if (action.current || !preview.data || preview.isFetching || preview.error || error) return;
+    if (action.current || !preview.data?.changed || preview.isFetching || preview.error || error) return;
     action.current = true;
     setBusy(true);
     try {
@@ -641,7 +641,7 @@ function BackupRestoreDialog({ name, onClose }: { name: string; onClose: () => v
   };
   return (
     <Dialog open onOpenChange={(open) => { if (!open && !action.current) onClose(); }}>
-      <DialogContent hideClose={busy} onCloseAutoFocus={(e) => { e.preventDefault(); requestAnimationFrame(() => opener?.focus()); }} className="flex max-h-[calc(100dvh-1.5rem)] flex-col overflow-hidden p-4 sm:p-6">
+      <DialogContent hideClose={busy} onCloseAutoFocus={(e) => { e.preventDefault(); requestAnimationFrame(() => opener?.focus()); }} className="flex max-h-[calc(100dvh-1.5rem)] max-w-5xl flex-col overflow-hidden p-4 sm:p-6">
         <DialogHeader className="shrink-0 pr-7">
           <DialogTitle>{t("confirm.restoreBackup")}</DialogTitle>
           <DialogDescription>{t("tools.backupRestoreHint")}</DialogDescription>
@@ -649,7 +649,7 @@ function BackupRestoreDialog({ name, onClose }: { name: string; onClose: () => v
         <div className="min-h-0 space-y-3 overflow-y-auto text-xs">
           <p className="break-all font-mono text-faint">{name}</p>
           {preview.isFetching ? <p role="status">{t("common.loading")}</p> : preview.data && (
-            <div className="space-y-1 rounded-lg bg-fill p-3"><p className="text-muted">{t("tools.backupTarget")}</p><p className="break-all font-mono">{preview.data.targetPath}</p></div>
+            <div className="space-y-3"><div className="space-y-1 rounded-lg bg-fill p-3"><p className="text-muted">{t("tools.backupTarget")}</p><p className="break-all font-mono">{preview.data.targetPath}</p></div><BackupComparison preview={preview.data} /></div>
           )}
           {(error || preview.error) && (
             <div className="space-y-2"><p role="alert" className="break-words text-error">{error ?? normalizeError(preview.error).message}</p>
@@ -659,7 +659,7 @@ function BackupRestoreDialog({ name, onClose }: { name: string; onClose: () => v
         </div>
         <DialogFooter className="shrink-0">
           <Button variant="secondary" disabled={busy} onClick={onClose}>{t("common.cancel")}</Button>
-          <Button variant="destructive" disabled={busy || preview.isFetching || !preview.data || !!preview.error || !!error} onClick={restore}>
+          <Button variant="destructive" disabled={busy || preview.isFetching || !preview.data || !preview.data.changed || !!preview.error || !!error} onClick={restore}>
             {busy && <Loader2 className="h-4 w-4 animate-spin" />}{t("tools.restore")}
           </Button>
         </DialogFooter>

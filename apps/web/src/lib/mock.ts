@@ -2218,7 +2218,9 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const file = (await mockInvoke<ConfigFileInfo[]>("config_list")).find((file) => file.kind === backup?.target);
       if (!backup || !file) throw { code: "NOT_FOUND", message: "找不到对应备份或配置" };
       const current = currentConfigContent(file.kind);
-      return { name: args!.name, targetPath: file.path, targetRelative: file.path.replaceAll("\\", "/").split("NiceEnv/")[1], currentExists: true, revision: JSON.stringify([args!.name, file.path, backup.content, current]) } as BackupPreview as T;
+      const previewText = (content: string) => new TextEncoder().encode(content).length <= 256 * 1024 && !content.includes("\0") ? content : null;
+      return { name: args!.name, targetPath: file.path, targetRelative: file.path.replaceAll("\\", "/").split("NiceEnv/")[1], currentExists: true, revision: JSON.stringify([args!.name, file.path, backup.content, current]),
+        backupContent: previewText(backup.content), currentContent: previewText(current), backupSizeBytes: new TextEncoder().encode(backup.content).length, currentSizeBytes: new TextEncoder().encode(current).length, changed: current !== backup.content } as BackupPreview as T;
     }
     case "restore_backup": {
       const preview = await mockInvoke<BackupPreview>("preview_backup", args);
@@ -2285,7 +2287,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           const exists = id !== "redis" || configPreviewContent.has(kind);
           files.push({ kind, label: shared ? label : `${label} · ${pkg.version}`,
             description: "浏览器演示配置；桌面端读取实际安装版本的配置文件",
-            path: `C:/NiceEnv/etc/${id}/${shared ? "" : `${pkg.version}/`}${filename}`,
+            path: `C:/NiceEnv/${id === "postgresql" ? "data" : "etc"}/${id}/${shared ? "" : `${pkg.version}/`}${filename}`,
             exists, sizeBytes: exists ? new TextEncoder().encode(currentConfigContent(kind)).length : 0,
             language, validated: shared, usedByService: shared ? id : `${id}@${pkg.version}`,
             requiresPackage: id, resettable: true,
@@ -2359,6 +2361,14 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "config_rollback": {
       const backup = configPreviewHistory.find((b) => b.name === args!.name);
       if (!backup || (args!.kind && args!.kind !== backup.target)) throw { code: "BACKUP_TARGET_MISMATCH", message: "该历史版本不属于当前配置" };
+      if (args!.revision !== undefined || args!.expectedPath !== undefined) {
+        if (!args!.kind || typeof args!.expectedContent !== "string" || !args!.expectedPath || !args!.revision) throw { code: "BACKUP_PREVIEW_REQUIRED", message: "恢复前请先读取完整预览" };
+        const preview = await mockInvoke<BackupPreview>("preview_backup", { name: `config/${backup.name}` });
+        if (preview.targetPath !== args!.expectedPath) throw { code: "BACKUP_TARGET_MISMATCH", message: "备份目标与当前配置不一致" };
+        if (preview.revision !== args!.revision) throw { code: "BACKUP_PREVIEW_CHANGED", message: "配置或备份已变化，请重新预览后恢复" };
+        savePreviewConfig(backup.target!, backup.content, args!.expectedContent as string);
+        return true as T;
+      }
       await mockInvoke("config_save", { kind: backup.target, content: backup.content, force: true, expectedContent: args!.expectedContent });
       return true as T;
     }

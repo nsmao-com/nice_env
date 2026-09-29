@@ -4090,10 +4090,18 @@ async fn config_rollback(
     name: String,
     kind: Option<String>,
     expected_content: Option<String>,
+    expected_path: Option<String>,
+    revision: Option<String>,
 ) -> Result<bool, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        if expected_path.is_some() || revision.is_some() {
+            return map_jh(match (kind, expected_content, expected_path, revision) {
+                (Some(kind), Some(content), Some(path), Some(revision)) => st.rollback_config_reviewed(&name, &kind, &path, &content, &revision).map(|_| true),
+                _ => Err(nsb_core::AppError::new("BACKUP_PREVIEW_REQUIRED", "恢复前请先读取完整预览")),
+            });
+        }
         map_jh(
             st.rollback_config(&name, kind.as_deref(), expected_content.as_deref())
                 .map(|_| true),

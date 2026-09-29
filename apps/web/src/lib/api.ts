@@ -263,6 +263,11 @@ export interface BackupPreview {
   targetRelative: string;
   currentExists: boolean;
   revision: string;
+  backupContent: string | null;
+  currentContent: string | null;
+  backupSizeBytes: number;
+  currentSizeBytes: number;
+  changed: boolean;
 }
 export interface ConfigResetPreview {
   kind: string;
@@ -483,8 +488,8 @@ export const configValidate = (kind: string, content: string) =>
 export const configSave = (kind: string, content: string, force = false, expectedContent?: string) =>
   safe(invoke<ConfigValidation>("config_save", { kind, content, force, expectedContent }));
 export const configBackups = (kind?: string) => safe(invoke<ConfigBackup[]>("config_backups", { kind }));
-export const configRollback = (name: string, kind?: string, expectedContent?: string) =>
-  safe(invoke<boolean>("config_rollback", { name, kind, expectedContent }));
+export const configRollback = (name: string, kind?: string, expectedContent?: string, preview?: Pick<BackupPreview, "targetPath" | "revision">) =>
+  safe(invoke<boolean>("config_rollback", { name, kind, expectedContent, expectedPath: preview?.targetPath, revision: preview?.revision }));
 export const configApply = (kind: string, expectedPath: string, expectedContent: string, serviceId: string, revision: string, restart: boolean) =>
   safe(invoke<boolean>("config_apply", { kind, expectedPath, expectedContent, serviceId, revision, restart }));
 

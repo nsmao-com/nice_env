@@ -1516,6 +1516,12 @@ impl CoreState {
         cfgeditor::rollback_config_selected(&self.paths, &self.store, name, kind, expected)
     }
 
+    pub fn rollback_config_reviewed(&self, name: &str, kind: &str, path: &str, content: &str, revision: &str) -> Result<()> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
+        let _operation = self.manager.lifecycle.lock();
+        cfgeditor::rollback_config_reviewed(&self.paths, &self.store, name, kind, path, content, revision)
+    }
+
     /// 应用已保存的配置；在同一服务操作锁内核对文件与确认过的进程身份，再启停。
     pub fn apply_config(
         &self,

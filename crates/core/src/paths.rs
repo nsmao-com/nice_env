@@ -940,6 +940,21 @@ pub struct BackupPreview {
     pub target_relative: String,
     pub current_exists: bool,
     pub revision: String,
+    pub backup_content: Option<String>,
+    pub current_content: Option<String>,
+    pub backup_size_bytes: u64,
+    pub current_size_bytes: u64,
+    pub changed: bool,
+}
+
+fn restorable_config_target(relative: &str) -> bool {
+    relative.starts_with("etc/") || crate::cfgeditor::config_key_for_relative(relative).is_some()
+}
+
+fn backup_preview_text(content: &[u8]) -> Option<String> {
+    // 只在内存预览有限大小的完整文本；不把截断内容误当作将恢复的完整文件。
+    if content.len() > 256 * 1024 || content.contains(&0) { return None; }
+    std::str::from_utf8(content).ok().map(str::to_owned)
 }
 
 fn legacy_target(base: &Path, name: &str) -> io::Result<String> {
@@ -1070,7 +1085,7 @@ pub fn list_backup_files(base: &Path) -> io::Result<Vec<BackupFile>> {
                 Err(error) => (metadata, Some(format!("无法读取备份内容：{error}"))),
             };
             let (target_path, reason) = match backup_source(base, &name) {
-                Ok((_, relative, _)) if relative.starts_with("etc/") => {
+                Ok((_, relative, _)) if restorable_config_target(&relative) => {
                     match checked_data_path(base, &relative) {
                         Ok(_) => (Some(relative), None),
                         Err(error) => (Some(relative), Some(error.to_string())),
@@ -1121,7 +1136,7 @@ fn read_backup_snapshot(
     name: &str,
 ) -> io::Result<(BackupPreview, Vec<u8>, Option<Vec<u8>>)> {
     let (source, relative, expected_hash) = backup_source(base, name)?;
-    if !relative.starts_with("etc/") {
+    if !restorable_config_target(&relative) {
         return Err(backup_error("只能从此入口恢复服务配置"));
     }
     let target = checked_data_path(base, &relative)?;
@@ -1150,6 +1165,11 @@ fn read_backup_snapshot(
             target_relative: relative,
             current_exists: current.is_some(),
             revision,
+            backup_content: backup_preview_text(&content),
+            current_content: current.as_deref().and_then(backup_preview_text),
+            backup_size_bytes: content.len() as u64,
+            current_size_bytes: current.as_ref().map_or(0, |bytes| bytes.len() as u64),
+            changed: current.as_deref() != Some(content.as_slice()),
         },
         content,
         current,

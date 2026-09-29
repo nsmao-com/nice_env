@@ -1227,7 +1227,7 @@ pub(crate) fn backup_relative_target(name: &str) -> Option<String> {
     })
 }
 
-fn config_key_for_relative(relative: &str) -> Option<String> {
+pub(crate) fn config_key_for_relative(relative: &str) -> Option<String> {
     let parts: Vec<_> = relative.split('/').collect();
     let key = match parts.as_slice() {
         ["etc", "nginx", "nginx.conf"] => "nginx-main".into(),
@@ -1279,6 +1279,40 @@ fn scan_config_backups(paths: &Paths, selected: Option<&str>) -> Result<Vec<Conf
 }
 
 /// 回滚到备份明确绑定的配置与版本。
+pub fn rollback_config_reviewed(
+    paths: &Paths,
+    store: &crate::store::Store,
+    name: &str,
+    key: &str,
+    expected_path: &str,
+    expected_content: &str,
+    revision: &str,
+) -> Result<()> {
+    let storage_name = if let Some(legacy) = name.strip_prefix("legacy/") {
+        legacy.to_string()
+    } else if name.starts_with("files/") {
+        name.to_string()
+    } else {
+        format!("config/{name}")
+    };
+    let target = ConfigTarget::parse(key)?.selected(store)?;
+    let path = target.path(paths, store)?;
+    let preview = crate::paths::preview_backup(&paths.base, &storage_name)?;
+    if preview.target_path != expected_path || Path::new(&preview.target_path) != path {
+        return Err(AppError::new("BACKUP_TARGET_MISMATCH", "备份目标与当前配置不一致，请重新打开配置"));
+    }
+    if revision.is_empty() || preview.revision != revision {
+        return Err(AppError::new("BACKUP_PREVIEW_CHANGED", "配置或备份已变化，请重新预览后恢复"));
+    }
+    if read_config_selected(paths, store, key)? != expected_content {
+        return Err(AppError::new("CONFIG_CONFLICT", "磁盘配置与编辑器内容不一致，请保留草稿并重新读取"));
+    }
+    // 再次核对预览修订号，并沿用通用恢复的原子替换与恢复前备份。
+    crate::paths::restore_backup_checked(&paths.base, &storage_name, Some(revision))?;
+    Ok(())
+}
+
+/// 兼容未提供预览修订号的内部调用。
 pub fn rollback_config(
     paths: &Paths,
     store: &crate::store::Store,

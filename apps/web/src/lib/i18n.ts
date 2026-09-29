@@ -2540,6 +2540,7 @@ const dict = {
     "install.taskMissing": "该任务记录已移除，请关闭此窗口后查看套件状态。",
     "install.automaticVersion": "自动选择版本",
     "install.preparing": "正在准备安装…",
+    "install.resultUnconfirmed": "未能确认本次安装的版本和目录，请刷新套件列表检查已安装版本后再操作。",
     /* ---- 二次确认 ---- */
     "confirm.title": "确认操作",
     "confirm.deleteDb": "删除数据库",
@@ -5438,6 +5439,7 @@ const dict = {
     "install.taskMissing": "This task record was removed. Close this window and check the package status.",
     "install.automaticVersion": "Automatic version",
     "install.preparing": "Preparing installation…",
+    "install.resultUnconfirmed": "The installed version and directory could not be confirmed. Refresh the package list and check the installed versions before continuing.",
     /* ---- Confirmations ---- */
     "confirm.title": "Confirm action",
     "confirm.deleteDb": "Delete database",

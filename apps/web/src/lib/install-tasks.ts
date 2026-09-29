@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 import { toast } from "sonner";
-import type { DownloadProgress } from "@nsb/schema";
+import { InstalledPackage, type DownloadProgress } from "@nsb/schema";
 import * as api from "./api";
 import { normalizeError } from "./backend";
 import type { TKey } from "./i18n";
@@ -25,7 +25,7 @@ export interface InstallTask {
   version?: string;
   displayName: string;
   status: InstallStatus;
-  /** 后端进度确认的版本；请求未指定版本时也能准确展示结果。 */
+  /** 进行中由进度提示，完成后始终使用安装命令返回的实际版本。 */
   resolvedVersion?: string;
   progressId?: string;
   progressKeys?: string[];
@@ -108,29 +108,35 @@ export const useInstallTasks = create<InstallTasksState>()((set, get) => ({
     const label = target.version ? `${target.displayName} ${target.version}` : target.displayName;
     const promise = api
       .installPackage(key)
-      .then(
-        () => {
-          set((s) => ({ tasks: { ...s.tasks, [key]: { ...s.tasks[key], status: "done", cancelRequested: false, error: undefined } } }));
-          if (!opts?.quiet) toast.success(`${label} ${t("packages.installed")}`);
-          return true;
-        },
-        (e: unknown) => {
-          const err = normalizeError(e);
-          if (err.code === "CANCELLED") {
-            // 以后端确认结果为准；点击取消本身不能冒充任务已停止。
-            set((s) => ({ tasks: { ...s.tasks, [key]: { ...s.tasks[key], status: "cancelled", cancelRequested: false } } }));
-            toast.info(`${label} ${t("install.cancelled")}`);
-            return false;
-          }
-          const message = err.message ? `${err.message}${err.hint ? ` — ${err.hint}` : ""}` : String(e);
-          set((s) => ({ tasks: { ...s.tasks, [key]: { ...s.tasks[key], status: "error", cancelRequested: false, error: message } } }));
-          toast.error(`${label} ${t("install.failed")}`, {
-            description: message,
-            classNames: { description: "line-clamp-2 [overflow-wrap:anywhere]" },
-          });
+      .then((installed) => {
+        const result = InstalledPackage.safeParse(installed);
+        if (!result.success || result.data.id !== target.id || (target.version
+          && result.data.version.replace(/^[vV]/, "") !== target.version.replace(/^[vV]/, ""))) {
+          throw { code: "INSTALL_RESULT_UNCONFIRMED", message: t("install.resultUnconfirmed") };
+        }
+        const resolvedVersion = result.data.version;
+        const progressId = `${result.data.id}@${resolvedVersion}`;
+        set((s) => ({ tasks: { ...s.tasks, [key]: { ...s.tasks[key], status: "done", resolvedVersion, progressId,
+          progressKeys: [...new Set([...(s.tasks[key]?.progressKeys ?? []), progressId])], cancelRequested: false, error: undefined } } }));
+        if (!opts?.quiet) toast.success(`${target.displayName} ${resolvedVersion} ${t("packages.installed")}`);
+        return true;
+      })
+      .catch((e: unknown) => {
+        const err = normalizeError(e);
+        if (err.code === "CANCELLED") {
+          // 以后端确认结果为准；点击取消本身不能冒充任务已停止。
+          set((s) => ({ tasks: { ...s.tasks, [key]: { ...s.tasks[key], status: "cancelled", cancelRequested: false } } }));
+          toast.info(`${label} ${t("install.cancelled")}`);
           return false;
         }
-      )
+        const message = err.message ? `${err.message}${err.hint ? ` — ${err.hint}` : ""}` : String(e);
+        set((s) => ({ tasks: { ...s.tasks, [key]: { ...s.tasks[key], status: "error", cancelRequested: false, error: message } } }));
+        toast.error(`${label} ${t("install.failed")}`, {
+          description: message,
+          classNames: { description: "line-clamp-2 [overflow-wrap:anywhere]" },
+        });
+        return false;
+      })
       .finally(() => {
         inflight.delete(key);
         set((s) => ({ progress: clearTaskProgress(s, key) }));

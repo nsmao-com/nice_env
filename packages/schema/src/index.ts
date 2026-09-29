@@ -208,6 +208,15 @@ export const PackageView = PackageManifestEntry.extend({
 });
 export type PackageView = z.infer<typeof PackageView>;
 
+/** 安装命令返回的实际安装记录；最终版本不依赖进度事件是否收到。 */
+export const InstalledPackage = PackageView.shape.install.unwrap().extend({
+  id: z.string().min(1),
+  category: z.string(),
+  version: z.string().min(1),
+  installPath: z.string().min(1),
+});
+export type InstalledPackage = z.infer<typeof InstalledPackage>;
+
 /* ============ 环境变量注入 / PathEnv ============ */
 
 /** 单个已安装版本在 PATH 注入里的呈现，使用 id + version 标识 */

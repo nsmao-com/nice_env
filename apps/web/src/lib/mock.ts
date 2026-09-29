@@ -1484,7 +1484,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         };
         refreshPackageSelection(p.id);
         report("installed", 1);
-        return true as T;
+        return structuredClone({ id: p.id, category: p.category, ...p.install }) as T;
       } catch (e) {
         const error = normalizeError(e);
         report(error.code === "CANCELLED" ? "cancelled" : "error", 0, error.message);

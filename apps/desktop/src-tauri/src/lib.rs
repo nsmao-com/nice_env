@@ -671,12 +671,12 @@ fn list_packages(
 async fn install_package(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
-) -> Result<bool, tauri::Error> {
+) -> Result<nsb_core::model::InstalledPackage, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         tauri::async_runtime::block_on(async move {
-            map_jh(st.install_package(&id).await.map(|_| true))
+            map_jh(st.install_package(&id).await)
         })
     })
     .await

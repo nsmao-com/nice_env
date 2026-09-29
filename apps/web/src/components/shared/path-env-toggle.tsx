@@ -4,7 +4,7 @@ import * as React from "react";
 import { useIsMutating, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Loader2, RefreshCw, Terminal } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, sameVersion } from "@/lib/utils";
 import { useT } from "@/lib/store";
 import { usePathEnv, toastError } from "@/lib/hooks";
 import * as api from "@/lib/api";
@@ -32,7 +32,7 @@ export function PathEnvToggle({ pkgId, version, disabled = false }: { pkgId: str
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["pathenv"] }),
   });
 
-  const entry = data?.entries.find((e) => e.id === pkgId && e.version === version);
+  const entry = data?.entries.find((e) => e.id === pkgId && sameVersion(e.version, version));
   const selected = entry?.selected ?? false;
   const enabled = data?.enabled ?? false;
   const inPath = enabled && selected && !!entry?.inPath;

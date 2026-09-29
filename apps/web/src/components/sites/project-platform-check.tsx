@@ -9,13 +9,14 @@ import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { PhpExtensionsDialog } from "@/components/shared/php-extensions";
+import { sameVersion } from "@/lib/utils";
 
 type Props = { project?: string; siteId?: string; savedRoot?: string; version: string; disabled?: boolean; directoryChanged?: boolean };
 
 /** 项目、版本或安装元数据变化后丢弃旧报告，异步结果只属于发起时的面板。 */
 export function ProjectPlatformCheck(props: Props) {
   const { data: packages } = usePackages();
-  const installed = packages.filter((p) => (p.id === "php" && p.version === props.version) || p.id === "composer");
+  const installed = packages.filter((p) => (p.id === "php" && sameVersion(p.version, props.version)) || p.id === "composer");
   const available = installed.some((p) => p.id === "php" && p.install);
   const identity = JSON.stringify([props.project, props.siteId, props.savedRoot, props.version, props.directoryChanged, installed.map((p) => [p.id, p.version, p.install])]);
   return <PlatformPanel key={identity} {...props} available={available} />;

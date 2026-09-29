@@ -272,14 +272,18 @@ impl Installer {
         installed: &InstalledPackage,
     ) -> crate::model::PackageManifestEntry {
         let snapshot = Path::new(&installed.install_path).join(".niceenv-package.json");
-        if let Some(entry) = std::fs::read_to_string(snapshot)
+        if let Some(mut entry) = std::fs::read_to_string(snapshot)
             .ok()
             .and_then(|raw| serde_json::from_str::<crate::model::PackageManifestEntry>(&raw).ok())
             .filter(|entry| entry.id == installed.id && same_version(&entry.version, &installed.version))
         {
+            // 安装记录是版本身份的最终来源；快照只提供真实入口和运行描述。
+            // 这样带 v 前缀的历史记录不会在 API 列表里变成另一套版本身份。
+            entry.version = installed.version.clone();
             return upgrade_legacy_run(entry);
         }
-        if let Some(entry) = self.find(&format!("{}@{}", installed.id, installed.version)) {
+        if let Some(mut entry) = self.find(&format!("{}@{}", installed.id, installed.version)) {
+            entry.version = installed.version.clone();
             return entry;
         }
         if let Some(mut entry) = self.template_for(&installed.id) {
@@ -2277,6 +2281,21 @@ mod tests {
         assert_eq!(views.len(), 1);
         assert!(views[0].install.is_some());
         assert_eq!(views[0].available_versions, ["1.2.3"]);
+        assert_eq!(views[0].manifest.version, installed.version);
+
+        // 快照描述程序包内的真实路径，版本身份必须来自安装记录。
+        entry.entry = "fixture-1.2.3/bin/app.exe".into();
+        entry.run = Some(serde_json::from_value(serde_json::json!({
+            "args": [], "singleInstance": false
+        })).unwrap());
+        let snapshot = temp.path().join(".niceenv-package.json");
+        let original = serde_json::to_vec(&entry).unwrap();
+        std::fs::write(&snapshot, &original).unwrap();
+        let recovered = installer.installed_entry(&installed);
+        assert_eq!(recovered.version, installed.version);
+        assert_eq!(recovered.entry, entry.entry);
+        assert_eq!(crate::generic::service_id_of(&recovered), "fixture@v1.2.3");
+        assert_eq!(std::fs::read(&snapshot).unwrap(), original);
 
         let remote = crate::model::RemoteVersion {
             version: "v1.2.4".into(),

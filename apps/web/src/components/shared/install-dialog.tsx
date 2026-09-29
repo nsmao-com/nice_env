@@ -230,7 +230,7 @@ export function InstallDialog({
         service = validateService(selected.find((service) => service.id === startableAs));
       }
       if (!sameCompletedTask()) throw { code: "INSTALL_TASK_CHANGED", message: t("install.startTaskChanged") };
-      if (service.state !== "running") await api.startService(startableAs, displayVersion);
+      if (service.state !== "running") await api.startService(startableAs, service.version);
       if (!current() || !sameCompletedTask()) return;
       toast.success(`${target.displayName} ${displayVersion} · ${t("common.running")}`);
       onOpenChange(false);

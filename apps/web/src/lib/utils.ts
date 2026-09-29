@@ -355,10 +355,10 @@ export function versionParts(v: string): number[] {
 
 /** 统一上游 tag、清单和安装记录之间可能出现的 v 前缀。 */
 export function normalizeVersion(version: string): string {
-  return version.trim().replace(/^[vV]/, "");
+  return version.trim().replace(/^[vV]+/, "");
 }
 
-export function sameVersion(left: string | undefined, right: string | undefined): boolean {
+export function sameVersion(left: string | null | undefined, right: string | null | undefined): boolean {
   return left != null && right != null && normalizeVersion(left) === normalizeVersion(right);
 }
 

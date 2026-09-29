@@ -221,7 +221,7 @@ function groupPackages(packages: PackageView[], defaultTld?: string): PackageGro
     }
     if (!g.description && p.description) g.description = p.description;
     g.versions.push({
-      version: normalizeVersion(p.version),
+      version: p.version,
       sizeBytes: p.sizeBytes,
       installed: !!p.install,
       installPath: p.install?.installPath,
@@ -917,14 +917,14 @@ function PackageRow({
       }
       if (current.state === "unknown") throw { code: "SERVICE_STATE_UNKNOWN", message: t("packages.statusUnknown") };
       if (action === "stop") {
-        if (serviceHasProcess(current)) await api.stopService(sid, version);
+        if (serviceHasProcess(current)) await api.stopService(sid, current.version);
         toast.success(`${group.displayName} ${version} ${t("common.stopped")}`);
       } else {
         if (current.state !== "running") {
           if (serviceHasProcess(current)) throw { code: "SERVICE_BUSY", message: t("svc.processStillRunning") };
           if (current.missingRequires.length) throw { code: "MISSING_DEPENDENCIES", message: t("svc.needDepsHint") };
           toast.info(`${t("packages.starting")} ${group.displayName} ${version}`);
-          await api.startService(sid, version);
+          await api.startService(sid, current.version);
         }
         toast.success(`${group.displayName} ${version} ${t("common.running")}`);
       }

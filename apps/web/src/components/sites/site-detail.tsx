@@ -42,6 +42,7 @@ import { SiteProxyRules } from "./site-proxy-rules";
 import { SiteErrorPagesSettings } from "./site-error-pages-settings";
 import { SiteBasicAuthSettings } from "./site-basic-auth-settings";
 import { SiteFileBackups } from "./site-file-backups";
+import { SiteFileBrowser } from "./site-file-browser";
 
 const REWRITE_OPTIONS: { value: RewritePreset; label?: string; labelKey?: string }[] = [
   { value: "none", labelKey: "detail.none" },
@@ -104,8 +105,13 @@ export function SiteDetailSheet({
   const [envState, setEnvState] = React.useState<EnvEditorState>({ dirty: false, busy: false, canSave: false, fileName: ".env" });
   const [filesBusy, setFilesBusy] = React.useState(false);
   const filesBusyRef = React.useRef(false);
+  const browserBusyRef = React.useRef(false);
+  const backupBusyRef = React.useRef(false);
+  const [browserBusy, setBrowserBusy] = React.useState(false);
+  const [backupBusy, setBackupBusy] = React.useState(false);
   const openingRestored = React.useRef(false);
-  const onFilesBusyChange = React.useCallback((value: boolean) => { filesBusyRef.current = value; setFilesBusy(value); }, []);
+  const onFilesBusyChange = React.useCallback((value: boolean) => { backupBusyRef.current = value; setBackupBusy(value); filesBusyRef.current = value || browserBusyRef.current; setFilesBusy(filesBusyRef.current); }, []);
+  const onBrowserBusyChange = React.useCallback((value: boolean) => { browserBusyRef.current = value; setBrowserBusy(value); filesBusyRef.current = value || backupBusyRef.current; setFilesBusy(filesBusyRef.current); }, []);
 
   const [draft, setDraft] = React.useState<Site | null>(site);
   const [baseline, setBaseline] = React.useState<Site | null>(site);
@@ -123,6 +129,8 @@ export function SiteDetailSheet({
     setDuplicateError(null);
     setDiscardOpen(false);
     setTab("general");
+    onFilesBusyChange(false);
+    onBrowserBusyChange(false);
     setEnvState({ dirty: false, busy: false, canSave: false, fileName: ".env" });
     return () => phpFocusObserver.current?.disconnect();
   }, [site?.id]);
@@ -553,14 +561,17 @@ export function SiteDetailSheet({
                 directoryChanged={directoryChanged} onStateChange={setEnvState} />
             </TabsContent>}
             {!isRedirect && <TabsContent value="files" forceMount className="mt-0 data-[state=inactive]:hidden">
-              <SiteFileBackups key={site.id} siteId={site.id} revision={baseline?.updatedAt ?? site.updatedAt} active={tab === "files"}
-                disabled={siteBusy || envState.busy} dirty={dirty} onBusyChange={onFilesBusyChange}
-                onCreateFromRestored={(project) => {
-                  if (dirty || busy || filesBusyRef.current || savingRef.current || deletingRef.current || reloadingRef.current || envEditorRef.current?.isBusy()) return;
-                  openingRestored.current = true;
-                  onClose();
-                  useUI.getState().openExistingProject(project);
-                }} />
+              <div className="space-y-5">
+                <SiteFileBrowser key={`${site.id}:${baseline?.rootDir}`} siteId={site.id} active={tab === "files"} disabled={siteBusy || envState.busy || backupBusy || dirty} onBusyChange={onBrowserBusyChange} />
+                <SiteFileBackups key={site.id} siteId={site.id} revision={baseline?.updatedAt ?? site.updatedAt} active={tab === "files"}
+                  disabled={siteBusy || envState.busy || browserBusy} dirty={dirty} onBusyChange={onFilesBusyChange}
+                  onCreateFromRestored={(project) => {
+                    if (dirty || busy || filesBusyRef.current || savingRef.current || deletingRef.current || reloadingRef.current || envEditorRef.current?.isBusy()) return;
+                    openingRestored.current = true;
+                    onClose();
+                    useUI.getState().openExistingProject(project);
+                  }} />
+              </div>
             </TabsContent>}
             {draft.runtime.kind === "php" && <TabsContent ref={phpPanelRef} value="php" forceMount className="mt-0 space-y-5 data-[state=inactive]:hidden">
               <ProjectPlatformCheck siteId={site.id} savedRoot={baseline?.rootDir} version={draft.runtime.phpVersion ?? ""} disabled={busy} directoryChanged={directoryChanged} />

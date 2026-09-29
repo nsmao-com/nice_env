@@ -318,6 +318,9 @@ pub fn run() {
             site_files_delete,
             site_files_inspect_import,
             site_files_import,
+            site_directory,
+            site_file_read,
+            site_file_write,
             site_access_url,
             create_site,
             update_site,
@@ -1204,6 +1207,44 @@ async fn site_files_inspect_import(app:tauri::AppHandle,state:State<'_,std::sync
 #[tauri::command]
 async fn site_files_import(app:tauri::AppHandle,state:State<'_,std::sync::Arc<CoreState>>,id:String,source:String,revision:String,confirmed:bool,operation_id:String)->Result<nsb_core::sitebackup::BackupInfo,tauri::Error> {
     let st=state.inner().clone();tauri::async_runtime::spawn_blocking(move ||map_jh(nsb_core::sitebackup::import_archive(&st,&id,&source,&revision,confirmed,&site_files_progress(app,id.clone(),operation_id)))).await.map_err(|e|tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn site_directory(
+    state: State<'_, std::sync::Arc<CoreState>>,
+    id: String,
+    current: Option<String>,
+) -> Result<nsb_core::sitefiles::SiteDirectory, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(nsb_core::sitefiles::list(&st.store, &id, current.as_deref()))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn site_file_read(
+    state: State<'_, std::sync::Arc<CoreState>>,
+    id: String,
+    path: String,
+) -> Result<nsb_core::sitefiles::SiteTextFile, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(nsb_core::sitefiles::read(&st.store, &id, &path))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn site_file_write(
+    state: State<'_, std::sync::Arc<CoreState>>,
+    id: String,
+    path: String,
+    content: String,
+    expected_revision: String,
+) -> Result<nsb_core::sitefiles::SiteTextFile, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(nsb_core::sitefiles::write(&st.store, &id, &path, &content, &expected_revision))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]

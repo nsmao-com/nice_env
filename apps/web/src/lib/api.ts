@@ -566,6 +566,16 @@ export const siteFilesInspectImport = (id: string, source: string, operationId: 
 export const siteFilesImport = (id: string, source: string, revision: string, confirmed: boolean, operationId: string) =>
   safe(invoke<SiteFileBackup>("site_files_import", { id, source, revision, confirmed, operationId }));
 
+export interface SiteFileEntry { name: string; path: string; directory: boolean; sizeBytes: number; modifiedAt: number }
+export interface SiteDirectory { siteId: string; root: string; current: string; parent?: string | null; revision: string; entries: SiteFileEntry[] }
+export interface SiteTextFile { siteId: string; path: string; sizeBytes: number; revision: string; content: string }
+export const siteDirectory = (id: string, current?: string) =>
+  safe(invoke<SiteDirectory>("site_directory", { id, current: current || null }));
+export const siteFileRead = (id: string, path: string) =>
+  safe(invoke<SiteTextFile>("site_file_read", { id, path }));
+export const siteFileWrite = (id: string, path: string, content: string, expectedRevision: string) =>
+  safe(invoke<SiteTextFile>("site_file_write", { id, path, content, expectedRevision }));
+
 export const envRead = (siteId: string, fileName = ".env") => safe(invoke<EnvFileView>("env_read", { siteId, fileName }));
 export const envSave = (siteId: string, changes: [string, string][], expectedRevision: string, fileName = ".env") =>
   safe(invoke<EnvFileView>("env_save", { siteId, changes, expectedRevision, fileName }));

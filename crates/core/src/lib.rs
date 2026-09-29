@@ -58,6 +58,7 @@ pub mod sitecors;
 pub mod siteaccess;
 pub mod siteproxy;
 pub mod sitebackup;
+pub mod sitefiles;
 pub mod stacks;
 pub mod stats;
 pub mod store;

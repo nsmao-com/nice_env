@@ -202,6 +202,27 @@ mod tests {
             let mut site = crate::sites::create(&creation,&state.paths,&state.store,&state.manager).unwrap();
             let client = reqwest::blocking::Client::builder().no_proxy().danger_accept_invalid_certs(true).redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(5)).build().unwrap();
             let address = format!("http://127.0.0.1:{port}");
+            // 静态目录可能同时包含未清理的 PHP 源码；首页和直接请求都不能下载源码。
+            let sources = ["index.php", "config.PHP", "legacy.php8", "view.phtml", "view.pht", "archive.phar", "config.php.bak"];
+            for name in sources { std::fs::write(project.join(name), "<?php /* static-source-must-stay-private */").unwrap(); }
+            std::fs::create_dir_all(project.join("private-dir")).unwrap();
+            std::fs::write(project.join("private-dir/secret.txt"), "directory-listing-must-stay-private").unwrap();
+            for origin in [&address, &format!("https://127.0.0.1:{tls_port}")] {
+                for name in sources {
+                    let response = client.get(format!("{origin}/{name}")).send().unwrap();
+                    assert_eq!(response.status().as_u16(), 403, "{server}: static source {name}");
+                    assert!(!response.text().unwrap().contains("static-source-must-stay-private"));
+                }
+                let directory = client.get(format!("{origin}/private-dir/")).send().unwrap();
+                assert!(directory.status().is_client_error(), "{server}: static directory listing");
+                assert!(!directory.text().unwrap().contains("directory-listing-must-stay-private"));
+                for path in ["/config.%50HP", "/index.%70hp", "/index.php/extra"] {
+                    let response = client.get(format!("{origin}{path}")).send().unwrap();
+                    assert!(response.status().is_client_error(), "{server}: encoded or PATH_INFO source {path}");
+                    assert!(!response.text().unwrap().contains("static-source-must-stay-private"));
+                }
+                assert_eq!(client.get(origin).send().unwrap().text().unwrap(), "static-front", "{server}: HTML takes precedence over PHP in static sites");
+            }
             assert_eq!(client.get(&address).send().unwrap().text().unwrap(),"static-front");
             let secure=client.get(format!("{address}/secure/check.html")).send().unwrap();
             assert_eq!(secure.status().as_u16(),200,"{server} HTTPS backend: {:?}",state.tail_logs_checked(&format!("site-error:{}",site.id),20).unwrap());
@@ -261,6 +282,10 @@ mod tests {
                 site=crate::sites::update(&site,&state.paths,&state.store,&state.manager).unwrap_or_else(|error| panic!("{server}: {error:?}; service logs: {:?}", state.tail_logs_checked(server,40).unwrap()));
                 assert_eq!(client.get(format!("{address}/index.php")).send().unwrap().text().unwrap(),"php-front","{server} PHP page");
                 let payload:serde_json::Value=client.get(format!("{address}/api/users.php")).send().unwrap().json().unwrap();assert_eq!(payload["uri"],"/v1/users.php","{server} proxy before PHP");
+                site.runtime.kind=SiteKind::Static;
+                site=crate::sites::update(&site,&state.paths,&state.store,&state.manager).unwrap();
+                assert_eq!(client.get(&address).send().unwrap().text().unwrap(),"static-front","{server}: returning to static restores HTML index");
+                assert_eq!(client.get(format!("{address}/index.php")).send().unwrap().status().as_u16(),403,"{server}: returning to static blocks PHP source");
             }
             site.runtime.kind=SiteKind::ReverseProxy;site.runtime.proxy_target=Some(format!("{source_origin}/default/"));
             site=crate::sites::update(&site,&state.paths,&state.store,&state.manager).unwrap_or_else(|error| panic!("{server}: {error:?}; service logs: {:?}", state.tail_logs_checked(server,40).unwrap()));

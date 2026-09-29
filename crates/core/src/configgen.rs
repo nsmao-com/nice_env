@@ -638,6 +638,7 @@ pub fn render_site_conf(
         }
         crate::model::SiteKind::Static => {
             let mut s = site.runtime.custom_rewrite.as_ref().filter(|r| r.server == "nginx").map(|r| r.content.clone()).unwrap_or_else(|| rewrite_snippet(&site.rewrite).to_string());
+            s.push_str("    location ~* \\.(?:php[0-9]*|phtml|pht|phar)(?:[./]|$) { deny all; }\n");
             if site.runtime.custom_rewrite.is_none() && matches!(site.rewrite, RewritePreset::None) {
                 s.push_str("    location / {\n        try_files $uri $uri/ =404;\n    }\n");
             }
@@ -693,7 +694,8 @@ server {{
         server_names = server_names,
         ssl_lines = ssl_lines,
         document_root = if site.runtime.kind == crate::model::SiteKind::Redirect { String::new() } else {
-            format!("root \"{}\";\n    index index.php index.html index.htm;", nginx_path(std::path::Path::new(&site.root_dir)))
+            let index = if site.runtime.kind == crate::model::SiteKind::Php { "index.php index.html index.htm" } else { "index.html index.htm" };
+            format!("root \"{}\";\n    index {index};", nginx_path(std::path::Path::new(&site.root_dir)))
         },
         body = cors.as_ref().map_or_else(|| body.clone(), |cors| nginx_cors_headers_in_locations(&body, &cors.headers)),
         cors_maps = cors.as_ref().map_or("", |cors| cors.maps.as_str()),
@@ -1547,7 +1549,7 @@ pub fn render_httpd_vhost(
             } else {
                 ""
             };
-            format!("    <Directory \"{root}\">\n        AllowOverride All\n        Require all granted\n{rewrite}    </Directory>\n{error_page}")
+            format!("    <FilesMatch \"(?i)\\.(?:php[0-9]*|phtml|pht|phar)(?:\\.|$)\">\n        Require all denied\n    </FilesMatch>\n    <Directory \"{root}\">\n        AllowOverride All\n        Options -Indexes\n        DirectoryIndex index.html index.htm\n        Require all granted\n{rewrite}    </Directory>\n{error_page}")
         }
         _ => {
             let target = site

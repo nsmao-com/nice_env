@@ -864,7 +864,7 @@ fn render_block(
                     "\t\t\tphp_fastcgi 127.0.0.1:{port} {{\n\t\t\t\tcapture_stderr\n\t\t\t}}\n"
                 ));
             } else {
-                out.push_str("\t\t\t@php_source path_regexp php_source (?i)\\.php(/|$)\n\t\t\trespond @php_source 403\n");
+                out.push_str("\t\t\t@php_source path_regexp php_source (?i)\\.(php[0-9]*|phtml|pht|phar)([./]|$)\n\t\t\trespond @php_source 403\n");
             }
             out.push_str("\t\t\tfile_server\n");
         }

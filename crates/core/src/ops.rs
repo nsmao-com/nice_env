@@ -1550,7 +1550,7 @@ pub fn rebuild_and_reload(
     paths: &Paths,
     manager: &Arc<ServiceManager>,
 ) -> Result<()> {
-    rebuild_and_reload_selected(store, paths, manager, &["nginx", "apache"])
+    rebuild_and_reload_selected(store, paths, manager, &["nginx", "apache", "caddy"])
 }
 
 /// 证书更新只应用到实际引用它的 Web 服务，沿用原有配置验证和重载顺序。
@@ -1643,6 +1643,16 @@ pub(crate) fn rebuild_and_reload_selected(
             }
         }
     }
+    if servers.contains(&"caddy") && installed_by_choice(store, "caddy").is_some() {
+        if manager.snapshot("caddy").is_some_and(|s| s.state == ServiceState::Running) {
+            let resolved = crate::generic::resolve(store, paths, "caddy")?;
+            crate::caddy::prepare(paths, store, &resolved)?;
+            // 默认 admin off，重载采用同步重启，端口与站点入口由本次进程重新确认。
+            stop_service(store, paths, manager, "caddy")?;
+            start_service(store, paths, manager, "caddy")?;
+        }
+    }
+
     Ok(())
 }
 
@@ -2193,6 +2203,7 @@ fn validate_configs_selected(
     for (id, kind, label) in [
         ("nginx", "nginx-main", "Nginx"),
         ("apache", "apache-conf", "Apache"),
+        ("caddy", "caddy-conf", "Caddy"),
         ("php", "php-ini", "PHP"),
         ("mysql", "mysql-ini", "MySQL"),
         ("redis", "redis-conf", "Redis"),
@@ -2239,6 +2250,7 @@ fn validate_configs_selected(
             let path = match id {
                 "nginx" => paths.nginx_conf(),
                 "apache" => paths.apache_conf(),
+                "caddy" => paths.etc_dir("caddy", &package.version).join("Caddyfile"),
                 "php" => paths.php_ini(&package.version),
                 "mysql" => paths.mysql_ini(&package.version),
                 _ => paths.redis_conf(&package.version),
@@ -2330,6 +2342,11 @@ fn validate_configs_selected(
                     &conf,
                     timeout,
                 );
+            }
+            if package.id == "caddy" {
+                let resolved = crate::generic::resolve(store, paths, &format!("caddy@{}", package.version))?;
+                crate::caddy::adapt(&resolved, &conf)?;
+                return Ok(("ok".into(), "Caddy 原生配置校验通过".into()));
             }
             let (root, exe) = if package.id == "nginx" {
                 nginx_exe_for(package)?

@@ -129,8 +129,8 @@ function monitorEndpoint(input: string, port: number): { host: string; port: num
 function ownPorts(): [string, string, number][] {
   const safe = settings.portProfile === "safe";
   const p = safe
-    ? { http: 8080, https: 8443, mysql: 23306, redis: 26379, apacheHttp: 8180, apacheHttps: 8444, postgres: 25432, mongodb: 28017 }
-    : { http: 80, https: 443, mysql: 3306, redis: 6379, apacheHttp: 8080, apacheHttps: 8443, postgres: 5432, mongodb: 27017 };
+    ? { http: 8080, https: 8443, mysql: 23306, redis: 26379, apacheHttp: 8180, apacheHttps: 8444, caddy: 28080, caddyHttps: 28443, postgres: 25432, mongodb: 28017 }
+    : { http: 80, https: 443, mysql: 3306, redis: 6379, apacheHttp: 8080, apacheHttps: 8443, caddy: 8080, caddyHttps: 8445, postgres: 5432, mongodb: 27017 };
   const merged = { ...p, ...settings.portOverrides };
   return [
     ["nginx", "Nginx", merged.http],
@@ -810,9 +810,9 @@ for (const service of services.values()) {
 
 // 浏览器预览也保留上次加载的站点端口，修改设置本身不会替换运行中入口。
 function mockSiteUrl(site: Site) {
-  const key = site.runtime.webServer === "apache" ? site.https ? "apacheHttps" : "apacheHttp" : site.https ? "https" : "http";
-  const defaults = settings.portProfile === "safe" ? { http: 8080, https: 8443, apacheHttp: 8180, apacheHttps: 8444 }
-    : { http: 80, https: 443, apacheHttp: 8080, apacheHttps: 8443 };
+  const key = site.runtime.webServer === "caddy" ? site.https ? "caddyHttps" : "caddy" : site.runtime.webServer === "apache" ? site.https ? "apacheHttps" : "apacheHttp" : site.https ? "https" : "http";
+  const defaults = settings.portProfile === "safe" ? { http: 8080, https: 8443, apacheHttp: 8180, apacheHttps: 8444, caddy: 28080, caddyHttps: 28443 }
+    : { http: 80, https: 443, apacheHttp: 8080, apacheHttps: 8443, caddy: 8080, caddyHttps: 8445 };
   const port = settings.portOverrides?.[key] ?? defaults[key];
   const domain = (site.domains.find((domain) => !domain.startsWith("*.")) ?? site.domains[0] ?? "localhost").replace(/^\*\./, "www.");
   return `${site.https ? "https" : "http"}://${domain}${port === (site.https ? 443 : 80) ? "" : `:${port}`}`;
@@ -1013,6 +1013,7 @@ character-set-server=utf8mb4
 max_connections=200
 `;
     case "redis-conf": return "bind 127.0.0.1\nport 6379\n";
+    case "caddy-conf": return "{\n  admin off\n}\nhttp://:8080 {\n  file_server\n}\n";
     case "apache-conf": return 'ServerName localhost\nListen 8080\n';
     case "postgres-conf": return `# PostgreSQL preview configuration
 listen_addresses = '127.0.0.1'
@@ -1101,9 +1102,9 @@ async function performServiceAction(action: "start_service" | "stop_service" | "
         const site = sites.get(id.slice("site-app:".length));
         if (!site?.runtime.application) throw { code: "APP_NOT_MANAGED", message: "此站点未开启应用进程托管" };
         validateMockApplication(site.runtime);
-        const defaults = settings.portProfile === "safe" ? { http: 8080, https: 8443, apacheHttp: 8180, apacheHttps: 8444 }
-          : { http: 80, https: 443, apacheHttp: 8080, apacheHttps: 8443 };
-        const ports = site.runtime.webServer === "apache" ? ["apacheHttp", "apacheHttps"] as const : ["http", "https"] as const;
+        const defaults = settings.portProfile === "safe" ? { http: 8080, https: 8443, apacheHttp: 8180, apacheHttps: 8444, caddy: 28080, caddyHttps: 28443 }
+          : { http: 80, https: 443, apacheHttp: 8080, apacheHttps: 8443, caddy: 8080, caddyHttps: 8445 };
+        const ports = site.runtime.webServer === "caddy" ? ["caddy", "caddyHttps"] as const : site.runtime.webServer === "apache" ? ["apacheHttp", "apacheHttps"] as const : ["http", "https"] as const;
         if (ports.some((key) => (settings.portOverrides?.[key] ?? defaults[key]) === service.port)) {
           throw { code: "APP_WEB_PORT_CONFLICT", message: "应用监听端口与站点 Web 服务相同，请为应用选择另一个端口" };
         }
@@ -2375,6 +2376,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const definitions = [
         ["nginx", "nginx-main", "Nginx 主配置", "nginx.conf", "nginx"],
         ["apache", "apache-conf", "Apache 主配置", "httpd.conf", "apache"],
+        ["caddy", "caddy-conf", "Caddyfile", "Caddyfile", "caddy"],
         ["php", "php-ini", "php.ini", "php.ini", "ini"],
         ["mysql", "mysql-ini", "my.ini", "my.ini", "ini"],
         ["mariadb", "mariadb-ini", "MariaDB my.ini", "my.ini", "ini"],
@@ -2395,8 +2397,8 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
             description: "浏览器演示配置；桌面端读取实际安装版本的配置文件",
             path: `C:/NiceEnv/${id === "postgresql" ? "data" : "etc"}/${id}/${shared ? "" : `${pkg.version}/`}${filename}`,
             exists, sizeBytes: exists ? new TextEncoder().encode(currentConfigContent(kind)).length : 0,
-            language, validated: shared, usedByService: shared ? id : `${id}@${pkg.version}`,
-            requiresPackage: id, resettable: true,
+            language, validated: shared || id === "caddy", usedByService: shared ? id : `${id}@${pkg.version}`,
+            requiresPackage: id, resettable: id !== "caddy",
           });
         }
       }

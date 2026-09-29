@@ -331,7 +331,7 @@ fn check_sites(r: &mut HealthReport, sites: &[Site], installed: &[InstalledPacka
             ));
         }
         let web = site.runtime.web_server.as_str();
-        if !matches!(web, "nginx" | "apache") {
+        if !matches!(web, "nginx" | "apache" | "caddy") {
             reasons.push(format!("不支持的 Web 服务器：{web}"));
         } else if !installed.iter().any(|package| package.id == web) {
             reasons.push(format!("未安装 {web}"));

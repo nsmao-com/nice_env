@@ -190,8 +190,10 @@ mod tests {
         for (server, version, variable, port_key, tls_key) in [
             ("nginx", "1.28.1", "NSB_NGINX_ROOT", "http", "https"),
             ("apache", "2.4.66", "NSB_APACHE_ROOT", "apacheHttp", "apacheHttps"),
+            ("caddy", "2.11.4", "NSB_VERIFY_CADDY", "caddy", "caddyHttps"),
         ] {
             if std::env::var("NSB_CORS_SERVER").is_ok_and(|selected| selected != server) { continue; }
+            if server == "caddy" && std::env::var_os(variable).is_none() { continue; }
             let root = PathBuf::from(std::env::var(variable).expect(variable));
             let temp = tempfile::tempdir().unwrap();
             let state = crate::CoreState::init(Some(temp.path().join("cors native with spaces")), Arc::new(|_| {})).unwrap();

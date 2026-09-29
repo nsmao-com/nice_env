@@ -157,7 +157,7 @@ export function SiteWizard({
     return () => { cancelled = true; };
   // Inventory changes require a fresh result; unrelated package polling must not erase the draft.
   }, [open, existingProject?.path, kind, phpInventory, phpCheckRevision]);
-  const [webServer, setWebServer] = React.useState<"nginx" | "apache">("nginx");
+  const [webServer, setWebServer] = React.useState<"nginx" | "apache" | "caddy">("nginx");
   const [proxyTarget, setProxyTarget] = React.useState("127.0.0.1:3001");
   const [application, setApplication] = React.useState<CreateSiteInput["runtime"]["application"]>();
   const appRuntime = applicationRuntime(kind);
@@ -611,15 +611,16 @@ export function SiteWizard({
                 {existingProject && kind === "php" && <ProjectPlatformCheck project={existingProject.path} version={phpVersion} disabled={creating} />}
                 <div className="flex flex-col gap-1.5">
                   <Label>{t("sites.wizard.webServer")}</Label>
-                  <div className="flex gap-2">
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
                     {[
                       { v: "nginx", label: "Nginx", hintKey: "wz.nginxHint" },
                       { v: "apache", label: "Apache", hintKey: "wz.apacheHint" },
+                      { v: "caddy", label: "Caddy", hintKey: "wz.caddyHint" },
                     ].map((w) => (
                       <button
                         key={w.v}
                         aria-pressed={webServer === w.v}
-                        onClick={() => setWebServer(w.v as "nginx" | "apache")}
+                        onClick={() => setWebServer(w.v as "nginx" | "apache" | "caddy")}
                         className={cn(
                           "flex flex-1 flex-col items-start gap-0.5 rounded-xl border p-3 text-left transition-all",
                           webServer === w.v
@@ -752,10 +753,10 @@ export function SiteWizard({
                     label={t("wz.runtime")}
                     value={
                       kind === "php"
-                        ? `${webServer === "apache" ? "Apache" : "Nginx"} + PHP ${phpVersion || t("wz.phpPending")}`
+                        ? `${webServer === "caddy" ? "Caddy" : webServer === "apache" ? "Apache" : "Nginx"} + PHP ${phpVersion || t("wz.phpPending")}`
                         : isProxy
-                          ? `${webServer === "apache" ? "Apache" : "Nginx"} ${t("sites.proxyP1")} ${normalizedProxyTarget ?? proxyTarget}`
-                          : `${webServer === "apache" ? "Apache" : "Nginx"} · ${t(isRedirect ? "redirect.title" : "sites.static")}`
+                          ? `${webServer === "caddy" ? "Caddy" : webServer === "apache" ? "Apache" : "Nginx"} ${t("sites.proxyP1")} ${normalizedProxyTarget ?? proxyTarget}`
+                          : `${webServer === "caddy" ? "Caddy" : webServer === "apache" ? "Apache" : "Nginx"} · ${t(isRedirect ? "redirect.title" : "sites.static")}`
                     }
                   />
                   {appRuntime && <SummaryRow label={t("appProcess.title")} value={application ? `${appRuntime.label} ${application.version} · ${application.args.join(" · ")}` : t("appProcess.externalHint")} />}

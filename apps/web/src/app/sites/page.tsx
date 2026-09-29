@@ -94,6 +94,7 @@ export default function SitesPage() {
             <SelectItem value="all">{t("sites.allServers")}</SelectItem>
             <SelectItem value="nginx">Nginx</SelectItem>
             <SelectItem value="apache">Apache</SelectItem>
+            <SelectItem value="caddy">Caddy</SelectItem>
           </SelectContent>
         </Select>
         <span className="text-xs tabular-nums text-muted" aria-live="polite">{visibleSites.length} / {sites.length}</span>
@@ -207,7 +208,7 @@ function SiteCard({ site, onOpenDetail }: { site: Site; onOpenDetail: () => void
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5">
-          <Badge variant="outline">{site.runtime.webServer === "apache" ? "Apache" : "Nginx"}</Badge>
+          <Badge variant="outline">{site.runtime.webServer === "caddy" ? "Caddy" : site.runtime.webServer === "apache" ? "Apache" : "Nginx"}</Badge>
           {site.https && <Badge variant="info">HTTPS</Badge>}
           <Badge variant="muted" className="max-w-full break-all whitespace-normal">
             {site.runtime.kind === "php"

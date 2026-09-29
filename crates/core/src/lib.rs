@@ -3,6 +3,7 @@
 pub mod acme;
 pub mod applications;
 pub mod bulk;
+pub mod caddy;
 pub mod certauto;
 pub mod certdeploy;
 pub mod certmonitor;
@@ -1402,7 +1403,9 @@ impl CoreState {
                 return Err(AppError::new("BAD_SITE_ID", "站点标识无效，无法读取日志"));
             }
             let site = sites::get(&self.store, site_id)?;
-            let dir = if site.runtime.web_server == "apache" {
+            let dir = if site.runtime.web_server == "caddy" {
+                self.paths.logs().join("caddy")
+            } else if site.runtime.web_server == "apache" {
                 self.paths.etc().join("apache").join("logs")
             } else {
                 self.paths.logs().join("nginx")

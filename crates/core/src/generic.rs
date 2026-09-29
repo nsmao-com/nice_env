@@ -277,7 +277,7 @@ fn resolve_with_sftpgo_directory(store: &Store, paths: &Paths, service_id: &str,
 }
 
 /// 端口解析不探测或占用端口；实际启动时一次选择主端口及派生端口。
-fn resolve_port(
+pub(crate) fn resolve_port(
     store: &Store,
     service_id: &str,
     entry: &PackageManifestEntry,
@@ -1199,8 +1199,9 @@ fn select_port(store: &Store, r: &Resolved) -> Result<Option<u16>> {
     };
     let original = ports(desired).ok_or_else(|| AppError::new("BAD_PORT", "主端口及派生端口必须位于 1–65535，请调整服务端口"))?;
     let listeners = crate::ports::listeners()?;
+    let caddy_tls = if r.entry.id == "caddy" { Some(crate::caddy::https_port(store)?) } else { None };
     let available = |base| ports(base).is_some_and(|ports| ports.into_iter().all(|port|
-        !listeners.iter().any(|(bound, _)| *bound == port) && tcp_port_bindable(port)
+        Some(port) != caddy_tls && !listeners.iter().any(|(bound, _)| *bound == port) && tcp_port_bindable(port)
             && (!needs_udp(r, base, port) || std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok())));
     if available(desired) { return Ok(Some(desired)); }
     let enabled = match store.get_setting_checked("autoFallbackPort")?.as_deref() {
@@ -1578,6 +1579,10 @@ pub fn start(
         crate::paths::checked_data_path(&paths.base, &crate::paths::nginx_path(&relative))?;
     }
     prepare_config(paths, &r)?;
+    let caddy_snapshot = if r.entry.id == "caddy" {
+        crate::caddy::prepare(paths, store, &r)?;
+        Some(crate::sites::snapshot_endpoints(paths, store, "caddy"))
+    } else { None };
     let qdrant_env = qdrant_snapshot_env(store, paths, manager, &r)?;
     let sftpgo = if managed_sftpgo(&r.entry, &r.spec) { Some(prepare_sftpgo(store, paths, &r)?) } else { None };
     let mut web_target = generic_web_target(&r, sftpgo.as_ref());
@@ -1652,7 +1657,13 @@ pub fn start(
     spawn_tracked(manager, &r.service_id, &spec)?;
 
     let timeout = Duration::from_secs(r.spec.health_timeout_sec.max(3));
-    let healthy = if r.entry.id == "mariadb" {
+    let healthy = if r.entry.id == "caddy" {
+        let mut ports = vec![r.port.unwrap_or(0)];
+        if store.list_sites()?.iter().any(|site| site.runtime.web_server == "caddy" && site.https && crate::sites::derive_status(paths, site) == "running") {
+            ports.push(crate::caddy::https_port(store)?);
+        }
+        wait_owned_ports(manager, &r.service_id, &ports, timeout)
+    } else if r.entry.id == "mariadb" {
         r.port.is_some_and(|port| wait_owned_ports(manager, &r.service_id, &[port], timeout))
     } else if sftpgo.is_some() {
         wait_sftpgo_healthy(manager, &r, timeout)
@@ -1687,7 +1698,7 @@ pub fn start(
             .then(|| rnacos_panic_error(manager, &r));
         if r.entry.id == "coredns" || managed_rnacos(&r) || sftpgo.is_some() { crate::ops::stop_service(store, paths, manager, &r.service_id)?; }
         if let Some(error) = panic_error { return Err(error); }
-        return Err(AppError::new(
+        let error = AppError::new(
             "SERVICE_START_TIMEOUT",
             format!(
                 "{} 启动超时（{}s 内{}）",
@@ -1711,8 +1722,10 @@ pub fn start(
         } else { format!(
             "查看日志页 {} 的最后输出；常见原因是端口冲突、缺少依赖运行库或配置不合法",
             r.service_id
-        ) }));
+        ) });
+        return Err(if r.entry.id == "caddy" { error.with_detail(manager.tail(&r.service_id, 40).join("\n")) } else { error });
     }
+    if let Some(snapshot) = caddy_snapshot { crate::sites::record_endpoints(manager, "caddy", snapshot); }
     if managed_rnacos(&r) { web_target = rnacos_http_target(manager, &r, 2000, "/rnacos/"); }
     if sftpgo.is_some() {
         let relative = r.etc.strip_prefix(&paths.base).map_err(|_| AppError::new("SFTPGO_CONFIG_PATH", "配置目录超出托管目录"))?;

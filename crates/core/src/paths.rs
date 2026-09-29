@@ -106,6 +106,7 @@ impl Paths {
             self.etc().join("apache").join("sites"),
             self.etc().join("apache").join("run"),
             self.etc().join("apache").join("logs"),
+            self.etc().join("caddy").join("sites"),
         ] {
             std::fs::create_dir_all(d)?;
         }
@@ -149,6 +150,9 @@ impl Paths {
     }
     pub fn nginx_sites_dir(&self) -> PathBuf {
         self.etc().join("nginx").join("sites")
+    }
+    pub fn caddy_sites_dir(&self) -> PathBuf {
+        self.etc().join("caddy").join("sites")
     }
     pub fn php_ini(&self, version: &str) -> PathBuf {
         self.etc().join("php").join(version).join("php.ini")

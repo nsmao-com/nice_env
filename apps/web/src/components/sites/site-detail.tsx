@@ -260,7 +260,7 @@ export function SiteDetailSheet({
                 finally { invalidate("sites", "services", "hosts"); reloadingRef.current = false; setReloading(false); }
               }}><Square className="size-3.5" />{t("appProcess.stop")}</Button>}
           </div>
-          <p className="text-xs leading-relaxed text-faint">{t("detail.reloadHint").replace("{server}", site.runtime.webServer === "apache" ? "Apache" : "Nginx")}</p>
+          <p className="text-xs leading-relaxed text-faint">{t("detail.reloadHint").replace("{server}", site.runtime.webServer === "caddy" ? "Caddy" : site.runtime.webServer === "apache" ? "Apache" : "Nginx")}</p>
 
           <Tabs value={tab} onValueChange={setTab}>
             <TabsList className="mb-5 grid h-auto w-full grid-cols-2 gap-1 rounded-2xl sm:flex sm:w-auto sm:flex-wrap">
@@ -332,6 +332,7 @@ export function SiteDetailSheet({
               <SelectContent>
                 <SelectItem value="nginx">Nginx</SelectItem>
                 <SelectItem value="apache">Apache</SelectItem>
+                <SelectItem value="caddy">Caddy</SelectItem>
               </SelectContent>
             </Select>
           </div>

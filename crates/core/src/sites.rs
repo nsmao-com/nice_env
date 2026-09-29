@@ -18,7 +18,9 @@ pub(crate) static SITE_CHANGES: parking_lot::Mutex<()> = parking_lot::Mutex::new
 /// `.conf` 存在 = 已启用（nginx 会加载），`.conf.disabled` = 已停用。
 /// 这比在数据库里存一个会漂移的布尔值可靠 —— 用户手动删过文件也能反映出来。
 pub fn derive_status(paths: &Paths, site: &Site) -> &'static str {
-    let dirs = [if site.runtime.web_server == "apache" {
+    let dirs = [if site.runtime.web_server == "caddy" {
+        paths.caddy_sites_dir()
+    } else if site.runtime.web_server == "apache" {
         paths.apache_sites_dir()
     } else {
         paths.nginx_sites_dir()
@@ -127,6 +129,7 @@ pub(crate) struct SiteEndpointSnapshot {
 }
 
 fn includes_sites(source: &str, paths: &Paths, server: &str) -> bool {
+    if server == "caddy" { return crate::caddy::includes_sites(source, paths); }
     let dir = if server == "apache" { paths.apache_sites_dir() } else { paths.nginx_sites_dir() };
     let pattern = format!("{}/*.conf", dir.to_string_lossy().replace('\\', "/"));
     if server == "nginx" {
@@ -151,15 +154,19 @@ fn includes_sites(source: &str, paths: &Paths, server: &str) -> bool {
 
 /// 在校验配置之后、启动/重载之前读取；失败只关闭快捷入口，不改写用户配置。
 pub(crate) fn snapshot_endpoints(paths: &Paths, store: &Store, server: &str) -> SiteEndpointSnapshot {
-    let main_path = if server == "apache" { paths.apache_conf() } else { paths.nginx_conf() };
+    let main_path = if server == "caddy" { crate::caddy::config_path(paths, store).unwrap_or_default() } else if server == "apache" { paths.apache_conf() } else { paths.nginx_conf() };
     let main_source = std::fs::read_to_string(&main_path).unwrap_or_default();
+    let caddy_config = (server == "caddy").then(|| crate::generic::resolve(store, paths, "caddy").and_then(|r| crate::caddy::adapt(&r, &main_path))).and_then(std::result::Result::ok);
     let sites = store.list_sites().unwrap_or_default().into_iter()
         .filter(|site| site.runtime.web_server == server && includes_sites(&main_source, paths, server))
         .filter_map(|site| {
             if site.id.is_empty() || !site.id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')) { return None; }
             let path = crate::paths::checked_data_path(&paths.base, &format!("etc/{server}/sites/{}.conf", site.id)).ok()?;
             let source = std::fs::read_to_string(&path).ok()?;
-            let endpoint = endpoint_from_config(&site, &source)?;
+            let endpoint = if server == "caddy" {
+                let (url, port) = crate::caddy::endpoint(&site, caddy_config.as_ref()?)?;
+                SiteEndpoint { url, port, domains: site.domains.clone(), https: site.https }
+            } else { endpoint_from_config(&site, &source)? };
             Some((site.id, path, source, endpoint))
         }).collect();
     SiteEndpointSnapshot { main_path, main_source, sites }
@@ -330,8 +337,8 @@ fn validate_site_fields(
             "请选择站点的完整目录路径，路径不能包含配置控制字符",
         ));
     }
-    if !matches!(runtime.web_server.as_str(), "nginx" | "apache") {
-        return Err(AppError::new("BAD_RUNTIME", "请选择 Nginx 或 Apache"));
+    if !matches!(runtime.web_server.as_str(), "nginx" | "apache" | "caddy") {
+        return Err(AppError::new("BAD_RUNTIME", "请选择 Nginx、Apache 或 Caddy"));
     }
     if let Some(cors) = &runtime.cors { crate::sitecors::normalize(cors)?; }
     crate::siteproxy::normalize(runtime)?;
@@ -838,7 +845,7 @@ pub fn update(
     let mut user_ini = UserIniChanges::prepare(store, &current, Some(&original))?;
     let local_certificate_changed = certificate_changed && current.https && current.runtime.uses_default_certificate();
     let mut snapshots = snapshot_site_configs(paths, &current)?;
-    let servers = ["nginx", "apache"].into_iter().enumerate().filter_map(|(index, server)| {
+    let servers = ["nginx", "apache", "caddy"].into_iter().enumerate().filter_map(|(index, server)| {
         (snapshots[index * 2].1.is_some() || (enabled && current.runtime.web_server == server)).then_some(server)
     }).collect();
     let mut web = SiteWebChanges::new(manager, servers);
@@ -1026,11 +1033,11 @@ fn site_config_paths(paths: &Paths, site: &Site) -> Result<Vec<std::path::PathBu
     if site.id.is_empty() || !site.id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')) {
         return Err(AppError::new("BAD_SITE_ID", "站点标识无效，无法操作配置文件"));
     }
-    if !matches!(site.runtime.web_server.as_str(), "nginx" | "apache") {
+    if !matches!(site.runtime.web_server.as_str(), "nginx" | "apache" | "caddy") {
         return Err(AppError::new("BAD_RUNTIME", "站点的 Web 服务类型无效"));
     }
     let mut files = Vec::new();
-    for server in ["nginx", "apache"] {
+    for server in ["nginx", "apache", "caddy"] {
         for suffix in ["conf", "conf.disabled"] {
             files.push(crate::paths::checked_data_path(&paths.base, &format!("etc/{server}/sites/{}.{suffix}", site.id))?);
         }
@@ -1078,7 +1085,7 @@ pub fn delete(
     let _hosts = crate::hosts::HOSTS_CHANGES.lock();
     let site = get(store, id)?;
     let mut files = site_config_paths(paths, &site)?;
-    let servers = ["nginx", "apache"].into_iter().enumerate().filter_map(|(index, server)| files[index * 2].is_file().then_some(server)).collect();
+    let servers = ["nginx", "apache", "caddy"].into_iter().enumerate().filter_map(|(index, server)| files[index * 2].is_file().then_some(server)).collect();
     let mut web = SiteWebChanges::new(manager, servers);
     // 只清理此站点主域名对应的本地签发证书。导入证书、ACME 证书和其它站点
     // 使用的证书保留；别名不能成为删除另一个证书的依据。
@@ -1240,7 +1247,7 @@ fn start_site_inner(
     )?;
     let snapshots = snapshot_site_configs(paths, &site)?;
     let mut user_ini = UserIniChanges::prepare(store, &site, Some(&site))?;
-    let servers: Vec<_> = ["nginx", "apache"].into_iter().enumerate().filter_map(|(index, server)| {
+    let servers: Vec<_> = ["nginx", "apache", "caddy"].into_iter().enumerate().filter_map(|(index, server)| {
         (site.runtime.web_server == server || snapshots[index * 2].1.is_some()).then_some(server)
     }).collect();
     let mut web = SiteWebChanges::new(manager, servers);
@@ -1337,7 +1344,13 @@ fn write_site_conf_state(paths: &Paths, store: &Store, site: &Site, enabled: boo
     crate::certs::validate_site_certificate(paths, store, site)?;
     let extension = if enabled { "conf" } else { "conf.disabled" };
     let ports = PortsProfile::from_settings(store);
-    if site.runtime.web_server == "apache" {
+    if site.runtime.web_server == "caddy" {
+        let (http, https) = crate::caddy::ports(paths, store)?;
+        let php = site.runtime.php_version.as_deref().and_then(|v| store.get_port_assign(&format!("php@{v}")));
+        let conf = crate::caddy::render(site, paths, http, https, php)?;
+        std::fs::create_dir_all(paths.logs().join("caddy"))?;
+        write_with_backup(&paths.caddy_sites_dir().join(format!("{}.{extension}", site.id)), &conf, &paths.backup())?;
+    } else if site.runtime.web_server == "apache" {
         let cert_dir = paths.certs().join("sites");
         let php_pool = match site.runtime.kind {
             crate::model::SiteKind::Php => {
@@ -1377,6 +1390,7 @@ fn write_site_conf_state(paths: &Paths, store: &Store, site: &Site, enabled: boo
     for (server, dir) in [
         ("nginx", paths.nginx_sites_dir()),
         ("apache", paths.apache_sites_dir()),
+        ("caddy", paths.caddy_sites_dir()),
     ] {
         for suffix in ["conf", "conf.disabled"] {
             if server == site.runtime.web_server && suffix == extension {
@@ -5196,7 +5210,7 @@ pub fn stop_many(
 }
 
 fn stop_prepared_sites(paths: &Paths, store: &Store, manager: &Arc<ServiceManager>, pending: &[(Site, SiteConfigSnapshot)]) -> Result<()> {
-    let servers: Vec<_> = ["nginx", "apache"].into_iter().enumerate().filter_map(|(index, server)| {
+    let servers: Vec<_> = ["nginx", "apache", "caddy"].into_iter().enumerate().filter_map(|(index, server)| {
         pending.iter().any(|(_, snapshot)| snapshot[index * 2].1.is_some()).then_some(server)
     }).collect();
     let previous: Vec<_> = servers.iter().map(|server| (*server, manager.snapshot(server))).collect();
@@ -5272,28 +5286,8 @@ fn stop_prepared_sites(paths: &Paths, store: &Store, manager: &Arc<ServiceManage
 
 /// 禁用 vhost（不做 reload）
 fn disable_site_conf(paths: &Paths, site: &Site) -> Result<()> {
-    let web_server = if site.runtime.web_server == "apache" {
-        "apache"
-    } else {
-        "nginx"
-    };
-    let dir = if web_server == "apache" {
-        paths.apache_sites_dir()
-    } else {
-        paths.nginx_sites_dir()
-    };
-    let conf = dir.join(format!("{}.conf", site.id));
-    if conf.exists() {
-        std::fs::rename(&conf, conf.with_extension("conf.disabled"))?;
-    }
-    let other_dir = if web_server == "apache" {
-        paths.nginx_sites_dir()
-    } else {
-        paths.apache_sites_dir()
-    };
-    let other = other_dir.join(format!("{}.conf", site.id));
-    if other.exists() {
-        std::fs::rename(&other, other.with_extension("conf.disabled"))?;
+    for files in site_config_paths(paths, site)?.chunks_exact(2) {
+        if files[0].exists() { std::fs::rename(&files[0], &files[1])?; }
     }
     Ok(())
 }
@@ -5530,11 +5524,13 @@ pub fn read_project_pin(root_dir: &str) -> Option<(String, String)> {
 /// Templates are server-level snippets; they cannot escape the generated virtual host.
 pub fn validate_custom_rewrite(template: &crate::model::CustomRewrite, server: &str) -> Result<()> {
     if template.name.trim().is_empty() || template.name.len() > 240 || template.name.chars().any(char::is_control)
-        || template.server != server || !matches!(server, "nginx" | "apache")
+        || template.server != server || !matches!(server, "nginx" | "apache" | "caddy")
         || template.content.trim().is_empty() || template.content.len() > 65536 || template.content.contains('\0') {
         return Err(AppError::new("BAD_REWRITE", "模板名称、服务器类型或内容无效（内容上限 64 KB）"));
     }
-    if server == "nginx" {
+    if server == "caddy" {
+        crate::caddy::validate_rewrite(&template.content)?;
+    } else if server == "nginx" {
         configgen::nginx_directives(&template.content)?;
     } else if template.content.lines().any(|line| { let line = line.trim(); !line.is_empty() && !line.starts_with('#') && !line.split_whitespace().next().is_some_and(|key| ["RewriteEngine", "RewriteCond", "RewriteRule", "RewriteBase"].iter().any(|allowed| key.eq_ignore_ascii_case(allowed))) }) {
         return Err(AppError::new("BAD_REWRITE", "Apache 模板仅支持 RewriteEngine、RewriteCond、RewriteRule、RewriteBase 和注释"));

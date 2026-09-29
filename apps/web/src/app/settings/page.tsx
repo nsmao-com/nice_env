@@ -80,6 +80,8 @@ const PORT_FIELDS = [
   { key: "mongodb", label: "MongoDB", fallback: { safe: 28017, standard: 27017 } },
   { key: "apacheHttp", label: "Apache", fallback: { safe: 8180, standard: 8080 } },
   { key: "apacheHttps", label: "Apache (HTTPS)", fallback: { safe: 8444, standard: 8443 } },
+  { key: "caddy", label: "Caddy", fallback: { safe: 28080, standard: 8080 } },
+  { key: "caddyHttps", label: "Caddy (HTTPS)", fallback: { safe: 28443, standard: 8445 } },
 ] as const;
 
 /** 左侧分区导航：设置项多了以后，一屏铺 8 张卡很难扫读 */

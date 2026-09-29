@@ -534,7 +534,7 @@ pub fn rewrite_snippet(preset: &RewritePreset) -> &'static str {
 }
 
 /// 显式 ACME 选择引用签发时的主域名文件；导入和默认来源保留原有目录。
-fn site_certificate_files(site: &Site, cert_dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+pub(crate) fn site_certificate_files(site: &Site, cert_dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
     let (directory, stem) = match &site.runtime.imported_cert_id {
         Some(id) => (
             cert_dir.parent().unwrap_or(cert_dir).join("imported"),

@@ -17,6 +17,7 @@ const CONFIGURABLE_SERVICES = new Set([
   "mariadb",
   "redis",
   "apache",
+  "caddy",
   "mihomo",
   "postgresql",
   "mongodb",

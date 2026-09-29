@@ -173,8 +173,10 @@ mod tests {
         for (server, version, variable, port_key, tls_key) in [
             ("nginx","1.28.1","NSB_NGINX_ROOT","http","https"),
             ("apache","2.4.66","NSB_APACHE_ROOT","apacheHttp","apacheHttps"),
+            ("caddy","2.11.4","NSB_VERIFY_CADDY","caddy","caddyHttps"),
         ] {
             if std::env::var("NSB_PROXY_SERVER").is_ok_and(|selected| selected != server) { continue; }
+            if server == "caddy" && std::env::var_os(variable).is_none() { continue; }
             let root = PathBuf::from(std::env::var(variable).expect(variable));
             let temp = tempfile::tempdir().unwrap();
             let state = crate::CoreState::init(Some(temp.path().join("proxy routes with spaces")), Arc::new(|_|{})).unwrap();
@@ -256,12 +258,12 @@ mod tests {
                 state.store.set_port_assign("php@8.4.26",base).unwrap();
                 std::fs::write(project.join("index.php"),"<?php echo 'php-front';").unwrap();
                 site.runtime.kind=SiteKind::Php;site.runtime.php_version=Some("8.4.26".into());
-                site=crate::sites::update(&site,&state.paths,&state.store,&state.manager).unwrap();
+                site=crate::sites::update(&site,&state.paths,&state.store,&state.manager).unwrap_or_else(|error| panic!("{server}: {error:?}; service logs: {:?}", state.tail_logs_checked(server,40).unwrap()));
                 assert_eq!(client.get(format!("{address}/index.php")).send().unwrap().text().unwrap(),"php-front","{server} PHP page");
                 let payload:serde_json::Value=client.get(format!("{address}/api/users.php")).send().unwrap().json().unwrap();assert_eq!(payload["uri"],"/v1/users.php","{server} proxy before PHP");
             }
             site.runtime.kind=SiteKind::ReverseProxy;site.runtime.proxy_target=Some(format!("{source_origin}/default/"));
-            site=crate::sites::update(&site,&state.paths,&state.store,&state.manager).unwrap();
+            site=crate::sites::update(&site,&state.paths,&state.store,&state.manager).unwrap_or_else(|error| panic!("{server}: {error:?}; service logs: {:?}", state.tail_logs_checked(server,40).unwrap()));
             for (path,expected) in [("/home","/default/home"),("/api/users","/v1/users")]{
                 let response=client.get(format!("{address}{path}")).send().unwrap();assert_eq!(response.status().as_u16(),200,"{server} proxy coexistence");
                 let payload:serde_json::Value=response.json().unwrap();assert_eq!(payload["uri"],expected,"{server}");
@@ -273,7 +275,7 @@ mod tests {
             crate::transfer::import_from(&backup,&imported_paths,&imported_store,&Arc::new(crate::services::ServiceManager::new())).unwrap();
             assert_eq!(imported_store.list_sites().unwrap()[0].runtime.proxy_rules.len(),6);
             site.runtime.proxy_rules.clear();
-            crate::sites::update(&site,&state.paths,&state.store,&state.manager).unwrap();
+            crate::sites::update(&site,&state.paths,&state.store,&state.manager).unwrap_or_else(|error| panic!("{server}: {error:?}; service logs: {:?}", state.tail_logs_checked(server,40).unwrap()));
             let payload:serde_json::Value=client.get(format!("{address}/api/users")).send().unwrap().json().unwrap();assert_eq!(payload["uri"],"/default/api/users");
             let pids=state.manager.snapshot(server).unwrap().pids;state.stop_service(server).unwrap();assert!(pids.iter().all(|pid|!platform::process_alive(*pid)));
             println!("{server}: path boundaries, longest match, URI/query/body, HTTPS, scoped redirects, WebSocket, CORS, proxy coexistence, invalid update, backup and removal passed");

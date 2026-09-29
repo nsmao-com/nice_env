@@ -29,6 +29,7 @@ pub enum ConfigKind {
     MariaDbIni,
     RedisConf,
     ApacheConf,
+    CaddyConf,
     MihomoConfig,
     PostgresConf,
     MongoConf,
@@ -43,6 +44,7 @@ impl ConfigKind {
             "mariadb-ini" | "mariadb" => Self::MariaDbIni,
             "redis-conf" | "redis" => Self::RedisConf,
             "apache-conf" | "apache" => Self::ApacheConf,
+            "caddy-conf" | "caddy" => Self::CaddyConf,
             "mihomo-config" | "mihomo" => Self::MihomoConfig,
             "postgres-conf" | "postgresql-conf" | "postgresql" => Self::PostgresConf,
             "mongo-conf" | "mongodb-conf" | "mongodb" => Self::MongoConf,
@@ -58,6 +60,7 @@ impl ConfigKind {
             Self::MariaDbIni => "mariadb-ini",
             Self::RedisConf => "redis-conf",
             Self::ApacheConf => "apache-conf",
+            Self::CaddyConf => "caddy-conf",
             Self::MihomoConfig => "mihomo-config",
             Self::PostgresConf => "postgres-conf",
             Self::MongoConf => "mongo-conf",
@@ -69,6 +72,7 @@ impl ConfigKind {
         match self {
             Self::NginxMain => "nginx",
             Self::ApacheConf => "apache",
+            Self::CaddyConf => "caddy",
             Self::PhpIni => "ini",
             Self::MySqlIni => "ini",
             Self::MariaDbIni => "ini",
@@ -81,7 +85,7 @@ impl ConfigKind {
 
     /// 校验方式：能不能跑真校验器
     pub fn has_validator(&self) -> bool {
-        matches!(self, Self::NginxMain | Self::ApacheConf)
+        matches!(self, Self::NginxMain | Self::ApacheConf | Self::CaddyConf)
     }
 }
 
@@ -107,6 +111,7 @@ impl ConfigTarget {
                     | ConfigKind::RedisConf
                     | ConfigKind::PostgresConf
                     | ConfigKind::MongoConf
+                    | ConfigKind::CaddyConf
             ) || version.is_empty()
                 || version.ends_with('.')
                 || !version
@@ -131,6 +136,7 @@ impl ConfigTarget {
                 | ConfigKind::RedisConf
                 | ConfigKind::PostgresConf
                 | ConfigKind::MongoConf
+                | ConfigKind::CaddyConf
         ) {
             let id = label_of(self.kind).2.unwrap();
             let package = match &self.version {
@@ -160,6 +166,7 @@ impl ConfigTarget {
             ConfigKind::MariaDbIni => paths.mariadb_ini(target.version.as_deref().unwrap()),
             ConfigKind::RedisConf => paths.redis_conf(target.version.as_deref().unwrap()),
             ConfigKind::ApacheConf => paths.apache_conf(),
+            ConfigKind::CaddyConf => paths.etc_dir("caddy", target.version.as_deref().unwrap()).join("Caddyfile"),
             ConfigKind::MihomoConfig => {
                 if crate::ops::installed_by_choice(store, "mihomo").is_none() {
                     return Err(AppError::not_installed("mihomo"));
@@ -232,6 +239,7 @@ pub fn resolve_path(
 
 fn label_of(kind: ConfigKind) -> (&'static str, &'static str, Option<&'static str>) {
     match kind {
+        ConfigKind::CaddyConf => ("Caddyfile", "按版本保存自定义配置；站点导入、监听端口与站点日志由应用维护，保存后重启 Caddy 生效", Some("caddy")),
         ConfigKind::NginxMain => (
             "Nginx 主配置",
             "自定义全局设置在重启后保留；端口、默认站点、PHP 连接池和站点入口由应用维护",
@@ -289,6 +297,7 @@ pub fn list_configs(paths: &Paths, store: &crate::store::Store) -> Vec<ConfigFil
         ConfigKind::MariaDbIni,
         ConfigKind::RedisConf,
         ConfigKind::ApacheConf,
+        ConfigKind::CaddyConf,
         ConfigKind::MihomoConfig,
         ConfigKind::PostgresConf,
         ConfigKind::MongoConf,
@@ -305,6 +314,7 @@ pub fn list_configs(paths: &Paths, store: &crate::store::Store) -> Vec<ConfigFil
                     | ConfigKind::RedisConf
                     | ConfigKind::PostgresConf
                     | ConfigKind::MongoConf
+                    | ConfigKind::CaddyConf
             ) {
                 let id = label_of(kind).2.unwrap();
                 let mut targets: Vec<_> = installed
@@ -347,6 +357,7 @@ pub fn list_configs(paths: &Paths, store: &crate::store::Store) -> Vec<ConfigFil
                 validated: match target.kind {
                     ConfigKind::NginxMain => crate::ops::nginx_exe(store).is_ok(),
                     ConfigKind::ApacheConf => crate::ops::apache_paths(store).is_ok(),
+                    ConfigKind::CaddyConf => crate::generic::resolve(store, paths, &format!("caddy@{}", target.version.as_deref().unwrap())).is_ok(),
                     _ => false,
                 },
                 used_by_service: pkg.map(|s| match &target.version {
@@ -359,6 +370,7 @@ pub fn list_configs(paths: &Paths, store: &crate::store::Store) -> Vec<ConfigFil
                                 | ConfigKind::RedisConf
                                 | ConfigKind::PostgresConf
                                 | ConfigKind::MongoConf
+                                | ConfigKind::CaddyConf
                         ) => {
                         format!("{s}@{v}")
                     }
@@ -432,6 +444,7 @@ pub fn preview_config_reset(
         .collect();
     pools.sort_by(|a, b| a.0.cmp(&b.0));
     let content = match target.kind {
+        ConfigKind::CaddyConf => return Err(AppError::new("CONFIG_RESET_UNSUPPORTED", "Caddy 配置请先启动服务生成，或从配置历史恢复")),
         ConfigKind::NginxMain => {
             let (root, _) = crate::ops::nginx_exe(store)?;
             crate::configgen::render_nginx_conf(
@@ -727,7 +740,7 @@ pub fn lint(kind: ConfigKind, content: &str) -> Vec<ConfigIssue> {
     match kind {
         ConfigKind::NginxMain => lint_nginx(content),
         // Apache 不使用分号或花括号；真实语法由 httpd -t 校验。
-        ConfigKind::ApacheConf => Vec::new(),
+        ConfigKind::ApacheConf | ConfigKind::CaddyConf => Vec::new(),
         ConfigKind::PhpIni | ConfigKind::MySqlIni | ConfigKind::MariaDbIni | ConfigKind::PostgresConf => {
             let mut v = lint_ini(content);
             v.extend(lint_ini_comment_style(content));
@@ -765,6 +778,7 @@ pub fn validate(
     kind: ConfigKind,
     content: &str,
 ) -> Result<ConfigValidation> {
+    if kind == ConfigKind::CaddyConf { return validate_caddy(paths, store, None, content); }
     let runtime = match kind {
         ConfigKind::NginxMain => Some(crate::ops::nginx_exe(store)),
         ConfigKind::ApacheConf => Some(crate::ops::apache_paths(store)),
@@ -991,6 +1005,24 @@ pub(crate) fn run_validator_with_timeout(
     Ok((status.success(), output))
 }
 
+fn validate_caddy(paths: &Paths, store: &crate::store::Store, version: Option<&str>, content: &str) -> Result<ConfigValidation> {
+    let service = version.map_or_else(|| "caddy".into(), |version| format!("caddy@{version}"));
+    let resolved = crate::generic::resolve(store, paths, &service)?;
+    let mut temporary = tempfile::Builder::new().prefix(".nsb-validate-").suffix(".Caddyfile").tempfile_in(&resolved.etc)?;
+    temporary.write_all(content.as_bytes())?; temporary.flush()?;
+    match crate::caddy::adapt(&resolved, temporary.path()) {
+        Ok(_) => Ok(ConfigValidation { ok: true, messages: vec!["Caddy 原生配置校验通过".into()], issues: Vec::new() }),
+        Err(error) => Ok(ConfigValidation { ok: false, messages: vec![error.message.clone()], issues: vec![ConfigIssue {
+            line: 0, severity: "error".into(), message: error.detail.unwrap_or(error.message),
+        }] }),
+    }
+}
+
+fn validate_target(paths: &Paths, store: &crate::store::Store, target: &ConfigTarget, content: &str) -> Result<ConfigValidation> {
+    if target.kind == ConfigKind::CaddyConf { validate_caddy(paths, store, target.version.as_deref(), content) }
+    else { validate(paths, store, target.kind, content) }
+}
+
 pub fn validate_selected(
     paths: &Paths,
     store: &crate::store::Store,
@@ -999,7 +1031,7 @@ pub fn validate_selected(
 ) -> Result<ConfigValidation> {
     let target = ConfigTarget::parse(key)?;
     target.path(paths, store)?;
-    validate(paths, store, target.kind, content)
+    validate_target(paths, store, &target, content)
 }
 
 /// 保存配置：先校验，通过了才写；不通过要么拒绝，要么（force）带备份写入。
@@ -1026,7 +1058,7 @@ pub fn save_config_selected(
 ) -> Result<ConfigValidation> {
     let target = ConfigTarget::parse(key)?.selected(store)?;
     let path = target.path(paths, store)?;
-    let v = validate(paths, store, target.kind, content)?;
+    let v = validate_target(paths, store, &target, content)?;
     if !v.ok && !force {
         return Err(AppError::new("CONFIG_INVALID", "配置校验未通过，未写入")
             .with_hint("按提示改好再保存；确实需要跳过校验可以用「强制保存」")
@@ -1189,6 +1221,7 @@ fn backup_target(name: &str) -> Option<ConfigTarget> {
                         | ConfigKind::RedisConf
                         | ConfigKind::PostgresConf
                         | ConfigKind::MongoConf
+                        | ConfigKind::CaddyConf
                 )
             {
                 return None;
@@ -1217,6 +1250,7 @@ pub(crate) fn backup_relative_target(name: &str) -> Option<String> {
     Some(match target.kind {
         ConfigKind::NginxMain => "etc/nginx/nginx.conf".into(),
         ConfigKind::ApacheConf => "etc/apache/httpd.conf".into(),
+        ConfigKind::CaddyConf => format!("etc/caddy/{}/Caddyfile", target.version?),
         ConfigKind::MihomoConfig => "etc/mihomo/config.yaml".into(),
         ConfigKind::PhpIni => format!("etc/php/{}/php.ini", target.version?),
         ConfigKind::MySqlIni => format!("etc/mysql/{}/my.ini", target.version?),
@@ -1232,6 +1266,7 @@ pub(crate) fn config_key_for_relative(relative: &str) -> Option<String> {
     let key = match parts.as_slice() {
         ["etc", "nginx", "nginx.conf"] => "nginx-main".into(),
         ["etc", "apache", "httpd.conf"] => "apache-conf".into(),
+        ["etc", "caddy", version, "Caddyfile"] => format!("caddy-conf@{version}"),
         ["etc", "mihomo", "config.yaml"] => "mihomo-config".into(),
         ["etc", "php", version, "php.ini"] => format!("php-ini@{version}"),
         ["etc", "mysql", version, "my.ini"] => format!("mysql-ini@{version}"),

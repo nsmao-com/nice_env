@@ -52,7 +52,7 @@ export function scannedProjectProblem(project: ScannedProject, draft: ProjectDra
   return null;
 }
 
-export function scannedSiteInput(project: ScannedProject, draft: ProjectDraft, webServer: "nginx" | "apache", https: boolean): CreateSiteInput {
+export function scannedSiteInput(project: ScannedProject, draft: ProjectDraft, webServer: "nginx" | "apache" | "caddy", https: boolean): CreateSiteInput {
   return {
     name: project.name,
     domains: [draft.domain.trim().toLowerCase()],
@@ -81,7 +81,7 @@ export function ProjectScannerDialog({ open, onOpenChange, onCreated }: {
   const packageQuery = usePackages();
   const siteQuery = useSites();
   const phpVersions = [...new Set(packageQuery.data.filter((p) => p.id === "php" && p.install).map((p) => p.version))].sort(cmpVersionDesc);
-  const webServers = (["nginx", "apache"] as const).filter((id) => packageQuery.data.some((p) => p.id === id && p.install));
+  const webServers = (["nginx", "apache", "caddy"] as const).filter((id) => packageQuery.data.some((p) => p.id === id && p.install));
   const defaultWeb = webServers[0];
   const occupied = new Set(siteQuery.data.flatMap((site) => site.domains.map((domain) => domain.toLowerCase())));
   const [root, setRoot] = React.useState("");
@@ -96,7 +96,7 @@ export function ProjectScannerDialog({ open, onOpenChange, onCreated }: {
   const [error, setError] = React.useState("");
   const [query, setQuery] = React.useState("");
   const [page, setPage] = React.useState(1);
-  const [webServer, setWebServer] = React.useState<"nginx" | "apache" | "">("");
+  const [webServer, setWebServer] = React.useState<"nginx" | "apache" | "caddy" | "">("");
   const [bulkPhp, setBulkPhp] = React.useState("");
   const [https, setHttps] = React.useState(false);
   const [attempted, setAttempted] = React.useState(false);
@@ -259,8 +259,8 @@ export function ProjectScannerDialog({ open, onOpenChange, onCreated }: {
             <p className="text-xs font-medium">{t("scanSetup.settings")}</p>
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-1.5"><Label htmlFor="scan-web">{t("sites.wizard.webServer")}</Label>
-                <Select value={webServer} disabled={busy || !webServers.length} onValueChange={(value) => setWebServer(value as "nginx" | "apache")}>
-                  <SelectTrigger id="scan-web"><SelectValue placeholder={t("scanSetup.webRequired")} /></SelectTrigger><SelectContent>{webServers.map((id) => <SelectItem key={id} value={id}>{id === "nginx" ? "Nginx" : "Apache"}</SelectItem>)}</SelectContent>
+                <Select value={webServer} disabled={busy || !webServers.length} onValueChange={(value) => setWebServer(value as "nginx" | "apache" | "caddy")}>
+                  <SelectTrigger id="scan-web"><SelectValue placeholder={t("scanSetup.webRequired")} /></SelectTrigger><SelectContent>{webServers.map((id) => <SelectItem key={id} value={id}>{id === "caddy" ? "Caddy" : id === "nginx" ? "Nginx" : "Apache"}</SelectItem>)}</SelectContent>
                 </Select>
               </div>
               <div className="space-y-1.5"><Label htmlFor="scan-php-all">{t("scanSetup.bulkPhp")}</Label>
@@ -273,7 +273,7 @@ export function ProjectScannerDialog({ open, onOpenChange, onCreated }: {
             <p className="text-xs leading-relaxed text-muted">{t("scanSetup.phpHint")}</p>
             <label className="flex items-center justify-between gap-3 text-xs"><span>{t("sites.wizard.https")}</span><Switch checked={https} disabled={busy} onCheckedChange={setHttps} /></label>
             <p className="text-xs leading-relaxed text-muted">{t(https ? "scanSetup.httpsHint" : "scanSetup.preserve")}</p>
-            {(queryError || missingPhp || !webServers.length || !webServers.includes(webServer as "nginx" | "apache")) && <div role="alert" className="space-y-2 text-xs text-error">
+            {(queryError || missingPhp || !webServers.length || !webServers.includes(webServer as "nginx" | "apache" | "caddy")) && <div role="alert" className="space-y-2 text-xs text-error">
               <p className="[overflow-wrap:anywhere]">{queryError ? normalizeError(queryError).message : t(missingPhp && webServers.length ? "scanSetup.phpRequired" : "scanSetup.webRequired")}</p>
               <div className="flex flex-wrap gap-2"><Button size="sm" variant="secondary" disabled={busy} onClick={() => { void packageQuery.refetch(); void siteQuery.refetch(); }}>{t("siteFiles.retry")}</Button>
                 <Button size="sm" variant="ghost" disabled={busy} onClick={() => { if (!busyRef.current) { onOpenChange(false); router.push("/packages"); } }}>{t("scanSetup.packages")}</Button></div>
@@ -353,7 +353,7 @@ export function ProjectScannerDialog({ open, onOpenChange, onCreated }: {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <span className="text-xs text-muted">{t("scanner.selected").replace("{n}", String(selected.length))}</span>
           <div className="flex flex-wrap gap-2"><Button variant="ghost" disabled={busy} onClick={() => onOpenChange(false)}>{t("common.close")}</Button>
-            <Button disabled={busy || !selected.length || !webServer || !webServers.includes(webServer as "nginx" | "apache") || !!queryError} onClick={() => void createAll()}>{mode === "creating" && <Loader2 className="size-4 animate-spin motion-reduce:animate-none" />}{t("scanner.createN").replace("{n}", String(selected.length))}</Button>
+            <Button disabled={busy || !selected.length || !webServer || !webServers.includes(webServer as "nginx" | "apache" | "caddy") || !!queryError} onClick={() => void createAll()}>{mode === "creating" && <Loader2 className="size-4 animate-spin motion-reduce:animate-none" />}{t("scanner.createN").replace("{n}", String(selected.length))}</Button>
           </div>
         </div>
       </div>

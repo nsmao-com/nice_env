@@ -44,7 +44,7 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, {
   const colors = useCodePalette();
   const [wrap, setWrap] = React.useState(false);
   const [error, setError] = React.useState("");
-  const lang = language === "apache" ? "apache" : language === "ini" ? "ini" : guessLang(language);
+  const lang = language === "caddy" ? "shell" : language === "apache" ? "apache" : language === "ini" ? "ini" : guessLang(language);
   const format = () => {
     const view = editor.current?.view;
     if (!view || readOnly) return;

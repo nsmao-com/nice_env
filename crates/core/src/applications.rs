@@ -193,7 +193,10 @@ fn launch_spec(paths: &Paths, store: &Store, site: &Site) -> Result<(SpawnSpec, 
     let app = site.runtime.application.as_ref().unwrap();
     let target = target(&site.runtime)?;
     let ports = crate::services::PortsProfile::from_settings(store);
-    let web_ports = if site.runtime.web_server == "apache" {
+    let web_ports = if site.runtime.web_server == "caddy" {
+        let (http, https) = crate::caddy::ports(paths, store)?;
+        [http, https]
+    } else if site.runtime.web_server == "apache" {
         [ports.apache_http, ports.apache_https]
     } else {
         [ports.http, ports.https]

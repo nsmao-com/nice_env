@@ -383,7 +383,7 @@ export const RewritePreset = z.enum([
 ]);
 export type RewritePreset = z.infer<typeof RewritePreset>;
 
-export const CustomRewrite = z.object({ name: z.string().min(1).max(80), server: z.enum(["nginx", "apache"]), content: z.string().min(1).max(65536) });
+export const CustomRewrite = z.object({ name: z.string().min(1).max(80), server: z.enum(["nginx", "apache", "caddy"]), content: z.string().min(1).max(65536) });
 export type CustomRewrite = z.infer<typeof CustomRewrite>;
 export const SiteRedirect = z.object({ target: z.string(), status: z.union([z.literal(301), z.literal(302), z.literal(307), z.literal(308)]), preservePath: z.boolean() });
 export type SiteRedirect = z.infer<typeof SiteRedirect>;
@@ -405,7 +405,7 @@ export const SiteRuntime = z.object({
   customRewrite: CustomRewrite.optional(),
   importedCertId: z.string().optional(),
   acmeCertId: z.string().optional(),
-  webServer: z.enum(["nginx", "apache"]).default("nginx"),
+  webServer: z.enum(["nginx", "apache", "caddy"]).default("nginx"),
   kind: SiteKind,
   application: z.object({
     version: z.string(),

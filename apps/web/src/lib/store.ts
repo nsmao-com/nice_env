@@ -10,7 +10,7 @@ import { translate } from "./i18n";
 
 export type ExistingProjectDefaults = {
   domain?: string; phpVersion?: string; proxyTarget?: string;
-  webServer?: "nginx" | "apache"; https?: boolean;
+  webServer?: "nginx" | "apache" | "caddy"; https?: boolean;
 };
 
 interface UIState {

@@ -11,16 +11,17 @@ import {
   Loader2,
   Save,
   RotateCcw,
+  RotateCw,
   ShieldCheck,
   Undo2,
   AlertTriangle,
   XCircle,
   ExternalLink,
 } from "lucide-react";
-import type { ConfigBackup, ConfigFileInfo, ConfigValidation } from "@nsb/schema";
+import type { ConfigBackup, ConfigFileInfo, ConfigValidation, ServiceStatus, ServiceStopPreview } from "@nsb/schema";
 import { useQuery } from "@tanstack/react-query";
 import { useT } from "@/lib/store";
-import { useInvalidate, toastError } from "@/lib/hooks";
+import { useInvalidate, toastError, serviceHasProcess } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import { normalizeError } from "@/lib/backend";
 import { cn } from "@/lib/utils";
@@ -69,6 +70,15 @@ function configForService(files: ConfigFileInfo[], service: string) {
   const base = service.split("@")[0];
   if (!["nginx", "apache", "mihomo"].includes(base)) return undefined;
   return files.find((file) => file.usedByService === base && !file.kind.includes("@"));
+}
+
+/** 单实例服务以基础 ID 注册，也必须核对版本；不能把旧版本配置应用到当前新版。 */
+function serviceForConfig(info: ConfigFileInfo, services: ServiceStatus[]) {
+  if (!info.usedByService) return undefined;
+  const [id, version] = info.usedByService.split("@");
+  return services.find((service) => version
+    ? (service.id === info.usedByService || service.id === id) && service.version === version
+    : service.id === id);
 }
 
 /**
@@ -227,6 +237,8 @@ function ConfigEditSession({
   const [saving, setSaving] = React.useState(false);
   const [validating, setValidating] = React.useState(false);
   const [rollingBack, setRollingBack] = React.useState(false);
+  const [applying, setApplying] = React.useState(false);
+  const [confirmApply, setConfirmApply] = React.useState<(ServiceStopPreview & { restart: boolean }) | null>(null);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [actionError, setActionError] = React.useState<string | null>(null);
   const [historyError, setHistoryError] = React.useState(false);
@@ -243,7 +255,7 @@ function ConfigEditSession({
   const [confirmRollback, setConfirmRollback] = React.useState<ConfigBackup | null>(null);
   const editorRef = React.useRef<CodeEditorHandle>(null);
 
-  const busy = saving || validating || rollingBack;
+  const busy = saving || validating || rollingBack || applying;
 
   // 后端按 kind 解析当前目录；恢复旧目录草稿前先核对目标，避免写入同名的新配置。
   const verifyTarget = React.useCallback(async () => {
@@ -400,6 +412,54 @@ function ConfigEditSession({
     } finally {
       actionRef.current = false;
       if (alive.current) setRollingBack(false);
+    }
+  };
+
+  const prepareApply = async () => {
+    if (actionRef.current || reading.current || !hasLoaded || loadError || dirty || !info.usedByService) return;
+    actionRef.current = true;
+    setApplying(true);
+    setActionError(null);
+    try {
+      await verifyTarget();
+      const service = serviceForConfig(info, await api.listServiceStatus());
+      if (!service) throw new Error(t("cfgeditor.applyServiceMissing"));
+      const preview = await api.serviceStopPreview(service.id);
+      if (!serviceForConfig(info, [preview.service])) throw new Error(t("cfgeditor.applyServiceMissing"));
+      if (["starting", "stopping", "unknown"].includes(preview.service.state)) throw new Error(t("cfgeditor.applyServiceBusy"));
+      if (preview.service.missingRequires.length) throw new Error(t("svc.needDepsHint"));
+      if (await api.configRead(info.kind) !== original) throw new Error(t("cfgeditor.applyConflict"));
+      if (alive.current) setConfirmApply({ ...preview, restart: serviceHasProcess(preview.service) });
+    } catch (e) {
+      if (alive.current) setActionError(normalizeError(e).message);
+      else toastError(e);
+    } finally {
+      actionRef.current = false;
+      if (alive.current) setApplying(false);
+    }
+  };
+
+  const apply = async () => {
+    if (!confirmApply || actionRef.current || reading.current || !hasLoaded || loadError || dirty) return;
+    actionRef.current = true;
+    setApplying(true);
+    setActionError(null);
+    try {
+      await api.configApply(info.kind, info.path, original, confirmApply.service.id, confirmApply.revision, confirmApply.restart);
+      const message = t(confirmApply.restart ? "cfgeditor.appliedRestart" : "cfgeditor.appliedStart").replace("{s}", confirmApply.service.label);
+      toast.success(message);
+      if (alive.current) {
+        await reload();
+        if (alive.current) setNotice(message);
+      }
+    } catch (e) {
+      const err = normalizeError(e);
+      if (alive.current) { setNotice(null); setActionError(`${err.message}${err.hint ? ` — ${err.hint}` : ""}`); }
+      else toastError(e);
+    } finally {
+      invalidate("services", "sites", "stacks", "config-files");
+      actionRef.current = false;
+      if (alive.current) { setApplying(false); setConfirmApply(null); }
     }
   };
 
@@ -584,8 +644,12 @@ function ConfigEditSession({
               </details>
             )}
           </div>
-          <DialogFooter className="shrink-0 border-t border-border px-4 py-3 sm:px-5">
+          <DialogFooter className="shrink-0 flex-wrap border-t border-border px-4 py-3 sm:px-5">
             <Button variant="ghost" onClick={close} disabled={busy}>{t("common.close")}</Button>
+            {info.usedByService && <Button variant="secondary" onClick={() => void prepareApply()} disabled={dirty || busy || loading || !!loadError || !hasLoaded} title={dirty ? t("cfgeditor.applySaveFirst") : t("cfgeditor.apply")}>
+              {applying ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCw className="h-3.5 w-3.5" />}
+              {t("cfgeditor.apply")}
+            </Button>}
             <Button onClick={() => void save(false)} disabled={!dirty || busy || loading || !!loadError}>
               {saving || rollingBack ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
               {t("common.save")}
@@ -593,6 +657,14 @@ function ConfigEditSession({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDialog open={confirmApply !== null} onOpenChange={(open) => { if (!open && !actionRef.current) setConfirmApply(null); }}
+        title={t(confirmApply?.restart ? "cfgeditor.applyRestartTitle" : "cfgeditor.applyStartTitle")}
+        description={t(confirmApply?.restart ? "cfgeditor.applyRestartDesc" : "cfgeditor.applyStartDesc").replace("{s}", confirmApply ? `${confirmApply.service.label}${confirmApply.service.version ? ` · ${confirmApply.service.version}` : ""}` : "")}
+        confirmText={t(confirmApply?.restart ? "cfgeditor.applyRestart" : "cfgeditor.applyStart")}
+        loading={applying} confirmDisabled={dirty || loading || !!loadError} onConfirm={() => void apply()}>
+        <p className="text-xs text-muted [overflow-wrap:anywhere]">{info.path}</p>
+      </ConfirmDialog>
 
       <ConfirmDialog open={discard !== null} onOpenChange={(open) => !open && setDiscard(null)}
         title={t("cfgeditor.discardTitle")} description={t("cfgeditor.discardDesc")}

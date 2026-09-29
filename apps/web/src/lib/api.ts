@@ -485,6 +485,8 @@ export const configSave = (kind: string, content: string, force = false, expecte
 export const configBackups = (kind?: string) => safe(invoke<ConfigBackup[]>("config_backups", { kind }));
 export const configRollback = (name: string, kind?: string, expectedContent?: string) =>
   safe(invoke<boolean>("config_rollback", { name, kind, expectedContent }));
+export const configApply = (kind: string, expectedPath: string, expectedContent: string, serviceId: string, revision: string, restart: boolean) =>
+  safe(invoke<boolean>("config_apply", { kind, expectedPath, expectedContent, serviceId, revision, restart }));
 
 /* 证书体检 */
 export const certHealth = () => safe(invoke<CertReport>("cert_health"));

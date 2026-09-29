@@ -341,6 +341,7 @@ pub fn run() {
             config_save,
             config_backups,
             config_rollback,
+            config_apply,
             config_reset_preview,
             config_reset,
             // PHP 扩展
@@ -3998,6 +3999,22 @@ async fn project_platform_check(
 }
 
 /* ================= 配置文件编辑 ================= */
+
+#[tauri::command]
+async fn config_apply(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    kind: String,
+    expected_path: String,
+    expected_content: String,
+    service_id: String,
+    revision: String,
+    restart: bool,
+) -> Result<bool, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(st.apply_config(&kind, &expected_path, &expected_content, &service_id, &revision, restart).map(|_| true))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
 
 #[tauri::command]
 fn config_list(

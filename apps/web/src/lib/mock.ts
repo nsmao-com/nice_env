@@ -1047,10 +1047,10 @@ async function runServiceAction(action: "start_service" | "stop_service" | "rest
 }
 
 const serviceRunRevisions = new Map<string, number>();
-function stopPreview(id: string) {
+function stopPreview(id: string, operationHeld = false) {
   const service = services.get(id);
   if (!service) throw { code: "UNKNOWN_SERVICE", message: "服务未注册或已卸载" };
-  if (serviceActionInProgress || ["starting", "stopping"].includes(service.state)) throw { code: "SERVICE_BUSY", message: "服务正在操作，请稍后重新读取" };
+  if ((!operationHeld && serviceActionInProgress) || ["starting", "stopping"].includes(service.state)) throw { code: "SERVICE_BUSY", message: "服务正在操作，请稍后重新读取" };
   return { service: structuredClone(service), revision: JSON.stringify([id, service.version, service.port, service.pids, serviceRunRevisions.get(id) ?? 0]) };
 }
 
@@ -2294,6 +2294,23 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       }
       return files as T;
     }
+    case "config_apply": return withServiceOperation(async () => {
+      const files = await mockInvoke<ConfigFileInfo[]>("config_list");
+      const file = files.find((entry) => entry.kind === args!.kind && entry.path === args!.expectedPath && entry.exists);
+      if (!file) throw { code: "CONFIG_TARGET_CHANGED", message: "配置路径已变化或文件不存在，请重新打开配置" };
+      const current = stopPreview(String(args!.serviceId), true);
+      const service = current.service;
+      const [id, version] = (file.usedByService ?? "").split("@");
+      if (!(version ? (service.id === id || service.id === file.usedByService) && service.version === version : service.id === id)) {
+        throw { code: "CONFIG_SERVICE_MISMATCH", message: "当前服务实例不使用这份配置，请检查所选版本" };
+      }
+      const restart = service.state === "running" || service.pids.length > 0;
+      if (!args!.revision || current.revision !== args!.revision || args!.restart !== restart) throw { code: "CONFIG_SERVICE_CHANGED", message: "服务版本或运行状态已变化，请重新确认应用配置" };
+      if (service.state === "unknown") throw { code: "SERVICE_STATE_UNKNOWN", message: "无法确认服务状态，请先到服务页检查" };
+      if (currentConfigContent(file.kind) !== args!.expectedContent) throw { code: "CONFIG_CONFLICT", message: "配置已被其他操作修改，未启动或重启服务" };
+      if (service.missingRequires.length) throw { code: "MISSING_DEPENDENCIES", message: "请先安装所需依赖" };
+      return performServiceAction(restart ? "restart_service" : "start_service", service.id);
+    }) as Promise<T>;
     case "config_read": {
       const key = args!.kind as string;
       return currentConfigContent(key) as T;

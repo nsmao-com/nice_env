@@ -1516,6 +1516,50 @@ impl CoreState {
         cfgeditor::rollback_config_selected(&self.paths, &self.store, name, kind, expected)
     }
 
+    /// 应用已保存的配置；在同一服务操作锁内核对文件与确认过的进程身份，再启停。
+    pub fn apply_config(
+        &self,
+        kind: &str,
+        expected_path: &str,
+        expected_content: &str,
+        service_id: &str,
+        revision: &str,
+        restart: bool,
+    ) -> Result<()> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| {
+            AppError::new("SERVICE_BUSY", "服务正在操作，请稍后应用配置")
+        })?;
+        ensure_application_accepts_work()?;
+        let file = cfgeditor::list_configs(&self.paths, &self.store).into_iter()
+            .find(|file| file.kind == kind && file.path == expected_path && file.exists)
+            .ok_or_else(|| AppError::new("CONFIG_TARGET_CHANGED", "配置路径已变化或文件不存在，请重新打开配置"))?;
+        let current = ops::service_stop_preview(&self.manager, service_id)?;
+        let service = &current.service;
+        let matches_target = file.used_by_service.as_deref().is_some_and(|target| {
+            match target.split_once('@') {
+                Some((id, version)) => (service.id == id || service.id == target)
+                    && service.version.as_deref() == Some(version),
+                None => service.id == target,
+            }
+        });
+        if !matches_target {
+            return Err(AppError::new("CONFIG_SERVICE_MISMATCH", "当前服务实例不使用这份配置，请检查所选版本"));
+        }
+        let has_process = service.state == model::ServiceState::Running || !service.pids.is_empty();
+        if revision.is_empty() || current.revision != revision || restart != has_process {
+            return Err(AppError::new("CONFIG_SERVICE_CHANGED", "服务版本或运行状态已变化，请重新确认应用配置"));
+        }
+        if service.state == model::ServiceState::Unknown {
+            return Err(AppError::new("SERVICE_STATE_UNKNOWN", "无法确认服务状态，请先到服务页检查"));
+        }
+        if cfgeditor::read_config_selected(&self.paths, &self.store, kind)? != expected_content {
+            return Err(AppError::new("CONFIG_CONFLICT", "配置已被其他操作修改，未启动或重启服务")
+                .with_hint("重新读取并检查最新配置后再应用"));
+        }
+        if restart { self.restart_service(service_id) } else { self.start_service(service_id) }
+    }
+
     /* ---------- PHP 扩展 ---------- */
 
     /// 某版本 PHP 的扩展面板：磁盘上有什么 + php.ini 里开了什么

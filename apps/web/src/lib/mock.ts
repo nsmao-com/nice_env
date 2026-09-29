@@ -458,8 +458,7 @@ const mockDnsStatus = new Map<string, import("./api").DnsInterfaceStatus>(mockDn
   current: { interfaceId: name, automatic: name !== "Ethernet", servers: name === "Ethernet" ? ["9.9.9.9", "1.1.1.1"] : [] },
   backup: null, local: false,
 }]));
-const activeDownloads = new Set<string>();
-const cancelledDownloads = new Set<string>();
+const activeDownloads = new Map<string, { requestId?: string; cancelled: boolean; committing: boolean }>();
 const settings: AppSettings = {
   rewriteTemplates: [],
   language: "zh",
@@ -1415,9 +1414,12 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "cancel_download": {
       const taskId = args?.taskId as string | undefined;
       if (!taskId) return false as T;
-      const matches = Array.from(activeDownloads).filter((key) => key === taskId || (!taskId.includes("@") && key.startsWith(`${taskId}@`)));
-      if (matches.length !== 1) return false as T;
-      cancelledDownloads.add(matches[0]);
+      const requestId = args?.requestId as string | undefined;
+      const matches = Array.from(activeDownloads).filter(([key, control]) => requestId !== undefined
+        ? control.requestId === requestId && key.split("@")[0] === taskId.split("@")[0]
+        : control.requestId === undefined && (key === taskId || (!taskId.includes("@") && key.startsWith(`${taskId}@`))));
+      if (matches.length !== 1 || matches[0][1].committing) return false as T;
+      matches[0][1].cancelled = true;
       return true as T;
     }
     case "set_active_version": {
@@ -1451,15 +1453,22 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         : Array.from(packages.values()).filter((pkg) => pkg.id === requested).sort((a, b) => cmpVersionDesc(a.version, b.version))[0];
       if (!p) throw { code: "PACKAGE_NOT_FOUND", message: `找不到套件 ${requested}` };
       const key = `${p.id}@${p.version}`;
-      if (activeDownloads.has(key)) throw { code: "DOWNLOAD_BUSY", message: `${key} 正在安装` };
-      activeDownloads.add(key);
+      const requestId = args?.requestId as string | undefined;
+      if (requestId !== undefined && (typeof requestId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId))) {
+        throw { code: "INVALID_INSTALL_REQUEST", message: "非法的安装请求标识" };
+      }
+      if (activeDownloads.has(key) || (requestId !== undefined && Array.from(activeDownloads.values()).some((task) => task.requestId === requestId))) {
+        throw { code: "PACKAGE_BUSY", message: `${key} 正在安装` };
+      }
+      const control = { requestId, cancelled: false, committing: false };
+      activeDownloads.set(key, control);
       const total = p.sizeBytes || 0;
       const report = (state: DownloadProgress["state"], ratio: number, error?: string) => emitLocal("download://progress", {
-        taskId: key, received: Math.round(total * ratio), total,
+        taskId: key, requestId, received: Math.round(total * ratio), total,
         speedBps: state === "downloading" ? total / 2 : 0, etaSec: 0, state, error,
       } satisfies DownloadProgress);
       const checkCancelled = () => {
-        if (cancelledDownloads.has(key)) throw { code: "CANCELLED", message: "安装已取消" };
+        if (control.cancelled) throw { code: "CANCELLED", message: "安装已取消" };
       };
       try {
         // 浏览器预览沿用桌面端事件结构；仅模拟阶段，不下载或写入本机文件。
@@ -1474,7 +1483,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           checkCancelled();
         }
         // 与原生提交阶段一致，此后不再接受取消。
-        activeDownloads.delete(key);
+        control.committing = true;
         report("configuring", 1);
         p.install = {
           version: p.version,
@@ -1490,8 +1499,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         report(error.code === "CANCELLED" ? "cancelled" : "error", 0, error.message);
         throw e;
       } finally {
-        activeDownloads.delete(key);
-        cancelledDownloads.delete(key);
+        if (activeDownloads.get(key) === control) activeDownloads.delete(key);
       }
     }
     case "uninstall_package": {

@@ -671,12 +671,13 @@ fn list_packages(
 async fn install_package(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
+    request_id: Option<String>,
 ) -> Result<nsb_core::model::PackageInstallResult, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         tauri::async_runtime::block_on(async move {
-            map_jh(st.install_package_with_result(&id).await)
+            map_jh(st.install_package_with_result(&id, request_id.as_deref()).await)
         })
     })
     .await
@@ -843,8 +844,9 @@ async fn version_catalogs(
 fn cancel_download(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     task_id: String,
+    request_id: Option<String>,
 ) -> Result<bool, tauri::Error> {
-    Ok(state.downloader.cancel(&task_id))
+    Ok(state.downloader.cancel_request(&task_id, request_id.as_deref()))
 }
 
 /* ================= 服务 ================= */

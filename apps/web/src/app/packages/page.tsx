@@ -758,7 +758,8 @@ function PackageRow({
 
   const pct = task && task.total > 0 ? Math.min(100, (task.received / task.total) * 100) : 0;
   const downloading = task?.state === "downloading";
-  const cancelling = useInstallTasks((s) => task ? !!s.tasks[task.taskId]?.cancelRequested : false);
+  const activeInstallTask = task?.requestId ? Object.values(installTasks).find((item) => item.status === "running" && item.requestId === task.requestId) : undefined;
+  const cancelling = !!activeInstallTask?.cancelRequested;
   const stageLabel = task?.state === "extracting" ? t("install.stage.extract")
     : task?.state === "configuring" ? t("install.stage.config")
     : task?.state === "downloaded" || task?.state === "verifying" ? t("install.stage.verify")
@@ -949,8 +950,8 @@ function PackageRow({
               size="sm"
               variant="ghost"
               className="h-6 px-2 text-[10px] text-faint"
-              onClick={() => void cancelInstall(task.taskId)}
-              disabled={cancelling || task.state === "configuring"}
+              onClick={() => { if (activeInstallTask) void cancelInstall(activeInstallTask.key); }}
+              disabled={!activeInstallTask || cancelling || task.state === "configuring"}
             >
               {t("common.cancel")}
             </Button>

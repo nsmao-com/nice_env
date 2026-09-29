@@ -131,6 +131,7 @@ impl Event {
     ) -> Self {
         Event::DownloadProgress(DownloadProgress {
             task_id: task_id.to_string(),
+            request_id: None,
             received,
             total,
             speed_bps: speed,
@@ -142,6 +143,7 @@ impl Event {
     pub fn state(task_id: &str, state: &str) -> Self {
         Event::DownloadProgress(DownloadProgress {
             task_id: task_id.to_string(),
+            request_id: None,
             received: 0,
             total: 0,
             speed_bps: 0,
@@ -325,6 +327,7 @@ impl CoreState {
             parts.extend(orphans.unresolved.iter().cloned());
             (state.emit)(Event::DownloadProgress(model::DownloadProgress {
                 task_id: "orphans".into(),
+                request_id: None,
                 received: 0,
                 total: 0,
                 speed_bps: 0,
@@ -377,14 +380,14 @@ impl CoreState {
     }
 
     pub async fn install_package(&self, key: &str) -> Result<model::InstalledPackage> {
-        self.install_package_with_result(key).await.map(|result| result.installed)
+        self.install_package_with_result(key, None).await.map(|result| result.installed)
     }
 
     /// 安装成功与后续环境变量同步分别报告，不能因 PATH 失败要求重新安装。
-    pub async fn install_package_with_result(&self, key: &str) -> Result<model::PackageInstallResult> {
+    pub async fn install_package_with_result(&self, key: &str, request_id: Option<&str>) -> Result<model::PackageInstallResult> {
         let installed = self
             .installer
-            .install(key, &self.paths, &self.store, &self.downloader, &|e| {
+            .install_for_request(key, request_id, &self.paths, &self.store, &self.downloader, &|e| {
                 (self.emit)(e)
             })
             .await?;

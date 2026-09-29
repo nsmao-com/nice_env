@@ -821,6 +821,7 @@ fn run_once_registered(state: &CoreState, id: &str, _work: crate::BackgroundWork
     if let Some(Err(ne)) = notify_result {
         (state.emit)(Event::DownloadProgress(model::DownloadProgress {
             task_id: format!("certauto-notify-{}", a.id), received: 0, total: 0, speed_bps: 0, eta_sec: 0.0,
+            request_id: None,
             state: "notify-failed".into(), error: Some(ne.to_string()),
         }));
     }

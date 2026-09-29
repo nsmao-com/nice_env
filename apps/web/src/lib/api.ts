@@ -120,12 +120,12 @@ export const stopStack = (id: string) =>
 
 /* 套件 */
 export const listPackages = () => safe(invoke<PackageView[]>("list_packages"));
-export const installPackage = (id: string) =>
-  safe(invoke<PackageInstallResult>("install_package", { id }));
+export const installPackage = (id: string, requestId?: string) =>
+  safe(invoke<PackageInstallResult>("install_package", { id, requestId }));
 export const uninstallPackage = (id: string) =>
   safe(invoke<boolean>("uninstall_package", { id }));
-export const cancelDownload = (taskId: string) =>
-  safe(invoke<boolean>("cancel_download", { taskId }));
+export const cancelDownload = (taskId: string, requestId?: string) =>
+  safe(invoke<boolean>("cancel_download", { taskId, requestId }));
 export const setActiveVersion = (id: string, version: string) =>
   safe(invoke<boolean>("set_active_version", { id, version }));
 

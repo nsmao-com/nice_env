@@ -895,6 +895,8 @@ pub struct TunnelInfo {
 #[serde(rename_all = "camelCase")]
 pub struct DownloadProgress {
     pub task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
     pub received: u64,
     pub total: u64,
     pub speed_bps: u64,

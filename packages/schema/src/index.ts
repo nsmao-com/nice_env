@@ -565,6 +565,7 @@ export type CertRecord = z.infer<typeof CertRecord>;
 
 export const DownloadProgress = z.object({
   taskId: z.string(),
+  requestId: z.string().optional(),
   received: z.number(),
   total: z.number(),
   speedBps: z.number(),

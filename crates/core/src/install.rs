@@ -426,18 +426,32 @@ impl Installer {
         downloader: &Arc<Downloader>,
         emit: &dyn Fn(crate::Event),
     ) -> Result<InstalledPackage> {
+        self.install_for_request(key, None, paths, store, downloader, emit).await
+    }
+
+    pub(crate) async fn install_for_request(
+        &self, key: &str, request_id: Option<&str>, paths: &Paths, store: &Store,
+        downloader: &Arc<Downloader>, emit: &dyn Fn(crate::Event),
+    ) -> Result<InstalledPackage> {
         let task_id = self
             .find(key)
             .map(|entry| format!("{}@{}", entry.id, entry.version))
             .unwrap_or_else(|| key.to_string());
-        let task = downloader.begin_task(&task_id)?;
+        let task = downloader.begin_task_for_request(&task_id, request_id)?;
+        let emit_request = |mut event: crate::Event| {
+            if let crate::Event::DownloadProgress(progress) = &mut event {
+                progress.request_id = request_id.map(str::to_owned);
+            }
+            emit(event);
+        };
         let result = self
-            .install_task(key, paths, store, downloader, &task, emit)
+            .install_task(key, paths, store, downloader, &task, &emit_request)
             .await;
         if let Err(err) = &result {
-            emit(crate::Event::DownloadProgress(
+            emit_request(crate::Event::DownloadProgress(
                 crate::model::DownloadProgress {
                     task_id,
+                    request_id: None,
                     received: 0,
                     total: 0,
                     speed_bps: 0,

@@ -21,6 +21,8 @@ export type InstallStatus = "running" | "done" | "error" | "cancelled";
 export interface InstallTask {
   /** `${id}@${version}`（与后端下载进度的 taskId 一致）；不指定版本时就是 id，由后端取最新版 */
   key: string;
+  /** 每次安装独立标识，取消和进度只能作用于这一轮请求。 */
+  requestId: string;
   id: string;
   version?: string;
   displayName: string;
@@ -60,6 +62,7 @@ const t = (key: TKey) => useUI.getState().t(key);
 
 /** 自动选版与精确版本可能先后共用进度键；不得清理其他仍在运行任务的进度。 */
 function clearTaskProgress(state: InstallTasksState, key: string) {
+  const requestId = state.tasks[key]?.requestId;
   const owned = new Set([key, ...(state.tasks[key]?.progressKeys ?? [])]);
   for (const task of Object.values(state.tasks)) {
     if (task.key !== key && task.status === "running") {
@@ -67,7 +70,8 @@ function clearTaskProgress(state: InstallTasksState, key: string) {
       for (const progressKey of task.progressKeys ?? []) owned.delete(progressKey);
     }
   }
-  return Object.fromEntries(Object.entries(state.progress).filter(([id]) => !owned.has(id)));
+  return Object.fromEntries(Object.entries(state.progress).filter(([id, progress]) =>
+    (!requestId || progress.requestId !== requestId) && !owned.has(id)));
 }
 
 export const useInstallTasks = create<InstallTasksState>()((set, get) => ({
@@ -75,14 +79,12 @@ export const useInstallTasks = create<InstallTasksState>()((set, get) => ({
   progress: {},
 
   setProgress: (p) => set((s) => {
-    const exact = s.tasks[p.taskId];
-    const packageId = p.taskId.split("@")[0];
-    const automatic = s.tasks[packageId];
-    // 精确版本任务优先；自动选版任务只接收自己包的进度，不借用其他正在运行的版本。
-    const task = exact?.status === "running" ? exact
-      : automatic?.status === "running" && !automatic.version
-        && (!automatic.progressId || automatic.progressId === automatic.key || automatic.progressId === p.taskId) ? automatic : undefined;
-    const resolvedVersion = p.taskId.startsWith(`${packageId}@`) ? p.taskId.slice(packageId.length + 1) : task?.resolvedVersion;
+    const task = p.requestId ? Object.values(s.tasks).find((task) => task.status === "running"
+      && task.requestId === p.requestId && (p.taskId === task.id || p.taskId.startsWith(`${task.id}@`))) : undefined;
+    if (p.requestId && !task) return s; // 旧请求的延迟事件不能覆盖重装任务。
+    if (!task && Object.values(s.tasks).some((task) => task.status === "running"
+      && task.requestId === s.progress[p.taskId]?.requestId)) return s;
+    const resolvedVersion = task && p.taskId.startsWith(`${task.id}@`) ? p.taskId.slice(task.id.length + 1) : task?.resolvedVersion;
     const changed = task && (task.progressId !== p.taskId || task.resolvedVersion !== resolvedVersion);
     return {
       progress: { ...s.progress, [p.taskId]: p },
@@ -95,6 +97,7 @@ export const useInstallTasks = create<InstallTasksState>()((set, get) => ({
     const key = target.version ? `${target.id}@${target.version}` : target.id;
     const running = inflight.get(key);
     if (running) return running;
+    const requestId = crypto.randomUUID();
 
     set((s) => {
       // 清掉上一次（失败/已完成）残留的进度，免得重装时一上来就显示「已完成」
@@ -103,14 +106,14 @@ export const useInstallTasks = create<InstallTasksState>()((set, get) => ({
         progress,
         tasks: {
           ...s.tasks,
-          [key]: { key, id: target.id, version: target.version, displayName: target.displayName, status: "running", startedAt: Date.now() },
+          [key]: { key, requestId, id: target.id, version: target.version, displayName: target.displayName, status: "running", startedAt: Date.now() },
         },
       };
     });
 
     const label = target.version ? `${target.displayName} ${target.version}` : target.displayName;
     const promise = api
-      .installPackage(key)
+      .installPackage(key, requestId)
       .then((installed) => {
         const result = PackageInstallResult.safeParse(installed);
         if (!result.success || result.data.id !== target.id || (target.version
@@ -154,22 +157,25 @@ export const useInstallTasks = create<InstallTasksState>()((set, get) => ({
   },
 
   cancel: async (key) => {
-    if (get().tasks[key]?.cancelRequested) return false;
-    const markRequested = (requested: boolean) => set((s) => s.tasks[key]?.status === "running"
+    const task = get().tasks[key];
+    if (!task || task.status !== "running" || task.cancelRequested) return false;
+    const current = () => get().tasks[key]?.requestId === task.requestId && get().tasks[key]?.status === "running";
+    const markRequested = (requested: boolean) => set((s) => s.tasks[key]?.requestId === task.requestId && s.tasks[key]?.status === "running"
       ? { tasks: { ...s.tasks, [key]: { ...s.tasks[key], cancelRequested: requested } } } : s);
     markRequested(true);
     try {
-      const accepted = await api.cancelDownload(get().tasks[key]?.progressId ?? key);
+      const accepted = await api.cancelDownload(task.progressId ?? key, task.requestId);
+      if (!current()) return accepted;
       if (!accepted) {
         markRequested(false);
-        if (get().tasks[key]?.status === "running") toast.info(t("install.cannotCancel"));
-      } else if (!get().tasks[key]) {
-        toast.info(t("install.cancelling"));
+        toast.info(t("install.cannotCancel"));
       }
       return accepted;
     } catch (e) {
-      markRequested(false);
-      toast.error(normalizeError(e).message || t("install.failed"));
+      if (current()) {
+        markRequested(false);
+        toast.error(normalizeError(e).message || t("install.failed"));
+      }
       return false;
     }
   },
@@ -190,7 +196,8 @@ export const useInstallTasks = create<InstallTasksState>()((set, get) => ({
 
 /** 请求键和后端进度键可能不同（自动选版）；只读取已确认属于该任务的事件。 */
 export function progressForTask(progress: Record<string, DownloadProgress>, task: InstallTask | undefined) {
-  return task?.status === "running" ? progress[task.progressId ?? task.key] : undefined;
+  const item = task?.status === "running" ? progress[task.progressId ?? task.key] : undefined;
+  return item?.requestId === task?.requestId ? item : undefined;
 }
 
 /** 某个套件（任一版本）正在下载中的进度；用于列表行内进度条 */

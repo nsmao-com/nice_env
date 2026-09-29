@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
 struct TaskControl {
+    request_id: Option<String>,
     // 0 = 可取消，1 = 已取消，2 = 正在提交安装结果（不可中断）。
     phase: AtomicU8,
     notify: Notify,
@@ -93,6 +94,14 @@ impl Downloader {
     }
 
     pub(crate) fn begin_task(&self, task_id: &str) -> Result<DownloadTask> {
+        self.begin_task_for_request(task_id, None)
+    }
+
+    pub(crate) fn begin_task_for_request(&self, task_id: &str, request_id: Option<&str>) -> Result<DownloadTask> {
+        if request_id.is_some_and(|id| id.is_empty() || id.len() > 128
+            || !id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')) {
+            return Err(AppError::new("INVALID_INSTALL_REQUEST", "非法的安装请求标识"));
+        }
         // taskId 会成为下载文件名，不能允许路径、盘符或 Windows ADS。
         if task_id.is_empty()
             || task_id == "."
@@ -103,13 +112,14 @@ impl Downloader {
             return Err(AppError::new("INVALID_PACKAGE_KEY", "非法的安装任务标识"));
         }
         let mut tasks = self.tasks.lock();
-        if tasks.contains_key(task_id) {
+        if tasks.contains_key(task_id) || request_id.is_some_and(|id| tasks.values().any(|task| task.request_id.as_deref() == Some(id))) {
             return Err(
                 AppError::new("PACKAGE_BUSY", format!("{task_id} 正在安装或卸载"))
                     .with_hint("等待当前操作完成后重试"),
             );
         }
         let control = Arc::new(TaskControl {
+            request_id: request_id.map(str::to_owned),
             phase: AtomicU8::new(0),
             notify: Notify::new(),
         });
@@ -128,8 +138,17 @@ impl Downloader {
 
     /// true 表示已接收取消；提交阶段或已结束的任务返回 false。
     pub fn cancel(&self, task_id: &str) -> bool {
+        self.cancel_request(task_id, None)
+    }
+
+    /// 请求标识绑定一次安装；旧取消消息不能取消同版本的新任务。
+    pub fn cancel_request(&self, task_id: &str, request_id: Option<&str>) -> bool {
         let tasks = self.tasks.lock();
-        let control = tasks.get(task_id).or_else(|| {
+        let control = if let Some(request_id) = request_id {
+            let package = task_id.split('@').next();
+            tasks.iter().find(|(id, task)| id.split('@').next() == package
+                && task.request_id.as_deref() == Some(request_id)).map(|(_, task)| task)
+        } else { tasks.get(task_id).or_else(|| {
             // 不带版本的调用也能取消唯一对应的版本任务。
             let prefix = format!("{task_id}@");
             let mut matches = tasks.iter().filter(|(id, _)| id.starts_with(&prefix));
@@ -139,7 +158,7 @@ impl Downloader {
             } else {
                 None
             }
-        });
+        }).filter(|task| task.request_id.is_none()) };
         let Some(control) = control else { return false };
         match control
             .phase

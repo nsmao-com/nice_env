@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { toast } from "sonner";
+import { version as bundledAppVersion } from "../../../package.json";
 import {
   ChevronDown,
   RefreshCw,
@@ -18,12 +18,13 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { useUI, useT } from "@/lib/store";
-import { useServices, toastError } from "@/lib/hooks";
+import { useServices, useStacks, toastError, useQuickServiceActions, serviceHasProcess } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import { isTauri, listen, normalizeError } from "@/lib/backend";
 import { cn } from "@/lib/utils";
 import { ConfirmDialog } from "@/components/shared/misc";
 import { UpdateDialog } from "@/components/shared/update-dialog";
+import { BulkResult } from "@/components/shared/bulk-actions";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -75,11 +76,19 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
   const t = useT();
   const router = useRouter();
   const setWizardOpen = useUI((s) => s.setWizardOpen);
-  const { data: services } = useServices(0);
+  const serviceQuery = useServices();
+  const stackQuery = useStacks();
+  const services = serviceQuery.data;
+  const stacks = stackQuery.data;
+  const quickStackId = useUI((s) => s.quickStackId);
+  const selectedStack = stacks.find((stack) => stack.id === quickStackId) ?? stacks[0];
+  const servicesReady = serviceQuery.dataUpdatedAt > 0 && !serviceQuery.error;
+  const startReady = servicesReady && stackQuery.dataUpdatedAt > 0 && !stackQuery.error;
+  const quick = useQuickServiceActions(services, stacks);
   const { isMac, minimize, close } = useDesktopWindow();
   const [aboutOpen, setAboutOpen] = React.useState(false);
   const [checking, setChecking] = React.useState(false);
-  const [version, setVersion] = React.useState("0.2.125");
+  const [version, setVersion] = React.useState(bundledAppVersion);
   const [updateOpen, setUpdateOpen] = React.useState(false);
   const [confirm, setConfirm] = React.useState<null | "stopAll" | "quit">(null);
   const [busy, setBusy] = React.useState(false);
@@ -105,59 +114,15 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
   };
 
   const startStack = async () => {
-    const ids = services
-      .filter((s) => s.id === "nginx" || s.id === "redis" || s.id.startsWith("php@") || s.id.startsWith("mysql@"))
-      .sort((a, b) => {
-        const order = (id: string) =>
-          id === "nginx" ? 0 : id.startsWith("php@") ? 1 : id.startsWith("mysql@") ? 2 : 3;
-        return order(a.id) - order(b.id);
-      })
-      .map((s) => s.id);
-    if (ids.length === 0) {
-      toast.info(t("dashboard.noStackServices"));
-      return;
-    }
-    toast.promise(
-      (async () => {
-        const failures: string[] = [];
-        for (const id of ids) {
-          try {
-            await api.startService(id);
-          } catch (error) {
-            failures.push(id + ": " + normalizeError(error).message);
-          }
-        }
-        if (failures.length > 0) {
-          throw new Error(failures.join("；"));
-        }
-      })(),
-      { loading: t("dashboard.startingStack"), success: t("dashboard.stackStarted"), error: t("cmd.startFail") }
-    );
+    if (!startReady || busy || quick.busy) return;
+    await quick.start(selectedStack);
   };
 
   /** 真正执行「全部停止」，确认弹窗点确认后调用 */
   const doStopAll = async () => {
-    setBusy(true);
-    try {
-      const failures: string[] = [];
-      for (const s of services) {
-        if (s.state === "running" || s.state === "starting") {
-          try {
-            await api.stopService(s.id);
-          } catch (error) {
-            failures.push(s.label + ": " + normalizeError(error).message);
-          }
-        }
-      }
-      if (failures.length > 0) {
-        toast.error(t("dashboard.stopFailed"), { description: failures.join("；") });
-      } else {
-        toast.success(t("dashboard.allStopped"));
-      }
-      setConfirm(null);
-    } finally {
-      setBusy(false);
-    }
+    if (busy) return;
+    const report = await quick.stop(quick.stopReport?.failed.map((failure) => failure.serviceId));
+    if (report && report.failed.length === 0) setConfirm(null);
   };
 
   const checkUpdate = async () => {
@@ -208,12 +173,18 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
           <DropdownMenuItem onSelect={() => setWizardOpen(true)}>
             <Plus /> {t("appmenu.newSite")}
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => run(startStack)}>
-            <Rocket /> {t("appmenu.startStack")}
+          <DropdownMenuItem disabled={busy || quick.busy || !startReady} onSelect={() => run(startStack)}>
+            <Rocket /><span className="min-w-0 [overflow-wrap:anywhere]">{selectedStack ? `${t("dash.startStack")}「${selectedStack.name}」` : t("appmenu.startStack")}</span>
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => setConfirm("stopAll")}>
+          <DropdownMenuItem disabled={busy || quick.busy || !servicesReady || !services.some(serviceHasProcess)} onSelect={() => { quick.prepareStop(); setConfirm("stopAll"); }}>
             <Square /> {t("appmenu.stopAll")}
           </DropdownMenuItem>
+          {(serviceQuery.error || stackQuery.error) && <>
+            <DropdownMenuLabel role="status" className="text-error [overflow-wrap:anywhere]">{t("stack.readFailed")}</DropdownMenuLabel>
+            <DropdownMenuItem disabled={serviceQuery.isFetching || stackQuery.isFetching} onSelect={() => { void Promise.all([serviceQuery.refetch(), stackQuery.refetch()]); }}>
+              <RefreshCw />{t("packages.reload")}
+            </DropdownMenuItem>
+          </>}
           <DropdownMenuSeparator />
           <DropdownMenuItem onSelect={() => router.push("/settings")}>
             <Settings /> {t("appmenu.settings")}
@@ -242,6 +213,7 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
           </DropdownMenuItem>
           <DropdownMenuItem
             className="text-error focus:text-error"
+            disabled={busy || quick.busy}
             onSelect={() => {
               // 退出会停掉所有服务：先确认，避免误点导致站点全下线
               if (isTauri) { setQuitError(null); setConfirm("quit"); }
@@ -257,17 +229,19 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
 
       <ConfirmDialog
         open={confirm === "stopAll"}
-        onOpenChange={(o) => !o && setConfirm(null)}
+        onOpenChange={(o) => { if (!o && !quick.busy) setConfirm(null); }}
         title={t("confirm.stopAll")}
-        description={t("confirm.stopAllDesc").replace(
+        description={t(quick.stopReport?.failed.length ? "bulk.retryStopHint" : "confirm.stopAllDesc").replace(
           "{count}",
-          String(services.filter((s) => s.state === "running" || s.state === "starting").length)
+          String(quick.stopTargetCount)
         )}
-        confirmText={t("dash.stopAll")}
+        confirmText={t(quick.stopReport?.failed.length ? "bulk.retryFailed" : "dash.stopAll")}
         danger
-        loading={busy}
+        loading={quick.busy}
         onConfirm={doStopAll}
-      />
+      >
+        <BulkResult report={quick.stopReport} error={quick.stopError} services={services} busy={quick.busy} />
+      </ConfirmDialog>
 
       <ConfirmDialog
         open={confirm === "quit"}

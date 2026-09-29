@@ -6,6 +6,7 @@ import { PackageManifestEntry, HostsEntry as HostsEntrySchema, DiagnosticsBundle
 import { normalizeError } from "./backend";
 import type { ConfigCheck, BackupPreview, ConfigResetPreview, TunnelInfo, OllamaModelRow, OllamaPullStatus } from "./api";
 import bundledManifest from "../../../../manifest/packages.win.json";
+import { version as bundledAppVersion } from "../../package.json";
 import type {
   DownloadProgress,
   VersionCatalog,
@@ -80,7 +81,7 @@ function mockSiteFileScope(id: string, project: boolean, exclude: boolean): Site
 }
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
-const MOCK_APP_VERSION = "0.2.125";
+const MOCK_APP_VERSION = bundledAppVersion;
 const MOCK_NEXT_VERSION = "0.3.0";
 
 const mockMongoDatabases = new Map<string, Record<string, Record<string, unknown>[]>>([

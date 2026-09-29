@@ -189,28 +189,26 @@ export function ServiceRow({ service, dragHandle, dragPreview = false }: { servi
         <Button variant="ghost" size="icon-sm" className="shrink-0 text-faint" title={t("svc.diagnose")} aria-label={t("svc.diagnose")} onClick={() => setDiagOpen(true)}>
           <Stethoscope className="h-3.5 w-3.5" />
         </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="shrink-0 text-faint opacity-100 transition-opacity hover:text-secondary sm:opacity-0 sm:group-hover/item:opacity-100 focus-visible:opacity-100"
+          title={t("common.restart")}
+          disabled={busy || service.state === "starting" || service.state === "stopping"}
+          onClick={restart}
+        >
+          <RotateCw className="h-3.5 w-3.5" />
+        </Button>
         {service.logFile && (
-          <>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className="shrink-0 text-faint opacity-100 transition-opacity hover:text-secondary sm:opacity-0 sm:group-hover/item:opacity-100 focus-visible:opacity-100"
-              title={t("common.restart")}
-              disabled={busy || service.state === "starting" || service.state === "stopping"}
-              onClick={restart}
-            >
-              <RotateCw className="h-3.5 w-3.5" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className="shrink-0 text-faint opacity-100 transition-opacity hover:text-secondary sm:opacity-0 sm:group-hover/item:opacity-100 focus-visible:opacity-100"
-              title={t("logs.title")}
-              onClick={() => router.push(`/logs?service=${encodeURIComponent(service.id)}`)}
-            >
-              <ScrollText className="h-3.5 w-3.5" />
-            </Button>
-          </>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="shrink-0 text-faint opacity-100 transition-opacity hover:text-secondary sm:opacity-0 sm:group-hover/item:opacity-100 focus-visible:opacity-100"
+            title={t("logs.title")}
+            onClick={() => router.push(`/logs?service=${encodeURIComponent(service.id)}`)}
+          >
+            <ScrollText className="h-3.5 w-3.5" />
+          </Button>
         )}
 
         <div className="ml-auto flex shrink-0 sm:ml-0">

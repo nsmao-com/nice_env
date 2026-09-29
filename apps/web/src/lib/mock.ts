@@ -3407,7 +3407,10 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return true as T;
     case "get_settings":
       return { ...settings } as T;
+    case "get_autostart_status":
+      throw { code: "DESKTOP_ONLY", message: "请在桌面应用中读取系统的开机自启动状态。" };
     case "set_setting": {
+      if (args?.key === "autostart") throw { code: "DESKTOP_ONLY", message: "请在桌面应用中修改开机自启动，网页预览不能修改系统登录项。" };
       Object.assign(settings, { [args!.key as string]: args!.value });
       return true as T;
     }

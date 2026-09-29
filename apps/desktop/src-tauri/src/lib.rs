@@ -487,6 +487,7 @@ pub fn run() {
             adminer_stop,
             // 设置
             get_settings,
+            get_autostart_status,
             set_setting,
             set_port_override,
             get_app_version,
@@ -2870,6 +2871,58 @@ async fn proxy_delay_test(node: String) -> Result<u32, tauri::Error> {
 
 /* ================= 设置 ================= */
 
+// 系统登录项读写串行执行，查询不能读到保存或回滚中间的状态。
+static AUTOSTART_CHANGE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[tauri::command]
+fn get_autostart_status(app: tauri::AppHandle) -> Result<bool, tauri::Error> {
+    use tauri_plugin_autostart::ManagerExt;
+    let _change = AUTOSTART_CHANGE.lock().unwrap_or_else(|error| error.into_inner());
+    app.autolaunch().is_enabled().map_err(|error| box_err(
+        AppError::new("AUTOSTART_READ_FAILED", "无法读取系统的开机自启动状态")
+            .with_hint("请重新读取状态，或检查系统的登录项设置后重试。")
+            .with_detail(error.to_string()),
+    ))
+}
+
+fn save_autostart(app: &tauri::AppHandle, store: &nsb_core::store::Store, enabled: bool) -> Result<bool, tauri::Error> {
+    use tauri_plugin_autostart::ManagerExt;
+    let _change = AUTOSTART_CHANGE.lock().unwrap_or_else(|error| error.into_inner());
+    let manager = app.autolaunch();
+    let previous = manager.is_enabled().map_err(|error| box_err(
+        AppError::new("AUTOSTART_READ_FAILED", "无法确认原来的开机自启动状态，未修改设置")
+            .with_hint("请重新读取状态后重试。")
+            .with_detail(error.to_string()),
+    ))?;
+    let apply = |value| if value { manager.enable() } else { manager.disable() };
+    let saved = (|| -> std::result::Result<(), String> {
+        if previous != enabled { apply(enabled).map_err(|error| error.to_string())?; }
+        let actual = manager.is_enabled().map_err(|error| error.to_string())?;
+        if actual != enabled { return Err("系统返回的登录项状态与请求不一致".into()); }
+        // 系统确认成功才保存；本机设置写入失败时恢复原来的系统状态。
+        store.set_setting("autostart", if enabled { "true" } else { "false" }).map_err(|error| error.to_string())?;
+        Ok(())
+    })();
+    if let Err(error) = saved {
+        let rollback = (|| -> std::result::Result<(), String> {
+            if manager.is_enabled().ok() != Some(previous) { apply(previous).map_err(|error| error.to_string())?; }
+            if manager.is_enabled().map_err(|error| error.to_string())? != previous {
+                return Err("系统未恢复原来的登录项状态".into());
+            }
+            Ok(())
+        })();
+        return Err(box_err(match rollback {
+            Ok(()) => AppError::new("AUTOSTART_SAVE_FAILED", "开机自启动设置未保存，已保留原来的系统状态")
+                .with_hint("请检查系统权限后重试。")
+                .with_detail(error),
+            Err(rollback) => AppError::new("AUTOSTART_STATE_UNCONFIRMED", "开机自启动设置失败，系统状态尚未确认")
+                .with_hint("请重新读取状态；如仍失败，请到系统登录项设置中检查 NiceEnv。")
+                .with_detail(format!("保存：{error}；恢复：{rollback}")),
+        }));
+    }
+    Ok(true)
+}
+
 #[tauri::command]
 fn get_settings(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> serde_json::Value {
     let overrides: serde_json::Map<String, serde_json::Value> = state
@@ -2899,6 +2952,7 @@ fn get_settings(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> serde_
         "portOverrides": overrides,
         "mirror": state.store.get_setting("mirror").unwrap_or_else(|| "official".into()),
         "customMirror": state.store.get_setting("customMirror").unwrap_or_default(),
+        // 已保存偏好；系统实际状态由 get_autostart_status 读取，不能据此确认登录项。
         "autostart": state.store.get_setting("autostart").map(|v| v == "true").unwrap_or(false),
         "minimizeToTray": state.store.get_setting("minimizeToTray").map(|v| v != "false").unwrap_or(true),
         "startStackOnLaunch": state.store.get_setting("startStackOnLaunch").unwrap_or_default(),
@@ -2921,6 +2975,10 @@ fn set_setting(
     key: String,
     value: serde_json::Value,
 ) -> Result<bool, tauri::Error> {
+    if key == "autostart" {
+        let enabled = value.as_bool().ok_or_else(|| box_err(AppError::new("INVALID_AUTOSTART", "开机自启动开关值无效")))?;
+        return save_autostart(&app, &state.store, enabled);
+    }
     if nsb_core::mongodb_auth::local_setting(&key) {
         return Err(box_err(nsb_core::AppError::new("SETTING_PROTECTED", "请通过 MongoDB 认证或计划备份界面修改此设置")));
     }
@@ -2936,18 +2994,6 @@ fn set_setting(
     };
     if key == "defaultTld" { val = nsb_core::dns::normalize_tld(&val).map_err(box_err)?; }
     state.store.set_setting(&key, &val).map_err(box_err)?;
-    // autostart 需要真正落到操作系统（注册表 Run / LaunchAgent），不能只存一个布尔值
-    if key == "autostart" {
-        use tauri_plugin_autostart::ManagerExt;
-        let mgr = app.autolaunch();
-        let enable = val == "true";
-        let r = if enable { mgr.enable() } else { mgr.disable() };
-        if let Err(e) = r {
-            return Err(tauri::Error::Anyhow(anyhow::anyhow!(format!(
-                "设置开机自启动失败：{e}"
-            ))));
-        }
-    }
     Ok(true)
 }
 

@@ -5,7 +5,7 @@ import { version as bundledAppVersion } from "../../../package.json";
 import * as React from "react";
 import { toast } from "sonner";
 import { useTheme } from "next-themes";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Palette,
   Sun,
@@ -909,9 +909,7 @@ export default function SettingsPage() {
                   </Select>
                 </SettingRow>
                 <Divider />
-                <SettingRow label={t("settings.autostart")}>
-                  <Switch checked={settings.autostart} onCheckedChange={(v) => update("autostart", v)} />
-                </SettingRow>
+                <AutostartSetting />
                 <SettingRow label={t("settings.minimizeToTray")}>
                   <Switch checked={settings.minimizeToTray} onCheckedChange={(v) => update("minimizeToTray", v)} />
                 </SettingRow>
@@ -1491,6 +1489,76 @@ function WatchdogPanel({ enabled, onChange }: { enabled: boolean; onChange: (val
       )}
     </div>
   );
+}
+
+function AutostartSetting() {
+  const t = useT();
+  const queryClient = useQueryClient();
+  const busyRef = React.useRef(false);
+  const mounted = React.useRef(true);
+  const [busy, setBusy] = React.useState<"read" | "save" | null>(null);
+  const [error, setError] = React.useState<ReturnType<typeof normalizeError> | null>(null);
+  React.useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const options = {
+    queryKey: ["autostart"],
+    queryFn: async () => {
+      const value = await api.getAutostartStatus();
+      if (typeof value !== "boolean") throw { code: "AUTOSTART_READ_FAILED", message: t("settings.autostartReadFailed") };
+      return value;
+    },
+    networkMode: "always" as const,
+    staleTime: 0,
+    retry: false,
+  };
+  const query = useQuery({ ...options, enabled: isTauri });
+  const ready = typeof query.data === "boolean" && !query.error;
+  const problem = error ?? (query.error ? normalizeError(query.error) : null);
+  const read = async () => {
+    await queryClient.cancelQueries({ queryKey: options.queryKey });
+    const actual = await queryClient.fetchQuery(options);
+    queryClient.setQueryData<AppSettings>(["settings"], (previous) => previous ? { ...previous, autostart: actual } : previous);
+    return actual;
+  };
+  const run = async (enabled?: boolean) => {
+    if (!isTauri || busyRef.current || (enabled !== undefined && (!ready || query.isFetching))) return;
+    busyRef.current = true;
+    setBusy(enabled === undefined ? "read" : "save");
+    setError(null);
+    let failure: ReturnType<typeof normalizeError> | null = null;
+    try {
+      if (enabled !== undefined) {
+        try { await api.setSetting("autostart", enabled); }
+        catch (error) { failure = normalizeError(error); }
+      }
+      try {
+        const actual = await read();
+        if (!failure && enabled !== undefined && actual !== enabled) {
+          failure = { code: "AUTOSTART_STATE_CHANGED", message: t("settings.autostartChanged") };
+        }
+      } catch (error) { failure ??= normalizeError(error); }
+      if (mounted.current) setError(failure);
+      if (failure) toast.error(failure.message);
+      else if (enabled !== undefined) toast.success(t("settings.saved"));
+    } finally {
+      busyRef.current = false;
+      if (mounted.current) setBusy(null);
+    }
+  };
+  return <div className="space-y-2">
+    <SettingRow label={t("settings.autostart")}>
+      {!isTauri ? <span className="text-xs text-muted">{t("settings.autostartDesktopOnly")}</span>
+        : ready ? <Switch aria-label={t("settings.autostart")} checked={query.data} disabled={busy !== null || query.isFetching}
+          onCheckedChange={(value) => void run(value)} />
+          : <span role="status" className="text-xs text-muted">{t(query.isFetching || busy === "read" ? "common.loading" : "packages.statusUnknown")}</span>}
+    </SettingRow>
+    <p className="text-[11.5px] leading-relaxed text-faint [overflow-wrap:anywhere]">{t("settings.autostartHint")}</p>
+    {busy === "save" && <p role="status" className="text-xs text-muted">{t("settings.autostartSaving")}</p>}
+    {isTauri && problem && <div role="alert" className="space-y-2 rounded-lg bg-error-soft p-3 text-xs text-error [overflow-wrap:anywhere]">
+      <p>{problem.message}</p>
+      {problem.hint && <p>{problem.hint}</p>}
+      <Button size="sm" variant="secondary" disabled={busy !== null || query.isFetching} onClick={() => void run()}>{t("packages.reload")}</Button>
+    </div>}
+  </div>;
 }
 
 function SettingRow({ label, children }: { label: React.ReactNode; children: React.ReactNode }) {

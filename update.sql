@@ -157,3 +157,11 @@
 -- COMMIT;
 -- 任一写入失败均回滚；下载期间用户新选的默认版本在提交时读取并保留。
 -- pathEnvVersions 的独立 PATH 选择不改写；原有运行时目录和服务进程不因安装切换。
+
+-- v0.2.144：开机自启动先修改并重新读取系统登录项，确认成功后才保存本机记录。
+-- 沿用 SQLite settings 表（已核对 Store::open），无表结构变更，不需要手工执行。
+-- 本轮未修改真实用户数据库或本机系统登录项；以下为运行时幂等语句记录。
+-- INSERT INTO settings(key,value) VALUES('autostart',:value)
+-- ON CONFLICT(key) DO UPDATE SET value=:value;
+-- :value 为已由操作系统确认的 'true' 或 'false'；读取/修改/确认失败不执行写入。
+-- 本机记录写入失败时恢复原系统状态，并向界面返回错误；界面重新读取真实状态。

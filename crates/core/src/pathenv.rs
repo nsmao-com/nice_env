@@ -715,11 +715,17 @@ fn wants(sel: &Option<Vec<String>>, id: &str) -> bool {
 /// 多版本包只取独立选择的 PATH 版本：同一 id 装了两个版本时，如果不做选择，
 /// `php` 最终指向哪个版本取决于 PATH 顺序，行为不可预测。
 pub fn desired_dirs(store: &Store, manifest: &Manifest) -> Vec<String> {
+    desired_dirs_checked(store, manifest).unwrap_or_default()
+}
+
+/// 写入 PATH 时不能把数据库或选择集读取失败当成空列表，否则会误删原托管路径。
+fn desired_dirs_checked(store: &Store, manifest: &Manifest) -> Result<Vec<String>> {
     let installer = crate::install::Installer {
         manifest: manifest.clone(),
     };
-    let installed = store.list_installed().unwrap_or_default();
-    let sel = selected_ids(store);
+    let installed = store.list_installed()?;
+    let sel = read_selection::<Option<Vec<String>>>(store, SELECTED_KEY)?;
+    let versions = read_selection(store, VERSIONS_KEY)?;
 
     // 按 id 归并，每个套件只保留一个 PATH 版本。
     let mut by_id: Vec<String> = Vec::new();
@@ -733,10 +739,10 @@ pub fn desired_dirs(store: &Store, manifest: &Manifest) -> Vec<String> {
         if !wants(&sel, &id) {
             continue;
         }
-        let Some(chosen) = chosen_version(store, &id) else {
+        let Some(chosen) = chosen_from(store, &installed, &versions, &id)? else {
             continue;
         };
-        let entry = installer.installed_entry(&chosen);
+        let entry = installer.installed_entry(chosen);
         if let Some(dir) = bin_dir_for(&chosen.install_path, &entry.entry) {
             if std::path::Path::new(&dir).is_dir() {
                 dirs.push((id.clone(), dir));
@@ -745,7 +751,7 @@ pub fn desired_dirs(store: &Store, manifest: &Manifest) -> Vec<String> {
     }
     // 按 id 排序，保证多次调用结果稳定
     dirs.sort_by(|a, b| a.0.cmp(&b.0));
-    dirs.into_iter().map(|(_, d)| d).collect()
+    Ok(dirs.into_iter().map(|(_, d)| d).collect())
 }
 
 /// 组装完整状态（不写盘），供前端展示
@@ -805,10 +811,7 @@ pub fn status(store: &Store, manifest: &Manifest) -> PathEnvStatus {
     } else {
         Vec::new()
     };
-    let drift = enabled
-        && desired
-            .iter()
-            .any(|d| !current_path.iter().any(|p| same_path(p, d)));
+    let drift = path_has_drift(&desired, &applied, &current_path);
 
     PathEnvStatus {
         enabled,
@@ -817,6 +820,12 @@ pub fn status(store: &Store, manifest: &Manifest) -> PathEnvStatus {
         note: platform_note(),
         drift,
     }
+}
+
+fn path_has_drift(desired: &[String], applied: &[String], current: &[String]) -> bool {
+    desired.iter().any(|dir| !current.iter().any(|path| same_path(path, dir)))
+        || applied.iter().any(|dir| !desired.iter().any(|expected| same_path(expected, dir))
+            && current.iter().any(|path| same_path(path, dir)))
 }
 
 fn platform_note() -> String {
@@ -923,9 +932,9 @@ pub fn strip_win_path(existing: &str, previously_managed: &[String]) -> String {
 /// 幂等：内容不变就不写盘，也不广播（避免无意义地惊动系统）。
 pub fn apply(store: &Store, paths: &Paths, manifest: &Manifest) -> Result<PathEnvStatus> {
     let _ = paths;
-    let enabled = is_enabled(store);
+    let enabled = store.get_setting_checked(ENABLED_KEY)?.as_deref() == Some("1");
     let desired = if enabled {
-        desired_dirs(store, manifest)
+        desired_dirs_checked(store, manifest)?
     } else {
         Vec::new()
     };
@@ -936,7 +945,7 @@ pub fn apply(store: &Store, paths: &Paths, manifest: &Manifest) -> Result<PathEn
     #[cfg(windows)]
     {
         // 上次写入的托管目录：先从 PATH 里摘掉再放新的
-        let prev = managed_dirs(store);
+        let prev = read_selection::<Vec<String>>(store, DIRS_KEY)?;
         let raw = platform::pathenv::read_user_path().map_err(AppError::from)?;
         let merged = merge_win_path(&raw.value, &prev, &desired);
         if merged != raw.value {
@@ -964,6 +973,47 @@ pub fn apply(store: &Store, paths: &Paths, manifest: &Manifest) -> Result<PathEn
     Ok(status(store, manifest))
 }
 
+/// 总开关、勾选与选版共用恢复流程；失败后保留旧选择，并记住需要清理的托管目录。
+fn update_selection(
+    store: &Store,
+    manifest: &Manifest,
+    update: impl FnOnce() -> Result<()>,
+    mut apply_update: impl FnMut() -> Result<PathEnvStatus>,
+) -> Result<PathEnvStatus> {
+    let previous = [
+        (ENABLED_KEY, store.get_setting_checked(ENABLED_KEY)?.unwrap_or_else(|| "0".into())),
+        (SELECTED_KEY, store.get_setting_checked(SELECTED_KEY)?.unwrap_or_else(|| "null".into())),
+        (VERSIONS_KEY, store.get_setting_checked(VERSIONS_KEY)?.unwrap_or_else(|| "{}".into())),
+    ];
+    let previous_dirs = read_selection::<Vec<String>>(store, DIRS_KEY)?;
+    // 读取失败时不能用默认版本覆盖旧设置，也不能开始写系统环境。
+    desired_dirs_checked(store, manifest)?;
+    let current = status(store, manifest);
+    let mut applied = false;
+    let result = update().and_then(|()| { applied = true; apply_update() });
+    let error = match result { Ok(status) => return Ok(status), Err(error) => error };
+    let mut failures = Vec::new();
+    if applied {
+        let mut cleanup = previous_dirs;
+        if let Ok(desired) = desired_dirs_checked(store, manifest) {
+            cleanup.extend(desired.into_iter().filter(|dir| !current.entries.iter()
+                .any(|entry| entry.in_path && same_path(&entry.bin_dir, dir))));
+        }
+        if let Err(error) = store.set_setting_json(DIRS_KEY, &cleanup) { failures.push(error.message); }
+    }
+    // 每项独立恢复；一次写入失败不能跳过其它已变更的设置。
+    for (key, value) in previous {
+        if let Err(error) = store.set_setting(key, &value) { failures.push(error.message); }
+    }
+    if failures.is_empty() && applied {
+        if let Err(error) = apply_update() { failures.push(error.message); }
+    }
+    if failures.is_empty() { return Err(error); }
+    Err(AppError::new("PATH_UPDATE_FAILED", "环境变量更新失败，尚未确认原 PATH 已恢复")
+        .with_hint("请检查目录或系统环境变量的写入权限，再到环境变量卡片重新应用 PATH。")
+        .with_detail(format!("原错误：{}；恢复时：{}", error.message, failures.join("；"))))
+}
+
 /// 开/关总开关
 pub fn set_enabled(
     store: &Store,
@@ -971,19 +1021,19 @@ pub fn set_enabled(
     manifest: &Manifest,
     enabled: bool,
 ) -> Result<PathEnvStatus> {
-    store.set_setting(ENABLED_KEY, if enabled { "1" } else { "0" })?;
-    apply(store, paths, manifest)
+    update_selection(store, manifest,
+        || store.set_setting(ENABLED_KEY, if enabled { "1" } else { "0" }),
+        || apply(store, paths, manifest))
 }
 
-/// 设置要注入的包集合（传 None 恢复「全部」）
+/// 设置要注入的包集合；空集合表示不选择任何套件。
 pub fn set_selected(
     store: &Store,
     paths: &Paths,
     manifest: &Manifest,
     ids: &[String],
 ) -> Result<PathEnvStatus> {
-    set_selected_ids(store, ids)?;
-    apply(store, paths, manifest)
+    update_selection(store, manifest, || set_selected_ids(store, ids), || apply(store, paths, manifest))
 }
 
 /// 从任一已安装版本直接加入/移出 PATH，整个操作由 CoreState 的生命周期锁串行执行。
@@ -1009,15 +1059,7 @@ pub fn set_version(
     if !selected && !entry.selected {
         return Ok(current);
     }
-    let previous_versions = store
-        .get_setting(VERSIONS_KEY)
-        .unwrap_or_else(|| "{}".into());
-    let previous_selected = store
-        .get_setting(SELECTED_KEY)
-        .unwrap_or_else(|| "null".into());
-    let previous_enabled = store.get_setting(ENABLED_KEY).unwrap_or_else(|| "0".into());
-    let mut versions =
-        store.get_setting_or::<std::collections::BTreeMap<String, String>>(VERSIONS_KEY);
+    let mut versions = read_selection::<std::collections::BTreeMap<String, String>>(store, VERSIONS_KEY)?;
     let mut ids: Vec<String> = if current.enabled {
         current
             .entries
@@ -1033,43 +1075,14 @@ pub fn set_version(
         versions.insert(id.to_string(), version.to_string());
         ids.push(id.to_string());
     }
-    let result = (|| {
+    update_selection(store, manifest, || {
         store.set_setting_json(VERSIONS_KEY, &versions)?;
         set_selected_ids(store, &ids)?;
         if selected {
             store.set_setting(ENABLED_KEY, "1")?;
         }
-        apply(store, paths, manifest)
-    })();
-    match result {
-        Ok(status) => Ok(status),
-        Err(error) => {
-            // 注册表/配置文件写入失败时恢复选择，避免界面显示成已经切换成功。
-            let rollback = (|| -> Result<()> {
-                let mut cleanup = current.managed_dirs.clone();
-                cleanup.extend(desired_dirs(store, manifest).into_iter().filter(|dir| {
-                    !current
-                        .entries
-                        .iter()
-                        .any(|entry| entry.in_path && same_path(&entry.bin_dir, dir))
-                }));
-                store.set_setting_json(DIRS_KEY, &cleanup)?;
-                store.set_setting(VERSIONS_KEY, &previous_versions)?;
-                store.set_setting(SELECTED_KEY, &previous_selected)?;
-                store.set_setting(ENABLED_KEY, &previous_enabled)?;
-                apply(store, paths, manifest).map(|_| ())
-            })();
-            if let Err(rollback_error) = rollback {
-                return Err(AppError::new(
-                    "PATH_VERSION_UPDATE_FAILED",
-                    "环境变量更新失败，恢复原设置时也遇到问题",
-                )
-                .with_hint("请到工具箱的环境变量卡片重新应用 PATH")
-                .with_detail(format!("{}; {}", error.message, rollback_error.message)));
-            }
-            Err(error)
-        }
-    }
+        Ok(())
+    }, || apply(store, paths, manifest))
 }
 
 /// 安装/卸载/切换版本后自动同步（开关没开就只更新一次状态，不写盘）。
@@ -1253,6 +1266,101 @@ impl MigrationActivationRollback {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_selection_failed_apply_restores_enabled_selected_and_version() {
+        for enabled in ["0", "1"] {
+            let (_temp, store, _paths, manifest) = terminal_fixture();
+            store.set_setting(ENABLED_KEY, enabled).unwrap();
+            store.set_setting(SELECTED_KEY, r#"["terminal-fixture"]"#).unwrap();
+            store.set_setting(VERSIONS_KEY, r#"{"terminal-fixture":"1.0.0"}"#).unwrap();
+            let mut calls = 0;
+            let error = update_selection(&store, &manifest, || {
+                store.set_setting(ENABLED_KEY, if enabled == "0" { "1" } else { "0" })?;
+                store.set_setting(SELECTED_KEY, "[]")?;
+                store.set_setting(VERSIONS_KEY, r#"{"terminal-fixture":"2.0.0"}"#)
+            }, || {
+                calls += 1;
+                if calls == 1 { return Err(AppError::new("WRITE_DENIED", "write denied")); }
+                assert_eq!(store.get_setting(ENABLED_KEY).as_deref(), Some(enabled));
+                assert_eq!(selected_ids(&store), Some(v(&["terminal-fixture"])));
+                assert_eq!(chosen_version(&store, "terminal-fixture").unwrap().version, "1.0.0");
+                Ok(status(&store, &manifest))
+            }).unwrap_err();
+            assert_eq!(error.code, "WRITE_DENIED");
+            assert_eq!(calls, 2);
+        }
+    }
+
+    #[test]
+    fn path_selection_partial_settings_failure_never_applies_system_path() {
+        let (_temp, store, _paths, manifest) = terminal_fixture();
+        let error = update_selection(&store, &manifest, || {
+            store.set_setting(ENABLED_KEY, "1")?;
+            store.set_setting(SELECTED_KEY, "[]")?;
+            Err(AppError::new("SETTINGS_DENIED", "settings denied"))
+        }, || panic!("system PATH must not be written after a settings failure")).unwrap_err();
+        assert_eq!(error.code, "SETTINGS_DENIED");
+        assert!(!is_enabled(&store));
+        assert_eq!(selected_ids(&store), None);
+        assert!(read_selection::<std::collections::BTreeMap<String, String>>(&store, VERSIONS_KEY).unwrap().is_empty());
+    }
+
+    #[test]
+    fn path_selection_failed_recovery_keeps_original_choices_and_cleanup_paths() {
+        let (_temp, store, _paths, manifest) = terminal_fixture();
+        store.set_setting(ENABLED_KEY, "0").unwrap();
+        store.set_setting(VERSIONS_KEY, r#"{"terminal-fixture":"1.0.0"}"#).unwrap();
+        let mut calls = 0;
+        let error = update_selection(&store, &manifest, || {
+            store.set_setting(ENABLED_KEY, "1")?;
+            store.set_setting(VERSIONS_KEY, r#"{"terminal-fixture":"2.0.0"}"#)
+        }, || {
+            calls += 1;
+            Err(AppError::new("WRITE_DENIED", if calls == 1 { "original failure" } else { "recovery failure" }))
+        }).unwrap_err();
+        assert_eq!(error.code, "PATH_UPDATE_FAILED");
+        assert!(error.detail.as_deref().unwrap().contains("original failure"));
+        assert!(error.detail.as_deref().unwrap().contains("recovery failure"));
+        assert!(!is_enabled(&store));
+        assert_eq!(chosen_version(&store, "terminal-fixture").unwrap().version, "1.0.0");
+        assert!(managed_dirs(&store).iter().any(|dir| dir.contains("custom-2.0.0")));
+    }
+
+    #[test]
+    fn path_selection_corrupt_snapshot_cannot_be_replaced_by_defaults() {
+        for key in [SELECTED_KEY, VERSIONS_KEY, DIRS_KEY] {
+            let (_temp, store, _paths, manifest) = terminal_fixture();
+            store.set_setting(key, "invalid json").unwrap();
+            assert!(update_selection(&store, &manifest,
+                || panic!("corrupt selection must not be changed"),
+                || panic!("system PATH must not be written")).is_err());
+            assert_eq!(store.get_setting(key).as_deref(), Some("invalid json"));
+        }
+    }
+
+    #[test]
+    fn path_selection_success_applies_once_and_preserves_new_choices() {
+        let (_temp, store, _paths, manifest) = terminal_fixture();
+        let mut calls = 0;
+        let result = update_selection(&store, &manifest, || {
+            store.set_setting(ENABLED_KEY, "1")?;
+            store.set_setting(SELECTED_KEY, "[]")
+        }, || { calls += 1; Ok(status(&store, &manifest)) }).unwrap();
+        assert_eq!(calls, 1);
+        assert!(result.enabled);
+        assert_eq!(selected_ids(&store), Some(vec![]));
+        assert!(desired_dirs_checked(&store, &manifest).unwrap().is_empty());
+    }
+
+    #[test]
+    fn path_selection_drift_detects_leftovers_even_when_disabled() {
+        assert!(path_has_drift(&[], &v(&["C:/old"]), &v(&["C:/old", "C:/foreign"])));
+        assert!(path_has_drift(&v(&["C:/new"]), &v(&["C:/old", "C:/new"]), &v(&["C:/old", "C:/new"])));
+        assert!(path_has_drift(&v(&["C:/new"]), &[], &v(&["C:/foreign"])));
+        assert!(!path_has_drift(&[], &v(&["C:/old"]), &v(&["C:/foreign"])));
+        assert!(!path_has_drift(&v(&["C:/new"]), &v(&["C:/new"]), &v(&["c:/NEW/", "C:/foreign"])));
+    }
 
     #[test]
     fn migration_activation_rollback_restores_copy_for_retry_without_system_writes() {

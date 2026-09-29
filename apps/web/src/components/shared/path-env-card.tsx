@@ -7,7 +7,7 @@ import { Terminal, RefreshCw, CheckCircle2, AlertTriangle, FolderX } from "lucid
 import type { PathEnvEntry, PathEnvStatus } from "@nsb/schema";
 import { useT } from "@/lib/store";
 import { usePathEnv, toastError } from "@/lib/hooks";
-import { normalizeError } from "@/lib/backend";
+import { normalizeError, type AppErrorShape } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
@@ -34,6 +34,8 @@ export function PathEnvCard() {
   const readError = query.error ? normalizeError(query.error) : null;
   const queryClient = useQueryClient();
   const [busy, setBusy] = React.useState(false);
+  const [changeError, setChangeError] = React.useState<AppErrorShape | null>(null);
+  const errorRef = React.useRef<HTMLDivElement>(null);
   const busyRef = React.useRef(false);
   const pathBusy = useIsMutating({ mutationKey: ["pathenv-change"] }) > 0;
   const mutation = useMutation({
@@ -42,15 +44,17 @@ export function PathEnvCard() {
     onSuccess: (result) => { queryClient.setQueryData(["pathenv"], result); },
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["pathenv"] }),
   });
+  React.useEffect(() => { if (changeError) errorRef.current?.focus(); }, [changeError]);
 
   const run = async (fn: () => Promise<PathEnvStatus>, okMsg: string) => {
     if (!ready || busyRef.current || queryClient.isMutating({ mutationKey: ["pathenv-change"] })) return;
     busyRef.current = true;
-    setBusy(true);
+    setBusy(true); setChangeError(null);
     try {
       await mutation.mutateAsync(fn);
       toast.success(okMsg);
     } catch (e) {
+      setChangeError(normalizeError(e));
       toastError(e);
     } finally {
       setBusy(false);
@@ -92,6 +96,20 @@ export function PathEnvCard() {
         </div>
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
+        {changeError && <div ref={errorRef} tabIndex={-1} role="alert" className="space-y-2 rounded-lg border border-error/25 bg-error-soft px-3 py-2.5 text-xs text-error outline-none focus-visible:ring-2 focus-visible:ring-error [overflow-wrap:anywhere]">
+          <p className="font-medium">{t("tools.pathEnvFailed")}</p>
+          <p>{changeError.message}</p>
+          {changeError.hint && <p>{changeError.hint}</p>}
+          <p>{t("tools.pathEnvCheckAfterFailure")}</p>
+          {changeError.detail && <details><summary className="cursor-pointer">{t("wz.errorDetails")}</summary><p className="mt-2 whitespace-pre-wrap">{changeError.detail}</p></details>}
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="secondary" disabled={busy || pathBusy || query.isFetching} onClick={() => void query.refetch({ cancelRefetch: false })}>
+              <RefreshCw className={cn("h-3.5 w-3.5", query.isFetching && "animate-spin motion-reduce:animate-none")} />{t("tools.pathEnvRetry")}
+            </Button>
+            {changeError.code === "PATH_UPDATE_FAILED" && <Button size="sm" variant="secondary" disabled={busy || pathBusy || !ready}
+              onClick={() => run(() => api.pathenvReapply(), t("tools.pathEnvReapply"))}>{t("tools.pathEnvReapply")}</Button>}
+          </div>
+        </div>}
         {readError && <div role="alert" className="space-y-2 rounded-lg border border-error/25 bg-error-soft px-3 py-2.5 text-xs text-error [overflow-wrap:anywhere]">
           <p>{t("tools.pathEnvReadFailed")}</p>
           <p>{readError.message}</p>
@@ -130,7 +148,7 @@ export function PathEnvCard() {
               disabled={busy || pathBusy || !ready}
               onClick={() => run(() => api.pathenvReapply(), t("tools.pathEnvReapply"))}
             >
-              <RefreshCw className={cn("h-3 w-3", busy && "animate-spin")} />
+              <RefreshCw className={cn("h-3 w-3", busy && "animate-spin motion-reduce:animate-none")} />
               {t("tools.pathEnvReapply")}
             </Button>
           </div>
@@ -176,9 +194,9 @@ function PathEnvRow({
       />
 
       <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-1.5">
-          <span className="truncate text-[12.5px] font-medium">{entry.label}</span>
-          <span className="shrink-0 text-[10.5px] tabular text-faint">{entry.version}</span>
+        <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 [overflow-wrap:anywhere]">
+          <span className="min-w-0 text-[12.5px] font-medium">{entry.label}</span>
+          <span className="min-w-0 text-[10.5px] tabular text-faint">{entry.version}</span>
           {entry.inPath && (
             <CheckCircle2 className="h-3 w-3 shrink-0 text-running" aria-label={t("tools.pathEnvInPath")} />
           )}

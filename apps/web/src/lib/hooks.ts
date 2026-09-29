@@ -12,13 +12,14 @@ import { toast } from "sonner";
 import { useInstallTasks } from "./install-tasks";
 import { useT } from "./store";
 
-/* 服务状态轮询：2s，不阻塞。
+/* 服务状态轮询：2s，不阻塞。本地 IPC 查询在断网时仍应执行。
    initialDataUpdatedAt: 0 让 react-query 立刻发起首次请求——否则 initialData 的空数组
    会被当成「新鲜数据」，在 staleTime 内不请求，页面就先显示成空的。 */
 export function useServices(intervalMs = 2000) {
   return useQuery({
     queryKey: ["services"],
     queryFn: api.listServiceStatus,
+    networkMode: "always",
     refetchInterval: intervalMs,
     initialDataUpdatedAt: 0,
     initialData: [],
@@ -29,6 +30,7 @@ export function useService(id: string | undefined, intervalMs = 2000) {
   return useQuery({
     queryKey: ["services"],
     queryFn: api.listServiceStatus,
+    networkMode: "always",
     refetchInterval: intervalMs,
     select: (list) => list.find((s) => s.id === id),
     initialDataUpdatedAt: 0,
@@ -98,6 +100,7 @@ export function useSites() {
   return useQuery({
     queryKey: ["sites"],
     queryFn: api.listSites,
+    networkMode: "always",
     refetchInterval: 4000,
     initialDataUpdatedAt: 0,
     initialData: [],
@@ -109,6 +112,7 @@ export function useStacks() {
   return useQuery({
     queryKey: ["stacks"],
     queryFn: api.listStacks,
+    networkMode: "always",
     initialDataUpdatedAt: 0,
     initialData: [],
   });
@@ -311,8 +315,8 @@ export function useQuickServiceActions(services: ServiceStatus[], stacks: Stack[
     try {
       // 两类进程都读取成功才允许确认；失败不能用空列表伪装为全部停止。
       const [currentServices, consoleStatus] = await Promise.all([
-        qc.fetchQuery({ queryKey: ["services"], queryFn: api.listServiceStatus, staleTime: 0 }),
-        qc.fetchQuery({ queryKey: ["adminer"], queryFn: api.adminerStatus, staleTime: 0, retry: false }),
+        qc.fetchQuery({ queryKey: ["services"], queryFn: api.listServiceStatus, staleTime: 0, networkMode: "always" }),
+        qc.fetchQuery({ queryKey: ["adminer"], queryFn: api.adminerStatus, staleTime: 0, retry: false, networkMode: "always" }),
       ]);
       const ids = currentServices.filter(serviceHasProcess).map((service) => service.id);
       if (consoleStatus) ids.push(api.ADMINER_CONSOLE_ID);
@@ -373,12 +377,44 @@ export function useQuickServiceActions(services: ServiceStatus[], stacks: Stack[
       busyRef.current = false; setBusy(false); invalidate("services", "stacks", "adminer");
     }
   };
+  const serviceAction = async (id: string, action: "start" | "stop" | "restart"): Promise<void> => {
+    if (busyRef.current) return;
+    busyRef.current = true; setBusy(true);
+    const pending = toast.loading(t("common.loading"));
+    try {
+      // 固定用户选择的动作，执行和冲突重试前重新读取状态，不能按旧状态反转动作。
+      const current = await qc.fetchQuery({ queryKey: ["services"], queryFn: api.listServiceStatus, staleTime: 0, retry: false, networkMode: "always" });
+      const service = current.find((item) => item.id === id);
+      if (!service) { toast.error(t("svc.notFound")); return; }
+      if (service.state === "starting" || service.state === "stopping") {
+        toast.info(`${service.label} · ${t(service.state === "starting" ? "state.starting" : "state.stopping")}`);
+        return;
+      }
+      if (action !== "stop" && service.missingRequires.length) {
+        toast.warning(t("svc.needDepsHint"));
+        return;
+      }
+      if (action === "start" && service.state !== "running" && serviceHasProcess(service)) {
+        toast.warning(t("svc.processStillRunning"));
+        return;
+      }
+      if (action === "stop") await api.stopService(id);
+      else if (action === "restart") await api.restartService(id);
+      else await api.startService(id);
+      toast.success(`${service.label} · ${t(action === "stop" ? "common.stopped" : "common.running")}`);
+    } catch (error) {
+      if (action === "stop" || !toastPortConflict(error, { onResolved: () => serviceAction(id, action) })) toastError(error);
+    } finally {
+      toast.dismiss(pending);
+      busyRef.current = false; setBusy(false); invalidate("services", "stacks", "sites");
+    }
+  };
   const pendingTargets = stopReport ? stopReport.failed.map((failure) => failure.serviceId) : stopTargets;
   const stopDescription = t(stopReport?.failed.length ? "bulk.retryStopHint" : "confirm.stopAllDesc")
     .replace("{count}", String(pendingTargets.length))
     + (pendingTargets.includes(api.ADMINER_CONSOLE_ID) ? ` ${t("confirm.stopAllConsoleHint")}` : "");
   const hasStopTargets = services.some(serviceHasProcess) || Boolean(adminerQuery.data) || !adminerQuery.isSuccess;
-  return { busy, start, stop, stopReport, stopError, prepareStop, stopDescription, hasStopTargets };
+  return { busy, start, stop, serviceAction, stopReport, stopError, prepareStop, stopDescription, hasStopTargets };
 }
 
 /* 端口方案 → 期望端口 */
@@ -418,7 +454,7 @@ export function useInterval(fn: () => void, ms: number | null) {
 
 /** 数据库页与工具箱共享真实管理台状态，换页后仍能打开或停止原进程。 */
 function useAdminerStatus() {
-  return useQuery({ queryKey: ["adminer"], queryFn: api.adminerStatus, refetchInterval: 5000, retry: false });
+  return useQuery({ queryKey: ["adminer"], queryFn: api.adminerStatus, refetchInterval: 5000, retry: false, networkMode: "always" });
 }
 
 export function useAdminer(packageId: "adminer" | "phpmyadmin" = "adminer", targetServiceId?: string) {

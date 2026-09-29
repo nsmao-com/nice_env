@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useUI, useT } from "@/lib/store";
+import { useT } from "@/lib/store";
 import { Command as CommandPrimitive } from "cmdk";
 import { Search } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -21,10 +21,10 @@ function CommandDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         hideClose
-        className="overflow-hidden p-0 max-w-[560px] shadow-[0_24px_80px_-12px_rgba(0,0,0,0.6)]"
+        className="flex max-h-[calc(100dvh-1.5rem)] max-w-[560px] flex-col gap-0 overflow-hidden p-0 shadow-[0_24px_80px_-12px_rgba(0,0,0,0.6)]"
       >
         <DialogTitle className="sr-only">{t("palette.title")}</DialogTitle>
-        <Command>{children}</Command>
+        <Command label={t("palette.title")}>{children}</Command>
       </DialogContent>
     </Dialog>
   );
@@ -36,7 +36,7 @@ const Command = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <CommandPrimitive
     ref={ref}
-    className={cn("flex h-full w-full flex-col overflow-hidden rounded-3xl", className)}
+    className={cn("flex h-full min-h-0 w-full flex-col overflow-hidden rounded-3xl", className)}
     {...props}
   />
 ));
@@ -46,7 +46,7 @@ const CommandInput = React.forwardRef<
   React.ComponentRef<typeof CommandPrimitive.Input>,
   React.ComponentPropsWithoutRef<typeof CommandPrimitive.Input>
 >(({ className, ...props }, ref) => (
-  <div className="mx-3 flex items-center gap-2 border-b border-dashed border-separator px-1">
+  <div className="mx-3 flex shrink-0 items-center gap-2 border-b border-dashed border-separator px-1">
     <Search className="h-4 w-4 shrink-0 text-faint" />
     <CommandPrimitive.Input
       ref={ref}
@@ -66,7 +66,7 @@ const CommandList = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <CommandPrimitive.List
     ref={ref}
-    className={cn("max-h-[340px] overflow-y-auto overflow-x-hidden p-2", className)}
+    className={cn("min-h-0 max-h-[340px] overflow-y-auto overflow-x-hidden overscroll-contain p-2", className)}
     {...props}
   />
 ));

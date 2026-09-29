@@ -44,6 +44,7 @@ import { PhpExtensionsDialog } from "@/components/shared/php-extensions";
 import { CodeEditor } from "@/components/shared/code-editor";
 import { ConfigEditDialog } from "@/components/shared/config-editor";
 import { DiagnosticsCard } from "@/components/shared/diagnostics-card";
+import { PageHeader } from "@/components/layout/app-shell";
 import {
   CronTool,
   TunnelTool,
@@ -70,7 +71,7 @@ export function UtilityWorkspace({ section = "tools" }: { section?: "tools" | "n
   }, [pendingTool, consumeTool, router, section]);
   const title = section === "tools" ? t("tools.title") : t(("nav." + section) as "nav.network");
   return <div className="pb-8">
-    <PageHeaderInline title={title} subtitle={t(("workspace." + section) as "workspace.tools")} />
+    <PageHeader title={title} subtitle={t(("workspace." + section) as "workspace.tools")} />
     <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
       {section === "tools" && <><div id="nsb-tool-ports" className="min-w-0 scroll-mt-6"><PortLookupTool request={portRequest} /></div><PortTool onInspect={inspectPort} /></>}
       {section === "network" && <><DnsTool /><HostsTool /></>}
@@ -82,15 +83,6 @@ export function UtilityWorkspace({ section = "tools" }: { section?: "tools" | "n
       {section === "models" && <div className="xl:col-span-2"><OllamaTool /></div>}
     </div>
   </div>;
-}
-
-function PageHeaderInline({ title, subtitle }: { title: string; subtitle?: string }) {
-  return (
-    <div className="mb-6">
-      <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
-      {subtitle && <p className="mt-1 text-[13px] text-muted">{subtitle}</p>}
-    </div>
-  );
 }
 
 function ToolCard({

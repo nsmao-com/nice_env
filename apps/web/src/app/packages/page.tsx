@@ -18,6 +18,7 @@ import {
   LayoutGrid,
   Play,
   Square,
+  RotateCw,
   Power,
   Sparkles,
   Bot,
@@ -217,7 +218,7 @@ export default function PackagesPage() {
   );
   const statusKnown = serviceQuery.dataUpdatedAt > 0 && !serviceQuery.error;
   const dataReady = packageQuery.dataUpdatedAt > 0 && !packageQuery.error && statusKnown;
-  const [bulkTarget, setBulkTarget] = React.useState<{ action: "start" | "stop"; ids: string[] } | null>(null);
+  const [bulkTarget, setBulkTarget] = React.useState<{ action: "start" | "stop" | "restart"; ids: string[] } | null>(null);
   const [bulkBusy, setBulkBusy] = React.useState(false);
   const bulkRef = React.useRef(false);
   const [bulkReport, setBulkReport] = React.useState<BulkReport | null>(null);
@@ -321,7 +322,7 @@ export default function PackagesPage() {
     return grp ? filtered.filter((g) => grp.subs.some((s) => s.value === g.category)).length : 0;
   };
 
-  const openBulk = (action: "start" | "stop") => {
+  const openBulk = (action: "start" | "stop" | "restart") => {
     if (!dataReady || bulkRef.current || uninstallRef.current) return;
     const installedIds = new Set(groups
       .filter((g) => g.isService)
@@ -347,7 +348,13 @@ export default function PackagesPage() {
     setBulkBusy(true);
     setBulkError(null);
     try {
-      const result = await (bulkTarget.action === "start" ? api.bulkStart(ids) : api.bulkStop(ids));
+      const result = await (
+        bulkTarget.action === "start"
+          ? api.bulkStart(ids)
+          : bulkTarget.action === "restart"
+            ? api.bulkRestart(ids)
+            : api.bulkStop(ids)
+      );
       setBulkReport((previous) => previous ? {
         ...result,
         order: previous.order,
@@ -355,7 +362,7 @@ export default function PackagesPage() {
         already: [...new Set([...previous.already, ...result.already])],
       } : result);
       if (result.failed.length === 0) {
-        toast.success(t("bulk.done").replace("{action}", t(bulkTarget.action === "start" ? "bulk.start" : "bulk.stop"))
+        toast.success(t("bulk.done").replace("{action}", t(`bulk.${bulkTarget.action}` as never))
           .replace("{n}", String(bulkTarget.ids.length)));
         setBulkTarget(null);
       }
@@ -457,6 +464,9 @@ export default function PackagesPage() {
             </Button>
             <Button variant="outline" size="sm" disabled={actionsDisabled} onClick={() => openBulk("stop")}>
               <Square className="h-3 w-3" /> {t("packages.stopAll")}
+            </Button>
+            <Button variant="outline" size="sm" disabled={actionsDisabled} onClick={() => openBulk("restart")}>
+              <RotateCw className="h-3.5 w-3.5" /> {t("packages.restartAll")}
             </Button>
           </div>
         }
@@ -575,10 +585,10 @@ export default function PackagesPage() {
       <ConfirmDialog
         open={!!bulkTarget}
         onOpenChange={(open) => { if (!open && !bulkRef.current) setBulkTarget(null); }}
-        title={t(bulkTarget?.action === "stop" ? "packages.stopAll" : "packages.startAll")}
-        description={t(bulkTarget?.action === "stop" ? "packages.bulkStopConfirm" : "packages.bulkStartConfirm")
+        title={t(bulkTarget?.action === "stop" ? "packages.stopAll" : bulkTarget?.action === "restart" ? "packages.restartAll" : "packages.startAll")}
+        description={t(bulkTarget?.action === "stop" ? "packages.bulkStopConfirm" : bulkTarget?.action === "restart" ? "packages.bulkRestartConfirm" : "packages.bulkStartConfirm")
           .replace("{count}", String(bulkTarget?.ids.length ?? 0))}
-        confirmText={t(bulkReport?.failed.length ? "bulk.retryFailed" : bulkTarget?.action === "stop" ? "bulk.stop" : "bulk.start")}
+        confirmText={t(bulkReport?.failed.length ? "bulk.retryFailed" : bulkTarget?.action === "stop" ? "bulk.stop" : bulkTarget?.action === "restart" ? "bulk.restart" : "bulk.start")}
         danger={bulkTarget?.action === "stop"}
         loading={bulkBusy}
         confirmDisabled={!dataReady}

@@ -3413,11 +3413,17 @@ mod scaffold_tests {
             emit: Arc::new(|_| {}),
         };
         let id = format!("site:{}", site.id);
+        let error_id = format!("site-error:{}", site.id);
         let nginx = state.paths.logs().join("nginx").join(format!("{}.access.log", site.id));
         assert_eq!(state.log_source_path(&id).unwrap(), nginx);
         std::fs::create_dir_all(nginx.parent().unwrap()).unwrap();
         std::fs::write(&nginx, "nginx request\n").unwrap();
         assert_eq!(state.tail_logs_checked(&id, 5).unwrap()[0].line, "nginx request");
+        let nginx_error = nginx.with_file_name(format!("{}.error.log", site.id));
+        assert_eq!(state.log_source_path(&error_id).unwrap(), nginx_error);
+        assert!(state.tail_logs_checked(&error_id, 5).unwrap().is_empty());
+        std::fs::write(&nginx_error, "nginx error one\nnginx error two\n").unwrap();
+        assert_eq!(state.tail_logs_checked(&error_id, 1).unwrap()[0].line, "nginx error two");
         site.runtime.web_server = "apache".into();
         state.store.save_site(&site).unwrap();
         let apache = state.paths.etc().join("apache/logs").join(format!("{}.access.log", site.id));
@@ -3425,15 +3431,125 @@ mod scaffold_tests {
         assert!(state.tail_logs_checked(&id, 5).unwrap().is_empty());
         std::fs::write(&apache, "apache request\n").unwrap();
         assert_eq!(state.tail_logs_checked(&id, 5).unwrap()[0].line, "apache request");
+        let apache_error = apache.with_file_name(format!("{}.error.log", site.id));
+        assert_eq!(state.log_source_path(&error_id).unwrap(), apache_error);
+        assert!(state.tail_logs_checked(&error_id, 5).unwrap().is_empty(), "切换服务器不能读回旧 Nginx 错误日志");
+        std::fs::write(&apache_error, "apache error one\napache error two\n").unwrap();
+        assert_eq!(state.tail_logs_checked(&error_id, 1).unwrap()[0].line, "apache error two");
+        let export = temp.0.join("selected-error.log");
+        crate::logs_export::copy_log_file(&state.log_source_path(&error_id).unwrap(), &export).unwrap();
+        assert_eq!(std::fs::read_to_string(export).unwrap(), "apache error one\napache error two\n");
+        std::fs::remove_file(&apache_error).unwrap();
+        std::fs::create_dir(&apache_error).unwrap();
+        assert!(state.tail_logs_checked(&error_id, 5).is_err(), "日志读取错误不得降级为空日志");
         let conf = configgen::render_httpd_vhost(&site, 8180, 8444, &state.paths.certs(), None);
         assert!(conf.contains(&format!("CustomLog \"${{NSB_ETC}}/logs/{}.access.log\"", site.id)));
         assert!(conf.contains(&format!("ErrorLog \"${{NSB_ETC}}/logs/{}.error.log\"", site.id)));
         assert_eq!(state.log_source_path("site:../escape").unwrap_err().code, "BAD_SITE_ID");
         assert_eq!(state.log_source_path("site:missing").unwrap_err().code, "SITE_NOT_FOUND");
+        for id in ["site-error:", "site-error:../escape", "site-error:one/file", "site-error:one:stream"] {
+            assert_eq!(state.log_source_path(id).unwrap_err().code, "BAD_SITE_ID");
+        }
+        assert_eq!(state.log_source_path("site-error:missing").unwrap_err().code, "SITE_NOT_FOUND");
+        state.store.delete_site(&site.id).unwrap();
+        assert_eq!(state.log_source_path(&error_id).unwrap_err().code, "SITE_NOT_FOUND");
         assert_eq!(state.log_source_path("../escape").unwrap_err().code, "UNKNOWN_SERVICE");
         let service_log = state.paths.logs().join("custom-service.log");
         state.manager.register("fixture", "Fixture", None, None, None, service_log.clone());
         assert_eq!(state.log_source_path("fixture").unwrap(), service_log);
+    }
+
+    #[test]
+    #[ignore = "requires NSB_NGINX_ROOT, NSB_APACHE_ROOT and NSB_SKIP_HOSTS=1; isolated HTTP access/error log verification"]
+    fn site_logs_native_nginx_and_apache() {
+        assert_eq!(std::env::var("NSB_SKIP_HOSTS").as_deref(), Ok("1"));
+        for (server, version, variable, port_key, tls_key) in [
+            ("nginx", "1.28.1", "NSB_NGINX_ROOT", "http", "https"),
+            ("apache", "2.4.66", "NSB_APACHE_ROOT", "apacheHttp", "apacheHttps"),
+        ] {
+            let root = PathBuf::from(std::env::var(variable).expect(variable));
+            let temp = tempfile::tempdir().unwrap();
+            let base = temp.path().join("site logs with spaces");
+            let lease = crate::control::Lease::acquire(Some(base.clone()), std::time::Duration::ZERO).unwrap();
+            let state = crate::CoreState::init(Some(base), Arc::new(|_| {})).unwrap();
+            let http = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let https = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = http.local_addr().unwrap().port();
+            state.store.set_port_override(port_key, Some(port)).unwrap();
+            state.store.set_port_override(tls_key, Some(https.local_addr().unwrap().port())).unwrap();
+            state.store.upsert_installed(&crate::model::InstalledPackage {
+                id: server.into(), version: version.into(), category: "web-server".into(),
+                install_path: root.parent().unwrap().to_string_lossy().into(), config_path: String::new(), installed_at: 1,
+            }).unwrap();
+            let project = state.paths.base.join("project");
+            std::fs::create_dir_all(&project).unwrap();
+            std::fs::write(project.join("index.html"), "native site log fixture").unwrap();
+            std::fs::write(project.join(".private-log-fixture"), "not served").unwrap();
+            std::fs::create_dir_all(project.join("assets/.git")).unwrap();
+            std::fs::write(project.join("assets/.git/config"), "must remain private").unwrap();
+            std::fs::create_dir_all(project.join(".well-known/acme-challenge")).unwrap();
+            std::fs::write(project.join(".well-known/acme-challenge/log-probe"), "challenge allowed").unwrap();
+            for id in ["logs-one", "logs-two"] {
+                let site_root = if id == "logs-two" {
+                    format!("{}/assets/../", crate::paths::nginx_path(&project))
+                } else { crate::paths::nginx_path(&project) };
+                let site: crate::model::Site = serde_json::from_value(serde_json::json!({
+                    "id":id,"name":id,"domains":[format!("{id}.test")],"rootDir":site_root,
+                    "runtime":{"kind":"static","webServer":server},"https":false,
+                    "rewrite":"none","createdAt":1,"updatedAt":1
+                })).unwrap();
+                state.store.save_site(&site).unwrap();
+                write_site_conf(&state.paths, &state.store, &site).unwrap();
+            }
+            struct Cleanup(Arc<crate::CoreState>, &'static str);
+            impl Drop for Cleanup { fn drop(&mut self) { let _ = self.0.stop_service(self.1); } }
+            let _cleanup = Cleanup(state.clone(), server);
+            drop((http, https));
+            state.start_service(server).unwrap();
+            let _controller = crate::control::Server::start(lease, state.clone(), || Ok(())).unwrap();
+            let client = reqwest::blocking::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(3)).build().unwrap();
+            for (site, resource, status) in [("logs-one", "/?first-site-request", 200),
+                ("logs-one", "/.private-log-fixture", 403), ("logs-one", "/assets/.git/config", 403),
+                ("logs-one", "/.well-known/acme-challenge/log-probe", 200), ("logs-two", "/?second-site-request", 200),
+                ("logs-two", "/assets/.git/config", 403)] {
+                let response = client.get(format!("http://127.0.0.1:{port}{resource}"))
+                    .header("Host", format!("{site}.test")).send().unwrap();
+                assert_eq!(response.status().as_u16(), status, "{server} {resource}");
+                let _ = response.text().unwrap();
+            }
+            let access_id = "site:logs-one";
+            let error_id = "site-error:logs-one";
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                let access = state.tail_logs_checked(access_id, 50).unwrap();
+                let errors = state.tail_logs_checked(error_id, 50).unwrap();
+                if access.iter().any(|row| row.line.contains("first-site-request"))
+                    && errors.iter().any(|row| row.line.contains(".private-log-fixture")) { break; }
+                assert!(std::time::Instant::now() < deadline, "{server} 未生成站点访问与错误日志");
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            let access = state.tail_logs_checked(access_id, 50).unwrap();
+            assert!(access.iter().any(|row| row.line.contains(" 403 ")));
+            assert!(access.iter().all(|row| !row.line.contains("second-site-request")));
+            assert!(state.tail_logs_checked("site-error:logs-two", 50).unwrap().iter().all(|row| !row.line.contains(".private-log-fixture")));
+            let broker = crate::control::Client::connect_existing(Some(state.paths.base.clone())).unwrap();
+            let shared: Vec<crate::model::LogLine> = broker.call(crate::control::Request::Logs { id:error_id.into(), lines:50 }).unwrap();
+            assert!(shared.iter().any(|row| row.line.contains(".private-log-fixture")));
+            let mcp: serde_json::Value = broker.call(crate::control::Request::Mcp {
+                name:"read_logs".into(), arguments:serde_json::json!({"id":error_id,"lines":50})
+            }).unwrap();
+            assert_eq!(mcp["isError"], false);
+            assert!(mcp["content"][0]["text"].as_str().unwrap().contains(".private-log-fixture"));
+            let source = state.log_source_path(error_id).unwrap();
+            let export = state.paths.base.join("exported-errors.log");
+            crate::logs_export::copy_log_file(&source, &export).unwrap();
+            assert_eq!(std::fs::read(&source).unwrap(), std::fs::read(&export).unwrap());
+            let pids = state.manager.snapshot(server).unwrap().pids;
+            state.stop_service(server).unwrap();
+            assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));
+            assert!(state.tail_logs_checked(error_id, 50).unwrap().iter().any(|row| row.line.contains(".private-log-fixture")));
+            println!("{server} {version}: real HTTP 200/403, access/error separation, other-site isolation, control/MCP reads, byte-exact export and logs after stop passed");
+        }
     }
 
     #[test]

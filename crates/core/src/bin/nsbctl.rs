@@ -15,7 +15,7 @@
 //!   nsbctl sites [--json]         站点列表（含访问 URL）
 //!   nsbctl open <site-name>       用默认浏览器打开站点
 //!   nsbctl packages [--json]      已安装套件
-//!   nsbctl logs <service> [n]     最后 n 行日志（默认 50）
+//!   nsbctl logs <source> [n]      最后 n 行日志（默认 50）；站点使用 site:<id> / site-error:<id>
 //!   nsbctl diagnose <port>        查端口占用者
 //!
 //! 退出码：0 成功；1 运行失败；2 用法错误。
@@ -89,7 +89,7 @@ fn parse_command(args: &[String]) -> Result<Command<'_>, String> {
             Ok(Command::Open(pos[0]))
         },
         "logs" => {
-            if !(1..=2).contains(&pos.len()) { return Err("用法：nsbctl logs <service> [n]".into()); }
+            if !(1..=2).contains(&pos.len()) { return Err("用法：nsbctl logs <service|site:id|site-error:id> [n]".into()); }
             service_id(pos[0])?;
             let lines = match pos.get(1) {
                 None => 50,
@@ -174,7 +174,8 @@ fn usage() {
          \x20 help | --version\n\
          \x20 status [--json] | start|stop|restart <service> | start-all [--json] | stop-all [--json]\n\
          \x20 kill <service> --yes（强制停止，可能丢失未保存数据）\n\
-         \x20 sites [--json] | open <site> | packages [--json] | logs <service> [n] | diagnose <port>\n\
+         \x20 sites [--json] | open <site> | packages [--json] | logs <source> [n] | diagnose <port>\n\
+         \x20 日志 source：服务 id、site:<站点 id>（访问）或 site-error:<站点 id>（错误）\n\
          \x20 pin <php@x.y.z> <dir>（站点 PHP 版本，写入 .nsb.json）"
     );
 }

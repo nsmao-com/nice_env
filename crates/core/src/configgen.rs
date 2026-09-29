@@ -1346,7 +1346,15 @@ pub fn render_httpd_vhost(
         .first()
         .cloned()
         .unwrap_or_else(|| "localhost".into());
-    let root = nginx_path(std::path::Path::new(&site.root_dir));
+    // 文档根与保护规则使用同一个真实路径，避免 Apache 规范化 .. 或目录联接后失配。
+    let root_path = std::path::Path::new(&site.root_dir);
+    let root = std::fs::canonicalize(root_path)
+        .map(|path| crate::paths::portable_path_text(&path))
+        .unwrap_or_else(|_| nginx_path(root_path));
+    // DirectoryMatch 匹配完整磁盘路径：只保护文档根内部的隐藏目录，
+    // 不能因为项目位于 .work / .tmp 等父目录中就拒绝整个站点。
+    let root_pattern = regex::escape(root.trim_end_matches('/'));
+    let root_pattern = if cfg!(windows) { format!("(?i:{root_pattern})") } else { root_pattern };
 
     let (listen, ssl_lines) = if site.https {
         let (certificate, key) = site_certificate_files(site, cert_dir);
@@ -1433,7 +1441,7 @@ pub fn render_httpd_vhost(
     <FilesMatch "^\.">
         Require all denied
     </FilesMatch>
-    <DirectoryMatch "/\.(?!well-known(?:/|$))">
+    <DirectoryMatch "^{root_pattern}/(?:[^/]+/)*\.(?!well-known(?:/|$))">
         Require all denied
     </DirectoryMatch>
 

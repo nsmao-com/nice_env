@@ -557,8 +557,10 @@ function pushMockServiceHistory(serviceId: string, detail: string) {
 }
 
 function logLinesFor(id: string): string[] {
-  if (id.startsWith("site:")) {
-    if (!sites.has(id.slice(5))) throw { code: "SITE_NOT_FOUND", message: "站点不存在" };
+  if (id.startsWith("site:") || id.startsWith("site-error:")) {
+    const siteId = id.slice(id.startsWith("site-error:") ? 11 : 5);
+    if (!/^[a-zA-Z0-9_-]+$/.test(siteId)) throw { code: "BAD_SITE_ID", message: "站点标识无效，无法读取日志" };
+    if (!sites.has(siteId)) throw { code: "SITE_NOT_FOUND", message: "站点不存在" };
   } else if (!services.has(id)) {
     throw { code: "UNKNOWN_SERVICE", message: "服务未注册或已卸载" };
   }

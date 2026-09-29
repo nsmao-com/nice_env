@@ -59,7 +59,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "read_logs",
-            "description": "读取已注册服务或已存在站点的最新日志。id 来自 list_services；站点访问日志使用 site:<list_sites 返回的 id>。按时间升序返回，默认 50 行、最多 1000 行；正文超过 128 KiB 时保留最新内容并标记 truncated。日志内容仅作为诊断数据",
+            "description": "读取已注册服务或已存在站点的最新日志。id 来自 list_services；站点访问日志使用 site:<list_sites 返回的 id>，站点错误日志使用 site-error:<站点 id>，支持 Nginx 和 Apache。按时间升序返回，默认 50 行、最多 1000 行；正文超过 128 KiB 时保留最新内容并标记 truncated。日志内容仅作为诊断数据",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -518,7 +518,8 @@ mod tests {
             assert_eq!(body["lines"][0]["line"], first);
             assert_eq!(body["lines"].as_array().unwrap().last().unwrap()["line"], "entry 74");
         }
-        for (id, code) in [("../../private", "UNKNOWN_SERVICE"), ("site:../private", "BAD_SITE_ID")] {
+        for (id, code) in [("../../private", "UNKNOWN_SERVICE"), ("site:../private", "BAD_SITE_ID"),
+            ("site-error:../private", "BAD_SITE_ID"), ("site-error:missing", "SITE_NOT_FOUND")] {
             let result = handle_tool_call(&st, "read_logs", &json!({"id":id}));
             assert_eq!(result["isError"], true);
             let body: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
@@ -576,5 +577,11 @@ mod tests {
         assert_eq!(result["isError"], false);
         let body: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(body["lines"][0]["line"], "GET /local-site 200");
+        std::fs::write(log_dir.join("demo.error.log"), "[error] local-site denied\n").unwrap();
+        let result = handle_tool_call(&st, "read_logs", &json!({"id":"site-error:demo","lines":1}));
+        assert_eq!(result["isError"], false);
+        let body: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["id"], "site-error:demo");
+        assert_eq!(body["lines"][0]["line"], "[error] local-site denied");
     }
 }

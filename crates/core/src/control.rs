@@ -322,6 +322,15 @@ mod tests {
         let (lease, state) = owner(&base);
         state.manager.register("control-native", "native probe", Some("7.8.9".into()), None, None, base.join("probe.log"));
         std::fs::write(base.join("probe.log"), "native-controller-log\n").unwrap();
+        let site: crate::model::Site = serde_json::from_value(serde_json::json!({
+            "id":"control-log-site","name":"log fixture","domains":["fixture.test"],"rootDir":base,
+            "runtime":{"kind":"static","webServer":"apache"},"https":false,"rewrite":"none","createdAt":1,"updatedAt":1
+        })).unwrap();
+        state.store.save_site(&site).unwrap();
+        let log_dir = state.paths.etc().join("apache/logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        std::fs::write(log_dir.join("control-log-site.access.log"), "GET /controller-site 200\n").unwrap();
+        std::fs::write(log_dir.join("control-log-site.error.log"), "[error] controller-site forbidden\n").unwrap();
         crate::services::spawn_tracked(&state.manager, "control-native", &crate::services::SpawnSpec {
             program: std::env::current_exe().unwrap(),
             args: vec!["--exact".into(), "control::tests::controller_service_probe".into(), "--nocapture".into()],

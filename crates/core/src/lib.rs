@@ -1393,7 +1393,9 @@ impl CoreState {
 
     /// 只允许已注册服务或真实站点，不能把调用方的任意路径拼入日志目录。
     pub fn log_source_path(&self, id: &str) -> Result<std::path::PathBuf> {
-        if let Some(site_id) = id.strip_prefix("site:") {
+        let site_log = id.strip_prefix("site:").map(|site_id| (site_id, "access"))
+            .or_else(|| id.strip_prefix("site-error:").map(|site_id| (site_id, "error")));
+        if let Some((site_id, kind)) = site_log {
             if site_id.is_empty() || !site_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
                 return Err(AppError::new("BAD_SITE_ID", "站点标识无效，无法读取日志"));
             }
@@ -1403,13 +1405,13 @@ impl CoreState {
             } else {
                 self.paths.logs().join("nginx")
             };
-            return Ok(dir.join(format!("{site_id}.access.log")));
+            return Ok(dir.join(format!("{site_id}.{kind}.log")));
         }
         self.manager.log_path(id)
     }
 
     pub fn tail_logs_checked(&self, id: &str, lines: usize) -> Result<Vec<model::LogLine>> {
-        let raw = if id.starts_with("site:") {
+        let raw = if id.starts_with("site:") || id.starts_with("site-error:") {
             services::read_log_tail(&self.log_source_path(id)?, lines)?
         } else {
             self.manager.tail_checked(id, lines)?

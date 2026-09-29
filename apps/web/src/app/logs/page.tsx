@@ -46,14 +46,20 @@ function LogsPageInner() {
 
   React.useEffect(() => {
     // 指定了目标服务时，默认项不能覆盖 URL；后续轮询也不重置手动选择。
-    if (!wanted && !selected && services.length > 0) setSelected(services[0].id);
-  }, [wanted, services, selected]);
+    if (!wanted && !selected) {
+      if (services.length > 0) setSelected(services[0].id);
+      else if (servicesQuery.dataUpdatedAt && sites.length > 0) setSelected(`site:${sites[0].id}`);
+    }
+  }, [wanted, services, selected, servicesQuery.dataUpdatedAt, sites]);
 
-  // Nginx / Apache 均按站点读取访问日志。
+  // 同一站点的访问/错误日志共用一个列表项，在右侧切换来源。
+  const siteSelection = selected?.startsWith("site:") ? { id: selected.slice(5), kind: "access" as const }
+    : selected?.startsWith("site-error:") ? { id: selected.slice(11), kind: "error" as const } : null;
   const siteItems = React.useMemo(
     () =>
       sites.map((s) => ({
         id: `site:${s.id}`,
+        siteId: s.id,
         label: s.name,
         state: s.status as never,
       })),
@@ -75,8 +81,10 @@ function LogsPageInner() {
   }, [siteItems, query]);
 
   const runningCount = services.filter((s) => s.state === "running").length;
-  const selectedLabel = services.find((s) => s.id === selected)?.label
-    ?? siteItems.find((s) => s.id === selected)?.label ?? selected;
+  const selectedSite = siteItems.find((s) => s.siteId === siteSelection?.id);
+  const selectedLabel = siteSelection
+    ? `${selectedSite?.label ?? siteSelection.id} · ${t(siteSelection.kind === "error" ? "logs.siteError" : "logs.siteAccess")}`
+    : services.find((s) => s.id === selected)?.label ?? selected;
   const exportFullLog = async () => {
     if (!selected || exportBusy.current) return;
     const source = selected;
@@ -171,7 +179,7 @@ function LogsPageInner() {
                 </button>
               ))
             )}
-            {/* 站点访问日志 */}
+            {/* 站点日志 */}
             <p className="mt-2 px-2 py-1 text-[10.5px] font-medium uppercase tracking-wider text-faint/70">
               {t("logs.sites")}
             </p>
@@ -188,11 +196,11 @@ function LogsPageInner() {
               filteredSites.map((item) => (
                 <button
                   key={item.id}
-                  aria-pressed={selected === item.id}
-                  onClick={() => setSelected(item.id)}
+                  aria-pressed={siteSelection?.id === item.siteId}
+                  onClick={() => setSelected(`${siteSelection?.kind === "error" ? "site-error:" : "site:"}${item.siteId}`)}
                   className={cn(
                     "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors",
-                    selected === item.id
+                    siteSelection?.id === item.siteId
                       ? "bg-card-2 font-medium text-foreground"
                       : "text-muted hover:bg-fill hover:text-foreground"
                   )}
@@ -209,15 +217,26 @@ function LogsPageInner() {
         <Card className="flex h-full min-h-0 min-w-0 flex-col p-3 sm:p-4">
           {selected ? (
             <>
-              <div className="mb-2 flex items-center gap-2 text-[12px] text-faint">
-                <ScrollText className="h-3.5 w-3.5 shrink-0" />
-                <span className="min-w-0 break-all">{selectedLabel}</span>
+              <div className="mb-3 flex min-w-0 flex-col gap-3 text-[12px] text-faint sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+                <div className="flex min-w-0 flex-1 items-center gap-2">
+                  <ScrollText className="h-3.5 w-3.5 shrink-0" />
+                  <span className="min-w-0 [overflow-wrap:anywhere]">{selectedLabel}</span>
+                </div>
+                {siteSelection && <div role="group" aria-label={t("logs.siteKind")} className="flex w-fit max-w-full flex-wrap gap-1 rounded-lg bg-fill p-1">
+                  {(["access", "error"] as const).map((kind) => <Button key={kind} size="sm"
+                    variant={siteSelection.kind === kind ? "secondary" : "ghost"}
+                    aria-pressed={siteSelection.kind === kind}
+                    onClick={() => setSelected(`${kind === "error" ? "site-error:" : "site:"}${siteSelection.id}`)}>
+                    {t(kind === "error" ? "logs.siteError" : "logs.siteAccess")}
+                  </Button>)}
+                </div>}
               </div>
+              {siteSelection?.kind === "error" && <p className="mb-3 text-[11px] leading-relaxed text-muted">{t("logs.siteErrorHint")}</p>}
               <LogPane
                 serviceId={selected}
                 className="min-h-0 flex-1"
                 height={520}
-                emptyHint={t(selected.startsWith("site:") ? "logs.siteEmptyHint" : "logs.emptyHint")}
+                emptyHint={t(siteSelection?.kind === "error" ? "logs.siteErrorEmptyHint" : siteSelection ? "logs.siteEmptyHint" : "logs.emptyHint")}
                 tailLines={settings?.logTailLines ?? 500}
                 defaultAutoRefresh={settings?.logAutoRefresh ?? true}
               />

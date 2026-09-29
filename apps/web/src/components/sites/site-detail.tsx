@@ -217,7 +217,7 @@ export function SiteDetailSheet({
             <Button variant="secondary" size="sm" onClick={() => api.openInFolder(site.rootDir).catch(toastError)}>
               <FolderOpen className="h-3.5 w-3.5" /> {t("detail.dirBtn")}
             </Button>
-            <Button variant="secondary" size="sm" disabled={busy || dirty} onClick={() => router.push("/logs?service=" + encodeURIComponent(site.runtime.webServer === "apache" ? "apache" : "site:" + site.id))}>
+            <Button variant="secondary" size="sm" disabled={busy || dirty} onClick={() => router.push("/logs?service=" + encodeURIComponent("site:" + site.id))}>
               <ScrollText className="h-3.5 w-3.5" /> {t("detail.logs")}
             </Button>
             <Button

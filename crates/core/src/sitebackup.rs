@@ -241,6 +241,9 @@ fn archive_path(paths: &Paths, id: &str, name: &str) -> Result<PathBuf> {
 }
 pub fn scope(store: &Store, id: &str, project: bool, exclude_generated: bool) -> Result<Scope> {
     let site = site(store, id)?;
+    if site.runtime.kind == crate::model::SiteKind::Redirect {
+        return Err(AppError::new("SITE_NO_PROJECT", "跳转站点没有需要备份的项目目录，请使用配置备份"));
+    }
     let web = Path::new(&site.root_dir);
     let root = if project {
         site.runtime

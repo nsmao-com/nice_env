@@ -150,6 +150,7 @@ fn main() {
             .to_string_lossy()
             .to_string(),
         runtime: nsb_core::model::SiteRuntime {
+            redirect: None,
             custom_rewrite: None,
             application: None,
             acme_cert_id: None,

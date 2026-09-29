@@ -247,10 +247,10 @@ export default function DashboardPage() {
                                 <Button variant="ghost" size="icon-sm" className="text-faint hover:text-foreground" title={t("dashboard.openBrowser")} onClick={() => api.openSite(site.id).catch(toastError)}>
                                   <ExternalLink className="h-3.5 w-3.5" />
                                 </Button>
-                                <Button variant="ghost" size="icon-sm" className="text-faint hover:text-foreground" title={t("dashboard.openFolder")} onClick={() => api.openInFolder(site.rootDir).catch(toastError)}>
+                                {site.runtime.kind !== "redirect" && <Button variant="ghost" size="icon-sm" className="text-faint hover:text-foreground" title={t("dashboard.openFolder")} onClick={() => api.openInFolder(site.rootDir).catch(toastError)}>
                                   <FolderOpen className="h-3.5 w-3.5" />
-                                </Button>
-                                <SiteTerminalButton site={site} />
+                                </Button>}
+                                {site.runtime.kind !== "redirect" && <SiteTerminalButton site={site} />}
                               </div>
                             </div>
                             <div className="mt-2 flex items-center justify-between gap-2">
@@ -269,7 +269,7 @@ export default function DashboardPage() {
                                   ? `PHP ${site.runtime.phpVersion}`
                                   : site.runtime.kind === "reverse-proxy"
                                     ? `⇄ ${site.runtime.proxyTarget}`
-                                    : site.runtime.kind}
+                                    : site.runtime.kind === "redirect" ? `${t("redirect.title")} · ${site.runtime.redirect?.status ?? 302}` : site.runtime.kind}
                               </span>
                             </div>
                           </Card>

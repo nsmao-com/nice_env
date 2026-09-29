@@ -79,6 +79,21 @@ export function normalizeProxyTarget(input: string): string | null {
   }
 }
 
+export function siteRedirectTarget(redirect: SiteRuntime["redirect"], domains: string[]): { url: string; error: null } | { url: null; error: "redirect.invalid" | "redirect.pathQuery" | "redirect.loop" } {
+  const bad = { url: null, error: "redirect.invalid" } as const;
+  if (!redirect || ![301, 302, 307, 308].includes(redirect.status)) return bad;
+  const value = redirect.target.trim();
+  if (!/^https?:\/\//i.test(value) || value.length > 8192 || /[\s\p{Cc}"'\\$;{}<>]/u.test(value)) return bad;
+  try {
+    const url = new URL(value);
+    if (!["http:", "https:"].includes(url.protocol) || !url.hostname || url.username || url.password || url.port === "0") return bad;
+    if (redirect.preservePath && (value.includes("?") || value.includes("#"))) return { url: null, error: "redirect.pathQuery" };
+    const host = url.hostname.toLowerCase().replace(/\.$/, "");
+    if (domains.some((domain) => { const name = domain.trim().toLowerCase(); return name.startsWith("*.") ? host.endsWith(name.slice(1)) : host === name; })) return { url: null, error: "redirect.loop" };
+    return { url: url.href, error: null };
+  } catch { return bad; }
+}
+
 export const PHP_SITE_OPTIONS = [
   { key: "memory_limit", type: "size", initial: "512M" },
   { key: "upload_max_filesize", type: "size", initial: "64M" },

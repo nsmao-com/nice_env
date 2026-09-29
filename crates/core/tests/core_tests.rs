@@ -116,6 +116,7 @@ fn site_conf_php_has_fastcgi_upstream() {
         domains: vec!["x.test".into()],
         root_dir: "D:/code/x".into(),
         runtime: nsb_core::model::SiteRuntime {
+            redirect: None,
             custom_rewrite: None,
             application: None,
             acme_cert_id: None,
@@ -163,6 +164,7 @@ fn site_conf_proxy_has_websocket_headers() {
         domains: vec!["p.test".into()],
         root_dir: "D:/code/p".into(),
         runtime: nsb_core::model::SiteRuntime {
+            redirect: None,
             custom_rewrite: None,
             application: None,
             acme_cert_id: None,
@@ -787,6 +789,7 @@ fn user_ini_written_for_php_sites_only() {
             .to_string_lossy()
             .to_string(),
         runtime: nsb_core::model::SiteRuntime {
+            redirect: None,
             custom_rewrite: None,
             application: None,
             acme_cert_id: None,
@@ -913,6 +916,7 @@ fn site_conf_contains_per_site_access_log() {
         domains: vec!["log.test".into()],
         root_dir: "D:/code/logtest".into(),
         runtime: nsb_core::model::SiteRuntime {
+            redirect: None,
             custom_rewrite: None,
             application: None,
             acme_cert_id: None,

@@ -359,6 +359,7 @@ export const SiteKind = z.enum([
   "php",
   "static",
   "reverse-proxy",
+  "redirect",
   "node",
   "python",
   "java",
@@ -384,7 +385,10 @@ export type RewritePreset = z.infer<typeof RewritePreset>;
 
 export const CustomRewrite = z.object({ name: z.string().min(1).max(80), server: z.enum(["nginx", "apache"]), content: z.string().min(1).max(65536) });
 export type CustomRewrite = z.infer<typeof CustomRewrite>;
+export const SiteRedirect = z.object({ target: z.string(), status: z.union([z.literal(301), z.literal(302), z.literal(307), z.literal(308)]), preservePath: z.boolean() });
+export type SiteRedirect = z.infer<typeof SiteRedirect>;
 export const SiteRuntime = z.object({
+  redirect: SiteRedirect.optional(),
   customRewrite: CustomRewrite.optional(),
   importedCertId: z.string().optional(),
   acmeCertId: z.string().optional(),
@@ -437,7 +441,7 @@ export type Site = z.infer<typeof Site>;
 export const CreateSiteInput = z.object({
   name: z.string().min(1),
   domains: z.array(z.string()).min(1),
-  rootDir: z.string().min(1),
+  rootDir: z.string(),
   runtime: SiteRuntime,
   https: z.boolean().default(false),
   rewrite: RewritePreset.default("none"),
@@ -460,6 +464,13 @@ export const CreateSiteInput = z.object({
       "none",
     ])
     .default("none"),
+}).superRefine((input, ctx) => {
+  if (input.runtime.kind !== "redirect" && !input.rootDir.trim()) {
+    ctx.addIssue({ code: "custom", path: ["rootDir"], message: "请选择项目目录" });
+  }
+  if (input.runtime.kind === "redirect" && (!input.runtime.redirect?.target.trim() || input.template !== "none" || input.createDb || input.writeEnvExample || input.rewrite !== "none")) {
+    ctx.addIssue({ code: "custom", path: ["runtime", "redirect"], message: "跳转站点需要目标地址，不使用模板、环境文件或数据库绑定" });
+  }
 });
 export type CreateSiteInput = z.infer<typeof CreateSiteInput>;
 

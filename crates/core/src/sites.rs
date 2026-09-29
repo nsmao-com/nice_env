@@ -320,10 +320,10 @@ fn validate_site_fields(
         )
         .with_hint("换一个域名，或到该站点的设置里修改"));
     }
-    if !std::path::Path::new(root_dir).is_absolute()
+    if runtime.kind != SiteKind::Redirect && (!std::path::Path::new(root_dir).is_absolute()
         || root_dir
             .chars()
-            .any(|c| c.is_control() || matches!(c, '"' | '$' | ';' | '{' | '}'))
+            .any(|c| c.is_control() || matches!(c, '"' | '$' | ';' | '{' | '}')))
     {
         return Err(AppError::new(
             "BAD_ROOT_DIR",
@@ -352,12 +352,35 @@ fn validate_site_fields(
                 "请选择 PHP 版本，或先设置项目的 PHP 版本",
             ));
         }
+    } else if runtime.kind == SiteKind::Redirect {
+        redirect_url(runtime.redirect.as_ref().ok_or_else(|| AppError::new("BAD_REDIRECT", "请填写跳转目标"))?, domains)?;
     } else if runtime.kind != SiteKind::Static {
         proxy_url(runtime.proxy_target.as_deref().unwrap_or_default())?;
     }
     crate::applications::validate(runtime)?;
     if runtime.application.is_some() { crate::applications::installed_version(store, runtime)?; }
     Ok(())
+}
+
+/// 两种 Web 服务共用目标规范化，拒绝配置注入和指向本站域名的直接循环。
+pub fn redirect_url(redirect: &crate::model::SiteRedirect, domains: &[String]) -> Result<String> {
+    let raw = redirect.target.trim();
+    let invalid = || AppError::new("BAD_REDIRECT", "请填写完整的 HTTP/HTTPS 跳转地址，不能包含账号或配置控制字符");
+    if !matches!(redirect.status, 301 | 302 | 307 | 308) || raw.is_empty() || raw.len() > 8192
+        || raw.chars().any(|c| c.is_control() || c.is_whitespace() || "\"'\\$;{}<>".contains(c)) { return Err(invalid()); }
+    if !raw.to_ascii_lowercase().starts_with("http://") && !raw.to_ascii_lowercase().starts_with("https://") { return Err(invalid()); }
+    let url = reqwest::Url::parse(raw).map_err(|_| invalid())?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() || !url.username().is_empty()
+        || url.password().is_some() || url.port() == Some(0) { return Err(invalid()); }
+    if redirect.preserve_path && (url.query().is_some() || url.fragment().is_some()) {
+        return Err(AppError::new("BAD_REDIRECT", "保留原路径时，目标地址不能带查询参数或 # 片段；可关闭路径保留以跳转到固定地址"));
+    }
+    let host = url.host_str().unwrap().trim_end_matches('.').to_ascii_lowercase();
+    if domains.iter().any(|domain| {
+        let domain = domain.to_ascii_lowercase();
+        domain.strip_prefix("*.").map_or(host == domain, |suffix| host.ends_with(&format!(".{suffix}")))
+    }) { return Err(AppError::new("REDIRECT_LOOP", "目标地址不能使用本站域名或别名，否则会循环跳转")); }
+    Ok(url.to_string())
 }
 
 fn normalize_domains(domains: &[String]) -> Vec<String> {
@@ -508,6 +531,7 @@ fn create_inner(
     let mut normalized = input.clone();
     normalized.domains = normalize_domains(&input.domains);
     normalized.root_dir = input.root_dir.trim().to_string();
+    if normalized.runtime.kind == SiteKind::Redirect { normalized.root_dir.clear(); }
     if normalized.runtime.kind == SiteKind::Php
         && normalized
             .runtime
@@ -593,6 +617,10 @@ fn create_inner(
             "Next.js 静态导出需要静态站点类型，不使用数据库绑定",
         ));
     }
+    if input.runtime.kind == SiteKind::Redirect && (input.template != "none" || input.create_db.is_some()
+        || input.write_env_example || !matches!(input.rewrite, crate::model::RewritePreset::None) || existing_project.is_some()) {
+        return Err(AppError::new("BAD_REDIRECT", "跳转站点不使用项目模板、目录、伪静态或数据库绑定"));
+    }
     if let Some(db) = &input.create_db {
         crate::dbadmin::validate_create_db(&db.database, &db.username, &db.password)?;
         if store.find_installed("mysql", None).is_none() {
@@ -612,7 +640,7 @@ fn create_inner(
         scaffold_composer(&root, input, package, paths, store, progress)?;
     } else if input.template == "next-export" {
         scaffold_next_export(&root, paths, store, progress)?;
-    } else {
+    } else if input.runtime.kind != SiteKind::Redirect {
         std::fs::create_dir_all(&root).map_err(|e| {
             AppError::io("创建站点根目录", e).with_hint("检查路径是否正确、磁盘是否可写")
         })?;
@@ -769,6 +797,7 @@ pub fn update(
     current.domains = normalize_domains(&site_patch.domains);
     current.root_dir = site_patch.root_dir.trim().to_string();
     current.runtime = site_patch.runtime.clone();
+    if current.runtime.kind == SiteKind::Redirect { current.root_dir.clear(); }
     let certificate_changed =
         current.https != site_patch.https || current.domains != original.domains
             || current.runtime.imported_cert_id != original.runtime.imported_cert_id
@@ -789,7 +818,11 @@ pub fn update(
         store,
         Some(&current.id),
     )?;
-    if !std::path::Path::new(&current.root_dir).is_dir() {
+    if current.runtime.kind == SiteKind::Redirect && (!matches!(current.rewrite, crate::model::RewritePreset::None)
+        || current.db.as_ref().is_some_and(|db| db.enabled)) {
+        return Err(AppError::new("BAD_REDIRECT", "跳转站点不使用伪静态或数据库绑定"));
+    }
+    if current.runtime.kind != SiteKind::Redirect && !std::path::Path::new(&current.root_dir).is_dir() {
         return Err(AppError::new(
             "BAD_ROOT_DIR",
             "站点根目录不存在，请重新选择目录",
@@ -2737,6 +2770,7 @@ mod scaffold_tests {
             domains: vec!["t.test".into()],
             root_dir: String::new(),
             runtime: SiteRuntime {
+            redirect: None,
             custom_rewrite: None,
                 application: None,
                 acme_cert_id: None,
@@ -3457,6 +3491,114 @@ mod scaffold_tests {
         let service_log = state.paths.logs().join("custom-service.log");
         state.manager.register("fixture", "Fixture", None, None, None, service_log.clone());
         assert_eq!(state.log_source_path("fixture").unwrap(), service_log);
+    }
+
+
+    #[test]
+    fn redirect_validation_and_legacy_runtime_compatibility() {
+        use crate::model::SiteRedirect;
+        let mut redirect = SiteRedirect { target: "https://destination.test/base/".into(), status: 302, preserve_path: true };
+        let domains = vec!["source.test".into(), "alias.test".into(), "*.wild.test".into()];
+        assert_eq!(redirect_url(&redirect, &domains).unwrap(), redirect.target);
+        for target in ["", "https:destination.test", "ftp://destination.test", "https://user:pass@destination.test",
+            "https://destination.test:0", "https://destination.test/\nlocation", "https://destination.test/$host",
+            "https://destination.test/?", "https://destination.test/#", "https://SOURCE.test./path",
+            "https://alias.test:8443", "https://a.wild.test", "https://a.b.wild.test"] {
+            redirect.target = target.into();
+            assert!(redirect_url(&redirect, &domains).is_err(), "{target}");
+        }
+        redirect.target = "https://destination.test/a%20b?q=1#part".into();
+        redirect.preserve_path = false;
+        for code in [301, 302, 307, 308] { redirect.status = code; assert!(redirect_url(&redirect, &domains).is_ok()); }
+        redirect.status = 200; assert!(redirect_url(&redirect, &domains).is_err());
+        let old: SiteRuntime = serde_json::from_value(serde_json::json!({"kind":"static","webServer":"nginx"})).unwrap();
+        assert!(old.redirect.is_none());
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().into()); paths.ensure_dirs().unwrap();
+        let store = Store::open(paths.db()).unwrap();
+        let mut site = saved_site(&paths, &store);
+        site.runtime.kind = SiteKind::Redirect; site.root_dir.clear(); redirect.status = 302;
+        site.runtime.redirect = Some(redirect);
+        store.save_site(&site).unwrap();
+        assert_eq!(crate::envfile::read_env(&paths, &store, &site.id).unwrap_err().code, "SITE_NO_PROJECT");
+        assert_eq!(crate::sitebackup::scope(&store, &site.id, true, true).unwrap_err().code, "SITE_NO_PROJECT");
+        assert_eq!(crate::pathenv::project_runtime_versions(&store, &crate::install::Installer::bundled().manifest, &site.id).unwrap_err().code, "SITE_NO_PROJECT");
+        assert!(!crate::pathenv::project_references_version(&store, &site, "node", "22.0.0").unwrap());
+    }
+
+    #[test]
+    #[ignore = "requires NSB_NGINX_ROOT, NSB_APACHE_ROOT and NSB_SKIP_HOSTS=1; isolated redirect lifecycle and HTTP checks"]
+    fn redirect_native_nginx_and_apache() {
+        assert_eq!(std::env::var("NSB_SKIP_HOSTS").as_deref(), Ok("1"));
+        for (server, version, variable, port_key, tls_key) in [
+            ("nginx", "1.28.1", "NSB_NGINX_ROOT", "http", "https"),
+            ("apache", "2.4.66", "NSB_APACHE_ROOT", "apacheHttp", "apacheHttps"),
+        ] {
+            let root = PathBuf::from(std::env::var(variable).expect(variable));
+            let temp = tempfile::tempdir().unwrap();
+            let state = crate::CoreState::init(Some(temp.path().join("redirect with spaces")), Arc::new(|_| {})).unwrap();
+            let http = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let https = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = http.local_addr().unwrap().port();
+            state.store.set_port_override(port_key, Some(port)).unwrap();
+            state.store.set_port_override(tls_key, Some(https.local_addr().unwrap().port())).unwrap();
+            state.store.upsert_installed(&crate::model::InstalledPackage {
+                id: server.into(), version: version.into(), category: "web-server".into(),
+                install_path: root.parent().unwrap().to_string_lossy().into(), config_path: String::new(), installed_at: 1,
+            }).unwrap();
+            struct Cleanup(Arc<crate::CoreState>, &'static str);
+            impl Drop for Cleanup { fn drop(&mut self) { let _ = self.0.stop_service(self.1); } }
+            let _cleanup = Cleanup(state.clone(), server);
+            drop((http, https));
+            let mut creation = input(SiteKind::Redirect);
+            creation.runtime.web_server = server.into(); creation.runtime.php_version = None;
+            creation.domains = vec!["redirect.test".into(), "alias.redirect.test".into()];
+            creation.root_dir = temp.path().join("must-not-create").to_string_lossy().into();
+            creation.runtime.redirect = Some(crate::model::SiteRedirect { target: "https://destination.test/a%20b".into(), status: 302, preserve_path: true });
+            let mut site = create(&creation, &state.paths, &state.store, &state.manager).unwrap();
+            assert!(site.root_dir.is_empty());
+            assert!(!PathBuf::from(&creation.root_dir).exists());
+            let client = reqwest::blocking::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
+                .timeout(std::time::Duration::from_secs(3)).build().unwrap();
+            for (status, preserve, target) in [(302, true, "https://destination.test/a%20b"),
+                (301, false, "https://destination.test/a%20b?fixed=yes%20ok&x=2#section"),
+                (307, true, "https://destination.test/base/"), (308, false, "https://destination.test/final#section")] {
+                site.runtime.redirect = Some(crate::model::SiteRedirect { target: target.into(), status, preserve_path: preserve });
+                site = update(&site, &state.paths, &state.store, &state.manager).unwrap();
+                for resource in ["/", "/docs/start?lang=zh&next=%2Fhome", "/a%20b/%E4%B8%AD?x=%23part",
+                    "/encoded%2Fslash?q=a+b", "/encoded%3Fquestion?x=1", "/.git/config"] {
+                    for method in [reqwest::Method::GET, reqwest::Method::POST] {
+                        let expected = if preserve { format!("{}{resource}", target.trim_end_matches('/')) } else { target.into() };
+                        let response = client.request(method.clone(), format!("http://127.0.0.1:{port}{resource}"))
+                            .header("Host", "alias.redirect.test").send().unwrap();
+                        assert_eq!(response.status().as_u16(), status, "{server} {method} {resource}");
+                        assert_eq!(response.headers().get("location").unwrap().to_str().unwrap(), expected, "{server} {method} {resource}");
+                    }
+                }
+            }
+            let mut invalid = site.clone(); invalid.runtime.redirect.as_mut().unwrap().target = "https://alias.redirect.test".into();
+            assert_eq!(update(&invalid, &state.paths, &state.store, &state.manager).unwrap_err().code, "REDIRECT_LOOP");
+            assert_eq!(get(&state.store, &site.id).unwrap().runtime.redirect.as_ref().unwrap().target, "https://destination.test/final#section");
+            stop_site(&site.id, &state.paths, &state.store, &state.manager).unwrap();
+            assert_eq!(runtime_status(&state.paths, &site, &state.manager), "stopped");
+            start_site(&site.id, &state.paths, &state.store, &state.manager).unwrap();
+            assert_eq!(client.get(format!("http://127.0.0.1:{port}/again")).header("Host", "redirect.test").send().unwrap().status().as_u16(), 308);
+            let backup = temp.path().join("redirect.json");
+            crate::transfer::export_to(&state.store, &backup).unwrap();
+            let imported_paths = Paths::new(temp.path().join("imported")); imported_paths.ensure_dirs().unwrap();
+            let imported_store = Store::open(imported_paths.db()).unwrap();
+            let report = crate::transfer::import_from(&backup, &imported_paths, &imported_store, &Arc::new(ServiceManager::new())).unwrap();
+            assert_eq!(report.sites, 1);
+            let imported = get(&imported_store, &site.id).unwrap();
+            assert!(imported.root_dir.is_empty()); assert_eq!(imported.runtime.redirect.as_ref().unwrap().target, "https://destination.test/final#section");
+            assert!(!imported_paths.base.join("index.php").exists());
+            delete(&site.id, true, false, &state.paths, &state.store, &state.manager).unwrap();
+            assert!(state.store.list_sites().unwrap().is_empty());
+            let pids = state.manager.snapshot(server).unwrap().pids;
+            state.stop_service(server).unwrap();
+            assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));
+            println!("{server}: redirect create/update/stop/start/delete, aliases, GET/POST 301/302/307/308, encoded path/query, fixed query/fragment, loop rejection and config backup roundtrip passed");
+        }
     }
 
     #[test]

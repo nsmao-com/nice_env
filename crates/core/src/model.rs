@@ -109,6 +109,7 @@ pub enum SiteKind {
     Php,
     Static,
     ReverseProxy,
+    Redirect,
     #[allow(non_camel_case_types)]
     Node,
     Python,
@@ -153,6 +154,8 @@ pub struct SiteApplication {
 #[serde(rename_all = "camelCase")]
 pub struct SiteRuntime {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect: Option<SiteRedirect>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_rewrite: Option<CustomRewrite>,
     /// 明确开启的应用进程托管；历史 command/cwd 字段不会触发执行。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -173,6 +176,14 @@ pub struct SiteRuntime {
     pub command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteRedirect {
+    pub target: String,
+    pub status: u16,
+    pub preserve_path: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

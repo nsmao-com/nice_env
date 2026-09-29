@@ -36,7 +36,7 @@ export default function SitesPage() {
     return sites.filter((site) =>
       (statusFilter === "all" || site.status === statusFilter) &&
       (serverFilter === "all" || site.runtime.webServer === serverFilter) &&
-      (!search || [site.name, ...site.domains, site.rootDir, site.runtime.phpVersion ?? "", site.runtime.proxyTarget ?? ""].some((value) => value.toLowerCase().includes(search)))
+      (!search || [site.name, ...site.domains, site.rootDir, site.runtime.phpVersion ?? "", site.runtime.proxyTarget ?? "", site.runtime.redirect?.target ?? ""].some((value) => value.toLowerCase().includes(search)))
     ).sort((a, b) => b.updatedAt - a.updatedAt);
   }, [sites, query, statusFilter, serverFilter]);
   const [scanOpen, setScanOpen] = React.useState(false);
@@ -65,6 +65,7 @@ export default function SitesPage() {
             <SiteBulkActions sites={visibleSites} />
             {/* 批量打开 / 复制全部地址：起一套站点后逐个点开太磨人 */}
             <BatchUrlActions sites={visibleSites} />
+            <Button variant="secondary" onClick={() => setWizardOpen(true, "redirect")}>{t("redirect.title")}</Button>
             <Button onClick={() => setWizardOpen(true)}>
               <Plus className="h-3.5 w-3.5" /> {t("sites.create")}
             </Button>
@@ -185,15 +186,15 @@ function SiteCard({ site, onOpenDetail }: { site: Site; onOpenDetail: () => void
               </TooltipTrigger>
               <TooltipContent>{t("dashboard.openBrowser")}</TooltipContent>
             </Tooltip>
-            <Tooltip>
+            {site.runtime.kind !== "redirect" && <Tooltip>
               <TooltipTrigger asChild>
                 <Button aria-label={t("dashboard.openFolder")} variant="ghost" size="icon-sm" className="text-faint hover:text-foreground" onClick={() => api.openInFolder(site.rootDir).catch(toastError)}>
                   <FolderOpen className="h-3.5 w-3.5" />
                 </Button>
               </TooltipTrigger>
               <TooltipContent>{t("dashboard.openFolder")}</TooltipContent>
-            </Tooltip>
-            <SiteTerminalButton site={site} />
+            </Tooltip>}
+            {site.runtime.kind !== "redirect" && <SiteTerminalButton site={site} />}
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button aria-label={t("sites.siteSettings")} variant="ghost" size="icon-sm" className="text-faint hover:text-foreground" onClick={onOpenDetail}>
@@ -213,6 +214,8 @@ function SiteCard({ site, onOpenDetail }: { site: Site; onOpenDetail: () => void
               ? `PHP ${site.runtime.phpVersion}`
               : site.runtime.kind === "reverse-proxy"
                 ? `${t("sites.proxyP1")} ${site.runtime.proxyTarget}`
+                : site.runtime.kind === "redirect"
+                  ? t("redirect.title") + " · " + site.runtime.redirect?.status + " → " + (site.runtime.redirect?.target ?? "")
                 : site.runtime.kind === "static"
                   ? t("sites.static")
                   : site.runtime.kind}

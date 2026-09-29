@@ -546,6 +546,9 @@ pub(crate) fn read_env_file(path: &Path) -> Result<Option<String>> {
 }
 
 fn env_root(site: &crate::model::Site) -> Result<PathBuf> {
+    if site.runtime.kind == crate::model::SiteKind::Redirect {
+        return Err(AppError::new("SITE_NO_PROJECT", "跳转站点没有项目环境文件"));
+    }
     if !Path::new(&site.root_dir).is_dir() {
         return Err(AppError::new("ROOT_MISSING", "站点根目录不存在")
             .with_hint("站点目录可能被移动或删除，请到站点详情里修正路径"));

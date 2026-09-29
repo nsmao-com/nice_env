@@ -1,7 +1,8 @@
 "use client";
 import { CustomRewriteSelect } from "./custom-rewrite-select";
 import type { CustomRewrite } from "@nsb/schema";
-import { isSiteHostname } from "@/lib/utils";
+import { SiteRedirectFields, DEFAULT_REDIRECT } from "./site-redirect-fields";
+import { isSiteHostname, siteRedirectTarget } from "@/lib/utils";
 
 
 import * as React from "react";
@@ -70,6 +71,7 @@ const KINDS: { value: SiteKind; labelKey: string; hintKey: string }[] = [
   { value: "php", labelKey: "wz.kindPhp", hintKey: "wz.kindPhpHint2" },
   { value: "static", labelKey: "wz.kindStatic", hintKey: "wz.staticHint" },
   { value: "reverse-proxy", labelKey: "wz.kindProxy", hintKey: "wz.proxyTargetHint" },
+  { value: "redirect", labelKey: "redirect.title", hintKey: "redirect.hint" },
   ...APPLICATION_RUNTIMES.map((runtime) => ({ value: runtime.kind, labelKey: runtime.label, hintKey: "appProcess.kindHint" })),
 ];
 
@@ -161,7 +163,12 @@ export function SiteWizard({
   const appRuntime = applicationRuntime(kind);
   const appVersions = packages.filter((p) => p.id === appRuntime?.id && p.install).map((p) => p.version).sort(cmpVersionDesc);
   const applicationValid = validApplication(application, proxyTarget) && (!application || appVersions.includes(application.version));
-  const isProxy = kind !== "php" && kind !== "static";
+  const isRedirect = kind === "redirect";
+  const [redirect, setRedirect] = React.useState(DEFAULT_REDIRECT);
+  const redirectResult = siteRedirectTarget(redirect, [domain, ...aliases.split(/[,，\s]+/).filter(Boolean)]);
+  const isProxy = kind !== "php" && kind !== "static" && !isRedirect;
+  const stepOrder = isRedirect ? [0, 2, 3, 5] : existingProject ? [0, 1, 2, 3, 4, 5] : [0, 2, 1, 3, 4, 5];
+  const stepIndex = stepOrder.indexOf(step);
   const normalizedProxyTarget = normalizeProxyTarget(proxyTarget);
   const [https, setHttps] = React.useState(false);
   const [certificate, setCertificate] = React.useState<SiteCertificateBinding>({});
@@ -186,7 +193,7 @@ export function SiteWizard({
   const templateNodeCompatible = !nextTemplate || nodeCompatible;
   const minimumPhp = template === "thinkphp" ? "8.0" : "8.2";
   const templatePhpCompatible = !composerTemplate || (!!phpVersion && cmpVersionDesc(phpVersion, minimumPhp) <= 0);
-  const databaseValid = !dbEnabled || (mysqlInstalled && /^[a-z0-9_]{1,64}$/i.test(dbName)
+  const databaseValid = isRedirect || !dbEnabled || (mysqlInstalled && /^[a-z0-9_]{1,64}$/i.test(dbName)
     && /^[a-z0-9_]{1,32}$/i.test(dbUser) && dbPass.length > 0 && !/[\u0000-\u001f\u007f]/.test(dbPass));
 
   React.useEffect(() => {
@@ -202,6 +209,7 @@ export function SiteWizard({
       setRootDir(existingProject ? (existingProject.needsDevServer ? existingProject.path : existingProject.documentRoot) : "");
       setTemplate("none");
       setKind(initialKind);
+      setRedirect(DEFAULT_REDIRECT);
       setPhpVersion(existingDefaults?.phpVersion || (existingProject ? recommendedProjectPhp(existingProject.phpCompatibility, phpVersions) : phpVersions[0]) || "");
       setAllowUnverifiedPhp(false); setPhpReport(existingProject?.phpCompatibility ?? null);
       setWebServer(existingDefaults?.webServer ?? "nginx");
@@ -240,6 +248,8 @@ export function SiteWizard({
   }, [open]);
 
   const canNext = React.useMemo(() => {
+    if ((step === 2 || step === 5) && isRedirect && redirectResult.error) return false;
+    if (step === 5 && !isRedirect && !rootDir.trim()) return false;
     if (step >= 2 && kind === "php" && (!phpVersions.includes(phpVersion) || (existingProject && (phpChecking || existingPhpProblem)))) return false;
     if (step >= 3 && https && certificateSelection.problem) return false;
     if (step >= 2 && isProxy && (!normalizedProxyTarget || !applicationValid)) return false;
@@ -252,11 +262,11 @@ export function SiteWizard({
         return webInstalled && templatePhpCompatible && (kind !== "php" || phpVersions.includes(phpVersion));
       case 4:
       case 5:
-        return databaseValid && (!composerTemplate || composerInstalled) && templatePhpCompatible && templateNodeCompatible;
+        return webInstalled && databaseValid && (!composerTemplate || composerInstalled) && templatePhpCompatible && templateNodeCompatible;
       default:
         return true;
     }
-  }, [existingProject, phpChecking, existingPhpProblem, https, certificateSelection.problem, step, name, domain, aliases, rootDir, kind, phpVersion, phpVersions, webInstalled, normalizedProxyTarget, databaseValid, composerTemplate, composerInstalled, templatePhpCompatible, templateNodeCompatible, isProxy, applicationValid]);
+  }, [existingProject, phpChecking, existingPhpProblem, https, certificateSelection.problem, step, name, domain, aliases, rootDir, kind, phpVersion, phpVersions, webInstalled, normalizedProxyTarget, databaseValid, composerTemplate, composerInstalled, templatePhpCompatible, templateNodeCompatible, isProxy, applicationValid, isRedirect, redirectResult.error]);
 
   const pickFolder = async () => {
     if (isTauri) {
@@ -295,23 +305,24 @@ export function SiteWizard({
       const input: CreateSiteInput = {
         name: name.trim(),
         domains: [domain.trim(), ...aliases.split(/[,，\s]+/).filter(Boolean)],
-        rootDir: rootDir.trim(),
+        rootDir: isRedirect ? "" : rootDir.trim(),
         runtime: {
           webServer,
-          customRewrite,
+          customRewrite: isRedirect ? undefined : customRewrite,
           kind,
+          ...(isRedirect ? { redirect: { ...redirect, target: redirectResult.url! } } : {}),
           ...(kind === "php" ? { phpVersion } : {}),
           ...(isProxy ? { proxyTarget: normalizedProxyTarget! } : {}),
           ...(appRuntime && application ? { application } : {}),
           ...(https ? certificate : {}),
         },
         https,
-        rewrite,
-        ...(dbEnabled && dbName
+        rewrite: isRedirect ? "none" : rewrite,
+        ...(!isRedirect && dbEnabled && dbName
           ? { createDb: { database: dbName, username: dbUser, password: dbPass } }
           : {}),
-        writeEnvExample: !existingProject && dbEnabled,
-        template: existingProject ? "none" : template,
+        writeEnvExample: !isRedirect && !existingProject && dbEnabled,
+        template: existingProject || isRedirect ? "none" : template,
       };
       unlisten = await listen<SiteCreateProgress>("site://create-progress", (event) => {
         if (event.rootDir === input.rootDir) setProgress(event);
@@ -357,31 +368,31 @@ export function SiteWizard({
         <DialogHeader>
           <DialogTitle>{t(existingProject ? "scanSetup.configureTitle" : "sites.create")}</DialogTitle>
           <DialogDescription>
-            {t("sites.wizard.step")} {step + 1}/6 · {t(STEPS[step].key)}
+            {t("sites.wizard.step")} {stepIndex + 1}/{stepOrder.length} · {t(isRedirect && step === 5 ? "redirect.summary" : STEPS[step].key)}
           </DialogDescription>
         </DialogHeader>
 
         {/* 步骤指示器 */}
         <div className="flex items-center gap-1.5">
-          {STEPS.map((s, i) => (
+          {stepOrder.map((stepId, i) => { const s = STEPS[stepId]; return (
             <React.Fragment key={s.key}>
               <div
                 className={cn(
                   "flex h-6 w-6 items-center justify-center rounded-full border text-[10px] font-semibold transition-all",
-                  i < step
+                  i < stepIndex
                     ? "border-primary/40 bg-primary-soft text-primary"
-                    : i === step
+                    : i === stepIndex
                       ? "border-primary text-primary"
                       : "border-border text-faint"
                 )}
               >
-                {i < step ? <Check className="h-3 w-3" /> : i + 1}
+                {i < stepIndex ? <Check className="h-3 w-3" /> : i + 1}
               </div>
-              {i < STEPS.length - 1 && (
-                <div className={cn("h-px flex-1 transition-colors", i < step ? "bg-primary/40" : "bg-border")} />
+              {i < stepOrder.length - 1 && (
+                <div className={cn("h-px flex-1 transition-colors", i < stepIndex ? "bg-primary/40" : "bg-border")} />
               )}
             </React.Fragment>
-          ))}
+          ); })}
         </div>
 
         <div className="min-h-0 min-w-0 flex-1 overflow-y-auto pr-1">
@@ -622,6 +633,7 @@ export function SiteWizard({
                     ))}
                   </div>
                 </div>
+                {isRedirect && <SiteRedirectFields id="wizard-redirect" value={redirect} domains={[domain, ...aliases.split(/[,，\s]+/).filter(Boolean)]} disabled={creating} onChange={setRedirect} />}
                 {isProxy && (
                   <div className="flex flex-col gap-1.5">
                     <Label htmlFor="site-create-proxy">{t("sites.wizard.proxyTarget")}</Label>
@@ -715,7 +727,7 @@ export function SiteWizard({
 
             {step === 5 && (
               <div className="flex flex-col gap-4">
-                <div className="flex flex-col gap-1.5">
+                {!isRedirect && <div className="flex flex-col gap-1.5">
                   <Label>{t("sites.wizard.rewrite")}</Label>
                   <Select value={rewrite} onValueChange={(v) => { setRewrite(v as RewritePreset); setCustomRewrite(undefined); }}>
                     <SelectTrigger>
@@ -729,12 +741,13 @@ export function SiteWizard({
                       ))}
                     </SelectContent>
                   </Select>
-                </div>
+                </div>}
                 {(kind === "php" || kind === "static") && <CustomRewriteSelect server={webServer} value={customRewrite} onChange={setCustomRewrite} />}
                 {/* 摘要 */}
                 <div className="flex flex-col gap-2 rounded-xl bg-fill p-4 text-[12px]">
                   <SummaryRow label={t("wz.domain")} value={[domain, ...aliases.split(/[,，\s]+/).filter(Boolean)].join(" · ")} mono />
-                  <SummaryRow label={t("wz.rootDir")} value={rootDir} mono />
+                  {!isRedirect && <SummaryRow label={t("wz.rootDir")} value={rootDir} mono />}
+                  {isRedirect && <><SummaryRow label={t("redirect.target")} value={redirectResult.url ?? redirect.target} mono /><SummaryRow label={t("redirect.status")} value={t(`redirect.code${redirect.status}`)} /><SummaryRow label={t("redirect.preserve")} value={t(redirect.preservePath ? "redirect.preserveOn" : "common.off")} /></>}
                   <SummaryRow
                     label={t("wz.runtime")}
                     value={
@@ -742,13 +755,13 @@ export function SiteWizard({
                         ? `${webServer === "apache" ? "Apache" : "Nginx"} + PHP ${phpVersion || t("wz.phpPending")}`
                         : isProxy
                           ? `${webServer === "apache" ? "Apache" : "Nginx"} ${t("sites.proxyP1")} ${normalizedProxyTarget ?? proxyTarget}`
-                          : `${webServer === "apache" ? "Apache" : "Nginx"} · ${t("sites.static")}`
+                          : `${webServer === "apache" ? "Apache" : "Nginx"} · ${t(isRedirect ? "redirect.title" : "sites.static")}`
                     }
                   />
                   {appRuntime && <SummaryRow label={t("appProcess.title")} value={application ? `${appRuntime.label} ${application.version} · ${application.args.join(" · ")}` : t("appProcess.externalHint")} />}
                   <SummaryRow label="HTTPS" value={https ? certificateSelection.value === "local" ? t("wz.caAuto") : certificateSelection.selected?.subject ?? t("sites.detail.certUnavailableSelection") : t("detail.none")} />
-                  <SummaryRow label={t("wz.db")} value={dbEnabled ? `${dbName}（${dbUser}）` : t("wz.noDb")} />
-                  <SummaryRow label={t("wz.rewrite")} value={customRewrite ? customRewrite.name : rewrite === "none" ? t("wz.noneOpt") : REWRITES.find((r) => r.value === rewrite)?.label ?? ""} />
+                  {!isRedirect && <SummaryRow label={t("wz.db")} value={dbEnabled ? `${dbName}（${dbUser}）` : t("wz.noDb")} />}
+                  {!isRedirect && <SummaryRow label={t("wz.rewrite")} value={customRewrite ? customRewrite.name : rewrite === "none" ? t("wz.noneOpt") : REWRITES.find((r) => r.value === rewrite)?.label ?? ""} />}
                 </div>
                 <Badge variant="info" className="w-fit">
                   <ArrowRight className="h-3 w-3" /> {t("wz.createHint")}
@@ -789,11 +802,11 @@ export function SiteWizard({
         )}
 
         <div className="flex shrink-0 items-center justify-between border-t border-dashed border-separator pt-4">
-          <Button variant="ghost" onClick={() => setStep((s) => Math.max(0, s - 1))} disabled={step === 0 || creating}>
+          <Button variant="ghost" onClick={() => setStep(stepOrder[Math.max(0, stepIndex - 1)])} disabled={step === 0 || creating}>
             <ChevronLeft className="h-3.5 w-3.5" /> {t("common.back")}
           </Button>
-          {step < STEPS.length - 1 ? (
-            <Button onClick={() => setStep((s) => s + 1)} disabled={!canNext}>
+          {stepIndex < stepOrder.length - 1 ? (
+            <Button onClick={() => setStep(stepOrder[stepIndex + 1])} disabled={!canNext}>
               {t("common.next")} <ChevronRight className="h-3.5 w-3.5" />
             </Button>
           ) : (

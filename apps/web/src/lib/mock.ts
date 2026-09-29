@@ -64,7 +64,7 @@ import type {
 } from "@nsb/schema";
 import { emitLocal } from "./backend";
 import type { SiteFileBackup, SiteFileScope, SiteFilePlan, BackupPlanConfig } from "./api";
-import { cmpVersionDesc, resolvedStackItems, stackVersionConflicts, normalizeProxyTarget, isPhpSiteSettingValid, isEnvSecretKey, isEnvFileName, applicationRuntime, validApplication } from "./utils";
+import { cmpVersionDesc, resolvedStackItems, stackVersionConflicts, normalizeProxyTarget, siteRedirectTarget, isPhpSiteSettingValid, isEnvSecretKey, isEnvFileName, applicationRuntime, validApplication } from "./utils";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const siteFileArchives = new Map<string, SiteFileBackup[]>();
@@ -1601,16 +1601,19 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (args?.existingProject && (input.template !== "none" || input.writeEnvExample)) {
         throw { code: "EXISTING_PROJECT_WRITE", message: "使用已有项目时不能生成模板或改写项目配置" };
       }
-      if (input.runtime.kind !== "php" && input.runtime.kind !== "static" && !normalizeProxyTarget(input.runtime.proxyTarget ?? "")) {
+      if (input.runtime.kind !== "php" && input.runtime.kind !== "static" && input.runtime.kind !== "redirect" && !normalizeProxyTarget(input.runtime.proxyTarget ?? "")) {
         throw { code: "BAD_PROXY_TARGET", message: "请填写有效的 HTTP/HTTPS 代理地址，不能包含账号、查询参数或片段" };
       }
+      if (input.runtime.kind === "redirect" && siteRedirectTarget(input.runtime.redirect, input.domains).error) throw { code: "BAD_REDIRECT", message: "跳转地址无效，或目标指向本站域名" };
+      if (input.runtime.kind === "redirect" && (input.template !== "none" || input.createDb || input.writeEnvExample || input.rewrite !== "none" || args?.existingProject)) throw { code: "BAD_REDIRECT", message: "跳转站点不使用项目模板、目录、伪静态或数据库绑定" };
+      if (input.runtime.kind !== "redirect" && !input.rootDir.trim()) throw { code: "BAD_ROOT_DIR", message: "请选择项目目录" };
       validateMockApplication(input.runtime);
       const id = `site-${uid()}`;
       sites.set(id, {
         id,
         name: input.name,
         domains: input.domains,
-        rootDir: input.rootDir,
+        rootDir: input.runtime.kind === "redirect" ? "" : input.rootDir,
         runtime: input.runtime,
         https: input.https,
         rewrite: input.rewrite,
@@ -1642,11 +1645,16 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         || next.runtime.kind !== s.runtime.kind || next.rootDir !== s.rootDir || next.runtime.proxyTarget !== s.runtime.proxyTarget)) {
         throw { code: "APP_RUNNING", message: "应用正在运行，请先停止站点再修改入口、参数、目录、运行时或监听地址" };
       }
+      if (next.runtime.kind === "redirect" && siteRedirectTarget(next.runtime.redirect, next.domains).error) throw { code: "BAD_REDIRECT", message: "跳转地址无效，或目标指向本站域名" };
+      if (next.runtime.kind === "redirect") {
+        if (next.rewrite !== "none" || next.db?.enabled) throw { code: "BAD_REDIRECT", message: "跳转站点不使用伪静态或数据库绑定" };
+        next.rootDir = "";
+      } else if (!next.rootDir.trim()) throw { code: "BAD_ROOT_DIR", message: "请选择项目目录" };
       validateMockApplication(next.runtime);
       if (next.runtime.kind === "php" && Object.entries(next.phpOverrides ?? {}).some(([key, value]) => !isPhpSiteSettingValid(key, value, s.phpOverrides?.[key]))) {
         throw { code: "BAD_PHP_OVERRIDE", message: "PHP 设置不受支持或值无效，请检查后重试" };
       }
-      if (next.runtime.kind !== "php" && next.runtime.kind !== "static" && !normalizeProxyTarget(next.runtime.proxyTarget ?? "")) {
+      if (next.runtime.kind !== "php" && next.runtime.kind !== "static" && next.runtime.kind !== "redirect" && !normalizeProxyTarget(next.runtime.proxyTarget ?? "")) {
         throw { code: "BAD_PROXY_TARGET", message: "请填写有效的 HTTP/HTTPS 代理地址，不能包含账号、查询参数或片段" };
       }
       if (mockSiteStatus(s) === "running") {

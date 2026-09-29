@@ -110,6 +110,9 @@ pub fn import_from(
     // 备份只含选择信息，不含 PEM；证书缺失时在任何导入写入前明确失败，不能回退到本地 CA。
     let current_domains: Vec<_> = store.list_sites()?.into_iter().flat_map(|site| site.domains).collect();
     for site in bundle.sites.iter().filter(|site| !site.domains.iter().any(|d| current_domains.contains(d))) {
+        if site.runtime.kind == crate::model::SiteKind::Redirect {
+            crate::sites::redirect_url(site.runtime.redirect.as_ref().ok_or_else(|| AppError::new("BAD_REDIRECT", "跳转站点缺少目标地址"))?, &site.domains)?;
+        }
         crate::certs::validate_site_certificate(paths, store, site).map_err(|error|
             error.with_hint(format!("站点「{}」的证书尚不可用。请先恢复或部署原证书，再导入配置。", site.name)))?;
     }
@@ -168,7 +171,7 @@ pub fn import_from(
             continue;
         }
         let root = std::path::PathBuf::from(&site.root_dir);
-        if !root.exists() {
+        if site.runtime.kind != crate::model::SiteKind::Redirect && !root.exists() {
             std::fs::create_dir_all(&root).map_err(|e| AppError::io("创建站点目录", e))?;
             std::fs::write(
                 root.join("index.php"),
@@ -176,8 +179,10 @@ pub fn import_from(
             )
             .ok();
         }
-        store.save_site(site)?;
-        crate::sites::write_site_conf(paths, store, site)?;
+        let mut imported = site.clone();
+        if imported.runtime.kind == crate::model::SiteKind::Redirect { imported.root_dir.clear(); }
+        store.save_site(&imported)?;
+        crate::sites::write_site_conf(paths, store, &imported)?;
         report.sites += 1;
     }
     if report.sites > 0 {

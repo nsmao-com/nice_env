@@ -213,6 +213,9 @@ fn terminal_runtime_label(id: &str, display_name: &str) -> String {
 }
 
 fn project_directory(site: &crate::model::Site) -> Result<std::path::PathBuf> {
+    if site.runtime.kind == crate::model::SiteKind::Redirect {
+        return Err(AppError::new("SITE_NO_PROJECT", "跳转站点没有项目目录或项目终端"));
+    }
     terminal_directory(&site.root_dir)?;
     crate::envfile::project_root(std::path::Path::new(&site.root_dir)).canonicalize()
         .map_err(|e| AppError::io("读取项目目录", e))
@@ -347,6 +350,7 @@ pub fn save_project_runtime_versions(store: &Store, manifest: &Manifest, site_id
 
 /// 只保护仍在站点列表中、可读取的项目；不扫描任意磁盘目录。
 pub(crate) fn project_references_version(store: &Store, site: &crate::model::Site, id: &str, version: &str) -> Result<bool> {
+    if site.runtime.kind == crate::model::SiteKind::Redirect { return Ok(false); }
     let root = crate::envfile::project_root(std::path::Path::new(&site.root_dir));
     let result = (|| {
         let content = read_project_file(&root.join(PROJECT_FILE))?;

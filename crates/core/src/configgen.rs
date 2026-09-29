@@ -575,6 +575,7 @@ pub fn render_site_conf(
     };
 
     let body = match &site.runtime.kind {
+        crate::model::SiteKind::Redirect => redirect_directives(site, false),
         crate::model::SiteKind::Php => {
             let upstream =
                 nginx_upstream_name(site.runtime.php_version.as_deref().unwrap_or("8.3"));
@@ -619,8 +620,7 @@ server {{
     {listen};
     server_name {server_names};
     {ssl_lines}
-    root "{root}";
-    index index.php index.html index.htm;
+    {document_root}
     charset utf-8;
 
     # 站点级日志（日志页按站点查看就靠它）
@@ -638,12 +638,34 @@ server {{
         listen = listen,
         server_names = server_names,
         ssl_lines = ssl_lines,
-        root = nginx_path(std::path::Path::new(&site.root_dir)),
+        document_root = if site.runtime.kind == crate::model::SiteKind::Redirect { String::new() } else {
+            format!("root \"{}\";\n    index index.php index.html index.htm;", nginx_path(std::path::Path::new(&site.root_dir)))
+        },
         body = body,
     )
 }
 
 /* ================= php.ini ================= */
+
+fn redirect_directives(site: &Site, apache: bool) -> String {
+    let redirect = site.runtime.redirect.as_ref();
+    let target = redirect.and_then(|value| crate::sites::redirect_url(value, &site.domains).ok());
+    let (Some(redirect), Some(target)) = (redirect, target) else {
+        return if apache { "    RewriteEngine On\n    RewriteRule ^ - [F,L]\n" } else { "    return 400;\n" }.into();
+    };
+    let code = redirect.status;
+    if apache {
+        let target = target.replace('%', "\\%");
+        if redirect.preserve_path {
+            format!("    AllowEncodedSlashes NoDecode\n    RewriteEngine On\n    RewriteCond %{{THE_REQUEST}} \"\\s(/[^\\s?]*)(?:\\?[^\\s]*)?\\s\"\n    RewriteRule ^ \"{}%1\" [R={code},L,NE]\n", target.trim_end_matches('/'))
+        } else {
+            format!("    AllowEncodedSlashes NoDecode\n    RewriteEngine On\n    RewriteRule ^ \"{target}\" [R={code},L,NE,QSD]\n")
+        }
+    } else {
+        let target = if redirect.preserve_path { format!("{}$request_uri", target.trim_end_matches('/')) } else { target };
+        format!("    return {code} \"{target}\";\n")
+    }
+}
 
 pub fn render_php_ini(paths: &Paths, version: &str, runtime_dir: &std::path::Path) -> String {
     format!(
@@ -1371,6 +1393,7 @@ pub fn render_httpd_vhost(
     };
 
     let body = match &site.runtime.kind {
+        crate::model::SiteKind::Redirect => redirect_directives(site, true),
         crate::model::SiteKind::Php => {
             let mut s = String::new();
             if let Some(base) = php_pool {
@@ -1433,7 +1456,7 @@ pub fn render_httpd_vhost(
 {listen}
     ServerName {primary}
     ServerAlias {server_names}
-    DocumentRoot "{root}"
+    {document_root}
     CustomLog "${{NSB_ETC}}/logs/{id}.access.log" "%h %l %u %t \"%r\" %>s %b"
     ErrorLog "${{NSB_ETC}}/logs/{id}.error.log"
     {ssl_lines}
@@ -1453,7 +1476,7 @@ pub fn render_httpd_vhost(
         listen = listen,
         primary = primary,
         server_names = server_names,
-        root = root,
+        document_root = if site.runtime.kind == crate::model::SiteKind::Redirect { String::new() } else { format!("DocumentRoot \"{root}\"") },
         ssl_lines = ssl_lines,
         body = body,
     )

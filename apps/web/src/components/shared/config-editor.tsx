@@ -37,6 +37,31 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 
+type ConfigDraft = { content: string; original: string; info: ConfigFileInfo };
+// 草稿仅保存在当前窗口内存；路径和版本共同隔离，不把配置内容写进浏览器存储。
+const configDrafts = new Map<string, ConfigDraft>();
+let draftWarningAttached = false;
+const warnBeforeLeaving = (event: BeforeUnloadEvent) => {
+  if (configDrafts.size) { event.preventDefault(); event.returnValue = ""; }
+};
+function syncDraftWarning() {
+  if (typeof window === "undefined") return;
+  if (configDrafts.size && !draftWarningAttached) {
+    window.addEventListener("beforeunload", warnBeforeLeaving); draftWarningAttached = true;
+  } else if (!configDrafts.size && draftWarningAttached) {
+    window.removeEventListener("beforeunload", warnBeforeLeaving); draftWarningAttached = false;
+  }
+}
+function rememberDraft(key: string, content: string, original: string, info: ConfigFileInfo) {
+  if (content === original) configDrafts.delete(key);
+  else configDrafts.set(key, { content, original, info });
+  syncDraftWarning();
+}
+function forgetDraft(key: string, expected: ConfigDraft | undefined) {
+  if (configDrafts.get(key) === expected) configDrafts.delete(key);
+  syncDraftWarning();
+}
+
 /** 版本配置必须精确匹配；只有后端定义的共用配置允许忽略服务版本。 */
 function configForService(files: ConfigFileInfo[], service: string) {
   const exact = files.find((file) => file.usedByService === service);
@@ -64,6 +89,7 @@ export function ConfigEditor() {
   const { data: files = [], isPending, isFetching, error, refetch } = useQuery({ queryKey: ["config-files"], queryFn: api.configList });
   const filteredFiles = files.filter((f) => `${f.label} ${f.path} ${f.kind}`.toLowerCase().includes(search.toLowerCase()));
   const requestedFile = requestedService ? configForService(files, requestedService) : undefined;
+  const unavailableDrafts = [...configDrafts.values()].filter((draft) => error || !files.some((file) => file.kind === draft.info.kind && file.path === draft.info.path));
 
   // 配置页在 Suspense 内读取查询参数，同一路由切换实例时也重新定位。
   React.useEffect(() => {
@@ -91,6 +117,10 @@ export function ConfigEditor() {
           </div>
         </CardHeader>
         <CardContent>
+          {unavailableDrafts.length > 0 && <div className="mb-4 space-y-2 rounded-lg border border-warn/25 bg-warn-soft p-3">
+            <p className="text-xs text-muted">{t("cfgeditor.unavailableDrafts")}</p>
+            {unavailableDrafts.map((draft) => <Button key={JSON.stringify([draft.info.kind, draft.info.path])} variant="secondary" size="sm" className="h-auto w-full justify-start whitespace-normal py-2 text-left [overflow-wrap:anywhere]" onClick={() => { autoOpened.current = true; setEditing(draft.info); }}>{draft.info.label} · {draft.info.path} · {t("cfgeditor.unsaved")}</Button>)}
+          </div>}
           {requestedService && !isPending && !error && !requestedFile?.exists && (
             <div role="status" className="mb-4 space-y-2 rounded-lg border border-warn/25 bg-warn-soft px-3 py-2.5 text-xs [overflow-wrap:anywhere]">
               <p>{t(requestedFile ? "cfgeditor.targetNotGenerated" : "cfgeditor.targetUnavailable").replace("{service}", requestedService)}</p>
@@ -118,11 +148,11 @@ export function ConfigEditor() {
                 <button
                   key={f.kind}
                   type="button"
-                  onClick={() => { if (f.exists) { autoOpened.current = true; setEditing(f); } }}
-                  disabled={!f.exists}
+                  onClick={() => { if (f.exists || configDrafts.has(JSON.stringify([f.kind, f.path]))) { autoOpened.current = true; setEditing(f); } }}
+                  disabled={!f.exists && !configDrafts.has(JSON.stringify([f.kind, f.path]))}
                   className={cn(
                     "flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left transition-colors",
-                    f.exists
+                    f.exists || configDrafts.has(JSON.stringify([f.kind, f.path]))
                       ? "border-border/60 hover:border-border-strong hover:bg-card-2/30"
                       : "cursor-not-allowed border-border/40 opacity-55"
                   )}
@@ -130,6 +160,7 @@ export function ConfigEditor() {
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="text-[12.5px] font-medium">{f.label}</span>
+                      {configDrafts.has(JSON.stringify([f.kind, f.path])) && <Badge variant="outline" className="shrink-0 text-[9.5px] text-warn">{t("cfgeditor.unsaved")}</Badge>}
                       {f.validated && (
                         <Badge variant="outline" className="shrink-0 text-[9.5px] text-running">
                           <ShieldCheck className="mr-0.5 h-3 w-3" />
@@ -168,19 +199,30 @@ export function ConfigEditor() {
   );
 }
 
-export function ConfigEditDialog({
-  info,
-  onClose,
-  onSaved,
-}: {
+type ConfigEditDialogProps = {
   info: ConfigFileInfo;
   onClose: () => void;
   onSaved: () => void;
-}) {
+};
+
+export function ConfigEditDialog(props: ConfigEditDialogProps) {
+  return <ConfigEditSession key={JSON.stringify([props.info.kind, props.info.path])} {...props} />;
+}
+
+function ConfigEditSession({
+  info,
+  onClose,
+  onSaved,
+}: ConfigEditDialogProps) {
   const t = useT();
+  const translateRef = React.useRef(t);
+  translateRef.current = t;
   const invalidate = useInvalidate();
-  const [content, setContent] = React.useState("");
-  const [original, setOriginal] = React.useState("");
+  const draftKey = JSON.stringify([info.kind, info.path]);
+  const initialDraft = React.useRef(configDrafts.get(draftKey)).current;
+  const [content, setContent] = React.useState(initialDraft?.content ?? "");
+  const [original, setOriginal] = React.useState(initialDraft?.original ?? "");
+  const [hasLoaded, setHasLoaded] = React.useState(!!initialDraft);
   const [loading, setLoading] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
   const [validating, setValidating] = React.useState(false);
@@ -191,6 +233,10 @@ export function ConfigEditDialog({
   const [notice, setNotice] = React.useState<string | null>(null);
   const [discard, setDiscard] = React.useState<"close" | "reload" | null>(null);
   const actionRef = React.useRef(false);
+  const alive = React.useRef(true);
+  const reading = React.useRef(false);
+  const readGeneration = React.useRef(0);
+  const historyGeneration = React.useRef(0);
   const [validation, setValidation] = React.useState<ConfigValidation | null>(null);
   const [backups, setBackups] = React.useState<ConfigBackup[]>([]);
   const [confirmForce, setConfirmForce] = React.useState(false);
@@ -199,49 +245,61 @@ export function ConfigEditDialog({
 
   const busy = saving || validating || rollingBack;
 
+  // 后端按 kind 解析当前目录；恢复旧目录草稿前先核对目标，避免写入同名的新配置。
+  const verifyTarget = React.useCallback(async () => {
+    const files = await api.configList();
+    if (!files.some((file) => file.kind === info.kind && file.path === info.path && file.exists)) {
+      throw new Error(translateRef.current("cfgeditor.draftTargetChanged"));
+    }
+  }, [info.kind, info.path]);
+
   const refreshHistory = React.useCallback(async () => {
+    if (!alive.current) return;
+    const request = ++historyGeneration.current;
     try {
-      setBackups(await api.configBackups(info.kind));
+      const history = await api.configBackups(info.kind);
+      if (!alive.current || request !== historyGeneration.current) return;
+      setBackups(history);
       setHistoryError(false);
     } catch {
-      setHistoryError(true);
+      if (alive.current && request === historyGeneration.current) setHistoryError(true);
     }
   }, [info.kind]);
 
-  const reload = React.useCallback(async () => {
+  const reload = React.useCallback(async (restoreDraft = false) => {
+    if (reading.current) return;
+    reading.current = true;
+    const request = ++readGeneration.current;
+    const previousDraft = configDrafts.get(draftKey);
     setLoading(true);
     setLoadError(null);
     try {
+      await verifyTarget();
+      if (!alive.current || request !== readGeneration.current) return;
       const value = await api.configRead(info.kind);
-      setContent(value);
-      setOriginal(value);
+      if (!alive.current || request !== readGeneration.current) return;
+      const draft = restoreDraft ? configDrafts.get(draftKey) : undefined;
+      const restored = draft && draft.content !== value;
+      setContent(restored ? draft.content : value);
+      setOriginal(restored ? draft.original : value);
+      setHasLoaded(true);
       setValidation(null);
-      setActionError(null);
+      setNotice(restored ? translateRef.current("cfgeditor.draftRestored") : null);
+      setActionError(restored && draft.original !== value ? translateRef.current("cfgeditor.draftConflict") : null);
+      if (!restored) forgetDraft(draftKey, previousDraft);
       await refreshHistory();
     } catch (e) {
-      setLoadError(normalizeError(e).message);
+      if (alive.current && request === readGeneration.current) setLoadError(normalizeError(e).message);
     } finally {
-      setLoading(false);
+      if (alive.current && request === readGeneration.current) { reading.current = false; setLoading(false); }
     }
-  }, [info.kind, refreshHistory]);
+  }, [draftKey, info.kind, refreshHistory, verifyTarget]);
 
   React.useEffect(() => {
-    let alive = true;
-    void (async () => {
-      try {
-        const c = await api.configRead(info.kind);
-        if (!alive) return;
-        setContent(c);
-        setOriginal(c);
-        void refreshHistory();
-      } catch (e) {
-        if (alive) setLoadError(normalizeError(e).message);
-      } finally {
-        if (alive) setLoading(false);
-      }
-    })();
-    return () => { alive = false; };
-  }, [info.kind, refreshHistory]);
+    alive.current = true;
+    void reload(true);
+    return () => { alive.current = false; reading.current = false; readGeneration.current++; historyGeneration.current++; };
+  }, [reload]);
 
   const dirty = content !== original;
   const close = () => {
@@ -249,85 +307,99 @@ export function ConfigEditDialog({
     if (dirty) setDiscard("close");
     else onClose();
   };
-  React.useEffect(() => {
-    if (!dirty) return;
-    const guard = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
-    window.addEventListener("beforeunload", guard);
-    return () => window.removeEventListener("beforeunload", guard);
-  }, [dirty]);
+  const requestReload = () => {
+    if (actionRef.current || reading.current) return;
+    if (dirty) setDiscard("reload");
+    else void reload();
+  };
   const lineCount = React.useMemo(() => content.split("\n").length, [content]);
 
   const validate = async () => {
-    if (actionRef.current) return;
+    if (actionRef.current || reading.current || !hasLoaded || loadError) return;
     actionRef.current = true;
     setValidating(true);
     setActionError(null);
     try {
+      await verifyTarget();
+      if (!alive.current) return;
       const v = await api.configValidate(info.kind, content);
-      setValidation(v);
+      if (alive.current) setValidation(v);
       if (v.ok) toast.success(t("cfgeditor.checkOk"));
       else toast.error(t("cfgeditor.checkFailed"));
       return v;
     } catch (e) {
-      setActionError(normalizeError(e).message);
+      if (alive.current) setActionError(normalizeError(e).message);
+      else toastError(e);
       return null;
     } finally {
       actionRef.current = false;
-      setValidating(false);
+      if (alive.current) setValidating(false);
     }
   };
 
   const save = async (force = false) => {
-    if (actionRef.current) return;
+    if (actionRef.current || reading.current || !hasLoaded || loadError || !dirty) return;
     actionRef.current = true;
+    const submittedDraft = configDrafts.get(draftKey);
     setSaving(true);
     setActionError(null);
     setNotice(null);
     try {
+      await verifyTarget();
+      if (!alive.current) return;
       if (!force) {
         const checked = await api.configValidate(info.kind, content);
-        setValidation(checked);
+        if (alive.current) setValidation(checked);
         if (!checked.ok) return;
       }
+      if (!alive.current) return;
       const v = await api.configSave(info.kind, content, force, original);
-      setValidation(v);
-      setOriginal(content);
+      forgetDraft(draftKey, submittedDraft);
+      if (alive.current) { setValidation(v); setOriginal(content); }
       toast.success(force ? t("cfgeditor.savedForced") : t("cfgeditor.saved"), {
         description: info.usedByService
           ? t("cfgeditor.restartHint").replace("{s}", info.usedByService)
           : undefined,
       });
-      setNotice(info.usedByService ? t("cfgeditor.restartHint").replace("{s}", info.usedByService) : t("cfgeditor.saved"));
+      if (alive.current) setNotice(info.usedByService ? t("cfgeditor.restartHint").replace("{s}", info.usedByService) : t("cfgeditor.saved"));
       await refreshHistory();
-      invalidate("services", "backups");
-      onSaved();
+      invalidate("services", "backups", "config-files");
+      if (alive.current) onSaved();
     } catch (e) {
       const err = normalizeError(e);
-      setActionError(`${err.message}${err.hint ? ` — ${err.hint}` : ""}`);
+      if (alive.current) setActionError(`${err.message}${err.hint ? ` — ${err.hint}` : ""}`);
+      else toastError(e);
     } finally {
       actionRef.current = false;
-      setSaving(false);
+      if (alive.current) setSaving(false);
     }
   };
 
   const rollback = async (b: ConfigBackup) => {
-    if (actionRef.current) return;
+    if (actionRef.current || reading.current || !hasLoaded || loadError) return;
     actionRef.current = true;
+    const discardedDraft = configDrafts.get(draftKey);
     setRollingBack(true);
     setActionError(null);
     try {
+      await verifyTarget();
+      if (!alive.current) return;
       await api.configRollback(b.name, info.kind, original);
+      forgetDraft(draftKey, discardedDraft);
       toast.success(t("cfgeditor.rolledBack"));
-      await reload();
-      setNotice(info.usedByService ? t("cfgeditor.restartHint").replace("{s}", info.usedByService) : t("cfgeditor.rolledBack"));
-      invalidate("services", "backups");
-      onSaved();
+      if (alive.current) {
+        await reload();
+        if (alive.current) setNotice(info.usedByService ? t("cfgeditor.restartHint").replace("{s}", info.usedByService) : t("cfgeditor.rolledBack"));
+      }
+      invalidate("services", "backups", "config-files");
+      if (alive.current) onSaved();
     } catch (e) {
       const err = normalizeError(e);
-      setActionError(`${err.message}${err.hint ? ` — ${err.hint}` : ""}`);
+      if (alive.current) setActionError(`${err.message}${err.hint ? ` — ${err.hint}` : ""}`);
+      else toastError(e);
     } finally {
       actionRef.current = false;
-      setRollingBack(false);
+      if (alive.current) setRollingBack(false);
     }
   };
 
@@ -383,10 +455,7 @@ export function ConfigEditDialog({
                   size="sm"
                   variant="ghost"
                   className="h-8"
-                  onClick={() => {
-                    if (dirty) setDiscard("reload");
-                    else void reload();
-                  }}
+                  onClick={requestReload}
                   disabled={loading || busy}
                   title={t("cfgeditor.reload")}
                   aria-label={t("cfgeditor.reload")}
@@ -399,6 +468,11 @@ export function ConfigEditDialog({
 
           <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
             <p className="shrink-0 border-b border-border px-4 py-2 text-[11px] text-muted [overflow-wrap:anywhere] sm:px-5">{info.description}</p>
+            {loadError && hasLoaded && <div role="alert" className="shrink-0 space-y-2 bg-error-soft px-4 py-2.5 text-xs text-error [overflow-wrap:anywhere] sm:px-5">
+              <p>{t("cfgeditor.reloadKeptDraft")}</p><p>{loadError}</p>
+              <Button variant="secondary" size="sm" disabled={loading || busy} onClick={() => void reload(true)}>{t("install.retry")}</Button>
+            </div>}
+            {loading && hasLoaded && <p role="status" className="shrink-0 px-4 py-2 text-xs text-muted sm:px-5">{t("common.loading")}</p>}
             {(actionError || notice) && (
               <p role={actionError ? "alert" : "status"} className={cn("max-h-24 shrink-0 overflow-y-auto px-4 py-2 text-xs [overflow-wrap:anywhere] sm:px-5", actionError ? "bg-error-soft text-error" : "bg-running-soft text-secondary")}>
                 {actionError || notice}
@@ -446,7 +520,7 @@ export function ConfigEditDialog({
                       variant="ghost"
                       className="h-6 shrink-0 text-[11px] text-error"
                       onClick={() => setConfirmForce(true)}
-                      disabled={busy || loading || !dirty}
+                      disabled={busy || loading || !!loadError || !dirty}
                     >
                       {t("cfgeditor.forceSave")}
                     </Button>
@@ -464,17 +538,21 @@ export function ConfigEditDialog({
 
             {/* 编辑器：搜索、语法高亮与可跳转行号 */}
             <div className="flex min-h-44 flex-1 overflow-hidden bg-card-2/20">
-              {loading ? (
+              {loading && !hasLoaded ? (
                 <div className="flex flex-1 items-center justify-center">
                   <Loader2 className="h-5 w-5 animate-spin text-primary" />
                 </div>
-              ) : loadError ? (
+              ) : loadError && !hasLoaded ? (
                 <div className="flex min-w-0 flex-1 flex-col items-center justify-center gap-3 overflow-y-auto p-4 text-xs" role="alert">
                   <p className="text-error [overflow-wrap:anywhere]">{loadError}</p>
                   <Button variant="secondary" onClick={() => void reload()}>{t("install.retry")}</Button>
                 </div>
               ) : (
-                <div className="min-w-0 flex-1 overflow-auto p-2"><CodeEditor ref={editorRef} value={content} label={info.label} language={info.kind.startsWith("apache") ? "apache" : info.kind.startsWith("php") || info.kind.startsWith("mysql") || info.kind.startsWith("mariadb") || info.kind.startsWith("postgres") ? "ini" : info.kind.startsWith("mongo") ? "yaml" : info.path} readOnly={busy} height="min(52dvh, 520px)" onChange={(next) => { setContent(next); setValidation(null); setNotice(null); }} /></div>
+                <div className="min-w-0 flex-1 overflow-auto p-2"><CodeEditor ref={editorRef} value={content} label={info.label} language={info.kind.startsWith("apache") ? "apache" : info.kind.startsWith("php") || info.kind.startsWith("mysql") || info.kind.startsWith("mariadb") || info.kind.startsWith("postgres") ? "ini" : info.kind.startsWith("mongo") ? "yaml" : info.path} readOnly={busy || loading} height="min(52dvh, 520px)" onChange={(next) => {
+                  if (actionRef.current || reading.current) return;
+                  rememberDraft(draftKey, next, original, info);
+                  setContent(next); setValidation(null); setNotice(null);
+                }} /></div>
               )}
             </div>
 
@@ -521,7 +599,7 @@ export function ConfigEditDialog({
         confirmText={t("cfgeditor.discard")} danger onConfirm={() => {
           const action = discard;
           setDiscard(null);
-          if (action === "close") onClose();
+          if (action === "close") { forgetDraft(draftKey, configDrafts.get(draftKey)); onClose(); }
           else void reload();
         }} />
 

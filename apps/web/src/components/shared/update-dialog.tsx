@@ -60,6 +60,7 @@ export function UpdateDialog({
   const [dl, setDl] = React.useState<DownloadUpdateResult | null>(null);
   const [progress, setProgress] = React.useState<UpdateProgress | null>(null);
   const [manifestState, setManifestState] = React.useState<"idle" | "applying" | "applied">("idle");
+  const [manifestRestarting, setManifestRestarting] = React.useState(false);
   const installBusy = React.useRef(false);
   const [installError, setInstallError] = React.useState<string | null>(null);
   const installErrorRef = React.useRef<HTMLDivElement>(null);
@@ -73,6 +74,7 @@ export function UpdateDialog({
       setProgress(null);
       setDl(null);
       setManifestState("idle");
+      setManifestRestarting(false);
       try {
         const r = await api.checkUpdates();
         setResult(r);
@@ -135,6 +137,17 @@ export function UpdateDialog({
     }
   };
 
+  const restartForManifest = async () => {
+    if (!isTauri || manifestState !== "applied" || manifestRestarting) return;
+    setManifestRestarting(true);
+    try {
+      await api.restartApp();
+    } catch (e) {
+      setManifestRestarting(false);
+      toastError(e);
+    }
+  };
+
   const install = async () => {
     if (!dl || installBusy.current) return;
     installBusy.current = true;
@@ -156,8 +169,8 @@ export function UpdateDialog({
   const pct = progress && progress.total > 0 ? (progress.received / progress.total) * 100 : 0;
 
   return (
-    <Dialog open={open} onOpenChange={(o) => (["downloading", "installing"].includes(phase) ? undefined : onOpenChange(o))}>
-      <DialogContent className="flex max-h-[90dvh] max-w-xl flex-col gap-0 overflow-hidden p-0" hideClose={["downloading", "installing"].includes(phase)}>
+    <Dialog open={open} onOpenChange={(o) => (["downloading", "installing"].includes(phase) || manifestRestarting ? undefined : onOpenChange(o))}>
+      <DialogContent className="flex max-h-[90dvh] max-w-xl flex-col gap-0 overflow-hidden p-0" hideClose={["downloading", "installing"].includes(phase) || manifestRestarting}>
         {/* 头部：图标 + 标题 + 版本 */}
         <div className="relative shrink-0 bg-card-2/30 px-4 py-5 sm:px-6 after:absolute after:inset-x-4 after:bottom-0 after:border-b after:border-dashed after:border-border sm:after:inset-x-6">
           <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/40 to-transparent" />
@@ -386,6 +399,12 @@ export function UpdateDialog({
                     <ShieldCheck className="h-3.5 w-3.5" />
                   )}
                   {t("update.applyManifest")}
+                </Button>
+              )}
+              {manifestState === "applied" && isTauri && (
+                <Button onClick={() => void restartForManifest()} disabled={manifestRestarting}>
+                  {manifestRestarting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                  {t(manifestRestarting ? "update.restartingForManifest" : "update.restartForManifest")}
                 </Button>
               )}
               {/* 只有清单有更新时，应用本体没有新版可下 */}

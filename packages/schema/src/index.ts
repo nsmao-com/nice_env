@@ -326,6 +326,14 @@ export const ServiceStatus = z.object({
 });
 export type ServiceStatus = z.infer<typeof ServiceStatus>;
 
+export const PackageUninstallPreview = z.object({
+  installed: InstalledPackage,
+  runtimePath: z.string().min(1),
+  service: ServiceStatus.optional(),
+  blockers: z.array(z.object({ kind: z.enum(["site", "stack", "package", "console"]), name: z.string() })),
+});
+export type PackageUninstallPreview = z.infer<typeof PackageUninstallPreview>;
+
 export const ServiceStopPreview = z.object({ service: ServiceStatus, revision: z.string() });
 export type ServiceStopPreview = z.infer<typeof ServiceStopPreview>;
 

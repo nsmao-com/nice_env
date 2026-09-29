@@ -399,6 +399,11 @@ impl CoreState {
         Ok(model::PackageInstallResult { installed, path_sync_error })
     }
 
+    pub fn preview_package_uninstall(&self, key: &str) -> Result<model::PackageUninstallPreview> {
+        let _sites = sites::SITE_CHANGES.lock();
+        self.installer.uninstall_preview(key, &self.paths, &self.store, &self.manager)
+    }
+
     pub fn uninstall_package(&self, key: &str) -> Result<()> {
         let _sites = sites::SITE_CHANGES.lock();
         let _operation = self.manager.lifecycle.lock();

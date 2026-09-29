@@ -514,8 +514,8 @@ function InstallPathWarning({ task, disabled }: { task: InstallTask; disabled: b
       if (mountedRef.current) setBusy(false);
     }
   };
-  return <div role="alert" className="mt-3 space-y-2 rounded-xl border border-warning/30 bg-warning-soft p-3 text-[12px] [overflow-wrap:anywhere]">
-    <p className="flex items-center gap-2 font-medium text-warning"><AlertTriangle className="h-4 w-4 shrink-0" />{t("install.pathSyncPending")}</p>
+  return <div role="alert" className="mt-3 space-y-2 rounded-xl border border-warn/30 bg-warn-soft p-3 text-[12px] [overflow-wrap:anywhere]">
+    <p className="flex items-center gap-2 font-medium text-warn"><AlertTriangle className="h-4 w-4 shrink-0" />{t("install.pathSyncPending")}</p>
     <p className="leading-relaxed text-secondary">{t("install.pathSyncHint")}</p>
     <p className="whitespace-pre-wrap text-muted">{task.pathSyncError?.message}</p>
     {task.pathSyncError?.hint && <p className="whitespace-pre-wrap text-muted">{task.pathSyncError.hint}</p>}
@@ -555,7 +555,7 @@ export function InstallTasksPanel({ onInspect }: {
           <span>{t("install.tasks")}</span><span className="text-muted">{list.length}</span>
           {running > 0 && <span className="text-xs text-info">{running} {t("install.tasksRunning")}</span>}
           {failed > 0 && <span className="text-xs text-error">{failed} {t("install.failed")}</span>}
-          {pendingPath > 0 && <span className="text-xs text-warning">{pendingPath} {t("install.pathSyncCount")}</span>}
+          {pendingPath > 0 && <span className="text-xs text-warn">{pendingPath} {t("install.pathSyncCount")}</span>}
         </span>
         <ChevronDown className={cn("h-4 w-4 shrink-0", expanded && "rotate-180")} />
       </button>
@@ -595,7 +595,7 @@ function InstallTaskRow({ task, onInspect, onDismiss }: {
   return <li className="flex flex-wrap items-center gap-3 border-t border-dashed border-separator px-1 py-3 first:border-t-0">
     <div className="min-w-0 flex-1 basis-44 space-y-1">
       <p className="text-xs font-medium [overflow-wrap:anywhere]">{name}</p>
-      <p className={cn("flex items-center gap-1.5 text-xs", task.status === "error" ? "text-error" : task.pathSyncError ? "text-warning" : "text-muted")}>
+      <p className={cn("flex items-center gap-1.5 text-xs", task.status === "error" ? "text-error" : task.pathSyncError ? "text-warn" : "text-muted")}>
         {busy && <Loader2 className="h-3 w-3 shrink-0 animate-spin" />}{label}
       </p>
       {busy && progress && <div role="progressbar" aria-label={`${name} ${label}`} aria-valuemin={0} aria-valuemax={100}

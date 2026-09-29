@@ -6,6 +6,7 @@ import type {
   Site,
   PackageView,
   PackageInstallResult,
+  PackageUninstallPreview,
   SystemStats,
   PortDiagnosis,
   PortScanEntry,
@@ -124,6 +125,8 @@ export const installPackage = (id: string, requestId?: string) =>
   safe(invoke<PackageInstallResult>("install_package", { id, requestId }));
 export const uninstallPackage = (id: string) =>
   safe(invoke<boolean>("uninstall_package", { id }));
+export const previewPackageUninstall = (id: string) =>
+  safe(invoke<PackageUninstallPreview>("preview_package_uninstall", { id }));
 export const cancelDownload = (taskId: string, requestId?: string) =>
   safe(invoke<boolean>("cancel_download", { taskId, requestId }));
 export const setActiveVersion = (id: string, version: string) =>

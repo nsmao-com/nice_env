@@ -15,6 +15,11 @@ on:
 permissions:
   contents: write
 
+# 同一 tag 的重复触发排队执行，避免并发替换 Release 附件时出现 404。
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   release:
     name: Build & Release (${{ matrix.platform }} ${{ matrix.targets }})

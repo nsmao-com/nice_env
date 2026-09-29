@@ -201,6 +201,7 @@ pub fn run() {
             list_packages,
             install_package,
             uninstall_package,
+            preview_package_uninstall,
             cancel_download,
             set_active_version,
             pathenv_status,
@@ -682,6 +683,17 @@ async fn install_package(
     })
     .await
     .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn preview_package_uninstall(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    id: String,
+) -> Result<nsb_core::model::PackageUninstallPreview, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.preview_package_uninstall(&id)))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]

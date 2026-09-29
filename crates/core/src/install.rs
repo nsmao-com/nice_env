@@ -825,13 +825,14 @@ impl Installer {
         Ok(())
     }
 
-    pub fn uninstall(
+    /// 预览与执行共用依赖和服务判定；只检查，不停止服务或删除文件。
+    pub fn uninstall_preview(
         &self,
         key: &str,
         paths: &Paths,
         store: &Store,
         manager: &Arc<crate::services::ServiceManager>,
-    ) -> Result<Option<String>> {
+    ) -> Result<crate::model::PackageUninstallPreview> {
         let _operation = manager.lifecycle.lock();
         let installed = match key.split_once('@') {
             Some((id, version)) => {
@@ -843,15 +844,17 @@ impl Installer {
         .ok_or_else(|| AppError::not_installed(key))?;
         let id = &installed.id;
         let version = &installed.version;
-        // 下面会 remove_dir_all(runtimes/{id}/{version})，先挡住 `x@../..` 这类 key
+        // 执行阶段会删除 runtimes/{id}/{version}，先挡住 `x@../..` 这类 key。
         ensure_safe_key(id, version)?;
+        let mut blockers = self.uninstall_references(store, &installed)?;
         if let Some(console) = crate::toolbox::adminer_status(manager)? {
             if (id == "php" && *version == console.php_version)
                 || (id == &console.package_id && *version == console.adminer_version) {
-                return Err(AppError::new("PACKAGE_IN_USE", "该版本正在运行数据库管理台，请先在数据库页面停止管理台"));
+                blockers.push(crate::model::PackageUninstallBlocker {
+                    kind: "console".into(), name: console.package_id,
+                });
             }
         }
-        self.check_uninstall_references(store, &installed)?;
         let entry = self.installed_entry(&installed);
         let service_id = if id == "php" || id == "mysql" {
             Some(format!("{id}@{version}"))
@@ -860,12 +863,35 @@ impl Installer {
         } else {
             None
         };
+        let service = service_id.and_then(|sid| manager.snapshot(&sid))
+            .filter(|service| service.version.as_deref() == Some(version.as_str()));
+        let runtime_path = paths.runtime_dir(id, version).to_string_lossy().into_owned();
+        Ok(crate::model::PackageUninstallPreview { installed, runtime_path, service, blockers })
+    }
+
+    pub fn uninstall(
+        &self, key: &str, paths: &Paths, store: &Store,
+        manager: &Arc<crate::services::ServiceManager>,
+    ) -> Result<Option<String>> {
+        let _operation = manager.lifecycle.lock();
+        // 不能信任之前显示的预览：在生命周期锁内重新检查真实安装与引用。
+        let preview = self.uninstall_preview(key, paths, store, manager)?;
+        if !preview.blockers.is_empty() {
+            let users = preview.blockers.iter().map(|item| match item.kind.as_str() {
+                "site" => format!("站点「{}」", item.name),
+                "stack" => format!("服务栈「{}」", item.name),
+                "console" => format!("数据库管理台 {}", item.name),
+                _ => format!("套件 {}", item.name),
+            }).collect::<Vec<_>>();
+            return Err(AppError::new("PACKAGE_IN_USE", format!(
+                "无法卸载 {} {}：仍被 {} 使用", preview.installed.id, preview.installed.version, users.join("、"),
+            )).with_hint("先修改相关站点、项目版本或服务栈的版本绑定，卸载依赖套件，或在数据库页面停止管理台后重试"));
+        }
+        let installed = preview.installed;
+        let id = &installed.id;
+        let version = &installed.version;
         // 单实例的另一个版本可能正在运行，只有版本吻合才能停止和移除注册。
-        let stopped_service = service_id.filter(|sid| {
-            manager
-                .snapshot(sid)
-                .is_some_and(|s| s.version.as_deref() == Some(version.as_str()))
-        });
+        let stopped_service = preview.service.map(|service| service.id);
         if let Some(sid) = &stopped_service {
             crate::ops::stop_service(store, paths, manager, sid)?;
         }
@@ -907,7 +933,7 @@ impl Installer {
     }
 
     /// 固定版本引用始终保护；无版本引用仅在卸载最后一个可用版本时阻止。
-    fn check_uninstall_references(&self, store: &Store, target: &InstalledPackage) -> Result<()> {
+    fn uninstall_references(&self, store: &Store, target: &InstalledPackage) -> Result<Vec<crate::model::PackageUninstallBlocker>> {
         let installed = store.list_installed()?;
         let has_alternative = installed
             .iter()
@@ -934,7 +960,7 @@ impl Installer {
                         })
                 });
             if php_ref || application_ref || web_ref || db_ref || project_ref {
-                users.push(format!("站点「{}」", site.name));
+                users.push(crate::model::PackageUninstallBlocker { kind: "site".into(), name: site.name });
             }
         }
         for stack in store.list_stacks()? {
@@ -945,7 +971,7 @@ impl Installer {
                     .iter()
                     .any(|item| references_target(&item.service_id))
             {
-                users.push(format!("服务栈「{}」", stack.name));
+                users.push(crate::model::PackageUninstallBlocker { kind: "stack".into(), name: stack.name });
             }
         }
         for package in installed
@@ -959,22 +985,12 @@ impl Installer {
                 .chain(entry.depends.iter())
                 .chain(entry.run.iter().flat_map(|run| run.requires.iter()));
             if required.into_iter().any(|dep| references_target(dep)) {
-                users.push(format!("套件 {} {}", entry.display_name, package.version));
+                users.push(crate::model::PackageUninstallBlocker {
+                    kind: "package".into(), name: format!("{} {}", entry.display_name, package.version),
+                });
             }
         }
-        if !users.is_empty() {
-            return Err(AppError::new(
-                "PACKAGE_IN_USE",
-                format!(
-                    "无法卸载 {} {}：仍被 {} 使用",
-                    target.id,
-                    target.version,
-                    users.join("、")
-                ),
-            )
-            .with_hint("先修改相关站点、项目版本或服务栈的版本绑定，或卸载依赖它的套件后重试"));
-        }
-        Ok(())
+        Ok(users)
     }
 }
 

@@ -451,6 +451,23 @@ pub struct PackageInstallResult {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
+pub struct PackageUninstallBlocker {
+    pub kind: String,
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageUninstallPreview {
+    pub installed: InstalledPackage,
+    pub runtime_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service: Option<ServiceStatus>,
+    pub blockers: Vec<PackageUninstallBlocker>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 /// 环境变量注入状态（前端「环境变量」卡片用）
 pub struct PathEnvStatus {
     pub enabled: bool,

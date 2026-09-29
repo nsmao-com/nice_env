@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   Server,
@@ -34,7 +34,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 import type { PackageView, PackageCategory, ServiceStatus, BulkReport } from "@nsb/schema";
-import { PACKAGE_CATEGORY_ORDER } from "@nsb/schema";
+import { PACKAGE_CATEGORY_ORDER, PackageUninstallPreview } from "@nsb/schema";
 import { cn, fmtBytes, fmtSpeed, isPlatformCompatible } from "@/lib/utils";
 import { useUI, useT } from "@/lib/store";
 import { usePackages, useServices, useSettings, useVersionCatalogs, serviceHasProcess } from "@/lib/hooks";
@@ -235,6 +235,25 @@ export default function PackagesPage() {
   const [category, setCategory] = React.useState("all");
   const [uninstallTarget, setUninstallTarget] = React.useState<{ id: string; version: string; name: string } | null>(null);
   const [installTarget, setInstallTarget] = React.useState<InstallTarget | null>(null);
+  const uninstallPreview = useQuery({
+    queryKey: ["package-uninstall-preview", uninstallTarget?.id, uninstallTarget?.version],
+    queryFn: async () => {
+      if (!uninstallTarget) throw { code: "UNINSTALL_PREVIEW_UNCONFIRMED", message: t("packages.uninstallPreviewFailed") };
+      const result = PackageUninstallPreview.safeParse(await api.previewPackageUninstall(`${uninstallTarget.id}@${uninstallTarget.version}`));
+      if (!result.success || result.data.installed.id !== uninstallTarget.id || result.data.installed.version !== uninstallTarget.version) {
+        throw { code: "UNINSTALL_PREVIEW_UNCONFIRMED", message: t("packages.uninstallPreviewFailed") };
+      }
+      return result.data;
+    },
+    enabled: !!uninstallTarget && !uninstallPathPending && !uninstalling,
+    networkMode: "always",
+    staleTime: 0,
+    retry: false,
+  });
+  const uninstallPreviewReady = !!uninstallPreview.data && !uninstallPreview.isFetching && !uninstallPreview.error
+    && uninstallPreview.data.installed.id === uninstallTarget?.id && uninstallPreview.data.installed.version === uninstallTarget?.version;
+  const uninstallBlocked = !uninstallPreviewReady || !!uninstallPreview.data?.blockers.length;
+  const uninstallPreviewError = uninstallPreview.error ? normalizeError(uninstallPreview.error) : null;
 
   // 服务卡片可以把缺失依赖直接带到套件页；只在首次挂载时读取，用户随后编辑搜索框不会被 URL 覆盖。
   React.useEffect(() => {
@@ -384,7 +403,7 @@ export default function PackagesPage() {
   };
 
   const uninstall = async () => {
-    if (!uninstallTarget || uninstallRef.current || (!uninstallPathPending && (!dataReady || uninstallInstalling))) return;
+    if (!uninstallTarget || uninstallRef.current || (!uninstallPathPending && (!dataReady || uninstallInstalling || uninstallBlocked))) return;
     uninstallRef.current = true;
     setUninstalling(true);
     setUninstallError(null);
@@ -615,11 +634,43 @@ export default function PackagesPage() {
         confirmText={t(uninstallPathPending ? "packages.retryPathCleanup" : "packages.uninstall")}
         danger={!uninstallPathPending}
         loading={uninstalling}
-        confirmDisabled={!uninstallPathPending && (!dataReady || uninstallInstalling)}
+        confirmDisabled={!uninstallPathPending && (!dataReady || uninstallInstalling || uninstallBlocked)}
         onConfirm={() => void uninstall()}
       >
         {uninstallInstalling && !uninstallPathPending && <p role="status" className="text-xs text-muted">{t("packages.installing")}</p>}
         {!uninstallPathPending && readStatus}
+        {!uninstallPathPending && <div className="space-y-3 text-xs leading-relaxed [overflow-wrap:anywhere]" aria-busy={uninstallPreview.isFetching}>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="font-medium text-secondary">{t("packages.uninstallImpact")}</p>
+            <Button size="sm" variant="ghost" disabled={uninstallPreview.isFetching || uninstalling}
+              onClick={() => void uninstallPreview.refetch()}>{t("packages.reload")}</Button>
+          </div>
+          {uninstallPreview.isFetching && <p role="status" className="text-muted">{t("packages.uninstallChecking")}</p>}
+          {uninstallPreviewError && <div role="alert" className="space-y-1 text-error">
+            <p>{t("packages.uninstallPreviewFailed")}</p>
+            {uninstallPreviewError.message !== t("packages.uninstallPreviewFailed") && <p>{uninstallPreviewError.message}</p>}
+            {uninstallPreviewError.hint && <p>{uninstallPreviewError.hint}</p>}
+          </div>}
+          {uninstallPreviewReady && uninstallPreview.data && <>
+            <dl className="space-y-1 rounded-lg bg-fill/40 p-3">
+              <dt className="text-muted">{t("packages.uninstallRuntimePath")}</dt>
+              <dd className="font-mono text-foreground">{uninstallPreview.data.runtimePath}</dd>
+            </dl>
+            {uninstallPreview.data.service && serviceHasProcess(uninstallPreview.data.service) && <p className="text-warn">
+              {t("packages.uninstallStopsService").replace("{name}", `${uninstallPreview.data.service.label} ${uninstallPreview.data.service.version ?? ""}`)}
+            </p>}
+            {uninstallPreview.data.blockers.length > 0 ? <div role="status" className="space-y-2">
+              <p className="text-warn">{t("packages.uninstallBlocked")}</p>
+              <ul className="space-y-2 rounded-lg bg-fill/40 p-3">
+                {uninstallPreview.data.blockers.map((item, index) => <li key={`${item.kind}:${index}`} className="flex flex-wrap gap-x-2 gap-y-1">
+                  <span className="text-muted">{t(`packages.uninstallRef.${item.kind}`)}</span>
+                  <span className="min-w-0 text-foreground">{item.name}</span>
+                </li>)}
+              </ul>
+              <p className="text-muted">{t("packages.uninstallResolve")}</p>
+            </div> : <p role="status" className="text-muted">{t("packages.uninstallNoReferences")}</p>}
+          </>}
+        </div>}
         {uninstallError && <div role="alert" className="rounded-lg bg-error-soft p-3 text-xs text-error [overflow-wrap:anywhere]">
           <p>{uninstallError.message}</p>
           {uninstallError.hint && <p className="mt-1">{uninstallError.hint}</p>}

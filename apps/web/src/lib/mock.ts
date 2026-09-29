@@ -13,6 +13,7 @@ import type {
   ServiceStatus,
   Site,
   PackageView,
+  PackageUninstallPreview,
   ProjectRuntimeVersions,
   SystemStats,
   PortDiagnosis,
@@ -1502,6 +1503,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         if (activeDownloads.get(key) === control) activeDownloads.delete(key);
       }
     }
+    case "preview_package_uninstall":
     case "uninstall_package": {
       const key = args!.id as string;
       const p = packages.get(key);
@@ -1509,7 +1511,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const installed = Array.from(packages.values()).filter((p) => p.install);
       const hasAlternative = installed.some((other) => other.id === p.id && other.version !== p.version);
       const referencesTarget = (dep: string) => dep.includes("@") ? dep === key : dep === p.id && !hasAlternative;
-      const usedBy = [
+      const blockers: PackageUninstallPreview["blockers"] = [
         ...Array.from(sites.values()).filter((site) =>
           (p.id === "php" && site.runtime.kind === "php" && site.runtime.phpVersion === p.version)
           || (applicationRuntime(site.runtime.kind)?.id === p.id && site.runtime.application?.version === p.version)
@@ -1517,14 +1519,26 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           || ((site.runtime.webServer ?? "nginx") === p.id && !hasAlternative)
           || (p.id === "mysql" && site.db?.enabled
             && (site.db.version != null ? site.db.version === p.version : !hasAlternative))
-        ).map((site) => site.name),
+        ).map((site) => ({ kind: "site" as const, name: site.name })),
         ...Array.from(stacks.values()).filter((stack) => !stack.builtin
-          && stack.items.some((item) => referencesTarget(item.serviceId))).map((stack) => stack.name),
+          && stack.items.some((item) => referencesTarget(item.serviceId))).map((stack) => ({ kind: "stack" as const, name: stack.name })),
         ...installed.filter((other) => other !== p && [...(other.requires ?? []), ...(other.depends ?? []), ...(other.run?.requires ?? [])]
-          .some(referencesTarget)).map((other) => other.displayName),
+          .some(referencesTarget)).map((other) => ({ kind: "package" as const, name: `${other.displayName} ${other.version}` })),
       ];
-      if (usedBy.length > 0) throw { code: "PACKAGE_IN_USE", message: `无法卸载 ${key}：仍被 ${usedBy.join("、")} 使用` };
+      const consolePackage = mockAdminer?.packageId ?? "adminer";
+      if (mockAdminer && ((p.id === "php" && mockAdminer.phpVersion === p.version)
+        || (p.id === consolePackage && p.version === mockAdminer.adminerVersion))) {
+        blockers.push({ kind: "console", name: consolePackage });
+      }
       const sid = p.run?.singleInstance === false ? `${p.id}@${p.version}` : p.id;
+      if (cmd === "preview_package_uninstall") return structuredClone({
+        installed: { id: p.id, category: p.category, ...p.install },
+        runtimePath: p.install.installPath,
+        service: services.get(sid)?.version === p.version ? services.get(sid) : undefined,
+        blockers,
+      } satisfies PackageUninstallPreview) as T;
+      if (activeDownloads.has(key)) throw { code: "PACKAGE_BUSY", message: `${key} 正在安装` };
+      if (blockers.length > 0) throw { code: "PACKAGE_IN_USE", message: `无法卸载 ${key}：仍被 ${blockers.map((item) => item.name).join("、")} 使用` };
       if (services.get(sid)?.version === p.version) services.delete(sid);
       p.install = undefined;
       p.active = false;

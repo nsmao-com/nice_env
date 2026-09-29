@@ -293,6 +293,7 @@ pub fn run() {
         root_dir: site_root.to_string_lossy().to_string(),
         runtime: nsb_core::model::SiteRuntime {
             access: None,
+            basic_auth: None,
             https_redirect: None,
             proxy_rules: Vec::new(),
             error_pages: None,
@@ -319,6 +320,7 @@ pub fn run() {
         }),
         write_env_example: true,
         template: "blank-php".into(),
+        auth_source_site_id: None,
     };
     let site = check(
         &state,
@@ -412,6 +414,7 @@ echo implode("\n", $out);
         root_dir: site2_root.to_string_lossy().to_string(),
         runtime: nsb_core::model::SiteRuntime {
             access: None,
+            basic_auth: None,
             https_redirect: None,
             proxy_rules: Vec::new(),
             error_pages: None,
@@ -434,6 +437,7 @@ echo implode("\n", $out);
         create_db: None,
         write_env_example: false,
         template: "blank-php".into(),
+        auth_source_site_id: None,
     };
     let site2 = check(
         &state,
@@ -480,6 +484,7 @@ echo implode("\n", $out);
             .to_string(),
         runtime: nsb_core::model::SiteRuntime {
             access: None,
+            basic_auth: None,
             https_redirect: None,
             proxy_rules: Vec::new(),
             error_pages: None,
@@ -502,6 +507,7 @@ echo implode("\n", $out);
         create_db: None,
         write_env_example: false,
         template: "none".into(),
+        auth_source_site_id: None,
     };
     if check(
         &state,

@@ -281,6 +281,103 @@ pub(crate) fn validate_https_redirect(https: bool, runtime: &crate::model::SiteR
     Ok(())
 }
 
+fn basic_auth_path(paths: &Paths, site_id: &str) -> Result<std::path::PathBuf> {
+    if site_id.is_empty() || !site_id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')) {
+        return Err(AppError::new("BAD_SITE_ID", "站点标识无效，无法操作认证文件"));
+    }
+    crate::paths::checked_data_path(&paths.base, &format!("etc/auth/{site_id}.htpasswd"))
+        .map_err(Into::into)
+}
+
+fn validate_basic_auth(config: &crate::model::SiteBasicAuth) -> Result<()> {
+    let username = config.username.trim();
+    if config.enabled && (username.is_empty() || username.len() > 128
+        || username.chars().any(|c| c.is_control() || c.is_whitespace() || c == ':')) {
+        return Err(AppError::new("BAD_BASIC_AUTH", "Basic Auth 用户名不能为空，且不能包含空白、冒号或控制字符"));
+    }
+    if let Some(password) = &config.password {
+        let length = password.as_bytes().len();
+        if length < 8 || length > 72 || password.chars().any(char::is_control) {
+            return Err(AppError::new("BAD_BASIC_AUTH", "Basic Auth 密码需要 8–72 字节，且不能包含控制字符"));
+        }
+    }
+    Ok(())
+}
+
+fn valid_basic_auth_hash(hash: &str) -> bool {
+    let bytes = hash.as_bytes();
+    bytes.len() == 60
+        && (hash.starts_with("$2a$") || hash.starts_with("$2b$") || hash.starts_with("$2y$"))
+        && bytes.get(4).is_some_and(u8::is_ascii_digit)
+        && bytes.get(5).is_some_and(u8::is_ascii_digit)
+        && bytes[6] == b'$'
+        && bytes[7..].iter().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'/'))
+}
+
+fn read_basic_auth_hash(paths: &Paths, site: &Site, username: &str) -> Result<Option<String>> {
+    let path = basic_auth_path(paths, &site.id)?;
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(AppError::io("读取站点 Basic Auth 文件", error)),
+    };
+    let line = content.lines().find(|line| !line.trim().is_empty()).unwrap_or_default();
+    let (stored_user, hash) = line.split_once(':').ok_or_else(|| AppError::new("BASIC_AUTH_INVALID", "站点 Basic Auth 文件格式无效"))?;
+    if stored_user != username || !valid_basic_auth_hash(hash) {
+        return Err(AppError::new("BASIC_AUTH_INVALID", "站点 Basic Auth 文件与当前用户名不匹配"));
+    }
+    Ok(Some(hash.to_string()))
+}
+
+fn basic_auth_hash(paths: &Paths, site: &Site, fallback: Option<&Site>) -> Result<Option<String>> {
+    let Some(config) = &site.runtime.basic_auth else { return Ok(None); };
+    if !config.enabled { return Ok(None); }
+    validate_basic_auth(config)?;
+    if let Some(hash) = &config.password_hash {
+        if !valid_basic_auth_hash(hash) { return Err(AppError::new("BASIC_AUTH_INVALID", "站点 Basic Auth 哈希格式无效")); }
+        return Ok(Some(hash.clone()));
+    }
+    if let Some(password) = &config.password {
+        return bcrypt::hash(password, bcrypt::DEFAULT_COST)
+            .map(Some)
+            .map_err(|error| AppError::new("BASIC_AUTH_HASH_FAILED", "无法生成 Basic Auth 密码哈希").with_detail(error.to_string()));
+    }
+    let source = fallback.unwrap_or(site);
+    let source_username = source.runtime.basic_auth.as_ref()
+        .map(|value| value.username.trim())
+        .unwrap_or_else(|| config.username.trim());
+    read_basic_auth_hash(paths, source, source_username)?.ok_or_else(||
+        AppError::new("BASIC_AUTH_PASSWORD_REQUIRED", "启用 Basic Auth 时请填写密码")
+            .with_hint("已有密码会在密码框留空时保留；新站点必须设置至少 8 个字符的密码。")
+    ).map(Some)
+}
+
+pub(crate) fn site_basic_auth_hash(paths: &Paths, site: &Site) -> Result<Option<String>> {
+    basic_auth_hash(paths, site, None)
+}
+
+fn write_basic_auth_file(paths: &Paths, site: &Site, hash: Option<&str>) -> Result<()> {
+    let path = basic_auth_path(paths, &site.id)?;
+    if let Some(hash) = hash {
+        let config = site.runtime.basic_auth.as_ref().ok_or_else(|| AppError::new("BAD_BASIC_AUTH", "Basic Auth 配置缺失"))?;
+        std::fs::create_dir_all(path.parent().unwrap_or(paths.etc().as_path()))?;
+        let content = format!("{}:{}\n", config.username.trim(), hash);
+        crate::paths::write_with_backup(&path, &content, &paths.backup())?;
+    } else if path.is_file() {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+fn sanitize_basic_auth(config: &mut Option<crate::model::SiteBasicAuth>, has_password: bool) {
+    if let Some(config) = config {
+        config.username = config.username.trim().to_string();
+        config.password = None;
+        config.password_hash = None;
+        config.has_password = config.enabled && has_password;
+    }
+}
+
 fn validate_site_fields(
     name: &str,
     domains: &[String],
@@ -353,6 +450,7 @@ fn validate_site_fields(
         return Err(AppError::new("BAD_RUNTIME", "请选择 Nginx、Apache 或 Caddy"));
     }
     if let Some(access) = &runtime.access { crate::siteaccess::normalize(access)?; }
+    if let Some(basic_auth) = &runtime.basic_auth { validate_basic_auth(basic_auth)?; }
     if let Some(cors) = &runtime.cors { crate::sitecors::normalize(cors)?; }
     crate::siteproxy::normalize(runtime)?;
     if let Some(error_pages) = &runtime.error_pages {
@@ -810,6 +908,15 @@ fn create_inner(
             runtime.php_version = Some(ver);
         }
     }
+    let auth_source = input.auth_source_site_id.as_deref()
+        .map(|id| get(store, id))
+        .transpose()?;
+    if let Some(source) = &auth_source {
+        if !input.runtime.basic_auth.as_ref().is_some_and(|auth| auth.enabled)
+            || !source.runtime.basic_auth.as_ref().is_some_and(|auth| auth.enabled) {
+            return Err(AppError::new("BAD_BASIC_AUTH", "复制 Basic Auth 的源站点认证配置无效"));
+        }
+    }
     let now = now_ms();
     let mut site = Site {
         access_url: None,
@@ -832,10 +939,13 @@ fn create_inner(
         created_at: now,
         updated_at: now,
     };
+    let auth_hash = basic_auth_hash(paths, &site, auth_source.as_ref())?;
+    sanitize_basic_auth(&mut site.runtime.basic_auth, auth_hash.is_some());
     let mut user_ini = UserIniChanges::prepare(store, &site, None)?;
     store.save_site(&site)?;
 
     let result: Result<()> = (|| {
+        write_basic_auth_file(paths, &site, auth_hash.as_deref())?;
         user_ini.apply(paths)?;
         if site.https && site.runtime.uses_default_certificate() {
             crate::tls::issue_site_cert(paths, store, &site.domains)?;
@@ -845,6 +955,9 @@ fn create_inner(
     })();
     if let Err(error) = result {
         let mut failures = Vec::new();
+        if auth_hash.is_some() {
+            if let Err(e) = write_basic_auth_file(paths, &site, None) { failures.push(format!("清理 Basic Auth 文件：{e}")); }
+        }
         if let Err(e) = user_ini.restore() { failures.push(e.to_string()); }
         if let Err(e) = store.delete_site(&site.id) { failures.push(e.to_string()); }
         if !manager.is_busy(&crate::applications::service_id(&site)) {
@@ -886,6 +999,8 @@ pub fn update(
     current.runtime.proxy_rules = crate::siteproxy::normalize(&site_patch.runtime)?;
     current.runtime.error_pages = site_patch.runtime.error_pages.as_ref().map(normalize_error_pages).transpose()?;
     if current.runtime.kind == SiteKind::Redirect { current.root_dir.clear(); }
+    let auth_hash = basic_auth_hash(paths, &current, Some(&original))?;
+    sanitize_basic_auth(&mut current.runtime.basic_auth, auth_hash.is_some());
     let certificate_changed =
         current.https != site_patch.https || current.domains != original.domains
             || current.runtime.imported_cert_id != original.runtime.imported_cert_id
@@ -951,6 +1066,7 @@ pub fn update(
         Vec::new()
     };
     let result: Result<()> = (|| {
+        write_basic_auth_file(paths, &current, auth_hash.as_deref())?;
         user_ini.apply(paths)?;
         if local_certificate_changed {
             crate::tls::issue_site_cert_for_update(paths, store, &current.domains, Some(&current.id))?;
@@ -1117,6 +1233,9 @@ fn site_config_paths(paths: &Paths, site: &Site) -> Result<Vec<std::path::PathBu
             files.push(crate::paths::checked_data_path(&paths.base, &format!("etc/{server}/sites/{}.{suffix}", site.id))?);
         }
     }
+    // Keep this after the six server configuration paths: callers use the existing
+    // ordering to detect affected services before handling the auth sidecar.
+    files.push(basic_auth_path(paths, &site.id)?);
     Ok(files)
 }
 
@@ -1418,12 +1537,14 @@ pub fn write_site_conf(paths: &Paths, store: &Store, site: &Site) -> Result<()> 
 
 fn write_site_conf_state(paths: &Paths, store: &Store, site: &Site, enabled: bool) -> Result<()> {
     crate::certs::validate_site_certificate(paths, store, site)?;
+    let auth_hash = site_basic_auth_hash(paths, site)?;
+    let auth_file = auth_hash.as_ref().map(|_| basic_auth_path(paths, &site.id)).transpose()?;
     let extension = if enabled { "conf" } else { "conf.disabled" };
     let ports = PortsProfile::from_settings(store);
     if site.runtime.web_server == "caddy" {
         let (http, https) = crate::caddy::ports(paths, store)?;
         let php = site.runtime.php_version.as_deref().and_then(|v| store.get_port_assign(&format!("php@{v}")));
-        let conf = crate::caddy::render(site, paths, http, https, php)?;
+        let conf = crate::caddy::render_with_auth(site, paths, http, https, php, auth_hash.as_deref())?;
         let conf = match crate::webnetwork::mode(store, "caddy")? {
             Some(enabled) => crate::caddy::network_bind(&conf, enabled, None)?, None => conf,
         };
@@ -1438,12 +1559,13 @@ fn write_site_conf_state(paths: &Paths, store: &Store, site: &Site, enabled: boo
             }
             _ => None,
         };
-        let conf = configgen::render_httpd_vhost(
+        let conf = configgen::render_httpd_vhost_with_auth(
             site,
             ports.apache_http,
             ports.apache_https,
             &cert_dir,
             php_pool,
+            auth_file.as_deref(),
         );
         let path = paths
             .apache_sites_dir()
@@ -1452,13 +1574,14 @@ fn write_site_conf_state(paths: &Paths, store: &Store, site: &Site, enabled: boo
     } else {
         let fastcgi = paths.etc().join("nginx").join("fastcgi_params");
         let cert_dir = paths.certs().join("sites");
-        let conf = configgen::render_site_conf(
+        let conf = configgen::render_site_conf_with_auth(
             site,
             ports.http,
             ports.https,
             &fastcgi,
             &cert_dir,
             &paths.logs().join("nginx"),
+            auth_file.as_deref(),
         );
         let path = paths
             .nginx_sites_dir()
@@ -2873,6 +2996,7 @@ mod scaffold_tests {
             root_dir: String::new(),
             runtime: SiteRuntime {
             access: None,
+            basic_auth: None,
             https_redirect: None,
             proxy_rules: Vec::new(),
             error_pages: None,
@@ -2895,6 +3019,7 @@ mod scaffold_tests {
             write_env_example: false,
             template: "none".into(),
             php_overrides: None,
+            auth_source_site_id: None,
         }
     }
 
@@ -4412,7 +4537,7 @@ mod scaffold_tests {
         let apache = configgen::render_httpd_vhost(&site, 8180, 8444, &paths.certs().join("sites"), None);
         assert!(apache.contains("ErrorDocument 404 /errors/not-found.html"));
         assert!(apache.contains("ProxyErrorOverride On"));
-        let caddy = crate::caddy::render(&site, &paths, 8080, 8443, None).unwrap();
+        let caddy = crate::caddy::render_with_auth(&site, &paths, 8080, 8443, None, None).unwrap();
         assert!(caddy.contains("handle_response @niceenv_main_error_404"));
         assert!(caddy.contains("rewrite * \"/errors/not-found.html\""));
 
@@ -4420,6 +4545,34 @@ mod scaffold_tests {
         assert!(normalize_error_pages(&invalid).is_err());
         let unsupported = [(418u16, "/418.html".into())].into_iter().collect();
         assert!(normalize_error_pages(&unsupported).is_err());
+    }
+
+    #[test]
+    fn basic_auth_renders_for_all_servers_without_serializing_passwords() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().unwrap();
+        let hash = bcrypt::hash("secret-pass", bcrypt::DEFAULT_COST).unwrap();
+        let auth_file = paths.etc().join("auth/site-auth.htpasswd");
+        std::fs::create_dir_all(auth_file.parent().unwrap()).unwrap();
+        std::fs::write(&auth_file, format!("admin:{hash}\n")).unwrap();
+        let mut site: Site = serde_json::from_value(serde_json::json!({
+            "id": "site-auth", "name": "Auth", "domains": ["auth.test"], "rootDir": dir.path(),
+            "runtime": { "kind": "static", "webServer": "nginx", "basicAuth": { "enabled": true, "username": "admin", "hasPassword": true } },
+            "https": false, "rewrite": "none", "db": null, "status": "running", "createdAt": 1, "updatedAt": 1
+        })).unwrap();
+        let nginx = configgen::render_site_conf_with_auth(&site, 8080, 8443, &paths.nginx_conf(), &paths.certs(), &paths.logs().join("nginx"), Some(&auth_file));
+        assert!(nginx.contains("auth_basic \"Restricted\";"));
+        assert!(nginx.contains("auth_basic_user_file"));
+        let apache = configgen::render_httpd_vhost_with_auth(&site, 8180, 8444, &paths.certs(), None, Some(&auth_file));
+        assert!(apache.contains("AuthType Basic"));
+        site.runtime.web_server = "caddy".into();
+        let caddy = crate::caddy::render_with_auth(&site, &paths, 8080, 8443, None, Some(&hash)).unwrap();
+        assert!(caddy.contains("basic_auth"));
+        assert!(caddy.contains("\"admin\""));
+        let serialized = serde_json::to_string(&site).unwrap();
+        assert!(!serialized.contains("passwordHash"));
+        assert!(!serialized.contains("secret-pass"));
     }
 
     #[test]

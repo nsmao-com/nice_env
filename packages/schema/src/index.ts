@@ -400,11 +400,20 @@ export const SiteAccess = z.object({ mode: z.enum(["allow", "deny"]), addresses:
 export type SiteAccess = z.infer<typeof SiteAccess>;
 export const SiteProxyRule = z.object({ path: z.string(), target: z.string(), stripPrefix: z.boolean() });
 export type SiteProxyRule = z.infer<typeof SiteProxyRule>;
+export const SiteBasicAuth = z.object({
+  enabled: z.boolean(),
+  username: z.string(),
+  /** Only present while submitting a new password; the backend never returns it. */
+  password: z.string().optional(),
+  hasPassword: z.boolean().default(false),
+});
+export type SiteBasicAuth = z.infer<typeof SiteBasicAuth>;
 /** Custom error document paths keyed by HTTP status code (for example {"404":"/404.html"}). */
 export const SiteErrorPages = z.record(z.string(), z.string().min(1).max(512)).optional();
 export type SiteErrorPages = z.infer<typeof SiteErrorPages>;
 export const SiteRuntime = z.object({
   access: SiteAccess.optional(),
+  basicAuth: SiteBasicAuth.optional(),
   httpsRedirect: z.union([z.literal(307), z.literal(308)]).optional(),
   proxyRules: z.array(SiteProxyRule).max(16).optional(),
   errorPages: SiteErrorPages,
@@ -473,6 +482,8 @@ export const CreateSiteInput = z.object({
   writeEnvExample: z.boolean().default(true),
   /** Optional site-level PHP overrides copied when duplicating an existing site. */
   phpOverrides: z.record(z.string(), z.string()).optional(),
+  /** Server-side source used when copying an enabled site Basic Auth credential. */
+  authSourceSiteId: z.string().optional(),
   template: z
     .enum([
       "blank-php",

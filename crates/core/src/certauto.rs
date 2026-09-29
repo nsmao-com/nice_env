@@ -1176,6 +1176,7 @@ mod tests {
             root_dir: root.to_string_lossy().into(),
             runtime: model::SiteRuntime {
             access: None,
+            basic_auth: None,
             https_redirect: None,
             proxy_rules: Vec::new(),
             error_pages: None,

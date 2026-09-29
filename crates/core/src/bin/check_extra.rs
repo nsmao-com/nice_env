@@ -151,6 +151,7 @@ fn main() {
             .to_string(),
         runtime: nsb_core::model::SiteRuntime {
             access: None,
+            basic_auth: None,
             https_redirect: None,
             proxy_rules: Vec::new(),
             error_pages: None,
@@ -173,6 +174,7 @@ fn main() {
         write_env_example: false,
         template: "blank-php".into(),
         php_overrides: None,
+        auth_source_site_id: None,
     };
     check!("创建 Apache PHP 站点", {
         nsb_core::sites::create(&input, &state.paths, &state.store, &state.manager)

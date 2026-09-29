@@ -155,6 +155,10 @@ pub struct SiteApplication {
 pub struct SiteRuntime {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<SiteAccess>,
+    /// Optional HTTP Basic Authentication. The password is accepted only for an IPC update,
+    /// then hashed into the site-local htpasswd file and never serialized back to the client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basic_auth: Option<SiteBasicAuth>,
     /// HTTP 入口转到本站 HTTPS；仅支持保留请求方法的 307 / 308，旧站点默认关闭。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub https_redirect: Option<u16>,
@@ -188,6 +192,22 @@ pub struct SiteRuntime {
     pub command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteBasicAuth {
+    pub enabled: bool,
+    pub username: String,
+    /// A new password supplied by the editor; it is never persisted or returned by IPC.
+    #[serde(default, skip_serializing)]
+    pub password: Option<String>,
+    /// Whether a hashed password is expected in the site-local htpasswd file.
+    #[serde(default)]
+    pub has_password: bool,
+    /// Hydrated only while rendering a server configuration; never crosses the IPC/storage boundary.
+    #[serde(default, skip_serializing, skip_deserializing)]
+    pub password_hash: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -306,6 +326,9 @@ pub struct CreateSiteInput {
     pub template: String,
     #[serde(default)]
     pub php_overrides: Option<std::collections::BTreeMap<String, String>>,
+    /// Internal clone source for site-local credentials; the hash is copied server-side only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_source_site_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

@@ -465,6 +465,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bcrypt"
+version = "0.19.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0cd0bd35a28836d528d2b58ad499bc3c5641d59379421b1be9eeb0c2f2b912a"
+dependencies = [
+ "base64 0.23.1",
+ "blowfish",
+ "getrandom 0.4.3",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
 name = "bcrypt-pbkdf"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3280,7 +3293,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "niceservbay"
-version = "0.2.178"
+version = "0.2.179"
 dependencies = [
  "anyhow",
  "nsb-core",
@@ -3330,9 +3343,10 @@ dependencies = [
 
 [[package]]
 name = "nsb-core"
-version = "0.2.178"
+version = "0.2.179"
 dependencies = [
  "base64 0.22.1",
+ "bcrypt",
  "chrono",
  "dirs 5.0.1",
  "dotenv",
@@ -4114,7 +4128,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "platform"
-version = "0.2.178"
+version = "0.2.179"
 dependencies = [
  "libc",
  "serde",

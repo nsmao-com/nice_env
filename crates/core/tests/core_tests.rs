@@ -117,6 +117,7 @@ fn site_conf_php_has_fastcgi_upstream() {
         root_dir: "D:/code/x".into(),
         runtime: nsb_core::model::SiteRuntime {
             access: None,
+            basic_auth: None,
             https_redirect: None,
             proxy_rules: Vec::new(),
             error_pages: None,
@@ -170,6 +171,7 @@ fn site_conf_proxy_has_websocket_headers() {
         root_dir: "D:/code/p".into(),
         runtime: nsb_core::model::SiteRuntime {
             access: None,
+            basic_auth: None,
             https_redirect: None,
             proxy_rules: Vec::new(),
             error_pages: None,
@@ -800,6 +802,7 @@ fn user_ini_written_for_php_sites_only() {
             .to_string(),
         runtime: nsb_core::model::SiteRuntime {
             access: None,
+            basic_auth: None,
             https_redirect: None,
             proxy_rules: Vec::new(),
             error_pages: None,
@@ -932,6 +935,7 @@ fn site_conf_contains_per_site_access_log() {
         root_dir: "D:/code/logtest".into(),
         runtime: nsb_core::model::SiteRuntime {
             access: None,
+            basic_auth: None,
             https_redirect: None,
             proxy_rules: Vec::new(),
             error_pages: None,

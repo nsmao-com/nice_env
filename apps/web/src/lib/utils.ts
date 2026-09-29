@@ -159,6 +159,19 @@ export function siteErrorPagesProblem(runtime: SiteRuntime): "errorPages.invalid
   return Object.values(pages).some((path) => !validSiteErrorPagePath(path)) ? "errorPages.invalid" : null;
 }
 
+export function siteBasicAuthProblem(value: SiteRuntime["basicAuth"]): "basicAuth.usernameInvalid" | "basicAuth.passwordRequired" | "basicAuth.passwordInvalid" | null {
+  if (!value?.enabled) return null;
+  const username = value.username.trim();
+  if (!username || new TextEncoder().encode(username).length > 128 || /[\s:\u0000-\u001f\u007f-\u009f]/u.test(username)) return "basicAuth.usernameInvalid";
+  if (value.password !== undefined) {
+    const length = new TextEncoder().encode(value.password).length;
+    if (length < 8 || length > 72 || /[\u0000-\u001f\u007f-\u009f]/u.test(value.password)) return "basicAuth.passwordInvalid";
+  } else if (!value.hasPassword) {
+    return "basicAuth.passwordRequired";
+  }
+  return null;
+}
+
 export function proxyRuleExample(rule: NonNullable<SiteRuntime["proxyRules"]>[number]): string | null {
   const path = proxyRulePath(rule.path), target = normalizeProxyTarget(rule.target);
   return path && target ? `${target}${rule.stripPrefix ? "" : `${path.slice(1)}/`}users?limit=10` : null;

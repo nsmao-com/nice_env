@@ -721,16 +721,17 @@ fn proxy(
     Ok(out)
 }
 
-pub(crate) fn render(
+pub(crate) fn render_with_auth(
     site: &Site,
     paths: &Paths,
     http: u16,
     https: u16,
     php_port: Option<u16>,
+    password_hash: Option<&str>,
 ) -> Result<String> {
-    let mut output = render_block(site, paths, http, false, php_port, https)?;
+    let mut output = render_block(site, paths, http, false, php_port, https, password_hash)?;
     if site.https {
-        output.push_str(&render_block(site, paths, https, true, php_port, https)?);
+        output.push_str(&render_block(site, paths, https, true, php_port, https, password_hash)?);
     }
     Ok(output)
 }
@@ -746,6 +747,7 @@ fn render_block(
     secure: bool,
     php_port: Option<u16>,
     https_port: u16,
+    password_hash: Option<&str>,
 ) -> Result<String> {
     let scheme = if secure { "https" } else { "http" };
     let addresses = site
@@ -766,6 +768,9 @@ fn render_block(
             quoted(&nginx_path(&cert)),
             quoted(&nginx_path(&key))
         ));
+    }
+    if let (Some(auth), Some(hash)) = (site.runtime.basic_auth.as_ref().filter(|auth| auth.enabled), password_hash) {
+        out.push_str(&format!("\tbasic_auth {{\n\t\t{} {}\n\t}}\n", quoted(auth.username.trim()), hash));
     }
     out.push_str(&format!(
         "\tlog niceenv_{}_{scheme} {{\n\t\toutput file {}\n\t}}\n",
@@ -1126,7 +1131,7 @@ mod tests {
                 &preset_file,
                 format!(
                     "{custom_pki}{}",
-                    render(&candidate, &state.paths, port, tls_port, Some(1)).unwrap()
+                    render_with_auth(&candidate, &state.paths, port, tls_port, Some(1), None).unwrap()
                 ),
             )
             .unwrap();

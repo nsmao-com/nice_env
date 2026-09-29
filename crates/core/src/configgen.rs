@@ -599,6 +599,18 @@ pub fn render_site_conf(
     cert_dir: &std::path::Path,
     log_dir: &std::path::Path,
 ) -> String {
+    render_site_conf_with_auth(site, http_port, https_port, fastcgi_params_path, cert_dir, log_dir, None)
+}
+
+pub fn render_site_conf_with_auth(
+    site: &Site,
+    http_port: u16,
+    https_port: u16,
+    fastcgi_params_path: &std::path::Path,
+    cert_dir: &std::path::Path,
+    log_dir: &std::path::Path,
+    auth_file: Option<&std::path::Path>,
+) -> String {
     let server_names = site.domains.join(" ");
     let https_redirect = site.https.then_some(site.runtime.https_redirect).flatten();
     let listen = if https_redirect.is_some() {
@@ -622,6 +634,7 @@ pub fn render_site_conf(
     let (access_maps, access_gate) = crate::siteaccess::nginx(&site.id, site.runtime.access.as_ref());
     let cors = site.runtime.cors.as_ref().map(|cors| crate::sitecors::nginx(&site.id, cors));
     let error_pages = nginx_error_pages(site.runtime.error_pages.as_ref());
+    let basic_auth = auth_file.map(|path| format!("    auth_basic \"Restricted\";\n    auth_basic_user_file \"{}\";\n", nginx_path(path))).unwrap_or_default();
     let body = match &site.runtime.kind {
         crate::model::SiteKind::Redirect => redirect_directives(site, false),
         crate::model::SiteKind::Php => {
@@ -679,6 +692,7 @@ server {{
     access_log "{access_log}";
     error_log "{error_log}" warn;
 {error_pages}
+{basic_auth}
 
     location ~ /\.(?!well-known(?:/|$)) {{ deny all; }}
 {cors_headers}
@@ -693,6 +707,7 @@ server {{
         access_log = nginx_path(&log_dir.join(format!("{}.access.log", site.id))),
         error_log = nginx_path(&log_dir.join(format!("{}.error.log", site.id))),
         error_pages = error_pages,
+        basic_auth = basic_auth,
         listen = listen,
         server_names = server_names,
         ssl_lines = ssl_lines,
@@ -1487,9 +1502,21 @@ pub fn render_httpd_vhost(
     cert_dir: &std::path::Path,
     php_pool: Option<u16>,
 ) -> String {
+    render_httpd_vhost_with_auth(site, http_port, https_port, cert_dir, php_pool, None)
+}
+
+pub fn render_httpd_vhost_with_auth(
+    site: &Site,
+    http_port: u16,
+    https_port: u16,
+    cert_dir: &std::path::Path,
+    php_pool: Option<u16>,
+    auth_file: Option<&std::path::Path>,
+) -> String {
     let server_names = site.domains.join(" ");
     let access = crate::siteaccess::apache(site.runtime.access.as_ref());
     let error_pages = apache_error_pages(site.runtime.error_pages.as_ref());
+    let basic_auth = auth_file.map(|path| format!("    AuthType Basic\n    AuthName \"Restricted\"\n    AuthBasicProvider file\n    AuthUserFile \"{}\"\n    Require valid-user\n", nginx_path(path))).unwrap_or_default();
     let primary = site
         .domains
         .first()
@@ -1596,6 +1623,7 @@ pub fn render_httpd_vhost(
     </DirectoryMatch>
 
 {access}
+{basic_auth}
 {error_pages}
 {cors}
 {proxy_rules}
@@ -1610,6 +1638,7 @@ pub fn render_httpd_vhost(
         document_root = if site.runtime.kind == crate::model::SiteKind::Redirect { String::new() } else { format!("DocumentRoot \"{root}\"") },
         cors = site.runtime.cors.as_ref().map(crate::sitecors::apache).unwrap_or_default(),
         error_pages = error_pages,
+        basic_auth = basic_auth,
         proxy_rules = crate::siteproxy::apache(&site.runtime),
         ssl_lines = ssl_lines,
         body = body,

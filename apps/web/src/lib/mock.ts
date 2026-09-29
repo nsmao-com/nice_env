@@ -2774,6 +2774,11 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       mockPhpToggleState.set(version, toggles);
       return true as T;
     }
+    case "database_data_dir": {
+      const engine = String(args?.engine ?? "mysql");
+      const version = String(args?.version ?? "8.0.36");
+      return `C:\\Users\\Demo\\AppData\\Local\\NiceEnv\\data\\${engine}\\${version}` as T;
+    }
     case "db_list": return structuredClone([...mysqlPreview(args?.version as string | undefined, true, args?.engine as DatabaseEngine | undefined).state.databases.values()]) as T;
     case "db_create": {
       const { state } = mysqlPreview(args?.version as string | undefined, true, args?.engine as DatabaseEngine | undefined);

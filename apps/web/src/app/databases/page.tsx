@@ -43,6 +43,7 @@ import { RedisPersistenceButton } from "@/components/shared/redis-persistence";
 import { RedisBackupsButton } from "@/components/shared/redis-backups";
 import { RedisPasswordButton } from "@/components/shared/redis-password";
 import { RedisKeyBrowser } from "@/components/shared/redis-key-browser";
+import { DatabaseDataDir } from "@/components/shared/database-data-dir";
 
 export default function DatabasesPage() {
   const t = useT();
@@ -474,6 +475,7 @@ function MySqlInstanceCard({ service, count, engine }: { service?: ServiceStatus
         <StatChip icon={Database}>{count ?? "—"} {t("db.dbs")}</StatChip>
         <StatChip icon={HardDrive}>{t("db.datadir")} · {t("db.datadirSuffix")}</StatChip>
       </div>
+      <DatabaseDataDir engine={engine} version={service?.version} />
       <Separator className="my-3" />
       <div className="flex flex-col gap-1.5">
         <p className="text-[11px] font-medium text-secondary">{t("db.connStrings")}</p>
@@ -516,6 +518,7 @@ function PostgresInstanceCard() {
         <div className="min-w-0 flex-1"><p className="text-[13px] font-medium">PostgreSQL {service?.version}</p><p className="text-[11px] text-faint">127.0.0.1:{service?.port ?? "—"} · postgres</p></div>
         {service && <InstanceStartButton base="postgresql" />}
       </div>
+      <DatabaseDataDir engine="postgresql" version={service?.version} />
       {!running ? <p className="text-xs text-muted">{t(service ? "db.pgStopped" : "db.pgNotInstalled")}</p> : <>
         {query.isPending && <p role="status" className="mb-3 text-xs text-muted">{t("db.loading")}</p>}
         {error && <div role="alert" className="mb-3 space-y-1 rounded-md bg-warning-soft p-2.5 text-xs text-muted"><p className="break-words">{error.message}</p>{error.hint && <p className="break-words">{error.hint}</p>}</div>}
@@ -609,6 +612,7 @@ function RedisInstanceCard() {
         <InstanceStartButton base="redis" />
       </div>
       <div className="mb-3 flex flex-wrap gap-2"><RedisSettingsButton version={service?.version} /><RedisPasswordButton version={service?.version} running={running || service?.state === "starting" || service?.state === "stopping"} /><RedisPersistenceButton version={service?.version} running={running} /><RedisBackupsButton version={service?.version} running={running} /></div>
+      <DatabaseDataDir engine="redis" version={service?.version} />
       {!running ? <p className="text-xs text-muted">{t("db.redisStopped")}</p> : <>
         {query.isPending && <p role="status" className="mb-3 text-xs text-muted">{t("db.redisLoading")}</p>}
         {error && <div role="alert" className="mb-3 space-y-1 rounded-md bg-warning-soft p-2.5 text-xs text-muted">

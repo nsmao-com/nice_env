@@ -432,6 +432,7 @@ pub fn run() {
             open_in_folder,
             open_terminal,
             // 数据库
+            database_data_dir,
             db_list,
             db_workspace,
             db_create,
@@ -1796,6 +1797,23 @@ async fn postgres_connection(state: State<'_, std::sync::Arc<nsb_core::CoreState
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.postgres_connection(&version))).await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn database_data_dir(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    engine: String,
+    version: String,
+) -> Result<String, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = map_jh(st.database_data_dir(&engine, &version))?;
+        path.to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| box_err(nsb_core::AppError::new("DATABASE_PATH_ENCODING", "数据目录包含无法显示的字符")))
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 #[tauri::command]

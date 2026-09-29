@@ -802,6 +802,48 @@ impl CoreState {
         engine.bin_dir(&package)
     }
 
+    /// 返回受管数据库实例的数据目录。
+    ///
+    /// 目录只能由已安装的服务版本推导，调用方不能传入任意路径，避免把
+    /// “打开数据目录”变成一个绕过路径校验的文件浏览入口。
+    pub fn database_data_dir(&self, engine: &str, version: &str) -> Result<std::path::PathBuf> {
+        if version.trim().is_empty()
+            || version.chars().any(char::is_control)
+            || version.chars().any(|ch| matches!(ch, '/' | '\\' | ':'))
+        {
+            return Err(AppError::new("DATABASE_VERSION_INVALID", "数据库版本无效"));
+        }
+        let path = match engine {
+            "mysql" => {
+                self.store.find_installed("mysql", Some(version))
+                    .ok_or_else(|| AppError::not_installed("MySQL"))?;
+                dbadmin::DatabaseEngine::Mysql.data_dir(&self.paths, version)?
+            }
+            "mariadb" => {
+                self.store.find_installed("mariadb", Some(version))
+                    .ok_or_else(|| AppError::not_installed("MariaDB"))?;
+                dbadmin::DatabaseEngine::Mariadb.data_dir(&self.paths, version)?
+            }
+            "postgresql" => {
+                self.store.find_installed("postgresql", Some(version))
+                    .ok_or_else(|| AppError::not_installed("PostgreSQL"))?;
+                self.paths.postgres_data_dir(version)
+            }
+            "mongodb" => {
+                self.store.find_installed("mongodb", Some(version))
+                    .ok_or_else(|| AppError::not_installed("MongoDB"))?;
+                self.paths.mongo_data_dir(version)
+            }
+            "redis" => {
+                self.store.find_installed("redis", Some(version))
+                    .ok_or_else(|| AppError::not_installed("Redis"))?;
+                self.paths.redis_data_dir()
+            }
+            _ => return Err(AppError::new("DATABASE_ENGINE_INVALID", "数据库类型无效")),
+        };
+        Ok(path)
+    }
+
     pub fn with_postgres<T>(&self, version: &str, operation: impl FnOnce(&dbadmin::PostgresClient) -> Result<T>) -> Result<T> {
         let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
         let _operation = self.manager.lifecycle.lock();

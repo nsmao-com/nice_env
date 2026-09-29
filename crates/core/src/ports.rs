@@ -76,10 +76,9 @@ impl ProcessSnapshot {
         let protected = pid <= 4
             || pid == std::process::id()
             || ownership(std::process::id(), &[pid], &self.parents) == Ownership::Own;
+        // 服务归属只决定是否走受管服务停止流程；手动结束依靠进程身份核对。
         let close_reason = if protected {
             Some("系统进程或 NiceEnv 所在进程链不能从此处结束".into())
-        } else if !known {
-            Some("无法确认进程归属，请重新扫描或在系统工具中检查".into())
         } else if process_start_marker.is_none() {
             Some("无法读取进程身份，不能安全结束，请重新扫描".into())
         } else {
@@ -168,6 +167,13 @@ pub fn close_port(
     port: u16,
 ) -> Result<ClosePortOutcome> {
     let expected = scan_port_range(manager, port, port)?.listeners;
+    // 自动释放不能替用户决定结束未知归属进程，必须在端口工具里明确选择。
+    if expected.iter().any(|listener| listener.ownership == "unknown") {
+        return Err(AppError::new(
+            "PORT_TARGET_UNKNOWN",
+            "端口存在归属未确认的进程，请在端口检测中确认并手动结束",
+        ));
+    }
     close_port_checked(store, paths, manager, port, &expected)
 }
 
@@ -872,6 +878,20 @@ mod tests {
             .find(|row| row.pid == first.0.id())
             .unwrap();
         assert!(target.can_close, "{:?}", target);
+        // 模拟进程身份可读但父进程链缺失：归属未知仍允许手动选择。
+        manager.register("unknown-owner", "Unknown owner", None, None, None, paths.service_log("unknown-owner"));
+        let mut service = manager.snapshot("unknown-owner").unwrap();
+        service.pids = vec![u32::MAX];
+        let mut snapshot = ProcessSnapshot::read();
+        snapshot.parents.clear();
+        let unknown = snapshot.listener(first.1, first.0.id(), &[service]);
+        assert_eq!(unknown.ownership, "unknown");
+        assert!(unknown.can_close, "{unknown:?}");
+        assert!(unknown.close_reason.is_none());
+        assert_eq!(validate_close_targets(first.1, std::slice::from_ref(&unknown), std::slice::from_ref(&unknown)).unwrap().len(), 1);
+        let mut replaced = unknown.clone();
+        replaced.process_start_marker = Some("win:1".into());
+        assert_eq!(validate_close_targets(first.1, &[unknown], &[replaced]).unwrap_err().code, "PORT_TARGET_CHANGED");
         assert!(platform::VerifiedProcess::open(target.pid, target.process_start_marker.as_deref().unwrap()).unwrap().is_some());
         let mut stale = target.clone();
         stale.process_start_marker = Some("win:1".into());

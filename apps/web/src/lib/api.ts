@@ -412,6 +412,9 @@ export interface PostgresConnectionInfo {
   version: string; port: number; serverVersion: string; databaseCount: number; sizeBytes: number; passwordRequired: boolean;
 }
 export const postgresConnection = (version: string) => safe(invoke<PostgresConnectionInfo>("postgres_connection", { version }));
+export interface PostgresQueryRequest { database: string; sql: string; confirmed?: boolean }
+export interface PostgresQueryResult { columns: string[]; rows: string[][] }
+export const postgresQuery = (version: string, request: PostgresQueryRequest) => safe(invoke<PostgresQueryResult>("postgres_query", { version, request }));
 export const mongoOverview = (version: string) => safe(invoke<MongoOverview>("mongodb_browse", { version, request: { action: "overview" } }));
 export const mongoBackupInspectImport = (source: string) => safe(invoke<MongoImportPreview>("mongodb_backup_inspect_import", { source }));
 export const mongoBackupImport = (source: string, database: string, revision: string) => safe(invoke<MongoBackup>("mongodb_backup_import", { source, database, revision }));

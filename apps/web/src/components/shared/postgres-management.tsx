@@ -19,6 +19,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { CopyButton } from "@/components/shared/misc";
 import { PostgresBackupCard } from "@/components/shared/postgres-backup";
+import { PostgresWorkspace } from "@/components/shared/postgres-workspace";
 
 type Action = { kind: "create-database" | "create-role" | "password" | "drop-database" | "drop-role"; signature: string; name?: string; oid?: number };
 const validName = (name: string) => /^[A-Za-z0-9_]{1,63}$/.test(name) && !/^pg_/i.test(name) && !/^(postgres|template0|template1)$/i.test(name);
@@ -49,6 +50,7 @@ export function PostgresManagement({ service, onLockChange }: { service?: Servic
   const [confirmation, setConfirmation] = React.useState("");
   const [error, setError] = React.useState("");
   const [busy, setBusy] = React.useState(false);
+  const [workspaceLocked, setWorkspaceLocked] = React.useState(false);
   const lock = React.useRef(false);
   const changed = !!action && (!running || action.signature !== signature);
   const deleting = action?.kind === "drop-database" || action?.kind === "drop-role";
@@ -58,7 +60,7 @@ export function PostgresManagement({ service, onLockChange }: { service?: Servic
   const rolePages = Math.max(1, Math.ceil(filteredRoles.length / PAGE_SIZE));
   const currentDbPage = Math.min(dbPage, dbPages);
   const currentRolePage = Math.min(rolePage, rolePages);
-  React.useEffect(() => { onLockChange(!!action || !!accessRole || backupLocked); return () => onLockChange(false); }, [action, accessRole, backupLocked, onLockChange]);
+  React.useEffect(() => { onLockChange(!!action || !!accessRole || backupLocked || workspaceLocked); return () => onLockChange(false); }, [action, accessRole, backupLocked, workspaceLocked, onLockChange]);
   React.useEffect(() => { setDbPage(1); setRolePage(1); }, [signature]);
   const refresh = () => invalidate("postgres-databases", "postgres-roles", "postgres-connection");
   const begin = (kind: Action["kind"], target?: { name: string; oid: number }) => {
@@ -92,6 +94,7 @@ export function PostgresManagement({ service, onLockChange }: { service?: Servic
       <div className="flex flex-wrap gap-2"><Button variant="secondary" disabled={!running || databases.isFetching || roleQuery.isFetching} onClick={refresh}>{t("db.refresh")}</Button><Button variant="secondary" disabled={!ready} onClick={() => begin("create-role")}><UserRound className="h-3.5 w-3.5" />{t("db.createUser")}</Button><Button disabled={!ready} onClick={() => begin("create-database")}><Plus className="h-3.5 w-3.5" />{t("db.createDb")}</Button></div>
     </div>
     <p className="text-xs leading-5 text-muted">{t("pg.ownerHint")}</p>
+    <PostgresWorkspace version={version} databases={dbs} ready={running && databases.isSuccess && !backupLocked && !action && !accessRole} targetLabel={`PostgreSQL ${version || "—"} · 127.0.0.1:${service?.port ?? "—"}`} onLockChange={setWorkspaceLocked} />
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
       <Card className="min-w-0"><CardHeader><CardTitle className="flex items-center gap-2 text-sm"><Database className="h-4 w-4" />{t("db.databases")} <span className="text-muted">{running && databases.isSuccess ? dbs.length : "—"}</span></CardTitle></CardHeader><CardContent>
         <Input aria-label={t("pg.searchDatabases")} placeholder={t("pg.searchDatabases")} value={dbSearch} onChange={(event) => { setDbSearch(event.target.value); setDbPage(1); }} className="mb-3" />

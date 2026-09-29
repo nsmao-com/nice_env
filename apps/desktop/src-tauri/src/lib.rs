@@ -468,6 +468,7 @@ pub fn run() {
             redis_connection,
             redis_save_connection,
             postgres_connection,
+            postgres_query,
             mongodb_browse,
             mongodb_database_delete_preview,
             mongodb_database_delete,
@@ -1794,6 +1795,17 @@ async fn validate_configs(
 async fn postgres_connection(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String) -> Result<nsb_core::dbadmin::PostgresConnectionInfo, tauri::Error> {
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.postgres_connection(&version))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn postgres_query(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    version: String,
+    request: nsb_core::dbadmin::PostgresQueryRequest,
+) -> Result<nsb_core::dbadmin::PostgresQueryResult, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.postgres_query(&version, &request))).await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

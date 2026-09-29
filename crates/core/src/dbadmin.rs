@@ -992,6 +992,22 @@ pub struct PostgresConnectionInfo {
     pub password_required: bool,
 }
 
+#[derive(serde::Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresQueryRequest {
+    pub database: String,
+    pub sql: String,
+    #[serde(default)]
+    pub confirmed: bool,
+}
+
+#[derive(serde::Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresQueryResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct PostgresDatabaseInfo {
@@ -1139,6 +1155,40 @@ impl PostgresClient {
                 .with_detail(detail));
         }
         read_output(&mut output, 1024 * 1024)
+    }
+
+    pub(crate) fn query_database(&self, database: &str, sql: &str) -> Result<String> {
+        postgres_ident(database)?;
+        if sql.is_empty() || sql.len() > 1024 * 1024 || sql.contains('\0') {
+            return Err(AppError::new("BAD_SQL", "SQL 为空、过长或包含无效字符"));
+        }
+        let (_private, mut command) = self.tool_command("psql", database, None)?;
+        command.args([
+            "--no-psqlrc",
+            "--csv",
+            "--set=ON_ERROR_STOP=1",
+            "--pset=footer=off",
+        ]).env("PGOPTIONS", "-c statement_timeout=20000 -c lock_timeout=5000");
+        let mut input = tempfile::tempfile()?;
+        input.write_all(sql.as_bytes())?;
+        input.rewind()?;
+        let mut output = tempfile::tempfile()?;
+        let mut error = tempfile::tempfile()?;
+        command.stdin(Stdio::from(input)).stdout(output.try_clone()?).stderr(error.try_clone()?);
+        let status = wait_client(&mut command, Duration::from_secs(20), || {})?;
+        if !status.success() {
+            let mut detail = read_output(&mut error, 16 * 1024)?;
+            if !self.password.is_empty() {
+                detail = detail.replace(&self.password, "***");
+            }
+            return Err(AppError::new("POSTGRES_QUERY_FAILED", "PostgreSQL 查询失败，数据修改结果请以实例实际状态为准")
+                .with_hint("请检查 SQL、当前数据库和账号权限；查询设置了 20 秒执行上限")
+                .with_detail(detail));
+        }
+        if output.metadata()?.len() > 16 * 1024 * 1024 {
+            return Err(AppError::new("POSTGRES_RESULT_TOO_LARGE", "查询结果超过 16 MB，请使用 LIMIT；已执行的写入不会因此撤销"));
+        }
+        read_output(&mut output, 16 * 1024 * 1024)
     }
 
     pub(crate) fn verify_data_dir(&self, expected: &Path) -> Result<()> {
@@ -1323,6 +1373,87 @@ impl PostgresClient {
         let updated = postgres_local_password_rules(&previous)?;
         Ok((file, previous, updated))
     }
+}
+
+pub fn postgres_query(client: &PostgresClient, request: &PostgresQueryRequest) -> Result<PostgresQueryResult> {
+    if !request.confirmed {
+        return Err(AppError::new("SQL_CONFIRM_REQUIRED", "请确认目标数据库和完整 SQL 后执行"));
+    }
+    if !client.list_databases()?.iter().any(|database| database.name == request.database && database.allow_connections) {
+        return Err(AppError::new("DATABASE_NOT_FOUND", "所选 PostgreSQL 数据库不存在或不允许连接"));
+    }
+    let output = client.query_database(&request.database, &request.sql)?;
+    parse_postgres_csv(&output)
+}
+
+pub fn parse_postgres_csv(input: &str) -> Result<PostgresQueryResult> {
+    let bytes = input.as_bytes();
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut row = Vec::new();
+    let mut field: Vec<u8> = Vec::new();
+    let mut quoted = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if quoted {
+            match byte {
+                b'"' if bytes.get(index + 1) == Some(&b'"') => {
+                    field.push(b'"');
+                    index += 2;
+                }
+                b'"' => {
+                    quoted = false;
+                    index += 1;
+                }
+                _ => {
+                    field.push(byte);
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        match byte {
+            b'"' if field.is_empty() => {
+                quoted = true;
+                index += 1;
+            }
+            b',' => {
+                row.push(String::from_utf8_lossy(&std::mem::take(&mut field)).into_owned());
+                index += 1;
+            }
+            b'\n' => {
+                row.push(String::from_utf8_lossy(&std::mem::take(&mut field)).into_owned());
+                rows.push(std::mem::take(&mut row));
+                index += 1;
+            }
+            b'\r' if bytes.get(index + 1) == Some(&b'\n') => index += 1,
+            _ => {
+                field.push(byte);
+                index += 1;
+            }
+        }
+    }
+    if quoted {
+        return Err(AppError::new("POSTGRES_RESULT_INVALID", "PostgreSQL 返回的 CSV 结果不完整"));
+    }
+    if !field.is_empty() || !row.is_empty() {
+        row.push(String::from_utf8_lossy(&field).into_owned());
+        rows.push(row);
+    }
+    if rows.is_empty() {
+        return Ok(PostgresQueryResult { columns: Vec::new(), rows: Vec::new() });
+    }
+    let columns = rows.remove(0);
+    if columns.len() > 256 {
+        return Err(AppError::new("POSTGRES_RESULT_INVALID", "查询返回的字段数量过多"));
+    }
+    if rows.iter().any(|row| row.len() != columns.len()) {
+        return Err(AppError::new("POSTGRES_RESULT_INVALID", "PostgreSQL 返回的列数不一致"));
+    }
+    if rows.len() > 20_000 {
+        return Err(AppError::new("POSTGRES_RESULT_TOO_LARGE", "单个查询结果超过 20,000 行，请使用 LIMIT"));
+    }
+    Ok(PostgresQueryResult { columns, rows })
 }
 
 pub(crate) fn selected_postgres(state: &crate::CoreState, version: &str, password: Option<String>) -> Result<PostgresClient> {

@@ -815,6 +815,13 @@ impl CoreState {
         dbadmin::selected_postgres(self, version, None)?.info(version)
     }
 
+    pub fn postgres_query(&self, version: &str, request: &dbadmin::PostgresQueryRequest) -> Result<dbadmin::PostgresQueryResult> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后执行 PostgreSQL 查询"))?;
+        let client = dbadmin::selected_postgres(self, version, None)?;
+        dbadmin::postgres_query(&client, request)
+    }
+
     pub fn postgres_password(&self, version: &str) -> Result<String> {
         let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
         let _operation = self.manager.lifecycle.lock();

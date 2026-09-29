@@ -3313,6 +3313,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "postgres_backup_restore":
     case "postgres_backup_replace":
     case "postgres_connection":
+    case "postgres_query":
     case "postgres_password":
     case "postgres_databases":
     case "postgres_roles":
@@ -3350,11 +3351,19 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         return undefined as T;
       }
       if (connection.passwordRequired && connection.saved !== connection.password) throw { code: "POSTGRES_CONNECTION_FAILED", message: "请先更新本机连接密码" };
+      const data = postgresPreview(version);
+      if (cmd === "postgres_query") {
+        const request = args!.request as import("./api").PostgresQueryRequest;
+        if (!request.confirmed || !request.sql.trim()) throw { code: "SQL_CONFIRM_REQUIRED", message: "请确认目标数据库和完整 SQL 后执行" };
+        const database = data.databases.find((entry) => entry.name === request.database && entry.allowConnections);
+        if (!database) throw { code: "DATABASE_NOT_FOUND", message: "所选 PostgreSQL 数据库不存在或不允许连接" };
+        if (/\b(insert|update|delete|drop|alter|truncate|create)\b/i.test(request.sql)) return { columns: [], rows: [] } as T;
+        return { columns: ["database", "user", "server_version"], rows: [[database.name, "postgres", version]] } as T;
+      }
       if (cmd === "postgres_password") {
         if (!connection.passwordRequired) throw { code: "POSTGRES_AUTH_DISABLED", message: "本机连接无需密码，无法验证保存的密码" };
         return connection.saved as T;
       }
-      const data = postgresPreview(version);
       if (cmd === "postgres_role_access" || cmd === "postgres_role_access_save") {
         const input = args!.input as import("./api").PostgresRoleAccessInput | undefined;
         const role = data.roles.find((role) => role.name === (input?.name ?? args!.name) && role.oid === (input?.oid ?? args!.oid));

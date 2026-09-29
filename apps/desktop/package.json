@@ -1,9 +1,10 @@
 {
   "name": "@nsb/desktop",
-  "version": "0.2.153",
+  "version": "0.2.154",
   "private": true,
   "scripts": {
-    "tauri": "tauri"
+    "tauri": "node scripts/tauri.mjs",
+    "prepare:tools": "node scripts/tauri.mjs prepare-tools"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.0"

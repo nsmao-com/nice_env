@@ -69,7 +69,7 @@ pub fn tool_error(error: AppError) -> Value {
     text_result(json!({ "ok": false, "error": error }).to_string(), true)
 }
 
-fn validate_tool_arguments(name: &str, args: &Value) -> std::result::Result<(), String> {
+pub(crate) fn validate_tool_arguments(name: &str, args: &Value) -> std::result::Result<(), String> {
     let Some(args) = args.as_object() else { return Err("工具参数必须是对象".into()); };
     match name {
         "list_services" | "list_sites" if args.is_empty() => Ok(()),

@@ -154,10 +154,16 @@ Corefile 每次启动按当前 TLD 设置自动重建。
 
 ## CLI 与 AI 集成（nsbctl / nsb-mcp）
 
-**nsbctl**：仓库中的命令行工具（与桌面端共用数据目录）。当前安装包尚未包含
-`nsbctl` / `nsb-mcp`，可通过 `cargo build -p nsb-core --bin nsbctl --bin nsb-mcp --locked`
-编译，程序位于 `target/debug`。工具目前使用独立的服务状态，暂不支持与桌面端或
-另一个工具会话同时管理服务。
+**nsbctl**：与桌面端共用数据目录的命令行工具。`pnpm tauri build` 和 Release 工作流
+会先按目标架构编译 `nsbctl` / `nsb-mcp`，再附带到安装包：Windows 位于应用安装目录，
+macOS 位于 `NiceEnv.app/Contents/MacOS`。无需额外安装 Node.js 或 Rust 来使用这些工具。
+开发时也可用 `cargo build -p nsb-core --bin nsbctl --bin nsb-mcp --locked` 单独编译到
+`target/debug`；`pnpm --filter @nsb/desktop prepare:tools --debug` 仅准备 Rust 工具，不打包前端。
+
+桌面已打开时，工具通过经过认证的本机通道使用桌面进程的真实状态与启停逻辑。
+桌面未打开时，单次命令取得独占控制权；另一个工具正在操作时会明确提示稍后重试。
+应用启动、退出、重启或迁移期间不接收新的工具操作；连接中断且结果不明时不会自动重发。
+请使用同一版本安装包中的应用和工具；旧版本仍管理服务时需先正常退出旧进程。
 
 ```
 nsbctl --version         查看工具版本
@@ -165,7 +171,7 @@ nsbctl status [--json]    服务状态总览
 nsbctl start <service>    启动（nginx / php@8.3.33 / mysql@8.0.46 / …）
 nsbctl stop <service>     停止
 nsbctl restart <service>  重启
-nsbctl start-all          启动常用栈（与托盘一致）
+nsbctl start-all          按依赖顺序启动全部已注册服务
 nsbctl sites / open <站点> / packages / logs <服务> [n] / diagnose <端口>
 nsbctl pin php@8.3.33 <项目目录>   # 站点 PHP 版本（更新 .nsb.json，保留其它字段，向导「跟随项目」时采用）
 ```
@@ -187,6 +193,9 @@ Cursor 等 AI 客户端加上即可用自然语言操作本地环境——列服
 将 `command` 改为实际编译出的 `nsb-mcp` 绝对路径（Windows 为 `nsb-mcp.exe`）。
 MCP 握手与工具列表不初始化环境；无请求 ID 或参数不合法的调用不会执行服务操作。
 操作失败返回 `isError: true`，并保留错误码、原因和可用的处理提示。
+AI 客户端的长期连接不会占住服务控制权；每次调用重新连接当前桌面进程，桌面关闭时
+使用独立短会话执行，之后仍可打开桌面接管服务。可通过 `NSB_HOME` 让工具与桌面使用
+指定数据目录；控制通道凭据不会随数据目录迁移复制。
 
 ## 套件与运维增强
 

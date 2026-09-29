@@ -1874,6 +1874,19 @@ fn record_owner_alive(record: &ProcessRecord) -> bool {
     }
 }
 
+/// 较旧版本没有控制通道锁；不能在它仍管理服务时另建一份状态并报告假成功。
+pub(crate) fn ensure_no_foreign_controller(paths: &Paths) -> Result<()> {
+    let _lock = lock_pidfile(paths)?;
+    if let Some(file) = read_pidfile(paths)? {
+        if file.services.iter().any(|record| record.owner_pid != Some(std::process::id())
+            && record_owner_alive(record) && record.pids.iter().any(|pid| platform::process_alive(*pid))) {
+            return Err(AppError::new("CONTROLLER_UNAVAILABLE", "仍有旧版本应用或工具正在管理服务，无法连接其控制通道")
+                .with_hint("请先正常退出旧版本应用或工具，再用同一新版安装包中的程序重试；不要重复启动服务。"));
+        }
+    }
+    Ok(())
+}
+
 /// 旧版本没有创建标识，只接受 runtimes 内、创建时间不晚于记录的进程。
 fn legacy_process(pid: u32, saved_at: u64, paths: &Paths) -> Option<ProcessIdentity> {
     let identity = ProcessIdentity::capture(pid)?;

@@ -93,6 +93,7 @@ jobs:
         with:
           # Tauri 工程在 apps/desktop，tauri.conf.json 位于其 src-tauri 下
           projectPath: apps/desktop
+          # 工作区 tauri 脚本先按 --target 编译 CLI/MCP，并注入 externalBin 后再打包。
           tauriScript: pnpm tauri
           tagName: ${{ inputs.tag || github.ref_name }}
           releaseCommitish: ${{ github.sha }}
@@ -102,6 +103,7 @@ jobs:
 
             - Windows：NSIS 安装包（x64，当前用户安装，无需管理员）
             - macOS：`.dmg`（Apple Silicon 与 Intel 各一份）
+            - 内含 `nsbctl` 命令行工具与 `nsb-mcp` AI 集成工具
 
             安装包未做代码签名，Windows SmartScreen / macOS Gatekeeper 可能提示
             来源不明，属预期现象。

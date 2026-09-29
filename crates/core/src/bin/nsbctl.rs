@@ -10,7 +10,7 @@
 //!   nsbctl stop <service>         停止服务
 //!   nsbctl kill <service> --yes   强制停止已核实的服务（可能丢失未保存数据）
 //!   nsbctl restart <service>      重启服务
-//!   nsbctl start-all              启动常用栈（与托盘「启动常用栈」一致）
+//!   nsbctl start-all              按依赖顺序启动全部已注册服务
 //!   nsbctl stop-all               停止全部服务
 //!   nsbctl sites [--json]         站点列表（含访问 URL）
 //!   nsbctl open <site-name>       用默认浏览器打开站点
@@ -21,6 +21,7 @@
 //! 退出码：0 成功；1 运行失败；2 用法错误。
 
 use std::process::ExitCode;
+use nsb_core::control::{Client, Request};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -136,35 +137,29 @@ fn main() -> ExitCode {
         _ => {},
     }
 
-    let emit: nsb_core::EventSink = std::sync::Arc::new(|_| {});
-    let state = match nsb_core::CoreState::init(None, emit) {
+    let state = match Client::connect(None) {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
-                "nsbctl: 初始化失败：{}{}",
+                "nsbctl: 连接服务控制者失败：{}{}",
                 e.message, e.hint.map(|hint|format!("\n{hint}")).unwrap_or_default()
             );
             return ExitCode::FAILURE;
         }
     };
 
-    let _activity = match nsb_core::paths::DataDirActivity::shared(&state.paths.base) {
-        Ok(guard) => guard,
-        Err(error) => { eprintln!("nsbctl: {}{}", error.message,error.hint.map(|hint|format!("\n{hint}")).unwrap_or_default()); return ExitCode::FAILURE; }
-    };
     match command {
         Command::Status(json) => cmd_status(&state, json),
         Command::Sites(json) => cmd_sites(&state, json),
         Command::Packages(json) => cmd_packages(&state, json),
-        Command::Service { action: "start", id } => one_service(&state, id, |s, id| s.start_service(id)),
-        Command::Service { action: "stop", id } => one_service(&state, id, |s, id| s.stop_service(id)),
+        Command::Service { action: "start", id } => one_service(&state, id, |s, id| s.call(Request::Start { id: id.into() })),
+        Command::Service { action: "stop", id } => one_service(&state, id, |s, id| s.call(Request::Stop { id: id.into() })),
         Command::Service { action: "kill", id } => {
             one_service(&state, id, |state, id| {
-                let preview = state.service_stop_preview(id)?;
-                state.force_stop_service(id, &preview.revision)
+                state.call(Request::Kill { id: id.into() })
             })
         },
-        Command::Service { action: "restart", id } => one_service(&state, id, |s, id| s.restart_service(id)),
+        Command::Service { action: "restart", id } => one_service(&state, id, |s, id| s.call(Request::Restart { id: id.into() })),
         Command::Stack { start, json } => stack(&state, start, json),
         Command::Open(name) => cmd_open(&state, name),
         Command::Logs { id, lines } => cmd_logs(&state, id, lines),
@@ -185,9 +180,9 @@ fn usage() {
 }
 
 fn one_service(
-    state: &std::sync::Arc<nsb_core::CoreState>,
+    state: &Client,
     id: &str,
-    f: fn(&nsb_core::CoreState, &str) -> nsb_core::error::Result<()>,
+    f: fn(&Client, &str) -> nsb_core::error::Result<()>,
 ) -> ExitCode {
     match f(state, id) {
         Ok(()) => {
@@ -204,8 +199,11 @@ fn one_service(
     }
 }
 
-fn cmd_status(state: &std::sync::Arc<nsb_core::CoreState>, json: bool) -> ExitCode {
-    let list = state.service_status_list();
+fn cmd_status(state: &Client, json: bool) -> ExitCode {
+    let list: Vec<nsb_core::model::ServiceStatus> = match state.call(Request::Status) {
+        Ok(list) => list,
+        Err(error) => { eprintln!("nsbctl: {error}"); return ExitCode::FAILURE; }
+    };
     if json {
         println!(
             "{}",
@@ -230,8 +228,8 @@ fn cmd_status(state: &std::sync::Arc<nsb_core::CoreState>, json: bool) -> ExitCo
     ExitCode::SUCCESS
 }
 
-fn cmd_sites(state: &std::sync::Arc<nsb_core::CoreState>, json: bool) -> ExitCode {
-    let sites = match nsb_core::sites::list_with_status(&state.paths, &state.store, &state.manager) {
+fn cmd_sites(state: &Client, json: bool) -> ExitCode {
+    let sites: Vec<serde_json::Value> = match state.call(Request::Sites) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("nsbctl: {}", e.message);
@@ -246,7 +244,14 @@ fn cmd_sites(state: &std::sync::Arc<nsb_core::CoreState>, json: bool) -> ExitCod
         return ExitCode::SUCCESS;
     }
     for s in &sites {
-        println!("{:<18} {:<8} {}", s.name, s.status, s.access_url.as_deref().unwrap_or("（访问入口尚未就绪）"));
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Row { name: String, status: String, access_url: Option<String> }
+        let row: Row = match serde_json::from_value(s.clone()) {
+            Ok(row) => row,
+            Err(error) => { eprintln!("nsbctl: 站点列表格式不正确：{error}"); return ExitCode::FAILURE; }
+        };
+        println!("{:<18} {:<8} {}", row.name, row.status, row.access_url.as_deref().unwrap_or("（访问入口尚未就绪）"));
     }
     if sites.is_empty() {
         println!("（还没有站点）");
@@ -254,8 +259,8 @@ fn cmd_sites(state: &std::sync::Arc<nsb_core::CoreState>, json: bool) -> ExitCod
     ExitCode::SUCCESS
 }
 
-fn cmd_packages(state: &std::sync::Arc<nsb_core::CoreState>, json: bool) -> ExitCode {
-    let views = match state.list_packages() {
+fn cmd_packages(state: &Client, json: bool) -> ExitCode {
+    let views: Vec<nsb_core::model::PackageView> = match state.call(Request::Packages) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("nsbctl: {}", e.message);
@@ -281,16 +286,9 @@ fn cmd_packages(state: &std::sync::Arc<nsb_core::CoreState>, json: bool) -> Exit
     ExitCode::SUCCESS
 }
 
-fn stack(state: &std::sync::Arc<nsb_core::CoreState>, start: bool, json: bool) -> ExitCode {
+fn stack(state: &Client, start: bool, json: bool) -> ExitCode {
     // 与桌面批量操作一致：启动先库后 Web，停止反向，错误不能忽略。
-    let mut ids: Vec<String> = state
-        .service_status_list()
-        .iter()
-        .map(|s| s.id.clone())
-        .collect();
-    ids.sort();
-    let result = if start { state.bulk_start(&ids) } else { state.stop_all_services() };
-    let report = match result {
+    let report: nsb_core::bulk::BulkReport = match state.call(if start { Request::StartAll } else { Request::StopAll }) {
         Ok(report) => report,
         Err(error) => {
             eprintln!("{}: {}", error.code, error.message);
@@ -311,16 +309,8 @@ fn stack(state: &std::sync::Arc<nsb_core::CoreState>, start: bool, json: bool) -
     }
 }
 
-fn cmd_open(state: &std::sync::Arc<nsb_core::CoreState>, name: &str) -> ExitCode {
-    let sites = match nsb_core::sites::list(&state.store) {
-        Ok(sites) => sites,
-        Err(error) => { eprintln!("nsbctl: 读取站点失败：{error}"); return ExitCode::FAILURE; }
-    };
-    let Some(site) = sites.iter().find(|s| s.name == name) else {
-        eprintln!("nsbctl: 找不到站点 {name}");
-        return ExitCode::FAILURE;
-    };
-    let url = match nsb_core::sites::access_url(&state.paths, &state.store, &state.manager, &site.id) {
+fn cmd_open(state: &Client, name: &str) -> ExitCode {
+    let url: String = match state.call(Request::SiteUrl { name: name.into() }) {
         Ok(url) => url,
         Err(error) => {
             eprintln!("nsbctl: {}{}", error.message, error.hint.map(|hint| format!("\n{hint}")).unwrap_or_default());
@@ -353,11 +343,11 @@ fn cmd_open(state: &std::sync::Arc<nsb_core::CoreState>, name: &str) -> ExitCode
 }
 
 fn cmd_logs(
-    state: &std::sync::Arc<nsb_core::CoreState>,
+    state: &Client,
     id: &str,
     lines: usize,
 ) -> ExitCode {
-    let logs = match state.tail_logs_checked(id, lines) {
+    let logs: Vec<nsb_core::model::LogLine> = match state.call(Request::Logs { id: id.into(), lines }) {
         Ok(logs) => logs,
         Err(e) => {
             eprintln!("nsbctl: {}", e.message);

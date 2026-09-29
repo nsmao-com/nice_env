@@ -9,6 +9,36 @@ use std::os::windows::process::CommandExt;
 
 pub mod pathenv;
 
+/// 本机控制通道凭据仅允许文件所有者与系统读取；写入凭据前调用。
+pub fn restrict_file_to_owner(path: &std::path::Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(io_err)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::{Foundation::LocalFree, Security::{
+            Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1},
+            SetFileSecurityW, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+        }};
+        let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        // OW 是文件实际所有者，避免用户名解析、继承的 Everyone/Users 读取权限。
+        let sddl: Vec<u16> = "D:P(A;;FA;;;SY)(A;;FA;;;OW)".encode_utf16().chain(Some(0)).collect();
+        unsafe {
+            let mut descriptor = std::ptr::null_mut();
+            if ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut descriptor, std::ptr::null_mut()) == 0 {
+                return Err(io_err(std::io::Error::last_os_error()));
+            }
+            let result = SetFileSecurityW(name.as_ptr(), DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, descriptor);
+            let error = (result == 0).then(std::io::Error::last_os_error);
+            LocalFree(descriptor);
+            error.map_or(Ok(()), |error| Err(io_err(error)))
+        }
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum PlatformError {
     #[error("{0}")]

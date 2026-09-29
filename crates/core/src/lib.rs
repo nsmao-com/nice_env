@@ -9,6 +9,7 @@ pub mod certmonitor;
 pub mod certs;
 pub mod cfgeditor;
 pub mod configgen;
+pub mod control;
 pub mod cron;
 pub mod dbadmin;
 pub mod dbworkspace;

@@ -100,7 +100,8 @@ pub fn run() {
             let emit: EventSink = std::sync::Arc::new(move |e: Event| {
                 let _ = handle.emit(e.channel(), e.payload());
             });
-            let state = CoreState::init(None, emit)?;
+            let control_lease = nsb_core::control::Lease::acquire(None, std::time::Duration::from_secs(10))?;
+            let state = CoreState::init(Some(control_lease.base.clone()), emit)?;
             if let Some(child) = setup_startup.child.lock().unwrap_or_else(|e|e.into_inner()).as_ref() {
                 child.verify_path(&state.paths.base)?;
             }
@@ -109,6 +110,14 @@ pub fn run() {
             nsb_core::backup_job::spawn_scheduler_when_ready(state.paths.clone(),Some(setup_startup.gate.clone()));
             nsb_core::backup_job::spawn_database_scheduler_when_ready(state.clone(), setup_startup.gate.clone())?;
             nsb_core::sitebackup::spawn_scheduler_when_ready(state.clone(), setup_startup.gate.clone())?;
+            let control_gate = setup_startup.gate.clone();
+            let control = nsb_core::control::Server::start(control_lease, state.clone(), move || {
+                if APP_TRANSITION.load(Ordering::Acquire) != 0 || !control_gate.wait_timeout(std::time::Duration::ZERO) {
+                    return Err(AppError::new("APP_BUSY", "应用正在启动、退出、重启或迁移，请稍后重试"));
+                }
+                Ok(())
+            })?;
+            app.manage(control);
             app.manage(state);
 
             /* ---------- 证书自动化调度：启动 30s 后先补一轮，之后每小时检查到期 ---------- */

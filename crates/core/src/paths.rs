@@ -643,7 +643,7 @@ fn copy_tree(source: &Path, target: &Path, stats: &mut (u64, u64), root: bool) -
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
         // 活跃 SQLite 文件不能逐个复制；随后用 VACUUM INTO 创建一致快照。
-        if root && matches!(entry.file_name().to_str(), Some("nsb.sqlite" | "nsb.sqlite-wal" | "nsb.sqlite-shm" | "nsb.sqlite-journal" | ".data-dir-activity.lock" | ".data-dir-activation.json" | ".data-dir-authority.json")) { continue; }
+        if root && matches!(entry.file_name().to_str(), Some("nsb.sqlite" | "nsb.sqlite-wal" | "nsb.sqlite-shm" | "nsb.sqlite-journal" | ".data-dir-activity.lock" | ".data-dir-activation.json" | ".data-dir-authority.json" | ".niceenv-control.lock" | ".niceenv-control.json")) { continue; }
         let from = entry.path();
         let to = target.join(entry.file_name());
         let metadata = std::fs::symlink_metadata(&from)?;
@@ -1220,6 +1220,8 @@ mod tests {
         let source_store = crate::store::Store::open(paths.db()).unwrap();
         source_store.set_setting("snapshot-fixture", "includes-wal").unwrap();
         std::fs::write(paths.etc().join("marker.ini"), b"preserve me").unwrap();
+        std::fs::write(source.join(".niceenv-control.lock"), b"live lock").unwrap();
+        std::fs::write(source.join(".niceenv-control.json"), b"private endpoint").unwrap();
         let target = temp.path().join("target");
 
         let result = copy_data_dir(&source, &target).unwrap();
@@ -1227,6 +1229,9 @@ mod tests {
         let copied_store = crate::store::Store::open(target.join("nsb.sqlite")).unwrap();
         assert_eq!(copied_store.get_setting("snapshot-fixture").as_deref(), Some("includes-wal"));
         assert_eq!(std::fs::read(target.join("etc/marker.ini")).unwrap(), b"preserve me");
+        assert!(!target.join(".niceenv-control.lock").exists());
+        assert!(!target.join(".niceenv-control.json").exists());
+        assert_eq!(std::fs::read(source.join(".niceenv-control.json")).unwrap(), b"private endpoint");
 
         std::fs::write(target.join("keep.txt"), b"do not overwrite").unwrap();
         let error = copy_data_dir(&source, &target).unwrap_err();

@@ -158,6 +158,41 @@ pub fn manifest_entry_for(store: &Store, service_id: &str) -> Option<PackageMani
     Some(installer.installed_entry(&inst))
 }
 
+/// 检查服务启动前必须具备的套件依赖。
+///
+/// 依赖校验放在通用服务入口之外复用，确保内置编排（Nginx、PHP、MySQL 等）
+/// 和清单驱动服务使用同一条前置规则。重启流程也会在停止前调用它，避免
+/// 因为依赖缺失把一个原本正在运行的服务先停掉。
+pub fn ensure_dependencies(store: &Store, service_id: &str) -> Result<()> {
+    let Some(entry) = manifest_entry_for(store, service_id) else {
+        return Ok(());
+    };
+    let mut dependencies = entry
+        .run
+        .as_ref()
+        .map(|run| run.requires.clone())
+        .unwrap_or_default();
+    dependencies.extend(entry.requires.iter().cloned());
+    dependencies.sort();
+    dependencies.dedup();
+    let missing: Vec<String> = dependencies
+        .iter()
+        .filter(|dependency| crate::ops::installed_by_choice(store, dependency).is_none())
+        .cloned()
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(AppError::new(
+        "DEPENDENCY_MISSING",
+        format!("{} 需要先安装：{}", entry.display_name, missing.join("、")),
+    )
+    .with_hint(format!(
+        "到套件页安装 {} 后再启动或重启",
+        missing.join("、")
+    )))
+}
+
 /// 解析服务上下文：安装信息 + 清单条目 + run 描述 + 各占位符取值
 pub fn resolve(store: &Store, paths: &Paths, service_id: &str) -> Result<Resolved> {
     resolve_with_sftpgo_directory(store, paths, service_id, None)
@@ -1533,17 +1568,6 @@ pub fn start(
 ) -> Result<()> {
     let _ = ports;
     let mut r = resolve(store, paths, service_id)?;
-
-    // 清单声明的运行时依赖必须先安装。
-    for dep in &r.spec.requires {
-        if crate::ops::installed_by_choice(store, dep).is_none() {
-            return Err(AppError::new(
-                "DEPENDENCY_MISSING",
-                format!("{} 需要先安装 {}", r.entry.display_name, dep),
-            )
-            .with_hint(format!("到套件页安装 {dep} 后再启动")));
-        }
-    }
 
     // 先确定最终端口再生成配置、初始化和展开命令，所有阶段使用同一组端口。
     let planned = r.port;

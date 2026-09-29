@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -142,6 +143,10 @@ export default function StacksPage() {
               const running = resolved.filter(({ service }) => service?.state === "running").length;
               const total = resolved.length;
               const allRunning = stateReady && total > 0 && running === total;
+              const missingDependencies = [...new Set(resolved.flatMap(({ service }) =>
+                service && !serviceHasProcess(service) ? service.missingRequires : []
+              ))];
+              const dependenciesBlocked = missingDependencies.length > 0;
               return (
                 <motion.div
                   key={stack.id}
@@ -194,12 +199,24 @@ export default function StacksPage() {
                         );
                       })}
                     </div>
+                    {dependenciesBlocked && (
+                      <p role="status" className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-warn">
+                        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                        <span>{t("stack.dependenciesBlocked")}</span>
+                        {missingDependencies.map((dependency) => (
+                          <Link key={dependency} href={`/packages?search=${encodeURIComponent(dependency)}`} className="font-mono underline decoration-dashed underline-offset-2">
+                            {dependency}
+                          </Link>
+                        ))}
+                      </p>
+                    )}
 
                     <div className="mt-auto flex flex-wrap items-center gap-2 pt-1">
                       <Button
                         size="sm"
                         className="flex-1 basis-full sm:basis-auto"
-                        disabled={busyId !== null || !stateReady}
+                        disabled={busyId !== null || !stateReady || dependenciesBlocked}
+                        title={dependenciesBlocked ? t("stack.dependenciesBlocked") : undefined}
                         onClick={() => startStack(stack)}
                       >
                         {busyId === stack.id ? (

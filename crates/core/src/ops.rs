@@ -319,6 +319,7 @@ fn start_service_inner(
             return Ok(());
         }
     }
+    crate::generic::ensure_dependencies(store, id)?;
     if !id.contains('@') && crate::applications::site_id(id).is_none() {
         if let Some(version) = status.version {
             set_active_version(store, id, &version)?;

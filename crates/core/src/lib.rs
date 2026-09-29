@@ -1189,6 +1189,7 @@ impl CoreState {
         if matches!(before.state, model::ServiceState::Starting | model::ServiceState::Stopping) {
             return Err(AppError::new("SERVICE_BUSY", "服务正在切换状态，请稍后重启"));
         }
+        generic::ensure_dependencies(&self.store, id)?;
         self.stop_service(id).map_err(|mut error| {
             error.message = format!("重启中止，停止阶段失败：{}", error.message);
             self.manager.set_error(id, error.clone());
@@ -1385,6 +1386,9 @@ impl CoreState {
 
     pub fn bulk_restart(&self, ids: &[String]) -> Result<bulk::BulkReport> {
         let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
+        for id in ids {
+            generic::ensure_dependencies(&self.store, id)?;
+        }
         bulk::restart_many_with(&self.paths, &self.manager, ids,
             |id| self.start_service(id), |id| self.stop_service(id))
     }

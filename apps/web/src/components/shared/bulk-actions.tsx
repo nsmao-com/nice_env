@@ -274,7 +274,8 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
               <Button
                 size="sm"
                 className="h-8"
-                disabled={busy != null || picked.size === 0}
+                disabled={busy != null || picked.size === 0 || selectedMissingDependencies.length > 0}
+                title={selectedMissingDependencies.length > 0 ? t("bulk.dependenciesBlocked") : undefined}
                 onClick={() => void run("start")}
               >
                 {busy === "start" ? (

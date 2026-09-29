@@ -175,7 +175,18 @@ fn redis_paths(store: &Store) -> Result<(PathBuf, PathBuf)> {
     let inst =
         installed_by_choice(store, "redis").ok_or_else(|| AppError::not_installed("Redis"))?;
     let dir = PathBuf::from(&inst.install_path);
-    let exe = dir.join(exe_name("redis-server"));
+    // 新社区构建把程序和 MSYS2 DLL 一起放在版本子目录；不能只搬出 exe。
+    // 旧安装仍保留根目录入口，优先按已有文件识别。
+    let legacy = dir.join(exe_name("redis-server"));
+    let exe = if legacy.is_file() {
+        legacy
+    } else {
+        let entry = crate::install::Installer::bundled().installed_entry(&inst);
+        dir.join(crate::install::entry_relative_path(&entry.entry))
+    };
+    if !exe.is_file() {
+        return Err(AppError::new("BROKEN_INSTALL", "找不到 redis-server"));
+    }
     Ok((dir, exe))
 }
 
@@ -721,7 +732,7 @@ fn start_redis(
     precheck_port(redis_port, "Redis")?;
     let spec = SpawnSpec {
         program: exe.clone(),
-        args: redis_launch_args(paths, &version, redis_port),
+        args: redis_launch_args(paths, &version, redis_port, &exe),
         cwd: Some(exe.parent().map(PathBuf::from).unwrap_or_default()),
         env: vec![],
         detached: None,
@@ -773,13 +784,28 @@ fn start_mihomo(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>) -> 
     Ok(())
 }
 
-fn redis_launch_args(paths: &Paths, version: &str, port: u16) -> Vec<String> {
+fn redis_launch_args(paths: &Paths, version: &str, port: u16, exe: &Path) -> Vec<String> {
+    let posix = cfg!(windows) && exe.parent().is_some_and(|dir| {
+        dir.join("msys-2.0.dll").is_file() || dir.join("cygwin1.dll").is_file()
+    });
+    let path_arg = |path: PathBuf| {
+        let native = path.to_string_lossy().to_string();
+        if !posix { return native; }
+        let slash = native.replace('\\', "/");
+        let slash = slash.strip_prefix("//?/UNC/").map(|s| format!("//{s}"))
+            .unwrap_or_else(|| slash.strip_prefix("//?/").unwrap_or(&slash).to_string());
+        if slash.as_bytes().get(1) == Some(&b':') && slash.as_bytes()[0].is_ascii_alphabetic() {
+            format!("/cygdrive/{}{}", slash[..1].to_ascii_lowercase(), &slash[2..])
+        } else {
+            slash
+        }
+    };
     vec![
-        paths.redis_conf(version).to_string_lossy().to_string(),
+        path_arg(paths.redis_conf(version)),
         "--port".into(),
         port.to_string(),
         "--dir".into(),
-        paths.redis_data_dir().to_string_lossy().to_string(),
+        path_arg(paths.redis_data_dir()),
         "--daemonize".into(),
         "no".into(),
     ]
@@ -4623,15 +4649,23 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
     #[test]
     #[ignore = "requires NSB_REDIS_ROOT; starts only an isolated Redis on ephemeral ports"]
     fn real_redis_keeps_settings_and_records_stable_fallback_port() {
+        let version = std::env::var("NSB_REDIS_VERSION").unwrap_or_else(|_| "5.0.14.1".into());
+        let version = version.as_str();
         let source = PathBuf::from(std::env::var("NSB_REDIS_ROOT").expect("NSB_REDIS_ROOT"));
         let temp = tempfile::tempdir().unwrap();
         let state = isolated_state(Paths::new(temp.path().join("redis with spaces")));
-        let root = state.paths.runtime_dir("redis", "5.0.14.1");
+        let runtime = state.paths.runtime_dir("redis", version);
+        let root = if source.join("msys-2.0.dll").is_file() {
+            runtime.join(format!("Redis-{version}-Windows-x64-msys2"))
+        } else { runtime.clone() };
         std::fs::create_dir_all(&root).unwrap();
-        for file in ["redis-server.exe", "redis-cli.exe", "EventLog.dll"] {
-            std::fs::copy(source.join(file), root.join(file)).unwrap();
+        for file in std::fs::read_dir(&source).unwrap() {
+            let file = file.unwrap();
+            if file.file_type().unwrap().is_file() {
+                std::fs::copy(file.path(), root.join(file.file_name())).unwrap();
+            }
         }
-        register_fixture(&state, "redis", "5.0.14.1", &root);
+        register_fixture(&state, "redis", version, &runtime);
         struct StopRedisOnDrop<'a>(&'a crate::CoreState);
         impl Drop for StopRedisOnDrop<'_> {
             fn drop(&mut self) {
@@ -4650,8 +4684,8 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
             .set_port_override("redis", Some(desired))
             .unwrap();
         state.store.set_setting("autoFallbackPort", "true").unwrap();
-        configgen::write_redis_conf(&state.paths, "5.0.14.1", desired).unwrap();
-        let config = state.paths.redis_conf("5.0.14.1");
+        configgen::write_redis_conf(&state.paths, version, desired).unwrap();
+        let config = state.paths.redis_conf(version);
         let customized = std::fs::read_to_string(&config)
             .unwrap()
             .replace("maxmemory 256mb", "maxmemory 64mb")
@@ -4661,6 +4695,10 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
             )
             .replace("databases 16", "databases 32")
             .replace("save \"\"", "save 3600 1");
+        // 仅隔离夹具需要修改 dbfilename 模拟保存失败；Redis 7+ 默认保护此配置。
+        let customized = if source.join("msys-2.0.dll").is_file() {
+            format!("{customized}\nenable-protected-configs yes\n")
+        } else { customized };
         std::fs::write(&config, &customized).unwrap();
         state.start_service("redis").unwrap();
         let port = PortsProfile::from_settings(&state.store).redis;
@@ -4713,7 +4751,7 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
         };
         drop(set_password("isolated-fixture-password"));
         assert_eq!(state.redis_stats().unwrap_err().code, "REDIS_AUTH_REQUIRED");
-        assert_eq!(state.redis_snapshot("5.0.14.1").unwrap_err().code, "REDIS_AUTH_REQUIRED");
+        assert_eq!(state.redis_snapshot(version).unwrap_err().code, "REDIS_AUTH_REQUIRED");
         assert_eq!(state.stop_service("redis").unwrap_err().code, "REDIS_AUTH_REQUIRED");
         assert!(state.manager.snapshot("redis").unwrap().pids.iter().any(|pid| platform::process_alive(*pid)));
         let running_pids = state.manager.snapshot("redis").unwrap().pids;
@@ -4733,15 +4771,15 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
         assert!(stopped_stack.started.is_empty() && stopped_stack.already_running.is_empty());
         assert_eq!(state.manager.snapshot("redis").unwrap().pids, running_pids);
         let credentials = |password: &str| crate::stats::RedisCredentials { username: String::new(), password: password.into() };
-        assert_eq!(state.save_redis_connection("5.0.14.1", credentials("wrong")).unwrap_err().code, "REDIS_AUTH_FAILED");
-        assert!(state.store.get_setting(&crate::stats::RedisCredentials::key("5.0.14.1")).is_none());
-        state.save_redis_connection("5.0.14.1", credentials("isolated-fixture-password")).unwrap();
+        assert_eq!(state.save_redis_connection(version, credentials("wrong")).unwrap_err().code, "REDIS_AUTH_FAILED");
+        assert!(state.store.get_setting(&crate::stats::RedisCredentials::key(version)).is_none());
+        state.save_redis_connection(version, credentials("isolated-fixture-password")).unwrap();
         assert_eq!(state.redis_stats().unwrap().keys, Some(2));
-        let authenticated_snapshot = state.redis_snapshot("5.0.14.1").unwrap();
+        let authenticated_snapshot = state.redis_snapshot(version).unwrap();
         let wait_for_snapshot = |receipt: &crate::stats::RedisSnapshotReceipt, expected: &str| {
             let started = std::time::Instant::now();
             loop {
-                let persistence = state.redis_persistence("5.0.14.1").unwrap();
+                let persistence = state.redis_persistence(version).unwrap();
                 assert_eq!(persistence.run_id, receipt.run_id);
                 assert_eq!(persistence.process_id, receipt.process_id);
                 if !persistence.saving && persistence.last_save_status == expected
@@ -4753,15 +4791,15 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
             }
         };
         assert!(!wait_for_snapshot(&authenticated_snapshot, "ok").aof_enabled);
-        let authenticated_backup = state.redis_backup_create("5.0.14.1").unwrap();
+        let authenticated_backup = state.redis_backup_create(version).unwrap();
         assert_eq!(authenticated_backup.kind, "snapshot");
         assert!(crate::redis_backup::list(&state.paths).unwrap().items.iter().any(|item| item.id == authenticated_backup.id));
         assert_eq!(state.redis_snapshot("7.0.0").unwrap_err().code, "REDIS_INSTANCE_CHANGED");
-        assert_eq!(state.save_redis_connection("5.0.14.1", credentials("wrong")).unwrap_err().code, "REDIS_AUTH_FAILED");
-        assert_eq!(crate::stats::RedisCredentials::load(&state.store, "5.0.14.1").unwrap().password, "isolated-fixture-password");
+        assert_eq!(state.save_redis_connection(version, credentials("wrong")).unwrap_err().code, "REDIS_AUTH_FAILED");
+        assert_eq!(crate::stats::RedisCredentials::load(&state.store, version).unwrap().password, "isolated-fixture-password");
         assert!(crate::stats::RedisCredentials::load(&state.store, "7.0.0").unwrap().password.is_empty());
         assert_eq!(state.save_redis_connection("7.0.0", credentials("isolated-fixture-password")).unwrap_err().code, "REDIS_INSTANCE_CHANGED");
-        let info = state.redis_connection("5.0.14.1").unwrap();
+        let info = state.redis_connection(version).unwrap();
         assert!(info.has_password);
         assert!(!serde_json::to_string(&info).unwrap().contains("isolated-fixture-password"));
         let exported = temp.path().join("config-backup.json");
@@ -4773,39 +4811,39 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
         state.start_service("redis").unwrap();
         // requirepass was a runtime-only change: restarted server is unauthenticated again.
         assert_eq!(state.redis_stats().unwrap_err().code, "REDIS_AUTH_FAILED");
-        state.save_redis_connection("5.0.14.1", crate::stats::RedisCredentials::default()).unwrap();
+        state.save_redis_connection(version, crate::stats::RedisCredentials::default()).unwrap();
         assert_eq!(state.redis_stats().unwrap().keys, Some(2));
-        assert!(!state.redis_connection("5.0.14.1").unwrap().has_password);
+        assert!(!state.redis_connection(version).unwrap().has_password);
         assert_eq!(state.manager.snapshot("redis").unwrap().port, Some(port));
         assert_eq!(PortsProfile::from_settings(&state.store).redis, port);
         assert_eq!(std::fs::read_to_string(&config).unwrap(), persisted);
         assert_eq!(query("maxmemory"), "maxmemory\n67108864");
 
         // 可视化配置保存通过原生 CONFIG GET 与实际 RDB 文件与键数回读验证。
-        let before_view=state.redis_settings("5.0.14.1").unwrap();
+        let before_view=state.redis_settings(version).unwrap();
         assert_eq!(before_view.settings.max_memory_bytes,Some(64*1024*1024));
         let mut settings=before_view.settings.clone();
         settings.max_memory_bytes=Some(96*1024*1024);settings.eviction_policy=Some("allkeys-random".into());
         settings.timeout_seconds=Some(42);settings.max_clients=Some(333);
         settings.save_rules=Some(vec![crate::redis_settings::SnapshotRule{seconds:60,changes:1},crate::redis_settings::SnapshotRule{seconds:300,changes:10}]);
         let before_file=std::fs::read_to_string(&config).unwrap();
-        let saved=state.save_redis_settings("5.0.14.1",&before_view.revision,&settings,false).unwrap();
+        let saved=state.save_redis_settings(version,&before_view.revision,&settings,false).unwrap();
         assert_eq!(saved.settings,settings);assert_ne!(saved.revision,before_view.revision);
         assert_eq!(query("maxmemory"),"maxmemory\n67108864","save must not change the running server");
         assert_eq!(query("databases"),"databases\n32","unrelated directives preserved");
-        let history=crate::cfgeditor::list_config_backups_selected(&state.paths,&state.store,Some("redis-conf@5.0.14.1")).unwrap();
+        let history=crate::cfgeditor::list_config_backups_selected(&state.paths,&state.store,Some(&format!("redis-conf@{version}"))).unwrap();
         assert!(history.iter().any(|b|std::fs::read_to_string(&b.path).unwrap()==before_file));
-        assert_eq!(state.save_redis_settings("5.0.14.1",&before_view.revision,&settings,false).unwrap_err().code,"CONFIG_CONFLICT");
+        assert_eq!(state.save_redis_settings(version,&before_view.revision,&settings,false).unwrap_err().code,"CONFIG_CONFLICT");
         let mut disabled=settings.clone();disabled.save_rules=Some(vec![]);
-        assert_eq!(state.save_redis_settings("5.0.14.1",&saved.revision,&disabled,false).unwrap_err().code,"REDIS_SNAPSHOT_CONFIRM");
+        assert_eq!(state.save_redis_settings(version,&saved.revision,&disabled,false).unwrap_err().code,"REDIS_SNAPSHOT_CONFIRM");
         let customized=std::fs::read_to_string(&config).unwrap();assert!(customized.contains("databases 32"));assert!(customized.contains("appendonly no"));
         state.stop_service("redis").unwrap();state.start_service("redis").unwrap();
         assert_eq!(query("maxmemory"),"maxmemory\n100663296");assert_eq!(query("maxmemory-policy"),"maxmemory-policy\nallkeys-random");
         assert_eq!(query("timeout"),"timeout\n42");assert_eq!(query("maxclients"),"maxclients\n333");assert_eq!(query("save"),"save\n60 1 300 10");
         assert_eq!(state.redis_stats().unwrap().keys,Some(2));
-        let current=state.redis_settings("5.0.14.1").unwrap();let backup=history.iter().find(|b|std::fs::read_to_string(&b.path).unwrap()==before_file).unwrap();
-        state.rollback_config(&backup.name,Some("redis-conf@5.0.14.1"),Some(&std::fs::read_to_string(&config).unwrap())).unwrap();
-        assert_eq!(state.save_redis_settings("5.0.14.1",&current.revision,&settings,false).unwrap_err().code,"CONFIG_CONFLICT");
+        let current=state.redis_settings(version).unwrap();let backup=history.iter().find(|b|std::fs::read_to_string(&b.path).unwrap()==before_file).unwrap();
+        state.rollback_config(&backup.name,Some(&format!("redis-conf@{version}")),Some(&std::fs::read_to_string(&config).unwrap())).unwrap();
+        assert_eq!(state.save_redis_settings(version,&current.revision,&settings,false).unwrap_err().code,"CONFIG_CONFLICT");
         state.stop_service("redis").unwrap();state.start_service("redis").unwrap();
         assert_eq!(query("maxmemory"),"maxmemory\n67108864");assert_eq!(state.redis_stats().unwrap().keys,Some(2));
         // 手动 RDB 快照需要在停止主实例之前回读独立文件，不能由 SHUTDOWN 的保存掩盖失败。
@@ -4817,12 +4855,12 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
         let occupied_rdb = state.paths.redis_data_dir().join("occupied.rdb");
         std::fs::create_dir(&occupied_rdb).unwrap();
         assert_eq!(cli(&["CONFIG", "SET", "dbfilename", "occupied.rdb"]), "OK");
-        let failed_snapshot = state.redis_snapshot("5.0.14.1").unwrap();
+        let failed_snapshot = state.redis_snapshot(version).unwrap();
         assert_eq!(wait_for_snapshot(&failed_snapshot, "err").last_save_status, "err");
         assert_eq!(state.redis_stats().unwrap().keys, Some(2));
         assert_eq!(cli(&["CONFIG", "SET", "dbfilename", "dump.rdb"]), "OK");
-        let before_snapshot = state.redis_persistence("5.0.14.1").unwrap();
-        let manual_snapshot = state.redis_snapshot("5.0.14.1").unwrap();
+        let before_snapshot = state.redis_persistence(version).unwrap();
+        let manual_snapshot = state.redis_snapshot(version).unwrap();
         assert!(manual_snapshot.minimum_save_time > before_snapshot.last_save_time);
         let confirmed = wait_for_snapshot(&manual_snapshot, "ok");
         assert_eq!(confirmed.changes_since_save, 0);
@@ -4849,27 +4887,27 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
         drop(reader);
         assert!(std::net::TcpStream::connect(("127.0.0.1", reader_port)).is_err());
         // 独立备份 -> 修改数据 -> 恢复 -> 回退，均用真实 Redis 读取逻辑数据库值。
-        let backup = state.redis_backup_create("5.0.14.1").unwrap();
-        assert_eq!(state.redis_restore_preview("5.0.14.1", &backup.id).unwrap_err().code, "REDIS_RESTORE_RUNNING");
+        let backup = state.redis_backup_create(version).unwrap();
+        assert_eq!(state.redis_restore_preview(version, &backup.id).unwrap_err().code, "REDIS_RESTORE_RUNNING");
         assert_eq!(cli(&["SET", "isolated-fixture", "2"]), "OK");
         state.stop_service("redis").unwrap();
-        let preview = state.redis_restore_preview("5.0.14.1", &backup.id).unwrap();
-        assert!(state.redis_backup_restore("5.0.14.1", &backup.id, &preview.revision, "Redis wrong").is_err());
+        let preview = state.redis_restore_preview(version, &backup.id).unwrap();
+        assert!(state.redis_backup_restore(version, &backup.id, &preview.revision, "Redis wrong").is_err());
         let original_config = std::fs::read_to_string(&config).unwrap();
         std::fs::write(&config, format!("{original_config}\n# external edit\n")).unwrap();
-        assert_eq!(state.redis_backup_restore("5.0.14.1", &backup.id, &preview.revision, "Redis 5.0.14.1").unwrap_err().code, "REDIS_RESTORE_CHANGED");
+        assert_eq!(state.redis_backup_restore(version, &backup.id, &preview.revision, &format!("Redis {version}")).unwrap_err().code, "REDIS_RESTORE_CHANGED");
         std::fs::write(&config, original_config.replace("appendonly no", "appendonly yes")).unwrap();
-        assert_eq!(state.redis_restore_preview("5.0.14.1", &backup.id).unwrap_err().code, "REDIS_RESTORE_AOF");
+        assert_eq!(state.redis_restore_preview(version, &backup.id).unwrap_err().code, "REDIS_RESTORE_AOF");
         std::fs::write(&config, &original_config).unwrap();
         let content_path = state.paths.backup().join("redis").join(&backup.id).join("content.rdb");
         let original_backup = std::fs::read(&content_path).unwrap();
         let mut corrupt = original_backup.clone(); corrupt[10] ^= 1;
         std::fs::write(&content_path, &corrupt).unwrap();
-        assert_eq!(state.redis_restore_preview("5.0.14.1", &backup.id).unwrap_err().code, "REDIS_BACKUP_CHECKSUM");
+        assert_eq!(state.redis_restore_preview(version, &backup.id).unwrap_err().code, "REDIS_BACKUP_CHECKSUM");
         std::fs::write(&content_path, &original_backup).unwrap();
-        assert!(state.redis_restore_preview("5.0.14.1", "../escape").is_err());
-        let preview = state.redis_restore_preview("5.0.14.1", &backup.id).unwrap();
-        let restored = state.redis_backup_restore("5.0.14.1", &backup.id, &preview.revision, "Redis 5.0.14.1").unwrap();
+        assert!(state.redis_restore_preview(version, "../escape").is_err());
+        let preview = state.redis_restore_preview(version, &backup.id).unwrap();
+        let restored = state.redis_backup_restore(version, &backup.id, &preview.revision, &format!("Redis {version}")).unwrap();
         let safety = restored.safety_backup.unwrap();
         assert_eq!(std::fs::read(state.paths.redis_data_dir().join("dump.rdb")).unwrap(), original_backup);
         assert!(!state.manager.is_busy("redis"));
@@ -4877,14 +4915,14 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
         assert_eq!(cli(&["GET", "isolated-fixture"]), "1");
         assert_eq!(state.redis_stats().unwrap().keys, Some(2));
         state.stop_service("redis").unwrap();
-        let preview = state.redis_restore_preview("5.0.14.1", &safety.id).unwrap();
-        state.redis_backup_restore("5.0.14.1", &safety.id, &preview.revision, "Redis 5.0.14.1").unwrap();
+        let preview = state.redis_restore_preview(version, &safety.id).unwrap();
+        state.redis_backup_restore(version, &safety.id, &preview.revision, &format!("Redis {version}")).unwrap();
         state.start_service("redis").unwrap();
         assert_eq!(cli(&["GET", "isolated-fixture"]), "2");
         state.stop_service("redis").unwrap();
         std::fs::write(state.paths.redis_data_dir().join("dump.rdb"), b"damaged original").unwrap();
-        let preview = state.redis_restore_preview("5.0.14.1", &backup.id).unwrap();
-        let restored = state.redis_backup_restore("5.0.14.1", &backup.id, &preview.revision, "Redis 5.0.14.1").unwrap();
+        let preview = state.redis_restore_preview(version, &backup.id).unwrap();
+        let restored = state.redis_backup_restore(version, &backup.id, &preview.revision, &format!("Redis {version}")).unwrap();
         let preserved = state.paths.backup().join("redis").join(restored.safety_backup.unwrap().id).join("content.rdb");
         assert_eq!(std::fs::read(preserved).unwrap(), b"damaged original");
         state.start_service("redis").unwrap();
@@ -4895,7 +4933,8 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
         std::fs::write(&external, &original_backup).unwrap();
         let before_import = crate::redis_backup::list(&state.paths).unwrap().items.len();
         let import = crate::redis_backup::inspect_import(external.to_str().unwrap()).unwrap();
-        assert_eq!(import.version, "5.0.14.1"); assert_eq!(import.rdb_version, 9);
+        assert_eq!(import.version, version);
+        assert_eq!(format!("REDIS{:04}", import.rdb_version).as_bytes(), &original_backup[..9]);
         assert_eq!(import.size_bytes, original_backup.len() as u64);
         assert_eq!(crate::redis_backup::list(&state.paths).unwrap().items.len(), before_import);
         assert!(crate::redis_backup::import_rdb(&state.paths, &import.source, "stale").is_err());
@@ -4906,13 +4945,15 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
         assert_eq!(cli(&["GET", "isolated-fixture"]), "3");
         assert_eq!(crate::redis_backup::list(&state.paths).unwrap().items.len(), before_import + 1);
         let mut changed = original_backup.clone();
-        let source_version_at = changed.windows(8).position(|bytes| bytes == b"5.0.14.1").unwrap();
-        changed[source_version_at + 5] = b'5';
+        let source_version_at = changed.windows(version.len()).position(|bytes| bytes == version.as_bytes()).unwrap();
+        let mut changed_version = version.as_bytes().to_vec();
+        *changed_version.last_mut().unwrap() = b'9';
+        changed[source_version_at..source_version_at + version.len()].copy_from_slice(&changed_version);
         let checksum_at = changed.len() - 8;
         let checksum = crate::redis_backup::rdb_checksum(0, &changed[..checksum_at]);
         changed[checksum_at..].copy_from_slice(&checksum.to_le_bytes());
         std::fs::write(&external, &changed).unwrap();
-        assert_eq!(crate::redis_backup::inspect_import(external.to_str().unwrap()).unwrap().version, "5.0.15.1");
+        assert_eq!(crate::redis_backup::inspect_import(external.to_str().unwrap()).unwrap().version, String::from_utf8(changed_version).unwrap());
         assert_eq!(crate::redis_backup::import_rdb(&state.paths, &import.source, &import.revision).unwrap_err().code, "REDIS_IMPORT_CHANGED");
         std::fs::write(&external, &corrupt).unwrap();
         assert_eq!(crate::redis_backup::inspect_import(external.to_str().unwrap()).unwrap_err().code, "REDIS_BACKUP_CHECKSUM");
@@ -4936,13 +4977,13 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
         state.stop_service("redis").unwrap();
         for directive in ["preload-file rdb:/tmp/other.rdb", "replicaof 127.0.0.1 6379", "slaveof 127.0.0.1 6379"] {
             std::fs::write(&config, format!("{original_config}\n{directive}\n")).unwrap();
-            assert_eq!(state.redis_restore_preview("5.0.14.1", &imported.id).unwrap_err().code, "REDIS_RESTORE_SOURCE");
+            assert_eq!(state.redis_restore_preview(version, &imported.id).unwrap_err().code, "REDIS_RESTORE_SOURCE");
         }
         std::fs::write(&config, format!("{original_config}\npreload-file \"\"\n")).unwrap();
-        assert!(state.redis_restore_preview("5.0.14.1", &imported.id).is_ok());
+        assert!(state.redis_restore_preview(version, &imported.id).is_ok());
         std::fs::write(&config, &original_config).unwrap();
-        let preview = state.redis_restore_preview("5.0.14.1", &imported.id).unwrap();
-        state.redis_backup_restore("5.0.14.1", &imported.id, &preview.revision, "Redis 5.0.14.1").unwrap();
+        let preview = state.redis_restore_preview(version, &imported.id).unwrap();
+        state.redis_backup_restore(version, &imported.id, &preview.revision, &format!("Redis {version}")).unwrap();
         assert!(!state.manager.is_busy("redis"));
         state.start_service("redis").unwrap();
         assert_eq!(cli(&["GET", "isolated-fixture"]), "1");
@@ -4954,7 +4995,7 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
         assert_eq!(state.redis_backup_export(&imported.id, exported_rdb.to_str().unwrap()).unwrap_err().code, "REDIS_EXPORT_EXISTS");
         assert!(state.redis_backup_export(&imported.id, state.paths.base.join("not-an-export.rdb").to_str().unwrap()).is_err());
         let exported_scope = crate::redis_backup::inspect_import(exported_rdb.to_str().unwrap()).unwrap();
-        assert_eq!(exported_scope.version, "5.0.14.1");
+        assert_eq!(exported_scope.version, version);
         let make_copy = || crate::redis_backup::import_rdb(&state.paths, &exported_scope.source, &exported_scope.revision).unwrap();
         let damaged = make_copy();
         let damaged_dir = state.paths.backup().join("redis").join(&damaged.id);
@@ -5004,21 +5045,21 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
         assert!(state.redis_backup_removal_preview("../outside").is_err());
         assert_eq!(std::fs::read(&exported_rdb).unwrap(), original_backup);
         assert_eq!(cli(&["GET", "isolated-fixture"]), "1");
-        let password_scope = state.redis_password("5.0.14.1").unwrap();
+        let password_scope = state.redis_password(version).unwrap();
         assert!(!password_scope.enabled && password_scope.blocked_reason.is_none());
-        assert_eq!(state.save_redis_password("5.0.14.1", &password_scope.revision, "new-password", false).unwrap_err().code, "REDIS_PASSWORD_RUNNING");
+        assert_eq!(state.save_redis_password(version, &password_scope.revision, "new-password", false).unwrap_err().code, "REDIS_PASSWORD_RUNNING");
         assert_eq!(state.stop_redis_for_password("7.4.0").unwrap_err().code, "REDIS_INSTANCE_CHANGED");
         let pids = state.manager.snapshot("redis").unwrap().pids;
-        state.stop_redis_for_password("5.0.14.1").unwrap();
+        state.stop_redis_for_password(version).unwrap();
         assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));
         let original_config = std::fs::read_to_string(&config).unwrap();
         let password = "fixture # quote\" and slash\\ value";
-        let saved = state.save_redis_password("5.0.14.1", &password_scope.revision, password, false).unwrap();
+        let saved = state.save_redis_password(version, &password_scope.revision, password, false).unwrap();
         assert!(saved.connection_saved && saved.view.enabled);
-        assert_eq!(crate::stats::RedisCredentials::load(&state.store,"5.0.14.1").unwrap().password, password);
+        assert_eq!(crate::stats::RedisCredentials::load(&state.store,version).unwrap().password, password);
         assert!(!serde_json::to_string(&saved).unwrap().contains(password));
-        assert_eq!(state.save_redis_password("5.0.14.1", &password_scope.revision, password, false).unwrap_err().code, "CONFIG_CONFLICT");
-        let history = crate::cfgeditor::list_config_backups_selected(&state.paths, &state.store, Some("redis-conf@5.0.14.1")).unwrap();
+        assert_eq!(state.save_redis_password(version, &password_scope.revision, password, false).unwrap_err().code, "CONFIG_CONFLICT");
+        let history = crate::cfgeditor::list_config_backups_selected(&state.paths, &state.store, Some(&format!("redis-conf@{version}"))).unwrap();
         assert!(history.iter().any(|entry| std::fs::read_to_string(&entry.path).ok().as_deref() == Some(original_config.as_str())));
         state.start_service("redis").unwrap();
         assert_eq!(state.redis_stats().unwrap().keys,Some(2));
@@ -5029,13 +5070,13 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
         assert!(read_back.status.success());
         assert_eq!(String::from_utf8_lossy(&read_back.stdout).trim(),"1");
         state.stop_service("redis").unwrap();
-        let scope = state.redis_password("5.0.14.1").unwrap();
+        let scope = state.redis_password(version).unwrap();
         let before = std::fs::read_to_string(&config).unwrap();
         std::fs::write(&config,format!("{before}# external edit\n")).unwrap();
-        assert_eq!(state.save_redis_password("5.0.14.1",&scope.revision,"",true).unwrap_err().code,"CONFIG_CONFLICT");
-        let scope = state.redis_password("5.0.14.1").unwrap();
-        assert_eq!(state.save_redis_password("5.0.14.1",&scope.revision,"",false).unwrap_err().code,"REDIS_PASSWORD_CONFIRM");
-        let disabled = state.save_redis_password("5.0.14.1",&scope.revision,"",true).unwrap();
+        assert_eq!(state.save_redis_password(version,&scope.revision,"",true).unwrap_err().code,"CONFIG_CONFLICT");
+        let scope = state.redis_password(version).unwrap();
+        assert_eq!(state.save_redis_password(version,&scope.revision,"",false).unwrap_err().code,"REDIS_PASSWORD_CONFIRM");
+        let disabled = state.save_redis_password(version,&scope.revision,"",true).unwrap();
         assert!(!disabled.view.enabled && disabled.connection_saved);
         state.start_service("redis").unwrap();
         assert_eq!(state.redis_stats().unwrap().keys,Some(2));
@@ -5044,24 +5085,24 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
         let disabled_config = std::fs::read_to_string(&config).unwrap();
         for extra in ["include extra.conf\n","aclfile users.acl\n","user default on nopass ~* +@all\n"] {
             std::fs::write(&config,format!("{disabled_config}{extra}")).unwrap();
-            let view = state.redis_password("5.0.14.1").unwrap();
+            let view = state.redis_password(version).unwrap();
             assert!(view.blocked_reason.is_some());
-            assert_eq!(state.save_redis_password("5.0.14.1",&view.revision,password,false).unwrap_err().code,"REDIS_PASSWORD_COMPLEX");
-            assert!(crate::stats::RedisCredentials::load(&state.store,"5.0.14.1").unwrap().password.is_empty());
+            assert_eq!(state.save_redis_password(version,&view.revision,password,false).unwrap_err().code,"REDIS_PASSWORD_COMPLEX");
+            assert!(crate::stats::RedisCredentials::load(&state.store,version).unwrap().password.is_empty());
         }
         std::fs::write(&config, &disabled_config).unwrap();
-        let view = state.redis_password("5.0.14.1").unwrap();
+        let view = state.redis_password(version).unwrap();
         // 仅隔离 SQLite 夹具注入记录写入失败，确认不把部分保存报告为全部成功。
         let db = rusqlite::Connection::open(state.paths.db()).unwrap();
-        db.execute_batch("CREATE TRIGGER reject_redis_credentials BEFORE INSERT ON settings WHEN NEW.key = 'redisConnection@5.0.14.1' BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END;").unwrap();
-        let partial = state.save_redis_password("5.0.14.1",&view.revision,password,false).unwrap();
+        db.execute_batch("CREATE TRIGGER reject_redis_credentials BEFORE INSERT ON settings WHEN NEW.key LIKE 'redisConnection@%' BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END;").unwrap();
+        let partial = state.save_redis_password(version,&view.revision,password,false).unwrap();
         assert!(partial.view.enabled && !partial.connection_saved);
         db.execute_batch("DROP TRIGGER reject_redis_credentials;").unwrap();
-        assert!(state.save_redis_password("5.0.14.1",&partial.view.revision,password,false).unwrap().connection_saved);
+        assert!(state.save_redis_password(version,&partial.view.revision,password,false).unwrap().connection_saved);
         {
             let _locked = state.manager.lifecycle.lock();
             std::thread::scope(|threads| threads.spawn(|| {
-                assert_eq!(state.save_redis_password("5.0.14.1",&partial.view.revision,password,false).unwrap_err().code,"SERVICE_BUSY");
+                assert_eq!(state.save_redis_password(version,&partial.view.revision,password,false).unwrap_err().code,"SERVICE_BUSY");
             }).join().unwrap());
         }
         state.start_service("redis").unwrap();

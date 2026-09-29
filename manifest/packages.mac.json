@@ -1,5 +1,5 @@
 {
-  "revision": 9,
+  "revision": 10,
   "updated": "2026-09-29",
   "note": "macOS 清单（aarch64/x86_64；MongoDB Shell / Database Tools 提供双架构，其余条目为 arm64 构建）。当前仅收录已在源头验证可达（HTTP 206/200）的二进制；PHP/Nginx/Redis 的 macOS 官方二进制不存在或需源码编译，候选源见 README「在 macOS 上构建」章节，待 mac 端验证后补入。",
   "packages": [
@@ -286,6 +286,38 @@
         "kind": "go",
         "entryTemplate": "go/bin/go",
         "maxVersions": 60
+      }
+    },
+    {
+      "id": "mongodb",
+      "version": "9.0.2",
+      "category": "database",
+      "displayName": "MongoDB 8.0",
+      "description": "文档数据库（官方 tgz 发行）",
+      "homepage": "https://www.mongodb.com",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "targz",
+      "url": "https://fastdl.mongodb.org/osx/mongodb-macos-arm64-9.0.2.tgz",
+      "sha256": "9a30e942877445dc143d83671eba6cda2ec93a99160c8a8de57595853dc76de3",
+      "sizeBytes": 0,
+      "entry": "mongodb-macos-arm64-9.0.2/bin/mongod",
+      "defaultPort": 28017,
+      "run": {
+        "args": [
+          "--dbpath",
+          "{data}",
+          "--port",
+          "{port}",
+          "--bind_ip",
+          "127.0.0.1"
+        ],
+        "singleInstance": true,
+        "dataDir": "mongodb"
       }
     },
     {

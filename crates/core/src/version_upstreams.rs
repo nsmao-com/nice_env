@@ -137,6 +137,22 @@ pub(super) async fn fetch(
     let client = http()?;
     let mut out = Vec::new();
     match src.kind.as_str() {
+        "memcached" => {
+            // 维护中的 Windows 构建发布在 Git tags 中，仓库没有 Release assets。
+            // 下载固定 commit 的整包以保留同目录 Cygwin DLL，使用通用 SSE2 入口。
+            let data = get_json(&client, "https://api.github.com/repos/nono303/memcached/tags?per_page=100").await?;
+            let numeric = regex::Regex::new(r"^\d+\.\d+\.\d+$").unwrap();
+            for row in rows(&data) {
+                let (Some(version), Some(commit)) = (row["name"].as_str(), row["commit"]["sha"].as_str()) else { continue };
+                if !numeric.is_match(version) || cmp_version_desc(version, "1.6.24").is_gt()
+                    || commit.len() != 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) { continue; }
+                let mut item = release(src, template, version,
+                    &format!("https://github.com/nono303/memcached/archive/{commit}.zip"));
+                item.entry = format!("memcached-{commit}/libevent-2.1/x64/memcached.exe");
+                item.note = Some("Windows 社区构建 · Cygwin / SSE2".into());
+                out.push(item);
+            }
+        }
         "composer" => {
             let data = get_json(&client, "https://getcomposer.org/versions").await?;
             for row in rows(&data["2"]) {

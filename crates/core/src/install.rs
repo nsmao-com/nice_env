@@ -31,6 +31,19 @@ pub(crate) fn official_qdrant(entry: &crate::model::PackageManifestEntry) -> boo
 
 /// 只升级曾随应用发布的原始运行描述；下载信息、实际入口及用户修改保持不变。
 fn upgrade_legacy_run(mut entry: crate::model::PackageManifestEntry) -> crate::model::PackageManifestEntry {
+    if entry.id == "rustfs" && entry.url.starts_with("https://github.com/rustfs/rustfs/releases/download/") {
+        let legacy: crate::model::ServiceRunSpec = serde_json::from_value(serde_json::json!({
+            "args": ["server", "--address", ":{port}", "--console-enable", "--console-address", ":{port+1}", "{data}/rustfs-data"],
+            "health": "tcp", "healthTimeoutSec": 20, "initDirs": ["rustfs-data"]
+        })).expect("内置旧运行描述合法");
+        if entry.run.as_ref().is_some_and(|run| serde_json::to_value(run).ok() == serde_json::to_value(&legacy).ok()) {
+            // 上游会再次按空白切分 VOLUMES；相对路径避免拆开用户数据目录。
+            let run = entry.run.as_mut().unwrap();
+            *run.args.last_mut().unwrap() = ".".into();
+            run.cwd = Some("{data}/rustfs-data".into());
+        }
+        return entry;
+    }
     if entry.id == "mariadb" {
         let bundled: crate::model::Manifest = serde_json::from_str(include_str!("../../../manifest/packages.win.json")).expect("内置清单合法");
         if let Some(current) = bundled.packages.into_iter().find(|p| p.id == "mariadb").and_then(|p| p.run) {
@@ -215,6 +228,7 @@ impl Installer {
         // 按版本号语义取最新：字符串比较会把 5.26.30 排在 2025.09.0 前、21.0.9 排在 21.0.12 前
         candidates.sort_by(|a, b| {
             Self::is_platform_compatible(b).cmp(&Self::is_platform_compatible(a))
+                .then_with(|| crate::versions::is_prerelease(&a.version).cmp(&crate::versions::is_prerelease(&b.version)))
                 .then_with(|| crate::versions::cmp_version_desc(&a.version, &b.version))
                 .then_with(|| a.arch.is_empty().cmp(&b.arch.is_empty()))
                 .then_with(|| a.os.is_empty().cmp(&b.os.is_empty()))
@@ -236,6 +250,7 @@ impl Installer {
                 .then_with(|| a.arch.is_empty().cmp(&b.arch.is_empty()))
                 .then_with(|| a.os.is_empty().cmp(&b.os.is_empty()))
                 .then_with(|| b.version_source.is_some().cmp(&a.version_source.is_some()))
+                .then_with(|| crate::versions::is_prerelease(&a.version).cmp(&crate::versions::is_prerelease(&b.version)))
                 .then_with(|| crate::versions::cmp_version_desc(&a.version, &b.version))
         });
         entries.first().map(|p| upgrade_available_entry((*p).clone()))
@@ -265,6 +280,11 @@ impl Installer {
                 .filter(|tpl| !tpl.contains("{asset}"))
                 .map(|tpl| tpl.replace("{version}", &installed.version))
                 .unwrap_or_else(|| entry.entry.replace(&entry.version, &installed.version));
+            // 旧 Windows Redis 安装可能使用 5.0.14 兼容标识或清单外 3.x/4.x。
+            // 新版源的嵌套目录不能用于恢复这些历史安装的入口（例如加入 PATH）。
+            if installed.id == "redis" && Path::new(&installed.install_path).join("redis-server.exe").is_file() {
+                entry.entry = "redis-server.exe".into();
+            }
             entry.display_name = entry
                 .display_name
                 .replace(&entry.version, &installed.version);
@@ -2329,12 +2349,18 @@ mod find_latest_tests {
             "packages": [
                 pkg("neo4j", "5.26.30"), pkg("neo4j", "2025.09.0"), pkg("neo4j", "5.25.1"),
                 pkg("jdk", "21.0.9+10"), pkg("jdk", "21.0.8+9"), pkg("jdk", "21.0.12+8"),
+                pkg("zincsearch", "1.0.0-beta3"), pkg("zincsearch", "0.4.10"),
+                pkg("preview-only", "2.0.0-rc.10"), pkg("preview-only", "2.0.0-rc.9"),
             ]
         }))
         .unwrap();
         let inst = Installer { manifest };
         assert_eq!(inst.find("neo4j").unwrap().version, "2025.09.0");
         assert_eq!(inst.find("jdk").unwrap().version, "21.0.12+8");
+        assert_eq!(inst.find("zincsearch").unwrap().version, "0.4.10");
+        assert_eq!(inst.template_for("zincsearch").unwrap().version, "0.4.10");
+        assert_eq!(inst.find("zincsearch@1.0.0-beta3").unwrap().version, "1.0.0-beta3");
+        assert_eq!(inst.find("preview-only").unwrap().version, "2.0.0-rc.10");
         // 显式指定版本不受影响
         assert_eq!(inst.find("neo4j@5.25.1").unwrap().version, "5.25.1");
         let mut native = inst.find("jdk@21.0.9+10").unwrap();

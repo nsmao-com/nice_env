@@ -3042,6 +3042,44 @@ mod startup_tests {
     }
 
     #[test]
+    #[ignore = "requires NSB_VERIFY_RUSTFS pointing to the verified RustFS 1.0.0 executable; isolated ports and data only"]
+    fn native_rustfs_legacy_snapshot_starts_with_spaces_in_data_path() {
+        let executable = std::env::var_os("NSB_VERIFY_RUSTFS").expect("set NSB_VERIFY_RUSTFS");
+        let (_temp, state, mut r) = fixture("rustfs");
+        assert!(r.data.to_string_lossy().contains(' '), "fixture must exercise paths with spaces");
+        std::fs::copy(executable, &r.bin).unwrap();
+        // 模拟升级前保存的默认快照，确认无需重装即可修复；定制描述保持不变。
+        let run = r.entry.run.as_mut().unwrap();
+        run.cwd = None;
+        *run.args.last_mut().unwrap() = "{data}/rustfs-data".into();
+        let snapshot = PathBuf::from(&r.inst.install_path).join(".niceenv-package.json");
+        let mut custom = r.entry.clone();
+        custom.run.as_mut().unwrap().cwd = Some("{data}/custom".into());
+        std::fs::write(&snapshot, serde_json::to_vec(&custom).unwrap()).unwrap();
+        assert_eq!(state.installer.installed_entry(&r.inst).run.unwrap().cwd, Some("{data}/custom".into()));
+        std::fs::write(&snapshot, serde_json::to_vec(&r.entry).unwrap()).unwrap();
+        let base = (31000..42000).find(|p| tcp_port_bindable(*p) && tcp_port_bindable(*p + 1)).unwrap();
+        state.store.set_port_override("rustfs", Some(base)).unwrap();
+        struct Cleanup<'a>(&'a crate::CoreState);
+        impl Drop for Cleanup<'_> { fn drop(&mut self) { let _ = self.0.stop_service("rustfs"); } }
+        let _cleanup = Cleanup(&state);
+        let client = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(2)).build().unwrap();
+        for _ in 0..2 {
+            state.start_service("rustfs").unwrap();
+            let port = state.manager.snapshot("rustfs").unwrap().port.unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !client.get(format!("http://127.0.0.1:{port}/health/live")).send().is_ok_and(|r| r.status().is_success()) {
+                assert!(std::time::Instant::now() < deadline, "RustFS HTTP health must be ready");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            assert!(r.data.join("rustfs-data/.rustfs.sys").is_dir());
+            let pids = state.manager.snapshot("rustfs").unwrap().pids;
+            state.stop_service("rustfs").unwrap();
+            assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));
+        }
+    }
+
+    #[test]
     #[ignore = "requires verified NSB_VERIFY_CONSUL_OLD executable (2.0.3) and NSB_VERIFY_CONSUL_ZIP (2.0.4)"]
     fn native_consul_keeps_kv_and_services_across_restart_port_change_and_upgrade() {
         let old_program = std::env::var_os("NSB_VERIFY_CONSUL_OLD").expect("set NSB_VERIFY_CONSUL_OLD");

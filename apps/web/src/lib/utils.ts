@@ -276,16 +276,19 @@ export function timeAgo(ts: number): string {
 const PRERELEASE_MARKERS = ["rc", "beta", "alpha", "dev", "preview", "snapshot", "nightly"];
 
 export function isPrerelease(v: string): boolean {
-  const low = v.toLowerCase();
-  return PRERELEASE_MARKERS.some((m) => low.includes(m));
+  return prereleaseStart(v) !== undefined;
 }
 
-/** 版本号 → 数字段。忽略 v/V 前缀（清单里 v1.19.1 与 1.19.0 并存），
- *  段内取前导数字（1.2.3rc1 → [1,2,3,1]）。与 Rust 侧 cmp_version_desc 对齐。 */
+function prereleaseStart(v: string): number | undefined {
+  const low = v.split("+")[0].toLowerCase();
+  const positions = PRERELEASE_MARKERS.map((marker) => low.indexOf(marker)).filter((i) => i >= 0);
+  return positions.length ? Math.min(...positions) : undefined;
+}
+
+/** 主版本数字段不包含预发布序号或构建号；与 Rust 侧保持一致。 */
 export function versionParts(v: string): number[] {
-  return v
-    .replace(/^[vV]/, "")
-    .split("+")[0]
+  const normalized = v.replace(/^[vV]/, "").split("+")[0];
+  return normalized.slice(0, prereleaseStart(normalized) ?? normalized.length)
     .split(/[.\-_+]/)
     .map((s) => {
       const m = s.match(/^\d+/);
@@ -305,7 +308,23 @@ export function cmpVersionDesc(a: string, b: string): number {
   const ra = isPrerelease(a) ? 1 : 0;
   const rb = isPrerelease(b) ? 1 : 0;
   if (ra !== rb) return ra - rb; // 正式版（0）排前面
-  return b.localeCompare(a);
+  return naturalVersionCompare(b.replace(/^[vV]/, ""), a.replace(/^[vV]/, ""));
+}
+
+/** 构建号和预发布序号按数字比较，不依赖浏览器语言或浮点数精度。 */
+function naturalVersionCompare(a: string, b: string): number {
+  const aa = a.toLowerCase().match(/[0-9]+|[^0-9]+/g) ?? [];
+  const bb = b.toLowerCase().match(/[0-9]+|[^0-9]+/g) ?? [];
+  for (let i = 0; i < Math.max(aa.length, bb.length); i++) {
+    let x = aa[i], y = bb[i];
+    if (x === undefined || y === undefined) return Number(x !== undefined) - Number(y !== undefined);
+    if (/^[0-9]/.test(x) && /^[0-9]/.test(y)) {
+      x = x.replace(/^0+/, ""); y = y.replace(/^0+/, "");
+      if (x.length !== y.length) return x.length - y.length;
+    }
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
 }
 
 /* ---------- 平台兼容性（与 Rust 侧 install::current_os/arch 对齐） ---------- */

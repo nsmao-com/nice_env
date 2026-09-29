@@ -1,5 +1,5 @@
 {
-  "revision": 44,
+  "revision": 46,
   "updated": "2026-09-29",
   "packages": [
     {
@@ -263,11 +263,11 @@
     },
     {
       "id": "redis",
-      "version": "5.0.14",
+      "version": "8.10.2",
       "category": "cache",
       "displayName": "Redis",
-      "description": "内存 KV 缓存（Windows 移植版），开发模式免密",
-      "homepage": "https://github.com/tporadowski/redis",
+      "description": "内存 KV 缓存（redis-windows 社区 Windows 构建），默认仅监听本机",
+      "homepage": "https://github.com/redis-windows/redis-windows",
       "os": [
         "windows"
       ],
@@ -275,10 +275,10 @@
         "x64"
       ],
       "kind": "archive",
-      "url": "https://github.com/tporadowski/redis/releases/download/v5.0.14.1/Redis-x64-5.0.14.1.zip",
-      "sha256": "018ea18a35876383cbb5f4cd0258adfc87747cf9d619bce1cf73a2e36f720ccf",
-      "sizeBytes": 12617669,
-      "entry": "redis-server.exe",
+      "url": "https://github.com/redis-windows/redis-windows/releases/download/8.10.2/Redis-8.10.2-Windows-x64-msys2.zip",
+      "sha256": "7c8cebd50347eaa1d9e784da842ed47a4f33394637835531d6614777b950ee85",
+      "sizeBytes": 13938657,
+      "entry": "Redis-8.10.2-Windows-x64-msys2/redis-server.exe",
       "defaultPort": 26379,
       "run": {
         "args": [
@@ -316,6 +316,30 @@
         ],
         "singleInstance": true
       }
+    },
+    {
+      "id": "adminer",
+      "version": "6.1.1",
+      "category": "tool",
+      "displayName": "Adminer 4.8.1",
+      "description": "单文件数据库管理器，作为内置站点挂载（Phase 3 启用）",
+      "homepage": "https://adminer.org",
+      "os": [
+        "windows",
+        "macos"
+      ],
+      "arch": [
+        "x64",
+        "arm64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/vrana/adminer/releases/download/v6.1.1/adminer-6.1.1.php",
+      "sha256": "49c4d400994ef74bbb1b1b4d06c05445c1ba49ba3766b9092dce157750e09303",
+      "sizeBytes": 562723,
+      "entry": "adminer.php",
+      "requires": [
+        "php"
+      ]
     },
     {
       "id": "adminer",
@@ -568,6 +592,38 @@
         ],
         "singleInstance": true,
         "dataDir": "postgresql"
+      }
+    },
+    {
+      "id": "mongodb",
+      "version": "9.0.2",
+      "category": "database",
+      "displayName": "MongoDB 8.0",
+      "description": "文档数据库（官方 zip 发行，含 mongod/mongos）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://fastdl.mongodb.org/windows/mongodb-windows-x86_64-9.0.2.zip",
+      "sha256": "2cabba2e80b90bcd1c1096845711975199104148c849a007984cb3ee4d237406",
+      "sizeBytes": 0,
+      "entry": "mongodb-win32-x86_64-windows-9.0.2/bin/mongod.exe",
+      "homepage": "https://www.mongodb.com",
+      "defaultPort": 28017,
+      "run": {
+        "args": [
+          "--dbpath",
+          "{data}",
+          "--port",
+          "{port}",
+          "--bind_ip",
+          "127.0.0.1"
+        ],
+        "singleInstance": true,
+        "dataDir": "mongodb"
       }
     },
     {
@@ -1108,6 +1164,39 @@
     },
     {
       "id": "mailpit",
+      "version": "1.31.3",
+      "category": "mail",
+      "displayName": "Mailpit",
+      "description": "邮件测试服务器：拦截并预览所有外发邮件（本地开发必备）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/axllent/mailpit/releases/download/v1.31.3/mailpit-windows-amd64.zip",
+      "sizeBytes": 10492621,
+      "entry": "mailpit.exe",
+      "homepage": "https://mailpit.axllent.org",
+      "sha256": "863e9502d4e0f14a78c0f91c5091797b1c7b7b7e3fc7e5eab62e5770ce44b76e",
+      "defaultPort": 8025,
+      "run": {
+        "args": [
+          "--database",
+          "{data}/mailpit.db",
+          "--listen",
+          "127.0.0.1:{port}",
+          "--smtp",
+          "127.0.0.1:{port-7000}",
+          "--disable-version-check"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 12
+      }
+    },
+    {
+      "id": "mailpit",
       "version": "v1.31.1",
       "category": "mail",
       "displayName": "Mailpit",
@@ -1137,6 +1226,37 @@
         ],
         "health": "tcp",
         "healthTimeoutSec": 12
+      }
+    },
+    {
+      "id": "meilisearch",
+      "version": "1.54.1",
+      "category": "search",
+      "displayName": "Meilisearch",
+      "description": "轻量全文搜索引擎，开箱即用的中文搜索体验",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/meilisearch/meilisearch/releases/download/v1.54.1/meilisearch-windows-amd64.exe",
+      "sizeBytes": 352484352,
+      "entry": "meilisearch-windows-amd64.exe",
+      "homepage": "https://meilisearch.com",
+      "sha256": "b011d3cb78683b77d0f4c9fd9c1e71c56475b259ca65c46a886524457d7c5818",
+      "defaultPort": 7700,
+      "run": {
+        "args": [
+          "--db-path",
+          "{data}",
+          "--http-addr",
+          "127.0.0.1:{port}",
+          "--no-analytics"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 15
       }
     },
     {
@@ -1304,13 +1424,14 @@
           "--console-enable",
           "--console-address",
           ":{port+1}",
-          "{data}/rustfs-data"
+          "."
         ],
         "health": "tcp",
         "healthTimeoutSec": 20,
         "initDirs": [
           "rustfs-data"
-        ]
+        ],
+        "cwd": "{data}/rustfs-data"
       },
       "note": "上游只有一个稳定版 1.0.0（其余是 1.0.1-preview.* 预发布），暂无可补的稳定版本。"
     },
@@ -1380,6 +1501,38 @@
           "temurin-jdk21"
         ],
         "cwd": "{root}"
+      }
+    },
+    {
+      "id": "memcached",
+      "version": "1.6.45",
+      "category": "cache",
+      "displayName": "Memcached",
+      "description": "高性能内存对象缓存（nono303 Windows 社区构建，Cygwin / SSE2）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/nono303/memcached/archive/e78f75a8f8606409a090a1a88a682a1f9be47c20.zip",
+      "sizeBytes": 17187402,
+      "entry": "memcached-e78f75a8f8606409a090a1a88a682a1f9be47c20/libevent-2.1/x64/memcached.exe",
+      "homepage": "https://github.com/nono303/memcached",
+      "sha256": "380362e17c7454d91b9ebcdbfafa835fa5fda4d8ee2dfb5d4bb7e1293b7bfc59",
+      "defaultPort": 11211,
+      "run": {
+        "args": [
+          "-p",
+          "{port}",
+          "-l",
+          "127.0.0.1",
+          "-m",
+          "512"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 10
       }
     },
     {
@@ -1469,6 +1622,38 @@
         ],
         "health": "tcp",
         "healthTimeoutSec": 30
+      }
+    },
+    {
+      "id": "etcd",
+      "version": "3.7.2",
+      "category": "service-mesh",
+      "displayName": "etcd",
+      "description": "分布式 KV 存储（K8s 同款；Windows 为官方 Tier 3 支持）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/etcd-io/etcd/releases/download/v3.7.2/etcd-v3.7.2-windows-amd64.zip",
+      "sizeBytes": 24508798,
+      "entry": "etcd-v3.7.2-windows-amd64/etcd.exe",
+      "homepage": "https://etcd.io",
+      "sha256": "76989536a5f333642687fbd85603087c3deb4d316fd86fdfb63897b05f851cf4",
+      "defaultPort": 2379,
+      "run": {
+        "args": [
+          "--data-dir",
+          "{data}",
+          "--listen-client-urls",
+          "http://127.0.0.1:{port}",
+          "--advertise-client-urls",
+          "http://127.0.0.1:{port}"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 20
       }
     },
     {
@@ -1837,6 +2022,25 @@
       "entry": "zig-x86_64-windows-0.16.0/zig.exe",
       "homepage": "https://ziglang.org",
       "sha256": "68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e"
+    },
+    {
+      "id": "temurin-jdk21",
+      "version": "21.0.12.1+1",
+      "category": "runtime",
+      "displayName": "Temurin JDK 21 LTS",
+      "description": "Eclipse Temurin OpenJDK 21（Tomcat / Gradle / Neo4j 依赖它）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_x64_windows_hotspot_21.0.12.1_1.zip",
+      "sizeBytes": 205073461,
+      "entry": "jdk-21.0.12.1+1/bin/java.exe",
+      "homepage": "https://adoptium.net",
+      "sha256": "f9d6e191ab098c0d416e7d588a24420a8621cd2f4720dab2459b8b7b2d2d8b4e"
     },
     {
       "id": "temurin-jdk21",

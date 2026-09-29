@@ -71,11 +71,11 @@ fn builtin_source(id: &str) -> Option<VersionSource> {
             "qdrant.exe",
         ),
         "memcached" => (
-            "github",
-            "jefyt/memcached-windows",
+            "memcached",
+            "nono303/memcached",
             "",
-            r"memcached-.*-win64.*\.zip$",
-            "memcached-{version}-win64-mingw/bin/memcached.exe",
+            "",
+            "memcached-{version}/libevent-2.1/x64/memcached.exe",
         ),
         "etcd" => (
             "github",
@@ -214,10 +214,10 @@ fn builtin_source(id: &str) -> Option<VersionSource> {
         ),
         "redis" => (
             "github",
-            "tporadowski/redis",
-            "v",
-            r"^Redis-x64-[\d.]+\.zip$",
-            "redis-server.exe",
+            "redis-windows/redis-windows",
+            "",
+            r"^Redis-[\d.]+-Windows-x64-msys2\.zip$",
+            "Redis-{version}-Windows-x64-msys2/redis-server.exe",
         ),
         "strawberry-perl" => (
             "github",
@@ -291,12 +291,7 @@ fn builtin_source(id: &str) -> Option<VersionSource> {
             "python" => Some(r"^3\.(?:9|[1-9]\d+)\.".to_string()),
             _ => None,
         },
-        // memcached 的 tag 形如 `1.6.8_mingw_libressl`；安装路径只认 `1.6.8`
-        version_strip: if id == "memcached" {
-            Some(r"^(\d+(?:\.\d+)+).*$".to_string())
-        } else {
-            None
-        },
+        version_strip: None,
         max_versions: Some(
             if matches!(id, "php" | "node" | "python" | "go" | "nginx") {
                 80
@@ -361,8 +356,8 @@ pub async fn catalog(
         "{src:?}:{:?}:{:?}:{}:{}",
         template.os, template.arch, template.entry, template.kind
     );
-    // Apache 旧缓存不含官方 SHA256，升级后重新读取，不能继续按无校验条目安装。
-    let cache_revision = if src.kind == "apache" { "v3" } else { "v2" };
+    // v4 重新枚举旧排序结果，同时废弃缺少 Apache 官方 SHA256 的更早缓存。
+    let cache_revision = "v4";
     let cache_key = format!(
         "versionCatalog:{cache_revision}:{}:{:x}",
         template.id,
@@ -1057,18 +1052,45 @@ pub fn cmp_version_desc(a: &str, b: &str) -> std::cmp::Ordering {
     match (is_prerelease(a), is_prerelease(b)) {
         (false, true) => std::cmp::Ordering::Less,
         (true, false) => std::cmp::Ordering::Greater,
-        _ => b.cmp(a),
+        _ => natural_version_cmp(b.trim_start_matches(['v', 'V']), a.trim_start_matches(['v', 'V'])),
     }
 }
 
 /// 预发布判定：出现 rc / beta / alpha / dev / preview / snapshot 等标记
-fn is_prerelease(v: &str) -> bool {
-    let low = v.to_ascii_lowercase();
+pub(crate) fn is_prerelease(v: &str) -> bool {
+    prerelease_start(v).is_some()
+}
+
+fn prerelease_start(v: &str) -> Option<usize> {
+    let low = v.split('+').next().unwrap_or(v).to_ascii_lowercase();
     [
         "rc", "beta", "alpha", "dev", "preview", "snapshot", "nightly",
     ]
     .iter()
-    .any(|m| low.contains(m))
+    .filter_map(|m| low.find(m))
+    .min()
+}
+
+// 同一主版本下按数字比较构建号、预发布序号（+10 > +9、rc.10 > rc.9）。
+// 不转浮点数，避免长数字丢失精度；前后端使用相同的自然排序规则。
+fn natural_version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    static TOKENS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"[0-9]+|[^0-9]+").unwrap());
+    let a = a.to_ascii_lowercase();
+    let b = b.to_ascii_lowercase();
+    let mut aa = TOKENS.find_iter(&a);
+    let mut bb = TOKENS.find_iter(&b);
+    loop {
+        let (x, y) = match (aa.next(), bb.next()) {
+            (Some(x), Some(y)) => (x.as_str(), y.as_str()),
+            (x, y) => return x.is_some().cmp(&y.is_some()),
+        };
+        let order = if x.as_bytes()[0].is_ascii_digit() && y.as_bytes()[0].is_ascii_digit() {
+            let x = x.trim_start_matches('0');
+            let y = y.trim_start_matches('0');
+            x.len().cmp(&y.len()).then_with(|| x.cmp(y))
+        } else { x.cmp(y) };
+        if !order.is_eq() { return order; }
+    }
 }
 
 fn version_parts(v: &str) -> Vec<u64> {
@@ -1078,9 +1100,11 @@ fn version_parts(v: &str) -> Vec<u64> {
         .split('+')
         .next()
         .unwrap_or(v);
+    // rc.10 等后缀不属于主版本，不能使预发布排到同号正式版之前。
+    let v = &v[..prerelease_start(v).unwrap_or(v.len())];
     v.split(['.', '-', '_', '+'])
         .map(|s| {
-            // 取段内前导数字：1.2.3rc1 → 1,2,3(,1)
+            // 保留日期版本和发行包编号中的数字段。
             let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
             digits.parse().unwrap_or(0)
         })
@@ -1239,5 +1263,12 @@ mod tests {
         for x in &v[1..] {
             assert!(is_prerelease(x), "{x} 应是预发布");
         }
+        assert_eq!(sorted(&["1.2.3-rc.9", "1.2.3-rc.10", "1.2.3", "1.2.3-beta.2"]),
+            ["1.2.3", "1.2.3-rc.10", "1.2.3-rc.9", "1.2.3-beta.2"]);
+        assert_eq!(sorted(&["21.0.9+9", "21.0.9+10", "21.0.10+1"]),
+            ["21.0.10+1", "21.0.9+10", "21.0.9+9"]);
+        assert!(cmp_version_desc("v1.2.3", "1.2.3").is_eq());
+        assert!(!is_prerelease("1.2.3+dev.build"));
+        assert_eq!(sorted(&["4.0.7-9", "4.0.7-10"]), ["4.0.7-10", "4.0.7-9"]);
     }
 }

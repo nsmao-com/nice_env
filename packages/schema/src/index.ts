@@ -96,7 +96,7 @@ export type ServiceRunSpec = z.infer<typeof ServiceRunSpec>;
 export const VersionSource = z.object({
   /** github=Release API；其余动态源读取对应的官方发行索引或下载页。
    * static=仅用清单内固定版本。 */
-  kind: z.enum(["github", "nodejs", "php", "go", "nginx", "python", "composer", "consul", "gradle", "zig", "dotnet", "flutter", "mongodb", "mongodb-tools", "mysql", "mariadb", "postgresql", "apache", "tomcat", "elasticsearch", "neo4j", "rustup", "phpmyadmin", "static"]),
+  kind: z.enum(["github", "memcached", "nodejs", "php", "go", "nginx", "python", "composer", "consul", "gradle", "zig", "dotnet", "flutter", "mongodb", "mongodb-tools", "mysql", "mariadb", "postgresql", "apache", "tomcat", "elasticsearch", "neo4j", "rustup", "phpmyadmin", "static"]),
   /** github：owner/repo */
   repo: z.string().optional(),
   /** github：匹配发行包文件名的正则（每个 release 取第一个命中的 asset） */

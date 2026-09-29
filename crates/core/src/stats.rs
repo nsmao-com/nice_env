@@ -217,7 +217,7 @@ pub struct RedisConnectionInfo {
     pub has_password: bool,
 }
 
-struct RedisClient(std::io::BufReader<std::net::TcpStream>);
+struct RedisClient(std::io::BufReader<std::net::TcpStream>, Option<u32>);
 
 enum RedisReply {
     Simple(String),
@@ -245,6 +245,7 @@ impl RedisClient {
         stream.set_read_timeout(Some(Duration::from_secs(2)))?;
         stream.set_write_timeout(Some(Duration::from_secs(2)))?;
         // 先建立连接，再核对当前监听归属；任何凭据都只能发给本应用的实例。
+        let mut verified_pid = None;
         if let Some(pids) = expected_pids {
             let listeners = crate::ports::listeners()?;
             let owners: Vec<_> = listeners.iter().filter(|(p, _)| *p == port).collect();
@@ -254,8 +255,12 @@ impl RedisClient {
                     "Redis 端口归属与当前实例不符，未发送连接密码",
                 ));
             }
+            let first = owners[0].1;
+            if owners.iter().all(|(_, pid)| *pid == first) {
+                verified_pid = Some(first);
+            }
         }
-        let mut client = Self(std::io::BufReader::new(stream));
+        let mut client = Self(std::io::BufReader::new(stream), verified_pid);
         if !credentials.password.is_empty() {
             let args = if credentials.username.is_empty() || credentials.username == "default" {
                 vec!["AUTH", credentials.password.as_str()]
@@ -271,6 +276,22 @@ impl RedisClient {
             }
         }
         Ok(client)
+    }
+
+    fn native_process_info(&self, info: String) -> String {
+        // MSYS2/Cygwin 的 INFO process_id 是 POSIX PID，不能与 Windows PID 比较。
+        // 仅对已通过系统监听表核验的托管连接使用原生 PID；未验证的连接绝不猜测归属。
+        let posix = cfg!(windows) && info.lines().any(|line| {
+            line.starts_with("os:MSYS_") || line.starts_with("os:CYGWIN_")
+        });
+        if let Some(pid) = self.1.filter(|_| posix) {
+            return info.lines().map(|line| {
+                if line.strip_prefix("process_id:").is_some_and(|v| v.trim().parse::<u32>().is_ok_and(|p| p > 0)) {
+                    format!("process_id:{pid}")
+                } else { line.to_string() }
+            }).collect::<Vec<_>>().join("\r\n");
+        }
+        info
     }
 
     fn command(&mut self, args: &[&str]) -> crate::error::Result<RedisReply> {
@@ -465,7 +486,7 @@ impl RedisClient {
         pids: &[u32],
     ) -> crate::error::Result<RedisPersistence> {
         if let RedisReply::Bulk(info) = self.command(&["INFO"])? {
-            return persistence_info(&info, version, pids);
+            return persistence_info(&self.native_process_info(info), version, pids);
         }
         Err(crate::error::AppError::new(
             "REDIS_PROTOCOL_ERROR",
@@ -517,7 +538,16 @@ pub(crate) fn redis_rdb_file(
         }
         Err(AppError::new("REDIS_STORAGE_UNKNOWN", "无法确认 Redis 实际 RDB 保存位置"))
     };
-    let directory = std::path::PathBuf::from(config("dir")?);
+    let directory = config("dir")?;
+    // 新版 Windows Redis 的 CONFIG GET dir 返回 /cygdrive/c/...。
+    // 转回原生路径后仍执行相同的 canonicalize 与托管目录归属检查。
+    let directory = if cfg!(windows) {
+        directory.strip_prefix("/cygdrive/")
+            .filter(|p| p.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) && p.as_bytes().get(1) == Some(&b'/'))
+            .map(|p| format!("{}:{}", &p[..1], &p[1..]))
+            .unwrap_or(directory)
+    } else { directory };
+    let directory = std::path::PathBuf::from(directory);
     let expected = crate::paths::checked_data_path(&paths.base, "data/redis")?;
     if !directory.is_absolute() || directory.canonicalize()? != expected.canonicalize()? {
         return Err(AppError::new("REDIS_STORAGE_UNMANAGED", "Redis 使用了非托管数据目录，请在外部管理该目录的备份"));
@@ -612,6 +642,7 @@ pub(crate) fn redis_stats_authenticated(
     let RedisReply::Bulk(info) = client.command(&["INFO"])? else {
         return Err(invalid());
     };
+    let info = client.native_process_info(info);
     let get = |key: &str| {
         info.lines()
             .filter_map(|line| line.split_once(':'))

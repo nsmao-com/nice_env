@@ -399,6 +399,7 @@ export type SiteCors = z.infer<typeof SiteCors>;
 export const SiteProxyRule = z.object({ path: z.string(), target: z.string(), stripPrefix: z.boolean() });
 export type SiteProxyRule = z.infer<typeof SiteProxyRule>;
 export const SiteRuntime = z.object({
+  httpsRedirect: z.union([z.literal(307), z.literal(308)]).optional(),
   proxyRules: z.array(SiteProxyRule).max(16).optional(),
   cors: SiteCors.optional(),
   redirect: SiteRedirect.optional(),

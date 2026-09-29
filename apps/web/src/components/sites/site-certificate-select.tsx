@@ -11,6 +11,27 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSepa
 
 export type SiteCertificateBinding = Pick<SiteRuntime, "importedCertId" | "acmeCertId">;
 
+export function SiteHttpsRedirectSelect({ id, value, onChange, disabled = false }: {
+  id: string; value: SiteRuntime["httpsRedirect"];
+  onChange: (value: SiteRuntime["httpsRedirect"]) => void; disabled?: boolean;
+}) {
+  const t = useT();
+  return <div className="flex min-w-0 flex-col gap-2">
+    <Label htmlFor={id}>{t("httpsRedirect.title")}</Label>
+    <Select value={value ? String(value) : "off"} disabled={disabled}
+      onValueChange={(next) => onChange(next === "307" ? 307 : next === "308" ? 308 : undefined)}>
+      <SelectTrigger id={id} aria-describedby={`${id}-hint`} className="min-w-0 [&>span]:truncate"><SelectValue /></SelectTrigger>
+      <SelectContent className="w-[var(--radix-select-trigger-width)]">
+        <SelectItem value="off">{t("httpsRedirect.off")}</SelectItem>
+        <SelectItem value="307">{t("httpsRedirect.temporary")}</SelectItem>
+        <SelectItem value="308">{t("httpsRedirect.permanent")}</SelectItem>
+      </SelectContent>
+    </Select>
+    <p id={`${id}-hint`} className="text-xs leading-relaxed text-muted">{t(value === 308 ? "httpsRedirect.permanentHint" : value === 307 ? "httpsRedirect.temporaryHint" : "httpsRedirect.offHint")}</p>
+    {value && <p className="text-xs leading-relaxed text-muted">{t("httpsRedirect.scopeHint")}</p>}
+  </div>;
+}
+
 export function useSiteCertificateSelection(binding: SiteCertificateBinding, domains: string[], enabled: boolean) {
   const t = useT();
   const query = useQuery({ queryKey: ["site-certificate-choices"], queryFn: api.siteCertificateChoices, enabled, retry: false, staleTime: 0 });

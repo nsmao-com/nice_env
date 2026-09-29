@@ -153,6 +153,9 @@ pub struct SiteApplication {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct SiteRuntime {
+    /// HTTP 入口转到本站 HTTPS；仅支持保留请求方法的 307 / 308，旧站点默认关闭。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub https_redirect: Option<u16>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub proxy_rules: Vec<SiteProxyRule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

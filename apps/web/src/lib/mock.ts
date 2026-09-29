@@ -836,6 +836,12 @@ function mockApplicationBusy(id: string) {
   return !!service && (!!service.pids.length || ["running", "starting", "stopping"].includes(service.state));
 }
 
+function validateMockHttpsRedirect(site: Pick<Site, "https" | "runtime">) {
+  if (site.runtime.httpsRedirect != null && (!site.https || ![307, 308].includes(site.runtime.httpsRedirect))) {
+    throw { code: "BAD_HTTPS_REDIRECT", message: "请先开启 HTTPS，并选择临时或永久跳转" };
+  }
+}
+
 function validateMockApplication(runtime: Site["runtime"]) {
   const app = runtime.application;
   if (!app) return;
@@ -1599,6 +1605,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "create_site": {
       return withServiceOperation(async () => {
       const input = args!.input as CreateSiteInput;
+      validateMockHttpsRedirect(input);
       if (args?.existingProject && (input.template !== "none" || input.writeEnvExample)) {
         throw { code: "EXISTING_PROJECT_WRITE", message: "使用已有项目时不能生成模板或改写项目配置" };
       }
@@ -1656,6 +1663,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (siteProxyProblem(next.runtime)) throw { code: "BAD_PROXY_RULE", message: "路径代理规则无效，请检查匹配路径和目标地址" };
       if (siteCorsProblem(next.runtime.cors)) throw { code: "BAD_CORS", message: "跨域设置无效，请检查来源、方法和请求头" };
       validateMockApplication(next.runtime);
+      validateMockHttpsRedirect(next);
       if (next.runtime.kind === "php" && Object.entries(next.phpOverrides ?? {}).some(([key, value]) => !isPhpSiteSettingValid(key, value, s.phpOverrides?.[key]))) {
         throw { code: "BAD_PHP_OVERRIDE", message: "PHP 设置不受支持或值无效，请检查后重试" };
       }

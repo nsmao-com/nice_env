@@ -234,6 +234,13 @@ fn sync_nginx_config(current: &str, generated: &str, paths: &Paths) -> Result<St
         "\n"
     };
     let mut edits = Vec::new();
+    // 兼容旧版默认配置；长域名和别名不能受 Nginx Windows 的 32 字节默认桶限制。
+    // 用户已有数值或额外 include 时保留其配置，避免与 include 中的同名指令重复。
+    if !old_http.children.iter().any(|node| node.words[0] == "server_names_hash_bucket_size")
+        && !old_http.children.iter().any(|node| node.words[0] == "include" && class(node).is_none())
+    {
+        edits.push((old_http.end - 1..old_http.end - 1, format!("{newline}    server_names_hash_bucket_size 512;{newline}")));
+    }
     for group in 0..5 {
         let (before, after, insert_at) = if group == 0 {
             (&old, &new, 0)
@@ -416,6 +423,7 @@ http {{
     sendfile        on;
     tcp_nopush      on;
     keepalive_timeout  65;
+    server_names_hash_bucket_size 512;
     server_tokens   off;
     client_max_body_size 128m;
 
@@ -558,7 +566,10 @@ pub fn render_site_conf(
     log_dir: &std::path::Path,
 ) -> String {
     let server_names = site.domains.join(" ");
-    let listen = if site.https {
+    let https_redirect = site.https.then_some(site.runtime.https_redirect).flatten();
+    let listen = if https_redirect.is_some() {
+        format!("listen 127.0.0.1:{https_port} ssl")
+    } else if site.https {
         format!("listen 127.0.0.1:{http_port};\n    listen 127.0.0.1:{https_port} ssl")
     } else {
         format!("listen 127.0.0.1:{http_port}")
@@ -618,6 +629,7 @@ pub fn render_site_conf(
     format!(
         r#"# site: {name} ({id}) — NiceEnv 托管
 {cors_maps}
+{http_redirect}
 server {{
     {listen};
     server_name {server_names};
@@ -648,6 +660,11 @@ server {{
         },
         body = cors.as_ref().map_or_else(|| body.clone(), |cors| nginx_cors_headers_in_locations(&body, &cors.headers)),
         cors_maps = cors.as_ref().map_or("", |cors| cors.maps.as_str()),
+        http_redirect = https_redirect.map(|status| {
+            let suffix = https_port_suffix(https_port);
+            let hosts = https_redirect_hosts(site);
+            format!("server {{\n    listen 127.0.0.1:{http_port};\n    server_name {server_names};\n    access_log \"{}\";\n    error_log \"{}\" warn;\n    if ($host !~* \"^(?:{hosts})$\") {{ return 421; }}\n    return {status} \"https://$host{suffix}$request_uri\";\n}}\n", nginx_path(&log_dir.join(format!("{}.access.log", site.id))), nginx_path(&log_dir.join(format!("{}.error.log", site.id))))
+        }).unwrap_or_default(),
         cors_headers = cors.as_ref().map_or("", |cors| cors.headers.as_str()),
         cors_preflight = cors.as_ref().map_or("", |cors| cors.before_content.as_str()),
         proxy_rules = crate::siteproxy::nginx(&site.runtime),
@@ -684,6 +701,16 @@ fn nginx_cors_headers_in_locations(content: &str, headers: &str) -> String {
 }
 
 /* ================= php.ini ================= */
+
+pub(crate) fn https_port_suffix(port: u16) -> String {
+    if port == 443 { String::new() } else { format!(":{port}") }
+}
+
+fn https_redirect_hosts(site: &Site) -> String {
+    site.domains.iter().map(|domain| domain.strip_prefix("*.")
+        .map(|suffix| format!("(?:[^.:]+\\.)+{}", regex::escape(suffix)))
+        .unwrap_or_else(|| regex::escape(domain))).collect::<Vec<_>>().join("|")
+}
 
 fn redirect_directives(site: &Site, apache: bool) -> String {
     let redirect = site.runtime.redirect.as_ref();
@@ -1534,6 +1561,12 @@ pub fn render_httpd_vhost(
     )
     .replace("{root}", &root);
     if site.https {
+        if let Some(status) = site.runtime.https_redirect {
+            let suffix = https_port_suffix(https_port);
+            let hosts = https_redirect_hosts(site);
+            let http = format!("# NiceEnv HTTP to HTTPS\n<VirtualHost *:{http_port}>\n    ServerName {primary}\n    ServerAlias {server_names}\n    CustomLog \"${{NSB_ETC}}/logs/{}.access.log\" \"%h %l %u %t \\\"%r\\\" %>s %b\"\n    ErrorLog \"${{NSB_ETC}}/logs/{}.error.log\"\n    AllowEncodedSlashes NoDecode\n    RewriteEngine On\n    RewriteCond %{{THE_REQUEST}} \"\\s(/[^\\s?]*)(?:\\?[^\\s]*)?\\s\"\n    RewriteRule ^ - [E=NSB_HTTPS_URI:%1]\n    RewriteCond %{{ENV:NSB_HTTPS_URI}} !^/\n    RewriteRule ^ - [R=400,L]\n    RewriteCond %{{HTTP_HOST}} \"^({hosts})(?::[0-9]+)?$\" [NC]\n    RewriteRule ^ \"https://%1{suffix}%{{ENV:NSB_HTTPS_URI}}\" [R={status},L,NE]\n    RewriteRule ^ - [R=421,L]\n</VirtualHost>\n", site.id, site.id);
+            return format!("{http}\n{vhost}");
+        }
         let http = vhost
             .replace(&listen, &format!("<VirtualHost *:{http_port}>"))
             .replace(&ssl_lines, "");
@@ -1719,6 +1752,12 @@ secret: fixture-secret
         );
         let crlf = output.replace('\n', "\r\n");
         assert_eq!(sync_nginx_config(&crlf, &generated, &paths).unwrap(), crlf);
+        let missing_bucket = output.replace("    server_names_hash_bucket_size 512;\n", "");
+        assert!(sync_nginx_config(&missing_bucket, &generated, &paths).unwrap().contains("server_names_hash_bucket_size 512;"));
+        let custom_bucket = output.replace("server_names_hash_bucket_size 512;", "server_names_hash_bucket_size 128;");
+        assert_eq!(sync_nginx_config(&custom_bucket, &generated, &paths).unwrap(), custom_bucket);
+        let included_bucket = missing_bucket.replace("http {", "http {\n    include user-options.conf;");
+        assert!(!sync_nginx_config(&included_bucket, &generated, &paths).unwrap().contains("server_names_hash_bucket_size"));
 
         let legacy = "# site: demo (fixture) — NiceEnv 托管\r\nserver {\r\n    listen 8080; # keep comment\r\n    listen 8443 ssl;\r\n    listen 0.0.0.0:9000;\r\n    listen [::1]:9001;\r\n    location / { return 200 'listen 9999;'; }\r\n}\r\n";
         let localized = localize_legacy_site_listeners(legacy).unwrap();

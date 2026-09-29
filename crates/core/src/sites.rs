@@ -269,6 +269,15 @@ pub fn runtime_status(paths: &Paths, site: &Site, manager: &ServiceManager) -> &
 }
 
 /// 创建与编辑使用相同校验，所有写文件和保存记录操作必须在校验之后。
+pub(crate) fn validate_https_redirect(https: bool, runtime: &crate::model::SiteRuntime) -> Result<()> {
+    if let Some(status) = runtime.https_redirect {
+        if !https || !matches!(status, 307 | 308) {
+            return Err(AppError::new("BAD_HTTPS_REDIRECT", "请先开启 HTTPS；HTTP 跳转仅支持临时跳转（307）或永久跳转（308）"));
+        }
+    }
+    Ok(())
+}
+
 fn validate_site_fields(
     name: &str,
     domains: &[String],
@@ -555,6 +564,7 @@ fn create_inner(
             read_project_pin(&normalized.root_dir).map(|(_, version)| version);
     }
     let input = &normalized;
+    validate_https_redirect(input.https, &input.runtime)?;
     if let Some((project, allow_unverified)) = existing_project {
         validate_existing_project(input, project)?;
         validate_existing_php(input, project, allow_unverified, paths, store)?;
@@ -1237,6 +1247,7 @@ fn start_site_inner(
 ) -> Result<()> {
     let _operation = manager.lifecycle.lock();
     let site = get(store, id)?;
+    validate_https_redirect(site.https, &site.runtime)?;
     validate_site_fields(
         &site.name,
         &site.domains,
@@ -2790,6 +2801,7 @@ mod scaffold_tests {
             domains: vec!["t.test".into()],
             root_dir: String::new(),
             runtime: SiteRuntime {
+            https_redirect: None,
             proxy_rules: Vec::new(),
             cors: None,
             redirect: None,
@@ -3535,6 +3547,15 @@ mod scaffold_tests {
         redirect.status = 200; assert!(redirect_url(&redirect, &domains).is_err());
         let old: SiteRuntime = serde_json::from_value(serde_json::json!({"kind":"static","webServer":"nginx"})).unwrap();
         assert!(old.redirect.is_none());
+        assert!(old.https_redirect.is_none());
+        let mut policy = old.clone();
+        for status in [307, 308] {
+            policy.https_redirect = Some(status);
+            assert!(validate_https_redirect(true, &policy).is_ok());
+            assert_eq!(validate_https_redirect(false, &policy).unwrap_err().code, "BAD_HTTPS_REDIRECT");
+        }
+        policy.https_redirect = Some(301);
+        assert!(validate_https_redirect(true, &policy).is_err());
         let temp = tempfile::tempdir().unwrap();
         let paths = Paths::new(temp.path().into()); paths.ensure_dirs().unwrap();
         let store = Store::open(paths.db()).unwrap();
@@ -3546,6 +3567,156 @@ mod scaffold_tests {
         assert_eq!(crate::sitebackup::scope(&store, &site.id, true, true).unwrap_err().code, "SITE_NO_PROJECT");
         assert_eq!(crate::pathenv::project_runtime_versions(&store, &crate::install::Installer::bundled().manifest, &site.id).unwrap_err().code, "SITE_NO_PROJECT");
         assert!(!crate::pathenv::project_references_version(&store, &site, "node", "22.0.0").unwrap());
+    }
+
+
+    #[test]
+    #[ignore = "requires native Nginx, Apache, Caddy and NSB_SKIP_HOSTS=1; isolated HTTPS redirects"]
+    fn https_redirect_native_servers() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        assert_eq!(std::env::var("NSB_SKIP_HOSTS").as_deref(), Ok("1"));
+        let upstream = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let upstream_port = upstream.local_addr().unwrap().port();
+        upstream.set_nonblocking(true).unwrap();
+        let stopping = Arc::new(AtomicBool::new(false));
+        let stopped = stopping.clone();
+        let thread = std::thread::spawn(move || {
+            while !stopped.load(Ordering::Relaxed) {
+                let Ok((mut stream, _)) = upstream.accept() else { std::thread::sleep(std::time::Duration::from_millis(10)); continue; };
+                stream.set_nonblocking(false).unwrap();
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+                let mut request = Vec::new(); let mut chunk = [0; 4096];
+                let end = loop {
+                    let count = stream.read(&mut chunk).unwrap_or(0); if count == 0 { break None; }
+                    request.extend_from_slice(&chunk[..count]);
+                    if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]);
+                        let size = headers.lines().filter_map(|line| line.split_once(':'))
+                            .find(|(name, _)| name.eq_ignore_ascii_case("Content-Length"))
+                            .and_then(|(_, value)| value.trim().parse::<usize>().ok()).unwrap_or(0);
+                        if request.len() >= end + 4 + size { break Some(end); }
+                    }
+                    if request.len() > 65536 { break None; }
+                };
+                let Some(end) = end else { continue; };
+                let headers = String::from_utf8_lossy(&request[..end]);
+                let first: Vec<_> = headers.lines().next().unwrap().split_whitespace().collect();
+                let body = serde_json::json!({"method":first[0], "uri":first[1], "body":String::from_utf8_lossy(&request[end+4..])}).to_string();
+                let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        struct Upstream(Arc<AtomicBool>, Option<std::thread::JoinHandle<()>>);
+        impl Drop for Upstream { fn drop(&mut self) { self.0.store(true, Ordering::Relaxed); if let Some(thread) = self.1.take() { let _ = thread.join(); } } }
+        let _upstream = Upstream(stopping, Some(thread));
+        for (server, version, variable, http_key, https_key) in [
+            ("nginx", "1.28.1", "NSB_NGINX_ROOT", "http", "https"),
+            ("apache", "2.4.66", "NSB_APACHE_ROOT", "apacheHttp", "apacheHttps"),
+            ("caddy", "2.11.4", "NSB_VERIFY_CADDY", "caddy", "caddyHttps"),
+        ] {
+            if std::env::var("NSB_HTTPS_SERVER").is_ok_and(|selected| selected != server) { continue; }
+            let root = PathBuf::from(std::env::var_os(variable).expect(variable));
+            let temp = tempfile::tempdir().unwrap();
+            let state = crate::CoreState::init(Some(temp.path().join("HTTPS redirects with spaces")), Arc::new(|_|{})).unwrap();
+            struct Cleanup(Arc<crate::CoreState>, &'static str);
+            impl Drop for Cleanup { fn drop(&mut self) { let _ = self.0.stop_service(self.1); } }
+            let _cleanup = Cleanup(state.clone(), server);
+            let http = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let tls = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut port = http.local_addr().unwrap().port(); let mut tls_port = tls.local_addr().unwrap().port();
+            state.store.set_port_override(http_key, Some(port)).unwrap();
+            state.store.set_port_override(https_key, Some(tls_port)).unwrap();
+            state.store.upsert_installed(&crate::model::InstalledPackage { id:server.into(), version:version.into(),
+                category:"web-server".into(), install_path:root.parent().unwrap().to_string_lossy().into(), config_path:String::new(), installed_at:1 }).unwrap();
+            let project = temp.path().join("web project"); std::fs::create_dir_all(&project).unwrap();
+            std::fs::write(project.join("index.html"), "https-static").unwrap();
+            let creation: CreateSiteInput = serde_json::from_value(serde_json::json!({
+                "name":"HTTPS redirects","domains":["secure-redirect.test","alias.secure-redirect.test","*.wild-redirect.test"],
+                "rootDir":project,"https":true,"rewrite":"none","template":"none","writeEnvExample":false,
+                "runtime":{"kind":"static","webServer":server,"httpsRedirect":307}
+            })).unwrap();
+            drop((http,tls));
+            let mut site = create(&creation, &state.paths, &state.store, &state.manager).unwrap_or_else(|error| panic!("{server}: {error:?}"));
+            let domains = ["secure-redirect.test","alias.secure-redirect.test","one.wild-redirect.test"];
+            let build_client = |follow| {
+                let ca = std::fs::read(state.paths.certs().join("ca.crt")).unwrap();
+                let mut builder = reqwest::blocking::Client::builder().no_proxy()
+                    .add_root_certificate(reqwest::Certificate::from_pem(&ca).unwrap())
+                    .timeout(std::time::Duration::from_secs(5))
+                    .redirect(if follow { reqwest::redirect::Policy::limited(5) } else { reqwest::redirect::Policy::none() });
+                for domain in domains { builder = builder.resolve(domain, ([127,0,0,1],0).into()); }
+                builder.build().unwrap()
+            };
+            let client = build_client(false); let follow = build_client(true);
+            assert_eq!(follow.get(format!("http://secure-redirect.test:{port}/")).send().unwrap().text().unwrap(), "https-static", "{server}");
+            assert_eq!(running_url(&state.paths, site.clone(), &state.manager).unwrap(), format!("https://secure-redirect.test:{tls_port}"));
+            site.runtime.kind = SiteKind::ReverseProxy;
+            site.runtime.proxy_target = Some(format!("http://127.0.0.1:{upstream_port}"));
+            for status in [307,308] {
+                site.runtime.https_redirect = Some(status);
+                site = update(&site, &state.paths, &state.store, &state.manager).unwrap();
+                for domain in domains {
+                    for resource in ["/", "/docs/start?next=%2Fhome", "/a%20b/%E4%B8%AD?x=%23part", "/encoded%2Fslash?q=a+b", "/encoded%3Fquestion?x=1"] {
+                        let address = format!("http://{domain}:{port}{resource}");
+                        let response = client.post(&address).body("preserve=body").send().unwrap();
+                        assert_eq!(response.status().as_u16(),status,"{server} {domain} {resource}");
+                        assert_eq!(response.headers()["location"],format!("https://{domain}:{tls_port}{resource}"),"{server}");
+                        let response = follow.post(&address).body("preserve=body").send().unwrap();
+                        assert_eq!(response.url().as_str(),format!("https://{domain}:{tls_port}{resource}"),"{server}");
+                        let redirected_status = response.status();
+                        let result = response.text().unwrap();
+                        let direct = client.post(format!("https://{domain}:{tls_port}{resource}")).body("preserve=body").send().unwrap();
+                        assert_eq!(redirected_status, direct.status(), "{server} {resource}");
+                        // 上游路径规范化由 Web 服务自身负责；跳转后的请求必须与直接 HTTPS 完全一致。
+                        assert_eq!(result,direct.text().unwrap(),"{server} {resource}");
+                        if redirected_status.is_success() {
+                            let result:serde_json::Value = serde_json::from_str(&result).unwrap();
+                            assert_eq!(result["method"],"POST","{server}"); assert_eq!(result["body"],"preserve=body","{server}");
+                        } else {
+                            // Apache 默认拒绝编码斜杠；仍须原样跳到 HTTPS，由同一规则决定是否接受。
+                            assert!(resource.starts_with("/encoded") && matches!(redirected_status.as_u16(),400|403|404),"{server} {resource}: {result}");
+                        }
+                    }
+                }
+                let wrong_host = client.get(format!("http://127.0.0.1:{port}/")).header("Host","unconfigured.invalid").send().unwrap();
+                assert!(!wrong_host.status().is_redirection(),"{server}: unconfigured host redirected");
+            }
+            let mut invalid = site.clone(); invalid.https = false;
+            assert_eq!(update(&invalid,&state.paths,&state.store,&state.manager).unwrap_err().code,"BAD_HTTPS_REDIRECT");
+            invalid = site.clone(); invalid.runtime.https_redirect = Some(301);
+            assert_eq!(update(&invalid,&state.paths,&state.store,&state.manager).unwrap_err().code,"BAD_HTTPS_REDIRECT");
+            invalid = site.clone(); invalid.runtime.kind = SiteKind::Static; invalid.runtime.proxy_target = None;
+            invalid.runtime.custom_rewrite = Some(crate::model::CustomRewrite { name:"invalid native".into(),server:server.into(),
+                content:match server {"nginx"=>"location / { unknown_directive; }","apache"=>"RewriteRule",_=>"rewrite"}.into() });
+            assert!(update(&invalid,&state.paths,&state.store,&state.manager).is_err(),"{server}");
+            assert_eq!(client.get(format!("http://secure-redirect.test:{port}/")).send().unwrap().status().as_u16(),308);
+            let next_tls = std::net::TcpListener::bind("127.0.0.1:0").unwrap(); tls_port=next_tls.local_addr().unwrap().port();
+            state.store.set_port_override(https_key,Some(tls_port)).unwrap(); drop(next_tls);
+            site = update(&site,&state.paths,&state.store,&state.manager).unwrap();
+            assert_eq!(client.get(format!("http://secure-redirect.test:{port}/")).send().unwrap().headers()["location"],format!("https://secure-redirect.test:{tls_port}/"));
+            if server == "caddy" {
+                state.stop_service(server).unwrap();
+                let occupied = std::net::TcpListener::bind(("127.0.0.1",port)).unwrap();
+                state.store.set_setting("autoFallbackPort","true").unwrap(); state.start_service(server).unwrap();
+                let next_port = state.manager.snapshot(server).unwrap().port.unwrap(); assert_ne!(next_port,port); port=next_port; drop(occupied);
+                assert_eq!(client.get(format!("http://secure-redirect.test:{port}/")).send().unwrap().headers()["location"],format!("https://secure-redirect.test:{tls_port}/"));
+            }
+            let backup = temp.path().join("https.json"); crate::transfer::export_to(&state.store,&backup).unwrap();
+            let imported_paths = Paths::new(temp.path().join("imported")); imported_paths.ensure_dirs().unwrap();
+            let imported_store = Store::open(imported_paths.db()).unwrap();
+            crate::transfer::import_from(&backup,&imported_paths,&imported_store,&Arc::new(ServiceManager::new())).unwrap();
+            assert_eq!(get(&imported_store,&site.id).unwrap().runtime.https_redirect,Some(308));
+            stop_site(&site.id,&state.paths,&state.store,&state.manager).unwrap();
+            start_site(&site.id,&state.paths,&state.store,&state.manager).unwrap();
+            assert_eq!(client.get(format!("http://secure-redirect.test:{port}/")).send().unwrap().status().as_u16(),308);
+            site.runtime.https_redirect = None;
+            site = update(&site,&state.paths,&state.store,&state.manager).unwrap();
+            assert_eq!(client.get(format!("http://secure-redirect.test:{port}/")).send().unwrap().status(),200);
+            assert_eq!(client.get(format!("https://secure-redirect.test:{tls_port}/")).send().unwrap().status(),200);
+            site.https=false; update(&site,&state.paths,&state.store,&state.manager).unwrap();
+            assert_eq!(client.get(format!("http://secure-redirect.test:{port}/")).send().unwrap().status(),200);
+            println!("{server}: HTTPS redirects, aliases/wildcard, encoded URI/query, POST body, trusted TLS, port changes, rollback, disable, lifecycle and backup passed");
+        }
     }
 
     #[test]

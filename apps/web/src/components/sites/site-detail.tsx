@@ -29,7 +29,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ConfirmDialog } from "@/components/shared/misc";
 
-import { SiteCertificateSelect, useSiteCertificateSelection } from "./site-certificate-select";
+import { SiteCertificateSelect, SiteHttpsRedirectSelect, useSiteCertificateSelection } from "./site-certificate-select";
 import { SitePhpSettings } from "./site-php-settings";
 import { ProjectPlatformCheck } from "./project-platform-check";
 import { SiteApplicationFields } from "./site-application-fields";
@@ -398,7 +398,7 @@ export function SiteDetailSheet({
             <Switch
               aria-label="HTTPS"
               checked={draft.https}
-              onCheckedChange={(https) => setDraft({ ...draft, https })}
+              onCheckedChange={(https) => setDraft({ ...draft, https, runtime: { ...draft.runtime, httpsRedirect: https ? draft.runtime.httpsRedirect : undefined } })}
               disabled={busy}
             />
           </div>
@@ -407,6 +407,8 @@ export function SiteDetailSheet({
             <SiteCertificateSelect id="site-edit-cert" selection={certificateSelection} disabled={busy}
               onChange={(binding) => setDraft({ ...draft, runtime: { ...draft.runtime, ...binding } })} />
           )}
+          {draft.https && <SiteHttpsRedirectSelect id="site-edit-https-redirect" value={draft.runtime.httpsRedirect} disabled={busy}
+            onChange={(httpsRedirect) => setDraft({ ...draft, runtime: { ...draft.runtime, httpsRedirect } })} />}
 
           {/* 伪静态 */}
           {!isRedirect && <div className="flex flex-col gap-1.5">

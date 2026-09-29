@@ -1,6 +1,14 @@
 /** i18n：文案默认中文，key 用英文 */
 const dict = {
   zh: {
+    "httpsRedirect.title": "HTTP 访问方式",
+    "httpsRedirect.off": "继续提供 HTTP 内容",
+    "httpsRedirect.temporary": "临时跳转到 HTTPS（307）",
+    "httpsRedirect.permanent": "永久跳转到 HTTPS（308）",
+    "httpsRedirect.offHint": "HTTP 和 HTTPS 都能访问站点，保持现有行为。",
+    "httpsRedirect.temporaryHint": "适合开发调试；HTTP 请求会转到本站 HTTPS，保留域名、路径、查询参数和请求方法。",
+    "httpsRedirect.permanentHint": "浏览器可能缓存永久跳转；关闭后若仍自动跳转，可清除站点缓存或用无痕窗口验证。",
+    "httpsRedirect.scopeHint": "HTTPS 使用本站实际配置的端口。跨域请求请直接使用 HTTPS 地址；关闭 HTTPS 时会同时关闭此跳转。",
     "proxyRules.title": "代理规则",
     "proxyRules.description": "将站点的指定路径转发到另一个 HTTP/HTTPS 服务，例如让前端站点的 /api 访问本地后端。",
     "proxyRules.priority": "按完整路径段匹配，更长的路径优先；其余请求继续使用原站点。",
@@ -3091,6 +3099,14 @@ const dict = {
     "siteBulk.clearSelection": "清空选择",
   },
   en: {
+    "httpsRedirect.title": "HTTP access",
+    "httpsRedirect.off": "Keep serving HTTP content",
+    "httpsRedirect.temporary": "Temporarily redirect to HTTPS (307)",
+    "httpsRedirect.permanent": "Permanently redirect to HTTPS (308)",
+    "httpsRedirect.offHint": "Serve the site over both HTTP and HTTPS, keeping the existing behavior.",
+    "httpsRedirect.temporaryHint": "Suitable for development. Redirect to this site's HTTPS address while preserving the hostname, path, query and request method.",
+    "httpsRedirect.permanentHint": "Browsers may cache permanent redirects. After disabling, clear site data or use a private window to verify the change.",
+    "httpsRedirect.scopeHint": "Uses this site's configured HTTPS port. Cross-origin requests should use HTTPS directly. Turning HTTPS off also disables this redirect.",
     "proxyRules.title": "Proxy routes",
     "proxyRules.description": "Forward selected paths to another HTTP/HTTPS service, such as a local backend under /api.",
     "proxyRules.priority": "Match complete path segments; longer paths take priority. Other requests use the existing site.",

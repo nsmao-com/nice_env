@@ -150,6 +150,7 @@ fn main() {
             .to_string_lossy()
             .to_string(),
         runtime: nsb_core::model::SiteRuntime {
+            https_redirect: None,
             proxy_rules: Vec::new(),
             cors: None,
             redirect: None,

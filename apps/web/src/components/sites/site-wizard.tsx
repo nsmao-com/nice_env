@@ -54,7 +54,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-import { SiteCertificateSelect, useSiteCertificateSelection, type SiteCertificateBinding } from "./site-certificate-select";
+import { SiteCertificateSelect, SiteHttpsRedirectSelect, useSiteCertificateSelection, type SiteCertificateBinding } from "./site-certificate-select";
 import { SiteApplicationFields } from "./site-application-fields";
 import { APPLICATION_RUNTIMES, applicationRuntime, validApplication } from "@/lib/utils";
 
@@ -171,6 +171,7 @@ export function SiteWizard({
   const stepIndex = stepOrder.indexOf(step);
   const normalizedProxyTarget = normalizeProxyTarget(proxyTarget);
   const [https, setHttps] = React.useState(false);
+  const [httpsRedirect, setHttpsRedirect] = React.useState<CreateSiteInput["runtime"]["httpsRedirect"]>();
   const [certificate, setCertificate] = React.useState<SiteCertificateBinding>({});
   const certificateSelection = useSiteCertificateSelection(certificate, [domain.trim(), ...aliases.split(/[,，\s]+/).filter(Boolean)], open && https);
   const [dbEnabled, setDbEnabled] = React.useState(false);
@@ -214,6 +215,7 @@ export function SiteWizard({
       setAllowUnverifiedPhp(false); setPhpReport(existingProject?.phpCompatibility ?? null);
       setWebServer(existingDefaults?.webServer ?? "nginx");
       setHttps(existingDefaults?.https ?? false);
+      setHttpsRedirect(undefined);
       setCertificate({});
       setDbEnabled(false);
       setRewrite(existingProject && !existingProject.needsDevServer ? RewriteSchema.safeParse(existingProject.rewrite).data ?? "none" : "none");
@@ -314,7 +316,7 @@ export function SiteWizard({
           ...(kind === "php" ? { phpVersion } : {}),
           ...(isProxy ? { proxyTarget: normalizedProxyTarget! } : {}),
           ...(appRuntime && application ? { application } : {}),
-          ...(https ? certificate : {}),
+          ...(https ? { ...certificate, httpsRedirect } : {}),
         },
         https,
         rewrite: isRedirect ? "none" : rewrite,
@@ -670,11 +672,12 @@ export function SiteWizard({
                     </span>
                     <span className="text-[11.5px] text-faint">{t("sites.detail.httpsSelectHint")}</span>
                   </div>
-                  <Switch checked={https} onCheckedChange={setHttps} aria-label={t("sites.wizard.https")} />
+                  <Switch checked={https} onCheckedChange={(enabled) => { setHttps(enabled); if (!enabled) setHttpsRedirect(undefined); }} aria-label={t("sites.wizard.https")} />
                 </div>
                 {https && (
-                  <div className="min-w-0 rounded-xl border border-border p-4">
+                  <div className="min-w-0 space-y-5 rounded-xl border border-border p-4">
                     <SiteCertificateSelect id="sw-cert-source" selection={certificateSelection} onChange={setCertificate} disabled={creating} />
+                    <SiteHttpsRedirectSelect id="sw-https-redirect" value={httpsRedirect} onChange={setHttpsRedirect} disabled={creating} />
                   </div>
                 )}
               </div>
@@ -761,6 +764,7 @@ export function SiteWizard({
                   />
                   {appRuntime && <SummaryRow label={t("appProcess.title")} value={application ? `${appRuntime.label} ${application.version} · ${application.args.join(" · ")}` : t("appProcess.externalHint")} />}
                   <SummaryRow label="HTTPS" value={https ? certificateSelection.value === "local" ? t("wz.caAuto") : certificateSelection.selected?.subject ?? t("sites.detail.certUnavailableSelection") : t("detail.none")} />
+                  {https && <SummaryRow label={t("httpsRedirect.title")} value={t(httpsRedirect === 308 ? "httpsRedirect.permanent" : httpsRedirect === 307 ? "httpsRedirect.temporary" : "httpsRedirect.off")} />}
                   {!isRedirect && <SummaryRow label={t("wz.db")} value={dbEnabled ? `${dbName}（${dbUser}）` : t("wz.noDb")} />}
                   {!isRedirect && <SummaryRow label={t("wz.rewrite")} value={customRewrite ? customRewrite.name : rewrite === "none" ? t("wz.noneOpt") : REWRITES.find((r) => r.value === rewrite)?.label ?? ""} />}
                 </div>

@@ -110,6 +110,7 @@ pub fn import_from(
     // 备份只含选择信息，不含 PEM；证书缺失时在任何导入写入前明确失败，不能回退到本地 CA。
     let current_domains: Vec<_> = store.list_sites()?.into_iter().flat_map(|site| site.domains).collect();
     for site in bundle.sites.iter().filter(|site| !site.domains.iter().any(|d| current_domains.contains(d))) {
+        crate::sites::validate_https_redirect(site.https, &site.runtime)?;
         if let Some(cors) = &site.runtime.cors { crate::sitecors::normalize(cors)?; }
         crate::siteproxy::normalize(&site.runtime)?;
         if site.runtime.kind == crate::model::SiteKind::Redirect {

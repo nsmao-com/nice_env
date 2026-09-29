@@ -556,6 +556,13 @@ fn sync_site_ports(content: &str, site: &Site, http: u16, https: u16) -> Result<
     for (start, end, replacement) in edits.into_iter().rev() {
         updated.replace_range(start..end, &replacement);
     }
+    if site.https && site.runtime.https_redirect.is_some() {
+        let marker = regex::Regex::new(r"(?m)^\t# NiceEnv HTTPS redirect\r?\n\tredir [^\r\n]+\r?\n").expect("constant pattern");
+        if marker.find_iter(&updated).count() != 1 {
+            return Err(AppError::new("CADDY_CONFIG", "HTTP 跳转规则已被手动修改，请在站点详情重新保存后再同步端口"));
+        }
+        updated = marker.replace(&updated, https_redirect_line(site, https)).into_owned();
+    }
     Ok(updated)
 }
 
@@ -681,11 +688,15 @@ pub(crate) fn render(
     https: u16,
     php_port: Option<u16>,
 ) -> Result<String> {
-    let mut output = render_block(site, paths, http, false, php_port)?;
+    let mut output = render_block(site, paths, http, false, php_port, https)?;
     if site.https {
-        output.push_str(&render_block(site, paths, https, true, php_port)?);
+        output.push_str(&render_block(site, paths, https, true, php_port, https)?);
     }
     Ok(output)
+}
+
+fn https_redirect_line(site: &Site, https: u16) -> String {
+    format!("\t# NiceEnv HTTPS redirect\n\tredir \"https://{{host}}{}{{uri}}\" {}\n", crate::configgen::https_port_suffix(https), site.runtime.https_redirect.unwrap_or(307))
 }
 
 fn render_block(
@@ -694,6 +705,7 @@ fn render_block(
     port: u16,
     secure: bool,
     php_port: Option<u16>,
+    https_port: u16,
 ) -> Result<String> {
     let scheme = if secure { "https" } else { "http" };
     let addresses = site
@@ -735,6 +747,11 @@ fn render_block(
                 .join(format!("{}.error.log", site.id))
         ))
     ));
+    if !secure && site.https && site.runtime.https_redirect.is_some() {
+        out.push_str(&https_redirect_line(site, https_port));
+        out.push_str("}\n");
+        return Ok(out);
+    }
     if site.runtime.kind != SiteKind::Redirect {
         out.push_str(&format!(
             "\troot * {}\n",

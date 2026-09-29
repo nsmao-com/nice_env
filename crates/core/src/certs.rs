@@ -602,6 +602,7 @@ pub fn validate_acme_domains(paths: &Paths, store: &crate::store::Store, id: &st
 }
 
 pub fn validate_site_certificate(paths: &Paths, store: &crate::store::Store, site: &crate::model::Site) -> Result<()> {
+    crate::sites::validate_https_redirect(site.https, &site.runtime)?;
     if site.runtime.imported_cert_id.is_some() && site.runtime.acme_cert_id.is_some() {
         return Err(AppError::new("BAD_CERT_ID", "每个站点只能选择一种证书来源"));
     }

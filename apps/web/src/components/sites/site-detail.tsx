@@ -8,7 +8,7 @@ import { Copy, ExternalLink, FolderOpen, RefreshCw, Trash2, ScrollText, Square }
 import { CustomRewriteSelect } from "./custom-rewrite-select";
 import type { CreateSiteInput, Site, RewritePreset } from "@nsb/schema";
 import { useT, useUI } from "@/lib/store";
-import { cn, cmpVersionDesc, normalizeProxyTarget, isPhpSiteSettingValid, APPLICATION_RUNTIMES, applicationRuntime, validApplication } from "@/lib/utils";
+import { cn, cmpVersionDesc, normalizeProxyTarget, isPhpSiteSettingValid, APPLICATION_RUNTIMES, applicationRuntime, validApplication, siteErrorPagesProblem } from "@/lib/utils";
 import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { usePackages, useService, useInvalidate, toastError, siteUrl } from "@/lib/hooks";
 import * as api from "@/lib/api";
@@ -39,6 +39,7 @@ import { siteRedirectTarget, siteCorsProblem, siteAccessProblem, siteProxyProble
 import { SiteCorsSettings } from "./site-cors-settings";
 import { SiteAccessSettings } from "./site-access-settings";
 import { SiteProxyRules } from "./site-proxy-rules";
+import { SiteErrorPagesSettings } from "./site-error-pages-settings";
 import { SiteFileBackups } from "./site-file-backups";
 
 const REWRITE_OPTIONS: { value: RewritePreset; label?: string; labelKey?: string }[] = [
@@ -153,6 +154,7 @@ export function SiteDetailSheet({
   const corsProblem = siteCorsProblem(draft.runtime.cors);
   const accessProblem = siteAccessProblem(draft.runtime.access);
   const proxyRulesProblem = siteProxyProblem(draft.runtime);
+  const errorPagesProblem = siteErrorPagesProblem(draft.runtime);
   const redirectResult = siteRedirectTarget(draft.runtime.redirect, domainsInput.split(/[,，\s]+/).filter(Boolean));
   const redirectInvalid = isRedirect && !!redirectResult.error;
   const isProxy = draft.runtime.kind !== "php" && draft.runtime.kind !== "static" && !isRedirect;
@@ -169,7 +171,7 @@ export function SiteDetailSheet({
     else onClose();
   };
   const save = async () => {
-    if (busy || savingRef.current || deletingRef.current || reloadingRef.current || filesBusyRef.current || envEditorRef.current?.isBusy() || (directoryChanged && envState.dirty) || proxyInvalid || redirectInvalid || !!corsProblem || !!accessProblem || !!proxyRulesProblem || applicationInvalid || phpInvalid || (draft.https && certificateSelection.problem)) return;
+    if (busy || savingRef.current || deletingRef.current || reloadingRef.current || filesBusyRef.current || envEditorRef.current?.isBusy() || (directoryChanged && envState.dirty) || proxyInvalid || redirectInvalid || !!corsProblem || !!accessProblem || !!proxyRulesProblem || !!errorPagesProblem || applicationInvalid || phpInvalid || (draft.https && certificateSelection.problem)) return;
     const domains = [...new Set(domainsInput.split(/[,，\s]+/).filter(Boolean).map((d) => d.toLowerCase()))];
     if (!draft.name.trim() || (!isRedirect && !draft.rootDir.trim()) || !domains.length) {
       setFormError({ code: "REQUIRED_FIELDS", message: t("detail.requiredFields") });
@@ -219,6 +221,7 @@ export function SiteDetailSheet({
         exposedHeaders: [...site.runtime.cors.exposedHeaders],
       } : undefined,
       proxyRules: site.runtime.proxyRules?.map((rule) => ({ ...rule })),
+      errorPages: site.runtime.errorPages ? { ...site.runtime.errorPages } : undefined,
       redirect: site.runtime.redirect ? { ...site.runtime.redirect } : undefined,
       customRewrite: site.runtime.customRewrite ? { ...site.runtime.customRewrite } : undefined,
       application: site.runtime.application ? { ...site.runtime.application, args: [...site.runtime.application.args] } : undefined,
@@ -340,6 +343,7 @@ export function SiteDetailSheet({
               <TabsTrigger value="general" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("detail.general")}</TabsTrigger>
               <TabsTrigger value="access" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("siteAccess.title")}{accessProblem && <span className="text-error" aria-label={t("siteAccess.review")}>!</span>}</TabsTrigger>
               <TabsTrigger value="cors" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("cors.title")}{corsProblem && <span className="text-error" aria-label={t("cors.review")}>!</span>}</TabsTrigger>
+              {!isRedirect && <TabsTrigger value="error-pages" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("errorPages.title" as never)}{errorPagesProblem && <span className="text-error" aria-label={t("errorPages.invalid" as never)}>!</span>}</TabsTrigger>}
               {!isRedirect && <TabsTrigger value="proxy-rules" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("proxyRules.title")}{proxyRulesProblem && <span className="text-error" aria-label={t("proxyRules.review")}>!</span>}</TabsTrigger>}
               {!isRedirect && <TabsTrigger value="environment" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("env.title")}</TabsTrigger>}
               {!isRedirect && <TabsTrigger value="files" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("siteFiles.title")}</TabsTrigger>}
@@ -352,6 +356,10 @@ export function SiteDetailSheet({
             <TabsContent value="cors" forceMount className="mt-0 data-[state=inactive]:hidden">
               <SiteCorsSettings key={site.id} value={draft.runtime.cors} disabled={busy} onChange={(cors) => setDraft({ ...draft, runtime: { ...draft.runtime, cors } })} />
             </TabsContent>
+            {!isRedirect && <TabsContent value="error-pages" forceMount className="mt-0 data-[state=inactive]:hidden">
+              <SiteErrorPagesSettings key={site.id} value={draft.runtime.errorPages} disabled={busy} onChange={(errorPages) => setDraft({ ...draft, runtime: { ...draft.runtime, errorPages } })} />
+              {errorPagesProblem && <p role="alert" className="mt-3 text-xs leading-relaxed text-error">{t(errorPagesProblem as never)}</p>}
+            </TabsContent>}
             {!isRedirect && <TabsContent value="proxy-rules" forceMount className="mt-0 data-[state=inactive]:hidden">
               <SiteProxyRules siteId={site.id} value={draft.runtime.proxyRules} disabled={busy} onChange={(proxyRules) => setDraft({ ...draft, runtime: { ...draft.runtime, proxyRules } })} />
               {proxyRulesProblem && <p role="alert" className="mt-3 text-xs leading-relaxed text-error">{t(proxyRulesProblem)}</p>}
@@ -617,6 +625,7 @@ export function SiteDetailSheet({
           {tab !== "environment" && envState.dirty && <button className="mb-2 text-left text-xs text-warn underline" onClick={() => setTab("environment")}>{t("env.pendingElsewhere")}</button>}
           {accessProblem && <button className="mb-2 mr-3 text-left text-xs text-error underline" onClick={() => { setTab("access"); requestAnimationFrame(() => document.querySelector<HTMLElement>('[id^="site-access-"][aria-invalid="true"]:not(:disabled)')?.focus()); }}>{t("siteAccess.review")}</button>}
           {corsProblem && <button className="mb-2 mr-3 text-left text-xs text-error underline" onClick={() => { setTab("cors"); requestAnimationFrame(() => document.querySelector<HTMLElement>('[id^="site-cors-"][aria-invalid="true"]:not(:disabled)')?.focus()); }}>{t("cors.review")}</button>}
+          {errorPagesProblem && <button className="mb-2 mr-3 text-left text-xs text-error underline" onClick={() => { setTab("error-pages"); requestAnimationFrame(() => document.querySelector<HTMLElement>('[id^="site-error-page-"][aria-invalid="true"]:not(:disabled)')?.focus()); }}>{t("errorPages.invalid" as never)}</button>}
           {proxyRulesProblem && <button className="mb-2 mr-3 text-left text-xs text-error underline" onClick={() => { setTab("proxy-rules"); requestAnimationFrame(() => document.querySelector<HTMLElement>('[id^="site-proxy-"][aria-invalid="true"]:not(:disabled)')?.focus()); }}>{t("proxyRules.review")}</button>}
           {phpInvalid && <button className="mb-2 text-left text-xs text-error underline" onClick={() => {
             phpFocusObserver.current?.disconnect();
@@ -643,7 +652,7 @@ export function SiteDetailSheet({
             <div className="flex min-w-0 max-w-full gap-2">
               <Button variant="ghost" onClick={requestClose} disabled={busy}>{t(tab === "files" ? "common.close" : "common.cancel")}</Button>
               {tab === "environment" ? <Button className="min-w-0" title={t("env.saveNamed").replace("{file}", envState.fileName)} onClick={() => void envEditorRef.current?.save()} disabled={siteBusy || filesBusy || !envState.canSave}><span className="truncate">{envState.busy ? t("detail.saveBusy") : t("env.saveNamed").replace("{file}", envState.fileName)}</span></Button>
-                : tab !== "files" && <Button onClick={save} disabled={busy || !siteDirty || (directoryChanged && envState.dirty) || proxyInvalid || redirectInvalid || !!corsProblem || !!accessProblem || !!proxyRulesProblem || applicationInvalid || phpInvalid || (draft.https && !!certificateSelection.problem)}>{saving ? t("detail.saveBusy") : t("common.save")}</Button>}
+                : tab !== "files" && <Button onClick={save} disabled={busy || !siteDirty || (directoryChanged && envState.dirty) || proxyInvalid || redirectInvalid || !!corsProblem || !!accessProblem || !!proxyRulesProblem || !!errorPagesProblem || applicationInvalid || phpInvalid || (draft.https && !!certificateSelection.problem)}>{saving ? t("detail.saveBusy") : t("common.save")}</Button>}
             </div>
           </div>
         </div>

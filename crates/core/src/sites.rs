@@ -355,6 +355,12 @@ fn validate_site_fields(
     if let Some(access) = &runtime.access { crate::siteaccess::normalize(access)?; }
     if let Some(cors) = &runtime.cors { crate::sitecors::normalize(cors)?; }
     crate::siteproxy::normalize(runtime)?;
+    if let Some(error_pages) = &runtime.error_pages {
+        normalize_error_pages(error_pages)?;
+        if runtime.kind == SiteKind::Redirect {
+            return Err(AppError::new("BAD_ERROR_PAGES", "跳转站点没有项目目录，不能配置自定义错误页"));
+        }
+    }
     if let Some(custom) = &runtime.custom_rewrite {
         validate_custom_rewrite(custom, &runtime.web_server)?;
         if !matches!(runtime.kind, SiteKind::Php | SiteKind::Static) { return Err(AppError::new("BAD_REWRITE", "自定义伪静态仅适用于 PHP 或静态站点")); }
@@ -382,6 +388,57 @@ fn validate_site_fields(
     crate::applications::validate(runtime)?;
     if runtime.application.is_some() { crate::applications::installed_version(store, runtime)?; }
     Ok(())
+}
+
+/// Statuses supported by the visual error-page editor and all three managed servers.
+pub const CUSTOM_ERROR_STATUSES: &[u16] = &[400, 401, 403, 404, 405, 408, 429, 500, 502, 503, 504];
+
+/// Normalize and validate site-local error document paths before they reach a server config.
+/// Keeping the grammar deliberately small prevents traversal, query-string and config injection bugs.
+pub fn normalize_error_pages(
+    pages: &std::collections::BTreeMap<u16, String>,
+) -> Result<std::collections::BTreeMap<u16, String>> {
+    if pages.len() > CUSTOM_ERROR_STATUSES.len() {
+        return Err(AppError::new("BAD_ERROR_PAGES", "每个站点最多配置 11 个 HTTP 错误页"));
+    }
+    let mut normalized = std::collections::BTreeMap::new();
+    for (status, value) in pages {
+        if !CUSTOM_ERROR_STATUSES.contains(status) {
+            return Err(AppError::new("BAD_ERROR_PAGES", format!("不支持 HTTP {status} 自定义错误页")));
+        }
+        let path = value.trim();
+        let lower = path.to_ascii_lowercase();
+        let valid_chars = path.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~' | b'!' | b'$' | b'&' | b'\'' | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'=' | b':' | b'@' | b'%')
+        });
+        let bytes = path.as_bytes();
+        let malformed_percent = bytes.iter().enumerate().any(|(index, byte)| {
+            *byte == b'%'
+                && !(bytes.get(index + 1).is_some_and(|value| value.is_ascii_hexdigit())
+                    && bytes.get(index + 2).is_some_and(|value| value.is_ascii_hexdigit()))
+        });
+        let invalid = path.is_empty()
+            || path.len() > 512
+            || !path.starts_with('/')
+            || path == "/"
+            || path.contains("//")
+            || path.split('/').any(|part| part == "." || part == "..")
+            || lower.contains("%2e")
+            || lower.contains("%2f")
+            || lower.contains("%5c")
+            || malformed_percent
+            || !valid_chars;
+        if invalid {
+            return Err(AppError::new(
+                "BAD_ERROR_PAGES",
+                format!("HTTP {status} 的错误页路径无效"),
+            )
+            .with_hint("请输入站点根目录内的绝对 URL 路径，例如 /errors/404.html；不能包含参数、片段、空格或 ..。"));
+        }
+        normalized.insert(*status, path.to_string());
+    }
+    Ok(normalized)
 }
 
 /// 两种 Web 服务共用目标规范化，拒绝配置注入和指向本站域名的直接循环。
@@ -556,6 +613,7 @@ fn create_inner(
     normalized.runtime.cors = input.runtime.cors.as_ref().map(crate::sitecors::normalize).transpose()?;
     normalized.runtime.access = input.runtime.access.as_ref().map(crate::siteaccess::normalize).transpose()?;
     normalized.runtime.proxy_rules = crate::siteproxy::normalize(&input.runtime)?;
+    normalized.runtime.error_pages = input.runtime.error_pages.as_ref().map(normalize_error_pages).transpose()?;
     if normalized.runtime.kind == SiteKind::Redirect { normalized.root_dir.clear(); }
     if normalized.runtime.kind == SiteKind::Php
         && normalized
@@ -826,6 +884,7 @@ pub fn update(
     current.runtime.cors = site_patch.runtime.cors.as_ref().map(crate::sitecors::normalize).transpose()?;
     current.runtime.access = site_patch.runtime.access.as_ref().map(crate::siteaccess::normalize).transpose()?;
     current.runtime.proxy_rules = crate::siteproxy::normalize(&site_patch.runtime)?;
+    current.runtime.error_pages = site_patch.runtime.error_pages.as_ref().map(normalize_error_pages).transpose()?;
     if current.runtime.kind == SiteKind::Redirect { current.root_dir.clear(); }
     let certificate_changed =
         current.https != site_patch.https || current.domains != original.domains
@@ -2816,6 +2875,7 @@ mod scaffold_tests {
             access: None,
             https_redirect: None,
             proxy_rules: Vec::new(),
+            error_pages: None,
             cors: None,
             redirect: None,
             custom_rewrite: None,
@@ -4334,6 +4394,32 @@ mod scaffold_tests {
             &paths.base,
         );
         assert!(!rejected.contains("../outside"));
+    }
+
+    #[test]
+    fn custom_error_pages_render_for_all_servers_and_reject_unsafe_paths() {
+        let temp = Tmp::new("error-pages");
+        let paths = Paths::new(temp.0.clone());
+        let store = Store::open(paths.db()).unwrap();
+        let mut site = saved_site(&paths, &store);
+        site.runtime.kind = SiteKind::ReverseProxy;
+        site.runtime.proxy_target = Some("http://127.0.0.1:8081".into());
+        site.runtime.error_pages = Some([(404u16, "/errors/not-found.html".into()), (500u16, "/errors/server.html".into())].into_iter().collect());
+
+        let nginx = configgen::render_site_conf(&site, 8080, 8443, &paths.nginx_conf(), &paths.certs(), &paths.logs().join("nginx"));
+        assert!(nginx.contains("error_page 404 /errors/not-found.html;"));
+        assert!(nginx.contains("proxy_intercept_errors on;"));
+        let apache = configgen::render_httpd_vhost(&site, 8180, 8444, &paths.certs().join("sites"), None);
+        assert!(apache.contains("ErrorDocument 404 /errors/not-found.html"));
+        assert!(apache.contains("ProxyErrorOverride On"));
+        let caddy = crate::caddy::render(&site, &paths, 8080, 8443, None).unwrap();
+        assert!(caddy.contains("handle_response @niceenv_main_error_404"));
+        assert!(caddy.contains("rewrite * \"/errors/not-found.html\""));
+
+        let invalid = [(404u16, "/errors/../secret.html".into())].into_iter().collect();
+        assert!(normalize_error_pages(&invalid).is_err());
+        let unsupported = [(418u16, "/418.html".into())].into_iter().collect();
+        assert!(normalize_error_pages(&unsupported).is_err());
     }
 
     #[test]

@@ -160,6 +160,9 @@ pub struct SiteRuntime {
     pub https_redirect: Option<u16>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub proxy_rules: Vec<SiteProxyRule>,
+    /// Custom error documents keyed by HTTP status code; paths are validated before configuration generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_pages: Option<std::collections::BTreeMap<u16, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cors: Option<SiteCors>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

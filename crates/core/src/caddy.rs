@@ -645,6 +645,8 @@ fn proxy(
     paths: &Paths,
     target: &str,
     rule: Option<&crate::model::SiteProxyRule>,
+    error_pages: Option<&std::collections::BTreeMap<u16, String>>,
+    error_prefix: &str,
 ) -> Result<String> {
     let target = crate::sites::proxy_url(target)?;
     let url =
@@ -706,6 +708,14 @@ fn proxy(
             quoted(&cookie),
             quoted(&format!("${{1}}{}${{2}}${{3}}", rule.path))
         ));
+    }
+    if let Some(pages) = error_pages {
+        for (status, path) in pages {
+            out.push_str(&format!(
+                "\t\t\t\t@{error_prefix}_error_{status} status {status}\n\t\t\t\thandle_response @{error_prefix}_error_{status} {{\n\t\t\t\t\trewrite * {}\n\t\t\t\t\tfile_server {{\n\t\t\t\t\t\tstatus {status}\n\t\t\t\t\t}}\n\t\t\t\t}}\n",
+                quoted(path),
+            ));
+        }
     }
     out.push_str("\t\t\t}\n\t\t\t}\n");
     Ok(out)
@@ -810,7 +820,7 @@ fn render_block(
             quoted(&rule.path),
             quoted(&format!("{}/*", rule.path))
         ));
-        out.push_str(&proxy(paths, &rule.target, Some(rule))?);
+            out.push_str(&proxy(paths, &rule.target, Some(rule), site.runtime.error_pages.as_ref(), &format!("niceenv_proxy_{index}"))?);
         out.push_str("\t\t}\n");
     }
     out.push_str("\t\thandle {\n");
@@ -875,6 +885,8 @@ fn render_block(
                 .as_deref()
                 .unwrap_or("127.0.0.1:1"),
             None,
+            site.runtime.error_pages.as_ref(),
+            "niceenv_main",
         )?),
     }
     out.push_str("\t\t}\n\t}\n");
@@ -882,12 +894,20 @@ fn render_block(
     if let Some(policy) = &site.runtime.cors {
         out.push_str(&cors(policy)?.replace("@cors_", "@error_cors_"));
     }
+    if let Some(pages) = &site.runtime.error_pages {
+        for (status, path) in pages {
+            out.push_str(&format!(
+                "\t\t@niceenv_error_{status} expression {{err.status_code}} == {status}\n\t\thandle @niceenv_error_{status} {{\n\t\t\trewrite * {}\n\t\t\tfile_server\n\t\t}}\n",
+                quoted(path),
+            ));
+        }
+    }
     if site.runtime.kind == SiteKind::Static
         && site.runtime.custom_rewrite.is_none()
         && matches!(site.rewrite, RewritePreset::NextExport)
     {
         // Next 导出的自定义错误页保留 404 状态；缺少文件时使用通用错误响应。
-        out.push_str("\t\t@next404 {\n\t\t\texpression {err.status_code} == 404\n\t\t\tfile /404.html\n\t\t}\n\t\thandle @next404 {\n\t\t\trewrite * /404.html\n\t\t\tfile_server {\n\t\t\t\tstatus 404\n\t\t\t}\n\t\t}\n\t\thandle {\n\t\t\trespond \"{err.status_code} {err.status_text}\" {err.status_code}\n\t\t}\n");
+        out.push_str("\t\t@next404 {\n\t\t\texpression {err.status_code} == 404\n\t\t\tfile /404.html\n\t\t}\n\t\thandle @next404 {\n\t\t\trewrite * /404.html\n\t\t\tfile_server\n\t\t}\n\t\thandle {\n\t\t\trespond \"{err.status_code} {err.status_text}\" {err.status_code}\n\t\t}\n");
     } else {
         out.push_str("\t\trespond \"{err.status_code} {err.status_text}\" {err.status_code}\n");
     }

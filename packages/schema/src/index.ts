@@ -400,10 +400,14 @@ export const SiteAccess = z.object({ mode: z.enum(["allow", "deny"]), addresses:
 export type SiteAccess = z.infer<typeof SiteAccess>;
 export const SiteProxyRule = z.object({ path: z.string(), target: z.string(), stripPrefix: z.boolean() });
 export type SiteProxyRule = z.infer<typeof SiteProxyRule>;
+/** Custom error document paths keyed by HTTP status code (for example {"404":"/404.html"}). */
+export const SiteErrorPages = z.record(z.string(), z.string().min(1).max(512)).optional();
+export type SiteErrorPages = z.infer<typeof SiteErrorPages>;
 export const SiteRuntime = z.object({
   access: SiteAccess.optional(),
   httpsRedirect: z.union([z.literal(307), z.literal(308)]).optional(),
   proxyRules: z.array(SiteProxyRule).max(16).optional(),
+  errorPages: SiteErrorPages,
   cors: SiteCors.optional(),
   redirect: SiteRedirect.optional(),
   customRewrite: CustomRewrite.optional(),

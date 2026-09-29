@@ -621,6 +621,7 @@ pub fn render_site_conf(
 
     let (access_maps, access_gate) = crate::siteaccess::nginx(&site.id, site.runtime.access.as_ref());
     let cors = site.runtime.cors.as_ref().map(|cors| crate::sitecors::nginx(&site.id, cors));
+    let error_pages = nginx_error_pages(site.runtime.error_pages.as_ref());
     let body = match &site.runtime.kind {
         crate::model::SiteKind::Redirect => redirect_directives(site, false),
         crate::model::SiteKind::Php => {
@@ -657,7 +658,7 @@ pub fn render_site_conf(
             let target =
                 crate::sites::proxy_url(&target).unwrap_or_else(|_| "http://127.0.0.1:1/".into());
             format!(
-                "    location / {{\n        proxy_pass {target};\n        proxy_ssl_server_name on;\n        proxy_http_version 1.1;\n        proxy_set_header Host $proxy_host;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto $scheme;\n        proxy_set_header Upgrade $http_upgrade;\n        proxy_set_header Connection \"upgrade\";\n        proxy_read_timeout 300s;\n    }}\n"
+                "    location / {{\n        proxy_pass {target};\n        proxy_intercept_errors on;\n        proxy_ssl_server_name on;\n        proxy_http_version 1.1;\n        proxy_set_header Host $proxy_host;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto $scheme;\n        proxy_set_header Upgrade $http_upgrade;\n        proxy_set_header Connection \"upgrade\";\n        proxy_read_timeout 300s;\n    }}\n"
             )
         }
     };
@@ -677,6 +678,7 @@ server {{
     # 站点级日志（日志页按站点查看就靠它）
     access_log "{access_log}";
     error_log "{error_log}" warn;
+{error_pages}
 
     location ~ /\.(?!well-known(?:/|$)) {{ deny all; }}
 {cors_headers}
@@ -690,6 +692,7 @@ server {{
         id = site.id,
         access_log = nginx_path(&log_dir.join(format!("{}.access.log", site.id))),
         error_log = nginx_path(&log_dir.join(format!("{}.error.log", site.id))),
+        error_pages = error_pages,
         listen = listen,
         server_names = server_names,
         ssl_lines = ssl_lines,
@@ -708,6 +711,12 @@ server {{
         cors_preflight = cors.as_ref().map_or("", |cors| cors.before_content.as_str()),
         proxy_rules = crate::siteproxy::nginx(&site.runtime),
     )
+}
+
+fn nginx_error_pages(pages: Option<&std::collections::BTreeMap<u16, String>>) -> String {
+    pages.into_iter().flatten()
+        .map(|(status, path)| format!("    error_page {status} {path};\n"))
+        .collect()
 }
 
 /// Nginx 子块一旦定义 add_header 就不再继承父级；保留自定义头并补回托管 CORS 头。
@@ -1480,6 +1489,7 @@ pub fn render_httpd_vhost(
 ) -> String {
     let server_names = site.domains.join(" ");
     let access = crate::siteaccess::apache(site.runtime.access.as_ref());
+    let error_pages = apache_error_pages(site.runtime.error_pages.as_ref());
     let primary = site
         .domains
         .first()
@@ -1563,7 +1573,7 @@ pub fn render_httpd_vhost(
                 target.push('/');
             }
             format!(
-                "    SSLProxyEngine On\n    ProxyPreserveHost Off\n    ProxyPass / \"{target}\"\n    ProxyPassReverse / \"{target}\"\n"
+                "    SSLProxyEngine On\n    ProxyErrorOverride On\n    ProxyPreserveHost Off\n    ProxyPass / \"{target}\"\n    ProxyPassReverse / \"{target}\"\n"
             )
         }
     };
@@ -1586,6 +1596,7 @@ pub fn render_httpd_vhost(
     </DirectoryMatch>
 
 {access}
+{error_pages}
 {cors}
 {proxy_rules}
 {body}
@@ -1598,6 +1609,7 @@ pub fn render_httpd_vhost(
         server_names = server_names,
         document_root = if site.runtime.kind == crate::model::SiteKind::Redirect { String::new() } else { format!("DocumentRoot \"{root}\"") },
         cors = site.runtime.cors.as_ref().map(crate::sitecors::apache).unwrap_or_default(),
+        error_pages = error_pages,
         proxy_rules = crate::siteproxy::apache(&site.runtime),
         ssl_lines = ssl_lines,
         body = body,
@@ -1617,6 +1629,12 @@ pub fn render_httpd_vhost(
     } else {
         vhost
     }
+}
+
+fn apache_error_pages(pages: Option<&std::collections::BTreeMap<u16, String>>) -> String {
+    pages.into_iter().flatten()
+        .map(|(status, path)| format!("    ErrorDocument {status} {path}\n"))
+        .collect()
 }
 
 pub fn write_httpd_conf(

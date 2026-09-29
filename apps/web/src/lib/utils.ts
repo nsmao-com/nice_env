@@ -138,6 +138,27 @@ export function siteProxyProblem(runtime: SiteRuntime): "proxyRules.pathInvalid"
   return null;
 }
 
+export const SITE_ERROR_STATUSES = [400, 401, 403, 404, 405, 408, 429, 500, 502, 503, 504] as const;
+
+/** 与 sites::normalize_error_pages 对齐，避免把非法 URL 路径提交给 Web 服务。 */
+export function validSiteErrorPagePath(value: string): boolean {
+  const path = value.trim();
+  return path.length > 1 && path.length <= 512 && path.startsWith("/") && !path.includes("//")
+    && !path.split("/").some((part) => part === "." || part === "..")
+    && !/%(?:2e|2f|5c)/i.test(path)
+    && !/%(?![0-9a-f]{2})/i.test(path)
+    && /^[A-Za-z0-9/_.~!$&'()*+,;=:@%-]+$/.test(path);
+}
+
+export function siteErrorPagesProblem(runtime: SiteRuntime): "errorPages.invalid" | "errorPages.unsupported" | "errorPages.redirectInvalid" | null {
+  const pages = runtime.errorPages ?? {};
+  const keys = Object.keys(pages);
+  if (!keys.length) return null;
+  if (runtime.kind === "redirect") return "errorPages.redirectInvalid";
+  if (keys.length > SITE_ERROR_STATUSES.length || keys.some((key) => !SITE_ERROR_STATUSES.includes(Number(key) as typeof SITE_ERROR_STATUSES[number]))) return "errorPages.unsupported";
+  return Object.values(pages).some((path) => !validSiteErrorPagePath(path)) ? "errorPages.invalid" : null;
+}
+
 export function proxyRuleExample(rule: NonNullable<SiteRuntime["proxyRules"]>[number]): string | null {
   const path = proxyRulePath(rule.path), target = normalizeProxyTarget(rule.target);
   return path && target ? `${target}${rule.stripPrefix ? "" : `${path.slice(1)}/`}users?limit=10` : null;

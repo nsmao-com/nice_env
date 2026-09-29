@@ -114,6 +114,7 @@ pub fn import_from(
         if let Some(access) = &site.runtime.access { crate::siteaccess::normalize(access)?; }
         if let Some(cors) = &site.runtime.cors { crate::sitecors::normalize(cors)?; }
         crate::siteproxy::normalize(&site.runtime)?;
+        if let Some(error_pages) = &site.runtime.error_pages { crate::sites::normalize_error_pages(error_pages)?; }
         if site.runtime.kind == crate::model::SiteKind::Redirect {
             crate::sites::redirect_url(site.runtime.redirect.as_ref().ok_or_else(|| AppError::new("BAD_REDIRECT", "跳转站点缺少目标地址"))?, &site.domains)?;
         }
@@ -187,6 +188,7 @@ pub fn import_from(
         imported.runtime.access = site.runtime.access.as_ref().map(crate::siteaccess::normalize).transpose()?;
         imported.runtime.cors = site.runtime.cors.as_ref().map(crate::sitecors::normalize).transpose()?;
         imported.runtime.proxy_rules = crate::siteproxy::normalize(&site.runtime)?;
+        imported.runtime.error_pages = site.runtime.error_pages.as_ref().map(crate::sites::normalize_error_pages).transpose()?;
         if imported.runtime.kind == crate::model::SiteKind::Redirect { imported.root_dir.clear(); }
         store.save_site(&imported)?;
         crate::sites::write_site_conf(paths, store, &imported)?;

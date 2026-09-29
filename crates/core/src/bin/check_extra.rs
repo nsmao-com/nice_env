@@ -153,6 +153,7 @@ fn main() {
             access: None,
             https_redirect: None,
             proxy_rules: Vec::new(),
+            error_pages: None,
             cors: None,
             redirect: None,
             custom_rewrite: None,

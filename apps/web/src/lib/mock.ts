@@ -233,6 +233,7 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 /* ---------- 内存状态 ---------- */
 
 const services = new Map<string, ServiceStatus>();
+const webLanModes = new Map<string, boolean>();
 const sites = new Map<string, Site>();
 const mockEnvFiles = new Map<string, EnvFileView>();
 const mockEnvBackups = new Map<string, { entries: EnvFileView["entries"]; revision: string }>();
@@ -1594,6 +1595,26 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         status: mockSiteStatus(site),
         accessUrl: mockSiteStatus(site) === "running" ? site.accessUrl : undefined,
       })) as T;
+    case "site_network_info": {
+      const site = sites.get(args?.id as string);
+      if (!site) throw { code: "SITE_NOT_FOUND", message: "站点不存在，请刷新列表" };
+      const server = site.runtime.webServer;
+      const running = services.get(server)?.state === "running";
+      const enabled = webLanModes.get(server) ?? false;
+      return { server, enabled, running,
+        affectedSites: [...sites.values()].filter((row) => row.runtime.webServer === server).map((row) => row.name),
+        addresses: [{ interface: "Preview LAN", address: "192.0.2.10", listening: running && mockSiteStatus(site) === "running" && enabled && !!site.accessUrl }],
+        accessUrl: mockSiteStatus(site) === "running" ? site.accessUrl ?? null : null,
+        localCa: site.https && !site.runtime.acmeCertId && !site.runtime.importedCertId,
+      } as T;
+    }
+    case "site_network_apply": {
+      const site = sites.get(args?.id as string);
+      if (!site) throw { code: "SITE_NOT_FOUND", message: "站点不存在，请刷新列表" };
+      if (site.runtime.webServer !== args?.server || typeof args?.enabled !== "boolean") throw { code: "WEB_NETWORK_CHANGED", message: "站点服务器已变化，请刷新后重试" };
+      webLanModes.set(site.runtime.webServer, args.enabled);
+      return true as T;
+    }
     case "site_access_url": {
       const site = sites.get(args?.id as string);
       if (!site) throw { code: "SITE_NOT_FOUND", message: "站点不存在" };

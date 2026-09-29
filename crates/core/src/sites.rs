@@ -54,9 +54,11 @@ pub fn list(store: &Store) -> Result<Vec<Site>> {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SiteEndpoint {
     url: String,
-    port: u16,
+    pub(crate) port: u16,
     domains: Vec<String>,
     https: bool,
+    #[serde(default)]
+    pub(crate) lan: bool,
 }
 
 /// 入口来自本次加载的 vhost，而不是之后可能被修改的端口设置。
@@ -65,13 +67,13 @@ fn endpoint_from_config(site: &Site, content: &str) -> Option<SiteEndpoint> {
         .or_else(|| site.domains.first())?.replacen("*.", "www.", 1);
     let matches_name = |name: &str| name.eq_ignore_ascii_case(&domain)
         || name.strip_prefix("*.").is_some_and(|suffix| domain.to_ascii_lowercase().ends_with(&format!(".{}", suffix.to_ascii_lowercase())));
-    let local_port = |value: &str| -> Option<u16> {
-        if let Ok(port) = value.parse::<u16>() { return (port > 0).then_some(port); }
-        if let Some(port) = value.strip_prefix("*:") { return port.parse::<u16>().ok().filter(|p| *p > 0); }
+    let local_port = |value: &str| -> Option<(u16, bool)> {
+        if let Ok(port) = value.parse::<u16>() { return (port > 0).then_some((port, true)); }
+        if let Some(port) = value.strip_prefix("*:") { return port.parse::<u16>().ok().filter(|p| *p > 0).map(|port| (port, true)); }
         let address = value.parse::<std::net::SocketAddr>().ok()?;
         // hosts 管理将站点指向 127.0.0.1；不能把仅网卡 IP / IPv6 的监听冒充该入口。
         (address.is_ipv4() && (address.ip().is_unspecified() || address.ip() == std::net::Ipv4Addr::LOCALHOST) && address.port() > 0)
-            .then_some(address.port())
+            .then_some((address.port(), address.ip().is_unspecified()))
     };
     let mut ports = Vec::new();
     if site.runtime.web_server == "nginx" {
@@ -116,10 +118,11 @@ fn endpoint_from_config(site: &Site, content: &str) -> Option<SiteEndpoint> {
             }
         }
     }
-    let port = *ports.first()?;
+    let (port, _) = *ports.first()?;
+    let lan = ports.iter().any(|(number, lan)| *number == port && *lan);
     let scheme = if site.https { "https" } else { "http" };
     let suffix = if port == if site.https { 443 } else { 80 } { String::new() } else { format!(":{port}") };
-    Some(SiteEndpoint { url: format!("{scheme}://{domain}{suffix}"), port, domains: site.domains.clone(), https: site.https })
+    Some(SiteEndpoint { url: format!("{scheme}://{domain}{suffix}"), port, domains: site.domains.clone(), https: site.https, lan })
 }
 
 pub(crate) struct SiteEndpointSnapshot {
@@ -164,8 +167,8 @@ pub(crate) fn snapshot_endpoints(paths: &Paths, store: &Store, server: &str) -> 
             let path = crate::paths::checked_data_path(&paths.base, &format!("etc/{server}/sites/{}.conf", site.id)).ok()?;
             let source = std::fs::read_to_string(&path).ok()?;
             let endpoint = if server == "caddy" {
-                let (url, port) = crate::caddy::endpoint(&site, caddy_config.as_ref()?)?;
-                SiteEndpoint { url, port, domains: site.domains.clone(), https: site.https }
+                let (url, port, lan) = crate::caddy::endpoint(&site, caddy_config.as_ref()?)?;
+                SiteEndpoint { url, port, domains: site.domains.clone(), https: site.https, lan }
             } else { endpoint_from_config(&site, &source)? };
             Some((site.id, path, source, endpoint))
         }).collect();
@@ -194,7 +197,7 @@ pub(crate) fn endpoints_changed(manager: &ServiceManager, server: &str, snapshot
     current.len() != snapshot.sites.len() || snapshot.sites.iter().any(|(id, _, _, endpoint)| current.get(id) != Some(endpoint))
 }
 
-fn loaded_endpoint(manager: &ServiceManager, site: &Site) -> Option<SiteEndpoint> {
+pub(crate) fn loaded_endpoint(manager: &ServiceManager, site: &Site) -> Option<SiteEndpoint> {
     let status = manager.snapshot(&site.runtime.web_server)?;
     if status.state != ServiceState::Running || site.status != "running" { return None; }
     let entry = manager.services.lock().get(&site.runtime.web_server)?.clone();
@@ -1359,6 +1362,9 @@ fn write_site_conf_state(paths: &Paths, store: &Store, site: &Site, enabled: boo
         let (http, https) = crate::caddy::ports(paths, store)?;
         let php = site.runtime.php_version.as_deref().and_then(|v| store.get_port_assign(&format!("php@{v}")));
         let conf = crate::caddy::render(site, paths, http, https, php)?;
+        let conf = match crate::webnetwork::mode(store, "caddy")? {
+            Some(enabled) => crate::caddy::network_bind(&conf, enabled, None)?, None => conf,
+        };
         std::fs::create_dir_all(paths.logs().join("caddy"))?;
         write_with_backup(&paths.caddy_sites_dir().join(format!("{}.{extension}", site.id)), &conf, &paths.backup())?;
     } else if site.runtime.web_server == "apache" {
@@ -1395,6 +1401,9 @@ fn write_site_conf_state(paths: &Paths, store: &Store, site: &Site, enabled: boo
         let path = paths
             .nginx_sites_dir()
             .join(format!("{}.{extension}", site.id));
+        let conf = match crate::webnetwork::mode(store, "nginx")? {
+            Some(enabled) => configgen::network_listeners(&conf, enabled, false)?, None => conf,
+        };
         write_with_backup(&path, &conf, &paths.backup())?;
     }
     // 切换服务器或启停状态后只保留目标配置，避免两个服务器同时加载旧站点。
@@ -5030,7 +5039,7 @@ func main() { fmt.Println("managed-app-log"); http.HandleFunc("/",func(w http.Re
         site.https = true;
         crate::tls::issue_site_cert(&paths, &store, &site.domains).unwrap();
         let pools = vec![("8.3.33".to_string(), 29100)];
-        configgen::write_nginx_conf(&paths, &nginx_root, &pools, 28080, 28443).unwrap();
+        configgen::write_nginx_conf(&paths, &nginx_root, &pools, 28080, 28443, None).unwrap();
         for (kind, rewrite) in [
             (SiteKind::Static, crate::model::RewritePreset::None),
             (SiteKind::Static, crate::model::RewritePreset::NextExport),

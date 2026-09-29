@@ -337,7 +337,7 @@ fn localize_legacy_site_listeners(current: &str) -> Result<String> {
     Ok(output)
 }
 
-fn localize_legacy_nginx_sites(paths: &Paths) -> Result<()> {
+fn localize_legacy_nginx_sites(paths: &Paths, network: Option<bool>) -> Result<()> {
     let directory = crate::paths::checked_data_path(&paths.base, "etc/nginx/sites")?;
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
@@ -357,7 +357,12 @@ fn localize_legacy_nginx_sites(paths: &Paths) -> Result<()> {
             continue;
         }
         let previous = std::fs::read_to_string(&path)?;
-        let content = localize_legacy_site_listeners(&previous)?;
+        let mut content = localize_legacy_site_listeners(&previous)?;
+        if let Some(enabled) = network {
+            if previous.lines().next().is_some_and(|line| line.starts_with("# site: ") && line.contains("NiceEnv 托管")) {
+                content = network_listeners(&content, enabled, false)?;
+            }
+        }
         if content != previous {
             changes.push((path, previous, content));
         }
@@ -371,6 +376,35 @@ fn localize_legacy_nginx_sites(paths: &Paths) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// 只调整托管 server 的监听参数，保留端口、SSL 标记、正文与用户注释。
+pub(crate) fn network_listeners(source: &str, enabled: bool, main: bool) -> Result<String> {
+    let nodes = nginx_directives(source.trim_start_matches('\u{feff}'))?;
+    let offset = source.len() - source.trim_start_matches('\u{feff}').len();
+    let servers: Vec<_> = if main {
+        nodes.iter().filter(|node| node.words[0] == "http").flat_map(|node| &node.children)
+            .filter(|node| node.words[0] == "server" && node.children.iter().any(|child| child.words == ["server_name", "_"])).collect()
+    } else { nodes.iter().filter(|node| node.words[0] == "server").collect() };
+    let host = if enabled { "0.0.0.0" } else { "127.0.0.1" };
+    let argument = regex::Regex::new(r"^listen\s+(\S+?)(?:\s|;)").expect("constant pattern");
+    let mut edits = Vec::new();
+    for server in servers {
+        for node in server.children.iter().filter(|node| node.words[0] == "listen") {
+            let value = node.words.get(1).ok_or_else(nginx_structure_error)?;
+            let port = value.strip_prefix("127.0.0.1:").or_else(|| value.strip_prefix("0.0.0.0:"))
+                .or_else(|| value.strip_prefix("*:"))
+                .unwrap_or(value).parse::<u16>().ok().filter(|port| *port > 0)
+                .ok_or_else(|| AppError::new("WEB_NETWORK_CUSTOM", "站点包含自定义监听地址，无法自动切换局域网访问")
+                    .with_hint("请先在配置编辑器中将托管站点的监听改回 127.0.0.1，再重试。"))?;
+            let span = argument.captures(&source[offset + node.start..offset + node.end]).and_then(|m| m.get(1))
+                .ok_or_else(nginx_structure_error)?;
+            edits.push((offset + node.start + span.start(), offset + node.start + span.end(), format!("{host}:{port}")));
+        }
+    }
+    let mut result = source.to_string();
+    for (start, end, value) in edits.into_iter().rev() { result.replace_range(start..end, &value); }
+    Ok(result)
 }
 
 pub fn render_nginx_conf(
@@ -388,7 +422,7 @@ pub fn render_nginx_conf(
             let upstream = nginx_upstream_name(ver);
             let file = p.to_string_lossy().replace('\\', "/");
             format!(
-                "        location = /_adminer {{ return 302 /_adminer/; }}\n        location /_adminer/ {{\n            fastcgi_pass {upstream};\n            fastcgi_index index.php;\n            fastcgi_param SCRIPT_FILENAME \"{file}\";\n            fastcgi_param DOCUMENT_ROOT \"{dir}\";\n            include {params};\n        }}\n",
+                "        location = /_adminer {{ return 302 /_adminer/; }}\n        location /_adminer/ {{\n            allow 127.0.0.1;\n            deny all;\n            fastcgi_pass {upstream};\n            fastcgi_index index.php;\n            fastcgi_param SCRIPT_FILENAME \"{file}\";\n            fastcgi_param DOCUMENT_ROOT \"{dir}\";\n            include {params};\n        }}\n",
                 dir = nginx_path(p.parent().unwrap_or(std::path::Path::new("."))),
                 params = nginx_path(&paths.etc().join("nginx").join("fastcgi_params")),
             )
@@ -1150,6 +1184,7 @@ pub fn write_nginx_conf(
     pools: &[(String, u16)],
     http_port: u16,
     https_port: u16,
+    network: Option<bool>,
 ) -> Result<()> {
     std::fs::create_dir_all(paths.logs().join("nginx"))?;
     std::fs::create_dir_all(paths.etc().join("nginx").join("temp"))?;
@@ -1169,8 +1204,9 @@ pub fn write_nginx_conf(
         Some(current) => sync_nginx_config(current, &conf, paths)?,
         None => conf,
     };
+    let conf = match network { Some(enabled) => network_listeners(&conf, enabled, true)?, None => conf };
     crate::tls::ensure_server_fallback(paths)?;
-    localize_legacy_nginx_sites(paths)?;
+    localize_legacy_nginx_sites(paths, network)?;
     publish_config(paths, "nginx-main", &path, &conf, previous.as_deref())?;
     let fp = paths.etc().join("nginx").join("fastcgi_params");
     if !fp.exists() {
@@ -1582,6 +1618,7 @@ pub fn write_httpd_conf(
     pools: &[(String, u16)],
     http_port: u16,
     https_port: u16,
+    network: Option<bool>,
 ) -> Result<()> {
     std::fs::create_dir_all(paths.apache_sites_dir())?;
     std::fs::create_dir_all(paths.apache_run_dir())?;
@@ -1593,6 +1630,7 @@ pub fn write_httpd_conf(
         || render_httpd_conf(paths, apache_root, pools, http_port, https_port),
         |current| sync_httpd_config(current, paths, apache_root, http_port, https_port),
     );
+    let conf = if network == Some(true) { conf.replace("Listen 127.0.0.1:", "Listen 0.0.0.0:") } else { conf };
     crate::tls::ensure_server_fallback(paths)?;
     publish_config(paths, "apache-conf", &path, &conf, previous.as_deref())?;
     Ok(())
@@ -1769,9 +1807,9 @@ secret: fixture-secret
         std::fs::create_dir_all(paths.nginx_sites_dir()).unwrap();
         let site_path = paths.nginx_sites_dir().join("fixture.conf");
         std::fs::write(&site_path, legacy).unwrap();
-        localize_legacy_nginx_sites(&paths).unwrap();
+        localize_legacy_nginx_sites(&paths, None).unwrap();
         assert_eq!(std::fs::read_to_string(&site_path).unwrap(), localized);
-        localize_legacy_nginx_sites(&paths).unwrap();
+        localize_legacy_nginx_sites(&paths, None).unwrap();
         assert_eq!(std::fs::read_to_string(&site_path).unwrap(), localized);
     }
 

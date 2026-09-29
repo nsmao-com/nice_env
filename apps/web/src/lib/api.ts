@@ -156,6 +156,19 @@ export const deleteSite = (id: string, opts: { hosts?: boolean; certs?: boolean 
 export const startSite = (id: string) => safe(invoke<boolean>("start_site", { id }));
 export const stopSite = (id: string) => safe(invoke<boolean>("stop_site", { id }));
 
+export interface SiteNetworkInfo {
+  server: "nginx" | "apache" | "caddy";
+  enabled: boolean;
+  running: boolean;
+  affectedSites: string[];
+  addresses: { interface: string; address: string; listening: boolean }[];
+  accessUrl: string | null;
+  localCa: boolean;
+}
+export const siteNetworkInfo = (id: string) => safe(invoke<SiteNetworkInfo>("site_network_info", { id }));
+export const siteNetworkApply = (id: string, server: SiteNetworkInfo["server"], enabled: boolean) =>
+  safe(invoke<boolean>("site_network_apply", { id, server, enabled }));
+
 /* hosts / 证书 */
 export const readHosts = () => safe(invoke<HostsEntry[]>("read_hosts"));
 export const applyHosts = (entries: HostsEntry[], expectedEntries?: HostsEntry[]) =>

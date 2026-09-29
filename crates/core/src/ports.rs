@@ -159,6 +159,40 @@ pub(crate) fn owns_listener(target: std::net::SocketAddr, roots: &[u32]) -> Resu
     }))
 }
 
+/// 仅为已枚举的本机网卡检查通配监听，不能将远端地址当成本机服务。
+pub(crate) fn owns_interface_listener(target: std::net::SocketAddr, roots: &[u32]) -> Result<bool> {
+    let networks = sysinfo::Networks::new_with_refreshed_list();
+    if !networks.iter().any(|(_, network)| network.ip_networks().iter().any(|network| network.addr == target.ip())) { return Ok(false); }
+    let listeners = listener_endpoints()?;
+    let processes = ProcessSnapshot::read();
+    let owners: Vec<_> = listeners.iter().filter(|entry| entry.address.is_some_and(|address|
+        address.port() == target.port() && address.is_ipv4() == target.is_ipv4()
+            && (address.ip().is_unspecified() || address.ip() == target.ip()))).collect();
+    Ok(!owners.is_empty() && owners.iter().all(|entry| ownership(entry.pid, roots, &processes.parents) == Ownership::Own))
+}
+
+/// Windows 上 wildcard 绑定成功仍可能与其它进程的具体网卡监听重叠。
+/// 检查本服务全部 IPv4 通配端口（包括 HTTP 跳转端口），只报告冲突，不结束外部进程。
+pub(crate) fn verify_wildcard_listeners(roots: &[u32]) -> Result<()> {
+    if roots.is_empty() {
+        return Err(AppError::new("WEB_NETWORK_PROCESS", "无法确认 Web 服务进程，请检查服务日志"));
+    }
+    let listeners = listener_endpoints()?;
+    let processes = ProcessSnapshot::read();
+    let ports: HashSet<_> = listeners.iter().filter(|entry| {
+        entry.address.is_some_and(|address| address.is_ipv4() && address.ip().is_unspecified())
+            && ownership(entry.pid, roots, &processes.parents) == Ownership::Own
+    }).map(|entry| entry.port).collect();
+    for entry in listeners.iter().filter(|entry| ports.contains(&entry.port)
+        && entry.address.is_none_or(|address| address.is_ipv4())) {
+        if ownership(entry.pid, roots, &processes.parents) != Ownership::Own {
+            return Err(AppError::new("WEB_NETWORK_PORT_CONFLICT", format!("局域网端口 {} 存在其他或归属未确认的监听进程（PID {}）", entry.port, entry.pid))
+                .with_hint("请在端口检测中检查占用，或为 Web 服务选择其他端口后重试。"));
+        }
+    }
+    Ok(())
+}
+
 /// 仅供已启用自动释放端口的内部启动流程；UI 必须传扫描时选中的监听者。
 pub fn close_port(
     store: &Store,

@@ -62,8 +62,8 @@ pub(crate) fn encode_export(store: &Store) -> Result<(Vec<u8>, usize)> {
         format: "niceservbay/backup-v1".into(),
         app_version: env!("CARGO_PKG_VERSION").into(),
         exported_at: crate::services::now_ms(),
-        // 本机连接凭据、数据库备份计划及 DNS 恢复记录不随配置导入导出。
-        settings: store.all_settings()?.into_iter().filter(|(key, _)| !crate::mongodb_auth::local_setting(key) && !key.starts_with("redisConnection@") && !key.starts_with("postgresPassword@") && !key.starts_with("postgresBackupPlan@") && !key.starts_with("mysqlBackupPlan@") && !key.starts_with("mariadbBackupPlan@") && !key.starts_with("siteFileBackupPlan@") && !key.starts_with("dnsBackup.")).collect(),
+        // 本机连接凭据、数据库备份计划、局域网开放选择及 DNS 恢复记录不随配置导入导出。
+        settings: store.all_settings()?.into_iter().filter(|(key, _)| !crate::mongodb_auth::local_setting(key) && !key.starts_with("redisConnection@") && !key.starts_with("postgresPassword@") && !key.starts_with("postgresBackupPlan@") && !key.starts_with("mysqlBackupPlan@") && !key.starts_with("mariadbBackupPlan@") && !key.starts_with("siteFileBackupPlan@") && !key.starts_with("dnsBackup.") && !key.starts_with("webLan.")).collect(),
         packages: store
             .list_installed()?
             .into_iter()
@@ -126,7 +126,7 @@ pub fn import_from(
 
     // ---- 设置（逐项覆盖） ----
     for (k, v) in &bundle.settings {
-        if crate::mongodb_auth::local_setting(k) || k.starts_with("redisConnection@") || k.starts_with("postgresPassword@") || k.starts_with("postgresBackupPlan@") || k.starts_with("mysqlBackupPlan@") || k.starts_with("mariadbBackupPlan@") || k.starts_with("siteFileBackupPlan@") || k.starts_with("dnsBackup.") { continue; }
+        if crate::mongodb_auth::local_setting(k) || k.starts_with("redisConnection@") || k.starts_with("postgresPassword@") || k.starts_with("postgresBackupPlan@") || k.starts_with("mysqlBackupPlan@") || k.starts_with("mariadbBackupPlan@") || k.starts_with("siteFileBackupPlan@") || k.starts_with("dnsBackup.") || k.starts_with("webLan.") { continue; }
         store.set_setting(k, v)?;
         report.settings += 1;
     }

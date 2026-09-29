@@ -359,7 +359,13 @@ fn start_service_inner(
         ),
         // 清单声明 `run` 的包（Caddy/Meilisearch/MinIO/Mailpit …）走通用路径
         other => crate::generic::start(store, paths, manager, other, &ports),
-    };
+    }.and_then(|()| {
+        if matches!(id, "nginx" | "apache" | "caddy") && crate::webnetwork::mode(store, id)? == Some(true) {
+            let status = manager.snapshot(id).ok_or_else(|| AppError::new("WEB_NETWORK_PROCESS", "无法确认 Web 服务状态"))?;
+            crate::ports::verify_wildcard_listeners(&status.pids)?;
+        }
+        Ok(())
+    });
 
     match result {
         Ok(()) => {
@@ -418,7 +424,7 @@ fn start_nginx(
 
     // 主配置只包含运行中的 PHP 池；仅安装但未启动的版本不能生成指向空端口的 upstream。
     let pools = running_php_pools(store, manager);
-    configgen::write_nginx_conf(paths, &root, &pools, ports.http, ports.https)?;
+    configgen::write_nginx_conf(paths, &root, &pools, ports.http, ports.https, crate::webnetwork::mode(store, "nginx")?)?;
     configgen::validate_nginx(&exe, &paths.nginx_conf())?;
 
     let site_endpoints = crate::sites::snapshot_endpoints(paths, store, "nginx");
@@ -506,7 +512,7 @@ fn start_php(
         .unwrap_or(false)
     {
         let (root, exe) = nginx_exe(store)?;
-        configgen::write_nginx_conf(paths, &root, &pools, ports.http, ports.https)?;
+        configgen::write_nginx_conf(paths, &root, &pools, ports.http, ports.https, crate::webnetwork::mode(store, "nginx")?)?;
         configgen::validate_nginx(&exe, &paths.nginx_conf())?;
         reload_nginx(store, paths, manager).map_err(|error| {
             AppError::new(
@@ -523,7 +529,7 @@ fn start_php(
         .unwrap_or(false)
     {
         let (root, exe) = apache_paths(store)?;
-        configgen::write_httpd_conf(paths, &root, &pools, ports.apache_http, ports.apache_https)?;
+        configgen::write_httpd_conf(paths, &root, &pools, ports.apache_http, ports.apache_https, crate::webnetwork::mode(store, "apache")?)?;
         configgen::validate_httpd(&exe, &paths.apache_conf())?;
         reload_apache(&root, &exe, paths, store, manager, manager.started_port_or("apache", ports.apache_http))
             .map_err(|error| {
@@ -825,7 +831,7 @@ fn start_apache(
     }
     // 重建主配置（包含运行中的 php 池 balancer）
     let pools = running_php_pools(store, manager);
-    configgen::write_httpd_conf(paths, &root, &pools, ports.apache_http, ports.apache_https)?;
+    configgen::write_httpd_conf(paths, &root, &pools, ports.apache_http, ports.apache_https, crate::webnetwork::mode(store, "apache")?)?;
     configgen::validate_httpd(&exe, &paths.apache_conf())?;
 
     let site_endpoints = crate::sites::snapshot_endpoints(paths, store, "apache");
@@ -1567,7 +1573,7 @@ pub(crate) fn rebuild_and_reload_selected(
     // ---- nginx ----
     if servers.contains(&"nginx") && nginx_exe(store).is_ok() {
         let (root, exe) = nginx_exe(store)?;
-        configgen::write_nginx_conf(paths, &root, &pools, ports.http, ports.https)?;
+        configgen::write_nginx_conf(paths, &root, &pools, ports.http, ports.https, crate::webnetwork::mode(store, "nginx")?)?;
         if manager
             .snapshot("nginx")
             .map(|s| s.state == ServiceState::Running)
@@ -1618,6 +1624,7 @@ pub(crate) fn rebuild_and_reload_selected(
             &active_pools,
             ports.apache_http,
             ports.apache_https,
+            crate::webnetwork::mode(store, "apache")?,
         )?;
         if running {
             configgen::validate_httpd(&exe, &paths.apache_conf())?;

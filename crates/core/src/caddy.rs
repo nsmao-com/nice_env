@@ -239,7 +239,7 @@ pub(crate) fn includes_sites(source: &str, paths: &Paths) -> bool {
     })
 }
 
-fn bind_default_site(source: &str, http: u16) -> Result<String> {
+fn bind_default_site(source: &str, http: u16, network: Option<bool>) -> Result<String> {
     let parsed = tokens(source)?;
     let mut additions = Vec::new();
     for (index, token) in parsed.iter().enumerate() {
@@ -265,6 +265,33 @@ fn bind_default_site(source: &str, http: u16) -> Result<String> {
     for at in additions.into_iter().rev() {
         output.insert_str(at, "\n\tbind 127.0.0.1");
     }
+    match network { Some(enabled) => network_bind(&output, enabled, Some(http)), None => Ok(output) }
+}
+
+/// 站点块必须共享监听；主配置中只接管应用的 http://:port 兜底块。
+pub(crate) fn network_bind(source: &str, enabled: bool, default_port: Option<u16>) -> Result<String> {
+    let tokens = tokens(source)?;
+    let host = if enabled { "0.0.0.0" } else { "127.0.0.1" };
+    let mut edits = Vec::new();
+    for (index, token) in tokens.iter().enumerate().filter(|(index, token)| *index > 0 && token.depth == 0 && token.value == "{") {
+        if default_port.is_some_and(|port| tokens[index - 1].value != format!("http://:{port}")) { continue; }
+        let block: Vec<_> = tokens[index + 1..].iter().take_while(|t| t.depth > 0).collect();
+        let mut found = false;
+        for (index, token) in block.iter().enumerate().filter(|(_, t)| t.depth == 1 && t.value == "bind") {
+            let value = block.get(index + 1).ok_or_else(|| AppError::new("WEB_NETWORK_CUSTOM", "Caddy 监听配置缺少地址"))?;
+            let end = source[token.end..].find('\n').map_or(source.len(), |at| token.end + at);
+            let arguments = source[token.end..end].split('#').next().unwrap_or_default().split_whitespace().collect::<Vec<_>>();
+            if arguments.len() != 1 || !matches!(value.value.as_str(), "127.0.0.1" | "0.0.0.0") {
+                return Err(AppError::new("WEB_NETWORK_CUSTOM", "Caddy 站点包含自定义监听地址，请先将托管站点 bind 改回 127.0.0.1"));
+            }
+            found = true;
+            edits.push((value.start, value.end, host.to_string()));
+        }
+        if !found { edits.push((token.end, token.end, format!("\n\tbind {host}"))); }
+    }
+    edits.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
+    let mut output = source.to_string();
+    for (start, end, value) in edits { output.replace_range(start..end, &value); }
     Ok(output)
 }
 
@@ -336,6 +363,9 @@ pub(crate) fn prepare(
             }
             let original = std::fs::read_to_string(&path)?;
             let mut updated = sync_site_ports(&original, site, http, https)?;
+            if let Some(enabled) = crate::webnetwork::mode(store, "caddy")? {
+                updated = network_bind(&updated, enabled, None)?;
+            }
             if site.runtime.kind == SiteKind::Php {
                 let php = site
                     .runtime
@@ -364,7 +394,7 @@ pub(crate) fn prepare(
         let mut content = if sites.is_empty() && !includes_sites(&initial, paths) {
             initial.clone()
         } else {
-            global_options(&bind_default_site(&initial, http)?, http, https, &errors)?
+            global_options(&bind_default_site(&initial, http, crate::webnetwork::mode(store, "caddy")?)?, http, https, &errors)?
         };
         if !sites.is_empty() && !includes_sites(&content, paths) {
             content.push_str(&format!(
@@ -439,7 +469,7 @@ pub(crate) fn adapt(
 }
 
 /// 从原生适配后的配置确认域名、TLS 与回环监听；不使用待应用的设置拼访问地址。
-pub(crate) fn endpoint(site: &Site, config: &serde_json::Value) -> Option<(String, u16)> {
+pub(crate) fn endpoint(site: &Site, config: &serde_json::Value) -> Option<(String, u16, bool)> {
     let domain = site
         .domains
         .iter()
@@ -503,7 +533,7 @@ pub(crate) fn endpoint(site: &Site, config: &serde_json::Value) -> Option<(Strin
             } else {
                 format!(":{port}")
             };
-            return Some((format!("{scheme}://{domain}{suffix}"), port));
+            return Some((format!("{scheme}://{domain}{suffix}"), port, listener.starts_with(':') || address.ip().is_unspecified()));
         }
     }
     None

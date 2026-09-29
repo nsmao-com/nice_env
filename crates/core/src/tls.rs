@@ -580,8 +580,8 @@ mod local_certificate_tests {
         // 模拟只有 ACME 文件，尚未创建本地 CA。配置生成不读取或改写站点证书。
         std::fs::create_dir_all(state.paths.certs().join("sites")).unwrap();
         let existing = state.paths.certs().join("sites/existing.crt"); std::fs::write(&existing, "keep-existing").unwrap();
-        crate::configgen::write_nginx_conf(&state.paths, &state.paths.base.join("nginx-runtime"), &[], 8080, 8443).unwrap();
-        crate::configgen::write_httpd_conf(&state.paths, &state.paths.base.join("apache-runtime"), &[], 8180, 8444).unwrap();
+        crate::configgen::write_nginx_conf(&state.paths, &state.paths.base.join("nginx-runtime"), &[], 8080, 8443, None).unwrap();
+        crate::configgen::write_httpd_conf(&state.paths, &state.paths.base.join("apache-runtime"), &[], 8180, 8444, None).unwrap();
         assert!(!state.paths.certs().join("ca.crt").exists());
         let crt = state.paths.certs().join("fallback/localhost.crt"); let key = state.paths.certs().join("fallback/localhost.key");
         let pem = std::fs::read_to_string(&crt).unwrap(); let key_pem = std::fs::read_to_string(&key).unwrap();
@@ -593,8 +593,8 @@ mod local_certificate_tests {
             assert!(conf.contains("/fallback/localhost.crt")); assert!(!conf.contains("/ca.key")); assert!(!conf.contains("ssl-dummy"));
         }
         std::fs::write(state.paths.certs().join("ca.crt"), "damaged-root-keep").unwrap();
-        crate::configgen::write_nginx_conf(&state.paths, &state.paths.base.join("nginx-runtime"), &[], 8080, 8443).unwrap();
-        crate::configgen::write_httpd_conf(&state.paths, &state.paths.base.join("apache-runtime"), &[], 8180, 8444).unwrap();
+        crate::configgen::write_nginx_conf(&state.paths, &state.paths.base.join("nginx-runtime"), &[], 8080, 8443, None).unwrap();
+        crate::configgen::write_httpd_conf(&state.paths, &state.paths.base.join("apache-runtime"), &[], 8180, 8444, None).unwrap();
         assert_eq!(std::fs::read_to_string(&crt).unwrap(), pem); assert_eq!(std::fs::read_to_string(&key).unwrap(), key_pem);
         assert_eq!(std::fs::read_to_string(existing).unwrap(), "keep-existing");
         assert_eq!(std::fs::read_to_string(state.paths.certs().join("ca.crt")).unwrap(), "damaged-root-keep");

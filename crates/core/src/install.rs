@@ -867,6 +867,7 @@ impl Installer {
                     &pools,
                     ports.apache_http,
                     ports.apache_https,
+                    crate::webnetwork::mode(store, "apache")?,
                 )?;
             }
             _ => {}

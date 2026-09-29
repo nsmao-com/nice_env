@@ -65,6 +65,7 @@ pub mod toolmirror;
 pub mod transfer;
 pub mod versions;
 pub mod watchdog;
+pub mod webnetwork;
 pub mod xdebug;
 
 use download::Downloader;

@@ -1198,7 +1198,13 @@ fn select_port(store: &Store, r: &Resolved) -> Result<Option<u16>> {
             .and_then(|value| u16::try_from(value).ok()).filter(|p| *p > 0)).collect()
     };
     let original = ports(desired).ok_or_else(|| AppError::new("BAD_PORT", "主端口及派生端口必须位于 1–65535，请调整服务端口"))?;
-    let listeners = crate::ports::listeners()?;
+    // Caddy 的本机模式只占用回环地址；局域网 IP 的同号端口不能阻止失败后的本机配置恢复。
+    // 未识别的地址仍视为冲突，实际配置与监听归属继续由启动流程验证。
+    let listeners = if r.entry.id == "caddy" && crate::webnetwork::mode(store, "caddy")? != Some(true) {
+        crate::ports::listener_endpoints()?.into_iter().filter(|entry| entry.address.is_none()
+            || entry.accepts(([127, 0, 0, 1], entry.port).into()))
+            .map(|entry| (entry.port, entry.pid)).collect()
+    } else { crate::ports::listeners()? };
     let caddy_tls = if r.entry.id == "caddy" { Some(crate::caddy::https_port(store)?) } else { None };
     let available = |base| ports(base).is_some_and(|ports| ports.into_iter().all(|port|
         Some(port) != caddy_tls && !listeners.iter().any(|(bound, _)| *bound == port) && tcp_port_bindable(port)
@@ -1411,6 +1417,13 @@ fn rnacos_http_target(manager: &ServiceManager, r: &Resolved, offset: u16, path:
 fn owned_ports_ready(manager: &ServiceManager, service_id: &str, ports: &[u16]) -> bool {
     let pids = manager.snapshot(service_id).map(|s| s.pids).unwrap_or_default();
     if pids.is_empty() || !pids.iter().any(|pid| platform::process_alive(*pid)) { return false; }
+    if service_id == "caddy" {
+        return ports.iter().all(|port| {
+            let target = ([127, 0, 0, 1], *port).into();
+            crate::ports::owns_listener(target, &pids).unwrap_or(false)
+                && std::net::TcpStream::connect_timeout(&target, Duration::from_millis(200)).is_ok()
+        });
+    }
     crate::ports::listener_endpoints().is_ok_and(|listeners| ports.iter().all(|port|
         listeners.iter().filter(|entry| entry.port == *port).all(|entry| pids.contains(&entry.pid))
             && listeners.iter().filter(|entry| entry.port == *port && pids.contains(&entry.pid))

@@ -1926,8 +1926,8 @@ mod tests {
             }).unwrap();
         }
         let ports = crate::services::PortsProfile::from_settings(&store);
-        crate::configgen::write_nginx_conf(&paths, &root, &[], ports.http, ports.https).unwrap();
-        crate::configgen::write_httpd_conf(&paths, &apache_root, &[], ports.apache_http, ports.apache_https).unwrap();
+        crate::configgen::write_nginx_conf(&paths, &root, &[], ports.http, ports.https, None).unwrap();
+        crate::configgen::write_httpd_conf(&paths, &apache_root, &[], ports.apache_http, ports.apache_https, None).unwrap();
         for (kind, path, extra) in [
             (ConfigKind::NginxMain, paths.nginx_conf(), "\nworker_rlimit_nofile 4096;\n"),
             (ConfigKind::ApacheConf, paths.apache_conf(), "\nTimeout 123\n"),

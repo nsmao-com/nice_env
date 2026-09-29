@@ -323,6 +323,8 @@ pub fn run() {
             update_site,
             delete_site,
             start_site,
+            site_network_info,
+            site_network_apply,
             stop_site,
             // hosts / 证书
             read_hosts,
@@ -3055,12 +3057,35 @@ fn get_settings(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> serde_
 }
 
 #[tauri::command]
+async fn site_network_info(state: State<'_, Arc<CoreState>>, id: String) -> Result<nsb_core::webnetwork::SiteNetworkInfo, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::webnetwork::info(&st.paths, &st.store, &st.manager, &id)))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn site_network_apply(app: tauri::AppHandle, state: State<'_, Arc<CoreState>>, id: String, server: String, enabled: bool) -> Result<bool, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    let st = state.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let result = nsb_core::webnetwork::apply(&st.paths, &st.store, &st.manager, &id, &server, enabled);
+        nsb_core::ops::save_pidfile(&st.paths, &st.manager);
+        map_jh(result.map(|_| true))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?;
+    crate::tray::refresh(&app);
+    result
+}
+
+#[tauri::command]
 fn set_setting(
     app: tauri::AppHandle,
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     key: String,
     value: serde_json::Value,
 ) -> Result<bool, tauri::Error> {
+    if key.starts_with("webLan.") {
+        return Err(box_err(AppError::new("SETTING_PROTECTED", "请通过站点的局域网访问面板修改监听设置")));
+    }
     if key == "autostart" {
         let enabled = value.as_bool().ok_or_else(|| box_err(AppError::new("INVALID_AUTOSTART", "开机自启动开关值无效")))?;
         return save_autostart(&app, &state.store, enabled);

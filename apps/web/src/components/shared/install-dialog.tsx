@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useIsMutating, useQueryClient } from "@tanstack/react-query";
+import { useIsMutating, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -14,6 +14,7 @@ import {
   HardDrive,
   Loader2,
   Package,
+  RefreshCw,
   Settings2,
   ShieldCheck,
   X,
@@ -187,6 +188,7 @@ export function InstallDialog({
     };
     setStarting(true);
     setStartError(null);
+    let syncedPathTasks: InstallTask[] = [];
     try {
       const [packages, services] = await Promise.all([
         queryClient.fetchQuery({ queryKey: ["packages"], queryFn: api.listPackages, staleTime: 0, retry: false, networkMode: "always" }),
@@ -219,7 +221,9 @@ export function InstallDialog({
       let service = validateService(services.find((service) => service.id === startableAs), singleInstance);
       if (service.state !== "running" && singleInstance) {
         // PATH 同步失败后可以继续重试，即使默认版本选择已保存。
+        const pendingPathTasks = Object.values(useInstallTasks.getState().tasks).filter((task) => task.status === "done" && task.pathSyncError);
         await api.setActiveVersion(target.id, displayVersion);
+        syncedPathTasks = pendingPathTasks;
         if (!current()) return;
         const selected = await queryClient.fetchQuery({ queryKey: ["services"], queryFn: api.listServiceStatus, staleTime: 0, retry: false, networkMode: "always" });
         if (!current()) return;
@@ -237,6 +241,7 @@ export function InstallDialog({
         startRef.current = null;
         setStarting(false);
       }
+      for (const synced of syncedPathTasks) useInstallTasks.getState().updatePathSyncError(synced);
       invalidate("services", "packages", "pathenv", "stacks", "databases", "db-users");
     }
   };
@@ -428,6 +433,7 @@ export function InstallDialog({
               </motion.div>
             )}
           </AnimatePresence>
+          {finished && task?.pathSyncError && <InstallPathWarning key={`${task.key}:${task.startedAt}`} task={task} disabled={starting} />}
           {finished && startableAs === target?.id && <p className="mt-3 text-[11.5px] leading-relaxed text-muted">{t("install.startVersionHint")}</p>}
           {finished && startError && <div ref={startErrorRef} role="alert" className="mt-3 rounded-xl border border-error/30 bg-error-soft p-3 text-[12px] text-error [overflow-wrap:anywhere]">
             <p className="font-medium">{t("install.startFailed")}</p>
@@ -471,6 +477,54 @@ export function InstallDialog({
   );
 }
 
+/** 安装已成功，单独恢复环境变量；关闭详情也保留任务中的待处理提示。 */
+function InstallPathWarning({ task, disabled }: { task: InstallTask; disabled: boolean }) {
+  const t = useT();
+  const queryClient = useQueryClient();
+  const pathBusy = useIsMutating({ mutationKey: ["pathenv-change"] }) > 0;
+  const [busy, setBusy] = React.useState(false);
+  const busyRef = React.useRef(false);
+  const mountedRef = React.useRef(true);
+  React.useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+  const mutation = useMutation({
+    mutationKey: ["pathenv-change"],
+    mutationFn: api.pathenvReapply,
+    onSuccess: (result) => queryClient.setQueryData(["pathenv"], result),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["pathenv"] }),
+  });
+  const retry = async () => {
+    if (disabled || busyRef.current || queryClient.isMutating({ mutationKey: ["pathenv-change"] })
+      || useInstallTasks.getState().tasks[task.key] !== task) return;
+    busyRef.current = true;
+    setBusy(true);
+    const pendingPathTasks = Object.values(useInstallTasks.getState().tasks).filter((task) => task.status === "done" && task.pathSyncError);
+    try {
+      const result = await mutation.mutateAsync();
+      if (result.drift) throw { code: "PATH_SYNC_UNCONFIRMED", message: t("install.pathSyncUnconfirmed") };
+      // 重新应用会同步所有当前选择，只清理开始重试前已有且未变化的提醒。
+      for (const synced of pendingPathTasks) useInstallTasks.getState().updatePathSyncError(synced);
+      toast.success(t("install.pathSyncDone"));
+    } catch (error) {
+      useInstallTasks.getState().updatePathSyncError(task, normalizeError(error));
+    } finally {
+      busyRef.current = false;
+      if (mountedRef.current) setBusy(false);
+    }
+  };
+  return <div role="alert" className="mt-3 space-y-2 rounded-xl border border-warning/30 bg-warning-soft p-3 text-[12px] [overflow-wrap:anywhere]">
+    <p className="flex items-center gap-2 font-medium text-warning"><AlertTriangle className="h-4 w-4 shrink-0" />{t("install.pathSyncPending")}</p>
+    <p className="leading-relaxed text-secondary">{t("install.pathSyncHint")}</p>
+    <p className="whitespace-pre-wrap text-muted">{task.pathSyncError?.message}</p>
+    {task.pathSyncError?.hint && <p className="whitespace-pre-wrap text-muted">{task.pathSyncError.hint}</p>}
+    <Button size="sm" variant="outline" disabled={disabled || busy || pathBusy} onClick={() => void retry()}>
+      <RefreshCw className={cn("h-3.5 w-3.5", busy && "animate-spin motion-reduce:animate-none")} />{t("install.retryPathSync")}
+    </Button>
+  </div>;
+}
+
 /** 会话内的任务入口独立于套件筛选；切换页面或关闭进度弹窗后仍可查看结果。 */
 export function InstallTasksPanel({ onInspect }: {
   onInspect: (target: InstallTarget, trigger: HTMLButtonElement | null) => void;
@@ -483,13 +537,15 @@ export function InstallTasksPanel({ onInspect }: {
   const contentId = React.useId();
   const toggleRef = React.useRef<HTMLButtonElement>(null);
   const rank = { running: 0, error: 1, cancelled: 2, done: 3 };
-  const list = Object.values(tasks).sort((a, b) => rank[a.status] - rank[b.status] || b.startedAt - a.startedAt);
+  const taskRank = (task: InstallTask) => task.status === "done" && task.pathSyncError ? 1 : rank[task.status];
+  const list = Object.values(tasks).sort((a, b) => taskRank(a) - taskRank(b) || b.startedAt - a.startedAt);
   React.useEffect(() => {
     if (list.length) setHasShown(true);
   }, [list.length]);
   if (!list.length && !hasShown) return null;
   const running = list.filter((task) => task.status === "running").length;
   const failed = list.filter((task) => task.status === "error").length;
+  const pendingPath = list.filter((task) => task.status === "done" && task.pathSyncError).length;
   return <Card role="region" className="mb-4 overflow-hidden" aria-label={t("install.tasks")}>
     <div className="flex flex-wrap items-center gap-2 p-3">
       <button ref={toggleRef} type="button" aria-expanded={expanded} aria-controls={contentId} onClick={() => setExpanded(!expanded)}
@@ -499,6 +555,7 @@ export function InstallTasksPanel({ onInspect }: {
           <span>{t("install.tasks")}</span><span className="text-muted">{list.length}</span>
           {running > 0 && <span className="text-xs text-info">{running} {t("install.tasksRunning")}</span>}
           {failed > 0 && <span className="text-xs text-error">{failed} {t("install.failed")}</span>}
+          {pendingPath > 0 && <span className="text-xs text-warning">{pendingPath} {t("install.pathSyncCount")}</span>}
         </span>
         <ChevronDown className={cn("h-4 w-4 shrink-0", expanded && "rotate-180")} />
       </button>
@@ -529,7 +586,7 @@ function InstallTaskRow({ task, onInspect, onDismiss }: {
   const cancel = useInstallTasks((s) => s.cancel);
   const busy = task.status === "running";
   const stage = progress ? stageFromState(progress.state) : "download";
-  const label = task.status === "error" ? t("install.failed") : task.status === "done" ? t("install.stage.done")
+  const label = task.status === "error" ? t("install.failed") : task.status === "done" ? t(task.pathSyncError ? "install.pathSyncPending" : "install.stage.done")
     : task.status === "cancelled" ? t("install.cancelled") : task.cancelRequested ? t("install.cancelling")
     : progress ? t(STAGES.find((s) => s.id === stage)?.labelKey ?? "install.stage.download") : t("install.preparing");
   const version = task.resolvedVersion ?? task.version;
@@ -538,7 +595,7 @@ function InstallTaskRow({ task, onInspect, onDismiss }: {
   return <li className="flex flex-wrap items-center gap-3 border-t border-dashed border-separator px-1 py-3 first:border-t-0">
     <div className="min-w-0 flex-1 basis-44 space-y-1">
       <p className="text-xs font-medium [overflow-wrap:anywhere]">{name}</p>
-      <p className={cn("flex items-center gap-1.5 text-xs", task.status === "error" ? "text-error" : "text-muted")}>
+      <p className={cn("flex items-center gap-1.5 text-xs", task.status === "error" ? "text-error" : task.pathSyncError ? "text-warning" : "text-muted")}>
         {busy && <Loader2 className="h-3 w-3 shrink-0 animate-spin" />}{label}
       </p>
       {busy && progress && <div role="progressbar" aria-label={`${name} ${label}`} aria-valuemin={0} aria-valuemax={100}

@@ -442,6 +442,15 @@ pub struct InstalledPackage {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
+pub struct PackageInstallResult {
+    #[serde(flatten)]
+    pub installed: InstalledPackage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_sync_error: Option<crate::error::AppError>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 /// 环境变量注入状态（前端「环境变量」卡片用）
 pub struct PathEnvStatus {
     pub enabled: bool,

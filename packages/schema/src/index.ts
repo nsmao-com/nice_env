@@ -301,6 +301,12 @@ export const AppErrorInfo = z.object({
 });
 export type AppErrorInfo = z.infer<typeof AppErrorInfo>;
 
+/** 套件已经安装；可选错误仅表示后续 PATH 同步还需处理。 */
+export const PackageInstallResult = InstalledPackage.extend({
+  pathSyncError: AppErrorInfo.optional(),
+});
+export type PackageInstallResult = z.infer<typeof PackageInstallResult>;
+
 export const ServiceStatus = z.object({
   id: z.string(),
   label: z.string(),

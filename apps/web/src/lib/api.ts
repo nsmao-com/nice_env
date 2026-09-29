@@ -5,7 +5,7 @@ import type {
   SftpgoConfigDirectories,
   Site,
   PackageView,
-  InstalledPackage,
+  PackageInstallResult,
   SystemStats,
   PortDiagnosis,
   PortScanEntry,
@@ -121,7 +121,7 @@ export const stopStack = (id: string) =>
 /* 套件 */
 export const listPackages = () => safe(invoke<PackageView[]>("list_packages"));
 export const installPackage = (id: string) =>
-  safe(invoke<InstalledPackage>("install_package", { id }));
+  safe(invoke<PackageInstallResult>("install_package", { id }));
 export const uninstallPackage = (id: string) =>
   safe(invoke<boolean>("uninstall_package", { id }));
 export const cancelDownload = (taskId: string) =>

@@ -377,17 +377,23 @@ impl CoreState {
     }
 
     pub async fn install_package(&self, key: &str) -> Result<model::InstalledPackage> {
+        self.install_package_with_result(key).await.map(|result| result.installed)
+    }
+
+    /// 安装成功与后续环境变量同步分别报告，不能因 PATH 失败要求重新安装。
+    pub async fn install_package_with_result(&self, key: &str) -> Result<model::PackageInstallResult> {
         let installed = self
             .installer
             .install(key, &self.paths, &self.store, &self.downloader, &|e| {
                 (self.emit)(e)
             })
             .await?;
+        let _operation = self.manager.lifecycle.lock();
         ops::register_services(&self.paths, &self.store, &self.manager);
         generic::register_services(&self.paths, &self.store, &self.manager);
-        // 装完即让命令可用（开关开着才真正写盘；失败不阻断安装）
-        let _ = pathenv::sync(&self.store, &self.paths, &self.installer.manifest);
-        Ok(installed)
+        // 开关开着才写 PATH；失败不撤回已完成的安装，但必须把错误带回界面。
+        let path_sync_error = pathenv::sync(&self.store, &self.paths, &self.installer.manifest).err();
+        Ok(model::PackageInstallResult { installed, path_sync_error })
     }
 
     pub fn uninstall_package(&self, key: &str) -> Result<()> {

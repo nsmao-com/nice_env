@@ -2,9 +2,9 @@
 
 import { create } from "zustand";
 import { toast } from "sonner";
-import { InstalledPackage, type DownloadProgress } from "@nsb/schema";
+import { PackageInstallResult, type DownloadProgress } from "@nsb/schema";
 import * as api from "./api";
-import { normalizeError } from "./backend";
+import { normalizeError, type AppErrorShape } from "./backend";
 import type { TKey } from "./i18n";
 import { useUI } from "./store";
 
@@ -31,6 +31,8 @@ export interface InstallTask {
   progressKeys?: string[];
   startedAt: number;
   error?: string;
+  /** 安装成功后的待处理项，不应被当成安装失败而重复下载。 */
+  pathSyncError?: AppErrorShape;
   cancelRequested?: boolean;
 }
 
@@ -47,6 +49,7 @@ interface InstallTasksState {
   ) => Promise<boolean>;
   cancel: (key: string) => Promise<boolean>;
   dismiss: (key: string) => void;
+  updatePathSyncError: (task: InstallTask, error?: AppErrorShape) => void;
 }
 
 /** 进行中任务的 Promise（去重用，不进 state，避免无意义的重渲染） */
@@ -109,7 +112,7 @@ export const useInstallTasks = create<InstallTasksState>()((set, get) => ({
     const promise = api
       .installPackage(key)
       .then((installed) => {
-        const result = InstalledPackage.safeParse(installed);
+        const result = PackageInstallResult.safeParse(installed);
         if (!result.success || result.data.id !== target.id || (target.version
           && result.data.version.replace(/^[vV]/, "") !== target.version.replace(/^[vV]/, ""))) {
           throw { code: "INSTALL_RESULT_UNCONFIRMED", message: t("install.resultUnconfirmed") };
@@ -117,8 +120,13 @@ export const useInstallTasks = create<InstallTasksState>()((set, get) => ({
         const resolvedVersion = result.data.version;
         const progressId = `${result.data.id}@${resolvedVersion}`;
         set((s) => ({ tasks: { ...s.tasks, [key]: { ...s.tasks[key], status: "done", resolvedVersion, progressId,
-          progressKeys: [...new Set([...(s.tasks[key]?.progressKeys ?? []), progressId])], cancelRequested: false, error: undefined } } }));
-        if (!opts?.quiet) toast.success(`${target.displayName} ${resolvedVersion} ${t("packages.installed")}`);
+          progressKeys: [...new Set([...(s.tasks[key]?.progressKeys ?? []), progressId])], cancelRequested: false, error: undefined,
+          pathSyncError: result.data.pathSyncError } } }));
+        if (result.data.pathSyncError) {
+          toast.warning(`${target.displayName} ${resolvedVersion} · ${t("install.pathSyncPending")}`, {
+            description: t("install.pathSyncHint"),
+          });
+        } else if (!opts?.quiet) toast.success(`${target.displayName} ${resolvedVersion} ${t("packages.installed")}`);
         return true;
       })
       .catch((e: unknown) => {
@@ -171,6 +179,12 @@ export const useInstallTasks = create<InstallTasksState>()((set, get) => ({
     const tasks = { ...s.tasks };
     delete tasks[key];
     return { tasks };
+  }),
+
+  updatePathSyncError: (task, error) => set((s) => {
+    // 旧重试结果不能清理重装后的新任务，也不能重新创建已移除的记录。
+    if (s.tasks[task.key] !== task || task.status !== "done") return s;
+    return { tasks: { ...s.tasks, [task.key]: { ...task, pathSyncError: error } } };
   }),
 }));
 

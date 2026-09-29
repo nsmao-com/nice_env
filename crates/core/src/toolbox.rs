@@ -1034,6 +1034,8 @@ pub const ADMINER_PORT: u16 = 8991;
 #[serde(rename_all = "camelCase")]
 pub struct AdminerStatus {
     pub package_id: String,
+    /// 启动入口指定的受管数据库实例；为空表示允许管理台列出全部可用实例。
+    pub database_service_id: Option<String>,
     pub port: u16,
     pub file: String,
     pub url: String,
@@ -1100,6 +1102,23 @@ pub(crate) fn adminer_start_on_port(
 }
 
 pub fn database_console_start(store: &Store, paths: &Paths, installer: &crate::install::Installer, manager: &crate::services::ServiceManager, package: &str, port: u16) -> Result<AdminerStatus> {
+    database_console_start_for(store, paths, installer, manager, package, port, None)
+}
+
+/// 启动管理台并将入口绑定到指定的受管 MySQL/MariaDB 实例。
+///
+/// 绑定只接受服务管理器中当前仍有进程和端口记录的实例，避免用户从某个
+/// 版本卡片打开管理台后实际连接到另一套数据库。传入 `None` 保留工具箱
+/// 入口的全实例模式。
+pub fn database_console_start_for(
+    store: &Store,
+    paths: &Paths,
+    installer: &crate::install::Installer,
+    manager: &crate::services::ServiceManager,
+    package: &str,
+    port: u16,
+    database_service_id: Option<&str>,
+) -> Result<AdminerStatus> {
     if !matches!(package, "adminer" | "phpmyadmin") { return Err(AppError::new("BAD_CONSOLE", "请选择 Adminer 或 phpMyAdmin")); }
     use std::io::Read;
     use std::path::PathBuf;
@@ -1117,8 +1136,25 @@ pub fn database_console_start(store: &Store, paths: &Paths, installer: &crate::i
     }
     if let Some(status) = adminer_status(manager)? {
         if status.package_id != package { return Err(AppError::new("CONSOLE_RUNNING", "另一个数据库管理台正在运行，请先停止后再切换")); }
+        if status.database_service_id.as_deref() != database_service_id {
+            return Err(AppError::new("CONSOLE_RUNNING", "数据库管理台已绑定另一实例，请先停止后再切换数据库实例"));
+        }
         return Ok(status);
     }
+    let mut servers: Vec<_> = manager.list_status().into_iter().filter(|service| {
+        (service.id.starts_with("mysql@") || service.id == "mariadb")
+            && matches!(service.state, crate::model::ServiceState::Running | crate::model::ServiceState::Error)
+            && service.port.is_some()
+            && service.pids.iter().any(|pid| platform::process_alive(*pid))
+    }).collect();
+    if let Some(target) = database_service_id {
+        servers.retain(|service| service.id == target);
+        if servers.is_empty() {
+            return Err(AppError::new("DATABASE_INSTANCE_NOT_RUNNING", "所选数据库实例未运行或运行版本已变化")
+                .with_hint("请先启动当前选择的 MySQL / MariaDB 实例，再打开管理台"));
+        }
+    }
+    servers.sort_by(|a, b| a.id.cmp(&b.id));
     let php = crate::ops::installed_by_choice(store, "php")
         .ok_or_else(|| AppError::not_installed("PHP").with_hint("先到套件页安装 PHP"))?;
     let adm = crate::ops::installed_by_choice(store, package)
@@ -1194,11 +1230,14 @@ pub fn database_console_start(store: &Store, paths: &Paths, installer: &crate::i
     if package == "phpmyadmin" {
         let config = dir.join("config.inc.php");
         let managed = "<?php\n// NiceEnv managed database console\n";
-        if !config.exists() || std::fs::read_to_string(&config)?.starts_with(managed) {
+        let existing_managed = !config.exists() || std::fs::read_to_string(&config)?.starts_with(managed);
+        if database_service_id.is_some() && !existing_managed {
+            return Err(AppError::new("ADMINER_CONFIG_CUSTOM", "phpMyAdmin 使用了自定义配置，无法安全绑定当前数据库实例")
+                .with_hint("请切换到 Adminer，或先备份并恢复由 NiceEnv 管理的 phpMyAdmin 配置"));
+        }
+        if existing_managed {
             let secret = match store.get_setting("phpMyAdminCookieSecret") { Some(value) if value.len() == 32 => value, _ => { let value = hex::encode(rand::random::<[u8; 16]>()); store.set_setting("phpMyAdminCookieSecret", &value)?; value } };
             let mut content = format!("{managed}$cfg['blowfish_secret'] = '{secret}';\n$cfg['AllowArbitraryServer'] = false;\n");
-            let mut servers: Vec<_> = manager.list_status().into_iter().filter(|s| (s.id.starts_with("mysql@") || s.id == "mariadb") && s.state == crate::model::ServiceState::Running && s.port.is_some()).collect();
-            servers.sort_by(|a,b| a.id.cmp(&b.id));
             if servers.is_empty() { return Err(AppError::new("DATABASE_NOT_RUNNING", "请先启动 MySQL 或 MariaDB，再打开 phpMyAdmin")); }
             for (index, server) in servers.iter().enumerate() {
                 let i = index + 1; let port = server.port.unwrap();
@@ -1223,8 +1262,12 @@ pub fn database_console_start(store: &Store, paths: &Paths, installer: &crate::i
     let mut url = reqwest::Url::parse(&format!("http://127.0.0.1:{port}/"))
         .map_err(|e| AppError::internal("管理台地址无效", e.to_string()))?;
     url.set_path(&format!("/{file}"));
+    if let Some(server) = servers.first().filter(|_| database_service_id.is_some()) {
+        url.query_pairs_mut().append_pair("server", &format!("127.0.0.1:{}", server.port.unwrap()));
+    }
     let status = AdminerStatus {
         package_id: package.to_string(),
+        database_service_id: database_service_id.map(str::to_owned),
         port,
         file,
         url: url.to_string(),

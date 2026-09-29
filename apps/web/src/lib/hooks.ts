@@ -386,7 +386,7 @@ export function useInterval(fn: () => void, ms: number | null) {
 }
 
 /** 数据库页与工具箱共享真实管理台状态，换页后仍能打开或停止原进程。 */
-export function useAdminer(packageId: "adminer" | "phpmyadmin" = "adminer") {
+export function useAdminer(packageId: "adminer" | "phpmyadmin" = "adminer", targetServiceId?: string) {
   const qc = useQueryClient();
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
@@ -398,7 +398,7 @@ export function useAdminer(packageId: "adminer" | "phpmyadmin" = "adminer") {
       if (action === "stop") {
         await api.adminerStop(); qc.setQueryData(["adminer"], null);
       } else {
-        const status = await api.adminerStart(packageId);
+        const status = await api.adminerStart(packageId, targetServiceId);
         qc.setQueryData(["adminer"], status);
         await api.openInBrowser(status.url);
       }

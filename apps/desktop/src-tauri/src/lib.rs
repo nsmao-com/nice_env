@@ -2746,12 +2746,21 @@ fn ollama_cancel_pull(id: String) -> Result<bool, tauri::Error> {
 #[tauri::command]
 async fn adminer_start(
     package: Option<String>,
+    target_service_id: Option<String>,
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<nsb_core::toolbox::AdminerStatus, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let status = map_jh(nsb_core::toolbox::database_console_start(&st.store, &st.paths, &st.installer, &st.manager, package.as_deref().unwrap_or("adminer"), nsb_core::toolbox::ADMINER_PORT))?;
+        let status = map_jh(nsb_core::toolbox::database_console_start_for(
+            &st.store,
+            &st.paths,
+            &st.installer,
+            &st.manager,
+            package.as_deref().unwrap_or("adminer"),
+            nsb_core::toolbox::ADMINER_PORT,
+            target_service_id.as_deref(),
+        ))?;
         nsb_core::ops::save_pidfile(&st.paths, &st.manager);
         Ok(status)
     }).await

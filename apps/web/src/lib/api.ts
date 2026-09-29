@@ -699,8 +699,8 @@ export const ollamaPull = (name: string) =>
 export const ollamaPullStatus = () => safe(invoke<OllamaPullStatus | null>("ollama_pull_status"));
 export const ollamaCancelPull = (id: string) => safe(invoke<boolean>("ollama_cancel_pull", { id }));
 
-export interface AdminerStatus { packageId?: string; port: number; file: string; url: string; phpVersion: string; adminerVersion: string }
-export const adminerStart = (packageId: "adminer" | "phpmyadmin" = "adminer") => safe(invoke<AdminerStatus>("adminer_start", { package: packageId }));
+export interface AdminerStatus { packageId?: string; databaseServiceId?: string | null; port: number; file: string; url: string; phpVersion: string; adminerVersion: string }
+export const adminerStart = (packageId: "adminer" | "phpmyadmin" = "adminer", targetServiceId?: string) => safe(invoke<AdminerStatus>("adminer_start", { package: packageId, targetServiceId }));
 export const adminerStatus = () => safe(invoke<AdminerStatus | null>("adminer_status"));
 export const adminerStop = () => safe(invoke<boolean>("adminer_stop"));
 

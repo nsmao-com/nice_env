@@ -278,9 +278,9 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
                 {t("db.emptyHint")}
               </p>
             ) : (
-              <div className="flex flex-col divide-y divide-border">
-                {dbs.map((db) => (
-                  <div key={db.name} className="flex flex-wrap items-center gap-2 py-2.5 sm:gap-3">
+              <div className="flex flex-col">
+                {dbs.map((db, index) => (
+                  <div key={db.name} className={`relative flex flex-wrap items-center gap-2 py-2.5 sm:gap-3 ${index > 0 ? "before:absolute before:inset-x-3 before:top-0 before:border-t before:border-dashed before:border-border" : ""}`}>
                     <Table2 className="h-3.5 w-3.5 shrink-0 text-faint" />
                     <span className="flex-1 truncate font-mono text-[12.5px]">{db.name}</span>
                     {db.tables != null && <StatChip icon={Table2}>{db.tables} {t("db.tables")}</StatChip>}
@@ -448,8 +448,12 @@ function InstanceStartButton({ base, version }: { base: string; version?: string
 
 function MySqlInstanceCard({ service, count, engine }: { service?: ServiceStatus; count?: number; engine: DatabaseEngine }) {
   const t = useT();
-  const adminer = useAdminer();
-  const phpMyAdmin = useAdminer("phpmyadmin");
+  const targetServiceId = service?.id;
+  const active = !!service && (service.state === "running" || (service.state === "error" && service.pids.length > 0));
+  const adminer = useAdminer("adminer", targetServiceId);
+  const phpMyAdmin = useAdminer("phpmyadmin", targetServiceId);
+  const consoleTarget = adminer.query.data?.databaseServiceId ?? phpMyAdmin.query.data?.databaseServiceId;
+  const consoleMatches = !consoleTarget || consoleTarget === targetServiceId;
   const port = service?.port;
   return (
     <Card className="min-w-0 p-4">
@@ -485,11 +489,11 @@ function MySqlInstanceCard({ service, count, engine }: { service?: ServiceStatus
         ))}
       </div>
       <div className="mt-3 flex flex-wrap gap-2">
-        <Button variant="secondary" size="sm" disabled={adminer.busy} onClick={() => void adminer.open()}>
+        <Button variant="secondary" size="sm" disabled={adminer.busy || !active} title={!active ? t("db.serviceStoppedHint") : undefined} onClick={() => void adminer.open()}>
           {adminer.busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ExternalLink className="h-3.5 w-3.5" />} {t("db.openAdminer")}
         </Button>
-        <Button variant="secondary" size="sm" disabled={phpMyAdmin.busy || adminer.busy} onClick={() => void phpMyAdmin.open()}><ExternalLink className="h-3.5 w-3.5" />phpMyAdmin</Button>
-        {adminer.query.data && <Button size="sm" variant="ghost" disabled={adminer.busy || phpMyAdmin.busy} onClick={() => void adminer.stop()}>停止 {adminer.query.data.packageId === "phpmyadmin" ? "phpMyAdmin" : "Adminer"}</Button>}
+        <Button variant="secondary" size="sm" disabled={phpMyAdmin.busy || adminer.busy || !active} title={!active ? t("db.serviceStoppedHint") : undefined} onClick={() => void phpMyAdmin.open()}><ExternalLink className="h-3.5 w-3.5" />phpMyAdmin</Button>
+        {adminer.query.data && consoleMatches && <Button size="sm" variant="ghost" disabled={adminer.busy || phpMyAdmin.busy} onClick={() => void adminer.stop()}>停止 {adminer.query.data.packageId === "phpmyadmin" ? "phpMyAdmin" : "Adminer"}</Button>}
       </div>
     </Card>
   );

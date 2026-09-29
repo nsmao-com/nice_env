@@ -1534,6 +1534,8 @@ export const AppSettings = z.object({
   checkUpdateOnLaunch: z.boolean().default(true),
   /** 发现新版后自动开始后台下载安装包 */
   autoDownloadUpdate: z.boolean().default(false),
+  /** 站点页收藏的站点 id；只保存排序与筛选偏好，不改变站点配置。 */
+  favoriteSites: z.array(z.string()).default([]),
   /** 日志页默认拉取行数 */
   logTailLines: z.number().default(500),
   /** 日志页默认自动刷新 */

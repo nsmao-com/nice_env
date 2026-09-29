@@ -3196,6 +3196,9 @@ fn get_settings(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> serde_
         "manifestUrl": state.store.get_setting("manifestUrl").unwrap_or_default(),
         "checkUpdateOnLaunch": state.store.get_setting("checkUpdateOnLaunch").map(|v| v != "false").unwrap_or(true),
         "autoDownloadUpdate": state.store.get_setting("autoDownloadUpdate").map(|v| v == "true").unwrap_or(false),
+        "favoriteSites": state.store.get_setting("favoriteSites")
+            .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+            .unwrap_or_default(),
         "logTailLines": state.store.get_setting("logTailLines").map(|v| v.parse::<i64>().unwrap_or(500)).unwrap_or(500),
         "logAutoRefresh": state.store.get_setting("logAutoRefresh").map(|v| v != "false").unwrap_or(true),
         "confirmKill": state.store.get_setting("confirmKill").map(|v| v != "false").unwrap_or(true),

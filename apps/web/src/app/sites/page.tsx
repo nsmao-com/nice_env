@@ -3,10 +3,10 @@
 import * as React from "react";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "motion/react";
-import { Globe, Plus, ExternalLink, FolderOpen, Loader2, Power, Settings2, FolderSearch, Copy, AppWindow, Search, RefreshCw, Share2, Network } from "lucide-react";
+import { Globe, Plus, ExternalLink, FolderOpen, Loader2, Power, Settings2, FolderSearch, Copy, AppWindow, Search, RefreshCw, Share2, Network, Star } from "lucide-react";
 import type { Site } from "@nsb/schema";
 import { useUI, useT } from "@/lib/store";
-import { useSites, useInvalidate, toastError, siteUrl } from "@/lib/hooks";
+import { useSites, useInvalidate, toastError, siteUrl, useSettings } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import { SiteTerminalButton } from "@/components/sites/site-terminal";
 import { Card } from "@/components/ui/card";
@@ -28,6 +28,34 @@ export default function SitesPage() {
   const t = useT();
   const setWizardOpen = useUI((s) => s.setWizardOpen);
   const { data: sites, error, isFetching, dataUpdatedAt, refetch } = useSites();
+  const invalidate = useInvalidate();
+  const settings = useSettings();
+  const [favoriteIds, setFavoriteIds] = React.useState<Set<string>>(new Set());
+  const [favoriteFilter, setFavoriteFilter] = React.useState("all");
+  const [favoriteBusyId, setFavoriteBusyId] = React.useState<string | null>(null);
+  const favoriteKey = JSON.stringify(settings.data?.favoriteSites ?? []);
+  React.useEffect(() => {
+    if (settings.data) setFavoriteIds(new Set(settings.data.favoriteSites ?? []));
+  }, [favoriteKey]);
+  const toggleFavorite = async (siteId: string) => {
+    if (favoriteBusyId) return;
+    const previous = new Set(favoriteIds);
+    const next = new Set(favoriteIds);
+    const favorite = !next.has(siteId);
+    if (favorite) next.add(siteId); else next.delete(siteId);
+    setFavoriteIds(next);
+    setFavoriteBusyId(siteId);
+    try {
+      await api.setSetting("favoriteSites", [...next]);
+      await invalidate("settings");
+      toast.success(t(favorite ? "sites.favoriteAdded" : "sites.favoriteRemoved"));
+    } catch (error) {
+      setFavoriteIds(previous);
+      toastError(error);
+    } finally {
+      setFavoriteBusyId(null);
+    }
+  };
   const [networkId, setNetworkId] = React.useState<string | null>(null);
   const networkSite = sites.find((site) => site.id === networkId);
   const [shareId, setShareId] = React.useState<string | null>(null);
@@ -42,9 +70,10 @@ export default function SitesPage() {
     return sites.filter((site) =>
       (statusFilter === "all" || site.status === statusFilter) &&
       (serverFilter === "all" || site.runtime.webServer === serverFilter) &&
+      (favoriteFilter !== "favorites" || favoriteIds.has(site.id)) &&
       (!search || [site.name, ...site.domains, site.rootDir, site.runtime.phpVersion ?? "", site.runtime.proxyTarget ?? "", site.runtime.redirect?.target ?? ""].some((value) => value.toLowerCase().includes(search)))
-    ).sort((a, b) => b.updatedAt - a.updatedAt);
-  }, [sites, query, statusFilter, serverFilter]);
+    ).sort((a, b) => Number(favoriteIds.has(b.id)) - Number(favoriteIds.has(a.id)) || b.updatedAt - a.updatedAt);
+  }, [sites, query, statusFilter, serverFilter, favoriteFilter, favoriteIds]);
   const [scanOpen, setScanOpen] = React.useState(false);
   // 命令面板/其它入口可能请求直接打开扫描对话框
   const pendingScan = useUI((st) => st.pendingScan);
@@ -103,6 +132,13 @@ export default function SitesPage() {
             <SelectItem value="caddy">Caddy</SelectItem>
           </SelectContent>
         </Select>
+        <Select value={favoriteFilter} onValueChange={setFavoriteFilter}>
+          <SelectTrigger className="w-[140px]" aria-label={t("sites.filterFavorites")}><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">{t("sites.allFavorites")}</SelectItem>
+            <SelectItem value="favorites">{t("sites.favoritesOnly")}</SelectItem>
+          </SelectContent>
+        </Select>
         <span className="text-xs tabular-nums text-muted" aria-live="polite">{visibleSites.length} / {sites.length}</span>
       </div>
       {error && (
@@ -126,14 +162,14 @@ export default function SitesPage() {
           className="min-h-[420px]"
         />
       ) : visibleSites.length === 0 ? (
-        <EmptyState icon={Search} title={t("sites.noMatches")} hint={t("sites.noMatchesHint")}
-          action={<Button variant="secondary" onClick={() => { setQuery(""); setStatusFilter("all"); setServerFilter("all"); }}>{t("sites.clearFilters")}</Button>} />
+        <EmptyState icon={favoriteFilter === "favorites" ? Star : Search} title={favoriteFilter === "favorites" ? t("sites.noFavorites") : t("sites.noMatches")} hint={favoriteFilter === "favorites" ? t("sites.noFavoritesHint") : t("sites.noMatchesHint")}
+          action={<Button variant="secondary" onClick={() => { setQuery(""); setStatusFilter("all"); setServerFilter("all"); setFavoriteFilter("all"); }}>{t("sites.clearFilters")}</Button>} />
       ) : (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
           <AnimatePresence>
             {visibleSites
               .map((site) => (
-                <SiteCard key={site.id} site={site} onOpenDetail={() => setDetailId(site.id)} onShare={() => setShareId(site.id)} onNetwork={() => setNetworkId(site.id)} />
+                <SiteCard key={site.id} site={site} favorite={favoriteIds.has(site.id)} favoriteBusy={favoriteBusyId !== null} onToggleFavorite={() => void toggleFavorite(site.id)} onOpenDetail={() => setDetailId(site.id)} onShare={() => setShareId(site.id)} onNetwork={() => setNetworkId(site.id)} />
               ))}
           </AnimatePresence>
         </div>
@@ -148,7 +184,7 @@ export default function SitesPage() {
   );
 }
 
-function SiteCard({ site, onOpenDetail, onShare, onNetwork }: { site: Site; onOpenDetail: () => void; onShare: () => void; onNetwork: () => void }) {
+function SiteCard({ site, favorite, favoriteBusy, onToggleFavorite, onOpenDetail, onShare, onNetwork }: { site: Site; favorite: boolean; favoriteBusy: boolean; onToggleFavorite: () => void; onOpenDetail: () => void; onShare: () => void; onNetwork: () => void }) {
   const t = useT();
   const invalidate = useInvalidate();
   const url = siteUrl(site);
@@ -186,6 +222,14 @@ function SiteCard({ site, onOpenDetail, onShare, onNetwork }: { site: Site; onOp
             </div>
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-0.5">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button aria-label={t(favorite ? "sites.unfavorite" : "sites.favorite")} aria-pressed={favorite} variant="ghost" size="icon-sm" className={favorite ? "text-amber-500 hover:text-amber-600" : "text-faint hover:text-foreground"} disabled={favoriteBusy} onClick={onToggleFavorite}>
+                  <Star className="h-3.5 w-3.5" fill={favorite ? "currentColor" : "none"} />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{t(favorite ? "sites.unfavorite" : "sites.favorite")}</TooltipContent>
+            </Tooltip>
             <CopyButton text={url} resolveText={() => api.siteAccessUrl(site.id)} />
             <Tooltip>
               <TooltipTrigger asChild>

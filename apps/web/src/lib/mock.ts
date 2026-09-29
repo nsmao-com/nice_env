@@ -651,6 +651,7 @@ const settings: AppSettings = {
   manifestUrl: "",
   checkUpdateOnLaunch: true,
   autoDownloadUpdate: false,
+  favoriteSites: [],
   logTailLines: 500,
   logAutoRefresh: true,
   confirmKill: true,

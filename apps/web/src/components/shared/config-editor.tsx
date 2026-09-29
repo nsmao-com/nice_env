@@ -1,6 +1,8 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { CodeEditor, type CodeEditorHandle } from "./code-editor";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
@@ -35,6 +37,15 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 
+/** 版本配置必须精确匹配；只有后端定义的共用配置允许忽略服务版本。 */
+function configForService(files: ConfigFileInfo[], service: string) {
+  const exact = files.find((file) => file.usedByService === service);
+  if (exact) return exact;
+  const base = service.split("@")[0];
+  if (!["nginx", "apache", "mihomo"].includes(base)) return undefined;
+  return files.find((file) => file.usedByService === base && !file.kind.includes("@"));
+}
+
 /**
  * 配置文件编辑器。
  *
@@ -47,29 +58,25 @@ export function ConfigEditor() {
   const t = useT();
   const [search, setSearch] = React.useState("");
   const [editing, setEditing] = React.useState<ConfigFileInfo | null>(null);
-  const [requestedService, setRequestedService] = React.useState<string | null>(null);
+  const searchParams = useSearchParams();
+  const requestedService = searchParams.get("service");
   const autoOpened = React.useRef(false);
-  const { data: files = [], isPending, error, refetch } = useQuery({ queryKey: ["config-files"], queryFn: api.configList });
+  const { data: files = [], isPending, isFetching, error, refetch } = useQuery({ queryKey: ["config-files"], queryFn: api.configList });
   const filteredFiles = files.filter((f) => `${f.label} ${f.path} ${f.kind}`.toLowerCase().includes(search.toLowerCase()));
+  const requestedFile = requestedService ? configForService(files, requestedService) : undefined;
 
-  // 服务卡片通过 query 参数直达配置；在 effect 中读取可避免静态导出引入
-  // useSearchParams 的 Suspense 要求，同时不会在服务端读取 window。
+  // 配置页在 Suspense 内读取查询参数，同一路由切换实例时也重新定位。
   React.useEffect(() => {
-    const service = new URLSearchParams(window.location.search).get("service");
-    if (service) setRequestedService(service);
-  }, []);
+    autoOpened.current = false;
+  }, [requestedService]);
 
   React.useEffect(() => {
-    if (!requestedService || autoOpened.current || editing || isPending || error || files.length === 0) return;
-    const exact = files.find((file) => file.exists && file.usedByService === requestedService);
-    const base = requestedService.split("@")[0];
-    const fallback = files.find((file) => file.exists && (file.usedByService === base || file.kind.startsWith(`${base}-`)));
-    const target = exact ?? fallback;
-    if (target) {
+    if (!requestedService || autoOpened.current || editing || isPending || error) return;
+    if (requestedFile?.exists) {
       autoOpened.current = true;
-      setEditing(target);
+      setEditing(requestedFile);
     }
-  }, [requestedService, editing, isPending, error, files]);
+  }, [requestedService, requestedFile, editing, isPending, error]);
 
   return (
     <>
@@ -84,6 +91,16 @@ export function ConfigEditor() {
           </div>
         </CardHeader>
         <CardContent>
+          {requestedService && !isPending && !error && !requestedFile?.exists && (
+            <div role="status" className="mb-4 space-y-2 rounded-lg border border-warn/25 bg-warn-soft px-3 py-2.5 text-xs [overflow-wrap:anywhere]">
+              <p>{t(requestedFile ? "cfgeditor.targetNotGenerated" : "cfgeditor.targetUnavailable").replace("{service}", requestedService)}</p>
+              {requestedFile && <p className="font-mono text-[10.5px] text-muted">{requestedFile.path}</p>}
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" variant="secondary" disabled={isFetching} onClick={() => void refetch({ cancelRefetch: false })}>{t("install.retry")}</Button>
+                <Button size="sm" variant="ghost" asChild><Link href="/configuration">{t("cfgeditor.showAll")}</Link></Button>
+              </div>
+            </div>
+          )}
           <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={t("editor.findFile")} aria-label={t("editor.findFile")} className="mb-4" />
           {isPending ? (
             <p className="flex items-center justify-center gap-2 py-4 text-xs text-muted" role="status"><Loader2 className="h-4 w-4 animate-spin" />{t("common.loading")}</p>
@@ -101,7 +118,7 @@ export function ConfigEditor() {
                 <button
                   key={f.kind}
                   type="button"
-                  onClick={() => f.exists && setEditing(f)}
+                  onClick={() => { if (f.exists) { autoOpened.current = true; setEditing(f); } }}
                   disabled={!f.exists}
                   className={cn(
                     "flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left transition-colors",
@@ -337,7 +354,7 @@ export function ConfigEditDialog({
                     </span>
                   )}
                 </DialogTitle>
-                <DialogDescription className="truncate font-mono text-[10.5px]">
+                <DialogDescription className="max-h-16 overflow-y-auto font-mono text-[10.5px] [overflow-wrap:anywhere]">
                   {info.path}
                 </DialogDescription>
               </div>

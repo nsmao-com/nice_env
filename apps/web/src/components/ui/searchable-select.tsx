@@ -93,7 +93,7 @@ export function SearchableSelect({ options, value, onValueChange, open, onOpenCh
             </CommandItem>)}
           </CommandGroup>)}
         </CommandList>
-        <div role="status" className="shrink-0 border-t border-border px-4 py-2 text-xs text-muted">
+        <div role="status" className="mx-2 shrink-0 border-t border-dashed border-separator px-2 py-2 text-xs text-muted">
           {t("select.count").replace("{visible}", String(visible.length)).replace("{total}", String(options.length))}
         </div>
       </Command>

@@ -433,6 +433,7 @@ pub fn run() {
             open_terminal,
             // 数据库
             database_data_dir,
+            service_data_dir,
             db_list,
             db_workspace,
             db_create,
@@ -1811,6 +1812,22 @@ async fn database_data_dir(
         path.to_str()
             .map(str::to_owned)
             .ok_or_else(|| box_err(nsb_core::AppError::new("DATABASE_PATH_ENCODING", "数据目录包含无法显示的字符")))
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn service_data_dir(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    service_id: String,
+) -> Result<String, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = map_jh(st.service_data_dir(&service_id))?;
+        path.to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| box_err(nsb_core::AppError::new("SERVICE_DATA_PATH_ENCODING", "服务数据目录包含无法显示的字符")))
     })
     .await
     .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?

@@ -16,6 +16,7 @@ import { ServiceDiagnostics } from "./service-diagnostics";
 import { ServiceIcon } from "./service-icon";
 import { ServiceWebButton } from "./service-web-button";
 import { ServiceConfigButton } from "./service-config-button";
+import { ServiceDataDirButton } from "./service-data-dir-button";
 import { SftpgoConfigButton } from "./sftpgo-config-button";
 import { useT } from "@/lib/store";
 import { useServiceActions } from "@/lib/hooks";
@@ -130,6 +131,7 @@ export function ServiceCard({ service, dragHandle, dragPreview = false }: { serv
             </StatChip>
           )}
           <ServiceConfigButton service={service} disabled={busy || dragPreview} />
+          <ServiceDataDirButton service={service} disabled={busy || dragPreview} />
           <ServiceWebButton service={service} disabled={busy || dragPreview} />
           <SftpgoConfigButton service={service} disabled={busy || dragPreview} />
           <Button

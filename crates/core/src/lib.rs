@@ -844,6 +844,11 @@ impl CoreState {
         Ok(path)
     }
 
+    /// 返回 manifest 驱动服务的受管数据目录；路径由已安装版本和清单推导。
+    pub fn service_data_dir(&self, service_id: &str) -> Result<std::path::PathBuf> {
+        generic::service_data_dir(&self.store, &self.paths, service_id)
+    }
+
     pub fn with_postgres<T>(&self, version: &str, operation: impl FnOnce(&dbadmin::PostgresClient) -> Result<T>) -> Result<T> {
         let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
         let _operation = self.manager.lifecycle.lock();

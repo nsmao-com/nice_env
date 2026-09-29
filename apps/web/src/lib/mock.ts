@@ -2933,6 +2933,15 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const version = String(args?.version ?? "8.0.36");
       return `C:\\Users\\Demo\\AppData\\Local\\NiceEnv\\data\\${engine}\\${version}` as T;
     }
+    case "service_data_dir": {
+      const serviceId = String(args?.serviceId ?? "");
+      const base = serviceId.split("@")[0];
+      if (!services.has(serviceId) && !services.has(base)) throw { code: "UNKNOWN_SERVICE", message: "服务未注册或已卸载" };
+      if (["nginx", "apache", "php", "mysql", "postgresql", "mongodb", "redis", "mihomo"].includes(base)) {
+        throw { code: "SERVICE_DATA_DIR_UNSUPPORTED", message: "该服务的数据目录请在对应管理页打开" };
+      }
+      return `C:\\Users\\Demo\\AppData\\Local\\NiceEnv\\data\\${base}` as T;
+    }
     case "db_list": return structuredClone([...mysqlPreview(args?.version as string | undefined, true, args?.engine as DatabaseEngine | undefined).state.databases.values()]) as T;
     case "db_create": {
       const { state } = mysqlPreview(args?.version as string | undefined, true, args?.engine as DatabaseEngine | undefined);

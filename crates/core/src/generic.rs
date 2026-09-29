@@ -158,6 +158,50 @@ pub fn manifest_entry_for(store: &Store, service_id: &str) -> Option<PackageMani
     Some(installer.installed_entry(&inst))
 }
 
+/// 返回通用服务由清单推导出的受管数据目录。
+///
+/// 目录名只能来自已安装版本对应的 `run.dataDir` 或服务 id，不能由前端
+/// 传入任意路径；同时复用应用数据目录的路径检查，避免目录穿越、设备名和
+/// 软链接把“打开数据目录”变成任意文件系统访问入口。
+pub fn service_data_dir(store: &Store, paths: &Paths, service_id: &str) -> Result<PathBuf> {
+    let entry = manifest_entry_for(store, service_id).ok_or_else(|| {
+        AppError::new("UNKNOWN_SERVICE", format!("清单里没有服务 {service_id}"))
+            .with_hint("该服务可能是内置编排，或清单需要更新")
+    })?;
+    if is_builtin(&entry.id) {
+        return Err(AppError::new(
+            "SERVICE_DATA_DIR_UNSUPPORTED",
+            format!("{} 的数据目录由专用管理页提供", entry.display_name),
+        ));
+    }
+    let spec = entry
+        .run
+        .as_ref()
+        .ok_or_else(|| AppError::new("NOT_A_SERVICE", "该套件不是可运行的服务"))?;
+    let (id, version) = match service_id.split_once('@') {
+        Some((id, version)) if !id.is_empty() && !version.is_empty() => {
+            (id.to_string(), version.to_string())
+        }
+        Some(_) => return Err(AppError::new("BAD_SERVICE_ID", "服务版本无效")),
+        None => {
+            let installed = crate::ops::installed_by_choice(store, &entry.id)
+                .ok_or_else(|| AppError::not_installed(&entry.display_name))?;
+            (installed.id.clone(), installed.version.clone())
+        }
+    };
+    store
+        .find_installed(&id, Some(&version))
+        .ok_or_else(|| AppError::not_installed(&format!("{} {}", entry.display_name, version)))?;
+    let name = spec
+        .data_dir
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(&id);
+    let relative = format!("data/{}", name.replace('\\', "/"));
+    crate::paths::checked_data_path(&paths.base, &relative)
+        .map_err(|error| AppError::io("解析服务数据目录", error))
+}
+
 /// 检查服务启动前必须具备的套件依赖。
 ///
 /// 依赖校验放在通用服务入口之外复用，确保内置编排（Nginx、PHP、MySQL 等）

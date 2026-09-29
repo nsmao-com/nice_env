@@ -351,6 +351,8 @@ export const openTerminal = (expectedRevision: string, siteId?: string) =>
 export type DatabaseDataDirEngine = DatabaseEngine | "postgresql" | "mongodb" | "redis";
 export const databaseDataDir = (engine: DatabaseDataDirEngine, version: string) =>
   safe(invoke<string>("database_data_dir", { engine, version }));
+export const serviceDataDir = (serviceId: string) =>
+  safe(invoke<string>("service_data_dir", { serviceId }));
 export const dbList = (version?: string, engine: DatabaseEngine = "mysql") => safe(invoke<DatabaseInfo[]>("db_list", { version, engine }));
 export const dbCreate = (name: string, version?: string, engine: DatabaseEngine = "mysql") => safe(invoke<boolean>("db_create", { name, version, engine }));
 export const dbDrop = (name: string, version?: string, engine: DatabaseEngine = "mysql") => safe(invoke<boolean>("db_drop", { name, version, engine }));

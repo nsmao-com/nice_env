@@ -292,6 +292,7 @@ pub fn run() {
         domains: vec!["smoke83.nsb.test".into()],
         root_dir: site_root.to_string_lossy().to_string(),
         runtime: nsb_core::model::SiteRuntime {
+            cors: None,
             redirect: None,
             custom_rewrite: None,
             application: None,
@@ -406,6 +407,7 @@ echo implode("\n", $out);
         domains: vec!["smoke74.nsb.test".into()],
         root_dir: site2_root.to_string_lossy().to_string(),
         runtime: nsb_core::model::SiteRuntime {
+            cors: None,
             redirect: None,
             custom_rewrite: None,
             application: None,
@@ -469,6 +471,7 @@ echo implode("\n", $out);
             .to_string_lossy()
             .to_string(),
         runtime: nsb_core::model::SiteRuntime {
+            cors: None,
             redirect: None,
             custom_rewrite: None,
             application: None,

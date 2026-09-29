@@ -574,6 +574,7 @@ pub fn render_site_conf(
         String::new()
     };
 
+    let cors = site.runtime.cors.as_ref().map(|cors| crate::sitecors::nginx(&site.id, cors));
     let body = match &site.runtime.kind {
         crate::model::SiteKind::Redirect => redirect_directives(site, false),
         crate::model::SiteKind::Php => {
@@ -616,6 +617,7 @@ pub fn render_site_conf(
 
     format!(
         r#"# site: {name} ({id}) — NiceEnv 托管
+{cors_maps}
 server {{
     {listen};
     server_name {server_names};
@@ -628,6 +630,8 @@ server {{
     error_log "{error_log}" warn;
 
     location ~ /\.(?!well-known(?:/|$)) {{ deny all; }}
+{cors_headers}
+{cors_preflight}
 
 {body}}}
 "#,
@@ -641,8 +645,40 @@ server {{
         document_root = if site.runtime.kind == crate::model::SiteKind::Redirect { String::new() } else {
             format!("root \"{}\";\n    index index.php index.html index.htm;", nginx_path(std::path::Path::new(&site.root_dir)))
         },
-        body = body,
+        body = cors.as_ref().map_or_else(|| body.clone(), |cors| nginx_cors_headers_in_locations(&body, &cors.headers)),
+        cors_maps = cors.as_ref().map_or("", |cors| cors.maps.as_str()),
+        cors_headers = cors.as_ref().map_or("", |cors| cors.headers.as_str()),
+        cors_preflight = cors.as_ref().map_or("", |cors| cors.before_content.as_str()),
     )
+}
+
+/// Nginx 子块一旦定义 add_header 就不再继承父级；保留自定义头并补回托管 CORS 头。
+fn nginx_cors_headers_in_locations(content: &str, headers: &str) -> String {
+    let Ok(nodes) = nginx_directives(content) else { return content.into(); };
+    fn edits(nodes: &[NginxDirective], headers: &str, out: &mut Vec<(usize, usize, String)>) {
+        for node in nodes {
+            if matches!(node.words.first().map(String::as_str), Some("add_header" | "proxy_pass_header" | "fastcgi_pass_header"))
+                && node.words.get(1).is_some_and(|name| crate::sitecors::HEADERS.iter().any(|header| name.eq_ignore_ascii_case(header))) {
+                out.push((node.start, node.end, String::new()));
+            }
+            if !node.children.is_empty() && node.children.iter().any(|child| child.words.first().is_some_and(|word| word == "add_header")) {
+                out.push((node.end - 1, node.end - 1, format!("\n{headers}")));
+            }
+            // 自定义隐藏头同样会中断父级继承，子 location 仍须过滤应用返回的 CORS 头。
+            for directive in ["proxy_hide_header", "fastcgi_hide_header"] {
+                if node.children.iter().any(|child| child.words.first().is_some_and(|word| word == directive)) {
+                    let hidden = crate::sitecors::HEADERS.iter().map(|header| format!("    {directive} {header};\n")).collect::<String>();
+                    out.push((node.end - 1, node.end - 1, format!("\n{hidden}")));
+                }
+            }
+            edits(&node.children, headers, out);
+        }
+    }
+    let mut changes = Vec::new(); edits(&nodes, headers, &mut changes);
+    changes.sort_by_key(|change| std::cmp::Reverse(change.0));
+    let mut output = content.to_string();
+    for (start, end, replacement) in changes { output.replace_range(start..end, &replacement); }
+    output
 }
 
 /* ================= php.ini ================= */
@@ -1225,6 +1261,8 @@ pub fn validate_nginx(nginx_exe: &std::path::Path, conf: &std::path::Path) -> Re
 
 /* ================= Apache httpd ================= */
 
+const HTTPD_PROXY_HTTP_MODULE: &str = "# NiceEnv HTTP reverse proxy support\n<IfModule !proxy_http_module>\n    LoadModule proxy_http_module modules/mod_proxy_http.so\n</IfModule>\n";
+
 fn sync_httpd_config(current: &str, paths: &Paths, root: &Path, http: u16, https: u16) -> String {
     let sites = format!("\"{}/*.conf\"", nginx_path(&paths.apache_sites_dir()));
     let managed_certificate = |line: &str, ext: &str| line.split_once(char::is_whitespace).is_some_and(|(_, value)| {
@@ -1252,7 +1290,7 @@ fn sync_httpd_config(current: &str, paths: &Paths, root: &Path, http: u16, https
         .map(|(index, line)| (line.clone(), if index >= 5 { String::new() } else { line }))
         .collect();
     let mut depth = 0usize;
-    sync_managed_lines(current, &groups, &[0, 1], |line| {
+    let mut output = sync_managed_lines(current, &groups, &[0, 1], |line| {
         if line.starts_with('#') {
             return None;
         }
@@ -1286,7 +1324,13 @@ fn sync_httpd_config(current: &str, paths: &Paths, root: &Path, http: u16, https
             }
             _ => None,
         }
-    })
+    });
+    if !output.replace("\r\n", "\n").contains(HTTPD_PROXY_HTTP_MODULE.trim_end()) {
+        let newline = if current.contains("\r\n") { "\r\n" } else { "\n" };
+        if !output.is_empty() && !output.ends_with('\n') { output.push_str(newline); }
+        output.push_str(&HTTPD_PROXY_HTTP_MODULE.replace('\n', newline));
+    }
+    output
 }
 
 /// 渲染 httpd.conf（ApacheLounge Apache24；pools 为运行中的 php 池）
@@ -1322,6 +1366,7 @@ LoadModule setenvif_module modules/mod_setenvif.so
 LoadModule rewrite_module modules/mod_rewrite.so
 LoadModule proxy_module modules/mod_proxy.so
 LoadModule proxy_fcgi_module modules/mod_proxy_fcgi.so
+{proxy_http_module}
 LoadModule ssl_module modules/mod_ssl.so
 LoadModule socache_shmcb_module modules/mod_socache_shmcb.so
 
@@ -1349,6 +1394,7 @@ IncludeOptional "{etc}/sites/*.conf"
         root = root,
         etc = etc,
         certs = nginx_path(&paths.certs()),
+        proxy_http_module = HTTPD_PROXY_HTTP_MODULE,
         http_port = http_port,
         https_port = https_port,
     )
@@ -1468,6 +1514,7 @@ pub fn render_httpd_vhost(
         Require all denied
     </DirectoryMatch>
 
+{cors}
 {body}
 </VirtualHost>
 "#,
@@ -1477,6 +1524,7 @@ pub fn render_httpd_vhost(
         primary = primary,
         server_names = server_names,
         document_root = if site.runtime.kind == crate::model::SiteKind::Redirect { String::new() } else { format!("DocumentRoot \"{root}\"") },
+        cors = site.runtime.cors.as_ref().map(crate::sitecors::apache).unwrap_or_default(),
         ssl_lines = ssl_lines,
         body = body,
     )
@@ -1815,6 +1863,13 @@ secret: fixture-secret
             sync_httpd_config(&recovered, &paths, Path::new("C:/apache"), 8180, 8444),
             recovered
         );
+        for newline in ["\n", "\r\n"] {
+            let user = recovered.replace(HTTPD_PROXY_HTTP_MODULE, "").trim_end().replace('\n', newline);
+            let synced = sync_httpd_config(&user, &paths, Path::new("C:/apache"), 8180, 8444);
+            assert!(synced.contains(&format!("{newline}# NiceEnv HTTP reverse proxy support{newline}")));
+            assert_eq!(synced.matches("LoadModule proxy_http_module").count(), 1);
+            assert_eq!(sync_httpd_config(synced.trim_end(), &paths, Path::new("C:/apache"), 8180, 8444), synced.trim_end());
+        }
     }
 
     #[test]

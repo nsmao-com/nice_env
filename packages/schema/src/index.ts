@@ -387,7 +387,17 @@ export const CustomRewrite = z.object({ name: z.string().min(1).max(80), server:
 export type CustomRewrite = z.infer<typeof CustomRewrite>;
 export const SiteRedirect = z.object({ target: z.string(), status: z.union([z.literal(301), z.literal(302), z.literal(307), z.literal(308)]), preservePath: z.boolean() });
 export type SiteRedirect = z.infer<typeof SiteRedirect>;
+export const SiteCors = z.object({
+  origins: z.array(z.string()).min(1).max(32),
+  methods: z.array(z.enum(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])).min(1),
+  allowedHeaders: z.array(z.string()).max(64),
+  exposedHeaders: z.array(z.string()).max(64),
+  credentials: z.boolean(),
+  maxAge: z.number().int().min(0).max(86400),
+});
+export type SiteCors = z.infer<typeof SiteCors>;
 export const SiteRuntime = z.object({
+  cors: SiteCors.optional(),
   redirect: SiteRedirect.optional(),
   customRewrite: CustomRewrite.optional(),
   importedCertId: z.string().optional(),

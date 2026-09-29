@@ -154,6 +154,8 @@ pub struct SiteApplication {
 #[serde(rename_all = "camelCase")]
 pub struct SiteRuntime {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cors: Option<SiteCors>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect: Option<SiteRedirect>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_rewrite: Option<CustomRewrite>,
@@ -184,6 +186,17 @@ pub struct SiteRedirect {
     pub target: String,
     pub status: u16,
     pub preserve_path: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteCors {
+    pub origins: Vec<String>,
+    pub methods: Vec<String>,
+    pub allowed_headers: Vec<String>,
+    pub exposed_headers: Vec<String>,
+    pub credentials: bool,
+    pub max_age: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

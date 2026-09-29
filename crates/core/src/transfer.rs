@@ -110,6 +110,7 @@ pub fn import_from(
     // 备份只含选择信息，不含 PEM；证书缺失时在任何导入写入前明确失败，不能回退到本地 CA。
     let current_domains: Vec<_> = store.list_sites()?.into_iter().flat_map(|site| site.domains).collect();
     for site in bundle.sites.iter().filter(|site| !site.domains.iter().any(|d| current_domains.contains(d))) {
+        if let Some(cors) = &site.runtime.cors { crate::sitecors::normalize(cors)?; }
         if site.runtime.kind == crate::model::SiteKind::Redirect {
             crate::sites::redirect_url(site.runtime.redirect.as_ref().ok_or_else(|| AppError::new("BAD_REDIRECT", "跳转站点缺少目标地址"))?, &site.domains)?;
         }
@@ -180,6 +181,7 @@ pub fn import_from(
             .ok();
         }
         let mut imported = site.clone();
+        imported.runtime.cors = site.runtime.cors.as_ref().map(crate::sitecors::normalize).transpose()?;
         if imported.runtime.kind == crate::model::SiteKind::Redirect { imported.root_dir.clear(); }
         store.save_site(&imported)?;
         crate::sites::write_site_conf(paths, store, &imported)?;

@@ -94,6 +94,29 @@ export function siteRedirectTarget(redirect: SiteRuntime["redirect"], domains: s
   } catch { return bad; }
 }
 
+export const CORS_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
+
+export function corsOrigin(input: string): string | null {
+  const raw = input.trim();
+  if (raw === "*") return raw;
+  if (!/^https?:\/\//i.test(raw) || new TextEncoder().encode(raw).length > 2048 || /[\s\p{Cc}\\"'$;{}<>]/u.test(raw)) return null;
+  try {
+    const url = new URL(raw);
+    return url.hostname && !url.username && !url.password && url.port !== "0" && url.pathname === "/" && !raw.includes("?") && !raw.includes("#") ? url.origin : null;
+  } catch { return null; }
+}
+
+export function siteCorsProblem(cors: SiteRuntime["cors"]): "cors.originInvalid" | "cors.wildcardInvalid" | "cors.methodsInvalid" | "cors.headersInvalid" | "cors.ageInvalid" | null {
+  if (!cors) return null;
+  if (!cors.origins.length || cors.origins.length > 32 || cors.origins.some((origin) => !corsOrigin(origin))) return "cors.originInvalid";
+  const origins = new Set(cors.origins.map(corsOrigin));
+  if (origins.has("*") && (cors.credentials || origins.size !== 1)) return "cors.wildcardInvalid";
+  if (!cors.methods.length || cors.methods.length > CORS_METHODS.length || cors.methods.some((method) => !(CORS_METHODS as readonly string[]).includes(method))) return "cors.methodsInvalid";
+  if ([cors.allowedHeaders, cors.exposedHeaders].some((values) => values.length > 64 || values.some((value) => !/^[A-Za-z0-9_-]{1,128}$/.test(value.trim())))) return "cors.headersInvalid";
+  if (!Number.isInteger(cors.maxAge) || cors.maxAge < 0 || cors.maxAge > 86400) return "cors.ageInvalid";
+  return null;
+}
+
 export const PHP_SITE_OPTIONS = [
   { key: "memory_limit", type: "size", initial: "512M" },
   { key: "upload_max_filesize", type: "size", initial: "64M" },

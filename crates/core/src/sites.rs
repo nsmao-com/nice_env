@@ -333,6 +333,7 @@ fn validate_site_fields(
     if !matches!(runtime.web_server.as_str(), "nginx" | "apache") {
         return Err(AppError::new("BAD_RUNTIME", "请选择 Nginx 或 Apache"));
     }
+    if let Some(cors) = &runtime.cors { crate::sitecors::normalize(cors)?; }
     if let Some(custom) = &runtime.custom_rewrite {
         validate_custom_rewrite(custom, &runtime.web_server)?;
         if !matches!(runtime.kind, SiteKind::Php | SiteKind::Static) { return Err(AppError::new("BAD_REWRITE", "自定义伪静态仅适用于 PHP 或静态站点")); }
@@ -531,6 +532,7 @@ fn create_inner(
     let mut normalized = input.clone();
     normalized.domains = normalize_domains(&input.domains);
     normalized.root_dir = input.root_dir.trim().to_string();
+    normalized.runtime.cors = input.runtime.cors.as_ref().map(crate::sitecors::normalize).transpose()?;
     if normalized.runtime.kind == SiteKind::Redirect { normalized.root_dir.clear(); }
     if normalized.runtime.kind == SiteKind::Php
         && normalized
@@ -797,6 +799,7 @@ pub fn update(
     current.domains = normalize_domains(&site_patch.domains);
     current.root_dir = site_patch.root_dir.trim().to_string();
     current.runtime = site_patch.runtime.clone();
+    current.runtime.cors = site_patch.runtime.cors.as_ref().map(crate::sitecors::normalize).transpose()?;
     if current.runtime.kind == SiteKind::Redirect { current.root_dir.clear(); }
     let certificate_changed =
         current.https != site_patch.https || current.domains != original.domains
@@ -2770,6 +2773,7 @@ mod scaffold_tests {
             domains: vec!["t.test".into()],
             root_dir: String::new(),
             runtime: SiteRuntime {
+            cors: None,
             redirect: None,
             custom_rewrite: None,
                 application: None,

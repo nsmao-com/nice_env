@@ -69,6 +69,136 @@ import { cmpVersionDesc, resolvedStackItems, stackVersionConflicts, normalizePro
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const siteFileArchives = new Map<string, SiteFileBackup[]>();
 const siteFilePlans = new Map<string, SiteFilePlan>();
+
+type MockSiteFile = { content: string; modifiedAt: number };
+const mockSiteFiles = new Map<string, Map<string, MockSiteFile>>();
+
+/** 浏览器预览用的站点文件树；只保留普通文本文件，不接触本机文件系统。 */
+function seedMockSiteFiles(site: Site) {
+  if (site.runtime.kind === "redirect" || !site.rootDir.trim() || mockSiteFiles.has(site.id)) return;
+  const common = (files: Record<string, string>) => {
+    const tree = new Map<string, MockSiteFile>();
+    Object.entries(files).forEach(([path, content], index) => tree.set(path, { content, modifiedAt: now() - index * 60_000 }));
+    mockSiteFiles.set(site.id, tree);
+  };
+  if (site.id === "site-1") {
+    common({
+      "index.php": "<?php\nrequire __DIR__ . '/../bootstrap/app.php';\n\necho 'NiceEnv preview';\n",
+      "assets/app.css": "body { font-family: system-ui, sans-serif; }\n",
+      "assets/app.js": "console.info('laravel-shop preview');\n",
+      "robots.txt": "User-agent: *\nDisallow: /admin\n",
+      ".env.example": "APP_NAME=laravel-shop\nAPP_ENV=local\n",
+    });
+    return;
+  }
+  if (site.id === "site-2") {
+    common({
+      "index.php": "<?php\nrequire __DIR__ . '/public/index.php';\n",
+      "public/index.php": "<?php\n// legacy-admin entry point\n",
+      "config/app.php": "<?php\nreturn [\n    'name' => 'legacy-admin',\n];\n",
+      "README.md": "# legacy-admin\n\n这是浏览器预览中的示例项目文件。\n",
+      ".env.example": "APP_ENV=local\nAPP_DEBUG=true\n",
+    });
+    return;
+  }
+  common({
+    "README.md": `# ${site.name}\n\nNiceEnv 站点文件预览。\n`,
+    "index.html": `<!doctype html>\n<html><body><h1>${site.name}</h1></body></html>\n`,
+    "config/example.json": "{\n  \"environment\": \"local\"\n}\n",
+    ".env.example": "APP_ENV=local\n",
+  });
+}
+
+function mockSiteFileError(code: string, message: string): never {
+  throw { code, message };
+}
+
+function mockSiteRelativePath(input: unknown, allowEmpty = true): string {
+  const value = input == null ? "" : String(input);
+  if ((!allowEmpty && !value) || value.length > 2048 || /[\u0000-\u001f\u007f-\u009f\\:]/.test(value) || value.startsWith("/")) {
+    return mockSiteFileError("SITE_FILE_PATH_INVALID", "文件路径过长或包含不安全的目录名");
+  }
+  const parts = value.split("/").filter(Boolean);
+  if (parts.some((part) => part === "." || part === ".." || /[\u0000-\u001f\u007f-\u009f\\:]/.test(part))) {
+    return mockSiteFileError("SITE_FILE_PATH_INVALID", "文件路径必须位于站点根目录内");
+  }
+  return parts.join("/");
+}
+
+function mockSiteFileRevision(site: Site, path: string, content: string): string {
+  return JSON.stringify([site.rootDir, path, content]);
+}
+
+function mockSensitiveSiteFile(path: string): boolean {
+  const name = path.split("/").pop()?.toLowerCase() ?? "";
+  return name === ".env" || name.startsWith(".env.") || ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"].includes(name)
+    || [".key", ".pem", ".p12", ".pfx", ".crt", ".cer"].some((suffix) => name.endsWith(suffix));
+}
+
+function mockSiteTree(siteId: string): { site: Site; files: Map<string, MockSiteFile> } {
+  const site = sites.get(siteId);
+  if (!site) mockSiteFileError("SITE_NOT_FOUND", "站点已不存在，请刷新列表");
+  if (site.runtime.kind === "redirect" || !site.rootDir.trim()) mockSiteFileError("SITE_FILES_UNAVAILABLE", "跳转站点没有可浏览的项目目录");
+  seedMockSiteFiles(site);
+  return { site, files: mockSiteFiles.get(site.id)! };
+}
+
+function mockSiteDirectory(siteId: string, current?: string) {
+  const { site, files } = mockSiteTree(siteId);
+  const relative = mockSiteRelativePath(current);
+  const prefix = relative ? `${relative}/` : "";
+  const entries = new Map<string, { name: string; path: string; directory: boolean; sizeBytes: number; modifiedAt: number }>();
+  for (const [path, file] of files) {
+    if (!path.startsWith(prefix)) continue;
+    const rest = path.slice(prefix.length);
+    if (!rest) continue;
+    const slash = rest.indexOf("/");
+    const name = slash === -1 ? rest : rest.slice(0, slash);
+    const entryPath = `${prefix}${name}`;
+    const existing = entries.get(name);
+    if (slash !== -1) {
+      entries.set(name, { name, path: entryPath, directory: true, sizeBytes: 0, modifiedAt: Math.max(existing?.modifiedAt ?? 0, file.modifiedAt) });
+    } else if (!existing) {
+      entries.set(name, { name, path: entryPath, directory: false, sizeBytes: new TextEncoder().encode(file.content).length, modifiedAt: file.modifiedAt });
+    }
+  }
+  const list = [...entries.values()].sort((a, b) => Number(a.directory === false) - Number(b.directory === false) || a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+  return {
+    siteId: site.id,
+    root: site.rootDir,
+    current: relative,
+    parent: relative ? (relative.split("/").slice(0, -1).join("/") || null) : null,
+    revision: JSON.stringify(list.map(({ path, directory, sizeBytes, modifiedAt }) => [path, directory, sizeBytes, modifiedAt])),
+    entries: list,
+  };
+}
+
+function mockSiteFileRead(siteId: string, path: string) {
+  const { site, files } = mockSiteTree(siteId);
+  const relative = mockSiteRelativePath(path, false);
+  if (mockSensitiveSiteFile(relative)) mockSiteFileError("SITE_FILE_SENSITIVE", "环境变量和密钥文件请使用专用编辑器或系统文件管理器打开");
+  const file = files.get(relative);
+  if (!file) mockSiteFileError("SITE_FILE_NOT_TEXT", "请选择普通文本文件");
+  const bytes = new TextEncoder().encode(file.content);
+  if (bytes.length > 1024 * 1024) mockSiteFileError("SITE_FILE_TOO_LARGE", "文件超过 1 MiB，暂不支持在应用内编辑");
+  if (file.content.includes("\0")) mockSiteFileError("SITE_FILE_NOT_TEXT", "该文件包含二进制内容，不能在文本编辑器中打开");
+  return { siteId: site.id, path: relative, sizeBytes: bytes.length, revision: mockSiteFileRevision(site, relative, file.content), content: file.content };
+}
+
+function mockSiteFileWrite(siteId: string, path: string, content: string, expectedRevision: string) {
+  const { site, files } = mockSiteTree(siteId);
+  const relative = mockSiteRelativePath(path, false);
+  if (mockSensitiveSiteFile(relative)) mockSiteFileError("SITE_FILE_SENSITIVE", "环境变量和密钥文件请使用专用编辑器或系统文件管理器打开");
+  const file = files.get(relative);
+  if (!file) mockSiteFileError("SITE_FILE_NOT_TEXT", "请选择普通文本文件");
+  if (new TextEncoder().encode(content).length > 1024 * 1024) mockSiteFileError("SITE_FILE_TOO_LARGE", "文件超过 1 MiB，不能保存");
+  if (content.includes("\0")) mockSiteFileError("SITE_FILE_NOT_TEXT", "文件内容不能包含二进制字符");
+  if (mockSiteFileRevision(site, relative, file.content) !== expectedRevision) mockSiteFileError("SITE_FILE_CHANGED", "文件已在其他位置发生变化，请重新打开后再保存");
+  file.content = content;
+  file.modifiedAt = now();
+  return { siteId: site.id, path: relative, sizeBytes: new TextEncoder().encode(content).length, revision: mockSiteFileRevision(site, relative, content), content };
+}
+
 function mockSiteFilePlan(id: string): SiteFilePlan {
   if (!sites.has(id)) throw { code: "SITE_NOT_FOUND", message: "站点已不存在" };
   const plan = siteFilePlans.get(id) ?? { status: { config: { enabled: false, frequency: "daily", time: "03:00", weekday: 0, monthDay: 1, keep: 10 }, nextAt: null, lastRunAt: null, finishedAt: null, state: "idle", message: "", files: [] }, project: true, excludeGenerated: true, scope: null, revision: "initial" };
@@ -744,6 +874,7 @@ function seed() {
     createdAt: now() - 86400_000 * 3,
     updatedAt: now() - 86400_000,
   });
+  for (const site of sites.values()) seedMockSiteFiles(site);
 
   // 浏览器复用正式清单，不再维护另一份过期版本表或编造上游历史。
   for (const raw of bundledManifest.packages) {
@@ -1634,6 +1765,12 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         status: mockSiteStatus(site),
         accessUrl: mockSiteStatus(site) === "running" ? site.accessUrl : undefined,
       })) as T;
+    case "site_directory":
+      return mockSiteDirectory(String(args?.id ?? ""), args?.current == null ? "" : String(args.current)) as T;
+    case "site_file_read":
+      return mockSiteFileRead(String(args?.id ?? ""), String(args?.path ?? "")) as T;
+    case "site_file_write":
+      return mockSiteFileWrite(String(args?.id ?? ""), String(args?.path ?? ""), String(args?.content ?? ""), String(args?.expectedRevision ?? "")) as T;
     case "site_network_info": {
       const site = sites.get(args?.id as string);
       if (!site) throw { code: "SITE_NOT_FOUND", message: "站点不存在，请刷新列表" };
@@ -1695,6 +1832,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         createdAt: now(),
         updatedAt: now(),
       });
+      seedMockSiteFiles(sites.get(id)!);
       try { await startMockSiteServices(sites.get(id)!); }
       catch (error) { sites.delete(id); services.delete(`site-app:${id}`); throw error; }
       if (input.createDb) databases.set(input.createDb.database, { name: input.createDb.database, tables: 0, sizeKb: 0 });
@@ -1767,6 +1905,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         }
       }
       sites.delete(id);
+      mockSiteFiles.delete(id);
       services.delete(`site-app:${id}`);
       return true as T;
       });

@@ -41,7 +41,7 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
   const directory = useQuery({
     queryKey: ["site-directory", siteId, current],
     queryFn: () => api.siteDirectory(siteId, current),
-    enabled: active && isTauri && !disabled,
+    enabled: active && !disabled,
     retry: false,
     staleTime: 0,
   });
@@ -120,13 +120,13 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
         <h3 className="text-sm font-semibold">{t("siteFiles.browserTitle" as never)}</h3>
         <p className="mt-1 text-xs leading-relaxed text-muted">{t("siteFiles.browserHint" as never)}</p>
       </div>
-      <Button size="sm" variant="ghost" disabled={!isTauri || locked || directory.isFetching} onClick={() => void directory.refetch()}>
+      <Button size="sm" variant="ghost" disabled={locked || directory.isFetching} onClick={() => void directory.refetch()}>
         <RefreshCw className={directory.isFetching ? "size-3.5 animate-spin" : "size-3.5"} />{t("siteFiles.refresh")}
       </Button>
     </div>
     {!isTauri && <p className="flex items-start gap-2 rounded-lg bg-warn-soft p-3 text-xs leading-relaxed text-warn"><AlertTriangle className="mt-0.5 size-3.5 shrink-0" />{t("siteFiles.browserPreview" as never)}</p>}
     {disabled && <p className="text-xs text-warn">{t("siteFiles.browserUnavailable")}</p>}
-    {isTauri && <>
+    <>
       <div className="flex min-w-0 items-center gap-1 overflow-x-auto rounded-lg bg-fill px-2.5 py-2 text-xs">
         <button type="button" className="shrink-0 rounded px-1.5 py-1 font-medium hover:bg-card-2" disabled={locked || !current} onClick={() => setCurrent("")}>{t("siteFiles.browserRoot" as never)}</button>
         {current.split("/").filter(Boolean).map((part, index, parts) => {
@@ -146,7 +146,7 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
           {!directory.data.entries.length && <p className="p-4 text-center text-xs text-muted">{t("siteFiles.browserEmpty" as never)}</p>}
         </div>
       </>}
-    </>}
+    </>
     {error && !editor && <p role="alert" className="text-xs leading-relaxed text-error [overflow-wrap:anywhere]">{error}</p>}
     <Dialog open={!!editor} onOpenChange={(open) => { if (!open) requestClose(); }}>
       <DialogContent hideClose={busy} onCloseAutoFocus={(event) => { event.preventDefault(); openerRef.current?.focus(); }} className="flex max-h-[90dvh] max-w-3xl flex-col gap-0 overflow-y-auto p-0">

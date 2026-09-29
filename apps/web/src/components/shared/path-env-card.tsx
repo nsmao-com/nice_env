@@ -82,7 +82,7 @@ export function PathEnvCard() {
           <Badge variant={ready && enabled ? "running" : "muted"} className="text-[10px]">
             {t(ready ? enabled ? "tools.pathEnvOn" : "tools.pathEnvOff" : readError ? "state.unknown" : "common.loading")}
           </Badge>
-          <Switch
+          {ready && <Switch
             checked={enabled}
             aria-label={t("tools.pathEnvEnable")}
             disabled={busy || pathBusy || !ready}
@@ -92,7 +92,7 @@ export function PathEnvCard() {
                 v ? t("tools.pathEnvOn") : t("tools.pathEnvOff")
               )
             }
-          />
+          />}
         </div>
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
@@ -124,7 +124,7 @@ export function PathEnvCard() {
           <p className="py-4 text-center text-[12px] text-faint">{t("tools.pathEnvEmpty")}</p>
         )}
 
-        {entries.length > 0 && (
+        {ready && entries.length > 0 && (
           <div className="flex flex-col gap-1.5">
             {entries.map((e) => (
               <PathEnvRow
@@ -138,7 +138,7 @@ export function PathEnvCard() {
         )}
 
         {/* 漂移提示：PATH 被外部改过时给一键修复 */}
-        {data?.drift && (
+        {ready && data?.drift && (
           <div className="flex flex-wrap items-center gap-2 rounded-lg border border-warn/30 bg-warn/10 px-2.5 py-2">
             <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-warn" />
             <span className="min-w-0 flex-1 text-[11px] text-secondary [overflow-wrap:anywhere]">{t("tools.pathEnvDrift")}</span>
@@ -155,7 +155,7 @@ export function PathEnvCard() {
         )}
 
         {/* 说明：为什么新终端才生效、以及不碰系统 PATH 的边界 */}
-        {data?.note && (
+        {ready && data?.note && (
           <p className="text-[10.5px] leading-relaxed text-faint">{data.note}</p>
         )}
         <p className="text-[10.5px] leading-relaxed text-faint">

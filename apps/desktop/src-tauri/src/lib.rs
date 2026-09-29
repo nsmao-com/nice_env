@@ -787,10 +787,13 @@ async fn set_active_version(
 
 /// 环境变量注入状态：总开关、已写入的目录、每个包可用的命令
 #[tauri::command]
-fn pathenv_status(
+async fn pathenv_status(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
-) -> nsb_core::model::PathEnvStatus {
-    state.pathenv_status()
+) -> Result<nsb_core::model::PathEnvStatus, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(state.pathenv_status()))
+        .await.map_err(|e| box_err(nsb_core::AppError::internal("读取 PATH 状态", e.to_string())))?
 }
 
 #[tauri::command]

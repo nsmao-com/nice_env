@@ -99,7 +99,6 @@ pub fn shell_profiles() -> Vec<std::path::PathBuf> {
 }
 
 /// 读取某个 profile 全文（不存在返回空串）
-#[cfg(not(windows))]
 pub fn read_profile(path: &std::path::Path) -> Result<String> {
     match std::fs::read_to_string(path) {
         Ok(s) => Ok(s),

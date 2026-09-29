@@ -26,6 +26,7 @@ const SELECTED_KEY: &str = "pathEnvSelected";
 /// 每个套件单独选择的 PATH 版本；与 activeVersion 设置独立。
 const VERSIONS_KEY: &str = "pathEnvVersions";
 
+#[cfg(test)]
 fn chosen_version(store: &Store, id: &str) -> Option<crate::model::InstalledPackage> {
     let installed = store.list_installed().ok()?;
     let versions = read_selection(store, VERSIONS_KEY).ok()?;
@@ -686,6 +687,7 @@ fn commands_in_dir(bin_dir: &std::path::Path, prefer: &str) -> Vec<String> {
 
 /* ================= 选择集与状态 ================= */
 
+#[cfg(test)]
 fn selected_ids(store: &Store) -> Option<Vec<String>> {
     store.get_setting_or::<Option<Vec<String>>>(SELECTED_KEY)
 }
@@ -694,6 +696,7 @@ fn set_selected_ids(store: &Store, ids: &[String]) -> Result<()> {
     store.set_setting_json(SELECTED_KEY, &ids.to_vec())
 }
 
+#[cfg(test)]
 fn managed_dirs(store: &Store) -> Vec<String> {
     store.get_setting_or::<Vec<String>>(DIRS_KEY)
 }
@@ -754,17 +757,27 @@ fn desired_dirs_checked(store: &Store, manifest: &Manifest) -> Result<Vec<String
     Ok(dirs.into_iter().map(|(_, d)| d).collect())
 }
 
-/// 组装完整状态（不写盘），供前端展示
-pub fn status(store: &Store, manifest: &Manifest) -> PathEnvStatus {
+/// 读取已保存的系统配置；错误必须传给前端，不能伪装成关闭或空列表。
+pub fn status(store: &Store, manifest: &Manifest) -> Result<PathEnvStatus> {
+    status_with_paths(store, manifest, &read_current_path_entries()?, cfg!(windows))
+}
+
+fn status_with_paths(store: &Store, manifest: &Manifest, current_paths: &[Vec<String>], windows: bool) -> Result<PathEnvStatus> {
+    if current_paths.is_empty() {
+        return Err(AppError::new("PATH_STATUS_UNAVAILABLE", "没有可读取的系统 PATH 配置"));
+    }
     let installer = crate::install::Installer {
         manifest: manifest.clone(),
     };
-    let enabled = is_enabled(store);
-    let sel = selected_ids(store);
-    let applied = managed_dirs(store);
-    let installed = store.list_installed().unwrap_or_default();
-
-    let current_path = read_current_path_entries(store);
+    let enabled = match store.get_setting_checked(ENABLED_KEY)?.as_deref() {
+        None | Some("0") => false,
+        Some("1") => true,
+        _ => return Err(AppError::new("PATH_SETTINGS_INVALID", "保存的 PATH 开关状态无效，未将其视为关闭状态")),
+    };
+    let sel = read_selection::<Option<Vec<String>>>(store, SELECTED_KEY)?;
+    let versions = read_selection(store, VERSIONS_KEY)?;
+    let applied = read_selection::<Vec<String>>(store, DIRS_KEY)?;
+    let installed = store.list_installed()?;
     let mut entries = Vec::new();
     for package in &installed {
         let meta = installer.installed_entry(package);
@@ -779,7 +792,7 @@ pub fn status(store: &Store, manifest: &Manifest) -> PathEnvStatus {
             .unwrap_or_default();
         let in_path = bin_dir
             .as_deref()
-            .map(|d| current_path.iter().any(|p| same_path(p, d)))
+            .map(|dir| current_paths.iter().all(|paths| paths.iter().any(|path| same_system_path(path, dir, windows))))
             .unwrap_or(false);
         let usable = bin_dir.is_some() && exists && !commands.is_empty();
         if !usable && bin_dir.is_some() {
@@ -796,36 +809,38 @@ pub fn status(store: &Store, manifest: &Manifest) -> PathEnvStatus {
             bin_dir: bin_dir.unwrap_or_default(),
             exists,
             selected: wants(&sel, &package.id)
-                && chosen_version(store, &package.id)
+                && chosen_from(store, &installed, &versions, &package.id)?
                     .is_some_and(|chosen| chosen.version == package.version),
             in_path,
             commands,
         });
     }
 
-    // 漂移检测：开关开着，但磁盘上的实际内容与「应该注入的」不符。
-    // 判据用真实 PATH（而不是我们的记录）：记录只能说明上次写了什么，
-    // 用户手动删掉条目、或另一个程序覆盖了 PATH，都只有看磁盘才发现。
+    // 每个受管 shell 都必须一致；macOS 的标记块本身还可识别记录之外的残留路径。
     let desired = if enabled {
-        desired_dirs(store, manifest)
+        desired_dirs_checked(store, manifest)?
     } else {
         Vec::new()
     };
-    let drift = path_has_drift(&desired, &applied, &current_path);
+    let drift = current_paths.iter().any(|paths| path_has_drift(&desired, if windows { &applied } else { paths }, paths, windows));
 
-    PathEnvStatus {
+    Ok(PathEnvStatus {
         enabled,
         managed_dirs: applied,
         entries,
         note: platform_note(),
         drift,
-    }
+    })
 }
 
-fn path_has_drift(desired: &[String], applied: &[String], current: &[String]) -> bool {
-    desired.iter().any(|dir| !current.iter().any(|path| same_path(path, dir)))
-        || applied.iter().any(|dir| !desired.iter().any(|expected| same_path(expected, dir))
-            && current.iter().any(|path| same_path(path, dir)))
+fn same_system_path(a: &str, b: &str, windows: bool) -> bool {
+    if windows { same_path(a, b) } else { a.trim_end_matches('/') == b.trim_end_matches('/') }
+}
+
+fn path_has_drift(desired: &[String], applied: &[String], current: &[String], windows: bool) -> bool {
+    desired.iter().any(|dir| !current.iter().any(|path| same_system_path(path, dir, windows)))
+        || applied.iter().any(|dir| !desired.iter().any(|expected| same_system_path(expected, dir, windows))
+            && current.iter().any(|path| same_system_path(path, dir, windows)))
 }
 
 fn platform_note() -> String {
@@ -833,32 +848,33 @@ fn platform_note() -> String {
         "写入的是当前用户的环境变量（无需管理员）。已打开的终端不会自动更新，请新开一个终端窗口。"
             .to_string()
     } else {
-        "写入 ~/.zshrc 的托管块。请新开终端窗口，或执行 source ~/.zshrc 立即生效。".to_string()
+        "状态来自 ~/.zshrc 及已有 ~/.bash_profile 的托管块，不代表当前终端已更新。请新开对应 shell 的终端窗口后使用。".to_string()
     }
 }
 
 /* ================= PATH 读取与合并（Windows） ================= */
 
-/// 当前系统 PATH 的条目列表（Windows: 用户 Path；macOS: 进程环境变量）
-fn read_current_path_entries(store: &Store) -> Vec<String> {
-    let _ = store;
+/// Windows 读取用户注册表；macOS 分别读取受管 profile，不能用 App 启动时继承的 PATH。
+fn read_current_path_entries() -> Result<Vec<Vec<String>>> {
     #[cfg(windows)]
     {
         platform::pathenv::read_user_path()
-            .map(|p| split_win_path(&p.value))
-            .unwrap_or_default()
+            .map(|p| vec![split_win_path(&p.value)])
+            .map_err(AppError::from)
     }
     #[cfg(not(windows))]
     {
-        std::env::var("PATH")
-            .map(|p| {
-                p.split(':')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default()
+        read_profile_paths(&platform::pathenv::shell_profiles())
     }
+}
+
+#[cfg(any(not(windows), test))]
+fn read_profile_paths(profiles: &[std::path::PathBuf]) -> Result<Vec<Vec<String>>> {
+    if profiles.is_empty() {
+        return Err(AppError::new("NO_SHELL_PROFILE", "找不到用户 HOME 目录，无法读取 shell PATH 配置"));
+    }
+    profiles.iter().map(|path| platform::pathenv::read_profile(path)
+        .map(|content| platform::pathenv::parse_profile_managed_dirs(&content)).map_err(AppError::from)).collect()
 }
 
 /// 按 `;` 切分 Windows PATH，去掉空段与首尾空白
@@ -970,7 +986,7 @@ pub fn apply(store: &Store, paths: &Paths, manifest: &Manifest) -> Result<PathEn
     }
 
     store.set_setting_json(DIRS_KEY, &desired)?;
-    Ok(status(store, manifest))
+    status(store, manifest)
 }
 
 /// 总开关、勾选与选版共用恢复流程；失败后保留旧选择，并记住需要清理的托管目录。
@@ -988,7 +1004,7 @@ fn update_selection(
     let previous_dirs = read_selection::<Vec<String>>(store, DIRS_KEY)?;
     // 读取失败时不能用默认版本覆盖旧设置，也不能开始写系统环境。
     desired_dirs_checked(store, manifest)?;
-    let current = status(store, manifest);
+    let current = status(store, manifest)?;
     let mut applied = false;
     let result = update().and_then(|()| { applied = true; apply_update() });
     let error = match result { Ok(status) => return Ok(status), Err(error) => error };
@@ -1045,7 +1061,7 @@ pub fn set_version(
     version: &str,
     selected: bool,
 ) -> Result<PathEnvStatus> {
-    let current = status(store, manifest);
+    let current = status(store, manifest)?;
     let entry = current
         .entries
         .iter()
@@ -1144,7 +1160,7 @@ impl MigrationActivationRollback {
         let enabled = store.get_setting_checked(ENABLED_KEY)?.as_deref() == Some("1");
         let system = if enabled && marker.is_some() {
             let manifest = crate::install::Installer::effective(&paths).manifest;
-            let desired = desired_dirs(&store, &manifest);
+            let desired = desired_dirs_checked(&store, &manifest)?;
             for dir in &desired {
                 validate_terminal_dir(dir, cfg!(windows))?;
             }
@@ -1268,6 +1284,74 @@ mod tests {
     use super::*;
 
     #[test]
+    fn path_status_reads_each_profile_and_observes_saved_changes_immediately() {
+        let (_temp, store, paths, manifest) = terminal_fixture();
+        store.set_setting(ENABLED_KEY, "1").unwrap();
+        let desired = desired_dirs_checked(&store, &manifest).unwrap();
+        let profiles = vec![paths.base.join(".zshrc"), paths.base.join(".bash_profile")];
+        let inherited = std::env::var_os("PATH");
+        let content = platform::pathenv::merge_profile_content("# unrelated shell settings\n", &desired);
+        std::fs::write(&profiles[0], &content).unwrap();
+        std::fs::write(&profiles[1], "# no managed PATH yet\n").unwrap();
+        let partial = status_with_paths(&store, &manifest, &read_profile_paths(&profiles).unwrap(), false).unwrap();
+        assert!(partial.drift);
+        assert!(!partial.entries.iter().find(|entry| entry.selected).unwrap().in_path);
+        std::fs::write(&profiles[1], &content).unwrap();
+        let ready = status_with_paths(&store, &manifest, &read_profile_paths(&profiles).unwrap(), false).unwrap();
+        assert!(!ready.drift);
+        assert!(ready.entries.iter().find(|entry| entry.selected).unwrap().in_path);
+        std::fs::write(&profiles[0], "# managed block removed externally\n").unwrap();
+        assert!(status_with_paths(&store, &manifest, &read_profile_paths(&profiles).unwrap(), false).unwrap().drift);
+        assert_eq!(std::env::var_os("PATH"), inherited);
+        assert_eq!(std::fs::read_to_string(&profiles[1]).unwrap(), content);
+    }
+
+    #[test]
+    fn path_status_profiles_detect_owned_leftovers_without_a_database_record() {
+        let (_temp, store, _paths, manifest) = terminal_fixture();
+        let snapshot = vec![v(&["/old/niceenv/bin"]), Vec::new()];
+        let disabled = status_with_paths(&store, &manifest, &snapshot, false).unwrap();
+        assert!(!disabled.enabled);
+        assert!(disabled.drift);
+        assert!(disabled.managed_dirs.is_empty());
+        // Windows 只清理记录中确实由我们写入的路径，不把其它目录认作残留。
+        assert!(!status_with_paths(&store, &manifest, &snapshot, true).unwrap().drift);
+        assert!(!status_with_paths(&store, &manifest, &[Vec::new()], false).unwrap().drift);
+    }
+
+    #[test]
+    fn path_status_corrupt_settings_return_errors_instead_of_empty_success() {
+        for (key, value) in [(ENABLED_KEY, "maybe"), (SELECTED_KEY, "broken"), (VERSIONS_KEY, "[]"), (DIRS_KEY, "null")] {
+            let (_temp, store, _paths, manifest) = terminal_fixture();
+            store.set_setting(key, value).unwrap();
+            assert!(status_with_paths(&store, &manifest, &[Vec::new()], true).is_err());
+            assert_eq!(store.get_setting(key).as_deref(), Some(value));
+        }
+    }
+
+    #[test]
+    fn path_status_profile_read_errors_are_not_treated_as_missing_configuration() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(read_profile_paths(&[]).unwrap_err().code, "NO_SHELL_PROFILE");
+        assert_eq!(read_profile_paths(&[temp.path().join("missing")]).unwrap(), vec![Vec::<String>::new()]);
+        assert!(read_profile_paths(&[temp.path().to_path_buf()]).is_err());
+        let invalid = temp.path().join("invalid-profile");
+        std::fs::write(&invalid, [0xff, 0xfe, 0xff]).unwrap();
+        assert!(read_profile_paths(&[temp.path().join("missing"), invalid.clone()]).is_err());
+        assert_eq!(std::fs::read(invalid).unwrap(), [0xff, 0xfe, 0xff]);
+    }
+
+    #[test]
+    fn path_status_matches_posix_paths_without_windows_case_or_separator_folding() {
+        assert!(same_system_path("/Users/me/PHP/", "/Users/me/PHP", false));
+        assert!(!same_system_path("/Users/me/PHP", "/Users/me/php", false));
+        assert!(!same_system_path("/Users/me/a\\b", "/Users/me/a/b", false));
+        assert!(!same_system_path("/Users/me/php ", "/Users/me/php", false));
+        assert!(same_system_path("C:\\Tools\\PHP\\", "c:/tools/php", true));
+        assert!(path_has_drift(&v(&["/PHP"]), &v(&["/php"]), &v(&["/php"]), false));
+    }
+
+    #[test]
     fn path_selection_failed_apply_restores_enabled_selected_and_version() {
         for enabled in ["0", "1"] {
             let (_temp, store, _paths, manifest) = terminal_fixture();
@@ -1285,7 +1369,7 @@ mod tests {
                 assert_eq!(store.get_setting(ENABLED_KEY).as_deref(), Some(enabled));
                 assert_eq!(selected_ids(&store), Some(v(&["terminal-fixture"])));
                 assert_eq!(chosen_version(&store, "terminal-fixture").unwrap().version, "1.0.0");
-                Ok(status(&store, &manifest))
+                status(&store, &manifest)
             }).unwrap_err();
             assert_eq!(error.code, "WRITE_DENIED");
             assert_eq!(calls, 2);
@@ -1346,7 +1430,7 @@ mod tests {
         let result = update_selection(&store, &manifest, || {
             store.set_setting(ENABLED_KEY, "1")?;
             store.set_setting(SELECTED_KEY, "[]")
-        }, || { calls += 1; Ok(status(&store, &manifest)) }).unwrap();
+        }, || { calls += 1; status(&store, &manifest) }).unwrap();
         assert_eq!(calls, 1);
         assert!(result.enabled);
         assert_eq!(selected_ids(&store), Some(vec![]));
@@ -1355,11 +1439,11 @@ mod tests {
 
     #[test]
     fn path_selection_drift_detects_leftovers_even_when_disabled() {
-        assert!(path_has_drift(&[], &v(&["C:/old"]), &v(&["C:/old", "C:/foreign"])));
-        assert!(path_has_drift(&v(&["C:/new"]), &v(&["C:/old", "C:/new"]), &v(&["C:/old", "C:/new"])));
-        assert!(path_has_drift(&v(&["C:/new"]), &[], &v(&["C:/foreign"])));
-        assert!(!path_has_drift(&[], &v(&["C:/old"]), &v(&["C:/foreign"])));
-        assert!(!path_has_drift(&v(&["C:/new"]), &v(&["C:/new"]), &v(&["c:/NEW/", "C:/foreign"])));
+        assert!(path_has_drift(&[], &v(&["C:/old"]), &v(&["C:/old", "C:/foreign"]), true));
+        assert!(path_has_drift(&v(&["C:/new"]), &v(&["C:/old", "C:/new"]), &v(&["C:/old", "C:/new"]), true));
+        assert!(path_has_drift(&v(&["C:/new"]), &[], &v(&["C:/foreign"]), true));
+        assert!(!path_has_drift(&[], &v(&["C:/old"]), &v(&["C:/foreign"]), true));
+        assert!(!path_has_drift(&v(&["C:/new"]), &v(&["C:/new"]), &v(&["c:/NEW/", "C:/foreign"]), true));
     }
 
     #[test]

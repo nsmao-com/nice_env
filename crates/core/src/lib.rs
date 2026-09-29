@@ -561,7 +561,8 @@ impl CoreState {
     /* ---------- 环境变量（PATH 注入） ---------- */
 
     /// 环境变量注入的完整状态（含每个已安装包可注入的命令）
-    pub fn pathenv_status(&self) -> model::PathEnvStatus {
+    pub fn pathenv_status(&self) -> Result<model::PathEnvStatus> {
+        let _operation = self.manager.lifecycle.lock();
         pathenv::status(&self.store, &self.installer.manifest)
     }
 

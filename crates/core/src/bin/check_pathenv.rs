@@ -148,7 +148,7 @@ fn main() {
     let state = nsb_core::CoreState::init(Some(base.clone()), Arc::new(|_| {})).expect("初始化");
 
     check!("初始状态：开关默认关闭", {
-        let st = state.pathenv_status();
+        let st = state.pathenv_status().map_err(|e| e.message)?;
         if st.enabled {
             return Err("新数据目录不该是开启状态".into());
         }
@@ -266,7 +266,7 @@ fn main() {
             .collect();
         platform::pathenv::write_user_path(&stripped.join(";"), disk.reg_type)
             .map_err(|e| e.to_string())?;
-        if !state.pathenv_status().drift {
+        if !state.pathenv_status().map_err(|e| e.message)?.drift {
             return Err("托管目录被外部删除后未报告漂移".into());
         }
 

@@ -20,7 +20,7 @@ import {
   X,
 } from "lucide-react";
 import type { PackageView, ServiceStatus } from "@nsb/schema";
-import { cn, fmtBytes, fmtSpeed, fmtDuration } from "@/lib/utils";
+import { cn, fmtBytes, fmtSpeed, fmtDuration, sameVersion } from "@/lib/utils";
 import { useT } from "@/lib/store";
 import { serviceHasProcess, useInvalidate } from "@/lib/hooks";
 import { normalizeError, type AppErrorShape } from "@/lib/backend";
@@ -184,7 +184,7 @@ export function InstallDialog({
     const sameCompletedTask = () => {
       const latest = useInstallTasks.getState().tasks[taskId];
       return latest === task && latest?.status === "done" && latest.id === target.id
-        && (latest.resolvedVersion ?? latest.version) === displayVersion;
+        && sameVersion(latest.resolvedVersion ?? latest.version, displayVersion);
     };
     setStarting(true);
     setStartError(null);
@@ -196,7 +196,7 @@ export function InstallDialog({
       ]);
       if (!current()) return;
       if (!sameCompletedTask()) throw { code: "INSTALL_TASK_CHANGED", message: t("install.startTaskChanged") };
-      const installed = packages.find((pkg) => pkg.id === target.id && pkg.version === displayVersion && pkg.install);
+      const installed = packages.find((pkg) => pkg.id === target.id && sameVersion(pkg.version, displayVersion) && pkg.install);
       if (!installed) throw { code: "NOT_INSTALLED", message: t("versions.noLongerInstalled") };
       if (serviceIdFor(installed) !== startableAs) throw { code: "SERVICE_TARGET_CHANGED", message: t("versions.serviceChanged") };
       const validateService = (service: ServiceStatus | undefined, allowSwitch = false) => {
@@ -205,7 +205,7 @@ export function InstallDialog({
           throw { code: "SERVICE_BUSY", message: t(service.state === "starting" ? "state.starting" : "state.stopping") };
         }
         if (service.state === "unknown") throw { code: "SERVICE_STATE_UNKNOWN", message: t("packages.statusUnknown") };
-        if (service.version !== displayVersion) {
+        if (!sameVersion(service.version, displayVersion)) {
           if (!allowSwitch) throw { code: "SERVICE_TARGET_CHANGED", message: t("versions.serviceChanged") };
           if (serviceHasProcess(service)) throw { code: "SERVICE_BUSY", message: t("packages.switchRunning") };
         } else if (service.state === "running") {

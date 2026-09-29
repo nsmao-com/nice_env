@@ -35,7 +35,7 @@ import {
 } from "lucide-react";
 import type { PackageView, PackageCategory, ServiceStatus, BulkReport, BulkTarget, VersionCatalog } from "@nsb/schema";
 import { PACKAGE_CATEGORY_ORDER, PackageUninstallPreview } from "@nsb/schema";
-import { cn, fmtBytes, fmtSpeed, isPlatformCompatible, bulkTarget, mergeBulkReport } from "@/lib/utils";
+import { cn, fmtBytes, fmtSpeed, isPlatformCompatible, bulkTarget, mergeBulkReport, normalizeVersion, sameVersion } from "@/lib/utils";
 import { useUI, useT } from "@/lib/store";
 import { usePackages, useServices, useSettings, useVersionCatalogs, serviceHasProcess } from "@/lib/hooks";
 import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
@@ -156,13 +156,13 @@ type PackageFilter = "all" | "installed" | "running" | "updates";
 function packageVersionItems(group: PackageGroup, catalog?: Pick<VersionCatalog, "remote">): VersionItem[] {
   const versions = new Map<string, VersionItem>();
   for (const version of group.versions) {
-    const key = version.version.replace(/^[vV]/, "");
+    const key = normalizeVersion(version.version);
     const existing = versions.get(key);
     if (existing && (existing.installed || !version.installed)) continue;
     versions.set(key, { ...version, running: false, prerelease: isPrerelease(version.version) });
   }
   for (const remote of catalog?.remote ?? []) {
-    const key = remote.version.replace(/^[vV]/, "");
+    const key = normalizeVersion(remote.version);
     const current = versions.get(key);
     if (current) {
       // 远程目录是下载元数据的最新来源，但不能覆盖本地的安装、运行和平台状态。
@@ -176,7 +176,7 @@ function packageVersionItems(group: PackageGroup, catalog?: Pick<VersionCatalog,
       });
     } else {
       versions.set(key, {
-        version: remote.version.replace(/^[vV]/, ""), installed: false, active: false, running: false,
+        version: normalizeVersion(remote.version), installed: false, active: false, running: false,
         remote, sizeBytes: remote.sizeBytes, note: remote.note,
         prerelease: remote.prerelease || isPrerelease(remote.version),
       });
@@ -221,7 +221,7 @@ function groupPackages(packages: PackageView[], defaultTld?: string): PackageGro
     }
     if (!g.description && p.description) g.description = p.description;
     g.versions.push({
-      version: p.version,
+      version: normalizeVersion(p.version),
       sizeBytes: p.sizeBytes,
       installed: !!p.install,
       installPath: p.install?.installPath,
@@ -236,7 +236,7 @@ function groupPackages(packages: PackageView[], defaultTld?: string): PackageGro
     // 并优先保留带真实安装记录的一项，避免同一版本在「已安装」筛选里出现两次。
     const deduped = new Map<string, PackageGroup["versions"][number]>();
     for (const version of g.versions) {
-      const key = version.version.replace(/^[vV]/, "");
+      const key = normalizeVersion(version.version);
       const current = deduped.get(key);
       if (!current || (!current.installed && version.installed)) deduped.set(key, version);
     }
@@ -291,7 +291,7 @@ export default function PackagesPage() {
     queryFn: async () => {
       if (!uninstallTarget) throw { code: "UNINSTALL_PREVIEW_UNCONFIRMED", message: t("packages.uninstallPreviewFailed") };
       const result = PackageUninstallPreview.safeParse(await api.previewPackageUninstall(`${uninstallTarget.id}@${uninstallTarget.version}`));
-      if (!result.success || result.data.installed.id !== uninstallTarget.id || result.data.installed.version !== uninstallTarget.version) {
+      if (!result.success || result.data.installed.id !== uninstallTarget.id || !sameVersion(result.data.installed.version, uninstallTarget.version)) {
         throw { code: "UNINSTALL_PREVIEW_UNCONFIRMED", message: t("packages.uninstallPreviewFailed") };
       }
       return result.data;
@@ -302,7 +302,7 @@ export default function PackagesPage() {
     retry: false,
   });
   const uninstallPreviewReady = !!uninstallPreview.data && !uninstallPreview.isFetching && !uninstallPreview.error
-    && uninstallPreview.data.installed.id === uninstallTarget?.id && uninstallPreview.data.installed.version === uninstallTarget?.version;
+    && uninstallPreview.data.installed.id === uninstallTarget?.id && sameVersion(uninstallPreview.data.installed.version, uninstallTarget?.version);
   const uninstallBlocked = !uninstallPreviewReady || !!uninstallPreview.data?.blockers.length;
   const uninstallPreviewError = uninstallPreview.error ? normalizeError(uninstallPreview.error) : null;
 
@@ -317,7 +317,7 @@ export default function PackagesPage() {
   };
   const uninstallInstalling = !!uninstallTarget && Object.values(installTasks).some((task) =>
     task.status === "running" && task.id === uninstallTarget.id
-    && (!task.version || task.version === uninstallTarget.version)
+    && (!task.version || sameVersion(task.version, uninstallTarget.version))
   );
   const actionsDisabled = !dataReady || bulkBusy || uninstalling;
 
@@ -777,7 +777,7 @@ export default function PackagesPage() {
                 const g = groups.find((x) => x.id === installTarget.id);
                 const taskKey = installTarget.taskKey ?? (installTarget.version ? `${installTarget.id}@${installTarget.version}` : installTarget.id);
                 const version = installTasks[taskKey]?.resolvedVersion ?? installTarget.version;
-                const v = g?.versions.find((x) => x.version === version && x.installed);
+                const v = g?.versions.find((x) => sameVersion(x.version, version) && x.installed);
                 return v?.serviceId ?? null;
               })()
             : null
@@ -839,13 +839,13 @@ function PackageRow({
   }, [group.versions]);
 
   const items = React.useMemo(() => packageVersionItems(group, catalog).map((item) => {
-    const version = group.versions.find((version) => version.version === item.version);
+    const version = group.versions.find((version) => sameVersion(version.version, item.version));
     const service = version?.installed ? services.find((service) => service.id === version.serviceId
-      && service.version === version.version) : undefined;
+      && sameVersion(service.version, version.version)) : undefined;
     return {
       ...item,
       installing: Object.values(installTasks).some((task) => task.status === "running"
-        && task.id === group.id && (!task.version || task.version === item.version)),
+        && task.id === group.id && (!task.version || sameVersion(task.version, item.version))),
       running: service?.state === "running",
       canStop: !!service && serviceHasProcess(service),
       transitioning: !!version?.installed && services.some((service) => service.id === version.serviceId
@@ -877,11 +877,11 @@ function PackageRow({
         queryClient.fetchQuery({ queryKey: ["services"], queryFn: api.listServiceStatus, staleTime: 0, retry: false, networkMode: "always" }),
       ]);
       if (Object.values(useInstallTasks.getState().tasks).some((task) => task.status === "running"
-        && task.id === group.id && (action === "install" || !task.version || task.version === version))) {
+        && task.id === group.id && (action === "install" || !task.version || sameVersion(task.version, version)))) {
         throw { code: "PACKAGE_BUSY", message: t("packages.installing") };
       }
-      const targets = packages.filter((pkg) => pkg.id === group.id && pkg.version.replace(/^[vV]/, "") === version.replace(/^[vV]/, ""));
-      const target = targets.find((pkg) => pkg.install) ?? targets.find((pkg) => pkg.version === version) ?? targets[0];
+      const targets = packages.filter((pkg) => pkg.id === group.id && sameVersion(pkg.version, version));
+      const target = targets.find((pkg) => pkg.install) ?? targets.find((pkg) => sameVersion(pkg.version, version)) ?? targets[0];
       if (action === "install") {
         if (target?.install) throw { code: "VERSION_STATE_CHANGED", message: t("versions.alreadyInstalled") };
         if (item.incompatible || (target && !isPlatformCompatible(target.os, target.arch))) {
@@ -902,7 +902,7 @@ function PackageRow({
       const current = services.find((service) => service.id === sid);
       if (action === "active") {
         // 选择默认版本不触发多实例服务启停；单实例切换仍要求先停止。
-        if (current && target.run?.singleInstance !== false && current.version !== version && serviceHasProcess(current)) {
+        if (current && target.run?.singleInstance !== false && !sameVersion(current.version, version) && serviceHasProcess(current)) {
           throw { code: "SERVICE_BUSY", message: `${group.displayName} ${t("packages.switchRunning")}` };
         }
         // 即使默认选择已保存，仍需重试 PATH 同步失败的后续步骤。
@@ -911,7 +911,7 @@ function PackageRow({
         return;
       }
       if (!sid || !current) throw { code: "UNKNOWN_SERVICE", message: t("svc.notFound") };
-      if (current.version !== version) throw { code: "SERVICE_TARGET_CHANGED", message: t("versions.serviceChanged") };
+      if (!sameVersion(current.version, version)) throw { code: "SERVICE_TARGET_CHANGED", message: t("versions.serviceChanged") };
       if (current.state === "starting" || current.state === "stopping") {
         throw { code: "SERVICE_BUSY", message: t(current.state === "starting" ? "state.starting" : "state.stopping") };
       }

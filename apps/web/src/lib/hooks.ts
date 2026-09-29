@@ -246,7 +246,7 @@ export function toastError(e: unknown, fallback = "操作失败") {
  */
 export function toastPortConflict(
   e: unknown,
-  opts: { onResolved?: () => void | Promise<void>; retryLabel?: string } = {}
+  opts: { onResolved?: () => void | Promise<void>; retryLabel?: string; resolve?: () => Promise<void> } = {}
 ): boolean {
   const err = normalizeError(e) as AppErrorShape & { port?: number; pid?: number; holder?: string };
   if (err.code !== "PORT_IN_USE") return false;
@@ -258,10 +258,16 @@ export function toastPortConflict(
     action:
       port != null
         ? {
-            label: opts.retryLabel ?? (opts.onResolved ? "结束占用并重试" : "结束占用进程"),
+            label: opts.retryLabel ?? (opts.onResolved || opts.resolve ? "结束占用并重试" : "结束占用进程"),
             onClick: async () => {
               if (resolving) return;
               resolving = true;
+              // 服务入口自行持有操作锁并复查目标，再处理端口及原动作。
+              if (opts.resolve) {
+                try { await opts.resolve(); } catch (error) { toastError(error); }
+                finally { resolving = false; }
+                return;
+              }
               const pending = toast.loading(`正在释放端口 ${port}…`);
               try {
                 await api.resolvePortConflict(port, err.pid);
@@ -476,6 +482,105 @@ export function useInterval(fn: () => void, ms: number | null) {
 /** 数据库页与工具箱共享真实管理台状态，换页后仍能打开或停止原进程。 */
 function useAdminerStatus() {
   return useQuery({ queryKey: ["adminer"], queryFn: api.adminerStatus, refetchInterval: 5000, retry: false, networkMode: "always" });
+}
+
+/** 卡片与列表共用：固定操作和版本，状态重读及端口处理期间禁止重复操作。 */
+export function useServiceActions(service: ServiceStatus, disabled = false) {
+  const t = useT();
+  const qc = useQueryClient();
+  const latest = useRef(service);
+  latest.current = service;
+  const identity = React.useMemo(() => ({ id: service.id, version: service.version }), [service.id, service.version]);
+  const latestIdentity = useRef(identity);
+  latestIdentity.current = identity;
+  const disabledRef = useRef(disabled);
+  disabledRef.current = disabled;
+  const mounted = useRef(true);
+  const operationRef = useRef<object | null>(null);
+  const [busy, setBusy] = useState(false);
+  type Action = "start" | "stop" | "restart";
+  type Conflict = AppErrorShape & { port?: number; pid?: number; holder?: string };
+  const [failure, setFailure] = useState<{ action: Action; error: Conflict; conflict?: Conflict } | null>(null);
+  useEffect(() => {
+    mounted.current = true;
+    operationRef.current = null;
+    setBusy(false);
+    setFailure(null);
+    return () => { mounted.current = false; operationRef.current = null; };
+  }, [service.id, service.version]);
+  const execute = async (action: Action, conflict?: Conflict): Promise<void> => {
+    if (!mounted.current || disabledRef.current || operationRef.current) return;
+    const { id, version } = service;
+    if (latestIdentity.current !== identity || latest.current.id !== id || latest.current.version !== version) {
+      toast.error(t("versions.serviceChanged"));
+      return;
+    }
+    const operation = {};
+    operationRef.current = operation;
+    const current = () => mounted.current && operationRef.current === operation
+      && latestIdentity.current === identity && latest.current.id === id && latest.current.version === version && !disabledRef.current;
+    setBusy(true);
+    setFailure(null);
+    let pendingConflict = conflict;
+    const read = async () => {
+      // 独立读取，不能复用点击前已发出的轮询请求。
+      const list = await api.listServiceStatus();
+      if (!current()) return;
+      const target = list.find((item) => item.id === id);
+      if (!target) throw { code: "UNKNOWN_SERVICE", message: t("svc.notFound") };
+      if (target.version !== version) throw { code: "SERVICE_TARGET_CHANGED", message: t("versions.serviceChanged") };
+      if (["starting", "stopping"].includes(target.state)) throw { code: "SERVICE_BUSY", message: t(`state.${target.state}`) };
+      if (target.state === "unknown") throw { code: "SERVICE_STATE_UNKNOWN", message: t("packages.statusUnknown") };
+      if (action !== "stop" && target.missingRequires.length) throw { code: "MISSING_DEPENDENCIES", message: t("svc.needDepsHint") };
+      if (action === "start" && target.state !== "running" && serviceHasProcess(target)) throw { code: "SERVICE_BUSY", message: t("svc.processStillRunning") };
+      return target;
+    };
+    try {
+      let target = await read();
+      if (!target || !current()) return;
+      if (conflict) {
+        const actual = target.lastError;
+        if (conflict.port == null || serviceHasProcess(target) || actual?.code !== "PORT_IN_USE"
+          || actual.port !== conflict.port || actual.pid !== conflict.pid) {
+          throw { code: "PORT_CONFLICT_CHANGED", message: t("svc.portConflictChanged") };
+        }
+        await api.resolvePortConflict(conflict.port, conflict.pid);
+        pendingConflict = undefined;
+        if (!current()) return;
+        target = await read();
+        if (!target || !current()) return;
+      }
+      if (action === "stop") {
+        if (serviceHasProcess(target)) await api.stopService(id, version);
+      } else if (action === "restart") await api.restartService(id, version);
+      else if (target.state !== "running") await api.startService(id, version);
+      if (current()) toast.success(`${target.label} · ${t(action === "stop" ? "common.stopped" : "common.running")}`);
+    } catch (error) {
+      if (!current()) return;
+      const problem = normalizeError(error);
+      setFailure({ action, error: problem, conflict: pendingConflict });
+      if (action === "stop" || !toastPortConflict(problem, {
+        retryLabel: t("svc.freePortAndRetry"), resolve: () => execute(action, problem),
+      })) toastError(problem);
+    } finally {
+      if (operationRef.current === operation) {
+        operationRef.current = null;
+        if (mounted.current) setBusy(false);
+      }
+      void qc.invalidateQueries({ queryKey: ["services"] });
+      void qc.invalidateQueries({ queryKey: ["stacks"] });
+    }
+  };
+  const conflict = failure
+    ? failure.action !== "stop" && failure.error.code === "PORT_IN_USE" ? failure.error : undefined
+    : service.lastError;
+  return { busy, failure, conflict: conflict?.code === "PORT_IN_USE" && conflict.port != null ? conflict : null,
+    toggle: (next: boolean) => execute(next ? "start" : "stop"),
+    restart: () => execute("restart"),
+    resolveConflict: () => conflict?.code === "PORT_IN_USE" && conflict.port != null
+      ? execute(failure?.action ?? "start", conflict) : Promise.resolve(),
+    retry: () => failure ? execute(failure.action, failure.conflict) : Promise.resolve(),
+  };
 }
 
 export function useAdminer(packageId: "adminer" | "phpmyadmin" = "adminer", targetServiceId?: string) {

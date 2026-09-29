@@ -3,7 +3,6 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { toast } from "sonner";
 import { motion } from "motion/react";
 import { AlertTriangle, RotateCw, ScrollText, Server, ShieldAlert, Stethoscope } from "lucide-react";
 import type { ServiceStatus } from "@nsb/schema";
@@ -17,8 +16,7 @@ import { SftpgoConfigButton } from "./sftpgo-config-button";
 import { ServiceDiagnostics } from "./service-diagnostics";
 import { StatusLight } from "./status-light";
 import { useT } from "@/lib/store";
-import { useInvalidate, toastError, toastPortConflict } from "@/lib/hooks";
-import * as api from "@/lib/api";
+import { useServiceActions } from "@/lib/hooks";
 
 /**
  * 服务列表行：一屏能看更多服务。
@@ -27,52 +25,15 @@ import * as api from "@/lib/api";
 export function ServiceRow({ service, dragHandle, dragPreview = false }: { service: ServiceStatus; dragHandle?: React.ReactNode; dragPreview?: boolean }) {
   const t = useT();
   const router = useRouter();
-  const invalidate = useInvalidate();
-  const [busy, setBusy] = React.useState(false);
+  const { busy, failure, conflict, toggle, restart, resolveConflict, retry } = useServiceActions(service, dragPreview);
   const [diagOpen, setDiagOpen] = React.useState(false);
   const running = service.state === "running";
   const error = service.state === "error";
   const hasProcess = running || service.pids.length > 0;
   const dependencyBlocked = !hasProcess && service.missingRequires.length > 0;
-  const conflict =
-    service.lastError?.code === "PORT_IN_USE" && service.lastError.port != null
-      ? { port: service.lastError.port, pid: service.lastError.pid, holder: service.lastError.holder }
-      : null;
-
-  const toggle = async (next: boolean) => {
-    if (next && dependencyBlocked) {
-      toast.warning(t("svc.needDepsHint"));
-      return;
-    }
-    setBusy(true);
-    try {
-      if (next) await api.startService(service.id);
-      else await api.stopService(service.id);
-    } catch (e) {
-      if (!toastPortConflict(e, { onResolved: () => toggle(next) })) toastError(e);
-    } finally {
-      setBusy(false);
-      invalidate("services");
-    }
-  };
-
-  /** 就地重启：改配置 / 出错后的高频动作，省去先停再启两步 */
-  const restart = async () => {
-    if (service.missingRequires.length > 0) {
-      toast.warning(t("svc.needDepsHint"));
-      return;
-    }
-    setBusy(true);
-    try {
-      await api.restartService(service.id);
-      toast.success(`${service.label} · ${t("common.running")}`);
-    } catch (e) {
-      if (!toastPortConflict(e, { onResolved: restart })) toastError(e);
-    } finally {
-      setBusy(false);
-      invalidate("services");
-    }
-  };
+  const transitioning = service.state === "starting" || service.state === "stopping";
+  const actionDisabled = busy || transitioning || service.state === "unknown" || dragPreview;
+  const problem = failure?.error ?? (error ? service.lastError : undefined);
 
   const stateLabel: Record<string, string> = {
     running: t("state.running"),
@@ -89,7 +50,7 @@ export function ServiceRow({ service, dragHandle, dragPreview = false }: { servi
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0 }}
       className={cn(
-        "group/item grid items-center gap-2 rounded-lg border px-3 py-2 transition-colors sm:flex sm:gap-3",
+        "group/item grid items-center gap-2 rounded-lg border px-3 py-2 transition-colors sm:flex sm:flex-wrap sm:gap-3",
         dragHandle ? "grid-cols-[24px_7px_16px_minmax(0,1fr)]" : "grid-cols-[7px_16px_minmax(0,1fr)]",
         error
           ? "border-error/30 bg-error-soft/40"
@@ -160,33 +121,19 @@ export function ServiceRow({ service, dragHandle, dragPreview = false }: { servi
             size="sm"
             variant="ghost"
             className="h-6 shrink-0 gap-1 px-1.5 text-[11px] text-error hover:text-error"
-            disabled={busy}
-            title={conflict.holder ? `被 ${conflict.holder} 占用` : undefined}
-            onClick={async () => {
-              if (service.missingRequires.length > 0) {
-                toast.warning(t("svc.needDepsHint"));
-                return;
-              }
-              setBusy(true);
-              try {
-                await api.resolvePortConflict(conflict.port, conflict.pid);
-                await api.startService(service.id);
-              } catch (e) {
-                toastError(e);
-              } finally {
-                setBusy(false);
-                invalidate("services");
-              }
-            }}
+            disabled={actionDisabled || hasProcess || service.missingRequires.length > 0}
+            title={`${t("svc.freePortAndRetry")} :${conflict.port}${conflict.holder ? ` · ${conflict.holder}` : ""}`}
+            aria-label={`${t("svc.freePortAndRetry")} :${conflict.port}`}
+            onClick={resolveConflict}
           >
             <ShieldAlert className="h-3 w-3" />:{conflict.port}
           </Button>
         )}
 
-        <ServiceConfigButton service={service} disabled={busy} />
-        <ServiceWebButton service={service} disabled={busy} />
-        <SftpgoConfigButton service={service} disabled={busy} />
-        <Button variant="ghost" size="icon-sm" className="shrink-0 text-faint" title={t("svc.diagnose")} aria-label={t("svc.diagnose")} onClick={() => setDiagOpen(true)}>
+        <ServiceConfigButton service={service} disabled={busy || dragPreview} />
+        <ServiceWebButton service={service} disabled={busy || dragPreview} />
+        <SftpgoConfigButton service={service} disabled={busy || dragPreview} />
+        <Button variant="ghost" size="icon-sm" className="shrink-0 text-faint" title={t("svc.diagnose")} aria-label={t("svc.diagnose")} disabled={dragPreview} onClick={() => setDiagOpen(true)}>
           <Stethoscope className="h-3.5 w-3.5" />
         </Button>
         <Button
@@ -194,7 +141,8 @@ export function ServiceRow({ service, dragHandle, dragPreview = false }: { servi
           size="icon-sm"
           className="shrink-0 text-faint opacity-100 transition-opacity hover:text-secondary sm:opacity-0 sm:group-hover/item:opacity-100 focus-visible:opacity-100"
           title={t("common.restart")}
-          disabled={busy || service.state === "starting" || service.state === "stopping"}
+          aria-label={t("common.restart")}
+          disabled={actionDisabled || service.missingRequires.length > 0}
           onClick={restart}
         >
           <RotateCw className="h-3.5 w-3.5" />
@@ -205,6 +153,8 @@ export function ServiceRow({ service, dragHandle, dragPreview = false }: { servi
             size="icon-sm"
             className="shrink-0 text-faint opacity-100 transition-opacity hover:text-secondary sm:opacity-0 sm:group-hover/item:opacity-100 focus-visible:opacity-100"
             title={t("logs.title")}
+            aria-label={t("logs.title")}
+            disabled={dragPreview}
             onClick={() => router.push(`/logs?service=${encodeURIComponent(service.id)}`)}
           >
             <ScrollText className="h-3.5 w-3.5" />
@@ -215,13 +165,26 @@ export function ServiceRow({ service, dragHandle, dragPreview = false }: { servi
           <ServiceSwitch
             label={service.label}
             checked={hasProcess}
-            busy={busy || service.state === "starting" || service.state === "stopping"}
-            disabled={service.state === "starting" || service.state === "stopping" || dependencyBlocked}
+            busy={busy || transitioning}
+            disabled={actionDisabled || dependencyBlocked}
             title={dependencyBlocked ? t("svc.needDepsHint") : undefined}
             onCheckedChange={toggle}
           />
         </div>
       </div>
+      {problem && (
+        <div role="alert" className="col-span-full min-w-0 break-words rounded-md border border-error/25 bg-error-soft px-2.5 py-2 text-[11px] text-error [overflow-wrap:anywhere] sm:order-last sm:basis-full">
+          {problem.message}
+          {problem.hint && <span className="mt-0.5 block text-error/70">{problem.hint}</span>}
+          {failure && !conflict && (
+            <Button size="sm" variant="ghost" className="mt-1.5 h-auto min-h-7 max-w-full gap-1.5 whitespace-normal"
+              disabled={actionDisabled || (failure.action !== "stop" && service.missingRequires.length > 0)} onClick={retry}>
+              <RotateCw className="h-3.5 w-3.5 shrink-0" />
+              {t("bulk.retry")} · {t(`common.${failure.action}`)}
+            </Button>
+          )}
+        </div>
+      )}
       <ServiceDiagnostics service={service} open={diagOpen} onOpenChange={setDiagOpen} />
     </motion.div>
   );

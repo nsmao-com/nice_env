@@ -1202,6 +1202,17 @@ impl CoreState {
         self.stop_service(id)
     }
 
+    pub fn restart_service_version(&self, id: &str, expected_version: &str) -> Result<()> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重启"))?;
+        self.check_service_version(id, expected_version)?;
+        // 历史安装或导入可能留下“运行旧版、默认新版”的状态，不能先停掉旧版再启动另一版。
+        if ops::installed_by_choice(&self.store, id).is_some_and(|selected| selected.version != expected_version) {
+            return Err(AppError::new("SERVICE_TARGET_CHANGED", "默认版本与当前服务版本不一致，请先确认使用版本再重启"));
+        }
+        self.restart_service(id)
+    }
+
     pub fn start_service_version_with_port_policy(&self, id: &str, expected_version: &str, on_freed: impl FnMut(u16)) -> Result<()> {
         let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
         let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后启动"))?;

@@ -966,10 +966,17 @@ async fn restart_service(
     app: tauri::AppHandle,
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
+    expected_version: Option<String>,
 ) -> Result<bool, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
-    let r = tauri::async_runtime::spawn_blocking(move || map_jh(st.restart_service(&id).map(|_| true)))
+    let r = tauri::async_runtime::spawn_blocking(move || {
+        let result = match expected_version.as_deref() {
+            Some(version) => st.restart_service_version(&id, version),
+            None => st.restart_service(&id),
+        };
+        map_jh(result.map(|_| true))
+    })
     .await
     .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?;
     crate::tray::refresh(&app);

@@ -1049,6 +1049,12 @@ async function runServiceAction(action: "start_service" | "stop_service" | "rest
       if (!service) throw { code: "UNKNOWN_SERVICE", message: "服务未注册或已卸载" };
       if (!expectedVersion || service.version !== expectedVersion) throw { code: "SERVICE_TARGET_CHANGED", message: "服务已切换到其他版本，请重新选择要操作的版本" };
       if (service.state === "unknown") throw { code: "SERVICE_STATE_UNKNOWN", message: "无法确认服务状态，请先重新检查服务状态" };
+      if (action === "restart_service") {
+        const installed = Array.from(packages.values()).filter((pkg) => pkg.id === id && pkg.install)
+          .sort((a, b) => cmpVersionDesc(a.version, b.version));
+        const selected = installed.find((pkg) => pkg.active) ?? installed[0];
+        if (selected && selected.version !== expectedVersion) throw { code: "SERVICE_TARGET_CHANGED", message: "默认版本与当前服务版本不一致，请先确认使用版本再重启" };
+      }
     }
     return performServiceAction(action, id);
   });

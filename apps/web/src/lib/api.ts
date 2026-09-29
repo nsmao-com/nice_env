@@ -100,8 +100,8 @@ export const stopService = (id: string, expectedVersion?: string) =>
   safe(invoke<boolean>("stop_service", { id, expectedVersion }));
 export const serviceStopPreview = (id: string) => safe(invoke<ServiceStopPreview>("service_stop_preview", { id }));
 export const forceStopService = (id: string, revision: string) => safe(invoke<boolean>("force_stop_service", { id, revision }));
-export const restartService = (id: string) =>
-  safe(invoke<boolean>("restart_service", { id }));
+export const restartService = (id: string, expectedVersion?: string) =>
+  safe(invoke<boolean>("restart_service", { id, expectedVersion }));
 export const sftpgoConfigDirectories = () =>
   safe(invoke<SftpgoConfigDirectories>("sftpgo_config_directories"));
 export const selectSftpgoConfig = (directory: string, version: string, expectedCurrent: string | null) =>

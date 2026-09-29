@@ -141,6 +141,7 @@ interface PackageGroup {
     version: string;
     sizeBytes: number;
     installed: boolean;
+    installPath?: string;
     active: boolean;
     serviceId: string | null;
     /** 该清单条目不支持当前平台（下载前会被后端拦截） */
@@ -182,6 +183,7 @@ function groupPackages(packages: PackageView[], defaultTld?: string): PackageGro
       version: p.version,
       sizeBytes: p.sizeBytes,
       installed: !!p.install,
+      installPath: p.install?.installPath,
       active: !!p.active,
       serviceId: serviceIdOf(p),
       incompatible: !isPlatformCompatible(p.os as string[] | undefined, p.arch as string[] | undefined),
@@ -707,6 +709,7 @@ function PackageRow({
       list.push({
         version: v.version,
         installed: v.installed,
+        installPath: v.installPath,
         installing: Object.values(installTasks).some((task) => task.status === "running"
           && task.id === group.id && (!task.version || task.version === v.version)),
         active: v.active,
@@ -808,6 +811,15 @@ function PackageRow({
     }
   };
 
+  const openInstallFolder = async (item: VersionItem) => {
+    if (!item.installPath) return;
+    try {
+      await api.openInFolder(item.installPath);
+    } catch (error) {
+      toast.error(normalizeError(error).message);
+    }
+  };
+
   // 筛选立即卸载旧行，不能让退出动画保留过期的服务和安装操作。
   return (
     <div>
@@ -897,6 +909,7 @@ function PackageRow({
           onRefresh={onRefresh}
           onPick={clickVersion}
           onSetActive={setDefaultVersion}
+          onOpenFolder={openInstallFolder}
           onUninstall={onUninstall}
         />
 

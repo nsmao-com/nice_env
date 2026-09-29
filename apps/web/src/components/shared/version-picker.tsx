@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useIsMutating } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "motion/react";
-import { Check, ChevronDown, Download, Loader2, Pin, Power, RefreshCw, Trash2, WifiOff, X } from "lucide-react";
+import { Check, ChevronDown, Download, FolderOpen, Loader2, Pin, Power, RefreshCw, Trash2, WifiOff, X } from "lucide-react";
 import type { RemoteVersion } from "@nsb/schema";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/store";
@@ -16,6 +16,8 @@ import { PathEnvToggle } from "@/components/shared/path-env-toggle";
 export interface VersionItem {
   version: string;
   installed: boolean;
+  /** 已安装运行时目录，桌面端可直接在系统文件管理器中打开 */
+  installPath?: string;
   /** 默认版本；与服务是否正在运行独立。 */
   active: boolean;
   running: boolean;
@@ -52,6 +54,7 @@ interface Props {
   onRefresh: () => Promise<void> | void;
   onPick: (item: VersionItem, trigger: HTMLButtonElement | null) => Promise<void> | void;
   onSetActive: (item: VersionItem) => Promise<void>;
+  onOpenFolder: (item: VersionItem) => Promise<void> | void;
   onUninstall: (version: string, trigger: HTMLButtonElement | null) => void;
 }
 
@@ -76,7 +79,7 @@ function summarise(items: VersionItem[], countLabel: string) {
   };
 }
 
-export function VersionPicker({ group, items, catalog, disabled = false, statusKnown = true, onRefresh, onPick, onSetActive, onUninstall }: Props) {
+export function VersionPicker({ group, items, catalog, disabled = false, statusKnown = true, onRefresh, onPick, onSetActive, onOpenFolder, onUninstall }: Props) {
   const t = useT();
   const pathBusy = useIsMutating({ mutationKey: ["pathenv-change"] }) > 0;
   const [open, setOpen] = React.useState(false);
@@ -355,6 +358,20 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
                           {t(item.active ? "versions.default" : "versions.setDefault")}
                         </button>}
                         <span className="flex-1" />
+
+                        <button
+                          type="button"
+                          aria-label={`${t("packages.openFolder")} ${group.displayName} ${item.version}`}
+                          title={t("packages.openFolder")}
+                          disabled={disabled || busy !== null || item.installing || !item.installPath}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void onOpenFolder(item);
+                          }}
+                          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted transition-colors hover:bg-fill hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-primary disabled:opacity-45"
+                        >
+                          <FolderOpen className="h-3.5 w-3.5" />
+                        </button>
 
                       <button
                         aria-label={`${t("packages.uninstall")} ${item.version}`}

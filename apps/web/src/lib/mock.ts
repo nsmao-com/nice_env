@@ -1486,6 +1486,8 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         // 与原生提交阶段一致，此后不再接受取消。
         control.committing = true;
         report("configuring", 1);
+        // 在增加安装记录前固定当前选择，兼容尚未标记 active 的旧预览状态。
+        refreshPackageSelection(p.id);
         p.install = {
           version: p.version,
           installPath: `…/runtimes/${p.id}/${p.version}`,

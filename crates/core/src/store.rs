@@ -118,6 +118,10 @@ impl Store {
 
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
         let conn = self.conn.lock();
+        Self::write_setting(&conn, key, value)
+    }
+
+    fn write_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
         conn.execute(
             "INSERT INTO settings(key,value) VALUES(?1,?2)
              ON CONFLICT(key) DO UPDATE SET value=?2",
@@ -239,6 +243,35 @@ impl Store {
 
     pub fn upsert_installed(&self, p: &InstalledPackage) -> Result<()> {
         let conn = self.conn.lock();
+        Self::write_installed(&conn, p)
+    }
+
+    /// 安装成功只增加可用版本；保存当前实际默认选择，不能在安装新版时隐式切换。
+    /// 在提交时读取选择，保留下载期间用户的新选择；任一写入失败均整体回滚。
+    pub(crate) fn complete_install(&self, p: &InstalledPackage) -> Result<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let key = format!("active{}Version", p.id);
+        let active: Option<String> = tx.query_row(
+            "SELECT value FROM settings WHERE key=?1", params![key], |r| r.get(0),
+        ).optional()?;
+        let installed = {
+            let mut stmt = tx.prepare("SELECT version FROM installed WHERE id=?1")?;
+            let rows = stmt.query_map(params![p.id], |r| r.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let chosen = active.as_deref().filter(|version| installed.iter().any(|v| v == version))
+            .or_else(|| installed.iter().min_by(|a, b| crate::versions::cmp_version_desc(a, b)).map(String::as_str))
+            .unwrap_or(&p.version);
+        Self::write_installed(&tx, p)?;
+        if active.as_deref() != Some(chosen) {
+            Self::write_setting(&tx, &key, chosen)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn write_installed(conn: &Connection, p: &InstalledPackage) -> Result<()> {
         conn.execute(
             "INSERT INTO installed(key,id,version,category,install_path,config_path,installed_at)
              VALUES(?1,?2,?3,?4,?5,?6,?7)

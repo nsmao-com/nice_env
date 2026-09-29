@@ -727,7 +727,7 @@ impl Installer {
                 .map_err(|e| AppError::io("发布套件运行时", e))?;
             published = true;
             self.ensure_default_configs(&entry, paths, store)?;
-            store.upsert_installed(&installed)?;
+            store.complete_install(&installed)?;
             Ok(())
         })();
         if let Err(err) = commit {

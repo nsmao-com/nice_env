@@ -434,6 +434,7 @@ export function InstallDialog({
             )}
           </AnimatePresence>
           {finished && task?.pathSyncError && <InstallPathWarning key={`${task.key}:${task.startedAt}`} task={task} disabled={starting} />}
+          {finished && <p className="mt-3 text-[11.5px] leading-relaxed text-muted [overflow-wrap:anywhere]">{t("install.defaultPreservedHint")}</p>}
           {finished && startableAs === target?.id && <p className="mt-3 text-[11.5px] leading-relaxed text-muted">{t("install.startVersionHint")}</p>}
           {finished && startError && <div ref={startErrorRef} role="alert" className="mt-3 rounded-xl border border-error/30 bg-error-soft p-3 text-[12px] text-error [overflow-wrap:anywhere]">
             <p className="font-medium">{t("install.startFailed")}</p>

@@ -140,3 +140,20 @@
 -- 用户明确选择已有目录时，先在生命周期锁内确认服务已停止、版本及旧绑定未变化，
 -- 再只读复查配置/数据库/主机密钥，成功才保存 :key='sftpgoConfigDir'。
 -- 选择操作不启动服务、不复制或合并原数据；默认启动流程仍在健康启动后保存首次绑定。
+
+-- v0.2.143：安装新版本时保留实际默认选择，防止默认服务和跟随默认的 PATH 隐式换版。
+-- 已核对 Store::open 的 SQLite installed/settings 表定义，无表结构变更或 migration。
+-- 以下为应用运行时参数化 SQL 记录，不需要手工执行；本轮不操作真实用户数据库。
+-- 在同一个写事务内先读取当前选择及安装版本，再提交安装记录和默认选择。
+-- :active_version 为现有有效选择；缺失/失效时取提交前最高已装版本；首次安装取 :version。
+-- BEGIN IMMEDIATE;
+-- INSERT INTO installed(key,id,version,category,install_path,config_path,installed_at)
+-- VALUES(:package_key,:id,:version,:category,:install_path,:config_path,:installed_at)
+-- ON CONFLICT(key) DO UPDATE SET
+--   install_path=:install_path, config_path=:config_path, installed_at=:installed_at;
+-- 仅默认设置与上述选择不一致时执行；:active_key = 'active' || :id || 'Version'。
+-- INSERT INTO settings(key,value) VALUES(:active_key,:active_version)
+-- ON CONFLICT(key) DO UPDATE SET value=:active_version;
+-- COMMIT;
+-- 任一写入失败均回滚；下载期间用户新选的默认版本在提交时读取并保留。
+-- pathEnvVersions 的独立 PATH 选择不改写；原有运行时目录和服务进程不因安装切换。

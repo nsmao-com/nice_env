@@ -3,7 +3,7 @@
 import * as React from "react";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "motion/react";
-import { Globe, Plus, ExternalLink, FolderOpen, Loader2, Power, Settings2, FolderSearch, Copy, AppWindow, Search, RefreshCw } from "lucide-react";
+import { Globe, Plus, ExternalLink, FolderOpen, Loader2, Power, Settings2, FolderSearch, Copy, AppWindow, Search, RefreshCw, Share2 } from "lucide-react";
 import type { Site } from "@nsb/schema";
 import { useUI, useT } from "@/lib/store";
 import { useSites, useInvalidate, toastError, siteUrl } from "@/lib/hooks";
@@ -21,11 +21,14 @@ import { PageHeader } from "@/components/layout/app-shell";
 import { SiteDetailSheet } from "@/components/sites/site-detail";
 import { ProjectScannerDialog } from "@/components/sites/project-scanner";
 import { SiteBulkActions } from "@/components/sites/site-bulk-actions";
+import { SiteShareDialog } from "@/components/shared/tunnel-panel";
 
 export default function SitesPage() {
   const t = useT();
   const setWizardOpen = useUI((s) => s.setWizardOpen);
   const { data: sites, error, isFetching, dataUpdatedAt, refetch } = useSites();
+  const [shareId, setShareId] = React.useState<string | null>(null);
+  const sharedSite = sites.find((site) => site.id === shareId);
   const [detailId, setDetailId] = React.useState<string | null>(null);
   const detail = sites.find((site) => site.id === detailId) ?? null;
   const [query, setQuery] = React.useState("");
@@ -127,7 +130,7 @@ export default function SitesPage() {
           <AnimatePresence>
             {visibleSites
               .map((site) => (
-                <SiteCard key={site.id} site={site} onOpenDetail={() => setDetailId(site.id)} />
+                <SiteCard key={site.id} site={site} onOpenDetail={() => setDetailId(site.id)} onShare={() => setShareId(site.id)} />
               ))}
           </AnimatePresence>
         </div>
@@ -135,12 +138,13 @@ export default function SitesPage() {
 
       <ProjectScannerDialog open={scanOpen} onOpenChange={setScanOpen} />
 
+      {shareId && <SiteShareDialog siteId={shareId} name={sharedSite?.name ?? t("sites.share.unavailable")} onClose={() => setShareId(null)} />}
       <SiteDetailSheet site={detail} onClose={() => setDetailId(null)} />
     </div>
   );
 }
 
-function SiteCard({ site, onOpenDetail }: { site: Site; onOpenDetail: () => void }) {
+function SiteCard({ site, onOpenDetail, onShare }: { site: Site; onOpenDetail: () => void; onShare: () => void }) {
   const t = useT();
   const invalidate = useInvalidate();
   const url = siteUrl(site);
@@ -177,8 +181,16 @@ function SiteCard({ site, onOpenDetail }: { site: Site; onOpenDetail: () => void
               <span className="block truncate text-[11px] text-faint" title={site.domains.join(", ")}>{site.domains.join(", ")}</span>
             </div>
           </div>
-          <div className="flex shrink-0 items-center gap-0.5">
+          <div className="flex shrink-0 flex-wrap items-center gap-0.5">
             <CopyButton text={url} resolveText={() => api.siteAccessUrl(site.id)} />
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button aria-label={t("sites.share.title")} variant="ghost" size="icon-sm" className="text-faint hover:text-foreground" onClick={onShare}>
+                  <Share2 className="h-3.5 w-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{t("sites.share.title")}</TooltipContent>
+            </Tooltip>
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button aria-label={t("dashboard.openBrowser")} variant="ghost" size="icon-sm" className="text-faint hover:text-foreground" onClick={() => api.openSite(site.id).catch(toastError)}>

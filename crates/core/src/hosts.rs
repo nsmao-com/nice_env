@@ -79,8 +79,43 @@ pub fn read_all() -> Result<Vec<HostsEntry>> {
     parse_content(&content)
 }
 
+#[derive(serde::Serialize)]
+pub struct HostsFile {
+    pub path: String,
+    pub content: String,
+}
+
+pub fn read_file() -> Result<HostsFile> {
+    let _change = HOSTS_CHANGES.lock();
+    Ok(HostsFile {
+        path: platform::hosts_path()?.to_string_lossy().into_owned(),
+        content: platform::read_hosts_file()?,
+    })
+}
+
+/// 保存完整原文，同时同步托管段中的手动条目，避免下一次重建恢复旧记录。
+pub fn save_file(store: &Store, content: &str, expected: &str) -> Result<HostsFile> {
+    let _change = HOSTS_CHANGES.lock();
+    if platform::read_hosts_file()? != expected {
+        return Err(AppError::new("HOSTS_CHANGED", "hosts 文件已变化，本次修改未写入")
+            .with_hint("草稿已保留，请重新读取文件并核对其他程序的修改。"));
+    }
+    save_file_with_writer(store, content, || platform::write_hosts_file(expected, content).map_err(AppError::from))?;
+    // 返回本次实际写入的版本；后续外部写入将由下一次保存的快照检查拦截。
+    Ok(HostsFile { path: platform::hosts_path()?.to_string_lossy().into_owned(), content: content.into() })
+}
+
+fn save_file_with_writer(store: &Store, content: &str, write: impl FnOnce() -> Result<()>) -> Result<()> {
+    platform::validate_hosts_content(content)?;
+    let sites = site_entries(store)?;
+    let extras = parse_content(content)?.into_iter()
+        .filter(|entry| entry.managed && !sites.iter().any(|(_, domain)| domain == &entry.domain))
+        .collect();
+    apply_with_writer(store, Some(extras), |_| write())
+}
+
 fn parse_content(content: &str) -> Result<Vec<HostsEntry>> {
-    let lines: Vec<&str> = content.lines().collect();
+    let lines: Vec<&str> = content.trim_start_matches('\u{feff}').lines().collect();
     // 与 platform::merge_hosts_content 同一口径：结束标记缺失时，孤立的开始标记不算托管块
     let starts = platform::hosts_block_starts(&lines);
     let mut in_managed = false;
@@ -228,6 +263,18 @@ mod tests {
         let error = apply_with_writer(&store, Some(vec![entry("::1", "new.test")]), |_| Err(AppError::new("DENIED", "permission denied"))).unwrap_err();
         assert_eq!(error.code, "DENIED");
         assert_eq!(extra_entries(&store).unwrap(), previous);
+        let text = format!("\u{feff}# original comment\r\n127.0.0.1 localhost local-alias\r\n\r\n{}\r\n::1 new.test # comment\r\n{}\r\n", platform::HOSTS_BEGIN, platform::HOSTS_END);
+        let error = save_file_with_writer(&store, &text, || Err(AppError::new("DENIED", "cancelled authorization"))).unwrap_err();
+        assert_eq!(error.code, "DENIED");
+        assert_eq!(extra_entries(&store).unwrap(), previous);
+        save_file_with_writer(&store, &text, || Ok(())).unwrap();
+        assert_eq!(extra_entries(&store).unwrap(), vec![("::1".into(), "new.test".into())]);
+        for bad in ["127.0.0.1", "999.0.0.1 broken.test", "127.0.0.1 good.test\ninvalid line", "\0"] {
+            assert!(save_file_with_writer(&store, bad, || panic!("invalid file must not be written")).is_err());
+        }
+        assert_eq!(extra_entries(&store).unwrap(), vec![("::1".into(), "new.test".into())]);
+        save_file_with_writer(&store, "# empty file\r\n", || Ok(())).unwrap();
+        assert!(extra_entries(&store).unwrap().is_empty());
         store.set_setting(EXTRA_HOSTS_KEY, "broken json").unwrap();
         let error = apply_with_writer(&store, None, |_| panic!("unreadable settings must not clear hosts")).unwrap_err();
         assert_eq!(error.code, "HOSTS_SETTINGS_INVALID");

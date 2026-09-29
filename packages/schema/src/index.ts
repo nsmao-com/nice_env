@@ -677,6 +677,9 @@ export const HostsEntry = z.object({
 });
 export type HostsEntry = z.infer<typeof HostsEntry>;
 
+export const HostsFile = z.object({ path: z.string(), content: z.string() });
+export type HostsFile = z.infer<typeof HostsFile>;
+
 export const LogLine = z.object({
   ts: z.number().optional(),
   line: z.string(),

@@ -20,7 +20,7 @@ import {
   Stethoscope,
   RefreshCw,
 } from "lucide-react";
-import type { ServiceStatus, ListenerInfo, PortRangeScan, ClosePortOutcome, HostsEntry, ConfigFileInfo } from "@nsb/schema";
+import type { ServiceStatus, ListenerInfo, PortRangeScan, ClosePortOutcome, HostsEntry, HostsFile, ConfigFileInfo } from "@nsb/schema";
 import { HostsEntry as HostsEntrySchema } from "@nsb/schema";
 import { useUI, useT } from "@/lib/store";
 import { useHosts, useInvalidate, toastError, useSettings, useSites, useServices, copyText } from "@/lib/hooks";
@@ -83,7 +83,7 @@ export function UtilityWorkspace({ section = "tools" }: { section?: "tools" | "n
     <PageHeader title={title} subtitle={t(("workspace." + section) as "workspace.tools")} />
     <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
       {section === "tools" && <><div id="nsb-tool-ports" className="min-w-0 scroll-mt-6"><PortLookupTool request={portRequest} /></div><PortTool onInspect={inspectPort} /></>}
-      {section === "network" && <><DnsTool /><HostsTool /></>}
+      {section === "network" && <><DnsTool /><div className="min-w-0 xl:col-span-2"><HostsTool /></div></>}
       {section === "environment" && <><PathEnvCard /><TerminalInjectTool /></>}
       {section === "backups" && <BackupTool />}
       {section === "diagnostics" && <><div className="xl:col-span-2"><HealthCard /></div><ServiceRepairPanel /><RepairTool /><ToolCard icon={Stethoscope} title={t("diag.title")} hint={t("diag.hint")}><DiagnosticsCard /></ToolCard></>}
@@ -143,7 +143,9 @@ function HostsTool() {
   const [mode, setMode] = React.useState<"list" | "text">("list");
   const [textDraft, setTextDraft] = React.useState("");
   const [textBaseline, setTextBaseline] = React.useState("");
-  const textSnapshot = React.useRef<HostsEntry[]>([]);
+  const [textFile, setTextFile] = React.useState<HostsFile | null>(null);
+  const [discardAction, setDiscardAction] = React.useState<"list" | "reload" | null>(null);
+  const textDirty = textDraft !== textBaseline;
   const formRef = React.useRef<HTMLDivElement>(null);
   const errorRef = React.useRef<HTMLDivElement>(null);
   React.useEffect(() => { if (error) errorRef.current?.focus(); }, [error]);
@@ -185,8 +187,8 @@ function HostsTool() {
     return parsed;
   };
   const resetForm = () => { setEditing(null); setNewDomain(""); setNewIp("127.0.0.1"); };
-  const run = async (operation: () => Promise<void>) => {
-    if (action.current || !ready) return;
+  const run = async (operation: () => Promise<void>, requireEntries = true) => {
+    if (action.current || (requireEntries && !ready)) return;
     action.current = true;
     setBusy(true);
     setError(null);
@@ -218,24 +220,41 @@ function HostsTool() {
     setDeleteTarget(null);
     toast.success(t("tools.hostsDeleted"));
   });
-  const openText = () => {
-    if (disabled) return;
-    const content = manual.map((entry) => `${entry.ip} ${entry.domain}`).join("\n");
-    setTextDraft(content);
-    setTextBaseline(content);
-    textSnapshot.current = entries;
-    setError(null);
+  const loadText = (file: HostsFile) => {
+    setTextFile(file);
+    const draft = file.content.replace(/\r\n/g, "\n");
+    setTextDraft(draft);
+    setTextBaseline(draft);
+  };
+  const openText = () => run(async () => {
+    const file = await api.readHostsFile();
+    loadText(file);
     setMode("text");
+  }, false);
+  const leaveText = (next: "list" | "reload") => {
+    if (busy) return;
+    if (textDirty) { setDiscardAction(next); return; }
+    if (next === "reload") void openText();
+    else { setMode("list"); setError(null); void hosts.refetch(); void siteQuery.refetch(); }
+  };
+  const discardText = async () => {
+    const next = discardAction;
+    setDiscardAction(null);
+    if (next === "reload") await openText();
+    else { setTextDraft(textBaseline); setMode("list"); setError(null); void hosts.refetch(); void siteQuery.refetch(); }
   };
   const applyText = (confirmed = false) => run(async () => {
-    const parsed = parseText(textDraft);
-    if (!parsed.length && manual.length && !confirmed) { setClearOpen(true); return; }
-    await apply(parsed, textSnapshot.current);
+    if (!textFile || !textDirty) return;
+    const hasMappings = textDraft.split(/\r?\n/).some((line) => line.split("#")[0].trim());
+    if (!hasMappings && !confirmed) { setClearOpen(true); return; }
+    const content = textFile.content.includes("\r\n") ? textDraft.replace(/\r?\n/g, "\r\n") : textDraft;
+    const saved = await api.saveHostsFile(content, textFile.content);
+    loadText(saved);
     setClearOpen(false);
-    setMode("list");
     resetForm();
-    toast.success(`${t("tools.hostsUpdatedP1")}${parsed.length}`);
-  });
+    toast.success(t("tools.hostsFileSaved"));
+    void hosts.refetch();
+  }, false);
   const importFile = () => run(async () => {
     if (!isTauri) { toast.info(t("tools.hostsDesktopOnly")); return; }
     const { open } = await import("@tauri-apps/plugin-dialog");
@@ -277,19 +296,19 @@ function HostsTool() {
             <Button size="sm" variant="ghost" disabled={disabled || mode === "text"} onClick={importFile}>{t("tools.hostsImport")}</Button>
             <Button size="sm" variant="ghost" disabled={disabled || mode === "text"} onClick={exportFile}>{t("tools.hostsExport")}</Button>
             <Button size="sm" variant="ghost" disabled={busy || hosts.isFetching || siteQuery.isFetching}
-              onClick={() => { void hosts.refetch(); void siteQuery.refetch(); }}>{t("tools.refresh")}</Button>
+              onClick={() => { if (mode === "text") leaveText("reload"); else { void hosts.refetch(); void siteQuery.refetch(); } }}>{mode === "text" ? t("tools.hostsReloadFile") : t("tools.refresh")}</Button>
           </div>
-          <Tabs value={mode} onValueChange={(value) => { if (value === "text") openText(); else setMode("list"); }}>
+          <Tabs value={mode} onValueChange={(value) => { if (value === mode) return; if (value === "text") void openText(); else leaveText("list"); }}>
             <TabsList>
-              <TabsTrigger value="list" disabled={busy || (mode === "text" && textDraft !== textBaseline)}>{t("tools.hostsModeList")}</TabsTrigger>
-              <TabsTrigger value="text" disabled={disabled}>{t("tools.hostsModeText")}</TabsTrigger>
+              <TabsTrigger value="list" disabled={busy}>{t("tools.hostsModeList")}</TabsTrigger>
+              <TabsTrigger value="text" disabled={busy}>{t("tools.hostsModeText")}</TabsTrigger>
             </TabsList>
           </Tabs>
         </div>
-        {(hosts.error || siteQuery.error) && <div role="alert" className="text-xs text-error [overflow-wrap:anywhere]">
+        {mode === "list" && (hosts.error || siteQuery.error) && <div role="alert" className="text-xs text-error [overflow-wrap:anywhere]">
           {t("tools.hostsReadFailed")} {normalizeError(hosts.error ?? siteQuery.error).message}
         </div>}
-        {!ready && !hosts.error && !siteQuery.error && <p role="status" className="text-xs text-muted">{t("common.loading")}</p>}
+        {(busy || (mode === "list" && !ready && !hosts.error && !siteQuery.error)) && <p role="status" className="text-xs text-muted">{t("common.loading")}</p>}
         {!deleteTarget && !clearOpen && errorBox}
         {mode === "list" ? <>
           <div className="max-h-64 overflow-y-auto rounded-lg bg-fill/50" aria-busy={hosts.isFetching}>
@@ -324,12 +343,16 @@ function HostsTool() {
             </div>
           </div>
         </> : <>
-          <Label htmlFor="hosts-text">{t("tools.hostsModeText")}</Label>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <code className="min-w-0 flex-1 break-all text-xs text-muted">{textFile?.path}</code>
+            <Badge variant={textDirty ? "default" : "muted"}>{textDirty ? t("tools.hostsUnsaved") : t("tools.hostsSynced")}</Badge>
+          </div>
+          {!isTauri && <p className="text-xs text-warn">{t("tools.hostsPreview")}</p>}
           <p className="text-[11px] leading-relaxed text-muted">{t("tools.hostsTextHint")}</p>
-          <CodeEditor label={t("tools.hostsTextHint")} language="ini" value={textDraft} readOnly={busy} onChange={setTextDraft} height="220px" />
+          <CodeEditor label={t("tools.hostsModeText")} language="hosts" value={textDraft} readOnly={busy || !textFile} onChange={setTextDraft} height="420px" />
           <div className="flex flex-wrap gap-2">
-            <Button variant="secondary" size="sm" disabled={disabled} onClick={() => applyText()}>{t("tools.hostsApplyText")}</Button>
-            <Button variant="ghost" size="sm" disabled={busy} onClick={() => { setMode("list"); setError(null); }}>{t("common.cancel")}</Button>
+            <Button size="sm" disabled={busy || !textFile || !textDirty} onClick={() => applyText()}>{t("tools.hostsApplyText")}</Button>
+            <Button variant="ghost" size="sm" disabled={busy} onClick={() => leaveText("list")}>{t("common.cancel")}</Button>
           </div>
         </>}
       </div>
@@ -338,7 +361,10 @@ function HostsTool() {
         confirmText={t("common.delete")} danger loading={busy} confirmDisabled={!ready} onConfirm={remove}>{errorBox}</ConfirmDialog>
       <ConfirmDialog open={clearOpen} onOpenChange={(open) => { if (!action.current) setClearOpen(open); }}
         title={t("tools.hostsClearTitle")} description={t("tools.hostsClearHint")} confirmText={t("common.delete")}
-        danger loading={busy} confirmDisabled={!ready} onConfirm={() => applyText(true)}>{errorBox}</ConfirmDialog>
+        danger loading={busy} confirmDisabled={!textFile} onConfirm={() => applyText(true)}>{errorBox}</ConfirmDialog>
+      <ConfirmDialog open={discardAction !== null} onOpenChange={(open) => { if (!open) setDiscardAction(null); }}
+        title={t("tools.hostsDiscardTitle")} description={t("tools.hostsDiscardHint")} confirmText={t("tools.hostsDiscard")}
+        danger onConfirm={discardText} />
     </ToolCard>
   );
 }

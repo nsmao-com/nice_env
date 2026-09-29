@@ -46,6 +46,16 @@ const redis = {
   },
 };
 
+const hosts = {
+  token(stream: import("@codemirror/language").StringStream) {
+    if (stream.eatSpace()) return null;
+    if (stream.match(/^#.*/)) return "comment";
+    if (stream.match(/^(?:\d{1,3}\.){3}\d{1,3}(?=\s|$)|^[\da-f]*:[\da-f:.]*(?=\s|$)/i)) return "number";
+    stream.match(/^[^\s#]+/) || stream.next();
+    return "variableName";
+  },
+};
+
 export type CodeEditorHandle = { jumpToLine: (line: number) => void };
 
 /** Shared editable surface; search includes replace, case matching and regular expressions. */
@@ -61,7 +71,7 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, {
   const [wrap, setWrap] = React.useState(false);
   const [error, setError] = React.useState("");
   const hint = language?.toLowerCase() ?? "";
-  const lang = /(?:^|[/\\])redis(?:\.conf)?$/.test(hint) ? "redis" : hint === "caddy" || hint.endsWith("caddyfile") ? "caddy" : hint === "apache" ? "apache" : hint === "ini" ? "ini" : guessLang(language);
+  const lang = hint === "hosts" ? "hosts" : /(?:^|[/\\])redis(?:\.conf)?$/.test(hint) ? "redis" : hint === "caddy" || hint.endsWith("caddyfile") ? "caddy" : hint === "apache" ? "apache" : hint === "ini" ? "ini" : guessLang(language);
   const format = () => {
     const view = editor.current?.view;
     if (!view || readOnly) return;
@@ -88,7 +98,7 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, {
       { tag: [tags.propertyName, tags.attributeName, tags.tagName], color: "var(--code-key)" },
       { tag: [tags.variableName, tags.typeName], color: "var(--code-variable)" },
     ])),
-    lang === "json" ? json() : lang === "yaml" ? yaml() : lang === "sql" ? sql() : StreamLanguage.define(lang === "redis" ? redis : lang === "apache" ? apache : lang === "nginx" ? nginx : lang === "shell" || lang === "caddy" ? shell : properties),
+    lang === "json" ? json() : lang === "yaml" ? yaml() : lang === "sql" ? sql() : StreamLanguage.define(lang === "hosts" ? hosts : lang === "redis" ? redis : lang === "apache" ? apache : lang === "nginx" ? nginx : lang === "shell" || lang === "caddy" ? shell : properties),
     EditorView.contentAttributes.of({ "aria-label": label }),
     EditorState.tabSize.of(2),
     ...(wrap ? [EditorView.lineWrapping] : []),

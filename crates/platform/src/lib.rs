@@ -672,11 +672,46 @@ pub fn apply_managed_hosts(entries: &[(String, String)]) -> Result<()> {
         Ok(()) => Ok(()),
         #[cfg(windows)]
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied && HOSTS_HELPER.get().is_some() => {
-            apply_hosts_elevated(entries, &original)
+            apply_hosts_elevated(HostsRequest { entries: Some(entries.to_vec()), content: None, expected: original })
         }
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Err(PlatformError::Io("写入 hosts 需要管理员权限，请通过桌面应用重试并确认系统授权。".into())),
         Err(error) => Err(io_err(error)),
     }
+}
+
+/// 全文编辑固定的系统 hosts；沿用快照检查、恢复副本、ACL 和专用 UAC 流程。
+pub fn write_hosts_file(expected: &str, content: &str) -> Result<()> {
+    validate_hosts_content(content)?;
+    if read_hosts_file()? != expected {
+        return Err(PlatformError::Io("hosts 已被其它程序修改，请重新读取后再保存；草稿未写入".into()));
+    }
+    if content == expected { return Ok(()); }
+    match write_hosts_snapshot(&hosts_path()?, expected, content) {
+        Ok(()) => Ok(()),
+        #[cfg(windows)]
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied && HOSTS_HELPER.get().is_some() => {
+            apply_hosts_elevated(HostsRequest { entries: None, content: Some(content.into()), expected: expected.into() })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Err(PlatformError::Io("保存 hosts 需要管理员权限，请通过桌面应用重试并确认系统授权。".into())),
+        Err(error) => Err(io_err(error)),
+    }
+}
+
+pub fn validate_hosts_content(content: &str) -> Result<()> {
+    if content.len() > 1024 * 1024 || content.contains('\0') {
+        return Err(PlatformError::Io("hosts 文件超过 1 MiB 或包含无效字符，未写入".into()));
+    }
+    for (index, line) in content.trim_start_matches('\u{feff}').lines().enumerate() {
+        let line = line.split('#').next().unwrap_or_default().trim();
+        if line.is_empty() { continue; }
+        let mut parts = line.split_whitespace();
+        let ip = parts.next().unwrap_or_default();
+        let domains: Vec<_> = parts.collect();
+        if domains.is_empty() || domains.iter().any(|domain| validate_hosts_entries(&[(ip.into(), domain.trim_end_matches('.').to_ascii_lowercase())]).is_err()) {
+            return Err(PlatformError::Io(format!("hosts 第 {} 行格式不正确：请填写 IP 地址和至少一个主机名，注释以 # 开头", index + 1)));
+        }
+    }
+    Ok(())
 }
 
 fn validate_hosts_entries(entries: &[(String, String)]) -> Result<()> {
@@ -694,6 +729,45 @@ fn validate_hosts_entries(entries: &[(String, String)]) -> Result<()> {
 fn hosts_unchanged(original: &str, out: &str, entries: &[(String, String)]) -> bool {
     original.replace("\r\n", "\n") == out
         || (entries.is_empty() && !original.lines().any(|line| is_hosts_begin(line.trim()) || is_hosts_end(line.trim())))
+}
+
+#[cfg(test)]
+mod hosts_file_checks {
+    use super::*;
+
+    #[test]
+    fn full_file_preserves_original_text_and_rejects_stale_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("hosts");
+        let original = "\u{feff}# local mappings\r\n127.0.0.1 localhost local-alias # keep\r\n\r\n::1 localhost\r\n";
+        let updated = original.replace("local-alias", "renamed-alias");
+        validate_hosts_content(&updated).unwrap();
+        std::fs::write(&path, original).unwrap();
+        write_hosts_snapshot(&path, original, &updated).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), updated);
+        assert!(write_hosts_snapshot(&path, original, "").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), updated);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        write_hosts_snapshot(&path, &updated, "# no mappings\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# no mappings\n");
+        assert!(validate_hosts_content("127.0.0.1 ok.test\nnot-an-ip bad.test").unwrap_err().to_string().contains("第 2 行"));
+        assert!(validate_hosts_content(&"#".repeat(1024 * 1024 + 1)).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn elevation_request_accepts_only_one_valid_hosts_edit() {
+        let mut request = HostsRequest { entries: None, content: Some("127.0.0.1 localhost # comment\r\n".into()), expected: "# before\n".into() };
+        assert_eq!(request.output().unwrap(), request.content.clone().unwrap());
+        request.entries = Some(vec![("::1".into(), "local.test".into())]);
+        assert!(request.output().is_err());
+        request.content = None;
+        assert_eq!(request.output().unwrap(), merge_hosts_content(&request.expected, request.entries.as_ref().unwrap()));
+        request.entries = None;
+        assert!(request.output().is_err());
+        request.content = Some("not an IP".into());
+        assert!(request.output().is_err());
+    }
 }
 
 /// 锁定原文件后重核快照并保存恢复副本；写原文件以保留其 ACL，不替换文件身份。
@@ -751,37 +825,55 @@ pub fn enable_hosts_elevation(executable: std::path::PathBuf) {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HostsRequest {
-    entries: Vec<(String, String)>,
+    entries: Option<Vec<(String, String)>>,
+    content: Option<String>,
     expected: String,
 }
 
-/// 专用提权入口：只接受结构化映射，目标固定为系统 hosts，不启动 UI 或服务。
+#[cfg(windows)]
+impl HostsRequest {
+    fn output(&self) -> Result<String> {
+        match (&self.entries, &self.content) {
+            (Some(entries), None) => {
+                validate_hosts_entries(entries)?;
+                Ok(merge_hosts_content(&self.expected, entries))
+            }
+            (None, Some(content)) => {
+                validate_hosts_content(content)?;
+                Ok(content.clone())
+            }
+            _ => Err(PlatformError::Io("hosts 请求必须且只能指定一种编辑方式".into())),
+        }
+    }
+}
+
+/// 专用提权入口：目标固定为系统 hosts，映射和全文均校验，不启动 UI 或服务。
 #[cfg(windows)]
 pub fn run_hosts_elevation_helper(request_path: &std::path::Path) -> Result<()> {
     use std::io::Read;
     let mut request = String::new();
-    std::fs::File::open(request_path).map_err(io_err)?.take(1024 * 1024 + 1).read_to_string(&mut request).map_err(io_err)?;
-    if request.len() > 1024 * 1024 { return Err(PlatformError::Io("hosts 请求超过大小限制".into())); }
+    std::fs::File::open(request_path).map_err(io_err)?.take(8 * 1024 * 1024 + 1).read_to_string(&mut request).map_err(io_err)?;
+    if request.len() > 8 * 1024 * 1024 { return Err(PlatformError::Io("hosts 请求超过大小限制".into())); }
     let request: HostsRequest = serde_json::from_str(&request).map_err(|_| PlatformError::Io("hosts 请求格式无效".into()))?;
-    validate_hosts_entries(&request.entries)?;
-    let out = merge_hosts_content(&request.expected, &request.entries);
+    let out = request.output()?;
     write_hosts_snapshot(&hosts_path()?, &request.expected, &out).map_err(io_err)
 }
 
 #[cfg(windows)]
-fn apply_hosts_elevated(entries: &[(String, String)], expected: &str) -> Result<()> {
+fn apply_hosts_elevated(request: HostsRequest) -> Result<()> {
     use std::io::Write;
     let executable = HOSTS_HELPER.get().ok_or_else(|| PlatformError::Io("未配置 hosts 授权程序".into()))?;
     let mut request_file = tempfile::Builder::new().prefix("niceenv-hosts-request-").suffix(".json").tempfile().map_err(io_err)?;
-    let request = serde_json::to_vec(&HostsRequest { entries: entries.to_vec(), expected: expected.into() })
+    let out = request.output()?;
+    let request = serde_json::to_vec(&request)
         .map_err(|_| PlatformError::Io("无法生成 hosts 请求".into()))?;
-    if request.len() > 1024 * 1024 { return Err(PlatformError::Io("hosts 请求超过大小限制".into())); }
+    if request.len() > 8 * 1024 * 1024 { return Err(PlatformError::Io("hosts 请求超过大小限制".into())); }
     request_file.write_all(&request).map_err(io_err)?;
     request_file.as_file().sync_all().map_err(io_err)?;
     run_elevated(&executable.to_string_lossy(), &[HOSTS_HELPER_ARG, &request_file.path().to_string_lossy()])
         .map_err(|error| PlatformError::Win(format!("hosts 管理员授权未完成或写入失败，请确认 Windows 授权后重试；若已授权，请检查 hosts 是否被占用或修改。{error}")))?;
     let actual = read_hosts_file()?;
-    if !hosts_unchanged(&actual, &merge_hosts_content(&actual, entries), entries) {
+    if actual != out {
         return Err(PlatformError::Io("授权程序已退出，但 hosts 内容未通过核对，请重试".into()));
     }
     Ok(())

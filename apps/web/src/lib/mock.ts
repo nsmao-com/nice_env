@@ -454,6 +454,37 @@ function updateMockOllamaPull() {
 }
 
 const hostsManaged = new Map<string, string[]>();
+let hostsFileContent: string | null = null;
+let hostsFileManagedRevision = "";
+function readMockHostsFile() {
+  const revision = JSON.stringify([...hostsManaged]);
+  const block = "# BEGIN NiceEnv (managed)\n" + Array.from(hostsManaged, ([domain, ips]) => ips.map((ip) => `${ip}\t${domain}`)).flat().join("\n") + "\n# END NiceEnv (managed)\n";
+  if (hostsFileContent === null) hostsFileContent = "# Browser preview hosts file\n127.0.0.1 localhost\n::1 localhost\n\n" + block;
+  else if (revision !== hostsFileManagedRevision) {
+    const managed = /^# BEGIN NiceEnv \(managed\)\r?\n[\s\S]*?^# END NiceEnv \(managed\)(?:\r?\n|$)/m;
+    hostsFileContent = managed.test(hostsFileContent) ? hostsFileContent.replace(managed, () => block) : hostsFileContent + "\n" + block;
+  }
+  hostsFileManagedRevision = revision;
+  return { path: "Preview / hosts", content: hostsFileContent };
+}
+function parseMockHostsFile(content: string): HostsEntry[] {
+  const entries: HostsEntry[] = [];
+  let managed = false;
+  for (const [index, raw] of content.replace(/^\uFEFF/, "").split(/\r?\n/).entries()) {
+    if (/^# BEGIN (NiceEnv|NiceServBay) \(managed\)$/.test(raw.trim())) { managed = true; continue; }
+    if (/^# END (NiceEnv|NiceServBay) \(managed\)$/.test(raw.trim())) { managed = false; continue; }
+    const line = raw.split("#")[0].trim();
+    if (!line) continue;
+    const [ip, ...domains] = line.split(/\s+/);
+    if (!domains.length) throw { code: "HOSTS_INVALID", message: `hosts 第 ${index + 1} 行缺少主机名` };
+    for (const domain of domains) {
+      const parsed = HostsEntrySchema.safeParse({ ip, domain, managed });
+      if (!parsed.success) throw { code: "HOSTS_INVALID", message: `hosts 第 ${index + 1} 行格式不正确` };
+      entries.push(parsed.data);
+    }
+  }
+  return entries;
+}
 const mockTextFiles = new Map<string, string>();
 const mockDnsInterfaces = ["Ethernet", "Wi-Fi"];
 const mockDnsStatus = new Map<string, import("./api").DnsInterfaceStatus>(mockDnsInterfaces.map((name) => [name, {
@@ -1748,14 +1779,31 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       });
     }
     case "read_hosts": {
-      const list: HostsEntry[] = [];
-      hostsManaged.forEach((ips, domain) => ips.forEach((ip) => list.push({ ip, domain, managed: true })));
-      return list as T;
+      return parseMockHostsFile(readMockHostsFile().content) as T;
+    }
+    case "read_hosts_file": {
+      return readMockHostsFile() as T;
+    }
+    case "save_hosts_file": {
+      const current = readMockHostsFile();
+      if (args?.expectedContent !== current.content) throw { code: "HOSTS_CHANGED", message: "hosts 文件已变化，请重新读取后再保存" };
+      const content = args?.content;
+      if (typeof content !== "string" || new TextEncoder().encode(content).length > 1024 * 1024 || content.includes("\0")) throw { code: "HOSTS_INVALID", message: "hosts 文件过大或包含无效字符" };
+      const entries = parseMockHostsFile(content);
+      hostsManaged.clear();
+      for (const entry of entries.filter((entry) => entry.managed)) {
+        const ips = hostsManaged.get(entry.domain) ?? [];
+        if (!ips.includes(entry.ip)) ips.push(entry.ip);
+        hostsManaged.set(entry.domain, ips);
+      }
+      hostsFileContent = content;
+      hostsFileManagedRevision = JSON.stringify([...hostsManaged]);
+      return readMockHostsFile() as T;
     }
     case "apply_hosts": {
       const entries = (args?.entries as HostsEntry[] | undefined) ?? [];
       const expected = args?.expectedEntries as HostsEntry[] | undefined;
-      const current = Array.from(hostsManaged, ([domain, ips]) => ips.map((ip) => ({ ip, domain, managed: true }))).flat();
+      const current = parseMockHostsFile(readMockHostsFile().content);
       const snapshot = (list: HostsEntry[]) => JSON.stringify(list.map((e) => JSON.stringify([e.ip, e.domain, e.managed])).sort());
       if (expected && snapshot(expected) !== snapshot(current)) throw { code: "HOSTS_CHANGED", message: "hosts 内容已变化，请刷新并核对后重试" };
       const siteDomains = new Set(Array.from(sites.values()).flatMap((site) => site.domains.filter((d) => !d.startsWith("*."))));

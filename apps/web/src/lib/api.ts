@@ -19,6 +19,7 @@ import type {
   StackRetry,
   StartupStackStatus,
   HostsEntry,
+  HostsFile,
   LogLine,
   DatabaseInfo,
   DatabaseEngine,
@@ -171,6 +172,9 @@ export const siteNetworkApply = (id: string, server: SiteNetworkInfo["server"], 
 
 /* hosts / 证书 */
 export const readHosts = () => safe(invoke<HostsEntry[]>("read_hosts"));
+export const readHostsFile = () => safe(invoke<HostsFile>("read_hosts_file"));
+export const saveHostsFile = (content: string, expectedContent: string) =>
+  safe(invoke<HostsFile>("save_hosts_file", { content, expectedContent }));
 export const applyHosts = (entries: HostsEntry[], expectedEntries?: HostsEntry[]) =>
   safe(invoke<boolean>("apply_hosts", { entries, expectedEntries }));
 export const listCerts = () => safe(invoke<CertRecord[]>("list_certs"));

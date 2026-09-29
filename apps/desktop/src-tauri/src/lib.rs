@@ -328,6 +328,8 @@ pub fn run() {
             stop_site,
             // hosts / 证书
             read_hosts,
+            read_hosts_file,
+            save_hosts_file,
             apply_hosts,
             rebuild_hosts,
             list_certs,
@@ -1332,6 +1334,24 @@ async fn stop_site(
 #[tauri::command]
 async fn read_hosts() -> Result<Vec<nsb_core::model::HostsEntry>, tauri::Error> {
     tauri::async_runtime::spawn_blocking(|| map_jh(nsb_core::hosts::read_all()))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn read_hosts_file() -> Result<nsb_core::hosts::HostsFile, tauri::Error> {
+    tauri::async_runtime::spawn_blocking(|| map_jh(nsb_core::hosts::read_file()))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn save_hosts_file(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    content: String,
+    expected_content: String,
+) -> Result<nsb_core::hosts::HostsFile, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::hosts::save_file(&st.store, &content, &expected_content)))
         .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

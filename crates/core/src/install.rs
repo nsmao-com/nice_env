@@ -23,6 +23,15 @@ const QDRANT_WEB_ASSET: &str = "qdrant-web-ui-0.2.18";
 const QDRANT_WEB_URL: &str = "https://github.com/qdrant/qdrant-web-ui/releases/download/v0.2.18/dist-qdrant.zip";
 const QDRANT_WEB_SHA256: &str = "fdce24c04ec1627d2369cb8fe610ee06ad9236f82aad214aa7f294ac37372859";
 
+/// 发行版 tag 可带一个 v 前缀，但安装记录、目录和前端筛选必须使用同一规范。
+pub(crate) fn canonical_version(version: &str) -> &str {
+    version.trim_start_matches(['v', 'V'])
+}
+
+pub(crate) fn same_version(left: &str, right: &str) -> bool {
+    canonical_version(left) == canonical_version(right)
+}
+
 pub(crate) fn official_qdrant(entry: &crate::model::PackageManifestEntry) -> bool {
     entry.id == "qdrant" && entry.url.starts_with("https://github.com/qdrant/qdrant/releases/download/")
         && entry.run.as_ref().is_some_and(|run| run.args == ["--config-path", "{etc}/config.yaml", "--disable-telemetry"]
@@ -222,7 +231,7 @@ impl Installer {
             .manifest
             .packages
             .iter()
-            .filter(|p| p.id == id && version.map_or(true, |v| p.version == v))
+            .filter(|p| p.id == id && version.map_or(true, |v| same_version(&p.version, v)))
             .cloned()
             .collect();
         // 按版本号语义取最新：字符串比较会把 5.26.30 排在 2025.09.0 前、21.0.9 排在 21.0.12 前
@@ -266,7 +275,7 @@ impl Installer {
         if let Some(entry) = std::fs::read_to_string(snapshot)
             .ok()
             .and_then(|raw| serde_json::from_str::<crate::model::PackageManifestEntry>(&raw).ok())
-            .filter(|entry| entry.id == installed.id && entry.version == installed.version)
+            .filter(|entry| entry.id == installed.id && same_version(&entry.version, &installed.version))
         {
             return upgrade_legacy_run(entry);
         }
@@ -322,16 +331,17 @@ impl Installer {
 
     pub fn package_views(&self, installed: &[InstalledPackage]) -> Vec<crate::model::PackageView> {
         // UI/安装记录使用 id@version 作为标识，同版本的多架构包只展示本机适用的一项。
+        // 上游 tag 有时带 v 前缀，必须按规范化版本去重，否则会出现同一版本两行。
         let mut seen = std::collections::HashSet::new();
         let mut entries: Vec<_> = self.manifest.packages.iter()
-            .filter(|p| seen.insert((p.id.clone(), p.version.clone())))
+            .filter(|p| seen.insert((p.id.clone(), canonical_version(&p.version).to_owned())))
             .filter_map(|p| self.find(&format!("{}@{}", p.id, p.version)))
             .collect();
         for package in installed {
             let entry = self.installed_entry(package);
             if let Some(current) = entries
                 .iter_mut()
-                .find(|p| p.id == package.id && p.version == package.version)
+                .find(|p| p.id == package.id && same_version(&p.version, &package.version))
             {
                 *current = entry;
             } else {
@@ -344,7 +354,7 @@ impl Installer {
                 let mut available_versions: Vec<_> = entries
                     .iter()
                     .filter(|p| p.id == entry.id)
-                    .map(|p| p.version.clone())
+                    .map(|p| canonical_version(&p.version).to_owned())
                     .collect();
                 available_versions.sort_by(|a, b| crate::versions::cmp_version_desc(a, b));
                 available_versions.dedup();
@@ -352,7 +362,7 @@ impl Installer {
                     manifest: entry.clone(),
                     install: installed
                         .iter()
-                        .find(|p| p.id == entry.id && p.version == entry.version)
+                        .find(|p| p.id == entry.id && same_version(&p.version, &entry.version))
                         .cloned(),
                     available_versions,
                     active: false,
@@ -369,8 +379,11 @@ impl Installer {
         remote: &crate::model::RemoteVersion,
     ) -> crate::model::PackageManifestEntry {
         let mut e = template.clone();
-        e.version = remote.version.clone();
-        e.display_name = e.display_name.replace(&template.version, &remote.version);
+        // GitHub tags commonly use `v1.2.3`; keep the installed key and folder
+        // consistent with manifest versions while retaining the real download URL.
+        let version = canonical_version(&remote.version).to_owned();
+        e.version = version.clone();
+        e.display_name = e.display_name.replace(&template.version, &version);
         e.url = remote.url.clone();
         e.sha256 = remote.sha256.clone();
         e.size_bytes = remote.size_bytes.unwrap_or(0);
@@ -389,14 +402,21 @@ impl Installer {
         store: &Store,
     ) -> Result<Option<crate::model::PackageManifestEntry>> {
         if let Some(hit) = self.find(key) {
-            if official_apache(&hit) && store.find_installed(&hit.id, Some(&hit.version)).is_none() {
-                // 官方会撤掉同版本的旧构建，安装时强制刷新，避免六小时目录缓存继续选中失效链接。
-                // 仅更新用户所选版本；离线或官方未列出的历史版仍用清单中已校验的发行包。
-                let catalog = crate::versions::catalog(store, &hit, true).await;
-                if catalog.online {
-                    if let Some(remote) = catalog.remote.iter().find(|r| r.version == hit.version && r.sha256.is_some()) {
-                        return Ok(Some(Self::entry_from_remote(&hit, remote)));
-                    }
+            if store
+                .list_installed()
+                .ok()
+                .is_none_or(|installed| !installed.iter().any(|p| p.id == hit.id && same_version(&p.version, &hit.version)))
+                && crate::versions::source_for(&hit).is_some()
+            {
+                // 版本源是安装信息的最终来源：清单中的旧 URL 不能覆盖上游当前构建。
+                // 普通安装复用六小时缓存，Apache 仍强制刷新以规避官方替换同版本构建。
+                let catalog = crate::versions::catalog(store, &hit, official_apache(&hit)).await;
+                if let Some(remote) = catalog
+                    .remote
+                    .iter()
+                    .find(|r| same_version(&r.version, &hit.version))
+                {
+                    return Ok(Some(Self::entry_from_remote(&hit, remote)));
                 }
             }
             return Ok(Some(hit));
@@ -408,7 +428,7 @@ impl Installer {
             return Ok(None);
         };
         let cat = crate::versions::catalog(store, &template, official_apache(&template)).await;
-        let Some(remote) = cat.remote.iter().find(|r| r.version == version) else {
+        let Some(remote) = cat.remote.iter().find(|r| same_version(&r.version, version)) else {
             return Ok(None);
         };
         let mut remote = remote.clone();
@@ -2232,6 +2252,46 @@ mod tests {
         };
         let e = entry_with(vec![current_os()], vec![other_arch]);
         assert!(!Installer::is_platform_compatible(&e));
+    }
+
+    #[test]
+    fn version_prefixes_are_normalized_across_manifest_remote_and_install_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut entry = entry_with(vec![], vec![]);
+        entry.id = "fixture".into();
+        entry.version = "1.2.3".into();
+        let installer = Installer {
+            manifest: crate::model::Manifest { revision: 1, packages: vec![entry.clone()] },
+        };
+        assert_eq!(installer.find("fixture@v1.2.3").unwrap().version, "1.2.3");
+
+        let installed = InstalledPackage {
+            id: "fixture".into(),
+            version: "v1.2.3".into(),
+            category: "tool".into(),
+            install_path: temp.path().to_string_lossy().into_owned(),
+            config_path: String::new(),
+            installed_at: 0,
+        };
+        let views = installer.package_views(std::slice::from_ref(&installed));
+        assert_eq!(views.len(), 1);
+        assert!(views[0].install.is_some());
+        assert_eq!(views[0].available_versions, ["1.2.3"]);
+
+        let remote = crate::model::RemoteVersion {
+            version: "v1.2.4".into(),
+            url: "https://example.com/v1.2.4.zip".into(),
+            sha256: None,
+            size_bytes: None,
+            entry: "bin/app.exe".into(),
+            kind: "archive".into(),
+            prerelease: false,
+            note: None,
+            released_at: None,
+        };
+        let remote_entry = Installer::entry_from_remote(&entry, &remote);
+        assert_eq!(remote_entry.version, "1.2.4");
+        assert_eq!(remote_entry.url, remote.url);
     }
 }
 

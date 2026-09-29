@@ -5,13 +5,15 @@ import { Check, ChevronDown, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/store";
 import { Popover, PopoverContent, PopoverTrigger } from "./popover";
-import { Command, CommandGroup, CommandInput, CommandItem, CommandList } from "./command";
+import { Command, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator } from "./command";
 
 export type SearchableOption = {
   value: string;
   label: React.ReactNode;
   searchText: string;
   group?: string;
+  /** The original Select contained a separator immediately before this option. */
+  separatorBefore?: boolean;
   disabled?: boolean;
   className?: string;
   style?: React.CSSProperties;
@@ -85,12 +87,15 @@ export function SearchableSelect({ options, value, onValueChange, open, onOpenCh
         <CommandList className="max-h-72 flex-1">
           {!visible.length && <div role="status" className="px-4 py-8 text-center text-sm text-muted">{t(query.trim() ? "select.noResults" : "select.empty")}</div>}
           {groups.map(group => <CommandGroup key={group} heading={group || undefined}>
-            {visible.filter(item => (item.group ?? "") === group).map(item => <CommandItem key={item.value} value={item.value}
-              disabled={item.disabled} className={cn("min-h-9 gap-2 py-2", item.className)} style={item.style}
-              onSelect={() => { if (!item.disabled) { onValueChange(item.value); changeOpen(false); } }}>
-              <span className="min-w-0 flex-1 break-words">{item.label}</span>
-              {item.value === value && <Check aria-label={t("select.selected")} className="h-4 w-4 shrink-0 text-primary" />}
-            </CommandItem>)}
+            {visible.filter(item => (item.group ?? "") === group).map(item => <React.Fragment key={item.value}>
+              {item.separatorBefore && <CommandSeparator className="mx-2 my-1 border-t border-dashed border-separator" />}
+              <CommandItem value={item.value}
+                disabled={item.disabled} className={cn("min-h-9 gap-2 py-2", item.className)} style={item.style}
+                onSelect={() => { if (!item.disabled) { onValueChange(item.value); changeOpen(false); } }}>
+                <span className="min-w-0 flex-1 break-words">{item.label}</span>
+                {item.value === value && <Check aria-label={t("select.selected")} className="h-4 w-4 shrink-0 text-primary" />}
+              </CommandItem>
+            </React.Fragment>)}
           </CommandGroup>)}
         </CommandList>
         <div role="status" className="mx-2 shrink-0 border-t border-dashed border-separator px-2 py-2 text-xs text-muted">

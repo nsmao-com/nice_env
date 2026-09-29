@@ -260,7 +260,11 @@ impl Store {
             let rows = stmt.query_map(params![p.id], |r| r.get::<_, String>(0))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        let chosen = active.as_deref().filter(|version| installed.iter().any(|v| v == version))
+        let chosen = active.as_deref().and_then(|version| {
+            installed.iter().find(|v| {
+                v.trim_start_matches(['v', 'V']) == version.trim_start_matches(['v', 'V'])
+            }).map(String::as_str)
+        })
             .or_else(|| installed.iter().min_by(|a, b| crate::versions::cmp_version_desc(a, b)).map(String::as_str))
             .unwrap_or(&p.version);
         Self::write_installed(&tx, p)?;
@@ -325,7 +329,13 @@ impl Store {
         self.list_installed()
             .ok()?
             .into_iter()
-            .find(|p| p.id == id && version.map_or(true, |v| p.version == v))
+            .find(|p| {
+                p.id == id
+                    && version.map_or(true, |v| {
+                        p.version.trim_start_matches(['v', 'V'])
+                            == v.trim_start_matches(['v', 'V'])
+                    })
+            })
     }
 
     /* ---------- sites ---------- */

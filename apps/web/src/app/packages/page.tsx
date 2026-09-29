@@ -163,12 +163,24 @@ function packageVersionItems(group: PackageGroup, catalog?: Pick<VersionCatalog,
   }
   for (const remote of catalog?.remote ?? []) {
     const key = remote.version.replace(/^[vV]/, "");
-    if (versions.has(key)) continue;
-    versions.set(key, {
-      version: remote.version, installed: false, active: false, running: false,
-      remote, sizeBytes: remote.sizeBytes, note: remote.note,
-      prerelease: remote.prerelease || isPrerelease(remote.version),
-    });
+    const current = versions.get(key);
+    if (current) {
+      // 远程目录是下载元数据的最新来源，但不能覆盖本地的安装、运行和平台状态。
+      // 清单里已有的版本也要挂上 remote，避免沿用已经失效的旧链接。
+      versions.set(key, {
+        ...current,
+        remote,
+        sizeBytes: current.installed ? current.sizeBytes : (remote.sizeBytes ?? current.sizeBytes),
+        note: remote.note ?? current.note,
+        prerelease: current.prerelease || remote.prerelease || isPrerelease(remote.version),
+      });
+    } else {
+      versions.set(key, {
+        version: remote.version.replace(/^[vV]/, ""), installed: false, active: false, running: false,
+        remote, sizeBytes: remote.sizeBytes, note: remote.note,
+        prerelease: remote.prerelease || isPrerelease(remote.version),
+      });
+    }
   }
   return [...versions.values()].sort((a, b) => cmpVersionDesc(a.version, b.version));
 }
@@ -220,6 +232,15 @@ function groupPackages(packages: PackageView[], defaultTld?: string): PackageGro
   }
   for (const g of map.values()) {
     g.description = g.description.replaceAll("{tld}", defaultTld || "…");
+    // 清单、快照和旧安装记录可能使用不同的 v 前缀；合并前先按规范化版本去重，
+    // 并优先保留带真实安装记录的一项，避免同一版本在「已安装」筛选里出现两次。
+    const deduped = new Map<string, PackageGroup["versions"][number]>();
+    for (const version of g.versions) {
+      const key = version.version.replace(/^[vV]/, "");
+      const current = deduped.get(key);
+      if (!current || (!current.installed && version.installed)) deduped.set(key, version);
+    }
+    g.versions = [...deduped.values()];
     g.versions.sort((a, b) => cmpVersionDesc(a.version, b.version));
   }
   return [...map.values()];

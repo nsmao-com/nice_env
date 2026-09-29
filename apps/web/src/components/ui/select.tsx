@@ -118,9 +118,10 @@ function textOf(node: React.ReactNode): string {
 }
 
 /** Read the existing declarative options without changing their labels or stored values. */
-function searchableOptions(children: React.ReactNode, group = ""): SearchableOption[] | null {
+function searchableOptions(children: React.ReactNode, group = "", leadingSeparator = false): SearchableOption[] | null {
   const options: SearchableOption[] = [];
   let supported = true;
+  let separatorBefore = leadingSeparator;
   React.Children.forEach(children, child => {
     if (child == null || typeof child === "boolean") return;
     if (!React.isValidElement<{ children?: React.ReactNode }>(child)) { supported = false; return; }
@@ -128,12 +129,16 @@ function searchableOptions(children: React.ReactNode, group = ""): SearchableOpt
       const props = (child as React.ReactElement<React.ComponentProps<typeof SelectItem>>).props;
       const searchText = props.textValue ?? textOf(props.children);
       if (!searchText) { supported = false; return; }
-      options.push({ value: props.value, label: props.children, searchText, group, disabled: props.disabled, className: props.className, style: props.style });
+      options.push({ value: props.value, label: props.children, searchText, group, separatorBefore, disabled: props.disabled, className: props.className, style: props.style });
+      separatorBefore = false;
     } else if (child.type === SelectGroup || child.type === React.Fragment) {
       const label = React.Children.toArray(child.props.children).find(item => React.isValidElement(item) && item.type === SelectLabel);
-      const nested = searchableOptions(child.props.children, label ? textOf(label) : group);
-      if (nested) options.push(...nested); else supported = false;
-    } else if (child.type !== SelectLabel && child.type !== SelectSeparator) {
+      const nested = searchableOptions(child.props.children, label ? textOf(label) : group, separatorBefore);
+      if (nested) { options.push(...nested); separatorBefore = false; } else supported = false;
+    } else if (child.type === SelectSeparator) {
+      // Preserve explicit separators when the list is upgraded to SearchableSelect.
+      separatorBefore = true;
+    } else if (child.type !== SelectLabel) {
       // Custom option components keep Radix behavior unless they expose ordinary SelectItems.
       supported = false;
     }

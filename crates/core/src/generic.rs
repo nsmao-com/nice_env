@@ -1991,7 +1991,7 @@ pub fn register_services(paths: &Paths, store: &Store, manager: &Arc<ServiceMana
         let Some(run) = &entry.run else { continue };
         if run.single_instance {
             let active = crate::ops::installed_by_choice(store, &p.id);
-            if active.map(|a| a.version != p.version).unwrap_or(true) {
+            if active.map(|a| !crate::install::same_version(&a.version, &p.version)).unwrap_or(true) {
                 continue;
             }
         }

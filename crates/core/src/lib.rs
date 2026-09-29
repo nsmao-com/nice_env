@@ -381,7 +381,7 @@ impl CoreState {
         }
         for v in views.iter_mut() {
             if let Some(av) = active_map.get(&v.manifest.id) {
-                v.active = v.manifest.version == *av;
+                v.active = crate::install::same_version(&v.manifest.version, av);
             }
         }
         Ok(views)
@@ -443,7 +443,7 @@ impl CoreState {
     /// 切换「使用中版本」并同步 PATH；已单独选择的 PATH 版本保持不变
     pub fn set_active_version(&self, id: &str, version: &str) -> Result<()> {
         let _operation = self.manager.lifecycle.lock();
-        if ops::installed_by_choice(&self.store, id).is_some_and(|p| p.version != version)
+        if ops::installed_by_choice(&self.store, id).is_some_and(|p| !install::same_version(&p.version, version))
             && self.manager.is_busy(id)
         {
             return Err(AppError::new(
@@ -952,7 +952,7 @@ impl CoreState {
             return Err(AppError::new("REDIS_RESTORE_RUNNING", "请先停止 Redis，再检查和恢复备份")
                 .with_hint("恢复会替换共享数据目录中的全部逻辑数据库；请先停止应用写入并创建独立备份"));
         }
-        if ops::installed_by_choice(&self.store, "redis").is_none_or(|package| package.version != version) {
+        if ops::installed_by_choice(&self.store, "redis").is_none_or(|package| !install::same_version(&package.version, version)) {
             return Err(AppError::new("REDIS_RESTORE_VERSION", "默认 Redis 版本已变化，请先选择备份对应版本，再重新打开恢复面板"));
         }
         Ok(())
@@ -1010,7 +1010,7 @@ impl CoreState {
             return Err(AppError::new("REDIS_PASSWORD_RUNNING", "请先停止 Redis，再保存服务密码")
                 .with_hint("运行中实例仍使用原密码；请先保存应用写入，再到套件页正常停止 Redis"));
         }
-        if ops::installed_by_choice(&self.store, "redis").is_none_or(|package| package.version != version) {
+        if ops::installed_by_choice(&self.store, "redis").is_none_or(|package| !install::same_version(&package.version, version)) {
             return Err(AppError::new("REDIS_INSTANCE_CHANGED", "默认 Redis 版本已变化，请重新打开该版本的密码设置"));
         }
         redis_settings::password_save(&self.paths, &self.store, version, revision, password, acknowledge_disable)
@@ -1226,7 +1226,7 @@ impl CoreState {
         let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重启"))?;
         self.check_service_version(id, expected_version)?;
         // 历史安装或导入可能留下“运行旧版、默认新版”的状态，不能先停掉旧版再启动另一版。
-        if ops::installed_by_choice(&self.store, id).is_some_and(|selected| selected.version != expected_version) {
+        if ops::installed_by_choice(&self.store, id).is_some_and(|selected| !install::same_version(&selected.version, expected_version)) {
             return Err(AppError::new("SERVICE_TARGET_CHANGED", "默认版本与当前服务版本不一致，请先确认使用版本再重启"));
         }
         self.restart_service(id)
@@ -1488,7 +1488,7 @@ impl CoreState {
         for id in ids {
             generic::ensure_dependencies(&self.store, id)?;
             if let Some(version) = self.manager.snapshot(id).and_then(|s| s.version) {
-                if ops::installed_by_choice(&self.store, id).is_some_and(|selected| selected.version != version) {
+                if ops::installed_by_choice(&self.store, id).is_some_and(|selected| !install::same_version(&selected.version, &version)) {
                     return Err(AppError::new("SERVICE_TARGET_CHANGED", format!("服务 {id} 的默认版本与当前版本不一致，请先确认后再重启")));
                 }
             }
@@ -1542,7 +1542,7 @@ impl CoreState {
             self.check_bulk_target(target)?;
             if action == "restart" {
                 generic::ensure_dependencies(&self.store, &target.id)?;
-                if ops::installed_by_choice(&self.store, &target.id).is_some_and(|active| Some(active.version) != target.version) {
+                if ops::installed_by_choice(&self.store, &target.id).is_some_and(|active| target.version.as_deref().is_none_or(|version| !install::same_version(&active.version, version))) {
                     return Err(AppError::new("SERVICE_TARGET_CHANGED", format!("服务 {} 的默认版本与当前版本不一致，请先确认后再重启", target.id)));
                 }
             }

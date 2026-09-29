@@ -54,12 +54,12 @@ fn chosen_from<'a>(
         // 已选版本卸载后不擅自换成其它版本，sync 会清除原有托管路径。
         Some(version) => Ok(installed
             .iter()
-            .find(|p| p.id == id && p.version == *version)),
+            .find(|p| p.id == id && crate::install::same_version(&p.version, version))),
         None => {
             let active = store.get_setting_checked(&format!("active{id}Version"))?;
             Ok(installed
                 .iter()
-                .find(|p| p.id == id && Some(&p.version) == active.as_ref())
+                .find(|p| p.id == id && active.as_deref().is_some_and(|v| crate::install::same_version(&p.version, v)))
                 .or_else(|| {
                     installed
                         .iter()
@@ -302,7 +302,7 @@ fn validate_project_versions(store: &Store, manifest: &Manifest, versions: &std:
     let installed = store.list_installed()?;
     let installer = crate::install::Installer { manifest: manifest.clone() };
     for (id, version) in versions {
-        let package = installed.iter().find(|p| p.id == *id && p.version == *version && p.category == "runtime")
+        let package = installed.iter().find(|p| p.id == *id && crate::install::same_version(&p.version, version) && p.category == "runtime")
             .ok_or_else(|| AppError::new("TERMINAL_RUNTIME_UNAVAILABLE", format!("项目指定的 {id} {version} 尚未安装或不是可用运行时"))
                 .with_hint("请在项目版本中改选已安装版本或取消固定，也可以先到套件页安装所需版本。"))?;
         let entry = installer.installed_entry(package);

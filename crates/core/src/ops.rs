@@ -36,7 +36,8 @@ pub fn register_services(paths: &Paths, store: &Store, manager: &Arc<ServiceMana
         }
         if p.id != "php"
             && p.id != "mysql"
-            && installed_by_choice(store, &p.id).is_none_or(|active| active.version != p.version)
+            && installed_by_choice(store, &p.id)
+                .is_none_or(|active| !crate::install::same_version(&active.version, &p.version))
         {
             continue;
         }
@@ -2224,13 +2225,13 @@ fn validate_configs_selected(
             let version = service.version.as_deref().or_else(|| service.id.split_once('@').map(|(_, version)| version))
                 .filter(|version| !version.is_empty())
                 .ok_or_else(|| AppError::new("SERVICE_VERSION_UNKNOWN", "无法确认当前服务版本，未执行配置校验"))?;
-            packages.retain(|package| package.version == version);
+            packages.retain(|package| crate::install::same_version(&package.version, version));
             if packages.is_empty() { return Err(AppError::not_installed(&format!("{id} {version}"))); }
         } else if matches!(id, "nginx" | "apache") && !packages.is_empty() {
             let active = store.get_setting_checked(&format!("active{id}Version"))?;
             let selected = packages
                 .iter()
-                .find(|p| Some(&p.version) == active.as_ref())
+                .find(|p| active.as_deref().is_some_and(|version| crate::install::same_version(&p.version, version)))
                 .copied()
                 .unwrap_or(packages[0]);
             packages = vec![selected];

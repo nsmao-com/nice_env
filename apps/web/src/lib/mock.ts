@@ -1194,6 +1194,17 @@ max_connections = 100
 operationProfiling:
   mode: off
 `;
+    case "qdrant-conf": return `log_level: INFO
+service:
+  host: 127.0.0.1
+  http_port: 6333
+  grpc_port: 6334
+  enable_static_content: true
+storage:
+  storage_path: C:/NiceEnv/data/qdrant/storage
+  snapshots_path: C:/NiceEnv/data/qdrant/snapshots
+telemetry_disabled: true
+`;
     default: throw { code: "BAD_KIND", message: "找不到对应配置" };
   }
 }
@@ -2609,6 +2620,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         ["redis", "redis-conf", "redis.conf", "redis.conf", "conf"],
         ["postgresql", "postgres-conf", "postgresql.conf", "postgresql.conf", "ini"],
         ["mongodb", "mongo-conf", "mongod.conf", "mongod.conf", "yaml"],
+        ["qdrant", "qdrant-conf", "Qdrant config.yaml", "config.yaml", "yaml"],
       ];
       const installed = Array.from(packages.values()).filter((p) => p.install);
       const files: ConfigFileInfo[] = [];
@@ -2624,7 +2636,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
             path: `C:/NiceEnv/${id === "postgresql" ? "data" : "etc"}/${id}/${shared ? "" : `${pkg.version}/`}${filename}`,
             exists, sizeBytes: exists ? new TextEncoder().encode(currentConfigContent(kind)).length : 0,
             language, validated: shared || id === "caddy", usedByService: shared ? id : `${id}@${pkg.version}`,
-            requiresPackage: id, resettable: id !== "caddy",
+            requiresPackage: id, resettable: !["caddy", "qdrant"].includes(id),
           });
         }
       }
@@ -2665,6 +2677,9 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           if (t.startsWith(";") || t.startsWith("[")) return;
           if (["php-ini", "mysql-ini"].includes(kind) && !t.includes("=")) {
             issues.push({ line: i + 1, severity: "error", message: "配置项需要使用 key=value 格式" });
+          }
+          if (["mongo-conf", "qdrant-conf", "mihomo-config"].includes(kind) && raw.startsWith("\t")) {
+            issues.push({ line: i + 1, severity: "error", message: "YAML 不允许用 Tab 缩进，请改成空格" });
           }
           return;
         }

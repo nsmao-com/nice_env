@@ -21,6 +21,7 @@ const CONFIGURABLE_SERVICES = new Set([
   "mihomo",
   "postgresql",
   "mongodb",
+  "qdrant",
 ]);
 
 export function ServiceConfigButton({ service, disabled = false }: { service: ServiceStatus; disabled?: boolean }) {

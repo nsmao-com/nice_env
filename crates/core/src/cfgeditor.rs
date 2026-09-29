@@ -33,6 +33,7 @@ pub enum ConfigKind {
     MihomoConfig,
     PostgresConf,
     MongoConf,
+    QdrantConf,
 }
 
 impl ConfigKind {
@@ -48,6 +49,7 @@ impl ConfigKind {
             "mihomo-config" | "mihomo" => Self::MihomoConfig,
             "postgres-conf" | "postgresql-conf" | "postgresql" => Self::PostgresConf,
             "mongo-conf" | "mongodb-conf" | "mongodb" => Self::MongoConf,
+            "qdrant-conf" | "qdrant" => Self::QdrantConf,
             _ => return None,
         })
     }
@@ -64,6 +66,7 @@ impl ConfigKind {
             Self::MihomoConfig => "mihomo-config",
             Self::PostgresConf => "postgres-conf",
             Self::MongoConf => "mongo-conf",
+            Self::QdrantConf => "qdrant-conf",
         }
     }
 
@@ -80,6 +83,7 @@ impl ConfigKind {
             Self::MihomoConfig => "yaml",
             Self::PostgresConf => "ini",
             Self::MongoConf => "yaml",
+            Self::QdrantConf => "yaml",
         }
     }
 
@@ -111,6 +115,7 @@ impl ConfigTarget {
                     | ConfigKind::RedisConf
                     | ConfigKind::PostgresConf
                     | ConfigKind::MongoConf
+                    | ConfigKind::QdrantConf
                     | ConfigKind::CaddyConf
             ) || version.is_empty()
                 || version.ends_with('.')
@@ -136,6 +141,7 @@ impl ConfigTarget {
                 | ConfigKind::RedisConf
                 | ConfigKind::PostgresConf
                 | ConfigKind::MongoConf
+                | ConfigKind::QdrantConf
                 | ConfigKind::CaddyConf
         ) {
             let id = label_of(self.kind).2.unwrap();
@@ -175,6 +181,7 @@ impl ConfigTarget {
             }
             ConfigKind::PostgresConf => paths.postgres_conf(target.version.as_deref().unwrap()),
             ConfigKind::MongoConf => paths.mongo_conf(target.version.as_deref().unwrap()),
+            ConfigKind::QdrantConf => paths.etc_dir("qdrant", target.version.as_deref().unwrap()).join("config.yaml"),
         })
     }
 }
@@ -285,6 +292,11 @@ fn label_of(kind: ConfigKind) -> (&'static str, &'static str, Option<&'static st
             "MongoDB YAML 配置。数据目录、端口、日志路径和本机绑定由应用启动参数控制",
             Some("mongodb"),
         ),
+        ConfigKind::QdrantConf => (
+            "Qdrant config.yaml",
+            "Qdrant 服务配置。监听端口、数据目录和静态管理台路径由应用启动参数与托管配置控制",
+            Some("qdrant"),
+        ),
     }
 }
 
@@ -301,6 +313,7 @@ pub fn list_configs(paths: &Paths, store: &crate::store::Store) -> Vec<ConfigFil
         ConfigKind::MihomoConfig,
         ConfigKind::PostgresConf,
         ConfigKind::MongoConf,
+        ConfigKind::QdrantConf,
     ];
     let installed = store.list_installed().unwrap_or_default();
     kinds
@@ -314,6 +327,7 @@ pub fn list_configs(paths: &Paths, store: &crate::store::Store) -> Vec<ConfigFil
                     | ConfigKind::RedisConf
                     | ConfigKind::PostgresConf
                     | ConfigKind::MongoConf
+                    | ConfigKind::QdrantConf
                     | ConfigKind::CaddyConf
             ) {
                 let id = label_of(kind).2.unwrap();
@@ -358,6 +372,7 @@ pub fn list_configs(paths: &Paths, store: &crate::store::Store) -> Vec<ConfigFil
                     ConfigKind::NginxMain => crate::ops::nginx_exe(store).is_ok(),
                     ConfigKind::ApacheConf => crate::ops::apache_paths(store).is_ok(),
                     ConfigKind::CaddyConf => crate::generic::resolve(store, paths, &format!("caddy@{}", target.version.as_deref().unwrap())).is_ok(),
+                    ConfigKind::QdrantConf => crate::generic::resolve(store, paths, &format!("qdrant@{}", target.version.as_deref().unwrap())).is_ok(),
                     _ => false,
                 },
                 used_by_service: pkg.map(|s| match &target.version {
@@ -370,6 +385,7 @@ pub fn list_configs(paths: &Paths, store: &crate::store::Store) -> Vec<ConfigFil
                                 | ConfigKind::RedisConf
                                 | ConfigKind::PostgresConf
                                 | ConfigKind::MongoConf
+                                | ConfigKind::QdrantConf
                                 | ConfigKind::CaddyConf
                         ) => {
                         format!("{s}@{v}")
@@ -483,6 +499,12 @@ pub fn preview_config_reset(
             return Err(AppError::new(
                 "CONFIG_RESET_UNSUPPORTED",
                 "该数据库配置没有安全的默认重置模板，请直接编辑或从历史版本回滚",
+            ))
+        }
+        ConfigKind::QdrantConf => {
+            return Err(AppError::new(
+                "CONFIG_RESET_UNSUPPORTED",
+                "Qdrant 配置没有安全的默认重置模板，请直接编辑或从历史版本回滚",
             ))
         }
         ConfigKind::RedisConf => crate::configgen::render_redis_conf(
@@ -764,7 +786,7 @@ pub fn lint(kind: ConfigKind, content: &str) -> Vec<ConfigIssue> {
             }
             issues
         }
-        ConfigKind::MihomoConfig | ConfigKind::MongoConf => lint_yaml(content),
+        ConfigKind::MihomoConfig | ConfigKind::MongoConf | ConfigKind::QdrantConf => lint_yaml(content),
     }
 }
 
@@ -1221,6 +1243,7 @@ fn backup_target(name: &str) -> Option<ConfigTarget> {
                         | ConfigKind::RedisConf
                         | ConfigKind::PostgresConf
                         | ConfigKind::MongoConf
+                        | ConfigKind::QdrantConf
                         | ConfigKind::CaddyConf
                 )
             {
@@ -1258,6 +1281,7 @@ pub(crate) fn backup_relative_target(name: &str) -> Option<String> {
         ConfigKind::RedisConf => format!("etc/redis/{}/redis.conf", target.version?),
         ConfigKind::PostgresConf => format!("data/postgresql/{}/postgresql.conf", target.version?),
         ConfigKind::MongoConf => format!("etc/mongodb/{}/mongod.conf", target.version?),
+        ConfigKind::QdrantConf => format!("etc/qdrant/{}/config.yaml", target.version?),
     })
 }
 
@@ -1274,6 +1298,7 @@ pub(crate) fn config_key_for_relative(relative: &str) -> Option<String> {
         ["etc", "redis", version, "redis.conf"] => format!("redis-conf@{version}"),
         ["data", "postgresql", version, "postgresql.conf"] => format!("postgres-conf@{version}"),
         ["etc", "mongodb", version, "mongod.conf"] => format!("mongo-conf@{version}"),
+        ["etc", "qdrant", version, "config.yaml"] => format!("qdrant-conf@{version}"),
         _ => return None,
     };
     ConfigTarget::parse(&key).ok().map(|target| target.key())

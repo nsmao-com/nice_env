@@ -467,6 +467,8 @@ pub fn run() {
             redis_save_connection,
             postgres_connection,
             mongodb_browse,
+            mongodb_database_delete_preview,
+            mongodb_database_delete,
             mongodb_backup_list,
             mongodb_backup_create,
             mongodb_restore_preview,
@@ -1797,6 +1799,20 @@ async fn postgres_connection(state: State<'_, std::sync::Arc<nsb_core::CoreState
 async fn mongodb_browse(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, request: nsb_core::mongodb::BrowseRequest) -> Result<nsb_core::mongodb::BrowseResponse, tauri::Error> {
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::mongodb::browse(&st, &version, request))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn mongodb_database_delete_preview(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, database: String) -> Result<nsb_core::mongodb_backup::DatabaseDeletePreview, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::mongodb_backup::database_delete_preview(&st, &version, &database))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn mongodb_database_delete(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, version: String, database: String, revision: String, confirmation: String) -> Result<(), tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(nsb_core::mongodb_backup::database_delete(&st, &version, &database, &revision, &confirmation))).await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

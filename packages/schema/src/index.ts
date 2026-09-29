@@ -736,6 +736,8 @@ export const MongoDocuments = z.object({ kind: z.literal("documents"), database:
 export type MongoDocuments = z.infer<typeof MongoDocuments>;
 export const MongoFilter = z.object({ field: z.string(), value: z.string(), valueType: z.enum(["text", "number", "boolean", "null", "objectId"]) });
 export type MongoFilter = z.infer<typeof MongoFilter>;
+export const MongoDatabaseDeletePreview = z.object({ version: z.string(), database: z.string(), collections: z.number().int(), revision: z.string() });
+export type MongoDatabaseDeletePreview = z.infer<typeof MongoDatabaseDeletePreview>;
 
 export const MongoCredentials = z.object({ username: z.string(), password: z.string(), authDatabase: z.string() });
 export type MongoCredentials = z.infer<typeof MongoCredentials>;

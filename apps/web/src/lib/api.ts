@@ -1,5 +1,5 @@
 import type {
-  MongoCredentials, MongoAuthView, MongoAuthApply, MongoOverview, MongoCollections, MongoDocuments, MongoFilter, MongoBackup, MongoBackupList, MongoRestorePreview, MongoRestoreResult, MongoImportPreview, MongoBackupRemoval,
+  MongoCredentials, MongoAuthView, MongoAuthApply, MongoOverview, MongoCollections, MongoDocuments, MongoFilter, MongoDatabaseDeletePreview, MongoBackup, MongoBackupList, MongoRestorePreview, MongoRestoreResult, MongoImportPreview, MongoBackupRemoval,
   ServiceStatus,
   ServiceStopPreview,
   SftpgoConfigDirectories,
@@ -418,6 +418,8 @@ export const mongoBackupRestore = (version: string, id: string, target: string, 
 export const mongoCollections = (version: string, database: string, search: string) => safe(invoke<MongoCollections>("mongodb_browse", { version, request: { action: "collections", database, search } }));
 export const mongoDocuments = (version: string, database: string, collection: string, offset: number, limit: number, filter: MongoFilter | null) =>
   safe(invoke<MongoDocuments>("mongodb_browse", { version, request: { action: "documents", database, collection, offset, limit, filter } }));
+export const mongoDatabaseDeletePreview = (version: string, database: string) => safe(invoke<MongoDatabaseDeletePreview>("mongodb_database_delete_preview", { version, database }));
+export const mongoDatabaseDelete = (version: string, database: string, revision: string, confirmation: string) => safe(invoke<void>("mongodb_database_delete", { version, database, revision, confirmation }));
 export const postgresPassword = (version: string) => safe(invoke<string>("postgres_password", { version }));
 export const postgresSetPassword = (version: string, password: string, useExisting: boolean, enablePasswordAuth: boolean) =>
   safe(invoke<void>("postgres_set_password", { version, password, useExisting, enablePasswordAuth }));

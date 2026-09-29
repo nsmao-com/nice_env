@@ -30,6 +30,9 @@ pub struct RestorePreview { pub backup: MongoBackup, pub target: String, pub exi
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreResult { pub target: String, pub safety_backup: Option<MongoBackup> }
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseDeletePreview { pub version: String, pub database: String, pub collections: usize, pub revision: String }
 
 fn invalid(message: &str) -> AppError { AppError::new("MONGO_BACKUP_INVALID", message) }
 fn database_name(name: &str) -> Result<()> {
@@ -37,6 +40,34 @@ fn database_name(name: &str) -> Result<()> {
         || matches!(name.to_ascii_lowercase().as_str(), "admin" | "local" | "config") {
         return Err(invalid("请选择业务数据库；名称须少于 64 字节，不能包含空白或路径、命名空间特殊字符"));
     }
+    Ok(())
+}
+fn database_delete_revision(info: &Value) -> Result<String> {
+    let bytes = serde_json::to_vec(info).map_err(|e| AppError::internal("准备 MongoDB 删除确认", e.to_string()))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+pub fn database_delete_preview(state: &CoreState, version: &str, database: &str) -> Result<DatabaseDeletePreview> {
+    let _work = crate::BackgroundWork::begin("检查 MongoDB 数据库删除范围")?;
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    let _lock = state.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重试"))?;
+    database_name(database)?;
+    let info = inspect(state, version, database, false)?;
+    if info["exists"] != true { return Err(AppError::new("MONGO_DATABASE_MISSING", "所选数据库已不存在，请刷新数据库列表")); }
+    let collections = info["collections"].as_array().map_or(0, Vec::len);
+    Ok(DatabaseDeletePreview { version: version.into(), database: database.into(), collections, revision: database_delete_revision(&info)? })
+}
+pub fn database_delete(state: &CoreState, version: &str, database: &str, revision: &str, confirmation: &str) -> Result<()> {
+    let _work = crate::BackgroundWork::begin("删除 MongoDB 数据库")?;
+    let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
+    let _lock = state.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重试"))?;
+    database_name(database)?;
+    if confirmation != database { return Err(AppError::new("MONGO_DATABASE_CONFIRM", "请输入完整数据库名称以确认删除")); }
+    let before = inspect(state, version, database, false)?;
+    if before["exists"] != true { return Err(AppError::new("MONGO_DATABASE_MISSING", "所选数据库已不存在，请刷新数据库列表")); }
+    if database_delete_revision(&before)? != revision { return Err(AppError::new("MONGO_DATABASE_CHANGED", "数据库结构或实例状态已变化，请重新检查后确认")); }
+    inspect(state, version, database, true)?;
+    let after = inspect(state, version, database, false)?;
+    if after["exists"] == true { return Err(AppError::new("MONGO_DATABASE_DELETE_INCOMPLETE", "MongoDB 未确认删除数据库，请刷新后检查")); }
     Ok(())
 }
 pub fn directory(state: &CoreState) -> Result<PathBuf> { Ok(crate::paths::checked_data_path(&state.paths.base, "backup/mongodb")?) }

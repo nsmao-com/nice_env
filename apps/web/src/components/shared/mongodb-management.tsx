@@ -3,8 +3,9 @@
 import * as React from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronLeft, ChevronRight, Database, RefreshCw, Search } from "lucide-react";
-import type { MongoFilter, ServiceStatus } from "@nsb/schema";
+import { toast } from "sonner";
+import { ChevronLeft, ChevronRight, Database, Loader2, RefreshCw, Search, Trash2 } from "lucide-react";
+import type { MongoDatabaseDeletePreview, MongoFilter, ServiceStatus } from "@nsb/schema";
 import * as api from "@/lib/api";
 import { normalizeError } from "@/lib/backend";
 import { useT } from "@/lib/store";
@@ -17,6 +18,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { CopyButton } from "@/components/shared/misc";
 import { MongoAuthPanel } from "@/components/shared/mongodb-auth";
 import { MongoBackupPanel } from "@/components/shared/mongodb-backup";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 const options = { retry: (count: number, error: unknown) => count < 2 && normalizeError(error).code === "SERVICE_BUSY", retryDelay: 700, refetchOnWindowFocus: false };
 const PAGE_SIZE = 10;
@@ -51,7 +53,13 @@ function MongoBrowser({ version, signature }: { version: string; signature: stri
   const [valueType, setValueType] = React.useState<MongoFilter["valueType"]>("text");
   const [value, setValue] = React.useState("");
   const [filter, setFilter] = React.useState<MongoFilter | null>(null);
+  const [deletePreview, setDeletePreview] = React.useState<MongoDatabaseDeletePreview | null>(null);
+  const [deleteOpen, setDeleteOpen] = React.useState(false);
+  const [deleteConfirmation, setDeleteConfirmation] = React.useState("");
+  const [deleteBusy, setDeleteBusy] = React.useState(false);
+  const [deleteError, setDeleteError] = React.useState("");
   const databaseExists = !!overview.data?.databases.includes(database);
+  const deletableDatabase = databaseExists && !["admin", "local", "config"].includes(database.toLowerCase());
   const collections = useQuery({ queryKey: ["mongo-collections", signature, database, search], queryFn: () => api.mongoCollections(version, database, search), enabled: databaseExists && !overview.isError && !overview.isFetching, ...options });
   const collectionExists = !!collections.data?.entries.some(entry => entry.name === collection);
   const ready = databaseExists && collectionExists && !overview.isError && !collections.isError && !overview.isFetching && !collections.isFetching;
@@ -60,9 +68,27 @@ function MongoBrowser({ version, signature }: { version: string; signature: stri
   const searchValid = new TextEncoder().encode(searchDraft).length <= 200 && !/[\x00-\x1f\x7f-\x9f]/.test(searchDraft);
   const valueValid = new TextEncoder().encode(value).length <= 4096 && !value.includes("\0") && (valueType === "number" ? /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(value) && Number.isFinite(Number(value)) && (!Number.isInteger(Number(value)) || Number.isSafeInteger(Number(value))) : valueType === "objectId" ? /^[a-f\d]{24}$/i.test(value) : valueType === "boolean" ? ["true", "false"].includes(value) : true);
   const clearFilter = () => { setFilter(null); setField(""); setValue(""); setValueType("text"); setOffset(0); };
-  const selectDatabase = (next: string) => { setDatabase(next); setCollection(""); setSearch(""); setSearchDraft(""); clearFilter(); };
+  const selectDatabase = (next: string) => { setDatabase(next); setCollection(""); setSearch(""); setSearchDraft(""); setDeleteOpen(false); setDeletePreview(null); setDeleteConfirmation(""); setDeleteError(""); clearFilter(); };
   const selectCollection = (next: string) => { setCollection(next); clearFilter(); };
-  const loading = overview.isFetching || collections.isFetching || documents.isFetching;
+  const inspectDelete = async () => {
+    if (!deletableDatabase || deleteBusy) return;
+    setDeleteBusy(true); setDeleteError("");
+    try { setDeletePreview(await api.mongoDatabaseDeletePreview(version, database)); setDeleteConfirmation(""); setDeleteOpen(true); }
+    catch (error) { const parsed = normalizeError(error); setDeleteError(parsed.message); toast.error(parsed.message, { description: parsed.hint }); }
+    finally { setDeleteBusy(false); }
+  };
+  const deleteDatabase = async () => {
+    if (!deletePreview || deleteConfirmation !== deletePreview.database || deleteBusy) return;
+    setDeleteBusy(true); setDeleteError("");
+    try {
+      await api.mongoDatabaseDelete(version, deletePreview.database, deletePreview.revision, deleteConfirmation);
+      toast.success(t("mongo.databaseDeleted"));
+      setDeleteOpen(false); setDeletePreview(null); setDeleteConfirmation(""); setDatabase(""); setCollection(""); setSearch(""); setSearchDraft(""); clearFilter();
+      await overview.refetch();
+    } catch (error) { setDeleteError(normalizeError(error).message); }
+    finally { setDeleteBusy(false); }
+  };
+  const loading = overview.isFetching || collections.isFetching || documents.isFetching || deleteBusy;
   return <>
     <Card><CardHeader><div className="flex flex-wrap items-center justify-between gap-2"><CardTitle>{t("mongo.connection")}</CardTitle><Button size="sm" variant="ghost" disabled={loading} onClick={() => void overview.refetch()}><RefreshCw className="h-3.5 w-3.5" />{t("mongo.refresh")}</Button></div></CardHeader><CardContent>
       {overview.isPending && <p role="status" className="text-sm text-muted">{t("mongo.loading")}</p>}
@@ -70,7 +96,7 @@ function MongoBrowser({ version, signature }: { version: string; signature: stri
     </CardContent></Card>
     {!overview.isError && overview.data && <Card><CardHeader><CardTitle>{t("mongo.choose")}</CardTitle></CardHeader><CardContent className="space-y-4">
       {overview.data.databases.length === 0 ? <p className="text-sm text-muted">{t("mongo.noDatabases")}</p> : <div className="grid min-w-0 gap-4 sm:grid-cols-2">
-        <div className="min-w-0 space-y-1.5"><Label htmlFor="mongo-database">{t("mongo.database")}</Label><Select value={databaseExists ? database : ""} onValueChange={selectDatabase} disabled={overview.isFetching}><SelectTrigger id="mongo-database" title={database} className="min-w-0"><SelectValue placeholder={t("mongo.selectDatabase")} /></SelectTrigger><SelectContent>{overview.data.databases.map(name => <SelectItem key={name} value={name} className="whitespace-normal break-all">{name}</SelectItem>)}</SelectContent></Select></div>
+        <div className="min-w-0 space-y-1.5"><div className="flex flex-wrap items-center justify-between gap-2"><Label htmlFor="mongo-database">{t("mongo.database")}</Label><Button type="button" size="sm" variant="ghost" className="h-auto min-h-7 px-2 py-1 text-error hover:text-error" disabled={!deletableDatabase || loading} onClick={() => void inspectDelete()}><Trash2 className="h-3.5 w-3.5" />{t("mongo.deleteDatabase")}</Button></div><Select value={databaseExists ? database : ""} onValueChange={selectDatabase} disabled={overview.isFetching}><SelectTrigger id="mongo-database" title={database} className="min-w-0"><SelectValue placeholder={t("mongo.selectDatabase")} /></SelectTrigger><SelectContent>{overview.data.databases.map(name => <SelectItem key={name} value={name} className="whitespace-normal break-all">{name}</SelectItem>)}</SelectContent></Select></div>
         <div className="min-w-0 space-y-1.5"><Label htmlFor="mongo-collection">{t("mongo.collection")}</Label><Select value={collectionExists ? collection : ""} onValueChange={selectCollection} disabled={!databaseExists || collections.isFetching || collections.isError || !collections.data?.entries.length}><SelectTrigger id="mongo-collection" title={collection} className="min-w-0"><SelectValue placeholder={t("mongo.selectCollection")} /></SelectTrigger><SelectContent>{collections.data?.entries.map(entry => <SelectItem key={entry.name} value={entry.name} className="whitespace-normal break-all">{entry.name}{entry.kind === "view" ? ` · ${t("mongo.view")}` : entry.kind === "timeseries" ? ` · ${t("mongo.timeseries")}` : ""}</SelectItem>)}</SelectContent></Select></div>
       </div>}
       {databaseExists && <><form className="flex flex-wrap items-end gap-2" onSubmit={event => { event.preventDefault(); if (!searchValid || collections.isFetching || overview.isFetching) return; setCollection(""); setOffset(0); if (search === searchDraft) void collections.refetch(); else setSearch(searchDraft); }}><div className="min-w-0 flex-1 basis-48 space-y-1.5"><Label htmlFor="mongo-collection-search">{t("mongo.searchCollections")}</Label><Input id="mongo-collection-search" value={searchDraft} maxLength={200} aria-invalid={!searchValid} onChange={event => setSearchDraft(event.target.value)} /></div><Button size="sm" variant="secondary" disabled={!searchValid || collections.isFetching || overview.isFetching}><Search className="h-3.5 w-3.5" />{t("mongo.search")}</Button></form>{!searchValid && <p role="alert" className="text-xs text-error">{t("mongo.badSearch")}</p>}
@@ -96,5 +122,18 @@ function MongoBrowser({ version, signature }: { version: string; signature: stri
         {offset+PAGE_SIZE > 10_000 && documents.data?.hasMore && <p className="text-xs text-warn">{t("mongo.pageLimit")}</p>}
       </CardContent>
     </Card>}
+    <Dialog open={deleteOpen} onOpenChange={(open) => { if (!open && !deleteBusy) { setDeleteOpen(false); setDeletePreview(null); setDeleteConfirmation(""); setDeleteError(""); } }}>
+      <DialogContent hideClose={deleteBusy} className="flex max-h-[85dvh] max-w-lg flex-col overflow-hidden">
+        <DialogHeader><DialogTitle className="pr-6">{t("mongo.deleteDatabase")}</DialogTitle><DialogDescription>{t("mongo.deleteDatabaseIntro")}</DialogDescription></DialogHeader>
+        <div className="min-h-0 space-y-4 overflow-y-auto px-0.5">
+          {deletePreview && <>
+            <div className="rounded-lg bg-warn-soft p-3 text-sm leading-6 text-warn"><p>{t("mongo.deleteDatabaseWarning")}</p><p className="mt-1 break-all font-mono">{deletePreview.database}</p><p className="mt-1">{t("mongo.deleteDatabaseCollections").replace("{count}", String(deletePreview.collections))}</p></div>
+            <div className="space-y-1.5"><Label htmlFor="mongo-delete-confirm">{t("mongo.deleteDatabaseConfirm")}</Label><Input id="mongo-delete-confirm" value={deleteConfirmation} disabled={deleteBusy} autoComplete="off" placeholder={deletePreview.database} onChange={(event) => setDeleteConfirmation(event.target.value)} /></div>
+          </>}
+          {deleteError && <p role="alert" className="break-words text-sm text-error">{deleteError}</p>}
+        </div>
+        <DialogFooter className="shrink-0 flex-col-reverse sm:flex-row"><Button type="button" variant="ghost" disabled={deleteBusy} onClick={() => { setDeleteOpen(false); setDeletePreview(null); setDeleteConfirmation(""); setDeleteError(""); }}>{t("common.cancel")}</Button><Button type="button" variant="destructive" disabled={deleteBusy || !deletePreview || deleteConfirmation !== deletePreview.database} onClick={() => void deleteDatabase()}>{deleteBusy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}{t("mongo.confirmDeleteDatabase")}</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
   </>;
 }

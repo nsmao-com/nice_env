@@ -3223,6 +3223,23 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (!mockMongoBackups.has(String(args!.id))) throw { code: "MONGO_BACKUP_INVALID", message: "备份不存在" };
       return String(args!.destination) as T;
     }
+    case "mongodb_database_delete_preview":
+    case "mongodb_database_delete": {
+      const version = String(args!.version);
+      const service = services.get("mongodb");
+      if (!service || !["running", "error"].includes(service.state) || !service.pids.length || service.version !== version) throw { code: "MONGO_NOT_RUNNING", message: "所选 MongoDB 实例未运行或运行版本已变化" };
+      if (!Array.from(packages.values()).some(pkg => pkg.id === "mongosh" && pkg.install)) throw { code: "MONGO_SHELL_MISSING", message: "请先安装 MongoDB Shell" };
+      const database = String(args!.database ?? "");
+      if (!database || database.length > 63 || /[\s\x00-\x1f\x7f-\x9f/\\."$*<>:|?]/.test(database) || ["admin", "local", "config"].includes(database.toLowerCase())) throw { code: "MONGO_BACKUP_INVALID", message: "请选择业务数据库" };
+      const data = mockMongoDatabases.get(database);
+      if (!data) throw { code: "MONGO_DATABASE_MISSING", message: "所选数据库已不存在，请刷新数据库列表" };
+      const revision = JSON.stringify([version, service.port, service.pids, database, data]);
+      if (cmd === "mongodb_database_delete_preview") return { version, database, collections: Object.keys(data).length, revision } as T;
+      if (args!.revision !== revision) throw { code: "MONGO_DATABASE_CHANGED", message: "数据库结构或实例状态已变化，请重新检查后确认" };
+      if (args!.confirmation !== database) throw { code: "MONGO_DATABASE_CONFIRM", message: "请输入完整数据库名称以确认删除" };
+      mockMongoDatabases.delete(database);
+      return undefined as T;
+    }
     case "mongodb_backup_removal_preview":
     case "mongodb_backup_delete": {
       const entry = mockMongoBackups.get(String(args!.id));

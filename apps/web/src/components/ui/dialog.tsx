@@ -30,13 +30,24 @@ const DialogContent = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
     hideClose?: boolean;
   }
->(({ className, children, hideClose, onOpenAutoFocus, onCloseAutoFocus, ...props }, ref) => {
+>(({ className, children, hideClose, onOpenAutoFocus, onCloseAutoFocus, onEscapeKeyDown, ...props }, ref) => {
   const opener = React.useRef<HTMLElement | null>(null);
   return (
   <DialogPortal>
     <DialogOverlay />
     <DialogPrimitive.Content
       ref={ref}
+      onEscapeKeyDown={(event) => {
+        // Radix receives Escape in capture phase, before CodeMirror's search panel.
+        const closeSearch = event.target instanceof Element
+          ? event.target.closest(".cm-editor")?.querySelector<HTMLButtonElement>(".nsb-search-close") : null;
+        if (closeSearch) {
+          event.preventDefault();
+          closeSearch.click();
+          return;
+        }
+        onEscapeKeyDown?.(event);
+      }}
       onOpenAutoFocus={(event) => {
         const active = document.activeElement;
         if (active instanceof HTMLElement && active !== document.body && !active.closest('[role="dialog"]')) opener.current = active;

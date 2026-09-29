@@ -23,6 +23,9 @@ import {
   siMeilisearch,
   siMinio,
   siMongodb,
+  siNatsdotio,
+  siPhpmyadmin,
+  siK6,
   siMysql,
   siNeo4j,
   siNginx,
@@ -52,7 +55,7 @@ import { cn } from "@/lib/utils";
  *   官方矢量路径 + 品牌色；
  * · 图标库没收录的小众服务，放各自官方仓库的原版 logo（public/brands/，
  *   已裁边、透明底）；
- * · memcached 官方从未发布过 logo，是唯一回退通用图标的特例。
+ * · Memcached 使用官网维护者提供的品牌图片；来源见 public/brands/SOURCES.md。
  * id 形如 "php" / "php@8.3"（带版本后缀），统一取 @ 前的基础名匹配。
  */
 const SIMPLE_ICONS: Record<string, SimpleIcon> = {
@@ -67,6 +70,11 @@ const SIMPLE_ICONS: Record<string, SimpleIcon> = {
   go: siGo,
   postgresql: siPostgresql,
   mongodb: siMongodb,
+  mongosh: siMongodb,
+  "mongodb-database-tools": siMongodb,
+  nats: siNatsdotio,
+  phpmyadmin: siPhpmyadmin,
+  k6: siK6,
   composer: siComposer,
   meilisearch: siMeilisearch,
   zincsearch: siZincsearch,
@@ -100,6 +108,7 @@ const SIMPLE_ICONS: Record<string, SimpleIcon> = {
 
 /** 本地品牌 logo。roadrunner 官方标是纯白，浅色底下不可见，固定垫深色小底。 */
 const LOCAL_BRANDS: Record<string, { src: string; title: string; dark?: boolean }> = {
+  memcached: { src: "/brands/memcached.png", title: "Memcached" },
   mihomo: { src: "/brands/mihomo.png", title: "mihomo" },
   frankenphp: { src: "/brands/frankenphp.png", title: "FrankenPHP" },
   mailpit: { src: "/brands/mailpit.svg", title: "Mailpit" },

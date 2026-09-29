@@ -36,6 +36,33 @@ fn mac(template: &PackageManifestEntry) -> bool {
     template.os.iter().any(|os| os == "macos")
 }
 
+pub(super) fn apache_releases(html: &str, src: &VersionSource, template: &PackageManifestEntry) -> Vec<RemoteVersion> {
+    // 只读取真正的 Win64 安装包链接，不能把签名、校验文件或第三方域名中的路径当作下载。
+    let links = regex::Regex::new(r#"(?i)\bhref\s*=\s*["']((?:https://www\.apachelounge\.com)?/download/VS(\d+)/binaries/httpd-(\d+\.\d+\.\d+)-(\d{6})-Win64-VS(\d+)\.zip)["']"#).unwrap();
+    let mut releases = Vec::new();
+    for cap in links.captures_iter(html) {
+        if cap[2] != cap[5] { continue; }
+        let url = if cap[1].starts_with('/') { format!("https://www.apachelounge.com{}", &cap[1]) } else { cap[1].to_string() };
+        releases.push((cap[4].to_string(), cap[2].parse::<u32>().unwrap_or(0), release(src, template, &cap[3], &url)));
+    }
+    // 上游会以不同日期重新构建同一版本；去重时必须保留最新构建。
+    releases.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    limit_and_sort(releases.into_iter().map(|(_, _, item)| item).collect(), src)
+}
+
+pub(super) fn apache_checksum(text: &str, filename: &str) -> Result<String> {
+    let marker = format!("SHA256-Checksum for: {filename}:");
+    let lines: Vec<_> = text.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    let mut matches = lines.windows(2).filter(|pair| pair[0] == marker);
+    if let Some(pair) = matches.next() {
+        if matches.next().is_none() && pair[1].len() == 64 && pair[1].bytes().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(pair[1].to_ascii_lowercase());
+        }
+    }
+    Err(AppError::new("APACHE_CHECKSUM_INVALID", "Apache 官方校验文件缺失或与安装包不匹配")
+        .with_hint("请刷新版本列表后重试；不会跳过 SHA256 校验"))
+}
+
 pub(super) fn mongodb_tools_releases(data: &Value, src: &VersionSource, template: &PackageManifestEntry) -> Vec<RemoteVersion> {
     let target = if mac(template) { "macos" } else { "windows" };
     let arch = if template.arch.iter().any(|arch| arch == "arm64") { "arm64" } else { "x86_64" };
@@ -380,27 +407,23 @@ pub(super) async fn fetch(
                 }
             }
         }
-        "apache" | "neo4j" => {
-            let (page, pattern, prefix) = match src.kind.as_str() {
-                "apache" => (
-                    "https://www.apachelounge.com/download/",
-                    r"(/download/VS\d+/binaries/httpd-(\d+\.\d+\.\d+)-\d+-Win64-VS\d+\.zip)",
-                    "https://www.apachelounge.com",
-                ),
-                _ => (
-                    "https://neo4j.com/deployment-center/",
-                    r"(neo4j-community-(\d+(?:\.\d+)+)-windows\.zip)",
-                    "https://dist.neo4j.org/",
-                ),
-            };
-            let html = get_text(&client, page).await?;
-            let re = regex::Regex::new(pattern).unwrap();
+        "apache" => {
+            let html = get_text(&client, "https://www.apachelounge.com/download/").await?;
+            out = apache_releases(&html, src, template);
+            for item in &mut out {
+                let checksums = get_text(&client, &format!("{}.txt", item.url)).await?;
+                item.sha256 = Some(apache_checksum(&checksums, item.url.rsplit('/').next().unwrap_or(""))?);
+            }
+        }
+        "neo4j" => {
+            let html = get_text(&client, "https://neo4j.com/deployment-center/").await?;
+            let re = regex::Regex::new(r"(neo4j-community-(\d+(?:\.\d+)+)-windows\.zip)").unwrap();
             for cap in re.captures_iter(&html) {
                 out.push(release(
                     src,
                     template,
                     &cap[2],
-                    &format!("{prefix}{}", &cap[1]),
+                    &format!("https://dist.neo4j.org/{}", &cap[1]),
                 ));
             }
         }

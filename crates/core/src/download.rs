@@ -355,6 +355,13 @@ impl Downloader {
         if status != 200 && status != 206 {
             return Err(AppError::download(url, format!("HTTP {}", resp.status())));
         }
+        // 有些下载站在文件失效时仍返回 HTTP 200 错误页，不能把网页存成可安装缓存。
+        let content_type = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next()).unwrap_or("").trim();
+        if content_type.eq_ignore_ascii_case("text/html") || content_type.eq_ignore_ascii_case("application/xhtml+xml") {
+            return Err(AppError::new("DOWNLOAD_NOT_PACKAGE", "下载源返回了网页，未取得安装包")
+                .with_detail(format!("{url}: Content-Type {content_type}")));
+        }
         let length = resp.content_length();
         let total = if status == 206 {
             let range = resp
@@ -655,6 +662,20 @@ mod tests {
         assert_eq!(std::fs::read(path).unwrap(), b"good");
         first.await.unwrap();
         second.await.unwrap();
+
+        for content_type in ["text/html; charset=UTF-8", "Application/XHTML+XML"] {
+            let (html, reply) = server(vec![format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: 18\r\nConnection: close\r\n\r\n<html>error</html>")]).await;
+            let error = downloader.download("html", &[html], "0", 0, &paths, &|_| {}).await.unwrap_err();
+            assert_eq!(error.code, "DOWNLOAD_NOT_PACKAGE");
+            assert!(!paths.downloads().join("html.pkg").exists());
+            assert!(!paths.downloads().join("html.part").exists());
+            reply.await.unwrap();
+        }
+        let (html, first) = server(vec!["HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 3\r\nConnection: close\r\n\r\nbad".into()]).await;
+        let (good, second) = server(vec!["HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Length: 4\r\nConnection: close\r\n\r\ngood".into()]).await;
+        let path = downloader.download("html-mirror", &[html, good], "0", 0, &paths, &|_| {}).await.unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"good");
+        first.await.unwrap(); second.await.unwrap();
     }
 
     #[tokio::test]

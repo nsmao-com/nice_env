@@ -361,8 +361,10 @@ pub async fn catalog(
         "{src:?}:{:?}:{:?}:{}:{}",
         template.os, template.arch, template.entry, template.kind
     );
+    // Apache 旧缓存不含官方 SHA256，升级后重新读取，不能继续按无校验条目安装。
+    let cache_revision = if src.kind == "apache" { "v3" } else { "v2" };
     let cache_key = format!(
-        "versionCatalog:v2:{}:{:x}",
+        "versionCatalog:{cache_revision}:{}:{:x}",
         template.id,
         Sha256::digest(signature)
     );
@@ -1088,6 +1090,34 @@ fn version_parts(v: &str) -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apache_catalog_uses_latest_build_and_checksum_for_the_exact_archive() {
+        let installer = crate::install::Installer { manifest: serde_json::from_str(include_str!("../../../manifest/packages.win.json")).unwrap() };
+        let template = installer.template_for("apache").unwrap();
+        let source = source_for(&template).unwrap();
+        let html = r#"
+            <a href="/download/VS18/binaries/httpd-2.4.68-260827-Win64-VS18.zip">old</a>
+            <a href='https://www.apachelounge.com/download/VS18/binaries/httpd-2.4.68-260920-Win64-VS18.zip'>current</a>
+            <a href="/download/VS18/binaries/httpd-2.4.68-260920-Win64-VS18.zip.txt">checksums</a>
+            <a href="/download/VS18/binaries/httpd-2.4.68-260920-Win32-VS18.zip">32 bit</a>
+            <a href="https://example.org/download/VS18/binaries/httpd-9.9.9-260920-Win64-VS18.zip">other origin</a>
+            <a href="/download/VS17/binaries/httpd-9.9.9-260920-Win64-VS18.zip">mismatched compiler</a>
+            <a href="/download/VS17/binaries/httpd-2.4.66-251206-Win64-VS17.zip">archive</a>
+        "#;
+        let releases = upstream::apache_releases(html, &source, &template);
+        assert_eq!(releases.iter().map(|r| r.version.as_str()).collect::<Vec<_>>(), ["2.4.68", "2.4.66"]);
+        let filename = "httpd-2.4.68-260920-Win64-VS18.zip";
+        assert!(releases[0].url.ends_with(filename));
+        let hash = "F6DCF17D08AA32721AE418CD818C157E4C521C9E889B758646FB64287F1D56E3";
+        let checksums = format!("SHA1-Checksum for: {filename}:\r\n{}\r\n\r\nSHA256-Checksum for: {filename}:\r\n{hash}\r\n\r\nSHA512-Checksum for: {filename}:\r\n{}", "0".repeat(40), "0".repeat(128));
+        assert_eq!(upstream::apache_checksum(&checksums, filename).unwrap(), hash.to_ascii_lowercase());
+        for bad in [String::from("<html>file not found</html>"), checksums.replace("SHA256", "SHA224"),
+            checksums.replace(filename, "httpd-2.4.68-260827-Win64-VS18.zip"), checksums.replace(hash, "not a hash"),
+            checksums.replace(hash, &"a".repeat(65)), format!("{checksums}\n{checksums}")] {
+            assert_eq!(upstream::apache_checksum(&bad, filename).unwrap_err().code, "APACHE_CHECKSUM_INVALID");
+        }
+    }
 
     #[tokio::test]
     #[ignore = "reads the official Node.js index; no package downloads or services"]

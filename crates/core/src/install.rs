@@ -92,9 +92,28 @@ pub(crate) fn is_sftpgo_installer(entry: &crate::model::PackageManifestEntry) ->
         || entry.url.ends_with("_windows_x86_64.exe"))
 }
 
-/// 仅可下载条目改用 portable 包；已安装快照保留真实入口，以便阻止误启动安装器。
+fn official_apache(entry: &crate::model::PackageManifestEntry) -> bool {
+    entry.id == "apache" && entry.os.iter().any(|os| os == "windows")
+        && entry.arch.iter().any(|arch| arch == "x64")
+        && entry.kind == "archive" && entry.entry == "Apache24/bin/httpd.exe" && entry.mirrors.is_empty()
+        && entry.url.starts_with("https://www.apachelounge.com/download/VS")
+        && entry.url.contains(&format!("/binaries/httpd-{}-", entry.version))
+        && entry.url.ends_with(".zip")
+        && crate::versions::source_for(entry).is_some_and(|source| source.kind == "apache")
+}
+
+/// 修正历史可下载条目；已安装快照保留实际安装时的下载信息和入口。
 fn upgrade_available_entry(entry: crate::model::PackageManifestEntry) -> crate::model::PackageManifestEntry {
     let mut entry = upgrade_legacy_run(entry);
+    // 旧远端清单快照会覆盖新内置清单。只修正曾发布过的失效 URL/哈希组合，保留用户自定义来源。
+    if official_apache(&entry) && entry.version == "2.4.68"
+        && entry.url == "https://www.apachelounge.com/download/VS18/binaries/httpd-2.4.68-260827-Win64-VS18.zip"
+        && entry.sha256.as_deref() == Some("a6b7de9fdccb28456f5b1f884920fe0b2425aadfca25c63ae1c0969d43bb355b") {
+        let bundled: crate::model::Manifest = serde_json::from_str(include_str!("../../../manifest/packages.win.json")).expect("内置清单合法");
+        if let Some(correct) = bundled.packages.into_iter().find(|p| p.id == entry.id && p.version == entry.version) {
+            entry.url = correct.url; entry.sha256 = correct.sha256; entry.size_bytes = correct.size_bytes;
+        }
+    }
     if is_sftpgo_installer(&entry)
         && entry.url == format!("https://github.com/drakkan/sftpgo/releases/download/v{0}/sftpgo_v{0}_windows_x86_64.exe", entry.version) {
         let bundled: crate::model::Manifest = serde_json::from_str(include_str!("../../../manifest/packages.win.json")).expect("内置清单合法");
@@ -343,13 +362,23 @@ impl Installer {
     }
 
     /// 解析安装 key，支持「清单里没有但版本源枚举得到」的版本：
-    /// 先查清单，未命中则查版本目录缓存/远程。
+    /// 先查清单，未命中则查版本目录缓存/远程；Apache 同版本重构建优先采用当前官方链接。
     pub async fn resolve_entry(
         &self,
         key: &str,
         store: &Store,
     ) -> Result<Option<crate::model::PackageManifestEntry>> {
         if let Some(hit) = self.find(key) {
+            if official_apache(&hit) && store.find_installed(&hit.id, Some(&hit.version)).is_none() {
+                // 官方会撤掉同版本的旧构建，安装时强制刷新，避免六小时目录缓存继续选中失效链接。
+                // 仅更新用户所选版本；离线或官方未列出的历史版仍用清单中已校验的发行包。
+                let catalog = crate::versions::catalog(store, &hit, true).await;
+                if catalog.online {
+                    if let Some(remote) = catalog.remote.iter().find(|r| r.version == hit.version && r.sha256.is_some()) {
+                        return Ok(Some(Self::entry_from_remote(&hit, remote)));
+                    }
+                }
+            }
             return Ok(Some(hit));
         }
         let Some((id, version)) = key.split_once('@') else {
@@ -358,7 +387,7 @@ impl Installer {
         let Some(template) = self.template_for(id) else {
             return Ok(None);
         };
-        let cat = crate::versions::catalog(store, &template, false).await;
+        let cat = crate::versions::catalog(store, &template, official_apache(&template)).await;
         let Some(remote) = cat.remote.iter().find(|r| r.version == version) else {
             return Ok(None);
         };
@@ -1578,6 +1607,38 @@ mod tests {
         assert_eq!(serde_json::to_value(state.installer.installed_entry(&installed).run).unwrap(), serde_json::to_value(&legacy.run).unwrap());
     }
 
+    #[test]
+    fn apache_old_catalog_snapshots_update_only_the_retired_official_artifact() {
+        let (_temp, mut state) = fixture();
+        state.installer.manifest = serde_json::from_str(include_str!("../../../manifest/packages.win.json")).unwrap();
+        let current = state.installer.find("apache@2.4.68").unwrap();
+        let mut legacy = current.clone();
+        legacy.url = "https://www.apachelounge.com/download/VS18/binaries/httpd-2.4.68-260827-Win64-VS18.zip".into();
+        legacy.sha256 = Some("a6b7de9fdccb28456f5b1f884920fe0b2425aadfca25c63ae1c0969d43bb355b".into());
+        legacy.size_bytes = 14584378;
+        state.installer.manifest.packages = vec![legacy.clone()];
+        for entry in [state.installer.find("apache").unwrap(), state.installer.template_for("apache").unwrap(),
+            state.installer.package_views(&[])[0].manifest.clone()] {
+            assert_eq!(entry.url, current.url); assert_eq!(entry.sha256, current.sha256); assert_eq!(entry.size_bytes, current.size_bytes);
+        }
+        let installed = install_fixture(&state, "apache", "2.4.68");
+        let snapshot = Path::new(&installed.install_path).join(".niceenv-package.json");
+        std::fs::write(&snapshot, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(state.installer.installed_entry(&installed).url, legacy.url);
+        assert_eq!(state.installer.installed_entry(&installed).sha256, legacy.sha256);
+        for variation in 0..5 {
+            let mut custom = legacy.clone();
+            match variation {
+                0 => custom.url = "https://example.org/custom-apache.zip".into(),
+                1 => custom.sha256 = Some("a".repeat(64)),
+                2 => custom.entry = "custom/httpd.exe".into(),
+                3 => custom.mirrors.push("https://example.org/apache.zip".into()),
+                _ => { let mut source = crate::versions::source_for(&custom).unwrap(); source.kind = "static".into(); custom.version_source = Some(source); },
+            }
+            assert_eq!(serde_json::to_value(upgrade_available_entry(custom.clone())).unwrap(), serde_json::to_value(custom).unwrap());
+        }
+    }
+
     #[tokio::test]
     async fn install_publishes_complete_runtime_and_preserves_previous_files() {
         let (_temp, mut state) = fixture();
@@ -1800,6 +1861,80 @@ mod tests {
             "official download → staged install → {} → idempotent repeat → uninstall passed",
             banner.trim()
         );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "downloads official Apache into a temporary directory; requires NSB_SKIP_HOSTS=1; starts only its own HTTP service"]
+    async fn official_apache_rebuilt_release_installs_and_serves_without_touching_system_settings() {
+        assert_eq!(std::env::var("NSB_SKIP_HOSTS").as_deref(), Ok("1"));
+        let (_temp, mut state) = fixture();
+        state.store.set_setting("pathEnvEnabled", "0").unwrap();
+        let http = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let https = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = http.local_addr().unwrap().port();
+        state.store.set_port_override("apacheHttp", Some(port)).unwrap();
+        state.store.set_port_override("apacheHttps", Some(https.local_addr().unwrap().port())).unwrap();
+        let template = state.installer.template_for("apache").unwrap();
+        let catalog = crate::versions::catalog(&state.store, &template, true).await;
+        assert!(catalog.online, "{:?}", catalog.error);
+        let remote = catalog.remote.first().unwrap();
+        assert!(remote.sha256.as_ref().is_some_and(|hash| hash.len() == 64));
+        let key = format!("apache@{}", remote.version);
+        state.installer.manifest.packages.retain(|entry| entry.id != "apache" || entry.version != remote.version);
+        let unlisted = state.installer.resolve_entry(&key, &state.store).await.unwrap().unwrap();
+        assert_eq!(unlisted.url, remote.url); assert_eq!(unlisted.sha256, remote.sha256);
+        let mut stale = Installer::entry_from_remote(&template, remote);
+        // 模拟同版本的另一旧构建，不能靠已知 260827 URL 的兼容修复侥幸通过。
+        stale.url = format!("https://www.apachelounge.com/download/VS18/binaries/httpd-{}-000101-Win64-VS18.zip", remote.version);
+        stale.sha256 = Some("1".repeat(64));
+        state.installer.manifest.packages = vec![stale];
+        let installed = state.install_package(&key).await.unwrap();
+        let actual = state.installer.installed_entry(&installed);
+        assert_eq!(actual.url, remote.url); assert_eq!(actual.sha256, remote.sha256);
+        assert_eq!(crate::download::sha256_file(&state.paths.downloads().join(format!("{key}.pkg"))).unwrap(), remote.sha256.as_ref().unwrap().as_str());
+        let binary = Path::new(&installed.install_path).join(&actual.entry);
+        let output = platform::command(&binary).arg("-v").output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains(&format!("Apache/{}", remote.version)));
+        let views = state.list_packages().unwrap();
+        assert_eq!(views.iter().filter(|p| p.manifest.id == "apache" && p.install.is_some()).count(), 1);
+        crate::versions::clear_cache(&state.store);
+        let before = std::fs::read(Path::new(&installed.install_path).join(".niceenv-package.json")).unwrap();
+        assert_eq!(state.install_package(&key).await.unwrap().installed_at, installed.installed_at);
+        assert_eq!(std::fs::read(Path::new(&installed.install_path).join(".niceenv-package.json")).unwrap(), before);
+        let project = state.paths.base.join("project");
+        std::fs::create_dir_all(project.join("assets/.git")).unwrap();
+        std::fs::write(project.join("index.html"), "verified Apache rebuild").unwrap();
+        std::fs::write(project.join("assets/.git/config"), "private").unwrap();
+        let site: crate::model::Site = serde_json::from_value(serde_json::json!({
+            "id":"apache-rebuild","name":"Apache rebuild","domains":["rebuild.test"],"rootDir":project,
+            "runtime":{"kind":"static","webServer":"apache"},"https":false,"rewrite":"none","createdAt":1,"updatedAt":1
+        })).unwrap();
+        state.store.save_site(&site).unwrap();
+        crate::sites::write_site_conf(&state.paths, &state.store, &site).unwrap();
+        struct Cleanup<'a>(&'a crate::CoreState);
+        impl Drop for Cleanup<'_> { fn drop(&mut self) { let _ = self.0.stop_service("apache"); } }
+        let _cleanup = Cleanup(&state);
+        drop((http, https));
+        state.start_service("apache").unwrap();
+        let client = reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(5)).build().unwrap();
+        for (path, expected) in [("/", 200), ("/assets/.git/config", 403)] {
+            let response = client.get(format!("http://127.0.0.1:{port}{path}")).header("Host", "rebuild.test").send().await.unwrap();
+            assert_eq!(response.status().as_u16(), expected);
+            let body = response.text().await.unwrap();
+            if expected == 200 { assert_eq!(body, "verified Apache rebuild"); }
+        }
+        assert!(state.tail_logs_checked("site:apache-rebuild", 20).unwrap().iter().any(|line| line.line.contains(" 200 ")));
+        assert!(state.tail_logs_checked("site-error:apache-rebuild", 20).unwrap().iter().any(|line| line.line.contains(".git")));
+        let pids = state.manager.snapshot("apache").unwrap().pids;
+        state.stop_service("apache").unwrap();
+        assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));
+        state.store.delete_site(&site.id).unwrap();
+        state.uninstall_package(&key).unwrap();
+        assert!(!Path::new(&installed.install_path).exists());
+        assert!(state.store.find_installed("apache", Some(&remote.version)).is_none());
+        println!("Apache {}: refreshed same-version build, official SHA256, real download/install/-v, installed list, repeat, HTTP 200/403, logs, stop and uninstall passed", remote.version);
     }
 
     #[test]

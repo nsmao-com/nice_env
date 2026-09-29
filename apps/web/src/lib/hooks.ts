@@ -4,7 +4,7 @@ import type { DatabaseEngine } from "@nsb/schema";
 
 import * as React from "react";
 import { useEffect, useRef, useState } from "react";
-import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as api from "./api";
 import type { DownloadProgress, VersionCatalog, Site, ServiceStatus, Stack, StackStartReport, BulkReport } from "@nsb/schema";
 import { normalizeError, type AppErrorShape } from "./backend";
@@ -53,39 +53,44 @@ export function usePackages() {
 export function useVersionCatalogs(packageIds: string[]) {
   const qc = useQueryClient();
   const ids = [...new Set(packageIds)].sort();
-  const queries = useQueries({
-    queries: ids.map((id) => ({
-      queryKey: ["version-catalogs", id],
-      queryFn: () => api.versionCatalog(id, false),
-      staleTime: 5 * 60_000,
-      retry: false,
-    })),
+  // 后端已有批量目录命令；首屏只走一次 IPC，避免套件数量增加后产生
+  // N 个独立请求、重复读取缓存以及 GitHub/上游匿名限流。
+  // 把当前套件 ID 放进 key，远端清单新增套件时会自动重新拉取目录。
+  const queryKey = ["version-catalogs", ids] as const;
+  const query = useQuery({
+    queryKey,
+    queryFn: () => api.versionCatalogs(false),
+    staleTime: 5 * 60_000,
+    retry: false,
+    enabled: ids.length > 0,
   });
+  const catalogs = new Map((query.data ?? []).map((catalog) => [catalog.id, catalog]));
   const byId = new Map<string, VersionCatalog & { loading: boolean }>();
-  queries.forEach((query, index) => {
-    const id = ids[index];
+  ids.forEach((id) => {
+    const catalog = catalogs.get(id);
     byId.set(id, {
       id, remote: [], online: false,
-      ...query.data,
+      ...catalog,
       ...(query.error ? { online: false, error: normalizeError(query.error).message } : {}),
       loading: query.isFetching,
     });
   });
   const refresh = React.useCallback(async (id: string) => {
     try {
-      await qc.fetchQuery({
-        queryKey: ["version-catalogs", id],
-        queryFn: () => api.versionCatalog(id, true),
-        staleTime: 0,
+      const catalog = await api.versionCatalog(id, true);
+      qc.setQueryData<VersionCatalog[]>(queryKey, (previous = []) => {
+        const next = new Map(previous.map((item) => [item.id, item]));
+        next.set(catalog.id, catalog);
+        return [...next.values()].sort((a, b) => a.id.localeCompare(b.id));
       });
     } catch (error) {
       toastError(error);
     }
-  }, [qc]);
+  }, [qc, queryKey]);
   const refreshAll = React.useCallback(async () => {
     const catalogs = await api.versionCatalogs(true);
-    catalogs.forEach((catalog) => qc.setQueryData(["version-catalogs", catalog.id], catalog));
-  }, [qc]);
+    qc.setQueryData<VersionCatalog[]>(queryKey, catalogs);
+  }, [qc, queryKey]);
   return { byId, refresh, refreshAll };
 }
 

@@ -641,7 +641,8 @@ export default function PackagesPage() {
           installTarget
             ? (() => {
                 const g = groups.find((x) => x.id === installTarget.id);
-                const version = installTarget.version ?? (installTarget.taskKey ? installTasks[installTarget.taskKey]?.resolvedVersion : undefined);
+                const taskKey = installTarget.taskKey ?? (installTarget.version ? `${installTarget.id}@${installTarget.version}` : installTarget.id);
+                const version = installTasks[taskKey]?.resolvedVersion ?? installTarget.version;
                 const v = g?.versions.find((x) => x.version === version && x.installed);
                 return v?.serviceId ?? null;
               })()

@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useIsMutating, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -20,7 +21,8 @@ import {
 import type { PackageView, ServiceStatus } from "@nsb/schema";
 import { cn, fmtBytes, fmtSpeed, fmtDuration } from "@/lib/utils";
 import { useT } from "@/lib/store";
-import { toastError, useInvalidate } from "@/lib/hooks";
+import { serviceHasProcess, useInvalidate } from "@/lib/hooks";
+import { normalizeError, type AppErrorShape } from "@/lib/backend";
 import { progressForTask, useInstallTasks, type InstallTask } from "@/lib/install-tasks";
 import * as api from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -99,7 +101,14 @@ export function InstallDialog({
 }) {
   const t = useT();
   const invalidate = useInvalidate();
+  const queryClient = useQueryClient();
+  const pathBusy = useIsMutating({ mutationKey: ["pathenv-change"] }) > 0;
   const [starting, setStarting] = React.useState(false);
+  const [startError, setStartError] = React.useState<AppErrorShape | null>(null);
+  const startErrorRef = React.useRef<HTMLDivElement>(null);
+  const startRef = React.useRef<object | null>(null);
+  const targetRef = React.useRef(target);
+  targetRef.current = target;
   const startedRef = React.useRef<string | null>(null);
 
   const taskId = target ? target.taskKey ?? (target.version ? `${target.id}@${target.version}` : target.id) : null;
@@ -117,6 +126,17 @@ export function InstallDialog({
   const cancelling = busy && !!task?.cancelRequested;
   const error = missing ? t("install.taskMissing") : task?.status === "error" ? (task.error ?? t("install.failed")) : null;
   const stage: StageId = finished ? "done" : progress ? stageFromState(progress.state) : "download";
+
+  React.useEffect(() => {
+    startRef.current = null;
+    setStarting(false);
+    setStartError(null);
+    return () => { startRef.current = null; };
+  }, [target, taskId]);
+
+  React.useEffect(() => {
+    if (startError) startErrorRef.current?.scrollIntoView({ block: "nearest" });
+  }, [startError]);
 
   /* 打开即开始安装；同一版本已在后台安装时只是重新显示它的进度 */
   React.useEffect(() => {
@@ -149,27 +169,75 @@ export function InstallDialog({
 
   /* 关闭弹窗不影响安装：进行中关掉就转入后台，装完会有通知 */
   const close = (open: boolean) => {
-    if (!open && starting) return;
+    if (!open && startRef.current) return;
     if (!open && busy) toast.info(t("install.background"));
     onOpenChange(open);
   };
 
   const startNow = async () => {
-    if (!startableAs || starting) return;
+    if (!target || !taskId || !finished || !displayVersion || !startableAs || startRef.current
+      || queryClient.isMutating({ mutationKey: ["pathenv-change"] })) return;
+    const operation = {};
+    startRef.current = operation;
+    const current = () => startRef.current === operation && targetRef.current === target;
+    const sameCompletedTask = () => {
+      const latest = useInstallTasks.getState().tasks[taskId];
+      return latest === task && latest?.status === "done" && latest.id === target.id
+        && (latest.resolvedVersion ?? latest.version) === displayVersion;
+    };
     setStarting(true);
+    setStartError(null);
     try {
-      if (target && startableAs === target.id) {
-        if (!displayVersion) return;
+      const [packages, services] = await Promise.all([
+        queryClient.fetchQuery({ queryKey: ["packages"], queryFn: api.listPackages, staleTime: 0, retry: false, networkMode: "always" }),
+        queryClient.fetchQuery({ queryKey: ["services"], queryFn: api.listServiceStatus, staleTime: 0, retry: false, networkMode: "always" }),
+      ]);
+      if (!current()) return;
+      if (!sameCompletedTask()) throw { code: "INSTALL_TASK_CHANGED", message: t("install.startTaskChanged") };
+      const installed = packages.find((pkg) => pkg.id === target.id && pkg.version === displayVersion && pkg.install);
+      if (!installed) throw { code: "NOT_INSTALLED", message: t("versions.noLongerInstalled") };
+      if (serviceIdFor(installed) !== startableAs) throw { code: "SERVICE_TARGET_CHANGED", message: t("versions.serviceChanged") };
+      const validateService = (service: ServiceStatus | undefined, allowSwitch = false) => {
+        if (!service) throw { code: "UNKNOWN_SERVICE", message: t("svc.notFound") };
+        if (service.state === "starting" || service.state === "stopping") {
+          throw { code: "SERVICE_BUSY", message: t(service.state === "starting" ? "state.starting" : "state.stopping") };
+        }
+        if (service.state === "unknown") throw { code: "SERVICE_STATE_UNKNOWN", message: t("packages.statusUnknown") };
+        if (service.version !== displayVersion) {
+          if (!allowSwitch) throw { code: "SERVICE_TARGET_CHANGED", message: t("versions.serviceChanged") };
+          if (serviceHasProcess(service)) throw { code: "SERVICE_BUSY", message: t("packages.switchRunning") };
+        } else if (service.state === "running") {
+          return service;
+        }
+        if (serviceHasProcess(service)) throw { code: "SERVICE_BUSY", message: t("svc.processStillRunning") };
+        if (service.missingRequires.length) {
+          throw { code: "MISSING_DEPENDENCIES", message: t("svc.needDepsHint"), hint: service.missingRequires.join(" · ") };
+        }
+        return service;
+      };
+      const singleInstance = startableAs === target.id;
+      let service = validateService(services.find((service) => service.id === startableAs), singleInstance);
+      if (service.state !== "running" && singleInstance) {
+        // PATH 同步失败后可以继续重试，即使默认版本选择已保存。
         await api.setActiveVersion(target.id, displayVersion);
+        if (!current()) return;
+        const selected = await queryClient.fetchQuery({ queryKey: ["services"], queryFn: api.listServiceStatus, staleTime: 0, retry: false, networkMode: "always" });
+        if (!current()) return;
+        service = validateService(selected.find((service) => service.id === startableAs));
       }
-      await api.startService(startableAs);
-      toast.success(t("common.running"));
+      if (!sameCompletedTask()) throw { code: "INSTALL_TASK_CHANGED", message: t("install.startTaskChanged") };
+      if (service.state !== "running") await api.startService(startableAs, displayVersion);
+      if (!current() || !sameCompletedTask()) return;
+      toast.success(`${target.displayName} ${displayVersion} · ${t("common.running")}`);
       onOpenChange(false);
     } catch (e) {
-      toastError(e);
+      if (current()) setStartError(normalizeError(e));
     } finally {
-      setStarting(false);
-      invalidate("services", "packages", "pathenv");
+      if (current()) {
+        startRef.current = null;
+        setStarting(false);
+      }
+      invalidate("services", "packages", "pathenv", "stacks", "databases", "db-users");
     }
   };
 
@@ -300,10 +368,10 @@ export function InstallDialog({
                 key="done"
                 initial={{ opacity: 0, y: 6 }}
                 animate={{ opacity: 1, y: 0 }}
-                className="flex items-center gap-3 rounded-xl border border-running/25 bg-running-soft/60 p-3.5"
+                className="flex flex-wrap items-center gap-3 rounded-xl border border-running/25 bg-running-soft/60 p-3.5"
               >
                 <HardDrive className="h-4 w-4 shrink-0 text-running" />
-                <div className="flex min-w-0 flex-col">
+                <div className="flex min-w-0 flex-1 basis-36 flex-col [overflow-wrap:anywhere]">
                   <span className="text-[12.5px] font-medium text-secondary">
                     {target?.displayName} {displayVersion}
                   </span>
@@ -312,7 +380,7 @@ export function InstallDialog({
                 {/* 装完顺手把命令加进环境变量：就地一步，不再跑去找入口 */}
                 {target && displayVersion && (
                   <div className="ml-auto shrink-0">
-                    <PathEnvToggle pkgId={target.id} version={displayVersion} />
+                    <PathEnvToggle pkgId={target.id} version={displayVersion} disabled={starting} />
                   </div>
                 )}
               </motion.div>
@@ -360,12 +428,18 @@ export function InstallDialog({
               </motion.div>
             )}
           </AnimatePresence>
+          {finished && startableAs === target?.id && <p className="mt-3 text-[11.5px] leading-relaxed text-muted">{t("install.startVersionHint")}</p>}
+          {finished && startError && <div ref={startErrorRef} role="alert" className="mt-3 rounded-xl border border-error/30 bg-error-soft p-3 text-[12px] text-error [overflow-wrap:anywhere]">
+            <p className="font-medium">{t("install.startFailed")}</p>
+            <p className="mt-1 whitespace-pre-wrap">{startError.message}</p>
+            {startError.hint && <p className="mt-1 whitespace-pre-wrap">{startError.hint}</p>}
+          </div>}
         </div>
 
         <DialogFooter className="shrink-0 border-t border-border bg-card-2/20 px-4 py-3.5 sm:px-6">
           {error || cancelled ? (
             <>
-              <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={starting}>
+              <Button variant="ghost" onClick={() => close(false)} disabled={starting}>
                 {t("common.close")}
               </Button>
               {!missing && <Button onClick={retry} disabled={busy}>
@@ -374,12 +448,12 @@ export function InstallDialog({
             </>
           ) : finished ? (
             <>
-              <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={starting}>
+              <Button variant="ghost" onClick={() => close(false)} disabled={starting}>
                 {t("install.close")}
               </Button>
               {startableAs && (
-                <Button onClick={startNow} disabled={starting}>
-                  {starting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowRight className="h-3.5 w-3.5" />} {t(starting ? "packages.starting" : "common.start")}
+                <Button onClick={startNow} disabled={starting || pathBusy || !displayVersion}>
+                  {starting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowRight className="h-3.5 w-3.5" />} {t(starting ? "packages.starting" : startError ? "install.retryStart" : "common.start")}
                 </Button>
               )}
             </>

@@ -4,9 +4,9 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ExternalLink, FolderOpen, RefreshCw, Trash2, ScrollText, Square } from "lucide-react";
+import { Copy, ExternalLink, FolderOpen, RefreshCw, Trash2, ScrollText, Square } from "lucide-react";
 import { CustomRewriteSelect } from "./custom-rewrite-select";
-import type { Site, RewritePreset } from "@nsb/schema";
+import type { CreateSiteInput, Site, RewritePreset } from "@nsb/schema";
 import { useT, useUI } from "@/lib/store";
 import { cn, cmpVersionDesc, normalizeProxyTarget, isPhpSiteSettingValid, APPLICATION_RUNTIMES, applicationRuntime, validApplication } from "@/lib/utils";
 import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
@@ -19,6 +19,7 @@ import {
   SheetTitle,
   SheetDescription,
 } from "@/components/ui/sheet";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -55,6 +56,14 @@ const REWRITE_OPTIONS: { value: RewritePreset; label?: string; labelKey?: string
   { value: "next-export", label: "Next.js (export)" },
 ];
 
+function suggestedCopyDomain(domain: string, name: string) {
+  const clean = domain.trim().toLowerCase().replace(/^\*\./, "");
+  const fallback = name.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "") || "site";
+  if (clean === "localhost" || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(clean) || !clean.includes(".")) return `${fallback}-copy.test`;
+  const [host, ...suffix] = clean.split(".");
+  return `${host || fallback}-copy.${suffix.join(".") || "test"}`;
+}
+
 export function SiteDetailSheet({
   site,
   onClose,
@@ -73,6 +82,11 @@ export function SiteDetailSheet({
   const [deleting, setDeleting] = React.useState(false);
   const deletingRef = React.useRef(false);
   const [deleteError, setDeleteError] = React.useState<AppErrorShape | null>(null);
+  const [duplicateOpen, setDuplicateOpen] = React.useState(false);
+  const [duplicating, setDuplicating] = React.useState(false);
+  const [duplicateName, setDuplicateName] = React.useState("");
+  const [duplicateDomain, setDuplicateDomain] = React.useState("");
+  const [duplicateError, setDuplicateError] = React.useState<AppErrorShape | null>(null);
   const [reloading, setReloading] = React.useState(false);
   const reloadingRef = React.useRef(false);
   const [formError, setFormError] = React.useState<AppErrorShape | null>(null);
@@ -103,6 +117,8 @@ export function SiteDetailSheet({
     setFormError(null);
     setDeleteOpen(false);
     setDeleteError(null);
+    setDuplicateOpen(false);
+    setDuplicateError(null);
     setDiscardOpen(false);
     setTab("general");
     setEnvState({ dirty: false, busy: false, canSave: false, fileName: ".env" });
@@ -130,7 +146,7 @@ export function SiteDetailSheet({
     JSON.stringify(draft.phpOverrides ?? {}) !== JSON.stringify(baseline.phpOverrides ?? {})
   );
   const dirty = siteDirty || envState.dirty;
-  const siteBusy = saving || deleting || reloading;
+  const siteBusy = saving || deleting || reloading || duplicating;
   const busy = siteBusy || envState.busy || filesBusy;
   const directoryChanged = draft.rootDir.trim() !== baseline?.rootDir;
   const isRedirect = draft.runtime.kind === "redirect";
@@ -181,6 +197,58 @@ export function SiteDetailSheet({
     }
   };
 
+  const openDuplicate = () => {
+    setDuplicateName(`${site.name} ${t("detail.copySuffix")}`);
+    setDuplicateDomain(suggestedCopyDomain(site.domains[0] ?? "", site.name));
+    setDuplicateError(null);
+    setDuplicateOpen(true);
+  };
+
+  const duplicate = async () => {
+    if (duplicating || !duplicateName.trim() || !duplicateDomain.trim()) return;
+    setDuplicating(true);
+    setDuplicateError(null);
+    const runtime: Site["runtime"] = {
+      ...site.runtime,
+      access: site.runtime.access ? { ...site.runtime.access, addresses: [...site.runtime.access.addresses] } : undefined,
+      cors: site.runtime.cors ? {
+        ...site.runtime.cors,
+        origins: [...site.runtime.cors.origins],
+        methods: [...site.runtime.cors.methods],
+        allowedHeaders: [...site.runtime.cors.allowedHeaders],
+        exposedHeaders: [...site.runtime.cors.exposedHeaders],
+      } : undefined,
+      proxyRules: site.runtime.proxyRules?.map((rule) => ({ ...rule })),
+      redirect: site.runtime.redirect ? { ...site.runtime.redirect } : undefined,
+      customRewrite: site.runtime.customRewrite ? { ...site.runtime.customRewrite } : undefined,
+      application: site.runtime.application ? { ...site.runtime.application, args: [...site.runtime.application.args] } : undefined,
+      importedCertId: undefined,
+      acmeCertId: undefined,
+    };
+    const input: CreateSiteInput = {
+      name: duplicateName.trim(),
+      domains: [duplicateDomain.trim()],
+      rootDir: site.runtime.kind === "redirect" ? "" : site.rootDir,
+      runtime,
+      https: site.https,
+      rewrite: site.runtime.kind === "redirect" ? "none" : site.rewrite,
+      phpOverrides: site.phpOverrides,
+      writeEnvExample: false,
+      template: "none",
+    };
+    try {
+      const created = await api.createSite(input);
+      queryClient.setQueryData<Site[]>(["sites"], (sites) => sites ? [...sites, created] : [created]);
+      invalidate("sites", "hosts", "certs", "services");
+      setDuplicateOpen(false);
+      toast.success(t("detail.copied").replace("{name}", created.name));
+    } catch (error) {
+      setDuplicateError(normalizeError(error));
+    } finally {
+      setDuplicating(false);
+    }
+  };
+
   const doDelete = async () => {
     if (busy || savingRef.current || deletingRef.current || reloadingRef.current || filesBusyRef.current || envEditorRef.current?.isBusy()) return;
     deletingRef.current = true;
@@ -228,6 +296,9 @@ export function SiteDetailSheet({
             {!isRedirect && <Button variant="secondary" size="sm" onClick={() => api.openInFolder(site.rootDir).catch(toastError)}>
               <FolderOpen className="h-3.5 w-3.5" /> {t("detail.dirBtn")}
             </Button>}
+            <Button variant="secondary" size="sm" disabled={busy || dirty} onClick={openDuplicate}>
+              <Copy className="h-3.5 w-3.5" /> {t("detail.copy")}
+            </Button>
             <Button variant="secondary" size="sm" disabled={busy || dirty} onClick={() => router.push("/logs?service=" + encodeURIComponent("site:" + site.id))}>
               <ScrollText className="h-3.5 w-3.5" /> {t("detail.logs")}
             </Button>
@@ -516,6 +587,32 @@ export function SiteDetailSheet({
 
           </div>
         </div>
+        <Dialog open={duplicateOpen} onOpenChange={(open) => { if (!duplicating) setDuplicateOpen(open); }}>
+          <DialogContent className="max-w-lg">
+            <DialogHeader>
+              <DialogTitle>{t("detail.copyTitle")}</DialogTitle>
+              <DialogDescription>{t("detail.copyHint")}</DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4">
+              <div className="space-y-1.5">
+                <Label htmlFor="site-copy-name">{t("detail.copyName")}</Label>
+                <Input id="site-copy-name" value={duplicateName} disabled={duplicating} onChange={(event) => setDuplicateName(event.target.value)} />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="site-copy-domain">{t("detail.copyDomain")}</Label>
+                <Input id="site-copy-domain" value={duplicateDomain} disabled={duplicating} onChange={(event) => setDuplicateDomain(event.target.value)} className="font-mono text-[12.5px]" />
+                <p className="text-xs leading-relaxed text-muted">{t("detail.copyDomainHint")}</p>
+              </div>
+              {duplicateError && <div role="alert" className="space-y-1 rounded-lg bg-error-soft p-3 text-xs text-error [overflow-wrap:anywhere]"><p>{duplicateError.message}</p>{duplicateError.hint && <p className="text-muted">{duplicateError.hint}</p>}</div>}
+              <div className="flex flex-wrap justify-end gap-2 border-t border-dashed border-separator pt-4">
+                <Button variant="ghost" disabled={duplicating} onClick={() => setDuplicateOpen(false)}>{t("common.cancel")}</Button>
+                <Button disabled={duplicating || !duplicateName.trim() || !duplicateDomain.trim()} onClick={() => void duplicate()}>
+                  {duplicating ? t("detail.copyBusy") : t("detail.copyCreate")}
+                </Button>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
         <div className="mx-5 shrink-0 border-t border-dashed border-separator py-4 sm:mx-6">
           {tab !== "environment" && envState.dirty && <button className="mb-2 text-left text-xs text-warn underline" onClick={() => setTab("environment")}>{t("env.pendingElsewhere")}</button>}
           {accessProblem && <button className="mb-2 mr-3 text-left text-xs text-error underline" onClick={() => { setTab("access"); requestAnimationFrame(() => document.querySelector<HTMLElement>('[id^="site-access-"][aria-invalid="true"]:not(:disabled)')?.focus()); }}>{t("siteAccess.review")}</button>}

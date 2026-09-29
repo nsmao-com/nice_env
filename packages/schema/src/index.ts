@@ -467,6 +467,8 @@ export const CreateSiteInput = z.object({
     .object({ database: z.string(), username: z.string(), password: z.string() })
     .optional(),
   writeEnvExample: z.boolean().default(true),
+  /** Optional site-level PHP overrides copied when duplicating an existing site. */
+  phpOverrides: z.record(z.string(), z.string()).optional(),
   template: z
     .enum([
       "blank-php",

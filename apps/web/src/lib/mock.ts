@@ -72,14 +72,21 @@ const siteFilePlans = new Map<string, SiteFilePlan>();
 
 type MockSiteFile = { content: string; modifiedAt: number };
 const mockSiteFiles = new Map<string, Map<string, MockSiteFile>>();
+const mockSiteDirectories = new Map<string, Set<string>>();
 
 /** 浏览器预览用的站点文件树；只保留普通文本文件，不接触本机文件系统。 */
 function seedMockSiteFiles(site: Site) {
   if (site.runtime.kind === "redirect" || !site.rootDir.trim() || mockSiteFiles.has(site.id)) return;
   const common = (files: Record<string, string>) => {
     const tree = new Map<string, MockSiteFile>();
-    Object.entries(files).forEach(([path, content], index) => tree.set(path, { content, modifiedAt: now() - index * 60_000 }));
+    const directories = new Set<string>();
+    Object.entries(files).forEach(([path, content], index) => {
+      tree.set(path, { content, modifiedAt: now() - index * 60_000 });
+      const parts = path.split("/");
+      for (let i = 1; i < parts.length; i++) directories.add(parts.slice(0, i).join("/"));
+    });
     mockSiteFiles.set(site.id, tree);
+    mockSiteDirectories.set(site.id, directories);
   };
   if (site.id === "site-1") {
     common({
@@ -135,19 +142,29 @@ function mockSensitiveSiteFile(path: string): boolean {
     || [".key", ".pem", ".p12", ".pfx", ".crt", ".cer"].some((suffix) => name.endsWith(suffix));
 }
 
-function mockSiteTree(siteId: string): { site: Site; files: Map<string, MockSiteFile> } {
+function mockSiteTree(siteId: string): { site: Site; files: Map<string, MockSiteFile>; directories: Set<string> } {
   const site = sites.get(siteId);
   if (!site) mockSiteFileError("SITE_NOT_FOUND", "站点已不存在，请刷新列表");
   if (site.runtime.kind === "redirect" || !site.rootDir.trim()) mockSiteFileError("SITE_FILES_UNAVAILABLE", "跳转站点没有可浏览的项目目录");
   seedMockSiteFiles(site);
-  return { site, files: mockSiteFiles.get(site.id)! };
+  return { site, files: mockSiteFiles.get(site.id)!, directories: mockSiteDirectories.get(site.id)! };
 }
 
 function mockSiteDirectory(siteId: string, current?: string) {
-  const { site, files } = mockSiteTree(siteId);
+  const { site, files, directories } = mockSiteTree(siteId);
   const relative = mockSiteRelativePath(current);
   const prefix = relative ? `${relative}/` : "";
   const entries = new Map<string, { name: string; path: string; directory: boolean; sizeBytes: number; modifiedAt: number }>();
+  for (const path of directories) {
+    if (!path.startsWith(prefix)) continue;
+    const rest = path.slice(prefix.length);
+    if (!rest) continue;
+    const slash = rest.indexOf("/");
+    const name = slash === -1 ? rest : rest.slice(0, slash);
+    const entryPath = `${prefix}${name}`;
+    const existing = entries.get(name);
+    entries.set(name, { name, path: entryPath, directory: true, sizeBytes: 0, modifiedAt: existing?.modifiedAt ?? 0 });
+  }
   for (const [path, file] of files) {
     if (!path.startsWith(prefix)) continue;
     const rest = path.slice(prefix.length);
@@ -200,7 +217,7 @@ function mockSiteFileWrite(siteId: string, path: string, content: string, expect
 }
 
 function mockSiteFileDelete(siteId: string, path: string, confirmation: string) {
-  const { site, files } = mockSiteTree(siteId);
+  const { site, files, directories } = mockSiteTree(siteId);
   const relative = mockSiteRelativePath(path, false);
   if (!relative || confirmation !== relative) throw { code: "SITE_FILE_DELETE_CONFIRM_REQUIRED", message: "请输入完整相对路径以确认删除" };
   if (mockSensitiveSiteFile(relative)) throw { code: "SITE_FILE_SENSITIVE", message: "环境变量和密钥文件请使用专用编辑器或系统文件管理器管理" };
@@ -210,8 +227,43 @@ function mockSiteFileDelete(siteId: string, path: string, confirmation: string) 
     return { siteId: site.id, path: relative, directory: false };
   }
   const prefix = `${relative}/`;
-  if ([...files.keys()].some(key => key.startsWith(prefix))) throw { code: "SITE_FILE_DIRECTORY_NOT_EMPTY", message: "目录不为空，请先删除或移动其中的文件" };
+  if ([...files.keys()].some(key => key.startsWith(prefix)) || [...directories].some(key => key.startsWith(prefix))) throw { code: "SITE_FILE_DIRECTORY_NOT_EMPTY", message: "目录不为空，请先删除或移动其中的文件" };
+  if (directories.delete(relative)) return { siteId: site.id, path: relative, directory: true };
   throw { code: "SITE_FILE_DELETE_INVALID", message: "只能删除站点目录中的普通文件或空目录" };
+}
+
+function mockSiteFileCreate(siteId: string, path: string, directory: boolean) {
+  const { site, files, directories } = mockSiteTree(siteId);
+  const relative = mockSiteRelativePath(path, false);
+  if (mockSensitiveSiteFile(relative)) mockSiteFileError("SITE_FILE_SENSITIVE", "环境变量和密钥文件请使用专用文件管理器管理");
+  const parent = relative.split("/").slice(0, -1).join("/");
+  if (parent && !directories.has(parent) && ![...files.keys()].some(key => key.startsWith(`${parent}/`))) mockSiteFileError("SITE_FILE_NOT_DIRECTORY", "目标父目录不存在或不可写");
+  if (files.has(relative) || directories.has(relative)) mockSiteFileError("SITE_FILE_EXISTS", "同名文件或目录已存在");
+  if (directory) directories.add(relative);
+  else files.set(relative, { content: "", modifiedAt: now() });
+  return { siteId: site.id, path: relative, directory };
+}
+
+function mockSiteFileRename(siteId: string, path: string, newPath: string) {
+  const { site, files, directories } = mockSiteTree(siteId);
+  const source = mockSiteRelativePath(path, false);
+  const target = mockSiteRelativePath(newPath, false);
+  if (source === target || mockSensitiveSiteFile(source) || mockSensitiveSiteFile(target)) throw { code: "SITE_FILE_RENAME_INVALID", message: "不能重命名敏感文件，且新旧名称必须不同" };
+  const isDirectory = directories.has(source);
+  if (!isDirectory && !files.has(source)) throw { code: "SITE_FILE_RENAME_INVALID", message: "只能重命名普通文件或目录" };
+  const parent = target.split("/").slice(0, -1).join("/");
+  if (parent && !directories.has(parent) && ![...files.keys()].some(key => key.startsWith(`${parent}/`))) mockSiteFileError("SITE_FILE_NOT_DIRECTORY", "目标父目录不存在或不可写");
+  if (files.has(target) || directories.has(target)) mockSiteFileError("SITE_FILE_EXISTS", "同名文件或目录已存在");
+  if (isDirectory && target.startsWith(`${source}/`)) mockSiteFileError("SITE_FILE_RENAME_INVALID", "目录不能移动到自身或子目录中");
+  if (isDirectory) {
+    const movedDirs = [...directories].filter(item => item === source || item.startsWith(`${source}/`));
+    movedDirs.forEach(item => { directories.delete(item); directories.add(`${target}${item.slice(source.length)}`); });
+    const movedFiles = [...files.entries()].filter(([item]) => item.startsWith(`${source}/`));
+    movedFiles.forEach(([item, file]) => { files.delete(item); files.set(`${target}${item.slice(source.length)}`, file); });
+  } else {
+    const file = files.get(source)!; files.delete(source); files.set(target, file);
+  }
+  return { siteId: site.id, from: source, path: target, directory: isDirectory };
 }
 
 function mockSiteFilePlan(id: string): SiteFilePlan {
@@ -1820,6 +1872,10 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return mockSiteFileWrite(String(args?.id ?? ""), String(args?.path ?? ""), String(args?.content ?? ""), String(args?.expectedRevision ?? "")) as T;
     case "site_file_delete":
       return mockSiteFileDelete(String(args?.id ?? ""), String(args?.path ?? ""), String(args?.confirmation ?? "")) as T;
+    case "site_file_create":
+      return mockSiteFileCreate(String(args?.id ?? ""), String(args?.path ?? ""), args?.directory === true) as T;
+    case "site_file_rename":
+      return mockSiteFileRename(String(args?.id ?? ""), String(args?.path ?? ""), String(args?.newPath ?? "")) as T;
     case "site_network_info": {
       const site = sites.get(args?.id as string);
       if (!site) throw { code: "SITE_NOT_FOUND", message: "站点不存在，请刷新列表" };
@@ -1955,6 +2011,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       }
       sites.delete(id);
       mockSiteFiles.delete(id);
+      mockSiteDirectories.delete(id);
       services.delete(`site-app:${id}`);
       return true as T;
       });

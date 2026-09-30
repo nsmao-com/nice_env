@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, ChevronRight, FileText, Folder, Loader2, RefreshCw, Save, Trash2 } from "lucide-react";
+import { AlertTriangle, ChevronRight, FilePlus, FileText, Folder, FolderPlus, Loader2, Pencil, RefreshCw, Save, Trash2 } from "lucide-react";
 import { useT } from "@/lib/store";
 import { isTauri, normalizeError } from "@/lib/backend";
 import * as api from "@/lib/api";
@@ -38,6 +38,12 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
   const [deleteEntry, setDeleteEntry] = React.useState<api.SiteFileEntry | null>(null);
   const [deleteConfirmation, setDeleteConfirmation] = React.useState("");
   const [deleteError, setDeleteError] = React.useState<string | null>(null);
+  const [createKind, setCreateKind] = React.useState<"file" | "directory" | null>(null);
+  const [createName, setCreateName] = React.useState("");
+  const [createError, setCreateError] = React.useState<string | null>(null);
+  const [renameEntry, setRenameEntry] = React.useState<api.SiteFileEntry | null>(null);
+  const [renameName, setRenameName] = React.useState("");
+  const [renameError, setRenameError] = React.useState<string | null>(null);
   const busyRef = React.useRef(false);
   const editorOpenRef = React.useRef(false);
   const openerRef = React.useRef<HTMLButtonElement | null>(null);
@@ -120,6 +126,47 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
     else closeEditor();
   };
 
+  const relativeNameValid = (name: string) => {
+    const trimmed = name.trim();
+    return trimmed.length > 0 && trimmed.length <= 255 && !/[\\/:\u0000-\u001f\u007f-\u009f]/.test(trimmed) && trimmed !== "." && trimmed !== "..";
+  };
+
+  const createEntry = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!createKind || !relativeNameValid(createName) || busyRef.current || disabled) return;
+    const name = createName.trim();
+    const path = current ? `${current}/${name}` : name;
+    setWorking(true); setCreateError(null);
+    try {
+      await api.siteFileCreate(siteId, path, createKind === "directory");
+      setCreateKind(null); setCreateName("");
+      await client.invalidateQueries({ queryKey: ["site-directory", siteId] });
+      toast.success(t(createKind === "directory" ? "siteFiles.browserCreatedDirectory" as never : "siteFiles.browserCreatedFile" as never));
+    } catch (failure) {
+      const parsed = normalizeError(failure); setCreateError([parsed.message, parsed.hint].filter(Boolean).join(" · "));
+    } finally { setWorking(false); }
+  };
+
+  const renameEntryNow = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!renameEntry || !relativeNameValid(renameName) || busyRef.current || disabled) return;
+    const name = renameName.trim();
+    const parent = renameEntry.path.split("/").slice(0, -1).join("/");
+    const newPath = parent ? `${parent}/${name}` : name;
+    setWorking(true); setRenameError(null);
+    try {
+      await api.siteFileRename(siteId, renameEntry.path, newPath);
+      if (editor?.path === renameEntry.path) {
+        editorOpenRef.current = false; setEditor(null); setSaved(false);
+      }
+      setRenameEntry(null); setRenameName("");
+      await client.invalidateQueries({ queryKey: ["site-directory", siteId] });
+      toast.success(t("siteFiles.browserRenamed" as never));
+    } catch (failure) {
+      const parsed = normalizeError(failure); setRenameError([parsed.message, parsed.hint].filter(Boolean).join(" · "));
+    } finally { setWorking(false); }
+  };
+
   const deleteEntryNow = async () => {
     if (!deleteEntry || busyRef.current || disabled || deleteConfirmation !== deleteEntry.path) return;
     setWorking(true);
@@ -144,9 +191,13 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
         <h3 className="text-sm font-semibold">{t("siteFiles.browserTitle" as never)}</h3>
         <p className="mt-1 text-xs leading-relaxed text-muted">{t("siteFiles.browserHint" as never)}</p>
       </div>
-      <Button size="sm" variant="ghost" disabled={locked || directory.isFetching} onClick={() => void directory.refetch()}>
-        <RefreshCw className={directory.isFetching ? "size-3.5 animate-spin" : "size-3.5"} />{t("siteFiles.refresh")}
-      </Button>
+      <div className="flex flex-wrap items-center justify-end gap-1.5">
+        <Button size="sm" variant="secondary" disabled={locked || directory.isFetching} onClick={() => { setCreateError(null); setCreateName(""); setCreateKind("file"); }}><FilePlus className="size-3.5" />{t("siteFiles.browserNewFile" as never)}</Button>
+        <Button size="sm" variant="secondary" disabled={locked || directory.isFetching} onClick={() => { setCreateError(null); setCreateName(""); setCreateKind("directory"); }}><FolderPlus className="size-3.5" />{t("siteFiles.browserNewFolder" as never)}</Button>
+        <Button size="sm" variant="ghost" disabled={locked || directory.isFetching} onClick={() => void directory.refetch()}>
+          <RefreshCw className={directory.isFetching ? "size-3.5 animate-spin" : "size-3.5"} />{t("siteFiles.refresh")}
+        </Button>
+      </div>
     </div>
     {!isTauri && <p className="flex items-start gap-2 rounded-lg bg-warn-soft p-3 text-xs leading-relaxed text-warn"><AlertTriangle className="mt-0.5 size-3.5 shrink-0" />{t("siteFiles.browserPreview" as never)}</p>}
     {disabled && <p className="text-xs text-warn">{t("siteFiles.browserUnavailable")}</p>}
@@ -168,7 +219,7 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
                <span className="min-w-0 flex-1 truncate font-mono">{entry.name}</span>
                <span className="shrink-0 text-[10px] text-faint">{entry.directory ? t("siteFiles.browserFolder" as never) : fmtBytes(entry.sizeBytes)}</span>
              </button>
-             <Button type="button" size="icon" variant="ghost" className="h-7 w-7 shrink-0 text-error hover:text-error" disabled={locked} aria-label={`${t("siteFiles.browserDelete" as never)} ${entry.name}`} title={t("siteFiles.browserDelete" as never)} onClick={() => { setDeleteError(null); setDeleteConfirmation(""); setDeleteEntry(entry); }}><Trash2 className="size-3.5" /></Button>
+             <Button type="button" size="icon" variant="ghost" className="h-7 w-7 shrink-0" disabled={locked} aria-label={`${t("siteFiles.browserRename" as never)} ${entry.name}`} title={t("siteFiles.browserRename" as never)} onClick={() => { setRenameError(null); setRenameName(entry.name); setRenameEntry(entry); }}><Pencil className="size-3.5" /></Button><Button type="button" size="icon" variant="ghost" className="h-7 w-7 shrink-0 text-error hover:text-error" disabled={locked} aria-label={`${t("siteFiles.browserDelete" as never)} ${entry.name}`} title={t("siteFiles.browserDelete" as never)} onClick={() => { setDeleteError(null); setDeleteConfirmation(""); setDeleteEntry(entry); }}><Trash2 className="size-3.5" /></Button>
            </div>)}
           {!directory.data.entries.length && <p className="p-4 text-center text-xs text-muted">{t("siteFiles.browserEmpty" as never)}</p>}
         </div>
@@ -189,6 +240,26 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
           <Button disabled={locked || !dirty} onClick={() => void save()}>{busy && <Loader2 className="size-3.5 animate-spin" />}<Save className="size-3.5" />{t("siteFiles.browserSave" as never)}</Button>
         </DialogFooter>
         <ConfirmDialog open={discardOpen} onOpenChange={setDiscardOpen} title={t("detail.discardTitle")} description={t("siteFiles.browserDiscard")} confirmText={t("detail.discard")} danger onConfirm={closeEditor} onCloseAutoFocus={(event) => { event.preventDefault(); if (editorOpenRef.current) textareaRef.current?.focus(); else openerRef.current?.focus(); }} />
+      </DialogContent>
+    </Dialog>
+    <Dialog open={createKind !== null} onOpenChange={(open) => { if (!busy && !open) { setCreateKind(null); setCreateName(""); setCreateError(null); } }}>
+      <DialogContent className="max-w-md" hideClose={busy}>
+        <DialogHeader><DialogTitle>{t(createKind === "directory" ? "siteFiles.browserNewFolderTitle" as never : "siteFiles.browserNewFileTitle" as never)}</DialogTitle><DialogDescription>{t("siteFiles.browserCreateHint" as never)}</DialogDescription></DialogHeader>
+        <form className="space-y-4" onSubmit={createEntry}>
+          <div className="space-y-1.5"><Label htmlFor="site-file-create-name">{t(createKind === "directory" ? "siteFiles.browserFolderName" as never : "siteFiles.browserFileName" as never)}</Label><Input id="site-file-create-name" value={createName} disabled={busy} autoComplete="off" spellCheck={false} placeholder={t("siteFiles.browserNamePlaceholder" as never)} aria-invalid={!!createName && !relativeNameValid(createName)} onChange={(event) => setCreateName(event.target.value)} /><p className="text-xs leading-relaxed text-muted">{t("siteFiles.browserNameHint" as never)}</p></div>
+          {createError && <p role="alert" className="break-words text-xs text-error">{createError}</p>}
+          <DialogFooter className="flex-col-reverse sm:flex-row"><Button type="button" variant="ghost" disabled={busy} onClick={() => setCreateKind(null)}>{t("common.cancel")}</Button><Button type="submit" disabled={busy || !relativeNameValid(createName)}>{busy && <Loader2 className="size-3.5 animate-spin" />}{t("siteFiles.browserCreateAction" as never)}</Button></DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+    <Dialog open={renameEntry !== null} onOpenChange={(open) => { if (!busy && !open) { setRenameEntry(null); setRenameName(""); setRenameError(null); } }}>
+      <DialogContent className="max-w-md" hideClose={busy}>
+        <DialogHeader><DialogTitle>{t("siteFiles.browserRenameTitle" as never)}</DialogTitle><DialogDescription className="break-all font-mono">{renameEntry?.path}</DialogDescription></DialogHeader>
+        <form className="space-y-4" onSubmit={renameEntryNow}>
+          <div className="space-y-1.5"><Label htmlFor="site-file-rename-name">{t("siteFiles.browserNewName" as never)}</Label><Input id="site-file-rename-name" value={renameName} disabled={busy} autoComplete="off" spellCheck={false} aria-invalid={!!renameName && !relativeNameValid(renameName)} onChange={(event) => setRenameName(event.target.value)} /></div>
+          {renameError && <p role="alert" className="break-words text-xs text-error">{renameError}</p>}
+          <DialogFooter className="flex-col-reverse sm:flex-row"><Button type="button" variant="ghost" disabled={busy} onClick={() => setRenameEntry(null)}>{t("common.cancel")}</Button><Button type="submit" disabled={busy || !relativeNameValid(renameName) || renameName.trim() === renameEntry?.name}>{busy && <Loader2 className="size-3.5 animate-spin" />}{t("siteFiles.browserRenameAction" as never)}</Button></DialogFooter>
+        </form>
       </DialogContent>
     </Dialog>
     <ConfirmDialog open={deleteEntry != null} onOpenChange={(open) => { if (!busy && !open) { setDeleteEntry(null); setDeleteConfirmation(""); setDeleteError(null); } }} title={t("siteFiles.browserDeleteTitle" as never)} description={t("siteFiles.browserDeleteHint" as never)} confirmText={t("siteFiles.browserDeleteAction" as never)} loading={busy} confirmDisabled={!deleteEntry || deleteConfirmation !== deleteEntry.path} danger onConfirm={() => void deleteEntryNow()}>

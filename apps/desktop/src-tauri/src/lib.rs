@@ -341,6 +341,8 @@ pub fn run() {
             site_file_read,
             site_file_write,
             site_file_delete,
+            site_file_create,
+            site_file_rename,
             site_access_url,
             create_site,
             update_site,
@@ -1307,6 +1309,32 @@ async fn site_file_delete(
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(nsb_core::sitefiles::delete(&st.store, &id, &path, &confirmation))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn site_file_create(
+    state: State<'_, std::sync::Arc<CoreState>>,
+    id: String,
+    path: String,
+    directory: bool,
+) -> Result<nsb_core::sitefiles::SiteFileCreateReceipt, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(nsb_core::sitefiles::create(&st.store, &id, &path, directory))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn site_file_rename(
+    state: State<'_, std::sync::Arc<CoreState>>,
+    id: String,
+    path: String,
+    new_path: String,
+) -> Result<nsb_core::sitefiles::SiteFileRenameReceipt, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(nsb_core::sitefiles::rename(&st.store, &id, &path, &new_path))
     }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

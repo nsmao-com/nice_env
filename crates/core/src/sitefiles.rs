@@ -64,6 +64,23 @@ pub struct SiteFileDeleteReceipt {
     pub directory: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteFileCreateReceipt {
+    pub site_id: String,
+    pub path: String,
+    pub directory: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteFileRenameReceipt {
+    pub site_id: String,
+    pub from: String,
+    pub path: String,
+    pub directory: bool,
+}
+
 fn site(store: &Store, id: &str) -> Result<Site> {
     store
         .list_sites()?
@@ -178,6 +195,23 @@ fn checked_path(root: &Path, relative: &Path) -> Result<PathBuf> {
         ));
     }
     Ok(candidate)
+}
+
+fn checked_new_path(root: &Path, relative: &Path) -> Result<PathBuf> {
+    let Some(name) = relative.file_name() else {
+        return Err(AppError::new("SITE_FILE_PATH_INVALID", "请选择要创建的文件或目录"));
+    };
+    let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    let parent_path = checked_path(root, parent)?;
+    let parent_meta = fs::symlink_metadata(&parent_path).map_err(|e| AppError::io("读取目标目录", e))?;
+    if linked(&parent_meta) || !parent_meta.is_dir() {
+        return Err(AppError::new("SITE_FILE_NOT_DIRECTORY", "目标父目录不存在或不可写"));
+    }
+    let target = parent_path.join(name);
+    if fs::symlink_metadata(&target).is_ok() {
+        return Err(AppError::new("SITE_FILE_EXISTS", "同名文件或目录已存在"));
+    }
+    Ok(target)
 }
 
 fn modified_at(meta: &fs::Metadata) -> i64 {
@@ -460,4 +494,52 @@ pub fn delete(
         fs::remove_file(&target).map_err(|e| AppError::io("删除站点文件", e))?;
     }
     Ok(SiteFileDeleteReceipt { site_id: id.to_string(), path: display, directory })
+}
+
+pub fn create(store: &Store, id: &str, path: &str, directory: bool) -> Result<SiteFileCreateReceipt> {
+    let _sites = crate::sites::SITE_CHANGES.lock();
+    let root = root(store, id)?;
+    let relative = relative(Some(path))?;
+    if relative.as_os_str().is_empty() || sensitive_name(&relative) {
+        return Err(AppError::new("SITE_FILE_SENSITIVE", "环境变量和密钥文件请使用专用编辑器或系统文件管理器管理"));
+    }
+    let target = checked_new_path(&root, &relative)?;
+    if directory {
+        fs::create_dir(&target).map_err(|e| AppError::io("创建站点目录", e))?;
+    } else {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .map_err(|e| AppError::io("创建站点文件", e))?;
+    }
+    Ok(SiteFileCreateReceipt { site_id: id.to_string(), path: display_path(&relative), directory })
+}
+
+pub fn rename(store: &Store, id: &str, path: &str, new_path: &str) -> Result<SiteFileRenameReceipt> {
+    let _sites = crate::sites::SITE_CHANGES.lock();
+    let root = root(store, id)?;
+    let source_relative = relative(Some(path))?;
+    let target_relative = relative(Some(new_path))?;
+    if source_relative.as_os_str().is_empty() || target_relative.as_os_str().is_empty() || sensitive_name(&source_relative) || sensitive_name(&target_relative) {
+        return Err(AppError::new("SITE_FILE_RENAME_INVALID", "不能重命名站点根目录、敏感文件或空路径"));
+    }
+    if source_relative == target_relative {
+        return Err(AppError::new("SITE_FILE_RENAME_INVALID", "新旧名称没有变化"));
+    }
+    let source = checked_path(&root, &source_relative)?;
+    let source_meta = fs::symlink_metadata(&source).map_err(|e| AppError::io("读取原文件", e))?;
+    if linked(&source_meta) || (!source_meta.is_file() && !source_meta.is_dir()) {
+        return Err(AppError::new("SITE_FILE_RENAME_INVALID", "只能重命名普通文件或目录"));
+    }
+    let target = checked_new_path(&root, &target_relative)?;
+    if source_meta.is_dir() {
+        let source_actual = source.canonicalize().map_err(|e| AppError::io("解析原目录", e))?;
+        let target_parent = target.parent().unwrap_or(&root).canonicalize().map_err(|e| AppError::io("解析目标目录", e))?;
+        if target_parent.starts_with(&source_actual) {
+            return Err(AppError::new("SITE_FILE_RENAME_INVALID", "目录不能移动到自身或子目录中"));
+        }
+    }
+    fs::rename(&source, &target).map_err(|e| AppError::io("重命名站点文件", e))?;
+    Ok(SiteFileRenameReceipt { site_id: id.to_string(), from: display_path(&source_relative), path: display_path(&target_relative), directory: source_meta.is_dir() })
 }

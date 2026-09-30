@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, ChevronRight, Download, FilePlus, FileText, Folder, FolderPlus, Loader2, Pencil, RefreshCw, Save, Trash2, Upload } from "lucide-react";
+import { AlertTriangle, ChevronRight, Download, FilePlus, FileText, Folder, FolderPlus, Loader2, Move, Pencil, RefreshCw, Save, Trash2, Upload } from "lucide-react";
 import { useT } from "@/lib/store";
 import { isTauri, normalizeError } from "@/lib/backend";
 import * as api from "@/lib/api";
@@ -44,9 +44,13 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
   const [renameEntry, setRenameEntry] = React.useState<api.SiteFileEntry | null>(null);
   const [renameName, setRenameName] = React.useState("");
   const [renameError, setRenameError] = React.useState<string | null>(null);
+  const [moveEntry, setMoveEntry] = React.useState<api.SiteFileEntry | null>(null);
+  const [movePath, setMovePath] = React.useState("");
+  const [moveError, setMoveError] = React.useState<string | null>(null);
   const busyRef = React.useRef(false);
   const editorOpenRef = React.useRef(false);
   const openerRef = React.useRef<HTMLButtonElement | null>(null);
+  const moveOpenerRef = React.useRef<HTMLButtonElement | null>(null);
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
   const dirty = !!editor && editor.content !== editor.original;
   const locked = busy || disabled;
@@ -129,6 +133,12 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
   const relativeNameValid = (name: string) => {
     const trimmed = name.trim();
     return trimmed.length > 0 && trimmed.length <= 255 && !/[\\/:\u0000-\u001f\u007f-\u009f]/.test(trimmed) && trimmed !== "." && trimmed !== "..";
+  };
+
+  const relativePathValid = (path: string) => {
+    const normalized = path.trim().replaceAll("\\", "/");
+    if (!normalized || normalized.length > 2048 || normalized.startsWith("/") || normalized.endsWith("/")) return false;
+    return normalized.split("/").every((part) => relativeNameValid(part));
   };
 
   const createEntry = async (event: React.FormEvent) => {
@@ -218,6 +228,25 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
     } finally { setWorking(false); }
   };
 
+  const moveEntryNow = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!moveEntry || !relativePathValid(movePath) || busyRef.current || disabled) return;
+    const target = movePath.trim().replaceAll("\\", "/");
+    if (target === moveEntry.path) return;
+    setWorking(true); setMoveError(null);
+    try {
+      await api.siteFileRename(siteId, moveEntry.path, target);
+      if (editor?.path === moveEntry.path) {
+        editorOpenRef.current = false; setEditor(null); setSaved(false);
+      }
+      setMoveEntry(null); setMovePath("");
+      await client.invalidateQueries({ queryKey: ["site-directory", siteId] });
+      toast.success(t("siteFiles.browserMoved" as never));
+    } catch (failure) {
+      const parsed = normalizeError(failure); setMoveError([parsed.message, parsed.hint].filter(Boolean).join(" · "));
+    } finally { setWorking(false); }
+  };
+
   const deleteEntryNow = async () => {
     if (!deleteEntry || busyRef.current || disabled || deleteConfirmation !== deleteEntry.path) return;
     setWorking(true);
@@ -271,7 +300,12 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
                <span className="min-w-0 flex-1 truncate font-mono">{entry.name}</span>
                <span className="shrink-0 text-[10px] text-faint">{entry.directory ? t("siteFiles.browserFolder" as never) : fmtBytes(entry.sizeBytes)}</span>
              </button>
-             {!entry.directory && <Button type="button" size="icon" variant="ghost" className="h-7 w-7 shrink-0" disabled={locked} aria-label={`${t("siteFiles.browserDownload" as never)} ${entry.name}`} title={t("siteFiles.browserDownload" as never)} onClick={() => void downloadFile(entry)}><Download className="size-3.5" /></Button>}<Button type="button" size="icon" variant="ghost" className="h-7 w-7 shrink-0" disabled={locked} aria-label={`${t("siteFiles.browserRename" as never)} ${entry.name}`} title={t("siteFiles.browserRename" as never)} onClick={() => { setRenameError(null); setRenameName(entry.name); setRenameEntry(entry); }}><Pencil className="size-3.5" /></Button><Button type="button" size="icon" variant="ghost" className="h-7 w-7 shrink-0 text-error hover:text-error" disabled={locked} aria-label={`${t("siteFiles.browserDelete" as never)} ${entry.name}`} title={t("siteFiles.browserDelete" as never)} onClick={() => { setDeleteError(null); setDeleteConfirmation(""); setDeleteEntry(entry); }}><Trash2 className="size-3.5" /></Button>
+             <div className="flex shrink-0 flex-wrap items-center justify-end gap-0.5">
+               {!entry.directory && <Button type="button" size="icon" variant="ghost" className="h-7 w-7 shrink-0" disabled={locked} aria-label={`${t("siteFiles.browserDownload" as never)} ${entry.name}`} title={t("siteFiles.browserDownload" as never)} onClick={() => void downloadFile(entry)}><Download className="size-3.5" /></Button>}
+               <Button type="button" size="icon" variant="ghost" className="h-7 w-7 shrink-0" disabled={locked} aria-label={`${t("siteFiles.browserMove" as never)} ${entry.name}`} title={t("siteFiles.browserMove" as never)} onClick={(event) => { moveOpenerRef.current = event.currentTarget; setMoveError(null); setMovePath(entry.path); setMoveEntry(entry); }}><Move className="size-3.5" /></Button>
+               <Button type="button" size="icon" variant="ghost" className="h-7 w-7 shrink-0" disabled={locked} aria-label={`${t("siteFiles.browserRename" as never)} ${entry.name}`} title={t("siteFiles.browserRename" as never)} onClick={() => { setRenameError(null); setRenameName(entry.name); setRenameEntry(entry); }}><Pencil className="size-3.5" /></Button>
+               <Button type="button" size="icon" variant="ghost" className="h-7 w-7 shrink-0 text-error hover:text-error" disabled={locked} aria-label={`${t("siteFiles.browserDelete" as never)} ${entry.name}`} title={t("siteFiles.browserDelete" as never)} onClick={() => { setDeleteError(null); setDeleteConfirmation(""); setDeleteEntry(entry); }}><Trash2 className="size-3.5" /></Button>
+             </div>
            </div>)}
           {!directory.data.entries.length && <p className="p-4 text-center text-xs text-muted">{t("siteFiles.browserEmpty" as never)}</p>}
         </div>
@@ -311,6 +345,16 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
           <div className="space-y-1.5"><Label htmlFor="site-file-rename-name">{t("siteFiles.browserNewName" as never)}</Label><Input id="site-file-rename-name" value={renameName} disabled={busy} autoComplete="off" spellCheck={false} aria-invalid={!!renameName && !relativeNameValid(renameName)} onChange={(event) => setRenameName(event.target.value)} /></div>
           {renameError && <p role="alert" className="break-words text-xs text-error">{renameError}</p>}
           <DialogFooter className="flex-col-reverse sm:flex-row"><Button type="button" variant="ghost" disabled={busy} onClick={() => setRenameEntry(null)}>{t("common.cancel")}</Button><Button type="submit" disabled={busy || !relativeNameValid(renameName) || renameName.trim() === renameEntry?.name}>{busy && <Loader2 className="size-3.5 animate-spin" />}{t("siteFiles.browserRenameAction" as never)}</Button></DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+    <Dialog open={moveEntry !== null} onOpenChange={(open) => { if (!busy && !open) { setMoveEntry(null); setMovePath(""); setMoveError(null); } }}>
+      <DialogContent className="max-w-md" hideClose={busy} onCloseAutoFocus={(event) => { event.preventDefault(); moveOpenerRef.current?.focus(); }}>
+        <DialogHeader><DialogTitle>{t("siteFiles.browserMoveTitle" as never)}</DialogTitle><DialogDescription className="break-all font-mono">{moveEntry?.path}</DialogDescription></DialogHeader>
+        <form className="space-y-4" onSubmit={moveEntryNow}>
+          <div className="space-y-1.5"><Label htmlFor="site-file-move-path">{t("siteFiles.browserTargetPath" as never)}</Label><Input id="site-file-move-path" value={movePath} disabled={busy} autoComplete="off" spellCheck={false} aria-invalid={!!movePath && !relativePathValid(movePath)} onChange={(event) => setMovePath(event.target.value)} /><p className="text-xs leading-relaxed text-muted">{t("siteFiles.browserMoveHint" as never)}</p></div>
+          {moveError && <p role="alert" className="break-words text-xs text-error">{moveError}</p>}
+          <DialogFooter className="flex-col-reverse sm:flex-row"><Button type="button" variant="ghost" disabled={busy} onClick={() => setMoveEntry(null)}>{t("common.cancel")}</Button><Button type="submit" disabled={busy || !relativePathValid(movePath) || movePath.trim().replaceAll("\\", "/") === moveEntry?.path}>{busy && <Loader2 className="size-3.5 animate-spin" />}{t("siteFiles.browserMoveAction" as never)}</Button></DialogFooter>
         </form>
       </DialogContent>
     </Dialog>

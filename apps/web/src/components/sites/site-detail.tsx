@@ -8,7 +8,7 @@ import { Copy, ExternalLink, FolderOpen, RefreshCw, Trash2, ScrollText, Square }
 import { CustomRewriteSelect } from "./custom-rewrite-select";
 import type { CreateSiteInput, Site, RewritePreset } from "@nsb/schema";
 import { useT, useUI } from "@/lib/store";
-import { cn, cmpVersionDesc, normalizeProxyTarget, isPhpSiteSettingValid, APPLICATION_RUNTIMES, applicationRuntime, validApplication, siteErrorPagesProblem, siteBasicAuthProblem } from "@/lib/utils";
+import { cn, cmpVersionDesc, normalizeProxyTarget, isPhpSiteSettingValid, APPLICATION_RUNTIMES, applicationRuntime, validApplication, sameVersion, siteErrorPagesProblem, siteBasicAuthProblem } from "@/lib/utils";
 import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { usePackages, useService, useInvalidate, toastError, siteUrl } from "@/lib/hooks";
 import * as api from "@/lib/api";
@@ -173,7 +173,7 @@ export function SiteDetailSheet({
   const proxyInvalid = isProxy && !normalizedProxyTarget;
   const appRuntime = applicationRuntime(draft.runtime.kind);
   const appVersions = packages.filter((p) => p.id === appRuntime?.id && p.install).map((p) => p.version).sort(cmpVersionDesc);
-  const applicationInvalid = !!draft.runtime.application && (!validApplication(draft.runtime.application, draft.runtime.proxyTarget ?? "") || !appVersions.includes(draft.runtime.application.version));
+  const applicationInvalid = !!draft.runtime.application && (!validApplication(draft.runtime.application, draft.runtime.proxyTarget ?? "") || !appVersions.some((version) => sameVersion(version, draft.runtime.application!.version)));
   const applicationBusy = !!applicationStatus && (!!applicationStatus.pids.length || ["running", "starting", "stopping"].includes(applicationStatus.state));
   const phpInvalid = draft.runtime.kind === "php" && Object.entries(draft.phpOverrides ?? {}).some(([key, value]) => !isPhpSiteSettingValid(key, value, baseline?.phpOverrides?.[key]));
   const requestClose = () => {
@@ -466,7 +466,7 @@ export function SiteDetailSheet({
                     disabled={busy}
                     onClick={() => setDraft({ ...draft, runtime: { ...draft.runtime, phpVersion: v } })}
                     className={`rounded-lg border px-3 py-1.5 font-mono text-[12px] transition-all ${
-                      draft.runtime.phpVersion === v
+                      sameVersion(draft.runtime.phpVersion, v)
                         ? "border-primary/60 bg-primary-soft text-primary"
                         : "border-border text-muted hover:border-border-strong"
                     }`}

@@ -11,7 +11,7 @@ import { useT, useUI } from "@/lib/store";
 import { useInvalidate, usePackages, useSites, toastError } from "@/lib/hooks";
 import { isTauri, normalizeError } from "@/lib/backend";
 import * as api from "@/lib/api";
-import { cn, cmpVersionDesc, normalizeProxyTarget } from "@/lib/utils";
+import { cn, cmpVersionDesc, normalizeProxyTarget, sameVersion } from "@/lib/utils";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -49,7 +49,7 @@ export function scannedProjectProblem(project: ScannedProject, draft: ProjectDra
   const domain = draft.domain.trim().toLowerCase();
   if (domain.length > 253 || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i.test(domain)) return "scanSetup.invalidDomain" as const;
   if (occupied.has(domain) || duplicate) return "scanSetup.domainUsed" as const;
-  if (project.siteKind === "php" && !phpVersions.includes(draft.phpVersion)) return "scanSetup.phpRequired" as const;
+  if (project.siteKind === "php" && !phpVersions.some((version) => sameVersion(version, draft.phpVersion))) return "scanSetup.phpRequired" as const;
   if (project.siteKind === "php") {
     const problem = projectPhpProblem(project.phpCompatibility, draft.phpVersion, !!draft.allowUnverifiedPhp);
     if (problem) return problem;

@@ -1680,7 +1680,7 @@ fn match_php_with_composer(php: &std::path::Path, composer: &std::path::Path, re
     if let Some(error) = reply.invalid { return Err(AppError::new("PHP_REQUIREMENT_INVALID", "composer.json 中的 PHP 版本约束无法解析").with_detail(error)); }
     if let Some(error) = reply.error { return Err(AppError::new("PHP_CHECK_FAILED", "无法使用已安装 Composer 检查版本，请修复 PHP 或 Composer").with_detail(error)); }
     let matching = reply.matching.ok_or_else(|| AppError::new("PHP_CHECK_FAILED", "Composer 版本校验结果不完整"))?;
-    if matching.iter().any(|v| !versions.contains(v)) { return Err(AppError::new("PHP_CHECK_FAILED", "Composer 版本校验返回了未知版本")); }
+    if matching.iter().any(|v| !versions.iter().any(|candidate| crate::install::same_version(candidate, v))) { return Err(AppError::new("PHP_CHECK_FAILED", "Composer 版本校验返回了未知版本")); }
     Ok(matching)
 }
 
@@ -1689,7 +1689,7 @@ fn validate_existing_php(input: &CreateSiteInput, project: &str, allow_unverifie
     let report = crate::scanner::project_php_compatibility(paths, store, std::path::Path::new(project))?;
     match report.status.as_str() {
         "invalid" => Err(AppError::new("PHP_REQUIREMENT_INVALID", report.message.unwrap_or_else(|| "项目 PHP 版本要求无效".into()))),
-        "checked" if !input.runtime.php_version.as_ref().is_some_and(|v| report.matching_versions.contains(v)) =>
+        "checked" if !input.runtime.php_version.as_ref().is_some_and(|v| report.matching_versions.iter().any(|candidate| crate::install::same_version(candidate, v))) =>
             Err(AppError::new("PHP_VERSION_MISMATCH", format!("所选 PHP 不符合项目要求 {}", report.requirement.unwrap_or_default()))
                 .with_hint("请重新检查并选择符合要求的已安装 PHP；没有兼容版本时到套件页安装")),
         "unavailable" if !allow_unverified => Err(AppError::new("PHP_CHECK_UNAVAILABLE", report.message.unwrap_or_else(|| "暂时无法校验项目 PHP 版本".into()))

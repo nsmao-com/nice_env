@@ -2,22 +2,22 @@
 
 import type { ProjectPhpCompatibility } from "@nsb/schema";
 import { useT } from "@/lib/store";
-import { cmpVersionDesc } from "@/lib/utils";
+import { cmpVersionDesc, sameVersion } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
 export function projectPhpProblem(report: ProjectPhpCompatibility | null | undefined, version: string, acknowledged: boolean) {
   if (report?.status === "invalid") return "projectPhp.invalid" as const;
   if (report?.status === "unspecified") return null;
-  if (report?.status === "checked" && report.versions.includes(version)) {
-    return report.matchingVersions.includes(version) ? null : "projectPhp.incompatible" as const;
+  if (report?.status === "checked" && report.versions.some((candidate) => sameVersion(candidate, version))) {
+    return report.matchingVersions.some((candidate) => sameVersion(candidate, version)) ? null : "projectPhp.incompatible" as const;
   }
   return acknowledged ? null : "projectPhp.confirmRequired" as const;
 }
 
 export function recommendedProjectPhp(report: ProjectPhpCompatibility | null | undefined, installed: string[], preferred = "") {
-  const eligible = report?.status === "checked" ? installed.filter((v) => report.matchingVersions.includes(v))
+  const eligible = report?.status === "checked" ? installed.filter((v) => report.matchingVersions.some((candidate) => sameVersion(candidate, v)))
     : report?.status === "unspecified" ? installed : [];
-  return eligible.includes(preferred) ? preferred : [...eligible].sort(cmpVersionDesc)[0] ?? "";
+  return eligible.some((candidate) => sameVersion(candidate, preferred)) ? preferred : [...eligible].sort(cmpVersionDesc)[0] ?? "";
 }
 
 /** 扫描列表与完整向导共用；无法校验的确认不能绕过已知版本冲突。 */
@@ -26,8 +26,10 @@ export function ProjectPhpCheck({ report, version, acknowledged, onAcknowledge, 
   onAcknowledge: (value: boolean) => void; onRefresh: () => void; loading?: boolean; disabled?: boolean;
 }) {
   const t = useT();
-  const unknown = !report || report.status === "unavailable" || (report.status === "checked" && !!version && !report.versions.includes(version));
-  const incompatible = report?.status === "checked" && !!version && report.versions.includes(version) && !report.matchingVersions.includes(version);
+  const known = !!version && !!report?.versions.some((candidate) => sameVersion(candidate, version));
+  const compatible = !!version && !!report?.matchingVersions.some((candidate) => sameVersion(candidate, version));
+  const unknown = !report || report.status === "unavailable" || (report.status === "checked" && !!version && !known);
+  const incompatible = report?.status === "checked" && !!version && known && !compatible;
   const message = loading ? "projectPhp.checking" : report?.status === "invalid" ? "projectPhp.invalid"
     : unknown ? "projectPhp.unavailable" : report?.status === "unspecified" ? "projectPhp.unspecified"
     : !report?.matchingVersions.length ? "projectPhp.none" : incompatible ? "projectPhp.incompatible" : !version ? "projectPhp.choose" : "projectPhp.checked";

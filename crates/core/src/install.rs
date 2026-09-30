@@ -40,6 +40,15 @@ pub(crate) fn same_optional_version(left: Option<&str>, right: Option<&str>) -> 
     }
 }
 
+/// 检查清单中的依赖是否由已安装套件满足。依赖可以只写套件 ID，
+/// 也可以写 `id@version`；历史安装记录的 `v` 前缀不应导致依赖被误报为缺失。
+pub(crate) fn installed_package_satisfies(package: &InstalledPackage, dependency: &str) -> bool {
+    match dependency.split_once('@') {
+        Some((id, version)) => package.id == id && same_version(&package.version, version),
+        None => package.id == dependency,
+    }
+}
+
 pub(crate) fn official_qdrant(entry: &crate::model::PackageManifestEntry) -> bool {
     entry.id == "qdrant" && entry.url.starts_with("https://github.com/qdrant/qdrant/releases/download/")
         && entry.run.as_ref().is_some_and(|run| run.args == ["--config-path", "{etc}/config.yaml", "--disable-telemetry"]

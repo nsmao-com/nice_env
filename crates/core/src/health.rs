@@ -626,12 +626,7 @@ fn check_services(
         let missing: Vec<_> = service
             .requires
             .iter()
-            .filter(|dependency| {
-                !installed.iter().any(|package| {
-                    package.id == **dependency
-                        || format!("{}@{}", package.id, package.version) == **dependency
-                })
-            })
+            .filter(|dependency| !installed.iter().any(|package| crate::install::installed_package_satisfies(package, dependency)))
             .cloned()
             .collect();
         if !missing.is_empty() {

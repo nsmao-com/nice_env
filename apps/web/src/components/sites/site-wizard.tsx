@@ -27,7 +27,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { RewritePreset as RewriteSchema, type ScannedProject, type CreateSiteInput, type RewritePreset, type SiteKind, type SiteCreateProgress } from "@nsb/schema";
-import { cn, cmpVersionDesc, normalizeProxyTarget } from "@/lib/utils";
+import { cn, cmpVersionDesc, normalizeProxyTarget, sameVersion } from "@/lib/utils";
 import { useT, type ExistingProjectDefaults } from "@/lib/store";
 import { isTauri, listen, normalizeError } from "@/lib/backend";
 import { usePackages, siteUrl, toastError } from "@/lib/hooks";
@@ -162,7 +162,7 @@ export function SiteWizard({
   const [application, setApplication] = React.useState<CreateSiteInput["runtime"]["application"]>();
   const appRuntime = applicationRuntime(kind);
   const appVersions = packages.filter((p) => p.id === appRuntime?.id && p.install).map((p) => p.version).sort(cmpVersionDesc);
-  const applicationValid = validApplication(application, proxyTarget) && (!application || appVersions.includes(application.version));
+  const applicationValid = validApplication(application, proxyTarget) && (!application || appVersions.some((version) => sameVersion(version, application.version)));
   const isRedirect = kind === "redirect";
   const [redirect, setRedirect] = React.useState(DEFAULT_REDIRECT);
   const redirectResult = siteRedirectTarget(redirect, [domain, ...aliases.split(/[,，\s]+/).filter(Boolean)]);
@@ -252,7 +252,7 @@ export function SiteWizard({
   const canNext = React.useMemo(() => {
     if ((step === 2 || step === 5) && isRedirect && redirectResult.error) return false;
     if (step === 5 && !isRedirect && !rootDir.trim()) return false;
-    if (step >= 2 && kind === "php" && (!phpVersions.includes(phpVersion) || (existingProject && (phpChecking || existingPhpProblem)))) return false;
+    if (step >= 2 && kind === "php" && (!phpVersions.some((version) => sameVersion(version, phpVersion)) || (existingProject && (phpChecking || existingPhpProblem)))) return false;
     if (step >= 3 && https && certificateSelection.problem) return false;
     if (step >= 2 && isProxy && (!normalizedProxyTarget || !applicationValid)) return false;
     switch (step) {
@@ -261,7 +261,7 @@ export function SiteWizard({
       case 1:
         return rootDir.trim().length > 0 && (!composerTemplate || composerInstalled) && templateNodeCompatible;
       case 2:
-        return webInstalled && templatePhpCompatible && (kind !== "php" || phpVersions.includes(phpVersion));
+        return webInstalled && templatePhpCompatible && (kind !== "php" || phpVersions.some((version) => sameVersion(version, phpVersion)));
       case 4:
       case 5:
         return webInstalled && databaseValid && (!composerTemplate || composerInstalled) && templatePhpCompatible && templateNodeCompatible;
@@ -595,10 +595,10 @@ export function SiteWizard({
                           <button
                             key={v}
                             onClick={() => { setPhpVersion(v); setAllowUnverifiedPhp(false); }}
-                            aria-pressed={phpVersion === v}
+                            aria-pressed={sameVersion(phpVersion, v)}
                             className={cn(
                               "rounded-lg border px-3 py-1.5 font-mono text-[12px] transition-all",
-                              phpVersion === v
+                              sameVersion(phpVersion, v)
                                 ? "border-primary/60 bg-primary-soft text-primary"
                                 : "border-border text-muted hover:border-border-strong"
                             )}
@@ -788,9 +788,9 @@ export function SiteWizard({
             </div>
           </div>
         )}
-        {!creating && step > 2 && existingProject && kind === "php" && (phpChecking || existingPhpProblem || !phpVersions.includes(phpVersion)) &&
+        {!creating && step > 2 && existingProject && kind === "php" && (phpChecking || existingPhpProblem || !phpVersions.some((version) => sameVersion(version, phpVersion))) &&
           <div role="alert" className="flex flex-wrap items-center gap-2 rounded-lg bg-warn-soft p-3 text-xs text-warn">
-            <span>{t(phpChecking ? "projectPhp.checking" : !phpVersions.includes(phpVersion) ? "scanSetup.phpRequired" : existingPhpProblem!)}</span>
+            <span>{t(phpChecking ? "projectPhp.checking" : !phpVersions.some((version) => sameVersion(version, phpVersion)) ? "scanSetup.phpRequired" : existingPhpProblem!)}</span>
             <Button size="sm" variant="ghost" onClick={() => setStep(2)}>{t("projectPhp.configure")}</Button>
           </div>}
         {!creating && createError && (

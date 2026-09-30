@@ -254,9 +254,14 @@ pub fn project_php_compatibility(paths: &crate::paths::Paths, store: &crate::sto
     };
     report.requirement = Some(requirement.into());
     report.versions = store.list_installed()?.into_iter().filter(|p| p.id == "php").map(|p| p.version).collect();
-    report.versions.sort_by(|a,b| crate::versions::cmp_version_desc(a,b)); report.versions.dedup();
+    report.versions.sort_by(|a,b| crate::versions::cmp_version_desc(a,b));
+    report.versions.dedup_by(|left, right| crate::install::same_version(left, right));
     match crate::sites::composer_matching_php_versions(paths, store, requirement, &report.versions) {
-        Ok(matching) => { report.status = "checked".into(); report.matching_versions = matching; }
+        Ok(mut matching) => {
+            matching.sort_by(|a, b| crate::versions::cmp_version_desc(a, b));
+            matching.dedup_by(|left, right| crate::install::same_version(left, right));
+            report.status = "checked".into(); report.matching_versions = matching;
+        }
         Err(error) => {
             report.status = if error.code == "PHP_REQUIREMENT_INVALID" { "invalid" } else { "unavailable" }.into();
             report.message = Some(error.message);

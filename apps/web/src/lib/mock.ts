@@ -1616,7 +1616,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         if (detected.issue && !Object.hasOwn(versions, detected.id)) throw { code: "PROJECT_RUNTIME_DETECTION", message: detected.issue, hint: "请选择已安装版本覆盖此项，或修正版本文件后重新读取。" };
       }
       for (const [id, version] of Object.entries(versions)) {
-        if (!view.options.find((option) => option.id === id)?.versions.includes(version)) throw { code: "TERMINAL_RUNTIME_UNAVAILABLE", message: `${id} ${version} 尚未安装，请改选已安装版本或取消固定` };
+        if (!view.options.find((option) => option.id === id)?.versions.some((candidate) => sameVersion(candidate, version))) throw { code: "TERMINAL_RUNTIME_UNAVAILABLE", message: `${id} ${version} 尚未安装，请改选已安装版本或取消固定` };
       }
       mockProjectVersions.set(mockProjectRoot(sites.get(siteId)!), { ...versions });
       return mockProjectView(siteId) as T;

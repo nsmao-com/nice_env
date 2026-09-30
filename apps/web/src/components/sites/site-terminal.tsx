@@ -53,7 +53,7 @@ export function SiteTerminalButton({ site, showLabel = false, disabled = false, 
   }, [project.data, project.isFetching, project.error, draft, open, tab]);
   const dirty = !!draft && (Object.keys(draft.versions).length !== Object.keys(draft.base.versions).length
     || Object.entries(draft.versions).some(([id, version]) => !sameVersion(draft.base.versions[id], version)));
-  const invalid = !!draft && (Object.entries(draft.versions).some(([id, version]) => !draft.base.options.find((o) => o.id === id)?.versions.includes(version))
+  const invalid = !!draft && (Object.entries(draft.versions).some(([id, version]) => !draft.base.options.find((o) => o.id === id)?.versions.some((candidate) => sameVersion(candidate, version)))
     || draft.base.detected.some((entry) => entry.issue && !Object.hasOwn(draft.versions, entry.id)));
   const problem = error ?? (environment.error ? normalizeError(environment.error) : null);
   const projectProblem = saveError ?? (project.error ? normalizeError(project.error) : null);
@@ -162,7 +162,7 @@ export function SiteTerminalButton({ site, showLabel = false, disabled = false, 
               <div className="rounded-lg bg-fill px-3">{draft.base.options.map((option) => {
                 const selected = Object.hasOwn(draft.versions, option.id) ? draft.versions[option.id] : undefined;
                 const detected = draft.base.detected.find((entry) => entry.id === option.id);
-                const missing = !!selected && !option.versions.includes(selected);
+                const missing = !!selected && !option.versions.some((candidate) => sameVersion(candidate, selected));
                 const inherit = detected ? (detected.resolvedVersion ? t("sites.project.autoVersion").replace("{version}", detected.resolvedVersion) : t("sites.project.autoIssue")) : option.id === "php" && draft.base.phpVersion
                   ? t("sites.project.followPhp").replace("{version}", draft.base.phpVersion) : t("sites.project.followPath");
                 return <div key={option.id} className="space-y-2 border-b border-dashed border-separator py-3 last:border-0">

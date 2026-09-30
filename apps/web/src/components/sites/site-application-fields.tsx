@@ -4,7 +4,7 @@ import type { SiteRuntime } from "@nsb/schema";
 import { FolderOpen, Plus, Trash2 } from "lucide-react";
 import { useT } from "@/lib/store";
 import { isTauri } from "@/lib/backend";
-import { applicationRuntime } from "@/lib/utils";
+import { applicationRuntime, sameVersion } from "@/lib/utils";
 import { toastError } from "@/lib/hooks";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -51,13 +51,13 @@ export function SiteApplicationFields({ id, kind, value, versions, rootDir, disa
         <div className="space-y-1.5">
           <Label htmlFor={`${id}-version`}>{runtime.label} · {t("appProcess.version")}</Label>
           <Select value={value.version || undefined} disabled={blocked || !versions.length} onValueChange={(version) => onChange({ ...value, version })}>
-            <SelectTrigger id={`${id}-version`} aria-invalid={!versions.includes(value.version)}><SelectValue placeholder={t("appProcess.chooseVersion")} /></SelectTrigger>
+            <SelectTrigger id={`${id}-version`} aria-invalid={!versions.some((candidate) => sameVersion(candidate, value.version))}><SelectValue placeholder={t("appProcess.chooseVersion")} /></SelectTrigger>
             <SelectContent>
-              {!!value.version && !versions.includes(value.version) && <SelectItem value={value.version} disabled>{value.version} · {t("appProcess.missing")}</SelectItem>}
+          {!!value.version && !versions.some((candidate) => sameVersion(candidate, value.version)) && <SelectItem value={value.version} disabled>{value.version} · {t("appProcess.missing")}</SelectItem>}
               {versions.map((version) => <SelectItem key={version} value={version}>{runtime.label} {version}</SelectItem>)}
             </SelectContent>
           </Select>
-          {!versions.includes(value.version) && <p role="alert" className="text-xs leading-relaxed text-error">{t("appProcess.installFirst")}</p>}
+          {!versions.some((candidate) => sameVersion(candidate, value.version)) && <p role="alert" className="text-xs leading-relaxed text-error">{t("appProcess.installFirst")}</p>}
           <p className="text-xs leading-relaxed text-muted">{t("appProcess.versionHint")}</p>
         </div>
         <div className="space-y-2">

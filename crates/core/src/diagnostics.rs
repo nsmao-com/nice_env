@@ -419,9 +419,8 @@ fn build_with_listeners(
             _ => None,
         };
         if let Some(kind) = kind {
-            if !configs
-                .iter()
-                .any(|file| file.kind == format!("{kind}@{}", package.version))
+            if !configs.iter().any(|file| file.kind.split_once('@')
+                .is_some_and(|(file_kind, version)| file_kind == kind && crate::install::same_version(version, &package.version)))
             {
                 skipped.push(format!(
                     "{} {}：无法解析配置目标，版本记录可能已变更或无效",
@@ -674,12 +673,7 @@ pub fn diagnose_service(
     service.missing_requires = service
         .requires
         .iter()
-        .filter(|dependency| {
-            !installed.iter().any(|package| {
-                package.id == **dependency
-                    || format!("{}@{}", package.id, package.version) == **dependency
-            })
-        })
+        .filter(|dependency| !installed.iter().any(|package| crate::install::installed_package_satisfies(package, dependency)))
         .cloned()
         .collect();
     let mut checks = vec![service_state_check(&service)];

@@ -269,6 +269,7 @@ pub fn run() {
             frontend_ready,
             // 套件
             list_packages,
+            reconcile_installed_packages,
             install_package,
             uninstall_package,
             preview_package_uninstall,
@@ -760,6 +761,17 @@ fn list_packages(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<Vec<nsb_core::model::PackageView>, tauri::Error> {
     map_jh(state.list_packages())
+}
+
+#[tauri::command]
+async fn reconcile_installed_packages(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+) -> Result<nsb_core::model::PackageReconcileResult, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.reconcile_installed_packages()))
+        .await
+        .map_err(|error| tauri::Error::Anyhow(anyhow::anyhow!("{error}")))?
 }
 
 #[tauri::command]

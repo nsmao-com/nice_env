@@ -32,6 +32,7 @@ import {
   HardDrive,
   Stethoscope,
   RefreshCw,
+  ScanSearch,
 } from "lucide-react";
 import type { PackageView, PackageCategory, ServiceStatus, BulkReport, BulkTarget, VersionCatalog } from "@nsb/schema";
 import { PACKAGE_CATEGORY_ORDER, PackageUninstallPreview } from "@nsb/schema";
@@ -59,6 +60,9 @@ import { InstallDialog, InstallTasksPanel, type InstallTarget } from "@/componen
 import { ServiceIcon } from "@/components/shared/service-icon";
 import { ServiceDiagnostics } from "@/components/shared/service-diagnostics";
 import { ServiceWebButton } from "@/components/shared/service-web-button";
+import { ServiceConfigButton } from "@/components/shared/service-config-button";
+import { ServiceDataDirButton } from "@/components/shared/service-data-dir-button";
+import { ServiceAutoStartButton } from "@/components/shared/service-auto-start-button";
 import { SortableCollection } from "@/components/shared/sortable-collection";
 import { PageHeader } from "@/components/layout/app-shell";
 import { cmpVersionDesc, isPrerelease } from "@/lib/utils";
@@ -280,6 +284,8 @@ export default function PackagesPage() {
   } = useVersionCatalogs(packages.map((p) => p.id));
   const [catalogRefreshing, setCatalogRefreshing] = React.useState(false);
   const catalogRefreshRef = React.useRef(false);
+  const [reconciling, setReconciling] = React.useState(false);
+  const reconcileRef = React.useRef(false);
   const [catalogRefreshIssue, setCatalogRefreshIssue] = React.useState<{ message: string; hint?: string; failures: { id: string; error: string }[] } | null>(null);
   const [query, setQuery] = React.useState("");
   const [packageFilter, setPackageFilter] = React.useState<PackageFilter>("all");
@@ -353,6 +359,26 @@ export default function PackagesPage() {
     } finally {
       catalogRefreshRef.current = false;
       setCatalogRefreshing(false);
+    }
+  };
+  const reconcileInstalled = async () => {
+    if (!isTauri || reconcileRef.current || reconciling) return;
+    reconcileRef.current = true;
+    setReconciling(true);
+    try {
+      const report = await api.reconcileInstalledPackages();
+      await refreshState(true);
+      const count = report.imported.length + report.refreshed.length;
+      if (count > 0) {
+        toast.success(t("packages.reconcileDone").replace("{count}", String(count)));
+      } else {
+        toast.info(t("packages.reconcileNone"));
+      }
+    } catch (error) {
+      toast.error(normalizeError(error).message);
+    } finally {
+      reconcileRef.current = false;
+      setReconciling(false);
     }
   };
   const filtered = React.useMemo(() => {
@@ -544,6 +570,9 @@ export default function PackagesPage() {
             {hasFilters && <Button variant="ghost" size="sm" onClick={resetFilters}>{t("packages.resetFilters")}</Button>}
             <Button variant="ghost" size="sm" disabled={!isTauri || !dataReady || catalogRefreshing} onClick={() => void refreshAllVersions()} title={t("packages.refreshVersionsHint")}>
               <RefreshCw className={cn("h-3.5 w-3.5", catalogRefreshing && "animate-spin")} /> {t("packages.refreshVersions")}
+            </Button>
+            <Button variant="ghost" size="sm" disabled={!isTauri || reconciling || !dataReady} onClick={() => void reconcileInstalled()} title={t("packages.reconcileInstalledHint")}>
+              <ScanSearch className={cn("h-3.5 w-3.5", reconciling && "animate-spin")} /> {t("packages.reconcileInstalled")}
             </Button>
             <Button variant="outline" size="sm" disabled={actionsDisabled} onClick={() => openBulk("start")}>
               <Play className="h-3.5 w-3.5" /> {t("packages.startAll")}
@@ -1035,6 +1064,9 @@ function PackageRow({
                     <button type="button" aria-label={t("svc.diag.title").replace("{name}", `${service.label}${service.version ? ` ${service.version}` : ""}`)}
                       className="inline-flex min-h-8 items-center gap-1 rounded px-1 py-1 text-primary hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                       onClick={() => setDiagnosticService(service)}><Stethoscope className="h-3 w-3 shrink-0" />{t("svc.diagnose")}</button>
+                    <ServiceConfigButton service={service} disabled={disabled || actionBusy} />
+                    <ServiceDataDirButton service={service} disabled={disabled || actionBusy} />
+                    <ServiceAutoStartButton service={service} disabled={disabled || actionBusy} />
                     <ServiceWebButton service={service} disabled={disabled} />
                     <SftpgoConfigButton service={service} disabled={disabled} />
                     {service.lastError && service.state === "error" && <p className="w-full break-words text-error [overflow-wrap:anywhere]">{service.lastError.message}</p>}

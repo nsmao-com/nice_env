@@ -1652,6 +1652,9 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "list_packages":
       return structuredClone(Array.from(packages.values())) as T;
+    case "reconcile_installed_packages":
+      // 浏览器预览的套件数据已经来自同一份内存清单；桌面端才需要扫描真实目录。
+      return { imported: [], refreshed: [] } as T;
     case "cancel_download": {
       const taskId = args?.taskId as string | undefined;
       if (!taskId) return false as T;

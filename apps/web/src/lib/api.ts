@@ -6,6 +6,7 @@ import type {
   Site,
   PackageView,
   PackageInstallResult,
+  PackageReconcileResult,
   PackageUninstallPreview,
   SystemStats,
   PortDiagnosis,
@@ -130,6 +131,7 @@ export const retryStack = (id: string, action: "start" | "stop", retry: StackRet
 
 /* 套件 */
 export const listPackages = () => safe(invoke<PackageView[]>("list_packages"));
+export const reconcileInstalledPackages = () => safe(invoke<PackageReconcileResult>("reconcile_installed_packages"));
 export const installPackage = (id: string, requestId?: string) =>
   safe(invoke<PackageInstallResult>("install_package", { id, requestId }));
 export const uninstallPackage = (id: string) =>

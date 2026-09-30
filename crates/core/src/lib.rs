@@ -298,13 +298,15 @@ impl CoreState {
         })?;
         // 服务栈内置预设（首次运行写入；用户改过的不动）
         let _ = stacks::ensure_presets(&store);
+        // 先从运行目录补齐可能丢失的安装记录，再注册服务；这样数据库恢复或
+        // 跨版本迁移后，已有的 Nginx/PHP/数据库版本会在首屏直接出现。
+        let installer = install::Installer::effective(&paths);
+        installer.reconcile_installed(&paths, &store)?;
         let manager = Arc::new(ServiceManager::new());
         ops::register_services(&paths, &store, &manager);
         generic::register_services(&paths, &store, &manager);
         // 上次会话崩溃/被强杀时留下的进程：启动即清理，否则它们占着端口让服务起不来
         let orphans = ops::sweep_orphans(&paths, &store, &manager);
-        // effective() 要在 paths 被 move 进 state 之前用掉
-        let installer = install::Installer::effective(&paths);
         let state = Arc::new(Self {
             paths,
             store,
@@ -386,6 +388,18 @@ impl CoreState {
             }
         }
         Ok(views)
+    }
+
+    /// 手动重新识别数据目录中的运行时；用于迁移旧版本、恢复数据库或清单更新后
+    /// 安装记录缺失的场景。扫描不会覆盖已有配置，也不会启动服务。
+    pub fn reconcile_installed_packages(&self) -> Result<model::PackageReconcileResult> {
+        let result = self.installer.reconcile_installed(&self.paths, &self.store)?;
+        if !result.imported.is_empty() || !result.refreshed.is_empty() {
+            let _operation = self.manager.lifecycle.lock();
+            ops::register_services(&self.paths, &self.store, &self.manager);
+            generic::register_services(&self.paths, &self.store, &self.manager);
+        }
+        Ok(result)
     }
 
     pub async fn install_package(&self, key: &str) -> Result<model::InstalledPackage> {

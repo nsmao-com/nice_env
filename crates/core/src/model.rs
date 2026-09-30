@@ -519,6 +519,14 @@ pub struct InstalledPackage {
     pub installed_at: i64,
 }
 
+/// 扫描运行目录后补齐的安装记录；只报告真实新增或路径信息被校准的版本。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageReconcileResult {
+    pub imported: Vec<InstalledPackage>,
+    pub refreshed: Vec<InstalledPackage>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct PackageInstallResult {

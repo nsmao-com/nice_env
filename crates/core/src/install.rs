@@ -221,6 +221,103 @@ impl Installer {
         }
     }
 
+    /// 从数据目录中的运行时文件夹重新建立安装记录。
+    ///
+    /// 安装记录可能因旧版本升级、数据库恢复或用户迁移数据目录而缺失，
+    /// 但运行时目录和安装快照仍然存在。扫描只接受安全的两级路径，并且
+    /// 必须能从快照/当前清单确认入口文件真实存在，避免把失败安装的空目录
+    /// 或用户随手创建的目录误判为已安装套件。
+    pub fn reconcile_installed(
+        &self,
+        paths: &Paths,
+        store: &Store,
+    ) -> Result<crate::model::PackageReconcileResult> {
+        let root = paths.runtimes();
+        if !root.exists() {
+            return Ok(crate::model::PackageReconcileResult::default());
+        }
+        let mut known = store.list_installed()?;
+        let mut result = crate::model::PackageReconcileResult::default();
+        let ids = std::fs::read_dir(&root).map_err(|error| AppError::io("扫描本地运行时", error))?;
+        for id_entry in ids.flatten() {
+            let id_path = id_entry.path();
+            let id_type = std::fs::symlink_metadata(&id_path).ok();
+            if !id_type.is_some_and(|metadata| metadata.file_type().is_dir()) {
+                continue;
+            }
+            let id = id_entry.file_name().to_string_lossy().to_string();
+            if !is_safe_path_component(&id) {
+                continue;
+            }
+            let Ok(versions) = std::fs::read_dir(&id_path) else { continue; };
+            for version_entry in versions.flatten() {
+                let runtime_dir = version_entry.path();
+                let version_type = std::fs::symlink_metadata(&runtime_dir).ok();
+                if !version_type.is_some_and(|metadata| metadata.file_type().is_dir()) {
+                    continue;
+                }
+                let folder_version = version_entry.file_name().to_string_lossy().to_string();
+                if !is_safe_path_component(&folder_version) {
+                    continue;
+                }
+                let snapshot = runtime_dir.join(".niceenv-package.json");
+                let snapshot_entry = std::fs::read_to_string(&snapshot)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<crate::model::PackageManifestEntry>(&raw).ok());
+                let mut entry = match snapshot_entry {
+                    Some(entry) if entry.id == id && same_version(&entry.version, &folder_version) => entry,
+                    Some(_) => continue,
+                    None => match self.manifest.packages.iter()
+                        .find(|entry| entry.id == id && same_version(&entry.version, &folder_version))
+                        .cloned()
+                    {
+                        Some(entry) => entry,
+                        None => continue,
+                    },
+                };
+                let version = canonical_version(&folder_version).to_string();
+                ensure_safe_key(&id, &version)?;
+                if !runtime_entry_exists(&runtime_dir, &entry.entry) {
+                    continue;
+                }
+                entry.version = version.clone();
+                let current = known.iter().find(|installed| installed.id == id && same_version(&installed.version, &version));
+                let installed = crate::model::InstalledPackage {
+                    id: id.clone(),
+                    version: current.map(|installed| installed.version.clone()).unwrap_or(version),
+                    category: entry.category.clone(),
+                    install_path: runtime_dir.to_string_lossy().to_string(),
+                    config_path: current.map(|installed| installed.config_path.clone())
+                        .filter(|path| !path.trim().is_empty())
+                        .unwrap_or_else(|| paths.etc_dir(&id, &entry.version).to_string_lossy().to_string()),
+                    installed_at: current.map(|installed| installed.installed_at)
+                        .filter(|timestamp| *timestamp > 0)
+                        .unwrap_or_else(|| modified_at_ms(&runtime_dir)),
+                };
+                let changed = current.is_none_or(|previous| previous.category != installed.category
+                    || previous.install_path != installed.install_path
+                    || previous.config_path != installed.config_path);
+                store.upsert_installed(&installed)?;
+                if let Some(previous) = current {
+                    if changed {
+                        result.refreshed.push(installed.clone());
+                    } else {
+                        // Keep the in-memory list in sync without reporting a no-op.
+                        let _ = previous;
+                    }
+                } else {
+                    result.imported.push(installed.clone());
+                }
+                if let Some(previous) = known.iter_mut().find(|item| item.id == installed.id && same_version(&item.version, &installed.version)) {
+                    *previous = installed;
+                } else {
+                    known.push(installed);
+                }
+            }
+        }
+        Ok(result)
+    }
+
     pub fn find(&self, key: &str) -> Option<crate::model::PackageManifestEntry> {
         // key: "nginx" | "php@8.3.33" | "mysql"（取最新版）
         let (id, version) = match key.split_once('@') {
@@ -1066,6 +1163,54 @@ impl Installer {
         }
         Ok(users)
     }
+}
+
+fn modified_at_ms(path: &Path) -> i64 {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .filter(|timestamp| *timestamp > 0)
+        .unwrap_or_else(crate::services::now_ms)
+}
+
+fn runtime_entry_exists(root: &Path, entry: &str) -> bool {
+    let relative = entry_relative_path(entry);
+    if relative.as_os_str().is_empty() {
+        return false;
+    }
+    let expected = root.join(&relative);
+    if std::fs::symlink_metadata(&expected).is_ok_and(|metadata| metadata.file_type().is_file()) {
+        return true;
+    }
+    let Some(wanted) = relative.file_name().map(|name| name.to_string_lossy().to_ascii_lowercase()) else {
+        return false;
+    };
+    fn walk(dir: &Path, wanted: &str, depth: usize, files: &mut usize) -> bool {
+        if depth > 8 || *files > 4096 {
+            return false;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else { return false; };
+        for item in entries.flatten() {
+            let path = item.path();
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else { continue; };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.file_type().is_file() {
+                *files += 1;
+                if metadata.len() > 0 && item.file_name().to_string_lossy().to_ascii_lowercase() == wanted {
+                    return true;
+                }
+            } else if metadata.file_type().is_dir() && walk(&path, wanted, depth + 1, files) {
+                return true;
+            }
+        }
+        false
+    }
+    let mut files = 0;
+    walk(root, &wanted, 0, &mut files)
 }
 
 /// 默认配置只在首次安装时创建；保留已有配置用于重装和多版本共存。

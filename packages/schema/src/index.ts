@@ -217,6 +217,13 @@ export const InstalledPackage = PackageView.shape.install.unwrap().extend({
 });
 export type InstalledPackage = z.infer<typeof InstalledPackage>;
 
+/** 从本地 runtimes 目录重新识别出的安装记录。 */
+export const PackageReconcileResult = z.object({
+  imported: z.array(InstalledPackage).default([]),
+  refreshed: z.array(InstalledPackage).default([]),
+});
+export type PackageReconcileResult = z.infer<typeof PackageReconcileResult>;
+
 /* ============ 环境变量注入 / PathEnv ============ */
 
 /** 单个已安装版本在 PATH 注入里的呈现，使用 id + version 标识 */

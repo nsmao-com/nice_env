@@ -280,7 +280,7 @@ impl Store {
             "INSERT INTO installed(key,id,version,category,install_path,config_path,installed_at)
              VALUES(?1,?2,?3,?4,?5,?6,?7)
              ON CONFLICT(key) DO UPDATE SET
-               install_path=?5, config_path=?6, installed_at=?7",
+               category=?4, install_path=?5, config_path=?6, installed_at=?7",
             params![
                 format!("{}@{}", p.id, p.version),
                 p.id,

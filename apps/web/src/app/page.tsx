@@ -3,6 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { motion, AnimatePresence } from "motion/react";
+import type { ServiceStatus } from "@nsb/schema";
 import {
   Rocket,
   Square,
@@ -17,6 +18,7 @@ import {
   Layers,
   LayoutGrid,
   List as ListIcon,
+  Search,
 } from "lucide-react";
 import { useUI, useT } from "@/lib/store";
 import {
@@ -44,6 +46,8 @@ import { PageHeader } from "@/components/layout/app-shell";
 import { Select, SelectTrigger, SelectContent, SelectItem, SelectValue } from "@/components/ui/select";
 import { HealthCard } from "@/components/shared/health-card";
 
+type DashboardServiceFilter = "all" | "running" | "stopped" | "error" | "autoStart";
+
 export default function DashboardPage() {
   const t = useT();
   const setWizardOpen = useUI((s) => s.setWizardOpen);
@@ -55,6 +59,9 @@ export default function DashboardPage() {
   const { data: stats } = useSystemStats(2000);
 
   const [confirmStopAll, setConfirmStopAll] = React.useState(false);
+  const [serviceQuery, setServiceQuery] = React.useState("");
+  const [serviceFilter, setServiceFilter] = React.useState<DashboardServiceFilter>("all");
+  const [serviceCategory, setServiceCategory] = React.useState("all");
   const stacks = stacksQuery.data;
   const dashboardReady = servicesQuery.dataUpdatedAt > 0 && sitesQuery.dataUpdatedAt > 0 && stacksQuery.dataUpdatedAt > 0;
   const dashboardError = servicesQuery.error || sitesQuery.error || stacksQuery.error;
@@ -62,6 +69,25 @@ export default function DashboardPage() {
     void Promise.all([servicesQuery.refetch(), sitesQuery.refetch(), stacksQuery.refetch()]);
   };
   const runningCount = services.filter((s) => s.state === "running").length;
+  const serviceCategories = React.useMemo(
+    () => [...new Set(services.map((service) => service.category)
+      .filter((category): category is NonNullable<ServiceStatus["category"]> => !!category))].sort(),
+    [services]
+  );
+  const visibleServices = React.useMemo(() => {
+    const q = serviceQuery.trim().toLowerCase();
+    return services.filter((service) => {
+      if (serviceFilter === "running" && service.state !== "running") return false;
+      if (serviceFilter === "stopped" && !["stopped", "unknown"].includes(service.state)) return false;
+      if (serviceFilter === "error" && service.state !== "error") return false;
+      if (serviceFilter === "autoStart" && !service.autoStart) return false;
+      if (serviceCategory !== "all" && service.category !== serviceCategory) return false;
+      return !q || [service.id, service.label, service.version ?? "", service.category ?? ""]
+        .some((value) => value.toLowerCase().includes(q));
+    });
+  }, [services, serviceQuery, serviceFilter, serviceCategory]);
+  const serviceFiltersActive = !!serviceQuery.trim() || serviceFilter !== "all" || serviceCategory !== "all";
+  const resetServiceFilters = () => { setServiceQuery(""); setServiceFilter("all"); setServiceCategory("all"); };
   const quick = useQuickServiceActions(services, stacks);
   const stackBusy = quick.busy;
 
@@ -157,6 +183,34 @@ export default function DashboardPage() {
               className="flex-col items-start sm:flex-row sm:items-center [&>div]:min-w-0 [&>div]:max-w-full"
               actions={
                 <div className="flex flex-wrap items-center gap-2">
+                  <div className="relative min-w-[11rem] flex-1 sm:flex-none">
+                    <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-faint" />
+                    <input
+                      value={serviceQuery}
+                      onChange={(event) => setServiceQuery(event.target.value)}
+                      placeholder={t("dash.serviceSearch")}
+                      aria-label={t("dash.serviceSearch")}
+                      className="h-8 w-full rounded-lg border border-border bg-card pl-8 pr-3 text-[12px] outline-none placeholder:text-faint focus:border-primary sm:w-48"
+                    />
+                  </div>
+                  <Select value={serviceFilter} onValueChange={(value) => setServiceFilter(value as DashboardServiceFilter)}>
+                    <SelectTrigger className="h-8 w-[7.5rem] text-xs" aria-label={t("dash.serviceFilter")}><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">{t("dash.serviceFilterAll")}</SelectItem>
+                      <SelectItem value="running">{t("state.running")}</SelectItem>
+                      <SelectItem value="stopped">{t("state.stopped")}</SelectItem>
+                      <SelectItem value="error">{t("state.error")}</SelectItem>
+                      <SelectItem value="autoStart">{t("dash.serviceAutoStart")}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {serviceCategories.length > 1 && <Select value={serviceCategory} onValueChange={setServiceCategory}>
+                    <SelectTrigger className="h-8 w-[7.5rem] text-xs" aria-label={t("dash.serviceCategory")}><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">{t("dash.serviceCategoryAll")}</SelectItem>
+                      {serviceCategories.map((category) => <SelectItem key={category} value={category}>{t(`packages.cat.${category}` as never)}</SelectItem>)}
+                    </SelectContent>
+                  </Select>}
+                  {serviceFiltersActive && <Button variant="ghost" size="sm" onClick={resetServiceFilters}>{t("packages.resetFilters")}</Button>}
                   {/* 卡片 / 列表切换（Apple 分段控件） */}
                   <Tabs
                     value={view}
@@ -194,15 +248,18 @@ export default function DashboardPage() {
                   </Button>
                 }
               />
-            ) : (
-              <SortableCollection items={services} scope="services" grid={view === "card"}
+            ) : visibleServices.length === 0 ? <EmptyState
+                icon={Search}
+                title={t("dash.noServiceMatches")}
+                hint={t("dash.noServiceMatchesHint")}
+                action={<Button variant="secondary" onClick={resetServiceFilters}>{t("packages.resetFilters")}</Button>}
+              /> : <SortableCollection items={visibleServices} allIds={services.map((service) => service.id)} scope="services" grid={view === "card"}
                 label={(s) => `${s.label}${s.version ? ` ${s.version}` : ""}`}
                 className={view === "card" ? "grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3" : "flex flex-col gap-1.5"}>
                 {(service, handle, preview) => view === "card"
                   ? <ServiceCard service={service} dragHandle={handle} dragPreview={preview} />
                   : <ServiceRow service={service} dragHandle={handle} dragPreview={preview} />}
-              </SortableCollection>
-            )}
+              </SortableCollection>}
           </section>
 
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">

@@ -110,6 +110,21 @@ fn upgrade_legacy_run(mut entry: crate::model::PackageManifestEntry) -> crate::m
         }
         return entry;
     }
+    if entry.id == "rabbitmq" {
+        let legacy: crate::model::ServiceRunSpec = serde_json::from_value(serde_json::json!({
+            "args": [], "health": "tcp", "healthTimeoutSec": 40,
+            "requires": ["erlang"],
+            "env": { "RABBITMQ_BASE": "{data}", "RABBITMQ_NODE_PORT": "{port}" }
+        })).expect("内置旧 RabbitMQ 运行描述合法");
+        if entry.run.as_ref().is_some_and(|run| serde_json::to_value(run).ok() == serde_json::to_value(&legacy).ok()) {
+            let bundled: crate::model::Manifest = serde_json::from_str(include_str!("../../../manifest/packages.win.json"))
+                .expect("内置清单 JSON 必须合法");
+            entry.run = bundled.packages.into_iter()
+                .find(|candidate| candidate.id == "rabbitmq" && same_version(&candidate.version, &entry.version))
+                .and_then(|candidate| candidate.run);
+        }
+        return entry;
+    }
     if entry.id != "rnacos" { return entry; }
     let legacy: crate::model::ServiceRunSpec = serde_json::from_value(serde_json::json!({
         "args": [], "health": "tcp", "healthTimeoutSec": 20,
@@ -1788,6 +1803,36 @@ mod tests {
                 2 => run.env = Some(std::collections::HashMap::from([("CONSUL_DATACENTER".into(), "custom".into())])),
                 3 => run.config_file = Some("custom.hcl".into()),
                 _ => run.health_timeout_sec = 60,
+            }
+            std::fs::write(&snapshot, serde_json::to_vec(&custom).unwrap()).unwrap();
+            assert_eq!(serde_json::to_value(state.installer.installed_entry(&installed)).unwrap(), serde_json::to_value(custom).unwrap());
+        }
+    }
+
+    #[test]
+    fn legacy_rabbitmq_runs_gain_managed_console_without_replacing_custom_settings() {
+        let (_temp, mut state) = fixture();
+        state.installer.manifest = serde_json::from_str(include_str!("../../../manifest/packages.win.json")).unwrap();
+        let expected = state.installer.find("rabbitmq").unwrap().run.unwrap();
+        let mut legacy = state.installer.find("rabbitmq").unwrap();
+        legacy.run = Some(serde_json::from_value(serde_json::json!({
+            "args": [], "health": "tcp", "healthTimeoutSec": 40,
+            "requires": ["erlang"],
+            "env": { "RABBITMQ_BASE": "{data}", "RABBITMQ_NODE_PORT": "{port}" }
+        })).unwrap());
+        let installed = install_fixture(&state, "rabbitmq", &legacy.version);
+        let snapshot = Path::new(&installed.install_path).join(".niceenv-package.json");
+        let raw = serde_json::to_vec(&legacy).unwrap(); std::fs::write(&snapshot, &raw).unwrap();
+        let upgraded = state.installer.installed_entry(&installed);
+        assert_eq!(serde_json::to_value(upgraded.run.unwrap()).unwrap(), serde_json::to_value(&expected).unwrap());
+        assert_eq!(std::fs::read(&snapshot).unwrap(), raw);
+        for variation in 0..4 {
+            let mut custom = legacy.clone(); let run = custom.run.as_mut().unwrap();
+            match variation {
+                0 => run.init_bin = Some("custom-plugins.bat".into()),
+                1 => run.init_args = Some(vec!["disable".into(), "rabbitmq_management".into()]),
+                2 => { run.env.as_mut().unwrap().insert("RABBITMQ_NODE_NAME".into(), "custom".into()); },
+                _ => run.config_template = Some("listeners.tcp.default = 127.0.0.1:{port}\n".into()),
             }
             std::fs::write(&snapshot, serde_json::to_vec(&custom).unwrap()).unwrap();
             assert_eq!(serde_json::to_value(state.installer.installed_entry(&installed)).unwrap(), serde_json::to_value(custom).unwrap());

@@ -1915,7 +1915,7 @@
       "version": "4.3.6",
       "category": "cache",
       "displayName": "RabbitMQ",
-      "description": "AMQP 消息队列（需要 Erlang 27+，管理台 :15672）",
+      "description": "AMQP 消息队列（需要 Erlang 27+，内置管理台）",
       "os": [
         "windows"
       ],
@@ -1941,8 +1941,14 @@
         ],
         "env": {
           "RABBITMQ_BASE": "{data}",
+          "RABBITMQ_CONFIG_FILE": "{etc}/rabbitmq.conf",
           "RABBITMQ_NODE_PORT": "{port}"
-        }
+        },
+        "configFile": "rabbitmq.conf",
+        "configTemplate": "listeners.tcp.default = 127.0.0.1:{port}\nmanagement.tcp.port = {port+10000}\nmanagement.tcp.ip = 127.0.0.1\n",
+        "initBin": "rabbitmq-plugins.bat",
+        "initArgs": ["enable", "rabbitmq_management"],
+        "initMarker": ".nsb-rabbitmq-management"
       }
     },
     {
@@ -3822,7 +3828,7 @@
       "version": "4.3.5",
       "category": "cache",
       "displayName": "RabbitMQ 4.3.5",
-      "description": "消息队列（AMQP，需 Erlang 运行时）",
+      "description": "消息队列（AMQP，需 Erlang 运行时，内置管理台）",
       "os": [
         "windows"
       ],
@@ -3848,8 +3854,14 @@
         ],
         "env": {
           "RABBITMQ_BASE": "{data}",
+          "RABBITMQ_CONFIG_FILE": "{etc}/rabbitmq.conf",
           "RABBITMQ_NODE_PORT": "{port}"
-        }
+        },
+        "configFile": "rabbitmq.conf",
+        "configTemplate": "listeners.tcp.default = 127.0.0.1:{port}\nmanagement.tcp.port = {port+10000}\nmanagement.tcp.ip = 127.0.0.1\n",
+        "initBin": "rabbitmq-plugins.bat",
+        "initArgs": ["enable", "rabbitmq_management"],
+        "initMarker": ".nsb-rabbitmq-management"
       }
     },
     {
@@ -3857,7 +3869,7 @@
       "version": "4.3.4",
       "category": "cache",
       "displayName": "RabbitMQ 4.3.4",
-      "description": "消息队列（AMQP，需 Erlang 运行时）",
+      "description": "消息队列（AMQP，需 Erlang 运行时，内置管理台）",
       "os": [
         "windows"
       ],
@@ -3883,8 +3895,14 @@
         ],
         "env": {
           "RABBITMQ_BASE": "{data}",
+          "RABBITMQ_CONFIG_FILE": "{etc}/rabbitmq.conf",
           "RABBITMQ_NODE_PORT": "{port}"
-        }
+        },
+        "configFile": "rabbitmq.conf",
+        "configTemplate": "listeners.tcp.default = 127.0.0.1:{port}\nmanagement.tcp.port = {port+10000}\nmanagement.tcp.ip = 127.0.0.1\n",
+        "initBin": "rabbitmq-plugins.bat",
+        "initArgs": ["enable", "rabbitmq_management"],
+        "initMarker": ".nsb-rabbitmq-management"
       }
     },
     {
@@ -3892,7 +3910,7 @@
       "version": "4.2.9",
       "category": "cache",
       "displayName": "RabbitMQ 4.2.9",
-      "description": "消息队列（AMQP，需 Erlang 运行时）",
+      "description": "消息队列（AMQP，需 Erlang 运行时，内置管理台）",
       "os": [
         "windows"
       ],
@@ -3918,8 +3936,14 @@
         ],
         "env": {
           "RABBITMQ_BASE": "{data}",
+          "RABBITMQ_CONFIG_FILE": "{etc}/rabbitmq.conf",
           "RABBITMQ_NODE_PORT": "{port}"
-        }
+        },
+        "configFile": "rabbitmq.conf",
+        "configTemplate": "listeners.tcp.default = 127.0.0.1:{port}\nmanagement.tcp.port = {port+10000}\nmanagement.tcp.ip = 127.0.0.1\n",
+        "initBin": "rabbitmq-plugins.bat",
+        "initArgs": ["enable", "rabbitmq_management"],
+        "initMarker": ".nsb-rabbitmq-management"
       }
     },
     {

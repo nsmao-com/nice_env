@@ -412,6 +412,27 @@ fn managed_consul(entry: &PackageManifestEntry, spec: &ServiceRunSpec) -> bool {
             "-hcl", "raft_logstore { backend = \"boltdb\" }"]
 }
 
+/// 仅识别内置的 RabbitMQ 单节点编排：AMQP 使用主端口，管理插件使用主端口
+/// +10000，并由首次启动命令在当前 RABBITMQ_BASE 中启用。自定义运行描述不猜测
+/// 管理台地址，也不强制等待额外端口。
+fn managed_rabbitmq(entry: &PackageManifestEntry, spec: &ServiceRunSpec) -> bool {
+    entry.id == "rabbitmq"
+        && spec.args.is_empty()
+        && spec.config_file.as_deref() == Some("rabbitmq.conf")
+        && spec.init_bin.as_deref() == Some("rabbitmq-plugins.bat")
+        && spec.init_args.as_deref() == Some(["enable".into(), "rabbitmq_management".into()].as_slice())
+        && spec.env.as_ref().is_some_and(|env| {
+            env.get("RABBITMQ_BASE").is_some_and(|value| value == "{data}")
+                && env.get("RABBITMQ_NODE_PORT").is_some_and(|value| value == "{port}")
+                && env.get("RABBITMQ_CONFIG_FILE").is_some_and(|value| value == "{etc}/rabbitmq.conf")
+        })
+        && spec.config_template.as_deref().is_some_and(|template| {
+            template.contains("listeners.tcp.default = 127.0.0.1:{port}")
+                && template.contains("management.tcp.port = {port+10000}")
+                && template.contains("management.tcp.ip = 127.0.0.1")
+        })
+}
+
 fn needs_udp(r: &Resolved, base: u16, port: u16) -> bool {
     r.entry.id == "coredns" || (managed_consul(&r.entry, &r.spec)
         && CONSUL_UDP_OFFSETS.contains(&(i32::from(port) - i32::from(base))))
@@ -1059,6 +1080,9 @@ fn generic_web_target(r: &Resolved, sftpgo: Option<&SftpgoConfig>) -> Result<Str
         }
         // Neo4j Community 的 console 模式在默认 HTTP 端口提供内置 Browser。
         "neo4j" if r.spec.args == ["console"] && r.port == Some(7474) => (0, "/browser"),
+        // RabbitMQ 管理插件由首次启动初始化命令启用；配置文件把 HTTP 管理台
+        // 固定在 AMQP 端口 + 10000，避免 safe 端口档位与其它实例冲突。
+        "rabbitmq" if managed_rabbitmq(&r.entry, &r.spec) => (10000, "/"),
         "consul" if args_pair("-http-port", "{port}") && args_pair("-client", "127.0.0.1") => (0, "/ui/"),
         "qdrant" if args_pair("--config-path", "{etc}/config.yaml") => (0, "/dashboard/"),
         _ => return Err(web_unavailable("当前运行配置没有已知的管理台入口，请按服务配置访问。")),
@@ -1878,6 +1902,9 @@ pub fn start(
     } else if crate::install::official_qdrant(&r.entry) {
         r.port.and_then(|port| port.checked_add(1).map(|grpc| [port, grpc]))
             .is_some_and(|ports| wait_owned_ports(manager, &r.service_id, &ports, timeout))
+    } else if managed_rabbitmq(&r.entry, &r.spec) {
+        r.port.and_then(|port| port.checked_add(10000).map(|management| [port, management]))
+            .is_some_and(|ports| wait_owned_ports(manager, &r.service_id, &ports, timeout))
     } else if r.entry.id == "rustfs"
         && r.spec.args.iter().any(|arg| arg == "--console-enable")
         && r.spec.args.windows(2).any(|pair| pair[0] == "--console-address" && pair[1] == ":{port+1}") {
@@ -1925,6 +1952,8 @@ pub fn start(
                     "S3 服务或已启用的管理台未就绪"
                 } else if r.entry.id == "rustfs" {
                     "S3 服务或管理台未就绪"
+                } else if managed_rabbitmq(&r.entry, &r.spec) {
+                    "AMQP 服务或管理台未就绪"
                 } else if r.port.is_some() {
                     "端口未就绪"
                 } else {
@@ -2148,9 +2177,22 @@ fn run_init_if_needed(r: &Resolved) -> Result<()> {
     };
 
     let args: Vec<String> = init_args.iter().map(|a| expand(a, r)).collect();
-    let out = platform::command(&init_exe)
+    let env = r.spec.env.iter().flatten().map(|(key, value)| (key, expand(value, r)));
+    // Windows 的 RabbitMQ 插件脚本是 .bat；与服务启动路径保持一致，经 cmd.exe
+    // 转发，并把受管环境传给初始化命令，确保 RABBITMQ_BASE 指向当前实例。
+    let (program, args) = if cfg!(windows) && is_script(&init_exe) {
+        let mut command = init_exe.to_string_lossy().to_string();
+        if command.contains(' ') { command = format!("\"{command}\""); }
+        let mut forwarded = vec!["/C".to_string(), command];
+        forwarded.extend(args);
+        (PathBuf::from("cmd.exe"), forwarded)
+    } else {
+        (init_exe, args)
+    };
+    let out = platform::command(&program)
         .args(&args)
         .current_dir(&r.root)
+        .envs(env)
         .output()
         .map_err(|e| {
             AppError::io(&format!("执行 {} 初始化", r.entry.display_name), e)
@@ -2521,7 +2563,7 @@ mod startup_tests {
 
     #[test]
     fn console_targets_use_resolved_ports_and_preserve_sftpgo_web_configuration() {
-        for (id, offset, path) in [("mailpit", 0, "/"), ("minio", 1, "/"), ("rustfs", 1, "/"), ("zincsearch", 0, "/"), ("consul", 0, "/ui"), ("qdrant", 0, "/dashboard"), ("temporal-cli", 1000, "/"), ("neo4j", 0, "/browser")] {
+        for (id, offset, path) in [("mailpit", 0, "/"), ("minio", 1, "/"), ("rustfs", 1, "/"), ("zincsearch", 0, "/"), ("consul", 0, "/ui"), ("qdrant", 0, "/dashboard"), ("temporal-cli", 1000, "/"), ("neo4j", 0, "/browser"), ("rabbitmq", 10000, "/")] {
             let (_temp, state, mut r) = fixture(id);
             let base_port = if id == "neo4j" { 7474 } else { 31000 };
             r.port = Some(base_port);

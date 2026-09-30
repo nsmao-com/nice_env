@@ -972,6 +972,13 @@ impl CoreState {
         stats::redis_key_preview(port, &stats::RedisCredentials::load(&self.store, &request.version)?, &service.pids, &request)
     }
 
+    pub fn redis_flush(&self, request: stats::RedisFlushRequest) -> Result<stats::RedisFlushReceipt> {
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后清空 Redis 逻辑数据库"))?;
+        let service = self.running_redis(Some(&request.version))?;
+        let port = service.port.ok_or_else(|| AppError::new("REDIS_PORT_UNKNOWN", "无法确认 Redis 实际端口"))?;
+        stats::redis_flush(port, &stats::RedisCredentials::load(&self.store, &request.version)?, &service.pids, &request)
+    }
+
     pub fn redis_settings(&self, version: &str) -> Result<redis_settings::RedisSettingsView> {
         let _operation = self.manager.lifecycle.lock();
         redis_settings::get(&self.paths, &self.store, version)

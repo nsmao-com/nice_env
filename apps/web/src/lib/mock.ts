@@ -1322,6 +1322,7 @@ const redisServerPasswordsPreview = new Map<string, string>();
 const redisPersistencePreview = new Map<string, { report: import("@nsb/schema").RedisPersistence; finishAt: number; minimumSaveTime: number }>();
 const redisBackupsPreview: import("@nsb/schema").RedisBackup[] = [];
 let redisRestoreRevisionPreview = 0;
+const redisFlushedDatabasesPreview = new Set<string>();
 const redisKeysPreview = [
   { key: "app:session:preview", keyType: "string", ttlMs: 1_800_000, value: "{\"user\":\"preview\",\"scope\":\"read-only\"}" },
   { key: "app:queue", keyType: "list", ttlMs: -1, elements: 3 },
@@ -3676,20 +3677,32 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const request = (args?.request ?? {}) as Record<string, unknown>;
       const pattern = String(request.pattern ?? "");
       const cursor = String(request.cursor ?? "0");
+      const database = Number(request.database ?? 0);
       const escaped = (pattern || "*").replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
       const matcher = new RegExp(`^${escaped}$`);
-      const filtered = redisKeysPreview.filter(entry => matcher.test(entry.key));
+      const filtered = redisFlushedDatabasesPreview.has(`${String(request.version)}:${database}`) ? [] : redisKeysPreview.filter(entry => matcher.test(entry.key));
       const start = cursor === "1" ? 3 : 0;
       const items = filtered.slice(start, start + 3).map(({ value: _value, ...entry }) => entry);
-      return { version: String(request.version), database: Number(request.database ?? 0), cursor, nextCursor: start + 3 < filtered.length ? "1" : "0", pattern: pattern || "*", items } as T;
+      return { version: String(request.version), database, cursor, nextCursor: start + 3 < filtered.length ? "1" : "0", pattern: pattern || "*", items } as T;
     }
     case "redis_key_preview": {
       const service = services.get("redis");
       if (service?.state !== "running") throw { code: "REDIS_NOT_RUNNING", message: "请先启动 Redis 实例" };
       const request = (args?.request ?? {}) as Record<string, unknown>;
-      const entry = redisKeysPreview.find(item => item.key === String(request.key));
+      const database = Number(request.database ?? 0);
+      const entry = redisFlushedDatabasesPreview.has(`${String(request.version)}:${database}`) ? undefined : redisKeysPreview.find(item => item.key === String(request.key));
       if (!entry) throw { code: "REDIS_KEY_GONE", message: "这个键已不存在，请刷新键空间列表" };
       return { version: String(request.version), database: Number(request.database ?? 0), key: entry.key, keyType: entry.keyType, ttlMs: entry.ttlMs, memoryBytes: 1024 + entry.key.length * 8, elements: entry.elements, value: entry.value, valueTruncated: false } as T;
+    }
+    case "redis_flush": {
+      const service = services.get("redis");
+      const request = (args?.request ?? {}) as Record<string, unknown>;
+      const version = String(request.version ?? "");
+      const database = Number(request.database ?? 0);
+      if (service?.state !== "running" || service.version !== version) throw { code: "REDIS_INSTANCE_CHANGED", message: "运行中的 Redis 版本已变化，请刷新后重试" };
+      if (String(request.confirmation ?? "").trim() !== "FLUSHDB") throw { code: "REDIS_FLUSH_CONFIRM_REQUIRED", message: "请输入 FLUSHDB 以确认清空当前逻辑数据库" };
+      redisFlushedDatabasesPreview.add(`${version}:${database}`);
+      return { version, database, mode: "async" } as T;
     }
     case "redis_backup_list": return { items: structuredClone(redisBackupsPreview.map(entry => ({ ...entry, problem: null }))), unreadable: 0, directory: "preview/backup/redis" } as T;
     case "redis_backup_removal_preview": {

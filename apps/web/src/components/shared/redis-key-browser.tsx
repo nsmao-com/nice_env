@@ -1,7 +1,8 @@
 "use client";
 
 import * as React from "react";
-import { ChevronLeft, ChevronRight, Eye, Loader2, RefreshCw, Search } from "lucide-react";
+import { ChevronLeft, ChevronRight, Eye, Loader2, RefreshCw, Search, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 import { useQuery } from "@tanstack/react-query";
 import * as api from "@/lib/api";
 import { normalizeError } from "@/lib/backend";
@@ -48,6 +49,10 @@ export function RedisKeyBrowser({ version, running, signature }: { version?: str
   const [cursor, setCursor] = React.useState("0");
   const [history, setHistory] = React.useState<string[]>([]);
   const [selectedKey, setSelectedKey] = React.useState<string | null>(null);
+  const [flushOpen, setFlushOpen] = React.useState(false);
+  const [flushConfirmation, setFlushConfirmation] = React.useState("");
+  const [flushBusy, setFlushBusy] = React.useState(false);
+  const [flushError, setFlushError] = React.useState("");
   const patternValid = new TextEncoder().encode(patternDraft).length <= 256 && !/[\x00-\x1f\x7f]/.test(patternDraft);
   const query = useQuery({
     queryKey: ["redis-keys", signature, database, cursor, pattern],
@@ -78,9 +83,22 @@ export function RedisKeyBrowser({ version, running, signature }: { version?: str
     const previous = history[history.length - 1];
     setHistory(history.slice(0, -1)); setCursor(previous);
   };
+  const submitFlush = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!version || !running || flushBusy || flushConfirmation.trim() !== "FLUSHDB") return;
+    setFlushBusy(true); setFlushError("");
+    try {
+      await api.redisFlush(version, Number(database), flushConfirmation.trim());
+      setFlushOpen(false); setFlushConfirmation(""); setCursor("0"); setHistory([]);
+      await query.refetch();
+      toast.success(t("redisBrowser.flushed").replace("{n}", database));
+    } catch (error) {
+      setFlushError(normalizeError(error).message);
+    } finally { setFlushBusy(false); }
+  };
   return <>
     <Card className="min-w-0">
-      <CardHeader><div className="flex flex-wrap items-start justify-between gap-2"><div className="min-w-0"><CardTitle>{t("redisBrowser.title")}</CardTitle><p className="mt-1 text-xs leading-5 text-muted">{t("redisBrowser.intro")}</p></div><Badge variant="outline">{t("redisBrowser.readonly")}</Badge></div></CardHeader>
+      <CardHeader><div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><CardTitle>{t("redisBrowser.title")}</CardTitle><p className="mt-1 text-xs leading-5 text-muted">{t("redisBrowser.intro")}</p></div><div className="flex shrink-0 flex-wrap items-center gap-2"><Badge variant="outline">{t("redisBrowser.readonly")}</Badge><Button type="button" size="sm" variant="destructive" disabled={!running || !version || query.isFetching || flushBusy} onClick={() => { setFlushError(""); setFlushConfirmation(""); setFlushOpen(true); }}><Trash2 className="h-3.5 w-3.5" />{t("redisBrowser.flush")}</Button></div></div></CardHeader>
       <CardContent className="space-y-4">
         <form className="grid min-w-0 gap-3 sm:grid-cols-[9rem_minmax(0,1fr)_auto] sm:items-end" onSubmit={submit}>
           <div className="min-w-0 space-y-1.5"><Label htmlFor="redis-browser-db">{t("redisBrowser.database")}</Label><Select value={database} disabled={query.isFetching} onValueChange={value => reset(value, pattern)}><SelectTrigger id="redis-browser-db"><SelectValue /></SelectTrigger><SelectContent>{Array.from({ length: 16 }, (_, index) => <SelectItem key={index} value={String(index)}>{t("redisBrowser.databaseNumber").replace("{n}", String(index))}</SelectItem>)}</SelectContent></Select></div>
@@ -101,6 +119,25 @@ export function RedisKeyBrowser({ version, running, signature }: { version?: str
         </>}
       </CardContent>
     </Card>
+    <Dialog open={flushOpen} onOpenChange={(open) => { if (!flushBusy) { setFlushOpen(open); if (!open) { setFlushConfirmation(""); setFlushError(""); } } }}>
+      <DialogContent className="max-w-md" hideClose={flushBusy}>
+        <DialogHeader>
+          <DialogTitle>{t("redisBrowser.flushTitle").replace("{n}", database)}</DialogTitle>
+          <DialogDescription>{t("redisBrowser.flushHint")}</DialogDescription>
+        </DialogHeader>
+        <form className="space-y-4" onSubmit={submitFlush}>
+          <div className="space-y-1.5">
+            <Label htmlFor="redis-flush-confirm">{t("redisBrowser.flushConfirm")}</Label>
+            <Input id="redis-flush-confirm" value={flushConfirmation} autoComplete="off" spellCheck={false} disabled={flushBusy} placeholder={t("redisBrowser.flushPlaceholder")} onChange={(event) => setFlushConfirmation(event.target.value)} />
+          </div>
+          {flushError && <p role="alert" className="break-words text-sm text-error">{flushError}</p>}
+          <DialogFooter className="flex-col-reverse sm:flex-row">
+            <Button type="button" variant="ghost" disabled={flushBusy} onClick={() => setFlushOpen(false)}>{t("redisBrowser.flushCancel")}</Button>
+            <Button type="submit" variant="destructive" disabled={flushBusy || flushConfirmation.trim() !== "FLUSHDB"}>{flushBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}{flushBusy ? t("redisBrowser.flushing") : t("redisBrowser.flushAction")}</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
     {selectedKey && version && <RedisKeyPreviewDialog key={`${signature}:${database}:${selectedKey}`} version={version} database={Number(database)} keyName={selectedKey} onClose={() => setSelectedKey(null)} />}
   </>;
 }

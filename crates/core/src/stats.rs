@@ -275,6 +275,23 @@ pub struct RedisKeyPreview {
     pub value_truncated: bool,
 }
 
+#[derive(serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisFlushRequest {
+    pub version: String,
+    #[serde(default)]
+    pub database: u8,
+    pub confirmation: String,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisFlushReceipt {
+    pub version: String,
+    pub database: u8,
+    pub mode: String,
+}
+
 struct RedisClient(std::io::BufReader<std::net::TcpStream>, Option<u32>);
 
 enum RedisReply {
@@ -397,10 +414,13 @@ impl RedisClient {
                         "REDIS_INFO_DENIED",
                         "当前 Redis 账号没有 INFO 权限，无法读取统计数据",
                     ),
+                    "NOPERM" if command == "FLUSHDB" => AppError::new("REDIS_FLUSH_DENIED", "当前 Redis 账号没有清空逻辑数据库的权限"),
                     "NOPERM" if matches!(command, "SCAN" | "TYPE" | "PTTL" | "GET" | "MEMORY" | "SELECT") =>
                         AppError::new("REDIS_KEY_BROWSE_DENIED", "当前 Redis 账号没有读取键空间所需的权限"),
                     "NOPERM" => AppError::new("REDIS_COMMAND_DENIED", "当前 Redis 账号没有执行快照操作所需的权限")
                         .with_hint("请检查 INFO、TIME、BGSAVE 权限；独立备份还需要 CONFIG GET 权限，或在连接认证中选择合适账号"),
+                    _ if command == "FLUSHDB" => AppError::new("REDIS_FLUSH_FAILED", "Redis 未接受清空逻辑数据库的请求")
+                        .with_hint("请检查当前账号权限、实例状态和服务日志；未改用同步清空。"),
                     _ if matches!(command, "SCAN" | "TYPE" | "PTTL" | "GET" | "MEMORY" | "SELECT") =>
                         AppError::new("REDIS_KEY_BROWSE_FAILED", "Redis 拒绝读取键空间，请检查账号权限和服务日志"),
                     _ if command == "INFO" => AppError::new(
@@ -652,6 +672,28 @@ pub(crate) fn redis_key_preview(
         value,
         value_truncated,
     })
+}
+
+pub(crate) fn redis_flush(
+    port: u16,
+    credentials: &RedisCredentials,
+    pids: &[u32],
+    request: &RedisFlushRequest,
+) -> crate::error::Result<RedisFlushReceipt> {
+    use crate::error::AppError;
+    if request.confirmation.trim() != "FLUSHDB" {
+        return Err(AppError::new("REDIS_FLUSH_CONFIRM_REQUIRED", "请输入 FLUSHDB 以确认清空当前逻辑数据库"));
+    }
+    let mut client = RedisClient::connect(port, credentials, Some(pids))?;
+    client.select_database(request.database)?;
+    match client.command(&["FLUSHDB", "ASYNC"])? {
+        RedisReply::Simple(value) if value.eq_ignore_ascii_case("OK") => Ok(RedisFlushReceipt {
+            version: request.version.clone(),
+            database: request.database,
+            mode: "async".into(),
+        }),
+        _ => Err(AppError::new("REDIS_FLUSH_FAILED", "Redis 未返回清空确认，未能确认数据已清除")),
+    }
 }
 
 #[derive(serde::Serialize, Clone, Debug)]

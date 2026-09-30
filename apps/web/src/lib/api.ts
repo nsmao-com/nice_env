@@ -45,6 +45,7 @@ import type {
   RedisRestoreResult,
   RedisImportPreview,
   RedisBackupRemoval,
+  RedisFlushReceipt,
   RedisPasswordView,
   RedisPasswordSave,
   ConfigFileInfo,
@@ -394,6 +395,8 @@ export const redisSaveConnection = (version: string, credentials: { username: st
   safe(invoke<RedisStats>("redis_save_connection", { version, credentials }));
 export const redisKeys = (request: RedisKeyRequest) => safe(invoke<RedisKeyPage>("redis_keys", { request }));
 export const redisKeyPreview = (request: RedisKeyPreviewRequest) => safe(invoke<RedisKeyPreview>("redis_key_preview", { request }));
+export const redisFlush = (version: string, database: number, confirmation: string) =>
+  safe(invoke<RedisFlushReceipt>("redis_flush", { request: { version, database, confirmation } }));
 export const redisSettings = (version: string) => safe(invoke<RedisSettingsView>("redis_settings", { version }));
 export const redisPersistence = (version: string) => safe(invoke<RedisPersistence>("redis_persistence", { version }));
 export const redisSnapshot = (version: string) => safe(invoke<RedisSnapshotReceipt>("redis_snapshot", { version }));

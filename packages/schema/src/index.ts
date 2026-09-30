@@ -1129,6 +1129,8 @@ export const RedisRestoreResult = z.object({ target: z.string(), safetyBackup: R
 export type RedisRestoreResult = z.infer<typeof RedisRestoreResult>;
 export const RedisImportPreview = z.object({ source: z.string(), version: z.string(), rdbVersion: z.number().int().nonnegative(), sizeBytes: z.number().nonnegative(), sha256: z.string(), revision: z.string() });
 export type RedisImportPreview = z.infer<typeof RedisImportPreview>;
+export const RedisFlushReceipt = z.object({ version: z.string(), database: z.number().int().nonnegative(), mode: z.literal("async") });
+export type RedisFlushReceipt = z.infer<typeof RedisFlushReceipt>;
 
 export const ProjectPlatformReport = z.object({
   project: z.string(), phpVersion: z.string(), ini: z.string(),

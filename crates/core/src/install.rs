@@ -1644,10 +1644,15 @@ mod tests {
         // 测试使用的服务不一定收录在当前主机清单；保存快照模拟真实安装元数据。
         if state.installer.installed_entry(&installed).entry.is_empty() {
             let source = Installer {
-                manifest: serde_json::from_str(include_str!("../../../manifest/packages.win.json")).unwrap(),
+                manifest: serde_json::from_str(include_str!("../../../manifest/packages.win.json"))
+                    .unwrap(),
             };
             let entry = source.installed_entry(&installed);
-            std::fs::write(path.join(".niceenv-package.json"), serde_json::to_vec(&entry).unwrap()).unwrap();
+            std::fs::write(
+                path.join(".niceenv-package.json"),
+                serde_json::to_vec(&entry).unwrap(),
+            )
+            .unwrap();
         }
         installed
     }

@@ -585,9 +585,7 @@ pub fn process_group_gone(pid: u32) -> Result<bool> {
                 let mut fields = tail.split_whitespace();
                 let state = fields.next();
                 // /proc/<pid>/stat：state 后依次是 ppid、pgrp；只关注 pgrp == 目标组。
-                let group = fields
-                    .nth(1)
-                    .and_then(|value| value.parse::<u32>().ok());
+                let group = fields.nth(1).and_then(|value| value.parse::<u32>().ok());
                 if group.is_none() {
                     return Ok(false);
                 }
@@ -659,7 +657,9 @@ pub fn process_alive(pid: u32) -> bool {
     {
         #[cfg(target_os = "linux")]
         if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-            if let Some(state) = stat.rfind(')').and_then(|end| stat.get(end + 1..))
+            if let Some(state) = stat
+                .rfind(')')
+                .and_then(|end| stat.get(end + 1..))
                 .and_then(|tail| tail.split_whitespace().next())
             {
                 if matches!(state, "Z" | "X" | "x") {
@@ -671,8 +671,14 @@ pub fn process_alive(pid: u32) -> bool {
         unsafe {
             let mut info: libc::proc_bsdinfo = std::mem::zeroed();
             let size = std::mem::size_of_val(&info) as libc::c_int;
-            if libc::proc_pidinfo(pid as libc::c_int, libc::PROC_PIDTBSDINFO, 0,
-                &mut info as *mut _ as *mut libc::c_void, size) == size && info.pbi_status == libc::SZOMB
+            if libc::proc_pidinfo(
+                pid as libc::c_int,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                &mut info as *mut _ as *mut libc::c_void,
+                size,
+            ) == size
+                && info.pbi_status == libc::SZOMB
             {
                 return false;
             }

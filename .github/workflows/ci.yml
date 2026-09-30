@@ -87,21 +87,10 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # 只检查本次提交改动的 Rust 文件。仓库历史包含大量未按当前 stable
+      # 只检查本次提交改动的 Rust 行。仓库历史包含大量未按当前 stable
       # rustfmt 排版的存量文件，不能因一次提交把无关文件全部重排。
       - name: Check formatting
-        shell: bash
-        run: |
-          files=$(git diff --name-only HEAD^ HEAD -- '*.rs')
-          if [ -z "$files" ]; then
-            echo "No Rust files changed; formatting check skipped."
-            exit 0
-          fi
-          while IFS= read -r file; do
-            [ -z "$file" ] && continue
-            echo "Checking $file"
-            rustfmt --check "$file"
-          done <<< "$files"
+        run: python3 .github/check-rust-format.py
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2

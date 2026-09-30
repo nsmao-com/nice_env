@@ -374,7 +374,14 @@ fn scan_app_ports_distinguishes_self_and_conflict() {
     // 未安装服务时没有计划端口；显式注册一个临时监听，验证自己的监听者与停止服务冲突。
     let owned = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let owned_port = owned.local_addr().unwrap().port();
-    manager.register("port-fixture", "Port fixture", None, None, Some(owned_port), paths.service_log("port-fixture"));
+    manager.register(
+        "port-fixture",
+        "Port fixture",
+        None,
+        None,
+        Some(owned_port),
+        paths.service_log("port-fixture"),
+    );
     manager.adopt("port-fixture", &[std::process::id()], Some(owned_port));
 
     // 占一个不在应用端口表里的高位端口，确认体检只报告应用关心的端口
@@ -383,7 +390,9 @@ fn scan_app_ports_distinguishes_self_and_conflict() {
 
     let rows = nsb_core::ports::scan_app_ports(&store, &manager).unwrap();
     assert!(!rows.is_empty(), "体检结果不应为空");
-    assert!(rows.iter().any(|row| row.port == owned_port && row.verdict == "self"));
+    assert!(rows
+        .iter()
+        .any(|row| row.port == owned_port && row.verdict == "self"));
     // 每个端口都应有明确结论
     for r in &rows {
         assert!(
@@ -401,13 +410,37 @@ fn scan_app_ports_distinguishes_self_and_conflict() {
         !rows.iter().any(|r| r.port == foreign_port),
         "不在应用端口表里的端口不应出现在体检结果中"
     );
-    manager.register("port-conflict", "Stopped fixture", None, None, Some(foreign_port), paths.service_log("port-conflict"));
-    manager.register("nginx", "Nginx", Some("1.31.6".into()), Some("web".into()), Some(80), paths.service_log("nginx"));
-    manager.register("mihomo", "Mihomo", Some("1.19.10".into()), Some("proxy".into()), Some(7890), paths.service_log("mihomo"));
+    manager.register(
+        "port-conflict",
+        "Stopped fixture",
+        None,
+        None,
+        Some(foreign_port),
+        paths.service_log("port-conflict"),
+    );
+    manager.register(
+        "nginx",
+        "Nginx",
+        Some("1.31.6".into()),
+        Some("web".into()),
+        Some(80),
+        paths.service_log("nginx"),
+    );
+    manager.register(
+        "mihomo",
+        "Mihomo",
+        Some("1.19.10".into()),
+        Some("proxy".into()),
+        Some(7890),
+        paths.service_log("mihomo"),
+    );
     store.set_setting("portProfile", "safe").unwrap();
     let rows = nsb_core::ports::scan_app_ports(&store, &manager).unwrap();
-    // 当前测试进程不是该服务的已登记根进程，归属链只能判为 unknown，不能把未知监听误报为可控冲突。
-    assert!(rows.iter().any(|row| row.port == foreign_port && row.verdict == "unknown" && row.pid == Some(std::process::id())));
+    // 系统可能无法提供完整祖先进程链，此时应保留 unknown；两种情况均不能误报为 self/free。
+    assert!(rows.iter().any(|row| row.port == foreign_port
+        && matches!(row.verdict.as_str(), "conflict" | "unknown")
+        && !row.owned_by_self
+        && row.pid == Some(std::process::id())));
     // 覆盖到 https 与 mihomo 控制端口（这两个之前完全没被预检）
     let covered: Vec<u16> = rows.iter().map(|r| r.port).collect();
     assert!(covered.contains(&8443), "Nginx HTTPS 端口必须被体检覆盖");

@@ -30,7 +30,7 @@ import { RewritePreset as RewriteSchema, type ScannedProject, type CreateSiteInp
 import { cn, cmpVersionDesc, normalizeProxyTarget, sameVersion } from "@/lib/utils";
 import { useT, type ExistingProjectDefaults } from "@/lib/store";
 import { isTauri, listen, normalizeError } from "@/lib/backend";
-import { usePackages, siteUrl, toastError } from "@/lib/hooks";
+import { usePackages, useSettings, siteUrl, toastError } from "@/lib/hooks";
 import { useInstallTasks } from "@/lib/install-tasks";
 import * as api from "@/lib/api";
 import {
@@ -112,6 +112,7 @@ export function SiteWizard({
   const t = useT();
   const { isDesktop, isMac } = useDesktopWindow();
   const { data: packages, refetch: refreshPackages } = usePackages();
+  const { data: settings } = useSettings();
   const [step, setStep] = React.useState(0);
   const [creating, setCreating] = React.useState(false);
   const [installingComposer, setInstallingComposer] = React.useState(false);
@@ -158,6 +159,10 @@ export function SiteWizard({
   // Inventory changes require a fresh result; unrelated package polling must not erase the draft.
   }, [open, existingProject?.path, kind, phpInventory, phpCheckRevision]);
   const [webServer, setWebServer] = React.useState<"nginx" | "apache" | "caddy">("nginx");
+  const installedWebServers = React.useMemo(
+    () => (["nginx", "apache", "caddy"] as const).filter((id) => packages.some((p) => p.id === id && p.install)),
+    [packages]
+  );
   const [proxyTarget, setProxyTarget] = React.useState("127.0.0.1:3001");
   const [application, setApplication] = React.useState<CreateSiteInput["runtime"]["application"]>();
   const appRuntime = applicationRuntime(kind);
@@ -231,6 +236,18 @@ export function SiteWizard({
   React.useEffect(() => {
     if (open && !existingProject && !phpVersion && phpVersions[0]) setPhpVersion(phpVersions[0]);
   }, [open, existingProject, phpVersion, phpVersions]);
+
+  // 设置页的默认 Web 服务器应成为新建站点的安全默认值；扫描到的已有项目
+  // 仍由项目配置或用户在扫描器中明确选择覆盖，避免改动已有项目的入口。
+  React.useEffect(() => {
+    if (!open || existingProject || existingDefaults?.webServer) return;
+    const configured = settings?.defaultWebServer;
+    if ((configured === "nginx" || configured === "apache" || configured === "caddy") && installedWebServers.includes(configured)) {
+      setWebServer(configured);
+    } else if (installedWebServers.length > 0 && !installedWebServers.includes(webServer)) {
+      setWebServer(installedWebServers[0]);
+    }
+  }, [open, existingProject, existingDefaults?.webServer, settings?.defaultWebServer, installedWebServers, webServer]);
 
   /* 名称 → 域名联动 */
   React.useEffect(() => {

@@ -924,6 +924,7 @@ export default function SettingsPage() {
                     <SelectContent>
                       <SelectItem value="nginx">Nginx</SelectItem>
                       <SelectItem value="apache">Apache</SelectItem>
+                      <SelectItem value="caddy">Caddy</SelectItem>
                     </SelectContent>
                   </Select>
                 </SettingRow>

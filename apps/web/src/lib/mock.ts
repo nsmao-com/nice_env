@@ -3472,11 +3472,20 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const shells = Array.from(packages.values()).filter(pkg => pkg.id === "mongosh" && pkg.install).sort((a,b) => cmpVersionDesc(a.version,b.version));
       const shell = shells.find(pkg => pkg.active) ?? shells[0];
       if (!shell) throw { code: "MONGO_SHELL_MISSING", message: "请先安装 MongoDB Shell，以启用数据库浏览" };
-      const request = args!.request as { action: string; database?: string; collection?: string; search?: string; offset?: number; limit?: number; filter?: import("@nsb/schema").MongoFilter | null };
+       const request = args!.request as { action: string; database?: string; collection?: string; search?: string; offset?: number; limit?: number; id?: string; confirmed?: boolean; filter?: import("@nsb/schema").MongoFilter | null };
       if (request.action === "overview") return { kind: "overview", version: service.version, serverVersion: service.version, port: service.port, uri: `mongodb://127.0.0.1:${service.port}`, shellVersion: shell.version, databases: ["admin", "local", ...mockMongoDatabases.keys()], limited: false } as T;
       const collections = mockMongoDatabases.get(request.database ?? "") ?? {};
       if (request.action === "collections") return { kind: "collections", database: request.database, entries: Object.keys(collections).filter(name => name.toLowerCase().includes((request.search ?? "").toLowerCase())).map(name => ({ name, kind: "collection" })), limited: false } as T;
-      if (request.action !== "documents" || !collections[request.collection ?? ""]) throw { code: "MONGO_COLLECTION_MISSING", message: "所选集合已不存在，请刷新集合列表" };
+        if (request.action === "deleteDocument") {
+          const collectionName = request.collection;
+          if (!request.confirmed || !request.id || !collectionName || !collections[collectionName]) throw { code: "MONGO_DOCUMENT_INVALID", message: "请选择仍存在的文档并确认删除" };
+          const entries = collections[collectionName];
+          const index = entries.findIndex((row) => JSON.stringify(row._id) === request.id);
+          if (index < 0) throw { code: "MONGO_DOCUMENT_MISSING", message: "文档已不存在，请刷新当前集合" };
+          entries.splice(index, 1);
+          return { kind: "deleteDocument", database: request.database, collection: collectionName, deleted: 1 } as T;
+        }
+       if (request.action !== "documents" || !collections[request.collection ?? ""]) throw { code: "MONGO_COLLECTION_MISSING", message: "所选集合已不存在，请刷新集合列表" };
       let rows = structuredClone(collections[request.collection!]);
       const filter = request.filter;
       if (filter) rows = rows.filter(row => {
@@ -3489,7 +3498,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         return current === filter.value;
       });
       const offset = request.offset ?? 0, limit = request.limit ?? 10;
-      return { kind: "documents", database: request.database, collection: request.collection, offset, limit, documents: rows.slice(offset,offset+limit).map(row => ({ content: JSON.stringify(row,null,2), truncated: false })), hasMore: offset+limit<rows.length } as T;
+       return { kind: "documents", database: request.database, collection: request.collection, offset, limit, documents: rows.slice(offset,offset+limit).map(row => ({ id: JSON.stringify(row._id), content: JSON.stringify(row,null,2), truncated: false })), hasMore: offset+limit<rows.length } as T;
     }
     case "postgres_backup_dir": return "C:/NiceEnv/backup/postgresql" as T;
     case "postgres_backup_delete": {

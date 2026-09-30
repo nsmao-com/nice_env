@@ -17,6 +17,7 @@ pub enum BrowseRequest {
     Overview,
     Collections { database: String, search: String },
     Documents { database: String, collection: String, offset: u32, limit: u32, filter: Option<DocumentFilter> },
+    DeleteDocument { database: String, collection: String, id: String, confirmed: bool },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -25,7 +26,7 @@ pub struct CollectionInfo { pub name: String, pub kind: String }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Document { pub content: String, pub truncated: bool }
+pub struct Document { pub id: String, pub content: String, pub truncated: bool }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -34,6 +35,7 @@ pub enum BrowseResponse {
         #[serde(rename = "shellVersion")] shell_version: String, databases: Vec<String>, limited: bool },
     Collections { database: String, entries: Vec<CollectionInfo>, limited: bool },
     Documents { database: String, collection: String, offset: u32, limit: u32, documents: Vec<Document>, #[serde(rename = "hasMore")] has_more: bool },
+    DeleteDocument { database: String, collection: String, deleted: u64 },
 }
 
 fn valid_name(name: &str, max: usize) -> bool {
@@ -62,6 +64,11 @@ fn validate(request: &BrowseRequest) -> Result<()> {
                     _ => false,
                 };
                 if !valid { return Err(bad().with_hint("数字需有限且整数不超过安全精度范围；ObjectId 需为 24 位十六进制字符")); }
+            }
+        }
+        BrowseRequest::DeleteDocument { database, collection, id, confirmed } => {
+            if !valid_name(database, 64) || !valid_name(collection, 255) || id.len() > 4096 || id.chars().any(char::is_control) || !confirmed {
+                return Err(bad().with_hint("请选择普通集合中的文档，并确认删除目标"));
             }
         }
     }
@@ -115,7 +122,17 @@ const SCRIPT: &str = r###"
     if (request.action === 'collections') {
       entries.sort((a,b) => a.name.localeCompare(b.name)); result = {kind:'collections',database:request.database,entries,limited};
     } else {
-      if (!entries.some(entry => entry.name === request.collection)) throw Object.assign(new Error('Collection no longer exists'), {code:'MONGO_COLLECTION_MISSING'});
+      const collectionInfo = entries.find(entry => entry.name === request.collection);
+      if (!collectionInfo) throw Object.assign(new Error('Collection no longer exists'), {code:'MONGO_COLLECTION_MISSING'});
+      if (request.action === 'deleteDocument') {
+        if (collectionInfo.kind !== 'collection') throw Object.assign(new Error('This collection is read-only'), {code:'MONGO_COLLECTION_READONLY'});
+        let id;
+        try { id = EJSON.parse(request.id, {relaxed:false}); } catch { throw Object.assign(new Error('Document id is invalid'), {code:'MONGO_DOCUMENT_INVALID'}); }
+        const deleted = database.getCollection(request.collection).deleteOne({_id:id}, {maxTimeMS:5000});
+        if (!deleted.acknowledged) throw Object.assign(new Error('Delete was not acknowledged'), {code:'MONGO_DELETE_UNACKNOWLEDGED'});
+        if (deleted.deletedCount !== 1) throw Object.assign(new Error('Document no longer exists'), {code:'MONGO_DOCUMENT_MISSING'});
+        result = {kind:'deleteDocument',database:request.database,collection:request.collection,deleted:deleted.deletedCount};
+      } else {
       let filter = {};
       if (request.filter) {
         const spec = request.filter;
@@ -128,11 +145,14 @@ const SCRIPT: &str = r###"
       try {
         while (docs.hasNext()) {
           if (documents.length >= request.limit) { hasMore = true; break; }
-          const text = EJSON.stringify(docs.next(), null, 2, {relaxed:false});
-          documents.push({content:text.slice(0,65536),truncated:text.length>65536});
+           const document = docs.next();
+           const id = EJSON.stringify(document._id, null, 0, {relaxed:false});
+           const text = EJSON.stringify(document, null, 2, {relaxed:false});
+           documents.push({id,content:text.slice(0,65536),truncated:text.length>65536});
         }
       } finally { docs.close(); }
-      result = {kind:'documents',database:request.database,collection:request.collection,offset:request.offset,limit:request.limit,documents,hasMore};
+       result = {kind:'documents',database:request.database,collection:request.collection,offset:request.offset,limit:request.limit,documents,hasMore};
+      }
     }
   }
   print(JSON.stringify({result}));
@@ -203,6 +223,10 @@ pub(crate) fn execute_as(state: &CoreState, version: &str, request: serde_json::
             "50" => ("MONGO_QUERY_TIMEOUT", "MongoDB 查询超时，请缩小筛选范围后重试"),
             "MONGO_INSTANCE_CHANGED" => ("MONGO_INSTANCE_CHANGED", "MongoDB 数据目录与所选实例不一致，已停止读取"),
             "MONGO_COLLECTION_MISSING" => ("MONGO_COLLECTION_MISSING", "所选集合已不存在，请刷新集合列表"),
+            "MONGO_COLLECTION_READONLY" => ("MONGO_COLLECTION_READONLY", "视图和时序集合不可在此处删除文档"),
+            "MONGO_DOCUMENT_INVALID" => ("MONGO_DOCUMENT_INVALID", "文档标识无效，请刷新后重试"),
+            "MONGO_DOCUMENT_MISSING" => ("MONGO_DOCUMENT_MISSING", "文档已不存在，请刷新当前集合"),
+            "MONGO_DELETE_UNACKNOWLEDGED" => ("MONGO_DELETE_UNACKNOWLEDGED", "MongoDB 未确认删除，请刷新后检查"),
             "MONGO_ADMIN_EXISTS" => ("MONGO_ADMIN_EXISTS", "实例已有账号，请验证现有管理账号，未创建新管理员"),
             _ => ("MONGO_QUERY_FAILED", "MongoDB 查询失败，请检查实例状态后重试"),
         };

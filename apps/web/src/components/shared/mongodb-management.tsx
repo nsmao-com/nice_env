@@ -60,18 +60,22 @@ function MongoBrowser({ version, signature }: { version: string; signature: stri
   const [deleteConfirmation, setDeleteConfirmation] = React.useState("");
   const [deleteBusy, setDeleteBusy] = React.useState(false);
   const [deleteError, setDeleteError] = React.useState("");
+  const [documentToDelete, setDocumentToDelete] = React.useState<{ id: string; content: string } | null>(null);
+  const [documentDeleteBusy, setDocumentDeleteBusy] = React.useState(false);
+  const [documentDeleteError, setDocumentDeleteError] = React.useState("");
   const databaseExists = !!overview.data?.databases.includes(database);
   const deletableDatabase = databaseExists && !["admin", "local", "config"].includes(database.toLowerCase());
   const collections = useQuery({ queryKey: ["mongo-collections", signature, database, search], queryFn: () => api.mongoCollections(version, database, search), enabled: databaseExists && !overview.isError && !overview.isFetching, ...options });
   const collectionExists = !!collections.data?.entries.some(entry => entry.name === collection);
+  const collectionWritable = collections.data?.entries.find(entry => entry.name === collection)?.kind === "collection";
   const ready = databaseExists && collectionExists && !overview.isError && !collections.isError && !overview.isFetching && !collections.isFetching;
   const documents = useQuery({ queryKey: ["mongo-documents", signature, database, collection, offset, filter], queryFn: () => api.mongoDocuments(version, database, collection, offset, PAGE_SIZE, filter), enabled: ready, ...options });
   const fieldValid = !!field && new TextEncoder().encode(field).length <= 255 && !/[\x00-\x1f\x7f-\x9f$]/.test(field) && field.split(".").every(Boolean);
   const searchValid = new TextEncoder().encode(searchDraft).length <= 200 && !/[\x00-\x1f\x7f-\x9f]/.test(searchDraft);
   const valueValid = new TextEncoder().encode(value).length <= 4096 && !value.includes("\0") && (valueType === "number" ? /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(value) && Number.isFinite(Number(value)) && (!Number.isInteger(Number(value)) || Number.isSafeInteger(Number(value))) : valueType === "objectId" ? /^[a-f\d]{24}$/i.test(value) : valueType === "boolean" ? ["true", "false"].includes(value) : true);
   const clearFilter = () => { setFilter(null); setField(""); setValue(""); setValueType("text"); setOffset(0); };
-  const selectDatabase = (next: string) => { setDatabase(next); setCollection(""); setSearch(""); setSearchDraft(""); setDeleteOpen(false); setDeletePreview(null); setDeleteConfirmation(""); setDeleteError(""); clearFilter(); };
-  const selectCollection = (next: string) => { setCollection(next); clearFilter(); };
+  const selectDatabase = (next: string) => { setDatabase(next); setCollection(""); setSearch(""); setSearchDraft(""); setDeleteOpen(false); setDeletePreview(null); setDeleteConfirmation(""); setDeleteError(""); setDocumentToDelete(null); setDocumentDeleteError(""); clearFilter(); };
+  const selectCollection = (next: string) => { setCollection(next); setDocumentToDelete(null); setDocumentDeleteError(""); clearFilter(); };
   const inspectDelete = async () => {
     if (!deletableDatabase || deleteBusy) return;
     setDeleteBusy(true); setDeleteError("");
@@ -85,12 +89,24 @@ function MongoBrowser({ version, signature }: { version: string; signature: stri
     try {
       await api.mongoDatabaseDelete(version, deletePreview.database, deletePreview.revision, deleteConfirmation);
       toast.success(t("mongo.databaseDeleted"));
-      setDeleteOpen(false); setDeletePreview(null); setDeleteConfirmation(""); setDatabase(""); setCollection(""); setSearch(""); setSearchDraft(""); clearFilter();
+      setDeleteOpen(false); setDeletePreview(null); setDeleteConfirmation(""); setDatabase(""); setCollection(""); setSearch(""); setSearchDraft(""); setDocumentToDelete(null); setDocumentDeleteError(""); clearFilter();
       await overview.refetch();
     } catch (error) { setDeleteError(normalizeError(error).message); }
     finally { setDeleteBusy(false); }
   };
-  const loading = overview.isFetching || collections.isFetching || documents.isFetching || deleteBusy;
+  const deleteDocument = async () => {
+    if (!documentToDelete || !collectionWritable || documentDeleteBusy) return;
+    setDocumentDeleteBusy(true); setDocumentDeleteError("");
+    try {
+      await api.mongoDeleteDocument(version, database, collection, documentToDelete.id);
+      toast.success(t("mongo.documentDeleted"));
+      setDocumentToDelete(null);
+      if (documents.data?.documents.length === 1 && offset > 0) setOffset(Math.max(0, offset - PAGE_SIZE));
+      else await documents.refetch();
+    } catch (error) { setDocumentDeleteError(normalizeError(error).message); }
+    finally { setDocumentDeleteBusy(false); }
+  };
+  const loading = overview.isFetching || collections.isFetching || documents.isFetching || deleteBusy || documentDeleteBusy;
   return <>
     <Card><CardHeader><div className="flex flex-wrap items-center justify-between gap-2"><CardTitle>{t("mongo.connection")}</CardTitle><Button size="sm" variant="ghost" disabled={loading} onClick={() => void overview.refetch()}><RefreshCw className="h-3.5 w-3.5" />{t("mongo.refresh")}</Button></div></CardHeader><CardContent>
       {overview.isPending && <p role="status" className="text-sm text-muted">{t("mongo.loading")}</p>}
@@ -118,13 +134,20 @@ function MongoBrowser({ version, signature }: { version: string; signature: stri
         {!documents.isFetching && documents.isError && <QueryError error={documents.error} busy={documents.isFetching} retry={() => void documents.refetch()} />}
         {ready && !documents.isFetching && !documents.isError && documents.data && <><p className="text-xs text-muted">{t("mongo.range").replace("{start}", String(documents.data.documents.length ? offset+1 : 0)).replace("{end}", String(offset+documents.data.documents.length))}</p>
           {!documents.data.documents.length && <p className="py-5 text-sm text-muted">{t(filter ? "mongo.noDocumentsMatch" : "mongo.noDocuments")}</p>}
-          <div className="min-w-0 space-y-3">{documents.data.documents.map((document, index) => <details key={`${documents.dataUpdatedAt}:${offset+index}`} open={index === 0} className="min-w-0 rounded-lg bg-fill p-3"><summary className="cursor-pointer text-sm">{t("mongo.document")} {offset+index+1}{document.truncated && <span className="ml-2 text-xs text-warn">{t("mongo.preview")}</span>}</summary><div className="mt-3 min-w-0 space-y-2">{document.truncated ? <p className="text-xs leading-5 text-warn">{t("mongo.truncated")}</p> : <div className="flex justify-end"><CopyButton text={document.content} /></div>}<pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all font-mono text-xs leading-5" tabIndex={0}>{document.content}</pre></div></details>)}</div>
+          <div className="min-w-0 space-y-3">{documents.data.documents.map((document, index) => <details key={`${documents.dataUpdatedAt}:${offset+index}`} open={index === 0} className="min-w-0 rounded-lg bg-fill p-3"><summary className="cursor-pointer text-sm">{t("mongo.document")} {offset+index+1}{document.truncated && <span className="ml-2 text-xs text-warn">{t("mongo.preview")}</span>}</summary><div className="mt-3 min-w-0 space-y-2"><div className="flex flex-wrap items-center justify-end gap-2">{!document.truncated && <CopyButton text={document.content} />}{collectionWritable && <Button type="button" size="sm" variant="ghost" className="text-error hover:text-error" disabled={loading} onClick={() => { setDocumentDeleteError(""); setDocumentToDelete({ id: document.id, content: document.content }); }}><Trash2 className="h-3.5 w-3.5" />{t("mongo.deleteDocument")}</Button>}</div>{document.truncated && <p className="text-xs leading-5 text-warn">{t("mongo.truncated")}</p>}<pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all font-mono text-xs leading-5" tabIndex={0}>{document.content}</pre></div></details>)}</div>
         </>}
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-dashed border-border pt-4"><Button variant="secondary" size="sm" disabled={!ready || documents.isFetching || offset === 0} onClick={() => setOffset(Math.max(0,offset-PAGE_SIZE))}><ChevronLeft className="h-3.5 w-3.5" />{t("mongo.previous")}</Button><span className="text-xs text-muted">{t("mongo.page").replace("{page}", String(offset/PAGE_SIZE+1))}</span><Button variant="secondary" size="sm" disabled={!ready || documents.isFetching || documents.isError || !documents.data?.hasMore || offset+PAGE_SIZE > 10_000} onClick={() => setOffset(offset+PAGE_SIZE)}>{t("mongo.next")}<ChevronRight className="h-3.5 w-3.5" /></Button></div>
         {offset+PAGE_SIZE > 10_000 && documents.data?.hasMore && <p className="text-xs text-warn">{t("mongo.pageLimit")}</p>}
       </CardContent>
     </Card>}
-    <Dialog open={deleteOpen} onOpenChange={(open) => { if (!open && !deleteBusy) { setDeleteOpen(false); setDeletePreview(null); setDeleteConfirmation(""); setDeleteError(""); } }}>
+    <Dialog open={documentToDelete !== null} onOpenChange={(open) => { if (!open && !documentDeleteBusy) { setDocumentToDelete(null); setDocumentDeleteError(""); } }}>
+      <DialogContent className="flex max-h-[85dvh] max-w-lg flex-col overflow-hidden" hideClose={documentDeleteBusy}>
+        <DialogHeader><DialogTitle>{t("mongo.deleteDocumentTitle")}</DialogTitle><DialogDescription>{t("mongo.deleteDocumentIntro")}</DialogDescription></DialogHeader>
+        <div className="min-h-0 space-y-4 overflow-y-auto px-0.5"><div className="rounded-lg bg-warn-soft p-3 text-sm leading-6 text-warn"><p>{t("mongo.deleteDocumentWarning")}</p><p className="mt-1 break-all font-mono text-xs">{documentToDelete?.id}</p></div>{documentToDelete && <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-fill p-3 font-mono text-xs leading-5">{documentToDelete.content}</pre>}{documentDeleteError && <p role="alert" className="break-words text-sm text-error">{documentDeleteError}</p>}</div>
+        <DialogFooter className="shrink-0 flex-col-reverse sm:flex-row"><Button type="button" variant="ghost" disabled={documentDeleteBusy} onClick={() => setDocumentToDelete(null)}>{t("common.cancel")}</Button><Button type="button" variant="destructive" disabled={documentDeleteBusy || !documentToDelete} onClick={() => void deleteDocument()}>{documentDeleteBusy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}{t("mongo.confirmDeleteDocument")}</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+    <Dialog open={deleteOpen} onOpenChange={(open) => { if (!open && !deleteBusy) { setDeleteOpen(open); setDeletePreview(null); setDeleteConfirmation(""); setDeleteError(""); } }}>
       <DialogContent hideClose={deleteBusy} className="flex max-h-[85dvh] max-w-lg flex-col overflow-hidden">
         <DialogHeader><DialogTitle className="pr-6">{t("mongo.deleteDatabase")}</DialogTitle><DialogDescription>{t("mongo.deleteDatabaseIntro")}</DialogDescription></DialogHeader>
         <div className="min-h-0 space-y-4 overflow-y-auto px-0.5">

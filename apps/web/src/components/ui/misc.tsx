@@ -10,8 +10,10 @@ function Separator({
     <div
       role="separator"
       className={cn(
-        "shrink-0 bg-border",
-        orientation === "horizontal" ? "h-px w-full" : "h-full w-px",
+        "shrink-0",
+        orientation === "horizontal"
+          ? "mx-3 w-auto border-t border-dashed border-separator"
+          : "h-full w-px bg-border",
         className
       )}
       {...props}

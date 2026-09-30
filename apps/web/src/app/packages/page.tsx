@@ -33,6 +33,7 @@ import {
   Stethoscope,
   RefreshCw,
   ScanSearch,
+  ExternalLink,
 } from "lucide-react";
 import type { PackageView, PackageCategory, ServiceStatus, BulkReport, BulkTarget, VersionCatalog } from "@nsb/schema";
 import { PACKAGE_CATEGORY_ORDER, PackageUninstallPreview } from "@nsb/schema";
@@ -136,6 +137,7 @@ interface PackageGroup {
   id: string;
   displayName: string;
   description: string;
+  homepage?: string;
   category: string;
   defaultPort?: number;
   /** 清单声明了 run → 可启停服务 */
@@ -215,6 +217,7 @@ function groupPackages(packages: PackageView[], defaultTld?: string): PackageGro
         description: ["php", "node", "python"].includes(p.id)
           ? p.description.replace(/^(PHP|Node\.js|Python)\s+[\d.]+(?: LTS)?/, "$1")
           : p.description,
+        homepage: p.homepage,
         category: p.category,
         defaultPort: p.defaultPort,
         isService: isService(p),
@@ -224,6 +227,7 @@ function groupPackages(packages: PackageView[], defaultTld?: string): PackageGro
       map.set(p.id, g);
     }
     if (!g.description && p.description) g.description = p.description;
+    if (!g.homepage && p.homepage) g.homepage = p.homepage;
     g.versions.push({
       version: p.version,
       sizeBytes: p.sizeBytes,
@@ -1185,6 +1189,23 @@ function PackageRow({
         {/* PHP：扩展面板入口。放在版本下拉左边，和「选版本」是同一类操作 */}
         {group.id === "php" && phpActiveVersion && (
           <PhpExtBadge version={phpActiveVersion} onOpen={() => { if (!disabled) setExtVersion(phpActiveVersion); }} />
+        )}
+
+        {group.homepage && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="shrink-0 text-muted hover:text-foreground"
+            title={t("packages.openHomepage")}
+            aria-label={`${t("packages.openHomepage")} · ${group.displayName}`}
+            disabled={disabled}
+            onClick={() => {
+              void api.openInBrowser(group.homepage!).catch((error) => toast.error(normalizeError(error).message));
+            }}
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+          </Button>
         )}
 
         {/* 右：版本下拉（清单内置 + 远程枚举的完整版本历史） */}

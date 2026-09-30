@@ -363,6 +363,8 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 /* ---------- 内存状态 ---------- */
 
 const services = new Map<string, ServiceStatus>();
+/** 浏览器预览中的服务自动启动偏好；与服务运行状态分开保存，模拟桌面端 Store。 */
+const mockAutoStartServices = new Set<string>();
 const webLanModes = new Map<string, boolean>();
 const sites = new Map<string, Site>();
 const mockEnvFiles = new Map<string, EnvFileView>();
@@ -767,6 +769,7 @@ function seed() {
       // schema 里两个数组带 default，但 mock 不走 zod 解析，这里必须自己带上
       requires: [],
       missingRequires: [],
+      autoStart: mockAutoStartServices.has(s.id),
       ...s,
     } as ServiceStatus);
 
@@ -1024,7 +1027,7 @@ function registerMockApplication(site: Site) {
   if (!site.runtime.application) { services.delete(id); return; }
   validateMockApplication(site.runtime);
   const target = new URL(normalizeProxyTarget(site.runtime.proxyTarget ?? "")!);
-  services.set(id, { id, label: `${site.name} · 应用`, state: "stopped", pids: [], requires: [], missingRequires: [],
+  services.set(id, { id, label: `${site.name} · 应用`, state: "stopped", pids: [], autoStart: mockAutoStartServices.has(id), requires: [], missingRequires: [],
     version: site.runtime.application.version, category: "runtime", port: Number(target.port || 80) });
 }
 
@@ -1060,6 +1063,7 @@ function refreshPackageSelection(id: string) {
     if (current && (current.state !== "stopped" || current.version === p.version)) continue;
     services.set(sid, {
       id: sid, label: p.displayName, state: "stopped", pids: [],
+      autoStart: mockAutoStartServices.has(sid),
       requires: p.run?.requires ?? [], missingRequires: [],
       version: p.version, category: p.category, port: p.defaultPort,
     });
@@ -1337,6 +1341,16 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
   switch (cmd) {
     case "list_service_status":
       return structuredClone(Array.from(services.values())) as T;
+    case "set_service_auto_start": {
+      const id = String(args?.id ?? "");
+      const service = services.get(id);
+      if (!service) throw { code: "UNKNOWN_SERVICE", message: `服务 ${id} 未注册或已卸载` };
+      const enabled = args?.enabled === true;
+      if (enabled) mockAutoStartServices.add(id);
+      else mockAutoStartServices.delete(id);
+      service.autoStart = enabled;
+      return enabled as T;
+    }
     case "service_history":
       return structuredClone(mockServiceHistory.slice(0, Math.min(200, Number(args?.n) || 200))) as T;
     case "service_web_url":

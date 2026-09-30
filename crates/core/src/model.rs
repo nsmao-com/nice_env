@@ -68,6 +68,9 @@ pub struct ServiceStatus {
     pub log_file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// 用户选择在 NiceEnv 启动后自动拉起此服务。
+    #[serde(default)]
+    pub auto_start: bool,
     /// 清单声明的前置依赖（服务 id）
     #[serde(default)]
     pub requires: Vec<String>,

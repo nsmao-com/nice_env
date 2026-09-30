@@ -319,6 +319,8 @@ export const ServiceStatus = z.object({
   lastError: AppErrorInfo.optional(),
   logFile: z.string().optional(),
   category: PackageCategory.optional(),
+  /** 登录 NiceEnv 后随应用启动的服务偏好；实际启动仍受依赖、端口和配置检查保护。 */
+  autoStart: z.boolean().default(false),
   /** 清单声明的前置依赖（服务 id） */
   requires: z.array(z.string()).default([]),
   /** 已声明但当前未安装的前置依赖 —— 前端在启动前就能提示 */

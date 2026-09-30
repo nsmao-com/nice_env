@@ -86,6 +86,8 @@ export const processRecoveryStatus = () => safe(invoke<ProcessRecoveryReport>("p
 export const recoverProcesses = () => safe(invoke<ProcessRecoveryReport>("recover_processes"));
 export const listServiceStatus = () =>
   safe(invoke<ServiceStatus[]>("list_service_status"));
+export const setServiceAutoStart = (id: string, enabled: boolean) =>
+  safe(invoke<boolean>("set_service_auto_start", { id, enabled }));
 export interface ServiceHistoryEntry {
   ts: number;
   serviceId: string;

@@ -1146,10 +1146,54 @@ impl CoreState {
         }).await.map_err(|error| AppError::internal("补齐管理台", error.to_string()))?
     }
 
+    /// 读取用户选择的服务自动启动清单；损坏的旧设置按空清单处理，避免阻断服务状态读取。
+    pub fn auto_start_service_ids(&self) -> Vec<String> {
+        self.store
+            .get_setting("autoStartServices")
+            .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+            .unwrap_or_default()
+    }
+
+    /// 保存单个服务的自动启动偏好。服务必须已经注册，避免前端把任意字符串写进启动清单。
+    pub fn set_service_auto_start(&self, id: &str, enabled: bool) -> Result<bool> {
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| {
+            AppError::new("SERVICE_BUSY", "服务正在操作，请稍后修改自动启动设置")
+        })?;
+        ops::register_services(&self.paths, &self.store, &self.manager);
+        generic::register_services(&self.paths, &self.store, &self.manager);
+        let status = self
+            .manager
+            .snapshot(id)
+            .ok_or_else(|| AppError::new("UNKNOWN_SERVICE", format!("服务 {id} 未注册或已卸载")))?;
+        if status.category.is_none() {
+            return Err(AppError::new("SERVICE_AUTOSTART_UNSUPPORTED", "此服务不支持独立自动启动设置")
+                .with_hint("可在服务栈中把相关服务组合起来，并在设置中选择启动时运行的服务栈"));
+        }
+        let mut ids = self.auto_start_service_ids();
+        ids.retain(|item| !item.trim().is_empty());
+        ids.sort();
+        ids.dedup();
+        if enabled {
+            if !ids.iter().any(|item| item == id) {
+                ids.push(id.to_string());
+                ids.sort();
+            }
+        } else {
+            ids.retain(|item| item != id);
+        }
+        self.store.set_setting(
+            "autoStartServices",
+            &serde_json::to_string(&ids).map_err(|error| AppError::internal("保存自动启动设置", error.to_string()))?,
+        )?;
+        Ok(enabled)
+    }
+
     pub fn service_status_list(&self) -> Vec<model::ServiceStatus> {
         let mut list = self.manager.list_status();
         let installed = self.store.list_installed().unwrap_or_default();
+        let auto_start: std::collections::HashSet<_> = self.auto_start_service_ids().into_iter().collect();
         for st in list.iter_mut() {
+            st.auto_start = auto_start.contains(&st.id);
             // 服务 id 形如 php@8.3.33，清单里查的是基础 id
             let base = st.id.split('@').next().unwrap_or(&st.id);
             if let Some(entry) = self

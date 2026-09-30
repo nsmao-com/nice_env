@@ -160,7 +160,24 @@ pub fn run() {
                         status.report = Some(report);
                         Ok(())
                     })();
-                    if let Err(error) = result { status.phase = StartupStackPhase::Failed; status.error = Some(error); }
+                    if let Err(error) = result {
+                        status.phase = StartupStackPhase::Failed;
+                        status.error = Some(error);
+                    } else {
+                        // 独立自动启动服务在服务栈之后执行；已由服务栈启动的服务是幂等成功，
+                        // 失败会保留在服务卡片状态，并在启动提示中给出可读的汇总。
+                        let mut failures = Vec::new();
+                        for id in st.auto_start_service_ids() {
+                            if let Err(error) = st.start_service(&id) {
+                                failures.push(format!("{}：{}", id, error.message));
+                            }
+                        }
+                        if !failures.is_empty() {
+                            status.phase = StartupStackPhase::Partial;
+                            status.error = Some(AppError::new("AUTOSTART_PARTIAL", "部分服务未能按自动启动设置拉起")
+                                .with_hint(failures.join("；")));
+                        }
+                    }
                     *startup_for_stack.stack.lock().unwrap_or_else(|e| e.into_inner()) = status;
                     tray::refresh(&handle_for_stack);
                 });
@@ -269,6 +286,7 @@ pub fn run() {
             version_catalogs,
             // 服务
             list_service_status,
+            set_service_auto_start,
             service_web_url,
             repair_service_web_ui,
             sftpgo_config_directories,
@@ -988,6 +1006,15 @@ fn list_service_status(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Vec<nsb_core::model::ServiceStatus> {
     state.service_status_list()
+}
+
+#[tauri::command]
+fn set_service_auto_start(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    id: String,
+    enabled: bool,
+) -> Result<bool, tauri::Error> {
+    map_jh(state.set_service_auto_start(&id, enabled))
 }
 
 #[tauri::command]

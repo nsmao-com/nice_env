@@ -13,6 +13,7 @@ import { ServiceIcon } from "./service-icon";
 import { ServiceWebButton } from "./service-web-button";
 import { ServiceConfigButton } from "./service-config-button";
 import { ServiceDataDirButton } from "./service-data-dir-button";
+import { ServiceAutoStartButton } from "./service-auto-start-button";
 import { SftpgoConfigButton } from "./sftpgo-config-button";
 import { ServiceDiagnostics } from "./service-diagnostics";
 import { StatusLight } from "./status-light";
@@ -133,6 +134,7 @@ export function ServiceRow({ service, dragHandle, dragPreview = false }: { servi
 
         <ServiceConfigButton service={service} disabled={busy || dragPreview} />
         <ServiceDataDirButton service={service} disabled={busy || dragPreview} />
+        <ServiceAutoStartButton service={service} disabled={busy || dragPreview} />
         <ServiceWebButton service={service} disabled={busy || dragPreview} />
         <SftpgoConfigButton service={service} disabled={busy || dragPreview} />
         <Button variant="ghost" size="icon-sm" className="shrink-0 text-faint" title={t("svc.diagnose")} aria-label={t("svc.diagnose")} disabled={dragPreview} onClick={() => setDiagOpen(true)}>

@@ -570,6 +570,7 @@ impl ServiceManager {
             last_error,
             log_file: Some(e.log_file.to_string_lossy().to_string()),
             category: e.category.clone(),
+            auto_start: false,
             requires: e.requires.clone(),
             // missing 需要 store 才能判断，由门面层补齐
             missing_requires: Vec::new(),

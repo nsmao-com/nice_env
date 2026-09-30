@@ -225,6 +225,20 @@ export default function SettingsPage() {
     retry: false,
   });
 
+  // 清单快照由桌面端立即生效；让当前会话中的套件、服务和环境查询
+  // 同步失效，否则用户刚拉到的新版本要等离开应用或缓存过期才会出现。
+  const invalidateManifestConsumers = React.useCallback(async () => {
+    await Promise.all([
+      "packages",
+      "version-catalogs",
+      "services",
+      "stacks",
+      "pathenv",
+      "databases",
+      "db-users",
+    ].map((key) => queryClient.invalidateQueries({ queryKey: [key] })));
+  }, [queryClient]);
+
   const syncManifest = async () => {
     if (!settings || !isTauri || manifestSyncing) return;
     const url = settings.manifestUrl.trim();
@@ -235,10 +249,26 @@ export default function SettingsPage() {
       await api.setSetting("manifestUrl", url);
       queryClient.setQueryData<AppSettings>(["settings"], (current) => current ? { ...current, manifestUrl: url } : current);
       const result = await api.refreshRemoteManifest(url);
+      await invalidateManifestConsumers();
       await manifestQuery.refetch();
       const revision = typeof result?.revision === "number" ? result.revision : "?";
       const packages = typeof result?.packages === "number" ? result.packages : "?";
       toast.success(t("settings.syncManifestDone").replace("{revision}", String(revision)).replace("{packages}", String(packages)));
+    } catch (error) {
+      toastError(error);
+    } finally {
+      setManifestSyncing(false);
+    }
+  };
+
+  const resetManifest = async () => {
+    if (manifestSyncing || !isTauri) return;
+    setManifestSyncing(true);
+    try {
+      await api.resetRemoteManifest();
+      await invalidateManifestConsumers();
+      await manifestQuery.refetch();
+      toast.success(t("settings.resetManifestDone"));
     } catch (error) {
       toastError(error);
     } finally {
@@ -1370,13 +1400,8 @@ export default function SettingsPage() {
                       variant="ghost"
                       size="sm"
                       className="h-7 text-[11px] text-faint hover:text-foreground"
-                      disabled={manifestSyncing}
-                      onClick={() =>
-                        api
-                          .resetRemoteManifest()
-                          .then(() => { void manifestQuery.refetch(); toast.success(t("settings.resetManifestDone")); })
-                          .catch(toastError)
-                      }
+                      disabled={!isTauri || manifestSyncing}
+                      onClick={() => void resetManifest()}
                     >
                       <RotateCcw className="h-3 w-3" /> {t("settings.resetManifest")}
                     </Button>

@@ -266,6 +266,19 @@ function mockSiteFileRename(siteId: string, path: string, newPath: string) {
   return { siteId: site.id, from: source, path: target, directory: isDirectory };
 }
 
+function mockSiteFileUpload(siteId: string, source: string, path: string) {
+  const { site, files, directories } = mockSiteTree(siteId);
+  if (!source.trim()) mockSiteFileError("SITE_FILE_UPLOAD_INVALID", "请选择要上传的文件");
+  const relative = mockSiteRelativePath(path, false);
+  if (mockSensitiveSiteFile(relative)) mockSiteFileError("SITE_FILE_SENSITIVE", "环境变量和密钥文件请使用专用文件管理器管理");
+  const parent = relative.split("/").slice(0, -1).join("/");
+  if (parent && !directories.has(parent) && ![...files.keys()].some(key => key.startsWith(`${parent}/`))) mockSiteFileError("SITE_FILE_NOT_DIRECTORY", "目标父目录不存在或不可写");
+  if (files.has(relative) || directories.has(relative)) mockSiteFileError("SITE_FILE_EXISTS", "同名文件或目录已存在");
+  const content = `上传预览文件\n来源：${source}\n`;
+  files.set(relative, { content, modifiedAt: now() });
+  return { siteId: site.id, path: relative, sizeBytes: new TextEncoder().encode(content).length };
+}
+
 function mockSiteFilePlan(id: string): SiteFilePlan {
   if (!sites.has(id)) throw { code: "SITE_NOT_FOUND", message: "站点已不存在" };
   const plan = siteFilePlans.get(id) ?? { status: { config: { enabled: false, frequency: "daily", time: "03:00", weekday: 0, monthDay: 1, keep: 10 }, nextAt: null, lastRunAt: null, finishedAt: null, state: "idle", message: "", files: [] }, project: true, excludeGenerated: true, scope: null, revision: "initial" };
@@ -1876,6 +1889,8 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return mockSiteFileCreate(String(args?.id ?? ""), String(args?.path ?? ""), args?.directory === true) as T;
     case "site_file_rename":
       return mockSiteFileRename(String(args?.id ?? ""), String(args?.path ?? ""), String(args?.newPath ?? "")) as T;
+    case "site_file_upload":
+      return mockSiteFileUpload(String(args?.id ?? ""), String(args?.source ?? ""), String(args?.path ?? "")) as T;
     case "site_network_info": {
       const site = sites.get(args?.id as string);
       if (!site) throw { code: "SITE_NOT_FOUND", message: "站点不存在，请刷新列表" };

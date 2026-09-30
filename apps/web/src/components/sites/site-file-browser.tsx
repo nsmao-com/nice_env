@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, ChevronRight, FilePlus, FileText, Folder, FolderPlus, Loader2, Pencil, RefreshCw, Save, Trash2 } from "lucide-react";
+import { AlertTriangle, ChevronRight, FilePlus, FileText, Folder, FolderPlus, Loader2, Pencil, RefreshCw, Save, Trash2, Upload } from "lucide-react";
 import { useT } from "@/lib/store";
 import { isTauri, normalizeError } from "@/lib/backend";
 import * as api from "@/lib/api";
@@ -147,6 +147,28 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
     } finally { setWorking(false); }
   };
 
+  const uploadFile = async () => {
+    if (busyRef.current || disabled) return;
+    setWorking(true); setError(null);
+    try {
+      let source: string | null = "C:/Demo/uploads/readme.md";
+      if (isTauri) {
+        const { open } = await import("@tauri-apps/plugin-dialog");
+        const picked = await open({ directory: false, multiple: false, title: t("siteFiles.browserUpload" as never) });
+        source = typeof picked === "string" ? picked : null;
+      }
+      if (!source) return;
+      const fileName = source.replaceAll("\\", "/").split("/").pop() ?? "";
+      if (!relativeNameValid(fileName)) throw { code: "SITE_FILE_UPLOAD_INVALID", message: t("siteFiles.browserUploadInvalid" as never) };
+      const path = current ? `${current}/${fileName}` : fileName;
+      await api.siteFileUpload(siteId, source, path);
+      await client.invalidateQueries({ queryKey: ["site-directory", siteId] });
+      toast.success(t("siteFiles.browserUploaded" as never));
+    } catch (failure) {
+      const parsed = normalizeError(failure); setError([parsed.message, parsed.hint].filter(Boolean).join(" · "));
+    } finally { setWorking(false); }
+  };
+
   const renameEntryNow = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!renameEntry || !relativeNameValid(renameName) || busyRef.current || disabled) return;
@@ -192,6 +214,7 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
         <p className="mt-1 text-xs leading-relaxed text-muted">{t("siteFiles.browserHint" as never)}</p>
       </div>
       <div className="flex flex-wrap items-center justify-end gap-1.5">
+        <Button size="sm" variant="secondary" disabled={locked || directory.isFetching} onClick={() => void uploadFile()}><Upload className="size-3.5" />{t("siteFiles.browserUpload" as never)}</Button>
         <Button size="sm" variant="secondary" disabled={locked || directory.isFetching} onClick={() => { setCreateError(null); setCreateName(""); setCreateKind("file"); }}><FilePlus className="size-3.5" />{t("siteFiles.browserNewFile" as never)}</Button>
         <Button size="sm" variant="secondary" disabled={locked || directory.isFetching} onClick={() => { setCreateError(null); setCreateName(""); setCreateKind("directory"); }}><FolderPlus className="size-3.5" />{t("siteFiles.browserNewFolder" as never)}</Button>
         <Button size="sm" variant="ghost" disabled={locked || directory.isFetching} onClick={() => void directory.refetch()}>

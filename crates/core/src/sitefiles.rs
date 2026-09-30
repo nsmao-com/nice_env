@@ -23,6 +23,7 @@ use crate::{
 
 const MAX_ENTRIES: usize = 500;
 const MAX_TEXT_BYTES: u64 = 1024 * 1024;
+const MAX_UPLOAD_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_RELATIVE_PATH: usize = 2048;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +80,14 @@ pub struct SiteFileRenameReceipt {
     pub from: String,
     pub path: String,
     pub directory: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteFileUploadReceipt {
+    pub site_id: String,
+    pub path: String,
+    pub size_bytes: u64,
 }
 
 fn site(store: &Store, id: &str) -> Result<Site> {
@@ -542,4 +551,36 @@ pub fn rename(store: &Store, id: &str, path: &str, new_path: &str) -> Result<Sit
     }
     fs::rename(&source, &target).map_err(|e| AppError::io("重命名站点文件", e))?;
     Ok(SiteFileRenameReceipt { site_id: id.to_string(), from: display_path(&source_relative), path: display_path(&target_relative), directory: source_meta.is_dir() })
+}
+
+pub fn upload(store: &Store, id: &str, source: &str, path: &str) -> Result<SiteFileUploadReceipt> {
+    let _sites = crate::sites::SITE_CHANGES.lock();
+    let root = root(store, id)?;
+    let relative = relative(Some(path))?;
+    if relative.as_os_str().is_empty() || sensitive_name(&relative) {
+        return Err(AppError::new("SITE_FILE_SENSITIVE", "环境变量和密钥文件请使用专用编辑器或系统文件管理器管理"));
+    }
+    let source_path = Path::new(source);
+    if source.trim().is_empty() {
+        return Err(AppError::new("SITE_FILE_UPLOAD_INVALID", "请选择要上传的文件"));
+    }
+    let source_meta = fs::symlink_metadata(source_path).map_err(|e| AppError::io("读取待上传文件", e))?;
+    if linked(&source_meta) || !source_meta.is_file() {
+        return Err(AppError::new("SITE_FILE_UPLOAD_INVALID", "只能上传普通文件，不能上传目录或符号链接"));
+    }
+    if source_meta.len() > MAX_UPLOAD_BYTES {
+        return Err(AppError::new("SITE_FILE_UPLOAD_TOO_LARGE", "上传文件不能超过 64 MiB"));
+    }
+    let target = checked_new_path(&root, &relative)?;
+    let input = fs::File::open(source_path).map_err(|e| AppError::io("打开待上传文件", e))?;
+    let mut pending = tempfile::NamedTempFile::new_in(target.parent().unwrap())?;
+    let copied = std::io::copy(&mut input.take(MAX_UPLOAD_BYTES + 1), pending.as_file_mut())?;
+    if copied > MAX_UPLOAD_BYTES {
+        return Err(AppError::new("SITE_FILE_UPLOAD_TOO_LARGE", "上传文件不能超过 64 MiB"));
+    }
+    pending.as_file().sync_all()?;
+    pending
+        .persist(&target)
+        .map_err(|e| AppError::io("保存上传文件", e.error))?;
+    Ok(SiteFileUploadReceipt { site_id: id.to_string(), path: display_path(&relative), size_bytes: copied })
 }

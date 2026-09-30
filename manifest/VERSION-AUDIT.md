@@ -137,3 +137,17 @@
 同时纠正 Adminer 与 MongoDB 的显示名称，使其与实际版本一致。MySQL `26.7.0` 本轮在 Windows/macOS 官方发行目录中仍是可下载的最高正式版，因此保留。其余套件的清单最高版本与本轮上游目录一致，没有为了版本号变化而改动历史可选版本。
 
 第三轮验证边界：完成两平台全量目录刷新、变更包地址探测、MongoDB Database Tools 三架构实际下载哈希校验、JSON 解析及 `git diff --check`；未运行前端 dev/build，未启动用户服务，未修改数据库。
+
+## 第四轮：历史与中间版本逐条复核（2026-09-30）
+
+本轮把当前 Windows 清单的 202 个平台条目、macOS 清单的 29 个平台条目与上游完整目录逐版本比对，不只检查每个套件的最高版本。发现并修正 12 处真实差异：
+
+- PHP `8.3.33`、`8.5.10`、`8.4.25`、`8.2.33` 改用 PHP 官方 `releases/archives/` 地址；原地址会返回错误或不再提供文件。
+- Adminer `4.8.1`、`6.0.0`、`6.0.1`、`6.0.2`、`6.1.0` 统一到官方完整包，并将安装入口统一为 `adminer.php`。此前的 `-en.php` 或版本化入口会导致内置站点查找不到管理台文件。五个包均实际下载核对了大小和 SHA256。
+- FrankenPHP `1.12.7` 更新为实际包的 SHA256 `c301e350ca95823f392c5e10bf06e3a1220f9b22c1df0f8b8a42f8f9da46a145`、大小 59,435,733 字节。
+- RustFS `1.0.0` 改用上游当前 `rustfs-windows-x86_64-latest.zip` 地址；实际下载大小 105,040,603 字节，SHA256 `4ccf5858ce8e6f70f01af2394c8cc0e0878ee77faa6c20d3179153476554b7d8`。
+- Tomcat `10.1.60` 改用 Apache 当前下载站地址，包大小保持 16,441,684 字节。
+
+清单中较旧的 Redis、Memcached、MongoDB、Node、Composer、PostgreSQL 等版本在上游目录的当前返回窗口之外，属于已归档或已停止维护的历史版本；它们没有被误判成新版本，也没有删除，仍保留供已有环境选择。macOS 的 MongoDB Database Tools 与 mongosh x86_64 条目按架构单独核对，不能拿 arm64 目录结果覆盖。
+
+第四轮验证：重新执行 Windows 53 个套件、macOS 9 个套件的强制目录刷新；直接下载并核对 5 个 Adminer 包、FrankenPHP 1.12.7 和 RustFS 1.0.0；PHP/Tomcat 新地址返回 HTTP 200；未运行前端 dev/build，未启动用户服务，未修改数据库。

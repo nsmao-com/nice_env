@@ -1,5 +1,5 @@
 {
-  "revision": 47,
+  "revision": 48,
   "updated": "2026-09-30",
   "packages": [
     {
@@ -216,7 +216,7 @@
         "x64"
       ],
       "kind": "archive",
-      "url": "https://downloads.php.net/~windows/releases/php-8.3.33-Win32-vs16-x64.zip",
+      "url": "https://downloads.php.net/~windows/releases/archives/php-8.3.33-Win32-vs16-x64.zip",
       "sha256": "b089e370ff99eb7038b0d22617dec2f3a1d0e93ca26b11fd218f2f5b60422271",
       "sizeBytes": 34001105,
       "entry": "php-cgi.exe",
@@ -385,7 +385,7 @@
       "url": "https://github.com/vrana/adminer/releases/download/v4.8.1/adminer-4.8.1.php",
       "sha256": "2fd7e6d8f987b243ab1839249551f62adce19704c47d3d0c8dd9e57ea5b9c6b3",
       "sizeBytes": 476603,
-      "entry": "adminer-4.8.1.php",
+      "entry": "adminer.php",
       "requires": [
         "php"
       ]
@@ -433,7 +433,7 @@
         "x64"
       ],
       "kind": "archive",
-      "url": "https://downloads.php.net/~windows/releases/php-8.5.10-Win32-vs17-x64.zip",
+      "url": "https://downloads.php.net/~windows/releases/archives/php-8.5.10-Win32-vs17-x64.zip",
       "sha256": "a6bc8b2f3d7bfb397ccb973db2f959e61e530e0986c9cea262dd4a317ec599d8",
       "sizeBytes": 36160267,
       "entry": "php-cgi.exe",
@@ -461,7 +461,7 @@
         "x64"
       ],
       "kind": "archive",
-      "url": "https://downloads.php.net/~windows/releases/php-8.4.25-Win32-vs17-x64.zip",
+      "url": "https://downloads.php.net/~windows/releases/archives/php-8.4.25-Win32-vs17-x64.zip",
       "sha256": "2cf521fb6bcb45b634c7e9a7ab2afb6d41698b987bbc73c4975d90a065e0f16c",
       "sizeBytes": 35113790,
       "entry": "php-cgi.exe",
@@ -489,7 +489,7 @@
         "x64"
       ],
       "kind": "archive",
-      "url": "https://downloads.php.net/~windows/releases/php-8.2.33-Win32-vs16-x64.zip",
+      "url": "https://downloads.php.net/~windows/releases/archives/php-8.2.33-Win32-vs16-x64.zip",
       "sha256": "7d2568dfaad6ac1391e57994f52c8aed835baf9e6d89f4328770e2843311291c",
       "sizeBytes": 33562144,
       "entry": "php-cgi.exe",
@@ -1161,10 +1161,10 @@
       ],
       "kind": "archive",
       "url": "https://github.com/php/frankenphp/releases/download/v1.12.7/frankenphp-windows-x86_64.zip",
-      "sizeBytes": 59415145,
+      "sizeBytes": 59435733,
       "entry": "frankenphp.exe",
       "homepage": "https://frankenphp.dev",
-      "sha256": "db51302615dd121da4125072d59b7082af0540d1ae7658e2428689b26884e952",
+      "sha256": "c301e350ca95823f392c5e10bf06e3a1220f9b22c1df0f8b8a42f8f9da46a145",
       "defaultPort": 8080,
       "run": {
         "args": [
@@ -1466,7 +1466,7 @@
         "x64"
       ],
       "kind": "archive",
-      "url": "https://github.com/rustfs/rustfs/releases/download/1.0.0/rustfs-windows-x86_64-v1.0.0.zip",
+      "url": "https://github.com/rustfs/rustfs/releases/download/1.0.0/rustfs-windows-x86_64-latest.zip",
       "sizeBytes": 105040603,
       "entry": "rustfs.exe",
       "homepage": "https://rustfs.com",
@@ -4794,7 +4794,7 @@
         "x64"
       ],
       "kind": "archive",
-      "url": "https://archive.apache.org/dist/tomcat/tomcat-10/v10.1.60/bin/apache-tomcat-10.1.60-windows-x64.zip",
+      "url": "https://downloads.apache.org/tomcat/tomcat-10/v10.1.60/bin/apache-tomcat-10.1.60-windows-x64.zip",
       "sizeBytes": 16441684,
       "entry": "apache-tomcat-10.1.60/bin/startup.bat",
       "homepage": "https://tomcat.apache.org",
@@ -4911,10 +4911,10 @@
         "arm64"
       ],
       "kind": "binary",
-      "url": "https://github.com/vrana/adminer/releases/download/v6.1.0/adminer-6.1.0-en.php",
-      "sha256": "d21891f420eac5553e9a85d8af2ef3375c1066c4b5c0f573d8e4f936666d2000",
-      "sizeBytes": 402082,
-      "entry": "adminer-6.1.0-en.php",
+      "url": "https://github.com/vrana/adminer/releases/download/v6.1.0/adminer-6.1.0.php",
+      "sha256": "95bf24b510b41904446f720f4f1212c9e28b1d523f3df44259480d7a12ea181e",
+      "sizeBytes": 552584,
+      "entry": "adminer.php",
       "requires": [
         "php"
       ]
@@ -5043,10 +5043,10 @@
         "arm64"
       ],
       "kind": "binary",
-      "url": "https://github.com/vrana/adminer/releases/download/v6.0.2/adminer-6.0.2-en.php",
-      "sha256": "687b2d75611f41ce6789bcf9e742fd8bb2585f9f54ed9e92c160abbf4cf9af7f",
-      "sizeBytes": 386207,
-      "entry": "adminer-6.0.2-en.php",
+      "url": "https://github.com/vrana/adminer/releases/download/v6.0.2/adminer-6.0.2.php",
+      "sha256": "2d8d813523b84df7bcdfcba341845c740060c0c7974d1a1fdd676b98539847fc",
+      "sizeBytes": 533731,
+      "entry": "adminer.php",
       "requires": [
         "php"
       ]
@@ -5067,10 +5067,10 @@
         "arm64"
       ],
       "kind": "binary",
-      "url": "https://github.com/vrana/adminer/releases/download/v6.0.1/adminer-6.0.1-en.php",
-      "sha256": "c820771612aedd70b26b8f75f442cc9fc118f8225d0166cc6c5909a89f314805",
-      "sizeBytes": 372420,
-      "entry": "adminer-6.0.1-en.php",
+      "url": "https://github.com/vrana/adminer/releases/download/v6.0.1/adminer-6.0.1.php",
+      "sha256": "1815c03f26e21d533e729c0b09bc69a59c902a6440409d013105ee679dff006c",
+      "sizeBytes": 519492,
+      "entry": "adminer.php",
       "requires": [
         "php"
       ]
@@ -5091,10 +5091,10 @@
         "arm64"
       ],
       "kind": "binary",
-      "url": "https://github.com/vrana/adminer/releases/download/v6.0.0/adminer-6.0.0-en.php",
-      "sha256": "a53add52eb659deeabc8341b2ffe0479f0b6fa39908d0d1bc6e292c0d789dade",
-      "sizeBytes": 360760,
-      "entry": "adminer-6.0.0-en.php",
+      "url": "https://github.com/vrana/adminer/releases/download/v6.0.0/adminer-6.0.0.php",
+      "sha256": "8181c9be10f290243724acb0e4dc930fe04440a343fb11dcc8ddb9821095e274",
+      "sizeBytes": 503412,
+      "entry": "adminer.php",
       "requires": [
         "php"
       ]

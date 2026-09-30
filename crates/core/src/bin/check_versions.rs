@@ -135,32 +135,36 @@ async fn main() {
                     fail += 1;
                     continue;
                 }
-                // 抽查第一个版本的下载地址可达（HEAD 或 Range GET 拿 2xx/3xx）
+                // 抽查实际安装候选地址可达（直连失败时会继续尝试 GitHub 加速源）。
                 let client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(25))
                     .build()
                     .unwrap();
-                let probe = client
-                    .get(&newest.url)
-                    .header("Range", "bytes=0-64")
-                    .send()
-                    .await;
-                match probe {
-                    Ok(r) if r.status().is_success() || r.status().is_redirection() => {
-                        println!(
-                            "       ✓ 最新版本下载地址可达（HTTP {}）",
-                            r.status().as_u16()
-                        );
-                        pass += 1;
+                let candidates = installer.candidate_urls_for(&synthesized, &store);
+                let mut reachable: Option<(String, u16)> = None;
+                let mut last_error = String::new();
+                for candidate in candidates {
+                    match client
+                        .get(&candidate)
+                        .header("Range", "bytes=0-64")
+                        .send()
+                        .await
+                    {
+                        Ok(r) if r.status().is_success() || r.status().is_redirection() => {
+                            reachable = Some((candidate, r.status().as_u16()));
+                            break;
+                        }
+                        Ok(r) => last_error = format!("HTTP {}", r.status()),
+                        Err(e) => last_error = e.to_string(),
                     }
-                    Ok(r) => {
-                        println!("       ✗ 最新版本地址异常：HTTP {}", r.status());
-                        fail += 1;
-                    }
-                    Err(e) => {
-                        println!("       ✗ 最新版本地址不可达：{e}");
-                        fail += 1;
-                    }
+                }
+                if let Some((url, status)) = reachable {
+                    let source = if url == newest.url { "直连" } else { "镜像回退" };
+                    println!("       ✓ 最新版本下载地址可达（{source}，HTTP {status}）");
+                    pass += 1;
+                } else {
+                    println!("       ✗ 最新版本候选地址均不可达：{last_error}");
+                    fail += 1;
                 }
             }
             Err(e) => {

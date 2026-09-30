@@ -932,6 +932,19 @@ function PackageRow({
     };
   }), [group, catalog, services, installTasks]);
   const update = packageUpdate(items);
+  const installedVersions = React.useMemo(
+    () => items.filter((item) => item.installed).map((item) => item.version),
+    [items]
+  );
+  const latestStable = items.find((item) => !item.prerelease && !item.incompatible);
+  const showLatestSummary = !!latestStable && (catalog?.online || !!catalog?.cachedAt || installedVersions.length > 0);
+  const latestSource = catalog?.loading
+    ? t("versions.loading")
+    : catalog?.online
+      ? t("versions.fromRemote")
+      : catalog?.cachedAt
+        ? t("versions.fromCache")
+        : t("versions.fromManifest");
   const packageInstalling = Object.values(installTasks).some((task) => task.id === group.id && task.status === "running");
 
   const pct = task && task.total > 0 ? Math.min(100, (task.received / task.total) * 100) : 0;
@@ -1085,6 +1098,25 @@ function PackageRow({
             <p className="mt-1 break-words text-[11.5px] leading-relaxed text-faint [overflow-wrap:anywhere]">
               {group.description}
             </p>
+            {showLatestSummary && (
+              <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] leading-relaxed text-muted" aria-label={`${group.displayName} ${t("versions.installed")} / ${t("versions.latest")}`}>
+                <span className="inline-flex min-w-0 items-center gap-1">
+                  <span className="text-faint">{t("versions.installed")}:</span>
+                  <span className="max-w-full break-all font-mono text-secondary">
+                    {installedVersions.length > 0 ? installedVersions.join(" · ") : "—"}
+                  </span>
+                </span>
+                {latestStable && (
+                  <span className="inline-flex min-w-0 items-center gap-1">
+                    <span className="text-faint">{t("versions.latest")}:</span>
+                    <span className={cn("break-all font-mono", update ? "text-info" : "text-secondary")}>
+                      {latestStable.version}
+                    </span>
+                    <span className="max-w-full truncate rounded-full border border-border px-1 py-px text-[9px] text-faint" title={latestSource}>{latestSource}</span>
+                  </span>
+                )}
+              </div>
+            )}
             {update && <div className="mt-2 space-y-1.5">
               <Button type="button" size="sm" variant="secondary"
                 className="h-auto min-h-8 max-w-full py-1.5 text-left text-xs whitespace-normal [overflow-wrap:anywhere]"

@@ -301,6 +301,14 @@ export function SiteDetailSheet({
               {url || t("sites.addressPending")}
             </a>
           </SheetDescription>
+          {applicationStatus && (
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[10.5px] text-muted" aria-live="polite">
+              <span>{t("appProcess.state")} · {t(("state." + applicationStatus.state) as "state.running")}</span>
+              {applicationStatus.version && <span className="font-mono">{applicationStatus.version}</span>}
+              {applicationStatus.port != null && <span className="font-mono">:{applicationStatus.port}</span>}
+              {applicationStatus.pids.length > 0 && <span className="font-mono text-faint">PID {applicationStatus.pids.join(", ")}</span>}
+            </div>
+          )}
         </SheetHeader>
 
         <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-5 pb-5 sm:px-6">
@@ -353,18 +361,20 @@ export function SiteDetailSheet({
           <p className="text-xs leading-relaxed text-faint">{t("detail.reloadHint").replace("{server}", site.runtime.webServer === "caddy" ? "Caddy" : site.runtime.webServer === "apache" ? "Apache" : "Nginx")}</p>
 
           <Tabs value={tab} onValueChange={setTab}>
-            <TabsList className="mb-5 grid h-auto w-full grid-cols-2 gap-1 rounded-2xl sm:flex sm:w-auto sm:flex-wrap">
-              <TabsTrigger value="general" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("detail.general")}</TabsTrigger>
-              <TabsTrigger value="access" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("siteAccess.title")}{accessProblem && <span className="text-error" aria-label={t("siteAccess.review")}>!</span>}</TabsTrigger>
-              <TabsTrigger value="basic-auth" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("basicAuth.title" as never)}{basicAuthProblem && <span className="text-error" aria-label={t("basicAuth.review" as never)}>!</span>}</TabsTrigger>
-              <TabsTrigger value="cors" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("cors.title")}{corsProblem && <span className="text-error" aria-label={t("cors.review")}>!</span>}</TabsTrigger>
-              {!isRedirect && <TabsTrigger value="error-pages" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("errorPages.title" as never)}{errorPagesProblem && <span className="text-error" aria-label={t("errorPages.invalid" as never)}>!</span>}</TabsTrigger>}
-              {!isRedirect && <TabsTrigger value="proxy-rules" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("proxyRules.title")}{proxyRulesProblem && <span className="text-error" aria-label={t("proxyRules.review")}>!</span>}</TabsTrigger>}
-              {!isRedirect && <TabsTrigger value="environment" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("env.title")}</TabsTrigger>}
-              {!isRedirect && <TabsTrigger value="files" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("siteFiles.title")}</TabsTrigger>}
-              {isProxy && <TabsTrigger value="application" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("appProcess.title")}{applicationInvalid && <span className="text-error" aria-label={t("appProcess.invalid")}>!</span>}</TabsTrigger>}
-              {draft.runtime.kind === "php" && <TabsTrigger value="php" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">PHP{phpInvalid && <span className="text-error" aria-label={t("sites.php.review")}>!</span>}</TabsTrigger>}
-            </TabsList>
+            <div className="-mx-1 max-w-full overflow-x-auto px-1 pb-1 sm:overflow-visible">
+              <TabsList className="mb-4 w-max min-w-full gap-1 rounded-2xl sm:w-auto sm:min-w-0 sm:flex-wrap">
+                <TabsTrigger value="general" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("detail.general")}</TabsTrigger>
+                <TabsTrigger value="access" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("siteAccess.title")}{accessProblem && <span className="text-error" aria-label={t("siteAccess.review")}>!</span>}</TabsTrigger>
+                <TabsTrigger value="basic-auth" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("basicAuth.title" as never)}{basicAuthProblem && <span className="text-error" aria-label={t("basicAuth.review" as never)}>!</span>}</TabsTrigger>
+                <TabsTrigger value="cors" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("cors.title")}{corsProblem && <span className="text-error" aria-label={t("cors.review")}>!</span>}</TabsTrigger>
+                {!isRedirect && <TabsTrigger value="error-pages" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("errorPages.title" as never)}{errorPagesProblem && <span className="text-error" aria-label={t("errorPages.invalid" as never)}>!</span>}</TabsTrigger>}
+                {!isRedirect && <TabsTrigger value="proxy-rules" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("proxyRules.title")}{proxyRulesProblem && <span className="text-error" aria-label={t("proxyRules.review")}>!</span>}</TabsTrigger>}
+                {!isRedirect && <TabsTrigger value="environment" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("env.title")}</TabsTrigger>}
+                {!isRedirect && <TabsTrigger value="files" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("siteFiles.title")}</TabsTrigger>}
+                {isProxy && <TabsTrigger value="application" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">{t("appProcess.title")}{applicationInvalid && <span className="text-error" aria-label={t("appProcess.invalid")}>!</span>}</TabsTrigger>}
+                {draft.runtime.kind === "php" && <TabsTrigger value="php" disabled={filesBusy} className="px-2 text-[11px] sm:px-3 sm:text-[13px]">PHP{phpInvalid && <span className="text-error" aria-label={t("sites.php.review")}>!</span>}</TabsTrigger>}
+              </TabsList>
+            </div>
             <TabsContent value="access" forceMount className="mt-0 data-[state=inactive]:hidden">
               <SiteAccessSettings key={site.id} value={draft.runtime.access} disabled={busy} onChange={(access) => setDraft({ ...draft, runtime: { ...draft.runtime, access } })} />
             </TabsContent>
@@ -674,12 +684,12 @@ export function SiteDetailSheet({
             {formError.hint && <p>{formError.hint}</p>}
             {formError.detail && <details><summary className="cursor-pointer">{t("sites.detail.deleteErrorDetail")}</summary><p className="mt-2 whitespace-pre-wrap font-mono">{formError.detail}</p></details>}
           </div>}
-          <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <span className="text-xs text-muted">{(tab === "environment" ? envState.dirty : siteDirty) ? t("detail.unsaved") : t(tab === "environment" ? "env.clean" : "detail.saved")}</span>
-            <div className="flex min-w-0 max-w-full gap-2">
-              <Button variant="ghost" onClick={requestClose} disabled={busy}>{t(tab === "files" ? "common.close" : "common.cancel")}</Button>
-              {tab === "environment" ? <Button className="min-w-0" title={t("env.saveNamed").replace("{file}", envState.fileName)} onClick={() => void envEditorRef.current?.save()} disabled={siteBusy || filesBusy || !envState.canSave}><span className="truncate">{envState.busy ? t("detail.saveBusy") : t("env.saveNamed").replace("{file}", envState.fileName)}</span></Button>
-                : tab !== "files" && <Button onClick={save} disabled={busy || !siteDirty || (directoryChanged && envState.dirty) || proxyInvalid || redirectInvalid || !!corsProblem || !!accessProblem || !!proxyRulesProblem || !!errorPagesProblem || !!basicAuthProblem || applicationInvalid || phpInvalid || (draft.https && !!certificateSelection.problem)}>{saving ? t("detail.saveBusy") : t("common.save")}</Button>}
+            <div className="flex min-w-0 max-w-full flex-col-reverse gap-2 sm:flex-row">
+              <Button variant="ghost" className="w-full sm:w-auto" onClick={requestClose} disabled={busy}>{t(tab === "files" ? "common.close" : "common.cancel")}</Button>
+              {tab === "environment" ? <Button className="w-full min-w-0 sm:w-auto" title={t("env.saveNamed").replace("{file}", envState.fileName)} onClick={() => void envEditorRef.current?.save()} disabled={siteBusy || filesBusy || !envState.canSave}><span className="truncate">{envState.busy ? t("detail.saveBusy") : t("env.saveNamed").replace("{file}", envState.fileName)}</span></Button>
+                : tab !== "files" && <Button className="w-full sm:w-auto" onClick={save} disabled={busy || !siteDirty || (directoryChanged && envState.dirty) || proxyInvalid || redirectInvalid || !!corsProblem || !!accessProblem || !!proxyRulesProblem || !!errorPagesProblem || !!basicAuthProblem || applicationInvalid || phpInvalid || (draft.https && !!certificateSelection.problem)}>{saving ? t("detail.saveBusy") : t("common.save")}</Button>}
             </div>
           </div>
         </div>

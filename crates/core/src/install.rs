@@ -588,6 +588,15 @@ impl Installer {
         urls
     }
 
+    /// 返回实际安装时会尝试的下载地址，供版本验收和诊断工具复用同一套镜像回退逻辑。
+    pub fn candidate_urls_for(
+        &self,
+        entry: &crate::model::PackageManifestEntry,
+        store: &Store,
+    ) -> Vec<String> {
+        self.candidate_urls(entry, store)
+    }
+
     pub async fn install(
         &self,
         key: &str,

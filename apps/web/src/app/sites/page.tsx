@@ -3,7 +3,7 @@
 import * as React from "react";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "motion/react";
-import { Globe, Plus, ExternalLink, FolderOpen, Loader2, Power, Settings2, FolderSearch, Copy, AppWindow, Search, RefreshCw, Share2, Network, Star } from "lucide-react";
+import { Globe, Plus, ExternalLink, FolderOpen, Loader2, Power, Settings2, FolderSearch, Copy, AppWindow, Search, RefreshCw, Share2, Network, Star, X } from "lucide-react";
 import type { Site } from "@nsb/schema";
 import { useUI, useT } from "@/lib/store";
 import { useSites, useInvalidate, toastError, siteUrl, useSettings } from "@/lib/hooks";
@@ -74,6 +74,13 @@ export default function SitesPage() {
       (!search || [site.name, ...site.domains, site.rootDir, site.runtime.phpVersion ?? "", site.runtime.proxyTarget ?? "", site.runtime.redirect?.target ?? ""].some((value) => value.toLowerCase().includes(search)))
     ).sort((a, b) => Number(favoriteIds.has(b.id)) - Number(favoriteIds.has(a.id)) || b.updatedAt - a.updatedAt);
   }, [sites, query, statusFilter, serverFilter, favoriteFilter, favoriteIds]);
+  const hasFilters = !!query.trim() || statusFilter !== "all" || serverFilter !== "all" || favoriteFilter !== "all";
+  const resetFilters = () => {
+    setQuery("");
+    setStatusFilter("all");
+    setServerFilter("all");
+    setFavoriteFilter("all");
+  };
   const [scanOpen, setScanOpen] = React.useState(false);
   // 命令面板/其它入口可能请求直接打开扫描对话框
   const pendingScan = useUI((st) => st.pendingScan);
@@ -108,13 +115,13 @@ export default function SitesPage() {
         }
       />
 
-      <div className="mb-5 flex flex-wrap items-center gap-3">
-        <div className="relative min-w-[180px] flex-1 sm:max-w-sm">
+      <div className="mb-5 flex flex-wrap items-center gap-2.5 sm:gap-3">
+        <div className="relative min-w-0 basis-full sm:min-w-[180px] sm:flex-1 sm:basis-auto sm:max-w-sm">
           <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-faint" />
           <Input aria-label={t("sites.search")} placeholder={t("sites.search")} value={query} onChange={(event) => setQuery(event.target.value)} className="pl-9" />
         </div>
         <Select value={statusFilter} onValueChange={setStatusFilter}>
-          <SelectTrigger className="w-[140px]" aria-label={t("sites.filterStatus")}><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-full sm:w-[140px]" aria-label={t("sites.filterStatus")}><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">{t("sites.allStatuses")}</SelectItem>
             <SelectItem value="running">{t("state.running")}</SelectItem>
@@ -124,7 +131,7 @@ export default function SitesPage() {
           </SelectContent>
         </Select>
         <Select value={serverFilter} onValueChange={setServerFilter}>
-          <SelectTrigger className="w-[140px]" aria-label={t("sites.wizard.webServer")}><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-full sm:w-[140px]" aria-label={t("sites.wizard.webServer")}><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">{t("sites.allServers")}</SelectItem>
             <SelectItem value="nginx">Nginx</SelectItem>
@@ -133,13 +140,18 @@ export default function SitesPage() {
           </SelectContent>
         </Select>
         <Select value={favoriteFilter} onValueChange={setFavoriteFilter}>
-          <SelectTrigger className="w-[140px]" aria-label={t("sites.filterFavorites")}><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-full sm:w-[140px]" aria-label={t("sites.filterFavorites")}><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">{t("sites.allFavorites")}</SelectItem>
             <SelectItem value="favorites">{t("sites.favoritesOnly")}</SelectItem>
           </SelectContent>
         </Select>
-        <span className="text-xs tabular-nums text-muted" aria-live="polite">{visibleSites.length} / {sites.length}</span>
+        <div className="flex w-full min-w-0 items-center justify-between gap-2 sm:w-auto sm:justify-start">
+          <span className="text-xs tabular-nums text-muted" aria-live="polite">{visibleSites.length} / {sites.length}</span>
+          {hasFilters && <Button variant="ghost" size="sm" className="shrink-0" onClick={resetFilters}>
+            <X className="h-3.5 w-3.5" /> {t("sites.clearFilters")}
+          </Button>}
+        </div>
       </div>
       {error && (
         <div role="alert" className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-error/20 bg-error/5 p-4">

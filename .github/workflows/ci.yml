@@ -105,31 +105,14 @@ jobs:
       - name: Test core crate
         run: |
           set +e
-          # Cargo 默认会并行启动同一 crate 的多个测试二进制；部分验收测试会
-          # 启动真实子进程并共享控制通道/端口，即使每个二进制内部只有一个
-          # test thread，跨二进制仍会互相争用。按目标逐个运行，保留完整覆盖
-          # 并让失败结果可重复定位。
-          : > /tmp/core-test.log
-          status=0
-          run_target() {
-            target="$1"
-            if [ "$target" = "lib" ]; then
-              cargo test -p nsb-core --lib --no-fail-fast -- --test-threads=1 2>&1 | tee -a /tmp/core-test.log
-            else
-              cargo test -p nsb-core --test "$target" --no-fail-fast -- --test-threads=1 2>&1 | tee -a /tmp/core-test.log
-            fi
-            code=${PIPESTATUS[0]}
-            if [ "$code" -ne 0 ] && [ "$status" -eq 0 ]; then
-              status="$code"
-            fi
-          }
-          run_target lib
-          run_target core_tests
-          run_target feature_integration
+          # 单个测试二进制内串行执行，避免共享环境变量的用例互相干扰。
+          # 不手工限定目标列表，保留 lib、bin、集成测试和文档测试的完整覆盖。
+          cargo test -p nsb-core --no-fail-fast -- --test-threads=1 2>&1 | tee /tmp/core-test.log
+          status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
             # 失败摘要写进 GitHub 注解：日志需要仓库权限才能看，注解是公开可见的，
             # 便于在没有 admin 权限时也能定位平台相关的测试失败。
-            summary=$(grep -E "panicked at|assertion|^test .* FAILED|^test result|left:|right:|FAILED$" /tmp/core-test.log \
+            summary=$(grep -E "panicked at|AppError|assertion|^test .* FAILED|^test result|left:|right:|FAILED$" /tmp/core-test.log \
               | tr '\r\n' ' ' | sed 's/%/%25/g' | cut -c1-3500)
             echo "::error title=nsb-core 测试失败::${summary}"
             exit "$status"

@@ -167,7 +167,10 @@ impl ProcessTree {
         while index < targets.len() {
             let parent = targets[index].0.clone();
             for (pid, process) in system.processes() {
-                if process.parent().map(|pid| pid.as_u32()) != Some(parent.pid)
+                // Linux 的枚举还包含用户线程；TID 不能作为独立进程打开 pidfd。
+                // 线程随所属进程退出，只追踪真正的子进程并继续核对其身份。
+                if process.thread_kind().is_some()
+                    || process.parent().map(|pid| pid.as_u32()) != Some(parent.pid)
                     || targets.iter().any(|(known, _)| known.pid == pid.as_u32())
                 {
                     continue;

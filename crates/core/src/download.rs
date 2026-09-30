@@ -755,7 +755,8 @@ mod tests {
         let cancel = async {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut buf = [0; 2048];
-            stream.read(&mut buf).await.unwrap();
+            let received = stream.read(&mut buf).await.unwrap();
+            assert!(received > 0, "client closed before sending the request");
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nETag: \"one\"\r\n\r\ndata")
                 .await

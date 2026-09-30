@@ -1347,7 +1347,8 @@ mod redis_stats_tests {
                     .set_read_timeout(Some(std::time::Duration::from_secs(2)))
                     .unwrap();
                 let mut command = [0; 256];
-                stream.read(&mut command).unwrap();
+                let received = stream.read(&mut command).unwrap();
+                assert!(received > 0, "client closed before sending the request");
                 stream.write_all(reply.as_bytes()).unwrap();
             });
             assert_eq!(redis_stats(port).unwrap_err().code, code);
@@ -1401,7 +1402,8 @@ mod redis_stats_tests {
             use std::io::{Read, Write};
             let (mut stream, _) = listener.accept().unwrap();
             let mut command = [0; 256];
-            stream.read(&mut command).unwrap();
+            let received = stream.read(&mut command).unwrap();
+            assert!(received > 0, "client closed before sending the request");
             stream
                 .write_all(b"-WRONGPASS sensitive-fixture\r\n")
                 .unwrap();

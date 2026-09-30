@@ -42,13 +42,8 @@ fn php_extension_toggle_round_trip_through_ini() {
     // 造一个假的 PHP 安装：ext 目录 + php.ini
     let ext_dir = e.paths.runtime_dir("php", "8.3.33").join("ext");
     std::fs::create_dir_all(&ext_dir).unwrap();
-    for f in [
-        "php_curl.dll",
-        "php_gd.dll",
-        "php_xdebug.dll",
-        "php_redis.dll",
-    ] {
-        std::fs::write(ext_dir.join(f), b"MZ fake").unwrap();
+    for ext in ["curl", "gd", "xdebug", "redis"] {
+        std::fs::write(ext_dir.join(nsb_core::phpext::dll_file_name(ext)), b"MZ fake").unwrap();
     }
     let ini = e.paths.php_ini("8.3.33");
     std::fs::create_dir_all(ini.parent().unwrap()).unwrap();

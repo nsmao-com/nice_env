@@ -69,7 +69,7 @@ export function SftpgoConfigButton({ service, disabled = false }: { service: Ser
           <DialogTitle className="text-[14px] leading-relaxed">{t("svc.sftpgo.title")}</DialogTitle>
           <DialogDescription className="text-[11.5px] leading-relaxed">{t("svc.sftpgo.hint")}</DialogDescription>
         </DialogHeader>
-        <div className="mx-2 shrink-0 border-t border-dashed border-border" />
+        <div className="mx-4 my-2 shrink-0 border-t border-dashed border-separator" />
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5 [overflow-wrap:anywhere]" aria-busy={query.isFetching || saving}>
           {active && <p role="status" className="rounded-lg bg-warn-soft px-3 py-2 text-xs text-warn">{t("svc.sftpgo.stopFirst")}</p>}
           {error && <div role="alert" className="rounded-lg bg-error-soft px-3 py-2 text-xs text-error">
@@ -104,7 +104,7 @@ export function SftpgoConfigButton({ service, disabled = false }: { service: Ser
             </fieldset>}
           </>}
         </div>
-        <div className="mx-2 shrink-0 border-t border-dashed border-border" />
+        <div className="mx-4 my-2 shrink-0 border-t border-dashed border-separator" />
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-3 sm:px-5">
           <Button variant="ghost" size="sm" className="min-h-9" disabled={saving || query.isFetching} onClick={() => void query.refetch({ cancelRefetch: false })}>
             <RotateCw className="h-3.5 w-3.5" />{t("tools.refresh")}

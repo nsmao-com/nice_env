@@ -54,7 +54,7 @@ export function ServiceDiagnostics({ service, open, onOpenChange }: {
         </DialogTitle>
         <DialogDescription className="text-[11px] leading-relaxed">{t("svc.diag.subtitle")}</DialogDescription>
       </DialogHeader>
-      <div className="mx-4 shrink-0 border-t border-dashed border-border sm:mx-5" />
+      <div className="mx-4 my-2 shrink-0 border-t border-dashed border-separator sm:mx-5" />
       <div role="region" aria-label={t("svc.diag.results")} tabIndex={0} className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5 [overflow-wrap:anywhere] focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring">
         {error && <div role="alert" className="rounded-lg border border-error/25 bg-error-soft/40 px-3 py-2.5 text-xs text-error">
           <p className="font-medium">{t(report ? "svc.diag.refreshFailed" : "svc.diag.failed")}</p>
@@ -77,7 +77,7 @@ export function ServiceDiagnostics({ service, open, onOpenChange }: {
           </div>}
         </>}
       </div>
-      <div className="mx-4 shrink-0 border-t border-dashed border-border sm:mx-5" />
+      <div className="mx-4 my-2 shrink-0 border-t border-dashed border-separator sm:mx-5" />
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-3 sm:px-5">
         <div className="flex flex-wrap gap-1">
           <Button variant="ghost" size="sm" className="min-h-9 h-auto whitespace-normal text-[11.5px]" disabled={!report?.service.logFile}

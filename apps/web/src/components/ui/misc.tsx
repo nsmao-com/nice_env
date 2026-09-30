@@ -12,7 +12,7 @@ function Separator({
       className={cn(
         "shrink-0",
         orientation === "horizontal"
-          ? "mx-3 w-auto border-t border-dashed border-separator"
+          ? "mx-4 w-auto border-t border-dashed border-separator"
           : "h-full w-px bg-border",
         className
       )}

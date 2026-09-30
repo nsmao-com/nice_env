@@ -604,6 +604,23 @@ export default function PackagesPage() {
     </div>
   );
 
+  const installedPackageCount = groups.filter((group) => group.versions.some((version) => version.installed)).length;
+  const runningServiceCount = services.filter((service) => service.state === "running").length;
+  const catalogValues = [...catalogById.values()];
+  const remoteCatalogCount = catalogValues.filter((catalog) => catalog.online && !catalog.error).length;
+  const catalogFailureCount = catalogValues.filter((catalog) => !!catalog.error).length;
+  const catalogSource = catalogsLoading
+    ? t("packages.overview.remoteLoading")
+    : catalogFailureCount > 0
+      ? remoteCatalogCount > 0
+        ? t("packages.overview.remotePartial").replace("{ready}", String(remoteCatalogCount)).replace("{failed}", String(catalogFailureCount))
+        : t("packages.overview.remoteFailed")
+    : remoteCatalogCount > 0
+      ? remoteCatalogCount === groups.length
+        ? t("packages.overview.remoteReady")
+        : t("packages.overview.remoteProgress").replace("{ready}", String(remoteCatalogCount)).replace("{total}", String(groups.length))
+      : t("packages.overview.manifestSource");
+
   const empty = <div className="flex flex-col items-center gap-3 px-3 py-10 text-center text-[13px] text-muted">
     <p role="status">{filterUnavailable ? t("packages.runningUnavailable") : t(updatesLoading ? "common.loading" : packageFilter === "updates" ? "packages.noUpdates" : "packages.noMatches")}</p>
     {hasFilters && <Button variant="secondary" size="sm" onClick={resetFilters}>{t("packages.resetFilters")}</Button>}
@@ -660,6 +677,17 @@ export default function PackagesPage() {
       />
 
       {readStatus}
+
+      {dataReady && <PackageOverview
+        installed={installedPackageCount}
+        running={runningServiceCount}
+        updates={bulkUpdateTargets.length}
+        available={groups.length}
+        source={catalogSource}
+        loading={catalogsLoading}
+        remote={remoteCatalogCount > 0}
+        issue={catalogFailureCount > 0}
+      />}
 
       {packageFilter === "updates" && <p className="mb-4 text-xs leading-relaxed text-muted [overflow-wrap:anywhere]">{t("packages.updatesHint")}</p>}
 
@@ -1275,6 +1303,53 @@ function PackageRow({
       <Dialog open={!!logService} onOpenChange={(open) => { if (!open) setLogService(null); }}><DialogContent className="max-h-[90dvh] max-w-5xl overflow-y-auto"><DialogHeader><DialogTitle>{logService?.label} {logService?.version} · {t("logs.title")}</DialogTitle></DialogHeader>{logService && <LogPane key={logService.id} serviceId={logService.id} height={420} />}</DialogContent></Dialog>
       {diagnosticService && <ServiceDiagnostics service={diagnosticService} open onOpenChange={(open) => { if (!open) setDiagnosticService(null); }} />}
     </div>
+  );
+}
+
+function PackageOverview({
+  installed,
+  running,
+  updates,
+  available,
+  source,
+  loading,
+  remote,
+  issue,
+}: {
+  installed: number;
+  running: number;
+  updates: number;
+  available: number;
+  source: string;
+  loading: boolean;
+  remote: boolean;
+  issue: boolean;
+}) {
+  const t = useT();
+  const metrics = [
+    { label: t("packages.overview.installed"), value: installed, icon: Boxes, tone: "text-primary" },
+    { label: t("packages.overview.running"), value: running, icon: Play, tone: "text-running" },
+    { label: t("packages.overview.updates"), value: updates, icon: Download, tone: updates > 0 ? "text-info" : "text-muted" },
+    { label: t("packages.overview.available"), value: available, icon: Server, tone: "text-secondary" },
+  ] as const;
+  return (
+    <section className="mb-4 min-w-0 rounded-2xl border border-border bg-card p-2" aria-label={t("packages.title")}>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        {metrics.map(({ label, value, icon: Icon, tone }) => (
+          <div key={label} className="min-w-0 rounded-xl bg-fill/55 px-3 py-2.5">
+            <div className="flex items-center gap-1.5 text-[10.5px] text-muted">
+              <Icon className={cn("h-3.5 w-3.5 shrink-0", tone)} strokeWidth={1.9} />
+              <span className="truncate">{label}</span>
+            </div>
+            <p className="mt-1 tabular text-lg font-semibold tracking-tight">{value}</p>
+          </div>
+        ))}
+      </div>
+      <div className={cn("mt-2 flex min-w-0 items-center gap-2 border-t border-dashed border-separator px-2 pt-2 text-[10.5px]", issue ? "text-warn" : "text-faint")} role="status" aria-live="polite" title={source}>
+        <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", loading ? "animate-pulse bg-info" : issue ? "bg-warn" : remote ? "bg-running" : "bg-faint/60")} />
+        <span className="min-w-0 truncate">{source}</span>
+      </div>
+    </section>
   );
 }
 

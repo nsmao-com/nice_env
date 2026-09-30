@@ -24,6 +24,15 @@ import { SiteBulkActions } from "@/components/sites/site-bulk-actions";
 import { SiteNetworkDialog } from "@/components/sites/site-network";
 import { SiteShareDialog } from "@/components/shared/tunnel-panel";
 
+type SiteSort = "recent" | "name" | "status" | "runtime";
+
+const SITE_STATUS_ORDER: Record<Site["status"], number> = {
+  running: 0,
+  error: 1,
+  stopped: 2,
+  unconfigured: 3,
+};
+
 export default function SitesPage() {
   const t = useT();
   const setWizardOpen = useUI((s) => s.setWizardOpen);
@@ -65,21 +74,31 @@ export default function SitesPage() {
   const [query, setQuery] = React.useState("");
   const [statusFilter, setStatusFilter] = React.useState("all");
   const [serverFilter, setServerFilter] = React.useState("all");
+  const [sortBy, setSortBy] = React.useState<SiteSort>("recent");
   const visibleSites = React.useMemo(() => {
     const search = query.trim().toLowerCase();
-    return sites.filter((site) =>
+    const filtered = sites.filter((site) =>
       (statusFilter === "all" || site.status === statusFilter) &&
       (serverFilter === "all" || site.runtime.webServer === serverFilter) &&
       (favoriteFilter !== "favorites" || favoriteIds.has(site.id)) &&
       (!search || [site.name, ...site.domains, site.rootDir, site.runtime.phpVersion ?? "", site.runtime.proxyTarget ?? "", site.runtime.redirect?.target ?? ""].some((value) => value.toLowerCase().includes(search)))
-    ).sort((a, b) => Number(favoriteIds.has(b.id)) - Number(favoriteIds.has(a.id)) || b.updatedAt - a.updatedAt);
-  }, [sites, query, statusFilter, serverFilter, favoriteFilter, favoriteIds]);
-  const hasFilters = !!query.trim() || statusFilter !== "all" || serverFilter !== "all" || favoriteFilter !== "all";
+    );
+    return filtered.sort((a, b) => {
+      const favoriteOrder = Number(favoriteIds.has(b.id)) - Number(favoriteIds.has(a.id));
+      if (favoriteOrder !== 0) return favoriteOrder;
+      if (sortBy === "name") return a.name.localeCompare(b.name, "zh-CN", { sensitivity: "base" });
+      if (sortBy === "status") return SITE_STATUS_ORDER[a.status] - SITE_STATUS_ORDER[b.status] || b.updatedAt - a.updatedAt;
+      if (sortBy === "runtime") return a.runtime.kind.localeCompare(b.runtime.kind) || a.name.localeCompare(b.name, "zh-CN", { sensitivity: "base" });
+      return b.updatedAt - a.updatedAt;
+    });
+  }, [sites, query, statusFilter, serverFilter, favoriteFilter, favoriteIds, sortBy]);
+  const hasFilters = !!query.trim() || statusFilter !== "all" || serverFilter !== "all" || favoriteFilter !== "all" || sortBy !== "recent";
   const resetFilters = () => {
     setQuery("");
     setStatusFilter("all");
     setServerFilter("all");
     setFavoriteFilter("all");
+    setSortBy("recent");
   };
   const [scanOpen, setScanOpen] = React.useState(false);
   // 命令面板/其它入口可能请求直接打开扫描对话框
@@ -99,6 +118,10 @@ export default function SitesPage() {
         subtitle={t("sites.subtitle")}
         actions={
           <>
+            <Button variant="ghost" size="sm" onClick={() => void refetch()} disabled={isFetching} title={t("sites.refreshHint")} aria-label={t("sites.refresh")}>
+              <RefreshCw className={isFetching ? "h-3.5 w-3.5 animate-spin" : "h-3.5 w-3.5"} />
+              <span className="hidden sm:inline">{t("sites.refresh")}</span>
+            </Button>
             {/* 已有项目的人多半不想手填表单，先给「扫一下」这条路 */}
             <Button variant="secondary" onClick={() => setScanOpen(true)}>
               <FolderSearch className="h-3.5 w-3.5" /> {t("scanner.scan")}
@@ -146,6 +169,15 @@ export default function SitesPage() {
             <SelectItem value="favorites">{t("sites.favoritesOnly")}</SelectItem>
           </SelectContent>
         </Select>
+        <Select value={sortBy} onValueChange={(value) => setSortBy(value as SiteSort)}>
+          <SelectTrigger className="w-full sm:w-[140px]" aria-label={t("sites.sortBy")}><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="recent">{t("sites.sortRecent")}</SelectItem>
+            <SelectItem value="name">{t("sites.sortName")}</SelectItem>
+            <SelectItem value="status">{t("sites.sortStatus")}</SelectItem>
+            <SelectItem value="runtime">{t("sites.sortRuntime")}</SelectItem>
+          </SelectContent>
+        </Select>
         <div className="flex w-full min-w-0 items-center justify-between gap-2 sm:w-auto sm:justify-start">
           <span className="text-xs tabular-nums text-muted" aria-live="polite">{visibleSites.length} / {sites.length}</span>
           {hasFilters && <Button variant="ghost" size="sm" className="shrink-0" onClick={resetFilters}>
@@ -175,7 +207,7 @@ export default function SitesPage() {
         />
       ) : visibleSites.length === 0 ? (
         <EmptyState icon={favoriteFilter === "favorites" ? Star : Search} title={favoriteFilter === "favorites" ? t("sites.noFavorites") : t("sites.noMatches")} hint={favoriteFilter === "favorites" ? t("sites.noFavoritesHint") : t("sites.noMatchesHint")}
-          action={<Button variant="secondary" onClick={() => { setQuery(""); setStatusFilter("all"); setServerFilter("all"); setFavoriteFilter("all"); }}>{t("sites.clearFilters")}</Button>} />
+          action={<Button variant="secondary" onClick={resetFilters}>{t("sites.clearFilters")}</Button>} />
       ) : (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
           <AnimatePresence>

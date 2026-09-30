@@ -292,6 +292,8 @@ export default function PackagesPage() {
   const [category, setCategory] = React.useState("all");
   const [uninstallTarget, setUninstallTarget] = React.useState<{ id: string; version: string; name: string } | null>(null);
   const [installTarget, setInstallTarget] = React.useState<InstallTarget | null>(null);
+  const [bulkUpdateQueue, setBulkUpdateQueue] = React.useState<InstallTarget[]>([]);
+  const [bulkUpdateIndex, setBulkUpdateIndex] = React.useState(0);
   const uninstallPreview = useQuery({
     queryKey: ["package-uninstall-preview", uninstallTarget?.id, uninstallTarget?.version],
     queryFn: async () => {
@@ -318,6 +320,8 @@ export default function PackagesPage() {
     if (value) setQuery(value);
   }, []);
   const openInstall = (target: InstallTarget, trigger: HTMLButtonElement | null) => {
+    setBulkUpdateQueue([]);
+    setBulkUpdateIndex(0);
     installOpener.current = trigger;
     setInstallTarget(target);
   };
@@ -325,7 +329,7 @@ export default function PackagesPage() {
     task.status === "running" && task.id === uninstallTarget.id
     && (!task.version || sameVersion(task.version, uninstallTarget.version))
   );
-  const actionsDisabled = !dataReady || bulkBusy || uninstalling;
+  const actionsDisabled = !dataReady || bulkBusy || uninstalling || bulkUpdateQueue.length > 0;
 
   const defaultTld = settings.error ? undefined : settings.data?.defaultTld;
   const groups = React.useMemo(() => groupPackages(packages, defaultTld), [packages, defaultTld]);
@@ -333,10 +337,46 @@ export default function PackagesPage() {
     const update = packageUpdate(packageVersionItems(group, catalogById.get(group.id)));
     return update ? [[group.id, update] as const] : [];
   })), [groups, catalogById]);
-  const updatesLoading = packageFilter === "updates" && [...catalogById.values()].some((catalog) => catalog.loading);
+  const bulkUpdateTargets = React.useMemo(
+    () => groups.flatMap((group) => {
+      const update = updates.get(group.id);
+      if (!update) return [];
+      return [{
+        id: group.id,
+        displayName: group.displayName,
+        version: update.version,
+        sizeBytes: update.sizeBytes,
+        reinstall: false,
+      } satisfies InstallTarget];
+    }),
+    [groups, updates]
+  );
+  const catalogsLoading = [...catalogById.values()].some((catalog) => catalog.loading);
+  const updatesLoading = packageFilter === "updates" && catalogsLoading;
   const filterUnavailable = packageFilter === "running" && !statusKnown;
   const hasFilters = !!query.trim() || packageFilter !== "all" || category !== "all";
   const resetFilters = () => { setQuery(""); setPackageFilter("all"); setCategory("all"); };
+  const startBulkUpdates = () => {
+    if (!dataReady || catalogsLoading || bulkUpdateQueue.length > 0 || bulkUpdateTargets.length === 0) return;
+    setBulkUpdateQueue(bulkUpdateTargets);
+    setBulkUpdateIndex(0);
+    installOpener.current = null;
+    setInstallTarget(bulkUpdateTargets[0]);
+  };
+  const handleInstallDone = () => {
+    void refreshState(true);
+    if (bulkUpdateQueue.length === 0) return;
+    const nextIndex = bulkUpdateIndex + 1;
+    if (nextIndex < bulkUpdateQueue.length) {
+      setBulkUpdateIndex(nextIndex);
+      setInstallTarget(bulkUpdateQueue[nextIndex]);
+      return;
+    }
+    setInstallTarget(null);
+    setBulkUpdateQueue([]);
+    setBulkUpdateIndex(0);
+    toast.success(t("packages.bulkUpdatesDone"));
+  };
   const refreshAllVersions = async () => {
     if (!isTauri || catalogRefreshRef.current || packages.length === 0) return;
     catalogRefreshRef.current = true;
@@ -574,6 +614,10 @@ export default function PackagesPage() {
             <Button variant="ghost" size="sm" disabled={!isTauri || reconciling || !dataReady} onClick={() => void reconcileInstalled()} title={t("packages.reconcileInstalledHint")}>
               <ScanSearch className={cn("h-3.5 w-3.5", reconciling && "animate-spin")} /> {t("packages.reconcileInstalled")}
             </Button>
+            {bulkUpdateTargets.length > 0 && <Button variant="secondary" size="sm" disabled={!dataReady || catalogsLoading || bulkUpdateQueue.length > 0} onClick={startBulkUpdates}>
+              <Download className={cn("h-3.5 w-3.5", bulkUpdateQueue.length > 0 && "animate-bounce")} />
+              {bulkUpdateQueue.length > 0 ? `${t("packages.updating")} ${bulkUpdateIndex + 1}/${bulkUpdateQueue.length}` : `${t("packages.installAllUpdates")} (${bulkUpdateTargets.length})`}
+            </Button>}
             <Button variant="outline" size="sm" disabled={actionsDisabled} onClick={() => openBulk("start")}>
               <Play className="h-3.5 w-3.5" /> {t("packages.startAll")}
             </Button>
@@ -792,14 +836,20 @@ export default function PackagesPage() {
       {/* 安装走向导弹窗：阶段时间线 + 真实进度 + 完成后可直接启动 */}
       <InstallDialog
         target={installTarget}
-        onOpenChange={(o) => !o && setInstallTarget(null)}
+        onOpenChange={(o) => {
+          if (!o) {
+            setInstallTarget(null);
+            setBulkUpdateQueue([]);
+            setBulkUpdateIndex(0);
+          }
+        }}
         onCloseAutoFocus={(event) => {
           if (installOpener.current?.isConnected) {
             event.preventDefault();
             installOpener.current.focus();
           }
         }}
-        onDone={() => { void refreshState(true); }}
+        onDone={handleInstallDone}
         startableAs={
           installTarget
             ? (() => {

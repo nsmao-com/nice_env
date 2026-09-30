@@ -50,12 +50,12 @@ export default function DatabasesPage() {
   const { data: services } = useServices();
   const [choice, setChoice] = React.useState<string | null>(null);
   const [locked, setLocked] = React.useState(false);
-  const selected = choice ?? (services.some((service) => /^(mysql|mariadb)(@|$)/.test(service.id)) ? "mysql" : services.some((service) => service.id === "postgresql") ? "postgresql" : services.some((service) => service.id === "mongodb") ? "mongodb" : services.some((service) => service.id === "redis") ? "redis" : "mysql");
+  const selected = choice ?? (services.some((service) => /^(mysql|mariadb)(@|$)/.test(service.id)) ? "mysql" : services.some((service) => service.id === "postgresql") ? "postgresql" : services.some((service) => service.id === "mongodb") ? "mongodb" : services.some((service) => service.id === "redis") ? "redis" : services.some((service) => service.id === "memcached") ? "memcached" : "mysql");
   const postgres = services.find((service) => service.id === "postgresql");
   return <div className="pb-8">
     <PageHeader title={t("db.title")} subtitle={t("db.subtitle")} />
     <Tabs value={selected} onValueChange={setChoice}>
-      <div className="mb-5 max-w-full overflow-x-auto"><TabsList className="flex w-max"><TabsTrigger value="mysql" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">MySQL / MariaDB</TabsTrigger><TabsTrigger value="postgresql" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">PostgreSQL</TabsTrigger><TabsTrigger value="mongodb" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">MongoDB</TabsTrigger><TabsTrigger value="redis" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">Redis</TabsTrigger></TabsList></div>
+      <div className="mb-5 max-w-full overflow-x-auto"><TabsList className="flex w-max"><TabsTrigger value="mysql" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">MySQL / MariaDB</TabsTrigger><TabsTrigger value="postgresql" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">PostgreSQL</TabsTrigger><TabsTrigger value="mongodb" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">MongoDB</TabsTrigger><TabsTrigger value="redis" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">Redis</TabsTrigger><TabsTrigger value="memcached" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">Memcached</TabsTrigger></TabsList></div>
       <TabsContent value="mysql"><MySqlWorkspace onLockChange={setLocked} /></TabsContent>
       <TabsContent value="postgresql">
         <div className="mb-5"><PostgresInstanceCard /></div>
@@ -63,6 +63,7 @@ export default function DatabasesPage() {
       </TabsContent>
       <TabsContent value="mongodb"><MongoManagement service={services.find(service => service.id === "mongodb")} onLockChange={setLocked} /></TabsContent>
       <TabsContent value="redis"><div className="max-w-3xl"><RedisInstanceCard /></div></TabsContent>
+      <TabsContent value="memcached"><div className="max-w-3xl"><MemcachedInstanceCard /></div></TabsContent>
     </Tabs>
   </div>;
 }
@@ -622,6 +623,80 @@ function PostgresPasswordDialog({ service, passwordRequired, onClose }: { servic
       </form>
     </DialogContent>
   </Dialog>;
+}
+
+function MemcachedInstanceCard() {
+  const t = useT();
+  const service = useInstanceState("memcached");
+  const running = service?.state === "running" || (service?.state === "error" && service.pids.length > 0);
+  const invalidate = useInvalidate();
+  const queryClient = useQueryClient();
+  const [flushOpen, setFlushOpen] = React.useState(false);
+  const [flushBusy, setFlushBusy] = React.useState(false);
+  const query = useQuery({
+    queryKey: ["memcached-stats", service?.version, service?.port, service?.pids.join(",")],
+    queryFn: api.memcachedStats,
+    enabled: running,
+    refetchInterval: running ? 5000 : false,
+    retry: false,
+  });
+  const stats = running && !query.isError ? query.data : undefined;
+  const error = query.error ? normalizeError(query.error) : null;
+  const flush = async () => {
+    if (!service?.version || flushBusy) return;
+    setFlushBusy(true);
+    try {
+      const next = await api.memcachedFlush(service.version);
+      queryClient.setQueryData(["memcached-stats", service.version, service.port, service.pids.join(",")], next);
+      toast.success(t("db.memcachedFlushDone"));
+      setFlushOpen(false);
+    } catch (cause) {
+      toastError(cause);
+    } finally {
+      setFlushBusy(false);
+      invalidate("services");
+    }
+  };
+  return <>
+    <Card className="min-w-0 p-4">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-fill"><ServiceIcon id="memcached" className="h-[18px] w-[18px]" /></div>
+        <div className="min-w-0 flex-1">
+          <p className="text-[13px] font-medium">Memcached {service?.version ?? ""}</p>
+          <p className="text-[11px] text-faint">127.0.0.1:{service?.port ?? "—"}</p>
+        </div>
+        <InstanceStartButton base="memcached" />
+      </div>
+      {!service ? <p className="text-xs text-muted">{t("db.memcachedNotInstalled")}</p> : !running ? <p className="text-xs text-muted">{t("db.memcachedStopped")}</p> : <>
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <Button size="sm" variant="secondary" disabled={query.isPending || query.isError || flushBusy} onClick={() => setFlushOpen(true)}>{t("db.memcachedFlush")}</Button>
+          <Button size="sm" variant="ghost" disabled={query.isFetching} onClick={() => void query.refetch()}>{t("db.refresh")}</Button>
+          <span className="text-[11px] text-faint">{t("db.memcachedProtocol")}</span>
+        </div>
+        {query.isPending && <p role="status" className="mb-3 text-xs text-muted">{t("db.memcachedLoading")}</p>}
+        {error && <div role="alert" className="mb-3 space-y-1 rounded-md bg-error-soft p-2.5 text-xs text-error"><p className="break-words">{error.message}</p>{error.hint && <p className="break-words">{error.hint}</p>}<Button size="sm" variant="ghost" disabled={query.isFetching} onClick={() => void query.refetch()}>{t("db.retry")}</Button></div>}
+        {stats && <>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {[
+              [t("db.memcachedItems"), `${stats.currentItems} / ${stats.totalItems}`],
+              [t("db.memcachedMemory"), `${fmtBytes(stats.bytes)} / ${fmtBytes(stats.limitMaxbytes)}`],
+              [t("db.memcachedConnections"), `${stats.currentConnections} / ${stats.totalConnections}`],
+              [t("db.memcachedHitRate"), `${stats.cmdGet ? ((stats.getHits / stats.cmdGet) * 100).toFixed(1) : "0.0"}%`],
+            ].map(([label, value]) => <div key={label} className="min-w-0 rounded-md bg-fill px-3 py-2"><p className="truncate text-[10.5px] text-faint">{label}</p><p className="mt-1 break-all text-[12px] font-medium tabular-nums text-secondary">{value}</p></div>)}
+          </div>
+          <div className="mt-3 grid gap-2 text-xs text-muted sm:grid-cols-2">
+            <div className="rounded-md bg-fill px-3 py-2"><span>{t("db.memcachedVersion")}: </span><code className="font-mono text-secondary">{stats.version}</code></div>
+            <div className="rounded-md bg-fill px-3 py-2"><span>{t("db.memcachedUptime")}: </span><span className="tabular-nums text-secondary">{Math.floor(stats.uptimeSeconds / 86400)}d {Math.floor(stats.uptimeSeconds / 3600) % 24}h</span></div>
+            <div className="rounded-md bg-fill px-3 py-2"><span>{t("db.memcachedCommands")}: </span><span className="tabular-nums text-secondary">GET {stats.cmdGet} · SET {stats.cmdSet}</span></div>
+            <div className="rounded-md bg-fill px-3 py-2"><span>{t("db.memcachedEvictions")}: </span><span className="tabular-nums text-secondary">{stats.evictions}</span></div>
+          </div>
+        </>}
+      </>}
+    </Card>
+    <ConfirmDialog open={flushOpen} onOpenChange={(open) => !flushBusy && setFlushOpen(open)} title={t("db.memcachedFlushTitle")} description={t("db.memcachedFlushHint")} confirmText={t("db.memcachedFlush")} danger loading={flushBusy} onConfirm={() => void flush()}>
+      <p className="rounded-md bg-warn-soft p-3 text-xs leading-5 text-warn">{t("db.memcachedFlushWarning")}</p>
+    </ConfirmDialog>
+  </>;
 }
 
 function RedisInstanceCard() {

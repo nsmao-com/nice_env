@@ -156,6 +156,118 @@ pub struct RedisStats {
     pub connected_clients: Option<u64>,
 }
 
+/* ================= Memcached 运行统计（文本协议，零依赖） ================= */
+
+/// Memcached 的运行概览。字段全部来自当前受管实例的 `stats` 响应，
+/// 不接受前端传入的地址或 PID，避免把其它本机 Memcached 实例误展示出来。
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MemcachedStats {
+    pub reachable: bool,
+    pub port: u16,
+    pub process_id: u32,
+    pub version: String,
+    pub uptime_seconds: u64,
+    pub current_items: u64,
+    pub total_items: u64,
+    pub bytes: u64,
+    pub limit_maxbytes: u64,
+    pub current_connections: u64,
+    pub total_connections: u64,
+    pub cmd_get: u64,
+    pub cmd_set: u64,
+    pub get_hits: u64,
+    pub get_misses: u64,
+    pub evictions: u64,
+}
+
+fn memcached_connection(port: u16, expected_pids: &[u32]) -> crate::error::Result<std::net::TcpStream> {
+    use crate::error::AppError;
+    use std::net::TcpStream;
+    use std::time::Duration;
+    let owned = crate::ports::owns_listener((std::net::Ipv4Addr::LOCALHOST, port).into(), expected_pids)?;
+    if !owned {
+        return Err(AppError::new(
+            "MEMCACHED_INSTANCE_MISMATCH",
+            "该端口的 Memcached 不属于当前托管实例，未执行管理操作",
+        ));
+    }
+    let stream = TcpStream::connect_timeout(&(std::net::Ipv4Addr::LOCALHOST, port).into(), Duration::from_millis(700))
+        .map_err(|error| AppError::io("连接 Memcached", error))?;
+    stream.set_read_timeout(Some(Duration::from_secs(3))).map_err(|error| AppError::io("设置 Memcached 读取超时", error))?;
+    stream.set_write_timeout(Some(Duration::from_secs(3))).map_err(|error| AppError::io("设置 Memcached 写入超时", error))?;
+    Ok(stream)
+}
+
+fn memcached_stats_map(port: u16, expected_pids: &[u32]) -> crate::error::Result<std::collections::HashMap<String, String>> {
+    use crate::error::AppError;
+    use std::io::{BufRead, BufReader, Write};
+    let mut stream = memcached_connection(port, expected_pids)?;
+    stream.write_all(b"stats\r\n").map_err(|error| AppError::io("请求 Memcached 统计", error))?;
+    let mut reader = BufReader::new(stream);
+    let mut values = std::collections::HashMap::new();
+    loop {
+        let mut line = String::new();
+        let read = reader.read_line(&mut line).map_err(|error| AppError::io("读取 Memcached 统计", error))?;
+        if read == 0 { return Err(AppError::new("MEMCACHED_PROTOCOL_ERROR", "Memcached 统计响应提前结束")); }
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line == "END" { break; }
+        let Some(rest) = line.strip_prefix("STAT ") else {
+            if line.starts_with("ERROR") || line.starts_with("CLIENT_ERROR") || line.starts_with("SERVER_ERROR") {
+                return Err(AppError::new("MEMCACHED_PROTOCOL_ERROR", format!("Memcached 返回错误：{line}")));
+            }
+            continue;
+        };
+        let Some((key, value)) = rest.split_once(' ') else { continue; };
+        values.insert(key.to_string(), value.trim().to_string());
+    }
+    Ok(values)
+}
+
+fn memcached_u64(values: &std::collections::HashMap<String, String>, key: &str) -> crate::error::Result<u64> {
+    values.get(key).and_then(|value| value.parse::<u64>().ok()).ok_or_else(|| crate::error::AppError::new("MEMCACHED_PROTOCOL_ERROR", format!("Memcached 缺少有效的 {key} 统计")))
+}
+
+pub fn memcached_stats(port: u16, expected_pids: &[u32]) -> crate::error::Result<MemcachedStats> {
+    let values = memcached_stats_map(port, expected_pids)?;
+    let process_id = memcached_u64(&values, "pid")?;
+    if process_id > u32::MAX as u64 || !expected_pids.contains(&(process_id as u32)) {
+        return Err(crate::error::AppError::new("MEMCACHED_INSTANCE_MISMATCH", "Memcached 响应与托管进程不符，未显示统计数据"));
+    }
+    Ok(MemcachedStats {
+        reachable: true,
+        port,
+        process_id: process_id as u32,
+        version: values.get("version").cloned().ok_or_else(|| crate::error::AppError::new("MEMCACHED_PROTOCOL_ERROR", "Memcached 缺少版本信息"))?,
+        uptime_seconds: memcached_u64(&values, "uptime")?,
+        current_items: memcached_u64(&values, "curr_items")?,
+        total_items: memcached_u64(&values, "total_items")?,
+        bytes: memcached_u64(&values, "bytes")?,
+        limit_maxbytes: memcached_u64(&values, "limit_maxbytes")?,
+        current_connections: memcached_u64(&values, "curr_connections")?,
+        total_connections: memcached_u64(&values, "total_connections")?,
+        cmd_get: memcached_u64(&values, "cmd_get")?,
+        cmd_set: memcached_u64(&values, "cmd_set")?,
+        get_hits: memcached_u64(&values, "get_hits")?,
+        get_misses: memcached_u64(&values, "get_misses")?,
+        evictions: memcached_u64(&values, "evictions")?,
+    })
+}
+
+pub fn memcached_flush(port: u16, expected_pids: &[u32]) -> crate::error::Result<MemcachedStats> {
+    use crate::error::AppError;
+    use std::io::{BufRead, Write};
+    let mut stream = memcached_connection(port, expected_pids)?;
+    stream.write_all(b"flush_all\r\n").map_err(|error| AppError::io("清空 Memcached", error))?;
+    let mut reader = std::io::BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).map_err(|error| AppError::io("读取 Memcached 清空结果", error))?;
+    if line.trim() != "OK" {
+        return Err(AppError::new("MEMCACHED_FLUSH_FAILED", "Memcached 未返回清空确认，缓存未能确认已清除"));
+    }
+    memcached_stats(port, expected_pids)
+}
+
 /// 内联 RESP 命令编码：*N\r\n$len\r\narg…（与冒烟测试同款，免依赖）
 fn resp_command(args: &[&str]) -> String {
     let mut out = format!("*{}\r\n", args.len());

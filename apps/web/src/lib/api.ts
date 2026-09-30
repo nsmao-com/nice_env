@@ -427,6 +427,27 @@ export const redisSettingsSave = (version: string, revision: string, settings: R
   safe(invoke<RedisSettingsView>("redis_settings_save", { version, revision, settings, acknowledgeDisable }));
 export const redisStats = () => safe(invoke<RedisStats>("redis_stats"));
 
+export interface MemcachedStats {
+  reachable: boolean;
+  port: number;
+  processId: number;
+  version: string;
+  uptimeSeconds: number;
+  currentItems: number;
+  totalItems: number;
+  bytes: number;
+  limitMaxbytes: number;
+  currentConnections: number;
+  totalConnections: number;
+  cmdGet: number;
+  cmdSet: number;
+  getHits: number;
+  getMisses: number;
+  evictions: number;
+}
+export const memcachedStats = () => safe(invoke<MemcachedStats>("memcached_stats"));
+export const memcachedFlush = (version: string) => safe(invoke<MemcachedStats>("memcached_flush", { version }));
+
 export interface PostgresConnectionInfo {
   version: string; port: number; serverVersion: string; databaseCount: number; sizeBytes: number; passwordRequired: boolean;
 }

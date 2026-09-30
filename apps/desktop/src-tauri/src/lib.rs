@@ -473,6 +473,8 @@ pub fn run() {
             db_reset_root_password,
             db_root_password,
             redis_stats,
+            memcached_stats,
+            memcached_flush,
             redis_keys,
             redis_key_preview,
             redis_key_update,
@@ -2266,6 +2268,28 @@ async fn redis_stats(
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.redis_stats())).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+/// Memcached 运行统计（当前受管进程的文本协议）
+#[tauri::command]
+async fn memcached_stats(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+) -> Result<nsb_core::stats::MemcachedStats, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.memcached_stats())).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn memcached_flush(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    version: String,
+) -> Result<nsb_core::stats::MemcachedStats, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.memcached_flush(&version))).await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

@@ -1025,6 +1025,30 @@ impl CoreState {
         self.verify_redis(&service, &stats::RedisCredentials::load(&self.store, version)?)
     }
 
+    fn running_memcached(&self, version: Option<&str>) -> Result<model::ServiceStatus> {
+        let service = self.manager.snapshot("memcached")
+            .filter(|s| matches!(s.state, model::ServiceState::Running | model::ServiceState::Error) && s.pids.iter().any(|pid| platform::process_alive(*pid)))
+            .ok_or_else(|| AppError::new("MEMCACHED_NOT_RUNNING", "请先启动 Memcached 实例"))?;
+        if version.is_some_and(|v| !install::same_optional_version(service.version.as_deref(), Some(v))) {
+            return Err(AppError::new("MEMCACHED_INSTANCE_CHANGED", "运行中的 Memcached 版本已变化，请重新读取实例"));
+        }
+        Ok(service)
+    }
+
+    pub fn memcached_stats(&self) -> Result<stats::MemcachedStats> {
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后读取 Memcached 统计"))?;
+        let service = self.running_memcached(None)?;
+        let port = service.port.ok_or_else(|| AppError::new("MEMCACHED_PORT_UNKNOWN", "无法确认 Memcached 实际端口，请重新启动该实例"))?;
+        stats::memcached_stats(port, &service.pids)
+    }
+
+    pub fn memcached_flush(&self, version: &str) -> Result<stats::MemcachedStats> {
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后清空 Memcached"))?;
+        let service = self.running_memcached(Some(version))?;
+        let port = service.port.ok_or_else(|| AppError::new("MEMCACHED_PORT_UNKNOWN", "无法确认 Memcached 实际端口"))?;
+        stats::memcached_flush(port, &service.pids)
+    }
+
     pub fn redis_keys(&self, request: stats::RedisKeyRequest) -> Result<stats::RedisKeyPage> {
         let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后读取 Redis 键空间"))?;
         let service = self.running_redis(Some(&request.version))?;

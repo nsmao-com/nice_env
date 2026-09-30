@@ -919,6 +919,17 @@ function seed() {
     category: "cache",
   });
   mk({
+    id: "memcached",
+    label: "Memcached",
+    state: "running",
+    pids: [10720],
+    port: 11211,
+    version: "1.6.8",
+    memoryMb: 6.4,
+    uptimeSec: 4510,
+    category: "cache",
+  });
+  mk({
     id: "mihomo",
     label: "mihomo (Clash)",
     state: "stopped",
@@ -3963,6 +3974,18 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const service = services.get("redis");
       if (service?.state !== "running") throw { code: "REDIS_NOT_RUNNING", message: "请先启动 Redis 实例" };
       return { reachable: true, port: service.port, usedMemoryHuman: "1.5M", keys: 0, uptimeDays: 0, connectedClients: 1 } as T;
+    }
+    case "memcached_stats": {
+      const service = services.get("memcached");
+      if (service?.state !== "running") throw { code: "MEMCACHED_NOT_RUNNING", message: "请先启动 Memcached 实例" };
+      return { reachable: true, port: service.port, processId: service.pids[0] ?? 0, version: service.version ?? "1.6.8", uptimeSeconds: service.uptimeSec ?? 0, currentItems: 18, totalItems: 247, bytes: 786432, limitMaxbytes: 67108864, currentConnections: 2, totalConnections: 38, cmdGet: 1280, cmdSet: 247, getHits: 1074, getMisses: 206, evictions: 3 } as T;
+    }
+    case "memcached_flush": {
+      const service = services.get("memcached");
+      const version = String(args?.version ?? "");
+      if (service?.state !== "running") throw { code: "MEMCACHED_NOT_RUNNING", message: "请先启动 Memcached 实例" };
+      if (service.version && version && !sameVersion(service.version, version)) throw { code: "MEMCACHED_INSTANCE_CHANGED", message: "运行中的 Memcached 版本已变化，请重新读取实例" };
+      return { reachable: true, port: service.port, processId: service.pids[0] ?? 0, version: service.version ?? version, uptimeSeconds: service.uptimeSec ?? 0, currentItems: 0, totalItems: 247, bytes: 0, limitMaxbytes: 67108864, currentConnections: 2, totalConnections: 38, cmdGet: 1280, cmdSet: 247, getHits: 1074, getMisses: 206, evictions: 3 } as T;
     }
     case "adminer_status": return mockAdminer as T;
     case "adminer_start":

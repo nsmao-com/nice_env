@@ -28,7 +28,7 @@ function Failure({ error }: { error: unknown }) {
   return <div role="alert" className="min-w-0 space-y-2 text-sm text-error"><p className="break-words">{parsed.message}</p>{parsed.hint && <p className="break-words text-xs leading-5">{parsed.hint}</p>}{parsed.detail && <details className="text-muted"><summary className="cursor-pointer text-xs">{t("mongoBackup.details")}</summary><pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs">{parsed.detail}</pre></details>}</div>;
 }
 
-export function MongoBackupPanel({ service, signature, externalDisabled = false }: { service?: ServiceStatus; signature: string; externalDisabled?: boolean }) {
+export function MongoBackupPanel({ service, signature, externalDisabled = false, onLockChange }: { service?: ServiceStatus; signature: string; externalDisabled?: boolean; onLockChange: (locked: boolean) => void }) {
   const t = useT(); const client = useQueryClient();
   const running = !!service?.version && (service.state === "running" || (service.state === "error" && service.pids.length > 0));
   const version = service?.version ?? "";
@@ -52,6 +52,7 @@ export function MongoBackupPanel({ service, signature, externalDisabled = false 
   const [fileError, setFileError] = React.useState<unknown>(null);
   const alive = React.useRef(true);
   React.useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  React.useEffect(() => { onLockChange(busy || !!selected || !!importPreview || !!removal); return () => onLockChange(false); }, [busy, importPreview, onLockChange, removal, selected]);
   const signatureRef = React.useRef(signature); signatureRef.current = signature;
   const overview = useQuery({ queryKey: ["mongo-overview", signature], queryFn: () => api.mongoOverview(version), enabled: running && !busy, retry: false, refetchOnWindowFocus: false });
   const backups = useQuery({ queryKey: ["mongo-backups"], queryFn: api.mongoBackupList, enabled: !busy, retry: false, refetchOnWindowFocus: false });

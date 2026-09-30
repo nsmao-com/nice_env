@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { motion } from "motion/react";
 import { AlertTriangle, RotateCw, ScrollText, Server, ShieldAlert, Stethoscope } from "lucide-react";
 import type { ServiceStatus } from "@nsb/schema";
-import { cn, fmtUptime } from "@/lib/utils";
+import { cn, fmtUptime, packageIdFromDependency } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { ServiceSwitch } from "./service-switch";
 import { ServiceIcon } from "./service-icon";
@@ -103,7 +103,7 @@ export function ServiceRow({ service, dragHandle, dragPreview = false }: { servi
                 {service.missingRequires.map((dependency) => (
                   <Link
                     key={dependency}
-                    href={`/packages?search=${encodeURIComponent(dependency)}`}
+                    href={`/packages?search=${encodeURIComponent(packageIdFromDependency(dependency))}`}
                     className="font-mono underline decoration-dashed underline-offset-2 hover:text-foreground"
                   >
                     {dependency}

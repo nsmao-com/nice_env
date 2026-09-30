@@ -992,9 +992,13 @@ function PackageRow({
     const { version } = item;
     try {
       // 首次执行和失败重试都读取最新状态，但始终保持原来的动作和版本。
+      // 安装或切换纯运行时（Node/PHP/Composer 等）不依赖服务状态；
+      // 服务状态接口短暂失败时仍应允许用户安装和设置默认版本。
       const [packages, services] = await Promise.all([
         queryClient.fetchQuery({ queryKey: ["packages"], queryFn: api.listPackages, staleTime: 0, retry: false, networkMode: "always" }),
-        queryClient.fetchQuery({ queryKey: ["services"], queryFn: api.listServiceStatus, staleTime: 0, retry: false, networkMode: "always" }),
+        group.isService && action !== "install"
+          ? queryClient.fetchQuery({ queryKey: ["services"], queryFn: api.listServiceStatus, staleTime: 0, retry: false, networkMode: "always" })
+          : Promise.resolve<ServiceStatus[]>([]),
       ]);
       if (Object.values(useInstallTasks.getState().tasks).some((task) => task.status === "running"
         && task.id === group.id && (action === "install" || !task.version || sameVersion(task.version, version)))) {

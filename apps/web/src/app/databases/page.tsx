@@ -61,7 +61,7 @@ export default function DatabasesPage() {
         <div className="mb-5"><PostgresInstanceCard /></div>
         <PostgresManagement service={postgres} onLockChange={setLocked} />
       </TabsContent>
-      <TabsContent value="mongodb"><MongoManagement service={services.find(service => service.id === "mongodb")} /></TabsContent>
+      <TabsContent value="mongodb"><MongoManagement service={services.find(service => service.id === "mongodb")} onLockChange={setLocked} /></TabsContent>
       <TabsContent value="redis"><div className="max-w-3xl"><RedisInstanceCard /></div></TabsContent>
     </Tabs>
   </div>;
@@ -191,7 +191,12 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
   const instanceKey = (s: ServiceStatus) => `${s.id}:${s.version}`;
   const defaultService = databaseServices.find((s) => s.state === "running") ?? databaseServices[0];
   const selected = selectedInstance || (defaultService ? instanceKey(defaultService) : "");
-  React.useEffect(() => { if (!selectedInstance && selected) setSelectedInstance(selected); }, [selectedInstance, selected]);
+  React.useEffect(() => {
+    const available = new Set(databaseServices.map((service) => `${service.id}:${service.version}`));
+    if (selectedInstance && available.has(selectedInstance)) return;
+    const fallback = defaultService ? `${defaultService.id}:${defaultService.version}` : "";
+    if (selectedInstance !== fallback) setSelectedInstance(fallback);
+  }, [databaseServices, defaultService, selectedInstance]);
   const service = databaseServices.find((s) => instanceKey(s) === selected);
   const version = service?.version ?? "";
   const engine: DatabaseEngine = service?.id.split("@")[0] === "mariadb" ? "mariadb" : "mysql";
@@ -218,6 +223,12 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
   const [dropTyped, setDropTyped] = React.useState("");
   const [databaseSearch, setDatabaseSearch] = React.useState("");
   const locked = workspaceLocked || !!deleteUser || !!passwordUser || !!grantUser || backupLocked || createOpen || userOpen || rootOpen || importOpen || !!dropTarget;
+  // 工作区与备份共用同一实例连接；打开一个操作时，其他入口必须等待，
+  // 但当前已经打开的弹窗仍要能继续提交或重试。
+  const dialogReady = ready && !workspaceLocked && !backupLocked;
+  const actionReady = dialogReady && !createOpen && !userOpen && !rootOpen && !importOpen && !dropTarget;
+  const workspaceReady = dialogReady && !createOpen && !userOpen && !rootOpen && !importOpen && !dropTarget;
+  const backupReady = ready && !workspaceLocked && !createOpen && !userOpen && !rootOpen && !importOpen && !dropTarget;
   React.useEffect(() => { onLockChange(locked); return () => onLockChange(false); }, [locked, onLockChange]);
   React.useEffect(() => { setDatabaseSearch(""); }, [engine, version]);
 
@@ -232,13 +243,13 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
     <div className="pb-8">
       <DbImportDialog key={`import-${engine}-${version}`} open={importOpen} onOpenChange={setImportOpen} version={version} engine={engine} targetLabel={targetLabel} />
       <div className="mb-5 flex flex-wrap justify-end gap-2">
-            <Button variant="secondary" disabled={!running} onClick={() => setRootOpen(true)}>
+            <Button variant="secondary" disabled={!running || workspaceLocked || backupLocked || createOpen || userOpen || rootOpen || importOpen || !!dropTarget} onClick={() => setRootOpen(true)}>
               <KeyRound className="h-3.5 w-3.5" /> {t("db.rootManage")}
             </Button>
-            <Button variant="secondary" disabled={!ready} onClick={() => setImportOpen(true)}>
+            <Button variant="secondary" disabled={!actionReady} onClick={() => setImportOpen(true)}>
               <Import className="h-3.5 w-3.5" /> {t("dbImport.open")}
             </Button>
-            <Button disabled={!ready} onClick={() => setCreateOpen(true)}>
+            <Button disabled={!actionReady} onClick={() => setCreateOpen(true)}>
               <Plus className="h-3.5 w-3.5" /> {t("db.createDb")}
             </Button>
       </div>
@@ -251,7 +262,7 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
             <SelectContent>{databaseServices.map((s) => <SelectItem key={s.id} value={instanceKey(s)}>{s.id.split("@")[0] === "mariadb" ? "MariaDB" : "MySQL"} {s.version} · {s.port ?? "—"} · {s.state === "running" ? t("common.running") : s.state === "error" ? t("common.error") : t("common.stopped")}</SelectItem>)}</SelectContent>
           </Select>
         </div>
-        <Button variant="secondary" disabled={!running || dbQuery.isFetching || userQuery.isFetching} onClick={() => invalidate("databases", "db-users")}>{t("db.refresh")}</Button>
+        <Button variant="secondary" disabled={!running || locked || dbQuery.isFetching || userQuery.isFetching} onClick={() => invalidate("databases", "db-users")}>{t("db.refresh")}</Button>
       </div>
       {serviceQuery.isError ? <p role="alert" className="mb-4 text-sm text-error">{t("db.connectionFailed")} <Button variant="ghost" onClick={() => void serviceQuery.refetch()}>{t("db.retry")}</Button></p> : !databaseServices.length ? <p className="mb-4 text-sm text-muted">{serviceQuery.isFetching ? t("db.loading") : t("db.noInstance")}</p> : null}
       {/* 所选 MySQL / MariaDB 实例 */}
@@ -262,10 +273,10 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
         </div>
       </section>
 
-      <DatabaseWorkspace key={signature} engine={engine} version={version} databases={dbs.map((db) => db.name)} ready={ready} targetLabel={targetLabel} onLockChange={setWorkspaceLocked} />
+      <DatabaseWorkspace key={signature} engine={engine} version={version} databases={dbs.map((db) => db.name)} ready={workspaceReady} targetLabel={targetLabel} onLockChange={setWorkspaceLocked} />
       {/* 备份 / 还原 */}
       <section className="mb-6">
-        <DbBackupCard key={selected} version={version} engine={engine} targetLabel={targetLabel} ready={ready} databases={dbs.filter((db) => !systemDbs.has(db.name.toLowerCase())).map((db) => db.name)} onLockChange={setBackupLocked} />
+        <DbBackupCard key={selected} version={version} engine={engine} targetLabel={targetLabel} ready={backupReady} databases={dbs.filter((db) => !systemDbs.has(db.name.toLowerCase())).map((db) => db.name)} onLockChange={setBackupLocked} />
       </section>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
@@ -281,14 +292,14 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
                 <Input
                   value={databaseSearch}
                   onChange={(event) => setDatabaseSearch(event.target.value)}
-                  disabled={!ready || dbs.length === 0}
+                  disabled={!ready || locked || dbs.length === 0}
                   placeholder={t("db.searchDatabases")}
                   aria-label={t("db.searchDatabases")}
                   className="h-8 w-full pl-8 pr-8 text-xs"
                 />
                 {databaseSearch && <button type="button" aria-label={t("db.clearSearch")} className="absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-faint hover:bg-fill hover:text-foreground focus-visible:outline-none" onClick={() => setDatabaseSearch("")}><X className="h-3.5 w-3.5" /></button>}
               </div>
-              <Button variant="ghost" size="sm" disabled={!ready || !dbs.some((db) => !systemDbs.has(db.name.toLowerCase()))} onClick={() => setUserOpen(true)}>
+              <Button variant="ghost" size="sm" disabled={!actionReady || !dbs.some((db) => !systemDbs.has(db.name.toLowerCase()))} onClick={() => setUserOpen(true)}>
                 <UserRound className="h-3.5 w-3.5" /> {t("db.createUser")}
               </Button>
             </div>
@@ -323,7 +334,7 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
                         variant="ghost"
                         title={t("db.drop")}
                         aria-label={`${t("db.drop")} ${db.name}`}
-                        disabled={!ready}
+                        disabled={!ready || locked}
                         className="text-faint hover:text-error"
                         onClick={() => {
                           setDropTarget(db.name);
@@ -370,7 +381,7 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
 
       <CreateDbDialog key={`create-db-${engine}-${version}`} version={version} engine={engine} targetLabel={targetLabel} open={createOpen} onOpenChange={setCreateOpen} onDone={() => invalidate("databases")} />
       <CreateUserDialog key={`create-user-${engine}-${version}`} version={version} engine={engine} targetLabel={targetLabel} open={userOpen} onOpenChange={setUserOpen} onDone={() => invalidate("db-users")} />
-      {grantUser && <DatabaseGrantsSheet key={JSON.stringify([engine, version, grantUser.username, grantUser.host])} engine={engine} version={version} account={grantUser} targetLabel={targetLabel} ready={ready} onClose={() => setGrantUser(null)} />}
+      {grantUser && <DatabaseGrantsSheet key={JSON.stringify([engine, version, grantUser.username, grantUser.host])} engine={engine} version={version} account={grantUser} targetLabel={targetLabel} ready={dialogReady} onClose={() => setGrantUser(null)} />}
       {passwordUser && <UserPasswordDialog engine={engine} version={version} account={passwordUser.account} targetLabel={targetLabel} signature={passwordUser.signature} changed={!running || signature !== passwordUser.signature} onClose={() => setPasswordUser(null)} />}
       {deleteUser && <UserDropDialog engine={engine} version={version} account={deleteUser.account} targetLabel={targetLabel} signature={deleteUser.signature} changed={!running || signature !== deleteUser.signature} onClose={() => setDeleteUser(null)} />}
       <ResetRootDialog key={`root-${engine}-${version}`} version={version} engine={engine} targetLabel={targetLabel} open={rootOpen} onOpenChange={setRootOpen} />
@@ -384,9 +395,9 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
         confirmText={t("db.drop")}
         danger
         loading={dropping}
-        confirmDisabled={!ready || !dropTarget || dropTyped !== dropTarget}
+        confirmDisabled={!dialogReady || !dropTarget || dropTyped !== dropTarget}
         onConfirm={async () => {
-          if (dropping || !ready || !dropTarget || dropTyped !== dropTarget) return;
+          if (dropping || !dialogReady || !dropTarget || dropTyped !== dropTarget) return;
           setDropping(true);
           try {
             await api.dbDrop(dropTarget, version, engine);

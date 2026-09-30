@@ -2519,6 +2519,18 @@ mod tests {
         assert_eq!(remote_entry.version, "1.2.4");
         assert_eq!(remote_entry.url, remote.url);
     }
+
+    #[test]
+    fn uninstall_removes_install_record_when_version_prefix_differs() {
+        let (_temp, state) = fixture();
+        let installed = install_fixture(&state, "fixture", "v1.0.0");
+
+        // 调用方通常使用清单里的标准版本；历史数据库记录可能仍带上游 tag 的 v 前缀。
+        state.uninstall_package("fixture@1.0.0").unwrap();
+
+        assert!(!Path::new(&installed.install_path).exists());
+        assert!(state.store.find_installed("fixture", Some("1.0.0")).is_none());
+    }
 }
 
 /// 清单解析 + 基本合法性校验（远端快照 / 用户模块共用）。

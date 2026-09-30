@@ -132,7 +132,8 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
   const retryItem = failure ? items.find((item) => sameVersion(item.version, failure.version)) : undefined;
 
   const pick = async (item: VersionItem, action: VersionAction = actionOf(item)) => {
-    if (busyRef.current || pathBusy || disabled || !statusKnown || item.installing || item.transitioning) return;
+    const needsServiceStatus = group.isService && action !== "install";
+    if (busyRef.current || pathBusy || disabled || (needsServiceStatus && !statusKnown) || item.installing || item.transitioning) return;
     if (item.incompatible && !item.installed) {
       return; // UI 已明确标注；真正拦截在后端（PLATFORM_UNSUPPORTED）
     }
@@ -276,7 +277,7 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
                   >
                     <button
                       onClick={() => pick(item)}
-                      disabled={disabled || !statusKnown || pathBusy || busy !== null || item.installing || item.transitioning || (!!item.incompatible && !item.installed)
+                      disabled={disabled || (group.isService && !statusKnown && actionOf(item) !== "install") || pathBusy || busy !== null || item.installing || item.transitioning || (!!item.incompatible && !item.installed)
                         || (!group.isService && item.installed && item.active)}
                       title={item.incompatible && !item.installed ? t("versions.incompatible") : undefined}
                       className={cn(

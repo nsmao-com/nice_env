@@ -368,11 +368,10 @@ pub fn list_configs(paths: &Paths, store: &crate::store::Store) -> Vec<ConfigFil
                 exists: meta.as_ref().is_some_and(|m| m.is_file()),
                 size_bytes: meta.map(|m| m.len()).unwrap_or(0),
                 language: target.kind.language().to_string(),
-                validated: match target.kind {
+                validated: target.kind.has_validator() && match target.kind {
                     ConfigKind::NginxMain => crate::ops::nginx_exe(store).is_ok(),
                     ConfigKind::ApacheConf => crate::ops::apache_paths(store).is_ok(),
                     ConfigKind::CaddyConf => crate::generic::resolve(store, paths, &format!("caddy@{}", target.version.as_deref().unwrap())).is_ok(),
-                    ConfigKind::QdrantConf => crate::generic::resolve(store, paths, &format!("qdrant@{}", target.version.as_deref().unwrap())).is_ok(),
                     _ => false,
                 },
                 used_by_service: pkg.map(|s| match &target.version {
@@ -1748,6 +1747,41 @@ mod tests {
             .unwrap();
         std::fs::create_dir_all(paths.etc_dir("php", version)).unwrap();
         std::fs::write(paths.php_ini(version), content).unwrap();
+    }
+
+    #[test]
+    fn qdrant_config_uses_structural_lint_without_claiming_native_validation() {
+        let (_temp, paths, store) = fixture();
+        let version = "1.0.0";
+        store
+            .upsert_installed(&crate::model::InstalledPackage {
+                id: "qdrant".into(),
+                version: version.into(),
+                category: "search".into(),
+                install_path: paths.runtime_dir("qdrant", version).to_string_lossy().into(),
+                config_path: paths.etc_dir("qdrant", version).to_string_lossy().into(),
+                installed_at: 0,
+            })
+            .unwrap();
+        std::fs::create_dir_all(paths.etc_dir("qdrant", version)).unwrap();
+        std::fs::write(
+            paths.etc_dir("qdrant", version).join("config.yaml"),
+            "storage:\n  storage_path: ./storage\n",
+        )
+        .unwrap();
+        let info = list_configs(&paths, &store)
+            .into_iter()
+            .find(|item| item.kind == "qdrant-conf@1.0.0")
+            .expect("Qdrant config should be listed");
+        assert!(!info.validated);
+        assert!(validate_selected(
+            &paths,
+            &store,
+            "qdrant-conf@1.0.0",
+            "storage:\n  storage_path: ./storage\n"
+        )
+        .unwrap()
+        .ok);
     }
 
     #[test]

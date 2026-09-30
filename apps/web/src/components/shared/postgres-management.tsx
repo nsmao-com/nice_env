@@ -38,7 +38,8 @@ export function PostgresManagement({ service, onLockChange }: { service?: Servic
   const roles = running && !roleQuery.isError ? roleQuery.data ?? [] : [];
   const [backupLocked, setBackupLocked] = React.useState(false);
   const [accessRole, setAccessRole] = React.useState<{ name: string; oid: number; signature: string } | null>(null);
-  const ready = running && databases.isSuccess && roleQuery.isSuccess && !backupLocked && !accessRole;
+  const [workspaceLocked, setWorkspaceLocked] = React.useState(false);
+  const ready = running && databases.isSuccess && roleQuery.isSuccess && !backupLocked && !accessRole && !workspaceLocked;
   const [dbSearch, setDbSearch] = React.useState("");
   const [roleSearch, setRoleSearch] = React.useState("");
   const [dbPage, setDbPage] = React.useState(1);
@@ -50,7 +51,6 @@ export function PostgresManagement({ service, onLockChange }: { service?: Servic
   const [confirmation, setConfirmation] = React.useState("");
   const [error, setError] = React.useState("");
   const [busy, setBusy] = React.useState(false);
-  const [workspaceLocked, setWorkspaceLocked] = React.useState(false);
   const lock = React.useRef(false);
   const changed = !!action && (!running || action.signature !== signature);
   const deleting = action?.kind === "drop-database" || action?.kind === "drop-role";
@@ -88,10 +88,10 @@ export function PostgresManagement({ service, onLockChange }: { service?: Servic
   const stateMessage = (query: typeof databases | typeof roleQuery) => !running ? t("db.pgStopped") : query.isPending ? t("db.loading") : query.isError ? normalizeError(query.error).message : null;
 
   return <div className="space-y-4">
-    <PostgresBackupCard version={version} port={service?.port} signature={signature} ready={running && databases.isSuccess && roleQuery.isSuccess && !action && !accessRole} databases={dbs} roles={roles} onLockChange={setBackupLocked} />
+    <PostgresBackupCard version={version} port={service?.port} signature={signature} ready={running && databases.isSuccess && roleQuery.isSuccess && !action && !accessRole && !workspaceLocked} databases={dbs} roles={roles} onLockChange={setBackupLocked} />
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div className="min-w-0"><h2 className="text-sm font-semibold">{t("pg.manage")}</h2><p className="mt-1 break-words text-xs text-muted">PostgreSQL {version || "—"} · 127.0.0.1:{service?.port ?? "—"}</p></div>
-      <div className="flex flex-wrap gap-2"><Button variant="secondary" disabled={!running || databases.isFetching || roleQuery.isFetching} onClick={refresh}>{t("db.refresh")}</Button><Button variant="secondary" disabled={!ready} onClick={() => begin("create-role")}><UserRound className="h-3.5 w-3.5" />{t("db.createUser")}</Button><Button disabled={!ready} onClick={() => begin("create-database")}><Plus className="h-3.5 w-3.5" />{t("db.createDb")}</Button></div>
+      <div className="flex flex-wrap gap-2"><Button variant="secondary" disabled={!running || databases.isFetching || roleQuery.isFetching || workspaceLocked} onClick={refresh}>{t("db.refresh")}</Button><Button variant="secondary" disabled={!ready} onClick={() => begin("create-role")}><UserRound className="h-3.5 w-3.5" />{t("db.createUser")}</Button><Button disabled={!ready} onClick={() => begin("create-database")}><Plus className="h-3.5 w-3.5" />{t("db.createDb")}</Button></div>
     </div>
     <p className="text-xs leading-5 text-muted">{t("pg.ownerHint")}</p>
     <PostgresWorkspace version={version} databases={dbs} ready={running && databases.isSuccess && !backupLocked && !action && !accessRole} targetLabel={`PostgreSQL ${version || "—"} · 127.0.0.1:${service?.port ?? "—"}`} onLockChange={setWorkspaceLocked} />

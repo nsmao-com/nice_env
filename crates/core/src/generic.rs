@@ -219,9 +219,14 @@ pub fn ensure_dependencies(store: &Store, service_id: &str) -> Result<()> {
     dependencies.extend(entry.requires.iter().cloned());
     dependencies.sort();
     dependencies.dedup();
+    let installed = store.list_installed().unwrap_or_default();
     let missing: Vec<String> = dependencies
         .iter()
-        .filter(|dependency| crate::ops::installed_by_choice(store, dependency).is_none())
+        .filter(|dependency| {
+            !installed
+                .iter()
+                .any(|package| crate::install::installed_package_satisfies(package, dependency))
+        })
         .cloned()
         .collect();
     if missing.is_empty() {
@@ -1024,8 +1029,27 @@ fn generic_web_target(r: &Resolved, sftpgo: Option<&SftpgoConfig>) -> Result<Str
     if managed_minio(r) { return minio_web_target(r, &minio_settings(r)?); }
     if crate::install::official_qdrant(&r.entry) && r.entry.run.as_ref().is_some_and(|run| run.args == r.spec.args) { return qdrant_web_target(r); }
     let args_pair = |flag: &str, value: &str| r.spec.args.windows(2).any(|pair| pair[0] == flag && pair[1] == value);
+    let env_pair = |name: &str, value: &str| r.spec.env.as_ref().and_then(|env| env.get(name)).is_some_and(|current| current == value);
     let (offset, path) = match r.entry.id.as_str() {
         "mailpit" if args_pair("--listen", "127.0.0.1:{port}") => (0, "/"),
+        // RustFS 的官方 server 描述明确托管了对象端口和控制台端口；只有两组
+        // 参数都仍由清单提供时才生成入口，避免把用户自定义监听地址猜成控制台。
+        "rustfs"
+            if args_pair("--address", ":{port}")
+                && args_pair("--console-address", ":{port+1}")
+                && r.spec.args.iter().any(|arg| arg == "--console-enable") =>
+        {
+            (1, "/")
+        }
+        // ZincSearch 的清单运行描述直接托管 Web UI 与数据目录；不满足完整描述时
+        // 不猜测端口，避免把用户自定义 API 端口误当成管理台。
+        "zincsearch"
+            if r.spec.args.is_empty()
+                && env_pair("ZINC_SERVER_PORT", "{port}")
+                && env_pair("ZINC_DATA_PATH", "{data}") =>
+        {
+            (0, "/")
+        }
         // Temporal CLI 的开发服务把 Web UI 固定放在 gRPC 端口 + 1000；
         // 只有同时确认官方启动参数仍由清单托管时才提供快捷入口。
         "temporal-cli"
@@ -1854,6 +1878,11 @@ pub fn start(
     } else if crate::install::official_qdrant(&r.entry) {
         r.port.and_then(|port| port.checked_add(1).map(|grpc| [port, grpc]))
             .is_some_and(|ports| wait_owned_ports(manager, &r.service_id, &ports, timeout))
+    } else if r.entry.id == "rustfs"
+        && r.spec.args.iter().any(|arg| arg == "--console-enable")
+        && r.spec.args.windows(2).any(|pair| pair[0] == "--console-address" && pair[1] == ":{port+1}") {
+        r.port.and_then(|port| port.checked_add(1).map(|console| [port, console]))
+            .is_some_and(|ports| wait_owned_ports(manager, &r.service_id, &ports, timeout))
     } else if managed_rnacos(&r) {
         wait_rnacos_healthy(manager, &r, timeout)
     } else if managed_consul(&r.entry, &r.spec) {
@@ -1894,6 +1923,8 @@ pub fn start(
                     "监听端口或 Raft 集群未就绪"
                 } else if minio.is_some() {
                     "S3 服务或已启用的管理台未就绪"
+                } else if r.entry.id == "rustfs" {
+                    "S3 服务或管理台未就绪"
                 } else if r.port.is_some() {
                     "端口未就绪"
                 } else {
@@ -2490,7 +2521,7 @@ mod startup_tests {
 
     #[test]
     fn console_targets_use_resolved_ports_and_preserve_sftpgo_web_configuration() {
-        for (id, offset, path) in [("mailpit", 0, "/"), ("minio", 1, "/"), ("consul", 0, "/ui"), ("qdrant", 0, "/dashboard"), ("temporal-cli", 1000, "/"), ("neo4j", 0, "/browser")] {
+        for (id, offset, path) in [("mailpit", 0, "/"), ("minio", 1, "/"), ("rustfs", 1, "/"), ("zincsearch", 0, "/"), ("consul", 0, "/ui"), ("qdrant", 0, "/dashboard"), ("temporal-cli", 1000, "/"), ("neo4j", 0, "/browser")] {
             let (_temp, state, mut r) = fixture(id);
             let base_port = if id == "neo4j" { 7474 } else { 31000 };
             r.port = Some(base_port);

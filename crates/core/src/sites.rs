@@ -479,7 +479,12 @@ fn validate_site_fields(
             ));
         }
     } else if runtime.kind == SiteKind::Redirect {
-        redirect_url(runtime.redirect.as_ref().ok_or_else(|| AppError::new("BAD_REDIRECT", "请填写跳转目标"))?, domains)?;
+        let redirect = runtime
+            .redirect
+            .as_ref()
+            .ok_or_else(|| AppError::new("BAD_REDIRECT", "请填写跳转目标"))?;
+        let target = redirect_url(redirect, domains)?;
+        validate_redirect_chain(store, domains, &target, exclude_id)?;
     } else if runtime.kind != SiteKind::Static {
         proxy_url(runtime.proxy_target.as_deref().unwrap_or_default())?;
     }
@@ -539,6 +544,94 @@ pub fn normalize_error_pages(
     Ok(normalized)
 }
 
+fn normalized_host(host: &str) -> String {
+    host.trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn redirect_host(target: &str) -> Option<String> {
+    reqwest::Url::parse(target)
+        .ok()
+        .and_then(|url| url.host_str().map(normalized_host))
+}
+
+fn host_matches_domain(host: &str, domain: &str) -> bool {
+    let host = normalized_host(host);
+    let domain = normalized_host(domain);
+    domain
+        .strip_prefix("*.")
+        .map_or(host == domain, |suffix| host.ends_with(&format!(".{suffix}")))
+}
+
+#[derive(Clone, Debug)]
+struct RedirectNode {
+    domains: Vec<String>,
+    target_host: String,
+}
+
+fn validate_redirect_chain(
+    store: &Store,
+    domains: &[String],
+    target: &str,
+    exclude_id: Option<&str>,
+) -> Result<()> {
+    let mut nodes = Vec::new();
+    for site in store.list_sites()? {
+        if Some(site.id.as_str()) == exclude_id || site.runtime.kind != SiteKind::Redirect {
+            continue;
+        }
+        let Some(redirect) = site.runtime.redirect.as_ref() else {
+            continue;
+        };
+        let Ok(normalized_target) = redirect_url(redirect, &site.domains) else {
+            // An older or externally imported record may already be invalid. It is not a
+            // reliable edge for the new candidate, so leave it to the normal site repair path.
+            continue;
+        };
+        let Some(target_host) = redirect_host(&normalized_target) else {
+            continue;
+        };
+        nodes.push(RedirectNode {
+            domains: site.domains,
+            target_host,
+        });
+    }
+
+    let Some(candidate_target_host) = redirect_host(target) else {
+        return Ok(());
+    };
+    nodes.push(RedirectNode {
+        domains: domains.to_vec(),
+        target_host: candidate_target_host.clone(),
+    });
+    let candidate_index = nodes.len() - 1;
+
+    fn contains_loop(host: &str, nodes: &[RedirectNode], path: &mut Vec<usize>) -> bool {
+        for (index, node) in nodes.iter().enumerate() {
+            if !node.domains.iter().any(|domain| host_matches_domain(host, domain)) {
+                continue;
+            }
+            if path.contains(&index) {
+                return true;
+            }
+            path.push(index);
+            if contains_loop(&node.target_host, nodes, path) {
+                return true;
+            }
+            path.pop();
+        }
+        false
+    }
+
+    if contains_loop(&candidate_target_host, &nodes, &mut vec![candidate_index]) {
+        return Err(AppError::new(
+            "REDIRECT_CHAIN_LOOP",
+            "目标地址会进入多个站点组成的跳转循环",
+        )
+        .with_hint("请修改其中一个跳转站点的目标地址，确保链路最终指向外部地址或普通站点。"));
+    }
+    Ok(())
+}
+
 /// 两种 Web 服务共用目标规范化，拒绝配置注入和指向本站域名的直接循环。
 pub fn redirect_url(redirect: &crate::model::SiteRedirect, domains: &[String]) -> Result<String> {
     let raw = redirect.target.trim();
@@ -552,11 +645,10 @@ pub fn redirect_url(redirect: &crate::model::SiteRedirect, domains: &[String]) -
     if redirect.preserve_path && (url.query().is_some() || url.fragment().is_some()) {
         return Err(AppError::new("BAD_REDIRECT", "保留原路径时，目标地址不能带查询参数或 # 片段；可关闭路径保留以跳转到固定地址"));
     }
-    let host = url.host_str().unwrap().trim_end_matches('.').to_ascii_lowercase();
-    if domains.iter().any(|domain| {
-        let domain = domain.to_ascii_lowercase();
-        domain.strip_prefix("*.").map_or(host == domain, |suffix| host.ends_with(&format!(".{suffix}")))
-    }) { return Err(AppError::new("REDIRECT_LOOP", "目标地址不能使用本站域名或别名，否则会循环跳转")); }
+    let host = url.host_str().unwrap();
+    if domains.iter().any(|domain| host_matches_domain(host, domain)) {
+        return Err(AppError::new("REDIRECT_LOOP", "目标地址不能使用本站域名或别名，否则会循环跳转"));
+    }
     Ok(url.to_string())
 }
 
@@ -3758,9 +3850,32 @@ mod scaffold_tests {
         let paths = Paths::new(temp.path().into()); paths.ensure_dirs().unwrap();
         let store = Store::open(paths.db()).unwrap();
         let mut site = saved_site(&paths, &store);
-        site.runtime.kind = SiteKind::Redirect; site.root_dir.clear(); redirect.status = 302;
-        site.runtime.redirect = Some(redirect);
+        site.id = "redirect-a".into();
+        site.name = "Redirect A".into();
+        site.domains = vec!["a.test".into()];
+        site.runtime.kind = SiteKind::Redirect;
+        site.root_dir.clear();
+        site.runtime.redirect = Some(SiteRedirect { target: "https://b.test".into(), status: 302, preserve_path: false });
         store.save_site(&site).unwrap();
+        let mut site_b = site.clone();
+        site_b.id = "redirect-b".into();
+        site_b.name = "Redirect B".into();
+        site_b.domains = vec!["b.test".into()];
+        site_b.runtime.redirect = Some(SiteRedirect { target: "https://c.test".into(), status: 302, preserve_path: false });
+        store.save_site(&site_b).unwrap();
+
+        let mut candidate = input(SiteKind::Redirect).runtime;
+        candidate.redirect = Some(SiteRedirect { target: "https://a.test".into(), status: 302, preserve_path: false });
+        let error = validate_site_fields("Redirect C", &["c.test".into()], "", &candidate, &store, None).unwrap_err();
+        assert_eq!(error.code, "REDIRECT_CHAIN_LOOP");
+
+        candidate.redirect = Some(SiteRedirect { target: "https://ordinary.test".into(), status: 302, preserve_path: false });
+        assert!(validate_site_fields("Redirect C", &["c.test".into()], "", &candidate, &store, None).is_ok());
+
+        let mut replacement = input(SiteKind::Redirect).runtime;
+        replacement.redirect = Some(SiteRedirect { target: "https://c.test".into(), status: 302, preserve_path: false });
+        assert!(validate_site_fields("Redirect B", &["b.test".into()], "", &replacement, &store, Some("redirect-b")).is_ok());
+
         assert_eq!(crate::envfile::read_env(&paths, &store, &site.id).unwrap_err().code, "SITE_NO_PROJECT");
         assert_eq!(crate::sitebackup::scope(&store, &site.id, true, true).unwrap_err().code, "SITE_NO_PROJECT");
         assert_eq!(crate::pathenv::project_runtime_versions(&store, &crate::install::Installer::bundled().manifest, &site.id).unwrap_err().code, "SITE_NO_PROJECT");

@@ -218,6 +218,28 @@ fn builtin_modules(paths: &Paths, version: &str) -> Result<BTreeSet<String>> {
     Ok(modules)
 }
 
+/// 读取当前 php.ini 下实际加载的模块。配置文件里的 `extension=` 只代表用户
+/// 想启用它，DLL ABI、依赖或路径不匹配时 PHP 仍可能跳过加载；面板必须把这
+/// 两种状态区分开，避免显示一个实际上没有生效的“已启用”。
+fn loaded_modules(paths: &Paths, version: &str, ini_path: &Path) -> BTreeSet<String> {
+    let root = paths.runtime_dir("php", version);
+    let exe = root.join(crate::ops::exe_name("php"));
+    if !exe.is_file() || !ini_path.is_file() {
+        return BTreeSet::new();
+    }
+    let Ok((_ok, output)) = crate::cfgeditor::run_validator(
+        platform::command(&exe)
+            .current_dir(&root)
+            .env("PHP_INI_SCAN_DIR", "")
+            .arg("-c")
+            .arg(ini_path)
+            .arg("-m"),
+    ) else {
+        return BTreeSet::new();
+    };
+    module_names(&output)
+}
+
 /// 把 `php_curl.dll` / `php_xdebug.dll` / `redis.so` → `curl` / `xdebug` / `redis`
 ///
 /// 注意 `.dll` 与 `.so` 都要接受：前者是 Windows，后者是 macOS/Linux。
@@ -445,6 +467,7 @@ pub fn scan_available(paths: &Paths, version: &str) -> Result<Vec<PhpExtension>>
     } else {
         IniExtState::default()
     };
+    let loaded = loaded_modules(paths, version, &ini_path);
 
     let mut names = builtins.clone();
     // 保留 php.ini 中出现过的旧条目，让用户可以在面板里关闭失效配置，
@@ -469,6 +492,8 @@ pub fn scan_available(paths: &Paths, version: &str) -> Result<Vec<PhpExtension>>
     for name in names {
         let builtin = builtins.contains(&name);
         let enabled = builtin || state.enabled.contains(&name);
+        let loaded_name = if name == "gd2" { "gd" } else { name.as_str() };
+        let is_loaded = builtin || loaded.contains(loaded_name);
         let meta = meta_for(&name);
         let deps: Vec<String> = EXT_DEPS
             .iter()
@@ -511,6 +536,7 @@ pub fn scan_available(paths: &Paths, version: &str) -> Result<Vec<PhpExtension>>
                     })
             },
             enabled,
+            loaded: is_loaded,
             zend: is_zend(&name),
             builtin,
             dll: if builtin {
@@ -877,6 +903,16 @@ mod tests {
         assert!(parse_ext_line("; just a comment").is_none());
         assert!(parse_ext_line("").is_none());
         assert!(parse_ext_line("extension=").is_none());
+    }
+
+    #[test]
+    fn module_probe_only_marks_modules_inside_php_sections() {
+        let output = "PHP Warning: Unable to load dynamic library\n[PHP Modules]\nCore\nPDO\n[Zend Modules]\nZend OPcache\nwarning: extension skipped\n";
+        let modules = module_names(output);
+        assert!(modules.contains("core"));
+        assert!(modules.contains("pdo"));
+        assert!(modules.contains("opcache"));
+        assert!(!modules.contains("warning: extension skipped"));
     }
 
     #[test]

@@ -297,7 +297,11 @@ impl Store {
     pub fn remove_installed(&self, id: &str, version: &str) -> Result<()> {
         let conn = self.conn.lock();
         conn.execute(
-            "DELETE FROM installed WHERE id=?1 AND version=?2",
+            // 安装记录允许保留上游 tag 的 `v` 前缀；删除与查找必须使用同一版本规范，
+            // 否则卸载 `1.2.3` 可能删掉运行目录却遗留 `v1.2.3` 的数据库记录。
+            "DELETE FROM installed
+             WHERE id=?1
+               AND (version=?2 OR ltrim(version, 'vV')=ltrim(?2, 'vV'))",
             params![id, version],
         )?;
         Ok(())

@@ -791,6 +791,9 @@ fn check_extensions(
         if !extension.missing_deps.is_empty() {
             reasons.push(format!("缺少依赖：{}", extension.missing_deps.join("、")));
         }
+        if !extension.loaded {
+            reasons.push("PHP 实测未加载此模块".into());
+        }
         if !reasons.is_empty() {
             r.issue(
                 &format!("php-ext-{version}-{}", extension.name),
@@ -1159,6 +1162,7 @@ mod tests {
             group: "db".into(),
             hint: String::new(),
             enabled: true,
+            loaded: false,
             zend: false,
             builtin: false,
             dll: "missing.dll".into(),
@@ -1167,7 +1171,9 @@ mod tests {
         let mut r = HealthReport::default();
         check_extensions(&mut r, "8.3", temp.path(), &[ext]);
         assert_eq!(r.warnings, 1);
-        assert!(r.items[0].detail.contains("文件缺失") && r.items[0].detail.contains("pdo"));
+        assert!(r.items[0].detail.contains("文件缺失")
+            && r.items[0].detail.contains("pdo")
+            && r.items[0].detail.contains("未加载"));
     }
 
     #[test]

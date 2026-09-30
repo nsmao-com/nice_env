@@ -385,6 +385,7 @@ function mockPhpExtSeed(): PhpExtension[] {
     group,
     hint,
     enabled,
+    loaded: enabled,
     zend: false,
     builtin: false,
     dll: `php_${name}.dll`,
@@ -2995,7 +2996,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const version = (args!.input as { version: string }).version;
       const exts = mockPhpExtState.get(version) ?? mockPhpExtSeed();
       const xd = exts.find((e) => e.name === "xdebug");
-      if (xd) xd.enabled = true;
+      if (xd) { xd.enabled = true; xd.loaded = true; }
       mockPhpExtState.set(version, exts);
       return {
         version,
@@ -3032,8 +3033,9 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         if (!found && enabled) throw { code: "PHP_EXTENSION_FILE_MISSING", message: `缺少扩展文件：${dependency}` };
         return found;
       });
-      if (enabled) dependencies.forEach((e) => { if (e) e.enabled = true; });
+      if (enabled) dependencies.forEach((e) => { if (e) { e.enabled = true; e.loaded = true; } });
       target.enabled = enabled;
+      target.loaded = enabled;
       mockPhpExtState.set(version, exts);
       return {
         name,

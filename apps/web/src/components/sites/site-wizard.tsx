@@ -6,6 +6,7 @@ import { isSiteHostname, siteRedirectTarget } from "@/lib/utils";
 
 
 import * as React from "react";
+import { useRouter } from "next/navigation";
 import type { ProjectPhpCompatibility } from "@nsb/schema";
 import { ProjectPhpCheck, projectPhpProblem, recommendedProjectPhp } from "./project-php-compatibility";
 import { ProjectPlatformCheck } from "./project-platform-check";
@@ -110,6 +111,7 @@ export function SiteWizard({
   existingDefaults?: ExistingProjectDefaults | null;
 }) {
   const t = useT();
+  const router = useRouter();
   const { isDesktop, isMac } = useDesktopWindow();
   const { data: packages, refetch: refreshPackages } = usePackages();
   const { data: settings } = useSettings();
@@ -381,6 +383,12 @@ export function SiteWizard({
     }
   };
 
+  const openPackages = React.useCallback(() => {
+    if (creating) return;
+    onOpenChange(false);
+    router.push("/packages");
+  }, [creating, onOpenChange, router]);
+
   return (
     <Dialog open={open} onOpenChange={(o) => !creating && onOpenChange(o)}>
       <DialogContent className="flex w-[calc(100vw_-_1.5rem)] max-w-[640px] max-h-[86vh] flex-col overflow-hidden">
@@ -481,7 +489,7 @@ export function SiteWizard({
                 </div>
                 <div className="flex flex-col gap-1.5">
                   <Label>{t("sites.wizard.template")}</Label>
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                     {(
                       [
                         { v: "none", labelKey: "wz.useExistingOpt", hintKey: "wz.existingCodeHint" },
@@ -548,6 +556,9 @@ export function SiteWizard({
                       {!activeNode && <Button variant="secondary" size="sm" className="self-start" onClick={installNode} disabled={installingNode}>
                         {installingNode && <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />}{t(installingNode ? "wz.nodeInstalling" : "wz.installNode")}
                       </Button>}
+                      {activeNode && !nodeCompatible && <Button variant="secondary" size="sm" className="self-start" onClick={openPackages}>
+                        {t("wz.openPackages")}
+                      </Button>}
                     </div>
                   )}
                   {composerTemplate && (
@@ -569,7 +580,10 @@ export function SiteWizard({
                 {existingProject?.phpMinVersion && <p className="rounded-lg bg-fill p-3 text-xs text-muted">{t("siteResume.php").replace("{version}", existingProject.phpMinVersion)}</p>}
                 {existingProject?.needsDevServer && <p className="rounded-lg bg-warn-soft p-3 text-xs leading-relaxed text-warn">{t("siteResume.application")}</p>}
                 {!templatePhpCompatible && <p role="alert" className="rounded-lg bg-warn-soft p-3 text-xs text-warn">{t("wz.templatePhpMinimum").replace("{version}", minimumPhp)}</p>}
-                {!webInstalled && <p role="alert" className="rounded-lg bg-warn-soft p-3 text-xs text-warn">{t("wz.installWebFirst")}</p>}
+                {!webInstalled && <div role="alert" className="space-y-2 rounded-lg bg-warn-soft p-3 text-xs text-warn">
+                  <p>{t("wz.installWebFirst")}</p>
+                  <Button variant="secondary" size="sm" onClick={openPackages}>{t("wz.openPackages")}</Button>
+                </div>}
                 <div className="flex flex-col gap-1.5">
                   <Label>{t("sites.wizard.kind")}</Label>
                   <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -603,9 +617,10 @@ export function SiteWizard({
                   <div className="flex flex-col gap-1.5">
                     <Label>{t("sites.wizard.phpVersion")}</Label>
                     {phpVersions.length === 0 ? (
-                      <p className="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[11.5px] text-warn">
-                        {t("wz.noPhpHint")}
-                      </p>
+                      <div className="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[11.5px] text-warn">
+                        <span>{t("wz.noPhpHint")}</span>
+                        <Button variant="secondary" size="sm" className="mt-2" onClick={openPackages}>{t("wz.openPackages")}</Button>
+                      </div>
                     ) : (
                       <div className="flex flex-wrap gap-2">
                         {phpVersions.map((v) => (
@@ -718,7 +733,7 @@ export function SiteWizard({
                     animate={{ opacity: 1, height: "auto" }}
                     className="flex flex-col gap-3 overflow-hidden"
                   >
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                       <div className="flex flex-col gap-1.5">
                         <Label htmlFor="sw-db-name">{t("sites.wizard.dbName")}</Label>
                         <Input id="sw-db-name" value={dbName} onChange={(e) => setDbName(e.target.value)} maxLength={64} className="font-mono text-[13px]" />
@@ -740,7 +755,12 @@ export function SiteWizard({
                   </motion.div>
                 )}
                 {dbEnabled && !databaseValid && (
-                  <p role="alert" className="rounded-lg bg-warn-soft p-3 text-xs leading-relaxed text-warn">{t(mysqlInstalled ? "wz.databaseValidation" : "wz.installMysqlFirst")}</p>
+                  mysqlInstalled
+                    ? <p role="alert" className="rounded-lg bg-warn-soft p-3 text-xs leading-relaxed text-warn">{t("wz.databaseValidation")}</p>
+                    : <div role="alert" className="space-y-2 rounded-lg bg-warn-soft p-3 text-xs leading-relaxed text-warn">
+                        <p>{t("wz.installMysqlFirst")}</p>
+                        <Button variant="secondary" size="sm" onClick={openPackages}>{t("wz.openPackages")}</Button>
+                      </div>
                 )}
                 </>}
               </div>

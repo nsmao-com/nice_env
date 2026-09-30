@@ -16,7 +16,7 @@ import { useT } from "@/lib/store";
 import { useInvalidate, serviceHasProcess } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import { normalizeError, type AppErrorShape } from "@/lib/backend";
-import { cn, bulkTarget, mergeBulkReport, sameOptionalVersion } from "@/lib/utils";
+import { cn, bulkTarget, mergeBulkReport, packageIdFromDependency, sameOptionalVersion } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -186,7 +186,7 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
                       <p className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10.5px] text-warn">
                         <span>{t("svc.needDeps")}</span>
                         {s.missingRequires.map((dependency) => (
-                          <Link key={dependency} href={`/packages?search=${encodeURIComponent(dependency)}`} className="font-mono underline decoration-dashed underline-offset-2">
+                          <Link key={dependency} href={`/packages?search=${encodeURIComponent(packageIdFromDependency(dependency))}`} className="font-mono underline decoration-dashed underline-offset-2">
                             {dependency}
                           </Link>
                         ))}

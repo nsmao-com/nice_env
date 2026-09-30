@@ -362,6 +362,11 @@ export function sameVersion(left: string | null | undefined, right: string | nul
   return left != null && right != null && normalizeVersion(left) === normalizeVersion(right);
 }
 
+/** 依赖提示可能带有 `id@version`，套件页搜索需要使用可识别的基础 id。 */
+export function packageIdFromDependency(dependency: string): string {
+  return dependency.split("@", 1)[0].trim();
+}
+
 /** 比较允许为空的服务版本；空值只有和另一个空值才算相同。 */
 export function sameOptionalVersion(left: string | null | undefined, right: string | null | undefined): boolean {
   if (left == null || right == null) return left == null && right == null;

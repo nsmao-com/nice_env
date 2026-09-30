@@ -776,6 +776,8 @@ export const PhpExtension = z.object({
   group: z.string(),
   hint: z.string(),
   enabled: z.boolean(),
+  /** php.ini enables it and the current PHP runtime reports it from `php -m`. */
+  loaded: z.boolean(),
   /** 需要 zend_extension= 加载（Xdebug / OPcache） */
   zend: z.boolean(),
   /** 当前运行时实测的内置模块，不能通过 php.ini 单独禁用 */

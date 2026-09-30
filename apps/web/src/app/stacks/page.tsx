@@ -21,7 +21,7 @@ import {
   RotateCw,
 } from "lucide-react";
 import type { Stack, StackItem, PackageView, ServiceStatus } from "@nsb/schema";
-import { cn, cmpVersionDesc, resolveStackService, resolvedStackItems, sameVersion, stackServiceTarget, stackVersionConflicts } from "@/lib/utils";
+import { cn, cmpVersionDesc, packageIdFromDependency, resolveStackService, resolvedStackItems, sameVersion, stackServiceTarget, stackVersionConflicts } from "@/lib/utils";
 import { useT, useUI } from "@/lib/store";
 import { useInvalidate, useServices, useStacks, usePackages, toastError, useStackActions, type StackActionResult, serviceHasProcess } from "@/lib/hooks";
 import { BulkResult } from "@/components/shared/bulk-actions";
@@ -200,7 +200,7 @@ export default function StacksPage() {
                         <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
                         <span>{t("stack.dependenciesBlocked")}</span>
                         {missingDependencies.map((dependency) => (
-                          <Link key={dependency} href={`/packages?search=${encodeURIComponent(dependency)}`} className="font-mono underline decoration-dashed underline-offset-2">
+                          <Link key={dependency} href={`/packages?search=${encodeURIComponent(packageIdFromDependency(dependency))}`} className="font-mono underline decoration-dashed underline-offset-2">
                             {dependency}
                           </Link>
                         ))}

@@ -29,21 +29,24 @@ function QueryError({ error, busy, retry }: { error: unknown; busy: boolean; ret
   return <div className="space-y-2"><p role="alert" className="break-words text-sm text-error">{parsed.message}</p>{parsed.hint && <p className="break-words text-xs text-muted">{parsed.hint}</p>}<Button variant="secondary" size="sm" disabled={busy} onClick={retry}>{t("mongo.retry")}</Button></div>;
 }
 
-export function MongoManagement({ service }: { service?: ServiceStatus }) {
+export function MongoManagement({ service, onLockChange }: { service?: ServiceStatus; onLockChange: (locked: boolean) => void }) {
   const t = useT();
   const [authBusy, setAuthBusy] = React.useState(false);
+  const [browserBusy, setBrowserBusy] = React.useState(false);
+  const [backupBusy, setBackupBusy] = React.useState(false);
   const running = !!service?.version && (service.state === "running" || (service.state === "error" && service.pids.length > 0));
   const signature = `${service?.version}:${service?.port}:${service?.pids.join(",")}`;
+  React.useEffect(() => { onLockChange(authBusy || browserBusy || backupBusy); return () => onLockChange(false); }, [authBusy, backupBusy, browserBusy, onLockChange]);
   return <div className="min-w-0 space-y-5">
     <div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><h2 className="text-base font-semibold">MongoDB {service?.version ?? ""}</h2><p className="mt-1 text-xs leading-5 text-muted">{t("mongo.intro")}</p></div><Button variant="secondary" size="sm" asChild><Link href="/packages">{t("mongo.packages")}</Link></Button></div>
     <DatabaseDataDir engine="mongodb" version={service?.version} />
-    {!running ? <Card><CardContent className="py-8"><Database className="mb-3 h-6 w-6 text-muted" /><p className="text-sm">{t(service ? "mongo.stopped" : "mongo.notInstalled")}</p><p className="mt-2 text-xs leading-5 text-muted">{t("mongo.requireShell")}</p></CardContent></Card> : <MongoBrowser key={signature} version={service!.version!} signature={signature} />}
+    {!running ? <Card><CardContent className="py-8"><Database className="mb-3 h-6 w-6 text-muted" /><p className="text-sm">{t(service ? "mongo.stopped" : "mongo.notInstalled")}</p><p className="mt-2 text-xs leading-5 text-muted">{t("mongo.requireShell")}</p></CardContent></Card> : <MongoBrowser key={signature} version={service!.version!} signature={signature} onLockChange={setBrowserBusy} />}
     {!!service?.version && <MongoAuthPanel version={service.version} signature={signature} onLockChange={setAuthBusy} />}
-    <MongoBackupPanel service={service} signature={signature} externalDisabled={authBusy} />
+    <MongoBackupPanel service={service} signature={signature} externalDisabled={authBusy} onLockChange={setBackupBusy} />
   </div>;
 }
 
-function MongoBrowser({ version, signature }: { version: string; signature: string }) {
+function MongoBrowser({ version, signature, onLockChange }: { version: string; signature: string; onLockChange: (locked: boolean) => void }) {
   const t = useT();
   const overview = useQuery({ queryKey: ["mongo-overview", signature], queryFn: () => api.mongoOverview(version), ...options });
   const [database, setDatabase] = React.useState("");
@@ -106,7 +109,8 @@ function MongoBrowser({ version, signature }: { version: string; signature: stri
     } catch (error) { setDocumentDeleteError(normalizeError(error).message); }
     finally { setDocumentDeleteBusy(false); }
   };
-  const loading = overview.isFetching || collections.isFetching || documents.isFetching || deleteBusy || documentDeleteBusy;
+  const loading = overview.isFetching || collections.isFetching || documents.isFetching || deleteBusy || documentDeleteBusy || deleteOpen || !!documentToDelete;
+  React.useEffect(() => { onLockChange(loading); return () => onLockChange(false); }, [loading, onLockChange]);
   return <>
     <Card><CardHeader><div className="flex flex-wrap items-center justify-between gap-2"><CardTitle>{t("mongo.connection")}</CardTitle><Button size="sm" variant="ghost" disabled={loading} onClick={() => void overview.refetch()}><RefreshCw className="h-3.5 w-3.5" />{t("mongo.refresh")}</Button></div></CardHeader><CardContent>
       {overview.isPending && <p role="status" className="text-sm text-muted">{t("mongo.loading")}</p>}

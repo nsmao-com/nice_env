@@ -632,6 +632,12 @@ function ExtRow({
               <ShieldAlert className="h-3.5 w-3.5 shrink-0 text-warn" strokeWidth={2} />
             </span>
           )}
+          {ext.enabled && !ext.loaded && (
+            <span className="inline-flex shrink-0 items-center gap-1 text-[10.5px] text-warn" title={t("phpext.notLoadedHint")}>
+              <CircleAlert className="h-3.5 w-3.5" />
+              {t("phpext.notLoaded")}
+            </span>
+          )}
         </div>
         <p className="truncate text-[11px] text-faint">{ext.hint}</p>
       </div>

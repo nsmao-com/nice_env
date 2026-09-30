@@ -366,6 +366,59 @@ pub fn emit_hosts_denied(store: &store::Store, _paths: &paths::Paths) {
     let _ = e;
 }
 
+/// 为服务状态选择准确的清单描述。
+///
+/// 服务可能来自清单外的远程版本，或者安装时清单已经更新。此时必须优先
+/// 使用对应安装记录里的 `.niceenv-package.json` 快照，避免按基础 id 取到
+/// 另一版本的启动参数和依赖；快照缺失时再按服务版本精确查清单。
+fn service_entry_for_status(
+    installer: &install::Installer,
+    status: &model::ServiceStatus,
+    installed: &[model::InstalledPackage],
+) -> Option<model::PackageManifestEntry> {
+    let (id, id_version) = status
+        .id
+        .split_once('@')
+        .map_or((status.id.as_str(), None), |(id, version)| (id, Some(version)));
+    let version = status.version.as_deref().or(id_version);
+    let installed_entry = installed.iter().find(|package| {
+        package.id == id
+            && version.is_none_or(|expected| install::same_version(&package.version, expected))
+    });
+    if let Some(package) = installed_entry {
+        return Some(installer.installed_entry(package));
+    }
+    if let Some(version) = version {
+        if let Some(entry) = installer.find(&format!("{id}@{version}")) {
+            return Some(entry);
+        }
+    }
+    installer.find(id)
+}
+
+fn service_requirements(
+    entry: &model::PackageManifestEntry,
+    installed: &[model::InstalledPackage],
+) -> (Vec<String>, Vec<String>) {
+    let mut dependencies: Vec<String> = Vec::new();
+    if let Some(run) = &entry.run {
+        dependencies.extend(run.requires.iter().cloned());
+    }
+    dependencies.extend(entry.requires.iter().cloned());
+    dependencies.sort();
+    dependencies.dedup();
+    let missing = dependencies
+        .iter()
+        .filter(|dependency| {
+            !installed
+                .iter()
+                .any(|package| install::installed_package_satisfies(package, dependency))
+        })
+        .cloned()
+        .collect();
+    (dependencies, missing)
+}
+
 /* ================= 门面 API（desktop 命令与 smoke 测试共用） ================= */
 
 impl CoreState {
@@ -1222,32 +1275,15 @@ impl CoreState {
         let auto_start: std::collections::HashSet<_> = self.auto_start_service_ids().into_iter().collect();
         for st in list.iter_mut() {
             st.auto_start = auto_start.contains(&st.id);
-            // 服务 id 形如 php@8.3.33，清单里查的是基础 id
-            let base = st.id.split('@').next().unwrap_or(&st.id);
-            if let Some(entry) = self
-                .installer
-                .manifest
-                .packages
-                .iter()
-                .find(|p| p.id == base)
-            {
+            if let Some(entry) = service_entry_for_status(&self.installer, st, &installed) {
                 // 服务类看 run.requires；纯运行时（composer/gradle）看顶层 requires。
                 // 两处都查，才不会出现「清单里写了但界面不提示」。
-                let mut deps: Vec<String> = Vec::new();
-                if let Some(run) = &entry.run {
-                    deps.extend(run.requires.iter().cloned());
-                }
-                deps.extend(entry.requires.iter().cloned());
-                deps.sort();
-                deps.dedup();
-                if !deps.is_empty() {
-                    st.missing_requires = deps
-                        .iter()
-                        .filter(|dep| !installed.iter().any(|i| &i.id == *dep))
-                        .cloned()
-                        .collect();
-                    st.requires = deps;
-                }
+                let (dependencies, missing) = service_requirements(&entry, &installed);
+                st.requires = dependencies;
+                st.missing_requires = missing;
+            } else {
+                st.requires.clear();
+                st.missing_requires.clear();
             }
         }
         list
@@ -2234,6 +2270,92 @@ impl CoreState {
 
 #[cfg(test)]
 mod dep_tests {
+    fn service_entry(
+        id: &str,
+        version: &str,
+        run_requires: &[&str],
+        requires: &[&str],
+    ) -> crate::model::PackageManifestEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "version": version,
+            "category": "service",
+            "displayName": id,
+            "description": "fixture",
+            "os": [],
+            "arch": [],
+            "kind": "binary",
+            "url": format!("https://example.test/{id}-{version}.zip"),
+            "sizeBytes": 1,
+            "entry": "bin/service.exe",
+            "run": { "args": [], "requires": run_requires },
+            "requires": requires,
+        }))
+        .unwrap()
+    }
+
+    fn installed(id: &str, version: &str, path: &std::path::Path) -> crate::model::InstalledPackage {
+        crate::model::InstalledPackage {
+            id: id.into(),
+            version: version.into(),
+            category: "runtime".into(),
+            install_path: path.to_string_lossy().into_owned(),
+            config_path: String::new(),
+            installed_at: 0,
+        }
+    }
+
+    #[test]
+    fn service_status_uses_matching_installed_snapshot_instead_of_first_manifest_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let snapshot_path = temp.path().join(".niceenv-package.json");
+        let snapshot = service_entry("fixture", "2.0.0", &["runtime@2.0.0"], &[]);
+        std::fs::write(&snapshot_path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        let installer = crate::install::Installer {
+            manifest: crate::model::Manifest {
+                revision: 1,
+                packages: vec![
+                    service_entry("fixture", "1.0.0", &["runtime@1.0.0"], &[]),
+                    service_entry("fixture", "2.0.0", &["runtime@2.0.0"], &[]),
+                ],
+            },
+        };
+        let package = installed("fixture", "2.0.0", temp.path());
+        let status = crate::model::ServiceStatus {
+            id: "fixture@2.0.0".into(),
+            label: "Fixture".into(),
+            state: crate::model::ServiceState::Stopped,
+            pids: vec![],
+            port: None,
+            version: Some("2.0.0".into()),
+            memory_mb: None,
+            uptime_sec: None,
+            last_error: None,
+            log_file: None,
+            category: Some("service".into()),
+            auto_start: false,
+            requires: vec![],
+            missing_requires: vec![],
+        };
+        let entry = super::service_entry_for_status(&installer, &status, &[package]).unwrap();
+        assert_eq!(entry.version, "2.0.0");
+        assert_eq!(entry.run.unwrap().requires, ["runtime@2.0.0"]);
+    }
+
+    #[test]
+    fn service_status_dependency_matching_honors_requested_version() {
+        let temp = tempfile::tempdir().unwrap();
+        let installed_v2 = installed("runtime", "v2.0.0", temp.path());
+        let entry = service_entry("fixture", "2.0.0", &["runtime@2.0.0"], &["tool"]);
+        let (requires, missing) = super::service_requirements(&entry, &[installed_v2]);
+        assert_eq!(requires, ["runtime@2.0.0", "tool"]);
+        assert_eq!(missing, ["tool"]);
+
+        let installed_v1 = installed("runtime", "1.0.0", temp.path());
+        let (_, missing) = super::service_requirements(&entry, &[installed_v1]);
+        assert_eq!(missing, ["runtime@2.0.0", "tool"]);
+    }
+
     #[test]
     fn background_shutdown_waits_for_real_monitor_and_restores_after_timeout() {
         let output = platform::command(std::env::current_exe().unwrap())

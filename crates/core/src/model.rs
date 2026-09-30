@@ -1137,6 +1137,8 @@ pub struct PhpExtension {
     /// 一句话说明（这东西干什么用的）
     pub hint: String,
     pub enabled: bool,
+    /// php.ini 中已启用并且本次 `php -m` 实测成功加载。
+    pub loaded: bool,
     /// 需要 zend_extension= 加载（Xdebug / OPcache 等）
     pub zend: bool,
     /// 当前运行时实测的内置模块，无需 ini 配置且不能单独禁用

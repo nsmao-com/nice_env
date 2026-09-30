@@ -264,11 +264,11 @@ export default function PackagesPage() {
   const packages = packageQuery.data;
   const services = serviceQuery.data;
   const queryClient = useQueryClient();
-  const refreshState = (includeCatalogs = false) => Promise.all(
+  const refreshState = React.useCallback((includeCatalogs = false) => Promise.all(
     ["packages", "services", "pathenv", "stacks", "databases", "db-users", ...(includeCatalogs ? ["version-catalogs"] : [])].map(
       (key) => queryClient.invalidateQueries({ queryKey: [key] })
     )
-  );
+  ), [queryClient]);
   const statusKnown = serviceQuery.dataUpdatedAt > 0 && !serviceQuery.error;
   const dataReady = packageQuery.dataUpdatedAt > 0 && !packageQuery.error && statusKnown;
   const [bulkSelection, setBulkTarget] = React.useState<{ action: "start" | "stop" | "restart"; targets: BulkTarget[] } | null>(null);
@@ -314,6 +314,30 @@ export default function PackagesPage() {
   const uninstallBlocked = !uninstallPreviewReady || !!uninstallPreview.data?.blockers.length;
   const uninstallPreviewError = uninstallPreview.error ? normalizeError(uninstallPreview.error) : null;
 
+  // 迁移数据目录、恢复旧备份或切换远程清单后，安装记录可能落后于真实运行时目录。
+  // 首次读取套件列表后自动核对一次，避免用户必须先知道并点击“重新识别已安装版本”。
+  // 该操作只在桌面端执行，且每个页面会话只触发一次；没有变化时不会刷新或打扰用户。
+  const autoReconcileRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!isTauri || autoReconcileRef.current || packageQuery.dataUpdatedAt === 0 || packageQuery.error) return;
+    autoReconcileRef.current = true;
+    reconcileRef.current = true;
+    setReconciling(true);
+    void api.reconcileInstalledPackages()
+      .then((report) => {
+        if (report.imported.length > 0 || report.refreshed.length > 0) {
+          return refreshState(true);
+        }
+      })
+      .catch(() => {
+        // 自动核对是增强路径；失败时保留已读取的列表，由手动按钮提供可见重试和错误反馈。
+      })
+      .finally(() => {
+        reconcileRef.current = false;
+        setReconciling(false);
+      });
+  }, [packageQuery.dataUpdatedAt, packageQuery.error, refreshState]);
+
   // 服务卡片可以把缺失依赖直接带到套件页；只在首次挂载时读取，用户随后编辑搜索框不会被 URL 覆盖。
   React.useEffect(() => {
     const value = new URLSearchParams(window.location.search).get("search")?.trim();
@@ -329,7 +353,7 @@ export default function PackagesPage() {
     task.status === "running" && task.id === uninstallTarget.id
     && (!task.version || sameVersion(task.version, uninstallTarget.version))
   );
-  const actionsDisabled = !dataReady || bulkBusy || uninstalling || bulkUpdateQueue.length > 0;
+  const actionsDisabled = !dataReady || bulkBusy || uninstalling || reconciling || bulkUpdateQueue.length > 0;
 
   const defaultTld = settings.error ? undefined : settings.data?.defaultTld;
   const groups = React.useMemo(() => groupPackages(packages, defaultTld), [packages, defaultTld]);

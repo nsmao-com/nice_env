@@ -199,6 +199,7 @@ export default function SettingsPage() {
   const setCodeDefaults = useUI((s) => s.setCodeDefaults);
   const [settings, setSettings] = React.useState<AppSettings | null>(null);
   const [checking, setChecking] = React.useState(false);
+  const [manifestSyncing, setManifestSyncing] = React.useState(false);
   const [dataDir, setDataDir] = React.useState("");
   const [appVersion, setAppVersion] = React.useState("");
   const [dragging, setDragging] = React.useState(false);
@@ -222,6 +223,26 @@ export default function SettingsPage() {
     staleTime: 0,
     retry: false,
   });
+
+  const syncManifest = async () => {
+    if (!settings || !isTauri || manifestSyncing) return;
+    const url = settings.manifestUrl.trim();
+    if (!url) return;
+    setManifestSyncing(true);
+    try {
+      // 保存后再拉取，确保点击同步时使用的地址与下次启动读取的设置一致。
+      await api.setSetting("manifestUrl", url);
+      const result = await api.refreshRemoteManifest(url);
+      await manifestQuery.refetch();
+      const revision = typeof result?.revision === "number" ? result.revision : "?";
+      const packages = typeof result?.packages === "number" ? result.packages : "?";
+      toast.success(t("settings.syncManifestDone").replace("{revision}", String(revision)).replace("{packages}", String(packages)));
+    } catch (error) {
+      toastError(error);
+    } finally {
+      setManifestSyncing(false);
+    }
+  };
 
   const load = React.useCallback(async () => {
     try {
@@ -1286,24 +1307,38 @@ export default function SettingsPage() {
                     onChange={(e) => setSettings({ ...settings, manifestUrl: e.target.value })}
                     onBlur={(e) => update("manifestUrl", e.target.value)}
                     placeholder="https://…/packages.win.json"
-                    className="h-8 w-80 font-mono text-[11px]"
+                    className="h-8 w-full font-mono text-[11px] sm:w-80"
                   />
                 </SettingRow>
                 <div className="flex items-center gap-2">
-                  <p className="text-[10.5px] text-faint">{t("settings.manifestUrlHint")}</p>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="ml-auto h-7 shrink-0 text-[11px] text-faint hover:text-foreground"
-                    onClick={() =>
-                      api
-                        .resetRemoteManifest()
-                        .then(() => { void manifestQuery.refetch(); toast.success(t("settings.resetManifestDone")); })
-                        .catch(toastError)
-                    }
-                  >
-                    <RotateCcw className="h-3 w-3" /> {t("settings.resetManifest")}
-                  </Button>
+                  <p className="min-w-0 flex-1 text-[10.5px] text-faint">{t("settings.manifestUrlHint")}</p>
+                  <div className="flex shrink-0 flex-wrap justify-end gap-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 text-[11px] text-faint hover:text-foreground"
+                      disabled={!isTauri || manifestSyncing || !settings.manifestUrl.trim()}
+                      title={t("settings.syncManifestHint")}
+                      onClick={() => void syncManifest()}
+                    >
+                      <RefreshCw className={cn("h-3 w-3", manifestSyncing && "animate-spin")} />
+                      {manifestSyncing ? t("settings.syncManifesting") : t("settings.syncManifest")}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 text-[11px] text-faint hover:text-foreground"
+                      disabled={manifestSyncing}
+                      onClick={() =>
+                        api
+                          .resetRemoteManifest()
+                          .then(() => { void manifestQuery.refetch(); toast.success(t("settings.resetManifestDone")); })
+                          .catch(toastError)
+                      }
+                    >
+                      <RotateCcw className="h-3 w-3" /> {t("settings.resetManifest")}
+                    </Button>
+                  </div>
                 </div>
                 <div className="flex flex-col gap-2 rounded-xl border border-border/60 bg-card-2/20 px-3.5 py-3 text-[11px]" role="status">
                   <div className="flex flex-wrap items-center justify-between gap-2">

@@ -1064,13 +1064,14 @@ function DnsTool() {
 }
 
 function ServiceRepairPanel() {
+  const t = useT();
   const services = useServices();
   const [selected, setSelected] = React.useState<ServiceStatus | null>(null);
   const [php, setPhp] = React.useState<string | null>(null);
-  return <ToolCard icon={Stethoscope} title="按实际服务诊断" hint="检查当前版本的进程、监听端口、配置、安装文件和启动错误。先定位异常，再选择对应修复。">
+  return <ToolCard icon={Stethoscope} title={t("tools.serviceRepairTitle")} hint={t("tools.serviceRepairHint")}>
     {services.isError && <p role="alert" className="text-xs text-error">{normalizeError(services.error).message}</p>}
-    <div className="max-h-96 space-y-2 overflow-auto">{[...(services.data ?? [])].sort((a, b) => Number(b.state === "error") - Number(a.state === "error")).map((service) => <div key={service.id} className="rounded-lg border border-border p-3"><div className="flex flex-wrap items-center gap-2"><span className="min-w-0 flex-1 text-xs font-medium">{service.label} {service.version}</span><Button size="sm" variant="secondary" onClick={() => setSelected(service)}>检查并处理</Button>{service.id.startsWith("php@") && service.version && <Button size="sm" variant="ghost" onClick={() => setPhp(service.version!)}>扩展依赖修复</Button>}</div>{service.lastError && <p className="mt-2 break-words text-xs text-error">{service.lastError.message}</p>}</div>)}</div>
-    {services.isSuccess && !services.data?.length && <p className="text-xs text-muted">安装服务后，这里会列出对应的诊断入口。</p>}
+    <div className="max-h-96 space-y-2 overflow-auto">{[...(services.data ?? [])].sort((a, b) => Number(b.state === "error") - Number(a.state === "error")).map((service) => <div key={service.id} className="rounded-lg border border-border p-3"><div className="flex flex-wrap items-center gap-2"><span className="min-w-0 flex-1 text-xs font-medium">{service.label} {service.version}</span><Button size="sm" variant="secondary" onClick={() => setSelected(service)}>{t("tools.serviceRepairInspect")}</Button>{service.id.startsWith("php@") && service.version && <Button size="sm" variant="ghost" onClick={() => setPhp(service.version!)}>{t("tools.serviceRepairPhp")}</Button>}</div>{service.lastError && <p className="mt-2 break-words text-xs text-error">{service.lastError.message}</p>}</div>)}</div>
+    {services.isSuccess && !services.data?.length && <p className="text-xs text-muted">{t("tools.serviceRepairEmpty")}</p>}
     {selected && <ServiceDiagnostics service={selected} open onOpenChange={(open) => { if (!open) setSelected(null); }} />}
     <PhpExtensionsDialog version={php} open={!!php} onOpenChange={(open) => { if (!open) setPhp(null); }} />
   </ToolCard>;

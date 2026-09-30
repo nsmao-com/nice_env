@@ -253,6 +253,10 @@ pub fn launch_and_wait(command: &mut Command, target: &Path, timeout: Duration) 
                 .unwrap_or_default()
         )));
     }
+    // 成功交接后父进程可能仍短暂存活；丢弃 Child 不会在 Unix 上回收子进程。
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
 }
 

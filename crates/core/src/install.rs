@@ -1641,6 +1641,14 @@ mod tests {
             installed_at: 0,
         };
         state.store.upsert_installed(&installed).unwrap();
+        // 测试使用的服务不一定收录在当前主机清单；保存快照模拟真实安装元数据。
+        if state.installer.installed_entry(&installed).entry.is_empty() {
+            let source = Installer {
+                manifest: serde_json::from_str(include_str!("../../../manifest/packages.win.json")).unwrap(),
+            };
+            let entry = source.installed_entry(&installed);
+            std::fs::write(path.join(".niceenv-package.json"), serde_json::to_vec(&entry).unwrap()).unwrap();
+        }
         installed
     }
 
@@ -2605,7 +2613,11 @@ mod find_latest_tests {
 
     #[test]
     fn bundled_nginx_prefers_the_latest_manifest_version() {
-        let inst = Installer::bundled();
+        // Nginx 官方二进制目前只收录在 Windows 清单；在任意 CI 主机审计同一份发布数据。
+        let inst = Installer {
+            manifest: serde_json::from_str(include_str!("../../../manifest/packages.win.json"))
+                .unwrap(),
+        };
         let nginx = inst.find("nginx").expect("清单应包含 Nginx");
         assert_eq!(nginx.version, "1.31.6");
         assert_eq!(nginx.size_bytes, 2_797_070);

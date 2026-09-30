@@ -1,8 +1,9 @@
 "use client";
 
 import * as React from "react";
+import { useRouter } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { RefreshCw, TerminalSquare } from "lucide-react";
+import { Package, RefreshCw, SlidersHorizontal, TerminalSquare } from "lucide-react";
 import type { Site, ProjectRuntimeVersions } from "@nsb/schema";
 import * as api from "@/lib/api";
 import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
@@ -17,8 +18,15 @@ import { ConfirmDialog } from "@/components/shared/misc";
 import { CodeBlock } from "@/components/shared/code-block";
 
 /** 固定项目 CLI 版本；启动时由后端再次校验文件与安装状态。 */
-export function SiteTerminalButton({ site }: { site: Pick<Site, "id" | "name"> }) {
+export function SiteTerminalButton({ site, showLabel = false, disabled = false, initialTab = "terminal" }: {
+  site: Pick<Site, "id" | "name">;
+  /** 详情页使用带文字的快捷操作，列表卡片仍保持紧凑图标入口。 */
+  showLabel?: boolean;
+  disabled?: boolean;
+  initialTab?: "terminal" | "project";
+}) {
   const t = useT();
+  const router = useRouter();
   const qc = useQueryClient();
   const [open, setOpen] = React.useState(false);
   const [tab, setTab] = React.useState("terminal");
@@ -29,7 +37,9 @@ export function SiteTerminalButton({ site }: { site: Pick<Site, "id" | "name"> }
   const [opened, setOpened] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
   const [draft, setDraft] = React.useState<{ base: ProjectRuntimeVersions; versions: Record<string, string> } | null>(null);
-  const [confirm, setConfirm] = React.useState<"close" | "reload" | "lts" | null>(null);
+  const [confirm, setConfirm] = React.useState<"close" | "reload" | "lts" | "packages" | null>(null);
+  const packageTarget = React.useRef<string | undefined>(undefined);
+  const triggerRef = React.useRef<HTMLButtonElement>(null);
   const [ltsRefreshed, setLtsRefreshed] = React.useState(false);
   const errorRef = React.useRef<HTMLDivElement>(null);
   const projectErrorRef = React.useRef<HTMLDivElement>(null);
@@ -101,20 +111,35 @@ export function SiteTerminalButton({ site }: { site: Pick<Site, "id" | "name"> }
     finally { running.current = false; setBusy(null); }
   };
   const close = () => { setOpen(false); setDraft(null); setConfirm(null); };
+  const openPackages = (id?: string) => {
+    if (running.current) return;
+    packageTarget.current = id;
+    if (dirty) { setConfirm("packages"); return; }
+    close();
+    router.push(id ? `/packages?search=${encodeURIComponent(id)}` : "/packages");
+  };
   const data = environment.data;
+  const triggerLabel = t(initialTab === "project" ? "sites.project.title" : "sites.terminal.title");
   return <>
-    <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon-sm" className="text-faint hover:text-foreground" aria-label={t("dashboard.openTerminal")}
-      onClick={() => { setError(null); setSaveError(null); setOpened(false); setSaved(false); setLtsRefreshed(false); setDraft(null); setTab("terminal"); setOpen(true); }}><TerminalSquare className="h-3.5 w-3.5" /></Button></TooltipTrigger><TooltipContent>{t("sites.terminal.title")}</TooltipContent></Tooltip>
+    <Tooltip><TooltipTrigger asChild><Button variant={showLabel ? "secondary" : "ghost"} size={showLabel ? "sm" : "icon-sm"}
+      className={showLabel ? "shrink-0 gap-1.5" : "text-faint hover:text-foreground"} disabled={disabled}
+      ref={triggerRef} aria-label={triggerLabel} title={disabled ? t("sites.project.saveSiteFirst") : undefined}
+      onClick={() => { setError(null); setSaveError(null); setOpened(false); setSaved(false); setLtsRefreshed(false); setDraft(null); setTab(initialTab); setOpen(true); }}>
+      {initialTab === "project" ? <SlidersHorizontal className="h-3.5 w-3.5" /> : <TerminalSquare className="h-3.5 w-3.5" />}{showLabel && triggerLabel}
+    </Button></TooltipTrigger>{!showLabel && <TooltipContent>{triggerLabel}</TooltipContent>}</Tooltip>
     <Dialog open={open} onOpenChange={(next) => { if (running.current) return; if (!next && dirty) setConfirm("close"); else if (!next) close(); else setOpen(true); }}>
-      <DialogContent hideClose={!!busy} className="flex max-h-[85dvh] max-w-xl flex-col overflow-hidden">
+      <DialogContent hideClose={!!busy} className="flex max-h-[85dvh] max-w-xl flex-col overflow-hidden p-4 sm:p-6"
+        onCloseAutoFocus={(event) => { if (triggerRef.current?.isConnected) { event.preventDefault(); triggerRef.current.focus(); } }}>
         <DialogHeader className="shrink-0 pr-5"><DialogTitle title={site.name} className="line-clamp-2 leading-snug [overflow-wrap:anywhere]">{t("sites.terminal.title")} · {site.name}</DialogTitle><DialogDescription>{t("sites.terminal.hint")}</DialogDescription></DialogHeader>
         <Tabs value={tab} onValueChange={setTab} className="flex min-h-0 flex-1 flex-col gap-3">
-          <TabsList className="shrink-0 self-start"><TabsTrigger value="terminal" disabled={!!busy}>{t("sites.terminal.preview")}</TabsTrigger><TabsTrigger value="project" disabled={!!busy}>{t("sites.project.title")}{dirty && <span aria-label={t("detail.unsaved")}> •</span>}</TabsTrigger></TabsList>
+          <TabsList className="max-w-full shrink-0 flex-wrap self-start"><TabsTrigger value="terminal" disabled={!!busy}>{t("sites.terminal.preview")}</TabsTrigger><TabsTrigger value="project" disabled={!!busy}>{t("sites.project.title")}{dirty && <span aria-label={t("detail.unsaved")}> •</span>}</TabsTrigger></TabsList>
           <TabsContent value="terminal" className="mt-0 min-h-0 min-w-0 space-y-4 overflow-y-auto text-xs leading-relaxed" aria-busy={environment.isFetching}>
           {!isTauri && <p className="text-warn">{t("sites.terminal.demo")}</p>}
           {dirty && <p role="status" className="rounded-lg bg-warn-soft p-3 text-warn">{t("sites.project.pending")}</p>}
           {environment.isFetching && <p role="status" className="text-secondary">{t("common.loading")}</p>}
-          {problem && <div ref={errorRef} tabIndex={-1} role="alert" className="space-y-2 rounded-lg bg-error-soft p-3 text-error outline-none focus-visible:ring-2 focus-visible:ring-error [overflow-wrap:anywhere]"><p>{problem.message}</p>{problem.hint && <p>{problem.hint}</p>}</div>}
+          {problem && <div ref={errorRef} tabIndex={-1} role="alert" className="space-y-2 rounded-lg bg-error-soft p-3 text-error outline-none focus-visible:ring-2 focus-visible:ring-error [overflow-wrap:anywhere]"><p>{problem.message}</p>{problem.hint && <p>{problem.hint}</p>}
+            {(problem.code.startsWith("PROJECT_RUNTIME_") || problem.code === "TERMINAL_RUNTIME_UNAVAILABLE") && <Button variant="secondary" size="sm" disabled={!!busy} onClick={() => setTab("project")}><SlidersHorizontal className="h-3.5 w-3.5" />{t("sites.project.review")}</Button>}
+          </div>}
           {data && !environment.error && !environment.isFetching && <>
             <div className="space-y-1"><p className="text-secondary">{t("sites.terminal.directory")}</p><p className="font-mono [overflow-wrap:anywhere]">{data.cwd}</p></div>
             {data.warnings.length > 0 && <div role="status" className="rounded-lg bg-warn-soft p-3 text-warn"><p>{t("tools.termInjectSkipped")}</p><ul className="mt-2 list-disc space-y-1 pl-4 [overflow-wrap:anywhere]">{data.warnings.map((warning, i) => <li key={i}>{warning}</li>)}</ul></div>}
@@ -164,8 +189,9 @@ export function SiteTerminalButton({ site }: { site: Pick<Site, "id" | "name"> }
                     </div>}
                   </div>}
                   {missing && <p className="text-warn">{t("sites.project.missing")}</p>}
+                  {(missing || (!selected && !!detected?.issue) || option.versions.length === 0) && <Button variant="ghost" size="sm" className="h-auto max-w-full justify-start whitespace-normal py-2 text-left" disabled={!!busy || project.isFetching} onClick={() => openPackages(option.id)}><Package className="h-3.5 w-3.5 shrink-0" />{t("sites.project.findRuntime").replace("{name}", option.label)}</Button>}
                 </div>;
-              })}{draft.base.options.length === 0 && <p className="py-3 text-secondary">{t("sites.project.empty")}</p>}</div>
+              })}{draft.base.options.length === 0 && <div className="space-y-2 py-3"><p className="text-secondary">{t("sites.project.empty")}</p><Button variant="secondary" size="sm" disabled={!!busy || project.isFetching} onClick={() => openPackages()}><Package className="h-3.5 w-3.5" />{t("nav.packages")}</Button></div>}</div>
               <p className="text-secondary">{t("sites.project.phpScope")}</p>
               <details><summary className="cursor-pointer text-secondary">{t("sites.project.file")}</summary><div className="mt-2 space-y-2"><p className="font-mono [overflow-wrap:anywhere]">{draft.base.path}</p><p className="text-secondary">{t("sites.project.backup")}</p><p className="text-secondary">{t("sites.project.detectScope")}</p></div></details>
               {dirty && <p role="status" className="text-warn">{t("detail.unsaved")}</p>}
@@ -177,6 +203,6 @@ export function SiteTerminalButton({ site }: { site: Pick<Site, "id" | "name"> }
       </DialogContent>
     </Dialog>
     <ConfirmDialog open={confirm !== null} onOpenChange={(next) => { if (!next) setConfirm(null); }} title={t("cfgeditor.discardTitle")} description={t("sites.project.discard")}
-      confirmText={t(confirm === "lts" ? "sites.project.ltsRefresh" : confirm === "reload" ? "env.reload" : "cfgeditor.discard")} onConfirm={() => { const action = confirm; setConfirm(null); if (action === "close") close(); else if (action === "lts") void refreshLts(); else void reloadProject(); }} />
+      confirmText={t(confirm === "lts" ? "sites.project.ltsRefresh" : confirm === "reload" ? "env.reload" : confirm === "packages" ? "sites.project.goPackages" : "cfgeditor.discard")} onConfirm={() => { const action = confirm; setConfirm(null); if (action === "close") close(); else if (action === "lts") void refreshLts(); else if (action === "packages") { close(); router.push(packageTarget.current ? `/packages?search=${encodeURIComponent(packageTarget.current)}` : "/packages"); } else void reloadProject(); }} />
   </>;
 }

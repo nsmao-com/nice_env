@@ -564,7 +564,42 @@ pub fn process_group_gone(pid: u32) -> Result<bool> {
     if pid == 0 || pid > i32::MAX as u32 {
         return Err(PlatformError::Io("无效的进程组 ID".into()));
     }
-    if unsafe { libc::kill(-(pid as libc::pid_t), 0) } == 0 { return Ok(false); }
+    if unsafe { libc::kill(-(pid as libc::pid_t), 0) } == 0 {
+        #[cfg(target_os = "linux")]
+        {
+            // kill(0) 也匹配已退出、等待父进程回收的僵尸；它们已不再运行或占用监听端口。
+            // 逐项读取失败时保守地保留进程组，不能把无权读取当成清理成功。
+            for entry in std::fs::read_dir("/proc").map_err(io_err)? {
+                let entry = entry.map_err(io_err)?;
+                if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
+                    continue;
+                }
+                let stat = match std::fs::read_to_string(entry.path().join("stat")) {
+                    Ok(stat) => stat,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(io_err(error)),
+                };
+                let Some(tail) = stat.rfind(')').and_then(|end| stat.get(end + 1..)) else {
+                    return Ok(false);
+                };
+                let mut fields = tail.split_whitespace();
+                let state = fields.next();
+                // /proc/<pid>/stat：state 后依次是 ppid、pgrp；只关注 pgrp == 目标组。
+                let group = fields
+                    .nth(1)
+                    .and_then(|value| value.parse::<u32>().ok());
+                if group.is_none() {
+                    return Ok(false);
+                }
+                if group == Some(pid) && !matches!(state, Some("Z" | "X" | "x")) {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
+        #[cfg(not(target_os = "linux"))]
+        return Ok(false);
+    }
     let error = std::io::Error::last_os_error();
     if error.raw_os_error() == Some(libc::ESRCH) { Ok(true) } else { Err(io_err(error)) }
 }
@@ -622,6 +657,26 @@ pub fn process_alive(pid: u32) -> bool {
     }
     #[cfg(not(windows))]
     {
+        #[cfg(target_os = "linux")]
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            if let Some(state) = stat.rfind(')').and_then(|end| stat.get(end + 1..))
+                .and_then(|tail| tail.split_whitespace().next())
+            {
+                if matches!(state, "Z" | "X" | "x") {
+                    return false;
+                }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        unsafe {
+            let mut info: libc::proc_bsdinfo = std::mem::zeroed();
+            let size = std::mem::size_of_val(&info) as libc::c_int;
+            if libc::proc_pidinfo(pid as libc::c_int, libc::PROC_PIDTBSDINFO, 0,
+                &mut info as *mut _ as *mut libc::c_void, size) == size && info.pbi_status == libc::SZOMB
+            {
+                return false;
+            }
+        }
         // macOS 无 /proc：kill(pid, 0) 探测（0=存活 ; -1 且 ESRCH=不存在，EPERM=存在但无权限）
         unsafe {
             if libc::kill(pid as libc::pid_t, 0) == 0 {

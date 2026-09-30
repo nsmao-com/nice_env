@@ -43,6 +43,7 @@ import { SiteErrorPagesSettings } from "./site-error-pages-settings";
 import { SiteBasicAuthSettings } from "./site-basic-auth-settings";
 import { SiteFileBackups } from "./site-file-backups";
 import { SiteFileBrowser } from "./site-file-browser";
+import { SiteTerminalButton } from "./site-terminal";
 
 const REWRITE_OPTIONS: { value: RewritePreset; label?: string; labelKey?: string }[] = [
   { value: "none", labelKey: "detail.none" },
@@ -311,6 +312,7 @@ export function SiteDetailSheet({
             {!isRedirect && <Button variant="secondary" size="sm" onClick={() => api.openInFolder(site.rootDir).catch(toastError)}>
               <FolderOpen className="h-3.5 w-3.5" /> {t("detail.dirBtn")}
             </Button>}
+            {!isRedirect && <SiteTerminalButton site={site} showLabel disabled={busy || dirty} />}
             <Button variant="secondary" size="sm" disabled={busy || dirty} onClick={openDuplicate}>
               <Copy className="h-3.5 w-3.5" /> {t("detail.copy")}
             </Button>
@@ -426,6 +428,10 @@ export function SiteDetailSheet({
                   {t("detail.select")}
                   </Button>
             </div>
+          </div>}
+          {!isRedirect && <div className="flex flex-col items-start gap-3 rounded-xl bg-fill/50 p-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0 space-y-1"><p className="text-sm font-medium">{t("sites.project.title")}</p><p className="text-xs leading-relaxed text-secondary">{t("sites.project.detailHint")}</p>{dirty && <p className="text-xs text-warn">{t("sites.project.saveSiteFirst")}</p>}</div>
+            <SiteTerminalButton site={site} showLabel initialTab="project" disabled={busy || dirty} />
           </div>}
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="site-edit-server">{t("sites.wizard.webServer")}</Label>

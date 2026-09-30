@@ -5361,7 +5361,10 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
     #[test]
     fn default_version_keeps_live_instances_and_site_bindings() {
         let temp = tempfile::tempdir().unwrap();
-        let state = isolated_state(Paths::new(temp.path().to_path_buf()));
+        let mut state = isolated_state(Paths::new(temp.path().to_path_buf()));
+        // 此用例只检查元数据/PATH 选择，不启动二进制；不依赖 CI 平台是否收录 PHP。
+        state.installer.manifest =
+            serde_json::from_str(include_str!("../../../manifest/packages.win.json")).unwrap();
         assert!(!crate::pathenv::is_enabled(&state.store));
         let site: crate::model::Site = serde_json::from_value(serde_json::json!({
             "id": "pinned-site", "name": "Pinned PHP", "domains": ["pinned.test"],

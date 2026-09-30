@@ -15,6 +15,11 @@ import {
   Database,
   Globe2,
   Settings,
+  Boxes,
+  ScrollText,
+  Stethoscope,
+  FileCog,
+  Layers,
   FolderOpen,
   Info,
   LogOut,
@@ -232,6 +237,12 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
           <DropdownMenuItem onSelect={() => setWizardOpen(true)}>
             <Plus /> {t("appmenu.newSite")}
           </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => router.push("/sites")}>
+            <Globe2 /> {t("appmenu.sites")}
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => router.push("/stacks")}>
+            <Layers /> {t("appmenu.stacks")}
+          </DropdownMenuItem>
           {favoriteSites.length > 0 && <>
             <DropdownMenuSeparator />
             <DropdownMenuLabel><span className="flex items-center gap-1.5"><Star className="h-3.5 w-3.5 text-amber-500" />{t("appmenu.favoriteSites")}</span></DropdownMenuLabel>
@@ -242,9 +253,6 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
                 <span className="max-w-24 truncate text-[10px] text-faint">{site.domains[0] ?? ""}</span>
               </DropdownMenuItem>
             ))}
-            <DropdownMenuItem onSelect={() => router.push("/sites")}>
-              <Globe2 /> {t("appmenu.manageSites")}
-            </DropdownMenuItem>
           </>}
           <DropdownMenuItem disabled={busy || quick.busy || !startReady} onSelect={() => run(startStack)}>
             <Rocket /><span className="min-w-0 [overflow-wrap:anywhere]">{selectedStack ? `${t("dash.startStack")}「${selectedStack.name}」` : t("appmenu.startStack")}</span>
@@ -261,6 +269,19 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
               <RefreshCw />{t("packages.reload")}
             </DropdownMenuItem>
           </>}
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onSelect={() => router.push("/packages")}>
+            <Boxes /> {t("appmenu.packages")}
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => router.push("/configuration")}>
+            <FileCog /> {t("appmenu.configuration")}
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => router.push("/logs")}>
+            <ScrollText /> {t("appmenu.logs")}
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => router.push("/diagnostics")}>
+            <Stethoscope /> {t("appmenu.diagnostics")}
+          </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem onSelect={() => router.push("/settings")}>
             <Settings /> {t("appmenu.settings")}

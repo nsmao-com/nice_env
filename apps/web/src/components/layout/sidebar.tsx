@@ -102,7 +102,7 @@ export function Sidebar() {
               </span>
             )}
             {section.items.map((item) => {
-              const active = pathname === item.href;
+              const active = pathname === item.href || (item.href !== "/" && pathname.startsWith(`${item.href}/`));
               const label = t(item.key);
               const body = (
                 <Link

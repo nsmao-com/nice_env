@@ -217,7 +217,7 @@ pub struct RedisConnectionInfo {
     pub has_password: bool,
 }
 
-/// Redis 键空间浏览请求。浏览只使用 SCAN 和只读元数据命令，不提供删除或修改入口。
+/// Redis 键空间浏览请求。浏览只使用 SCAN 和只读元数据命令。
 #[derive(serde::Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct RedisKeyRequest {
@@ -273,6 +273,25 @@ pub struct RedisKeyPreview {
     pub elements: Option<u64>,
     pub value: Option<String>,
     pub value_truncated: bool,
+}
+
+#[derive(serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisKeyDeleteRequest {
+    pub version: String,
+    #[serde(default)]
+    pub database: u8,
+    pub key: String,
+    pub confirmation: String,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisKeyDeleteReceipt {
+    pub version: String,
+    pub database: u8,
+    pub key: String,
+    pub deleted: u64,
 }
 
 #[derive(serde::Deserialize, Clone, Debug)]
@@ -672,6 +691,50 @@ pub(crate) fn redis_key_preview(
         value,
         value_truncated,
     })
+}
+
+pub(crate) fn redis_key_delete(
+    port: u16,
+    credentials: &RedisCredentials,
+    pids: &[u32],
+    request: &RedisKeyDeleteRequest,
+) -> crate::error::Result<RedisKeyDeleteReceipt> {
+    use crate::error::AppError;
+    validate_key_name(&request.key)?;
+    if request.confirmation != request.key {
+        return Err(AppError::new(
+            "REDIS_KEY_DELETE_CONFIRM_REQUIRED",
+            "请输入完整键名以确认删除",
+        ));
+    }
+    let mut client = RedisClient::connect(port, credentials, Some(pids))?;
+    client.select_database(request.database)?;
+    match client.command(&["DEL", request.key.as_str()])? {
+        RedisReply::Integer(1) => Ok(RedisKeyDeleteReceipt {
+            version: request.version.clone(),
+            database: request.database,
+            key: request.key.clone(),
+            deleted: 1,
+        }),
+        RedisReply::Integer(0) => Err(AppError::new(
+            "REDIS_KEY_GONE",
+            "这个键已不存在，请刷新键空间列表",
+        )),
+        RedisReply::Bulk(value) if value == "1" => Ok(RedisKeyDeleteReceipt {
+            version: request.version.clone(),
+            database: request.database,
+            key: request.key.clone(),
+            deleted: 1,
+        }),
+        RedisReply::Bulk(value) if value == "0" => Err(AppError::new(
+            "REDIS_KEY_GONE",
+            "这个键已不存在，请刷新键空间列表",
+        )),
+        _ => Err(AppError::new(
+            "REDIS_DELETE_FAILED",
+            "Redis 未返回删除确认，未能确认这个键已删除",
+        )),
+    }
 }
 
 pub(crate) fn redis_flush(

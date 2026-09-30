@@ -470,6 +470,7 @@ pub fn run() {
             redis_stats,
             redis_keys,
             redis_key_preview,
+            redis_key_delete,
             redis_flush,
             redis_settings,
             redis_settings_save,
@@ -2216,6 +2217,17 @@ async fn redis_key_preview(
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.redis_key_preview(request))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn redis_key_delete(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    request: nsb_core::stats::RedisKeyDeleteRequest,
+) -> Result<nsb_core::stats::RedisKeyDeleteReceipt, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.redis_key_delete(request))).await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

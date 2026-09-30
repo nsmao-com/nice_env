@@ -3720,6 +3720,20 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (!entry) throw { code: "REDIS_KEY_GONE", message: "这个键已不存在，请刷新键空间列表" };
       return { version: String(request.version), database: Number(request.database ?? 0), key: entry.key, keyType: entry.keyType, ttlMs: entry.ttlMs, memoryBytes: 1024 + entry.key.length * 8, elements: entry.elements, value: entry.value, valueTruncated: false } as T;
     }
+    case "redis_key_delete": {
+      const service = services.get("redis");
+      const request = (args?.request ?? {}) as Record<string, unknown>;
+      const version = String(request.version ?? "");
+      const database = Number(request.database ?? 0);
+      const key = String(request.key ?? "");
+      if (service?.state !== "running" || service.version !== version) throw { code: "REDIS_INSTANCE_CHANGED", message: "运行中的 Redis 版本已变化，请刷新后重试" };
+      if (String(request.confirmation ?? "") !== key) throw { code: "REDIS_KEY_DELETE_CONFIRM_REQUIRED", message: "请输入完整键名以确认删除" };
+      if (redisFlushedDatabasesPreview.has(`${version}:${database}`)) throw { code: "REDIS_KEY_GONE", message: "这个键已不存在，请刷新键空间列表" };
+      const index = redisKeysPreview.findIndex(entry => entry.key === key);
+      if (index < 0) throw { code: "REDIS_KEY_GONE", message: "这个键已不存在，请刷新键空间列表" };
+      redisKeysPreview.splice(index, 1);
+      return { version, database, key, deleted: 1 } as T;
+    }
     case "redis_flush": {
       const service = services.get("redis");
       const request = (args?.request ?? {}) as Record<string, unknown>;

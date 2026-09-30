@@ -393,12 +393,15 @@ export interface RedisKeyInfo { key: string; keyType: string; ttlMs: number }
 export interface RedisKeyPage { version: string; database: number; cursor: string; nextCursor: string; pattern: string; items: RedisKeyInfo[] }
 export interface RedisKeyPreviewRequest { version: string; database: number; key: string }
 export interface RedisKeyPreview { version: string; database: number; key: string; keyType: string; ttlMs: number; memoryBytes?: number; elements?: number; value?: string; valueTruncated: boolean }
+export interface RedisKeyDeleteReceipt { version: string; database: number; key: string; deleted: number }
 export interface RedisConnectionInfo { version: string; username: string; hasPassword: boolean }
 export const redisConnection = (version: string) => safe(invoke<RedisConnectionInfo>("redis_connection", { version }));
 export const redisSaveConnection = (version: string, credentials: { username: string; password: string }) =>
   safe(invoke<RedisStats>("redis_save_connection", { version, credentials }));
 export const redisKeys = (request: RedisKeyRequest) => safe(invoke<RedisKeyPage>("redis_keys", { request }));
 export const redisKeyPreview = (request: RedisKeyPreviewRequest) => safe(invoke<RedisKeyPreview>("redis_key_preview", { request }));
+export const redisKeyDelete = (version: string, database: number, key: string, confirmation: string) =>
+  safe(invoke<RedisKeyDeleteReceipt>("redis_key_delete", { request: { version, database, key, confirmation } }));
 export const redisFlush = (version: string, database: number, confirmation: string) =>
   safe(invoke<RedisFlushReceipt>("redis_flush", { request: { version, database, confirmation } }));
 export const redisSettings = (version: string) => safe(invoke<RedisSettingsView>("redis_settings", { version }));

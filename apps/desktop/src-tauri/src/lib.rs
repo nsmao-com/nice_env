@@ -340,6 +340,7 @@ pub fn run() {
             site_directory,
             site_file_read,
             site_file_write,
+            site_file_delete,
             site_access_url,
             create_site,
             update_site,
@@ -1292,6 +1293,19 @@ async fn site_file_write(
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(nsb_core::sitefiles::write(&st.store, &id, &path, &content, &expected_revision))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn site_file_delete(
+    state: State<'_, std::sync::Arc<CoreState>>,
+    id: String,
+    path: String,
+    confirmation: String,
+) -> Result<nsb_core::sitefiles::SiteFileDeleteReceipt, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(nsb_core::sitefiles::delete(&st.store, &id, &path, &confirmation))
     }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

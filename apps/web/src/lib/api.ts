@@ -604,6 +604,9 @@ export const siteFileRead = (id: string, path: string) =>
   safe(invoke<SiteTextFile>("site_file_read", { id, path }));
 export const siteFileWrite = (id: string, path: string, content: string, expectedRevision: string) =>
   safe(invoke<SiteTextFile>("site_file_write", { id, path, content, expectedRevision }));
+export interface SiteFileDeleteReceipt { siteId: string; path: string; directory: boolean }
+export const siteFileDelete = (id: string, path: string, confirmation: string) =>
+  safe(invoke<SiteFileDeleteReceipt>("site_file_delete", { id, path, confirmation }));
 
 export const envRead = (siteId: string, fileName = ".env") => safe(invoke<EnvFileView>("env_read", { siteId, fileName }));
 export const envSave = (siteId: string, changes: [string, string][], expectedRevision: string, fileName = ".env") =>

@@ -199,6 +199,21 @@ function mockSiteFileWrite(siteId: string, path: string, content: string, expect
   return { siteId: site.id, path: relative, sizeBytes: new TextEncoder().encode(content).length, revision: mockSiteFileRevision(site, relative, content), content };
 }
 
+function mockSiteFileDelete(siteId: string, path: string, confirmation: string) {
+  const { site, files } = mockSiteTree(siteId);
+  const relative = mockSiteRelativePath(path, false);
+  if (!relative || confirmation !== relative) throw { code: "SITE_FILE_DELETE_CONFIRM_REQUIRED", message: "请输入完整相对路径以确认删除" };
+  if (mockSensitiveSiteFile(relative)) throw { code: "SITE_FILE_SENSITIVE", message: "环境变量和密钥文件请使用专用编辑器或系统文件管理器管理" };
+  const file = files.get(relative);
+  if (file) {
+    files.delete(relative);
+    return { siteId: site.id, path: relative, directory: false };
+  }
+  const prefix = `${relative}/`;
+  if ([...files.keys()].some(key => key.startsWith(prefix))) throw { code: "SITE_FILE_DIRECTORY_NOT_EMPTY", message: "目录不为空，请先删除或移动其中的文件" };
+  throw { code: "SITE_FILE_DELETE_INVALID", message: "只能删除站点目录中的普通文件或空目录" };
+}
+
 function mockSiteFilePlan(id: string): SiteFilePlan {
   if (!sites.has(id)) throw { code: "SITE_NOT_FOUND", message: "站点已不存在" };
   const plan = siteFilePlans.get(id) ?? { status: { config: { enabled: false, frequency: "daily", time: "03:00", weekday: 0, monthDay: 1, keep: 10 }, nextAt: null, lastRunAt: null, finishedAt: null, state: "idle", message: "", files: [] }, project: true, excludeGenerated: true, scope: null, revision: "initial" };
@@ -1801,6 +1816,8 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return mockSiteFileRead(String(args?.id ?? ""), String(args?.path ?? "")) as T;
     case "site_file_write":
       return mockSiteFileWrite(String(args?.id ?? ""), String(args?.path ?? ""), String(args?.content ?? ""), String(args?.expectedRevision ?? "")) as T;
+    case "site_file_delete":
+      return mockSiteFileDelete(String(args?.id ?? ""), String(args?.path ?? ""), String(args?.confirmation ?? "")) as T;
     case "site_network_info": {
       const site = sites.get(args?.id as string);
       if (!site) throw { code: "SITE_NOT_FOUND", message: "站点不存在，请刷新列表" };

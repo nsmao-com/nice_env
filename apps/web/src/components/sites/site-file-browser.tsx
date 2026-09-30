@@ -2,12 +2,15 @@
 
 import * as React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ChevronRight, FileText, Folder, Loader2, RefreshCw, Save } from "lucide-react";
+import { toast } from "sonner";
+import { AlertTriangle, ChevronRight, FileText, Folder, Loader2, RefreshCw, Save, Trash2 } from "lucide-react";
 import { useT } from "@/lib/store";
 import { isTauri, normalizeError } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { fmtBytes } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { ConfirmDialog } from "@/components/shared/misc";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
@@ -32,6 +35,9 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
   const [error, setError] = React.useState<string | null>(null);
   const [discardOpen, setDiscardOpen] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
+  const [deleteEntry, setDeleteEntry] = React.useState<api.SiteFileEntry | null>(null);
+  const [deleteConfirmation, setDeleteConfirmation] = React.useState("");
+  const [deleteError, setDeleteError] = React.useState<string | null>(null);
   const busyRef = React.useRef(false);
   const editorOpenRef = React.useRef(false);
   const openerRef = React.useRef<HTMLButtonElement | null>(null);
@@ -114,6 +120,24 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
     else closeEditor();
   };
 
+  const deleteEntryNow = async () => {
+    if (!deleteEntry || busyRef.current || disabled || deleteConfirmation !== deleteEntry.path) return;
+    setWorking(true);
+    setDeleteError(null);
+    try {
+      await api.siteFileDelete(siteId, deleteEntry.path, deleteConfirmation);
+      toast.success(t("siteFiles.browserDeleted" as never));
+      setDeleteEntry(null);
+      setDeleteConfirmation("");
+      await client.invalidateQueries({ queryKey: ["site-directory", siteId, current] });
+    } catch (failure) {
+      const parsed = normalizeError(failure);
+      setDeleteError([parsed.message, parsed.hint].filter(Boolean).join(" · "));
+    } finally {
+      setWorking(false);
+    }
+  };
+
   return <section className="min-w-0 space-y-3 rounded-xl border border-border p-3 sm:p-4">
     <div className="flex flex-wrap items-start justify-between gap-2">
       <div className="min-w-0">
@@ -138,11 +162,14 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
         <div className="flex items-center justify-between gap-2 text-[11px] text-faint"><span className="min-w-0 truncate font-mono" title={joinPath(directory.data.root, directory.data.current)}>{joinPath(directory.data.root, directory.data.current)}</span><span className="shrink-0">{directory.data.entries.length}</span></div>
         <div className="max-h-64 overflow-y-auto rounded-lg border border-border">
           {directory.data.parent != null && <button type="button" className="flex w-full items-center gap-2 border-b border-dashed border-separator px-3 py-2.5 text-left text-xs text-muted hover:bg-fill" disabled={locked} onClick={() => setCurrent(directory.data.parent ?? "")}><Folder className="size-3.5 shrink-0" />{t("siteFiles.browserParent")}</button>}
-          {directory.data.entries.map((entry) => <button key={entry.path} type="button" className="flex w-full min-w-0 items-center gap-2 border-b border-dashed border-separator px-3 py-2.5 text-left text-xs last:border-b-0 hover:bg-fill disabled:opacity-60" disabled={locked} onClick={(event) => void openEntry(entry, event.currentTarget)}>
-            {entry.directory ? <Folder className="size-3.5 shrink-0 text-primary" /> : <FileText className="size-3.5 shrink-0 text-faint" />}
-            <span className="min-w-0 flex-1 truncate font-mono">{entry.name}</span>
-            <span className="shrink-0 text-[10px] text-faint">{entry.directory ? t("siteFiles.browserFolder" as never) : fmtBytes(entry.sizeBytes)}</span>
-          </button>)}
+           {directory.data.entries.map((entry) => <div key={entry.path} className="flex w-full min-w-0 items-center gap-2 border-b border-dashed border-separator px-3 py-1.5 last:border-b-0 hover:bg-fill">
+             <button type="button" className="flex min-w-0 flex-1 items-center gap-2 py-1 text-left text-xs disabled:opacity-60" disabled={locked} onClick={(event) => void openEntry(entry, event.currentTarget)}>
+               {entry.directory ? <Folder className="size-3.5 shrink-0 text-primary" /> : <FileText className="size-3.5 shrink-0 text-faint" />}
+               <span className="min-w-0 flex-1 truncate font-mono">{entry.name}</span>
+               <span className="shrink-0 text-[10px] text-faint">{entry.directory ? t("siteFiles.browserFolder" as never) : fmtBytes(entry.sizeBytes)}</span>
+             </button>
+             <Button type="button" size="icon" variant="ghost" className="h-7 w-7 shrink-0 text-error hover:text-error" disabled={locked} aria-label={`${t("siteFiles.browserDelete" as never)} ${entry.name}`} title={t("siteFiles.browserDelete" as never)} onClick={() => { setDeleteError(null); setDeleteConfirmation(""); setDeleteEntry(entry); }}><Trash2 className="size-3.5" /></Button>
+           </div>)}
           {!directory.data.entries.length && <p className="p-4 text-center text-xs text-muted">{t("siteFiles.browserEmpty" as never)}</p>}
         </div>
       </>}
@@ -164,5 +191,8 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
         <ConfirmDialog open={discardOpen} onOpenChange={setDiscardOpen} title={t("detail.discardTitle")} description={t("siteFiles.browserDiscard")} confirmText={t("detail.discard")} danger onConfirm={closeEditor} onCloseAutoFocus={(event) => { event.preventDefault(); if (editorOpenRef.current) textareaRef.current?.focus(); else openerRef.current?.focus(); }} />
       </DialogContent>
     </Dialog>
+    <ConfirmDialog open={deleteEntry != null} onOpenChange={(open) => { if (!busy && !open) { setDeleteEntry(null); setDeleteConfirmation(""); setDeleteError(null); } }} title={t("siteFiles.browserDeleteTitle" as never)} description={t("siteFiles.browserDeleteHint" as never)} confirmText={t("siteFiles.browserDeleteAction" as never)} loading={busy} confirmDisabled={!deleteEntry || deleteConfirmation !== deleteEntry.path} danger onConfirm={() => void deleteEntryNow()}>
+      <div className="space-y-3"><div className="rounded-lg bg-warn-soft p-3 text-xs leading-relaxed text-warn">{t(deleteEntry?.directory ? "siteFiles.browserDeleteDirectoryHint" as never : "siteFiles.browserDeleteFileHint" as never)}</div><p className="break-all rounded-lg bg-fill p-3 font-mono text-xs">{deleteEntry?.path}</p><div className="space-y-1.5"><Label htmlFor="site-file-delete-confirm">{t("siteFiles.browserDeleteConfirm" as never)}</Label><Input id="site-file-delete-confirm" value={deleteConfirmation} disabled={busy} autoComplete="off" spellCheck={false} placeholder={t("siteFiles.browserDeletePlaceholder" as never)} onChange={(event) => setDeleteConfirmation(event.target.value)} /></div>{deleteError && <p role="alert" className="break-words text-xs text-error">{deleteError}</p>}</div>
+    </ConfirmDialog>
   </section>;
 }

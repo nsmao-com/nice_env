@@ -56,6 +56,14 @@ pub struct SiteTextFile {
     pub content: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteFileDeleteReceipt {
+    pub site_id: String,
+    pub path: String,
+    pub directory: bool,
+}
+
 fn site(store: &Store, id: &str) -> Result<Site> {
     store
         .list_sites()?
@@ -403,4 +411,53 @@ pub fn write(
         revision: file_revision(&root, &relative, content.as_bytes()),
         content: content.to_string(),
     })
+}
+
+pub fn delete(
+    store: &Store,
+    id: &str,
+    path: &str,
+    confirmation: &str,
+) -> Result<SiteFileDeleteReceipt> {
+    let _sites = crate::sites::SITE_CHANGES.lock();
+    let root = root(store, id)?;
+    let relative = relative(Some(path))?;
+    if relative.as_os_str().is_empty() {
+        return Err(AppError::new("SITE_FILE_DELETE_INVALID", "不能删除站点根目录"));
+    }
+    if sensitive_name(&relative) {
+        return Err(AppError::new(
+            "SITE_FILE_SENSITIVE",
+            "环境变量和密钥文件请使用专用编辑器或系统文件管理器管理",
+        ));
+    }
+    let display = display_path(&relative);
+    if confirmation != display {
+        return Err(AppError::new(
+            "SITE_FILE_DELETE_CONFIRM_REQUIRED",
+            "请输入完整相对路径以确认删除",
+        ));
+    }
+    let target = checked_path(&root, &relative)?;
+    let metadata = fs::symlink_metadata(&target).map_err(|e| AppError::io("读取站点文件", e))?;
+    if linked(&metadata) || (!metadata.is_file() && !metadata.is_dir()) {
+        return Err(AppError::new(
+            "SITE_FILE_DELETE_INVALID",
+            "只能删除站点目录中的普通文件或空目录",
+        ));
+    }
+    let directory = metadata.is_dir();
+    if directory {
+        let mut entries = fs::read_dir(&target).map_err(|e| AppError::io("读取站点目录", e))?;
+        if entries.next().transpose().map_err(|e| AppError::io("检查目录内容", e))?.is_some() {
+            return Err(AppError::new(
+                "SITE_FILE_DIRECTORY_NOT_EMPTY",
+                "目录不为空，请先删除或移动其中的文件",
+            ));
+        }
+        fs::remove_dir(&target).map_err(|e| AppError::io("删除站点目录", e))?;
+    } else {
+        fs::remove_file(&target).map_err(|e| AppError::io("删除站点文件", e))?;
+    }
+    Ok(SiteFileDeleteReceipt { site_id: id.to_string(), path: display, directory })
 }

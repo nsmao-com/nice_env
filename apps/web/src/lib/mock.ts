@@ -872,7 +872,7 @@ function seed() {
     state: "running",
     pids: [10412],
     port: 8080,
-    version: "1.26.3",
+    version: "1.31.6",
     memoryMb: 12.4,
     uptimeSec: 4523,
     logFile: "C:/…/logs/nginx/out.log",
@@ -924,7 +924,7 @@ function seed() {
     state: "running",
     pids: [10720],
     port: 11211,
-    version: "1.6.8",
+    version: "1.6.45",
     memoryMb: 6.4,
     uptimeSec: 4510,
     category: "cache",
@@ -3978,7 +3978,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "memcached_stats": {
       const service = services.get("memcached");
       if (service?.state !== "running") throw { code: "MEMCACHED_NOT_RUNNING", message: "请先启动 Memcached 实例" };
-      return { reachable: true, port: service.port, processId: service.pids[0] ?? 0, version: service.version ?? "1.6.8", uptimeSeconds: service.uptimeSec ?? 0, currentItems: 18, totalItems: 247, bytes: 786432, limitMaxbytes: 67108864, currentConnections: 2, totalConnections: 38, cmdGet: 1280, cmdSet: 247, getHits: 1074, getMisses: 206, evictions: 3 } as T;
+      return { reachable: true, port: service.port, processId: service.pids[0] ?? 0, version: service.version ?? "1.6.45", uptimeSeconds: service.uptimeSec ?? 0, currentItems: 18, totalItems: 247, bytes: 786432, limitMaxbytes: 67108864, currentConnections: 2, totalConnections: 38, cmdGet: 1280, cmdSet: 247, getHits: 1074, getMisses: 206, evictions: 3 } as T;
     }
     case "memcached_flush": {
       const service = services.get("memcached");

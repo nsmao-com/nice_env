@@ -101,8 +101,8 @@ function RestoreIcon() {
 /** Windows / Linux 窗口按钮，贴在窗口最右上角的灰底上，不进入内容区。 */
 export function WindowControls({ className }: { className?: string }) {
   const t = useT();
-  const { mounted, isMac, maximized, minimize, toggleMaximize, close } = useDesktopWindow();
-  if (!mounted || isMac) return null;
+  const { mounted, isDesktop, isMac, maximized, minimize, toggleMaximize, close } = useDesktopWindow();
+  if (!mounted || !isDesktop || isMac) return null;
 
   return (
     <div className={cn("nsb-window-controls nsb-no-drag flex items-stretch", className)}>

@@ -60,7 +60,8 @@ export function Sidebar() {
   const preferredCollapsed = useUI((s) => s.sidebarCollapsed);
   const [narrow, setNarrow] = React.useState(false);
   React.useEffect(() => {
-    const media = window.matchMedia("(max-width: 767px)");
+    // 侧栏展开态需要约 232px；在中等窗口保留内容宽度，避免顶栏和表单互相挤压。
+    const media = window.matchMedia("(max-width: 1023px)");
     const update = () => setNarrow(media.matches);
     update();
     media.addEventListener("change", update);

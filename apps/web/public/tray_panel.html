@@ -9,7 +9,7 @@
   - invoke `tray_panel_state` 拉初始数据；listen `tray://state` 收增量推送；
   - 动作复用主窗口命令（start_service / start_stack / open_in_browser …），
     托盘特有动作用 tray_open_main / tray_stop_all / tray_panel_resize / tray_panel_hide；
-  - 渲染完成后按内容高度 invoke `tray_panel_resize` 自适应窗口高度。
+  - 收藏站点优先展示，运行中服务可直接批量重启；渲染完成后按内容高度 invoke `tray_panel_resize` 自适应窗口高度。
   直接用浏览器打开本文件（无 __TAURI__）自动进入 mock 预览：
   #demo=quiet | #demo=busy | #demo=dark
 -->
@@ -98,7 +98,7 @@
   .dot.busy { background: var(--amber); animation: pulse 1.2s ease-in-out infinite; }
 
   /* ---- 快捷宫格卡 ---- */
-  .quick { display: grid; grid-template-columns: repeat(4, 1fr); padding: 6px; }
+  .quick { display: grid; grid-template-columns: repeat(5, 1fr); padding: 6px; }
   .qa {
     appearance: none; border: 0; background: none; font: inherit; color: var(--txt);
     display: flex; flex-direction: column; align-items: center; gap: 6px;
@@ -223,7 +223,9 @@ let loadError = "";
 let stateRevision = 0;
 const hasProcess = (s) => !!s.pids?.length || ["running", "starting", "stopping"].includes(s.state);
 const transitioning = (s) => ["starting", "stopping"].includes(s.state);
-const startTargets = () => (S?.services || []).filter((s) => !hasProcess(s)).map((s) => s.id);
+const targetOf = (s) => ({id:s.id, version:s.version ?? null, label:s.label});
+const startTargets = () => (S?.services || []).filter((s) => !hasProcess(s)).map(targetOf);
+const restartTargets = () => (S?.services || []).filter((s) => hasProcess(s) && !transitioning(s) && s.state !== "unknown").map(targetOf);
 const nameOf = (id) => (S?.services || []).find((s) => s.id === id)?.label || (id === "adminer-console" ? "数据库管理台" : id);
 const errorText = (e) => {
   if (typeof e === "string") { try { return errorText(JSON.parse(e)); } catch { return e; } }
@@ -273,6 +275,7 @@ function render() {
   $("quickCard").innerHTML =
     qa("qaStart", ICONS.play, "启动全部", startTargets().length > 0 && !locked, "start-all") +
     qa("qaStop", ICONS.stop, "停止全部", !locked, "stop-all") +
+    qa("qaRestart", ICONS.refresh, "重启运行中", restartTargets().length > 0 && !locked, "restart-all") +
     qa("qaWindow", ICONS.window, "主窗口", true, "") + qa("qaUpdate", ICONS.refresh, "检查更新", true, "");
   let env = "";
   if (S.stacks?.length) {
@@ -293,9 +296,15 @@ function render() {
         dot:transitioning(s) || busy.has("svc:" + s.id) ? "busy" : s.state === "running" ? "running" : s.state === "error" ? "error" : ""});
     }
   } else { env += `<div class="empty">${loadError ? "服务状态暂不可用，请先处理上方提示。" : "尚未安装服务，请到「套件 / 服务」安装。"}</div>`; }
-  if (S.sites?.length) {
+  const favoriteSites = (S.sites || []).filter((site) => site.favorite);
+  const otherSites = (S.sites || []).filter((site) => !site.favorite);
+  if (favoriteSites.length) {
+    env += '<div class="sep"></div><div class="cap">收藏站点</div>';
+    env += favoriteSites.map((site) => row({key:"site:" + site.id, icon:ICONS.globe, label:"★ " + site.name, meta:site.https ? "HTTPS" : "HTTP", chev:true})).join("");
+  }
+  if (otherSites.length) {
     env += '<div class="sep"></div><div class="cap">站点</div>';
-    env += S.sites.map((site) => row({key:"site:" + site.id, icon:ICONS.globe, label:site.name, meta:site.https ? "HTTPS" : "HTTP", chev:true})).join("");
+    env += otherSites.map((site) => row({key:"site:" + site.id, icon:ICONS.globe, label:site.name, meta:site.https ? "HTTPS" : "HTTP", chev:true})).join("");
   }
   $("envCard").innerHTML = env;
   const nav = (path, icon, label) => row({key:"nav:" + path, icon, label, chev:true});
@@ -320,6 +329,7 @@ function bind() {
   $("headCard").onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); void act("main"); } };
   $("qaStart").onclick = () => void act("start-all");
   $("qaStop").onclick = () => void act("stop-all");
+  $("qaRestart").onclick = () => void act("restart-all");
   $("qaWindow").onclick = () => void act("main");
   $("qaUpdate").onclick = () => void act("check-update");
   for (const el of document.querySelectorAll("[data-key]")) el.onclick = () => void act(el.dataset.key);
@@ -331,17 +341,19 @@ async function runServiceOperation(key, command, args) {
   try {
     const report = TAURI ? await inv(command, args) : await previewCommand(command, args);
     const stop = command.includes("stop");
+    const restart = command.includes("restart");
+    const verb = restart ? "重启" : stop ? "停止" : "启动";
     const succeeded = report.succeeded || report.started || [];
     const already = report.already || report.alreadyRunning || [];
     const failed = report.failed || [];
     const skipped = report.skipped || [];
     const single = command === "start_service" || command === "stop_service";
     result = {
-      title: single ? `${nameOf(args.id)}已${stop ? "停止" : "启动"}` : failed.length || skipped.length ? "部分服务未完成" : `服务${stop ? "停止" : "启动"}操作完成`,
+      title: single ? `${nameOf(args.id)}已${verb}` : failed.length || skipped.length ? "部分服务未完成" : `服务${verb}操作完成`,
       summary: single ? (TAURI ? "已读取实际操作结果。" : "演示状态已更新，本机服务未改变。") : `成功 ${succeeded.length} · 已在目标状态 ${already.length} · 失败 ${failed.length}`,
       failed, skipped, retry: failed.length ? command === "tray_stop_all"
-        ? {key, command, args:{ids:failed.map((f) => f.serviceId)}, label:"重试失败项"}
-        : {key:"retry-action", command:stop ? "bulk_stop" : "bulk_start", args:{ids:failed.map((f) => f.serviceId)}, label:"重试失败项"} : null,
+        ? {key, command, args:{targets:failed.map((f) => targetOf(S.services.find((s) => s.id === f.serviceId) || {id:f.serviceId, label:nameOf(f.serviceId)}))}, label:"重试失败项"}
+        : {key:"retry-action", command:restart ? "bulk_restart" : stop ? "bulk_stop" : "bulk_start", args:{targets:failed.map((f) => targetOf(S.services.find((s) => s.id === f.serviceId) || {id:f.serviceId, label:nameOf(f.serviceId)}))}, label:"重试失败项"} : null,
     };
   } catch (error) {
     actionError = errorText(error);
@@ -354,8 +366,9 @@ async function runServiceOperation(key, command, args) {
 }
 
 async function act(key) {
-  if (key === "start-all") { const ids = startTargets(); if (ids.length) return runServiceOperation(key, "bulk_start", {ids}); return; }
+  if (key === "start-all") { const targets = startTargets(); if (targets.length) return runServiceOperation(key, "bulk_start", {targets}); return; }
   if (key === "stop-all") return runServiceOperation(key, "tray_stop_all", {});
+  if (key === "restart-all") { const targets = restartTargets(); if (targets.length) return runServiceOperation(key, "bulk_restart", {targets}); return; }
   if (key.startsWith("svc:")) {
     const service = S?.services.find((s) => s.id === key.slice(4));
     if (service && !transitioning(service)) return runServiceOperation(key, hasProcess(service) ? "stop_service" : "start_service", {id:service.id});
@@ -400,15 +413,24 @@ function syncHeight() {
 // 预览只操作当前演示数据，也逐项返回缺失或失败，不声称修改了本机服务。
 async function previewCommand(command, args) {
   const stop = command.includes("stop");
+  const restart = command.includes("restart");
   const single = command.endsWith("_service");
   const stack = command === "start_stack" ? S.stacks.find((s) => s.id === args.id) : null;
   if (command === "start_stack" && !stack) throw {message:"找不到服务栈"};
-  const ids = [...new Set(single ? [args.id] : stack ? stack.items : args.ids || S.services.map((s) => s.id))];
+  const ids = [...new Set(single ? [args.id] : stack ? stack.items : (args.targets || []).map((target) => target.id))];
   const report = {succeeded:[], already:[], failed:[], skipped:[]};
   for (const id of ids) {
     const service = S.services.find((s) => s.id === id);
     if (!service) { if (stack) report.skipped.push(id); else report.failed.push({serviceId:id, error:{message:"服务未注册或已卸载"}}); continue; }
     if (transitioning(service)) { report.failed.push({serviceId:id, error:{message:"服务正在切换状态"}}); continue; }
+    if (restart) {
+      if (!hasProcess(service)) { report.failed.push({serviceId:id, error:{message:"服务当前未运行，无法重启"}}); continue; }
+      service.state = "stopping"; render();
+      await new Promise((resolve) => setTimeout(resolve, 220));
+      service.state = "starting"; render();
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      service.state = "running"; service.pids = [Math.floor(Math.random() * 40000) + 1000]; report.succeeded.push(id); continue;
+    }
     if (stop ? !hasProcess(service) : service.state === "running") { if (stop) service.state = "stopped"; report.already.push(id); continue; }
     if (!stop && hasProcess(service)) { report.failed.push({serviceId:id, error:{message:"仍有进程，请先停止服务"}}); continue; }
     service.state = stop ? "stopping" : "starting"; render();

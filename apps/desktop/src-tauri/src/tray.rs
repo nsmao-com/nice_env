@@ -241,6 +241,7 @@ pub fn panel_state_json<R: Runtime>(
                 "label": short_label(&s.id, &s.label),
                 "state": state_tag(&s.state),
                 "pids": s.pids,
+                "version": s.version,
                 "group": group_of(&s.id),
                 "port": s.port,
             })
@@ -260,10 +261,16 @@ pub fn panel_state_json<R: Runtime>(
         .collect();
 
     let ports = nsb_core::services::PortsProfile::from_settings(&state.store);
-    let sites_json: Vec<serde_json::Value> = nsb_core::sites::list(&state.store)
-        .unwrap_or_else(|error| { read_errors.push(format!("读取站点：{}", error.message)); Vec::new() })
+    let favorite_ids: Vec<String> = state.store.get_setting_or("favoriteSites");
+    let mut sites = nsb_core::sites::list(&state.store).unwrap_or_else(|error| {
+        read_errors.push(format!("读取站点：{}", error.message));
+        Vec::new()
+    });
+    // 收藏站点优先进入托盘面板，方便 ServBay 风格的一键打开；其余站点仍按原有顺序保留。
+    sites.sort_by_key(|site| (!favorite_ids.iter().any(|id| id == &site.id), std::cmp::Reverse(site.updated_at)));
+    let sites_json: Vec<serde_json::Value> = sites
         .into_iter()
-        .take(6)
+        .take(8)
         .map(|s| {
             let domain = s
                 .domains
@@ -278,7 +285,7 @@ pub fn panel_state_json<R: Runtime>(
             } else {
                 format!("{scheme}://{domain}:{port}")
             };
-            serde_json::json!({ "id": s.id, "name": s.name, "url": url, "https": s.https })
+            serde_json::json!({ "id": s.id, "name": s.name, "url": url, "https": s.https, "favorite": favorite_ids.iter().any(|id| id == &s.id) })
         })
         .collect();
 

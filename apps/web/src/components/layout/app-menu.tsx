@@ -10,6 +10,10 @@ import {
   Plus,
   Rocket,
   Square,
+  RotateCw,
+  Star,
+  Database,
+  Globe2,
   Settings,
   FolderOpen,
   Info,
@@ -18,13 +22,14 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { useUI, useT } from "@/lib/store";
-import { useServices, useStacks, toastError, useQuickServiceActions } from "@/lib/hooks";
+import { useServices, useStacks, useSites, useSettings, serviceHasProcess, toastError, useQuickServiceActions } from "@/lib/hooks";
 import * as api from "@/lib/api";
-import { isTauri, listen, normalizeError } from "@/lib/backend";
-import { cn } from "@/lib/utils";
+import { isTauri, listen, normalizeError, type AppErrorShape } from "@/lib/backend";
+import { cn, bulkTarget, mergeBulkReport } from "@/lib/utils";
 import { ConfirmDialog } from "@/components/shared/misc";
 import { UpdateDialog } from "@/components/shared/update-dialog";
 import { BulkResult, BulkTargetList } from "@/components/shared/bulk-actions";
+import type { BulkReport, BulkTarget } from "@nsb/schema";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -78,8 +83,11 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
   const setWizardOpen = useUI((s) => s.setWizardOpen);
   const serviceQuery = useServices();
   const stackQuery = useStacks();
+  const sitesQuery = useSites();
+  const settingsQuery = useSettings();
   const services = serviceQuery.data;
   const stacks = stackQuery.data;
+  const sites = sitesQuery.data;
   const quickStackId = useUI((s) => s.quickStackId);
   const selectedStack = stacks.find((stack) => stack.id === quickStackId) ?? stacks[0];
   const servicesReady = serviceQuery.dataUpdatedAt > 0 && !serviceQuery.error;
@@ -90,8 +98,13 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
   const [checking, setChecking] = React.useState(false);
   const [version, setVersion] = React.useState(bundledAppVersion);
   const [updateOpen, setUpdateOpen] = React.useState(false);
-  const [confirm, setConfirm] = React.useState<null | "stopAll" | "quit">(null);
+  const [confirm, setConfirm] = React.useState<null | "stopAll" | "restartAll" | "quit">(null);
   const [busy, setBusy] = React.useState(false);
+  const [restartBusy, setRestartBusy] = React.useState(false);
+  const [restartTargets, setRestartTargets] = React.useState<BulkTarget[]>([]);
+  const [restartReport, setRestartReport] = React.useState<BulkReport | null>(null);
+  const [restartError, setRestartError] = React.useState<AppErrorShape | null>(null);
+  const restartBusyRef = React.useRef(false);
   const quitBusy = React.useRef(false);
   const [quitError, setQuitError] = React.useState<string | null>(null);
   const quitErrorRef = React.useRef<HTMLDivElement>(null);
@@ -123,6 +136,51 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
     if (busy) return;
     const report = await quick.stop(quick.stopReport?.failed.map((failure) => failure.serviceId));
     if (report && report.failed.length === 0) setConfirm(null);
+  };
+
+  const runningTargets = React.useMemo(
+    () => services
+      .filter((service) => serviceHasProcess(service) && !["unknown", "starting", "stopping"].includes(service.state))
+      .map(bulkTarget),
+    [services]
+  );
+  const favoriteIds = settingsQuery.data?.favoriteSites ?? [];
+  const favoriteSites = React.useMemo(() => {
+    const order = new Map(favoriteIds.map((id, index) => [id, index]));
+    return sites
+      .filter((site) => order.has(site.id))
+      .sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+  }, [sites, favoriteIds]);
+
+  const prepareRestartAll = () => {
+    if (!servicesReady || restartBusyRef.current || quick.busy || runningTargets.length === 0) return;
+    setRestartTargets(runningTargets);
+    setRestartReport(null);
+    setRestartError(null);
+    setConfirm("restartAll");
+  };
+
+  const restartAll = async () => {
+    if (restartBusyRef.current || restartTargets.length === 0) return;
+    restartBusyRef.current = true;
+    setRestartBusy(true);
+    setRestartError(null);
+    try {
+      const retryTargets = restartReport?.failed.length
+        ? restartTargets.filter((target) => restartReport.failed.some((failure) => failure.serviceId === target.id))
+        : restartTargets;
+      const report = await api.bulkRestart(retryTargets);
+      setRestartReport((previous) => previous && retryTargets.length < restartTargets.length ? mergeBulkReport(previous, report) : report);
+      if (report.failed.length === 0) {
+        setConfirm(null);
+      }
+      await Promise.all([serviceQuery.refetch(), stackQuery.refetch()]);
+    } catch (error) {
+      setRestartError(normalizeError(error));
+    } finally {
+      restartBusyRef.current = false;
+      setRestartBusy(false);
+    }
   };
 
   const checkUpdate = async () => {
@@ -174,8 +232,25 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
           <DropdownMenuItem onSelect={() => setWizardOpen(true)}>
             <Plus /> {t("appmenu.newSite")}
           </DropdownMenuItem>
+          {favoriteSites.length > 0 && <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel><span className="flex items-center gap-1.5"><Star className="h-3.5 w-3.5 text-amber-500" />{t("appmenu.favoriteSites")}</span></DropdownMenuLabel>
+            {favoriteSites.slice(0, 6).map((site) => (
+              <DropdownMenuItem key={site.id} onSelect={() => run(() => api.openSite(site.id))}>
+                <Star className="text-amber-500" fill="currentColor" />
+                <span className="min-w-0 flex-1 truncate">{site.name}</span>
+                <span className="max-w-24 truncate text-[10px] text-faint">{site.domains[0] ?? ""}</span>
+              </DropdownMenuItem>
+            ))}
+            <DropdownMenuItem onSelect={() => router.push("/sites")}>
+              <Globe2 /> {t("appmenu.manageSites")}
+            </DropdownMenuItem>
+          </>}
           <DropdownMenuItem disabled={busy || quick.busy || !startReady} onSelect={() => run(startStack)}>
             <Rocket /><span className="min-w-0 [overflow-wrap:anywhere]">{selectedStack ? `${t("dash.startStack")}「${selectedStack.name}」` : t("appmenu.startStack")}</span>
+          </DropdownMenuItem>
+          <DropdownMenuItem disabled={busy || quick.busy || !servicesReady || runningTargets.length === 0 || restartBusy} onSelect={prepareRestartAll}>
+            <RotateCw /> {t("appmenu.restartAll")}
           </DropdownMenuItem>
           <DropdownMenuItem disabled={busy || quick.busy || !servicesReady || !quick.hasStopTargets} onSelect={async () => { if (await quick.prepareStop()) setConfirm("stopAll"); }}>
             <Square /> {t("appmenu.stopAll")}
@@ -189,6 +264,9 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
           <DropdownMenuSeparator />
           <DropdownMenuItem onSelect={() => router.push("/settings")}>
             <Settings /> {t("appmenu.settings")}
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => router.push("/databases")}>
+            <Database /> {t("appmenu.databaseTools")}
           </DropdownMenuItem>
           <DropdownMenuItem
             onSelect={() =>
@@ -227,6 +305,19 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
       </DropdownMenu>
 
       <UpdateDialog open={updateOpen} onOpenChange={(open) => { setUpdateOpen(open); if (!open) setChecking(false); }} />
+
+      <ConfirmDialog
+        open={confirm === "restartAll"}
+        onOpenChange={(o) => { if (!o && !restartBusy) setConfirm(null); }}
+        title={t("appmenu.restartAll")}
+        description={t(restartReport?.failed.length ? "appmenu.restartRetryDesc" : "appmenu.restartAllDesc").replace("{count}", String(restartReport?.failed.length ?? restartTargets.length))}
+        confirmText={t(restartReport?.failed.length ? "bulk.retryFailed" : "appmenu.restartAll")}
+        loading={restartBusy}
+        onConfirm={restartAll}
+      >
+        {!restartReport && <BulkTargetList targets={restartTargets} />}
+        <BulkResult report={restartReport} error={restartError} services={services} targets={restartTargets} busy={restartBusy} />
+      </ConfirmDialog>
 
       <ConfirmDialog
         open={confirm === "stopAll"}

@@ -504,7 +504,7 @@ fn start_php(
     // 单独启动 PHP 池时重建并加载正在运行的 Web 服务配置，确保新版本立即可被站点使用。
     // 不能只 reload 旧配置：旧配置里还没有刚分配的 PHP upstream。
     let mut pools = running_php_pools(store, manager);
-    if !pools.iter().any(|(ver, _)| ver == version) {
+    if !pools.iter().any(|(ver, _)| crate::install::same_version(ver, version)) {
         pools.push((version.to_string(), base));
     }
     if manager
@@ -2073,7 +2073,7 @@ pub fn sweep_orphans(paths: &Paths, store: &Store, manager: &Arc<ServiceManager>
                     report.blocked_services.push(record.id.clone());
                     continue;
                 }
-                if version != status.version {
+                if !crate::install::same_optional_version(version.as_deref(), status.version.as_deref()) {
                     let entry = manager.services.lock().get(&record.id).cloned().unwrap();
                     manager.register(
                         &record.id,

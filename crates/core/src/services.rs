@@ -287,7 +287,7 @@ impl ServiceManager {
         let previous = map.get(id).cloned();
         let unchanged = previous.as_ref().is_some_and(|e| {
             e.label == label
-                && e.version == version
+                && crate::install::same_optional_version(e.version.as_deref(), version.as_deref())
                 && e.category == category
                 && e.port == port
                 && e.log_file == log_file

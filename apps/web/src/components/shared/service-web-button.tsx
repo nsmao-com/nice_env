@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useT } from "@/lib/store";
 import { toastError, useInvalidate } from "@/lib/hooks";
+import { sameVersion } from "@/lib/utils";
 import { normalizeError } from "@/lib/backend";
 import { useInstallTasks } from "@/lib/install-tasks";
 import { ConfirmDialog } from "./misc";
@@ -58,7 +59,7 @@ export function ServiceWebButton({ service, disabled = false }: { service: Servi
     }
   };
   const repair = async () => {
-    if (pending.current || !repairVersion || disabled || !running || service.version !== repairVersion) return;
+    if (pending.current || !repairVersion || disabled || !running || !sameVersion(service.version, repairVersion)) return;
     pending.current = true; setRepairing(true); setRepairError(null); setCancelling(false);
     useInstallTasks.setState((s) => ({ progress: Object.fromEntries(Object.entries(s.progress).filter(([key]) => key !== taskId)) }));
     try {
@@ -98,7 +99,7 @@ export function ServiceWebButton({ service, disabled = false }: { service: Servi
   </Tooltip>
     <ConfirmDialog open={repairVersion !== null} onOpenChange={(value) => { if (!value && !repairing) setRepairVersion(null); }}
       title={t("svc.web.repairTitle")} description={t("svc.web.repairHint")} confirmText={t("svc.web.repairAction")}
-      loading={repairing} confirmDisabled={disabled || !running || service.version !== repairVersion}
+      loading={repairing} confirmDisabled={disabled || !running || !sameVersion(service.version, repairVersion)}
       onCloseAutoFocus={(event) => { event.preventDefault(); button.current?.focus(); }} onConfirm={() => void repair()}>
       {repairing && <div className="space-y-3 text-xs text-secondary" role="status" aria-live="polite">
         <p>{cancelling ? t("install.cancelling") : progress?.state === "installed" ? t("svc.web.restarting") : t("svc.web.repairing")}</p>
@@ -106,7 +107,7 @@ export function ServiceWebButton({ service, disabled = false }: { service: Servi
         {progress?.state !== "installed" && <Button variant="outline" size="sm" disabled={cancelling} onClick={() => void cancelRepair()}>{t("install.cancel")}</Button>}
       </div>}
       {repairError && <p role="alert" className="text-xs text-error [overflow-wrap:anywhere]">{repairError}</p>}
-      {!repairing && (!running || service.version !== repairVersion) && <p className="text-xs text-secondary">{t("svc.web.startFirst")}</p>}
+      {!repairing && (!running || !sameVersion(service.version, repairVersion)) && <p className="text-xs text-secondary">{t("svc.web.startFirst")}</p>}
     </ConfirmDialog>
   </>;
 }

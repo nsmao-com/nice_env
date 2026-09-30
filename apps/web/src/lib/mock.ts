@@ -64,7 +64,7 @@ import type {
 } from "@nsb/schema";
 import { emitLocal } from "./backend";
 import type { SiteFileBackup, SiteFileScope, SiteFilePlan, BackupPlanConfig } from "./api";
-import { cmpVersionDesc, resolvedStackItems, stackVersionConflicts, normalizeProxyTarget, siteRedirectTarget, siteCorsProblem, siteAccessProblem, siteProxyProblem, isPhpSiteSettingValid, isEnvSecretKey, isEnvFileName, applicationRuntime, validApplication } from "./utils";
+import { cmpVersionDesc, resolvedStackItems, stackVersionConflicts, normalizeProxyTarget, siteRedirectTarget, siteCorsProblem, siteAccessProblem, siteProxyProblem, isPhpSiteSettingValid, isEnvSecretKey, isEnvFileName, applicationRuntime, validApplication, sameVersion, sameOptionalVersion } from "./utils";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const siteFileArchives = new Map<string, SiteFileBackup[]>();
@@ -303,7 +303,7 @@ function mongoAuthPreview(version: string) {
   let item = mockMongoAuth.get(version);
   if (!item) { item = { view: { version, username: "", authDatabase: "admin", hasPassword: false, configured: false, running: false, authorization: null, hasUsers: false, administrator: false, problem: null, revision: "preview-0" }, password: "" }; mockMongoAuth.set(version, item); }
   const service = services.get("mongodb");
-  item.view.running = service?.version === version && !!service.pids.length && ["running", "error"].includes(service.state);
+  item.view.running = !!service && sameVersion(service.version, version) && !!service.pids.length && ["running", "error"].includes(service.state);
   item.view.authorization = item.view.running ? item.view.configured : null;
   return item;
 }
@@ -541,10 +541,10 @@ function mockDetectedVersions(root: string): ProjectRuntimeVersions["detected"] 
 
 function mockProjectReferences(site: Site, id: string, version: string): boolean {
   const root = mockProjectRoot(site), pinned = mockProjectVersions.get(root);
-  if (pinned && Object.hasOwn(pinned, id)) return pinned[id] === version;
+  if (pinned && Object.hasOwn(pinned, id)) return sameVersion(pinned[id], version);
   const detected = mockDetectedVersions(root).find((entry) => entry.id === id);
   if (detected?.issue) throw { code: "PROJECT_RUNTIME_UNREADABLE", message: `无法检查站点「${site.name}」的项目版本，未卸载运行时`, hint: detected.issue };
-  return detected?.resolvedVersion === version;
+  return sameVersion(detected?.resolvedVersion, version);
 }
 
 function mockProjectView(siteId: string): ProjectRuntimeVersions {
@@ -963,7 +963,7 @@ function seed() {
   // 浏览器复用正式清单，不再维护另一份过期版本表或编造上游历史。
   for (const raw of bundledManifest.packages) {
     const entry = PackageManifestEntry.parse(raw);
-    const service = [...services.values()].find((s) => s.id.split("@")[0] === entry.id && s.version === entry.version);
+    const service = [...services.values()].find((s) => s.id.split("@")[0] === entry.id && sameVersion(s.version, entry.version));
     const installed = !!service;
     packages.set(`${entry.id}@${entry.version}`, {
       ...entry,
@@ -1140,7 +1140,7 @@ function refreshPackageSelection(id: string) {
   }
   for (const [sid, p] of wanted) {
     const current = services.get(sid);
-    if (current && (current.state !== "stopped" || current.version === p.version)) continue;
+    if (current && (current.state !== "stopped" || sameVersion(current.version, p.version))) continue;
     services.set(sid, {
       id: sid, label: p.displayName, state: "stopped", pids: [],
       autoStart: mockAutoStartServices.has(sid),
@@ -1154,7 +1154,7 @@ type PreviewMySql = { databases: Map<string, DatabaseInfo>; users: Map<string, D
 const previewMySql = new Map<string, PreviewMySql>();
 const systemDatabase = (name: string) => ["mysql", "sys", "information_schema", "performance_schema"].includes(name.toLowerCase());
 function mysqlPreview(version?: string, requireAuth = true, engine: DatabaseEngine = "mysql") {
-  const service = Array.from(services.values()).find((s) => (s.id === engine || s.id.startsWith(`${engine}@`)) && (!version || s.version === version));
+  const service = Array.from(services.values()).find((s) => (s.id === engine || s.id.startsWith(`${engine}@`)) && (!version || sameVersion(s.version, version)));
   if (!service || !(service.state === "running" || (service.state === "error" && service.pids.length > 0))) throw { code: "MYSQL_NOT_RUNNING", message: "请先启动所选数据库实例" };
   const key = `${engine}@${service.version}`;
   let state = previewMySql.get(key);
@@ -1315,13 +1315,13 @@ async function runServiceAction(action: "start_service" | "stop_service" | "rest
     if (expectedVersion !== undefined) {
       const service = services.get(id);
       if (!service) throw { code: "UNKNOWN_SERVICE", message: "服务未注册或已卸载" };
-      if (!expectedVersion || service.version !== expectedVersion) throw { code: "SERVICE_TARGET_CHANGED", message: "服务已切换到其他版本，请重新选择要操作的版本" };
+      if (!expectedVersion || !sameVersion(service.version, expectedVersion)) throw { code: "SERVICE_TARGET_CHANGED", message: "服务已切换到其他版本，请重新选择要操作的版本" };
       if (service.state === "unknown") throw { code: "SERVICE_STATE_UNKNOWN", message: "无法确认服务状态，请先重新检查服务状态" };
       if (action === "restart_service") {
         const installed = Array.from(packages.values()).filter((pkg) => pkg.id === id && pkg.install)
           .sort((a, b) => cmpVersionDesc(a.version, b.version));
         const selected = installed.find((pkg) => pkg.active) ?? installed[0];
-        if (selected && selected.version !== expectedVersion) throw { code: "SERVICE_TARGET_CHANGED", message: "默认版本与当前服务版本不一致，请先确认使用版本再重启" };
+        if (selected && !sameVersion(selected.version, expectedVersion)) throw { code: "SERVICE_TARGET_CHANGED", message: "默认版本与当前服务版本不一致，请先确认使用版本再重启" };
       }
     }
     return performServiceAction(action, id);
@@ -1548,7 +1548,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           continue;
         }
         const found = target.service;
-        if (found.version !== target.expectedVersion) {
+        if (!sameOptionalVersion(found.version, target.expectedVersion)) {
           report.failed.push({ serviceId: found.id, error: { code: "SERVICE_TARGET_CHANGED", message: `${found.id} 要求版本 ${target.expectedVersion ?? "未知"}，当前服务版本为 ${found.version ?? "未知"}`, hint: "请在套件页选择要求的版本，或编辑服务栈的版本规则后再操作" } });
           continue;
         }
@@ -1640,10 +1640,10 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         ?? installed.find((p) => p.id === id)?.version;
       if (cmd === "pathenv_set_version") {
         const { id, version, selected } = args as { id: string; version: string; selected: boolean };
-        if (!installed.some((p) => p.id === id && p.version === version)) {
+        if (!installed.some((p) => p.id === id && sameVersion(p.version, version))) {
           throw { code: "PATH_VERSION_UNAVAILABLE", message: "该版本尚未安装，或没有可加入环境变量的命令" };
         }
-        if (selected || pathVersion(id) === version) {
+        if (selected || sameVersion(pathVersion(id), version)) {
           const ids = mockPathEnv.enabled ? (mockPathEnv.selected ?? [...new Set(installed.map((p) => p.id))]) : [];
           mockPathEnv.selected = ids.filter((value) => value !== id);
           if (selected) {
@@ -1658,7 +1658,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           const parent = p.entry.replace(/\\/g, "/").split("/").slice(0, -1).join("/");
           const binDir = `${p.install!.installPath.replace(/[\\/]$/, "")}${parent ? `/${parent}` : ""}`;
           const selected =
-            (mockPathEnv.selected === null || mockPathEnv.selected.includes(p.id)) && pathVersion(p.id) === p.version;
+            (mockPathEnv.selected === null || mockPathEnv.selected.includes(p.id)) && sameVersion(pathVersion(p.id), p.version);
           return {
             id: p.id,
             label: p.displayName,
@@ -1683,12 +1683,12 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           required[detected.id] = detected.resolvedVersion; sources[detected.id] = detected.files.join(" + ");
         }
         if (site?.runtime.kind === "php" && !required.php) {
-          const php = entries.find((entry) => entry.id === "php" && entry.version === site.runtime.phpVersion);
+          const php = entries.find((entry) => entry.id === "php" && sameVersion(entry.version, site.runtime.phpVersion));
           if (!php) throw { code: "TERMINAL_RUNTIME_UNAVAILABLE", message: `站点指定的 PHP ${site.runtime.phpVersion ?? ""} 尚未安装，请先安装或更改站点设置` };
           chosen = [...chosen.filter((entry) => entry.id !== "php"), php];
         }
         for (const [id, version] of Object.entries(required)) {
-          const selected = entries.find((entry) => entry.id === id && entry.version === version);
+          const selected = entries.find((entry) => entry.id === id && sameVersion(entry.version, version));
           if (!selected) throw { code: "TERMINAL_RUNTIME_UNAVAILABLE", message: `项目指定的 ${id} ${version} 尚未安装，请在项目版本中改选或取消固定` };
           chosen = [...chosen.filter((entry) => entry.id !== id), selected];
         }
@@ -1717,7 +1717,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           entries: chosen.map(({ id, label, version, binDir }) => ({ id, label: terminalRuntimeLabel(id, label), version, binDir, source: sources[id] })),
           warnings: Object.entries(mockPathEnv.versions)
             .filter(([id, version]) => !required[id] && !(id === "php" && site?.runtime.kind === "php") && (mockPathEnv.selected === null || mockPathEnv.selected.includes(id))
-              && !installed.some((p) => p.id === id && p.version === version))
+              && !installed.some((p) => p.id === id && sameVersion(p.version, version)))
             .map(([id]) => `${id}：所选 PATH 版本已卸载，请重新选择版本`),
         } as T;
       }
@@ -1754,7 +1754,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const target = packages.get(`${id}@${version}`);
       if (!target?.install) throw { code: "NOT_INSTALLED", message: `${id} ${version} 尚未安装` };
       const current = services.get(id);
-      if (current && current.version !== version && current.state !== "stopped") {
+      if (current && !sameVersion(current.version, version) && current.state !== "stopped") {
         throw { code: "SERVICE_BUSY", message: `${id} 正在运行或启停中，请先停止再切换版本` };
       }
       for (const p of packages.values()) if (p.id === id) p.active = p === target;
@@ -1836,16 +1836,16 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const p = packages.get(key);
       if (!p?.install) throw { code: "NOT_INSTALLED", message: `${key} 尚未安装` };
       const installed = Array.from(packages.values()).filter((p) => p.install);
-      const hasAlternative = installed.some((other) => other.id === p.id && other.version !== p.version);
+      const hasAlternative = installed.some((other) => other.id === p.id && !sameVersion(other.version, p.version));
       const referencesTarget = (dep: string) => dep.includes("@") ? dep === key : dep === p.id && !hasAlternative;
       const blockers: PackageUninstallPreview["blockers"] = [
         ...Array.from(sites.values()).filter((site) =>
-          (p.id === "php" && site.runtime.kind === "php" && site.runtime.phpVersion === p.version)
-          || (applicationRuntime(site.runtime.kind)?.id === p.id && site.runtime.application?.version === p.version)
+          (p.id === "php" && site.runtime.kind === "php" && sameVersion(site.runtime.phpVersion, p.version))
+          || (applicationRuntime(site.runtime.kind)?.id === p.id && sameVersion(site.runtime.application?.version, p.version))
           || (p.category === "runtime" && mockProjectReferences(site, p.id, p.version))
           || ((site.runtime.webServer ?? "nginx") === p.id && !hasAlternative)
           || (p.id === "mysql" && site.db?.enabled
-            && (site.db.version != null ? site.db.version === p.version : !hasAlternative))
+            && (site.db.version != null ? sameVersion(site.db.version, p.version) : !hasAlternative))
         ).map((site) => ({ kind: "site" as const, name: site.name })),
         ...Array.from(stacks.values()).filter((stack) => !stack.builtin
           && stack.items.some((item) => referencesTarget(item.serviceId))).map((stack) => ({ kind: "stack" as const, name: stack.name })),
@@ -1853,20 +1853,20 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           .some(referencesTarget)).map((other) => ({ kind: "package" as const, name: `${other.displayName} ${other.version}` })),
       ];
       const consolePackage = mockAdminer?.packageId ?? "adminer";
-      if (mockAdminer && ((p.id === "php" && mockAdminer.phpVersion === p.version)
-        || (p.id === consolePackage && p.version === mockAdminer.adminerVersion))) {
+      if (mockAdminer && ((p.id === "php" && sameVersion(mockAdminer.phpVersion, p.version))
+        || (p.id === consolePackage && sameVersion(p.version, mockAdminer.adminerVersion)))) {
         blockers.push({ kind: "console", name: consolePackage });
       }
       const sid = p.run?.singleInstance === false ? `${p.id}@${p.version}` : p.id;
       if (cmd === "preview_package_uninstall") return structuredClone({
         installed: { id: p.id, category: p.category, ...p.install },
         runtimePath: p.install.installPath,
-        service: services.get(sid)?.version === p.version ? services.get(sid) : undefined,
+        service: sameVersion(services.get(sid)?.version, p.version) ? services.get(sid) : undefined,
         blockers,
       } satisfies PackageUninstallPreview) as T;
       if (activeDownloads.has(key)) throw { code: "PACKAGE_BUSY", message: `${key} 正在安装` };
       if (blockers.length > 0) throw { code: "PACKAGE_IN_USE", message: `无法卸载 ${key}：仍被 ${blockers.map((item) => item.name).join("、")} 使用` };
-      if (services.get(sid)?.version === p.version) services.delete(sid);
+      if (sameVersion(services.get(sid)?.version, p.version)) services.delete(sid);
       p.install = undefined;
       p.active = false;
       refreshPackageSelection(p.id);
@@ -2242,14 +2242,14 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         }
         const service = services.get(target.id);
         if (!service) throw { code: "UNKNOWN_SERVICE", message: `服务 ${target.id} 已移除，请重新选择` };
-        if ((service.version ?? null) !== target.version || target.version === "") throw { code: "SERVICE_TARGET_CHANGED", message: `服务 ${target.id} 已切换版本，请重新选择要操作的版本` };
+        if (!sameOptionalVersion(service.version, target.version) || target.version === "") throw { code: "SERVICE_TARGET_CHANGED", message: `服务 ${target.id} 已切换版本，请重新选择要操作的版本` };
         if (["starting", "stopping"].includes(service.state)) throw { code: "SERVICE_BUSY", message: `服务 ${target.id} 正在切换状态，请稍后重试` };
         if (service.state === "unknown") throw { code: "SERVICE_STATE_UNKNOWN", message: `无法确认服务 ${target.id} 的状态，请先重新检查` };
         if (action === "restart") {
           if (service.missingRequires.length) throw { code: "MISSING_DEPENDENCIES", message: "请先安装服务依赖后再重启" };
           const installed = [...packages.values()].filter((p) => p.id === target.id && p.install).sort((a, b) => cmpVersionDesc(a.version, b.version));
           const selected = installed.find((p) => p.active) ?? installed[0];
-          if (selected && selected.version !== target.version) throw { code: "SERVICE_TARGET_CHANGED", message: `服务 ${target.id} 的默认版本与当前版本不一致，请先确认后再重启` };
+          if (selected && !sameVersion(selected.version, target.version)) throw { code: "SERVICE_TARGET_CHANGED", message: `服务 ${target.id} 的默认版本与当前版本不一致，请先确认后再重启` };
         }
       }
       const tier = (id: string) => {
@@ -2341,7 +2341,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         const reasons: string[] = [];
         const web = site.runtime.webServer || "nginx";
         if (!installed.some((pkg) => pkg.id === web)) reasons.push(`未安装 ${web}`);
-        if (site.runtime.kind === "php" && !installed.some((pkg) => pkg.id === "php" && pkg.version === site.runtime.phpVersion)) reasons.push(`未安装指定 PHP ${site.runtime.phpVersion || "（未指定）"}`);
+        if (site.runtime.kind === "php" && !installed.some((pkg) => pkg.id === "php" && sameVersion(pkg.version, site.runtime.phpVersion))) reasons.push(`未安装指定 PHP ${site.runtime.phpVersion || "（未指定）"}`);
         if (!site.rootDir.trim()) reasons.push("未配置根目录");
         if (reasons.length) items.push({ id: `broken-site-${site.id}`, severity: "error", title: `站点「${site.name}」配置有问题`, detail: reasons.join("；"), action: "修正站点配置或安装所需套件", route: "/sites" });
       }
@@ -2759,7 +2759,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const current = stopPreview(String(args!.serviceId), true);
       const service = current.service;
       const [id, version] = (file.usedByService ?? "").split("@");
-      if (!(version ? (service.id === id || service.id === file.usedByService) && service.version === version : service.id === id)) {
+      if (!(version ? (service.id === id || service.id === file.usedByService) && sameVersion(service.version, version) : service.id === id)) {
         throw { code: "CONFIG_SERVICE_MISMATCH", message: "当前服务实例不使用这份配置，请检查所选版本" };
       }
       const restart = service.state === "running" || service.pids.length > 0;
@@ -3454,14 +3454,14 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       try {
         if (cmd === "mongodb_backup_plan_run") {
           const service = services.get("mongodb");
-          if (!service || !service.pids.length || !["running", "error"].includes(service.state) || service.version !== version) throw { message: "所选 MongoDB 实例未运行或版本已变化" };
+      if (!service || !service.pids.length || !["running", "error"].includes(service.state) || !sameVersion(service.version, version)) throw { message: "所选 MongoDB 实例未运行或版本已变化" };
           const databases = [...mockMongoDatabases.keys()].filter(name => !["admin", "local", "config"].includes(name.toLowerCase()));
           const errors: string[] = [];
           for (const database of databases) {
             try {
               const backup = await mockInvoke<import("@nsb/schema").MongoBackup>("mongodb_backup_create", { version, database });
               mockMongoBackups.get(backup.id)!.record.kind = "automatic"; plan.files.push(backup.id);
-              if (plan.config.keep) [...mockMongoBackups.values()].filter(entry => entry.record.kind === "automatic" && entry.record.version === version && entry.record.database === database).reverse().slice(plan.config.keep).forEach(entry => mockMongoBackups.delete(entry.record.id));
+              if (plan.config.keep) [...mockMongoBackups.values()].filter(entry => entry.record.kind === "automatic" && sameVersion(entry.record.version, version) && entry.record.database === database).reverse().slice(plan.config.keep).forEach(entry => mockMongoBackups.delete(entry.record.id));
             } catch (error) { errors.push(`${database}: ${String((error as { message?: string }).message || error)}`); }
           }
           plan.state = errors.length ? (plan.files.length ? "partial" : "failed") : databases.length ? "success" : "skipped";
@@ -3513,7 +3513,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "mongodb_database_delete": {
       const version = String(args!.version);
       const service = services.get("mongodb");
-      if (!service || !["running", "error"].includes(service.state) || !service.pids.length || service.version !== version) throw { code: "MONGO_NOT_RUNNING", message: "所选 MongoDB 实例未运行或运行版本已变化" };
+      if (!service || !["running", "error"].includes(service.state) || !service.pids.length || !sameVersion(service.version, version)) throw { code: "MONGO_NOT_RUNNING", message: "所选 MongoDB 实例未运行或运行版本已变化" };
       if (!Array.from(packages.values()).some(pkg => pkg.id === "mongosh" && pkg.install)) throw { code: "MONGO_SHELL_MISSING", message: "请先安装 MongoDB Shell" };
       const database = String(args!.database ?? "");
       if (!database || database.length > 63 || /[\s\x00-\x1f\x7f-\x9f/\\."$*<>:|?]/.test(database) || ["admin", "local", "config"].includes(database.toLowerCase())) throw { code: "MONGO_BACKUP_INVALID", message: "请选择业务数据库" };
@@ -3539,7 +3539,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "mongodb_restore_preview":
     case "mongodb_backup_restore": {
       const service = services.get("mongodb");
-      if (!service || !["running", "error"].includes(service.state) || !service.pids.length || service.version !== args!.version) throw { code: "MONGO_NOT_RUNNING", message: "所选 MongoDB 实例未运行或运行版本已变化" };
+      if (!service || !["running", "error"].includes(service.state) || !service.pids.length || !sameVersion(service.version, String(args!.version))) throw { code: "MONGO_NOT_RUNNING", message: "所选 MongoDB 实例未运行或运行版本已变化" };
       if (!Array.from(packages.values()).some(pkg => pkg.id === "mongosh" && pkg.install)) throw { code: "MONGO_SHELL_MISSING", message: "请先安装 MongoDB Shell" };
       const tools = Array.from(packages.values()).filter(pkg => pkg.id === "mongodb-database-tools" && pkg.install);
       const selectedTools = tools.find(pkg => pkg.active) ?? tools.sort((a,b) => cmpVersionDesc(a.version,b.version))[0];
@@ -3550,7 +3550,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const entry = mockMongoBackups.get(String(args!.id));
       if (!entry) throw { code: "MONGO_BACKUP_INVALID", message: "备份已不存在" };
       if (entry.record.version.split(".")[0] !== service.version!.split(".")[0]) throw { code: "MONGO_BACKUP_VERSION", message: "备份与目标 MongoDB 主版本不同" };
-      if (!tools.some(pkg => pkg.version === entry.record.toolsVersion)) throw { code: "MONGO_TOOLS_MISSING", message: "请安装创建备份时的 Database Tools 版本" };
+      if (!tools.some(pkg => sameVersion(pkg.version, entry.record.toolsVersion))) throw { code: "MONGO_TOOLS_MISSING", message: "请安装创建备份时的 Database Tools 版本" };
       const revision = JSON.stringify([entry.record,target,mockMongoDatabases.get(target),service.version,service.port,service.pids]);
       if (cmd === "mongodb_restore_preview") return { backup: structuredClone(entry.record), target, exists: mockMongoDatabases.has(target), revision } as T;
       if (args!.revision !== revision || args!.confirmation !== target) throw { code: "MONGO_RESTORE_CHANGED", message: "请重新检查并确认恢复" };
@@ -3559,7 +3559,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "mongodb_browse": {
       const service = services.get("mongodb");
-      if (!service || !["running", "error"].includes(service.state) || !service.pids.length || service.version !== args!.version) throw { code: "MONGO_NOT_RUNNING", message: "所选 MongoDB 实例未运行或运行版本已变化" };
+      if (!service || !["running", "error"].includes(service.state) || !service.pids.length || !sameVersion(service.version, String(args!.version))) throw { code: "MONGO_NOT_RUNNING", message: "所选 MongoDB 实例未运行或运行版本已变化" };
       const shells = Array.from(packages.values()).filter(pkg => pkg.id === "mongosh" && pkg.install).sort((a,b) => cmpVersionDesc(a.version,b.version));
       const shell = shells.find(pkg => pkg.active) ?? shells[0];
       if (!shell) throw { code: "MONGO_SHELL_MISSING", message: "请先安装 MongoDB Shell，以启用数据库浏览" };
@@ -3614,7 +3614,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "postgres_set_password": {
       const version = args!.version as string;
       const service = services.get("postgresql");
-      if (!service || !["running", "error"].includes(service.state) || !service.pids.length || service.version !== version) {
+      if (!service || !["running", "error"].includes(service.state) || !service.pids.length || !sameVersion(service.version, version)) {
         throw { code: "POSTGRES_NOT_RUNNING", message: "所选 PostgreSQL 实例未运行或版本已变化" };
       }
       let connection = mockPostgresConnections.get(version);
@@ -3775,13 +3775,13 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "redis_password_stop": {
       const service = services.get("redis");
-      if (service?.version !== args!.version) throw { code: "REDIS_INSTANCE_CHANGED", message: "演示 Redis 版本已变化，未停止。" };
+      if (!sameVersion(service?.version, String(args!.version))) throw { code: "REDIS_INSTANCE_CHANGED", message: "演示 Redis 版本已变化，未停止。" };
       return await mockInvoke<T>("stop_service", { id: "redis" });
     }
     case "redis_save_connection": {
       const service = services.get("redis");
       const version = args!.version as string;
-      if (service?.state !== "running" || service.version !== version) throw { code: "REDIS_INSTANCE_CHANGED", message: "运行中的 Redis 版本已变化，请重新打开连接设置" };
+      if (service?.state !== "running" || !sameVersion(service.version, version)) throw { code: "REDIS_INSTANCE_CHANGED", message: "运行中的 Redis 版本已变化，请重新打开连接设置" };
       const credentials = args!.credentials as { username: string; password: string };
       // 演示认证对应演示服务密码；真实凭据只在桌面应用中验证。
       if ((credentials.username && credentials.username !== "default") || credentials.password !== (redisServerPasswordsPreview.get(version) ?? "")) throw { code: "REDIS_AUTH_FAILED", message: "连接凭据与演示 Redis 的服务密码不一致；真实凭据请在桌面应用中验证。" };
@@ -3817,7 +3817,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const version = String(request.version ?? "");
       const database = Number(request.database ?? 0);
       const key = String(request.key ?? "");
-      if (service?.state !== "running" || service.version !== version) throw { code: "REDIS_INSTANCE_CHANGED", message: "运行中的 Redis 版本已变化，请刷新后重试" };
+      if (service?.state !== "running" || !sameVersion(service.version, version)) throw { code: "REDIS_INSTANCE_CHANGED", message: "运行中的 Redis 版本已变化，请刷新后重试" };
       if (redisFlushedDatabasesPreview.has(`${version}:${database}`)) throw { code: "REDIS_KEY_GONE", message: "这个键已不存在，请刷新键空间列表" };
       const entry = redisKeysPreview.find(item => item.key === key);
       if (!entry) throw { code: "REDIS_KEY_GONE", message: "这个键已不存在，请刷新键详情" };
@@ -3843,7 +3843,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const version = String(request.version ?? "");
       const database = Number(request.database ?? 0);
       const key = String(request.key ?? "");
-      if (service?.state !== "running" || service.version !== version) throw { code: "REDIS_INSTANCE_CHANGED", message: "运行中的 Redis 版本已变化，请刷新后重试" };
+      if (service?.state !== "running" || !sameVersion(service.version, version)) throw { code: "REDIS_INSTANCE_CHANGED", message: "运行中的 Redis 版本已变化，请刷新后重试" };
       if (String(request.confirmation ?? "") !== key) throw { code: "REDIS_KEY_DELETE_CONFIRM_REQUIRED", message: "请输入完整键名以确认删除" };
       if (redisFlushedDatabasesPreview.has(`${version}:${database}`)) throw { code: "REDIS_KEY_GONE", message: "这个键已不存在，请刷新键空间列表" };
       const index = redisKeysPreview.findIndex(entry => entry.key === key);
@@ -3856,7 +3856,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const request = (args?.request ?? {}) as Record<string, unknown>;
       const version = String(request.version ?? "");
       const database = Number(request.database ?? 0);
-      if (service?.state !== "running" || service.version !== version) throw { code: "REDIS_INSTANCE_CHANGED", message: "运行中的 Redis 版本已变化，请刷新后重试" };
+      if (service?.state !== "running" || !sameVersion(service.version, version)) throw { code: "REDIS_INSTANCE_CHANGED", message: "运行中的 Redis 版本已变化，请刷新后重试" };
       if (String(request.confirmation ?? "").trim() !== "FLUSHDB") throw { code: "REDIS_FLUSH_CONFIRM_REQUIRED", message: "请输入 FLUSHDB 以确认清空当前逻辑数据库" };
       redisFlushedDatabasesPreview.add(`${version}:${database}`);
       return { version, database, mode: "async" } as T;
@@ -3885,7 +3885,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "redis_backup_create": {
       const version = String(args!.version), service = services.get("redis");
-      if (service?.state !== "running" || service.version !== version) throw { code: "REDIS_NOT_RUNNING", message: "请启动对应 Redis 版本后备份。" };
+      if (service?.state !== "running" || !sameVersion(service.version, version)) throw { code: "REDIS_NOT_RUNNING", message: "请启动对应 Redis 版本后备份。" };
       const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
       const entry = { id, version, createdAt: Date.now(), sizeBytes: 1024, sha256: id.replaceAll("-", "").padEnd(64, "0").slice(0, 64), kind: "snapshot" as const };
       redisBackupsPreview.unshift(entry); return structuredClone(entry) as T;
@@ -3894,7 +3894,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const version = String(args!.version), service = services.get("redis");
       if (service?.state !== "stopped") throw { code: "REDIS_RESTORE_RUNNING", message: "请先停止 Redis。" };
       const backup = redisBackupsPreview.find(entry => entry.id === args!.id);
-      if (!backup || backup.version !== version || service.version !== version) throw { code: "REDIS_RESTORE_VERSION", message: "请选用备份对应的 Redis 版本。" };
+      if (!backup || !sameVersion(backup.version, version) || !sameVersion(service.version, version)) throw { code: "REDIS_RESTORE_VERSION", message: "请选用备份对应的 Redis 版本。" };
       return { backup: structuredClone(backup), target: "preview/data/redis/dump.rdb", existingSize: 1024, revision: `${backup.id}:${redisRestoreRevisionPreview}` } as T;
     }
     case "redis_backup_restore": {
@@ -3908,7 +3908,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "redis_persistence": {
       const service = services.get("redis"), version = String(args!.version);
-      if (service?.state !== "running" || service.version !== version) throw { code: "REDIS_INSTANCE_CHANGED", message: "请启动所选 Redis 版本后重新读取。" };
+      if (service?.state !== "running" || !sameVersion(service.version, version)) throw { code: "REDIS_INSTANCE_CHANGED", message: "请启动所选 Redis 版本后重新读取。" };
       const runId = `preview-${version}-${service.pids.join("-")}`;
       let entry = redisPersistencePreview.get(version);
       if (!entry || entry.report.runId !== runId) {

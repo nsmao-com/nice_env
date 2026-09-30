@@ -217,7 +217,7 @@ pub(crate) fn rotate_automatic(state: &CoreState, newest: &MongoBackup, keep: us
             Ok(record) => record,
             Err(error) => { problems.push(format!("{id}：{}，已保留", error.message)); continue; }
         };
-        if record.kind != "automatic" || record.database != newest.database || record.version != newest.version { continue; }
+        if record.kind != "automatic" || record.database != newest.database || !crate::install::same_version(&record.version, &newest.version) { continue; }
         let checked = (|| -> Result<String> {
             let preview = removal_preview(state, &id)?;
             if verified(state, &id, std::io::sink())? != record { return Err(invalid("备份记录在检查期间变化")); }
@@ -296,7 +296,7 @@ pub fn restore(state: &CoreState, version: &str, id: &str, target: &str, revisio
 
 fn validate_content(record: &MongoBackup, path: &Path) -> Result<()> {
     let info = crate::mongodb_archive::inspect(fs::File::open(path)?, None, std::io::sink())?;
-    if info.version != record.version || info.tools_version != record.tools_version || info.compression != "gzip"
+    if !crate::install::same_version(&info.version, &record.version) || info.tools_version != record.tools_version || info.compression != "gzip"
         || info.databases.len() != 1 || info.databases[0].name != record.database {
         return Err(AppError::new("MONGO_BACKUP_METADATA", "备份记录与归档中的真实数据库或版本不一致，未执行操作"));
     }

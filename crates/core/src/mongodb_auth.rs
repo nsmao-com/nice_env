@@ -72,7 +72,7 @@ pub fn status(state: &CoreState, version: &str) -> Result<AuthView> {
     state.store.find_installed("mongodb",Some(version)).ok_or_else(||AppError::not_installed("MongoDB"))?;
     let (credentials, credential_problem) = match Credentials::load(state,version) { Ok(value)=>(value,None),Err(error)=>(Credentials::default(),Some(error)) };
     let service = state.manager.snapshot("mongodb");
-    let running = service.as_ref().is_some_and(|s|s.version.as_deref()==Some(version) && s.pids.iter().any(|pid|platform::process_alive(*pid)));
+    let running = service.as_ref().is_some_and(|s|s.version.as_deref().is_some_and(|current| crate::install::same_version(current, version)) && s.pids.iter().any(|pid|platform::process_alive(*pid)));
     let mut view = AuthView { version:version.into(), username:credentials.username.clone(), auth_database:credentials.auth_database.clone(),
         has_password:!credentials.password.is_empty(),configured:enabled(&state.store,version)?,running,authorization:None,has_users:None,administrator:false,problem:credential_problem,revision:String::new() };
     if running && view.problem.is_none() {
@@ -124,7 +124,7 @@ pub fn apply(state: &CoreState, version: &str, input: ApplyAuth) -> Result<AuthV
     if !input.acknowledge_restart || (!input.enabled && !input.acknowledge_disable) {
         return Err(AppError::new("MONGO_AUTH_CONFIRM","请确认重启会中断连接；关闭认证还需确认本机客户端可直接访问数据"));
     }
-    if crate::ops::installed_by_choice(&state.store,"mongodb").is_none_or(|p|p.version!=version) {
+    if crate::ops::installed_by_choice(&state.store,"mongodb").is_none_or(|p|!crate::install::same_version(&p.version, version)) {
         return Err(AppError::new("MONGO_AUTH_CHANGED","默认 MongoDB 版本已变化，请切换回当前版本后重试"));
     }
     if let Some(error)=before.problem { return Err(error); }

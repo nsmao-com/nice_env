@@ -16,6 +16,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ConfirmDialog } from "@/components/shared/misc";
 import { CodeBlock } from "@/components/shared/code-block";
+import { sameVersion } from "@/lib/utils";
 
 /** 固定项目 CLI 版本；启动时由后端再次校验文件与安装状态。 */
 export function SiteTerminalButton({ site, showLabel = false, disabled = false, initialTab = "terminal" }: {
@@ -51,7 +52,7 @@ export function SiteTerminalButton({ site, showLabel = false, disabled = false, 
     if (project.data && !draft && open && tab === "project" && !project.isFetching && !project.error) setDraft({ base: project.data, versions: { ...project.data.versions } });
   }, [project.data, project.isFetching, project.error, draft, open, tab]);
   const dirty = !!draft && (Object.keys(draft.versions).length !== Object.keys(draft.base.versions).length
-    || Object.entries(draft.versions).some(([id, version]) => draft.base.versions[id] !== version));
+    || Object.entries(draft.versions).some(([id, version]) => !sameVersion(draft.base.versions[id], version)));
   const invalid = !!draft && (Object.entries(draft.versions).some(([id, version]) => !draft.base.options.find((o) => o.id === id)?.versions.includes(version))
     || draft.base.detected.some((entry) => entry.issue && !Object.hasOwn(draft.versions, entry.id)));
   const problem = error ?? (environment.error ? normalizeError(environment.error) : null);

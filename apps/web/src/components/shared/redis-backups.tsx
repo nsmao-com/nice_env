@@ -7,7 +7,7 @@ import type { RedisBackupEntry, RedisBackupRemoval, RedisImportPreview, RedisRes
 import * as api from "@/lib/api";
 import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { useT } from "@/lib/store";
-import { fmtBytes } from "@/lib/utils";
+import { fmtBytes, sameVersion } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -39,7 +39,7 @@ function RedisBackupsDialog({ version, running, onClose }: { version: string; ru
   const [page, setPage] = React.useState(0);
   const errorRef = React.useRef<HTMLDivElement>(null);
   React.useEffect(() => { if (error || query.isError) errorRef.current?.focus(); }, [error, query.isError]);
-  const entries = (query.data?.items ?? []).filter((entry) => allVersions || entry.version === version || entry.version === null);
+  const entries = (query.data?.items ?? []).filter((entry) => allVersions || (entry.version !== null && sameVersion(entry.version, version)) || entry.version === null);
   const pages = Math.max(1, Math.ceil(entries.length / 5));
   const index = Math.min(page, pages - 1);
   const failure = error ?? (query.isError ? normalizeError(query.error) : null);
@@ -81,7 +81,7 @@ function RedisBackupsDialog({ version, running, onClose }: { version: string; ru
     void perform("import", async () => {
       const entry = await api.redisBackupImport(selected.source, selected.revision);
       if (!alive.current) return;
-      setImportPreview(null); setAllVersions(entry.version !== version); setPage(0);
+      setImportPreview(null); setAllVersions(!sameVersion(entry.version, version)); setPage(0);
       setMessage(t("redisBackup.importedDone").replace("{version}", entry.version).replace("{id}", entry.id));
       await query.refetch();
     });
@@ -119,7 +119,7 @@ function RedisBackupsDialog({ version, running, onClose }: { version: string; ru
     });
   };
   const inspect = (entry: Pick<RedisBackupEntry, "id" | "version">) => {
-    if (running || entry.version !== version) return;
+    if (running || !sameVersion(entry.version, version)) return;
     void perform("preview", async () => {
       setPreview(null); setConfirmation("");
       const value = await api.redisRestorePreview(version, entry.id);
@@ -157,14 +157,14 @@ function RedisBackupsDialog({ version, running, onClose }: { version: string; ru
             <p className="text-muted">{t(entry.kind === "before-restore" ? "redisBackup.safety" : entry.kind === "imported" ? "redisBackup.imported" : entry.kind ? "redisBackup.snapshot" : "redisBackup.unknownKind")}</p>
             {entry.problem && <p className="text-warn [overflow-wrap:anywhere]">{entry.problem}</p>}
             <div className="flex flex-wrap items-center justify-between gap-2 border-t border-dashed border-separator pt-2"><code className="min-w-0 text-[11px] text-faint [overflow-wrap:anywhere]">{entry.id}</code><div className="flex items-center gap-1">
-              <Button variant="ghost" size="sm" disabled={!!busy || !!entry.problem || running || entry.version !== version} onClick={() => inspect(entry)}><RotateCcw className="size-3.5" />{t("redisBackup.inspect")}</Button>
+              <Button variant="ghost" size="sm" disabled={!!busy || !!entry.problem || running || !sameVersion(entry.version, version)} onClick={() => inspect(entry)}><RotateCcw className="size-3.5" />{t("redisBackup.inspect")}</Button>
               <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" disabled={!!busy} aria-label={`${t("redisBackup.more")} ${entry.id}`}><Ellipsis className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">
                 <DropdownMenuItem disabled={!!busy || !!entry.problem} onSelect={() => exportFile(entry)}><Download className="size-3.5" />{t("redisBackup.export")}</DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem disabled={!!busy} className="text-error focus:text-error" onSelect={() => inspectDelete(entry.id)}><Trash2 className="size-3.5" />{t("redisBackup.delete")}</DropdownMenuItem>
               </DropdownMenuContent></DropdownMenu>
             </div></div>
-            {entry.version !== null && entry.version !== version && <p className="text-faint">{t("redisBackup.versionHint")}</p>}
+            {entry.version !== null && !sameVersion(entry.version, version) && <p className="text-faint">{t("redisBackup.versionHint")}</p>}
           </li>)}</ul>
           {pages > 1 && <div className="flex flex-wrap items-center justify-between gap-2"><Button variant="ghost" size="sm" disabled={!!busy || index === 0} onClick={() => setPage(index - 1)}>{t("redisBackup.previous")}</Button><span className="text-muted">{index + 1} / {pages}</span><Button variant="ghost" size="sm" disabled={!!busy || index + 1 >= pages} onClick={() => setPage(index + 1)}>{t("redisBackup.next")}</Button></div>}
           <p className="border-t border-dashed border-separator pt-3 text-muted">{t("redisBackup.offDevice")}</p>
@@ -193,7 +193,7 @@ function RedisBackupsDialog({ version, running, onClose }: { version: string; ru
         <p className="font-medium">{t("redisBackup.fileVersion").replace("{version}", importPreview.version)} · {size(importPreview.sizeBytes)}</p>
         <p className="rounded-lg bg-fill p-3 font-mono text-muted [overflow-wrap:anywhere]">{importPreview.source}</p>
         <p className="text-muted">{t("redisBackup.importValidation")}</p>
-        {importPreview.version !== version && <p className="text-warn">{t("redisBackup.importVersionHint").replace("{version}", importPreview.version)}</p>}
+        {!sameVersion(importPreview.version, version) && <p className="text-warn">{t("redisBackup.importVersionHint").replace("{version}", importPreview.version)}</p>}
         <details className="space-y-2"><summary className="cursor-pointer text-muted">{t("redisBackup.importDetails")}</summary><p className="text-faint">RDB {importPreview.rdbVersion}</p><p className="font-mono text-faint [overflow-wrap:anywhere]">SHA-256: {importPreview.sha256}</p></details>
         {errorBox}
         {error && <Button type="button" variant="ghost" size="sm" disabled={!!busy} onClick={() => pickImport(importPreview.source)}>{t("redisBackup.importRecheck")}</Button>}

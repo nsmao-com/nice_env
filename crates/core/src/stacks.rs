@@ -208,13 +208,15 @@ fn resolve_service_id(store: &Store, known: &[String], wanted: &str) -> Option<S
         if known.iter().any(|id| id == base) && store.find_installed(base, Some(version)).is_some() {
             return Some(base.to_string());
         }
+        if store.find_installed(base, Some(version)).is_some() {
+            return known.iter().find(|id| id.split_once('@').is_some_and(|(id_base, id_version)| id_base == base && crate::install::same_version(id_version, version))).cloned();
+        }
         return None;
     }
     // 所有按版本注册的服务都跟随已选择版本，不能取 HashMap 中的第一项。
     if let Some(inst) = crate::ops::installed_by_choice(store, wanted) {
-        let sid = format!("{}@{}", wanted, inst.version);
-        if known.iter().any(|k| k == &sid) {
-            return Some(sid);
+        if let Some(sid) = known.iter().find(|k| k.split_once('@').is_some_and(|(base, version)| base == wanted && crate::install::same_version(version, &inst.version))) {
+            return Some(sid.clone());
         }
     }
     None
@@ -224,7 +226,7 @@ fn check_version_conflicts(items: &[ResolvedStackItem]) -> Result<()> {
     let mut versions = std::collections::HashMap::new();
     for item in items {
         if let Some(previous) = versions.insert(&item.service_id, &item.expected_version) {
-            if previous != &item.expected_version {
+            if !crate::install::same_optional_version(previous.as_deref(), item.expected_version.as_deref()) {
                 return Err(AppError::new("STACK_VERSION_CONFLICT", format!("服务栈为单实例服务 {} 选择了不同版本", item.service_id))
                     .with_hint("请编辑服务栈，为此服务保留一个版本规则后再操作"));
             }
@@ -235,7 +237,7 @@ fn check_version_conflicts(items: &[ResolvedStackItem]) -> Result<()> {
 
 fn check_target_version(manager: &ServiceManager, item: &ResolvedStackItem) -> Result<()> {
     let status = manager.snapshot(&item.service_id).ok_or_else(|| AppError::new("UNKNOWN_SERVICE", "服务已移除，请重新读取服务栈"))?;
-    if status.version != item.expected_version {
+    if !crate::install::same_optional_version(status.version.as_deref(), item.expected_version.as_deref()) {
         return Err(AppError::new("SERVICE_TARGET_CHANGED", format!("{} 要求版本 {}，当前服务版本为 {}", item.service_id,
             item.expected_version.as_deref().unwrap_or("未知"), status.version.as_deref().unwrap_or("未知")))
             .with_hint("请在套件页选择要求的版本，或编辑服务栈的版本规则后再操作"));
@@ -510,7 +512,8 @@ pub fn status_of(store: &Store, manager: &Arc<ServiceManager>, stack: &Stack) ->
     let (items, skipped) = resolve_items(store, manager, stack);
     let total = items.len() + skipped.len();
     let running = items.iter().filter(|item| {
-        manager.snapshot(&item.service_id).is_some_and(|s| s.state == ServiceState::Running && s.version == item.expected_version)
+        manager.snapshot(&item.service_id).is_some_and(|s| s.state == ServiceState::Running
+            && crate::install::same_optional_version(s.version.as_deref(), item.expected_version.as_deref()))
     }).count();
     (running, total)
 }

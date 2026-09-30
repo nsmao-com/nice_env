@@ -7,6 +7,7 @@ import type { ConfigFileInfo, RedisPasswordView } from "@nsb/schema";
 import * as api from "@/lib/api";
 import { useT } from "@/lib/store";
 import { useInvalidate } from "@/lib/hooks";
+import { sameVersion } from "@/lib/utils";
 import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -20,7 +21,7 @@ export function RedisPasswordButton({ version, running }: { version?: string | n
   const t = useT();
   const [target, setTarget] = React.useState<string | null>(null);
   return <><Button variant="secondary" size="sm" disabled={!version} onClick={() => setTarget(version!)}><KeyRound className="size-3.5" />{t("redisPassword.title")}</Button>
-    {target && <RedisPasswordDialog key={target} version={target} running={!!running} changed={target !== version} onClose={() => setTarget(null)} />}</>;
+    {target && <RedisPasswordDialog key={target} version={target} running={!!running} changed={!sameVersion(target, version)} onClose={() => setTarget(null)} />}</>;
 }
 
 function RedisPasswordDialog({ version, running, changed, onClose }: { version: string; running: boolean; changed: boolean; onClose: () => void }) {

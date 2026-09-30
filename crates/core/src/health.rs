@@ -349,7 +349,7 @@ fn check_sites(r: &mut HealthReport, sites: &[Site], installed: &[InstalledPacka
                 Some(version)
                     if installed
                         .iter()
-                        .any(|package| package.id == "php" && package.version == version) => {}
+                        .any(|package| package.id == "php" && crate::install::same_version(&package.version, version)) => {}
                 Some(version) => reasons.push(format!("未安装指定 PHP {version}")),
                 None => reasons.push("未指定 PHP 版本".into()),
             }

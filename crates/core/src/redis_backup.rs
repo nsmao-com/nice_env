@@ -795,7 +795,7 @@ pub fn preview(
     id: &str,
 ) -> Result<RedisRestorePreview> {
     let backup = verified(paths, id)?;
-    if backup.version != version {
+    if !crate::install::same_version(&backup.version, version) {
         return Err(AppError::new(
             "REDIS_RESTORE_VERSION",
             "请切换到生成此备份的 Redis 版本后再恢复，避免 RDB 格式不兼容",

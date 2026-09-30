@@ -179,7 +179,7 @@ pub(crate) fn execute_as(state: &CoreState, version: &str, request: serde_json::
     credentials.validate()?;
     let _activity = crate::paths::DataDirActivity::shared(&state.paths.base)?;
     let _operation = state.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重新读取"))?;
-    let service = state.manager.snapshot("mongodb").filter(|service| service.version.as_deref() == Some(version)
+    let service = state.manager.snapshot("mongodb").filter(|service| service.version.as_deref().is_some_and(|current| crate::install::same_version(current, version))
         && matches!(service.state, crate::model::ServiceState::Running | crate::model::ServiceState::Error)
         && service.pids.iter().any(|pid| platform::process_alive(*pid)))
         .ok_or_else(|| AppError::new("MONGO_NOT_RUNNING", "所选 MongoDB 实例未运行或运行版本已变化"))?;

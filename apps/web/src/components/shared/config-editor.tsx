@@ -24,7 +24,7 @@ import { useT } from "@/lib/store";
 import { useInvalidate, toastError, serviceHasProcess } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import { normalizeError } from "@/lib/backend";
-import { cn } from "@/lib/utils";
+import { cn, sameVersion } from "@/lib/utils";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -77,7 +77,7 @@ function serviceForConfig(info: ConfigFileInfo, services: ServiceStatus[]) {
   if (!info.usedByService) return undefined;
   const [id, version] = info.usedByService.split("@");
   return services.find((service) => version
-    ? (service.id === info.usedByService || service.id === id) && service.version === version
+    ? (service.id === info.usedByService || service.id === id) && sameVersion(service.version, version)
     : service.id === id);
 }
 

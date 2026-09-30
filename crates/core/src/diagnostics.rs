@@ -731,7 +731,7 @@ fn service_changed(
     after: &crate::model::ServiceStatus,
 ) -> bool {
     before.id != after.id
-        || before.version != after.version
+        || !crate::install::same_optional_version(before.version.as_deref(), after.version.as_deref())
         || before.state != after.state
         || before.port != after.port
         || before

@@ -506,7 +506,7 @@ pub(crate) fn select_sftpgo_config(store: &Store, paths: &Paths, manager: &Servi
         return Err(AppError::new("SERVICE_BUSY", "请先停止 SFTPGo，再选择配置目录"));
     }
     let latest = sftpgo_config_directories(store, paths)?;
-    if latest.version != version || (latest.current.as_deref() != expected_current && latest.current.as_deref() != Some(directory)) {
+    if !crate::install::same_version(&latest.version, version) || (latest.current.as_deref() != expected_current && latest.current.as_deref() != Some(directory)) {
         return Err(AppError::new("SFTPGO_CONFIG_CHANGED", "SFTPGo 版本或目录选择已经变化，请刷新后重新选择"));
     }
     let candidate = latest.directories.iter().find(|entry| entry.directory == directory)
@@ -2002,7 +2002,7 @@ pub(crate) fn mariadb_data_dir(paths: &Paths, version: &str) -> Result<PathBuf> 
 fn verify_mariadb_data_version(data: &std::path::Path, version: &str) -> Result<()> {
     let marker = data.join(".niceenv-mariadb-version");
     if let Ok(recorded) = std::fs::read_to_string(&marker) {
-        if recorded.trim() == version { return Ok(()); }
+        if crate::install::same_version(recorded.trim(), version) { return Ok(()); }
     } else {
         // 旧版没有版本标记；只接受日志中唯一、明确的原版本，不猜测升级关系。
         use std::io::{Read, Seek, SeekFrom};
@@ -2020,7 +2020,7 @@ fn verify_mariadb_data_version(data: &std::path::Path, version: &str) -> Result<
             let mut bytes = Vec::new(); file.take(2 * 1024 * 1024).read_to_end(&mut bytes)?;
             for captures in pattern.captures_iter(&String::from_utf8_lossy(&bytes)) { versions.insert(captures[1].to_string()); }
         }
-        if versions.len() == 1 && versions.contains(version) { return Ok(()); }
+        if versions.len() == 1 && versions.iter().next().is_some_and(|recorded| crate::install::same_version(recorded, version)) { return Ok(()); }
     }
     Err(AppError::new("MARIADB_DATA_VERSION", "MariaDB 数据目录的原版本与所选版本不一致或无法确认，未启动")
         .with_hint("请使用原版本导出 SQL，再切换版本并导入；原数据目录已保留，未自动升级。"))

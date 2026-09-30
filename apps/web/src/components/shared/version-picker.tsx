@@ -5,7 +5,7 @@ import { useIsMutating } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "motion/react";
 import { Check, ChevronDown, Download, FolderOpen, Loader2, Pin, Power, RefreshCw, Trash2, WifiOff, X } from "lucide-react";
 import type { RemoteVersion } from "@nsb/schema";
-import { cn } from "@/lib/utils";
+import { cn, sameVersion } from "@/lib/utils";
 import { useT } from "@/lib/store";
 import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -129,7 +129,7 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
     : item.active || group.multiInstance ? "start" : "active";
   const actionLabel = (action: VersionAction) => action === "active"
     ? t(group.multiInstance ? "versions.setDefault" : "versions.switch") : t(`versions.${action}`);
-  const retryItem = failure ? items.find((item) => item.version === failure.version) : undefined;
+  const retryItem = failure ? items.find((item) => sameVersion(item.version, failure.version)) : undefined;
 
   const pick = async (item: VersionItem, action: VersionAction = actionOf(item)) => {
     if (busyRef.current || pathBusy || disabled || !statusKnown || item.installing || item.transitioning) return;
@@ -307,7 +307,7 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
                               {t(group.multiInstance || !group.isService ? "versions.default" : "packages.inUse")}
                             </span>
                           )}
-                          {item.version === latest && !item.installed && (
+                          {sameVersion(item.version, latest) && !item.installed && (
                             <span className="rounded-full border border-border px-1.5 py-px text-[9px] text-faint">
                               {t("versions.latest")}
                             </span>

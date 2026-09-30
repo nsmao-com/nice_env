@@ -104,7 +104,7 @@ pub(crate) fn authenticated_client(
     let service = state
         .manager
         .snapshot(&id)
-        .filter(|s| s.version.as_deref() == Some(&package.version)
+        .filter(|s| s.version.as_deref().is_some_and(|version| crate::install::same_version(version, &package.version))
             && matches!(s.state, crate::model::ServiceState::Running | crate::model::ServiceState::Error)
             && s.pids.iter().any(|pid| platform::process_alive(*pid)))
         .ok_or_else(|| {
@@ -1458,7 +1458,7 @@ pub fn parse_postgres_csv(input: &str) -> Result<PostgresQueryResult> {
 
 pub(crate) fn selected_postgres(state: &crate::CoreState, version: &str, password: Option<String>) -> Result<PostgresClient> {
     let package = state.store.find_installed("postgresql", Some(version)).ok_or_else(|| AppError::not_installed("PostgreSQL"))?;
-    let service = state.manager.snapshot("postgresql").filter(|service| service.version.as_deref() == Some(version)
+    let service = state.manager.snapshot("postgresql").filter(|service| service.version.as_deref().is_some_and(|current| crate::install::same_version(current, version))
         && matches!(service.state, crate::model::ServiceState::Running | crate::model::ServiceState::Error)
         && service.pids.iter().any(|pid| platform::process_alive(*pid)))
         .ok_or_else(|| AppError::new("POSTGRES_NOT_RUNNING", "所选 PostgreSQL 实例未运行或运行版本已变化"))?;

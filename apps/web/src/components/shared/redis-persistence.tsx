@@ -7,11 +7,12 @@ import type { RedisPersistence, RedisSnapshotReceipt } from "@nsb/schema";
 import * as api from "@/lib/api";
 import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { useT } from "@/lib/store";
+import { sameVersion } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 
 export function redisSnapshotState(receipt: RedisSnapshotReceipt, current: RedisPersistence) {
-  if (receipt.version !== current.version || receipt.runId !== current.runId || receipt.processId !== current.processId) return "restarted";
+  if (!sameVersion(receipt.version, current.version) || receipt.runId !== current.runId || receipt.processId !== current.processId) return "restarted";
   if (current.loading || current.saving) return "waiting";
   if (current.lastSaveStatus === "err") return "failed";
   return current.lastSaveTime >= receipt.minimumSaveTime ? "complete" : "waiting";

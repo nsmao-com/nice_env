@@ -32,6 +32,14 @@ pub(crate) fn same_version(left: &str, right: &str) -> bool {
     canonical_version(left) == canonical_version(right)
 }
 
+pub(crate) fn same_optional_version(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => same_version(left, right),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 pub(crate) fn official_qdrant(entry: &crate::model::PackageManifestEntry) -> bool {
     entry.id == "qdrant" && entry.url.starts_with("https://github.com/qdrant/qdrant/releases/download/")
         && entry.run.as_ref().is_some_and(|run| run.args == ["--config-path", "{etc}/config.yaml", "--disable-telemetry"]
@@ -1051,8 +1059,8 @@ impl Installer {
         ensure_safe_key(id, version)?;
         let mut blockers = self.uninstall_references(store, &installed)?;
         if let Some(console) = crate::toolbox::adminer_status(manager)? {
-            if (id == "php" && *version == console.php_version)
-                || (id == &console.package_id && *version == console.adminer_version) {
+            if (id == "php" && same_version(version, &console.php_version))
+                || (id == &console.package_id && same_version(version, &console.adminer_version)) {
                 blockers.push(crate::model::PackageUninstallBlocker {
                     kind: "console".into(), name: console.package_id,
                 });
@@ -1067,7 +1075,7 @@ impl Installer {
             None
         };
         let service = service_id.and_then(|sid| manager.snapshot(&sid))
-            .filter(|service| service.version.as_deref() == Some(version.as_str()));
+            .filter(|service| service.version.as_deref().is_some_and(|current| same_version(current, version)));
         let runtime_path = paths.runtime_dir(id, version).to_string_lossy().into_owned();
         Ok(crate::model::PackageUninstallPreview { installed, runtime_path, service, blockers })
     }
@@ -1123,7 +1131,7 @@ impl Installer {
             manager.services.lock().remove(sid);
             manager.watchdog.forget(sid);
         }
-        if store.get_setting(&format!("active{id}Version")).as_deref() == Some(version) {
+        if store.get_setting(&format!("active{id}Version")).as_deref().is_some_and(|current| same_version(current, version)) {
             let fallback = crate::ops::installed_by_choice(store, id)
                 .map(|p| p.version)
                 .unwrap_or_default();
@@ -1140,9 +1148,9 @@ impl Installer {
         let installed = store.list_installed()?;
         let has_alternative = installed
             .iter()
-            .any(|p| p.id == target.id && p.version != target.version);
+            .any(|p| p.id == target.id && !same_version(&p.version, &target.version));
         let references_target = |key: &str| match key.split_once('@') {
-            Some((id, version)) => id == target.id && version == target.version,
+            Some((id, version)) => id == target.id && same_version(version, &target.version),
             None => key == target.id && !has_alternative,
         };
         let mut users = Vec::new();
@@ -1151,15 +1159,15 @@ impl Installer {
                 && crate::pathenv::project_references_version(store, &site, &target.id, &target.version)?;
             let php_ref = target.id == "php"
                 && site.runtime.kind == crate::model::SiteKind::Php
-                && site.runtime.php_version.as_deref() == Some(target.version.as_str());
+                && site.runtime.php_version.as_deref().is_some_and(|version| same_version(version, &target.version));
             let application_ref = crate::applications::runtime_id(&site.runtime.kind) == Some(target.id.as_str())
-                && site.runtime.application.as_ref().is_some_and(|app| app.version == target.version);
+                && site.runtime.application.as_ref().is_some_and(|app| same_version(&app.version, &target.version));
             let web_ref = site.runtime.web_server == target.id && !has_alternative;
             let db_ref = target.id == "mysql"
                 && site.db.as_ref().is_some_and(|db| {
                     db.enabled
                         && db.version.as_deref().map_or(!has_alternative, |version| {
-                            version == target.version.as_str()
+                        same_version(version, &target.version)
                         })
                 });
             if php_ref || application_ref || web_ref || db_ref || project_ref {
@@ -1179,7 +1187,7 @@ impl Installer {
         }
         for package in installed
             .iter()
-            .filter(|p| p.id != target.id || p.version != target.version)
+            .filter(|p| p.id != target.id || !same_version(&p.version, &target.version))
         {
             let entry = self.installed_entry(package);
             let required = entry

@@ -354,11 +354,11 @@ pub(crate) fn project_references_version(store: &Store, site: &crate::model::Sit
     let root = crate::envfile::project_root(std::path::Path::new(&site.root_dir));
     let result = (|| {
         let content = read_project_file(&root.join(PROJECT_FILE))?;
-        if let Some(fixed) = project_versions(&project_document(content.as_deref())?)?.get(id) { return Ok(fixed == version); }
+        if let Some(fixed) = project_versions(&project_document(content.as_deref())?)?.get(id) { return Ok(crate::install::same_version(fixed, version)); }
         if matches!(id, "node" | "python") {
             if let Some(detected) = detect_project_versions(store, &runtime_version_files(&root))?.into_iter().find(|entry| entry.id == id) {
                 if let Some(issue) = detected.issue { return Err(AppError::new("PROJECT_RUNTIME_DETECTION", issue)); }
-                return Ok(detected.resolved_version.as_deref() == Some(version));
+                return Ok(detected.resolved_version.as_deref().is_some_and(|resolved| crate::install::same_version(resolved, version)));
             }
         }
         Ok(false)
@@ -814,7 +814,7 @@ fn status_with_paths(store: &Store, manifest: &Manifest, current_paths: &[Vec<St
             exists,
             selected: wants(&sel, &package.id)
                 && chosen_from(store, &installed, &versions, &package.id)?
-                    .is_some_and(|chosen| chosen.version == package.version),
+                    .is_some_and(|chosen| crate::install::same_version(&chosen.version, &package.version)),
             in_path,
             commands,
         });
@@ -1069,7 +1069,7 @@ pub fn set_version(
     let entry = current
         .entries
         .iter()
-        .find(|entry| entry.id == id && entry.version == version)
+        .find(|entry| entry.id == id && crate::install::same_version(&entry.version, version))
         .ok_or_else(|| {
             AppError::new(
                 "PATH_VERSION_UNAVAILABLE",

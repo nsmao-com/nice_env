@@ -950,7 +950,7 @@ impl CoreState {
         let service = self.manager.snapshot("redis")
             .filter(|s| matches!(s.state, model::ServiceState::Running | model::ServiceState::Error) && s.pids.iter().any(|pid| platform::process_alive(*pid)))
             .ok_or_else(|| AppError::new("REDIS_NOT_RUNNING", "请先启动 Redis 实例"))?;
-        if version.is_some_and(|v| service.version.as_deref() != Some(v)) {
+        if version.is_some_and(|v| !install::same_optional_version(service.version.as_deref(), Some(v))) {
             return Err(AppError::new("REDIS_INSTANCE_CHANGED", "运行中的 Redis 版本已变化，请重新打开连接设置"));
         }
         Ok(service)
@@ -1152,7 +1152,7 @@ impl CoreState {
         let (before, installed) = {
             let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后重试"))?;
             let service = self.manager.snapshot(id).filter(|s| id == "qdrant" && s.state == model::ServiceState::Running
-                && s.version.as_deref() == Some(version) && !s.pids.is_empty())
+                && install::same_version(s.version.as_deref().unwrap_or_default(), version) && !s.pids.is_empty())
                 .ok_or_else(|| AppError::new("SERVICE_CHANGED", "Qdrant 状态或版本已变化，请刷新后重试"))?;
             if !self.manager.web_target(id).is_err_and(|error| error.code == "QDRANT_WEB_MISSING") {
                 return Err(AppError::new("QDRANT_WEB_CUSTOM", "当前服务没有可自动补齐的管理台，请检查配置"));
@@ -1167,7 +1167,7 @@ impl CoreState {
             let _activity = _activity;
             let _operation = state.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "管理台已补齐；请在当前操作完成后重启 Qdrant"))?;
             let unchanged = state.manager.snapshot(&id).is_some_and(|s| s.state == model::ServiceState::Running
-                && s.version == before.version && s.pids == before.pids);
+                && install::same_optional_version(s.version.as_deref(), before.version.as_deref()) && s.pids == before.pids);
             if !unchanged { return Err(AppError::new("SERVICE_CHANGED", "管理台已补齐，但服务状态已变化；请手动启动或重启 Qdrant")); }
             state.restart_service(&id)?;
             state.service_web_url(&id)
@@ -1340,7 +1340,7 @@ impl CoreState {
     fn check_service_version(&self, id: &str, expected_version: &str) -> Result<()> {
         let status = self.manager.snapshot(id)
             .ok_or_else(|| AppError::new("UNKNOWN_SERVICE", format!("服务 {id} 未注册或已卸载")))?;
-        if expected_version.is_empty() || status.version.as_deref() != Some(expected_version) {
+        if expected_version.is_empty() || !install::same_version(status.version.as_deref().unwrap_or_default(), expected_version) {
             return Err(AppError::new("SERVICE_TARGET_CHANGED", "服务已切换到其他版本，请重新选择要操作的版本"));
         }
         if matches!(status.state, model::ServiceState::Starting | model::ServiceState::Stopping) {
@@ -1648,7 +1648,7 @@ impl CoreState {
     fn check_bulk_target(&self, target: &bulk::BulkTarget) -> Result<()> {
         let status = self.manager.snapshot(&target.id)
             .ok_or_else(|| AppError::new("UNKNOWN_SERVICE", format!("服务 {} 已移除，请重新选择", target.id)))?;
-        if status.version != target.version || target.version.as_deref() == Some("") {
+        if !install::same_optional_version(status.version.as_deref(), target.version.as_deref()) || target.version.as_deref() == Some("") {
             return Err(AppError::new("SERVICE_TARGET_CHANGED", format!("服务 {} 已切换版本，请重新选择要操作的版本", target.id)));
         }
         if matches!(status.state, model::ServiceState::Starting | model::ServiceState::Stopping) {
@@ -1879,7 +1879,7 @@ impl CoreState {
         let matches_target = file.used_by_service.as_deref().is_some_and(|target| {
             match target.split_once('@') {
                 Some((id, version)) => (service.id == id || service.id == target)
-                    && service.version.as_deref() == Some(version),
+                    && service.version.as_deref().is_some_and(|current| install::same_version(current, version)),
                 None => service.id == target,
             }
         });

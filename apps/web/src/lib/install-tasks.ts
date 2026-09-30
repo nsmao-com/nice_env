@@ -7,6 +7,7 @@ import * as api from "./api";
 import { normalizeError, type AppErrorShape } from "./backend";
 import type { TKey } from "./i18n";
 import { useUI } from "./store";
+import { sameVersion } from "./utils";
 
 /* ============================================================
    套件安装任务：与弹窗 / 页面解耦的全局后台任务。
@@ -117,7 +118,7 @@ export const useInstallTasks = create<InstallTasksState>()((set, get) => ({
       .then((installed) => {
         const result = PackageInstallResult.safeParse(installed);
         if (!result.success || result.data.id !== target.id || (target.version
-          && result.data.version.replace(/^[vV]/, "") !== target.version.replace(/^[vV]/, ""))) {
+          && !sameVersion(result.data.version, target.version))) {
           throw { code: "INSTALL_RESULT_UNCONFIRMED", message: t("install.resultUnconfirmed") };
         }
         const resolvedVersion = result.data.version;

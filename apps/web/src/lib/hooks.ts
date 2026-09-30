@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import * as api from "./api";
 import type { DownloadProgress, VersionCatalog, Site, ServiceStatus, Stack, StackStartReport, BulkReport, BulkTarget } from "@nsb/schema";
-import { bulkTarget, mergeBulkReport } from "./utils";
+import { bulkTarget, mergeBulkReport, sameOptionalVersion } from "./utils";
 import { normalizeError, type AppErrorShape } from "./backend";
 import { toast } from "sonner";
 import { useInstallTasks } from "./install-tasks";
@@ -317,7 +317,7 @@ async function performServiceAction(
     if (!current()) return;
     const target = list.find((item) => item.id === id);
     if (!target) throw { code: "UNKNOWN_SERVICE", message: t("svc.notFound") };
-    if (target.version !== version) throw { code: "SERVICE_TARGET_CHANGED", message: t("versions.serviceChanged") };
+    if (!sameOptionalVersion(target.version, version)) throw { code: "SERVICE_TARGET_CHANGED", message: t("versions.serviceChanged") };
     if (["starting", "stopping"].includes(target.state)) throw { code: "SERVICE_BUSY", message: t(`state.${target.state}`) };
     if (target.state === "unknown") throw { code: "SERVICE_STATE_UNKNOWN", message: t("packages.statusUnknown") };
     if (action !== "stop" && target.missingRequires.length) throw { code: "MISSING_DEPENDENCIES", message: t("svc.needDepsHint") };
@@ -454,7 +454,7 @@ export function useQuickServiceActions(services: ServiceStatus[], stacks: Stack[
   const present = new Set(services.map((service) => service.id));
   for (const service of services) {
     const previous = serviceIdentities.current.get(service.id);
-    if (!previous || previous.version !== service.version) serviceIdentities.current.set(service.id, { version: service.version });
+    if (!previous || !sameOptionalVersion(previous.version, service.version)) serviceIdentities.current.set(service.id, { version: service.version });
   }
   for (const id of serviceIdentities.current.keys()) if (!present.has(id)) serviceIdentities.current.delete(id);
   const [serviceFailure, setServiceFailure] = useState<{
@@ -542,7 +542,7 @@ export function useQuickServiceActions(services: ServiceStatus[], stacks: Stack[
     serviceRequest.current = request;
     const active = () => mounted.current && serviceRequest.current === request;
     const current = () => active() && identity !== undefined
-      && serviceIdentities.current.get(service.id) === identity && identity.version === service.version;
+      && serviceIdentities.current.get(service.id) === identity && sameOptionalVersion(identity.version, service.version);
     const execute = async (conflict?: ServiceConflict): Promise<void> => {
       if (!active() || busyRef.current || stackActions.isBusy()) return;
       busyRef.current = true; setBusy(true); setServiceFailure(null);
@@ -580,7 +580,7 @@ export function useQuickServiceActions(services: ServiceStatus[], stacks: Stack[
     setServiceFailure(null);
   };
   const serviceTargetChanged = Boolean(serviceFailure && (!serviceFailure.identity || serviceFailure.identity !== serviceIdentities.current.get(serviceFailure.service.id)
-    || serviceFailure.service.version !== serviceIdentities.current.get(serviceFailure.service.id)?.version));
+    || !sameOptionalVersion(serviceFailure.service.version, serviceIdentities.current.get(serviceFailure.service.id)?.version)));
   const pendingTargets = stopReport ? stopReport.failed.map((failure) => failure.serviceId) : stopTargets.map((target) => target.id);
   const stopDescription = t(stopReport?.failed.length ? "bulk.retryStopHint" : "confirm.stopAllDesc")
     .replace("{count}", String(pendingTargets.length))
@@ -655,14 +655,14 @@ export function useServiceActions(service: ServiceStatus, disabled = false) {
   const execute = async (action: ServiceAction, conflict?: ServiceConflict): Promise<void> => {
     if (!mounted.current || disabledRef.current || operationRef.current) return;
     const { id, version } = service;
-    if (latestIdentity.current !== identity || latest.current.id !== id || latest.current.version !== version) {
+    if (latestIdentity.current !== identity || latest.current.id !== id || !sameOptionalVersion(latest.current.version, version)) {
       toast.error(t("versions.serviceChanged"));
       return;
     }
     const operation = {};
     operationRef.current = operation;
     const current = () => mounted.current && operationRef.current === operation
-      && latestIdentity.current === identity && latest.current.id === id && latest.current.version === version && !disabledRef.current;
+      && latestIdentity.current === identity && latest.current.id === id && sameOptionalVersion(latest.current.version, version) && !disabledRef.current;
     setBusy(true);
     setFailure(null);
     let pendingConflict = conflict;

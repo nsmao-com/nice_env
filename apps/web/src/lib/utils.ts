@@ -251,7 +251,7 @@ export function stackServiceTarget(id: string, services: ServiceStatus[], packag
   if (separator !== -1) {
     const base = id.slice(0, separator), version = id.slice(separator + 1);
     const service = services.find((service) => service.id === base);
-    return service && packages.some((p) => p.id === base && p.version === version && p.install)
+    return service && packages.some((p) => p.id === base && sameVersion(p.version, version) && p.install)
       ? { service, expectedVersion: version } : undefined;
   }
   const installed = packages.filter((p) => p.id === id && p.install)
@@ -264,7 +264,7 @@ export function stackServiceTarget(id: string, services: ServiceStatus[], packag
 /** 状态只归属于符合版本约束的实例，不能把另一版本计为已运行。 */
 export function resolveStackService(id: string, services: ServiceStatus[], packages: PackageView[]) {
   const target = stackServiceTarget(id, services, packages);
-  return target && target.service.version === target.expectedVersion ? target.service : undefined;
+  return target && sameOptionalVersion(target.service.version, target.expectedVersion) ? target.service : undefined;
 }
 
 export function stackVersionConflicts(items: StackItem[], services: ServiceStatus[], packages: PackageView[]) {
@@ -274,7 +274,7 @@ export function stackVersionConflicts(items: StackItem[], services: ServiceStatu
     const target = stackServiceTarget(item.serviceId, services, packages);
     if (!target) continue;
     const { service, expectedVersion } = target;
-    if (versions.has(service.id) && versions.get(service.id) !== expectedVersion) conflicts.add(service.id);
+    if (versions.has(service.id) && !sameOptionalVersion(versions.get(service.id), expectedVersion)) conflicts.add(service.id);
     versions.set(service.id, expectedVersion);
   }
   return [...conflicts];
@@ -285,7 +285,7 @@ export function resolvedStackItems(items: StackItem[], services: ServiceStatus[]
   const seen = new Set<string>();
   return [...items].sort((a, b) => a.order - b.order).flatMap((item) => {
     const target = stackServiceTarget(item.serviceId, services, packages);
-    const service = target && target.service.version === target.expectedVersion ? target.service : undefined;
+    const service = target && sameOptionalVersion(target.service.version, target.expectedVersion) ? target.service : undefined;
     const key = target ? JSON.stringify([target.service.id, target.expectedVersion]) : item.serviceId;
     if (seen.has(key)) return [];
     seen.add(key);
@@ -360,6 +360,12 @@ export function normalizeVersion(version: string): string {
 
 export function sameVersion(left: string | null | undefined, right: string | null | undefined): boolean {
   return left != null && right != null && normalizeVersion(left) === normalizeVersion(right);
+}
+
+/** 比较允许为空的服务版本；空值只有和另一个空值才算相同。 */
+export function sameOptionalVersion(left: string | null | undefined, right: string | null | undefined): boolean {
+  if (left == null || right == null) return left == null && right == null;
+  return sameVersion(left, right);
 }
 
 /** 版本号降序比较：数值逐段比较，正式版优先于预发布版。

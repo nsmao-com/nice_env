@@ -16,7 +16,7 @@ import { useT } from "@/lib/store";
 import { useInvalidate, serviceHasProcess } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import { normalizeError, type AppErrorShape } from "@/lib/backend";
-import { cn, bulkTarget, mergeBulkReport } from "@/lib/utils";
+import { cn, bulkTarget, mergeBulkReport, sameOptionalVersion } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -60,7 +60,7 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
     () => services.filter((service) => picked.has(service.id) && service.missingRequires.length > 0),
     [services, picked]
   );
-  const changed = [...picked.values()].filter((target) => !services.some((s) => s.id === target.id && (s.version ?? null) === target.version));
+  const changed = [...picked.values()].filter((target) => !services.some((s) => s.id === target.id && sameOptionalVersion(s.version, target.version)));
   const unavailable = services.some((s) => picked.has(s.id) && ["unknown", "starting", "stopping"].includes(s.state));
 
   React.useEffect(() => {

@@ -4,7 +4,7 @@ import * as React from "react";
 import { toast } from "sonner";
 import { Database, HardDrive, KeyRound, Play, Plus, Search, Table2, Trash2, UserRound, ExternalLink, Loader2, Import, X } from "lucide-react";
 import { useT } from "@/lib/store";
-import { fmtBytes } from "@/lib/utils";
+import { fmtBytes, sameOptionalVersion } from "@/lib/utils";
 import { DatabaseWorkspace } from "@/components/shared/database-workspace";
 import { useDatabases, useDbUsers, useInvalidate, toastError, useAdminer, useServices } from "@/lib/hooks";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -426,7 +426,7 @@ function useInstanceState(base: string, version?: string) {
   const { data: services } = useServices(3000);
   return React.useMemo(
     () =>
-      (version ? services.find((s) => s.version === version && (s.id === base || s.id.startsWith(`${base}@`))) : undefined) ??
+      (version ? services.find((s) => sameOptionalVersion(s.version, version) && (s.id === base || s.id.startsWith(`${base}@`))) : undefined) ??
       (!version ? services.find((s) => s.id === base) ??
       services.find((s) => s.id.startsWith(`${base}@`)) : undefined) ?? null,
     [services, base, version]
@@ -566,7 +566,7 @@ function PostgresPasswordDialog({ service, passwordRequired, onClose }: { servic
   const invalidate = useInvalidate();
   const version = service.version!;
   const current = useInstanceState("postgresql");
-  const changed = !current || current.version !== version || current.port !== service.port || current.pids.join(",") !== service.pids.join(",") || !["running", "error"].includes(current.state);
+  const changed = !current || !sameOptionalVersion(current.version, version) || current.port !== service.port || current.pids.join(",") !== service.pids.join(",") || !["running", "error"].includes(current.state);
   const [mode, setMode] = React.useState(passwordRequired === false ? "change" : "existing");
   const [password, setPassword] = React.useState("");
   const [enableAuth, setEnableAuth] = React.useState(true);

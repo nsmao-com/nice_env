@@ -21,7 +21,7 @@ import {
   RotateCw,
 } from "lucide-react";
 import type { Stack, StackItem, PackageView, ServiceStatus } from "@nsb/schema";
-import { cn, cmpVersionDesc, resolveStackService, resolvedStackItems, stackServiceTarget, stackVersionConflicts } from "@/lib/utils";
+import { cn, cmpVersionDesc, resolveStackService, resolvedStackItems, sameVersion, stackServiceTarget, stackVersionConflicts } from "@/lib/utils";
 import { useT, useUI } from "@/lib/store";
 import { useInvalidate, useServices, useStacks, usePackages, toastError, useStackActions, type StackActionResult, serviceHasProcess } from "@/lib/hooks";
 import { BulkResult } from "@/components/shared/bulk-actions";
@@ -385,7 +385,7 @@ function stackItemHint(id: string, service: ServiceStatus | undefined, packages:
   const mode = pinned ? t("stack.fixedVersion") : multi ? t("stack.followVersion") : t("stack.currentVersion");
   const version = pinned ? id.slice(base.length + 1) : service?.version;
   const target = stackServiceTarget(id, services, packages);
-  const installed = packages.some((p) => p.id === base && p.install && (!pinned || p.version === version));
+  const installed = packages.some((p) => p.id === base && p.install && (!pinned || sameVersion(p.version, version)));
   const unavailable = target ? `${t("stack.versionMismatch")} ${target.service.version ?? "—"}`
     : installed ? t("stack.serviceUnavailable") : t("stack.notInstalled");
   return `${mode}${version ? ` · ${version}` : ""}${!service ? ` · ${unavailable}` : ""}`;

@@ -88,7 +88,7 @@ export function SearchableSelect({ options, value, onValueChange, open, onOpenCh
           {!visible.length && <div role="status" className="px-4 py-8 text-center text-sm text-muted">{t(query.trim() ? "select.noResults" : "select.empty")}</div>}
           {groups.map(group => <CommandGroup key={group} heading={group || undefined}>
             {visible.filter(item => (item.group ?? "") === group).map(item => <React.Fragment key={item.value}>
-              {item.separatorBefore && <CommandSeparator className="mx-2 my-1 border-t border-dashed border-separator" />}
+              {item.separatorBefore && <CommandSeparator />}
               <CommandItem value={item.value}
                 disabled={item.disabled} className={cn("min-h-9 gap-2 py-2", item.className)} style={item.style}
                 onSelect={() => { if (!item.disabled) { onValueChange(item.value); changeOpen(false); } }}>

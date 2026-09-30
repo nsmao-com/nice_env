@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { toast } from "sonner";
-import { Database, HardDrive, KeyRound, Play, Plus, Table2, Trash2, UserRound, ExternalLink, Loader2, Import } from "lucide-react";
+import { Database, HardDrive, KeyRound, Play, Plus, Search, Table2, Trash2, UserRound, ExternalLink, Loader2, Import, X } from "lucide-react";
 import { useT } from "@/lib/store";
 import { fmtBytes } from "@/lib/utils";
 import { DatabaseWorkspace } from "@/components/shared/database-workspace";
@@ -216,10 +216,17 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
   const [dropTarget, setDropTarget] = React.useState<string | null>(null);
   const [dropping, setDropping] = React.useState(false);
   const [dropTyped, setDropTyped] = React.useState("");
+  const [databaseSearch, setDatabaseSearch] = React.useState("");
   const locked = workspaceLocked || !!deleteUser || !!passwordUser || !!grantUser || backupLocked || createOpen || userOpen || rootOpen || importOpen || !!dropTarget;
   React.useEffect(() => { onLockChange(locked); return () => onLockChange(false); }, [locked, onLockChange]);
+  React.useEffect(() => { setDatabaseSearch(""); }, [engine, version]);
 
   const systemDbs = new Set(["mysql", "sys", "information_schema", "performance_schema"]);
+  const visibleDatabases = React.useMemo(() => {
+    const needle = databaseSearch.trim().toLocaleLowerCase();
+    if (!needle) return dbs;
+    return dbs.filter((db) => db.name.toLocaleLowerCase().includes(needle));
+  }, [databaseSearch, dbs]);
 
   return (
     <div className="pb-8">
@@ -264,13 +271,27 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         {/* 数据库列表 */}
         <Card className="lg:col-span-2">
-          <CardHeader className="flex-row items-center justify-between">
+          <CardHeader className="flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <CardTitle className="flex items-center gap-2 text-[13px]">
               <Database className="h-3.5 w-3.5 text-primary" /> {t("db.databases")}
             </CardTitle>
-            <Button variant="ghost" size="sm" disabled={!ready || !dbs.some((db) => !systemDbs.has(db.name.toLowerCase()))} onClick={() => setUserOpen(true)}>
-              <UserRound className="h-3.5 w-3.5" /> {t("db.createUser")}
-            </Button>
+            <div className="flex w-full min-w-0 flex-wrap items-center justify-end gap-2 sm:w-auto">
+              <div className="relative min-w-[min(100%,12rem)] flex-1 sm:w-48 sm:flex-none">
+                <Search aria-hidden className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-faint" />
+                <Input
+                  value={databaseSearch}
+                  onChange={(event) => setDatabaseSearch(event.target.value)}
+                  disabled={!ready || dbs.length === 0}
+                  placeholder={t("db.searchDatabases")}
+                  aria-label={t("db.searchDatabases")}
+                  className="h-8 w-full pl-8 pr-8 text-xs"
+                />
+                {databaseSearch && <button type="button" aria-label={t("db.clearSearch")} className="absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-faint hover:bg-fill hover:text-foreground focus-visible:outline-none" onClick={() => setDatabaseSearch("")}><X className="h-3.5 w-3.5" /></button>}
+              </div>
+              <Button variant="ghost" size="sm" disabled={!ready || !dbs.some((db) => !systemDbs.has(db.name.toLowerCase()))} onClick={() => setUserOpen(true)}>
+                <UserRound className="h-3.5 w-3.5" /> {t("db.createUser")}
+              </Button>
+            </div>
           </CardHeader>
           <CardContent>
             {!running || dbQuery.isPending || dbQuery.isError ? (
@@ -279,9 +300,13 @@ function MySqlWorkspace({ onLockChange }: { onLockChange: (locked: boolean) => v
               <p className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-xs text-faint">
                 {t("db.emptyHint")}
               </p>
+            ) : visibleDatabases.length === 0 ? (
+              <p role="status" className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-xs text-faint">
+                {t("db.noDatabaseMatches")}
+              </p>
             ) : (
-              <div className="flex flex-col">
-                {dbs.map((db, index) => (
+              <div className="flex max-h-[30rem] flex-col overflow-y-auto pr-1">
+                {visibleDatabases.map((db, index) => (
                   <div key={db.name} className={`relative flex flex-wrap items-center gap-2 py-2.5 sm:gap-3 ${index > 0 ? "before:absolute before:inset-x-3 before:top-0 before:border-t before:border-dashed before:border-border" : ""}`}>
                     <Table2 className="h-3.5 w-3.5 shrink-0 text-faint" />
                     <span className="flex-1 truncate font-mono text-[12.5px]">{db.name}</span>

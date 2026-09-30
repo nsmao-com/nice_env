@@ -105,7 +105,7 @@ const SelectSeparator = React.forwardRef<
   // 虚线 + 左右留边：通栏实线太重，内缩的细虚线更接近 Apple 分组分隔线
   <SelectPrimitive.Separator
     ref={ref}
-    className={cn("mx-2 my-1 border-t border-dashed border-separator", className)}
+    className={cn("mx-3 my-1 h-0 border-0 border-t border-dashed border-separator", className)}
     {...props}
   />
 ));

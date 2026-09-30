@@ -986,6 +986,13 @@ impl CoreState {
         stats::redis_key_preview(port, &stats::RedisCredentials::load(&self.store, &request.version)?, &service.pids, &request)
     }
 
+    pub fn redis_key_update(&self, request: stats::RedisKeyUpdateRequest) -> Result<stats::RedisKeyUpdateReceipt> {
+        let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后修改 Redis 键"))?;
+        let service = self.running_redis(Some(&request.version))?;
+        let port = service.port.ok_or_else(|| AppError::new("REDIS_PORT_UNKNOWN", "无法确认 Redis 实际端口"))?;
+        stats::redis_key_update(port, &stats::RedisCredentials::load(&self.store, &request.version)?, &service.pids, &request)
+    }
+
     pub fn redis_key_delete(&self, request: stats::RedisKeyDeleteRequest) -> Result<stats::RedisKeyDeleteReceipt> {
         let _operation = self.manager.lifecycle.try_lock().ok_or_else(|| AppError::new("SERVICE_BUSY", "服务正在操作，请稍后删除 Redis 键"))?;
         let service = self.running_redis(Some(&request.version))?;

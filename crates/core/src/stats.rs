@@ -273,6 +273,34 @@ pub struct RedisKeyPreview {
     pub elements: Option<u64>,
     pub value: Option<String>,
     pub value_truncated: bool,
+    /// 用于编辑时检测键值是否在读取后被其他客户端修改。
+    pub revision: String,
+}
+
+#[derive(serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisKeyUpdateRequest {
+    pub version: String,
+    #[serde(default)]
+    pub database: u8,
+    pub key: String,
+    /// 字符串键传入新值；集合类型传 null 表示只调整 TTL。
+    pub value: Option<String>,
+    /// preserve 保留当前 TTL，persist 清除 TTL，duration 设置 ttl_ms。
+    pub ttl_mode: String,
+    #[serde(default)]
+    pub ttl_ms: i64,
+    /// 由详情接口返回的内容修订号。
+    pub revision: String,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisKeyUpdateReceipt {
+    pub version: String,
+    pub database: u8,
+    pub key: String,
+    pub updated: bool,
 }
 
 #[derive(serde::Deserialize, Clone, Debug)]
@@ -436,12 +464,16 @@ impl RedisClient {
                     "NOPERM" if command == "FLUSHDB" => AppError::new("REDIS_FLUSH_DENIED", "当前 Redis 账号没有清空逻辑数据库的权限"),
                     "NOPERM" if matches!(command, "SCAN" | "TYPE" | "PTTL" | "GET" | "MEMORY" | "SELECT") =>
                         AppError::new("REDIS_KEY_BROWSE_DENIED", "当前 Redis 账号没有读取键空间所需的权限"),
+                    "NOPERM" if matches!(command, "SET" | "PEXPIRE" | "PERSIST") =>
+                        AppError::new("REDIS_KEY_EDIT_DENIED", "当前 Redis 账号没有修改键值或过期时间的权限"),
                     "NOPERM" => AppError::new("REDIS_COMMAND_DENIED", "当前 Redis 账号没有执行快照操作所需的权限")
                         .with_hint("请检查 INFO、TIME、BGSAVE 权限；独立备份还需要 CONFIG GET 权限，或在连接认证中选择合适账号"),
                     _ if command == "FLUSHDB" => AppError::new("REDIS_FLUSH_FAILED", "Redis 未接受清空逻辑数据库的请求")
                         .with_hint("请检查当前账号权限、实例状态和服务日志；未改用同步清空。"),
                     _ if matches!(command, "SCAN" | "TYPE" | "PTTL" | "GET" | "MEMORY" | "SELECT") =>
                         AppError::new("REDIS_KEY_BROWSE_FAILED", "Redis 拒绝读取键空间，请检查账号权限和服务日志"),
+                    _ if matches!(command, "SET" | "PEXPIRE" | "PERSIST") =>
+                        AppError::new("REDIS_KEY_EDIT_FAILED", "Redis 未接受键值或过期时间修改，请检查账号权限和服务日志"),
                     _ if command == "INFO" => AppError::new(
                         "REDIS_INFO_FAILED",
                         "Redis 拒绝请求，请检查服务日志与账号权限",
@@ -571,6 +603,12 @@ fn truncate_preview(value: String, max_bytes: usize) -> (String, bool) {
     (format!("{}…", &value[..end]), true)
 }
 
+fn redis_key_revision(key: &str, key_type: &str, value: Option<&str>, elements: Option<u64>) -> String {
+    use sha2::{Digest, Sha256};
+    let payload = format!("{key}\n{key_type}\n{}\n{}", value.unwrap_or_default(), elements.map(|n| n.to_string()).unwrap_or_default());
+    hex::encode(Sha256::digest(payload.as_bytes()))
+}
+
 fn redis_cardinality(client: &mut RedisClient, key_type: &str, key: &str) -> Option<u64> {
     let command = match key_type {
         "list" => "LLEN",
@@ -680,6 +718,7 @@ pub(crate) fn redis_key_preview(
     } else {
         (None, false)
     };
+    let revision = redis_key_revision(&request.key, &key_type, value.as_deref(), elements);
     Ok(RedisKeyPreview {
         version: request.version.clone(),
         database: request.database,
@@ -690,7 +729,92 @@ pub(crate) fn redis_key_preview(
         elements,
         value,
         value_truncated,
+        revision,
     })
+}
+
+pub(crate) fn redis_key_update(
+    port: u16,
+    credentials: &RedisCredentials,
+    pids: &[u32],
+    request: &RedisKeyUpdateRequest,
+) -> crate::error::Result<RedisKeyUpdateReceipt> {
+    use crate::error::AppError;
+    validate_key_name(&request.key)?;
+    if request.revision.trim().is_empty() {
+        return Err(AppError::new("REDIS_KEY_REVISION_REQUIRED", "键详情已过期，请重新读取后再保存"));
+    }
+    let value = request.value.as_ref();
+    if value.is_some_and(|value| value.len() > 1024 * 1024) {
+        return Err(AppError::new("REDIS_VALUE_TOO_LARGE", "字符串值不能超过 1 MiB"));
+    }
+    let ttl_mode = request.ttl_mode.as_str();
+    if !matches!(ttl_mode, "preserve" | "persist" | "duration") {
+        return Err(AppError::new("REDIS_TTL_INVALID", "过期时间设置无效，请重新选择"));
+    }
+    if ttl_mode == "duration" && !(1..=31_536_000_000_000_i64).contains(&request.ttl_ms) {
+        return Err(AppError::new("REDIS_TTL_INVALID", "过期时间必须在 1 毫秒到 1000 年之间"));
+    }
+    let mut client = RedisClient::connect(port, credentials, Some(pids))?;
+    client.select_database(request.database)?;
+    let key_type = client.key_type(&request.key)?;
+    if key_type == "none" {
+        return Err(AppError::new("REDIS_KEY_GONE", "这个键已不存在，请刷新键详情"));
+    }
+    let current_value = if key_type == "string" {
+        match client.command(&["GET", request.key.as_str()])? {
+            RedisReply::Bulk(value) => Some(value),
+            RedisReply::Nil => return Err(AppError::new("REDIS_KEY_GONE", "这个键已不存在，请刷新键详情")),
+            _ => return Err(AppError::new("REDIS_PROTOCOL_ERROR", "Redis 未返回有效的字符串值")),
+        }
+    } else {
+        None
+    };
+    if value.is_some() && key_type != "string" {
+        return Err(AppError::new("REDIS_VALUE_TYPE_UNSUPPORTED", "只有字符串键支持直接编辑值；集合键可以调整过期时间"));
+    }
+    let elements = redis_cardinality(&mut client, &key_type, &request.key);
+    let current_revision = redis_key_revision(&request.key, &key_type, current_value.as_deref(), elements);
+    if current_revision != request.revision {
+        return Err(AppError::new("REDIS_KEY_CHANGED", "这个键在读取后已被其他客户端修改，请刷新详情后重试"));
+    }
+    let current_ttl = client.key_ttl(&request.key)?;
+    if current_ttl == -2 {
+        return Err(AppError::new("REDIS_KEY_GONE", "这个键已不存在，请刷新键详情"));
+    }
+    let mut command: Vec<String> = Vec::new();
+    if let Some(value) = value {
+        // XX 防止键在读取校验后恰好过期时被意外重新创建。
+        command.extend(["SET".into(), request.key.clone(), value.clone(), "XX".into()]);
+        match ttl_mode {
+            "duration" => command.extend(["PX".into(), request.ttl_ms.to_string()]),
+            "preserve" if current_ttl > 0 => command.extend(["PX".into(), current_ttl.to_string()]),
+            _ => {}
+        }
+        let args = command.iter().map(String::as_str).collect::<Vec<_>>();
+        match client.command(&args)? {
+            RedisReply::Simple(message) | RedisReply::Bulk(message) if message.eq_ignore_ascii_case("OK") => {}
+            RedisReply::Nil => return Err(AppError::new("REDIS_KEY_GONE", "这个键已不存在，请刷新键详情")),
+            _ => return Err(AppError::new("REDIS_KEY_EDIT_FAILED", "Redis 未返回保存确认，键值未能确认已更新")),
+        }
+    } else {
+        let response = match ttl_mode {
+            "persist" => client.command(&["PERSIST", request.key.as_str()])?,
+            "duration" => {
+                let ttl = request.ttl_ms.to_string();
+                client.command(&["PEXPIRE", request.key.as_str(), ttl.as_str()])?
+            }
+            "preserve" => return Err(AppError::new("REDIS_TTL_NOOP", "没有需要保存的键值或过期时间变化")),
+            _ => unreachable!(),
+        };
+        match response {
+            RedisReply::Integer(1) => {}
+            RedisReply::Bulk(value) if value == "1" => {}
+            RedisReply::Integer(0) if ttl_mode == "persist" => {}
+            _ => return Err(AppError::new("REDIS_KEY_GONE", "键已不存在或过期时间未能更新，请刷新详情")),
+        }
+    }
+    Ok(RedisKeyUpdateReceipt { version: request.version.clone(), database: request.database, key: request.key.clone(), updated: true })
 }
 
 pub(crate) fn redis_key_delete(

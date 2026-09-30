@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ChevronLeft, ChevronRight, Eye, Loader2, RefreshCw, Search, Trash2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, Eye, Loader2, Pencil, RefreshCw, Save, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as api from "@/lib/api";
@@ -167,21 +167,58 @@ export function RedisKeyBrowser({ version, running, signature }: { version?: str
         </form>
       </DialogContent>
     </Dialog>
-    {selectedKey && version && <RedisKeyPreviewDialog key={`${signature}:${database}:${selectedKey}`} version={version} database={Number(database)} keyName={selectedKey} onClose={() => setSelectedKey(null)} />}
+    {selectedKey && version && <RedisKeyPreviewDialog key={`${signature}:${database}:${selectedKey}`} version={version} database={Number(database)} keyName={selectedKey} onClose={() => setSelectedKey(null)} onSaved={() => void queryClient.invalidateQueries({ queryKey: ["redis-keys", signature, database] })} />}
   </>;
 }
 
-function RedisKeyPreviewDialog({ version, database, keyName, onClose }: { version: string; database: number; keyName: string; onClose: () => void }) {
+function RedisKeyPreviewDialog({ version, database, keyName, onClose, onSaved }: { version: string; database: number; keyName: string; onClose: () => void; onSaved: () => void }) {
   const t = useT();
   const query = useQuery({ queryKey: ["redis-key-preview", version, database, keyName], queryFn: () => api.redisKeyPreview({ version, database, key: keyName }), retry: false, refetchOnWindowFocus: false });
   const parsedError = query.error ? normalizeError(query.error) : null;
-  return <Dialog open onOpenChange={open => !open && onClose()}><DialogContent className="flex max-h-[85dvh] max-w-2xl flex-col overflow-hidden"><DialogHeader><DialogTitle className="pr-6">{t("redisBrowser.previewTitle")}</DialogTitle><DialogDescription className="break-all font-mono">{keyName}</DialogDescription></DialogHeader><div className="min-h-0 space-y-4 overflow-y-auto px-0.5">
+  const [editing, setEditing] = React.useState(false);
+  const [draftValue, setDraftValue] = React.useState("");
+  const [ttlMode, setTtlMode] = React.useState<api.RedisKeyTtlMode>("preserve");
+  const [ttlSeconds, setTtlSeconds] = React.useState("");
+  const [saveBusy, setSaveBusy] = React.useState(false);
+  const [saveError, setSaveError] = React.useState("");
+  React.useEffect(() => {
+    if (!editing && query.data) {
+      setDraftValue(query.data.value ?? "");
+      setTtlMode("preserve");
+      setTtlSeconds("");
+    }
+  }, [editing, query.data]);
+  const beginEdit = () => {
+    if (!query.data) return;
+    setDraftValue(query.data.value ?? ""); setTtlMode("preserve"); setTtlSeconds(""); setSaveError(""); setEditing(true);
+  };
+  const ttlSecondsValid = ttlMode !== "duration" || (/^\d+$/.test(ttlSeconds) && Number(ttlSeconds) > 0 && Number(ttlSeconds) <= 31_536_000_000);
+  const canSave = !!query.data && !saveBusy && ttlSecondsValid && (ttlMode !== "preserve" || query.data.keyType === "string" && !query.data.valueTruncated && draftValue !== query.data.value);
+  const save = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!query.data || !canSave) return;
+    setSaveBusy(true); setSaveError("");
+    try {
+      await api.redisKeyUpdate({ version, database, key: keyName, value: query.data.keyType === "string" && !query.data.valueTruncated ? draftValue : null, ttlMode, ttlMs: ttlMode === "duration" ? Number(ttlSeconds) * 1000 : 0, revision: query.data.revision });
+      await query.refetch(); onSaved(); setEditing(false); toast.success(t("redisBrowser.updated"));
+    } catch (error) {
+      setSaveError(normalizeError(error).message);
+    } finally { setSaveBusy(false); }
+  };
+  return <Dialog open onOpenChange={open => !open && !saveBusy && onClose()}><DialogContent className="flex max-h-[85dvh] max-w-2xl flex-col overflow-hidden"><DialogHeader><div className="flex min-w-0 items-start justify-between gap-3"><div className="min-w-0"><DialogTitle className="pr-6">{t("redisBrowser.previewTitle")}</DialogTitle><DialogDescription className="break-all font-mono">{keyName}</DialogDescription></div>{query.data && <Button type="button" size="sm" variant={editing ? "secondary" : "outline"} disabled={query.isFetching || saveBusy} onClick={() => editing ? setEditing(false) : beginEdit()}>{editing ? t("redisBrowser.cancelEdit") : <><Pencil className="h-3.5 w-3.5" />{t("redisBrowser.edit")}</>}</Button>}</div></DialogHeader><div className="min-h-0 space-y-4 overflow-y-auto px-0.5">
     {query.isPending && <p role="status" className="flex items-center gap-2 text-sm text-muted"><Loader2 className="h-4 w-4 animate-spin" />{t("redisBrowser.previewLoading")}</p>}
     {parsedError && <div className="space-y-2"><p role="alert" className="break-words text-sm text-error">{parsedError.message}</p>{parsedError.hint && <p className="break-words text-xs leading-5 text-muted">{parsedError.hint}</p>}<Button type="button" size="sm" variant="secondary" disabled={query.isFetching} onClick={() => void query.refetch()}>{t("redisBrowser.retry")}</Button></div>}
     {query.data && <>
       <div className="grid min-w-0 gap-3 sm:grid-cols-3"><div className="min-w-0 rounded-lg bg-fill p-3"><p className="text-[11px] text-muted">{t("redisBrowser.type")}</p><p className="mt-1 break-all text-sm font-medium">{query.data.keyType}</p></div><div className="min-w-0 rounded-lg bg-fill p-3"><p className="text-[11px] text-muted">{t("redisBrowser.ttl")}</p><p className="mt-1 text-sm font-medium">{formatTtl(t, query.data.ttlMs)}</p></div><div className="min-w-0 rounded-lg bg-fill p-3"><p className="text-[11px] text-muted">{t("redisBrowser.memory")}</p><p className="mt-1 text-sm font-medium">{formatBytes(query.data.memoryBytes)}</p></div></div>
       {query.data.elements != null && <p className="text-xs text-muted">{t("redisBrowser.elements").replace("{n}", String(query.data.elements))}</p>}
-      {query.data.value != null ? <div className="min-w-0 space-y-2"><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm font-medium">{t("redisBrowser.value")}</p>{!query.data.valueTruncated && <CopyButton text={query.data.value} />}</div><pre tabIndex={0} className="max-h-72 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-fill p-3 font-mono text-xs leading-5">{query.data.value}</pre>{query.data.valueTruncated && <p className="text-xs leading-5 text-warn">{t("redisBrowser.valueTruncated")}</p>}</div> : <p className="rounded-lg bg-fill p-3 text-xs leading-5 text-muted">{t("redisBrowser.collectionHint")}</p>}
+      {editing ? <form className="space-y-4 border-t border-dashed border-border pt-4" onSubmit={save}>
+        {query.data.value != null && !query.data.valueTruncated && <div className="space-y-1.5"><Label htmlFor="redis-key-value">{t("redisBrowser.editValue")}</Label><textarea id="redis-key-value" value={draftValue} disabled={saveBusy} spellCheck={false} onChange={event => setDraftValue(event.target.value)} className="min-h-36 w-full resize-y rounded-lg border border-border bg-fill p-3 font-mono text-xs leading-5 outline-none focus-visible:ring-2 focus-visible:ring-primary" /><p className="text-xs leading-5 text-muted">{t("redisBrowser.editValueHint")}</p></div>}
+        {query.data.valueTruncated && <p className="rounded-lg bg-warn-soft p-3 text-xs leading-5 text-warn">{t("redisBrowser.valueTruncatedEditHint")}</p>}
+        <div className="space-y-1.5"><Label htmlFor="redis-key-ttl-mode">{t("redisBrowser.ttlAction")}</Label><Select value={ttlMode} disabled={saveBusy} onValueChange={(value: api.RedisKeyTtlMode) => { setTtlMode(value); if (value !== "duration") setTtlSeconds(""); }}><SelectTrigger id="redis-key-ttl-mode"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="preserve">{t("redisBrowser.ttlPreserve")}</SelectItem><SelectItem value="persist">{t("redisBrowser.ttlPersist")}</SelectItem><SelectItem value="duration">{t("redisBrowser.ttlDuration")}</SelectItem></SelectContent></Select></div>
+        {ttlMode === "duration" && <div className="space-y-1.5"><Label htmlFor="redis-key-ttl-seconds">{t("redisBrowser.ttlSeconds")}</Label><Input id="redis-key-ttl-seconds" type="number" min={1} max={31_536_000_000} step={1} inputMode="numeric" value={ttlSeconds} disabled={saveBusy} placeholder={t("redisBrowser.ttlSecondsPlaceholder")} aria-invalid={!ttlSecondsValid} onChange={event => setTtlSeconds(event.target.value)} /><p className="text-xs leading-5 text-muted">{t("redisBrowser.ttlHint")}</p></div>}
+        {saveError && <p role="alert" className="break-words text-sm text-error">{saveError}</p>}
+        <DialogFooter className="flex-col-reverse sm:flex-row"><Button type="button" variant="ghost" disabled={saveBusy} onClick={() => setEditing(false)}>{t("redisBrowser.cancelEdit")}</Button><Button type="submit" disabled={!canSave}>{saveBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}{saveBusy ? t("redisBrowser.saving") : t("redisBrowser.saveEdit")}</Button></DialogFooter>
+      </form> : query.data.value != null ? <div className="min-w-0 space-y-2"><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm font-medium">{t("redisBrowser.value")}</p>{!query.data.valueTruncated && <CopyButton text={query.data.value} />}</div><pre tabIndex={0} className="max-h-72 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-fill p-3 font-mono text-xs leading-5">{query.data.value}</pre>{query.data.valueTruncated && <p className="text-xs leading-5 text-warn">{t("redisBrowser.valueTruncated")}</p>}</div> : <p className="rounded-lg bg-fill p-3 text-xs leading-5 text-muted">{t("redisBrowser.collectionHint")}</p>}
     </>}
-  </div><DialogFooter><Button type="button" variant="ghost" onClick={onClose}>{t("common.close")}</Button></DialogFooter></DialogContent></Dialog>;
+  </div>{!editing && <DialogFooter><Button type="button" variant="ghost" onClick={onClose}>{t("common.close")}</Button></DialogFooter>}</DialogContent></Dialog>;
 }

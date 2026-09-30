@@ -1350,6 +1350,8 @@ const redisKeysPreview = [
   { key: "metrics:requests", keyType: "zset", ttlMs: -1, elements: 12 },
   { key: "jobs:events", keyType: "stream", ttlMs: 86_400_000, elements: 18 },
 ];
+const redisKeyRevisionPreview = (entry: { key: string; keyType: string; value?: string; elements?: number }) =>
+  [entry.key, entry.keyType, entry.value ?? "", entry.elements ?? ""].join("\n");
 
 export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   await delay(60 + Math.random() * 120);
@@ -3735,7 +3737,33 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const database = Number(request.database ?? 0);
       const entry = redisFlushedDatabasesPreview.has(`${String(request.version)}:${database}`) ? undefined : redisKeysPreview.find(item => item.key === String(request.key));
       if (!entry) throw { code: "REDIS_KEY_GONE", message: "这个键已不存在，请刷新键空间列表" };
-      return { version: String(request.version), database: Number(request.database ?? 0), key: entry.key, keyType: entry.keyType, ttlMs: entry.ttlMs, memoryBytes: 1024 + entry.key.length * 8, elements: entry.elements, value: entry.value, valueTruncated: false } as T;
+      return { version: String(request.version), database: Number(request.database ?? 0), key: entry.key, keyType: entry.keyType, ttlMs: entry.ttlMs, memoryBytes: 1024 + entry.key.length * 8, elements: entry.elements, value: entry.value, valueTruncated: false, revision: redisKeyRevisionPreview(entry) } as T;
+    }
+    case "redis_key_update": {
+      const service = services.get("redis");
+      const request = (args?.request ?? {}) as Record<string, unknown>;
+      const version = String(request.version ?? "");
+      const database = Number(request.database ?? 0);
+      const key = String(request.key ?? "");
+      if (service?.state !== "running" || service.version !== version) throw { code: "REDIS_INSTANCE_CHANGED", message: "运行中的 Redis 版本已变化，请刷新后重试" };
+      if (redisFlushedDatabasesPreview.has(`${version}:${database}`)) throw { code: "REDIS_KEY_GONE", message: "这个键已不存在，请刷新键空间列表" };
+      const entry = redisKeysPreview.find(item => item.key === key);
+      if (!entry) throw { code: "REDIS_KEY_GONE", message: "这个键已不存在，请刷新键详情" };
+      if (String(request.revision ?? "") !== redisKeyRevisionPreview(entry)) throw { code: "REDIS_KEY_CHANGED", message: "这个键在读取后已被其他客户端修改，请刷新详情后重试" };
+      const ttlMode = String(request.ttlMode ?? "");
+      const value = request.value == null ? null : String(request.value);
+      const ttlMs = Number(request.ttlMs ?? 0);
+      if (!['preserve', 'persist', 'duration'].includes(ttlMode)) throw { code: "REDIS_TTL_INVALID", message: "过期时间设置无效，请重新选择" };
+      if (ttlMode === "duration" && (!Number.isInteger(ttlMs) || ttlMs <= 0 || ttlMs > 31_536_000_000_000)) throw { code: "REDIS_TTL_INVALID", message: "过期时间必须在 1 毫秒到 1000 年之间" };
+      if (value !== null) {
+        if (entry.keyType !== "string") throw { code: "REDIS_VALUE_TYPE_UNSUPPORTED", message: "只有字符串键支持直接编辑值；集合键可以调整过期时间" };
+        entry.value = value;
+      } else if (ttlMode === "preserve") {
+        throw { code: "REDIS_TTL_NOOP", message: "没有需要保存的键值或过期时间变化" };
+      }
+      if (ttlMode === "persist") entry.ttlMs = -1;
+      if (ttlMode === "duration") entry.ttlMs = ttlMs;
+      return { version, database, key, updated: true } as T;
     }
     case "redis_key_delete": {
       const service = services.get("redis");

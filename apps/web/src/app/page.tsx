@@ -19,6 +19,7 @@ import {
   LayoutGrid,
   List as ListIcon,
   Search,
+  RefreshCw,
 } from "lucide-react";
 import { useUI, useT } from "@/lib/store";
 import {
@@ -33,6 +34,7 @@ import {
 import * as api from "@/lib/api";
 import { SiteTerminalButton } from "@/components/sites/site-terminal";
 import { normalizeError } from "@/lib/backend";
+import { cn } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -62,11 +64,23 @@ export default function DashboardPage() {
   const [serviceQuery, setServiceQuery] = React.useState("");
   const [serviceFilter, setServiceFilter] = React.useState<DashboardServiceFilter>("all");
   const [serviceCategory, setServiceCategory] = React.useState("all");
+  const [manualRefreshing, setManualRefreshing] = React.useState(false);
   const stacks = stacksQuery.data;
   const dashboardReady = servicesQuery.dataUpdatedAt > 0 && sitesQuery.dataUpdatedAt > 0 && stacksQuery.dataUpdatedAt > 0;
   const dashboardError = servicesQuery.error || sitesQuery.error || stacksQuery.error;
   const retryDashboard = () => {
     void Promise.all([servicesQuery.refetch(), sitesQuery.refetch(), stacksQuery.refetch()]);
+  };
+  const refreshDashboard = async () => {
+    if (manualRefreshing) return;
+    setManualRefreshing(true);
+    try {
+      await Promise.all([servicesQuery.refetch(), sitesQuery.refetch(), stacksQuery.refetch()]);
+    } catch (error) {
+      toastError(error, t("dash.refreshFailed"));
+    } finally {
+      setManualRefreshing(false);
+    }
   };
   const runningCount = services.filter((s) => s.state === "running").length;
   const serviceCategories = React.useMemo(
@@ -211,6 +225,17 @@ export default function DashboardPage() {
                     </SelectContent>
                   </Select>}
                   {serviceFiltersActive && <Button variant="ghost" size="sm" onClick={resetServiceFilters}>{t("packages.resetFilters")}</Button>}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => void refreshDashboard()}
+                    disabled={manualRefreshing || stackBusy}
+                    title={t("dash.refreshHint")}
+                    aria-label={t("dash.refresh")}
+                  >
+                    <RefreshCw className={cn("h-3.5 w-3.5", manualRefreshing && "animate-spin")} />
+                    <span className="hidden sm:inline">{t("dash.refresh")}</span>
+                  </Button>
                   {/* 卡片 / 列表切换（Apple 分段控件） */}
                   <Tabs
                     value={view}

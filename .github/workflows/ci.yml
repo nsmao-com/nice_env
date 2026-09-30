@@ -105,7 +105,10 @@ jobs:
       - name: Test core crate
         run: |
           set +e
-          cargo test -p nsb-core --no-fail-fast 2>&1 | tee /tmp/core-test.log
+          # 部分验收测试会启动真实的子进程并共享控制通道；Linux runner 上并行调度
+          # 会让它们在不同测试之间争用启动/退出窗口，造成非确定性失败。串行运行
+          # 仍保留 --no-fail-fast 的完整覆盖，同时让失败结果可重复定位。
+          cargo test -p nsb-core --no-fail-fast -- --test-threads=1 2>&1 | tee /tmp/core-test.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
             # 失败摘要写进 GitHub 注解：日志需要仓库权限才能看，注解是公开可见的，

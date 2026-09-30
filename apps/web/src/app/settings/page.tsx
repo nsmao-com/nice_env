@@ -197,6 +197,7 @@ export default function SettingsPage() {
   const { setTheme, resolvedTheme } = useTheme();
   const setLang = useUI((s) => s.setLang);
   const setCodeDefaults = useUI((s) => s.setCodeDefaults);
+  const queryClient = useQueryClient();
   const [settings, setSettings] = React.useState<AppSettings | null>(null);
   const [checking, setChecking] = React.useState(false);
   const [manifestSyncing, setManifestSyncing] = React.useState(false);
@@ -232,6 +233,7 @@ export default function SettingsPage() {
     try {
       // 保存后再拉取，确保点击同步时使用的地址与下次启动读取的设置一致。
       await api.setSetting("manifestUrl", url);
+      queryClient.setQueryData<AppSettings>(["settings"], (current) => current ? { ...current, manifestUrl: url } : current);
       const result = await api.refreshRemoteManifest(url);
       await manifestQuery.refetch();
       const revision = typeof result?.revision === "number" ? result.revision : "?";
@@ -248,6 +250,9 @@ export default function SettingsPage() {
     try {
       const s = await api.getSettings();
       setSettings(s);
+      // 设置页使用本地草稿，但其它页面通过 useSettings 读取 React Query。
+      // 每次重新读取都同步缓存，避免返回站点向导/项目扫描时继续使用旧值。
+      queryClient.setQueryData<AppSettings>(["settings"], s);
       setLang(s.language);
       // 外观统一走 applyAppearance，避免只生效一半（主题色变了字体没变这类）
       applyAppearance(s);
@@ -255,7 +260,7 @@ export default function SettingsPage() {
     } catch (e) {
       toastError(e);
     }
-  }, [setLang, setCodeDefaults]);
+  }, [queryClient, setLang, setCodeDefaults]);
 
   React.useEffect(() => {
     let active = true;
@@ -296,8 +301,11 @@ export default function SettingsPage() {
 
   const update = async (key: keyof AppSettings, value: unknown) => {
     if (!settings) return;
+    const previous = settings;
     const next = { ...settings, [key]: value } as AppSettings;
     setSettings(next);
+    // 先乐观更新共享缓存，让设置保存后立刻影响向导、扫描器和其它页面。
+    queryClient.setQueryData<AppSettings>(["settings"], next);
     applyAppearance(next);
     if (
       key === "codeLineNumbers" ||
@@ -315,6 +323,30 @@ export default function SettingsPage() {
     try {
       await api.setSetting(key, value);
     } catch (e) {
+      // 只在当前值仍是本次写入的值时回滚，避免较慢的旧请求覆盖用户后续的新选择。
+      setSettings((current) => {
+        if (!current || current[key] !== value) return current;
+        const restored = { ...current, [key]: previous[key] } as AppSettings;
+        applyAppearance(restored);
+        if (
+          key === "codeLineNumbers" ||
+          key === "codeWrap" ||
+          key === "codeTheme" ||
+          key === "codeBg"
+        ) {
+          setCodeDefaults({
+            lineNumbers: restored.codeLineNumbers,
+            wrap: restored.codeWrap,
+            theme: restored.codeTheme,
+            bg: restored.codeBg,
+          });
+        }
+        return restored;
+      });
+      queryClient.setQueryData<AppSettings>(["settings"], (current) => {
+        if (!current || current[key] !== value) return current;
+        return { ...current, [key]: previous[key] } as AppSettings;
+      });
       toastError(e);
     }
   };
@@ -511,6 +543,7 @@ export default function SettingsPage() {
     };
     const next = { ...settings, ...defaults } as AppSettings;
     setSettings(next);
+    queryClient.setQueryData<AppSettings>(["settings"], next);
     applyAppearance(next);
     setCodeDefaults({ lineNumbers: true, wrap: true, theme: "auto", bg: "" });
     const failed: string[] = [];
@@ -522,6 +555,8 @@ export default function SettingsPage() {
       }
     }
     if (failed.length > 0) {
+      // 部分写入失败时以磁盘实际值恢复，避免页面和其它页面继续显示未保存的默认值。
+      await load();
       toast.error(t("appearance.resetFailed"), { description: failed.join("\n") });
       return;
     }
@@ -662,9 +697,15 @@ export default function SettingsPage() {
                             onClick={() => {
                               const next = { ...settings, accentHue: p.hue, accentHex: "" };
                               setSettings(next);
+                              queryClient.setQueryData<AppSettings>(["settings"], next);
                               applyAppearance(next);
-                              api.setSetting("accentHue", p.hue).catch(toastError);
-                              api.setSetting("accentHex", "").catch(toastError);
+                              void Promise.all([
+                                api.setSetting("accentHue", p.hue),
+                                api.setSetting("accentHex", ""),
+                              ]).catch(async (error) => {
+                                await load();
+                                toastError(error);
+                              });
                             }}
                             className={cn(
                               "group/sw relative flex h-9 w-9 items-center justify-center rounded-full border transition-all",

@@ -1,6 +1,6 @@
 {
-  "revision": 10,
-  "updated": "2026-09-29",
+  "revision": 11,
+  "updated": "2026-09-30",
   "note": "macOS 清单（aarch64/x86_64；MongoDB Shell / Database Tools 提供双架构，其余条目为 arm64 构建）。当前仅收录已在源头验证可达（HTTP 206/200）的二进制；PHP/Nginx/Redis 的 macOS 官方二进制不存在或需源码编译，候选源见 README「在 macOS 上构建」章节，待 mac 端验证后补入。",
   "packages": [
     {
@@ -29,6 +29,31 @@
         "repo": "mongodb-js/mongosh",
         "tagPrefix": "v",
         "assetMatch": "^mongosh-[\\d.]+-darwin-arm64\\.zip$"
+      }
+    },
+    {
+      "id": "mongodb-database-tools",
+      "version": "100.19.1",
+      "category": "tool",
+      "displayName": "MongoDB Database Tools",
+      "description": "MongoDB 官方备份、恢复、导入导出及监控命令；包含 mongodump、mongorestore 等 8 个工具",
+      "homepage": "https://www.mongodb.com/docs/database-tools/",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "kind": "archive",
+      "url": "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-macos-arm64-100.19.1.zip",
+      "sha256": "54643d4aedb79ddc81797d6fb54113acf79f77fd82a5868b6674f6c74e1b3000",
+      "sizeBytes": 76422273,
+      "entry": "mongodb-database-tools-macos-arm64-100.19.1/bin/mongodump",
+      "versionSource": {
+        "kind": "mongodb-tools",
+        "entryTemplate": "mongodb-database-tools-macos-arm64-{version}/bin/mongodump",
+        "versionFilter": "^\\d+\\.\\d+\\.\\d+$",
+        "includePrerelease": false
       }
     },
     {
@@ -82,6 +107,31 @@
         "repo": "mongodb-js/mongosh",
         "tagPrefix": "v",
         "assetMatch": "^mongosh-[\\d.]+-darwin-x64\\.zip$"
+      }
+    },
+    {
+      "id": "mongodb-database-tools",
+      "version": "100.19.1",
+      "category": "tool",
+      "displayName": "MongoDB Database Tools",
+      "description": "MongoDB 官方备份、恢复、导入导出及监控命令；包含 mongodump、mongorestore 等 8 个工具",
+      "homepage": "https://www.mongodb.com/docs/database-tools/",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-macos-x86_64-100.19.1.zip",
+      "sha256": "1633f62c42d8cbff79b3f0b2475080ce9e1a536170fce632b64f83ae05520a4a",
+      "sizeBytes": 84167782,
+      "entry": "mongodb-database-tools-macos-x86_64-100.19.1/bin/mongodump",
+      "versionSource": {
+        "kind": "mongodb-tools",
+        "entryTemplate": "mongodb-database-tools-macos-x86_64-{version}/bin/mongodump",
+        "versionFilter": "^\\d+\\.\\d+\\.\\d+$",
+        "includePrerelease": false
       }
     },
     {
@@ -292,7 +342,7 @@
       "id": "mongodb",
       "version": "9.0.2",
       "category": "database",
-      "displayName": "MongoDB 8.0",
+      "displayName": "MongoDB 9.0.2",
       "description": "文档数据库（官方 tgz 发行）",
       "homepage": "https://www.mongodb.com",
       "os": [

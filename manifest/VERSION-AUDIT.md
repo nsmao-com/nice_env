@@ -1,12 +1,12 @@
-# 套件版本核对记录（2026-09-29）
+# 套件版本核对记录（2026-09-30）
 
-使用项目现有 `check_versions --all --json --force --manifest ...` 检查 Windows 的 53 个套件及 macOS 的 9 个套件；目录请求全部成功。下表是核对时相应平台/系列可安装的最高正式版，不代表每个产品所有平台的最高源码标签。Redis、Memcached 更换来源后再次强制刷新验证。
+使用项目现有 `check_versions --all --json --force --manifest ...` 检查 Windows 的 53 个套件及 macOS 的 9 个套件；Windows 的 52 个动态版本目录和 macOS 的 9 个动态版本目录均在线，phpMyAdmin 是固定清单条目且上游没有版本 API，另以官方下载页核对为 5.2.3。下表是核对时相应平台/系列可安装的最高正式版，不代表每个产品所有平台的最高源码标签。Redis、Memcached 更换来源后再次强制刷新验证。
 
 ## 本次处理
 
 - Redis：旧 `tporadowski/redis` 只能枚举到 5.0.14.1，切换到持续维护的 `redis-windows/redis-windows` MSYS2 便携包，内置 8.10.2。保留旧版 5.0.14.1 / 5.0.10，移除错误标为 5.0.14 的重复下载条目；历史安装入口继续兼容。
 - Memcached：旧 `jefyt/memcached-windows` 停在 1.6.8，改用 `nono303/memcached` 的版本 tag。下载固定 commit 的完整包并保留 Cygwin DLL，使用通用 SSE2 入口，内置 1.6.45。
-- 同步 Adminer 6.1.1、etcd 3.7.2、Mailpit 1.31.3、Meilisearch 1.54.1、MongoDB 9.0.2、Temurin JDK 21.0.12.1+1 的内置清单，保留原版本供选择；MongoDB 同步 Windows/macOS。
+- 同步 Adminer 6.1.1、etcd 3.7.2、Mailpit 1.31.3、Meilisearch 1.54.2、MongoDB 9.0.2、MongoDB Database Tools 100.19.1、Ollama 0.35.0、Temurin JDK 21.0.12.1+1 的内置清单，保留原版本供选择；MongoDB 同步 Windows/macOS。
 - Redis 适配嵌套程序目录、包含空格的 Windows/POSIX 参数路径、系统已核验的原生 PID 与 POSIX PID 差异、备份目录的路径转换。不会自动切换已安装版本或修改现有服务数据。
 
 ## 需要区分的版本含义
@@ -42,19 +42,19 @@
 | k6 | 2.3.0 | 目录正常，保留现有版本 |
 | mailpit | 1.31.3 | 更新内置版本 |
 | mariadb | 13.0.2 | 目录正常，保留现有版本 |
-| meilisearch | 1.54.1 | 更新内置版本 |
+| meilisearch | 1.54.2 | 更新内置版本 |
 | memcached | 1.6.45 | 更新来源及内置版本 |
 | mihomo | 1.19.31 | 目录正常，保留现有版本 |
 | minio | RELEASE.2025-09-07T16-13-09Z | 目录正常，保留现有版本 |
 | mongodb | 9.0.2 | 更新内置版本 |
-| mongodb-database-tools | 100.19.0 | 目录正常，保留现有版本 |
+| mongodb-database-tools | 100.19.1 | 更新内置版本 |
 | mongosh | 2.12.0 | 目录正常，保留现有版本 |
 | mysql | 26.7.0 | 目录正常，保留现有版本 |
 | nats | 2.15.0 | 目录正常，保留现有版本 |
 | neo4j | 2026.09.0 | 目录正常，保留现有版本 |
 | nginx | 1.31.6 | 目录正常，保留现有版本 |
 | node | 26.10.0 | 目录正常，保留现有版本 |
-| ollama | 0.34.4 | 目录正常，保留现有版本 |
+| ollama | 0.35.0 | 更新内置版本 |
 | php | 8.5.11 | 目录正常，保留现有版本 |
 | phpmyadmin | 5.2.3 | 目录正常，保留现有版本 |
 | postgresql | 18.6 | 目录正常，保留现有版本 |
@@ -86,7 +86,7 @@
 | go | 1.27.1 |
 | mihomo | 1.19.31 |
 | mongodb | 9.0.2 |
-| mongodb-database-tools | 100.19.0 |
+| mongodb-database-tools | 100.19.1 |
 | mongosh | 2.12.0 |
 | mysql | 26.7.0 |
 | nats | 2.15.0 |
@@ -98,7 +98,7 @@
 
 已完成的验证：
 
-- Windows 全量目录、最新安装包地址探测及缓存：54 项通过，0 项失败。
+- Windows 52 个动态目录、macOS 9 个动态目录、最新安装包地址探测及缓存均通过；phpMyAdmin 的固定版本通过官方下载页复核（其静态条目不会从 `check_versions` 动态枚举）。
 - Redis 8.10.2 与旧版 5.0.14.1：分别运行现有隔离集成用例，覆盖启停、端口回落、配置保留、认证、快照、备份/导入/恢复、密码设置及失败保护，均通过。8.x 夹具单独启用保护配置修改以注入 dbfilename 故障，此设置不进入产品默认配置。
 - Memcached 1.6.45：完整下载并核对 SHA256，原生程序 `VERSION`、`SET`、`GET` 验证通过。
 - 版本处理、Redis 协议/认证、安装器现有单元用例：41 项通过；未新增测试文件。
@@ -125,3 +125,15 @@
 - 新增于现有 `generic.rs` 测试模块的 RustFS 隔离回归通过：真实 Windows 1.0.0 程序、含空格目录、历史默认安装快照、保留自定义 cwd、连续两次启动/停止及 HTTP 200；原数据目录正确生成 `.rustfs.sys`，停止后托管进程退出。未新建测试文件。
 - MSVC 初次链接遇到 PDB/磁盘空间限制；仅清理本轮失败生成的目标文件，使用临时 rustc 参数禁用本次测试的调试符号、将增量缓存放到系统临时目录后完成测试，未修改项目构建配置。
 - 第二轮 `cargo check --workspace --all-targets` 与修改范围的 `git diff --check` 均通过；未运行前端 dev/build，未操作用户真实服务或数据库。
+
+## 第三轮：逐项上游复核（2026-09-30）
+
+本轮使用项目现有 `check_versions` 对 Windows 53 个套件、macOS 9 个套件执行强制刷新；52 个 Windows 动态目录与 9 个 macOS 动态目录在线，并对新增或变更的官方下载地址做了可达性与哈希核对。phpMyAdmin 没有动态版本源，官方下载页仍显示 5.2.3。发现以下三个套件需要补齐最新正式版：
+
+1. Meilisearch 从 `1.54.1` 更新至 `1.54.2`（Windows）。
+2. MongoDB Database Tools 从 `100.19.0` 更新至 `100.19.1`（Windows、macOS arm64、macOS x86_64）。三份新包的 SHA256/大小分别为 `527738a0f9ab2d80ea40cb8fc7a68f8e28664a2fd4e3b63626c2d4629aeb7f37` / 43,007,158 字节、`54643d4aedb79ddc81797d6fb54113acf79f77fd82a5868b6674f6c74e1b3000` / 76,422,273 字节、`1633f62c42d8cbff79b3f0b2475080ce9e1a536170fce632b64f83ae05520a4a` / 84,167,782 字节。
+3. Ollama 从 `0.34.4` 更新至 `0.35.0`（Windows）；官方目录已返回安装包地址与 SHA256，未下载 1.46 GB 安装包，仅做地址探测以避免无谓传输。
+
+同时纠正 Adminer 与 MongoDB 的显示名称，使其与实际版本一致。MySQL `26.7.0` 本轮在 Windows/macOS 官方发行目录中仍是可下载的最高正式版，因此保留。其余套件的清单最高版本与本轮上游目录一致，没有为了版本号变化而改动历史可选版本。
+
+第三轮验证边界：完成两平台全量目录刷新、变更包地址探测、MongoDB Database Tools 三架构实际下载哈希校验、JSON 解析及 `git diff --check`；未运行前端 dev/build，未启动用户服务，未修改数据库。

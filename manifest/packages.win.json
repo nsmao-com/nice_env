@@ -1,6 +1,6 @@
 {
-  "revision": 46,
-  "updated": "2026-09-29",
+  "revision": 47,
+  "updated": "2026-09-30",
   "packages": [
     {
       "id": "mongosh",
@@ -28,6 +28,31 @@
         "repo": "mongodb-js/mongosh",
         "tagPrefix": "v",
         "assetMatch": "^mongosh-[\\d.]+-win32-x64\\.zip$"
+      }
+    },
+    {
+      "id": "mongodb-database-tools",
+      "version": "100.19.1",
+      "category": "tool",
+      "displayName": "MongoDB Database Tools",
+      "description": "MongoDB 官方备份、恢复、导入导出及监控命令；包含 mongodump、mongorestore 等 8 个工具",
+      "homepage": "https://www.mongodb.com/docs/database-tools/",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-windows-x86_64-100.19.1.zip",
+      "sha256": "527738a0f9ab2d80ea40cb8fc7a68f8e28664a2fd4e3b63626c2d4629aeb7f37",
+      "sizeBytes": 43007158,
+      "entry": "mongodb-database-tools-windows-x86_64-100.19.1/bin/mongodump.exe",
+      "versionSource": {
+        "kind": "mongodb-tools",
+        "entryTemplate": "mongodb-database-tools-windows-x86_64-{version}/bin/mongodump.exe",
+        "versionFilter": "^\\d+\\.\\d+\\.\\d+$",
+        "includePrerelease": false
       }
     },
     {
@@ -321,7 +346,7 @@
       "id": "adminer",
       "version": "6.1.1",
       "category": "tool",
-      "displayName": "Adminer 4.8.1",
+      "displayName": "Adminer 6.1.1",
       "description": "单文件数据库管理器，作为内置站点挂载（Phase 3 启用）",
       "homepage": "https://adminer.org",
       "os": [
@@ -598,7 +623,7 @@
       "id": "mongodb",
       "version": "9.0.2",
       "category": "database",
-      "displayName": "MongoDB 8.0",
+      "displayName": "MongoDB 9.0.2",
       "description": "文档数据库（官方 zip 发行，含 mongod/mongos）",
       "os": [
         "windows"
@@ -1226,6 +1251,37 @@
         ],
         "health": "tcp",
         "healthTimeoutSec": 12
+      }
+    },
+    {
+      "id": "meilisearch",
+      "version": "1.54.2",
+      "category": "search",
+      "displayName": "Meilisearch",
+      "description": "轻量全文搜索引擎，开箱即用的中文搜索体验",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://github.com/meilisearch/meilisearch/releases/download/v1.54.2/meilisearch-windows-amd64.exe",
+      "sizeBytes": 352652288,
+      "entry": "meilisearch-windows-amd64.exe",
+      "homepage": "https://meilisearch.com",
+      "sha256": "c34967880cd01652cf41c8b7693733897b82d4fdeaed327d65c3dab3ae7ddff3",
+      "defaultPort": 7700,
+      "run": {
+        "args": [
+          "--db-path",
+          "{data}",
+          "--http-addr",
+          "127.0.0.1:{port}",
+          "--no-analytics"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 15
       }
     },
     {
@@ -2259,6 +2315,40 @@
       "entry": "perl/bin/perl.exe",
       "homepage": "https://strawberryperl.com",
       "sha256": "6a081a811781c30aca51dbc036afd93092af91e3297901f02c17043795a10690"
+    },
+    {
+      "id": "ollama",
+      "version": "0.35.0",
+      "category": "ai",
+      "displayName": "Ollama",
+      "description": "本地大模型运行时（1.4GB，含 CUDA 库；无 N 卡可删 lib/ollama/cuda_v12）",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "archive",
+      "url": "https://github.com/ollama/ollama/releases/download/v0.35.0/ollama-windows-amd64.zip",
+      "sizeBytes": 1461196158,
+      "entry": "ollama.exe",
+      "homepage": "https://ollama.com",
+      "sha256": "d6f7d3dd4f5d013553a78c1e78b2521fcf41d43dd2863e4596cdc046fe6036db",
+      "defaultPort": 11434,
+      "run": {
+        "args": [
+          "serve"
+        ],
+        "health": "tcp",
+        "healthTimeoutSec": 25,
+        "env": {
+          "OLLAMA_MODELS": "{data}/models",
+          "OLLAMA_HOST": "127.0.0.1:{port}"
+        },
+        "initDirs": [
+          "models"
+        ]
+      }
     },
     {
       "id": "ollama",

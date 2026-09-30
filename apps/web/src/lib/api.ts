@@ -620,6 +620,9 @@ export const siteFileRename = (id: string, path: string, newPath: string) =>
 export interface SiteFileUploadReceipt { siteId: string; path: string; sizeBytes: number }
 export const siteFileUpload = (id: string, source: string, path: string) =>
   safe(invoke<SiteFileUploadReceipt>("site_file_upload", { id, source, path }));
+export interface SiteFileDownloadReceipt { siteId: string; path: string; destination: string; sizeBytes: number }
+export const siteFileDownload = (id: string, path: string, destination: string) =>
+  safe(invoke<SiteFileDownloadReceipt>("site_file_download", { id, path, destination }));
 
 export const envRead = (siteId: string, fileName = ".env") => safe(invoke<EnvFileView>("env_read", { siteId, fileName }));
 export const envSave = (siteId: string, changes: [string, string][], expectedRevision: string, fileName = ".env") =>

@@ -279,6 +279,18 @@ function mockSiteFileUpload(siteId: string, source: string, path: string) {
   return { siteId: site.id, path: relative, sizeBytes: new TextEncoder().encode(content).length };
 }
 
+function mockSiteFileDownload(siteId: string, path: string, destination: string) {
+  const { site, files } = mockSiteTree(siteId);
+  const relative = mockSiteRelativePath(path, false);
+  if (!destination.trim()) mockSiteFileError("SITE_FILE_DEST_INVALID", "请选择有效的导出位置");
+  if (mockSensitiveSiteFile(relative)) mockSiteFileError("SITE_FILE_SENSITIVE", "环境变量和密钥文件请使用专用文件管理器导出");
+  const file = files.get(relative);
+  if (!file) mockSiteFileError("SITE_FILE_DOWNLOAD_INVALID", "只能导出站点目录中的普通文件");
+  const sizeBytes = new TextEncoder().encode(file.content).length;
+  if (sizeBytes > 64 * 1024 * 1024) mockSiteFileError("SITE_FILE_DOWNLOAD_TOO_LARGE", "文件超过 64 MiB，暂不支持在浏览器预览中导出");
+  return { siteId: site.id, path: relative, destination, sizeBytes };
+}
+
 function mockSiteFilePlan(id: string): SiteFilePlan {
   if (!sites.has(id)) throw { code: "SITE_NOT_FOUND", message: "站点已不存在" };
   const plan = siteFilePlans.get(id) ?? { status: { config: { enabled: false, frequency: "daily", time: "03:00", weekday: 0, monthDay: 1, keep: 10 }, nextAt: null, lastRunAt: null, finishedAt: null, state: "idle", message: "", files: [] }, project: true, excludeGenerated: true, scope: null, revision: "initial" };
@@ -1891,6 +1903,8 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return mockSiteFileRename(String(args?.id ?? ""), String(args?.path ?? ""), String(args?.newPath ?? "")) as T;
     case "site_file_upload":
       return mockSiteFileUpload(String(args?.id ?? ""), String(args?.source ?? ""), String(args?.path ?? "")) as T;
+    case "site_file_download":
+      return mockSiteFileDownload(String(args?.id ?? ""), String(args?.path ?? ""), String(args?.destination ?? "")) as T;
     case "site_network_info": {
       const site = sites.get(args?.id as string);
       if (!site) throw { code: "SITE_NOT_FOUND", message: "站点不存在，请刷新列表" };

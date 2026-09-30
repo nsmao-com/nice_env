@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, ChevronRight, FilePlus, FileText, Folder, FolderPlus, Loader2, Pencil, RefreshCw, Save, Trash2, Upload } from "lucide-react";
+import { AlertTriangle, ChevronRight, Download, FilePlus, FileText, Folder, FolderPlus, Loader2, Pencil, RefreshCw, Save, Trash2, Upload } from "lucide-react";
 import { useT } from "@/lib/store";
 import { isTauri, normalizeError } from "@/lib/backend";
 import * as api from "@/lib/api";
@@ -169,6 +169,35 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
     } finally { setWorking(false); }
   };
 
+  const downloadFile = async (entry: api.SiteFileEntry) => {
+    if (entry.directory || busyRef.current || disabled) return;
+    setWorking(true); setError(null);
+    try {
+      if (isTauri) {
+        const { save } = await import("@tauri-apps/plugin-dialog");
+        const destination = await save({
+          title: t("siteFiles.browserDownload" as never),
+          defaultPath: entry.name,
+        });
+        if (!destination) return;
+        await api.siteFileDownload(siteId, entry.path, destination);
+      } else {
+        // 浏览器预览没有本机文件路径，读取当前示例文本并生成真实下载文件。
+        const file = await api.siteFileRead(siteId, entry.path);
+        const url = URL.createObjectURL(new Blob([file.content], { type: "text/plain;charset=utf-8" }));
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = entry.name;
+        anchor.click();
+        window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      }
+      toast.success(t("siteFiles.browserDownloaded" as never));
+    } catch (failure) {
+      const parsed = normalizeError(failure);
+      setError([parsed.message, parsed.hint].filter(Boolean).join(" · "));
+    } finally { setWorking(false); }
+  };
+
   const renameEntryNow = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!renameEntry || !relativeNameValid(renameName) || busyRef.current || disabled) return;
@@ -242,7 +271,7 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
                <span className="min-w-0 flex-1 truncate font-mono">{entry.name}</span>
                <span className="shrink-0 text-[10px] text-faint">{entry.directory ? t("siteFiles.browserFolder" as never) : fmtBytes(entry.sizeBytes)}</span>
              </button>
-             <Button type="button" size="icon" variant="ghost" className="h-7 w-7 shrink-0" disabled={locked} aria-label={`${t("siteFiles.browserRename" as never)} ${entry.name}`} title={t("siteFiles.browserRename" as never)} onClick={() => { setRenameError(null); setRenameName(entry.name); setRenameEntry(entry); }}><Pencil className="size-3.5" /></Button><Button type="button" size="icon" variant="ghost" className="h-7 w-7 shrink-0 text-error hover:text-error" disabled={locked} aria-label={`${t("siteFiles.browserDelete" as never)} ${entry.name}`} title={t("siteFiles.browserDelete" as never)} onClick={() => { setDeleteError(null); setDeleteConfirmation(""); setDeleteEntry(entry); }}><Trash2 className="size-3.5" /></Button>
+             {!entry.directory && <Button type="button" size="icon" variant="ghost" className="h-7 w-7 shrink-0" disabled={locked} aria-label={`${t("siteFiles.browserDownload" as never)} ${entry.name}`} title={t("siteFiles.browserDownload" as never)} onClick={() => void downloadFile(entry)}><Download className="size-3.5" /></Button>}<Button type="button" size="icon" variant="ghost" className="h-7 w-7 shrink-0" disabled={locked} aria-label={`${t("siteFiles.browserRename" as never)} ${entry.name}`} title={t("siteFiles.browserRename" as never)} onClick={() => { setRenameError(null); setRenameName(entry.name); setRenameEntry(entry); }}><Pencil className="size-3.5" /></Button><Button type="button" size="icon" variant="ghost" className="h-7 w-7 shrink-0 text-error hover:text-error" disabled={locked} aria-label={`${t("siteFiles.browserDelete" as never)} ${entry.name}`} title={t("siteFiles.browserDelete" as never)} onClick={() => { setDeleteError(null); setDeleteConfirmation(""); setDeleteEntry(entry); }}><Trash2 className="size-3.5" /></Button>
            </div>)}
           {!directory.data.entries.length && <p className="p-4 text-center text-xs text-muted">{t("siteFiles.browserEmpty" as never)}</p>}
         </div>

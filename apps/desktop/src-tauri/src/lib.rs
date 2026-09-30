@@ -344,6 +344,7 @@ pub fn run() {
             site_file_create,
             site_file_rename,
             site_file_upload,
+            site_file_download,
             site_access_url,
             create_site,
             update_site,
@@ -1349,6 +1350,19 @@ async fn site_file_upload(
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(nsb_core::sitefiles::upload(&st.store, &id, &source, &path))
+    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn site_file_download(
+    state: State<'_, std::sync::Arc<CoreState>>,
+    id: String,
+    path: String,
+    destination: String,
+) -> Result<nsb_core::sitefiles::SiteFileDownloadReceipt, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(nsb_core::sitefiles::download(&st.store, &id, &path, &destination))
     }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

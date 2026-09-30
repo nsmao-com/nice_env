@@ -90,6 +90,15 @@ pub struct SiteFileUploadReceipt {
     pub size_bytes: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteFileDownloadReceipt {
+    pub site_id: String,
+    pub path: String,
+    pub destination: String,
+    pub size_bytes: u64,
+}
+
 fn site(store: &Store, id: &str) -> Result<Site> {
     store
         .list_sites()?
@@ -583,4 +592,78 @@ pub fn upload(store: &Store, id: &str, source: &str, path: &str) -> Result<SiteF
         .persist(&target)
         .map_err(|e| AppError::io("保存上传文件", e.error))?;
     Ok(SiteFileUploadReceipt { site_id: id.to_string(), path: display_path(&relative), size_bytes: copied })
+}
+
+/// 将站点目录中的普通文件导出到用户选择的目标位置。
+///
+/// 导出不覆盖已有文件，源文件和目标父目录都拒绝符号链接，避免文件管理器
+/// 操作被重定向到站点目录之外；复制期间持有站点变更锁，保证源文件不会被
+/// 本应用的其它文件操作同时替换。
+pub fn download(store: &Store, id: &str, path: &str, destination: &str) -> Result<SiteFileDownloadReceipt> {
+    let _sites = crate::sites::SITE_CHANGES.lock();
+    let root = root(store, id)?;
+    let relative = relative(Some(path))?;
+    if relative.as_os_str().is_empty() || sensitive_name(&relative) {
+        return Err(AppError::new(
+            "SITE_FILE_SENSITIVE",
+            "环境变量和密钥文件请使用专用编辑器或系统文件管理器导出",
+        ));
+    }
+    let source = checked_path(&root, &relative)?;
+    let source_meta = fs::symlink_metadata(&source).map_err(|e| AppError::io("读取站点文件", e))?;
+    if linked(&source_meta) || !source_meta.is_file() {
+        return Err(AppError::new("SITE_FILE_DOWNLOAD_INVALID", "只能导出站点目录中的普通文件"));
+    }
+    if source_meta.len() > MAX_UPLOAD_BYTES {
+        return Err(AppError::new("SITE_FILE_DOWNLOAD_TOO_LARGE", "文件超过 64 MiB，暂不支持在应用内导出"));
+    }
+    if destination.trim().is_empty() || destination.chars().any(char::is_control) {
+        return Err(AppError::new("SITE_FILE_DEST_INVALID", "请选择有效的导出位置"));
+    }
+    let target = PathBuf::from(destination);
+    if !target.is_absolute() {
+        return Err(AppError::new("SITE_FILE_DEST_INVALID", "导出位置必须是绝对路径"));
+    }
+    let parent = target.parent().filter(|value| !value.as_os_str().is_empty()).ok_or_else(|| {
+        AppError::new("SITE_FILE_DEST_INVALID", "导出位置缺少目标目录")
+    })?;
+    let parent_meta = fs::symlink_metadata(parent).map_err(|e| AppError::io("读取导出目录", e))?;
+    let mut ancestor = Some(parent);
+    while let Some(path) = ancestor {
+        let meta = fs::symlink_metadata(path).map_err(|e| AppError::io("读取导出目录", e))?;
+        if linked(&meta) {
+            return Err(AppError::new("SITE_FILE_DEST_INVALID", "导出目录不能经过符号链接或目录联接"));
+        }
+        ancestor = path.parent();
+    }
+    if !parent_meta.is_dir() {
+        return Err(AppError::new("SITE_FILE_DEST_INVALID", "导出目录不是可用的普通目录"));
+    }
+    let source_actual = source.canonicalize().map_err(|e| AppError::io("解析站点文件", e))?;
+    if target.canonicalize().is_ok_and(|actual| actual == source_actual) {
+        return Err(AppError::new("SITE_FILE_DEST_SAME", "导出位置不能是站点原文件，请另选文件名"));
+    }
+    if fs::symlink_metadata(&target).is_ok() {
+        return Err(AppError::new("SITE_FILE_DEST_EXISTS", "目标文件已存在，请另选文件名"));
+    }
+    let mut input = fs::File::open(&source).map_err(|e| AppError::io("读取站点文件", e))?;
+    let mut pending = tempfile::NamedTempFile::new_in(parent).map_err(|e| AppError::io("创建导出文件", e))?;
+    let copied = std::io::copy(&mut input, pending.as_file_mut()).map_err(|e| AppError::io("复制站点文件", e))?;
+    if copied != source_meta.len() {
+        return Err(AppError::new("SITE_FILE_CHANGED", "导出期间源文件发生变化，请重试"));
+    }
+    pending.as_file().sync_all().map_err(|e| AppError::io("保存导出文件", e))?;
+    pending.persist_noclobber(&target).map_err(|e| {
+        if e.error.kind() == std::io::ErrorKind::AlreadyExists {
+            AppError::new("SITE_FILE_DEST_EXISTS", "目标文件已存在，请另选文件名")
+        } else {
+            AppError::io("保存导出文件", e.error)
+        }
+    })?;
+    Ok(SiteFileDownloadReceipt {
+        site_id: id.to_string(),
+        path: display_path(&relative),
+        destination: target.to_string_lossy().into_owned(),
+        size_bytes: copied,
+    })
 }

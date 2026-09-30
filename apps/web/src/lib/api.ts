@@ -881,7 +881,7 @@ export const quitApp = () => safe(invoke<boolean>("quit_app"));
 
 /* 配置导入/导出 */
 export const exportConfig = (path: string) => safe(invoke<number>("export_config", { path }));
-export interface ImportReport {
+export interface ConfigImportReport {
   sites: number;
   skippedSites: number;
   settings: number;
@@ -891,10 +891,10 @@ export interface ImportReport {
   certMonitors: number;
   missingPackages: string[];
 }
-export const importConfig = (path: string) => safe(invoke<ImportReport>("import_config", { path }));
+export const importConfig = (path: string) => safe(invoke<ConfigImportReport>("import_config", { path }));
 /** 拖拽导入：WebView 拿不到文件真实路径，读文本交给后端解析 */
 export const importConfigText = (json: string) =>
-  safe(invoke<ImportReport>("import_config_text", { json }));
+  safe(invoke<ConfigImportReport>("import_config_text", { json }));
 
 export const exportLog = (id: string, dest: string) =>
   safe(invoke<number>("export_log", { id, dest }));
@@ -921,7 +921,7 @@ export interface SourceDb {
   name: string;
   sizeKb?: number;
 }
-export interface ImportReport {
+export interface DatabaseImportReport {
   imported: string[];
   failed: [string, string][];
 }
@@ -929,7 +929,7 @@ export const migrateListSource = (host: string, port: number, user: string, pass
   safe(invoke<SourceDb[]>("migrate_list_source", { host, port, user, password, version, engine }));
 export const migrateImport = (
   host: string, port: number, user: string, password: string, databases: string[], version?: string, engine: DatabaseEngine = "mysql"
-) => safe(invoke<ImportReport>("migrate_import", { host, port, user, password, databases, version, engine }));
+) => safe(invoke<DatabaseImportReport>("migrate_import", { host, port, user, password, databases, version, engine }));
 
 /* ===== DNS 一键接管（本地域名解析配套） ===== */
 export const dnsInterfaces = () => safe(invoke<string[]>("dns_interfaces"));

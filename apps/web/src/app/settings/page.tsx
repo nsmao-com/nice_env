@@ -323,7 +323,7 @@ export default function SettingsPage() {
 
   /** 导入成功后的统一收尾：重载设置 + 通知其它页面刷新缓存 */
   const afterImport = React.useCallback(
-    (r: api.ImportReport) => {
+    (r: api.ConfigImportReport) => {
       const desc = [
         `${t("settings.backup.rptSites")}: ${r.sites}`,
         `${t("settings.backup.rptSettings")}: ${r.settings}`,

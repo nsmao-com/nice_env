@@ -4,7 +4,7 @@ members = ["apps/desktop/src-tauri", "crates/core", "crates/platform"]
 
 [workspace.package]
 edition = "2021"
-version = "0.2.197"
+version = "0.2.198"
 license = "Proprietary"
 
 [workspace.dependencies]

@@ -28,7 +28,7 @@ export function DbImportDialog({ open, onOpenChange, version, engine, targetLabe
   const [selected, setSelected] = React.useState<Set<string>>(new Set());
   const [confirmed, setConfirmed] = React.useState(false);
   const [error, setError] = React.useState("");
-  const [report, setReport] = React.useState<api.ImportReport | null>(null);
+  const [report, setReport] = React.useState<api.DatabaseImportReport | null>(null);
   const valid = source.host.trim().length > 0 && source.user.trim().length > 0 && /^\d+$/.test(source.port) && Number(source.port) >= 1 && Number(source.port) <= 65535;
   const change = (field: keyof typeof source, value: string) => {
     if (busyRef.current) return;

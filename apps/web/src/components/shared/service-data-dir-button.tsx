@@ -16,7 +16,7 @@ export function ServiceDataDirButton({ service, disabled = false }: { service: S
   const t = useT();
   const [busy, setBusy] = React.useState(false);
   const baseId = service.id.split("@")[0];
-  if (!isTauri || BUILTIN_SERVICES.has(baseId) || baseId === "site-app" || baseId.startsWith("site-app:")) return null;
+  if (BUILTIN_SERVICES.has(baseId) || baseId === "site-app" || baseId.startsWith("site-app:")) return null;
 
   const open = async () => {
     if (busy || disabled) return;
@@ -32,14 +32,15 @@ export function ServiceDataDirButton({ service, disabled = false }: { service: S
   };
 
   const label = t("svc.dataDir" as never);
+  const hint = !isTauri ? t("svc.dataDirBrowserHint" as never) : `${label} · ${service.label}`;
   return <Button
     type="button"
     variant="ghost"
     size="sm"
     className="min-h-8 shrink-0 gap-1.5 px-2 text-[11px] text-primary"
-    disabled={disabled || busy}
+    disabled={disabled || busy || !isTauri}
     aria-label={`${label} · ${service.label}`}
-    title={`${label} · ${service.label}`}
+    title={hint}
     onClick={() => void open()}
   >
     {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderOpen className="h-3.5 w-3.5" />}

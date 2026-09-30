@@ -77,9 +77,9 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
       <Sidebar />
       <div className="nsb-workspace relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-card">
         <Topbar />
-        <main className="relative min-h-0 flex-1 overflow-y-auto">
+        <main className="relative min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
           {/* 路由内容由 Next 管理；避免退出动画保留旧树或让返回页面停留在透明状态。 */}
-          <div className="mx-auto h-full w-full max-w-[1240px] px-3 py-4 sm:px-6 sm:py-6">
+          <div className="mx-auto h-full min-w-0 w-full max-w-[1240px] px-3 py-4 sm:px-6 sm:py-6">
             <RecoveryAlert />
             <StartupStackAlert />
             {children}

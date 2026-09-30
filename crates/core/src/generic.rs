@@ -867,29 +867,126 @@ fn minio_web_target(r: &Resolved, settings: &MinioSettings) -> Result<String> {
     local_web_url("127.0.0.1", port, false, "/")
 }
 
-/// 根据监听 IP 生成链接；打开前再用系统监听表核实地址确实属于本机受管进程。
-fn local_web_url(address: &str, port: u16, https: bool, path: &str) -> Result<String> {
-    let host = match address {
-        "" | "0.0.0.0" | "localhost" => "127.0.0.1".to_string(),
-        "::" | "[::]" => "[::1]".to_string(),
-        other => {
-            let ip: std::net::IpAddr = other.trim_matches(['[', ']']).parse()
-                .map_err(|_| web_unavailable("管理台监听地址不是可识别的 IP，请按服务配置访问。"))?;
-            if ip.is_multicast() { return Err(web_unavailable("管理台不能使用组播地址。")); }
-            match ip {
-                std::net::IpAddr::V4(ip) => if ip.is_unspecified() { "127.0.0.1".into() } else { ip.to_string() },
-                std::net::IpAddr::V6(ip) => if ip.is_unspecified() { "[::1]".into() } else { format!("[{ip}]") },
-            }
+/// 将服务配置里的监听地址转换成可打开的 URL 主机部分。
+/// 此处只校验格式，不在服务启动的生命周期锁内等待 DNS；打开时再核实监听归属。
+fn local_web_host(raw: &str) -> Result<String> {
+    if raw.is_empty() || raw == "0.0.0.0" {
+        return Ok("127.0.0.1".into());
+    }
+    if raw == "::" || raw == "[::]" {
+        return Ok("[::1]".into());
+    }
+    if raw.chars().any(|c| {
+        c.is_control() || c.is_whitespace() || matches!(c, '/' | '\\' | '@' | '?' | '#' | '%')
+    }) {
+        return Err(web_unavailable(
+            "管理台监听地址包含无效字符，请检查服务配置。",
+        ));
+    }
+    let unbracketed = raw
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(raw);
+    if let Ok(ip) = unbracketed.parse::<std::net::IpAddr>() {
+        if ip.is_multicast() {
+            return Err(web_unavailable("管理台不能使用组播地址。"));
         }
+        return Ok(match ip {
+            std::net::IpAddr::V4(ip) if ip.is_unspecified() => "127.0.0.1".into(),
+            std::net::IpAddr::V4(ip) => ip.to_string(),
+            std::net::IpAddr::V6(ip) if ip.is_unspecified() => "[::1]".into(),
+            std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+        });
+    }
+    if raw.contains(['[', ']', ':']) {
+        return Err(web_unavailable("管理台监听地址不是有效的本地主机名或 IP。"));
+    }
+    // 与浏览器使用同一套 URL/IDNA 规范化；保留主机名供 Host/SNI 和证书校验使用。
+    let url = reqwest::Url::parse(&format!("http://{raw}/"))
+        .map_err(|_| web_unavailable("管理台监听主机名无效。"))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| web_unavailable("管理台监听主机名无效。"))?;
+    if host.parse::<std::net::IpAddr>().is_ok()
+        || host.len() > 254
+        || host.trim_end_matches('.').split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+        })
+    {
+        return Err(web_unavailable(
+            "管理台监听主机名无效，请使用完整 IP 或本地主机名。",
+        ));
+    }
+    Ok(host.to_string())
+}
+
+/// 限时解析主机名；解析本身不向目标发送 HTTP，也不把任意解析结果视为本机。
+fn resolve_web_host(host: &str, port: u16) -> Result<Vec<std::net::SocketAddr>> {
+    if port == 0 {
+        return Err(web_unavailable("管理台端口未启用。"));
+    }
+    let raw = host.trim_matches(['[', ']']);
+    let mut addresses = if let Ok(ip) = raw.parse::<std::net::IpAddr>() {
+        vec![std::net::SocketAddr::new(ip, port)]
+    } else {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .map_err(|_| web_unavailable("无法创建管理台主机名解析器。"))?;
+        let result = runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_millis(1500),
+                tokio::net::lookup_host((raw, port)),
+            )
+            .await
+            .map_err(|_| web_unavailable("管理台主机名解析超时，请检查本机 DNS 或 hosts 后重试。"))?
+            .map(|addresses| addresses.collect::<Vec<_>>())
+            .map_err(|_| web_unavailable("管理台主机名无法解析，请检查服务配置或本机 hosts。"))
+        });
+        // 系统 DNS 可能仍在阻塞线程执行，不能让 runtime 的析构无限等待。
+        runtime.shutdown_background();
+        result?
     };
-    if port == 0 { return Err(web_unavailable("管理台端口未启用。")); }
-    let mut url = reqwest::Url::parse(&format!("{}://{host}:{port}/", if https { "https" } else { "http" }))
-        .map_err(|_| web_unavailable("管理台地址无效，请检查服务配置。"))?;
+    addresses.retain(|address| !address.ip().is_unspecified() && !address.ip().is_multicast());
+    addresses.sort();
+    addresses.dedup();
+    if addresses.is_empty() {
+        return Err(web_unavailable("管理台没有可核实的本机监听地址。"));
+    }
+    Ok(addresses)
+}
+
+fn local_web_url(address: &str, port: u16, https: bool, path: &str) -> Result<String> {
+    if port == 0 {
+        return Err(web_unavailable("管理台端口未启用。"));
+    }
+    let host = local_web_host(address)?;
+    let mut url = reqwest::Url::parse(&format!(
+        "{}://{host}:{port}/",
+        if https { "https" } else { "http" }
+    ))
+    .map_err(|_| web_unavailable("管理台地址无效，请检查服务配置。"))?;
     let mut segments = Vec::new();
     for segment in path.split('/') {
-        match segment { "" | "." => {}, ".." => { segments.pop(); }, other => segments.push(other) }
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other),
+        }
     }
-    url.path_segments_mut().map_err(|_| web_unavailable("管理台路径无效。"))?.clear().extend(segments);
+    url.path_segments_mut()
+        .map_err(|_| web_unavailable("管理台路径无效。"))?
+        .clear()
+        .extend(segments);
     Ok(url.to_string())
 }
 
@@ -1176,24 +1273,54 @@ pub fn service_web_url(manager: &ServiceManager, id: &str) -> Result<String> {
     if !matches!(destination.scheme(), "http" | "https") || destination.host_str().is_none() || !destination.username().is_empty() || destination.password().is_some() {
         return Err(web_unavailable("管理台地址必须是无内嵌凭据的 HTTP/HTTPS 地址。"));
     }
-    let mut url = reqwest::Url::parse(original.probe.as_deref().unwrap_or(&original.url)).map_err(|_| web_unavailable("本次启动的管理台探测地址无效，请重启服务。"))?;
-    let ip = url.host_str().and_then(|host| host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().ok())
-        .filter(|ip| !ip.is_unspecified() && !ip.is_multicast())
-        .ok_or_else(|| web_unavailable("管理台快捷入口需要可核实的本机监听 IP。"))?;
+    let mut url = reqwest::Url::parse(original.probe.as_deref().unwrap_or(&original.url))
+        .map_err(|_| web_unavailable("本次启动的管理台探测地址无效，请重启服务。"))?;
     if !matches!(url.scheme(), "http" | "https") || !url.username().is_empty() || url.password().is_some() {
         return Err(web_unavailable("管理台快捷入口仅支持本机 HTTP/HTTPS 监听地址。"));
     }
-    let port = url.port_or_known_default().ok_or_else(|| web_unavailable("管理台端口无效。"))?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| web_unavailable("管理台端口无效。"))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| web_unavailable("管理台主机无效。"))?
+        .to_string();
+    let resolved = resolve_web_host(&host, port)?;
+    let listeners = crate::ports::listener_endpoints()?;
+    let target = resolved
+        .iter()
+        .copied()
+        .find(|target| {
+            listeners
+                .iter()
+                .any(|entry| entry.accepts(*target) && before.pids.contains(&entry.pid))
+        })
+        .ok_or_else(|| {
+            web_unavailable("管理台主机名或 IP 未指向当前服务的本机监听地址，请检查配置。")
+        })?;
     let owned = || -> Result<bool> {
         let listeners = crate::ports::listener_endpoints()?;
-        let target = std::net::SocketAddr::new(ip, port);
-        Ok(listeners.iter().any(|entry| entry.accepts(target) && before.pids.contains(&entry.pid))
-            && listeners.iter().filter(|entry| entry.port == port).all(|entry| before.pids.contains(&entry.pid)))
+        Ok(listeners
+            .iter()
+            .any(|entry| entry.accepts(target) && before.pids.contains(&entry.pid))
+            && listeners
+                .iter()
+                .filter(|entry| entry.port == port)
+                .all(|entry| before.pids.contains(&entry.pid)))
     };
     if !owned()? { return Err(web_unavailable("管理台端口尚未就绪或已由其他进程占用，请查看服务日志。")); }
     // 仅探测本机受管进程，不携带凭据、不跟随跳转；自签证书仍由浏览器正常提示。
-    let client = reqwest::blocking::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
-        .danger_accept_invalid_certs(true).timeout(Duration::from_millis(1500)).build()
+    let mut client_builder = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .danger_accept_invalid_certs(true)
+        .timeout(Duration::from_millis(1500));
+    if url.domain().is_some() {
+        // 固定到刚核实的监听地址，保留请求的 Host/SNI，不让第二次 DNS 查询换到远端。
+        client_builder = client_builder.resolve(&host, target);
+    }
+    let client = client_builder
+        .build()
         .map_err(|_| web_unavailable("无法创建本机管理台连接。"))?;
     let mut reachable = None;
     for scheme in [url.scheme().to_string(), if url.scheme() == "http" { "https".into() } else { "http".into() }] {
@@ -2386,7 +2513,11 @@ mod startup_tests {
         let config = serde_json::json!({"httpd":{"bindings":[{"enable_web_admin":"true","enable_https":"false"}]}});
         r.spec.env.as_mut().unwrap().insert("SFTPGO_HTTPD__BINDINGS__0__ENABLE_WEB_ADMIN".into(), "fAlSe".into());
         assert!(sftpgo_web_target(&r, &config, &sftpgo_process_env(&r).unwrap()).unwrap().starts_with("http://"));
-        assert!(local_web_url("remote.example", 8080, false, "/").is_err());
+        assert_eq!(
+            local_web_url("dev-box.local", 8080, false, "/").unwrap(),
+            "http://dev-box.local:8080/"
+        );
+        assert!(local_web_url("remote.example/path", 8080, false, "/").is_err());
         assert!(local_web_url("127.0.0.1", 0, false, "/").is_err());
     }
 
@@ -2482,6 +2613,43 @@ mod startup_tests {
         assert_eq!(state.service_web_url("mailpit").unwrap_err().code, "SERVICE_WEB_UNAVAILABLE");
         state.manager.set_state("mailpit", crate::model::ServiceState::Stopped);
         assert_eq!(state.manager.web_target("mailpit").unwrap_err().code, "SERVICE_WEB_UNKNOWN");
+        state.manager.services.lock().remove("mailpit");
+    }
+
+    #[test]
+    fn console_probe_pins_a_local_hostname_to_the_owned_listener() {
+        use std::io::{Read, Write};
+        let (_temp, state, _r) = fixture("mailpit");
+        register_services(&state.paths, &state.store, &state.manager);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        state
+            .manager
+            .adopt("mailpit", &[std::process::id()], Some(port));
+        state
+            .manager
+            .set_web_target("mailpit", Ok(format!("http://localhost:{port}/console")));
+        let worker = listener.try_clone().unwrap();
+        let serve = std::thread::spawn(move || {
+            let (mut stream, _) = worker.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut input = [0; 4096];
+            let n = stream.read(&mut input).unwrap();
+            let request = String::from_utf8_lossy(&input[..n]);
+            assert!(request.starts_with("GET /console HTTP/1.1"));
+            assert!(request.to_ascii_lowercase().contains("host: localhost:"));
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 13\r\nConnection: close\r\n\r\n<html></html>").unwrap();
+        });
+        assert_eq!(
+            state.service_web_url("mailpit").unwrap(),
+            format!("http://localhost:{port}/console")
+        );
+        serve.join().unwrap();
+        state
+            .manager
+            .set_state("mailpit", crate::model::ServiceState::Stopped);
         state.manager.services.lock().remove("mailpit");
     }
 

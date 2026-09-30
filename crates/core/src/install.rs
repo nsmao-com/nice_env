@@ -272,7 +272,30 @@ impl Installer {
                         .cloned()
                     {
                         Some(entry) => entry,
-                        None => continue,
+                        None => {
+                            // 旧版安装可能没有保存快照，清单更新后也可能不再列出该版本。
+                            // 只要套件仍有模板，就按版本源的入口模板恢复；下面还会
+                            // 再检查真实入口文件，避免把空目录或陌生目录当成已安装。
+                            let Some(mut entry) = self.template_for(&id) else {
+                                continue;
+                            };
+                            let version = canonical_version(&folder_version).to_string();
+                            let source = crate::versions::source_for(&entry);
+                            entry.entry = source
+                                .and_then(|source| source.entry_template)
+                                .filter(|template| !template.contains("{asset}"))
+                                .map(|template| template.replace("{version}", &version))
+                                .unwrap_or_else(|| entry.entry.replace(&entry.version, &version));
+                            if entry.entry.trim().is_empty() || entry.entry.contains('{') {
+                                continue;
+                            }
+                            entry.version = version;
+                            entry.url.clear();
+                            entry.mirrors.clear();
+                            entry.sha256 = None;
+                            entry.size_bytes = 0;
+                            entry
+                        }
                     },
                 };
                 let version = canonical_version(&folder_version).to_string();

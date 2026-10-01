@@ -44,6 +44,7 @@ import { RedisBackupsButton } from "@/components/shared/redis-backups";
 import { RedisPasswordButton } from "@/components/shared/redis-password";
 import { RedisKeyBrowser } from "@/components/shared/redis-key-browser";
 import { DatabaseDataDir } from "@/components/shared/database-data-dir";
+import { MemcachedSettingsButton } from "@/components/shared/memcached-settings";
 
 export default function DatabasesPage() {
   const t = useT();
@@ -55,7 +56,10 @@ export default function DatabasesPage() {
   return <div className="pb-8">
     <PageHeader title={t("db.title")} subtitle={t("db.subtitle")} />
     <Tabs value={selected} onValueChange={setChoice}>
-      <div className="mb-5 max-w-full overflow-x-auto"><TabsList className="flex w-max"><TabsTrigger value="mysql" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">MySQL / MariaDB</TabsTrigger><TabsTrigger value="postgresql" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">PostgreSQL</TabsTrigger><TabsTrigger value="mongodb" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">MongoDB</TabsTrigger><TabsTrigger value="redis" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">Redis</TabsTrigger><TabsTrigger value="memcached" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">Memcached</TabsTrigger></TabsList></div>
+      <div className="mb-5">
+        <div className="sm:hidden"><Label htmlFor="database-engine-mobile" className="sr-only">{t("db.engine")}</Label><Select value={selected} onValueChange={setChoice} disabled={locked}><SelectTrigger id="database-engine-mobile" className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="mysql">MySQL / MariaDB</SelectItem><SelectItem value="postgresql">PostgreSQL</SelectItem><SelectItem value="mongodb">MongoDB</SelectItem><SelectItem value="redis">Redis</SelectItem><SelectItem value="memcached">Memcached</SelectItem></SelectContent></Select></div>
+        <div className="hidden max-w-full overflow-x-auto sm:block"><TabsList className="flex w-max"><TabsTrigger value="mysql" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">MySQL / MariaDB</TabsTrigger><TabsTrigger value="postgresql" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">PostgreSQL</TabsTrigger><TabsTrigger value="mongodb" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">MongoDB</TabsTrigger><TabsTrigger value="redis" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">Redis</TabsTrigger><TabsTrigger value="memcached" disabled={locked} className="px-2 text-xs sm:px-3 sm:text-sm">Memcached</TabsTrigger></TabsList></div>
+      </div>
       <TabsContent value="mysql"><MySqlWorkspace onLockChange={setLocked} /></TabsContent>
       <TabsContent value="postgresql">
         <div className="mb-5"><PostgresInstanceCard /></div>
@@ -665,6 +669,7 @@ function MemcachedInstanceCard() {
           <p className="text-[13px] font-medium">Memcached {service?.version ?? ""}</p>
           <p className="text-[11px] text-faint">127.0.0.1:{service?.port ?? "—"}</p>
         </div>
+        <MemcachedSettingsButton version={service?.version} />
         <InstanceStartButton base="memcached" />
       </div>
       {!service ? <p className="text-xs text-muted">{t("db.memcachedNotInstalled")}</p> : !running ? <p className="text-xs text-muted">{t("db.memcachedStopped")}</p> : <>

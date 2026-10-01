@@ -38,6 +38,8 @@ import type {
   ProjectPlatformReport,
   RedisSettings,
   RedisSettingsView,
+  MemcachedSettings,
+  MemcachedSettingsView,
   RedisPersistence,
   RedisSnapshotReceipt,
   RedisBackup,
@@ -447,6 +449,9 @@ export interface MemcachedStats {
 }
 export const memcachedStats = () => safe(invoke<MemcachedStats>("memcached_stats"));
 export const memcachedFlush = (version: string) => safe(invoke<MemcachedStats>("memcached_flush", { version }));
+export const memcachedSettings = (version: string) => safe(invoke<MemcachedSettingsView>("memcached_settings", { version }));
+export const memcachedSettingsSave = (version: string, revision: string, settings: MemcachedSettings) =>
+  safe(invoke<MemcachedSettingsView>("memcached_settings_save", { version, revision, settings }));
 
 export interface PostgresConnectionInfo {
   version: string; port: number; serverVersion: string; databaseCount: number; sizeBytes: number; passwordRequired: boolean;
@@ -948,7 +953,7 @@ export interface ConfigCheck {
   kind: string;
   name: string;
   path: string | null;
-  method: "native" | "readability" | "none";
+  method: "native" | "readability" | "tcp" | "none";
   ok: boolean;
   status: "ok" | "warning" | "fail" | "skipped";
   detail: string;

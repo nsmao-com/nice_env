@@ -800,7 +800,7 @@ function RepairTool() {
             {checking && <p role="status" className="flex items-start gap-2 text-[11px] text-muted"><Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin" />{t("tools.checkRunning")}</p>}
             {rows.length > 0 && <>
               <div role="status" className="flex flex-wrap gap-x-3 gap-y-1 text-[11px]">
-                <span>{t("tools.checkPassed")} {rows.filter((row) => row.status === "ok" && row.method === "native").length}</span>
+                <span>{t("tools.checkPassed")} {rows.filter((row) => row.status === "ok" && (row.method === "native" || row.method === "tcp")).length}</span>
                 <span>{t("tools.checkReadable")} {rows.filter((row) => row.status === "ok" && row.method === "readability").length}</span>
                 <span className="text-warn">{t("tools.checkWarning")} {rows.filter((row) => row.status === "warning").length}</span>
                 <span className="text-error">{t("tools.checkFailed")} {failures.length}</span>
@@ -819,7 +819,7 @@ function RepairTool() {
                   return <div key={row.kind} className="min-w-0 space-y-2 border-t border-dashed border-border pt-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <p className="break-words text-[12px] font-medium">{row.name}</p>
-                      <Badge variant={row.status === "fail" ? "error" : row.status === "warning" ? "warn" : row.status === "ok" && row.method === "native" ? "running" : "muted"}>{statusLabel(row)}</Badge>
+                      <Badge variant={row.status === "fail" ? "error" : row.status === "warning" ? "warn" : row.status === "ok" && (row.method === "native" || row.method === "tcp") ? "running" : "muted"}>{statusLabel(row)}</Badge>
                     </div>
                     {row.path && <p className="break-all font-mono text-[10px] text-muted">{row.path}</p>}
                     <p className="text-[10px] text-faint">{new Date(row.checkedAt).toLocaleString()}</p>

@@ -2215,6 +2215,7 @@ fn validate_configs_selected(
         ("php", "php-ini", "PHP"),
         ("mysql", "mysql-ini", "MySQL"),
         ("redis", "redis-conf", "Redis"),
+        ("memcached", "memcached-settings", "Memcached"),
     ] {
         if service.is_some_and(|service| service.id.split('@').next() != Some(id)) {
             continue;
@@ -2256,18 +2257,22 @@ fn validate_configs_selected(
                 format!("{kind}@{}", package.version)
             };
             let path = match id {
-                "nginx" => paths.nginx_conf(),
-                "apache" => paths.apache_conf(),
-                "caddy" => paths.etc_dir("caddy", &package.version).join("Caddyfile"),
-                "php" => paths.php_ini(&package.version),
-                "mysql" => paths.mysql_ini(&package.version),
-                _ => paths.redis_conf(&package.version),
+                "nginx" => Some(paths.nginx_conf()),
+                "apache" => Some(paths.apache_conf()),
+                "caddy" => Some(paths.etc_dir("caddy", &package.version).join("Caddyfile")),
+                "php" => Some(paths.php_ini(&package.version)),
+                "mysql" => Some(paths.mysql_ini(&package.version)),
+                "redis" => Some(paths.redis_conf(&package.version)),
+                // Memcached 通过受管启动参数配置，没有独立配置文件。
+                _ => None,
             };
             checks.push(ConfigCheck {
                 kind: key,
                 name: format!("{label} {}", package.version),
-                path: Some(path.to_string_lossy().into()),
-                method: if matches!(id, "mysql" | "redis") {
+                path: path.as_ref().map(|path| path.to_string_lossy().into()),
+                method: if id == "memcached" && service.is_some() {
+                    "tcp"
+                } else if matches!(id, "mysql" | "redis" | "memcached") {
                     "readability"
                 } else {
                     "native"
@@ -2313,6 +2318,29 @@ fn validate_configs_selected(
             continue;
         }
         let result = (|| -> Result<(String, String)> {
+            if package.id == "memcached" {
+                let settings = crate::memcached_settings::get(store, &package.version)?.settings;
+                let configured = format!(
+                    "启动设置有效：{} MB 内存、{} 个最大连接、{} 个工作线程；保存的设置将在下次重启时应用",
+                    settings.memory_mb, settings.max_connections, settings.threads
+                );
+                if let Some(current) = service {
+                    let running = current.pids.iter().any(|pid| platform::process_alive(*pid));
+                    if running {
+                        let port = current.port.ok_or_else(|| AppError::new("MEMCACHED_PORT_UNKNOWN", "无法确认 Memcached 实际端口，未执行运行参数核对"))?;
+                        let stats = crate::stats::memcached_stats(port, &current.pids)?;
+                        let expected = u64::from(settings.memory_mb) * 1024 * 1024;
+                        if stats.limit_maxbytes != expected {
+                            return Ok((
+                                "warning".into(),
+                                format!("{configured}；运行实例实际内存上限为 {} 字节，请重启 Memcached 使新设置生效", stats.limit_maxbytes),
+                            ));
+                        }
+                        return Ok(("ok".into(), format!("{configured}；运行实例已核对内存上限 {} 字节", stats.limit_maxbytes)));
+                    }
+                }
+                return Ok(("ok".into(), configured));
+            }
             let conf = PathBuf::from(check.path.as_ref().unwrap());
             if !conf.is_file() {
                 return Err(AppError::new(

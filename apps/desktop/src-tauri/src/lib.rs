@@ -163,19 +163,30 @@ pub fn run() {
                     if let Err(error) = result {
                         status.phase = StartupStackPhase::Failed;
                         status.error = Some(error);
-                    } else {
-                        // 独立自动启动服务在服务栈之后执行；已由服务栈启动的服务是幂等成功，
-                        // 失败会保留在服务卡片状态，并在启动提示中给出可读的汇总。
-                        let mut failures = Vec::new();
-                        for id in st.auto_start_service_ids() {
-                            if let Err(error) = st.start_service(&id) {
-                                failures.push(format!("{}：{}", id, error.message));
-                            }
+                    }
+
+                    // 独立自动启动服务必须和服务栈错误隔离：服务栈被删除、依赖缺失或
+                    // 某一项启动失败时，仍然尝试用户单独勾选的服务。已由服务栈启动的
+                    // 服务是幂等成功；每个独立服务的失败会保留在服务卡片状态。
+                    let mut failures = Vec::new();
+                    for id in st.auto_start_service_ids() {
+                        if let Err(error) = st.start_service(&id) {
+                            failures.push(format!("{}：{}", id, error.message));
                         }
-                        if !failures.is_empty() {
+                    }
+                    if !failures.is_empty() {
+                        let detail = failures.join("；");
+                        if let Some(error) = status.error.as_mut() {
+                            let previous = error.hint.take().unwrap_or_default();
+                            error.hint = Some(if previous.is_empty() {
+                                format!("独立自动启动服务：{detail}")
+                            } else {
+                                format!("{previous}；独立自动启动服务：{detail}")
+                            });
+                        } else {
                             status.phase = StartupStackPhase::Partial;
                             status.error = Some(AppError::new("AUTOSTART_PARTIAL", "部分服务未能按自动启动设置拉起")
-                                .with_hint(failures.join("；")));
+                                .with_hint(detail));
                         }
                     }
                     *startup_for_stack.stack.lock().unwrap_or_else(|e| e.into_inner()) = status;
@@ -475,6 +486,8 @@ pub fn run() {
             redis_stats,
             memcached_stats,
             memcached_flush,
+            memcached_settings,
+            memcached_settings_save,
             redis_keys,
             redis_key_preview,
             redis_key_update,
@@ -2290,6 +2303,30 @@ async fn memcached_flush(
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || map_jh(st.memcached_flush(&version))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn memcached_settings(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    version: String,
+) -> Result<nsb_core::memcached_settings::MemcachedSettingsView, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.memcached_settings(&version))).await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+}
+
+#[tauri::command]
+async fn memcached_settings_save(
+    state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
+    version: String,
+    revision: String,
+    settings: nsb_core::memcached_settings::MemcachedSettings,
+) -> Result<nsb_core::memcached_settings::MemcachedSettingsView, tauri::Error> {
+    let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || map_jh(st.save_memcached_settings(&version, &revision, &settings))).await
         .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

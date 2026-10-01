@@ -28,6 +28,7 @@ pub mod health;
 pub mod hosts;
 pub mod install;
 pub mod logs_export;
+pub mod memcached_settings;
 pub mod model;
 pub mod mongodb;
 pub mod mongodb_auth;
@@ -1087,6 +1088,16 @@ impl CoreState {
     pub fn redis_settings(&self, version: &str) -> Result<redis_settings::RedisSettingsView> {
         let _operation = self.manager.lifecycle.lock();
         redis_settings::get(&self.paths, &self.store, version)
+    }
+
+    pub fn memcached_settings(&self, version: &str) -> Result<memcached_settings::MemcachedSettingsView> {
+        let _operation = self.manager.lifecycle.lock();
+        memcached_settings::get(&self.store, version)
+    }
+
+    pub fn save_memcached_settings(&self, version: &str, revision: &str, settings: &memcached_settings::MemcachedSettings) -> Result<memcached_settings::MemcachedSettingsView> {
+        let _operation = self.manager.lifecycle.lock();
+        memcached_settings::save(&self.store, version, revision, settings)
     }
 
     pub fn redis_persistence(&self, version: &str) -> Result<stats::RedisPersistence> {

@@ -1838,6 +1838,9 @@ pub fn start(
     if let Some(port) = r.port { store.save_generic_port(&r.service_id, port, planned != r.port)?; }
 
     let mut args: Vec<String> = r.spec.args.iter().map(|a| expand(a, &r)).collect();
+    if r.entry.id == "memcached" {
+        args = crate::memcached_settings::apply_args(store, &r.entry.version, args)?;
+    }
     if r.entry.id == "mariadb" {
         args.extend([
             format!("--basedir={}", r.root.parent().ok_or_else(|| AppError::new("MARIADB_PATH", "MariaDB 安装路径无效"))?.display()),

@@ -1113,6 +1113,17 @@ export const RedisSettingsView = z.object({
 });
 export type RedisSettingsView = z.infer<typeof RedisSettingsView>;
 
+export const MemcachedSettings = z.object({
+  memoryMb: z.number().int().min(64).max(1048576),
+  maxConnections: z.number().int().min(16).max(1000000),
+  threads: z.number().int().min(1).max(64),
+});
+export type MemcachedSettings = z.infer<typeof MemcachedSettings>;
+export const MemcachedSettingsView = z.object({
+  version: z.string(), revision: z.string(), settings: MemcachedSettings, restartRequired: z.boolean(),
+});
+export type MemcachedSettingsView = z.infer<typeof MemcachedSettingsView>;
+
 export const RedisPasswordView = z.object({ version: z.string(), revision: z.string(), enabled: z.boolean(), blockedReason: z.string().nullable() });
 export type RedisPasswordView = z.infer<typeof RedisPasswordView>;
 export const RedisPasswordSave = z.object({ view: RedisPasswordView, connectionSaved: z.boolean() });

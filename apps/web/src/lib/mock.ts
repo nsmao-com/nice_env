@@ -1425,6 +1425,7 @@ async function performServiceAction(action: "start_service" | "stop_service" | "
 }
 
 const redisSettingsPreview = new Map<string, import("@nsb/schema").RedisSettingsView>();
+const memcachedSettingsPreview = new Map<string, import("@nsb/schema").MemcachedSettingsView>();
 const redisPasswordsPreview = new Map<string, import("@nsb/schema").RedisPasswordView>();
 const redisServerPasswordsPreview = new Map<string, string>();
 const redisPersistencePreview = new Map<string, { report: import("@nsb/schema").RedisPersistence; finishAt: number; minimumSaveTime: number }>();
@@ -3980,6 +3981,21 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (service?.state !== "running") throw { code: "MEMCACHED_NOT_RUNNING", message: "请先启动 Memcached 实例" };
       return { reachable: true, port: service.port, processId: service.pids[0] ?? 0, version: service.version ?? "1.6.45", uptimeSeconds: service.uptimeSec ?? 0, currentItems: 18, totalItems: 247, bytes: 786432, limitMaxbytes: 67108864, currentConnections: 2, totalConnections: 38, cmdGet: 1280, cmdSet: 247, getHits: 1074, getMisses: 206, evictions: 3 } as T;
     }
+    case "memcached_settings": {
+      const version = String(args!.version);
+      if (!memcachedSettingsPreview.has(version)) memcachedSettingsPreview.set(version, { version, revision: "preview-0", restartRequired: true, settings: { memoryMb: 512, maxConnections: 1024, threads: 4 } });
+      return structuredClone(memcachedSettingsPreview.get(version)) as T;
+    }
+    case "memcached_settings_save": {
+      const version = String(args!.version);
+      const previous = memcachedSettingsPreview.get(version) ?? { version, revision: "preview-0", restartRequired: true, settings: { memoryMb: 512, maxConnections: 1024, threads: 4 } };
+      if (String(args!.revision) !== previous.revision) throw { code: "CONFIG_CONFLICT", message: "演示设置已变化，请重新读取。" };
+      const settings = structuredClone(args!.settings) as import("@nsb/schema").MemcachedSettings;
+      if (!Number.isInteger(settings.memoryMb) || settings.memoryMb < 64 || settings.memoryMb > 1_048_576 || !Number.isInteger(settings.maxConnections) || settings.maxConnections < 16 || settings.maxConnections > 1_000_000 || !Number.isInteger(settings.threads) || settings.threads < 1 || settings.threads > 64) throw { code: "MEMCACHED_SETTINGS_INVALID", message: "Memcached 设置超出允许范围。" };
+      const view = { version, revision: `preview-${Date.now()}-${Math.random()}`, restartRequired: true, settings };
+      memcachedSettingsPreview.set(version, view);
+      return structuredClone(view) as T;
+    }
     case "memcached_flush": {
       const service = services.get("memcached");
       const version = String(args?.version ?? "");
@@ -4055,7 +4071,13 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const files = await mockInvoke<ConfigFileInfo[]>("config_list");
       const installed = Array.from(packages.values()).filter((p) => p.install);
       const checks: ConfigCheck[] = [];
-      for (const [id, kind, label] of [["nginx", "nginx-main", "Nginx"], ["apache", "apache-conf", "Apache"], ["php", "php-ini", "PHP"], ["mysql", "mysql-ini", "MySQL"], ["redis", "redis-conf", "Redis"]]) {
+      for (const [id, kind, label] of [["nginx", "nginx-main", "Nginx"], ["apache", "apache-conf", "Apache"], ["php", "php-ini", "PHP"], ["mysql", "mysql-ini", "MySQL"], ["redis", "redis-conf", "Redis"], ["memcached", "memcached-settings", "Memcached"]]) {
+        if (id === "memcached") {
+          const targets = installed.filter((pkg) => pkg.id === id).sort((a, b) => cmpVersionDesc(a.version, b.version));
+          if (!targets.length) checks.push({ kind, name: label, path: null, method: "none", ok: false, status: "skipped", detail: "未安装，未执行检查", checkedAt: now() });
+          for (const pkg of targets) checks.push({ kind: `${kind}@${pkg.version}`, name: `${label} ${pkg.version}`, path: null, method: "readability", ok: true, status: "ok", detail: "浏览器演示设置有效；桌面端会在运行时核对受管进程的实际内存上限", checkedAt: now() });
+          continue;
+        }
         const targets = files.filter((file) => file.requiresPackage === id);
         if (!targets.length) checks.push({ kind, name: label, path: null, method: "none", ok: false, status: "skipped", detail: "未安装，未执行检查", checkedAt: now() });
         for (const file of targets) {

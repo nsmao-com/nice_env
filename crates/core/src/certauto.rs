@@ -830,6 +830,14 @@ fn run_once_registered(state: &CoreState, id: &str, _work: crate::BackgroundWork
 
 fn finish_execution(state: &CoreState, mut a: CertAutomation, outcome: &Result<()>, mut log: Vec<String>) -> Result<CertAutomation> {
     let run_at = now_ms();
+    let user_error = |error: &AppError| {
+        error
+            .hint
+            .as_deref()
+            .filter(|hint| !hint.trim().is_empty())
+            .map(|hint| format!("{}。{}", error.message, hint))
+            .unwrap_or_else(|| error.message.clone())
+    };
     match outcome {
         Ok(()) => {
             a.state = "ok".into();
@@ -850,7 +858,7 @@ fn finish_execution(state: &CoreState, mut a: CertAutomation, outcome: &Result<(
         }
         Err(e) => {
             a.state = if a.state == "deploying" { "deploy_error" } else { "error" }.into();
-            a.last_error = e.to_string();
+            a.last_error = user_error(e);
             a.fail_count = a.fail_count.saturating_add(1);
             // 重试节奏：按配置间隔重试；连续失败超过次数后改为每天兜底重试，等人工修配置
             let interval = if a.retry_interval_min > 0 {
@@ -881,7 +889,7 @@ fn finish_execution(state: &CoreState, mut a: CertAutomation, outcome: &Result<(
             ok: outcome.is_ok(),
             message: match &outcome {
                 Ok(_) => "签发与部署完成".into(),
-                Err(e) => e.to_string(),
+                Err(e) => user_error(e),
             },
             log,
         },

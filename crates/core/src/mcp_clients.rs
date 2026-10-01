@@ -12,6 +12,7 @@ const MAX_CONFIG_BYTES: u64 = 2 * 1024 * 1024;
 pub struct ClientStatus {
     pub id: String,
     pub name: String,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub path: String,
     pub status: String,
     pub revision: Option<String>,
@@ -23,6 +24,7 @@ pub struct ClientStatus {
 pub struct ClientUpdate {
     pub client: ClientStatus,
     pub changed: bool,
+    #[serde(serialize_with = "crate::model::serialize_optional_path")]
     pub backup_path: Option<String>,
 }
 

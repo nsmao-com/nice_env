@@ -28,6 +28,7 @@ pub struct RedisBackup {
 pub struct RedisBackupList {
     pub items: Vec<RedisBackupEntry>,
     pub unreadable: usize,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub directory: String,
 }
 
@@ -53,6 +54,7 @@ pub struct RedisBackupRemoval {
 #[serde(rename_all = "camelCase")]
 pub struct RedisRestorePreview {
     pub backup: RedisBackup,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub target: String,
     pub existing_size: Option<u64>,
     pub revision: String,
@@ -61,6 +63,7 @@ pub struct RedisRestorePreview {
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct RedisRestoreResult {
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub target: String,
     pub safety_backup: Option<RedisBackup>,
 }
@@ -68,6 +71,7 @@ pub struct RedisRestoreResult {
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct RedisImportPreview {
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub source: String,
     pub version: String,
     pub rdb_version: u16,

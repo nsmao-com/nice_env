@@ -198,6 +198,7 @@ pub struct ToolMirrorStatus {
     pub available: bool,
     /// 配置文件位置（让用户知道改了哪个文件）
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "crate::model::serialize_optional_path")]
     pub config_path: Option<String>,
     pub options: Vec<MirrorOption>,
 }

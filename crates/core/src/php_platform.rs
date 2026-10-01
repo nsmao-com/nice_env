@@ -34,8 +34,10 @@ pub struct FailedRequirement {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectPlatformReport {
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub project: String,
     pub php_version: String,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub ini: String,
     pub source: String,
     pub include_dev: bool,

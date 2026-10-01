@@ -1,6 +1,32 @@
 //! 与前端 @nsb/schema 一一对应的数据模型（serde camelCase）。
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
+
+/// 仅在序列化给前端时清理 Windows 扩展路径前缀，内部仍保留原始路径，
+/// 这样长路径的文件操作不会因为展示格式变化而失效。
+pub(crate) fn serialize_path<S>(value: &String, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(&crate::paths::portable_text(value))
+}
+
+pub(crate) fn serialize_optional_path<S>(value: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(value) => serializer.serialize_some(&crate::paths::portable_text(value)),
+        None => serializer.serialize_none(),
+    }
+}
+
+pub(crate) fn serialize_paths<S>(value: &Vec<String>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    value.iter().map(|path| crate::paths::portable_text(path)).collect::<Vec<_>>().serialize(serializer)
+}
 
 pub use crate::serde_proxy;
 
@@ -19,10 +45,13 @@ pub enum ServiceState {
 #[serde(rename_all = "camelCase")]
 pub struct AppErrorInfo {
     pub code: String,
+    #[serde(serialize_with = "serialize_path")]
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "serialize_optional_path")]
     pub hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "serialize_optional_path")]
     pub detail: Option<String>,
     /// 端口冲突：端口号 / 占用进程 pid / 占用进程名，前端据此提供「结束占用并重试」
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -65,6 +94,7 @@ pub struct ServiceStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<AppErrorInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "serialize_optional_path")]
     pub log_file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
@@ -90,6 +120,7 @@ pub struct ServiceStopPreview {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct SftpgoConfigDirectory {
+    #[serde(serialize_with = "serialize_path")]
     pub directory: String,
     pub label: String,
     pub config_file: Option<String>,
@@ -102,6 +133,7 @@ pub struct SftpgoConfigDirectory {
 #[serde(rename_all = "camelCase")]
 pub struct SftpgoConfigDirectories {
     pub version: String,
+    #[serde(serialize_with = "serialize_optional_path")]
     pub current: Option<String>,
     pub directories: Vec<SftpgoConfigDirectory>,
 }
@@ -150,6 +182,7 @@ pub struct SiteApplication {
     pub version: String,
     pub args: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "serialize_optional_path")]
     pub cwd: Option<String>,
 }
 
@@ -194,6 +227,7 @@ pub struct SiteRuntime {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "serialize_optional_path")]
     pub cwd: Option<String>,
 }
 
@@ -292,6 +326,7 @@ pub struct Site {
     pub id: String,
     pub name: String,
     pub domains: Vec<String>,
+    #[serde(serialize_with = "serialize_path")]
     pub root_dir: String,
     pub runtime: SiteRuntime,
     pub https: bool,
@@ -514,7 +549,9 @@ pub struct InstalledPackage {
     pub id: String,
     pub version: String,
     pub category: String,
+    #[serde(serialize_with = "serialize_path")]
     pub install_path: String,
+    #[serde(serialize_with = "serialize_path")]
     pub config_path: String,
     pub installed_at: i64,
 }
@@ -547,6 +584,7 @@ pub struct PackageUninstallBlocker {
 #[serde(rename_all = "camelCase")]
 pub struct PackageUninstallPreview {
     pub installed: InstalledPackage,
+    #[serde(serialize_with = "serialize_path")]
     pub runtime_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service: Option<ServiceStatus>,
@@ -558,6 +596,7 @@ pub struct PackageUninstallPreview {
 /// 环境变量注入状态（前端「环境变量」卡片用）
 pub struct PathEnvStatus {
     pub enabled: bool,
+    #[serde(serialize_with = "serialize_paths")]
     pub managed_dirs: Vec<String>,
     pub entries: Vec<PathEnvEntry>,
     pub note: String,
@@ -571,6 +610,7 @@ pub struct PathEnvEntry {
     pub id: String,
     pub label: String,
     pub version: String,
+    #[serde(serialize_with = "serialize_path")]
     pub bin_dir: String,
     pub exists: bool,
     pub selected: bool,
@@ -582,6 +622,7 @@ pub struct PathEnvEntry {
 #[serde(rename_all = "camelCase")]
 pub struct TerminalEnvironment {
     pub shell: String,
+    #[serde(serialize_with = "serialize_path")]
     pub cwd: String,
     pub revision: String,
     pub script: String,
@@ -595,6 +636,7 @@ pub struct TerminalEnvironmentEntry {
     pub id: String,
     pub label: String,
     pub version: String,
+    #[serde(serialize_with = "serialize_path")]
     pub bin_dir: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -603,6 +645,7 @@ pub struct TerminalEnvironmentEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectRuntimeVersions {
+    #[serde(serialize_with = "serialize_path")]
     pub path: String,
     pub exists: bool,
     pub revision: String,
@@ -657,8 +700,10 @@ pub struct CertRecord {
     pub sans: Vec<String>,
     pub not_before: i64,
     pub not_after: i64,
+    #[serde(serialize_with = "serialize_path")]
     pub cert_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "serialize_optional_path")]
     pub key_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trusted: Option<bool>,
@@ -1155,6 +1200,7 @@ pub struct PhpExtension {
 #[serde(rename_all = "camelCase")]
 pub struct PhpExtensionView {
     pub version: String,
+    #[serde(serialize_with = "serialize_path")]
     pub ini_path: String,
     pub extensions: Vec<PhpExtension>,
     /// php.ini 快捷开关的当前值（display_errors 等）
@@ -1191,6 +1237,7 @@ pub struct XdebugSetupResult {
     /// 实测确认 PHP 真的加载了 Xdebug
     pub installed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "serialize_optional_path")]
     pub dll_path: Option<String>,
     /// 实测到的 Xdebug 版本号
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1210,6 +1257,7 @@ pub struct XdebugSetupResult {
 #[serde(rename_all = "camelCase")]
 pub struct DbBackupFile {
     pub name: String,
+    #[serde(serialize_with = "serialize_path")]
     pub path: String,
     pub size_bytes: u64,
     /// Unix 秒
@@ -1244,5 +1292,6 @@ pub struct PostgresBackupProgress {
 pub struct DbRestoreResult {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "serialize_optional_path")]
     pub safety_backup: Option<String>,
 }

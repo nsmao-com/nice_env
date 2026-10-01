@@ -1896,7 +1896,7 @@ async fn restore_backup(
     tauri::async_runtime::spawn_blocking(move || {
         map_jh(
             st.restore_backup(&name, &revision)
-                .map(|path| path.to_string_lossy().to_string()),
+                .map(|path| nsb_core::paths::portable_path_text(&path)),
         )
     })
     .await
@@ -3526,7 +3526,7 @@ fn get_app_version() -> String {
 
 #[tauri::command]
 fn get_data_dir(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> String {
-    state.paths.base.to_string_lossy().to_string()
+    nsb_core::paths::portable_path_text(&state.paths.base)
 }
 
 #[derive(serde::Serialize)]
@@ -3963,7 +3963,7 @@ fn refresh_remote_manifest(
     Ok(serde_json::json!({
         "revision": m.revision,
         "packages": m.packages.len(),
-        "path": dest.to_string_lossy(),
+        "path": nsb_core::paths::portable_path_text(&dest),
         "takesEffect": "restart",
     }))
 }
@@ -4237,7 +4237,7 @@ async fn download_update(
         }),
     );
     Ok(serde_json::json!({
-        "path": dest.to_string_lossy(),
+        "path": nsb_core::paths::portable_path_text(&dest),
         "fileName": file_name,
         "sizeBytes": received,
     }))
@@ -4417,7 +4417,7 @@ async fn db_backup_dump(
         nsb_core::dbbackup::dump_databases(&st.paths, &conn, &databases, &path, &|prog| {
             (st.emit)(nsb_core::Event::DbBackup(prog))
         })?;
-        Ok(path.to_string_lossy().to_string())
+        Ok(nsb_core::paths::portable_path_text(&path))
     })
     .await
 }
@@ -4445,7 +4445,7 @@ async fn db_backup_restore(
         )?;
         Ok(nsb_core::model::DbRestoreResult {
             ok: true,
-            safety_backup: safety.map(|p| p.to_string_lossy().to_string()),
+            safety_backup: safety.map(|p| nsb_core::paths::portable_path_text(&p)),
         })
     })
     .await
@@ -4470,7 +4470,7 @@ fn postgres_backup_list(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -
 #[tauri::command]
 fn postgres_backup_dir(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> Result<String, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
-    map_jh((|| { let dir = nsb_core::dbbackup::postgres_backup_dir(&state.paths)?; std::fs::create_dir_all(&dir)?; Ok(dir.to_string_lossy().into()) })())
+    map_jh((|| { let dir = nsb_core::dbbackup::postgres_backup_dir(&state.paths)?; std::fs::create_dir_all(&dir)?; Ok(nsb_core::paths::portable_path_text(&dir)) })())
 }
 
 #[tauri::command]
@@ -4479,7 +4479,7 @@ async fn postgres_backup_dump(state: State<'_, std::sync::Arc<nsb_core::CoreStat
     tauri::async_runtime::spawn_blocking(move || map_jh(st.with_postgres(&version, |client| {
         nsb_core::dbbackup::postgres_dump(&st.paths, client, &version, &name, oid, &|progress| {
             (st.emit)(nsb_core::Event::PostgresBackup(nsb_core::model::PostgresBackupProgress { operation_id: operation_id.clone(), progress }));
-        }).map(|path| path.to_string_lossy().into())
+        }).map(|path| nsb_core::paths::portable_path_text(&path))
     }))).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 

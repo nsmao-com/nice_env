@@ -13,12 +13,13 @@ pub struct MongoBackup {
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BackupList { pub items: Vec<MongoBackup>, pub issues: Vec<BackupIssue>, pub unreadable: usize, pub directory: String }
+pub struct BackupList { pub items: Vec<MongoBackup>, pub issues: Vec<BackupIssue>, pub unreadable: usize, #[serde(serialize_with = "crate::model::serialize_path")] pub directory: String }
 #[derive(Debug, Serialize)]
 pub struct BackupIssue { pub id: String, pub problem: String }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportPreview {
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub source: String, pub info: crate::mongodb_archive::ArchiveInfo, pub size_bytes: u64, pub sha256: String, pub revision: String,
 }
 #[derive(Debug, Serialize)]
@@ -26,10 +27,10 @@ pub struct ImportPreview {
 pub struct BackupRemoval { pub id: String, pub database: Option<String>, pub kind: Option<String>, pub size_bytes: Option<u64>, pub revision: String }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RestorePreview { pub backup: MongoBackup, pub target: String, pub exists: bool, pub revision: String }
+pub struct RestorePreview { pub backup: MongoBackup, #[serde(serialize_with = "crate::model::serialize_path")] pub target: String, pub exists: bool, pub revision: String }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RestoreResult { pub target: String, pub safety_backup: Option<MongoBackup> }
+pub struct RestoreResult { #[serde(serialize_with = "crate::model::serialize_path")] pub target: String, pub safety_backup: Option<MongoBackup> }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseDeletePreview { pub version: String, pub database: String, pub collections: usize, pub revision: String }

@@ -196,12 +196,32 @@ impl AcmeClient {
                 eab_jws(kid, hmac_key, &account_url, &client.account)?;
         }
         let resp = client.jws_post_new(&account_url, &payload)?;
-        let kid = resp
+        let status = resp.status();
+        let location = resp
             .headers()
             .get("location")
             .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| AppError::new("ACME_ACCOUNT", "newAccount 未返回 Location (kid)"))?
-            .to_string();
+            .map(str::to_string);
+        let body = resp.text().unwrap_or_default();
+        if !status.is_success() {
+            return Err(acme_error(&body, "注册 ACME 账号").with_hint(
+                "请检查联系邮箱、证书颁发机构是否选对，以及系统代理是否能正常访问该服务；首次使用建议先选择“Let's Encrypt（推荐）”重试。",
+            ));
+        }
+        let kid = location.ok_or_else(|| {
+            let detail = if body.trim().is_empty() {
+                format!("证书服务返回 HTTP {}，但没有返回账号地址。", status.as_u16())
+            } else {
+                format!(
+                    "证书服务返回 HTTP {}，但没有返回账号地址。响应内容：{}",
+                    status.as_u16(),
+                    body.chars().take(500).collect::<String>()
+                )
+            };
+            AppError::new("ACME_ACCOUNT", "证书服务没有返回账号地址，暂时无法继续签发")
+                .with_hint("这通常是证书服务拒绝注册账号，或网络代理改写了响应。请先选择“Let's Encrypt（推荐）”、填写联系邮箱后重试；仍失败时检查系统代理和网络连接。")
+                .with_detail(detail)
+        })?;
         client.kid = kid;
         Ok((client, fresh_pem))
     }

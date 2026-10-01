@@ -134,10 +134,12 @@ impl ProjectKind {
 #[serde(rename_all = "camelCase")]
 pub struct ScannedProject {
     /// 项目根目录（绝对路径）
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub path: String,
     pub name: String,
     pub kind: ProjectKind,
     /// 建议的文档根（已拼成绝对路径）
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub document_root: String,
     /// 预期入口可用；false 时禁止把回退目录直接用来建站。
     pub document_root_ready: bool,

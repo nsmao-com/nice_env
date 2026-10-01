@@ -645,6 +645,7 @@ pub struct PostgresReplaceInput {
 pub struct PostgresReplaceResult {
     pub database: String,
     pub previous_database: String,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub safety_backup: String,
 }
 

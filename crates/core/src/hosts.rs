@@ -81,6 +81,7 @@ pub fn read_all() -> Result<Vec<HostsEntry>> {
 
 #[derive(serde::Serialize)]
 pub struct HostsFile {
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub path: String,
     pub content: String,
 }

@@ -169,7 +169,9 @@ pub struct ImportedCert {
     #[serde(default)]
     pub used_by_sites: Vec<String>,
     /// 落地后的证书路径
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub cert_path: String,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub key_path: String,
     pub subject: String,
     pub sans: Vec<String>,

@@ -217,7 +217,7 @@ pub fn panel_state_json<R: Runtime>(
             "version": app.package_info().version.to_string(),
             "readErrors": [format!("{}{}",error.message,error.hint.map(|hint|format!("；{hint}")).unwrap_or_default())],
             "running": 0, "active": 0, "total": 0,
-            "dataDir": state.paths.base.to_string_lossy(),
+            "dataDir": nsb_core::paths::portable_path_text(&state.paths.base),
             "groupTitles": GROUP_TITLES, "services": [], "stacks": [], "sites": [],
         });
     }
@@ -296,7 +296,7 @@ pub fn panel_state_json<R: Runtime>(
         "running": running,
         "active": active,
         "total": services.len(),
-        "dataDir": state.paths.base.to_string_lossy(),
+        "dataDir": nsb_core::paths::portable_path_text(&state.paths.base),
         "groupTitles": GROUP_TITLES,
         "services": services_json,
         "stacks": stacks_json,

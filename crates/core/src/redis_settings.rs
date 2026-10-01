@@ -32,6 +32,7 @@ pub struct SnapshotRule {
 #[serde(rename_all = "camelCase")]
 pub struct RedisSettingsView {
     pub version: String,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub path: String,
     pub revision: String,
     pub settings: RedisSettings,

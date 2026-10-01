@@ -40,6 +40,7 @@ pub struct SiteFileEntry {
 #[serde(rename_all = "camelCase")]
 pub struct SiteDirectory {
     pub site_id: String,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub root: String,
     pub current: String,
     pub parent: Option<String>,
@@ -95,6 +96,7 @@ pub struct SiteFileUploadReceipt {
 pub struct SiteFileDownloadReceipt {
     pub site_id: String,
     pub path: String,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub destination: String,
     pub size_bytes: u64,
 }

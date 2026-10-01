@@ -34,6 +34,7 @@ const EXCLUDED: &[&str] = &[
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Scope {
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub root: String,
     pub revision: String,
     pub excluded: Vec<String>,
@@ -42,11 +43,13 @@ pub struct Scope {
 #[serde(rename_all = "camelCase")]
 pub struct BackupInfo {
     pub name: String,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub path: String,
     pub size_bytes: u64,
     pub created_at: i64,
     pub files: u64,
     pub original_bytes: u64,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub root: String,
     pub excluded: Vec<String>,
     pub restorable: bool,
@@ -66,9 +69,11 @@ pub struct Progress {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportPreview {
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub source_path: String,
     pub source_site_id: String,
     pub target_name: String,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub target_root: String,
     pub archive: BackupInfo,
     pub revision: String,
@@ -84,6 +89,7 @@ pub struct RestoreEntry {
 #[serde(rename_all = "camelCase")]
 pub struct RestorePreview {
     pub archive: BackupInfo,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub parent: String,
     pub revision: String,
     pub sha256: String,

@@ -320,8 +320,10 @@ export default function TlsPage() {
 }
 
 function CertError({ error }: { error: AppErrorShape }) {
+  const t = useT();
   return <div role="alert" className="rounded-lg bg-error-soft p-3 text-xs text-error [overflow-wrap:anywhere]">
     <p>{error.message}</p>{error.hint && <p className="mt-1">{error.hint}</p>}
+    {error.detail && <details className="mt-2 text-muted"><summary className="cursor-pointer">{t("wz.errorDetails")}</summary><pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-all text-[11px]">{error.detail}</pre></details>}
   </div>;
 }
 

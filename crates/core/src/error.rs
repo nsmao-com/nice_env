@@ -7,10 +7,13 @@ use thiserror::Error;
 #[derive(Error, Debug, Clone, Serialize, Deserialize)]
 pub struct AppError {
     pub code: String,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "crate::model::serialize_optional_path")]
     pub hint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "crate::model::serialize_optional_path")]
     pub detail: Option<String>,
     /// 端口冲突时随错误一起带给前端：端口号与占用进程 pid，
     /// 前端据此直接提供「结束占用进程并重试」，不必再去猜是哪个端口
@@ -29,7 +32,7 @@ impl AppError {
     pub fn new(code: &str, message: impl Into<String>) -> Self {
         Self {
             code: code.to_string(),
-            message: message.into(),
+            message: crate::paths::portable_text(&message.into()),
             hint: None,
             detail: None,
             port: None,
@@ -39,12 +42,12 @@ impl AppError {
     }
 
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
-        self.hint = Some(hint.into());
+        self.hint = Some(crate::paths::portable_text(&hint.into()));
         self
     }
 
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
-        self.detail = Some(detail.into());
+        self.detail = Some(crate::paths::portable_text(&detail.into()));
         self
     }
 

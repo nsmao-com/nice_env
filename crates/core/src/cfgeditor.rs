@@ -195,6 +195,7 @@ pub struct ConfigFileInfo {
     pub label: String,
     /// 一句话说明这文件管什么
     pub description: String,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub path: String,
     pub exists: bool,
     pub size_bytes: u64,
@@ -431,6 +432,7 @@ pub fn read_config_selected(
 pub struct ConfigResetPreview {
     pub kind: String,
     pub label: String,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub path: String,
     pub content: String,
     pub language: String,
@@ -1207,6 +1209,7 @@ fn write_config_version_checked(
 #[serde(rename_all = "camelCase")]
 pub struct ConfigBackup {
     pub name: String,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub path: String,
     pub size_bytes: u64,
     pub created_at: i64,

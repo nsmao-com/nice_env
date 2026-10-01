@@ -38,6 +38,7 @@ pub struct EnvEntry {
 pub struct EnvFileView {
     pub site_id: String,
     pub site_name: String,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub path: String,
     pub file_name: String,
     pub backup_exists: bool,
@@ -58,6 +59,7 @@ pub struct EnvFileView {
 #[serde(rename_all = "camelCase")]
 pub struct EnvRestorePreview {
     pub file_name: String,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub backup_path: String,
     pub revision: String,
     pub current_exists: bool,

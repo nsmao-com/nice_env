@@ -158,6 +158,7 @@ const isRunning = (a?: CertAutomation | null) => a?.state === "issuing" || a?.st
 const isWaiting = (a: CertAutomation) => a.state === "waiting" || a.state === "deploy_waiting";
 const canRetryDeploy = (a: CertAutomation) => Boolean(a.deploymentId && (a.expiresAt ?? 0) > Date.now() && ["deploy_error", "deploy_waiting", "deploy_interrupted"].includes(a.state));
 const actionErrorText = (error: unknown) => { const value = normalizeError(error); return [value.message, value.hint].filter(Boolean).join("\n"); };
+const isLegacyAccountError = (message?: string | null) => Boolean(message && /newAccount 未返回 Location|Location \(kid\)/i.test(message));
 
 export function CertAutomationSection() {
   const t = useT();
@@ -187,8 +188,11 @@ export function CertAutomationSection() {
       if (result.state === "ok") {
         toast.success(t("certauto.issuedOk"), { description: result.domains.join(", ") });
       } else {
+        const lastError = isLegacyAccountError(result.lastError)
+          ? `${t("certauto.accountError")}\n${t("certauto.accountErrorHint")}`
+          : result.lastError;
         toast.error(t(result.state.startsWith("deploy_") ? "certauto.deployFailed" : "certauto.issueFailed"), {
-          description: result.lastError || t("certauto.issueFailedHint"),
+          description: lastError || t("certauto.issueFailedHint"),
         });
       }
     } catch (e) {
@@ -323,6 +327,9 @@ function AutomationCard({
   const [toggling, setToggling] = React.useState(false);
   const toggleRequest = React.useRef(false);
   const daysLeft = a.expiresAt ? Math.max(0, Math.round((a.expiresAt - Date.now()) / 86400_000)) : null;
+  const displayLastError = isLegacyAccountError(a.lastError)
+    ? `${t("certauto.accountError")}\n${t("certauto.accountErrorHint")}`
+    : a.lastError;
 
   const toggle = async (enabled: boolean) => {
     if (busy || toggleRequest.current) return;
@@ -403,14 +410,14 @@ function AutomationCard({
         )}
 
         {/* 失败原因就地可见 */}
-        {!isWaiting(a) && (a.state === "error" || a.state.startsWith("deploy_")) && a.lastError && (
-          <p className="rounded-lg border border-error/25 bg-error/10 px-2.5 py-1.5 text-[11px] text-error [overflow-wrap:anywhere]">
-            {a.lastError}
+        {!isWaiting(a) && (a.state === "error" || a.state.startsWith("deploy_")) && displayLastError && (
+          <p className="whitespace-pre-line rounded-lg border border-error/25 bg-error/10 px-2.5 py-1.5 text-[11px] text-error [overflow-wrap:anywhere]">
+            {displayLastError}
           </p>
         )}
 
         {isWaiting(a) && <div role="status" className="space-y-1 rounded-lg border border-warn/25 bg-warn-soft px-2.5 py-2 text-[11px] text-warn [overflow-wrap:anywhere]">
-          <p>{a.lastError || t("certauto.state.waiting")}</p>
+          <p className="whitespace-pre-line">{displayLastError || t("certauto.state.waiting")}</p>
           <p>{t("certauto.waitingHint")}</p>
         </div>}
 
@@ -779,20 +786,29 @@ function AutomationDialog({
           {needEab && (
             <div className="flex flex-col gap-2 rounded-xl border border-info/25 bg-info-soft p-3">
               <Label className="text-[12px]">{t("certauto.eabTitle")}</Label>
+              <p className="text-[10.5px] leading-relaxed text-info/80">{t("certauto.eabHint")}</p>
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                <Input
-                  value={form.eabKid}
-                  onChange={(e) => patch({ eabKid: e.target.value })}
-                  placeholder={t("certauto.field.eabKid")}
-                  className="font-mono text-[12px]"
-                />
-                <Input
-                  type="password"
-                  value={form.eabHmacKey}
-                  onChange={(e) => patch({ eabHmacKey: e.target.value })}
-                  placeholder={t("certauto.field.eabHmacKey")}
-                  className="font-mono text-[12px]"
-                />
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="certauto-eab-kid" className="text-[11px]">{t("certauto.field.eabKid")}</Label>
+                  <Input
+                    id="certauto-eab-kid"
+                    value={form.eabKid}
+                    onChange={(e) => patch({ eabKid: e.target.value })}
+                    placeholder={t("certauto.field.eabKid")}
+                    className="font-mono text-[12px]"
+                  />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="certauto-eab-hmac" className="text-[11px]">{t("certauto.field.eabHmacKey")}</Label>
+                  <Input
+                    id="certauto-eab-hmac"
+                    type="password"
+                    value={form.eabHmacKey}
+                    onChange={(e) => patch({ eabHmacKey: e.target.value })}
+                    placeholder={t("certauto.field.eabHmacKey")}
+                    className="font-mono text-[12px]"
+                  />
+                </div>
               </div>
             </div>
           )}
@@ -802,12 +818,7 @@ function AutomationDialog({
           {/* DNS 服务商 */}
           <div className="flex flex-col gap-2">
             <Label>{t("certauto.dnsTitle")}</Label>
-            {form.dns.kind === "manual" && (
-              <p className="rounded-lg border border-info/25 bg-info-soft px-2.5 py-2 text-[11px] text-info">
-                {t("certauto.manualHint")}
-              </p>
-            )}
-            <Select value={form.dns.kind} onValueChange={(v) => patch({ dns: { ...form.dns, kind: v } })}>
+            <Select value={form.dns.kind} onValueChange={(v) => patch({ dns: v === "manual" ? { kind: v, accessKey: "", secret: "" } : { ...form.dns, kind: v } })}>
               <SelectTrigger className="text-[12px]"><SelectValue /></SelectTrigger>
               <SelectContent>
                 {DNS_KINDS.map((d) => (
@@ -815,30 +826,45 @@ function AutomationDialog({
                 ))}
               </SelectContent>
             </Select>
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              <Input
-                value={form.dns.accessKey}
-                onChange={(e) => patch({ dns: { ...form.dns, accessKey: e.target.value } })}
-                placeholder={
-                  form.dns.kind === "cloudflare"
-                    ? t("certauto.field.cfToken")
-                    : form.dns.kind === "digitalocean"
-                      ? t("certauto.field.cfToken")
-                      : t("certauto.field.accessKeyId")
-                }
-                className="font-mono text-[12px]"
-              />
-              {form.dns.kind !== "cloudflare" && form.dns.kind !== "digitalocean" && (
-                <Input
-                  type="password"
-                  value={form.dns.secret}
-                  onChange={(e) => patch({ dns: { ...form.dns, secret: e.target.value } })}
-                  placeholder={t("certauto.field.accessKeySecret")}
-                  className="font-mono text-[12px]"
-                />
-              )}
-            </div>
-            <p className="text-[10.5px] text-faint">{t("certauto.dnsPermHint")}</p>
+            {form.dns.kind === "manual" ? (
+              <div className="rounded-lg border border-info/25 bg-info-soft px-2.5 py-2.5 text-[11px] text-info">
+                <p className="font-medium">{t("certauto.manualTitle")}</p>
+                <p className="mt-1 leading-relaxed text-info/80">{t("certauto.manualHint")}</p>
+              </div>
+            ) : (
+              <>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div className="flex flex-col gap-1.5">
+                    <Label htmlFor="certauto-dns-access" className="text-[11px]">
+                      {form.dns.kind === "cloudflare" || form.dns.kind === "digitalocean"
+                        ? t("certauto.field.apiToken")
+                        : t("certauto.field.accessKeyId")}
+                    </Label>
+                    <Input
+                      id="certauto-dns-access"
+                      value={form.dns.accessKey}
+                      onChange={(e) => patch({ dns: { ...form.dns, accessKey: e.target.value } })}
+                      placeholder={form.dns.kind === "cloudflare" || form.dns.kind === "digitalocean" ? t("certauto.field.apiToken") : t("certauto.field.accessKeyId")}
+                      className="font-mono text-[12px]"
+                    />
+                  </div>
+                  {form.dns.kind !== "cloudflare" && form.dns.kind !== "digitalocean" && (
+                    <div className="flex flex-col gap-1.5">
+                      <Label htmlFor="certauto-dns-secret" className="text-[11px]">{t("certauto.field.accessKeySecret")}</Label>
+                      <Input
+                        id="certauto-dns-secret"
+                        type="password"
+                        value={form.dns.secret}
+                        onChange={(e) => patch({ dns: { ...form.dns, secret: e.target.value } })}
+                        placeholder={t("certauto.field.accessKeySecret")}
+                        className="font-mono text-[12px]"
+                      />
+                    </div>
+                  )}
+                </div>
+                <p className="text-[10.5px] leading-relaxed text-faint">{t("certauto.dnsPermHint")}</p>
+              </>
+            )}
           </div>
 
           <Separator />
@@ -932,7 +958,7 @@ function AutomationDialog({
                   />
                 </div>
                 <div className="flex flex-col gap-1.5">
-                  <Label>{t("certauto.dnsWait")}</Label>
+                  <Label>{t(form.dns.kind === "manual" ? "certauto.manualTimeout" : "certauto.dnsWait")}</Label>
                   <Input
                     type="number"
                     min={0}

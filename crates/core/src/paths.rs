@@ -394,10 +394,22 @@ pub(crate) struct DataPathRebase {
     replacements: Vec<String>,
 }
 
-pub(crate) fn portable_path_text(path: &Path) -> String {
+/// 把 Windows 扩展路径前缀从面向用户的文本中移除。
+///
+/// Windows 为了支持超过 MAX_PATH 的路径会使用 `\\?\`（或斜杠形式
+/// `//?/`）前缀。这个前缀适合传给文件 API，但直接显示在界面或错误信息
+/// 中会变成用户无法理解的 `//?/D:/...`。这里只处理前缀，不改动路径主体。
+pub fn portable_text(value: &str) -> String {
+    value
+        .replace("\\\\?\\UNC\\", "\\\\")
+        .replace("\\\\?\\", "")
+        .replace("//?/UNC/", "//")
+        .replace("//?/", "")
+}
+
+pub fn portable_path_text(path: &Path) -> String {
     let text = path.to_string_lossy().replace('\\', "/");
-    if let Some(unc) = text.strip_prefix("//?/UNC/") { format!("//{unc}") }
-    else { text.strip_prefix("//?/").unwrap_or(&text).to_string() }
+    portable_text(&text)
 }
 
 impl DataPathRebase {
@@ -926,9 +938,11 @@ struct BackupMetadata {
 #[serde(rename_all = "camelCase")]
 pub struct BackupFile {
     pub name: String,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub path: String,
     pub size_bytes: u64,
     pub modified_at: i64,
+    #[serde(serialize_with = "crate::model::serialize_optional_path")]
     pub target_path: Option<String>,
     pub restorable: bool,
     pub reason: Option<String>,
@@ -940,6 +954,7 @@ pub struct BackupFile {
 #[serde(rename_all = "camelCase")]
 pub struct BackupPreview {
     pub name: String,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub target_path: String,
     pub target_relative: String,
     pub current_exists: bool,

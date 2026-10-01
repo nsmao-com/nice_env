@@ -2162,6 +2162,7 @@ pub fn sweep_orphans(paths: &Paths, store: &Store, manager: &Arc<ServiceManager>
 pub struct ConfigCheck {
     pub kind: String,
     pub name: String,
+    #[serde(serialize_with = "crate::model::serialize_optional_path")]
     pub path: Option<String>,
     pub method: String, // native | readability | none
     pub ok: bool,

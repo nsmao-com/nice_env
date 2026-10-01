@@ -458,6 +458,13 @@ export type SiteDbBinding = z.infer<typeof SiteDbBinding>;
 export const SiteState = z.enum(["running", "stopped", "error", "unconfigured"]);
 export type SiteState = z.infer<typeof SiteState>;
 
+/** 站点列表的用户分组；只影响管理视图，不改变站点运行配置。 */
+export const SiteGroup = z.object({
+  id: z.string().min(1).max(80),
+  name: z.string().trim().min(1).max(80),
+});
+export type SiteGroup = z.infer<typeof SiteGroup>;
+
 export const Site = z.object({
   /** 已成功加载的访问入口；不是当前端口设置的推算值。 */
   accessUrl: z.string().optional(),
@@ -1562,6 +1569,10 @@ export const AppSettings = z.object({
   autoDownloadUpdate: z.boolean().default(false),
   /** 站点页收藏的站点 id；只保存排序与筛选偏好，不改变站点配置。 */
   favoriteSites: z.array(z.string()).default([]),
+  /** 站点管理分组；分组和站点归属只影响管理视图。 */
+  siteGroups: z.array(SiteGroup).default([]),
+  /** 站点 id → 分组 id；站点删除后前端会自动清理无效归属。 */
+  siteGroupAssignments: z.record(z.string(), z.string()).default({}),
   /** 日志页默认拉取行数 */
   logTailLines: z.number().default(500),
   /** 日志页默认自动刷新 */

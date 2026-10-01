@@ -747,6 +747,8 @@ const settings: AppSettings = {
   checkUpdateOnLaunch: true,
   autoDownloadUpdate: false,
   favoriteSites: [],
+  siteGroups: [],
+  siteGroupAssignments: {},
   logTailLines: 500,
   logAutoRefresh: true,
   confirmKill: true,

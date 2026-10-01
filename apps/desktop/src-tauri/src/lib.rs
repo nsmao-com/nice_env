@@ -3405,6 +3405,14 @@ fn get_settings(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> serde_
         "favoriteSites": state.store.get_setting("favoriteSites")
             .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
             .unwrap_or_default(),
+        "siteGroups": state.store.get_setting("siteGroups")
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+            .filter(|value| value.is_array())
+            .unwrap_or_else(|| serde_json::json!([])),
+        "siteGroupAssignments": state.store.get_setting("siteGroupAssignments")
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+            .filter(|value| value.is_object())
+            .unwrap_or_else(|| serde_json::json!({})),
         "logTailLines": state.store.get_setting("logTailLines").map(|v| v.parse::<i64>().unwrap_or(500)).unwrap_or(500),
         "logAutoRefresh": state.store.get_setting("logAutoRefresh").map(|v| v != "false").unwrap_or(true),
         "confirmKill": state.store.get_setting("confirmKill").map(|v| v != "false").unwrap_or(true),
@@ -3461,6 +3469,29 @@ fn set_setting(
         if templates.len() > 100 { return Err(box_err(nsb_core::AppError::new("BAD_REWRITE", "最多保存 100 个模板"))); }
         let mut names = std::collections::HashSet::new();
         for template in templates { map_jh(nsb_core::sites::validate_custom_rewrite(&template, &template.server))?; if !names.insert((template.server, template.name)) { return Err(box_err(nsb_core::AppError::new("BAD_REWRITE", "同一服务器的模板名称不能重复"))); } }
+    }
+    if key == "siteGroups" {
+        let groups = value.as_array().ok_or_else(|| box_err(nsb_core::AppError::new("BAD_SITE_GROUPS", "站点分组格式无效")))?;
+        if groups.len() > 100 { return Err(box_err(nsb_core::AppError::new("BAD_SITE_GROUPS", "最多保存 100 个站点分组"))); }
+        let mut ids = std::collections::HashSet::new();
+        let mut names = std::collections::HashSet::new();
+        for group in groups {
+            let id = group.get("id").and_then(serde_json::Value::as_str).unwrap_or("").trim();
+            let name = group.get("name").and_then(serde_json::Value::as_str).unwrap_or("").trim();
+            if id.is_empty() || id.len() > 80 || name.is_empty() || name.chars().count() > 80 {
+                return Err(box_err(nsb_core::AppError::new("BAD_SITE_GROUPS", "站点分组名称或标识无效")));
+            }
+            if !ids.insert(id.to_string()) || !names.insert(name.to_ascii_lowercase()) {
+                return Err(box_err(nsb_core::AppError::new("BAD_SITE_GROUPS", "站点分组标识和名称不能重复")));
+            }
+        }
+    }
+    if key == "siteGroupAssignments" {
+        let assignments = value.as_object().ok_or_else(|| box_err(nsb_core::AppError::new("BAD_SITE_GROUPS", "站点分组归属格式无效")))?;
+        if assignments.len() > 10_000 || assignments.keys().any(|site| site.trim().is_empty() || site.len() > 160)
+            || assignments.values().any(|group| group.as_str().is_none_or(|id| id.trim().is_empty() || id.len() > 80)) {
+            return Err(box_err(nsb_core::AppError::new("BAD_SITE_GROUPS", "站点分组归属无效")));
+        }
     }
     let mut val = match value {
         serde_json::Value::String(s) => s,

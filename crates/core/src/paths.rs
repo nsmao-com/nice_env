@@ -844,7 +844,11 @@ pub(crate) fn write_with_backup_expected(
 
 /// Windows 路径转 nginx 正斜杠形式
 pub fn nginx_path(p: &Path) -> String {
-    p.to_string_lossy().replace('\\', "/")
+    let text = p.to_string_lossy().replace('\\', "/");
+    // Nginx 配置文件不需要 Windows 文件 API 使用的 `\\?\` 长路径前缀。
+    // 如果直接写入，用户会看到 `//?/D:/...`，并且旧配置同步时会和普通路径
+    // 被识别成两条不同的 include。
+    portable_text(&text)
 }
 
 /// 列出备份目录里的备份文件（新→旧）。返回 (文件名, 完整路径, 字节数, 修改时间 ms)

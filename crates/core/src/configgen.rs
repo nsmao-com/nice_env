@@ -2,7 +2,7 @@
 
 use crate::error::{AppError, Result};
 use crate::model::{RewritePreset, Site};
-use crate::paths::{nginx_path, write_with_backup, Paths};
+use crate::paths::{nginx_path, portable_text, write_with_backup, Paths};
 use std::path::Path;
 
 fn previous_config(path: &Path) -> Result<Option<String>> {
@@ -206,6 +206,15 @@ fn sync_nginx_config(current: &str, generated: &str, paths: &Paths) -> Result<St
         return Err(nginx_structure_error());
     }
     let sites = format!("{}/*.conf", nginx_path(&paths.nginx_sites_dir()));
+    let normalize_path = |value: &str| portable_text(value).replace('\\', "/");
+    let managed_sites = normalize_path(&sites);
+    let same_path = |left: &str, right: &str| {
+        if cfg!(windows) {
+            left.eq_ignore_ascii_case(right)
+        } else {
+            left == right
+        }
+    };
     let class = |node: &NginxDirective| -> Option<usize> {
         match node.words[0].as_str() {
             "include"
@@ -224,7 +233,14 @@ fn sync_nginx_config(current: &str, generated: &str, paths: &Paths) -> Result<St
                 Some(2)
             }
             "upstream" if node.words.get(1).is_some_and(|s| s.starts_with("nsb_php_")) => Some(3),
-            "include" if node.words.get(1) == Some(&sites) => Some(4),
+            "include"
+                if node
+                    .words
+                    .get(1)
+                    .is_some_and(|path| same_path(&normalize_path(path), &managed_sites)) =>
+            {
+                Some(4)
+            }
             _ => None,
         }
     };
@@ -1850,6 +1866,18 @@ secret: fixture-secret
         assert_eq!(sync_nginx_config(&custom_bucket, &generated, &paths).unwrap(), custom_bucket);
         let included_bucket = missing_bucket.replace("http {", "http {\n    include user-options.conf;");
         assert!(!sync_nginx_config(&included_bucket, &generated, &paths).unwrap().contains("server_names_hash_bucket_size"));
+
+        // 旧版本可能同时留下普通路径和 `//?/` 长路径形式；两条都属于
+        // NiceEnv 托管 include，重写时只能保留一条。
+        let managed_sites = nginx_path(&paths.nginx_sites_dir());
+        let output_body = output.trim_end().strip_suffix('}').unwrap().trim_end();
+        let legacy_sites = format!(
+            "{output_body}\n    include \"//?/{managed_sites}/*.conf\";\n}}\n"
+        );
+        let repaired_sites = sync_nginx_config(&legacy_sites, &generated, &paths).unwrap();
+        let managed_include = format!("include \"{managed_sites}/*.conf\";");
+        assert_eq!(repaired_sites.matches(&managed_include).count(), 1);
+        assert!(!repaired_sites.contains("//?/"));
 
         let legacy = "# site: demo (fixture) — NiceEnv 托管\r\nserver {\r\n    listen 8080; # keep comment\r\n    listen 8443 ssl;\r\n    listen 0.0.0.0:9000;\r\n    listen [::1]:9001;\r\n    location / { return 200 'listen 9999;'; }\r\n}\r\n";
         let localized = localize_legacy_site_listeners(legacy).unwrap();

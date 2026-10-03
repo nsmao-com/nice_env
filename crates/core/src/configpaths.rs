@@ -243,19 +243,29 @@ fn path_field(service: &str, path: &[String], root: &Value) -> bool {
         }
         (
             "sftpgo",
-            ["data_provider", "credentials_path" | "backups_path"]
+            ["common", "temp_path"]
+            | ["data_provider", "credentials_path" | "backups_path" | "users_base_dir" | "root_cert" | "client_cert"
+            | "client_key"]
             | ["httpd", "templates_path"
             | "static_files_path"
             | "openapi_path"
             | "certificate_file"
-            | "certificate_key_file"]
-            | ["httpd", "bindings", "*", "certificate_file" | "certificate_key_file"]
-            | ["httpd", "ca_certificates" | "certificate_revocation_lists", "*"]
-            | ["sftpd", "host_keys" | "trusted_user_ca_keys", "*"]
-            | ["sftpd", "revoked_user_certs_file"]
-            | ["ftpd" | "webdavd", "certificate_file" | "certificate_key_file"]
+            | "certificate_key_file"
+            | "signing_passphrase_file"]
+            | ["httpd" | "ftpd" | "webdavd", "bindings", "*", "certificate_file" | "certificate_key_file"]
+            | ["httpd", "bindings", "*", "oidc", "client_secret_file"]
+            | ["sftpd", "host_keys" | "host_certificates" | "trusted_user_ca_keys", "*"]
+            | ["sftpd", "revoked_user_certs_file" | "opkssh_path" | "login_banner_file"]
+            | ["ftpd", "banner_file"]
+            | ["ftpd" | "webdavd" | "telemetry", "certificate_file" | "certificate_key_file"]
+            | ["httpd" | "ftpd" | "webdavd", "ca_certificates" | "ca_revocation_lists", "*"]
+            | ["telemetry", "auth_user_file"]
+            | ["http", "ca_certificates", "*"]
+            | ["http", "certificates", "*", "cert" | "key"]
+            | ["kms", "secrets", "master_key_path"]
             | ["smtp", "templates_path"]
-            | ["acme", "certs_path"],
+            | ["acme", "certs_path"]
+            | ["acme", "http01_challenge", "webroot"],
         ) => true,
         _ => false,
     }

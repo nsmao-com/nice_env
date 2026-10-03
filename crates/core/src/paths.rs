@@ -2256,6 +2256,77 @@ mod tests {
         );
         assert_eq!(decoded["data_provider"]["password"], dsn);
         assert_eq!(decoded["data_provider"]["name"], format!("{old}/unused.db"));
+        let file = format!("{old}/资料 #1.pem");
+        let remote = format!("https://example.invalid/{old}/unchanged");
+        let sftpgo_paths = serde_json::json!({
+            "common":{"temp_path":file,"server_version":file},
+            "data_provider":{"driver":"postgresql","name":file,"password":file,
+                "connection_string":file,"root_cert":file,"client_cert":file,"client_key":file,"users_base_dir":file},
+            "sftpd":{"login_banner_file":file,"host_certificates":[file,"relative-cert.pub"],"opkssh_path":file,"opkssh_checksum":file},
+            "ftpd":{"banner_file":file,"bindings":[{"certificate_file":file,"certificate_key_file":file}],
+                "ca_certificates":[file],"ca_revocation_lists":[file]},
+            "webdavd":{"bindings":[{"certificate_file":file,"certificate_key_file":file,"prefix":file}],
+                "ca_certificates":[file],"ca_revocation_lists":[file]},
+            "httpd":{"signing_passphrase_file":file,"signing_passphrase":file,"ca_revocation_lists":[file],
+                "bindings":[{"oidc":{"client_secret_file":file,"client_secret":file,"config_url":remote},
+                    "branding":{"web_admin":{"logo_path":file,"favicon_path":file,"disclaimer_path":file}}}]},
+            "http":{"ca_certificates":[file],"certificates":[{"cert":file,"key":file}],
+                "headers":[{"key":"Authorization","value":file,"url":remote}]},
+            "telemetry":{"auth_user_file":file,"certificate_file":file,"certificate_key_file":file},
+            "kms":{"secrets":{"master_key_path":file,"master_key":file,"url":remote}},
+            "acme":{"http01_challenge":{"webroot":file},"ca_endpoint":remote},
+            "custom":{"login_banner_file":file}
+        });
+        let mut expected = sftpgo_paths.clone();
+        for pointer in [
+            "/common/temp_path",
+            "/data_provider/root_cert",
+            "/data_provider/client_cert",
+            "/data_provider/client_key",
+            "/data_provider/users_base_dir",
+            "/sftpd/login_banner_file",
+            "/sftpd/host_certificates/0",
+            "/sftpd/opkssh_path",
+            "/ftpd/banner_file",
+            "/ftpd/bindings/0/certificate_file",
+            "/ftpd/bindings/0/certificate_key_file",
+            "/ftpd/ca_certificates/0",
+            "/ftpd/ca_revocation_lists/0",
+            "/webdavd/bindings/0/certificate_file",
+            "/webdavd/bindings/0/certificate_key_file",
+            "/webdavd/ca_certificates/0",
+            "/webdavd/ca_revocation_lists/0",
+            "/httpd/signing_passphrase_file",
+            "/httpd/ca_revocation_lists/0",
+            "/httpd/bindings/0/oidc/client_secret_file",
+            "/http/ca_certificates/0",
+            "/http/certificates/0/cert",
+            "/http/certificates/0/key",
+            "/telemetry/auth_user_file",
+            "/telemetry/certificate_file",
+            "/telemetry/certificate_key_file",
+            "/kms/secrets/master_key_path",
+            "/acme/http01_challenge/webroot",
+        ] {
+            *expected.pointer_mut(pointer).unwrap() =
+                format!("{structured_target}/资料 #1.pem").into();
+        }
+        for (filename, config) in [
+            (
+                "sftpgo.json",
+                serde_json::to_string_pretty(&sftpgo_paths).unwrap(),
+            ),
+            ("sftpgo.yaml", yaml_serde::to_string(&sftpgo_paths).unwrap()),
+        ] {
+            let relative = PathBuf::from("etc/sftpgo/1").join(filename);
+            let updated = structured.config_text(&relative, &config).unwrap();
+            let decoded: serde_json::Value = yaml_serde::from_str(&updated).unwrap();
+            assert_eq!(decoded, expected, "{filename}");
+            assert_eq!(
+                structured.config_text(&relative, &updated).unwrap(),
+                updated
+            );
+        }
         let encoded_old = format!("{old} #中文");
         let encoded_rebase =
             DataPathRebase::new(Path::new(&encoded_old), Path::new(&structured_target)).unwrap();
@@ -2830,6 +2901,12 @@ mod tests {
         let qdrant_port = qdrant_listener.local_addr().unwrap().port();
         let mihomo_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let mihomo_port = mihomo_listener.local_addr().unwrap().port();
+        let ssh_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let ssh_port = ssh_listener.local_addr().unwrap().port();
+        let ftp_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let ftp_port = ftp_listener.local_addr().unwrap().port();
+        let dav_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dav_port = dav_listener.local_addr().unwrap().port();
         for directory in [
             "etc/qdrant/1",
             "etc/mihomo/providers",
@@ -2857,7 +2934,43 @@ mod tests {
         .unwrap();
         let mihomo = format!("mixed-port: 0\nexternal-controller: 127.0.0.1:{mihomo_port}\nsecret: '{secret}'\nallow-lan: false\nmode: rule\nproxy-providers:\n  local:\n    type: file\n    path: '{old}/etc/mihomo/providers/local.yaml'\nproxy-groups:\n  - {{name: fixture-group, type: select, use: [local]}}\nrules: ['MATCH,DIRECT']\n");
         std::fs::write(source.join("etc/mihomo/config.yaml"), &mihomo).unwrap();
-        let sftpgo = serde_json::json!({"data_provider":{"driver":"sqlite","name":format!("{old}/data/sftpgo/accounts.db"),"password":secret,"credentials_path":format!("{old}/data/sftpgo/credentials")}});
+        let certificate = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+        std::fs::write(source.join("data/sftpgo/tls.pem"), certificate.cert.pem()).unwrap();
+        std::fs::write(
+            source.join("data/sftpgo/tls.key"),
+            certificate.key_pair.serialize_pem(),
+        )
+        .unwrap();
+        std::fs::write(
+            source.join("data/sftpgo/banner.txt"),
+            "migrated native banner",
+        )
+        .unwrap();
+        std::fs::write(
+            source.join("data/sftpgo/master.key"),
+            "isolated native migration key",
+        )
+        .unwrap();
+        std::fs::create_dir(source.join("data/sftpgo/templates")).unwrap();
+        copy_tree(
+            &binaries.join("sftpgo/templates"),
+            &source.join("data/sftpgo/templates"),
+            &mut (0, 0),
+            false,
+        )
+        .unwrap();
+        let sftpgo = serde_json::json!({
+            "data_provider":{"driver":"sqlite","name":format!("{old}/data/sftpgo/accounts.db"),"password":secret,"credentials_path":format!("{old}/data/sftpgo/credentials")},
+            "sftpd":{"bindings":[{"address":"127.0.0.1","port":ssh_port}],"login_banner_file":format!("{old}/data/sftpgo/banner.txt")},
+            "ftpd":{"bindings":[{"address":"127.0.0.1","port":ftp_port}],"banner_file":format!("{old}/data/sftpgo/banner.txt")},
+            "webdavd":{"bindings":[{"address":"127.0.0.1","port":dav_port,"enable_https":true,
+                "certificate_file":format!("{old}/data/sftpgo/tls.pem"),"certificate_key_file":format!("{old}/data/sftpgo/tls.key")}]},
+            "httpd":{"bindings":[{"port":0}]},
+            "smtp":{"templates_path":format!("{old}/data/sftpgo/templates")},
+            "http":{"ca_certificates":[format!("{old}/data/sftpgo/tls.pem")],
+                "certificates":[{"cert":format!("{old}/data/sftpgo/tls.pem"),"key":format!("{old}/data/sftpgo/tls.key")}]},
+            "kms":{"secrets":{"master_key_path":format!("{old}/data/sftpgo/master.key")}}
+        });
         std::fs::write(
             source.join("etc/sftpgo/1/sftpgo.json"),
             serde_json::to_vec_pretty(&sftpgo).unwrap(),
@@ -2924,6 +3037,124 @@ mod tests {
                 let _ = self.0.wait();
             }
         }
+        let log = temp.path().join("sftpgo.log");
+        let output = std::fs::File::create(&log).unwrap();
+        let mut command = platform::command(executable("sftpgo", "sftpgo"));
+        for (key, _) in
+            std::env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("SFTPGO_"))
+        {
+            command.env_remove(key);
+        }
+        command
+            .current_dir(&target)
+            .args(["serve", "--config-dir"])
+            .arg(target.join("etc/sftpgo/1"))
+            .args(["--config-file", "sftpgo.json", "--log-file-path", ""])
+            .env(
+                "SFTPGO_DATA_PROVIDER__CONNECTION_STRING",
+                crate::configpaths::sftpgo_sqlite_dsn(
+                    &target.join("etc/sftpgo/1"),
+                    config["data_provider"]["name"].as_str().unwrap(),
+                ),
+            )
+            .stdout(output.try_clone().unwrap())
+            .stderr(output);
+        drop(ssh_listener);
+        drop(ftp_listener);
+        drop(dav_listener);
+        let mut child = Child(command.spawn().unwrap());
+        let tls = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .add_root_certificate(
+                reqwest::Certificate::from_pem(certificate.cert.pem().as_bytes()).unwrap(),
+            )
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "{}",
+                std::fs::read_to_string(&log).unwrap()
+            );
+            if let Ok(response) = tls.get(format!("https://127.0.0.1:{dav_port}/")).send() {
+                assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{}",
+                std::fs::read_to_string(&log).unwrap()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let ftp = std::net::TcpStream::connect(("127.0.0.1", ftp_port)).unwrap();
+        ftp.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut ftp = std::io::BufReader::new(ftp);
+        let mut greeting = String::new();
+        for _ in 0..10 {
+            use std::io::BufRead;
+            let mut line = String::new();
+            assert!(ftp.read_line(&mut line).unwrap() > 0);
+            greeting.push_str(&line);
+            if line.starts_with("220 ") {
+                break;
+            }
+        }
+        assert!(greeting.contains("migrated native banner"), "{greeting}");
+        let banner = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        struct Banner(std::sync::Arc<std::sync::Mutex<String>>, String);
+        impl russh::client::Handler for Banner {
+            type Error = russh::Error;
+            async fn check_server_key(
+                &mut self,
+                key: &russh::keys::PublicKeyOrCertificate,
+            ) -> std::result::Result<bool, Self::Error> {
+                Ok(key
+                    .public_key()
+                    .fingerprint(russh::keys::HashAlg::Sha256)
+                    .to_string()
+                    == self.1)
+            }
+            async fn auth_banner(
+                &mut self,
+                value: &str,
+                _: &mut russh::client::Session,
+            ) -> std::result::Result<(), Self::Error> {
+                *self.0.lock().unwrap() = value.into();
+                Ok(())
+            }
+        }
+        let fingerprint = crate::certdeploy::probe_ssh("127.0.0.1", ssh_port)
+            .unwrap()
+            .fingerprint;
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                let mut connection = russh::client::connect(
+                    std::sync::Arc::new(russh::client::Config::default()),
+                    ("127.0.0.1", ssh_port),
+                    Banner(banner.clone(), fingerprint),
+                )
+                .await
+                .unwrap();
+                assert!(!connection
+                    .authenticate_none("migration-probe")
+                    .await
+                    .unwrap()
+                    .success());
+                assert_eq!(*banner.lock().unwrap(), "migrated native banner");
+                connection
+                    .disconnect(russh::Disconnect::ByApplication, "done", "en")
+                    .await
+                    .unwrap();
+            })
+            .await
+            .unwrap();
+        });
+        drop(ftp);
+        drop(child);
         let http = reqwest::blocking::Client::builder()
             .no_proxy()
             .timeout(std::time::Duration::from_millis(500))
@@ -3036,7 +3267,7 @@ mod tests {
         assert!(target.join("data/qdrant/storage").is_dir());
         assert!(target.join("data/qdrant/snapshots").is_dir());
         assert!(!source.exists());
-        println!("Qdrant/mihomo native authenticated HTTP and SFTPGo provider reopen passed after data copy, old backup restore and removal of the original directory");
+        println!("Qdrant/mihomo authenticated HTTP; SFTPGo provider reopen, SSH/FTP banners and verified WebDAV TLS passed with the original directory unavailable");
     }
 
     #[test]

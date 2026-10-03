@@ -309,3 +309,17 @@ v0.2.259 main CI 的 Web、Linux、Windows、macOS Intel/ARM 全部成功，但 
 定向验证：13 项目录回归、5 项 SFTPGo 预检回归、2 项 SFTPGo 原生验收和 1 项结构化迁移原生验收通过。完整回归 core 738、集成 45、platform 15 项通过，56 项 ignored 未计为通过；桌面 cargo check、Clippy 和改动行格式检查通过。Clippy 仍有项目既有风格及 AppError 尺寸建议，未改动全局错误接口。最后对不透明 URI 参数保留及冲突 mode 的调整，重新运行路径/URI 单项回归通过。本版本远程平台结果待 CI；只格式化改动区域，没有新增测试文件或依赖，没有用户数据库/结构变更，未修改 `update.sql`，未运行本地前端 dev/build。
 
 整体复查仍未完成：旧版已经写到截断文件名的 SQLite 数据需要保留并单独确认恢复来源，不能自动猜测合并；服务数据库内部存储的用户目录（例如 SFTPGo home_dir）、其他 DSN/脚本/插件字段、UNC 实际共享目录、公网 ACME、桌面 IPC 和完整升级矩阵仍缺少完整验收。
+
+## 2026-10-04：v0.2.261 补齐 SFTPGo 文件字段并验证实际读取
+
+扩展既有原生迁移验收后，在修改实现前复现：复制数据并移走旧目录，SFTPGo 2.7.6 的 initprovider 仍读取旧目录下的 `kms.secrets.master_key_path`，报 `Unable to initialize KMS ... The system cannot find the path specified`。因此之前只验证默认 provider 配置的通过结果，不能推广为所有 SFTPGo 配置均可迁移。
+
+- 根据官方 v2.7.6 的 `sftpd/server.go`、`ftpd/ftpd.go`、`webdavd/webdavd.go`、`dataprovider/dataprovider.go`、`httpd/httpd.go` / `oidc.go`、`httpclient/httpclient.go`、`kms/kms.go` 与 `telemetry/telemetry.go` 核对实际字段语义。补齐 SSH 登录提示文件/主机证书/opkssh 程序，FTP 提示文件，FTP/WebDAV 监听器证书，HTTP 客户端证书，数据库 TLS 文件和新账号默认目录，KMS/OIDC/JWT 外置密钥文件，telemetry 认证文件及证书，以及临时目录和 ACME webroot。HTTP 服务的吊销列表字段纠正为上游实际使用的 `ca_revocation_lists`。
+- JSON/YAML 原文范围改写和完整语义核对继续复用。现有用例增加 28 个之前遗漏字段的预期路径，连同密码、内联密钥、签名口令、HTTP header、URL、WebDAV URL 前缀、branding 的网页资源路径和自定义同名字段一起比较；相对路径保持相对，远程数据库 name/DSN 不按本地文件迁移，再次迁移保持幂等。
+- 原生验收仍在临时目录、有限生命周期和 loopback 端口执行。旧目录先改名为不可达；新目录含中文、空格、`#`、方括号。现在实际重新打开 SQLite 文件、加载外置 KMS 主密钥与 HTTP 客户端证书，SSH 认证前收到指定 banner，FTP 握手收到指定 banner，WebDAV 用信任该测试证书的客户端完成 TLS 握手并收到未认证 401；没有关闭客户端证书校验。Qdrant 带 API key 的 collection/快照、mihomo 带 secret 的本地 provider 验证仍保留。首次启动 fixture 漏提供 SMTP 模板，补入官方 portable 包模板并随目录复制后，原生用例通过。
+
+v0.2.260 的 main CI `37152953149`：Web、Linux Rust/desktop、Windows、macOS Intel/ARM 全部成功；tag CI `37152953410` 的 Web/Linux 成功。Release `37152953447` 的三平台 runtime 门槛全部成功，包括上一版曾失败的 Intel Mac ACME 回环测试；当前进入安装包构建，附件完成情况仍需以 Release 实际结果为准。
+
+本批 13 项数据目录定向回归及扩展后的原生迁移用例通过；完整回归 core 738、集成 45、platform 15 项通过，56 项 ignored 未计为通过。desktop cargo check、Clippy、改动行格式和 git diff 检查通过；Clippy 仍有存量风格及 AppError 尺寸警告。当前 Windows 原生行为已有上述证据；本版本 Unix 分支的结果仍须由远程 CI 验证，不能用上一版本的绿灯替代。
+
+本批没有用户数据库或表结构变更，未修改 `update.sql`；只使用隔离的临时验收数据库。未新增测试文件、依赖或运行本地前端 dev/build。整体目标仍未完成：本次新账号默认目录字段的迁移不代表已迁移数据库内已有用户的 home_dir/virtual folders；env.d 的插值与 UTF-16、未知格式 fallback 对外置口令/提示文本的保护、SFTPGo 大小写配置键仍需继续验证，原有全平台安装/升级/桌面交互清单继续有效。

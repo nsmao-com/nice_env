@@ -81,18 +81,83 @@ export async function refreshVersionCatalog(qc: QueryClient, id: string) {
  */
 export function useVersionCatalogs(packageIds: string[]) {
   const qc = useQueryClient();
-  const ids = [...new Set(packageIds)].sort();
-  // 后端已有批量目录命令；首屏只走一次 IPC，避免套件数量增加后产生
-  // N 个独立请求、重复读取缓存以及 GitHub/上游匿名限流。
-  // 把当前套件 ID 放进 key，远端清单新增套件时会自动重新拉取目录。
-  const queryKey = ["version-catalogs", ids] as const;
+  const ids = React.useMemo(() => {
+    const priority = new Map(["nginx", "php", "mysql", "redis", "node", "python", "go"].map((id, index) => [id, index]));
+    return [...new Set(packageIds)].sort((a, b) => (priority.get(a) ?? 100) - (priority.get(b) ?? 100) || a.localeCompare(b));
+  }, [packageIds.join("\u0000")]);
+  const idKey = ids.join("\u0000");
+  // 目录不能再用一次批量 IPC 阻塞几十个上游请求；每个套件独立读取，先显示
+  // 清单/缓存版本，再把远程结果按有限并发写回同一个查询缓存。
+  const queryKey = React.useMemo(() => ["version-catalogs", ids] as const, [idKey]);
   const query = useQuery({
     queryKey,
-    queryFn: () => api.versionCatalogs(false),
-    staleTime: 5 * 60_000,
+    queryFn: async () => [],
+    staleTime: Infinity,
     retry: false,
-    enabled: ids.length > 0,
+    enabled: false,
+    initialData: [] as VersionCatalog[],
   });
+  const [loadingIds, setLoadingIds] = React.useState<Set<string>>(() => new Set());
+  const loadGeneration = React.useRef(0);
+  const publishCatalog = React.useCallback((catalog: VersionCatalog) => {
+    qc.setQueryData<VersionCatalog[]>(queryKey, (previous = []) => {
+      const current = new Map(previous.map((item) => [item.id, item]));
+      const old = current.get(catalog.id);
+      if (!(old?.cachedAt != null && catalog.cachedAt != null && old.cachedAt > catalog.cachedAt)) {
+        current.set(catalog.id, catalog);
+      }
+      return [...current.values()].sort((a, b) => a.id.localeCompare(b.id));
+    });
+  }, [qc, queryKey]);
+  const loadCatalogs = React.useCallback(async (requestedIds: string[], force: boolean) => {
+    const queue = [...new Set(requestedIds)];
+    const generation = ++loadGeneration.current;
+    setLoadingIds(new Set(queue));
+    let cursor = 0;
+    const results: VersionCatalog[] = [];
+    const publish = (catalog: VersionCatalog) => {
+      if (generation !== loadGeneration.current) return;
+      results.push(catalog);
+      publishCatalog(catalog);
+      setLoadingIds((previous) => {
+        if (!previous.has(catalog.id)) return previous;
+        const next = new Set(previous);
+        next.delete(catalog.id);
+        return next;
+      });
+    };
+    const worker = async () => {
+      while (generation === loadGeneration.current) {
+        const id = queue[cursor++];
+        if (!id) return;
+        try {
+          publish(await api.versionCatalog(id, force));
+        } catch (error) {
+          publish({
+            id,
+            remote: [],
+            online: false,
+            error: normalizeError(error).message,
+          });
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(6, queue.length) }, () => worker()));
+    return results;
+  }, [publishCatalog]);
+
+  React.useEffect(() => {
+    if (ids.length === 0) {
+      loadGeneration.current += 1;
+      setLoadingIds(new Set());
+      return;
+    }
+    void loadCatalogs(ids, false);
+    return () => {
+      loadGeneration.current += 1;
+    };
+  }, [idKey, ids, loadCatalogs]);
+
   const catalogs = new Map((query.data ?? []).map((catalog) => [catalog.id, catalog]));
   const byId = new Map<string, VersionCatalog & { loading: boolean }>();
   ids.forEach((id) => {
@@ -100,22 +165,32 @@ export function useVersionCatalogs(packageIds: string[]) {
     byId.set(id, {
       id, remote: [], online: false,
       ...catalog,
-      ...(query.error ? { online: false, error: normalizeError(query.error).message } : {}),
-      loading: query.isFetching,
+      loading: loadingIds.has(id),
     });
   });
   const refresh = React.useCallback(async (id: string) => {
+    setLoadingIds((previous) => {
+      const next = new Set(previous);
+      next.add(id);
+      return next;
+    });
     try {
-      await refreshVersionCatalog(qc, id);
+      const catalog = await api.versionCatalog(id, true);
+      publishCatalog(catalog);
     } catch (error) {
       toastError(error);
+    } finally {
+      setLoadingIds((previous) => {
+        if (!previous.has(id)) return previous;
+        const next = new Set(previous);
+        next.delete(id);
+        return next;
+      });
     }
-  }, [qc]);
+  }, [publishCatalog]);
   const refreshAll = React.useCallback(async () => {
-    const catalogs = await api.versionCatalogs(true);
-    await publishVersionCatalogs(qc, catalogs, true);
-    return catalogs;
-  }, [qc]);
+    return loadCatalogs(ids, true);
+  }, [ids, loadCatalogs]);
   return { byId, refresh, refreshAll };
 }
 

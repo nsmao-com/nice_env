@@ -600,7 +600,37 @@ pub fn process_group_gone(pid: u32) -> Result<bool> {
             }
             return Ok(true);
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            // libproc 同时列出普通进程和 zombie；返回值是 PID 个数，0 也可能表示错误。
+            // 完整枚举后检查存活状态，避免把只剩 zombie 的组误判成迁移清理失败。
+            let mut members = vec![0 as libc::pid_t; 64];
+            loop {
+                let count = unsafe {
+                    *libc::__error() = 0;
+                    libc::proc_listpgrppids(
+                        pid as libc::pid_t,
+                        members.as_mut_ptr().cast(),
+                        (members.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int,
+                    )
+                };
+                let error = std::io::Error::last_os_error();
+                if count < 0 || (count == 0 && error.raw_os_error() != Some(0)) {
+                    return Err(io_err(error));
+                }
+                let count = count as usize;
+                if count < members.len() {
+                    return Ok(members[..count]
+                        .iter()
+                        .all(|member| *member > 0 && !process_alive(*member as u32)));
+                }
+                if members.len() >= 65536 {
+                    return Ok(false);
+                }
+                members.resize(members.len() * 2, 0);
+            }
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         return Ok(false);
     }
     let error = std::io::Error::last_os_error();
@@ -1654,9 +1684,16 @@ mod process_tests {
     #[cfg(unix)]
     #[test]
     fn repeated_termination_handles_the_exit_transition_without_reaping() {
+        use std::os::unix::process::CommandExt;
         for _ in 0..16 {
-            let mut child = ChildGuard(command("sleep").arg("5").spawn().unwrap());
+            let mut cmd = command("sleep");
+            cmd.arg("5");
+            unsafe {
+                cmd.pre_exec(spawn_pre_exec);
+            }
+            let mut child = ChildGuard(cmd.spawn().unwrap());
             let pid = child.0.id();
+            assert!(!process_group_gone(pid).unwrap());
             let process = VerifiedProcess::open(pid, &process_start_marker(pid).unwrap())
                 .unwrap()
                 .unwrap();
@@ -1668,6 +1705,7 @@ mod process_tests {
             }
             assert!(process.has_exited().unwrap());
             process.terminate().unwrap();
+            assert!(process_group_gone(pid).unwrap());
             child.0.wait().unwrap();
         }
     }

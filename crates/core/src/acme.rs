@@ -259,20 +259,48 @@ impl AcmeClient {
         url: &str,
         payload: &serde_json::Value,
     ) -> Result<reqwest::blocking::Response> {
+        self.jws_post_with_key(url, payload, false)
+    }
+
+    fn jws_post_with_key(
+        &mut self,
+        url: &str,
+        payload: &serde_json::Value,
+        new_account: bool,
+    ) -> Result<reqwest::blocking::Response> {
         let mut last = None;
         for _ in 0..3 {
-            let resp = self.jws_post_once(url, payload, false)?;
+            let resp = self.jws_post_once(url, payload, new_account)?;
             let status = resp.status();
             if status.is_success() || status.as_u16() != 400 {
                 return Ok(resp);
             }
             let body = resp.text().unwrap_or_default();
-            if body.contains("badNonce") {
-                self.nonce = None;
-                last = Some(AppError::new("ACME_BAD_NONCE", body));
+            let bad_nonce = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .is_some_and(|problem| problem["type"] == "urn:ietf:params:acme:error:badNonce");
+            if bad_nonce {
+                // jws_post_once 已保存本次响应的 Replay-Nonce；缺失时 fetch_nonce 再请求。
+                last = Some(
+                    AppError::new(
+                        "ACME_BAD_NONCE",
+                        "证书服务的安全校验暂未通过，自动重试后仍失败",
+                    )
+                    .with_hint(
+                        "请稍后重试；若开启了网络代理，请检查代理连接是否正常。无需修改 DNS 凭据。",
+                    )
+                    .with_detail(body),
+                );
                 continue;
             }
-            return Err(acme_error(&body, url));
+            return Err(acme_error(
+                &body,
+                if new_account {
+                    "注册 ACME 账号"
+                } else {
+                    url
+                },
+            ));
         }
         Err(last.unwrap_or_else(|| AppError::new("ACME_RETRY", "重试次数用尽")))
     }
@@ -283,7 +311,7 @@ impl AcmeClient {
         url: &str,
         payload: &serde_json::Value,
     ) -> Result<reqwest::blocking::Response> {
-        self.jws_post_once(url, payload, true)
+        self.jws_post_with_key(url, payload, true)
     }
 
     fn jws_post_once(
@@ -323,12 +351,20 @@ impl AcmeClient {
         let request_body = serde_json::to_vec(&body)
             .map_err(|e| AppError::internal("序列化 JWS 请求", e.to_string()))?;
         // RFC 8555 §6.2：所有 ACME JWS POST（包括 POST-as-GET）必须使用 JOSE 类型。
-        self.http
+        let response = self
+            .http
             .post(url)
             .header(reqwest::header::CONTENT_TYPE, "application/jose+json")
             .body(request_body)
             .send()
-            .map_err(|e| AppError::new("ACME_HTTP", format!("请求 {url} 失败：{e}")))
+            .map_err(|e| AppError::new("ACME_HTTP", format!("请求 {url} 失败：{e}")))?;
+        self.nonce = response
+            .headers()
+            .get("replay-nonce")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        Ok(response)
     }
 
     /// POST-as-GET（幂等拉取），返回文本
@@ -672,6 +708,41 @@ fn acme_error(body: &str, what: &str) -> AppError {
             .with_hint("请更新 NiceEnv 后重试；无需更换联系邮箱或 DNS 凭据。若最新版仍出现此错误，请反馈错误详情。")
             .with_detail(detail);
     }
+    let problem = code
+        .strip_prefix("urn:ietf:params:acme:error:")
+        .unwrap_or(&code);
+    let guidance = match problem {
+        "invalidContact" | "unsupportedContact" => Some((
+            "ACME_CONTACT", "证书服务未接受联系邮箱",
+            "请检查邮箱格式，填写一个可以正常收信的邮箱后重试。无需修改 DNS 凭据。",
+        )),
+        "externalAccountRequired" => Some((
+            "ACME_EAB_REQUIRED", "当前证书颁发机构要求绑定账号",
+            "请填写该证书颁发机构提供的 EAB 账号凭据；它与 DNS 服务商的 Access ID 不同。也可以选择无需 EAB 的 Let's Encrypt。",
+        )),
+        "rateLimited" => Some((
+            "ACME_RATE_LIMITED", "证书服务暂时限制了申请次数",
+            "请按错误详情中给出的时间等待后重试，避免连续点击签发。",
+        )),
+        "unauthorized" => Some((
+            "ACME_VALIDATION", "域名所有权验证未通过",
+            "请核对当前申请的 TXT 记录名称和值，并等待公网 DNS 生效；旧申请的记录值不能用于本次验证。",
+        )),
+        "rejectedIdentifier" => Some((
+            "ACME_DOMAIN", "证书服务不接受当前域名",
+            "请检查域名拼写；本地测试域名应使用本地证书，公网证书需使用你能完成所有权验证的域名。",
+        )),
+        "serverInternal" => Some((
+            "ACME_CA_UNAVAILABLE", "证书颁发机构暂时无法处理申请",
+            "请稍后重试。无需修改联系邮箱或 DNS 凭据。",
+        )),
+        _ => None,
+    };
+    if let Some((code, message, hint)) = guidance {
+        return AppError::new(code, format!("{what}：{message}"))
+            .with_hint(hint)
+            .with_detail(detail);
+    }
     AppError::new(&code, format!("{what}：{detail}"))
 }
 
@@ -692,7 +763,7 @@ mod tests {
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}/acme", listener.local_addr().unwrap());
         let server = std::thread::spawn(move || {
-            for index in 0..3 {
+            for index in 0..9 {
                 let deadline = std::time::Instant::now() + Duration::from_secs(5);
                 let mut stream = loop {
                     if let Ok((stream, _)) = listener.accept() {
@@ -735,12 +806,28 @@ mod tests {
                     &B64URL.decode(body["protected"].as_str().unwrap()).unwrap(),
                 )
                 .unwrap();
-                assert_eq!(protected.get("jwk").is_some(), index == 0);
-                assert_eq!(protected.get("kid").is_some(), index != 0);
-                assert_eq!(body["payload"].as_str().unwrap().is_empty(), index == 2);
+                assert_eq!(protected.get("jwk").is_some(), index < 2);
+                assert_eq!(protected.get("kid").is_some(), index >= 2);
+                assert_eq!(body["payload"].as_str().unwrap().is_empty(), index >= 4);
+                assert_eq!(
+                    protected["nonce"],
+                    if index == 0 {
+                        "fixture-nonce".to_string()
+                    } else {
+                        format!("next-{}", index - 1)
+                    }
+                );
+                let (status, body) = if index % 2 == 0 || index >= 6 {
+                    (
+                        "400 Bad Request",
+                        r#"{"type":"urn:ietf:params:acme:error:badNonce","detail":"nonce expired"}"#,
+                    )
+                } else {
+                    ("200 OK", "{}")
+                };
                 stream
                     .write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                        format!("HTTP/1.1 {status}\r\nReplay-Nonce: next-{index}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes(),
                     )
                     .unwrap();
             }
@@ -755,7 +842,7 @@ mod tests {
             dir: serde_json::Value::Null,
             account,
             kid: "https://ca.example/account/1".into(),
-            nonce: None,
+            nonce: Some("fixture-nonce".into()),
             pending_order_url: None,
         };
         for (index, payload) in [
@@ -766,13 +853,20 @@ mod tests {
         .iter()
         .enumerate()
         {
-            client.nonce = Some("fixture-nonce".into());
-            assert!(client
-                .jws_post_once(&url, payload, index == 0)
+            assert!((if index == 0 {
+                client.jws_post_new(&url, payload)
+            } else {
+                client.jws_post(&url, payload)
+            })
                 .unwrap()
                 .status()
                 .is_success());
         }
+        assert_eq!(client.nonce.as_deref(), Some("next-5"));
+        let exhausted = client.post_as_get(&url).unwrap_err();
+        assert_eq!(exhausted.code, "ACME_BAD_NONCE");
+        assert!(exhausted.hint.unwrap().contains("无需修改 DNS 凭据"));
+        assert_eq!(client.nonce.as_deref(), Some("next-8"));
         server.join().unwrap();
         let error = acme_error(
             r#"{"type":"urn:ietf:params:acme:error:malformed","detail":"Invalid Content-Type header on POST. Content-Type must be application/jose+json"}"#,
@@ -780,6 +874,26 @@ mod tests {
         );
         assert_eq!(error.code, "ACME_CONTENT_TYPE");
         assert!(error.hint.unwrap().contains("无需更换联系邮箱"));
+        for (problem, code) in [
+            ("invalidContact", "ACME_CONTACT"),
+            ("externalAccountRequired", "ACME_EAB_REQUIRED"),
+            ("rateLimited", "ACME_RATE_LIMITED"),
+            ("unauthorized", "ACME_VALIDATION"),
+            ("rejectedIdentifier", "ACME_DOMAIN"),
+            ("serverInternal", "ACME_CA_UNAVAILABLE"),
+        ] {
+            let error = acme_error(
+                &serde_json::json!({
+                    "type": format!("urn:ietf:params:acme:error:{problem}"),
+                    "detail": "original CA detail",
+                })
+                .to_string(),
+                "申请证书",
+            );
+            assert_eq!(error.code, code);
+            assert!(error.hint.is_some());
+            assert_eq!(error.detail.as_deref(), Some("original CA detail"));
+        }
     }
 
     #[test]

@@ -4141,6 +4141,7 @@ async fn download_update(
     asset_name: Option<String>,
 ) -> Result<serde_json::Value, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
+    map_jh(state.paths.ensure_safe_app_update())?;
     use std::io::Write;
 
     if !url.starts_with("https://") {
@@ -4259,6 +4260,7 @@ fn install_update(app: tauri::AppHandle, path: String) -> Result<bool, tauri::Er
         )));
     }
     let state = app.state::<Arc<CoreState>>();
+    map_jh(state.paths.ensure_safe_app_update())?;
     let mut shutdown = map_jh(nsb_core::AuxiliaryShutdown::prepare())?;
     map_jh(state.with_stopped_services(|| {
         #[cfg(windows)]

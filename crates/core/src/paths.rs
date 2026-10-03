@@ -72,6 +72,11 @@ impl Paths {
         Self { base }
     }
 
+    /// 更新会替换 macOS 应用包；旧版包内的数据必须先通过设置中的迁移流程移出。
+    pub fn ensure_safe_app_update(&self) -> crate::error::Result<()> {
+        validate_update_data_location(&self.base, crate::install::current_os())
+    }
+
     pub fn ensure_dirs(&self) -> std::io::Result<()> {
         for d in [
             self.base.clone(),
@@ -397,6 +402,31 @@ fn with_selection_and_source<T>(file: &Path, target: &Path, source: Option<&Path
             Err(error)
         }
     }
+}
+
+fn validate_update_data_location(base: &Path, os: &str) -> crate::error::Result<()> {
+    if os != "macos" {
+        return Ok(());
+    }
+    let inside_bundle = |path: &Path| {
+        path.ancestors().any(|parent| {
+            parent
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+        })
+    };
+    // 同时检查原路径和真实路径：符号链接不能隐藏包内位置，也不能依赖即将被删除的包内入口。
+    let canonical = std::fs::canonicalize(base)
+        .map_err(|error| crate::error::AppError::io("检查更新前的数据目录", error))?;
+    if inside_bundle(base) || inside_bundle(&canonical) {
+        return Err(crate::error::AppError::new(
+            "DATA_DIR_IN_APP_BUNDLE",
+            "当前数据仍保存在 macOS 应用包内，请先迁移数据目录再更新",
+        ).with_hint("请到设置中的数据目录选项，将数据迁移到 .app 之外的文件夹；迁移完成并重启后再安装更新，以免替换应用时丢失站点、数据库和证书。")
+            .with_detail(portable_path_text(base)));
+    }
+    Ok(())
 }
 
 /// 数据目录迁移结果。迁移成功后桌面端会重启应用，让新进程从目标目录打开数据库和运行时。
@@ -1351,6 +1381,27 @@ mod tests {
             std::fs::read_to_string(legacy.join("nsb.sqlite")).unwrap(),
             "existing data"
         );
+        assert_eq!(
+            validate_update_data_location(&legacy, "macos")
+                .unwrap_err()
+                .code,
+            "DATA_DIR_IN_APP_BUNDLE"
+        );
+        assert!(validate_update_data_location(&legacy, "windows").is_ok());
+        let migrated = temp.path().join("Application Support/NiceEnv");
+        std::fs::create_dir_all(&migrated).unwrap();
+        assert!(validate_update_data_location(&migrated, "macos").is_ok());
+        #[cfg(unix)]
+        {
+            let alias = temp.path().join("data-alias");
+            std::os::unix::fs::symlink(&legacy, &alias).unwrap();
+            assert_eq!(
+                validate_update_data_location(&alias, "macos")
+                    .unwrap_err()
+                    .code,
+                "DATA_DIR_IN_APP_BUNDLE"
+            );
+        }
 
         let installed = temp.path().join("Program Files/NiceEnv/niceservbay.exe");
         let portable = installed.parent().unwrap().join("nsb-data");
@@ -1542,20 +1593,41 @@ mod tests {
         let previous = std::fs::read(&file).unwrap();
         let guard = DataDirActivity::exclusive(&source).unwrap();
         for mode in ["fail", "hang"] {
-            let error = guard.select_with_file(&file, &target, || {
-                let rollback = crate::pathenv::MigrationActivationRollback::capture(&target)?;
-                let mut command = platform::command(std::env::current_exe().unwrap());
-                command.args(["--exact", "restart::tests::restart_child_probe", "--nocapture"])
-                    .env("NSB_RESTART_PROBE_MODE", mode).env("NSB_RESTART_PROBE_ROOT", &target)
-                    .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-                let result = crate::restart::launch_and_wait(&mut command, &target, std::time::Duration::from_secs(2));
-                // 模拟新进程激活副本后出现后续初始化错误；仅写临时副本。
-                store.set_setting_json("pathEnvDirs", &vec!["changed-path"])?;
-                std::fs::remove_file(&marker_file)?;
-                rollback.restore()?;
-                result
-            }).unwrap_err();
-            assert_eq!(error.code, if mode=="fail" {"FIXTURE_INIT_FAILED"} else {"RESTART_TIMEOUT"});
+            let error = guard
+                .select_with_file(&file, &target, || {
+                    let rollback = crate::pathenv::MigrationActivationRollback::capture(&target)?;
+                    let mut command = platform::command(std::env::current_exe().unwrap());
+                    command
+                        .args([
+                            "--exact",
+                            "restart::tests::restart_child_probe",
+                            "--nocapture",
+                        ])
+                        .env("NSB_RESTART_PROBE_MODE", mode)
+                        .env("NSB_RESTART_PROBE_ROOT", &target)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null());
+                    let result = crate::restart::launch_and_wait(
+                        &mut command,
+                        &target,
+                        std::time::Duration::from_secs(2),
+                    );
+                    // 模拟新进程激活副本后出现后续初始化错误；仅写临时副本。
+                    store.set_setting_json("pathEnvDirs", &vec!["changed-path"])?;
+                    std::fs::remove_file(&marker_file)?;
+                    rollback.restore()?;
+                    result
+                })
+                .unwrap_err();
+            assert_eq!(
+                error.code,
+                if mode == "fail" {
+                    "FIXTURE_INIT_FAILED"
+                } else {
+                    "RESTART_TIMEOUT"
+                },
+                "{error:?}"
+            );
             assert_eq!(std::fs::read(&file).unwrap(), previous);
             assert!(redirected_data_dir(&source).unwrap().is_none());
             assert_eq!(std::fs::read(&marker_file).unwrap(), marker);

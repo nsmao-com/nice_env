@@ -223,7 +223,11 @@ pub fn launch_and_wait(command: &mut Command, target: &Path, timeout: Duration) 
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             match child.try_wait() {
-                Ok(Some(_)) if attached_ok && group_result.is_ok() => {
+                Ok(Some(_)) if attached_ok => {
+                    #[cfg(windows)]
+                    if group_result.is_err() {
+                        break;
+                    }
                     #[cfg(unix)]
                     if !platform::process_group_gone(child.id()).unwrap_or(false) {
                         if Instant::now() >= deadline {
@@ -232,6 +236,7 @@ pub fn launch_and_wait(command: &mut Command, target: &Path, timeout: Duration) 
                         std::thread::sleep(Duration::from_millis(20));
                         continue;
                     }
+                    // Unix 已独立确认整个组不再运行；退出竞态导致的信号错误不应阻止回滚。
                     return Err(error);
                 }
                 Ok(Some(_)) => break,

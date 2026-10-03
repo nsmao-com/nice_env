@@ -114,3 +114,18 @@ v0.2.249 的 Windows、Linux、Web、macOS Intel CI 通过。ARM64 Release 核�
 路径修复的本地完整回归通过 core 736、集成 45、platform 15；之后的 macOS 退出修改完成 Windows 编译和控制服务定向回归，真实 macOS 行为必须以新 runner 结果为准。新增套件验收代码已编译，未在 Windows 冒充 macOS 执行。仅格式化本批改动行，改动行检查通过。
 
 本批没有数据库结构或用户数据库变更，未修改 `update.sql`；未新增测试文件，未运行本地前端 dev/build。整体质量复查保持进行中。
+
+## 2026-10-03：v0.2.251 签发重试、应用包数据保护与原生验收结果
+
+v0.2.250 的 Windows、Linux、Web、macOS Intel 分支 CI 通过。ARM64 分支 CI 与 Intel Release 前置验证暴露目录迁移回滚的间歇性 `RESTART_CHILD_CLEANUP_FAILED`；ARM64 Release 核心验证为 727 项通过，之后实际套件验证有一项验收运行环境错误。因此本版 Release 未生成安装包；v0.2.249 的三个安装包构建均已确认 cancelled。
+
+ARM64 原生证据（均经应用安装器下载，临时目录含空格）：MySQL 26.7.0、MongoDB 9.0.2、NATS 2.15.0 完成两次启动/健康检查/停止；Go 1.27.1、Node 26.10.0、mongosh 2.12.0、Database Tools 100.19.1 实际执行版本命令。上述套件及 Composer 2.10.3 均通过安装列表、离线元信息、重复安装及卸载保留数据。Composer 只验证 PHAR 安装。mihomo 1.19.31 已执行原生版本命令，但同步 HTTP 校验在异步测试上下文中触发 Tokio panic，尚不能报告服务验收通过。Intel 因前置失败尚未执行套件验收。
+
+- 将原生套件验收改为同步函数，仅下载安装在专用 Tokio runtime 中执行，匹配桌面服务的同步调用环境。
+- macOS 进程组消失检查补充 libproc 完整成员枚举，排除已退出的 zombie，保留权限错误与不完整枚举的失败状态。Apple XNU `proc_info.c` 与 `libproc.c` 确认成员枚举含 zombie，`proc_listpgrppids` 返回 PID 个数，零值需结合 errno 判断。迁移清理时，Unix 仅在子进程已回收且整组确认不再运行后回滚，不再因退出竞态中单次信号错误永久阻止回滚；未知状态仍不回滚。
+- ACME 注册账号与既有账号共用最多三次 badNonce 重试，复用响应里的 Replay-Nonce。原生本机 HTTP 接收端覆盖账号、订单和 POST-as-GET 的 JOSE 请求头、正确 jwk/kid、过期 nonce 重试、新 nonce 连续使用及三次失败上限。常见邮箱、EAB、限流、域名验证、域名不支持和 CA 服务异常提供中文说明，原始详情保留。
+- macOS 应用内下载更新与安装更新前检查数据位置。旧数据仍在 `.app` 内，或通过符号链接指向包内时，提示先用设置中的现有迁移流程移到包外；不自动搬动数据。此保护不拦截用户在 Finder 中自行替换旧应用包。
+
+本地 ACME 8 项、重启 4 项、目录 21 项回归通过，桌面端 `cargo check --locked -p niceservbay` 和改动行格式检查通过。macOS 新增的进程组判断、符号链接边界及完整套件验收继续交给真实双架构 runner，未以本机结果代替。
+
+没有数据库结构或用户数据库变更，未修改 `update.sql`；未新增测试文件、未运行本地前端 dev/build。剩余清单继续有效，整体目标仍未完成。

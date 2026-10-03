@@ -2178,12 +2178,13 @@ mod tests {
             .is_none());
     }
 
-    #[tokio::test]
+    #[test]
     #[ignore = "requires macOS, NSB_NATIVE_PACKAGE and NSB_SKIP_HOSTS=1; downloads official packages and uses temporary service data"]
-    async fn official_macos_package_lifecycle() {
+    fn official_macos_package_lifecycle() {
         assert_eq!(current_os(), "macos");
         assert_eq!(std::env::var("NSB_SKIP_HOSTS").as_deref(), Ok("1"));
         let id = std::env::var("NSB_NATIVE_PACKAGE").expect("NSB_NATIVE_PACKAGE");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
         let (_temp, mut state) = fixture();
         state.paths = Paths::new(_temp.path().join("NiceEnv native data"));
         state.paths.ensure_dirs().unwrap();
@@ -2193,7 +2194,7 @@ mod tests {
         let entry = state.installer.template_for(&id).expect("native package");
         assert!(Installer::is_platform_compatible(&entry));
         let key = format!("{id}@{}", entry.version);
-        let installed = state.install_package(&key).await.unwrap();
+        let installed = runtime.block_on(state.install_package(&key)).unwrap();
         let actual = state.installer.installed_entry(&installed);
         let program = Path::new(&installed.install_path).join(entry_relative_path(&actual.entry));
         assert!(program.is_file(), "{}", program.display());
@@ -2231,7 +2232,10 @@ mod tests {
         );
         crate::versions::clear_cache(&state.store);
         assert_eq!(
-            state.install_package(&key).await.unwrap().installed_at,
+            runtime
+                .block_on(state.install_package(&key))
+                .unwrap()
+                .installed_at,
             installed.installed_at
         );
         let reopened = Store::open(state.paths.db()).unwrap();

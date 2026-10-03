@@ -340,3 +340,18 @@ v0.2.260 的 main CI `37152953149`：Web、Linux Rust/desktop、Windows、macOS 
 本机再次核对 `D:/NiceEnv/niceservbay.exe` 文件版本为 0.2.244，正在运行的进程也来自该路径。ACME JOSE 请求头修复已从 v0.2.245 起进入后续版本；本批完整回归中的实际 HTTP 请求检查通过，旧程序尚未更新不能作为新版本验收。未代用户更换邮箱或 DNS 凭据、运行安装器或注册公网 ACME 账号。
 
 整体复查仍未完成。本批资源识别覆盖已支持的 SFTPGo JSON/YAML 字段；其它服务、env.d 覆盖、未知格式、备份恢复中的资源角色仍需继续核对。已查阅 Viper 官方说明，配置键不区分大小写，而当前 SFTPGo 配置预检/字段匹配仍按大小写区分，这也是下一步必须修正的实际兼容性差异。原有 SFTPGo 内部用户目录、旧截断 SQLite 文件恢复、UNC、公网 ACME 和全平台升级/桌面交互事项继续保留。
+
+## 2026-10-04：v0.2.263 对齐 SFTPGo 配置键与 YAML 引用语义
+
+核对 SFTPGo 2.7.6 的 go.mod、config.LoadConfig 和 Viper v1.21.0 的 insensitiviseMap：键名递归转为小写，数组中的对象也同样处理，字符串值不变。Context7 查询失败后，直接读取上述官方源码核实。
+
+- 修改实现前，混合大小写的 `HTTPD/Templates_Path` 使预检误加默认模板环境变量；既有预检用例明确失败。官方 SFTPGo 能使用大写配置初始化数据库，但原迁移器漏掉资源引用，复制后外置主密钥字节发生变化，原生迁移用例明确失败。最初一次 native fixture 自身仍按小写读取测试 JSON，修正 fixture 后才记录上述真实复现，未把 fixture 错误算作产品证据。
+- 预检、资源识别和迁移共用 SFTPGo 语义视图：先展开 YAML merge/alias，再按 Go 的逐字符小写规则识别键，包括 `İ`。只在内存生成该视图；迁移仍按原源码范围修改路径值，保留键名大小写、注释、密码、远程数据库名称和未使用的路径字段。
+- 根节点、嵌套对象或数组对象内存在仅大小写不同的重复键时，返回 `SFTPGO_CONFIG_AMBIGUOUS`，保留原文件和数据，错误不展示字段值。原生 SQLite DSN 的路径编码继续使用专用逻辑，不因大写 CONNECTION_STRING 退回普通字符串替换。
+- 扩展已有用例覆盖 JSON/YAML 大小写、数组证书字段、引用合并、远程 driver、重复键、幂等迁移、模板/主机密钥保护和管理台 HTTPS/IPv6 地址。原生迁移 fixture 改用大写字段；原生升级 fixture 的其中一条路线改为含大写键与 provider merge 的 YAML，另一条继续验证 JSON 加 env.d。
+
+远程证据：v0.2.262 main CI `37156357307` 的 Web/Linux/Windows/macOS Intel/ARM 均成功，Release `37156357290` 三平台 runtime 门槛成功，正在构建安装包。v0.2.261 Release `37154363578` 首次失败发生在 Intel DMG 上传阶段（job `111296735741`，GitHub 返回 Error updating policy），编译与打包已经成功；只重试该失败 job，当前同一 run 第二次尝试仍在运行，Windows/ARM 既有附件保持不变。
+
+最终完整回归 core 738、集成 45、platform 15 项通过，56 项 ignored 未计为通过。原生迁移 1 项和 SFTPGo 2.7.5 → 2.7.6 升级 2 项另行执行通过：实际管理台、SFTP 文件传输、账号、SSH 指纹、配置原文及丢失数据拒绝启动均验证通过。desktop cargo check、Clippy、改动行格式和 git diff 检查通过；Clippy 仍报告存量风格和复用 AppError 的 result_large_err 警告。
+
+没有用户数据库或表结构变更，未修改 `update.sql`；上述原生验收只使用隔离的临时数据库、端口和进程。没有新依赖或测试文件，未运行本地前端 dev/build。本批 Unix 分支仍需本版本远程 CI 验证。整体目标仍未完成；其它服务资源、env.d 插值/覆盖迁移、服务内部用户目录、UNC、完整套件升级矩阵、桌面 IPC 与公网 ACME 继续待验。

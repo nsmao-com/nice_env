@@ -199,7 +199,21 @@ fn rebase_sqlite_connection(value: &str, rebase: &DataPathRebase) -> Result<Stri
     Ok(format!("{}{suffix}", sqlite_file_uri(Path::new(&updated))))
 }
 
+fn sftpgo_key(key: &str) -> String {
+    // 对齐 Go strings.ToLower 的逐字符映射；例如 İ → i，不附加组合点。
+    key.chars()
+        .map(|character| character.to_lowercase().next().unwrap_or(character))
+        .collect()
+}
+
 fn path_field(service: &str, path: &[String], root: &Value) -> bool {
+    let folded;
+    let path = if service == "sftpgo" {
+        folded = path.iter().map(|key| sftpgo_key(key)).collect::<Vec<_>>();
+        &folded
+    } else {
+        path
+    };
     let path = path.iter().map(String::as_str).collect::<Vec<_>>();
     match (service, path.as_slice()) {
         (
@@ -277,7 +291,11 @@ fn rebase_field(
     value: &str,
     rebase: &DataPathRebase,
 ) -> Result<String> {
-    if service == "sftpgo" && path == ["data_provider", "connection_string"] {
+    if service == "sftpgo"
+        && path.len() == 2
+        && sftpgo_key(&path[0]) == "data_provider"
+        && sftpgo_key(&path[1]) == "connection_string"
+    {
         rebase_sqlite_connection(value, rebase)
     } else {
         rebase.config_value(value, str::to_owned)
@@ -292,10 +310,7 @@ pub(crate) struct ResourcePath {
 /// SFTPGo 的这些字段引用文件/目录内容，而不是需要继续改写的配置。
 /// 先展开 YAML merge/alias；资源即使名为 sftpgo.json，也必须按声明的用途保留。
 pub(crate) fn sftpgo_resources(source: &str, json: bool) -> Result<Vec<ResourcePath>> {
-    let mut root = parse(source, json)?;
-    if !json {
-        root.apply_merge().map_err(|_| invalid())?;
-    }
+    let root = sftpgo_config(source, json)?;
     fn visit(
         value: &Value,
         path: &mut Vec<String>,
@@ -347,6 +362,63 @@ pub(crate) fn sftpgo_resources(source: &str, json: bool) -> Result<Vec<ResourceP
     let mut resources = Vec::new();
     visit(&root, &mut Vec::new(), &root, &mut resources)?;
     Ok(resources)
+}
+
+fn sftpgo_invalid() -> AppError {
+    AppError::new(
+        "SFTPGO_CONFIG_INVALID",
+        "SFTPGo 配置无法完整解析，原文件已保留",
+    )
+    .with_hint("请检查 JSON/YAML 语法；配置根节点必须是对象，配置项名称必须为文本。")
+}
+
+/// Viper 先解析 YAML merge，再将对象（含数组元素）的键转为小写，值保持原样。
+/// 只生成用于检查的语义视图，不能把此视图序列化回用户配置。
+fn sftpgo_semantics(mut root: Value, json: bool) -> Result<Value> {
+    if !root.is_mapping() {
+        return Err(sftpgo_invalid());
+    }
+    if !json {
+        root.apply_merge().map_err(|_| sftpgo_invalid())?;
+    }
+    fn fold(value: &mut Value, depth: usize) -> Result<()> {
+        if depth > 128 {
+            return Err(sftpgo_invalid());
+        }
+        match value {
+            Value::Mapping(values) => {
+                let mut folded = yaml_serde::Mapping::new();
+                for (key, mut value) in std::mem::take(values) {
+                    let key = sftpgo_key(key.as_str().ok_or_else(sftpgo_invalid)?);
+                    fold(&mut value, depth + 1)?;
+                    if folded.insert(Value::String(key), value).is_some() {
+                        return Err(AppError::new(
+                            "SFTPGO_CONFIG_AMBIGUOUS",
+                            "SFTPGo 配置包含仅大小写不同的重复配置项，无法确定实际生效值",
+                        )
+                        .with_hint(
+                            "配置项名称不区分大小写；请合并重复项后重试。原文件与数据均已保留。",
+                        ));
+                    }
+                }
+                *values = folded;
+            }
+            Value::Sequence(values) => {
+                for value in values {
+                    fold(value, depth + 1)?;
+                }
+            }
+            Value::Tagged(value) => fold(&mut value.value, depth + 1)?,
+            _ => {}
+        }
+        Ok(())
+    }
+    fold(&mut root, 0)?;
+    Ok(root)
+}
+
+pub(crate) fn sftpgo_config(source: &str, json: bool) -> Result<Value> {
+    sftpgo_semantics(parse(source, json).map_err(|_| sftpgo_invalid())?, json)
 }
 
 fn parse(source: &str, json: bool) -> Result<Value> {
@@ -638,7 +710,9 @@ pub(crate) fn rebase(
 ) -> Result<String> {
     let original = parse(source, json)?;
     let mut root = original.clone();
-    if !json {
+    if service == "sftpgo" {
+        root = sftpgo_semantics(root, json)?;
+    } else if !json {
         root.apply_merge().map_err(|_| invalid())?;
     }
     // 先判断实际配置是否需要变更；不改动纯凭据、注释或只有外部目录的文件。

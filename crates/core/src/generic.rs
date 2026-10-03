@@ -861,12 +861,18 @@ fn inspect_sftpgo(store: &Store, paths: &Paths, r: &Resolved, previously_started
     let metadata = std::fs::metadata(&source)?;
     if !metadata.is_file() || metadata.len() > 1024 * 1024 { return Err(AppError::new("SFTPGO_CONFIG_INVALID", "SFTPGo 配置必须是小于 1 MiB 的文本文件")); }
     let content = std::fs::read_to_string(&source)?;
-    let config: serde_json::Value = match source.extension().and_then(|v| v.to_str()) {
-        Some("json") => serde_json::from_str(&content).map_err(|_| AppError::new("SFTPGO_CONFIG_INVALID", "SFTPGo JSON 配置语法错误，原文件已保留"))?,
-        Some("yaml" | "yml") => yaml_serde::from_str(&content).map_err(|_| AppError::new("SFTPGO_CONFIG_INVALID", "SFTPGo YAML 配置语法错误，原文件已保留"))?,
+    let json = match source.extension().and_then(|v| v.to_str()) {
+        Some("json") => true,
+        Some("yaml" | "yml") => false,
         _ => return Err(AppError::new("SFTPGO_CONFIG_FORMAT", "托管 SFTPGo 配置目前支持 JSON 或 YAML，请使用自定义模块运行其他格式")),
     };
-    if !config.is_object() { return Err(AppError::new("SFTPGO_CONFIG_INVALID", "SFTPGo 配置根节点必须是对象")); }
+    let config =
+        serde_json::to_value(crate::configpaths::sftpgo_config(&content, json)?).map_err(|_| {
+            AppError::new(
+                "SFTPGO_CONFIG_INVALID",
+                "SFTPGo 配置字段类型无法识别，原文件已保留",
+            )
+        })?;
     let files = sftpgo_env_files(paths, &r.etc)?;
     let mut process_env = sftpgo_process_env(r)?;
     let mut effective_env = sftpgo_parse_env(&files, process_env.clone())?;
@@ -3671,7 +3677,7 @@ mod startup_tests {
         let (_temp, state, r) = fixture("sftpgo");
         std::fs::create_dir_all(r.root.join("static")).unwrap();
         std::fs::write(r.root.join("static/probe.txt"), "resource contents").unwrap();
-        let content = "{\"data_provider\":{\"driver\":\"bolt\",\"name\":\"kept.db\"},\"httpd\":{\"templates_path\":\"custom-templates\"}}\n";
+        let content = "{\"Data_Provider\":{\"DRIVER\":\"bolt\",\"Name\":\"kept.db\"},\"HTTPD\":{\"Templates_Path\":\"custom-templates\"}}\n";
         std::fs::write(r.root.join("sftpgo.json"), content).unwrap();
         let config = prepare_sftpgo(&state.store, &state.paths, &r).unwrap();
         assert_eq!(std::fs::read_to_string(&config.file).unwrap(), content);
@@ -3767,6 +3773,53 @@ mod startup_tests {
             .unwrap()
             .state_files
             .contains(&r.root.join("relative.db")));
+        for duplicate in [
+            r#"{"Data_Provider":{"DRIVER":"bolt"},"data_provider":{"driver":"sqlite"}}"#,
+            r#"{"httpd":{"bindings":[{"ENABLE_HTTPS":true,"enable_https":false}]}}"#,
+        ] {
+            std::fs::write(&config.file, duplicate).unwrap();
+            assert_eq!(
+                prepare_sftpgo(&state.store, &state.paths, &r)
+                    .err()
+                    .unwrap()
+                    .code,
+                "SFTPGO_CONFIG_AMBIGUOUS"
+            );
+            assert_eq!(std::fs::read_to_string(&config.file).unwrap(), duplicate);
+        }
+        std::fs::remove_file(&config.file).unwrap();
+        let yaml = r.etc.join("sftpgo.yaml");
+        let content = "defaults: &provider\n  Driver: bolt\n  Name: kept.db\nData_Provider:\n  <<: *provider\nSFTPD:\n  HOST_KEYS: [custom_key]\nHTTPD:\n  Templates_Path: custom-templates\n  Web_Root: /case-path\n  BINDINGS:\n    - ADDRESS: '::1'\n      ENABLE_HTTPS: true\n      ENABLE_WEB_ADMIN: true\n";
+        std::fs::write(&yaml, content).unwrap();
+        std::fs::write(
+            r.etc.join("custom_key"),
+            b"existing case-sensitive key file",
+        )
+        .unwrap();
+        r.port = Some(31000);
+        let prepared = prepare_sftpgo(&state.store, &state.paths, &r).unwrap();
+        assert_eq!(
+            prepared.state_files,
+            vec![r.etc.join("kept.db"), r.etc.join("custom_key")]
+        );
+        assert!(prepared
+            .env
+            .iter()
+            .all(|(key, _)| key != "SFTPGO_HTTPD__TEMPLATES_PATH"
+                && !key.starts_with("SFTPGO_DATA_PROVIDER")));
+        assert_eq!(
+            prepared.web_target.unwrap(),
+            "https://[::1]:37058/case-path/web/admin"
+        );
+        assert_eq!(std::fs::read_to_string(&yaml).unwrap(), content);
+        std::fs::remove_file(r.etc.join("custom_key")).unwrap();
+        assert_eq!(
+            prepare_sftpgo(&state.store, &state.paths, &r)
+                .err()
+                .unwrap()
+                .code,
+            "SFTPGO_STATE_MISSING"
+        );
     }
 
     #[test]
@@ -3915,8 +3968,46 @@ mod startup_tests {
             config["data_provider"]["driver"] = "sqlite".into();
         }
         config["httpd"]["web_root"] = "/niceenv-console".into();
-        let original_config = serde_json::to_vec_pretty(&config).unwrap();
-        let config_path = legacy_dir.join("sftpgo.json"); std::fs::write(&config_path, &original_config).unwrap();
+        let encode_config = |config: &serde_json::Value| {
+            if with_env_directory {
+                return serde_json::to_vec_pretty(config).unwrap();
+            }
+            fn uppercase(value: &mut serde_json::Value) {
+                match value {
+                    serde_json::Value::Object(values) => {
+                        *values = std::mem::take(values)
+                            .into_iter()
+                            .map(|(key, mut value)| {
+                                uppercase(&mut value);
+                                (key.to_uppercase(), value)
+                            })
+                            .collect();
+                    }
+                    serde_json::Value::Array(values) => values.iter_mut().for_each(uppercase),
+                    _ => {}
+                }
+            }
+            let mut upper = config.clone();
+            uppercase(&mut upper);
+            let provider = upper
+                .as_object_mut()
+                .unwrap()
+                .remove("DATA_PROVIDER")
+                .unwrap();
+            format!(
+                "Provider_Defaults: &provider {}\nDATA_PROVIDER:\n  <<: *provider\n{}",
+                serde_json::to_string(&provider).unwrap(),
+                yaml_serde::to_string(&upper).unwrap()
+            )
+            .into_bytes()
+        };
+        let original_config = encode_config(&config);
+        let config_path = legacy_dir.join(if with_env_directory {
+            "sftpgo.json"
+        } else {
+            "sftpgo.yaml"
+        });
+        std::fs::write(&config_path, &original_config).unwrap();
         let console_path = if with_env_directory { "/env-console/last" } else { "/niceenv-console" };
         let database_name = if with_env_directory { "env-provider.db" } else { "sftpgo.db" };
         if with_env_directory {
@@ -3956,7 +4047,7 @@ mod startup_tests {
         assert!(admin.status().is_success()); assert!(admin.text().unwrap().to_ascii_lowercase().contains("<html"));
         // 修改文件中的待生效路径和计划端口，不得改变当前进程的入口。
         config["httpd"]["web_root"] = "/next-start".into();
-        std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+        std::fs::write(&config_path, encode_config(&config)).unwrap();
         state.store.set_port_override("sftpgo", Some(first + 10)).unwrap();
         assert_eq!(state.service_web_url("sftpgo").unwrap(), web_url);
         std::fs::write(&config_path, &original_config).unwrap();

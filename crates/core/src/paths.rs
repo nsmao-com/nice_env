@@ -2270,6 +2270,73 @@ mod tests {
                 .unwrap(),
             connected
         );
+        for driver in ["sqlite", "bolt", "mysql"] {
+            let mixed = serde_json::json!({"Data_Provider":{"DRİVER":driver,"NaMe":format!("{old}/accounts.db"),"PASSWORD":format!("{old}/secret")}}).to_string();
+            for name in ["etc/sftpgo/sftpgo.json", "etc/sftpgo/sftpgo.yaml"] {
+                let changed = structured.config_text(Path::new(name), &mixed).unwrap();
+                let decoded: serde_json::Value = serde_json::from_str(&changed).unwrap();
+                assert_eq!(
+                    decoded["Data_Provider"]["NaMe"],
+                    format!(
+                        "{}/accounts.db",
+                        if driver == "mysql" {
+                            old
+                        } else {
+                            &structured_target
+                        }
+                    )
+                );
+                assert_eq!(
+                    decoded["Data_Provider"]["PASSWORD"],
+                    format!("{old}/secret")
+                );
+                assert!(decoded.get("data_provider").is_none());
+                assert_eq!(
+                    structured.config_text(Path::new(name), &changed).unwrap(),
+                    changed
+                );
+            }
+        }
+        let mixed = format!("# preserve casing and comment\nshared: &provider\n  DRIVER: sqlite\n  NaMe: '{old}/accounts.db'\n  Password: '{old}/secret'\nData_Provider:\n  <<: *provider\nHTTPD:\n  BINDINGS:\n    - Certificate_File: '{old}/tls.pem'\n");
+        let changed = structured
+            .config_text(Path::new("etc/sftpgo/sftpgo.yaml"), &mixed)
+            .unwrap();
+        let mut decoded: yaml_serde::Value = yaml_serde::from_str(&changed).unwrap();
+        decoded.apply_merge().unwrap();
+        assert_eq!(
+            decoded["Data_Provider"]["NaMe"].as_str(),
+            Some(format!("{structured_target}/accounts.db").as_str())
+        );
+        assert_eq!(
+            decoded["shared"]["NaMe"].as_str(),
+            Some(format!("{old}/accounts.db").as_str())
+        );
+        assert_eq!(
+            decoded["Data_Provider"]["Password"].as_str(),
+            Some(format!("{old}/secret").as_str())
+        );
+        assert_eq!(
+            decoded["HTTPD"]["BINDINGS"][0]["Certificate_File"].as_str(),
+            Some(format!("{structured_target}/tls.pem").as_str())
+        );
+        assert!(changed.starts_with("# preserve casing and comment\n"));
+        assert_eq!(
+            structured
+                .config_text(Path::new("etc/sftpgo/sftpgo.yaml"), &changed)
+                .unwrap(),
+            changed
+        );
+        for duplicate in [
+            r#"{"Data_Provider":{"NAME":"private"},"data_provider":{"name":"other"}}"#,
+            r#"{"HTTPD":{"BINDINGS":[{"PORT":8080,"port":8081}]}}"#,
+            "DATA_PROVIDER:\n  Name: private\n  name: other\n",
+        ] {
+            let error = structured
+                .config_text(Path::new("etc/sftpgo/sftpgo.yaml"), duplicate)
+                .unwrap_err();
+            assert_eq!(error.code, "SFTPGO_CONFIG_AMBIGUOUS");
+            assert!(!format!("{error:?}").contains("private"));
+        }
         let tagged = format!("systemLog:\n  path: &log !!str\n    # preserve tagged scalar comment\n    '{old}/mongo.log'\ncustom: *log\n");
         let updated = structured
             .config_text(Path::new("etc/mongodb/mongod.conf"), &tagged)
@@ -2376,6 +2443,22 @@ mod tests {
         );
         let dsn = format!("{uri}?mode=rw&_auth_pass={old}/secret&cache=shared#unchanged");
         let config = serde_json::json!({"data_provider":{"driver":"sqlite", "connection_string":dsn, "name":format!("{old}/unused.db"), "password":dsn}}).to_string();
+        let mixed_dsn =
+            serde_json::json!({"DATA_PROVIDER":{"DRIVER":"sqlite","CONNECTION_STRING":dsn}})
+                .to_string();
+        let changed = structured
+            .config_text(Path::new("etc/sftpgo/sftpgo.json"), &mixed_dsn)
+            .unwrap();
+        let decoded: serde_json::Value = serde_json::from_str(&changed).unwrap();
+        assert_eq!(
+            crate::configpaths::sqlite_connection_path(
+                decoded["DATA_PROVIDER"]["CONNECTION_STRING"]
+                    .as_str()
+                    .unwrap()
+            )
+            .unwrap(),
+            Some(Path::new(&structured_target).join("data/accounts #1.db"))
+        );
         let updated = structured
             .config_text(Path::new("etc/sftpgo/1/sftpgo.json"), &config)
             .unwrap();
@@ -2955,7 +3038,7 @@ mod tests {
             .unwrap();
         binary_resource.set_len(17 * 1024 * 1024).unwrap();
         drop(binary_resource);
-        let resource_config = format!("shared: &resource\n  templates_path: '{old}/etc/sftpgo/1/templates'\nhttpd:\n  <<: *resource\n  signing_passphrase_file: 'templates/../key.conf'\nsftpd:\n  host_keys: ['large.pem']\n");
+        let resource_config = format!("shared: &resource\n  Templates_Path: '{old}/etc/sftpgo/1/templates'\nHTTPD:\n  <<: *resource\n  Signing_Passphrase_File: 'templates/../key.conf'\nSFTPD:\n  Host_Keys: ['large.pem']\n");
         std::fs::write(sftpgo.join("sftpgo.yaml"), &resource_config).unwrap();
         let conn = rusqlite::Connection::open(paths.db()).unwrap();
         conn.execute("INSERT INTO sites(id,name,domains,root_dir,runtime,https,rewrite,created_at,updated_at) VALUES('site','site','[]',?1,?2,0,'\"none\"',1,2)", rusqlite::params![format!("{old}/www"),serde_json::json!({"kind":"node","cwd":format!("{old}/www"),"command":format!("\"{old}/runtimes/fixture/1/{binary}\""),"custom":"preserve","application":{"version":"1","cwd":format!("{old}/app"),"args":[format!("{old}/app/server.js"),format!("{external}/file"),"literal & ; argument"]}}).to_string()]).unwrap();
@@ -3140,7 +3223,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let sftpgo = serde_json::json!({
+        let mut sftpgo = serde_json::json!({
             "data_provider":{"driver":"sqlite","name":format!("{old}/data/sftpgo/accounts.db"),"password":secret,"credentials_path":format!("{old}/data/sftpgo/credentials")},
             "sftpd":{"bindings":[{"address":"127.0.0.1","port":ssh_port}],"login_banner_file":format!("{old}/etc/sftpgo/1/resources/banner.txt")},
             "ftpd":{"bindings":[{"address":"127.0.0.1","port":ftp_port}],"banner_file":"resources/banner.txt"},
@@ -3152,6 +3235,27 @@ mod tests {
                 "certificates":[{"cert":format!("{old}/data/sftpgo/tls.pem"),"key":format!("{old}/data/sftpgo/tls.key")}]},
             "kms":{"secrets":{"master_key_path":format!("{old}/etc/sftpgo/1/resources/master.key")}}
         });
+        fn uppercase_keys(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(values) => {
+                    *values = std::mem::take(values)
+                        .into_iter()
+                        .map(|(key, mut value)| {
+                            uppercase_keys(&mut value);
+                            let key = if key == "driver" {
+                                "DRİVER".into()
+                            } else {
+                                key.to_uppercase()
+                            };
+                            (key, value)
+                        })
+                        .collect();
+                }
+                serde_json::Value::Array(values) => values.iter_mut().for_each(uppercase_keys),
+                _ => {}
+            }
+        }
+        uppercase_keys(&mut sftpgo);
         std::fs::write(
             source.join("etc/sftpgo/1/sftpgo.json"),
             serde_json::to_vec_pretty(&sftpgo).unwrap(),
@@ -3177,7 +3281,7 @@ mod tests {
                 "SFTPGO_DATA_PROVIDER__CONNECTION_STRING",
                 crate::configpaths::sftpgo_sqlite_dsn(
                     &base.join("etc/sftpgo/1"),
-                    config["data_provider"]["name"].as_str().unwrap(),
+                    config["DATA_PROVIDER"]["NAME"].as_str().unwrap(),
                 ),
             );
             command
@@ -3214,7 +3318,7 @@ mod tests {
             &std::fs::read(target.join("etc/sftpgo/1/sftpgo.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(config["data_provider"]["password"], secret);
+        assert_eq!(config["DATA_PROVIDER"]["PASSWORD"], secret);
         struct Child(std::process::Child);
         impl Drop for Child {
             fn drop(&mut self) {
@@ -3239,7 +3343,7 @@ mod tests {
                 "SFTPGO_DATA_PROVIDER__CONNECTION_STRING",
                 crate::configpaths::sftpgo_sqlite_dsn(
                     &target.join("etc/sftpgo/1"),
-                    config["data_provider"]["name"].as_str().unwrap(),
+                    config["DATA_PROVIDER"]["NAME"].as_str().unwrap(),
                 ),
             )
             .stdout(output.try_clone().unwrap())

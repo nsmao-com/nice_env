@@ -2,7 +2,7 @@
 
 use crate::error::{AppError, Result};
 use crate::model::{RewritePreset, Site};
-use crate::paths::{nginx_path, portable_path_text, quoted_config_path, write_with_backup, Paths};
+use crate::paths::{portable_path_text, quoted_config_path, write_with_backup, Paths};
 use std::path::Path;
 
 fn previous_config(path: &Path) -> Result<Option<String>> {
@@ -32,7 +32,7 @@ pub fn nginx_upstream_name(php_version: &str) -> String {
     format!("nsb_php_{}", php_version.replace('.', "_"))
 }
 
-fn nginx_include_pattern(path: &Path, sites_glob: bool) -> String {
+pub(crate) fn nginx_include_pattern(path: &Path, sites_glob: bool) -> String {
     let text = portable_path_text(path);
     // Nginx 遇到 *?[ 会再交给系统 glob。Unix 的目录字符要先经过这一层转义，
     // 再经过配置字符串转义；否则合法的反斜杠或方括号目录会静默漏掉站点。
@@ -1413,25 +1413,95 @@ pub fn validate_nginx(nginx_exe: &std::path::Path, conf: &std::path::Path) -> Re
 
 const HTTPD_PROXY_HTTP_MODULE: &str = "# NiceEnv HTTP reverse proxy support\n<IfModule !proxy_http_module>\n    LoadModule proxy_http_module modules/mod_proxy_http.so\n</IfModule>\n";
 
+fn httpd_config_text(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+pub(crate) fn httpd_argument(value: &str) -> String {
+    let value = value.trim();
+    let quote = value.chars().next().filter(|c| matches!(c, '\'' | '"'));
+    let value = quote
+        .and_then(|quote| value.strip_prefix(quote)?.strip_suffix(quote))
+        .unwrap_or(value);
+    let mut result = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\\'
+            && chars
+                .peek()
+                .is_some_and(|next| *next == '\\' || Some(*next) == quote)
+        {
+            result.push(chars.next().unwrap());
+        } else {
+            result.push(character);
+        }
+    }
+    result
+}
+
+fn httpd_glob_text(value: &str) -> String {
+    let mut pattern = String::new();
+    for character in value.chars() {
+        // Windows APR 会先把反斜杠当作分隔符；用字符类引用通配符，不能用 \\[。
+        match character {
+            '[' => pattern.push_str("[[]"),
+            ']' => pattern.push_str("[]]"),
+            '*' => pattern.push_str("[*]"),
+            '?' => pattern.push_str("[?]"),
+            '\\' => pattern.push_str("\\\\"),
+            _ => pattern.push(character),
+        }
+    }
+    pattern
+}
+
+pub(crate) fn httpd_sites_pattern(paths: &Paths) -> String {
+    format!(
+        "{}/*.conf",
+        httpd_glob_text(&crate::paths::portable_path_text(&paths.apache_sites_dir()))
+    )
+}
+
 fn sync_httpd_config(current: &str, paths: &Paths, root: &Path, http: u16, https: u16) -> String {
-    let sites = format!("\"{}/*.conf\"", nginx_path(&paths.apache_sites_dir()));
-    let managed_certificate = |line: &str, ext: &str| line.split_once(char::is_whitespace).is_some_and(|(_, value)| {
-        let value = value.trim().trim_matches(['\"', '\'']).replace('\\', "/");
-        value == format!("${{NSB_ETC}}/ssl-dummy.{ext}")
-            || value == format!("{}/ssl-dummy.{ext}", nginx_path(&paths.etc().join("apache")))
-            || value == format!("{}/fallback/localhost.{ext}", nginx_path(&paths.certs()))
-    });
+    let sites_pattern = httpd_sites_pattern(paths);
+    let sites = format!("\"{}\"", httpd_config_text(&sites_pattern));
+    let managed_certificate = |line: &str, ext: &str| {
+        line.split_once(char::is_whitespace)
+            .is_some_and(|(_, value)| {
+                let value = crate::paths::portable_path_text(Path::new(&httpd_argument(value)));
+                value == format!("${{NSB_ETC}}/ssl-dummy.{ext}")
+                    || value
+                        == format!(
+                            "{}/ssl-dummy.{ext}",
+                            crate::paths::portable_path_text(&paths.etc().join("apache"))
+                        )
+                    || value
+                        == format!(
+                            "{}/fallback/localhost.{ext}",
+                            crate::paths::portable_path_text(&paths.certs())
+                        )
+            })
+    };
     let replacements = [
-        format!("ServerRoot \"{}\"", nginx_path(root)),
+        format!("ServerRoot \"{}\"", quoted_config_path(root)),
         format!(
             "Define NSB_ETC \"{}\"",
-            nginx_path(&paths.etc().join("apache"))
+            quoted_config_path(&paths.etc().join("apache"))
         ),
         format!("Listen 127.0.0.1:{http}\nListen 127.0.0.1:{https} https"),
-        format!("TypesConfig \"{}/conf/mime.types\"", nginx_path(root)),
+        format!(
+            "TypesConfig \"{}/conf/mime.types\"",
+            quoted_config_path(root)
+        ),
         format!("IncludeOptional {sites}"),
-        format!("SSLCertificateFile \"{}/fallback/localhost.crt\"", nginx_path(&paths.certs())),
-        format!("SSLCertificateKeyFile \"{}/fallback/localhost.key\"", nginx_path(&paths.certs())),
+        format!(
+            "SSLCertificateFile \"{}/fallback/localhost.crt\"",
+            quoted_config_path(&paths.certs())
+        ),
+        format!(
+            "SSLCertificateKeyFile \"{}/fallback/localhost.key\"",
+            quoted_config_path(&paths.certs())
+        ),
     ];
     let groups: Vec<_> = replacements
         .into_iter()
@@ -1467,7 +1537,15 @@ fn sync_httpd_config(current: &str, paths: &Paths, root: &Path, http: u16, https
                 if line
                     .split_once(char::is_whitespace)
                     .is_some_and(|(_, path)| {
-                        path.trim() == sites || path.trim() == sites.trim_matches('"')
+                        let path =
+                            crate::paths::portable_path_text(Path::new(&httpd_argument(path)));
+                        path == sites_pattern
+                            || path == "${NSB_ETC}/sites/*.conf"
+                            || path
+                                == format!(
+                                    "{}/*.conf",
+                                    crate::paths::portable_path_text(&paths.apache_sites_dir())
+                                )
                     }) =>
             {
                 Some(4)
@@ -1475,9 +1553,18 @@ fn sync_httpd_config(current: &str, paths: &Paths, root: &Path, http: u16, https
             _ => None,
         }
     });
-    if !output.replace("\r\n", "\n").contains(HTTPD_PROXY_HTTP_MODULE.trim_end()) {
-        let newline = if current.contains("\r\n") { "\r\n" } else { "\n" };
-        if !output.is_empty() && !output.ends_with('\n') { output.push_str(newline); }
+    if !output
+        .replace("\r\n", "\n")
+        .contains(HTTPD_PROXY_HTTP_MODULE.trim_end())
+    {
+        let newline = if current.contains("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        if !output.is_empty() && !output.ends_with('\n') {
+            output.push_str(newline);
+        }
         output.push_str(&HTTPD_PROXY_HTTP_MODULE.replace('\n', newline));
     }
     output
@@ -1491,8 +1578,8 @@ pub fn render_httpd_conf(
     http_port: u16,
     https_port: u16,
 ) -> String {
-    let root = nginx_path(apache_root);
-    let etc = nginx_path(&paths.etc().join("apache"));
+    let root = quoted_config_path(apache_root);
+    let etc = quoted_config_path(&paths.etc().join("apache"));
     // php balancer 定义在各站点 vhost 内（BalancerMember 需携带 docroot 路径）
     // MPM 在 ApacheLounge 发行中为静态编译（无 mod_mpm_*.so），不 LoadModule
     format!(
@@ -1539,11 +1626,12 @@ DocumentRoot "${{NSB_ETC}}/htdocs"
 TypesConfig "{root}/conf/mime.types"
 DirectoryIndex index.php index.html index.htm
 
-IncludeOptional "{etc}/sites/*.conf"
+IncludeOptional "{sites}"
 "#,
         root = root,
         etc = etc,
-        certs = nginx_path(&paths.certs()),
+        certs = quoted_config_path(&paths.certs()),
+        sites = httpd_config_text(&httpd_sites_pattern(paths)),
         proxy_http_module = HTTPD_PROXY_HTTP_MODULE,
         http_port = http_port,
         https_port = https_port,
@@ -1572,7 +1660,7 @@ pub fn render_httpd_vhost_with_auth(
     let server_names = site.domains.join(" ");
     let access = crate::siteaccess::apache(site.runtime.access.as_ref());
     let error_pages = apache_error_pages(site.runtime.error_pages.as_ref());
-    let basic_auth = auth_file.map(|path| format!("    AuthType Basic\n    AuthName \"Restricted\"\n    AuthBasicProvider file\n    AuthUserFile \"{}\"\n    Require valid-user\n", nginx_path(path))).unwrap_or_default();
+    let basic_auth = auth_file.map(|path| format!("    AuthType Basic\n    AuthName \"Restricted\"\n    AuthBasicProvider file\n    AuthUserFile \"{}\"\n    Require valid-user\n", quoted_config_path(path))).unwrap_or_default();
     let primary = site
         .domains
         .first()
@@ -1582,11 +1670,18 @@ pub fn render_httpd_vhost_with_auth(
     let root_path = std::path::Path::new(&site.root_dir);
     let root = std::fs::canonicalize(root_path)
         .map(|path| crate::paths::portable_path_text(&path))
-        .unwrap_or_else(|_| nginx_path(root_path));
+        .unwrap_or_else(|_| crate::paths::portable_path_text(root_path));
     // DirectoryMatch 匹配完整磁盘路径：只保护文档根内部的隐藏目录，
     // 不能因为项目位于 .work / .tmp 等父目录中就拒绝整个站点。
     let root_pattern = regex::escape(root.trim_end_matches('/'));
-    let root_pattern = if cfg!(windows) { format!("(?i:{root_pattern})") } else { root_pattern };
+    let root_pattern = if cfg!(windows) {
+        format!("(?i:{root_pattern})")
+    } else {
+        root_pattern
+    };
+    let root_pattern = httpd_config_text(&root_pattern);
+    let directory = httpd_config_text(&httpd_glob_text(&root));
+    let root = httpd_config_text(&root);
 
     let (listen, ssl_lines) = if site.https {
         let (certificate, key) = site_certificate_files(site, cert_dir);
@@ -1594,8 +1689,8 @@ pub fn render_httpd_vhost_with_auth(
             format!("<VirtualHost *:{https_port}>"),
             format!(
                 "    SSLEngine on\n    SSLCertificateFile \"{}\"\n    SSLCertificateKeyFile \"{}\"",
-                nginx_path(&certificate),
-                nginx_path(&key),
+                quoted_config_path(&certificate),
+                quoted_config_path(&key),
             ),
         )
     } else {
@@ -1609,25 +1704,35 @@ pub fn render_httpd_vhost_with_auth(
             if let Some(base) = php_pool {
                 // mod_proxy_balancer 依赖 slotmem-shm，Windows 重启存在已知缺陷；
                 // 改为每站点直连池内一个 worker（按站点 id 轮转，4 worker 跨站点分摊）。
-                // 用 RewriteRule [P] 而非 ProxyPassMatch：后者不处理 DirectoryIndex 内部重定向
+                // Handler 在 Apache 完成磁盘路径解析后转交 PHP，保留 DirectoryIndex 和 PATH_INFO。
+                // 不再把磁盘路径拼入 RewriteRule URL 或 ap_expr 字符串。
                 let worker = base
                     + (site.id.chars().map(|c| c as usize).sum::<usize>()
                         % PHP_POOL_WORKERS as usize) as u16;
-                s.push_str("    RewriteEngine On\n");
                 s.push_str(&format!(
-                    "    RewriteRule ^/?(.*\\.ph(p[3457]?|t|tml)(/.*)?)$ \"fcgi://127.0.0.1:{worker}/{root}/$1\" [P,L]\n"
+                    "    <FilesMatch \"\\.ph(p[3457]?|t|tml)$\">\n        SetHandler \"proxy:fcgi://127.0.0.1:{worker}/\"\n        ProxyFCGIBackendType GENERIC\n"
                 ));
-                // Windows 盘符路径带不了 fcgi URL 的前导斜杠 → 显式修正 SCRIPT_FILENAME
-                s.push_str(&format!(
-                    "    ProxyFCGISetEnvIf \"true\" SCRIPT_FILENAME \"{root}%{{reqenv:SCRIPT_NAME}}\"\n"
-                ));
+                if cfg!(windows) {
+                    // mod_proxy 给盘符前添加的 URL 斜杠不能传给 Windows php-cgi。
+                    s.push_str("        ProxyFCGISetEnvIf \"reqenv('SCRIPT_FILENAME') =~ m|^/([A-Za-z]:/.*)$|\" SCRIPT_FILENAME \"$1\"\n");
+                }
+                s.push_str("    </FilesMatch>\n");
             } else {
                 s.push_str(
                     "    <FilesMatch \"\\.php$\">\n        Require all denied\n    </FilesMatch>\n",
                 );
             }
-            s.push_str("    <Directory \"{root}\">\n        AllowOverride All\n        Require all granted\n    </Directory>\n");
-            if let Some(custom) = &site.runtime.custom_rewrite { s.push_str(&custom.content); s.push('\n'); } else { s.push_str("    RewriteCond %{REQUEST_FILENAME} !-d\n    RewriteCond %{REQUEST_FILENAME} !-f\n    RewriteRule ^ index.php [QSA,L]\n"); }
+            s.push_str(&format!("    <Directory \"{directory}\">\n        AllowOverride All\n        Require all granted\n"));
+            if site.runtime.custom_rewrite.is_none() {
+                // 目录映射完成后才能判断实际脚本是否存在，保留 /index.php/path 的 PATH_INFO。
+                s.push_str("        RewriteEngine On\n        RewriteCond %{REQUEST_FILENAME} !-d\n        RewriteCond %{REQUEST_FILENAME} !-f\n        RewriteRule ^ /index.php [QSA,L]\n");
+            }
+            s.push_str("    </Directory>\n");
+            if let Some(custom) = &site.runtime.custom_rewrite {
+                s.push_str("    RewriteEngine On\n");
+                s.push_str(&custom.content);
+                s.push('\n');
+            }
             s
         }
         crate::model::SiteKind::Static => {
@@ -1636,13 +1741,18 @@ pub fn render_httpd_vhost_with_auth(
                 RewritePreset::SpaFallback => "        RewriteEngine On\n        RewriteCond %{REQUEST_FILENAME} !-f\n        RewriteCond %{REQUEST_FILENAME} !-d\n        RewriteRule ^ index.html [END]\n",
                 _ => "",
             };
-            let rewrite = site.runtime.custom_rewrite.as_ref().map(|r| format!("{}\n", r.content)).unwrap_or_else(|| rewrite.to_string());
+            let rewrite = site
+                .runtime
+                .custom_rewrite
+                .as_ref()
+                .map(|r| format!("{}\n", r.content))
+                .unwrap_or_else(|| rewrite.to_string());
             let error_page = if matches!(site.rewrite, RewritePreset::NextExport) {
                 "    ErrorDocument 404 /404.html\n"
             } else {
                 ""
             };
-            format!("    <FilesMatch \"(?i)\\.(?:php[0-9]*|phtml|pht|phar)(?:\\.|$)\">\n        Require all denied\n    </FilesMatch>\n    <Directory \"{root}\">\n        AllowOverride All\n        Options -Indexes\n        DirectoryIndex index.html index.htm\n        Require all granted\n{rewrite}    </Directory>\n{error_page}")
+            format!("    <FilesMatch \"(?i)\\.(?:php[0-9]*|phtml|pht|phar)(?:\\.|$)\">\n        Require all denied\n    </FilesMatch>\n    <Directory \"{directory}\">\n        AllowOverride All\n        Options -Indexes\n        DirectoryIndex index.html index.htm\n        Require all granted\n{rewrite}    </Directory>\n{error_page}")
         }
         _ => {
             let target = site
@@ -1691,15 +1801,23 @@ pub fn render_httpd_vhost_with_auth(
         listen = listen,
         primary = primary,
         server_names = server_names,
-        document_root = if site.runtime.kind == crate::model::SiteKind::Redirect { String::new() } else { format!("DocumentRoot \"{root}\"") },
-        cors = site.runtime.cors.as_ref().map(crate::sitecors::apache).unwrap_or_default(),
+        document_root = if site.runtime.kind == crate::model::SiteKind::Redirect {
+            String::new()
+        } else {
+            format!("DocumentRoot \"{root}\"")
+        },
+        cors = site
+            .runtime
+            .cors
+            .as_ref()
+            .map(crate::sitecors::apache)
+            .unwrap_or_default(),
         error_pages = error_pages,
         basic_auth = basic_auth,
         proxy_rules = crate::siteproxy::apache(&site.runtime),
         ssl_lines = ssl_lines,
         body = body,
-    )
-    .replace("{root}", &root);
+    );
     if site.https {
         if let Some(status) = site.runtime.https_redirect {
             let suffix = https_port_suffix(https_port);
@@ -1799,6 +1917,7 @@ pub fn adminer_path(paths: &Paths) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod managed_config_tests {
     use super::*;
+    use crate::paths::nginx_path;
 
     #[test]
     fn mihomo_adaptation_preserves_nested_ports_and_yaml_merges() {
@@ -2127,11 +2246,83 @@ secret: fixture-secret
             recovered
         );
         for newline in ["\n", "\r\n"] {
-            let user = recovered.replace(HTTPD_PROXY_HTTP_MODULE, "").trim_end().replace('\n', newline);
+            let user = recovered
+                .replace(HTTPD_PROXY_HTTP_MODULE, "")
+                .trim_end()
+                .replace('\n', newline);
             let synced = sync_httpd_config(&user, &paths, Path::new("C:/apache"), 8180, 8444);
-            assert!(synced.contains(&format!("{newline}# NiceEnv HTTP reverse proxy support{newline}")));
+            assert!(synced.contains(&format!(
+                "{newline}# NiceEnv HTTP reverse proxy support{newline}"
+            )));
             assert_eq!(synced.matches("LoadModule proxy_http_module").count(), 1);
-            assert_eq!(sync_httpd_config(synced.trim_end(), &paths, Path::new("C:/apache"), 8180, 8444), synced.trim_end());
+            assert_eq!(
+                sync_httpd_config(
+                    synced.trim_end(),
+                    &paths,
+                    Path::new("C:/apache"),
+                    8180,
+                    8444
+                ),
+                synced.trim_end()
+            );
+        }
+        let special = paths.base.join("data [group] with spaces");
+        #[cfg(unix)]
+        let special = special.join(r#"literal\new\tail"quote"#);
+        let paths = Paths::new(special);
+        let root = paths.base.join("runtime");
+        let generated = render_httpd_conf(&paths, &root, &[], 8180, 8444);
+        assert_eq!(
+            httpd_argument(
+                generated
+                    .lines()
+                    .find_map(|line| line.strip_prefix("ServerRoot "))
+                    .unwrap()
+            ),
+            crate::paths::portable_path_text(&root)
+        );
+        assert!(generated.contains("data [[]group[]] with spaces"));
+        let legacy_include = format!(
+            "IncludeOptional \"{}/*.conf\"",
+            quoted_config_path(&paths.apache_sites_dir())
+        );
+        let mixed = format!(
+            "{generated}\n{legacy_include}\nIncludeOptional \"${{NSB_ETC}}/sites/*.conf\"\n"
+        );
+        let repaired = sync_httpd_config(&mixed, &paths, &root, 8180, 8444);
+        assert_eq!(repaired.matches("IncludeOptional").count(), 1);
+        assert_eq!(
+            sync_httpd_config(&repaired, &paths, &root, 8180, 8444),
+            repaired
+        );
+        let site: Site = serde_json::from_value(serde_json::json!({
+            "id":"path", "name":"path", "domains":["path.test"], "rootDir":paths.base.join("project {root}"),
+            "runtime":{"kind":"php", "webServer":"apache"}, "https":false,
+            "rewrite":"none", "createdAt":1, "updatedAt":1
+        })).unwrap();
+        let rendered = render_httpd_vhost(&site, 8180, 8444, &paths.certs(), Some(19000));
+        let docroot = rendered
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("DocumentRoot "))
+            .unwrap();
+        assert_eq!(
+            httpd_argument(docroot),
+            crate::paths::portable_path_text(Path::new(&site.root_dir))
+        );
+        assert!(rendered.contains("SetHandler \"proxy:fcgi://127.0.0.1:"));
+        #[cfg(unix)]
+        {
+            let other = format!(
+                "IncludeOptional \"{}/*.conf\"\n",
+                crate::paths::portable_path_text(&paths.apache_sites_dir())
+                    .replace('\\', "/")
+                    .replace('"', "\\\"")
+            );
+            let current = format!("{repaired}{other}");
+            assert_eq!(
+                sync_httpd_config(&current, &paths, &root, 8180, 8444),
+                current
+            );
         }
     }
 

@@ -343,6 +343,15 @@ pub(crate) fn import_line(paths: &Paths) -> String {
     )
 }
 
+fn validate_import_directory(paths: &Paths) -> Result<()> {
+    // Caddy 在 filepath.Glob 之前按原始文本拒绝 [] 和多通配符，引用或转义也不能绕过。
+    if portable_path_text(&paths.caddy_sites_dir()).contains(['[', '*', '?']) {
+        return Err(AppError::new("CADDY_IMPORT_PATH", "Caddy 无法从当前数据目录加载站点配置")
+            .with_hint("Caddy 的站点配置导入无法安全处理数据目录中的 [、* 或 ?。请在设置中将 NiceEnv 数据目录迁移到不含这些字符的位置，再启动 Caddy；站点项目目录无需更改。"));
+    }
+    Ok(())
+}
+
 pub(crate) fn includes_sites(source: &str, paths: &Paths) -> bool {
     let expected = format!(
         "{}/*.conf",
@@ -447,6 +456,9 @@ pub(crate) fn prepare(
         .into_iter()
         .filter(|site| site.runtime.web_server == "caddy")
         .collect::<Vec<_>>();
+    if !sites.is_empty() || includes_sites(&initial, paths) {
+        validate_import_directory(paths)?;
+    }
     let http = resolved
         .port
         .ok_or_else(|| AppError::new("BAD_PORT", "Caddy HTTP 端口未配置"))?;
@@ -1104,6 +1116,13 @@ mod tests {
             assert!(validate_rewrite(invalid).is_err(), "{invalid}");
         }
         validate_rewrite("@missing not file\nrewrite @missing /index.php?{query}\n").unwrap();
+        assert_eq!(
+            validate_import_directory(&Paths::new(PathBuf::from("/tmp/data[1]")))
+                .unwrap_err()
+                .code,
+            "CADDY_IMPORT_PATH"
+        );
+        validate_import_directory(&Paths::new(PathBuf::from("/tmp/data with spaces"))).unwrap();
         for path in [
             r"/tmp/literal\new\tail",
             "/tmp/end\\",

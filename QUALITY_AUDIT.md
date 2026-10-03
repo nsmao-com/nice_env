@@ -176,3 +176,20 @@ macOS 双架构原生套件验证已执行完成：
 本机已安装程序此前核实仍为 0.2.244，尚未包含 v0.2.245 的 ACME JOSE 请求头修复；v0.2.252 安装包已包含该修复。未代用户运行安装器或注册公网 ACME 账号。
 
 Apache 的正则/URL、数据迁移的多格式编码、剩余套件矩阵与真实桌面交互继续待查；整体目标保持进行中。没有数据库结构或用户数据库变更，未修改 `update.sql`；未新增测试文件，未运行本地前端 dev/build。
+
+## 2026-10-04：v0.2.254 Apache 路径、PHP 路径参数与站点入口
+
+v0.2.253 的 [main CI](https://github.com/nsmao-com/nice_env/actions/runs/37136814693) 五个平台任务全部成功；[Release](https://github.com/nsmao-com/nice_env/actions/runs/37136814542) 三个原生验证任务全部成功。记录时 macOS Intel/ARM64 的 DMG/app 附件已生成，Windows 安装器仍在构建，因此未将本版报告为所有安装包完成。
+
+- Apache 上游已发布 2.4.69，2.4.68 的旧下载地址返回 HTML。应用在线版本查询正确返回 2.4.69、261002 构建地址与 SHA256；本轮使用官方新包并核实 SHA256 `9b47a2363a71fef6209c88e79743db81311e1753c4564e007141934123132c10`。尚需继续检查请求安装已被上游撤下的旧版本时的错误提示与清单展示。
+- 原生 Apache `DUMP_INCLUDES` 复现：数据目录含 `[group]` 时，旧 IncludeOptional 语法通过却没有加载任何站点文件。改用 APR 字符类引用路径字面字符；Windows 不能用反斜杠转义，因为 APR 会先将它当作目录分隔符。Directory 同样支持通配符，现使用相同字面路径规则。
+- Apache 普通配置值、DirectoryMatch 正则分别编码，保留 Unix 字面反斜杠。已有配置中的受管 include 按解码后的参数归一去重，其他目录和自定义证书继续保留。
+- PHP 转发采用官方文档的 SetHandler 形式，由 Apache 完成实际文件映射后转交 FastCGI。原生 php-cgi 验证确认 Windows 需要去除 SCRIPT_FILENAME 盘符前多出的 URL 斜杠；规则只匹配此形态。默认路由回退移到 Directory 内，使用 `/index.php`，避免丢失 PATH_INFO 或把带特殊字符的磁盘路径当作内部跳转 URL。
+- Nginx/Apache 站点快捷入口与配置生成复用同一个 include 路径规则，避免服务已加载而界面没有可访问地址。
+- Caddy 2.11.4 原生 adapter 和上游 parse.go 证实，含方括号的导入路径在执行 glob 前即被拒绝，引用和反斜杠不能解决。补充数据目录的提前检查和中文迁移提示，检查在改写配置前执行。此限制仅针对包含 `[`、`*`、`?` 的数据目录，不限制站点项目目录；没有声称 v0.2.253 的 glob 转义已解决 Caddy 的上游语法限制。
+
+真实 Apache 2.4.69 + PHP 8.4.26 回归通过：数据目录含空格/方括号，项目目录含 `#`、单引号、`%1`、`&`、空格与方括号；SCRIPT_FILENAME、SCRIPT_NAME、PATH_INFO、查询参数、首页 DirectoryIndex、普通路由、私有目录 403、`.well-known` 可访问、站点入口、配置保留、端口切换、两次启停均核实。测试实例使用临时目录和独立端口，清理后确认无该 Apache 验证程序遗留进程。
+
+本地完整回归 core 738、集成 45、platform 15 通过，55 项 ignored。最终入口用例 1 项、配置用例 10 项、Caddy 用例 1 项、Apache 原生用例 1 项再次通过；未把一次过滤后执行 0 项计为验证成功。桌面端 cargo check、改动行格式检查通过。Unix 路径新增回归仍须本版远程 runner；未验证 macOS Apache 原生运行或 Windows UNC 共享目录。
+
+本机安装程序再次读取仍为 0.2.244，ACME 请求头修复需使用含修复的新版程序。整体质量复查未完成：数据迁移多格式转义、完整安装/升级矩阵、真实桌面 IPC 和公网证书签发继续待查。没有数据库变更，未修改 `update.sql`；未新增测试文件，未运行本地前端 dev/build。

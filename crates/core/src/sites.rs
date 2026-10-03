@@ -132,26 +132,49 @@ pub(crate) struct SiteEndpointSnapshot {
 }
 
 fn includes_sites(source: &str, paths: &Paths, server: &str) -> bool {
-    if server == "caddy" { return crate::caddy::includes_sites(source, paths); }
-    let dir = if server == "apache" { paths.apache_sites_dir() } else { paths.nginx_sites_dir() };
-    let pattern = format!("{}/*.conf", dir.to_string_lossy().replace('\\', "/"));
+    if server == "caddy" {
+        return crate::caddy::includes_sites(source, paths);
+    }
     if server == "nginx" {
-        return configgen::nginx_directives(source.trim_start_matches('\u{feff}')).is_ok_and(|nodes| {
-            nodes.iter().filter(|node| node.words[0] == "http").any(|http| http.children.iter().any(|node| {
-                node.words.first().is_some_and(|word| word == "include") && node.words.get(1) == Some(&pattern)
-            }))
-        });
+        let pattern = configgen::nginx_include_pattern(&paths.nginx_sites_dir(), true);
+        return configgen::nginx_directives(source.trim_start_matches('\u{feff}')).is_ok_and(
+            |nodes| {
+                nodes
+                    .iter()
+                    .filter(|node| node.words[0] == "http")
+                    .any(|http| {
+                        http.children.iter().any(|node| {
+                            node.words.first().is_some_and(|word| word == "include")
+                                && node.words.get(1) == Some(&pattern)
+                        })
+                    })
+            },
+        );
     }
     let mut depth = 0usize;
     source.lines().any(|line| {
         let line = line.trim();
-        if line.starts_with('#') { return false; }
-        if line.starts_with("</") { depth = depth.saturating_sub(1); return false; }
-        if line.starts_with('<') { depth += 1; return false; }
-        depth == 0 && line.split_once(char::is_whitespace).is_some_and(|(key, value)| {
-            (key.eq_ignore_ascii_case("IncludeOptional") || key.eq_ignore_ascii_case("Include"))
-                && value.trim().trim_matches('"').replace('\\', "/") == pattern
-        })
+        if line.starts_with('#') {
+            return false;
+        }
+        if line.starts_with("</") {
+            depth = depth.saturating_sub(1);
+            return false;
+        }
+        if line.starts_with('<') {
+            depth += 1;
+            return false;
+        }
+        depth == 0
+            && line
+                .split_once(char::is_whitespace)
+                .is_some_and(|(key, value)| {
+                    (key.eq_ignore_ascii_case("IncludeOptional")
+                        || key.eq_ignore_ascii_case("Include"))
+                        && crate::paths::portable_path_text(std::path::Path::new(
+                            &configgen::httpd_argument(value),
+                        )) == configgen::httpd_sites_pattern(paths)
+                })
     })
 }
 
@@ -5322,61 +5345,148 @@ func main() { fmt.Println("managed-app-log"); http.HandleFunc("/",func(w http.Re
     #[test]
     fn site_endpoints_follow_vhosts_and_reject_unconfirmed_loads() {
         let temp = Tmp::new("site-endpoints");
-        let paths = Paths::new(temp.0.clone());
+        let base = temp.0.join("data [path] with spaces");
+        #[cfg(unix)]
+        let base = base.join(r"literal\new\tail");
+        let paths = Paths::new(base);
         paths.ensure_dirs().unwrap();
         let store = Store::open(paths.db()).unwrap();
         let mut site = saved_site(&paths, &store);
         let config = "server { listen 18080; server_name lifecycle.test; }\nserver { listen 18443 ssl; server_name lifecycle.test; }";
-        assert_eq!(endpoint_from_config(&site, config).unwrap().url, "http://lifecycle.test:18080");
+        assert_eq!(
+            endpoint_from_config(&site, config).unwrap().url,
+            "http://lifecycle.test:18080"
+        );
         site.https = true;
-        assert_eq!(endpoint_from_config(&site, config).unwrap().url, "https://lifecycle.test:18443");
+        assert_eq!(
+            endpoint_from_config(&site, config).unwrap().url,
+            "https://lifecycle.test:18443"
+        );
         site.https = false;
-        for listener in ["192.0.2.1:8080", "[::1]:8080", "0", "$port", "8080 proxy_protocol", "8080 quic"] {
-            assert!(endpoint_from_config(&site, &format!("server {{ listen {listener}; server_name lifecycle.test; }}")).is_none(), "{listener}");
+        for listener in [
+            "192.0.2.1:8080",
+            "[::1]:8080",
+            "0",
+            "$port",
+            "8080 proxy_protocol",
+            "8080 quic",
+        ] {
+            assert!(
+                endpoint_from_config(
+                    &site,
+                    &format!("server {{ listen {listener}; server_name lifecycle.test; }}")
+                )
+                .is_none(),
+                "{listener}"
+            );
         }
         site.domains = vec!["*.demo.test".into()];
-        assert_eq!(endpoint_from_config(&site, "server { listen 80; server_name *.DEMO.TEST; }").unwrap().url, "http://www.demo.test");
+        assert_eq!(
+            endpoint_from_config(&site, "server { listen 80; server_name *.DEMO.TEST; }")
+                .unwrap()
+                .url,
+            "http://www.demo.test"
+        );
         site.domains = vec!["lifecycle.test".into()];
         site.runtime.web_server = "apache".into();
         let apache = "# ignored\n<VirtualHost\t127.0.0.1:8180>\nServerName lifecycle.test\n</VirtualHost>\n<VirtualHost *:8444>\nServerAlias LIFECYCLE.TEST\nSSLEngine on\n</VirtualHost>";
-        assert_eq!(endpoint_from_config(&site, apache).unwrap().url, "http://lifecycle.test:8180");
+        assert_eq!(
+            endpoint_from_config(&site, apache).unwrap().url,
+            "http://lifecycle.test:8180"
+        );
         site.https = true;
-        assert_eq!(endpoint_from_config(&site, apache).unwrap().url, "https://lifecycle.test:8444");
-        assert!(endpoint_from_config(&site, &format!("<IfDefine unknown>\n{apache}\n</IfDefine>")).is_none());
+        assert_eq!(
+            endpoint_from_config(&site, apache).unwrap().url,
+            "https://lifecycle.test:8444"
+        );
+        assert!(
+            endpoint_from_config(&site, &format!("<IfDefine unknown>\n{apache}\n</IfDefine>"))
+                .is_none()
+        );
         let mut json = serde_json::to_value(&site).unwrap();
         json["accessUrl"] = "https://untrusted.test".into();
-        assert!(serde_json::from_value::<Site>(json).unwrap().access_url.is_none());
+        assert!(serde_json::from_value::<Site>(json)
+            .unwrap()
+            .access_url
+            .is_none());
 
         site.runtime.web_server = "nginx".into();
         site.https = false;
         store.save_site(&site).unwrap();
-        let main = format!("events {{}} http {{ include \"{}/*.conf\"; }}", paths.nginx_sites_dir().to_string_lossy().replace('\\', "/"));
+        let main =
+            configgen::render_nginx_conf(&paths, &temp.0.join("nginx"), 18080, 18443, &[], None);
+        let apache_main =
+            configgen::render_httpd_conf(&paths, &temp.0.join("apache"), &[], 8180, 8444);
+        assert!(includes_sites(&apache_main, &paths, "apache"));
         let vhost = paths.nginx_sites_dir().join(format!("{}.conf", site.id));
         std::fs::write(paths.nginx_conf(), &main).unwrap();
         std::fs::write(&vhost, config).unwrap();
         let manager = ServiceManager::new();
-        manager.register("nginx", "Nginx", None, None, Some(18080), paths.logs().join("nginx.log"));
+        manager.register(
+            "nginx",
+            "Nginx",
+            None,
+            None,
+            Some(18080),
+            paths.logs().join("nginx.log"),
+        );
         manager.adopt("nginx", &[std::process::id()], Some(18080));
-        record_endpoints(&manager, "nginx", snapshot_endpoints(&paths, &store, "nginx"));
-        assert_eq!(list_with_status(&paths, &store, &manager).unwrap()[0].access_url.as_deref(), Some("http://lifecycle.test:18080"));
-        assert!(!endpoints_changed(&manager, "nginx", &snapshot_endpoints(&paths, &store, "nginx")));
+        record_endpoints(
+            &manager,
+            "nginx",
+            snapshot_endpoints(&paths, &store, "nginx"),
+        );
+        assert_eq!(
+            list_with_status(&paths, &store, &manager).unwrap()[0]
+                .access_url
+                .as_deref(),
+            Some("http://lifecycle.test:18080")
+        );
+        assert!(!endpoints_changed(
+            &manager,
+            "nginx",
+            &snapshot_endpoints(&paths, &store, "nginx")
+        ));
         store.set_port_override("http", Some(28080)).unwrap();
         std::fs::write(&vhost, config.replace("18080", "28080")).unwrap();
-        assert_eq!(list_with_status(&paths, &store, &manager).unwrap()[0].access_url.as_deref(), Some("http://lifecycle.test:18080"));
-        assert!(endpoints_changed(&manager, "nginx", &snapshot_endpoints(&paths, &store, "nginx")));
-        retain_reloaded_endpoints(&manager, "nginx", snapshot_endpoints(&paths, &store, "nginx"));
-        assert!(list_with_status(&paths, &store, &manager).unwrap()[0].access_url.is_none());
+        assert_eq!(
+            list_with_status(&paths, &store, &manager).unwrap()[0]
+                .access_url
+                .as_deref(),
+            Some("http://lifecycle.test:18080")
+        );
+        assert!(endpoints_changed(
+            &manager,
+            "nginx",
+            &snapshot_endpoints(&paths, &store, "nginx")
+        ));
+        retain_reloaded_endpoints(
+            &manager,
+            "nginx",
+            snapshot_endpoints(&paths, &store, "nginx"),
+        );
+        assert!(list_with_status(&paths, &store, &manager).unwrap()[0]
+            .access_url
+            .is_none());
         let pending = snapshot_endpoints(&paths, &store, "nginx");
         std::fs::write(&vhost, config).unwrap();
         record_endpoints(&manager, "nginx", pending);
-        assert!(list_with_status(&paths, &store, &manager).unwrap()[0].access_url.is_none());
+        assert!(list_with_status(&paths, &store, &manager).unwrap()[0]
+            .access_url
+            .is_none());
         let pending = snapshot_endpoints(&paths, &store, "nginx");
         std::fs::write(paths.nginx_conf(), "events {} http {}").unwrap();
         record_endpoints(&manager, "nginx", pending);
-        assert!(list_with_status(&paths, &store, &manager).unwrap()[0].access_url.is_none());
+        assert!(list_with_status(&paths, &store, &manager).unwrap()[0]
+            .access_url
+            .is_none());
         assert!(snapshot_endpoints(&paths, &store, "nginx").sites.is_empty());
         std::fs::write(paths.nginx_conf(), main).unwrap();
-        record_endpoints(&manager, "nginx", snapshot_endpoints(&paths, &store, "nginx"));
+        record_endpoints(
+            &manager,
+            "nginx",
+            snapshot_endpoints(&paths, &store, "nginx"),
+        );
         manager.set_state("nginx", ServiceState::Stopped);
         assert!(access_url(&paths, &store, &manager, &site.id).is_err());
     }

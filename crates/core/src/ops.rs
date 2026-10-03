@@ -4649,11 +4649,20 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
     }
 
     #[test]
-    #[ignore = "requires NSB_APACHE_ROOT; starts an isolated Apache with temporary configuration"]
+    #[ignore = "requires NSB_APACHE_ROOT and NSB_PHP_ROOT; starts isolated Apache/PHP with temporary configuration"]
     fn real_apache_custom_config_survives_rebuild_and_port_changes() {
         let root = PathBuf::from(std::env::var("NSB_APACHE_ROOT").expect("NSB_APACHE_ROOT"));
+        let php = PathBuf::from(std::env::var("NSB_PHP_ROOT").expect("NSB_PHP_ROOT"));
         let temp = tempfile::tempdir().unwrap();
-        let state = isolated_state(Paths::new(temp.path().join("apache with spaces")));
+        let state = isolated_state(Paths::new(temp.path().join("apache [path] with spaces")));
+        struct Cleanup<'a>(&'a crate::CoreState);
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.stop_service("apache");
+                let _ = self.0.stop_service("php@8.4.26");
+            }
+        }
+        let _cleanup = Cleanup(&state);
         register_fixture(&state, "apache", "2.4.66", root.parent().unwrap());
         let http = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let https = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -4708,7 +4717,82 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
         let pids = state.manager.snapshot("apache").unwrap().pids;
         state.stop_service("apache").unwrap();
         assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));
-        println!("Apache: native validation and HTTP confirmed custom header across rebuild and port change; owned processes stopped");
+        register_fixture(&state, "php", "8.4.26", &php);
+        let php_port = (24000..28000)
+            .find(|port| {
+                (0..configgen::PHP_POOL_WORKERS)
+                    .all(|offset| std::net::TcpListener::bind(("127.0.0.1", port + offset)).is_ok())
+            })
+            .unwrap();
+        state
+            .store
+            .set_port_override("php@8.4.26", Some(php_port))
+            .unwrap();
+        state.start_service("php@8.4.26").unwrap();
+        let project = temp.path().join("project # O'Brien %1 & space [2]");
+        std::fs::create_dir_all(project.join("assets/.git")).unwrap();
+        std::fs::create_dir_all(project.join(".well-known")).unwrap();
+        std::fs::write(project.join("index.php"), r#"<?php header('Content-Type: application/json'); echo json_encode(array_intersect_key($_SERVER,array_flip(['SCRIPT_FILENAME','SCRIPT_NAME','PATH_INFO','QUERY_STRING'])));"#).unwrap();
+        std::fs::write(project.join("assets/.git/config"), "private").unwrap();
+        std::fs::write(project.join(".well-known/probe"), "public").unwrap();
+        let site: crate::model::Site = serde_json::from_value(serde_json::json!({
+            "id":"php-path", "name":"PHP path", "domains":["php-path.test"], "rootDir":project,
+            "runtime":{"kind":"php", "webServer":"apache", "phpVersion":"8.4.26"},
+            "https":false, "rewrite":"none", "createdAt":1, "updatedAt":1
+        }))
+        .unwrap();
+        state.store.save_site(&site).unwrap();
+        crate::sites::write_site_conf(&state.paths, &state.store, &site).unwrap();
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        for _ in 0..2 {
+            state.start_service("apache").unwrap();
+            assert_eq!(
+                crate::sites::running_url(&state.paths, site.clone(), &state.manager).unwrap(),
+                format!("http://php-path.test:{new_port}")
+            );
+            for path in [
+                "/index.php?x=1",
+                "/?x=1",
+                "/index.php/path/info?x=1",
+                "/pretty/route?x=1",
+            ] {
+                let response = client
+                    .get(format!("http://127.0.0.1:{new_port}{path}"))
+                    .header("Host", "php-path.test")
+                    .send()
+                    .unwrap();
+                assert_eq!(response.status(), 200, "{path}");
+                let json: serde_json::Value = response.json().unwrap();
+                assert_eq!(
+                    json["SCRIPT_FILENAME"],
+                    crate::paths::portable_path_text(&project.join("index.php"))
+                );
+                assert_eq!(json["SCRIPT_NAME"], "/index.php");
+                assert_eq!(json["QUERY_STRING"], "x=1");
+                if path.contains("/path/info") {
+                    assert_eq!(json["PATH_INFO"], "/path/info");
+                }
+            }
+            for (path, expected) in [("/assets/.git/config", 403), ("/.well-known/probe", 200)] {
+                assert_eq!(
+                    client
+                        .get(format!("http://127.0.0.1:{new_port}{path}"))
+                        .header("Host", "php-path.test")
+                        .send()
+                        .unwrap()
+                        .status()
+                        .as_u16(),
+                    expected
+                );
+            }
+            state.stop_service("apache").unwrap();
+        }
+        state.stop_service("php@8.4.26").unwrap();
+        println!("Apache: custom config/ports, bracketed include paths, PHP filename/DirectoryIndex/PATH_INFO, private files and repeated starts passed");
     }
 
     #[test]

@@ -452,7 +452,7 @@ pub fn preview_config_reset(
     let relative = path
         .strip_prefix(&paths.base)
         .map_err(|_| AppError::new("BAD_CONFIG_PATH", "配置目录无效"))?;
-    crate::paths::checked_data_path(&paths.base, &crate::paths::nginx_path(relative))?;
+    crate::paths::checked_data_path(&paths.base, &crate::paths::portable_path_text(relative))?;
     let ports = crate::services::PortsProfile::from_settings(store);
     let mut pools: Vec<_> = store
         .all_port_assigns()
@@ -561,7 +561,7 @@ pub fn reset_config(
     let relative = path
         .strip_prefix(&paths.base)
         .map_err(|_| AppError::new("BAD_CONFIG_PATH", "配置目录无效"))?;
-    crate::paths::checked_data_path(&paths.base, &crate::paths::nginx_path(relative))?;
+    crate::paths::checked_data_path(&paths.base, &crate::paths::portable_path_text(relative))?;
     let expected = match std::fs::read(&path) {
         Ok(bytes) => Some(bytes),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -844,9 +844,9 @@ pub fn validate(
                 if kind == ConfigKind::NginxMain {
                     command
                         .arg("-p")
-                        .arg(crate::paths::nginx_path(&root))
+                        .arg(crate::paths::portable_path_text(&root))
                         .arg("-c")
-                        .arg(crate::paths::nginx_path(tmp.path()));
+                        .arg(crate::paths::portable_path_text(tmp.path()));
                 } else {
                     command
                         .arg("-d")
@@ -1150,7 +1150,7 @@ fn write_config_version_checked(
     let relative = path
         .strip_prefix(&paths.base)
         .map_err(|_| AppError::new("BAD_CONFIG_PATH", "配置不在应用数据目录内"))?;
-    let relative = crate::paths::nginx_path(relative);
+    let relative = crate::paths::portable_path_text(relative);
     crate::paths::checked_data_path(&paths.base, &relative)?;
     let previous = match std::fs::read(path) {
         Ok(bytes) => Some(bytes),

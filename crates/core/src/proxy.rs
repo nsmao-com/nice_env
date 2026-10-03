@@ -222,9 +222,17 @@ fn profile_path(paths: &Paths, id: &str) -> Result<PathBuf> {
     if id.is_empty() || id.len() > 128 || !id.bytes().all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c)) {
         return Err(AppError::new("BAD_PROFILE_ID", "订阅标识无效"));
     }
-    let path = paths.mihomo_dir().join("profiles").join(format!("{id}.yaml"));
-    let relative = path.strip_prefix(&paths.base).map_err(|_| AppError::new("BAD_PROFILE_PATH", "订阅目录无效"))?;
-    Ok(crate::paths::checked_data_path(&paths.base, &crate::paths::nginx_path(relative))?)
+    let path = paths
+        .mihomo_dir()
+        .join("profiles")
+        .join(format!("{id}.yaml"));
+    let relative = path
+        .strip_prefix(&paths.base)
+        .map_err(|_| AppError::new("BAD_PROFILE_PATH", "订阅目录无效"))?;
+    Ok(crate::paths::checked_data_path(
+        &paths.base,
+        &crate::paths::portable_path_text(relative),
+    )?)
 }
 
 fn profile_record(store: &Store, id: &str) -> Result<(String, String, String, bool, i64)> {

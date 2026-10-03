@@ -185,7 +185,7 @@ fn bounded_config(paths: &Paths, path: &Path) -> Result<String> {
     let relative = path
         .strip_prefix(&paths.base)
         .map_err(|_| AppError::new("BAD_CONFIG_PATH", "配置不在应用数据目录内"))?;
-    crate::paths::checked_data_path(&paths.base, &crate::paths::nginx_path(relative))?;
+    crate::paths::checked_data_path(&paths.base, &crate::paths::portable_path_text(relative))?;
     if !path.is_file() {
         return Err(AppError::new(
             "CONFIG_UNAVAILABLE",

@@ -114,15 +114,24 @@ fn snapshot(paths: &Paths, store: &Store, server: &str, enabled: bool) -> Result
             files.push(path);
         }
     }
-    files.into_iter().map(|path| {
-        let relative = path.strip_prefix(&paths.base).map_err(|_| AppError::new("WEB_NETWORK_PATH", "配置路径不在托管目录内"))?;
-        let path = crate::paths::checked_data_path(&paths.base, &crate::paths::nginx_path(relative))?;
-        let content = match std::fs::read(&path) {
-            Ok(content) => Some(content), Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(AppError::io("读取 Web 配置", e)),
-        };
-        Ok((path, content))
-    }).collect()
+    files
+        .into_iter()
+        .map(|path| {
+            let relative = path
+                .strip_prefix(&paths.base)
+                .map_err(|_| AppError::new("WEB_NETWORK_PATH", "配置路径不在托管目录内"))?;
+            let path = crate::paths::checked_data_path(
+                &paths.base,
+                &crate::paths::portable_path_text(relative),
+            )?;
+            let content = match std::fs::read(&path) {
+                Ok(content) => Some(content),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(AppError::io("读取 Web 配置", e)),
+            };
+            Ok((path, content))
+        })
+        .collect()
 }
 
 pub fn apply(paths: &Paths, store: &Store, manager: &Arc<ServiceManager>, site_id: &str, server: &str, enabled: bool) -> Result<()> {

@@ -632,7 +632,11 @@ pub fn bin_dir_for(install_path: &str, entry: &str) -> Option<String> {
         Some((p, _)) => p,
         None => "",
     };
-    let base = install_path.trim_end_matches(['/', '\\']);
+    let base = if cfg!(windows) {
+        install_path.trim_end_matches(['/', '\\'])
+    } else {
+        install_path.trim_end_matches('/')
+    };
     let joined = if parent.is_empty() {
         base.to_string()
     } else {
@@ -2124,6 +2128,11 @@ mod tests {
         assert_eq!(
             bin_dir_for("D:/rt/nginx/1.26.3/", "nginx-1.26.3/nginx.exe").unwrap(),
             "D:/rt/nginx/1.26.3/nginx-1.26.3"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            bin_dir_for("/runtime\\", "bin/tool").unwrap(),
+            "/runtime\\/bin"
         );
     }
 

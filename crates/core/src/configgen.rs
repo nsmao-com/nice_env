@@ -1355,10 +1355,10 @@ pub fn validate_nginx(nginx_exe: &std::path::Path, conf: &std::path::Path) -> Re
     command
         .current_dir(root)
         .arg("-p")
-        .arg(crate::paths::nginx_path(root))
+        .arg(crate::paths::portable_path_text(root))
         .arg("-t")
         .arg("-c")
-        .arg(crate::paths::nginx_path(conf));
+        .arg(crate::paths::portable_path_text(conf));
     let (ok, output) = crate::cfgeditor::run_validator(&mut command)?;
     if !ok {
         return Err(

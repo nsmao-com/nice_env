@@ -706,9 +706,16 @@ impl Installer {
         downloader: &Arc<Downloader>, task: &crate::download::DownloadTask,
         emit: &dyn Fn(crate::Event), published: bool,
     ) -> Result<()> {
-        if !official_qdrant(entry) { return Ok(()); }
-        let relative = root.strip_prefix(&paths.base).map_err(|_| AppError::new("INVALID_PACKAGE_PATH", "Qdrant 程序目录不在托管目录内"))?;
-        let root = crate::paths::checked_data_path(&paths.base, &crate::paths::nginx_path(relative))?;
+        if !official_qdrant(entry) {
+            return Ok(());
+        }
+        let relative = root
+            .strip_prefix(&paths.base)
+            .map_err(|_| AppError::new("INVALID_PACKAGE_PATH", "Qdrant 程序目录不在托管目录内"))?;
+        let root = crate::paths::checked_data_path(
+            &paths.base,
+            &crate::paths::portable_path_text(relative),
+        )?;
         let target = crate::paths::checked_data_path(&root, "static")?;
         if target.exists() {
             if crate::paths::checked_data_path(&target, "index.html")?.is_file() { return Ok(()); }
@@ -1136,8 +1143,14 @@ impl Installer {
             // Windows 在进程退出后仍可能短暂保留映像/静态文件句柄；有限重试，不改权限。
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
             loop {
-                crate::paths::checked_data_path(&paths.base, &crate::paths::nginx_path(runtime_dir.strip_prefix(&paths.base)
-                    .map_err(|_| AppError::new("INVALID_PACKAGE_PATH", "运行时目录超出托管目录"))?))?;
+                crate::paths::checked_data_path(
+                    &paths.base,
+                    &crate::paths::portable_path_text(
+                        runtime_dir.strip_prefix(&paths.base).map_err(|_| {
+                            AppError::new("INVALID_PACKAGE_PATH", "运行时目录超出托管目录")
+                        })?,
+                    ),
+                )?;
                 match std::fs::remove_dir_all(&runtime_dir) {
                     Ok(()) => break,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
@@ -2163,6 +2176,134 @@ mod tests {
             .store
             .find_installed("tar-bad", Some("1.0.0"))
             .is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires macOS, NSB_NATIVE_PACKAGE and NSB_SKIP_HOSTS=1; downloads official packages and uses temporary service data"]
+    async fn official_macos_package_lifecycle() {
+        assert_eq!(current_os(), "macos");
+        assert_eq!(std::env::var("NSB_SKIP_HOSTS").as_deref(), Ok("1"));
+        let id = std::env::var("NSB_NATIVE_PACKAGE").expect("NSB_NATIVE_PACKAGE");
+        let (_temp, mut state) = fixture();
+        state.paths = Paths::new(_temp.path().join("NiceEnv native data"));
+        state.paths.ensure_dirs().unwrap();
+        state.store = Store::open(state.paths.db()).unwrap();
+        state.store.set_setting("pathEnvEnabled", "0").unwrap();
+        state.store.set_setting("portProfile", "safe").unwrap();
+        let entry = state.installer.template_for(&id).expect("native package");
+        assert!(Installer::is_platform_compatible(&entry));
+        let key = format!("{id}@{}", entry.version);
+        let installed = state.install_package(&key).await.unwrap();
+        let actual = state.installer.installed_entry(&installed);
+        let program = Path::new(&installed.install_path).join(entry_relative_path(&actual.entry));
+        assert!(program.is_file(), "{}", program.display());
+        if id == "composer" {
+            // macOS 清单尚无 PHP；这里只验收 PHAR 安装，不能声称已执行 Composer。
+            println!("Composer PHAR installed; execution requires a separately installed PHP");
+        } else {
+            let argument = match id.as_str() {
+                "go" => "version",
+                "mihomo" => "-v",
+                _ => "--version",
+            };
+            let output = platform::command(&program).arg(argument).output().unwrap();
+            let banner = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.status.success(), "{key}: {banner}");
+            assert!(banner.contains(&actual.version), "{key}: {banner}");
+            println!(
+                "native binary {key}: {}",
+                banner.lines().next().unwrap_or("")
+            );
+        }
+        let listed = state.list_packages().unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .filter(|p| p.manifest.id == id
+                    && p.manifest.version == actual.version
+                    && p.install.is_some())
+                .count(),
+            1
+        );
+        crate::versions::clear_cache(&state.store);
+        assert_eq!(
+            state.install_package(&key).await.unwrap().installed_at,
+            installed.installed_at
+        );
+        let reopened = Store::open(state.paths.db()).unwrap();
+        let record = reopened.find_installed(&id, Some(&actual.version)).unwrap();
+        let offline = Installer {
+            manifest: crate::model::Manifest {
+                revision: 0,
+                packages: vec![],
+            },
+        };
+        assert_eq!(offline.installed_entry(&record).entry, actual.entry);
+        assert!(offline.package_views(&[record])[0].install.is_some());
+
+        if matches!(id.as_str(), "mysql" | "mongodb" | "mihomo" | "nats") {
+            let service = if id == "mysql" {
+                format!("mysql@{}", actual.version)
+            } else if actual.run.is_some() {
+                crate::generic::service_id_of(&actual)
+            } else {
+                id.clone()
+            };
+            struct Cleanup<'a>(&'a crate::CoreState, String);
+            impl Drop for Cleanup<'_> {
+                fn drop(&mut self) {
+                    if self.0.stop_service(&self.1).is_err() {
+                        if let Ok(preview) = self.0.service_stop_preview(&self.1) {
+                            let _ = self.0.force_stop_service(&self.1, &preview.revision);
+                        }
+                    }
+                }
+            }
+            let _cleanup = Cleanup(&state, service.clone());
+            for _ in 0..2 {
+                state.start_service(&service).unwrap_or_else(|error| {
+                    panic!(
+                        "{key}: {error:?}\n{}",
+                        state.manager.tail(&service, 40).join("\n")
+                    )
+                });
+                let running = state.manager.snapshot(&service).unwrap();
+                assert_eq!(running.state, crate::model::ServiceState::Running);
+                assert!(!running.pids.is_empty());
+                assert!(running.pids.iter().all(|pid| platform::process_alive(*pid)));
+                state.stop_service(&service).unwrap();
+                assert!(running
+                    .pids
+                    .iter()
+                    .all(|pid| !platform::process_alive(*pid)));
+                assert!(state.manager.snapshot(&service).unwrap().pids.is_empty());
+            }
+            println!("{key}: two native start/health/stop cycles passed");
+        }
+        let preserved = state.paths.data().join(&id).join("audit-preserve.txt");
+        std::fs::create_dir_all(preserved.parent().unwrap()).unwrap();
+        std::fs::write(&preserved, "retain user data").unwrap();
+        state.uninstall_package(&key).unwrap();
+        assert!(!Path::new(&installed.install_path).exists());
+        assert!(state
+            .store
+            .find_installed(&id, Some(&actual.version))
+            .is_none());
+        assert!(state
+            .list_packages()
+            .unwrap()
+            .iter()
+            .filter(|p| p.manifest.id == id && p.manifest.version == actual.version)
+            .all(|p| p.install.is_none()));
+        assert_eq!(
+            std::fs::read_to_string(preserved).unwrap(),
+            "retain user data"
+        );
+        println!("{key}: official install, installed list, offline reload, repeat install and uninstall passed");
     }
 
     #[cfg(windows)]

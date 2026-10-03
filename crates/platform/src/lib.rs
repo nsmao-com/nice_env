@@ -155,7 +155,7 @@ pub fn process_start_marker(pid: u32) -> Option<String> {
         if libc::proc_pidinfo(
             pid as libc::c_int,
             libc::PROC_PIDTBSDINFO,
-            0,
+            1, // 包含尚未回收的 zombie，保留退出阶段的创建时间身份。
             &mut info as *mut _ as *mut libc::c_void,
             size,
         ) != size
@@ -181,6 +181,26 @@ pub struct VerifiedProcess {
     pid: u32,
     #[cfg(not(any(windows, target_os = "linux")))]
     started: String,
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn confirmed_process_matches(pid: u32, started: &str) -> Result<bool> {
+    // macOS 的退出过渡期可能先从普通进程表消失、稍后才出现在 zombie 表。
+    // 此间不能发送信号，也不能仅凭读取失败就当成退出；有界重试后仍未知则报错。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        match process_start_marker(pid) {
+            Some(marker) => return Ok(marker == started && process_alive(pid)),
+            None if !process_alive(pid) => return Ok(false),
+            None => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(PlatformError::Io(format!(
+                "无法核实进程 {pid} 的身份，未发送信号"
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 impl VerifiedProcess {
@@ -254,14 +274,11 @@ impl VerifiedProcess {
             };
         }
         #[cfg(not(any(windows, target_os = "linux")))]
-        match process_start_marker(pid) {
-            Some(marker) if marker == started => Ok(Some(Self {
+        {
+            Ok(confirmed_process_matches(pid, started)?.then(|| Self {
                 pid,
-                started: marker,
-            })),
-            Some(_) => Ok(None),
-            None if !process_alive(pid) => Ok(None),
-            None => Err(PlatformError::Io(format!("无法核实进程 {pid} 的身份"))),
+                started: started.to_string(),
+            }))
         }
     }
 
@@ -330,15 +347,8 @@ impl VerifiedProcess {
         }
         #[cfg(not(any(windows, target_os = "linux")))]
         {
-            match process_start_marker(self.pid) {
-                Some(marker) if marker == self.started => {}
-                Some(_) => return Ok(()),
-                None if !process_alive(self.pid) => return Ok(()),
-                None => {
-                    return Err(PlatformError::Io(
-                        "进程身份暂时无法确认，未发送正常退出信号".into(),
-                    ))
-                }
+            if !confirmed_process_matches(self.pid, &self.started)? {
+                return Ok(());
             }
             if unsafe { libc::kill(self.pid as libc::pid_t, libc::SIGTERM) } != 0 {
                 let error = std::io::Error::last_os_error();
@@ -390,15 +400,8 @@ impl VerifiedProcess {
         }
         #[cfg(not(any(windows, target_os = "linux")))]
         {
-            match process_start_marker(self.pid) {
-                Some(marker) if marker == self.started => {}
-                Some(_) => return Ok(()),
-                None if !process_alive(self.pid) => return Ok(()),
-                None => {
-                    return Err(PlatformError::Io(
-                        "进程身份暂时无法确认，未发送终止信号".into(),
-                    ))
-                }
+            if !confirmed_process_matches(self.pid, &self.started)? {
+                return Ok(());
             }
             if unsafe { libc::kill(self.pid as libc::pid_t, libc::SIGKILL) } != 0 {
                 let error = std::io::Error::last_os_error();
@@ -1646,6 +1649,27 @@ mod process_tests {
         child.0.wait().unwrap();
         assert!(process.has_exited().unwrap());
         process.request_mongodb_shutdown().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repeated_termination_handles_the_exit_transition_without_reaping() {
+        for _ in 0..16 {
+            let mut child = ChildGuard(command("sleep").arg("5").spawn().unwrap());
+            let pid = child.0.id();
+            let process = VerifiedProcess::open(pid, &process_start_marker(pid).unwrap())
+                .unwrap()
+                .unwrap();
+            process.terminate().unwrap();
+            process.terminate().unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !process.has_exited().unwrap() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(process.has_exited().unwrap());
+            process.terminate().unwrap();
+            child.0.wait().unwrap();
+        }
     }
 
     #[cfg(unix)]

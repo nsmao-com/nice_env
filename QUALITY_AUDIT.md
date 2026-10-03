@@ -101,3 +101,16 @@ v0.2.248 的 Windows、Linux、Web 检查通过，Windows Release 前置验证�
 将剩余分隔符判断改为当前剩余字符串与取出的首项比较，消除命令替换中的 `case`，仍保留空 PATH 项、字面路径和重复应用幂等性。本地现有终端回归与改动行格式检查通过；macOS sh/zsh 结果以本版本真实 runner 为准。
 
 本批没有数据库变更，未修改 `update.sql`，未新增测试文件或运行前端 dev/build。整体质量复查仍在进行。
+
+## 2026-10-03：v0.2.250 原生路径与 macOS 退出竞态
+
+v0.2.249 的 Windows、Linux、Web、macOS Intel CI 通过。ARM64 Release 核心验证通过，但同提交的 ARM64 分支 CI 出现一次控制服务停机失败：退出过渡期无法读取进程身份，立即返回 STOP_FAILED。PATH 的 sh/zsh 用例已通过。为避免发布已知仍有停机问题的构建，已请求取消 v0.2.249 Release（GitHub 返回 202）。
+
+- 命令参数、环境变量、文件归属检查不再使用会无条件改写反斜杠的 `nginx_path`。Nginx 启停与校验、Qdrant 快照、SFTPGo 环境文件、配置备份及恢复改用原生平台路径文本。托管相对路径不支持的字符仍拒绝，避免把 Unix 的字面反斜杠误指向另一文件。
+- 数据迁移只在 Windows 保留反斜杠样式；Unix 安装根目录末尾的字面反斜杠不再被 PATH 推导删除。已有用例增加 Unix 路径和 SFTPGo 文件错读的回归场景。
+- macOS 创建时间查询也包含 zombie；在 open、正常停机、强制停机发送信号前，对暂时不可读的身份最多重试 1 秒。未确认身份不发信号，PID 身份改变或确认退出时不再操作。新增现有平台模块的 Unix 退出过渡期重复终止回归。
+- Release 的 macOS 双架构前置检查增加真实官方套件验收：MySQL、MongoDB、mihomo、NATS、Go、Node、mongosh、Database Tools 与 Composer，使用带空格的临时数据目录。验证原生版本、已安装列表、离线记录重载、重复安装和卸载保留数据；四类服务执行两次启停。Composer 仅验证 PHAR 安装，执行仍缺 PHP 依赖。版本升级、桌面交互和全部配置转义尚未验收。
+
+路径修复的本地完整回归通过 core 736、集成 45、platform 15；之后的 macOS 退出修改完成 Windows 编译和控制服务定向回归，真实 macOS 行为必须以新 runner 结果为准。新增套件验收代码已编译，未在 Windows 冒充 macOS 执行。仅格式化本批改动行，改动行检查通过。
+
+本批没有数据库结构或用户数据库变更，未修改 `update.sql`；未新增测试文件，未运行本地前端 dev/build。整体质量复查保持进行中。

@@ -433,9 +433,9 @@ fn start_nginx(
         program: exe.clone(),
         args: vec![
             "-p".into(),
-            crate::paths::nginx_path(&root),
+            crate::paths::portable_path_text(&root),
             "-c".into(),
-            crate::paths::nginx_path(&paths.nginx_conf()),
+            crate::paths::portable_path_text(&paths.nginx_conf()),
         ],
         cwd: Some(root.clone()),
         env: vec![],
@@ -1174,9 +1174,9 @@ fn stop_service_with_mode(store: &Store, paths: &Paths, manager: &Arc<ServiceMan
                     let _ = platform::command(&exe)
                         .args([
                             "-p".into(),
-                            crate::paths::nginx_path(&root),
+                            crate::paths::portable_path_text(&root),
                             "-c".into(),
-                            crate::paths::nginx_path(&paths.nginx_conf()),
+                            crate::paths::portable_path_text(&paths.nginx_conf()),
                             "-s".into(),
                             "stop".into(),
                         ])
@@ -1508,9 +1508,9 @@ pub fn reload_nginx(store: &Store, paths: &Paths, manager: &ServiceManager) -> R
     let out = platform::command(&exe)
         .args([
             "-p".into(),
-            crate::paths::nginx_path(&root),
+            crate::paths::portable_path_text(&root),
             "-c".into(),
-            crate::paths::nginx_path(&paths.nginx_conf()),
+            crate::paths::portable_path_text(&paths.nginx_conf()),
             "-s".into(),
             "reload".into(),
         ])
@@ -2353,7 +2353,10 @@ fn validate_configs_selected(
             let relative = conf
                 .strip_prefix(&paths.base)
                 .map_err(|_| AppError::new("BAD_CONFIG_PATH", "配置路径不在数据目录内"))?;
-            crate::paths::checked_data_path(&paths.base, &nginx_path(relative))?;
+            crate::paths::checked_data_path(
+                &paths.base,
+                &crate::paths::portable_path_text(relative),
+            )?;
             let mut file =
                 std::fs::File::open(&conf).map_err(|e| AppError::io("读取配置文件", e))?;
             let mut first_byte = [0u8; 1];
@@ -2395,9 +2398,9 @@ fn validate_configs_selected(
             if package.id == "nginx" {
                 command
                     .arg("-p")
-                    .arg(crate::paths::nginx_path(&root))
+                    .arg(crate::paths::portable_path_text(&root))
                     .arg("-c")
-                    .arg(crate::paths::nginx_path(&conf));
+                    .arg(crate::paths::portable_path_text(&conf));
             } else {
                 command
                     .arg("-d")

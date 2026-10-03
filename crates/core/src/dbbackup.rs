@@ -447,7 +447,7 @@ pub fn delete_backup(paths: &Paths, path: &str) -> Result<()> {
     let relative = target
         .strip_prefix(&paths.base)
         .map_err(|_| AppError::new("FORBIDDEN", "只能删除备份目录内的文件"))?;
-    crate::paths::checked_data_path(&paths.base, &crate::paths::nginx_path(relative))?;
+    crate::paths::checked_data_path(&paths.base, &crate::paths::portable_path_text(relative))?;
     if !target
         .extension()
         .and_then(|s| s.to_str())

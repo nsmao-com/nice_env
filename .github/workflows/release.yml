@@ -37,6 +37,18 @@ jobs:
           key: platform-core-${{ matrix.os }}
       - name: Verify core and platform before publishing installers
         run: cargo test --locked -p nsb-core -p platform --no-fail-fast -- --test-threads=1
+      - name: Verify official macOS packages with native binaries
+        if: runner.os == 'macOS'
+        timeout-minutes: 25
+        shell: bash
+        env:
+          NSB_SKIP_HOSTS: "1"
+        run: |
+          status=0
+          for package in mysql mongodb mihomo nats go node mongosh mongodb-database-tools composer; do
+            NSB_NATIVE_PACKAGE="$package" cargo test --locked -p nsb-core --lib install::tests::official_macos_package_lifecycle -- --exact --ignored --nocapture --test-threads=1 || status=1
+          done
+          exit "$status"
 
   release:
     name: Build & Release (${{ matrix.platform }} ${{ matrix.targets }})

@@ -574,8 +574,13 @@ fn sftpgo_env_error(path: &std::path::Path, line: usize) -> AppError {
 /// 一次读取，按上游 os.ReadDir 的文件名顺序解析；不把配置中的值写入父进程环境或错误信息。
 fn sftpgo_env_files(paths: &Paths, directory: &std::path::Path) -> Result<Vec<(PathBuf, String)>> {
     let mut files = Vec::new();
-    let relative = directory.join("env.d").strip_prefix(&paths.base).map_err(|_| AppError::new("SFTPGO_CONFIG_PATH", "环境配置路径无效"))?.to_path_buf();
-    let directory = crate::paths::checked_data_path(&paths.base, &crate::paths::nginx_path(&relative))?;
+    let relative = directory
+        .join("env.d")
+        .strip_prefix(&paths.base)
+        .map_err(|_| AppError::new("SFTPGO_CONFIG_PATH", "环境配置路径无效"))?
+        .to_path_buf();
+    let directory =
+        crate::paths::checked_data_path(&paths.base, &crate::paths::portable_path_text(&relative))?;
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(files),
@@ -584,9 +589,16 @@ fn sftpgo_env_files(paths: &Paths, directory: &std::path::Path) -> Result<Vec<(P
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        if entry.file_name().to_str().is_none() { return Err(sftpgo_env_error(&path, 1)); }
-        let relative = path.strip_prefix(&paths.base).map_err(|_| AppError::new("SFTPGO_CONFIG_PATH", "环境配置路径无效"))?;
-        let path = crate::paths::checked_data_path(&paths.base, &crate::paths::nginx_path(relative))?;
+        if entry.file_name().to_str().is_none() {
+            return Err(sftpgo_env_error(&path, 1));
+        }
+        let relative = path
+            .strip_prefix(&paths.base)
+            .map_err(|_| AppError::new("SFTPGO_CONFIG_PATH", "环境配置路径无效"))?;
+        let path = crate::paths::checked_data_path(
+            &paths.base,
+            &crate::paths::portable_path_text(relative),
+        )?;
         let metadata = std::fs::metadata(&path)?;
         // 与上游的文件限制相同，不读取大文件或目录。
         if !metadata.is_file() || metadata.len() > 1024 * 1024 { continue; }
@@ -719,8 +731,11 @@ fn inspect_sftpgo(store: &Store, paths: &Paths, r: &Resolved, previously_started
         sftpgo_config_file(&original_root)?.ok_or_else(|| AppError::new("SFTPGO_CONFIG_MISSING", "SFTPGo portable 包缺少默认配置")
             .with_hint("请重新安装完整 portable 包；现有数据库和主机密钥保持不变。"))?
     };
-    let relative = source.strip_prefix(&paths.base).map_err(|_| AppError::new("SFTPGO_CONFIG_PATH", "配置源必须位于托管数据目录"))?;
-    let source = crate::paths::checked_data_path(&paths.base, &crate::paths::nginx_path(relative))?;
+    let relative = source
+        .strip_prefix(&paths.base)
+        .map_err(|_| AppError::new("SFTPGO_CONFIG_PATH", "配置源必须位于托管数据目录"))?;
+    let source =
+        crate::paths::checked_data_path(&paths.base, &crate::paths::portable_path_text(relative))?;
     let metadata = std::fs::metadata(&source)?;
     if !metadata.is_file() || metadata.len() > 1024 * 1024 { return Err(AppError::new("SFTPGO_CONFIG_INVALID", "SFTPGo 配置必须是小于 1 MiB 的文本文件")); }
     let content = std::fs::read_to_string(&source)?;
@@ -1128,16 +1143,46 @@ fn qdrant_snapshot_setting(entry: &PackageManifestEntry, root: &std::path::Path,
     key: &str, pointer: &str, default: &str) -> Result<String> {
     let data = paths.data().join("qdrant"); let etc = paths.etc_dir("qdrant", &entry.version);
     let env_value = |key: &str| -> Result<Option<String>> {
-        let values: Vec<_> = entry.run.as_ref().and_then(|run| run.env.as_ref()).into_iter().flatten()
-            .filter(|(name, _)| if cfg!(windows) { name.eq_ignore_ascii_case(key) } else { name.as_str() == key }).map(|(_, value)| value).collect();
-        if values.len() > 1 { return Err(AppError::new("QDRANT_CONFIG_ENV", "Qdrant 环境变量存在重复的大小写名称，请合并后重试")); }
-        Ok(values.first().map(|value| value.replace("{root}", &crate::paths::nginx_path(root)).replace("{data}", &crate::paths::nginx_path(&data))
-            .replace("{etc}", &crate::paths::nginx_path(&etc))).or_else(|| std::env::var(key).ok()))
+        let values: Vec<_> = entry
+            .run
+            .as_ref()
+            .and_then(|run| run.env.as_ref())
+            .into_iter()
+            .flatten()
+            .filter(|(name, _)| {
+                if cfg!(windows) {
+                    name.eq_ignore_ascii_case(key)
+                } else {
+                    name.as_str() == key
+                }
+            })
+            .map(|(_, value)| value)
+            .collect();
+        if values.len() > 1 {
+            return Err(AppError::new(
+                "QDRANT_CONFIG_ENV",
+                "Qdrant 环境变量存在重复的大小写名称，请合并后重试",
+            ));
+        }
+        Ok(values
+            .first()
+            .map(|value| {
+                value
+                    .replace("{root}", &crate::paths::portable_path_text(root))
+                    .replace("{data}", &crate::paths::portable_path_text(&data))
+                    .replace("{etc}", &crate::paths::portable_path_text(&etc))
+            })
+            .or_else(|| std::env::var(key).ok()))
     };
     if let Some(value) = env_value(key)? { return Ok(value); }
     let read = |path: &std::path::Path| -> Result<Option<String>> {
-        let relative = path.strip_prefix(&paths.base).map_err(|_| AppError::new("QDRANT_CONFIG_PATH", "Qdrant 配置不在托管目录内"))?;
-        let path = crate::paths::checked_data_path(&paths.base, &crate::paths::nginx_path(relative))?;
+        let relative = path
+            .strip_prefix(&paths.base)
+            .map_err(|_| AppError::new("QDRANT_CONFIG_PATH", "Qdrant 配置不在托管目录内"))?;
+        let path = crate::paths::checked_data_path(
+            &paths.base,
+            &crate::paths::portable_path_text(relative),
+        )?;
         let meta = match std::fs::metadata(&path) {
             Ok(meta) => meta, Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None), Err(e) => return Err(e.into()),
         };
@@ -1227,9 +1272,16 @@ pub(crate) fn preserve_qdrant_snapshots(store: &Store, paths: &Paths, manager: &
             }
         }
         let source = root.join("snapshots");
-        let relative = source.strip_prefix(&paths.base).map_err(|_| AppError::new("QDRANT_SNAPSHOT_PATH", "快照路径超出托管目录"))?;
-        let source = crate::paths::checked_data_path(&paths.base, &crate::paths::nginx_path(relative))?;
-        if source.exists() && std::fs::read_dir(&source)?.next().transpose()?.is_some() { sources.push((installed.version, source)); }
+        let relative = source
+            .strip_prefix(&paths.base)
+            .map_err(|_| AppError::new("QDRANT_SNAPSHOT_PATH", "快照路径超出托管目录"))?;
+        let source = crate::paths::checked_data_path(
+            &paths.base,
+            &crate::paths::portable_path_text(relative),
+        )?;
+        if source.exists() && std::fs::read_dir(&source)?.next().transpose()?.is_some() {
+            sources.push((installed.version, source));
+        }
     }
     if sources.is_empty() { return Ok(()); }
     if manager.snapshot("qdrant").is_some_and(|s| s.pids.iter().any(|pid| platform::process_alive(*pid))) {
@@ -1267,8 +1319,15 @@ pub(crate) fn preserve_qdrant_snapshots(store: &Store, paths: &Paths, manager: &
     for (key, _, digest) in plan.values() {
         let mut parent = std::path::Path::new(key).parent();
         while let Some(path) = parent.filter(|path| !path.as_os_str().is_empty()) {
-            let key = crate::paths::nginx_path(path); let folded = if cfg!(windows) { key.to_lowercase() } else { key.clone() };
-            if plan.contains_key(&folded) { return Err(conflict(&key)); }
+            let key = crate::paths::portable_path_text(path);
+            let folded = if cfg!(windows) {
+                key.to_lowercase()
+            } else {
+                key.clone()
+            };
+            if plan.contains_key(&folded) {
+                return Err(conflict(&key));
+            }
             parent = path.parent();
         }
         let target = crate::paths::checked_data_path(&destination, key)?;
@@ -1296,10 +1355,19 @@ pub(crate) fn preserve_qdrant_snapshots(store: &Store, paths: &Paths, manager: &
     let backups = crate::paths::checked_data_path(&paths.base, "backup")?;
     std::fs::create_dir_all(&backups)?;
     for (version, source) in sources {
-        crate::paths::checked_data_path(&paths.base, &crate::paths::nginx_path(source.strip_prefix(&paths.base)
-            .map_err(|_| AppError::new("QDRANT_SNAPSHOT_PATH", "快照路径超出托管目录"))?))?;
-        let backup = tempfile::Builder::new().prefix(&format!("qdrant-snapshots-{version}-")).tempdir_in(&backups)?;
-        std::fs::rename(&source, backup.path().join("snapshots")).map_err(|e| AppError::io("备份旧版 Qdrant 快照目录", e))?;
+        crate::paths::checked_data_path(
+            &paths.base,
+            &crate::paths::portable_path_text(
+                source
+                    .strip_prefix(&paths.base)
+                    .map_err(|_| AppError::new("QDRANT_SNAPSHOT_PATH", "快照路径超出托管目录"))?,
+            ),
+        )?;
+        let backup = tempfile::Builder::new()
+            .prefix(&format!("qdrant-snapshots-{version}-"))
+            .tempdir_in(&backups)?;
+        std::fs::rename(&source, backup.path().join("snapshots"))
+            .map_err(|e| AppError::io("备份旧版 Qdrant 快照目录", e))?;
         let _ = backup.keep();
     }
     Ok(())
@@ -1569,8 +1637,13 @@ fn prepare_config(paths: &Paths, r: &Resolved) -> Result<Vec<(String, String)>> 
     let mut env = Vec::new();
     if let (Some(cf), Some(tpl)) = (&r.spec.config_file, &r.spec.config_template) {
         let path = r.etc.join(cf);
-        let relative = path.strip_prefix(&paths.base).map_err(|_| AppError::new("CONFIG_PATH", "配置路径必须位于数据目录内"))?;
-        let path = crate::paths::checked_data_path(&paths.base, &crate::paths::nginx_path(relative))?;
+        let relative = path
+            .strip_prefix(&paths.base)
+            .map_err(|_| AppError::new("CONFIG_PATH", "配置路径必须位于数据目录内"))?;
+        let path = crate::paths::checked_data_path(
+            &paths.base,
+            &crate::paths::portable_path_text(relative),
+        )?;
         let previous = match std::fs::metadata(&path) {
             Ok(meta) if meta.is_file() && meta.len() <= 1024 * 1024 => Some(std::fs::read_to_string(&path)?),
             Ok(_) => return Err(AppError::new("CONFIG_READ", "配置必须是小于 1 MiB 的文本文件")),
@@ -1802,7 +1875,7 @@ pub fn start(
     let minio = if managed_minio(&r) { Some(minio_settings(&r)?) } else { None };
     if minio.is_some() {
         let relative = r.data.join("data").strip_prefix(&paths.base).map_err(|_| AppError::new("MINIO_DATA_PATH", "MinIO 数据目录不在托管路径内"))?.to_path_buf();
-        crate::paths::checked_data_path(&paths.base, &crate::paths::nginx_path(&relative))?;
+        crate::paths::checked_data_path(&paths.base, &crate::paths::portable_path_text(&relative))?;
     }
     prepare_config(paths, &r)?;
     let caddy_snapshot = if r.entry.id == "caddy" {
@@ -1969,8 +2042,14 @@ pub fn start(
     if let Some(snapshot) = caddy_snapshot { crate::sites::record_endpoints(manager, "caddy", snapshot); }
     if managed_rnacos(&r) { web_target = rnacos_http_target(manager, &r, 2000, "/rnacos/"); }
     if sftpgo.is_some() {
-        let relative = r.etc.strip_prefix(&paths.base).map_err(|_| AppError::new("SFTPGO_CONFIG_PATH", "配置目录超出托管目录"))?;
-        if let Err(error) = store.set_setting(SFTPGO_CONFIG_BINDING, &crate::paths::nginx_path(relative)) {
+        let relative = r
+            .etc
+            .strip_prefix(&paths.base)
+            .map_err(|_| AppError::new("SFTPGO_CONFIG_PATH", "配置目录超出托管目录"))?;
+        if let Err(error) = store.set_setting(
+            SFTPGO_CONFIG_BINDING,
+            &crate::paths::portable_path_text(relative),
+        ) {
             crate::ops::stop_service(store, paths, manager, &r.service_id)?;
             return Err(error);
         }
@@ -2788,6 +2867,14 @@ mod startup_tests {
         assert_eq!(qdrant_snapshot_directory(&r.entry, &r.root, &state.paths).unwrap(), r.root.join("explicit-snapshots"));
         r.entry.run.as_mut().unwrap().env = Some(std::collections::HashMap::from([("QDRANT__STORAGE__SNAPSHOTS_PATH".into(), "{data}/private-snapshots".into())]));
         assert_eq!(qdrant_snapshot_directory(&r.entry, &r.root, &state.paths).unwrap(), state.paths.data().join("qdrant/private-snapshots"));
+        #[cfg(unix)]
+        {
+            let literal_paths = Paths::new(state.paths.base.join(r"literal\data"));
+            assert_eq!(
+                qdrant_snapshot_directory(&r.entry, &r.root, &literal_paths).unwrap(),
+                literal_paths.data().join("qdrant/private-snapshots")
+            );
+        }
         if cfg!(windows) {
             r.entry.run.as_mut().unwrap().env = Some(std::collections::HashMap::from([("qdrant__storage__snapshots_path".into(), "{data}/lowercase-snapshots".into())]));
             assert_eq!(qdrant_snapshot_directory(&r.entry, &r.root, &state.paths).unwrap(), state.paths.data().join("qdrant/lowercase-snapshots"));
@@ -3140,6 +3227,15 @@ mod startup_tests {
             assert_eq!(std::fs::read_to_string(&env_file).unwrap(), bad);
             assert_eq!(std::fs::read_to_string(&prepared.file).unwrap(), "{}");
             assert!(state.store.get_port_assign("sftpgo").is_none());
+        }
+        #[cfg(unix)]
+        {
+            std::fs::write(&env_file, "VALID=1\n").unwrap();
+            std::fs::create_dir(env_dir.join("nested")).unwrap();
+            std::fs::write(env_dir.join("nested/redirected.env"), "WRONG_FILE=1\n").unwrap();
+            std::fs::write(env_dir.join(r"nested\redirected.env"), "ACTUAL_FILE=1\n").unwrap();
+            // 托管相对路径不支持反斜杠时应拒绝，不能悄悄读取另一个目录的文件。
+            assert!(sftpgo_env_files(&state.paths, &r.etc).is_err());
         }
     }
 

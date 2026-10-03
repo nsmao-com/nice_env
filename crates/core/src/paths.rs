@@ -498,8 +498,14 @@ impl DataPathRebase {
         if let Some(source) = source {
             let suffix = &normalized[source.len()..];
             let rebased = format!("{}{suffix}", self.target);
-            if value.contains('\\') { rebased.replace('/', "\\") } else { rebased }
-        } else { value.to_string() }
+            if cfg!(windows) && value.contains('\\') {
+                rebased.replace('/', "\\")
+            } else {
+                rebased
+            }
+        } else {
+            value.to_string()
+        }
     }
 
     pub(crate) fn text(&self, value: &str) -> crate::error::Result<String> {
@@ -812,7 +818,7 @@ pub(crate) fn write_with_backup_expected(
     let relative = path
         .strip_prefix(base)
         .map_err(|_| backup_error("配置不在应用数据目录内"))?;
-    let relative = nginx_path(relative);
+    let relative = portable_path_text(relative);
     let target = checked_data_path(base, &relative)?;
     let previous = read_optional(&target)?;
     if expected.is_some_and(|bytes| previous.as_deref() != bytes) {
@@ -1064,7 +1070,7 @@ fn legacy_target(base: &Path, name: &str) -> io::Result<String> {
             if metadata.is_dir() {
                 stack.push(entry.path());
             } else if metadata.is_file() && entry.file_name().to_string_lossy() == original {
-                found.push(nginx_path(
+                found.push(portable_path_text(
                     entry
                         .path()
                         .strip_prefix(base)
@@ -1610,6 +1616,12 @@ mod tests {
             assert_eq!(rebase.text(r#"root "\\?\C:\old-data\www";"#).unwrap(), r#"root "D:\new-data\www";"#);
             let unc = DataPathRebase::new(Path::new(r"\\?\UNC\server\share\old"),Path::new("D:/new-data")).unwrap();
             assert_eq!(unc.text(r#"root "\\?\UNC\server\share\old\www";"#).unwrap(),r#"root "D:\new-data\www";"#);
+        } else {
+            // Unix 文件名的反斜杠不能触发整条路径的 Windows 样式转换。
+            assert_eq!(
+                rebase.path(&format!("{old}/etc/config\\archive.json")),
+                format!("{new}/etc/config\\archive.json")
+            );
         }
         assert_eq!(rebase.path(&format!("{old}/../external")),format!("{old}/../external"));
         assert!(rebase.text(&format!("root \"{old}/../external\";")).is_err());

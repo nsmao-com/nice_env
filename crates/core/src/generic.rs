@@ -4295,6 +4295,34 @@ mod startup_tests {
 
     #[test]
     fn sftpgo_env_migration_keeps_encoding_snapshot_secrets_and_resource_bytes() {
+        fn normalized_path(path: &std::path::Path) -> std::path::PathBuf {
+            let mut missing = Vec::new();
+            let mut existing = path;
+            while !existing.exists() {
+                missing.push(
+                    existing
+                        .file_name()
+                        .expect("missing path component")
+                        .to_owned(),
+                );
+                existing = existing.parent().expect("missing path parent");
+            }
+            let mut normalized = existing
+                .canonicalize()
+                .expect("canonicalize existing path");
+            for component in missing.iter().rev() {
+                normalized.push(component);
+            }
+            normalized
+        }
+
+        fn assert_same_path(actual: &str, expected: &std::path::Path) {
+            assert_eq!(
+                normalized_path(std::path::Path::new(actual)),
+                normalized_path(expected)
+            );
+        }
+
         for bom in [
             vec![],
             vec![0xef, 0xbb, 0xbf],
@@ -4336,17 +4364,18 @@ mod startup_tests {
             let environment = sftpgo_parse_env(&updated, Default::default()).unwrap();
             assert_eq!(environment["BASE"], old);
             assert_eq!(environment["SECRET"], resource_text);
-            assert_eq!(
-                environment["SFTPGO_KMS__SECRETS__MASTER_KEY_PATH"],
-                rebase.path(&resource_text)
+            assert_same_path(
+                &environment["SFTPGO_KMS__SECRETS__MASTER_KEY_PATH"],
+                std::path::Path::new(&rebase.path(&resource_text)),
             );
-            assert_eq!(
-                crate::configpaths::sqlite_connection_path(
-                    &environment["SFTPGO_DATA_PROVIDER__CONNECTION_STRING"]
-                )
-                .unwrap()
-                .unwrap(),
-                target.join("data/sftpgo/accounts.db")
+            let sqlite_path = crate::configpaths::sqlite_connection_path(
+                &environment["SFTPGO_DATA_PROVIDER__CONNECTION_STRING"],
+            )
+            .unwrap()
+            .unwrap();
+            assert_same_path(
+                &sqlite_path.to_string_lossy(),
+                &target.join("data/sftpgo/accounts.db"),
             );
             assert_eq!(
                 std::fs::read(target_dir.join("resources/sftpgo.json")).unwrap(),
@@ -4367,9 +4396,11 @@ mod startup_tests {
                     crate::paths::portable_path_text(&r.etc)
                 )
             );
-            assert_eq!(
-                snapshot["run"]["env"]["SFTPGO_FTPD__BANNER_FILE"],
-                rebase.path(&resource_text)
+            assert_same_path(
+                snapshot["run"]["env"]["SFTPGO_FTPD__BANNER_FILE"]
+                    .as_str()
+                    .expect("snapshot banner path"),
+                std::path::Path::new(&rebase.path(&resource_text)),
             );
         }
     }

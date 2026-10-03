@@ -214,7 +214,10 @@ pub(crate) fn nginx_directives(content: &str) -> Result<Vec<NginxDirective>> {
     parse(&tokens, &mut 0, 0)
 }
 
-fn rebase_posix_glob_pattern(value: &str, rebase: &crate::paths::DataPathRebase) -> Result<String> {
+pub(crate) fn rebase_posix_glob_pattern(
+    value: &str,
+    rebase: &crate::paths::DataPathRebase,
+) -> Result<String> {
     if value.contains(['*', '?', '[']) {
         let rebased = rebase.config_value(value, crate::paths::escaped_posix_glob_text)?;
         if rebased != value && !rebased.contains(['*', '?', '[']) {

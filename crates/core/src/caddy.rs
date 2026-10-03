@@ -92,6 +92,65 @@ pub(crate) fn expand_template_paths(
     Ok(output)
 }
 
+/// 迁移仅改写明确的文件路径参数，响应正文、认证值和注释保持原样。
+pub(crate) fn rebase_config(
+    source: &str,
+    rebase: &crate::paths::DataPathRebase,
+    target: &Path,
+) -> Result<String> {
+    let parsed = tokens(source)?;
+    let mut directive = "";
+    let mut argument = 0;
+    let mut edits = Vec::new();
+    for (index, token) in parsed.iter().enumerate() {
+        if index == 0 || source[parsed[index - 1].end..token.start].contains('\n') {
+            directive = "";
+        }
+        if matches!(token.value.as_str(), "{" | "}") {
+            directive = "";
+            continue;
+        }
+        if directive.is_empty() {
+            directive = &token.value;
+            argument = 0;
+            continue;
+        }
+        argument += 1;
+        let previous = &parsed[index - 1].value;
+        let decoded = argument_text(&token.value);
+        let is_path = match directive {
+            "root" => {
+                (argument == 1 && decoded != "*" && !decoded.starts_with('@'))
+                    || (argument == 2 && (previous == "*" || previous.starts_with('@')))
+            }
+            "tls" => argument <= 2,
+            "cert" | "key" | "pem_file" | "trusted_ca_cert_file" | "import" => argument == 1,
+            "output" => argument == 2 && previous == "file",
+            "storage" => argument == 2 && previous == "file_system",
+            _ => false,
+        };
+        if !is_path {
+            continue;
+        }
+        let rebased = if directive == "import" && cfg!(unix) {
+            crate::configgen::rebase_posix_glob_pattern(&decoded, rebase)?
+        } else {
+            rebase.config_value(&decoded, str::to_owned)?
+        };
+        if decoded != rebased {
+            if directive == "import" {
+                validate_import_directory(&Paths::new(target.to_path_buf()))?;
+            }
+            edits.push((token.start, token.end, quoted_path_text(&rebased)));
+        }
+    }
+    let mut output = source.to_string();
+    for (start, end, value) in edits.into_iter().rev() {
+        output.replace_range(start..end, &value);
+    }
+    Ok(output)
+}
+
 pub(crate) fn config_path(paths: &Paths, store: &Store) -> Result<PathBuf> {
     let package = crate::ops::installed_by_choice(store, "caddy")
         .ok_or_else(|| AppError::not_installed("Caddy"))?;
@@ -1155,6 +1214,50 @@ mod tests {
         let executable =
             PathBuf::from(std::env::var_os("NSB_VERIFY_CADDY").expect("NSB_VERIFY_CADDY"));
         let temp = tempfile::tempdir().unwrap();
+        let old = temp.path().join("old-data");
+        let target = temp.path().join("new data # kept");
+        std::fs::create_dir_all(old.join("imports")).unwrap();
+        std::fs::create_dir_all(target.join("imports")).unwrap();
+        std::fs::write(
+            target.join("imports/site.conf"),
+            "http://:18972 {\n respond imported\n}\n",
+        )
+        .unwrap();
+        let old_text = portable_path_text(&old);
+        let source = format!("# {old_text}/comment\n{{\n admin off\n auto_https off\n}}\nimport {old_text}/imports/*.conf\nhttp://:18971 {{\n root * {old_text}/www\n log {{\n output file {old_text}/logs/access.log\n }}\n respond \"{old_text}/literal body\"\n}}\n");
+        let rebased = rebase_config(
+            &source,
+            &crate::paths::DataPathRebase::new(&old, &target).unwrap(),
+            &target,
+        )
+        .unwrap();
+        std::fs::rename(&old, temp.path().join("old-unavailable")).unwrap();
+        let file = temp.path().join("migrated.Caddyfile");
+        std::fs::write(&file, &rebased).unwrap();
+        let output = platform::command(&executable)
+            .args(["adapt", "--adapter", "caddyfile", "--config"])
+            .arg(&file)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let encoded = json.to_string();
+        for value in [
+            format!("{}/www", portable_path_text(&target)),
+            format!("{}/logs/access.log", portable_path_text(&target)),
+            format!("{old_text}/literal body"),
+        ] {
+            assert!(
+                encoded.contains(&serde_json::to_string(&value).unwrap()),
+                "{encoded}"
+            );
+        }
+        assert!(encoded.contains("imported"));
+        println!("Caddy native adapter: migrated unquoted paths, imports and logs; literal response preserved with old directory unavailable");
         // 原生 adapter 回读路径，覆盖尾部反斜杠和双引号/反引号组合。
         for value in [
             r"/tmp/literal\new\tail",

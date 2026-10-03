@@ -653,6 +653,11 @@ impl DataPathRebase {
         let relative = portable_path_text(relative);
         let name = relative.rsplit('/').next().unwrap_or("");
         let conf = name.ends_with(".conf") || name.ends_with(".conf.disabled");
+        if (relative.starts_with("etc/caddy/") || relative.starts_with("runtimes/caddy/"))
+            && (conf || name == "Caddyfile")
+        {
+            return crate::caddy::rebase_config(value, self, Path::new(&self.target));
+        }
         if (relative.starts_with("etc/nginx/") || relative.starts_with("runtimes/nginx/"))
             && (conf
                 || [
@@ -1971,6 +1976,75 @@ mod tests {
             "/new-data"
         };
         let rebase = DataPathRebase::new(Path::new(old), Path::new(new)).unwrap();
+        let caddy_target = format!("{new} with spaces");
+        let caddy_rebase = DataPathRebase::new(Path::new(old), Path::new(&caddy_target)).unwrap();
+        let caddy = format!("# preserve {old}/comment\n{{\n storage file_system {{\n root {old}/storage\n }}\n}}\nimport {old}/etc/caddy/sites/*.conf\nhttp://:8080 {{\n root * {old}/www\n tls {old}/cert.pem {old}/key.pem\n log {{\n output file {old}/logs/caddy.log\n }}\n respond \"{old}/literal body\"\n header X-External \"{old} sibling/file\"\n basic_auth {{\n user {old}/credential\n }}\n}}\n");
+        let changed = caddy_rebase
+            .config_text(Path::new("etc/caddy/2.11.4/Caddyfile"), &caddy)
+            .unwrap();
+        for suffix in [
+            "storage",
+            "www",
+            "cert.pem",
+            "key.pem",
+            "logs/caddy.log",
+            "etc/caddy/sites/*.conf",
+        ] {
+            assert!(
+                changed.contains(&format!("\"{caddy_target}/{suffix}\"")),
+                "{changed}"
+            );
+        }
+        for line in [
+            format!("# preserve {old}/comment"),
+            format!("respond \"{old}/literal body\""),
+            format!("header X-External \"{old} sibling/file\""),
+            format!("user {old}/credential"),
+        ] {
+            assert!(changed.contains(&line), "{changed}");
+        }
+        assert_eq!(
+            caddy_rebase
+                .config_text(Path::new("etc/caddy/2.11.4/Caddyfile"), &changed)
+                .unwrap(),
+            changed
+        );
+        assert!(caddy_rebase
+            .config_text(Path::new("etc/caddy/sites/a.conf"), "root * \"unterminated")
+            .is_err());
+        let unsafe_target =
+            DataPathRebase::new(Path::new(old), Path::new(&format!("{new}[1]"))).unwrap();
+        assert_eq!(
+            unsafe_target
+                .config_text(Path::new("etc/caddy/2.11.4/Caddyfile"), &caddy)
+                .unwrap_err()
+                .code,
+            "CADDY_IMPORT_PATH"
+        );
+        #[cfg(unix)]
+        {
+            let unix_source = Path::new(r"/tmp/data\old");
+            let unix_target = Path::new(r"/tmp/new\data with spaces");
+            let rebase = DataPathRebase::new(unix_source, unix_target).unwrap();
+            let original = format!(
+                "import {}\nhttp://:8080 {{\n root * {}\n}}\n",
+                crate::caddy::quoted_path_text(&format!(
+                    "{}/*.conf",
+                    escaped_glob_path(unix_source)
+                )),
+                crate::caddy::quoted_path_text(r"/tmp/data\old/www")
+            );
+            let updated = rebase
+                .config_text(Path::new("etc/caddy/Caddyfile"), &original)
+                .unwrap();
+            assert!(updated.contains(&crate::caddy::quoted_path_text(&format!(
+                "{}/*.conf",
+                escaped_glob_path(unix_target)
+            ))));
+            assert!(updated.contains(&crate::caddy::quoted_path_text(
+                r"/tmp/new\data with spaces/www"
+            )));
+        }
         for suffix in [
             " sibling/file",
             "[other]/file",

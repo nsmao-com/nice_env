@@ -4307,9 +4307,7 @@ mod startup_tests {
                 );
                 existing = existing.parent().expect("missing path parent");
             }
-            let mut normalized = existing
-                .canonicalize()
-                .expect("canonicalize existing path");
+            let mut normalized = existing.canonicalize().expect("canonicalize existing path");
             for component in missing.iter().rev() {
                 normalized.push(component);
             }

@@ -868,31 +868,101 @@ fn inspect_sftpgo(store: &Store, paths: &Paths, r: &Resolved, previously_started
     }
     // 默认资源路径也属于子进程环境，env.d 的插值必须能读取到相同的值。
     if !env.is_empty() { effective_env = sftpgo_parse_env(&files, process_env)?; }
+    let value = |key: &str, pointer: &str, default: &str| {
+        effective_env.get(key).cloned().unwrap_or_else(|| {
+            config
+                .pointer(pointer)
+                .and_then(|value| value.as_str())
+                .unwrap_or(default)
+                .to_string()
+        })
+    };
+    let driver = value(
+        "SFTPGO_DATA_PROVIDER__DRIVER",
+        "/data_provider/driver",
+        "sqlite",
+    );
+    let connection = value(
+        "SFTPGO_DATA_PROVIDER__CONNECTION_STRING",
+        "/data_provider/connection_string",
+        "",
+    );
+    let database = if driver == "sqlite" {
+        let connection = if connection.is_empty() {
+            let name = value(
+                "SFTPGO_DATA_PROVIDER__NAME",
+                "/data_provider/name",
+                "sftpgo.db",
+            );
+            if name.is_empty() {
+                return Err(AppError::new(
+                    "SFTPGO_CONFIG_INVALID",
+                    "SQLite 数据库文件名不能为空",
+                ));
+            }
+            // 上游直接拼接 file:{name}，#/?/% 会改变实际数据库位置；只覆盖子进程参数，不重写用户配置。
+            let connection = crate::configpaths::sftpgo_sqlite_dsn(&r.etc, &name);
+            env.push((
+                "SFTPGO_DATA_PROVIDER__CONNECTION_STRING".into(),
+                connection.clone(),
+            ));
+            connection
+        } else {
+            connection.clone()
+        };
+        let cwd = r
+            .spec
+            .cwd
+            .as_ref()
+            .map(|path| PathBuf::from(expand(path, r)))
+            .unwrap_or_else(|| r.root.clone());
+        crate::configpaths::sqlite_connection_path(&connection)?.map(|path| cwd.join(path))
+    } else if driver == "bolt" && connection.is_empty() {
+        Some(r.etc.join(value(
+            "SFTPGO_DATA_PROVIDER__NAME",
+            "/data_provider/name",
+            "sftpgo.db",
+        )))
+    } else {
+        None
+    };
     // 使用实际生效的环境配置检查本地状态，避免 env.d 使丢失检查被跳过。
     let mut state_files = Vec::new();
     if previously_started {
-        let value = |key: &str, pointer: &str, default: &str| {
-            effective_env.get(key).cloned()
-                .unwrap_or_else(|| config.pointer(pointer).and_then(|value| value.as_str()).unwrap_or(default).to_string())
-        };
-        let mut require = |name: &str| -> Result<()> {
-            let path = r.etc.join(name);
+        let mut require = |path: PathBuf| -> Result<()> {
             let present = std::fs::metadata(&path).map(|m| m.is_file() && m.len() > 0).unwrap_or(false);
             if !present { return Err(AppError::new("SFTPGO_STATE_MISSING", "SFTPGo 原数据库或主机密钥缺失，未自动重新初始化")
                 .with_hint(format!("请先恢复原文件：{}", path.display()))); }
             state_files.push(path);
             Ok(())
         };
-        let driver = value("SFTPGO_DATA_PROVIDER__DRIVER", "/data_provider/driver", "sqlite");
-        let connection = value("SFTPGO_DATA_PROVIDER__CONNECTION_STRING", "/data_provider/connection_string", "");
-        if matches!(driver.as_str(), "bolt" | "sqlite") && connection.is_empty() {
-            require(&value("SFTPGO_DATA_PROVIDER__NAME", "/data_provider/name", "sftpgo.db"))?;
+        if let Some(database) = database {
+            require(database)?;
         }
         let keys: Vec<_> = if let Some(value) = effective_env.get("SFTPGO_SFTPD__HOST_KEYS") {
-            if value.is_empty() { vec![] } else { value.split(',').collect() }
-        } else { config.pointer("/sftpd/host_keys").and_then(|v| v.as_array()).into_iter().flatten().filter_map(|v| v.as_str()).collect() };
-        if keys.is_empty() { for name in ["id_rsa", "id_ecdsa", "id_ed25519"] { require(name)?; } }
-        else { for name in keys { require(name)?; } }
+            if value.is_empty() {
+                vec![]
+            } else {
+                value.split(',').collect()
+            }
+        } else {
+            config
+                .pointer("/sftpd/host_keys")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str())
+                .collect()
+        };
+        if keys.is_empty() {
+            for name in ["id_rsa", "id_ecdsa", "id_ed25519"] {
+                require(r.etc.join(name))?;
+            }
+        } else {
+            for name in keys {
+                require(r.etc.join(name))?;
+            }
+        }
     }
     let file = existing.unwrap_or_else(|| r.etc.join(source.file_name().unwrap()));
     if write_config && file != source {
@@ -2134,14 +2204,17 @@ pub fn start(
         .as_ref()
         .map(|c| PathBuf::from(expand(c, &r)))
         .unwrap_or_else(|| r.root.clone());
-    let mut env: Vec<(String, String)> = sftpgo.as_ref().map(|config| config.env.clone()).unwrap_or_default();
-    env.extend(r
+    let mut env: Vec<(String, String)> = r
         .spec
         .env
         .iter()
         .flatten()
         .map(|(k, v)| (k.clone(), expand(v, &r)))
-        .collect::<Vec<_>>());
+        .collect();
+    // 已解析的默认值最后应用，避免显式空连接地址覆盖必要的 SQLite URI 编码。
+    if let Some(config) = &sftpgo {
+        env.extend(config.env.clone());
+    }
     env.extend(qdrant_env);
 
     // .bat/.cmd 不是可执行文件：Windows 上须经 cmd.exe 转发（Tomcat/Neo4j/MariaDB 等）
@@ -2700,8 +2773,17 @@ mod startup_tests {
         fixture_version(id, None)
     }
 
-    fn fixture_version(id: &str, version: Option<&str>) -> (tempfile::TempDir, crate::CoreState, Resolved) {
-        let temp = tempfile::Builder::new().prefix("niceenv fixture ").tempdir().unwrap(); let paths = Paths::new(temp.path().to_path_buf());
+    fn fixture_version(
+        id: &str,
+        version: Option<&str>,
+    ) -> (tempfile::TempDir, crate::CoreState, Resolved) {
+        let prefix = if id == "sftpgo" {
+            "niceenv SFTP # %23 中文 "
+        } else {
+            "niceenv fixture "
+        };
+        let temp = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+        let paths = Paths::new(temp.path().to_path_buf());
         paths.ensure_dirs().unwrap();
         let state = crate::CoreState {
             store: Store::open(paths.db()).unwrap(), paths,
@@ -3578,6 +3660,61 @@ mod startup_tests {
         assert_eq!(prepare_sftpgo(&state.store, &state.paths, &r).err().unwrap().code, "SFTPGO_STATE_MISSING");
         for key in ["id_rsa", "id_ecdsa", "id_ed25519"] { std::fs::write(r.etc.join(key), b"kept host key").unwrap(); }
         assert!(prepare_sftpgo(&state.store, &state.paths, &r).is_ok());
+        let database = r.etc.join("accounts # %23.db");
+        let content =
+            serde_json::json!({"data_provider":{"driver":"sqlite","name":"accounts # %23.db"}})
+                .to_string();
+        std::fs::write(&config.file, &content).unwrap();
+        let prepared = inspect_sftpgo(&state.store, &state.paths, &r, false, false).unwrap();
+        let connection = &prepared
+            .env
+            .iter()
+            .find(|(key, _)| key == "SFTPGO_DATA_PROVIDER__CONNECTION_STRING")
+            .unwrap()
+            .1;
+        assert_eq!(
+            crate::configpaths::sqlite_connection_path(connection).unwrap(),
+            Some(PathBuf::from(crate::paths::portable_path_text(&database)))
+        );
+        assert_eq!(
+            prepare_sftpgo(&state.store, &state.paths, &r)
+                .err()
+                .unwrap()
+                .code,
+            "SFTPGO_STATE_MISSING"
+        );
+        std::fs::write(&database, b"persisted database fixture").unwrap();
+        assert!(prepare_sftpgo(&state.store, &state.paths, &r)
+            .unwrap()
+            .state_files
+            .contains(&database));
+        let explicit = serde_json::json!({"data_provider":{"driver":"sqlite","connection_string":format!("{}?mode=rw", crate::configpaths::sqlite_file_uri(&database)),"password":"retained"}}).to_string();
+        std::fs::write(&config.file, &explicit).unwrap();
+        let prepared = prepare_sftpgo(&state.store, &state.paths, &r).unwrap();
+        assert!(prepared
+            .env
+            .iter()
+            .all(|(key, _)| key != "SFTPGO_DATA_PROVIDER__CONNECTION_STRING"));
+        assert!(prepared.state_files.contains(&database));
+        std::fs::remove_file(&database).unwrap();
+        assert_eq!(
+            prepare_sftpgo(&state.store, &state.paths, &r)
+                .err()
+                .unwrap()
+                .code,
+            "SFTPGO_STATE_MISSING"
+        );
+        assert_eq!(std::fs::read_to_string(&config.file).unwrap(), explicit);
+        std::fs::write(&config.file, r#"{"data_provider":{"driver":"sqlite","connection_string":"file:temporary?mode=memory"}}"#).unwrap();
+        assert!(prepare_sftpgo(&state.store, &state.paths, &r).is_ok());
+        let mut r = r;
+        r.spec.cwd = Some("{root}".into());
+        std::fs::write(r.root.join("relative.db"), b"database at actual child cwd").unwrap();
+        std::fs::write(&config.file, r#"{"data_provider":{"driver":"sqlite","connection_string":"file:relative.db?mode=rw"}}"#).unwrap();
+        assert!(prepare_sftpgo(&state.store, &state.paths, &r)
+            .unwrap()
+            .state_files
+            .contains(&r.root.join("relative.db")));
     }
 
     #[test]
@@ -3693,9 +3830,28 @@ mod startup_tests {
             env.insert("SFTPGO_DATA_PROVIDER__CREATE_DEFAULT_ADMIN".into(), "true".into());
             env.insert("SFTPGO_DEFAULT_ADMIN_USERNAME".into(), "fixture".into());
             env.insert("SFTPGO_DEFAULT_ADMIN_PASSWORD".into(), password.clone());
-            std::fs::write(root.join(".niceenv-package.json"), serde_json::to_vec(&entry).unwrap()).unwrap();
-            state.store.upsert_installed(&InstalledPackage { id: "sftpgo".into(), version: version.into(), category: "ftp".into(),
-                install_path: root.to_string_lossy().into_owned(), config_path: String::new(), installed_at: 0 }).unwrap();
+            if with_env_directory && version == "2.7.5" {
+                env.insert(
+                    "SFTPGO_DATA_PROVIDER__CONNECTION_STRING".into(),
+                    String::new(),
+                );
+            }
+            std::fs::write(
+                root.join(".niceenv-package.json"),
+                serde_json::to_vec(&entry).unwrap(),
+            )
+            .unwrap();
+            state
+                .store
+                .upsert_installed(&InstalledPackage {
+                    id: "sftpgo".into(),
+                    version: version.into(),
+                    category: "ftp".into(),
+                    install_path: root.to_string_lossy().into_owned(),
+                    config_path: String::new(),
+                    installed_at: 0,
+                })
+                .unwrap();
         };
         install("2.7.5", &old_source);
         let legacy_dir = state.paths.etc_dir("sftpgo", "2.7.5"); std::fs::create_dir_all(&legacy_dir).unwrap();
@@ -3703,6 +3859,9 @@ mod startup_tests {
         config["sftpd"]["bindings"][0]["address"] = host.clone().into();
         config["httpd"]["bindings"][0]["address"] = host.clone().into();
         config["common"]["idle_timeout"] = 17.into();
+        if with_env_directory {
+            config["data_provider"]["driver"] = "sqlite".into();
+        }
         config["httpd"]["web_root"] = "/niceenv-console".into();
         let original_config = serde_json::to_vec_pretty(&config).unwrap();
         let config_path = legacy_dir.join("sftpgo.json"); std::fs::write(&config_path, &original_config).unwrap();
@@ -3799,6 +3958,17 @@ mod startup_tests {
             state.stop_service("sftpgo").unwrap();
             state.select_sftpgo_config("etc/sftpgo/2.7.5", "2.7.5", Some("etc/sftpgo/archive")).unwrap();
             assert!(alternate.join(database_name).is_file());
+        }
+        if with_env_directory {
+            let connection = format!(
+                "{}?mode=rw&cache=shared&_foreign_keys=1",
+                crate::configpaths::sqlite_file_uri(&legacy_dir.join(database_name))
+            );
+            std::fs::write(
+                legacy_dir.join("env.d/40-connection.env"),
+                format!("SFTPGO_DATA_PROVIDER__CONNECTION_STRING='{connection}'\n"),
+            )
+            .unwrap();
         }
         install("2.7.6", &new_source); state.set_active_version("sftpgo", "2.7.6").unwrap();
         let requested = (base + 20..42000).find(|port| [0, 6058].iter().all(|offset| tcp_port_bindable(port + offset))).unwrap();

@@ -14,8 +14,9 @@ fn invalid() -> AppError {
 }
 
 /// 只识别服务配置文件，不将同目录的数据库、下载缓存等按配置改写。
-pub(crate) fn service(relative: &Path) -> Option<(&str, bool)> {
-    let parts = relative
+pub(crate) fn service(relative: &Path) -> Option<(&'static str, bool)> {
+    let relative = crate::paths::config_path_key(relative);
+    let parts = Path::new(&relative)
         .components()
         .map(|part| part.as_os_str().to_str())
         .collect::<Option<Vec<_>>>()?;
@@ -26,19 +27,176 @@ pub(crate) fn service(relative: &Path) -> Option<(&str, bool)> {
         return None;
     }
     let name = *rest.last()?;
+    let name = name.strip_suffix(".disabled").unwrap_or(name);
     if name == ".niceenv-package.json" {
         return None;
     }
     let json = name.ends_with(".json");
     let yaml = name.ends_with(".yaml") || name.ends_with(".yml");
     match *service {
-        "mongodb" if yaml || json || name == "mongod.conf" => Some((service, json)),
-        "qdrant" | "mihomo" if yaml || json => Some((service, json)),
+        "mongodb" if yaml || json || name == "mongod.conf" => Some(("mongodb", json)),
+        "qdrant" if yaml || json => Some(("qdrant", json)),
+        "mihomo" if yaml || json => Some(("mihomo", json)),
         "sftpgo" if matches!(name, "sftpgo.json" | "sftpgo.yaml" | "sftpgo.yml") => {
-            Some((service, json))
+            Some(("sftpgo", json))
         }
         _ => None,
     }
+}
+
+fn sqlite_invalid() -> AppError {
+    AppError::new(
+        "SFTPGO_SQLITE_DSN",
+        "无法安全识别 SQLite 数据库文件，未启动或更改数据库",
+    )
+    .with_hint("请检查本地 SQLite 文件路径或 file: 连接地址；连接参数和密码不会显示在错误信息中。")
+}
+
+fn uri_decode(value: &str) -> Result<String> {
+    let mut bytes = Vec::with_capacity(value.len());
+    let mut input = value.as_bytes().iter().copied();
+    while let Some(byte) = input.next() {
+        bytes.push(if byte == b'%' {
+            let hi = (input.next().ok_or_else(sqlite_invalid)? as char)
+                .to_digit(16)
+                .ok_or_else(sqlite_invalid)?;
+            let lo = (input.next().ok_or_else(sqlite_invalid)? as char)
+                .to_digit(16)
+                .ok_or_else(sqlite_invalid)?;
+            (hi * 16 + lo) as u8
+        } else {
+            byte
+        });
+    }
+    if bytes.contains(&0) {
+        return Err(sqlite_invalid());
+    }
+    String::from_utf8(bytes).map_err(|_| sqlite_invalid())
+}
+
+/// SQLite URI 路径单独编码；不能把 #、?、% 或 Unix 反斜杠解释成 URI 结构。
+pub(crate) fn sqlite_file_uri(path: &Path) -> String {
+    let path = crate::paths::portable_path_text(path);
+    let mut uri = String::from("file:");
+    if path.starts_with("//") {
+        uri.push_str("//");
+    } else if cfg!(windows) && path.as_bytes().get(1) == Some(&b':') {
+        uri.push('/');
+    }
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~/:".contains(&byte) {
+            uri.push(byte as char);
+        } else {
+            uri.push('%');
+            uri.push(HEX[(byte >> 4) as usize] as char);
+            uri.push(HEX[(byte & 15) as usize] as char);
+        }
+    }
+    uri
+}
+
+pub(crate) fn sftpgo_sqlite_dsn(directory: &Path, name: &str) -> String {
+    let uri = if name == ":memory:" {
+        "file::memory:".into()
+    } else {
+        sqlite_file_uri(&directory.join(name))
+    };
+    format!("{uri}?cache=shared&_foreign_keys=1")
+}
+
+struct SqliteConnection<'a> {
+    path: Option<std::path::PathBuf>,
+    suffix: &'a str,
+    uri: bool,
+}
+
+fn sqlite_connection(value: &str) -> Result<SqliteConnection<'_>> {
+    let uri = value.starts_with("file:");
+    let value_path = value.strip_prefix("file:").unwrap_or(value);
+    let end = value_path
+        .find(|c| c == '?' || (uri && c == '#'))
+        .unwrap_or(value_path.len());
+    let suffix = &value_path[end..];
+    let mut path = &value_path[..end];
+    if uri {
+        if let Some(authority) = path.strip_prefix("//") {
+            let host = authority.split('/').next().unwrap_or("");
+            if !host.is_empty() && host != "localhost" {
+                return Err(sqlite_invalid());
+            }
+            path = &path[2 + host.len()..];
+        }
+    }
+    let path = if uri {
+        uri_decode(path)?
+    } else {
+        path.to_string()
+    };
+    let memory = if uri {
+        let parameters = suffix
+            .strip_prefix('?')
+            .unwrap_or("")
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .split('&')
+            .filter_map(|part| part.split_once('='))
+            .map(|(key, value)| Ok((uri_decode(&key.replace('+', " "))?, value)))
+            .collect::<Result<Vec<_>>>()?;
+        let mut modes = parameters
+            .iter()
+            .filter(|(key, _)| key == "mode")
+            .map(|(_, value)| uri_decode(&value.replace('+', " ")));
+        let mode = modes.next().transpose()?;
+        for next in modes {
+            if Some(next?) != mode {
+                return Err(sqlite_invalid());
+            }
+        }
+        mode.as_deref() == Some("memory")
+    } else {
+        false
+    };
+    let path = if path.is_empty() || path == ":memory:" || memory {
+        None
+    } else {
+        let path = if cfg!(windows)
+            && path.starts_with('/')
+            && path.as_bytes().get(1).is_some_and(u8::is_ascii_alphabetic)
+            && path.as_bytes().get(2) == Some(&b':')
+            && path.as_bytes().get(3) == Some(&b'/')
+        {
+            &path[1..]
+        } else {
+            &path
+        };
+        Some(std::path::PathBuf::from(path))
+    };
+    Ok(SqliteConnection { path, suffix, uri })
+}
+
+pub(crate) fn sqlite_connection_path(value: &str) -> Result<Option<std::path::PathBuf>> {
+    Ok(sqlite_connection(value)?.path)
+}
+
+fn rebase_sqlite_connection(value: &str, rebase: &DataPathRebase) -> Result<String> {
+    let connection = sqlite_connection(value)?;
+    let Some(path) = connection.path else {
+        return Ok(value.into());
+    };
+    let original = path.to_str().ok_or_else(sqlite_invalid)?;
+    let updated = rebase.path(original);
+    if updated == original {
+        return Ok(value.into());
+    }
+    // 普通 go-sqlite3 DSN 的查询参数可能含字面 #；转成 URI 时保留其参数值。
+    let suffix = if connection.uri {
+        connection.suffix.to_string()
+    } else {
+        connection.suffix.replace('#', "%23")
+    };
+    Ok(format!("{}{suffix}", sqlite_file_uri(Path::new(&updated))))
 }
 
 fn path_field(service: &str, path: &[String], root: &Value) -> bool {
@@ -80,6 +238,9 @@ fn path_field(service: &str, path: &[String], root: &Value) -> bool {
                 .unwrap_or("")
                 .is_empty()
         }
+        ("sftpgo", ["data_provider", "connection_string"]) => {
+            root["data_provider"]["driver"].as_str().unwrap_or("sqlite") == "sqlite"
+        }
         (
             "sftpgo",
             ["data_provider", "credentials_path" | "backups_path"]
@@ -97,6 +258,19 @@ fn path_field(service: &str, path: &[String], root: &Value) -> bool {
             | ["acme", "certs_path"],
         ) => true,
         _ => false,
+    }
+}
+
+fn rebase_field(
+    service: &str,
+    path: &[String],
+    value: &str,
+    rebase: &DataPathRebase,
+) -> Result<String> {
+    if service == "sftpgo" && path == ["data_provider", "connection_string"] {
+        rebase_sqlite_connection(value, rebase)
+    } else {
+        rebase.config_value(value, str::to_owned)
     }
 }
 
@@ -340,7 +514,8 @@ fn flow(value: &Value) -> Result<String> {
 
 fn contains_old(value: &Value, rebase: &DataPathRebase) -> Result<bool> {
     match value {
-        Value::String(value) => Ok(rebase.config_value(value, str::to_owned)? != *value),
+        Value::String(value) => Ok(rebase.config_value(value, str::to_owned)? != *value
+            || rebase_sqlite_connection(value, rebase).is_ok_and(|updated| updated != *value)),
         Value::Sequence(values) => {
             for value in values {
                 if contains_old(value, rebase)? {
@@ -402,7 +577,7 @@ pub(crate) fn rebase(
     ) -> Result<()> {
         match value {
             Value::String(value) if path_field(service, path, root) => {
-                *value = rebase.config_value(value, str::to_owned)?
+                *value = rebase_field(service, path, value, rebase)?
             }
             Value::Mapping(values) => {
                 for (name, value) in values {
@@ -487,7 +662,7 @@ pub(crate) fn rebase(
         &mut |node, value, path, key| {
             if !key && path_field(service, path, &root) {
                 if let (Node::Scalar(range), Value::String(value)) = (node, value) {
-                    let updated = rebase.config_value(value, str::to_owned)?;
+                    let updated = rebase_field(service, path, value, rebase)?;
                     if updated != *value {
                         let raw = &expanded[range.clone()];
                         let newline = if raw.ends_with("\r\n") {

@@ -473,6 +473,16 @@ pub fn portable_path_text(path: &Path) -> String {
     }
 }
 
+/// 仅用于判断托管配置类型；不改变实际文件名或写入配置的路径。
+pub(crate) fn config_path_key(path: &Path) -> String {
+    let text = portable_path_text(path);
+    if cfg!(windows) {
+        text.to_ascii_lowercase()
+    } else {
+        text
+    }
+}
+
 /// Nginx、PHP ini、MySQL ini 与 Redis 双引号路径的内部文本（不含外层引号）。
 /// Windows 先使用普通正斜杠路径；Unix 的字面反斜杠必须转义，不能改成目录分隔符。
 /// 不用于命令参数、Caddyfile、正则或 URL；这些用途有各自的编码规则。
@@ -653,11 +663,12 @@ impl DataPathRebase {
         if let Some((service, json)) = crate::configpaths::service(relative) {
             return crate::configpaths::rebase(value, service, json, self);
         }
-        let relative = portable_path_text(relative);
+        let relative = config_path_key(relative);
         let name = relative.rsplit('/').next().unwrap_or("");
-        let conf = name.ends_with(".conf") || name.ends_with(".conf.disabled");
+        let name = name.strip_suffix(".disabled").unwrap_or(name);
+        let conf = name.ends_with(".conf");
         if (relative.starts_with("etc/caddy/") || relative.starts_with("runtimes/caddy/"))
-            && (conf || name == "Caddyfile")
+            && (conf || name == "Caddyfile" || (cfg!(windows) && name == "caddyfile"))
         {
             return crate::caddy::rebase_config(value, self, Path::new(&self.target));
         }
@@ -1000,19 +1011,15 @@ fn rebase_config_files(
         let relative = path
             .strip_prefix(root)
             .map_err(|_| crate::error::AppError::new("DATA_DIR_INVALID", "配置文件超出迁移目录"))?;
-        let first = relative
-            .components()
-            .next()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let relative_text = config_path_key(relative);
+        let first = relative_text.split('/').next().unwrap_or("");
         // 历史、下载及数据库业务内容保持原样，不做全盘字符串替换。
         if matches!(
-            first.as_str(),
+            first,
             "backup" | "logs" | "downloads" | "certs" | "cron-locks"
         ) {
             continue;
         }
-        let relative_text = portable_path_text(relative);
         if [
             "etc/apache/logs",
             "etc/apache/run",
@@ -1030,18 +1037,19 @@ fn rebase_config_files(
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_lowercase();
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase();
+        let active_name = name.strip_suffix(".disabled").unwrap_or(&name);
+        let ext = active_name
+            .rsplit_once('.')
+            .map(|(_, ext)| ext)
+            .unwrap_or("");
         let config = first == "etc"
             || crate::configpaths::service(relative).is_some()
             || first == "user-modules"
             || name == ".user.ini"
+            || (relative_text.starts_with("runtimes/caddy/") && active_name == "caddyfile")
             || ((first == "runtimes" || first == "data")
                 && matches!(
-                    ext.as_str(),
+                    ext,
                     "conf" | "cnf" | "ini" | "cfg" | "properties" | "cmd" | "bat" | "ps1" | "sh"
                 ))
             || name == ".niceenv-package.json";
@@ -2195,6 +2203,106 @@ mod tests {
                 .is_err());
         }
         let caddy_target = format!("{new} with spaces");
+        for name in [
+            "etc/mihomo/config.yaml.disabled",
+            "runtimes/mihomo/config.yaml.disabled",
+        ] {
+            let updated = structured.config_text(Path::new(name), &mihomo).unwrap();
+            let decoded: yaml_serde::Value = yaml_serde::from_str(&updated).unwrap();
+            assert_eq!(
+                decoded["secret"].as_str(),
+                Some(format!("{old}/credential").as_str())
+            );
+            assert_eq!(
+                decoded["proxy-providers"]["local"]["path"].as_str(),
+                Some(format!("{structured_target}/providers/local.yaml").as_str())
+            );
+        }
+        #[cfg(windows)]
+        {
+            let updated = structured
+                .config_text(Path::new(r"EtC\MiHoMo\CONFIG.YAML.DISABLED"), &mihomo)
+                .unwrap();
+            assert_eq!(
+                yaml_serde::from_str::<yaml_serde::Value>(&updated).unwrap()["secret"].as_str(),
+                Some(format!("{old}/credential").as_str())
+            );
+        }
+        let uri = crate::configpaths::sqlite_file_uri(&Path::new(old).join("data/accounts #1.db"));
+        assert!(
+            crate::configpaths::sqlite_connection_path("file:temporary?mode=memory&mode=rw")
+                .is_err()
+        );
+        assert!(crate::configpaths::sqlite_connection_path("file:/bad%00name.db").is_err());
+        let opaque = format!("{uri}?private=%FF&mode=rw");
+        assert_eq!(
+            crate::configpaths::sqlite_connection_path(&opaque).unwrap(),
+            Some(Path::new(old).join("data/accounts #1.db"))
+        );
+        let dsn = format!("{uri}?mode=rw&_auth_pass={old}/secret&cache=shared#unchanged");
+        let config = serde_json::json!({"data_provider":{"driver":"sqlite", "connection_string":dsn, "name":format!("{old}/unused.db"), "password":dsn}}).to_string();
+        let updated = structured
+            .config_text(Path::new("etc/sftpgo/1/sftpgo.json"), &config)
+            .unwrap();
+        let decoded: serde_json::Value = serde_json::from_str(&updated).unwrap();
+        assert_eq!(
+            decoded["data_provider"]["connection_string"],
+            format!(
+                "{}?mode=rw&_auth_pass={old}/secret&cache=shared#unchanged",
+                crate::configpaths::sqlite_file_uri(
+                    &Path::new(&structured_target).join("data/accounts #1.db")
+                )
+            )
+        );
+        assert_eq!(decoded["data_provider"]["password"], dsn);
+        assert_eq!(decoded["data_provider"]["name"], format!("{old}/unused.db"));
+        let encoded_old = format!("{old} #中文");
+        let encoded_rebase =
+            DataPathRebase::new(Path::new(&encoded_old), Path::new(&structured_target)).unwrap();
+        let encoded_uri =
+            crate::configpaths::sqlite_file_uri(&Path::new(&encoded_old).join("accounts.db"));
+        let yaml = format!("shared: &dsn '{encoded_uri}?mode=rw'\ndata_provider:\n  driver: sqlite\n  connection_string: *dsn\n  password: *dsn\n");
+        let updated = encoded_rebase
+            .config_text(Path::new("etc/sftpgo/sftpgo.yaml"), &yaml)
+            .unwrap();
+        let decoded: yaml_serde::Value = yaml_serde::from_str(&updated).unwrap();
+        assert_eq!(
+            crate::configpaths::sqlite_connection_path(
+                decoded["data_provider"]["connection_string"]
+                    .as_str()
+                    .unwrap()
+            )
+            .unwrap(),
+            Some(Path::new(&structured_target).join("accounts.db"))
+        );
+        assert_eq!(
+            decoded["data_provider"]["password"].as_str(),
+            Some(format!("{encoded_uri}?mode=rw").as_str())
+        );
+        for connection in [
+            ":memory:",
+            "file::memory:?cache=shared",
+            "file:temporary?mode=memory",
+            "file:relative.db?mode=rw",
+        ] {
+            let config = serde_json::json!({"data_provider":{"driver":"sqlite","connection_string":connection}}).to_string();
+            assert_eq!(
+                structured
+                    .config_text(Path::new("etc/sftpgo/sftpgo.json"), &config)
+                    .unwrap(),
+                config
+            );
+        }
+        for name in ["data #资料.db", "literal%23name.db", r"literal\name.db"] {
+            let path = Path::new(old).join(name);
+            assert_eq!(
+                crate::configpaths::sqlite_connection_path(&crate::configpaths::sqlite_file_uri(
+                    &path
+                ))
+                .unwrap(),
+                Some(PathBuf::from(portable_path_text(&path)))
+            );
+        }
         let caddy_rebase = DataPathRebase::new(Path::new(old), Path::new(&caddy_target)).unwrap();
         let caddy = format!("# preserve {old}/comment\n{{\n storage file_system {{\n root {old}/storage\n }}\n}}\nimport {old}/etc/caddy/sites/*.conf\nhttp://:8080 {{\n root * {old}/www\n tls {old}/cert.pem {old}/key.pem\n log {{\n output file {old}/logs/caddy.log\n }}\n respond \"{old}/literal body\"\n header X-External \"{old} sibling/file\"\n basic_auth {{\n user {old}/credential\n }}\n}}\n");
         let changed = caddy_rebase
@@ -2605,6 +2713,18 @@ mod tests {
         let config = format!("root \"{old}/www\";\ninclude \"{old}/etc/*.conf\";\nexternal \"{external}/etc\";\n");
         std::fs::write(paths.nginx_conf(), &config).unwrap();
         std::fs::write(paths.backup().join("original.conf"), &config).unwrap();
+        #[cfg(windows)]
+        {
+            std::fs::rename(paths.etc(), source.join("EtC")).unwrap();
+            std::fs::rename(paths.backup(), source.join("BACKUP")).unwrap();
+            let directory = source.join("EtC/MiHoMo");
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(
+                directory.join("CONFIG.YAML.DISABLED"),
+                format!("external-ui: '{old}/ui'\nsecret: '{old}/private'\n"),
+            )
+            .unwrap();
+        }
         store.set_setting("mysqlRootPassword", &format!("{old}/secret")).unwrap();
         store.set_setting("pathEnvDirs", &format!(r#"["{old}/runtimes/fixture/1"]"#)).unwrap();
         let conn = rusqlite::Connection::open(paths.db()).unwrap();
@@ -2612,7 +2732,7 @@ mod tests {
         conn.execute("INSERT INTO certs(id,kind,subject,sans,not_before,not_after,cert_path,key_path) VALUES('cert','imported','test','[]',0,1,?1,?2)", rusqlite::params![format!("{old}/certs/site.pem"),format!("{external}/key.pem")]).unwrap();
         let target = temp.path().join("target");
         let result = copy_data_dir(&source, &target).unwrap();
-        assert_eq!(result.rewritten_files,1);
+        assert_eq!(result.rewritten_files, if cfg!(windows) { 2 } else { 1 });
         let new = result.path.clone();
         let copied = crate::store::Store::open(target.join("nsb.sqlite")).unwrap();
         let installed = copied.list_installed().unwrap().remove(0);
@@ -2630,6 +2750,20 @@ mod tests {
         assert_eq!(std::fs::read_to_string(target.join("backup/original.conf")).unwrap(), config);
         let migrated = std::fs::read_to_string(target.join("etc/nginx/nginx.conf")).unwrap();
         assert!(migrated.contains(&format!("{new}/etc")) && migrated.contains(&external));
+        #[cfg(windows)]
+        {
+            let content =
+                std::fs::read_to_string(target.join("EtC/MiHoMo/CONFIG.YAML.DISABLED")).unwrap();
+            let value: yaml_serde::Value = yaml_serde::from_str(&content).unwrap();
+            assert_eq!(
+                value["external-ui"].as_str(),
+                Some(format!("{new}/ui").as_str())
+            );
+            assert_eq!(
+                value["secret"].as_str(),
+                Some(format!("{old}/private").as_str())
+            );
+        }
         drop(conn); drop(store);
         std::fs::rename(&source,temp.path().join("unavailable-original")).unwrap();
         let output = platform::command(Path::new(&installed.install_path).join(binary)).output().unwrap();
@@ -2741,6 +2875,17 @@ mod tests {
             {
                 command.env_remove(key);
             }
+            let config: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(base.join("etc/sftpgo/1/sftpgo.json")).unwrap(),
+            )
+            .unwrap();
+            command.env(
+                "SFTPGO_DATA_PROVIDER__CONNECTION_STRING",
+                crate::configpaths::sftpgo_sqlite_dsn(
+                    &base.join("etc/sftpgo/1"),
+                    config["data_provider"]["name"].as_str().unwrap(),
+                ),
+            );
             command
                 .current_dir(base)
                 .args(["initprovider", "--config-dir"])

@@ -293,3 +293,19 @@ v0.2.258 远程 main CI 的 Web、Linux Rust/桌面检查、Windows 及 macOS �
 本机 `D:/NiceEnv/niceservbay.exe` 文件版本仍为 0.2.244。ACME `application/jose+json` 请求头修复已从 v0.2.245 起进入代码及后续发布；本轮未运行安装器或公网证书签发，旧版安装不能作为修复后的验收结果。
 
 本批没有数据库结构或用户数据库变更，未修改 `update.sql`；只在隔离临时目录通过官方 SFTPGo 命令建立验收数据库。未运行本地前端 dev/build。字段白名单之外的插件自定义配置、SQLite connection_string/其它 DSN、dotenv/脚本、UNC 与完整升级矩阵、桌面 IPC 和公网 ACME 仍需后续复查，整体目标未完成。
+
+## 2026-10-04：v0.2.260 SQLite 实际文件位置与配置类型识别
+
+**纠正上一批 SFTPGo 验收结论：** v0.2.259 的独立 initprovider 检查只证明命令成功，没有证明重新打开了预期文件。本批直接运行官方 SFTPGo 2.7.6，分别用相对及绝对 SQLite name 在含 `#`、中文的临时目录初始化，两个命令都退出 0，但预期 accounts.db 均不存在，实际数据库文件落在被 `#` 截断的位置。因此上一批“新目录重新打开数据库”的表述证据不足，不能作为该问题已修好的证明。
+
+- 按 SFTPGo v2.7.6 的 SQLite provider 源码及 SQLite URI 文档核对：未指定 connection_string 时，上游直接拼接 `file:{name}`。现在为托管 SQLite 的默认 name 生成正确编码的子进程连接地址，包含中文、空格、`#`、`%` 与 Unix 字面反斜杠，保持 cache/foreign_keys 默认参数；用户配置文件保持原文。已经明确设置的连接地址不覆盖。
+- 已指定 SQLite 连接地址时，启动预检解析实际数据库文件，并按实际子进程 cwd 处理相对路径。重启前发现原文件缺失就拒绝启动，避免创建空库；内存数据库保持内存语义，远程数据库驱动不按文件处理。生成的默认地址最后应用，避免运行配置里的空值覆盖编码修复。
+- 数据目录迁移按 SQLite URI 的路径部分处理 connection_string，保留查询参数、密码、fragment 与同字段共享引用的原值。百分号编码的旧目录、Windows 驱动器、Unix 字面反斜杠分别回读验证；未将 MySQL/PostgreSQL 等远程 DSN 当文件路径替换。
+- 配置类型识别在 Windows 上忽略文件名大小写，在 Unix 上保留文件名大小写和字面反斜杠。`.disabled` 配置仍按原格式迁移，runtime 下 Caddyfile 也纳入检查；大写 BACKUP 目录仍按历史数据保留，避免误改备份。新增真实复制回归覆盖 EtC/MiHoMo/CONFIG.YAML.DISABLED，密码原值保留。
+- Windows 官方原生验收：SFTPGo 2.7.5 ZIP 校验 SHA256 `75d803598d2c714e3262847ee87a1ea48e4dcddbbd5690b0ef88adea84478838`，2.7.6 沿用上一批已校验的官方 ZIP。既有两项原生用例分别验证默认 Bolt 和 env.d + SQLite，在含 `#`、`%23`、中文的目录中创建账号、通过真实 SSH/SFTP 上传下载、访问管理台、切换程序 2.7.5 → 2.7.6 后保留账号/文件/主机密钥。SQLite 后半段显式使用编码后的 mode=rw 连接地址，移走实际数据库会被预检阻止且不产生新库。两项通过；Qdrant/mihomo/结构化迁移原生用例也重新通过，其中 SFTPGo 改为使用产品同一 URI 构造逻辑。
+
+v0.2.259 main CI 的 Web、Linux、Windows、macOS Intel/ARM 全部成功，但 Release 的 Intel Mac 门槛失败，未生成安装包。下载完整 job `111285949389` 日志确认，失败是 ACME 回环测试在 accept 后未显式恢复阻塞 I/O，macOS 继承监听 socket 的非阻塞状态，read_line 偶发 WouldBlock。本批显式恢复阻塞模式，保留原读取超时和全部 JOSE/nonce 断言；不跳过测试、不放宽断言。v0.2.258 已观察到 Windows 安装器和四个 macOS 附件齐全。
+
+定向验证：13 项目录回归、5 项 SFTPGo 预检回归、2 项 SFTPGo 原生验收和 1 项结构化迁移原生验收通过。完整回归 core 738、集成 45、platform 15 项通过，56 项 ignored 未计为通过；桌面 cargo check、Clippy 和改动行格式检查通过。Clippy 仍有项目既有风格及 AppError 尺寸建议，未改动全局错误接口。最后对不透明 URI 参数保留及冲突 mode 的调整，重新运行路径/URI 单项回归通过。本版本远程平台结果待 CI；只格式化改动区域，没有新增测试文件或依赖，没有用户数据库/结构变更，未修改 `update.sql`，未运行本地前端 dev/build。
+
+整体复查仍未完成：旧版已经写到截断文件名的 SQLite 数据需要保留并单独确认恢复来源，不能自动猜测合并；服务数据库内部存储的用户目录（例如 SFTPGo home_dir）、其他 DSN/脚本/插件字段、UNC 实际共享目录、公网 ACME、桌面 IPC 和完整升级矩阵仍缺少完整验收。

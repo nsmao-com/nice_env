@@ -775,6 +775,8 @@ mod tests {
                     );
                     std::thread::sleep(Duration::from_millis(10));
                 };
+                // macOS accept 会继承监听 socket 的非阻塞状态；此处读取 HTTP 头需要阻塞 I/O。
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(3)))
                     .unwrap();

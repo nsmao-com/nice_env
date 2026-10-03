@@ -5,13 +5,20 @@ on:
     branches: [main, master]
     tags: ["v*"]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      native_package:
+        description: macOS package to verify with real binaries
+        type: choice
+        default: all
+        options: [all, mysql, mongodb, mihomo, nats, node, go, composer]
 
 jobs:
   # 在实际目标系统执行，而不是把 Linux 测试或跨架构编译当作平台验收。
   platform-core:
     name: Core runtime (${{ matrix.os }})
     # 发版时分支和 tag 一起推送，平台矩阵只执行分支对应的一次。
-    if: github.ref_type != 'tag'
+    if: github.ref_type != 'tag' && github.event_name != 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -48,6 +55,7 @@ jobs:
   # ---------- 前端：Next.js 静态导出 ----------
   web:
     name: Web (Next.js)
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -91,6 +99,7 @@ jobs:
   # ---------- Rust：core 测试 + 桌面壳编译检查 ----------
   rust:
     name: Rust (nsb-core / niceservbay)
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -163,3 +172,58 @@ jobs:
       # 但 clippy 默认 deny 的逻辑错误（如 `x || true` 恒真表达式）会让这步失败
       - name: Clippy
         run: cargo clippy --workspace --all-targets
+
+  native-packages:
+    name: Native packages (${{ matrix.os }})
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15-intel, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: native-packages-${{ matrix.os }}
+      - name: Verify real package lifecycle
+        shell: bash
+        env:
+          NSB_SKIP_HOSTS: "1"
+          NATIVE_PACKAGE_SELECTION: ${{ inputs.native_package }}
+          CARGO_TERM_COLOR: never
+        run: |
+          case "$NATIVE_PACKAGE_SELECTION" in
+            all) packages=(mysql mongodb mihomo nats node go composer) ;;
+            mysql|mongodb|mihomo|nats|node|go|composer) packages=("$NATIVE_PACKAGE_SELECTION") ;;
+            *) echo "Unsupported package selection"; exit 1 ;;
+          esac
+          mkdir -p native-package-logs
+          uname -a | tee native-package-logs/platform.log
+          status=0
+          for package in "${packages[@]}"; do
+            set +e
+            NSB_NATIVE_PACKAGE="$package" cargo test --locked -p nsb-core --lib \
+              install::tests::official_macos_package_lifecycle -- --ignored --exact --nocapture --test-threads=1 \
+              2>&1 | tee "native-package-logs/$package.log"
+            result=${PIPESTATUS[0]}
+            set -e
+            if [ "$result" -eq 0 ] && ! grep -q 'test result: ok. 1 passed; 0 failed; 0 ignored;' "native-package-logs/$package.log"; then
+              echo "::error title=Native verification did not execute::$package did not run the expected lifecycle test"
+              result=1
+            fi
+            if [ "$result" -ne 0 ]; then
+              echo "::error title=Native package verification failed::$package on $RUNNER_OS / $RUNNER_ARCH"
+              status=1
+            fi
+          done
+          exit "$status"
+      - name: Preserve native package evidence
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: native-packages-${{ matrix.os }}
+          path: native-package-logs
+          if-no-files-found: error

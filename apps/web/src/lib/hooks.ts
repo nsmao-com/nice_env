@@ -113,8 +113,14 @@ function loadVersionCatalog(qc: QueryClient, id: string, force: boolean): Promis
   return request.promise;
 }
 
-/** 项目 LTS 刷新与套件菜单使用同一入口，不创建旧的单项缓存键。 */
-export async function refreshVersionCatalog(qc: QueryClient, id: string) {
+/** 项目 LTS、套件菜单与安装后重读共用请求顺序。 */
+export async function refreshVersionCatalog(qc: QueryClient, id: string, afterInstall = false) {
+  if (afterInstall) {
+    // 安装器可能刚刷新过目录；不能复用安装前已发出但尚未返回的旧读取。
+    const pending = catalogRequests.get(qc)?.get(id);
+    if (pending?.pending) await pending.promise.catch(() => undefined);
+  }
+  // 安装版本与列表模板可能使用不同目录缓存；重新读取列表模板的上游信息。
   return loadVersionCatalog(qc, id, true);
 }
 

@@ -24,7 +24,7 @@ export interface VersionItem {
   canStop?: boolean;
   transitioning?: boolean;
   installing?: boolean;
-  /** 来自远程枚举（清单里没有） */
+  /** 上游目录中该版本的下载信息，也可能与内置清单重合。 */
   remote?: RemoteVersion;
   sizeBytes?: number;
   note?: string;
@@ -111,15 +111,17 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
     );
   }, [items, query]);
 
-  // 分组：已装 / 远程可装 / 预发布（分开折叠，主列表保持整洁）
+  // 已安装状态优先；内置历史版本独立展示，不把目录未收录等同于已撤下。
   const groups = React.useMemo(() => {
     const installed = filtered.filter((i) => i.installed);
-    const stable = filtered.filter((i) => !i.installed && !i.prerelease);
-    const pre = filtered.filter((i) => !i.installed && i.prerelease);
+    const stable = filtered.filter((i) => !i.installed && i.remote && !i.prerelease);
+    const pre = filtered.filter((i) => !i.installed && i.remote && i.prerelease);
+    const manifest = filtered.filter((i) => !i.installed && !i.remote);
     return [
       { key: "installed", label: t("versions.installed"), items: installed },
       { key: "available", label: t("versions.available"), items: stable },
       { key: "prerelease", label: t("versions.prerelease"), items: pre },
+      { key: "manifest", label: t("versions.fromManifest"), items: manifest },
     ].filter((g) => g.items.length > 0);
   }, [filtered, t]);
 
@@ -267,6 +269,9 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
                 </span>
                 <span className="text-[10px] tabular text-muted">{g.items.length}</span>
               </div>
+              {g.key === "manifest" && !!catalog?.cachedAt && (
+                <p className="px-2.5 pb-2 text-[10.5px] leading-relaxed text-muted [overflow-wrap:anywhere]">{t("versions.manifestOnlyHint")}</p>
+              )}
               <AnimatePresence initial={false}>
                 {g.items.map((item) => (
                   <motion.div

@@ -199,6 +199,12 @@ impl Downloader {
         self.download_cached_with_task(task, task.id(), urls, expected_sha256, expected_size, paths, emit).await
     }
 
+    /// 上游替换了同版本文件时，旧片段不能与新文件拼接。
+    pub(crate) fn discard_task_partial(&self, task: &DownloadTask, paths: &Paths) -> Result<()> {
+        task.check_cancelled()?;
+        discard_partial(&paths.downloads().join(format!("{}.part", task.id())))
+    }
+
     /// 附属资源沿用安装任务的取消和进度，但不能覆盖主程序压缩包缓存。
     pub(crate) async fn download_asset_with_task(
         &self, task: &DownloadTask, asset: &str, urls: &[String], expected_sha256: &str,
@@ -265,9 +271,12 @@ impl Downloader {
                 }
             }
         }
-        let err =
+        let mut err =
             last_err.unwrap_or_else(|| AppError::new("DOWNLOAD_ALL_FAILED", "没有可用的下载源"));
-        Err(err.with_hint("检查网络、代理或下载镜像后重试；有效的下载片段会保留"))
+        if err.hint.is_none() {
+            err = err.with_hint("检查网络、代理或下载镜像后重试；有效的下载片段会保留");
+        }
+        Err(err)
     }
 
     async fn download_one(
@@ -352,15 +361,34 @@ impl Downloader {
             break resp;
         };
         let status = resp.status().as_u16();
+        if matches!(status, 404 | 410) {
+            return Err(
+                AppError::new("DOWNLOAD_NOT_FOUND", "下载地址不存在或文件已被移除")
+                    .with_hint(
+                        "请刷新版本列表后重试，或选择其它版本；使用自定义镜像时也请检查镜像地址",
+                    )
+                    .with_detail(format!("{url}: HTTP {status}")),
+            );
+        }
         if status != 200 && status != 206 {
             return Err(AppError::download(url, format!("HTTP {}", resp.status())));
         }
         // 有些下载站在文件失效时仍返回 HTTP 200 错误页，不能把网页存成可安装缓存。
-        let content_type = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(';').next()).unwrap_or("").trim();
-        if content_type.eq_ignore_ascii_case("text/html") || content_type.eq_ignore_ascii_case("application/xhtml+xml") {
-            return Err(AppError::new("DOWNLOAD_NOT_PACKAGE", "下载源返回了网页，未取得安装包")
-                .with_detail(format!("{url}: Content-Type {content_type}")));
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .unwrap_or("")
+            .trim();
+        if content_type.eq_ignore_ascii_case("text/html")
+            || content_type.eq_ignore_ascii_case("application/xhtml+xml")
+        {
+            return Err(
+                AppError::new("DOWNLOAD_NOT_PACKAGE", "下载源返回了网页，未取得安装包")
+                    .with_hint("请刷新版本列表或切换下载镜像后重试；该地址可能已失效或被下载站拦截")
+                    .with_detail(format!("{url}: Content-Type {content_type}")),
+            );
         }
         let length = resp.content_length();
         let total = if status == 206 {
@@ -487,6 +515,7 @@ impl Downloader {
                 discard_partial(part_path)?;
                 return Err(
                     AppError::new("CHECKSUM_MISMATCH", "文件校验失败（sha256 不匹配）")
+                        .with_hint("已拒绝安装不匹配的文件。请刷新版本列表或切换下载镜像后重试")
                         .with_detail(format!("expect={expected_sha256} actual={actual}")),
                 );
             }
@@ -667,8 +696,29 @@ mod tests {
             let (html, reply) = server(vec![format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: 18\r\nConnection: close\r\n\r\n<html>error</html>")]).await;
             let error = downloader.download("html", &[html], "0", 0, &paths, &|_| {}).await.unwrap_err();
             assert_eq!(error.code, "DOWNLOAD_NOT_PACKAGE");
+            assert!(error.hint.as_deref().unwrap().contains("刷新版本"));
             assert!(!paths.downloads().join("html.pkg").exists());
             assert!(!paths.downloads().join("html.part").exists());
+            reply.await.unwrap();
+        }
+        for (status, code) in [
+            (404, "DOWNLOAD_NOT_FOUND"),
+            (410, "DOWNLOAD_NOT_FOUND"),
+            (403, "DOWNLOAD_FAILED"),
+        ] {
+            let (url, reply) = server(vec![format!(
+                "HTTP/1.1 {status} Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )])
+            .await;
+            let error = downloader
+                .download("missing", &[url], "0", 0, &paths, &|_| {})
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, code);
+            if status != 403 {
+                assert!(error.hint.as_deref().unwrap().contains("刷新版本"));
+            }
+            assert!(!paths.downloads().join("missing.pkg").exists());
             reply.await.unwrap();
         }
         let (html, first) = server(vec!["HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 3\r\nConnection: close\r\n\r\nbad".into()]).await;

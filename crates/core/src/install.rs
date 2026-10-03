@@ -5,7 +5,7 @@ use crate::error::{AppError, Result};
 use crate::model::InstalledPackage;
 use crate::paths::Paths;
 use crate::store::Store;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub struct Installer {
@@ -538,13 +538,119 @@ impl Installer {
         e.version = version.clone();
         e.display_name = e.display_name.replace(&template.version, &version);
         e.url = remote.url.clone();
-        e.sha256 = remote.sha256.clone();
-        e.size_bytes = remote.size_bytes.unwrap_or(0);
+        let same_file =
+            same_version(&template.version, &remote.version) && template.url == remote.url;
+        e.sha256 = remote
+            .sha256
+            .clone()
+            .or_else(|| same_file.then(|| template.sha256.clone()).flatten());
+        e.size_bytes = remote
+            .size_bytes
+            .unwrap_or(if same_file { template.size_bytes } else { 0 });
         e.kind = remote.kind.clone();
         e.entry = remote.entry.clone();
         // 远程版本默认不带 mirrors（镜像策略仍在下载时按域名前缀应用）
         e.mirrors.clear();
         e
+    }
+
+    fn download_refresh_candidate(
+        entry: &crate::model::PackageManifestEntry,
+        catalog: &crate::model::VersionCatalog,
+        failure: &AppError,
+    ) -> Result<Option<crate::model::PackageManifestEntry>> {
+        // 过期缓存和网络失败不能证明旧版本失效，也不能用它们替换校验信息。
+        if !catalog.online || catalog.error.is_some() {
+            return Ok(None);
+        }
+        let Some(remote) = catalog
+            .remote
+            .iter()
+            .find(|remote| same_version(&remote.version, &entry.version))
+        else {
+            if matches!(
+                failure.code.as_str(),
+                "DOWNLOAD_NOT_FOUND" | "DOWNLOAD_NOT_PACKAGE"
+            ) {
+                let suggestion = catalog
+                    .remote
+                    .iter()
+                    .find(|remote| !remote.prerelease)
+                    .map(|remote| format!("，例如 {}", remote.version))
+                    .unwrap_or_default();
+                let mut error = AppError::new("PACKAGE_DOWNLOAD_UNAVAILABLE", format!("{} {} 的下载地址当前不可用", entry.display_name, entry.version))
+                    .with_hint(format!("已刷新上游列表，但未找到该版本。请选择列表中的其它版本{suggestion}；不会自动替换成不同版本"));
+                error.detail = failure.detail.clone();
+                return Err(error);
+            }
+            return Ok(None);
+        };
+        let refreshed = Self::entry_from_remote(entry, remote);
+        if failure.code == "CHECKSUM_MISMATCH" && refreshed.sha256.is_none() {
+            return Ok(None);
+        }
+        // 同一地址未提供新哈希时保留已知校验，不能通过取消校验来消除失败。
+        Ok((refreshed.url != entry.url
+            || (refreshed.sha256.is_some() && refreshed.sha256 != entry.sha256))
+            .then_some(refreshed))
+    }
+
+    async fn download_entry(
+        &self,
+        mut entry: crate::model::PackageManifestEntry,
+        paths: &Paths,
+        store: &Store,
+        downloader: &Arc<Downloader>,
+        task: &crate::download::DownloadTask,
+        emit: &dyn Fn(crate::Event),
+    ) -> Result<(crate::model::PackageManifestEntry, PathBuf)> {
+        let mut refreshed = false;
+        loop {
+            let urls = self.candidate_urls(&entry, store);
+            let result = downloader
+                .download_with_task(
+                    task,
+                    &urls,
+                    entry.sha256.as_deref().unwrap_or("0"),
+                    entry.size_bytes,
+                    paths,
+                    emit,
+                )
+                .await;
+            let failure = match result {
+                Ok(archive) => return Ok((entry, archive)),
+                Err(failure) => failure,
+            };
+            if refreshed
+                || !matches!(
+                    failure.code.as_str(),
+                    "DOWNLOAD_NOT_FOUND" | "DOWNLOAD_NOT_PACKAGE" | "CHECKSUM_MISMATCH"
+                )
+                || !crate::versions::source_for(&entry)
+                    .is_some_and(|source| source.kind != "static")
+            {
+                return Err(failure);
+            }
+            let catalog = tokio::select! {
+                biased;
+                _ = task.cancelled() => return Err(AppError::new("CANCELLED", "安装已取消")),
+                catalog = crate::versions::catalog(store, &entry, true) => catalog,
+            };
+            let Some(mut updated) = Self::download_refresh_candidate(&entry, &catalog, &failure)?
+            else {
+                return Err(failure);
+            };
+            if updated.id == "node" && updated.sha256.is_none() {
+                updated.sha256 = Some(tokio::select! {
+                    biased;
+                    _ = task.cancelled() => return Err(AppError::new("CANCELLED", "安装已取消")),
+                    checksum = crate::versions::node_sha256(&updated.version, &updated.url) => checksum?,
+                });
+            }
+            downloader.discard_task_partial(task, paths)?;
+            entry = updated;
+            refreshed = true;
+        }
     }
 
     /// 解析安装 key，支持「清单里没有但版本源枚举得到」的版本：
@@ -830,16 +936,8 @@ impl Installer {
         }
 
         emit(crate::Event::state(&task_id, "downloading"));
-        let urls = self.candidate_urls(&entry, store);
-        let archive = downloader
-            .download_with_task(
-                task,
-                &urls,
-                entry.sha256.as_deref().unwrap_or("0"),
-                entry.size_bytes,
-                paths,
-                emit,
-            )
+        let (entry, archive) = self
+            .download_entry(entry, paths, store, downloader, task, emit)
             .await?;
 
         task.check_cancelled()?;
@@ -2371,7 +2469,28 @@ mod tests {
         // 模拟同版本的另一旧构建，不能靠已知 260827 URL 的兼容修复侥幸通过。
         stale.url = format!("https://www.apachelounge.com/download/VS18/binaries/httpd-{}-000101-Win64-VS18.zip", remote.version);
         stale.sha256 = Some("1".repeat(64));
-        state.installer.manifest.packages = vec![stale];
+        state.installer.manifest.packages = vec![stale.clone()];
+        // 直接用失效构建进入下载链路，确认下载失败后会刷新并只重试同一版本。
+        let task = state.downloader.begin_task(&key).unwrap();
+        let (refreshed, archive) = state
+            .installer
+            .download_entry(
+                stale,
+                &state.paths,
+                &state.store,
+                &state.downloader,
+                &task,
+                &|_| {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(refreshed.version, remote.version);
+        assert_eq!(refreshed.url, remote.url);
+        assert_eq!(
+            Some(crate::download::sha256_file(&archive).unwrap()),
+            remote.sha256
+        );
+        drop(task);
         let installed = state.install_package(&key).await.unwrap();
         let actual = state.installer.installed_entry(&installed);
         assert_eq!(actual.url, remote.url); assert_eq!(actual.sha256, remote.sha256);
@@ -2794,6 +2913,82 @@ mod tests {
         let remote_entry = Installer::entry_from_remote(&entry, &remote);
         assert_eq!(remote_entry.version, "1.2.4");
         assert_eq!(remote_entry.url, remote.url);
+        let mut same = remote.clone();
+        same.version = entry.version.clone();
+        same.url = entry.url.clone();
+        entry.sha256 = Some("a".repeat(64));
+        entry.size_bytes = 123;
+        let preserved = Installer::entry_from_remote(&entry, &same);
+        assert_eq!(preserved.sha256, entry.sha256);
+        assert_eq!(preserved.size_bytes, 123);
+        let failure = AppError::new("CHECKSUM_MISMATCH", "fixture checksum failure");
+        let mut catalog = crate::model::VersionCatalog {
+            id: entry.id.clone(),
+            remote: vec![same.clone()],
+            online: true,
+            cached_at: Some(1),
+            error: None,
+        };
+        assert!(
+            Installer::download_refresh_candidate(&entry, &catalog, &failure)
+                .unwrap()
+                .is_none()
+        );
+        same.sha256 = Some("b".repeat(64));
+        catalog.remote = vec![same.clone()];
+        assert_eq!(
+            Installer::download_refresh_candidate(&entry, &catalog, &failure)
+                .unwrap()
+                .unwrap()
+                .sha256,
+            same.sha256
+        );
+        catalog.online = false;
+        assert!(
+            Installer::download_refresh_candidate(&entry, &catalog, &failure)
+                .unwrap()
+                .is_none()
+        );
+        catalog.online = true;
+        catalog.error = Some("upstream offline".into());
+        assert!(
+            Installer::download_refresh_candidate(&entry, &catalog, &failure)
+                .unwrap()
+                .is_none()
+        );
+        catalog.error = None;
+        same.version = "9.9.9".into();
+        catalog.remote = vec![same];
+        let missing = AppError::new("DOWNLOAD_NOT_FOUND", "fixture missing");
+        let unavailable =
+            Installer::download_refresh_candidate(&entry, &catalog, &missing).unwrap_err();
+        assert_eq!(unavailable.code, "PACKAGE_DOWNLOAD_UNAVAILABLE");
+        assert!(unavailable.hint.unwrap().contains("9.9.9"));
+        assert!(
+            Installer::download_refresh_candidate(&entry, &catalog, &failure)
+                .unwrap()
+                .is_none()
+        );
+        // 相同 URL 被用于另一个版本时，不能沿用旧版本哈希。
+        assert!(Installer::entry_from_remote(&entry, &catalog.remote[0])
+            .sha256
+            .is_some());
+        catalog.remote[0].sha256 = None;
+        assert!(Installer::entry_from_remote(&entry, &catalog.remote[0])
+            .sha256
+            .is_none());
+        catalog.remote[0].version = entry.version.clone();
+        catalog.remote[0].url = "https://example.com/rebuilt.zip".into();
+        assert!(
+            Installer::download_refresh_candidate(&entry, &catalog, &failure)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            Installer::download_refresh_candidate(&entry, &catalog, &missing)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

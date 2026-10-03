@@ -10,7 +10,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { isTauri, listen } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { applyAppearance } from "@/lib/appearance";
-import { toastError } from "@/lib/hooks";
+import { refreshVersionCatalog, toastError } from "@/lib/hooks";
 import { useInstallTasks } from "@/lib/install-tasks";
 
 /**
@@ -83,11 +83,17 @@ function InstallTasksBridge() {
   React.useEffect(
     () =>
       useInstallTasks.subscribe((s, prev) => {
+        const settled = Object.values(s.tasks).filter((task) => task.status !== "running"
+          && prev.tasks[task.key]?.status === "running" && prev.tasks[task.key]?.requestId === task.requestId);
+        for (const id of new Set(settled.map((task) => task.id))) {
+          // 目录查询是 enabled=false，单纯 invalidate 不会重读；失败也可能已刷新上游。
+          void refreshVersionCatalog(qc, id, true).catch(() => undefined);
+        }
         const justDone = Object.values(s.tasks).some(
           (task) => task.status === "done" && prev.tasks[task.key]?.status !== "done"
         );
         if (!justDone) return;
-        for (const key of ["packages", "services", "version-catalogs", "pathenv"]) {
+        for (const key of ["packages", "services", "pathenv"]) {
           qc.invalidateQueries({ queryKey: [key] });
         }
       }),

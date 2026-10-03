@@ -994,13 +994,9 @@ function PackageRow({
   );
   const latestStable = items.find((item) => !item.prerelease && !item.incompatible);
   const showLatestSummary = !!latestStable && (catalog?.online || !!catalog?.cachedAt || installedVersions.length > 0);
-  const latestSource = catalog?.loading
-    ? t("versions.loading")
-    : catalog?.online
-      ? t("versions.fromRemote")
-      : catalog?.cachedAt
-        ? t("versions.fromCache")
-        : t("versions.fromManifest");
+  const latestSource = latestStable?.remote
+    ? t(catalog?.online && !catalog.error ? "versions.fromRemote" : "versions.fromCache")
+    : t(latestStable?.installed ? "versions.installed" : "versions.fromManifest");
   const packageInstalling = Object.values(installTasks).some((task) => task.id === group.id && task.status === "running");
 
   const pct = task && task.total > 0 ? Math.min(100, (task.received / task.total) * 100) : 0;

@@ -650,6 +650,9 @@ impl DataPathRebase {
     }
 
     fn config_text(&self, relative: &Path, value: &str) -> crate::error::Result<String> {
+        if let Some((service, json)) = crate::configpaths::service(relative) {
+            return crate::configpaths::rebase(value, service, json, self);
+        }
         let relative = portable_path_text(relative);
         let name = relative.rsplit('/').next().unwrap_or("");
         let conf = name.ends_with(".conf") || name.ends_with(".conf.disabled");
@@ -1033,6 +1036,7 @@ fn rebase_config_files(
             .unwrap_or("")
             .to_lowercase();
         let config = first == "etc"
+            || crate::configpaths::service(relative).is_some()
             || first == "user-modules"
             || name == ".user.ini"
             || ((first == "runtimes" || first == "data")
@@ -1976,6 +1980,220 @@ mod tests {
             "/new-data"
         };
         let rebase = DataPathRebase::new(Path::new(old), Path::new(new)).unwrap();
+        let structured_target = format!("{new} with spaces #资料");
+        let structured =
+            DataPathRebase::new(Path::new(old), Path::new(&structured_target)).unwrap();
+        let yaml = format!("# 中文注释 {old}/unchanged\r\nshared: &shared '{old}/shared'\r\nsecret: *shared\r\nstorage: {{dbPath: *shared}} # keep flow\r\nsystemLog:\r\n  path: &log \"{old}/mongo.log\" # keep log comment\r\nnet:\r\n  tls:\r\n    certificateKeyFile: |- # keep block comment\r\n      {old}/tls.pem\r\ncustom:\r\n  password: *log\r\n  external: '{old} sibling/file'\r\n");
+        let updated = structured
+            .config_text(Path::new("etc/mongodb/8.0/mongod.conf"), &yaml)
+            .unwrap();
+        let decoded: yaml_serde::Value = yaml_serde::from_str(&updated).unwrap();
+        assert_eq!(
+            decoded["storage"]["dbPath"].as_str(),
+            Some(format!("{structured_target}/shared").as_str())
+        );
+        assert_eq!(
+            decoded["systemLog"]["path"].as_str(),
+            Some(format!("{structured_target}/mongo.log").as_str())
+        );
+        assert_eq!(
+            decoded["net"]["tls"]["certificateKeyFile"].as_str(),
+            Some(format!("{structured_target}/tls.pem").as_str())
+        );
+        assert_eq!(
+            decoded["secret"].as_str(),
+            Some(format!("{old}/shared").as_str())
+        );
+        assert_eq!(
+            decoded["custom"]["password"].as_str(),
+            Some(format!("{old}/mongo.log").as_str())
+        );
+        for comment in [
+            "# 中文注释",
+            "# keep flow",
+            "# keep log comment",
+            "# keep block comment",
+        ] {
+            assert!(updated.contains(comment), "{updated}");
+        }
+        assert!(updated.contains(&format!("external: '{old} sibling/file'")));
+        assert!(!updated.replace("\r\n", "").contains('\n'));
+        assert_eq!(
+            structured
+                .config_text(Path::new("etc/mongodb/8.0/mongod.conf"), &updated)
+                .unwrap(),
+            updated
+        );
+        let merged = format!("defaults: &defaults {{dbPath: '{old}/db', enabled: true, count: 4, blank: null}}\nstorage: {{<<: [*defaults]}}\ncustom: *defaults\n");
+        let updated = structured
+            .config_text(Path::new("etc/mongodb/8.0/mongod.conf"), &merged)
+            .unwrap();
+        let mut decoded: yaml_serde::Value = yaml_serde::from_str(&updated).unwrap();
+        decoded.apply_merge().unwrap();
+        assert_eq!(
+            decoded["storage"]["dbPath"].as_str(),
+            Some(format!("{structured_target}/db").as_str())
+        );
+        assert_eq!(
+            decoded["custom"]["dbPath"].as_str(),
+            Some(format!("{old}/db").as_str())
+        );
+        assert_eq!(decoded["storage"]["enabled"].as_bool(), Some(true));
+        assert_eq!(decoded["storage"]["count"].as_i64(), Some(4));
+        let original = format!("{{\n  \"data_provider\": {{\"driver\": \"sqlite\", \"name\": \"{old}/users.db\", \"password\": \"{old}/secret\"}},\n  \"sftpd\": {{\"host_keys\": [\"{old}/key\", \"{old} sibling/key\"]}},\n  \"httpd\": {{\"templates_path\": \"{old}/templates\"}}\n}}\n");
+        let updated = structured
+            .config_text(Path::new("etc/sftpgo/2.6/sftpgo.json"), &original)
+            .unwrap();
+        let decoded: serde_json::Value = serde_json::from_str(&updated).unwrap();
+        assert_eq!(
+            decoded["data_provider"]["name"],
+            format!("{structured_target}/users.db")
+        );
+        assert_eq!(
+            decoded["data_provider"]["password"],
+            format!("{old}/secret")
+        );
+        assert_eq!(
+            decoded["sftpd"]["host_keys"][0],
+            format!("{structured_target}/key")
+        );
+        assert_eq!(
+            decoded["sftpd"]["host_keys"][1],
+            format!("{old} sibling/key")
+        );
+        assert_eq!(updated.lines().count(), original.lines().count());
+        let remote = original.replace("sqlite", "mysql");
+        let updated = structured
+            .config_text(Path::new("etc/sftpgo/2.6/sftpgo.json"), &remote)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&updated).unwrap()["data_provider"]["name"],
+            format!("{old}/users.db")
+        );
+        let qdrant = format!("service: {{api_key: '{old}/credential'}}\nstorage: {{storage_path: '{old}/storage', snapshots_path: '{old}/snapshots'}}\n");
+        let updated = structured
+            .config_text(Path::new("runtimes/qdrant/1.0/config/local.yaml"), &qdrant)
+            .unwrap();
+        let decoded: yaml_serde::Value = yaml_serde::from_str(&updated).unwrap();
+        assert_eq!(
+            decoded["service"]["api_key"].as_str(),
+            Some(format!("{old}/credential").as_str())
+        );
+        assert_eq!(
+            decoded["storage"]["snapshots_path"].as_str(),
+            Some(format!("{structured_target}/snapshots").as_str())
+        );
+        let mihomo = format!("secret: '{old}/credential'\nproxy-providers:\n  local: {{type: file, path: '{old}/providers/local.yaml'}}\nproxies:\n  - {{name: preserved, password: '{old}/credential'}}\n");
+        let updated = structured
+            .config_text(Path::new("etc/mihomo/profiles/local.yaml"), &mihomo)
+            .unwrap();
+        let decoded: yaml_serde::Value = yaml_serde::from_str(&updated).unwrap();
+        assert_eq!(
+            decoded["secret"].as_str(),
+            Some(format!("{old}/credential").as_str())
+        );
+        assert_eq!(
+            decoded["proxy-providers"]["local"]["path"].as_str(),
+            Some(format!("{structured_target}/providers/local.yaml").as_str())
+        );
+        assert_eq!(
+            decoded["proxies"][0]["password"].as_str(),
+            Some(format!("{old}/credential").as_str())
+        );
+        let secret_only = format!("secret: '{old}/do-not-edit' # keep bytes\r\n");
+        assert_eq!(
+            structured
+                .config_text(Path::new("etc/mihomo/config.yaml"), &secret_only)
+                .unwrap(),
+            secret_only
+        );
+        let literal_merge = serde_json::json!({"data_provider": {"driver": "sqlite", "name": format!("{old}/accounts.db"), "<<": {"name": format!("{old}/literal")}}}).to_string();
+        let updated = structured
+            .config_text(Path::new("etc/sftpgo/1/sftpgo.json"), &literal_merge)
+            .unwrap();
+        let decoded: serde_json::Value = serde_json::from_str(&updated).unwrap();
+        assert_eq!(
+            decoded["data_provider"]["name"],
+            format!("{structured_target}/accounts.db")
+        );
+        assert_eq!(
+            decoded["data_provider"]["<<"]["name"],
+            format!("{old}/literal")
+        );
+        let connected = serde_json::json!({"data_provider": {"driver": "sqlite", "connection_string": "file:accounts.db", "name": format!("{old}/literal")}}).to_string();
+        assert_eq!(
+            structured
+                .config_text(Path::new("etc/sftpgo/1/sftpgo.json"), &connected)
+                .unwrap(),
+            connected
+        );
+        let tagged = format!("systemLog:\n  path: &log !!str\n    # preserve tagged scalar comment\n    '{old}/mongo.log'\ncustom: *log\n");
+        let updated = structured
+            .config_text(Path::new("etc/mongodb/mongod.conf"), &tagged)
+            .unwrap();
+        let decoded: yaml_serde::Value = yaml_serde::from_str(&updated).unwrap();
+        assert_eq!(
+            decoded["systemLog"]["path"].as_str(),
+            Some(format!("{structured_target}/mongo.log").as_str())
+        );
+        assert_eq!(
+            decoded["custom"].as_str(),
+            Some(format!("{old}/mongo.log").as_str())
+        );
+        assert!(updated.contains("&log !!str\n    # preserve tagged scalar comment"));
+        #[cfg(unix)]
+        {
+            assert!(
+                crate::configpaths::service(Path::new(r"etc/sftpgo/1/other\sftpgo.json")).is_none()
+            );
+            assert!(crate::configpaths::service(Path::new(r"etc\qdrant/1/config.yaml")).is_none());
+            let old = r"/old-data/literal\old";
+            let new = r"/new-data/literal\new #资料";
+            let rebase = DataPathRebase::new(Path::new(old), Path::new(new)).unwrap();
+            let config = serde_json::json!({"data_provider": {"driver": "sqlite", "name": format!("{old}/accounts.db"), "password": format!("{old}/secret")}}).to_string();
+            for name in ["etc/sftpgo/1/sftpgo.json", "etc/sftpgo/1/sftpgo.yaml"] {
+                let updated = rebase.config_text(Path::new(name), &config).unwrap();
+                let decoded: yaml_serde::Value = yaml_serde::from_str(&updated).unwrap();
+                assert_eq!(
+                    decoded["data_provider"]["name"].as_str(),
+                    Some(format!("{new}/accounts.db").as_str())
+                );
+                assert_eq!(
+                    decoded["data_provider"]["password"].as_str(),
+                    Some(format!("{old}/secret").as_str())
+                );
+            }
+            let config = format!(
+                "storage:\n  storage_path: '{old}/storage'\nservice:\n  api_key: '{old}/secret'\n"
+            );
+            let updated = rebase
+                .config_text(Path::new("etc/qdrant/config.yaml"), &config)
+                .unwrap();
+            let decoded: yaml_serde::Value = yaml_serde::from_str(&updated).unwrap();
+            assert_eq!(
+                decoded["storage"]["storage_path"].as_str(),
+                Some(format!("{new}/storage").as_str())
+            );
+            assert_eq!(
+                decoded["service"]["api_key"].as_str(),
+                Some(format!("{old}/secret").as_str())
+            );
+        }
+        assert!(structured
+            .config_text(
+                Path::new("etc/sftpgo/1/sftpgo.json"),
+                "{\"data_provider\": {\"name\": \"unterminated}"
+            )
+            .is_err());
+        for invalid in [
+            "storage: [",
+            "storage: {dbPath: /old}\n---\nsecret: private",
+            "{\"data_provider\": {\"name\": \"unterminated}",
+        ] {
+            assert!(structured
+                .config_text(Path::new("etc/mongodb/mongod.conf"), invalid)
+                .is_err());
+        }
         let caddy_target = format!("{new} with spaces");
         let caddy_rebase = DataPathRebase::new(Path::new(old), Path::new(&caddy_target)).unwrap();
         let caddy = format!("# preserve {old}/comment\n{{\n storage file_system {{\n root {old}/storage\n }}\n}}\nimport {old}/etc/caddy/sites/*.conf\nhttp://:8080 {{\n root * {old}/www\n tls {old}/cert.pem {old}/key.pem\n log {{\n output file {old}/logs/caddy.log\n }}\n respond \"{old}/literal body\"\n header X-External \"{old} sibling/file\"\n basic_auth {{\n user {old}/credential\n }}\n}}\n");
@@ -2445,6 +2663,235 @@ mod tests {
             .file_name()
             .to_string_lossy()
             .contains("-migrating-")));
+        std::fs::write(paths.nginx_conf(), "# valid configuration\n").unwrap();
+        let mongo = source.join("etc/mongodb/8.0/mongod.conf");
+        std::fs::create_dir_all(mongo.parent().unwrap()).unwrap();
+        std::fs::write(&mongo, "storage: [ invalid\n").unwrap();
+        assert_eq!(
+            copy_data_dir(&source, &target).unwrap_err().code,
+            "DATA_DIR_CONFIG_FORMAT"
+        );
+        assert!(std::fs::read_dir(&target).unwrap().next().is_none());
+        assert_eq!(
+            std::fs::read_to_string(&mongo).unwrap(),
+            "storage: [ invalid\n"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires NSB_STRUCTURED_NATIVE pointing to verified mihomo/sftpgo/qdrant binaries; isolated migration and short-lived loopback services"]
+    fn native_structured_configs_keep_credentials_and_use_migrated_data() {
+        let binaries = PathBuf::from(
+            std::env::var_os("NSB_STRUCTURED_NATIVE").expect("NSB_STRUCTURED_NATIVE"),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("新 data # [1]");
+        let paths = Paths::new(source.clone());
+        paths.ensure_dirs().unwrap();
+        let store = crate::store::Store::open(paths.db()).unwrap();
+        let old = portable_path_text(&source);
+        let secret = format!("{old}/literal-secret");
+        let qdrant_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let qdrant_port = qdrant_listener.local_addr().unwrap().port();
+        let mihomo_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mihomo_port = mihomo_listener.local_addr().unwrap().port();
+        for directory in [
+            "etc/qdrant/1",
+            "etc/mihomo/providers",
+            "etc/sftpgo/1",
+            "data/sftpgo",
+        ] {
+            std::fs::create_dir_all(source.join(directory)).unwrap();
+        }
+        let qdrant = format!("# preserve path-shaped API key\nservice:\n  host: 127.0.0.1\n  http_port: {qdrant_port}\n  grpc_port: null\n  api_key: '{secret}'\nstorage:\n  storage_path: '{old}/data/qdrant/storage'\n  snapshots_path: '{old}/data/qdrant/snapshots'\ntelemetry_disabled: true\n");
+        let qdrant_config = source.join("etc/qdrant/1/config.yaml");
+        std::fs::write(&qdrant_config, &qdrant).unwrap();
+        write_with_backup(
+            &qdrant_config,
+            &format!("{qdrant}# changed\n"),
+            &paths.backup(),
+        )
+        .unwrap();
+        let mut backups = list_backup_files(&source).unwrap();
+        assert_eq!(backups.len(), 1);
+        let backup = backups.remove(0);
+        std::fs::write(
+            source.join("etc/mihomo/providers/local.yaml"),
+            "proxies:\n  - {name: fixture, type: socks5, server: 127.0.0.1, port: 9}\n",
+        )
+        .unwrap();
+        let mihomo = format!("mixed-port: 0\nexternal-controller: 127.0.0.1:{mihomo_port}\nsecret: '{secret}'\nallow-lan: false\nmode: rule\nproxy-providers:\n  local:\n    type: file\n    path: '{old}/etc/mihomo/providers/local.yaml'\nproxy-groups:\n  - {{name: fixture-group, type: select, use: [local]}}\nrules: ['MATCH,DIRECT']\n");
+        std::fs::write(source.join("etc/mihomo/config.yaml"), &mihomo).unwrap();
+        let sftpgo = serde_json::json!({"data_provider":{"driver":"sqlite","name":format!("{old}/data/sftpgo/accounts.db"),"password":secret,"credentials_path":format!("{old}/data/sftpgo/credentials")}});
+        std::fs::write(
+            source.join("etc/sftpgo/1/sftpgo.json"),
+            serde_json::to_vec_pretty(&sftpgo).unwrap(),
+        )
+        .unwrap();
+        let executable = |id: &str, name: &str| {
+            binaries
+                .join(id)
+                .join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
+        };
+        let initialize = |base: &Path| {
+            let mut command = platform::command(executable("sftpgo", "sftpgo"));
+            for (key, _) in
+                std::env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("SFTPGO_"))
+            {
+                command.env_remove(key);
+            }
+            command
+                .current_dir(base)
+                .args(["initprovider", "--config-dir"])
+                .arg(base.join("etc/sftpgo/1"))
+                .args(["--config-file", "sftpgo.json"]);
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        initialize(&source);
+        let original_db = std::fs::read(source.join("data/sftpgo/accounts.db")).unwrap();
+        assert!(original_db.len() > 4096);
+        drop(store);
+        copy_data_dir(&source, &target).unwrap();
+        assert_eq!(
+            std::fs::read(target.join("data/sftpgo/accounts.db")).unwrap(),
+            original_db
+        );
+        std::fs::rename(&source, temp.path().join("unavailable-source")).unwrap();
+        let preview = preview_backup(&target, &backup.name).unwrap();
+        restore_backup_checked(&target, &backup.name, Some(&preview.revision)).unwrap();
+        initialize(&target);
+        let config: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(target.join("etc/sftpgo/1/sftpgo.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(config["data_provider"]["password"], secret);
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let http = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_millis(500))
+            .build()
+            .unwrap();
+        drop(qdrant_listener);
+        drop(mihomo_listener);
+        for (id, binary, port, endpoint) in [
+            ("qdrant", "qdrant", qdrant_port, "/collections"),
+            (
+                "mihomo",
+                if cfg!(windows) {
+                    "mihomo-windows-amd64"
+                } else {
+                    "mihomo"
+                },
+                mihomo_port,
+                "/providers/proxies/local",
+            ),
+        ] {
+            let log = temp.path().join(format!("{id}.log"));
+            let output = std::fs::File::create(&log).unwrap();
+            let mut command = platform::command(executable(id, binary));
+            command
+                .current_dir(&target)
+                .stdout(output.try_clone().unwrap())
+                .stderr(output);
+            if id == "qdrant" {
+                for (key, _) in std::env::vars_os()
+                    .filter(|(key, _)| key.to_string_lossy().starts_with("QDRANT_"))
+                {
+                    command.env_remove(key);
+                }
+                command
+                    .arg("--config-path")
+                    .arg(target.join("etc/qdrant/1/config.yaml"))
+                    .arg("--disable-telemetry");
+            } else {
+                command
+                    .arg("-d")
+                    .arg(target.join("etc/mihomo"))
+                    .arg("-f")
+                    .arg(target.join("etc/mihomo/config.yaml"));
+            }
+            let mut child = Child(command.spawn().unwrap());
+            let url = format!("http://127.0.0.1:{port}{endpoint}");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            loop {
+                assert!(
+                    child.0.try_wait().unwrap().is_none(),
+                    "{}",
+                    std::fs::read_to_string(&log).unwrap()
+                );
+                let request = if id == "qdrant" {
+                    http.get(&url).header("api-key", &secret)
+                } else {
+                    http.get(&url).bearer_auth(&secret)
+                };
+                if let Ok(response) = request.send() {
+                    if response.status().is_success() {
+                        let value: serde_json::Value = response.json().unwrap();
+                        if id == "mihomo" {
+                            assert!(
+                                value["proxies"]
+                                    .as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .any(|proxy| proxy["name"] == "fixture"),
+                                "{value}"
+                            );
+                        }
+                        break;
+                    }
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{}",
+                    std::fs::read_to_string(&log).unwrap()
+                );
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            assert!(!http.get(&url).send().unwrap().status().is_success());
+            if id == "qdrant" {
+                let collection = format!("http://127.0.0.1:{port}/collections/migration_probe");
+                http.put(&collection)
+                    .header("api-key", &secret)
+                    .json(&serde_json::json!({"vectors":{"size":1,"distance":"Dot"}}))
+                    .timeout(std::time::Duration::from_secs(5))
+                    .send()
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap();
+                let snapshot: serde_json::Value = http
+                    .post(format!("{collection}/snapshots"))
+                    .header("api-key", &secret)
+                    .timeout(std::time::Duration::from_secs(5))
+                    .send()
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap()
+                    .json()
+                    .unwrap();
+                assert!(target
+                    .join("data/qdrant/snapshots/migration_probe")
+                    .join(snapshot["result"]["name"].as_str().unwrap())
+                    .is_file());
+            }
+            drop(child);
+        }
+        assert!(target.join("data/qdrant/storage").is_dir());
+        assert!(target.join("data/qdrant/snapshots").is_dir());
+        assert!(!source.exists());
+        println!("Qdrant/mihomo native authenticated HTTP and SFTPGo provider reopen passed after data copy, old backup restore and removal of the original directory");
     }
 
     #[test]

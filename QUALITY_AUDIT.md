@@ -275,3 +275,21 @@ main/tag 原子推送到 `297a38682226d44300866088bc3335e32c49e2aa`，main CI �
 本批没有数据库结构或用户数据库变更，未修改 `update.sql`；未新增测试文件，未运行本地前端 dev/build。Caddy 仅覆盖上述明确参数，未知插件自定义路径语法、JSON/YAML/dotenv 等其它格式及整体复查仍未完成。
 
 0.2.258 最终本地完整回归：core 738、集成 45、platform 15 项通过，55 项 ignored 未计为通过；桌面 cargo check、改动行格式检查、版本同步与本项目 crate 之外锁文件内容未变化的核对通过。Unix 专属迁移分支待本版本远程 Linux/macOS runner 验证；本轮没有前端逻辑改动，前端验证沿用 v0.2.257 本地类型/21 项逻辑检查及远程 Web CI 成功结果。
+
+v0.2.258 远程 main CI 的 Web、Linux Rust/桌面检查、Windows 及 macOS 双架构 core/platform 回归全部成功。Release 的三个 runtime 门槛成功；2026-10-04 本批检查时已上传四个 macOS 附件，Windows 安装包仍在构建，不能视为所有平台安装包已齐全。
+
+## 2026-10-04：v0.2.259 JSON / YAML 配置目录迁移
+
+继续检查发现 MongoDB、Qdrant、mihomo 和 SFTPGo 的 JSON/YAML 配置仍走普通文本替换：恰好像旧目录的密码或 API key 会被修改；带特殊字符的新路径还需要按格式引用。YAML 路径与凭据共享锚点时，只修改路径所在字符串也可能连带改变其它字段。
+
+- 新增私有业务模块 `configpaths.rs`，复用锁文件已有的 libyaml-rs 获取 scalar 的源码范围，用 yaml_serde 核对整份配置语义。只迁移明确的路径字段，保留密码、API key、正文、注释、映射顺序和 CRLF；没有实际路径变更时按字节保留原文。JSON 的 `<<` 仍是普通字段。
+- 含旧路径的 YAML alias 在需要迁移的文档内先展开原值，支持 merge mapping/sequence；再改路径值，最终重新解析并核对预期语义。语法错误、多个 YAML 文档或无法安全改写时中止复制，源目录和目标目录不变；历史备份仍保留原字节，恢复时复用当前迁移规则。
+- 配置文件识别使用当前系统的 Path components；Unix 字面反斜杠不当成目录分隔符。扩展现有回归，覆盖中文、空格、#、反斜杠、别名、标签、块文本、数组、保留类型与错误回滚，未新增测试文件。
+- Windows 原生验收使用官方 ZIP 且核对清单 SHA256：Qdrant 1.19.1、mihomo 1.19.10、SFTPGo 2.7.6。真实 copy_data_dir 后将旧目录改名不可用，并通过旧备份恢复 Qdrant 配置。Qdrant 使用原 API key 访问 collections、创建空 collection 与快照，快照落在新目录；mihomo 使用原 secret 读取迁移后 provider 的 fixture 节点；两个 HTTP 服务都拒绝未认证请求。SFTPGo initprovider 在新目录重新打开原字节复制的 SQLite。仅使用临时目录和短时 loopback 服务，退出时回收进程。
+- 验证中先发现 JSON 经 serde_json::Value 中转会排序键，已改为在验证 JSON 合法性后直接按源码顺序解析；首次原生 fixture 按错误备份名称查找失败，修正选择唯一备份后重跑通过。MongoDB 本批只完成语义回归，未运行 Windows mongod；SFTPGo 只验账号数据库初始化/重新打开，未验 SFTP 上传下载。
+
+本批完整回归 core 738、集成 45、platform 15 项通过；常规运行有 56 项 ignored，未计为通过。桌面 cargo check、Clippy、改动行格式及 diff 检查通过。Clippy 仍报告已有风格建议，以及复用项目 AppError 返回类型带来的 result_large_err 建议，本批未改动全局错误接口。Unix 专属分支仍须由本版本 Linux/macOS CI 执行，不能将 Windows 结果代替。
+
+本机 `D:/NiceEnv/niceservbay.exe` 文件版本仍为 0.2.244。ACME `application/jose+json` 请求头修复已从 v0.2.245 起进入代码及后续发布；本轮未运行安装器或公网证书签发，旧版安装不能作为修复后的验收结果。
+
+本批没有数据库结构或用户数据库变更，未修改 `update.sql`；只在隔离临时目录通过官方 SFTPGo 命令建立验收数据库。未运行本地前端 dev/build。字段白名单之外的插件自定义配置、SQLite connection_string/其它 DSN、dotenv/脚本、UNC 与完整升级矩阵、桌面 IPC 和公网 ACME 仍需后续复查，整体目标未完成。

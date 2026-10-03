@@ -10,6 +10,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 quick-xml = "0.42.0"
 yaml_serde = "0.10.7"
+# 复用 yaml_serde 已有的解析器，获取配置值的源码位置以保留注释和布局。
+libyaml-rs = "0.3.0"
 # 与 r-nacos 上游使用同一解析器，预检时不改变父进程环境。
 dotenv = "0.15.0"
 thiserror = { workspace = true }

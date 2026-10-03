@@ -204,9 +204,13 @@ impl AcmeClient {
             .map(str::to_string);
         let body = resp.text().unwrap_or_default();
         if !status.is_success() {
-            return Err(acme_error(&body, "注册 ACME 账号").with_hint(
-                "请检查联系邮箱、证书颁发机构是否选对，以及系统代理是否能正常访问该服务；首次使用建议先选择“Let's Encrypt（推荐）”重试。",
-            ));
+            let mut error = acme_error(&body, "注册 ACME 账号");
+            if error.hint.is_none() {
+                error = error.with_hint(
+                    "请检查联系邮箱、证书颁发机构是否选对，以及系统代理是否能正常访问该服务；首次使用建议先选择“Let's Encrypt（推荐）”重试。",
+                );
+            }
+            return Err(error);
         }
         let kid = location.ok_or_else(|| {
             let detail = if body.trim().is_empty() {
@@ -316,9 +320,13 @@ impl AcmeClient {
                 ).as_bytes()
             ),
         });
+        let request_body = serde_json::to_vec(&body)
+            .map_err(|e| AppError::internal("序列化 JWS 请求", e.to_string()))?;
+        // RFC 8555 §6.2：所有 ACME JWS POST（包括 POST-as-GET）必须使用 JOSE 类型。
         self.http
             .post(url)
-            .json(&body)
+            .header(reqwest::header::CONTENT_TYPE, "application/jose+json")
+            .body(request_body)
             .send()
             .map_err(|e| AppError::new("ACME_HTTP", format!("请求 {url} 失败：{e}")))
     }
@@ -656,6 +664,14 @@ fn acme_error(body: &str, what: &str) -> AppError {
         ),
         Err(_) => ("ACME_ERROR".to_string(), body.chars().take(300).collect()),
     };
+    let normalized_detail = detail.to_ascii_lowercase();
+    if normalized_detail.contains("content-type")
+        && normalized_detail.contains("application/jose+json")
+    {
+        return AppError::new("ACME_CONTENT_TYPE", format!("{what}：证书服务拒绝了请求格式，暂时无法继续签发"))
+            .with_hint("请更新 NiceEnv 后重试；无需更换联系邮箱或 DNS 凭据。若最新版仍出现此错误，请反馈错误详情。")
+            .with_detail(detail);
+    }
     AppError::new(&code, format!("{what}：{detail}"))
 }
 

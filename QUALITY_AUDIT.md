@@ -323,3 +323,20 @@ v0.2.260 的 main CI `37152953149`：Web、Linux Rust/desktop、Windows、macOS 
 本批 13 项数据目录定向回归及扩展后的原生迁移用例通过；完整回归 core 738、集成 45、platform 15 项通过，56 项 ignored 未计为通过。desktop cargo check、Clippy、改动行格式和 git diff 检查通过；Clippy 仍有存量风格及 AppError 尺寸警告。当前 Windows 原生行为已有上述证据；本版本 Unix 分支的结果仍须由远程 CI 验证，不能用上一版本的绿灯替代。
 
 本批没有用户数据库或表结构变更，未修改 `update.sql`；只使用隔离的临时验收数据库。未新增测试文件、依赖或运行本地前端 dev/build。整体目标仍未完成：本次新账号默认目录字段的迁移不代表已迁移数据库内已有用户的 home_dir/virtual folders；env.d 的插值与 UTF-16、未知格式 fallback 对外置口令/提示文本的保护、SFTPGo 大小写配置键仍需继续验证，原有全平台安装/升级/桌面交互清单继续有效。
+
+## 2026-10-04：v0.2.262 迁移时保留 SFTPGo 引用资源的原始内容
+
+在实现修改前，把上一批 native fixture 的主密钥和 SSH/FTP 提示文件放入 `etc/sftpgo/1/resources`，文件内容包含作为普通文本的旧目录名，复现两种问题：源目录没有空格时，迁移器把 banner 当配置，报 DATA_DIR_PATH_QUOTING；源目录也含空格时，复制成功但主密钥字节已被替换成新目录文本，内容核对失败。原因是原扫描器把 `etc` 下所有可读文本都交给路径替换。
+
+- 改为先收集待检查文件和 SFTPGo JSON/YAML 声明的资源引用，再执行配置改写。主密钥、证书、数据库、提示文件和模板等资源保留原始字节；配置中的实际路径仍迁移。资源过滤先于文本解码、16 MiB 配置大小限制和配置解析，避免把二进制资源或模板误报为损坏配置。
+- YAML merge/alias 按解析后实际引用收集；相对配置目录的资源路径按真实层级消除 `.`/`..`。相对当前工作目录的 KMS/SQLite 等路径，通过只读源数据库、有效安装快照和同一套服务启动上下文解析，包含自定义 `{etc}/resources`，不猜测是配置目录，也不创建目录或写回源数据库。
+- 先处理引用源，再排除其资源中的伪配置，消除目录枚举顺序影响：模板内的 `sftpgo.json` 即使有效、包含类似配置的字段，或本身根本不是 JSON，都作为资源保留，不能借其中的字段把真正的 Nginx 配置排除迁移。配置与资源出现自引用或循环冲突时，返回明确错误并回滚暂存目录，保留源和空目标。
+- 已有迁移用例增加模板伪配置、无效 JSON 资源、17 MiB 二进制资源、相对路径、YAML 引用和冲突回滚；已有 SFTPGo 目录选择用例增加只读自定义 cwd 及两个历史配置目录的相对主密钥迁移。native fixture 再次移走旧目录，核对主密钥原始字节，以及 SSH/FTP 返回包含旧目录字面文本的原始 banner，保留 WebDAV 严格证书校验、Qdrant/mihomo 验收。定向用例已通过。
+
+远程证据更新：v0.2.260 Release `37152953447` 已 success，公开附件包含 Windows x64 安装器、Intel/ARM64 两个 DMG 和两个 app.tar.gz；v0.2.261 main CI `37154363583` 全平台通过，tag CI `37154363571` 通过，Release `37154363578` 仍在构建，已生成 Windows 安装器和 ARM64 DMG/app 三个公开附件，Intel 附件尚未生成。
+
+本批完整回归 core 738、集成 45、platform 15 项通过，56 项 ignored 未计入通过；原生 SFTPGo/Qdrant/mihomo 迁移验收另行执行通过。desktop cargo check、Clippy、改动行格式及 git diff 检查通过，Clippy 仍报告存量风格及复用 AppError 带来的 result_large_err 警告。没有用户数据库或表结构变更，未修改 `update.sql`；新增的是只读读取方式，未新增依赖或测试文件，未运行本地前端 dev/build。
+
+本机再次核对 `D:/NiceEnv/niceservbay.exe` 文件版本为 0.2.244，正在运行的进程也来自该路径。ACME JOSE 请求头修复已从 v0.2.245 起进入后续版本；本批完整回归中的实际 HTTP 请求检查通过，旧程序尚未更新不能作为新版本验收。未代用户更换邮箱或 DNS 凭据、运行安装器或注册公网 ACME 账号。
+
+整体复查仍未完成。本批资源识别覆盖已支持的 SFTPGo JSON/YAML 字段；其它服务、env.d 覆盖、未知格式、备份恢复中的资源角色仍需继续核对。已查阅 Viper 官方说明，配置键不区分大小写，而当前 SFTPGo 配置预检/字段匹配仍按大小写区分，这也是下一步必须修正的实际兼容性差异。原有 SFTPGo 内部用户目录、旧截断 SQLite 文件恢复、UNC、公网 ACME 和全平台升级/桌面交互事项继续保留。

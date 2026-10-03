@@ -19,6 +19,15 @@ pub struct Store {
 }
 
 impl Store {
+    /// 迁移规划只读取源目录的安装记录和运行设置，不初始化或修改源数据库。
+    pub(crate) fn open_read_only(path: PathBuf) -> Result<Self> {
+        let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Ok(Self {
+            path,
+            conn: parking_lot::Mutex::new(conn),
+        })
+    }
+
     pub fn open(path: PathBuf) -> Result<Self> {
         if let Some(p) = path.parent() {
             std::fs::create_dir_all(p)?;

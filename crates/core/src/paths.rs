@@ -931,7 +931,7 @@ pub fn copy_data_dir(
         crate::store::Store::snapshot_for_data_dir(&source.join("nsb.sqlite"), &staging.join("nsb.sqlite"), &rebase)?;
         stats.0 += 1;
         stats.1 += std::fs::metadata(staging.join("nsb.sqlite"))?.len();
-        let rewritten = rebase_config_files(&staging, &staging, &rebase)?;
+        let rewritten = rebase_config_files(&staging, &source, &rebase)?;
         validate_migrated_root(&staging)?;
         let history_file = staging.join(".data-dir-history.json");
         let mut history = read_path_history(&staging)?;
@@ -1001,10 +1001,169 @@ fn copy_tree(source: &Path, target: &Path, stats: &mut (u64, u64), root: bool) -
 
 fn rebase_config_files(
     root: &Path,
-    directory: &Path,
+    source: &Path,
     rebase: &DataPathRebase,
 ) -> crate::error::Result<u64> {
+    let mut files = Vec::new();
+    migration_config_files(root, root, &mut files)?;
+    let resources = migration_resources(root, source, &files, rebase)?;
     let mut rewritten = 0;
+    for path in files {
+        if resources
+            .iter()
+            .any(|resource| resource_contains(resource, &config_path_key(&path)))
+        {
+            continue;
+        }
+        let relative = path.strip_prefix(root).unwrap();
+        if std::fs::metadata(&path)?.len() > 16 * 1024 * 1024 {
+            return Err(crate::error::AppError::new(
+                "DATA_DIR_CONFIG_SIZE",
+                format!("配置文件过大，无法自动检查：{}", relative.display()),
+            ));
+        }
+        let bytes = std::fs::read(&path)?;
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            // 二进制凭据/缓存保持字节不变；旧路径出现在非 UTF-8 配置时不能假装完成。
+            if rebase.patterns.is_match(&String::from_utf8_lossy(&bytes)) {
+                return Err(crate::error::AppError::new(
+                    "DATA_DIR_CONFIG_ENCODING",
+                    format!("配置不是 UTF-8，无法修正旧路径：{}", relative.display()),
+                ));
+            }
+            continue;
+        };
+        let rebased = rebase
+            .config_text(relative, text)
+            .map_err(|e| e.with_detail(relative.display().to_string()))?;
+        if rebased != text {
+            std::fs::write(&path, rebased)?;
+            rewritten += 1;
+        }
+    }
+    Ok(rewritten)
+}
+
+fn resource_contains(resource: &str, path: &str) -> bool {
+    path == resource
+        || path
+            .strip_prefix(resource)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn migration_resources(
+    root: &Path,
+    source: &Path,
+    files: &[PathBuf],
+    rebase: &DataPathRebase,
+) -> crate::error::Result<Vec<String>> {
+    // 使用复制后的文件做只读规划，所有规划成功后才改写。不能按 read_dir 顺序边读边改。
+    let root_key = config_path_key(root);
+    let target_key = config_path_key(Path::new(&rebase.target));
+    let mut plans = Vec::new();
+    for file in files {
+        let relative = file.strip_prefix(root).unwrap();
+        let Some(("sftpgo", json)) = crate::configpaths::service(relative) else {
+            continue;
+        };
+        let result = (|| {
+            if std::fs::metadata(file)?.len() > 16 * 1024 * 1024 {
+                return Err(crate::error::AppError::new("DATA_DIR_CONFIG_SIZE", "配置文件过大，无法自动检查"));
+            }
+            let text = std::fs::read_to_string(file)?;
+            let mut resources = Vec::new();
+            let mut cwd = None;
+            for resource in crate::configpaths::sftpgo_resources(&text, json)? {
+                let resource_path = if resource.path.is_absolute() || resource.relative_to_config {
+                    resource.path
+                } else {
+                    if cwd.is_none() {
+                        let store = crate::store::Store::open_read_only(source.join("nsb.sqlite"))?;
+                        cwd = Some(crate::generic::sftpgo_migration_cwd(&store,
+                            &Paths::new(source.to_path_buf()), source.join(relative).parent().unwrap().to_path_buf())
+                            .map_err(|_| crate::error::AppError::new("DATA_DIR_RESOURCE_BASE",
+                                "无法从 SFTPGo 安装记录确认资源的工作目录，未切换数据目录")
+                                .with_hint("请检查当前 SFTPGo 安装是否完整；也可将资源配置改为绝对路径。原文件已保留。"))?);
+                    }
+                    cwd.as_ref().unwrap().join(resource.path)
+                };
+                let key = if resource_path.is_absolute() {
+                    let mapped = rebase.path(&portable_path_text(&resource_path));
+                    let mapped = config_path_key(Path::new(&mapped));
+                    if !resource_contains(&target_key, &mapped) { continue; }
+                    format!("{root_key}{}", &mapped[target_key.len()..])
+                } else {
+                    let mut normalized = PathBuf::new();
+                    for part in file.parent().unwrap().join(resource_path).components() {
+                        match part {
+                            Component::CurDir => {},
+                            Component::ParentDir => { normalized.pop(); },
+                            part => normalized.push(part.as_os_str()),
+                        }
+                    }
+                    let key = config_path_key(&normalized);
+                    if !resource_contains(&root_key, &key) { continue; }
+                    key
+                };
+                resources.push(key.trim_end_matches('/').to_string());
+            }
+            Ok::<_, crate::error::AppError>(resources)
+        })().map_err(|error| error.with_detail(relative.display().to_string()));
+        plans.push((config_path_key(file), result));
+    }
+    let mut pending = (0..plans.len()).collect::<Vec<_>>();
+    let mut resources = Vec::<String>::new();
+    while !pending.is_empty() {
+        pending.retain(|index| {
+            !resources
+                .iter()
+                .any(|resource| resource_contains(resource, &plans[*index].0))
+        });
+        if pending.is_empty() {
+            break;
+        }
+        let roots = pending
+            .iter()
+            .copied()
+            .filter(|index| {
+                !pending.iter().any(|other| {
+                    plans[*other].1.as_ref().is_ok_and(|references| {
+                        references
+                            .iter()
+                            .any(|resource| resource_contains(resource, &plans[*index].0))
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        if roots.is_empty() {
+            return Err(crate::error::AppError::new(
+                "DATA_DIR_RESOURCE_CONFLICT",
+                "同一文件或目录同时被用作配置和资源，无法安全迁移",
+            )
+            .with_hint("请将密钥、模板或提示文本放在独立资源文件中；原配置和数据均已保留。"));
+        }
+        for index in &roots {
+            resources.extend(
+                plans[*index]
+                    .1
+                    .as_ref()
+                    .map_err(Clone::clone)?
+                    .iter()
+                    .cloned(),
+            );
+        }
+        pending.retain(|index| !roots.contains(index));
+    }
+    resources.sort();
+    resources.dedup();
+    Ok(resources)
+}
+
+fn migration_config_files(
+    root: &Path,
+    directory: &Path,
+    files: &mut Vec<PathBuf>,
+) -> crate::error::Result<()> {
     for entry in std::fs::read_dir(directory)? {
         let entry = entry?;
         let path = entry.path();
@@ -1033,7 +1192,7 @@ fn rebase_config_files(
         }
         let metadata = entry.metadata()?;
         if metadata.is_dir() {
-            rewritten += rebase_config_files(root, &path, rebase)?;
+            migration_config_files(root, &path, files)?;
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_lowercase();
@@ -1053,35 +1212,11 @@ fn rebase_config_files(
                     "conf" | "cnf" | "ini" | "cfg" | "properties" | "cmd" | "bat" | "ps1" | "sh"
                 ))
             || name == ".niceenv-package.json";
-        if !config {
-            continue;
-        }
-        if metadata.len() > 16 * 1024 * 1024 {
-            return Err(crate::error::AppError::new(
-                "DATA_DIR_CONFIG_SIZE",
-                format!("配置文件过大，无法自动检查：{}", relative.display()),
-            ));
-        }
-        let bytes = std::fs::read(&path)?;
-        let Ok(text) = std::str::from_utf8(&bytes) else {
-            // 二进制凭据/缓存保持字节不变；旧路径出现在非 UTF-8 配置时不能假装完成。
-            if rebase.patterns.is_match(&String::from_utf8_lossy(&bytes)) {
-                return Err(crate::error::AppError::new(
-                    "DATA_DIR_CONFIG_ENCODING",
-                    format!("配置不是 UTF-8，无法修正旧路径：{}", relative.display()),
-                ));
-            }
-            continue;
-        };
-        let rebased = rebase
-            .config_text(relative, text)
-            .map_err(|e| e.with_detail(relative.display().to_string()))?;
-        if rebased != text {
-            std::fs::write(&path, rebased)?;
-            rewritten += 1;
+        if config {
+            files.push(path);
         }
     }
-    Ok(rewritten)
+    Ok(())
 }
 
 fn read_path_history(base: &Path) -> io::Result<Vec<PathBuf>> {
@@ -2798,12 +2933,49 @@ mod tests {
         }
         store.set_setting("mysqlRootPassword", &format!("{old}/secret")).unwrap();
         store.set_setting("pathEnvDirs", &format!(r#"["{old}/runtimes/fixture/1"]"#)).unwrap();
+        let sftpgo = source.join("etc/sftpgo/1");
+        std::fs::create_dir_all(sftpgo.join("templates/invalid")).unwrap();
+        let opaque = format!("{old}/private-value");
+        let fake_config = serde_json::json!({"kms":{"secrets":{"master_key_path":format!("{old}/etc/nginx/nginx.conf")}}}).to_string();
+        for (name, bytes) in [
+            ("templates/banner.conf", opaque.as_bytes()),
+            ("templates/sftpgo.json", fake_config.as_bytes()),
+            (
+                "templates/invalid/sftpgo.json",
+                b"not a configuration".as_slice(),
+            ),
+            ("key.conf", opaque.as_bytes()),
+        ] {
+            std::fs::write(sftpgo.join(name), bytes).unwrap();
+        }
+        let opaque_binary = sftpgo.join("large.pem");
+        let mut binary_resource = std::fs::File::create(&opaque_binary).unwrap();
+        binary_resource
+            .write_all(format!("{old}/opaque\0").as_bytes())
+            .unwrap();
+        binary_resource.set_len(17 * 1024 * 1024).unwrap();
+        drop(binary_resource);
+        let resource_config = format!("shared: &resource\n  templates_path: '{old}/etc/sftpgo/1/templates'\nhttpd:\n  <<: *resource\n  signing_passphrase_file: 'templates/../key.conf'\nsftpd:\n  host_keys: ['large.pem']\n");
+        std::fs::write(sftpgo.join("sftpgo.yaml"), &resource_config).unwrap();
         let conn = rusqlite::Connection::open(paths.db()).unwrap();
         conn.execute("INSERT INTO sites(id,name,domains,root_dir,runtime,https,rewrite,created_at,updated_at) VALUES('site','site','[]',?1,?2,0,'\"none\"',1,2)", rusqlite::params![format!("{old}/www"),serde_json::json!({"kind":"node","cwd":format!("{old}/www"),"command":format!("\"{old}/runtimes/fixture/1/{binary}\""),"custom":"preserve","application":{"version":"1","cwd":format!("{old}/app"),"args":[format!("{old}/app/server.js"),format!("{external}/file"),"literal & ; argument"]}}).to_string()]).unwrap();
         conn.execute("INSERT INTO certs(id,kind,subject,sans,not_before,not_after,cert_path,key_path) VALUES('cert','imported','test','[]',0,1,?1,?2)", rusqlite::params![format!("{old}/certs/site.pem"),format!("{external}/key.pem")]).unwrap();
         let target = temp.path().join("target");
         let result = copy_data_dir(&source, &target).unwrap();
-        assert_eq!(result.rewritten_files, if cfg!(windows) { 2 } else { 1 });
+        assert_eq!(result.rewritten_files, if cfg!(windows) { 3 } else { 2 });
+        for name in [
+            "templates/banner.conf",
+            "templates/sftpgo.json",
+            "templates/invalid/sftpgo.json",
+            "key.conf",
+            "large.pem",
+        ] {
+            assert_eq!(
+                std::fs::read(target.join("etc/sftpgo/1").join(name)).unwrap(),
+                std::fs::read(sftpgo.join(name)).unwrap(),
+                "{name}"
+            );
+        }
         let new = result.path.clone();
         let copied = crate::store::Store::open(target.join("nsb.sqlite")).unwrap();
         let installed = copied.list_installed().unwrap().remove(0);
@@ -2881,6 +3053,18 @@ mod tests {
             std::fs::read_to_string(&mongo).unwrap(),
             "storage: [ invalid\n"
         );
+        std::fs::write(&mongo, "storage: {}\n").unwrap();
+        let sftpgo = source.join("etc/sftpgo/1/sftpgo.json");
+        std::fs::create_dir_all(sftpgo.parent().unwrap()).unwrap();
+        // 同一文件既是配置又是提示文本时，不能为了通过迁移而改写其中一种用途。
+        let content = serde_json::json!({"sftpd":{"login_banner_file":"sftpgo.json"}}).to_string();
+        std::fs::write(&sftpgo, &content).unwrap();
+        assert_eq!(
+            copy_data_dir(&source, &target).unwrap_err().code,
+            "DATA_DIR_RESOURCE_CONFLICT"
+        );
+        assert!(std::fs::read_dir(&target).unwrap().next().is_none());
+        assert_eq!(std::fs::read_to_string(&sftpgo).unwrap(), content);
     }
 
     #[test]
@@ -2890,7 +3074,7 @@ mod tests {
             std::env::var_os("NSB_STRUCTURED_NATIVE").expect("NSB_STRUCTURED_NATIVE"),
         );
         let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("source");
+        let source = temp.path().join("source data");
         let target = temp.path().join("新 data # [1]");
         let paths = Paths::new(source.clone());
         paths.ensure_dirs().unwrap();
@@ -2911,6 +3095,7 @@ mod tests {
             "etc/qdrant/1",
             "etc/mihomo/providers",
             "etc/sftpgo/1",
+            "etc/sftpgo/1/resources",
             "data/sftpgo",
         ] {
             std::fs::create_dir_all(source.join(directory)).unwrap();
@@ -2942,15 +3127,11 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            source.join("data/sftpgo/banner.txt"),
-            "migrated native banner",
+            source.join("etc/sftpgo/1/resources/banner.txt"),
+            format!("migrated native banner {old}/literal-text"),
         )
         .unwrap();
-        std::fs::write(
-            source.join("data/sftpgo/master.key"),
-            "isolated native migration key",
-        )
-        .unwrap();
+        std::fs::write(source.join("etc/sftpgo/1/resources/master.key"), &secret).unwrap();
         std::fs::create_dir(source.join("data/sftpgo/templates")).unwrap();
         copy_tree(
             &binaries.join("sftpgo/templates"),
@@ -2961,15 +3142,15 @@ mod tests {
         .unwrap();
         let sftpgo = serde_json::json!({
             "data_provider":{"driver":"sqlite","name":format!("{old}/data/sftpgo/accounts.db"),"password":secret,"credentials_path":format!("{old}/data/sftpgo/credentials")},
-            "sftpd":{"bindings":[{"address":"127.0.0.1","port":ssh_port}],"login_banner_file":format!("{old}/data/sftpgo/banner.txt")},
-            "ftpd":{"bindings":[{"address":"127.0.0.1","port":ftp_port}],"banner_file":format!("{old}/data/sftpgo/banner.txt")},
+            "sftpd":{"bindings":[{"address":"127.0.0.1","port":ssh_port}],"login_banner_file":format!("{old}/etc/sftpgo/1/resources/banner.txt")},
+            "ftpd":{"bindings":[{"address":"127.0.0.1","port":ftp_port}],"banner_file":"resources/banner.txt"},
             "webdavd":{"bindings":[{"address":"127.0.0.1","port":dav_port,"enable_https":true,
                 "certificate_file":format!("{old}/data/sftpgo/tls.pem"),"certificate_key_file":format!("{old}/data/sftpgo/tls.key")}]},
             "httpd":{"bindings":[{"port":0}]},
             "smtp":{"templates_path":format!("{old}/data/sftpgo/templates")},
             "http":{"ca_certificates":[format!("{old}/data/sftpgo/tls.pem")],
                 "certificates":[{"cert":format!("{old}/data/sftpgo/tls.pem"),"key":format!("{old}/data/sftpgo/tls.key")}]},
-            "kms":{"secrets":{"master_key_path":format!("{old}/data/sftpgo/master.key")}}
+            "kms":{"secrets":{"master_key_path":format!("{old}/etc/sftpgo/1/resources/master.key")}}
         });
         std::fs::write(
             source.join("etc/sftpgo/1/sftpgo.json"),
@@ -3017,6 +3198,10 @@ mod tests {
         assert!(original_db.len() > 4096);
         drop(store);
         copy_data_dir(&source, &target).unwrap();
+        assert_eq!(
+            std::fs::read(target.join("etc/sftpgo/1/resources/master.key")).unwrap(),
+            secret.as_bytes()
+        );
         assert_eq!(
             std::fs::read(target.join("data/sftpgo/accounts.db")).unwrap(),
             original_db
@@ -3103,7 +3288,10 @@ mod tests {
                 break;
             }
         }
-        assert!(greeting.contains("migrated native banner"), "{greeting}");
+        assert!(
+            greeting.contains(&format!("migrated native banner {old}/literal-text")),
+            "{greeting}"
+        );
         let banner = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         struct Banner(std::sync::Arc<std::sync::Mutex<String>>, String);
         impl russh::client::Handler for Banner {
@@ -3144,7 +3332,10 @@ mod tests {
                     .await
                     .unwrap()
                     .success());
-                assert_eq!(*banner.lock().unwrap(), "migrated native banner");
+                assert_eq!(
+                    *banner.lock().unwrap(),
+                    format!("migrated native banner {old}/literal-text")
+                );
                 connection
                     .disconnect(russh::Disconnect::ByApplication, "done", "en")
                     .await

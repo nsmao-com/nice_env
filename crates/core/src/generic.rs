@@ -347,6 +347,22 @@ pub fn resolve(store: &Store, paths: &Paths, service_id: &str) -> Result<Resolve
     resolve_with_sftpgo_directory(store, paths, service_id, None)
 }
 
+pub(crate) fn sftpgo_migration_cwd(
+    store: &Store,
+    paths: &Paths,
+    directory: PathBuf,
+) -> Result<PathBuf> {
+    // 与启动使用同一份有效安装快照、活动版本和占位符；显式目录启用只读预览。
+    let r = resolve_with_sftpgo_directory(store, paths, "sftpgo", Some(directory))?;
+    let cwd = r
+        .spec
+        .cwd
+        .as_ref()
+        .map(|value| PathBuf::from(expand(value, &r)))
+        .unwrap_or(r.root);
+    std::path::absolute(cwd).map_err(|error| AppError::io("解析 SFTPGo 工作目录", error))
+}
+
 /// 显式目录只供选择前的只读检查，不能创建目录或绕过路径检查。
 fn resolve_with_sftpgo_directory(store: &Store, paths: &Paths, service_id: &str, directory: Option<PathBuf>) -> Result<Resolved> {
     let entry = manifest_entry_for(store, service_id).ok_or_else(|| {
@@ -3132,6 +3148,42 @@ mod startup_tests {
             let directory = state.paths.etc_dir("sftpgo", version);
             assert_eq!(std::fs::read_to_string(directory.join("accounts.db")).unwrap(), version);
             assert_eq!(std::fs::read_to_string(directory.join("identity")).unwrap(), format!("key-{version}"));
+        }
+        let mut custom = r.entry.clone();
+        custom.run.as_mut().unwrap().cwd = Some("{etc}/resources".into());
+        std::fs::write(
+            PathBuf::from(&r.inst.install_path).join(".niceenv-package.json"),
+            serde_json::to_vec(&custom).unwrap(),
+        )
+        .unwrap();
+        let readonly = Store::open_read_only(state.paths.db()).unwrap();
+        let preview = state.paths.etc_dir("sftpgo", "migration-preview");
+        assert_eq!(
+            sftpgo_migration_cwd(&readonly, &state.paths, preview.clone()).unwrap(),
+            preview.join("resources")
+        );
+        assert!(!preview.exists(), "只读解析不能创建目录");
+        let secret = format!(
+            "{}/literal-secret",
+            crate::paths::portable_path_text(&state.paths.base)
+        );
+        for version in ["2.7.4", "2.7.5"] {
+            let directory = state.paths.etc_dir("sftpgo", version);
+            std::fs::create_dir(directory.join("resources")).unwrap();
+            std::fs::write(directory.join("resources/master.key"), &secret).unwrap();
+            std::fs::write(directory.join("sftpgo.json"), r#"{"data_provider":{"driver":"bolt","name":"accounts.db"},"kms":{"secrets":{"master_key_path":"master.key"}}}"#).unwrap();
+        }
+        let migration = tempfile::tempdir().unwrap();
+        let target = migration.path().join("migration destination");
+        crate::paths::copy_data_dir(&state.paths.base, &target).unwrap();
+        for version in ["2.7.4", "2.7.5"] {
+            assert_eq!(
+                std::fs::read_to_string(
+                    target.join(format!("etc/sftpgo/{version}/resources/master.key"))
+                )
+                .unwrap(),
+                secret
+            );
         }
     }
 

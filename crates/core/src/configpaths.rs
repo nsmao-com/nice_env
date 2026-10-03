@@ -284,6 +284,71 @@ fn rebase_field(
     }
 }
 
+pub(crate) struct ResourcePath {
+    pub path: std::path::PathBuf,
+    pub relative_to_config: bool,
+}
+
+/// SFTPGo 的这些字段引用文件/目录内容，而不是需要继续改写的配置。
+/// 先展开 YAML merge/alias；资源即使名为 sftpgo.json，也必须按声明的用途保留。
+pub(crate) fn sftpgo_resources(source: &str, json: bool) -> Result<Vec<ResourcePath>> {
+    let mut root = parse(source, json)?;
+    if !json {
+        root.apply_merge().map_err(|_| invalid())?;
+    }
+    fn visit(
+        value: &Value,
+        path: &mut Vec<String>,
+        root: &Value,
+        out: &mut Vec<ResourcePath>,
+    ) -> Result<()> {
+        if path.len() > 128 {
+            return Err(invalid());
+        }
+        match value {
+            Value::String(value) if !value.is_empty() && path_field("sftpgo", path, root) => {
+                let connection = path == &["data_provider", "connection_string"];
+                let file = if connection {
+                    sqlite_connection_path(value)?
+                } else if path == &["data_provider", "name"] && value == ":memory:" {
+                    None
+                } else {
+                    Some(value.into())
+                };
+                if let Some(file) = file {
+                    out.push(ResourcePath {
+                        path: file,
+                        relative_to_config: !connection
+                            && path != &["kms", "secrets", "master_key_path"]
+                            && path != &["common", "temp_path"]
+                            && path != &["acme", "http01_challenge", "webroot"],
+                    });
+                }
+            }
+            Value::Mapping(values) => {
+                for (key, value) in values {
+                    path.push(key.as_str().unwrap_or("\0").into());
+                    visit(value, path, root, out)?;
+                    path.pop();
+                }
+            }
+            Value::Sequence(values) => {
+                path.push("*".into());
+                for value in values {
+                    visit(value, path, root, out)?;
+                }
+                path.pop();
+            }
+            Value::Tagged(tag) => visit(&tag.value, path, root, out)?,
+            _ => {}
+        }
+        Ok(())
+    }
+    let mut resources = Vec::new();
+    visit(&root, &mut Vec::new(), &root, &mut resources)?;
+    Ok(resources)
+}
+
 fn parse(source: &str, json: bool) -> Result<Value> {
     if json {
         serde_json::from_str::<serde_json::Value>(source).map_err(|_| invalid())?;

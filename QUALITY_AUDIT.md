@@ -93,3 +93,11 @@ v0.2.247 远程 macOS 验证仍失败，Release 的三平台前置门槛已拦�
 本地核心完整回归再次通过：core 736、集成 45、platform 15，54 项 ignored；桌面端编译检查及 Rust 改动行格式检查通过。之后的终端和计划任务变更分别完成对应回归。补齐此前漏同步的 `packages/schema/package.json` 版本，并在发布流程检查全部工作区 package 版本。
 
 本批没有数据库变更，未修改 `update.sql`，整体复查继续进行。
+
+## 2026-10-03：v0.2.249 终端脚本兼容
+
+v0.2.248 的 Windows、Linux、Web 检查通过，Windows Release 前置验证也通过。macOS Intel 与 ARM64 均为 726 项通过、1 项失败、44 项 ignored；唯一剩余失败为终端 PATH 脚本。两个平台完整日志均定位到命令替换中剩余的 `case` 分支解析错误，Release 安装包因此跳过。
+
+将剩余分隔符判断改为当前剩余字符串与取出的首项比较，消除命令替换中的 `case`，仍保留空 PATH 项、字面路径和重复应用幂等性。本地现有终端回归与改动行格式检查通过；macOS sh/zsh 结果以本版本真实 runner 为准。
+
+本批没有数据库变更，未修改 `update.sql`，未新增测试文件或运行前端 dev/build。整体质量复查仍在进行。

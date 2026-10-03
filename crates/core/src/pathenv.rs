@@ -594,10 +594,10 @@ fn render_terminal_script(dirs: &[String], windows: bool) -> Result<String> {
       if [ "$nsb_selected" = 0 ]; then
         nsb_result=$nsb_result:$nsb_item
       fi
-      case "$nsb_rest" in
-        *:*) nsb_rest=${{nsb_rest#*:}} ;;
-        *) break ;;
-      esac
+      if [ "$nsb_rest" = "$nsb_item" ]; then
+        break
+      fi
+      nsb_rest=${{nsb_rest#*:}}
     done
   fi
   printf '%s.' "$nsb_result"

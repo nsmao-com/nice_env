@@ -1,6 +1,6 @@
 {
   "name": "@nsb/schema",
-  "version": "0.2.248",
+  "version": "0.2.249",
   "private": true,
   "main": "./src/index.ts",
   "types": "./src/index.ts",

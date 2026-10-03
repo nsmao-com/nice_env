@@ -3032,13 +3032,31 @@ mod startup_tests {
     #[test]
     fn sftpgo_preserves_provider_custom_resources_and_rejects_bad_configuration() {
         let (_temp, state, r) = fixture("sftpgo");
+        std::fs::create_dir_all(r.root.join("static")).unwrap();
+        std::fs::write(r.root.join("static/probe.txt"), "resource contents").unwrap();
         let content = "{\"data_provider\":{\"driver\":\"bolt\",\"name\":\"kept.db\"},\"httpd\":{\"templates_path\":\"custom-templates\"}}\n";
         std::fs::write(r.root.join("sftpgo.json"), content).unwrap();
         let config = prepare_sftpgo(&state.store, &state.paths, &r).unwrap();
         assert_eq!(std::fs::read_to_string(&config.file).unwrap(), content);
-        assert!(config.env.iter().all(|(key, _)| key != "SFTPGO_HTTPD__TEMPLATES_PATH"));
-        assert!(config.env.iter().all(|(key, _)| !key.starts_with("SFTPGO_DATA_PROVIDER")));
-        assert!(config.env.iter().any(|(key, value)| key == "SFTPGO_HTTPD__STATIC_FILES_PATH" && value == &r.root.join("static").to_string_lossy()));
+        assert!(config
+            .env
+            .iter()
+            .all(|(key, _)| key != "SFTPGO_HTTPD__TEMPLATES_PATH"));
+        assert!(config
+            .env
+            .iter()
+            .all(|(key, _)| !key.starts_with("SFTPGO_DATA_PROVIDER")));
+        let static_path = &config
+            .env
+            .iter()
+            .find(|(key, _)| key == "SFTPGO_HTTPD__STATIC_FILES_PATH")
+            .unwrap()
+            .1;
+        assert!(!static_path.contains("//?/"));
+        assert_eq!(
+            std::fs::read_to_string(std::path::Path::new(static_path).join("probe.txt")).unwrap(),
+            "resource contents"
+        );
         std::fs::write(r.root.join("sftpgo.json"), "{}").unwrap();
         assert_eq!(std::fs::read_to_string(prepare_sftpgo(&state.store, &state.paths, &r).unwrap().file).unwrap(), content);
         std::fs::write(&config.file, "{broken").unwrap();

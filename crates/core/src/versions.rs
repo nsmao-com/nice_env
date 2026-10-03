@@ -356,8 +356,8 @@ pub async fn catalog(
         "{src:?}:{:?}:{:?}:{}:{}",
         template.os, template.arch, template.entry, template.kind
     );
-    // v4 重新枚举旧排序结果，同时废弃缺少 Apache 官方 SHA256 的更早缓存。
-    let cache_revision = "v4";
+    // v5 废弃旧 macOS Intel 源误返回的 ARM64 下载记录，按目标架构重新枚举。
+    let cache_revision = "v5";
     let cache_key = format!(
         "versionCatalog:{cache_revision}:{}:{:x}",
         template.id,

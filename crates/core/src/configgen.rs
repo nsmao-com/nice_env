@@ -436,9 +436,10 @@ pub fn render_nginx_conf(
     let adminer_loc = match (adminer_path.filter(|p| p.exists()), php_pools.first()) {
         (Some(p), Some((ver, _))) => {
             let upstream = nginx_upstream_name(ver);
-            let file = p.to_string_lossy().replace('\\', "/");
+            let file = nginx_path(p);
+            // 公共参数含 SCRIPT_FILENAME / DOCUMENT_ROOT，Adminer 的固定入口必须在其后覆盖。
             format!(
-                "        location = /_adminer {{ return 302 /_adminer/; }}\n        location /_adminer/ {{\n            allow 127.0.0.1;\n            deny all;\n            fastcgi_pass {upstream};\n            fastcgi_index index.php;\n            fastcgi_param SCRIPT_FILENAME \"{file}\";\n            fastcgi_param DOCUMENT_ROOT \"{dir}\";\n            include {params};\n        }}\n",
+                "        location = /_adminer {{ return 302 /_adminer/; }}\n        location /_adminer/ {{\n            allow 127.0.0.1;\n            deny all;\n            fastcgi_pass {upstream};\n            fastcgi_index index.php;\n            include \"{params}\";\n            fastcgi_param SCRIPT_FILENAME \"{file}\";\n            fastcgi_param DOCUMENT_ROOT \"{dir}\";\n        }}\n",
                 dir = nginx_path(p.parent().unwrap_or(std::path::Path::new("."))),
                 params = nginx_path(&paths.etc().join("nginx").join("fastcgi_params")),
             )

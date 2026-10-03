@@ -23,48 +23,35 @@ impl Paths {
     /// 1. 显式 base（冒烟测试等）
     /// 2. NSB_HOME 环境变量（便携化/调试覆盖）
     /// 3. 用户在设置中确认的数据目录（独立于数据目录保存）
-    /// 4. 安装版：{exe 所在目录}/nsb-data
-    /// 5. 开发环境（cargo target 下运行）：LocalAppData，避免 cargo clean 清掉数据
+    /// 4. Windows 安装版：{exe 所在目录}/nsb-data；其它平台只兼容已有的邻接数据
+    /// 5. macOS / 开发环境：用户应用数据目录，避免应用更新或 cargo clean 清掉数据
     /// 相对路径统一锚定到当前目录（子进程 cwd 各异，绝不能把相对路径写进配置/参数）
     pub fn resolve(base: Option<PathBuf>) -> crate::error::Result<PathBuf> {
         let absolutize = |p: PathBuf| {
-            if p.is_absolute() {
-                p
-            } else {
-                std::env::current_dir().unwrap_or_default().join(p)
-            }
+            std::path::absolute(p).map_err(|e| crate::error::AppError::io("解析数据目录", e))
         };
         if let Some(p) = base {
-            return Ok(absolutize(p));
+            return absolutize(p);
         }
         if let Ok(env) = std::env::var("NSB_HOME") {
             if !env.trim().is_empty() {
-                return Ok(absolutize(PathBuf::from(env)));
+                return absolutize(PathBuf::from(env));
             }
         }
         if let Some(selected) = read_data_dir_selection(&data_dir_selection_file()?)? {
             return Ok(selected);
         }
         if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                let s = dir.to_string_lossy().to_lowercase().replace('\\', "/");
-                let is_dev = s.contains("/target/debug") || s.contains("/target/release");
-                if !is_dev {
-                    let candidate = absolutize(dir.join("nsb-data"));
-                    // 写权限探测（用户可能装到 Program Files 等只读位置）
-                    if std::fs::create_dir_all(&candidate).is_ok() {
-                        let probe = candidate.join(".write-probe");
-                        if std::fs::write(&probe, b"ok").is_ok() {
-                            let _ = std::fs::remove_file(&probe);
-                            return Ok(candidate);
-                        }
-                    }
-                }
+            if let Some(candidate) = adjacent_data_dir(&exe, crate::install::current_os())? {
+                return absolutize(candidate);
             }
         }
         // 产品改名（NiceServBay → NiceEnv）：把旧数据目录整体迁过来，
         // 设置/已装套件/站点注册全都无缝带走；迁移失败（如被占用）就沿用旧目录
-        let data_local = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
+        let data_local = dirs::data_local_dir().ok_or_else(|| {
+            crate::error::AppError::new("DATA_DIR_UNAVAILABLE", "无法确定用户数据目录")
+                .with_hint("请恢复系统用户目录，或通过 NSB_HOME 指定数据目录。")
+        })?;
         let base = data_local.join("NiceEnv");
         if !base.exists() {
             // "niceEnv" 是改名中途短暂的拼写，一并兼容
@@ -206,6 +193,42 @@ impl Paths {
             .join(service_id.replace(['@', ':'], "_"))
             .join("out.log")
     }
+}
+
+/// Windows 保留便携目录；macOS 不能在 .app/Contents/MacOS 内创建新数据。
+/// 旧版已在程序旁保存数据时继续读取，交由设置页的受锁迁移流程搬迁，避免静默丢失。
+fn adjacent_data_dir(executable: &Path, os: &str) -> crate::error::Result<Option<PathBuf>> {
+    let Some(directory) = executable.parent() else {
+        return Ok(None);
+    };
+    let is_dev = directory.ancestors().any(|parent| {
+        matches!(
+            parent.file_name().and_then(|name| name.to_str()),
+            Some("debug" | "release")
+        ) && parent
+            .ancestors()
+            .any(|ancestor| ancestor.file_name().is_some_and(|name| name == "target"))
+    });
+    if is_dev {
+        return Ok(None);
+    }
+    let candidate = directory.join("nsb-data");
+    if os != "windows" {
+        return candidate
+            .join("nsb.sqlite")
+            .try_exists()
+            .map(|exists| exists.then_some(candidate))
+            .map_err(|e| crate::error::AppError::io("检查旧数据目录", e));
+    }
+    if std::fs::create_dir_all(&candidate).is_ok()
+        && tempfile::Builder::new()
+            .prefix(".niceenv-write-probe-")
+            .tempfile_in(&candidate)
+            .is_ok()
+    {
+        return Ok(Some(candidate));
+    }
+    Ok(None)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -408,8 +431,16 @@ pub fn portable_text(value: &str) -> String {
 }
 
 pub fn portable_path_text(path: &Path) -> String {
-    let text = path.to_string_lossy().replace('\\', "/");
-    portable_text(&text)
+    let text = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        portable_text(&text.replace('\\', "/"))
+    }
+    // Unix 的反斜杠是合法文件名字符，不是目录分隔符。
+    #[cfg(not(windows))]
+    {
+        text.into_owned()
+    }
 }
 
 impl DataPathRebase {
@@ -1226,6 +1257,73 @@ pub fn restore_backup_checked(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platform_data_defaults_preserve_legacy_data_and_never_write_inside_new_mac_apps() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("NiceEnv.app/Contents/MacOS/niceservbay");
+        assert!(adjacent_data_dir(&executable, "macos").unwrap().is_none());
+        assert!(!temp.path().join("NiceEnv.app").exists());
+
+        let legacy = executable.parent().unwrap().join("nsb-data");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("nsb.sqlite"), "existing data").unwrap();
+        assert_eq!(
+            adjacent_data_dir(&executable, "macos").unwrap(),
+            Some(legacy.clone())
+        );
+        assert_eq!(
+            std::fs::read_to_string(legacy.join("nsb.sqlite")).unwrap(),
+            "existing data"
+        );
+
+        let installed = temp.path().join("Program Files/NiceEnv/niceservbay.exe");
+        let portable = installed.parent().unwrap().join("nsb-data");
+        std::fs::create_dir_all(&portable).unwrap();
+        std::fs::write(portable.join(".write-probe"), "user contents").unwrap();
+        assert_eq!(
+            adjacent_data_dir(&installed, "windows").unwrap(),
+            Some(portable.clone())
+        );
+        assert_eq!(
+            std::fs::read_to_string(portable.join(".write-probe")).unwrap(),
+            "user contents"
+        );
+        assert_eq!(std::fs::read_dir(portable).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn native_and_cross_target_builds_do_not_store_user_data_under_target() {
+        let temp = tempfile::tempdir().unwrap();
+        for relative in [
+            "target/debug/niceservbay.exe",
+            "target/release/niceservbay.exe",
+            "target/debug/deps/nsbctl.exe",
+            "target/x86_64-pc-windows-msvc/release/nsbctl.exe",
+            "target/aarch64-apple-darwin/release/niceservbay",
+        ] {
+            for os in ["windows", "macos"] {
+                assert!(
+                    adjacent_data_dir(&temp.path().join(relative), os)
+                        .unwrap()
+                        .is_none(),
+                    "{os}: {relative}"
+                );
+            }
+        }
+        assert!(!temp.path().join("target").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_service_paths_preserve_literal_backslashes_in_filenames() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(r"config\archive.json");
+        std::fs::write(&path, "unchanged").unwrap();
+        let argument = portable_path_text(&path);
+        assert_eq!(std::fs::read_to_string(&argument).unwrap(), "unchanged");
+        assert_eq!(argument, path.to_string_lossy());
+    }
 
     fn fixture() -> (tempfile::TempDir, Paths) {
         let temp = tempfile::tempdir().unwrap();

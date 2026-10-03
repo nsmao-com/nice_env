@@ -1,7 +1,7 @@
 {
-  "revision": 11,
-  "updated": "2026-09-30",
-  "note": "macOS 清单（aarch64/x86_64；MongoDB Shell / Database Tools 提供双架构，其余条目为 arm64 构建）。当前仅收录已在源头验证可达（HTTP 206/200）的二进制；PHP/Nginx/Redis 的 macOS 官方二进制不存在或需源码编译，候选源见 README「在 macOS 上构建」章节，待 mac 端验证后补入。",
+  "revision": 12,
+  "updated": "2026-10-03",
+  "note": "macOS 清单（arm64/x64）；已核对所列包的官方来源。新增 Intel 套件已核对实际 Mach-O 架构、入口及 SHA256，运行兼容性仍需对应 macOS 验证；MySQL 8.4.11 的官方构建要求 macOS 15。PHP/Nginx/Redis 尚无已验收的 macOS 二进制，候选源见 README「在 macOS 上构建」章节。",
   "packages": [
     {
       "id": "mongosh",
@@ -172,7 +172,7 @@
       "arch": [
         "arm64"
       ],
-      "kind": "archive",
+      "kind": "targz",
       "url": "https://github.com/nats-io/nats-server/releases/download/v2.15.0/nats-server-v2.15.0-darwin-arm64.tar.gz",
       "sha256": "e1c4e22d70bd44abfa0bcb3c16f7cf0c66f648c2e728c58924e8a1ce88913cc8",
       "sizeBytes": 6732089,
@@ -355,7 +355,7 @@
       "url": "https://fastdl.mongodb.org/osx/mongodb-macos-arm64-9.0.2.tgz",
       "sha256": "9a30e942877445dc143d83671eba6cda2ec93a99160c8a8de57595853dc76de3",
       "sizeBytes": 0,
-      "entry": "mongodb-macos-arm64-9.0.2/bin/mongod",
+      "entry": "mongodb-macos-aarch64--9.0.2/bin/mongod",
       "defaultPort": 28017,
       "run": {
         "args": [
@@ -387,7 +387,7 @@
       "url": "https://fastdl.mongodb.org/osx/mongodb-macos-arm64-8.0.4.tgz",
       "sha256": "219e3b3d7b31c049ff7bcf7470d38eff704e56df2ac18d4df78425e2985ccf58",
       "sizeBytes": 82223795,
-      "entry": "mongodb-macos-arm64-8.0.4/bin/mongod",
+      "entry": "mongodb-macos-aarch64-8.0.4/bin/mongod",
       "defaultPort": 28017,
       "run": {
         "args": [
@@ -512,7 +512,7 @@
       "url": "https://fastdl.mongodb.org/osx/mongodb-macos-arm64-7.0.24.tgz",
       "sha256": "31854a6632332ac5fbac2b601ee46ca5af2937a84caa70b18c0d8436ce982c1f",
       "sizeBytes": 69447167,
-      "entry": "mongodb-macos-arm64-7.0.24/bin/mongod",
+      "entry": "mongodb-macos-aarch64-7.0.24/bin/mongod",
       "homepage": "https://www.mongodb.com",
       "defaultPort": 28017,
       "run": {
@@ -711,7 +711,7 @@
       "kind": "targz",
       "url": "https://fastdl.mongodb.org/osx/mongodb-macos-arm64-8.3.11.tgz",
       "sizeBytes": 0,
-      "entry": "mongodb-macos-arm64-8.3.11/bin/mongod",
+      "entry": "mongodb-macos-aarch64--8.3.11/bin/mongod",
       "defaultPort": 28017,
       "run": {
         "args": [
@@ -798,6 +798,210 @@
         "singleInstance": false,
         "dataDir": "mysql"
       }
+    },
+    {
+      "id": "mysql",
+      "version": "8.4.11",
+      "category": "database",
+      "displayName": "MySQL 8.4.11",
+      "description": "关系型数据库（utf8mb4），数据保存在应用数据目录，独立于系统（Intel，官方 macOS 15 构建）",
+      "homepage": "https://mysql.com",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "targz",
+      "url": "https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-8.4.11-macos15-x86_64.tar.gz",
+      "sizeBytes": 171974960,
+      "entry": "mysql-8.4.11-macos15-x86_64/bin/mysqld",
+      "defaultPort": 23306,
+      "run": {
+        "args": [],
+        "singleInstance": false,
+        "dataDir": "mysql"
+      },
+      "sha256": "90e8aea10698d01b978f0179e72e8d5e2cbe9f9bd5771e88b0b75d7c82244d3f"
+    },
+    {
+      "id": "mongodb",
+      "version": "8.3.11",
+      "category": "database",
+      "displayName": "MongoDB 8.3.11",
+      "description": "文档数据库（官方 tgz 发行）",
+      "homepage": "https://www.mongodb.com",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "targz",
+      "url": "https://fastdl.mongodb.org/osx/mongodb-macos-x86_64-8.3.11.tgz",
+      "sizeBytes": 97291515,
+      "entry": "mongodb-macos-x86_64--8.3.11/bin/mongod",
+      "defaultPort": 28017,
+      "run": {
+        "args": [
+          "--dbpath",
+          "{data}",
+          "--port",
+          "{port}",
+          "--bind_ip",
+          "127.0.0.1"
+        ],
+        "singleInstance": true,
+        "dataDir": "mongodb"
+      },
+      "sha256": "45b4a7913c1384d4b3ce32c81630a5c0e1993de2f6119f511995ec2324dec5c9"
+    },
+    {
+      "id": "mihomo",
+      "version": "1.19.31",
+      "category": "tool",
+      "displayName": "mihomo (Clash 内核)",
+      "description": "代理内核：规则分流 / 全局 / 直连，节点测速与系统代理",
+      "homepage": "https://github.com/MetaCubeX/mihomo",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "targz",
+      "url": "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.31/mihomo-darwin-amd64-v1.19.31.gz",
+      "sizeBytes": 22216816,
+      "entry": "mihomo-darwin-amd64-v1.19.31",
+      "defaultPort": 17890,
+      "run": {
+        "args": [
+          "-d",
+          "{root}",
+          "-f",
+          "{etc}/config.yaml"
+        ],
+        "singleInstance": true
+      },
+      "versionSource": {
+        "kind": "github",
+        "repo": "MetaCubeX/mihomo",
+        "tagPrefix": "v",
+        "assetMatch": "^mihomo-darwin-amd64-v[\\d.]+\\.gz$",
+        "entryTemplate": "mihomo-darwin-amd64-v{version}",
+        "maxVersions": 40
+      },
+      "sha256": "3546681ebef3415e5dcbe7210a61aa80748136e95e6552768fd883df345508ed"
+    },
+    {
+      "id": "go",
+      "version": "1.27.1",
+      "category": "runtime",
+      "displayName": "Go 1.27.1",
+      "description": "Go 工具链（go/gofmt）",
+      "homepage": "https://go.dev",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "targz",
+      "url": "https://go.dev/dl/go1.27.1.darwin-amd64.tar.gz",
+      "sizeBytes": 71621873,
+      "entry": "go/bin/go",
+      "versionSource": {
+        "kind": "go",
+        "entryTemplate": "go/bin/go",
+        "maxVersions": 60
+      },
+      "sha256": "8f8f52c6649542cf027bbc9b9c68d1ec042f9f34808a40413f0b8b3f66f3caa4"
+    },
+    {
+      "id": "node",
+      "version": "24.21.0",
+      "category": "runtime",
+      "displayName": "Node.js 24.21.0 LTS",
+      "description": "Node.js 运行时（node/npm/npx）",
+      "homepage": "https://nodejs.org",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "targz",
+      "url": "https://nodejs.org/dist/v24.21.0/node-v24.21.0-darwin-x64.tar.gz",
+      "sizeBytes": 54203979,
+      "entry": "node-v24.21.0-darwin-x64/bin/node",
+      "versionSource": {
+        "kind": "nodejs",
+        "entryTemplate": "node-v{version}-darwin-x64/bin/node",
+        "maxVersions": 60
+      },
+      "sha256": "1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097"
+    },
+    {
+      "id": "composer",
+      "version": "2.10.3",
+      "category": "tool",
+      "displayName": "Composer 2.10.3",
+      "description": "PHP 依赖管理器（php composer.phar）",
+      "homepage": "https://getcomposer.org",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "binary",
+      "url": "https://getcomposer.org/download/2.10.3/composer.phar",
+      "sizeBytes": 3642137,
+      "entry": "composer.phar",
+      "depends": [
+        "php"
+      ],
+      "sha256": "7a2d379d5b8ffdaa028580ef26494c36d2feef4b178d3dd1473a4dbc5e17c8d6"
+    },
+    {
+      "id": "nats",
+      "version": "2.15.0",
+      "category": "other",
+      "displayName": "NATS",
+      "description": "轻量消息服务，启用 JetStream 持久化；默认仅监听本机",
+      "homepage": "https://nats.io",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "targz",
+      "url": "https://github.com/nats-io/nats-server/releases/download/v2.15.0/nats-server-v2.15.0-darwin-amd64.tar.gz",
+      "sizeBytes": 7291277,
+      "entry": "nats-server-v2.15.0-darwin-amd64/nats-server",
+      "defaultPort": 4222,
+      "run": {
+        "args": [
+          "--addr",
+          "127.0.0.1",
+          "--port",
+          "{port}",
+          "--jetstream",
+          "--store_dir",
+          "{data}"
+        ],
+        "singleInstance": true,
+        "defaultPort": 4222
+      },
+      "versionSource": {
+        "kind": "github",
+        "repo": "nats-io/nats-server",
+        "tagPrefix": "v",
+        "assetMatch": "^nats-server-v[\\d.]+-darwin-amd64\\.tar\\.gz$",
+        "entryTemplate": "nats-server-v{version}-darwin-amd64/nats-server"
+      },
+      "sha256": "5bd8b59ca5bf93fab3da2c5843cf564cd6e2e291e22ae3b861746e7ebe259b95"
     }
   ]
 }

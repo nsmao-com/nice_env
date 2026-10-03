@@ -2021,7 +2021,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    #[ignore = "requires NSB_NGINX_ROOT; runs only nginx -t against temporary configs"]
+    #[ignore = "requires NSB_NGINX_ROOT and NSB_PHP_ROOT; validates temporary configs and serves isolated Adminer PHP"]
     fn native_nginx_validator_uses_selected_runtime_and_preserves_live_file() {
         let source = PathBuf::from(std::env::var("NSB_NGINX_ROOT").expect("NSB_NGINX_ROOT"));
         let version = source
@@ -2087,6 +2087,130 @@ mod tests {
                 .file_name()
                 .to_string_lossy()
                 .starts_with(".nsb-validate-")));
+
+        // 安装 Adminer 后也要验证完整配置：canonicalize 会产生 Windows 扩展前缀，
+        // 数据目录含空格时 include 和 SCRIPT_FILENAME 都必须仍可被 Nginx 读取。
+        let adminer_base = paths.base.join("Adminer data with spaces");
+        std::fs::create_dir_all(&adminer_base).unwrap();
+        let adminer_paths = Paths::new(std::fs::canonicalize(adminer_base).unwrap());
+        adminer_paths.ensure_dirs().unwrap();
+        let adminer = adminer_paths.runtime_dir("adminer", "6.1.1");
+        std::fs::create_dir_all(&adminer).unwrap();
+        std::fs::write(adminer.join("adminer.php"), "<?php echo json_encode(['marker'=>'fixture','file'=>__FILE__,'root'=>$_SERVER['DOCUMENT_ROOT'],'query'=>$_GET['probe']]);").unwrap();
+        std::fs::create_dir_all(root.join("conf")).unwrap();
+        std::fs::copy(source.join("conf/mime.types"), root.join("conf/mime.types")).unwrap();
+        let reserved = loop {
+            let first = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = first.local_addr().unwrap().port();
+            if base > 65000 {
+                continue;
+            }
+            let mut held = vec![first];
+            for port in base + 1..base + 4 {
+                if let Ok(listener) = std::net::TcpListener::bind(("127.0.0.1", port)) {
+                    held.push(listener);
+                }
+            }
+            if held.len() == 4 {
+                break held;
+            }
+        };
+        let php_port = reserved[0].local_addr().unwrap().port();
+        let http = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let https = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let http_port = http.local_addr().unwrap().port();
+        crate::configgen::write_nginx_conf(
+            &adminer_paths,
+            &root,
+            &[("8.4.26".into(), php_port)],
+            http_port,
+            https.local_addr().unwrap().port(),
+            None,
+        )
+        .unwrap();
+        let generated = std::fs::read_to_string(adminer_paths.nginx_conf()).unwrap();
+        assert!(!generated.contains("//?/"), "{generated}");
+        drop((http, https));
+        crate::configgen::validate_nginx(&root.join("nginx.exe"), &adminer_paths.nginx_conf())
+            .unwrap();
+        struct Children(Vec<std::process::Child>, platform::ProcessGroup);
+        impl Drop for Children {
+            fn drop(&mut self) {
+                for child in &mut self.0 {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+        let php_root = PathBuf::from(std::env::var("NSB_PHP_ROOT").expect("NSB_PHP_ROOT"));
+        let mut children = Children(Vec::new(), platform::ProcessGroup::new().unwrap());
+        drop(reserved);
+        for port in php_port..php_port + 4 {
+            let child = platform::command(php_root.join("php-cgi.exe"))
+                .args([
+                    "-n",
+                    "-d",
+                    "cgi.force_redirect=0",
+                    "-b",
+                    &format!("127.0.0.1:{port}"),
+                ])
+                .current_dir(&php_root)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            children.0.push(child);
+            children.1.attach(children.0.last().unwrap().id()).unwrap();
+        }
+        let child = platform::command(root.join("nginx.exe"))
+            .args([
+                "-p",
+                &crate::paths::portable_path_text(&root),
+                "-c",
+                &crate::paths::portable_path_text(&adminer_paths.nginx_conf()),
+                "-g",
+                "daemon off; master_process off;",
+            ])
+            .current_dir(&root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        children.0.push(child);
+        children.1.attach(children.0.last().unwrap().id()).unwrap();
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let response = loop {
+            if let Ok(response) = client
+                .get(format!("http://127.0.0.1:{http_port}/_adminer/?probe=ok"))
+                .send()
+            {
+                break response;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "isolated Nginx did not start"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        };
+        let status = response.status();
+        let body = response.text().unwrap();
+        assert!(status.is_success(), "Adminer HTTP {status}: {body}");
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["marker"], "fixture");
+        assert_eq!(body["query"], "ok");
+        assert_eq!(
+            crate::paths::portable_path_text(Path::new(body["file"].as_str().unwrap())),
+            crate::paths::portable_path_text(&adminer.join("adminer.php"))
+        );
+        assert_eq!(
+            crate::paths::portable_path_text(Path::new(body["root"].as_str().unwrap())),
+            crate::paths::portable_path_text(&adminer)
+        );
         println!("Nginx {version}: actual -t accepts quoted #/braces and multiline directives, rejects invalid line 2, preserves current config, removes temporary validation files");
     }
 

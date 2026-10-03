@@ -285,7 +285,11 @@ pub(super) async fn fetch(
                 }
                 for file in rows(&row["downloads"]) {
                     let target = if mac(template) { "macos" } else { "windows" };
-                    let arch = if mac(template) { "arm64" } else { "x86_64" };
+                    let arch = if template.arch.iter().any(|arch| arch == "arm64") {
+                        "arm64"
+                    } else {
+                        "x86_64"
+                    };
                     if file["target"] != target || file["arch"] != arch || file["edition"] != "base"
                     {
                         continue;
@@ -378,8 +382,11 @@ pub(super) async fn fetch(
             .buffer_unordered(3)
             .collect::<Vec<_>>()
             .await;
-            let pattern = if mac(template) {
+            let mac_arm = mac(template) && template.arch.iter().any(|arch| arch == "arm64");
+            let pattern = if mac_arm {
                 r"mysql-(\d+\.\d+\.\d+)-macos\d+-arm64\.tar\.gz"
+            } else if mac(template) {
+                r"mysql-(\d+\.\d+\.\d+)-macos\d+-x86_64\.tar\.gz"
             } else {
                 r"mysql-(\d+\.\d+\.\d+)-winx64\.zip"
             };
@@ -401,10 +408,23 @@ pub(super) async fn fetch(
                     out.push(r);
                 }
             }
-            let file = if mac(template) { "mysql-8.2.0-macos13-arm64.tar.gz" } else { "mysql-8.2.0-winx64.zip" };
-            let mut archived = release(src, template, "8.2.0", &format!("https://cdn.mysql.com/archives/mysql-8.2/{file}"));
+            let file = if mac_arm {
+                "mysql-8.2.0-macos13-arm64.tar.gz"
+            } else if mac(template) {
+                "mysql-8.2.0-macos13-x86_64.tar.gz"
+            } else {
+                "mysql-8.2.0-winx64.zip"
+            };
+            let mut archived = release(
+                src,
+                template,
+                "8.2.0",
+                &format!("https://cdn.mysql.com/archives/mysql-8.2/{file}"),
+            );
             archived.note = Some("Oracle 官方历史归档；8.2 为已结束支持的 Innovation 分支".into());
-            if mac(template) { archived.entry = "mysql-8.2.0-macos13-arm64/bin/mysqld".into(); }
+            if mac(template) {
+                archived.entry = format!("{}/bin/mysqld", file.trim_end_matches(".tar.gz"));
+            }
             out.push(archived);
         }
         "postgresql" => {

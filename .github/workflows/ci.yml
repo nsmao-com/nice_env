@@ -7,6 +7,44 @@ on:
   pull_request:
 
 jobs:
+  # 在实际目标系统执行，而不是把 Linux 测试或跨架构编译当作平台验收。
+  platform-core:
+    name: Core runtime (${{ matrix.os }})
+    # 发版时分支和 tag 一起推送，平台矩阵只执行分支对应的一次。
+    if: github.ref_type != 'tag'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-15-intel, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: platform-core-${{ matrix.os }}
+      - name: Run core and platform tests
+        shell: bash
+        env:
+          CARGO_TERM_COLOR: never
+        run: |
+          set +e
+          cargo test --locked -p nsb-core -p platform --no-fail-fast -- --test-threads=1 2>&1 | tee platform-core.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            summary=$(grep -E 'panicked at|^test .* FAILED|^test result:|^error:|assertion failed|left:|right:' platform-core.log | tr '\r\n' ' ' | sed 's/%/%25/g' | cut -c1-3500)
+            echo "::error title=平台测试失败::${summary}"
+          fi
+          exit "$status"
+      - name: Preserve platform verification log
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: platform-core-${{ matrix.os }}
+          path: platform-core.log
+          if-no-files-found: warn
+
   # ---------- 前端：Next.js 静态导出 ----------
   web:
     name: Web (Next.js)

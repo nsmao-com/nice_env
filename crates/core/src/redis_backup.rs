@@ -799,7 +799,31 @@ pub fn preview(
     id: &str,
 ) -> Result<RedisRestorePreview> {
     let backup = verified(paths, id)?;
-    if !crate::install::same_version(&backup.version, version) {
+    let same_version = if crate::install::same_version(&backup.version, version) {
+        true
+    } else if crate::ops::installed_by_choice(store, "redis")
+        .is_some_and(|package| crate::install::same_version(&package.version, version))
+    {
+        // 外部 RDB 记录的是服务端真实版本，Windows 包名可能省略第四段修订号。
+        // 仅当当前二进制明确报告同一版本才允许恢复，不能按主版本推测兼容性。
+        let (_, executable) = crate::ops::redis_paths(store)?;
+        let mut command = platform::command(&executable);
+        command.arg("--version");
+        if let Some(directory) = executable.parent() {
+            command.current_dir(directory);
+        }
+        let (ok, output) = crate::cfgeditor::run_validator_with_timeout(
+            &mut command,
+            std::time::Duration::from_secs(15),
+        )?;
+        ok && output
+            .split_whitespace()
+            .find_map(|word| word.strip_prefix("v="))
+            .is_some_and(|actual| crate::install::same_version(actual, &backup.version))
+    } else {
+        false
+    };
+    if !same_version {
         return Err(AppError::new(
             "REDIS_RESTORE_VERSION",
             "请切换到生成此备份的 Redis 版本后再恢复，避免 RDB 格式不兼容",

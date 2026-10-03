@@ -686,6 +686,103 @@ mod tests {
     use super::*;
 
     #[test]
+    fn acme_posts_send_jose_headers_for_account_order_and_post_as_get() {
+        use std::io::{BufRead, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/acme", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for index in 0..3 {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    if let Ok((stream, _)) = listener.accept() {
+                        break stream;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "ACME request not received"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut input = std::io::BufReader::new(&mut stream);
+                let mut line = String::new();
+                input.read_line(&mut line).unwrap();
+                assert_eq!(line, "POST /acme HTTP/1.1\r\n");
+                let mut length = 0;
+                let mut types = Vec::new();
+                loop {
+                    line.clear();
+                    assert!(input.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    let (name, value) = line.split_once(':').unwrap();
+                    if name.eq_ignore_ascii_case("content-type") {
+                        types.push(value.trim().to_owned());
+                    }
+                    if name.eq_ignore_ascii_case("content-length") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                assert_eq!(types, ["application/jose+json"]);
+                let mut body = vec![0; length];
+                input.read_exact(&mut body).unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let protected: serde_json::Value = serde_json::from_slice(
+                    &B64URL.decode(body["protected"].as_str().unwrap()).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(protected.get("jwk").is_some(), index == 0);
+                assert_eq!(protected.get("kid").is_some(), index != 0);
+                assert_eq!(body["payload"].as_str().unwrap().is_empty(), index == 2);
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                    )
+                    .unwrap();
+            }
+        });
+        let (account, _) = AccountKey::generate().unwrap();
+        let mut client = AcmeClient {
+            http: reqwest::blocking::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(3))
+                .build()
+                .unwrap(),
+            dir: serde_json::Value::Null,
+            account,
+            kid: "https://ca.example/account/1".into(),
+            nonce: None,
+            pending_order_url: None,
+        };
+        for (index, payload) in [
+            serde_json::json!({"termsOfServiceAgreed": true}),
+            serde_json::json!({"identifiers": []}),
+            serde_json::Value::Null,
+        ]
+        .iter()
+        .enumerate()
+        {
+            client.nonce = Some("fixture-nonce".into());
+            assert!(client
+                .jws_post_once(&url, payload, index == 0)
+                .unwrap()
+                .status()
+                .is_success());
+        }
+        server.join().unwrap();
+        let error = acme_error(
+            r#"{"type":"urn:ietf:params:acme:error:malformed","detail":"Invalid Content-Type header on POST. Content-Type must be application/jose+json"}"#,
+            "注册 ACME 账号",
+        );
+        assert_eq!(error.code, "ACME_CONTENT_TYPE");
+        assert!(error.hint.unwrap().contains("无需更换联系邮箱"));
+    }
+
+    #[test]
     fn dns01_value_is_sha256_of_key_authorization() {
         // RFC 8555 §8.4：TXT = base64url(sha256(token "." thumbprint))
         let v = dns01_txt_value("token-x", "thumb-y");

@@ -20,9 +20,10 @@ impl ProxyRuntime {
         Self {
             base_url: format!("http://127.0.0.1:{}", configgen::MIHOMO_CONTROLLER_PORT),
             client: reqwest::blocking::Client::builder()
+                .no_proxy()
                 .timeout(std::time::Duration::from_secs(8))
                 .build()
-                .unwrap_or_else(|_| reqwest::blocking::Client::new()),
+                .expect("构建本机代理控制客户端"),
         }
     }
 

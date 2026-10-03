@@ -299,10 +299,7 @@ impl Installer {
                 let mut entry = match snapshot_entry {
                     Some(entry) if entry.id == id && same_version(&entry.version, &folder_version) => entry,
                     Some(_) => continue,
-                    None => match self.manifest.packages.iter()
-                        .find(|entry| entry.id == id && same_version(&entry.version, &folder_version))
-                        .cloned()
-                    {
+                    None => match self.find(&format!("{id}@{folder_version}")) {
                         Some(entry) => entry,
                         None => {
                             // 旧版安装可能没有保存快照，清单更新后也可能不再列出该版本。
@@ -883,7 +880,7 @@ impl Installer {
 
         // 入口归位。解包产物的内部命名五花八门：顶层目录、版本化文件名
         // （mihomo-windows-amd64-v1.19.31.exe）、单文件 gz 解出的内名不可控。
-        // entry 声明的路径不存在时按「精确文件名 → 包内唯一文件」容错定位并搬移。
+        // entry 声明的路径不存在时先处理根目录改名，再按文件名/单文件定位。
         let entry_rel = entry_relative_path(&entry.entry);
         let entry_path = match settle_entry_file(&prepared, &entry_rel) {
             Some(p) => p,
@@ -1308,7 +1305,7 @@ pub fn entry_relative_path(entry: &str) -> std::path::PathBuf {
 
 /// 解包后把主程序归位到 entry 声明的路径，三级容错：
 ///  1. 声明路径已存在 → 直接用；
-///  2. 解压树里按文件名精确匹配（不分大小写，取目录最浅的）→ 搬到声明位置；
+///  2. 解压树里按文件名精确匹配；只有包根目录命名不同时整目录归位，保留依赖和工具；
 ///  3. 整棵解压树只有一个文件时认定它是主程序（gz 内名/版本化单文件包）→ 搬移。
 /// 都不命中返回 None（调用方报 ENTRY_MISSING）。
 fn settle_entry_file(runtime_dir: &Path, entry_rel: &Path) -> Option<std::path::PathBuf> {
@@ -1348,6 +1345,27 @@ fn settle_entry_file(runtime_dir: &Path, entry_rel: &Path) -> Option<std::path::
     let mut hits = Vec::new();
     let mut files = 0usize;
     walk(runtime_dir, 0, &want, &mut hits, &mut files);
+
+    if hits.len() == 1 {
+        let source = hits[0].1.strip_prefix(runtime_dir).ok()?;
+        let source_parts: Vec<_> = source.components().collect();
+        let target_parts: Vec<_> = entry_rel.components().collect();
+        if source_parts.len() > 1
+            && source_parts.len() == target_parts.len()
+            && source_parts[1..] == target_parts[1..]
+            && source_parts[0] != target_parts[0]
+        {
+            // 仅在本次解压暂存目录中移动一个根目录；绝不把主程序从旁边的 DLL/
+            // mongos 等资源中拆走，也不合并/覆盖压缩包里另一个已经存在的目录。
+            let source_root = runtime_dir.join(source_parts[0].as_os_str());
+            let target_root = runtime_dir.join(target_parts[0].as_os_str());
+            if target_root.exists() {
+                return None;
+            }
+            std::fs::rename(source_root, target_root).ok()?;
+            return Some(expected);
+        }
+    }
 
     let src = if let Some((_, p)) = hits.first() {
         p.clone()
@@ -1667,6 +1685,29 @@ mod settle_entry_tests {
         write(&d.join("b.txt"), b"y");
         assert!(settle_entry_file(&d, std::path::Path::new("mihomo.exe")).is_none());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn renamed_package_root_keeps_companion_programs_and_libraries_together() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let actual = "mongodb-macos-aarch64--9.0.2";
+        let expected = "mongodb-macos-arm64-9.0.2";
+        write(&root.join(actual).join("bin/mongod"), b"server");
+        write(&root.join(actual).join("bin/mongos"), b"router");
+        write(&root.join(actual).join("lib/runtime.dylib"), b"library");
+        let entry = Path::new(expected).join("bin/mongod");
+        assert_eq!(settle_entry_file(root, &entry).unwrap(), root.join(&entry));
+        assert_eq!(
+            std::fs::read(root.join(expected).join("bin/mongos")).unwrap(),
+            b"router"
+        );
+        assert_eq!(
+            std::fs::read(root.join(expected).join("lib/runtime.dylib")).unwrap(),
+            b"library"
+        );
+        assert!(!root.join(actual).exists());
+        assert_eq!(settle_entry_file(root, &entry).unwrap(), root.join(entry));
     }
 }
 
@@ -2508,6 +2549,51 @@ mod tests {
         };
         let e = entry_with(vec![current_os()], vec![other_arch]);
         assert!(!Installer::is_platform_compatible(&e));
+    }
+
+    #[test]
+    fn reconcile_recovers_native_runtime_when_foreign_arch_comes_first() {
+        let (_temp, mut state) = fixture();
+        let mut native = entry_with(vec![current_os()], vec![current_arch()]);
+        native.entry = "native/bin/program-native".into();
+        let mut foreign = native.clone();
+        foreign.arch = vec![if current_arch() == "x64" {
+            "arm64"
+        } else {
+            "x64"
+        }
+        .into()];
+        foreign.entry = "foreign/bin/program-foreign".into();
+        state.installer.manifest.packages = vec![foreign, native.clone()];
+        let runtime = state.paths.runtime_dir(&native.id, &native.version);
+        let executable = runtime.join(&native.entry);
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, "native runtime fixture").unwrap();
+        let result = state
+            .installer
+            .reconcile_installed(&state.paths, &state.store)
+            .unwrap();
+        assert_eq!(result.imported.len(), 1);
+        let installed = state
+            .store
+            .find_installed(&native.id, Some(&native.version))
+            .unwrap();
+        assert_eq!(Path::new(&installed.install_path), runtime);
+        assert!(state
+            .installer
+            .package_views(&[installed])
+            .iter()
+            .any(|view| view.install.is_some()));
+        assert!(state
+            .installer
+            .reconcile_installed(&state.paths, &state.store)
+            .unwrap()
+            .imported
+            .is_empty());
+        assert_eq!(
+            std::fs::read_to_string(executable).unwrap(),
+            "native runtime fixture"
+        );
     }
 
     #[test]

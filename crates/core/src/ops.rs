@@ -172,7 +172,7 @@ pub fn mysql_paths(store: &Store, version: &str) -> Result<(PathBuf, PathBuf)> {
     Ok((basedir, mysqld))
 }
 
-fn redis_paths(store: &Store) -> Result<(PathBuf, PathBuf)> {
+pub(crate) fn redis_paths(store: &Store) -> Result<(PathBuf, PathBuf)> {
     let inst =
         installed_by_choice(store, "redis").ok_or_else(|| AppError::not_installed("Redis"))?;
     let dir = PathBuf::from(&inst.install_path);
@@ -4914,6 +4914,18 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
             assert!(output.status.success());
             String::from_utf8_lossy(&output.stdout).trim().to_string()
         };
+        // Windows 移植包可能带额外修订号（5.0.14 包实际报告 5.0.14.1）。
+        // RDB 必须保留真实服务端版本，与 INFO 回读核对，不能只比较安装目录名。
+        let server_info = cli(&["INFO", "server"]);
+        let server_version = server_info
+            .lines()
+            .find_map(|line| line.strip_prefix("redis_version:"))
+            .unwrap()
+            .trim();
+        assert_eq!(
+            server_version.split('.').take(3).collect::<Vec<_>>(),
+            version.split('.').take(3).collect::<Vec<_>>()
+        );
         let occupied_rdb = state.paths.redis_data_dir().join("occupied.rdb");
         std::fs::create_dir(&occupied_rdb).unwrap();
         assert_eq!(cli(&["CONFIG", "SET", "dbfilename", "occupied.rdb"]), "OK");
@@ -4995,7 +5007,7 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
         std::fs::write(&external, &original_backup).unwrap();
         let before_import = crate::redis_backup::list(&state.paths).unwrap().items.len();
         let import = crate::redis_backup::inspect_import(external.to_str().unwrap()).unwrap();
-        assert_eq!(import.version, version);
+        assert_eq!(import.version, server_version);
         assert_eq!(format!("REDIS{:04}", import.rdb_version).as_bytes(), &original_backup[..9]);
         assert_eq!(import.size_bytes, original_backup.len() as u64);
         assert_eq!(crate::redis_backup::list(&state.paths).unwrap().items.len(), before_import);
@@ -5007,10 +5019,14 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
         assert_eq!(cli(&["GET", "isolated-fixture"]), "3");
         assert_eq!(crate::redis_backup::list(&state.paths).unwrap().items.len(), before_import + 1);
         let mut changed = original_backup.clone();
-        let source_version_at = changed.windows(version.len()).position(|bytes| bytes == version.as_bytes()).unwrap();
-        let mut changed_version = version.as_bytes().to_vec();
+        let source_version_at = changed
+            .windows(server_version.len())
+            .position(|bytes| bytes == server_version.as_bytes())
+            .unwrap();
+        let mut changed_version = server_version.as_bytes().to_vec();
         *changed_version.last_mut().unwrap() = b'9';
-        changed[source_version_at..source_version_at + version.len()].copy_from_slice(&changed_version);
+        changed[source_version_at..source_version_at + server_version.len()]
+            .copy_from_slice(&changed_version);
         let checksum_at = changed.len() - 8;
         let checksum = crate::redis_backup::rdb_checksum(0, &changed[..checksum_at]);
         changed[checksum_at..].copy_from_slice(&checksum.to_le_bytes());
@@ -5057,7 +5073,7 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
         assert_eq!(state.redis_backup_export(&imported.id, exported_rdb.to_str().unwrap()).unwrap_err().code, "REDIS_EXPORT_EXISTS");
         assert!(state.redis_backup_export(&imported.id, state.paths.base.join("not-an-export.rdb").to_str().unwrap()).is_err());
         let exported_scope = crate::redis_backup::inspect_import(exported_rdb.to_str().unwrap()).unwrap();
-        assert_eq!(exported_scope.version, version);
+        assert_eq!(exported_scope.version, server_version);
         let make_copy = || crate::redis_backup::import_rdb(&state.paths, &exported_scope.source, &exported_scope.revision).unwrap();
         let damaged = make_copy();
         let damaged_dir = state.paths.backup().join("redis").join(&damaged.id);

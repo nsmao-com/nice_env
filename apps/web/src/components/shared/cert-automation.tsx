@@ -158,7 +158,7 @@ const isRunning = (a?: CertAutomation | null) => a?.state === "issuing" || a?.st
 const isWaiting = (a: CertAutomation) => a.state === "waiting" || a.state === "deploy_waiting";
 const canRetryDeploy = (a: CertAutomation) => Boolean(a.deploymentId && (a.expiresAt ?? 0) > Date.now() && ["deploy_error", "deploy_waiting", "deploy_interrupted"].includes(a.state));
 const actionErrorText = (error: unknown) => { const value = normalizeError(error); return [value.message, value.hint].filter(Boolean).join("\n"); };
-const isLegacyAccountError = (message?: string | null) => Boolean(message && /newAccount 未返回 Location|Location \(kid\)/i.test(message));
+const isLegacyAccountError = (message?: string | null) => Boolean(message && /newAccount 未返回 Location|Location \(kid\)|Invalid Content-Type header on POST|application\/jose\+json|Unable to validate JWS/i.test(message));
 
 export function CertAutomationSection() {
   const t = useT();

@@ -11,6 +11,12 @@
 
 本批没有数据库结构变更，未修改 `update.sql`；未运行前端 dev/build，未新增测试文件。v0.2.265 已触发远程流程；本次格式修正随 v0.2.266 发布，状态以其远程 CI 和 Release 实际结果为准。
 
+## 2026-10-04：v0.2.267 ACME 旧客户端错误兜底
+
+旧版桌面端可能仍把 ACME JWS 的 `Content-Type` 错误原样显示为 `Invalid Content-Type header on POST`。前端现在同时识别该错误、`application/jose+json` 和 `Unable to validate JWS`，统一提示用户更新 NiceEnv；后端仍以 `application/jose+json` 发送请求，不能通过重新填写邮箱或 DNS 凭据解决。
+
+本批没有数据库结构变更，未修改 `update.sql`；未运行前端 dev/build，未新增测试文件。版本同步到 v0.2.267，发布状态以远程 CI 和 Release 实际结果为准。
+
 ## 2026-10-04：v0.2.264 SFTPGo 环境目录与 ACME 诊断复查
 
 | 范围 | 发现与修复 | 验证情况 |

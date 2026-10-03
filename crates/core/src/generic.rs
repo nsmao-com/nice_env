@@ -363,6 +363,130 @@ pub(crate) fn sftpgo_migration_cwd(
     std::path::absolute(cwd).map_err(|error| AppError::io("解析 SFTPGo 工作目录", error))
 }
 
+pub(crate) struct SftpgoMigration {
+    pub cwd: PathBuf,
+    pub resources: Vec<crate::configpaths::ResourcePath>,
+    pub files: Vec<(PathBuf, Vec<u8>)>,
+}
+
+pub(crate) fn sftpgo_migrate_environment(
+    store: &Store,
+    paths: &Paths,
+    directory: PathBuf,
+    content: &str,
+    json: bool,
+    rebase: &crate::paths::DataPathRebase,
+) -> Result<SftpgoMigration> {
+    let mut r = resolve_with_sftpgo_directory(store, paths, "sftpgo", Some(directory.clone()))?;
+    if !managed_sftpgo(&r.entry, &r.spec) {
+        return Err(AppError::new(
+            "DATA_DIR_SFTPGO_RUN",
+            "自定义 SFTPGo 启动参数无法确认环境配置目录，未切换数据目录",
+        )
+        .with_hint("请检查自定义启动参数中的配置目录；原数据和配置保持不变。"));
+    }
+    let config = crate::configpaths::sftpgo_config(content, json)?;
+    let config_json = serde_json::to_value(&config)
+        .map_err(|_| AppError::new("SFTPGO_CONFIG_INVALID", "SFTPGo 配置类型无效"))?;
+    let files = sftpgo_env_files(paths, &directory)?;
+    let (_, before, effective) = sftpgo_environment(&r, &config_json, &files)?;
+    let cwd = r
+        .spec
+        .cwd
+        .as_ref()
+        .map(|value| PathBuf::from(expand(value, &r)))
+        .unwrap_or_else(|| r.root.clone());
+    let cwd =
+        std::path::absolute(cwd).map_err(|error| AppError::io("解析 SFTPGo 工作目录", error))?;
+    let snapshot_path = PathBuf::from(&r.inst.install_path).join(".niceenv-package.json");
+    let original_snapshot = match std::fs::read(&snapshot_path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let mut snapshot = if let Some(bytes) = &original_snapshot {
+        serde_json::from_slice::<serde_json::Value>(bytes)
+            .map_err(|_| AppError::new("DATA_DIR_SFTPGO_RUN", "SFTPGo 安装快照无法解析"))?
+    } else {
+        serde_json::to_value(&r.entry)
+            .map_err(|_| AppError::new("DATA_DIR_SFTPGO_RUN", "SFTPGo 运行配置无法保存"))?
+    };
+    let original_value = snapshot.clone();
+    let mut raw_environment = effective.clone();
+    for (key, value) in r.spec.env.iter().flatten() {
+        raw_environment.insert(sftpgo_env_key(key), value.clone());
+    }
+    let (raw_paths, _) =
+        crate::configpaths::sftpgo_environment_paths(&config, &raw_environment, rebase)?;
+    let source_expansions = r
+        .spec
+        .env
+        .iter()
+        .flatten()
+        .map(|(key, value)| (key.clone(), expand(value, &r)))
+        .collect::<std::collections::HashMap<_, _>>();
+    for path in [&mut r.bin, &mut r.root, &mut r.data, &mut r.etc, &mut r.log] {
+        *path = PathBuf::from(rebase.path(&crate::paths::portable_path_text(path)));
+    }
+    let mut environment = r.spec.env.clone().unwrap_or_default();
+    for (key, value) in &mut environment {
+        let folded = sftpgo_env_key(key);
+        if let Some(path) = raw_paths.get(&folded) {
+            *value = path.clone();
+        } else if expand(value, &r) != source_expansions[key] {
+            *value = source_expansions[key].clone();
+        }
+    }
+    if r.spec.env.is_some() {
+        r.spec.env = Some(environment.clone());
+    }
+    if let Some(cwd) = &mut r.spec.cwd {
+        *cwd = rebase.path(cwd);
+    }
+    if let Some(data) = &mut r.spec.data_dir {
+        *data = rebase.path(data);
+    }
+    if r.spec.env.is_some() {
+        snapshot["run"]["env"] = serde_json::to_value(environment)
+            .map_err(|_| AppError::new("DATA_DIR_SFTPGO_RUN", "SFTPGo 环境配置无法保存"))?;
+    }
+    if let Some(cwd) = &r.spec.cwd {
+        snapshot["run"]["cwd"] = cwd.clone().into();
+    }
+    if let Some(data) = &r.spec.data_dir {
+        snapshot["run"]["dataDir"] = data.clone().into();
+    }
+    let migrated_config = crate::configpaths::rebase(content, "sftpgo", json, rebase)?;
+    let migrated_config =
+        serde_json::to_value(crate::configpaths::sftpgo_config(&migrated_config, json)?)
+            .map_err(|_| AppError::new("SFTPGO_CONFIG_INVALID", "SFTPGo 配置类型无效"))?;
+    let (_, after, _) = sftpgo_environment(&r, &migrated_config, &files)?;
+    let (updated, resources) = rebase_sftpgo_env(&files, before, after, &config, rebase)?;
+    let mut output = Vec::new();
+    for (path, content) in updated {
+        let original = std::fs::read(&path)?;
+        let encoded = encode_sftpgo_env(&original, &content);
+        if encoded.len() > 1024 * 1024 {
+            return Err(sftpgo_env_error(&path, 1));
+        }
+        output.push((path, encoded));
+    }
+    if snapshot != original_value {
+        output.push((
+            snapshot_path,
+            serde_json::to_vec_pretty(&snapshot)
+                .map_err(|_| AppError::new("DATA_DIR_SFTPGO_RUN", "SFTPGo 安装快照无法保存"))?,
+        ));
+    } else if let Some(original) = original_snapshot {
+        output.push((snapshot_path, original));
+    }
+    Ok(SftpgoMigration {
+        cwd,
+        resources,
+        files: output,
+    })
+}
+
 /// 显式目录只供选择前的只读检查，不能创建目录或绕过路径检查。
 fn resolve_with_sftpgo_directory(store: &Store, paths: &Paths, service_id: &str, directory: Option<PathBuf>) -> Result<Resolved> {
     let entry = manifest_entry_for(store, service_id).ok_or_else(|| {
@@ -757,8 +881,20 @@ fn sftpgo_env_files(paths: &Paths, directory: &std::path::Path) -> Result<Vec<(P
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
-fn sftpgo_parse_env(files: &[(PathBuf, String)], mut environment: std::collections::HashMap<String, String>)
-    -> Result<std::collections::HashMap<String, String>> {
+fn sftpgo_parse_env(
+    files: &[(PathBuf, String)],
+    environment: std::collections::HashMap<String, String>,
+) -> Result<std::collections::HashMap<String, String>> {
+    sftpgo_parse_env_with(files, environment, &mut |_, _, _, value| {
+        Ok(value.to_string())
+    })
+}
+
+fn sftpgo_parse_env_with(
+    files: &[(PathBuf, String)],
+    mut environment: std::collections::HashMap<String, String>,
+    visit: &mut impl FnMut(&std::path::Path, std::ops::Range<usize>, &str, &str) -> Result<String>,
+) -> Result<std::collections::HashMap<String, String>> {
     static ASSIGNMENT: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(||
         regex::Regex::new(r#"\A[ \t\r\n\f]*(?:export[ \t\r\n\f]+)?([A-Za-z0-9_.]+)(?:[ \t\r\n\f]*=[ \t\r\n\f]*|:[ \t\r\n\f]+?)('(?:\'|[^'])*'|"(?:\"|[^"])*"|[^#\n]+)?[ \t\r\n\f]*(?:[ \t\r\n\f]*\#.*)?\z"#).unwrap());
     static VARIABLE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(||
@@ -766,15 +902,41 @@ fn sftpgo_parse_env(files: &[(PathBuf, String)], mut environment: std::collectio
     static UNESCAPE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(||
         regex::Regex::new(r"\\([^$])").unwrap());
     for (path, content) in files {
-        let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
-        let mut lines = normalized.split('\n').enumerate();
+        let mut normalized = Vec::with_capacity(content.len());
+        let mut positions = vec![0];
+        let mut position = 0;
+        while position < content.len() {
+            let byte = content.as_bytes()[position];
+            position += 1;
+            if byte == b'\r' {
+                if content.as_bytes().get(position) == Some(&b'\n') {
+                    position += 1;
+                }
+                normalized.push(b'\n');
+            } else {
+                normalized.push(byte);
+            }
+            positions.push(position);
+        }
+        let normalized = String::from_utf8(normalized).map_err(|_| sftpgo_env_error(path, 1))?;
+        let mut offset = 0;
+        let mut lines = normalized
+            .split_inclusive('\n')
+            .enumerate()
+            .map(|(number, line)| {
+                let start = offset;
+                offset += line.len();
+                (number, start, line.strip_suffix('\n').unwrap_or(line))
+            });
         let mut parsed = std::collections::HashMap::<String, String>::new();
         let mut names = std::collections::HashMap::<String, String>::new();
-        while let Some((number, raw)) = lines.next() {
+        while let Some((number, start, raw)) = lines.next() {
             let invalid = || sftpgo_env_error(path, number + 1);
             if raw.len() >= 65535 || raw.contains('\0') { return Err(invalid()); }
             let mut line = raw.trim().to_string();
             if line.is_empty() || line.starts_with('#') { continue; }
+            let leading = raw.len() - raw.trim_start().len();
+            let mut end = start + raw.trim_end().len();
             let mut quote = None;
             if let Some(index) = line.find('=').or_else(|| line.find(':')).filter(|i| *i > 0 && *i + 1 < line.len()) {
                 let value = line[index + 1..].trim();
@@ -785,9 +947,15 @@ fn sftpgo_parse_env(files: &[(PathBuf, String)], mut environment: std::collectio
                 }
             }
             while let Some(ending) = quote {
-                let Some((_, next)) = lines.next() else { return Err(invalid()); };
-                if next.len() >= 65535 || next.contains('\0') { return Err(invalid()); }
-                line.push('\n'); line.push_str(next);
+                let Some((_, next_start, next)) = lines.next() else {
+                    return Err(invalid());
+                };
+                if next.len() >= 65535 || next.contains('\0') {
+                    return Err(invalid());
+                }
+                line.push('\n');
+                line.push_str(next);
+                end = next_start + next.len();
                 if next.rfind(ending).is_some_and(|i| i == 0 || next.as_bytes()[i - 1] != b'\\') { quote = None; }
             }
             let captures = ASSIGNMENT.captures(&line).ok_or_else(invalid)?;
@@ -797,7 +965,18 @@ fn sftpgo_parse_env(files: &[(PathBuf, String)], mut environment: std::collectio
                 return Err(AppError::new("SFTPGO_ENV_AMBIGUOUS", "SFTPGo 环境配置包含重复的大小写变量名，请合并后重试")
                     .with_hint(path.display().to_string()));
             }
-            let mut value = captures.get(2).map(|m| m.as_str()).unwrap_or("").trim().to_string();
+            let captured = captures.get(2);
+            let raw_value = captured.map(|m| m.as_str()).unwrap_or("");
+            let value_start = start
+                + leading
+                + captured.map(|m| m.start()).unwrap_or(line.len())
+                + raw_value.len()
+                - raw_value.trim_start().len();
+            let value_end = end
+                - (line.len() - captured.map(|m| m.end()).unwrap_or(line.len()))
+                - (raw_value.len() - raw_value.trim_end().len());
+            let range = positions[value_start.min(value_end)]..positions[value_end];
+            let mut value = raw_value.trim().to_string();
             let single = value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'');
             let double = value.len() >= 2 && value.starts_with('"') && value.ends_with('"');
             if single || double { value = value[1..value.len() - 1].to_string(); }
@@ -813,6 +992,10 @@ fn sftpgo_parse_env(files: &[(PathBuf, String)], mut environment: std::collectio
                 }).into_owned();
             }
             if value.contains('\0') { return Err(invalid()); }
+            value = visit(path, range, &key, &value)?;
+            if value.contains('\0') {
+                return Err(invalid());
+            }
             parsed.insert(key, value);
         }
         // 同一文件的同名赋值最后一项生效；跨文件和继承环境则保留先已有的值（含空值）。
@@ -831,6 +1014,188 @@ fn sftpgo_process_env(r: &Resolved) -> Result<std::collections::HashMap<String, 
         environment.insert(key, expand(value, r));
     }
     Ok(environment)
+}
+
+fn sftpgo_env_literal(value: &str) -> Result<String> {
+    let double = value
+        .replace('\\', "\\\\")
+        .replace('$', "\\$")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r");
+    for candidate in [
+        format!("'{value}'"),
+        format!("\"{double}\""),
+        value.replace('$', "\\$"),
+    ] {
+        let probe = vec![(
+            PathBuf::from("env.d"),
+            format!("NICEENV_VALUE={candidate}\n"),
+        )];
+        if sftpgo_parse_env(&probe, Default::default())
+            .is_ok_and(|parsed| parsed.get("NICEENV_VALUE").map(String::as_str) == Some(value))
+        {
+            return Ok(candidate);
+        }
+    }
+    Err(AppError::new(
+        "DATA_DIR_ENV_ENCODING",
+        "环境变量无法按服务原有语法安全保存，未切换数据目录",
+    )
+    .with_hint(
+        "原文件和数据已保留；请检查环境配置中的引号、换行与末尾反斜杠。错误不会展示变量值。",
+    ))
+}
+
+fn rebase_sftpgo_env(
+    files: &[(PathBuf, String)],
+    before: std::collections::HashMap<String, String>,
+    after: std::collections::HashMap<String, String>,
+    config: &yaml_serde::Value,
+    rebase: &crate::paths::DataPathRebase,
+) -> Result<(
+    Vec<(PathBuf, String)>,
+    Vec<crate::configpaths::ResourcePath>,
+)> {
+    let mut assignments = Vec::new();
+    let original = sftpgo_parse_env_with(files, before, &mut |_, _, key, value| {
+        assignments.push((sftpgo_env_key(key), value.to_string()));
+        Ok(value.to_string())
+    })?;
+    let (paths, mut resources) =
+        crate::configpaths::sftpgo_environment_paths(config, &original, rebase)?;
+    let mut expected = original.clone();
+    expected.extend(paths);
+    let mut desired = Vec::new();
+    for (key, value) in assignments {
+        let mut context = std::collections::HashMap::new();
+        for guard in [
+            "SFTPGO_DATA_PROVIDER__DRIVER",
+            "SFTPGO_DATA_PROVIDER__CONNECTION_STRING",
+        ] {
+            if let Some(value) = original.get(guard) {
+                context.insert(guard.into(), value.clone());
+            }
+        }
+        context.insert(key.clone(), value.clone());
+        let (paths, refs) = crate::configpaths::sftpgo_environment_paths(config, &context, rebase)?;
+        desired.push(paths.get(&key).cloned().unwrap_or(value));
+        resources.extend(refs);
+    }
+    let mut changes =
+        std::collections::HashMap::<PathBuf, Vec<(std::ops::Range<usize>, String)>>::new();
+    let mut index = 0;
+    let migrated = sftpgo_parse_env_with(files, after.clone(), &mut |path, range, _, value| {
+        let expected = &desired[index];
+        index += 1;
+        if value != expected {
+            changes
+                .entry(path.into())
+                .or_default()
+                .push((range, sftpgo_env_literal(expected)?));
+        }
+        Ok(expected.clone())
+    })?;
+    if migrated != expected {
+        return Err(AppError::new(
+            "DATA_DIR_ENV_OVERRIDE",
+            "已有环境变量覆盖了服务配置，无法安全切换数据目录",
+        )
+        .with_hint(
+            "请检查系统环境变量和服务运行配置中指向旧数据目录的路径；原文件与数据均已保留。",
+        ));
+    }
+    let mut updated = files.to_vec();
+    for (path, text) in &mut updated {
+        if let Some(edits) = changes.remove(path) {
+            for (range, value) in edits.into_iter().rev() {
+                if text.get(range.clone()).is_none() {
+                    return Err(sftpgo_env_error(path, 1));
+                }
+                text.replace_range(range, &value);
+            }
+        }
+    }
+    if sftpgo_parse_env(&updated, after)? != expected {
+        return Err(AppError::new(
+            "DATA_DIR_ENV_ENCODING",
+            "环境配置转换后的值不一致，未切换数据目录",
+        ));
+    }
+    Ok((updated, resources))
+}
+
+fn encode_sftpgo_env(original: &[u8], text: &str) -> Vec<u8> {
+    if original.starts_with(&[0xff, 0xfe]) || original.starts_with(&[0xfe, 0xff]) {
+        let mut output = original[..2].to_vec();
+        for word in text.encode_utf16() {
+            output.extend(if original[0] == 0xff {
+                word.to_le_bytes()
+            } else {
+                word.to_be_bytes()
+            });
+        }
+        output
+    } else {
+        let mut output = if original.starts_with(&[0xef, 0xbb, 0xbf]) {
+            vec![0xef, 0xbb, 0xbf]
+        } else {
+            Vec::new()
+        };
+        output.extend_from_slice(text.as_bytes());
+        output
+    }
+}
+
+fn sftpgo_environment(
+    r: &Resolved,
+    config: &serde_json::Value,
+    files: &[(PathBuf, String)],
+) -> Result<(
+    Vec<(String, String)>,
+    std::collections::HashMap<String, String>,
+    std::collections::HashMap<String, String>,
+)> {
+    let mut process_env = sftpgo_process_env(r)?;
+    let mut effective_env = sftpgo_parse_env(files, process_env.clone())?;
+    let mut env = Vec::new();
+    for (pointer, key, default) in [
+        (
+            "/httpd/templates_path",
+            "SFTPGO_HTTPD__TEMPLATES_PATH",
+            "templates",
+        ),
+        (
+            "/httpd/static_files_path",
+            "SFTPGO_HTTPD__STATIC_FILES_PATH",
+            "static",
+        ),
+        (
+            "/httpd/openapi_path",
+            "SFTPGO_HTTPD__OPENAPI_PATH",
+            "openapi",
+        ),
+        (
+            "/smtp/templates_path",
+            "SFTPGO_SMTP__TEMPLATES_PATH",
+            "templates",
+        ),
+    ] {
+        if !effective_env.contains_key(key)
+            && config
+                .pointer(pointer)
+                .is_none_or(|value| value.as_str() == Some(default))
+        {
+            let value = crate::paths::portable_path_text(&r.root.join(default));
+            env.push((key.into(), value.clone()));
+            process_env.insert(key.into(), value);
+        }
+    }
+    // 默认资源路径也属于子进程环境，env.d 的插值必须能读取到相同的值。
+    if !env.is_empty() {
+        effective_env = sftpgo_parse_env(files, process_env.clone())?;
+    }
+    Ok((env, process_env, effective_env))
 }
 
 fn prepare_sftpgo(store: &Store, paths: &Paths, r: &Resolved) -> Result<SftpgoConfig> {
@@ -874,22 +1239,7 @@ fn inspect_sftpgo(store: &Store, paths: &Paths, r: &Resolved, previously_started
             )
         })?;
     let files = sftpgo_env_files(paths, &r.etc)?;
-    let mut process_env = sftpgo_process_env(r)?;
-    let mut effective_env = sftpgo_parse_env(&files, process_env.clone())?;
-    let mut env = Vec::new();
-    for (pointer, key, default) in [
-        ("/httpd/templates_path", "SFTPGO_HTTPD__TEMPLATES_PATH", "templates"),
-        ("/httpd/static_files_path", "SFTPGO_HTTPD__STATIC_FILES_PATH", "static"),
-        ("/httpd/openapi_path", "SFTPGO_HTTPD__OPENAPI_PATH", "openapi"),
-        ("/smtp/templates_path", "SFTPGO_SMTP__TEMPLATES_PATH", "templates"),
-    ] {
-        if !effective_env.contains_key(key) && config.pointer(pointer).is_none_or(|value| value.as_str() == Some(default)) {
-            let value = crate::paths::portable_path_text(&r.root.join(default));
-            env.push((key.into(), value.clone())); process_env.insert(key.into(), value);
-        }
-    }
-    // 默认资源路径也属于子进程环境，env.d 的插值必须能读取到相同的值。
-    if !env.is_empty() { effective_env = sftpgo_parse_env(&files, process_env)?; }
+    let (mut env, _, effective_env) = sftpgo_environment(r, &config, &files)?;
     let value = |key: &str, pointer: &str, default: &str| {
         effective_env.get(key).cloned().unwrap_or_else(|| {
             config
@@ -3860,6 +4210,202 @@ mod startup_tests {
             assert_eq!(sftpgo_process_env(&r).unwrap_err().code, "SFTPGO_ENV_AMBIGUOUS");
             assert_eq!(sftpgo_parse_env(&[(PathBuf::from("fixture.env"), "KEY=one\nkey=two".into())], HashMap::new()).unwrap_err().code, "SFTPGO_ENV_AMBIGUOUS");
         }
+    }
+
+    #[test]
+    fn sftpgo_env_migration_preserves_interpolated_credentials_and_assignment_ranges() {
+        use std::collections::HashMap;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("old data");
+        let target = temp.path().join("新 data # [1]");
+        let old = crate::paths::portable_path_text(&source);
+        let new = crate::paths::portable_path_text(&target);
+        let rebase = crate::paths::DataPathRebase::new(&source, &target).unwrap();
+        let first = format!("# retained comment\r\nBASE='{old}'\r\n  export SFTPGO_KMS__SECRETS__MASTER_KEY_PATH = ${{BASE}}/first.key  # key\r\nPASSWORD=${{SFTPGO_KMS__SECRETS__MASTER_KEY_PATH}}\r\nSFTPGO_KMS__SECRETS__MASTER_KEY_PATH='${{BASE}}/literal'\r\nSFTPGO_KMS__SECRETS__MASTER_KEY_PATH=\"${{BASE}}/last.key\"\r\nMULTILINE=\"中文\r\n${{SFTPGO_KMS__SECRETS__MASTER_KEY_PATH}}\r\nend\" # multiline\r\nEMPTY=  # empty\r\nQUOTED='${{BASE}} # literal'\r\n");
+        let files = vec![(PathBuf::from("10-first.env"), first), (PathBuf::from("20-last.env"),
+            "SFTPGO_KMS__SECRETS__MASTER_KEY_PATH=/ignored\nAFTER=${SFTPGO_KMS__SECRETS__MASTER_KEY_PATH}\nEMPTY=ignored\n".into())];
+        let original = sftpgo_parse_env(&files, HashMap::new()).unwrap();
+        let config = crate::configpaths::sftpgo_config("{}", true).unwrap();
+        let (updated, resources) =
+            rebase_sftpgo_env(&files, HashMap::new(), HashMap::new(), &config, &rebase).unwrap();
+        let mut expected = original.clone();
+        expected.insert(
+            "SFTPGO_KMS__SECRETS__MASTER_KEY_PATH".into(),
+            format!("{new}/last.key"),
+        );
+        assert_eq!(
+            sftpgo_parse_env(&updated, HashMap::new()).unwrap(),
+            expected
+        );
+        assert!(updated[0].1.contains("  # key\r\n"));
+        assert!(updated[0].1.contains("EMPTY=  # empty\r\n"));
+        assert!(updated[0].1.contains("QUOTED='${BASE} # literal'\r\n"));
+        assert_eq!(expected["PASSWORD"], format!("{old}/first.key"));
+        assert_eq!(expected["AFTER"], format!("{old}/last.key"));
+        assert!(resources.iter().any(|r| r.path == source.join("last.key")));
+        for value in [
+            "",
+            "plain",
+            "中文 # $VALUE",
+            "a'b\"c",
+            "first\nsecond",
+            r"C:\path\tail",
+            "old/path'suffix\\",
+        ] {
+            let literal = sftpgo_env_literal(value).unwrap();
+            let parsed = sftpgo_parse_env(
+                &[(PathBuf::from("probe.env"), format!("VALUE={literal}\n"))],
+                HashMap::new(),
+            )
+            .unwrap();
+            assert_eq!(parsed["VALUE"], value);
+        }
+        let inherited = HashMap::from([(
+            "SFTPGO_KMS__SECRETS__MASTER_KEY_PATH".into(),
+            format!("{old}/override"),
+        )]);
+        assert_eq!(
+            rebase_sftpgo_env(&files, inherited.clone(), inherited, &config, &rebase)
+                .err()
+                .unwrap()
+                .code,
+            "DATA_DIR_ENV_OVERRIDE"
+        );
+        let unknown = HashMap::from([
+            (
+                "SFTPGO_httpd__TEMPLATES_PATH".into(),
+                format!("{old}/opaque"),
+            ),
+            (
+                "SFTPGO_HTTPD__BINDINGS__10__CERTIFICATE_FILE".into(),
+                format!("{old}/ignored"),
+            ),
+            (
+                "SFTPGO_SFTPD__HOST_KEYS__0".into(),
+                format!("{old}/ignored"),
+            ),
+        ]);
+        assert!(
+            crate::configpaths::sftpgo_environment_paths(&config, &unknown, &rebase)
+                .unwrap()
+                .0
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn sftpgo_env_migration_keeps_encoding_snapshot_secrets_and_resource_bytes() {
+        for bom in [
+            vec![],
+            vec![0xef, 0xbb, 0xbf],
+            vec![0xff, 0xfe],
+            vec![0xfe, 0xff],
+        ] {
+            let (_temp, state, mut r) = fixture("sftpgo");
+            let destination = tempfile::tempdir().unwrap();
+            let target = destination.path().join("新 data # [1]");
+            let old = crate::paths::portable_path_text(&state.paths.base);
+            let secret = format!("{old}/literal-secret");
+            let resource = r.etc.join("resources/sftpgo.json");
+            std::fs::create_dir_all(resource.parent().unwrap()).unwrap();
+            std::fs::write(&resource, &secret).unwrap();
+            let env_dir = r.etc.join("env.d");
+            std::fs::create_dir(&env_dir).unwrap();
+            let resource_text = crate::paths::portable_path_text(&resource);
+            let text = format!("# retain comment\r\nBASE='{old}'\r\nSFTPGO_KMS__SECRETS__MASTER_KEY_PATH='{resource_text}'\r\nSFTPGO_DATA_PROVIDER__DRIVER=sqlite\r\nSFTPGO_DATA_PROVIDER__CONNECTION_STRING='{}'\r\nSFTPGO_SFTPD__HOST_KEYS='{resource_text}'\r\nSFTPGO_HTTPD__PASSWORD='${{BASE}} literal'\r\nSECRET=${{SFTPGO_KMS__SECRETS__MASTER_KEY_PATH}}\r\n", crate::configpaths::sqlite_file_uri(&state.paths.data().join("sftpgo/accounts.db")));
+            let bytes = encode_sftpgo_env(&bom, &text);
+            std::fs::write(env_dir.join("first.env"), &bytes).unwrap();
+            std::fs::write(
+                r.etc.join("sftpgo.json"),
+                r#"{"data_provider":{"driver":"mysql"}}"#,
+            )
+            .unwrap();
+            let env = r.entry.run.as_mut().unwrap().env.as_mut().unwrap();
+            env.insert("NICEENV_SECRET".into(), "{etc}/literal-secret".into());
+            env.insert("SFTPGO_FTPD__BANNER_FILE".into(), resource_text.clone());
+            let snapshot_path = PathBuf::from(&r.inst.install_path).join(".niceenv-package.json");
+            let snapshot = serde_json::to_vec(&r.entry).unwrap();
+            std::fs::write(&snapshot_path, &snapshot).unwrap();
+            let rebase = crate::paths::DataPathRebase::new(&state.paths.base, &target).unwrap();
+            crate::paths::copy_data_dir(&state.paths.base, &target).unwrap();
+            assert_eq!(std::fs::read(env_dir.join("first.env")).unwrap(), bytes);
+            assert_eq!(std::fs::read(&snapshot_path).unwrap(), snapshot);
+            let target_paths = Paths::new(target.clone());
+            let target_dir = PathBuf::from(rebase.path(&crate::paths::portable_path_text(&r.etc)));
+            let updated = sftpgo_env_files(&target_paths, &target_dir).unwrap();
+            let environment = sftpgo_parse_env(&updated, Default::default()).unwrap();
+            assert_eq!(environment["BASE"], old);
+            assert_eq!(environment["SECRET"], resource_text);
+            assert_eq!(
+                environment["SFTPGO_KMS__SECRETS__MASTER_KEY_PATH"],
+                rebase.path(&resource_text)
+            );
+            assert_eq!(
+                crate::configpaths::sqlite_connection_path(
+                    &environment["SFTPGO_DATA_PROVIDER__CONNECTION_STRING"]
+                )
+                .unwrap()
+                .unwrap(),
+                target.join("data/sftpgo/accounts.db")
+            );
+            assert_eq!(
+                std::fs::read(target_dir.join("resources/sftpgo.json")).unwrap(),
+                secret.as_bytes()
+            );
+            let target_bytes = std::fs::read(target_dir.join("env.d/first.env")).unwrap();
+            assert_eq!(target_bytes, encode_sftpgo_env(&bom, &updated[0].1));
+            assert!(updated[0].1.starts_with("# retain comment\r\n"));
+            let snapshot: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(rebase.path(&crate::paths::portable_path_text(&snapshot_path)))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                snapshot["run"]["env"]["NICEENV_SECRET"],
+                format!(
+                    "{}/literal-secret",
+                    crate::paths::portable_path_text(&r.etc)
+                )
+            );
+            assert_eq!(
+                snapshot["run"]["env"]["SFTPGO_FTPD__BANNER_FILE"],
+                rebase.path(&resource_text)
+            );
+        }
+    }
+
+    #[test]
+    fn sftpgo_env_migration_rejects_conflicting_snapshots_without_publishing_target() {
+        let (_temp, state, mut r) = fixture("sftpgo");
+        let destination = tempfile::tempdir().unwrap();
+        let target = destination.path().join("target");
+        for directory in [r.etc.clone(), state.paths.etc_dir("sftpgo", "other")] {
+            std::fs::create_dir_all(directory.join("env.d")).unwrap();
+            std::fs::write(directory.join("sftpgo.json"), "{}").unwrap();
+        }
+        r.entry
+            .run
+            .as_mut()
+            .unwrap()
+            .env
+            .as_mut()
+            .unwrap()
+            .insert("NICEENV_SECRET".into(), "{etc}/literal-secret".into());
+        let snapshot_path = PathBuf::from(&r.inst.install_path).join(".niceenv-package.json");
+        let snapshot = serde_json::to_vec(&r.entry).unwrap();
+        std::fs::write(&snapshot_path, &snapshot).unwrap();
+        assert_eq!(
+            crate::paths::copy_data_dir(&state.paths.base, &target)
+                .unwrap_err()
+                .code,
+            "DATA_DIR_ENV_CONFLICT"
+        );
+        assert!(!target.exists() || std::fs::read_dir(&target).unwrap().next().is_none());
+        assert_eq!(std::fs::read(&snapshot_path).unwrap(), snapshot);
+        assert_eq!(
+            std::fs::read_to_string(r.etc.join("sftpgo.json")).unwrap(),
+            "{}"
+        );
     }
 
     #[test]

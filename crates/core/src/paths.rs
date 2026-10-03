@@ -1010,8 +1010,14 @@ fn rebase_config_files(
     let mut rewritten = 0;
     for path in files {
         if resources
+            .paths
             .iter()
             .any(|resource| resource_contains(resource, &config_path_key(&path)))
+            || resources
+                .env_dirs
+                .iter()
+                .any(|directory| resource_contains(directory, &config_path_key(&path)))
+            || resources.files.contains_key(&path)
         {
             continue;
         }
@@ -1041,6 +1047,17 @@ fn rebase_config_files(
             rewritten += 1;
         }
     }
+    for (path, bytes) in resources.files {
+        let existing = match std::fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        if existing.as_deref() != Some(bytes.as_slice()) {
+            std::fs::write(path, bytes)?;
+            rewritten += 1;
+        }
+    }
     Ok(rewritten)
 }
 
@@ -1051,12 +1068,19 @@ fn resource_contains(resource: &str, path: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
+#[derive(Default)]
+struct MigrationResources {
+    paths: Vec<String>,
+    files: std::collections::HashMap<PathBuf, Vec<u8>>,
+    env_dirs: Vec<String>,
+}
+
 fn migration_resources(
     root: &Path,
     source: &Path,
     files: &[PathBuf],
     rebase: &DataPathRebase,
-) -> crate::error::Result<Vec<String>> {
+) -> crate::error::Result<MigrationResources> {
     // 使用复制后的文件做只读规划，所有规划成功后才改写。不能按 read_dir 顺序边读边改。
     let root_key = config_path_key(root);
     let target_key = config_path_key(Path::new(&rebase.target));
@@ -1071,9 +1095,26 @@ fn migration_resources(
                 return Err(crate::error::AppError::new("DATA_DIR_CONFIG_SIZE", "配置文件过大，无法自动检查"));
             }
             let text = std::fs::read_to_string(file)?;
-            let mut resources = Vec::new();
+            let mut resources = MigrationResources::default();
             let mut cwd = None;
-            for resource in crate::configpaths::sftpgo_resources(&text, json)? {
+            let mut references = crate::configpaths::sftpgo_resources(&text, json)?;
+            let directory = source.join(relative).parent().unwrap().to_path_buf();
+            if directory.join("env.d").is_dir() {
+                let store = crate::store::Store::open_read_only(source.join("nsb.sqlite"))?;
+                let planned = crate::generic::sftpgo_migrate_environment(&store, &Paths::new(source.to_path_buf()), directory, &text, json, rebase)?;
+                cwd = Some(planned.cwd);
+                references.extend(planned.resources);
+                resources.env_dirs.push(config_path_key(&file.parent().unwrap().join("env.d")));
+                for (path, bytes) in planned.files {
+                    let mapped = portable_path_text(Path::new(&rebase.path(&portable_path_text(&path))));
+                    if !resource_contains(&target_key, &config_path_key(Path::new(&mapped))) {
+                        return Err(crate::error::AppError::new("DATA_DIR_ENV_PATH", "环境配置文件超出数据目录，未修改原文件"));
+                    }
+                    let path = root.join(mapped[target_key.len()..].trim_start_matches('/'));
+                    resources.files.insert(path, bytes);
+                }
+            }
+            for resource in references {
                 let resource_path = if resource.path.is_absolute() || resource.relative_to_config {
                     resource.path
                 } else {
@@ -1105,17 +1146,18 @@ fn migration_resources(
                     if !resource_contains(&root_key, &key) { continue; }
                     key
                 };
-                resources.push(key.trim_end_matches('/').to_string());
+                resources.paths.push(key.trim_end_matches('/').to_string());
             }
             Ok::<_, crate::error::AppError>(resources)
         })().map_err(|error| error.with_detail(relative.display().to_string()));
         plans.push((config_path_key(file), result));
     }
     let mut pending = (0..plans.len()).collect::<Vec<_>>();
-    let mut resources = Vec::<String>::new();
+    let mut resources = MigrationResources::default();
     while !pending.is_empty() {
         pending.retain(|index| {
             !resources
+                .paths
                 .iter()
                 .any(|resource| resource_contains(resource, &plans[*index].0))
         });
@@ -1129,6 +1171,7 @@ fn migration_resources(
                 !pending.iter().any(|other| {
                     plans[*other].1.as_ref().is_ok_and(|references| {
                         references
+                            .paths
                             .iter()
                             .any(|resource| resource_contains(resource, &plans[*index].0))
                     })
@@ -1143,19 +1186,39 @@ fn migration_resources(
             .with_hint("请将密钥、模板或提示文本放在独立资源文件中；原配置和数据均已保留。"));
         }
         for index in &roots {
-            resources.extend(
-                plans[*index]
-                    .1
-                    .as_ref()
-                    .map_err(Clone::clone)?
-                    .iter()
-                    .cloned(),
-            );
+            let plan = plans[*index].1.as_ref().map_err(Clone::clone)?;
+            resources.paths.extend(plan.paths.iter().cloned());
+            resources.env_dirs.extend(plan.env_dirs.iter().cloned());
+            for (path, bytes) in &plan.files {
+                if resources
+                    .files
+                    .insert(path.clone(), bytes.clone())
+                    .is_some_and(|previous| previous != *bytes)
+                {
+                    return Err(crate::error::AppError::new(
+                        "DATA_DIR_ENV_CONFLICT",
+                        "多份 SFTPGo 配置要求不同的运行环境，未自动覆盖共享配置",
+                    )
+                    .with_hint("请先确认各配置目录的环境变量；源文件和目标目录均保持原样。"));
+                }
+            }
         }
         pending.retain(|index| !roots.contains(index));
     }
-    resources.sort();
-    resources.dedup();
+    resources.paths.sort();
+    resources.paths.dedup();
+    for path in resources.files.keys() {
+        if resources
+            .paths
+            .iter()
+            .any(|resource| resource_contains(resource, &config_path_key(path)))
+        {
+            return Err(crate::error::AppError::new(
+                "DATA_DIR_RESOURCE_CONFLICT",
+                "同一文件同时被用作环境配置和资源，无法安全迁移",
+            ));
+        }
+    }
     Ok(resources)
 }
 
@@ -3164,6 +3227,33 @@ mod tests {
         let store = crate::store::Store::open(paths.db()).unwrap();
         let old = portable_path_text(&source);
         let secret = format!("{old}/literal-secret");
+        let manifest: crate::model::Manifest =
+            serde_json::from_str(include_str!("../../../manifest/packages.win.json")).unwrap();
+        let mut entry = manifest
+            .packages
+            .iter()
+            .find(|entry| entry.id == "sftpgo" && entry.version == "2.7.6")
+            .unwrap()
+            .clone();
+        entry.entry = format!("sftpgo{}", std::env::consts::EXE_SUFFIX);
+        let runtime = paths.runtime_dir("sftpgo", &entry.version);
+        std::fs::create_dir_all(&runtime).unwrap();
+        copy_tree(&binaries.join("sftpgo"), &runtime, &mut (0, 0), false).unwrap();
+        std::fs::write(
+            runtime.join(".niceenv-package.json"),
+            serde_json::to_vec(&entry).unwrap(),
+        )
+        .unwrap();
+        store
+            .upsert_installed(&crate::model::InstalledPackage {
+                id: entry.id.clone(),
+                version: entry.version.clone(),
+                category: entry.category.clone(),
+                install_path: portable_path_text(&runtime),
+                config_path: String::new(),
+                installed_at: 0,
+            })
+            .unwrap();
         let qdrant_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let qdrant_port = qdrant_listener.local_addr().unwrap().port();
         let mihomo_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3225,7 +3315,7 @@ mod tests {
         .unwrap();
         let mut sftpgo = serde_json::json!({
             "data_provider":{"driver":"sqlite","name":format!("{old}/data/sftpgo/accounts.db"),"password":secret,"credentials_path":format!("{old}/data/sftpgo/credentials")},
-            "sftpd":{"bindings":[{"address":"127.0.0.1","port":ssh_port}],"login_banner_file":format!("{old}/etc/sftpgo/1/resources/banner.txt")},
+            "sftpd":{"bindings":[{"address":"127.0.0.1","port":ssh_port}]},
             "ftpd":{"bindings":[{"address":"127.0.0.1","port":ftp_port}],"banner_file":"resources/banner.txt"},
             "webdavd":{"bindings":[{"address":"127.0.0.1","port":dav_port,"enable_https":true,
                 "certificate_file":format!("{old}/data/sftpgo/tls.pem"),"certificate_key_file":format!("{old}/data/sftpgo/tls.key")}]},
@@ -3233,7 +3323,7 @@ mod tests {
             "smtp":{"templates_path":format!("{old}/data/sftpgo/templates")},
             "http":{"ca_certificates":[format!("{old}/data/sftpgo/tls.pem")],
                 "certificates":[{"cert":format!("{old}/data/sftpgo/tls.pem"),"key":format!("{old}/data/sftpgo/tls.key")}]},
-            "kms":{"secrets":{"master_key_path":format!("{old}/etc/sftpgo/1/resources/master.key")}}
+            "kms":{"secrets":{}}
         });
         fn uppercase_keys(value: &mut serde_json::Value) {
             match value {
@@ -3256,6 +3346,14 @@ mod tests {
             }
         }
         uppercase_keys(&mut sftpgo);
+        let env_dir = source.join("etc/sftpgo/1/env.d");
+        std::fs::create_dir(&env_dir).unwrap();
+        let env = format!("# native environment migration\r\nBASE='{old}'\r\nSFTPGO_DATA_PROVIDER__CONNECTION_STRING='{}'\r\nSFTPGO_KMS__SECRETS__MASTER_KEY_PATH=\"${{BASE}}/etc/sftpgo/1/resources/master.key\"\r\nSFTPGO_SFTPD__LOGIN_BANNER_FILE=\"${{BASE}}/etc/sftpgo/1/resources/banner.txt\"\r\nPASSWORD=${{SFTPGO_KMS__SECRETS__MASTER_KEY_PATH}}\r\n", crate::configpaths::sftpgo_sqlite_dsn(&source, "data/sftpgo/accounts.db"));
+        let mut env_bytes = vec![0xff, 0xfe];
+        for word in env.encode_utf16() {
+            env_bytes.extend(word.to_le_bytes());
+        }
+        std::fs::write(env_dir.join("native.env"), &env_bytes).unwrap();
         std::fs::write(
             source.join("etc/sftpgo/1/sftpgo.json"),
             serde_json::to_vec_pretty(&sftpgo).unwrap(),
@@ -3273,17 +3371,6 @@ mod tests {
             {
                 command.env_remove(key);
             }
-            let config: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(base.join("etc/sftpgo/1/sftpgo.json")).unwrap(),
-            )
-            .unwrap();
-            command.env(
-                "SFTPGO_DATA_PROVIDER__CONNECTION_STRING",
-                crate::configpaths::sftpgo_sqlite_dsn(
-                    &base.join("etc/sftpgo/1"),
-                    config["DATA_PROVIDER"]["NAME"].as_str().unwrap(),
-                ),
-            );
             command
                 .current_dir(base)
                 .args(["initprovider", "--config-dir"])
@@ -3302,6 +3389,22 @@ mod tests {
         assert!(original_db.len() > 4096);
         drop(store);
         copy_data_dir(&source, &target).unwrap();
+        assert_eq!(
+            std::fs::read(env_dir.join("native.env")).unwrap(),
+            env_bytes
+        );
+        let migrated_bytes = std::fs::read(target.join("etc/sftpgo/1/env.d/native.env")).unwrap();
+        assert_eq!(&migrated_bytes[..2], &[0xff, 0xfe]);
+        let migrated_env = String::from_utf16(
+            &migrated_bytes[2..]
+                .chunks_exact(2)
+                .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert!(migrated_env.contains(&format!(
+            "PASSWORD='{old}/etc/sftpgo/1/resources/master.key'"
+        )));
         assert_eq!(
             std::fs::read(target.join("etc/sftpgo/1/resources/master.key")).unwrap(),
             secret.as_bytes()
@@ -3339,13 +3442,6 @@ mod tests {
             .args(["serve", "--config-dir"])
             .arg(target.join("etc/sftpgo/1"))
             .args(["--config-file", "sftpgo.json", "--log-file-path", ""])
-            .env(
-                "SFTPGO_DATA_PROVIDER__CONNECTION_STRING",
-                crate::configpaths::sftpgo_sqlite_dsn(
-                    &target.join("etc/sftpgo/1"),
-                    config["DATA_PROVIDER"]["NAME"].as_str().unwrap(),
-                ),
-            )
             .stdout(output.try_clone().unwrap())
             .stderr(output);
         drop(ssh_listener);

@@ -307,6 +307,123 @@ pub(crate) struct ResourcePath {
     pub relative_to_config: bool,
 }
 
+fn sftpgo_resource(path: &[String], value: &str) -> Result<Option<ResourcePath>> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let connection = path == ["data_provider", "connection_string"];
+    let file = if connection {
+        sqlite_connection_path(value)?
+    } else if path == ["data_provider", "name"] && value == ":memory:" {
+        None
+    } else {
+        Some(value.into())
+    };
+    Ok(file.map(|path_value| ResourcePath {
+        path: path_value,
+        relative_to_config: !connection
+            && path != ["kms", "secrets", "master_key_path"]
+            && path != ["common", "temp_path"]
+            && path != ["acme", "http01_challenge", "webroot"],
+    }))
+}
+
+/// 环境变量沿用相同路径白名单；只转换路径值，未知变量、密码和共享插值变量保留原值。
+pub(crate) fn sftpgo_environment_paths(
+    root: &Value,
+    environment: &HashMap<String, String>,
+    rebase: &DataPathRebase,
+) -> Result<(HashMap<String, String>, Vec<ResourcePath>)> {
+    let mut effective = root.clone();
+    for (key, field) in [
+        ("SFTPGO_DATA_PROVIDER__DRIVER", "driver"),
+        (
+            "SFTPGO_DATA_PROVIDER__CONNECTION_STRING",
+            "connection_string",
+        ),
+    ] {
+        if let Some(value) = environment.get(key) {
+            let provider = effective
+                .as_mapping_mut()
+                .ok_or_else(sftpgo_invalid)?
+                .entry(Value::String("data_provider".into()))
+                .or_insert_with(|| Value::Mapping(yaml_serde::Mapping::new()));
+            provider
+                .as_mapping_mut()
+                .ok_or_else(sftpgo_invalid)?
+                .insert(Value::String(field.into()), Value::String(value.clone()));
+        }
+    }
+    let mut updated = HashMap::new();
+    let mut resources = Vec::new();
+    for (key, value) in environment {
+        if key.bytes().any(|byte| byte.is_ascii_lowercase()) {
+            continue;
+        }
+        let Some(key_path) = key.strip_prefix("SFTPGO_") else {
+            continue;
+        };
+        let parts = key_path.split("__").collect::<Vec<_>>();
+        if parts
+            .iter()
+            .any(|part| part.bytes().all(|byte| byte.is_ascii_digit()))
+            && !matches!(
+                parts.as_slice(),
+                [
+                    "HTTPD" | "FTPD" | "WEBDAVD",
+                    "BINDINGS",
+                    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9",
+                    ..
+                ] | [
+                    "HTTP",
+                    "CERTIFICATES",
+                    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9",
+                    _
+                ]
+            )
+        {
+            continue;
+        }
+        let mut path = parts
+            .iter()
+            .map(|part| {
+                if !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()) {
+                    "*".into()
+                } else {
+                    part.to_ascii_lowercase()
+                }
+            })
+            .collect::<Vec<_>>();
+        let list = if path_field("sftpgo", &path, &effective) {
+            false
+        } else {
+            path.push("*".into());
+            if !path_field("sftpgo", &path, &effective) {
+                continue;
+            }
+            true
+        };
+        let values = if list {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>()
+        } else {
+            vec![value.as_str()]
+        };
+        let mut migrated = Vec::new();
+        for value in values {
+            if let Some(resource) = sftpgo_resource(&path, value)? {
+                resources.push(resource);
+            }
+            migrated.push(rebase_field("sftpgo", &path, value, rebase)?);
+        }
+        updated.insert(key.clone(), migrated.join(if list { "," } else { "" }));
+    }
+    Ok((updated, resources))
+}
+
 /// SFTPGo 的这些字段引用文件/目录内容，而不是需要继续改写的配置。
 /// 先展开 YAML merge/alias；资源即使名为 sftpgo.json，也必须按声明的用途保留。
 pub(crate) fn sftpgo_resources(source: &str, json: bool) -> Result<Vec<ResourcePath>> {
@@ -322,22 +439,8 @@ pub(crate) fn sftpgo_resources(source: &str, json: bool) -> Result<Vec<ResourceP
         }
         match value {
             Value::String(value) if !value.is_empty() && path_field("sftpgo", path, root) => {
-                let connection = path == &["data_provider", "connection_string"];
-                let file = if connection {
-                    sqlite_connection_path(value)?
-                } else if path == &["data_provider", "name"] && value == ":memory:" {
-                    None
-                } else {
-                    Some(value.into())
-                };
-                if let Some(file) = file {
-                    out.push(ResourcePath {
-                        path: file,
-                        relative_to_config: !connection
-                            && path != &["kms", "secrets", "master_key_path"]
-                            && path != &["common", "temp_path"]
-                            && path != &["acme", "http01_challenge", "webroot"],
-                    });
+                if let Some(resource) = sftpgo_resource(path, value)? {
+                    out.push(resource);
                 }
             }
             Value::Mapping(values) => {

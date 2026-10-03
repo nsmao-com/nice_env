@@ -669,16 +669,18 @@ pub fn process_alive(pid: u32) -> bool {
         }
         #[cfg(target_os = "macos")]
         unsafe {
-            let mut info: libc::proc_bsdinfo = std::mem::zeroed();
+            // arg=1 才包含等待父进程回收的 zombie；kill(pid, 0) 对它仍返回成功。
+            // SHORTBSDINFO 不要求同一用户，避免把权限不足当成存活状态。
+            let mut info: libc::proc_bsdshortinfo = std::mem::zeroed();
             let size = std::mem::size_of_val(&info) as libc::c_int;
             if libc::proc_pidinfo(
                 pid as libc::c_int,
-                libc::PROC_PIDTBSDINFO,
-                0,
+                libc::PROC_PIDT_SHORTBSDINFO,
+                1,
                 &mut info as *mut _ as *mut libc::c_void,
                 size,
             ) == size
-                && info.pbi_status == libc::SZOMB
+                && info.pbsi_status == libc::SZOMB
             {
                 return false;
             }
@@ -1675,6 +1677,7 @@ mod process_tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(process.has_exited().unwrap());
+        assert!(!process_alive(pid));
         assert_eq!(child.0.wait().unwrap().code(), Some(0));
     }
 }

@@ -21,8 +21,26 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  verify-platforms:
+    name: Verify runtime (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-15-intel, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: platform-core-${{ matrix.os }}
+      - name: Verify core and platform before publishing installers
+        run: cargo test --locked -p nsb-core -p platform --no-fail-fast -- --test-threads=1
+
   release:
     name: Build & Release (${{ matrix.platform }} ${{ matrix.targets }})
+    needs: verify-platforms
     runs-on: ${{ matrix.platform }}
     strategy:
       fail-fast: false

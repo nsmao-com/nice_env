@@ -577,7 +577,8 @@ fn render_terminal_script(dirs: &[String], windows: bool) -> Result<String> {
         let joined = quote(&dirs.join(":"));
         let choices = dirs.iter().map(|d| quote(d)).collect::<Vec<_>>().join("|");
         Ok(format!(
-            r#"PATH="$(
+            // 赋值上下文不会分词；避免旧版 macOS sh 在双引号内解析 case 模式的缺陷。
+            r#"PATH=$(
   nsb_result={joined}
   nsb_rest=${{PATH-}}
   if [ -n "$nsb_rest" ]; then
@@ -594,7 +595,7 @@ fn render_terminal_script(dirs: &[String], windows: bool) -> Result<String> {
     done
   fi
   printf '%s.' "$nsb_result"
-)"
+)
 PATH=${{PATH%.}}
 export PATH"#
         ))

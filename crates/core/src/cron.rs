@@ -372,8 +372,9 @@ fn run_shell(command: &str, run: &ActiveRun, timeout: Duration) -> (String, Stri
         use std::os::windows::process::CommandExt;
         let mut cmd = platform::command("cmd");
         // 用户输入的是完整 shell 命令；cmd 不使用 C argv 转义规则。
+        // 隐藏子控制台使用 UTF-8，避免英文 Windows 的 OEM 代码页将中文替换为 ?。
         cmd.args(["/D", "/S", "/C"])
-            .raw_arg(format!("\"{command}\""));
+            .raw_arg(format!("\"chcp 65001 >nul && {command}\""));
         cmd
     };
     #[cfg(not(windows))]
@@ -743,7 +744,8 @@ mod tests {
         store.save_cron_job(&job, false).unwrap();
         let result = run_job(&store, &job.id, true).unwrap();
         assert_eq!(result.last_exit.as_deref(), Some("exit 0"));
-        assert!(result.last_output.unwrap().contains("recovered 中文输出"));
+        let output = result.last_output.unwrap();
+        assert!(output.contains("recovered 中文输出"), "{output}");
     }
 
     #[test]

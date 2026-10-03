@@ -147,6 +147,7 @@ fn linked(meta: &fs::Metadata) -> bool {
     meta.file_type().is_symlink()
 }
 fn plain_directory(path: &Path) -> Result<PathBuf> {
+    let path = crate::paths::system_path(path);
     if !path.is_absolute() {
         return Err(invalid("目录必须是绝对路径"));
     }

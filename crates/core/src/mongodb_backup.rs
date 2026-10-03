@@ -308,7 +308,8 @@ fn linked(meta: &fs::Metadata) -> bool {
     meta.file_type().is_symlink()
 }
 fn external_path(source: &str, exporting: bool) -> Result<PathBuf> {
-    let path = Path::new(source);
+    let normalized = crate::paths::system_path(Path::new(source));
+    let path = normalized.as_path();
     if !path.is_absolute() || path.components().any(|part| matches!(part, std::path::Component::ParentDir)) { return Err(invalid("请选择完整文件路径")); }
     let parent = path.parent().ok_or_else(|| invalid("文件目录无效"))?;
     for ancestor in if exporting { parent } else { path }.ancestors() {

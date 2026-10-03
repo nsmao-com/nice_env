@@ -465,7 +465,7 @@ pub(crate) fn remove(paths: &Paths, id: &str, revision: &str) -> Result<()> {
 
 pub(crate) fn export(paths: &Paths, id: &str, destination: &str) -> Result<String> {
     let _work = crate::BackgroundWork::begin("导出 Redis RDB 副本")?;
-    let dest = Path::new(destination);
+    let dest = crate::paths::system_path(Path::new(destination));
     if !dest.is_absolute()
         || dest
             .components()
@@ -581,7 +581,7 @@ fn archive_checked(
 }
 
 fn import_source(source: &str) -> Result<PathBuf> {
-    let path = Path::new(source);
+    let path = crate::paths::system_path(Path::new(source));
     if !path.is_absolute()
         || path
             .components()

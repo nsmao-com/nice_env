@@ -911,12 +911,36 @@ fn linked(metadata: &std::fs::Metadata) -> bool {
     metadata.file_type().is_symlink()
 }
 
+/// macOS 的根目录别名由系统维护；仅展开指向预期位置的别名，保留其余链接供安全检查拒绝。
+pub(crate) fn system_path(path: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    for (alias, target) in [
+        ("/var", "/private/var"),
+        ("/tmp", "/private/tmp"),
+        ("/etc", "/private/etc"),
+    ] {
+        if let Ok(relative) = path.strip_prefix(alias) {
+            if let Ok(link) = std::fs::read_link(alias) {
+                let resolved = if link.is_absolute() {
+                    link
+                } else {
+                    Path::new("/").join(link)
+                };
+                if resolved == Path::new(target) {
+                    return Path::new(target).join(relative);
+                }
+            }
+        }
+    }
+    path.to_path_buf()
+}
+
 /// 相对路径必须由普通组件构成；拒绝盘符、ADS、尾点、软链接和目录联接。
 pub(crate) fn checked_data_path(base: &Path, relative: &str) -> io::Result<PathBuf> {
     if relative.is_empty() || relative.contains(['\\', ':', '\0', '<', '>', '"', '|', '?', '*']) {
         return Err(backup_error("配置路径无效"));
     }
-    let mut result = base.to_path_buf();
+    let mut result = system_path(base);
     for part in relative.split('/') {
         let device = part.split('.').next().unwrap_or("").to_ascii_uppercase();
         let numbered_device = device
@@ -942,6 +966,7 @@ pub(crate) fn checked_data_path(base: &Path, relative: &str) -> io::Result<PathB
             return Err(backup_error("配置路径无效"));
         }
         result.push(part);
+        result = system_path(&result);
         match std::fs::symlink_metadata(&result) {
             Ok(metadata) if linked(&metadata) => {
                 return Err(backup_error("配置路径包含软链接或目录联接，无法自动恢复"))
@@ -1257,6 +1282,50 @@ pub fn restore_backup_checked(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_aliases_allow_real_files_but_still_reject_nested_links() {
+        for (alias, target) in [
+            ("/var", "/private/var"),
+            ("/tmp", "/private/tmp"),
+            ("/etc", "/private/etc"),
+        ] {
+            assert_eq!(system_path(Path::new(alias)), Path::new(target));
+            assert_eq!(
+                checked_data_path(Path::new("/"), &alias[1..]).unwrap(),
+                Path::new(target)
+            );
+        }
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let original = temp.path().join("original");
+        std::fs::create_dir(&original).unwrap();
+        std::fs::write(original.join("cert.pem"), "certificate").unwrap();
+        let linked = temp.path().join("linked");
+        std::os::unix::fs::symlink(&original, &linked).unwrap();
+        let relative = original
+            .join("cert.pem")
+            .strip_prefix("/")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let actual = checked_data_path(Path::new("/"), &relative).unwrap();
+        assert_eq!(std::fs::read_to_string(actual).unwrap(), "certificate");
+        let relative = linked
+            .join("cert.pem")
+            .strip_prefix("/")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(checked_data_path(Path::new("/"), &relative).is_err());
+        assert!(checked_data_path(temp.path(), "linked/cert.pem").is_err());
+        assert_eq!(
+            system_path(Path::new("/tmp-extra/cert.pem")),
+            Path::new("/tmp-extra/cert.pem")
+        );
+    }
 
     #[test]
     fn platform_data_defaults_preserve_legacy_data_and_never_write_inside_new_mac_apps() {

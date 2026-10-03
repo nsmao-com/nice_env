@@ -61,3 +61,19 @@ cargo run --locked -p nsb-core --bin check_versions -- --all --json --force
 - [ ] 其余页面与服务的真实交互验收，不能以浏览器 mock 成功代替桌面 IPC 成功。
 
 本批未改数据库结构，未修改 `update.sql`。
+
+## 2026-10-03：v0.2.247 平台失败修复
+
+v0.2.246 的真实平台 CI（run 37126180338）结果：Linux 与 Web 通过，Windows、macOS Intel、macOS ARM64 失败。失败不能由本机 Windows 通过替代，已下载三个平台完整日志核对。
+
+- macOS 两种架构的证书部署、账号密钥和站点备份均被系统 `/var` 软链接误拦截。统一只展开 `/var`、`/tmp`、`/etc` 且 `read_link` 确认指向预期 `/private/...` 的系统别名；保留后续目录的链接检查。Redis 和 MongoDB 外部备份路径同步修正。新增现有 Rust 模块用例确认别名可读、用户嵌套链接仍被拒绝。
+- macOS 进程退出检测使用 `PROC_PIDT_SHORTBSDINFO` 并传入 `arg=1`，包含尚未回收的 zombie。Apple XNU `proc_info.c` 明确只有非零 arg 才查 zombie；原有 arg=0 与 `kill(pid, 0)` 组合会误判。保留进程身份验证，正常停机用例在父进程回收前检查已退出。
+- POSIX PATH 赋值去掉命令替换外层不必要的双引号，规避 macOS 旧版 sh 对包含单引号、反引号的 case 模式的解析缺陷；变量赋值上下文不进行分词。
+- Windows 计划任务先把自己的隐藏子控制台代码页设为 UTF-8，避免英文系统 OEM 代码页在输出前就把中文替换成问号。未改变系统代码页。
+- Release workflow 新增三平台核心验证前置任务，全部成功才开始发布安装包。
+
+本地完整回归通过：core 736 项、集成测试 45 项、platform 15 项，54 项 ignored。桌面端 `cargo check --locked`、core/platform Clippy（存量警告）与改动行格式检查通过。新增 macOS 专有用例必须等待远程真实 runner 验证；不能把 Windows 通过当作 macOS 修复完成。
+
+补充 v0.2.246 发布后的原生证据：官方 Apache 2.4.69 实际下载、校验、安装、重复安装、HTTP 200/403、日志、停止及卸载通过；官方 Nginx 1.31.6 下载、安装、`-v`、重复安装及卸载通过。
+
+本批未新增测试文件，未运行本地前端 dev/build；没有数据库变更，未修改 `update.sql`。整体质量复查仍未完成，后续清单继续有效。

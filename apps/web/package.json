@@ -1,6 +1,6 @@
 {
   "name": "@nsb/web",
-  "version": "0.2.254",
+  "version": "0.2.255",
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000",

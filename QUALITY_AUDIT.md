@@ -193,3 +193,20 @@ v0.2.253 的 [main CI](https://github.com/nsmao-com/nice_env/actions/runs/371368
 本地完整回归 core 738、集成 45、platform 15 通过，55 项 ignored。最终入口用例 1 项、配置用例 10 项、Caddy 用例 1 项、Apache 原生用例 1 项再次通过；未把一次过滤后执行 0 项计为验证成功。桌面端 cargo check、改动行格式检查通过。Unix 路径新增回归仍须本版远程 runner；未验证 macOS Apache 原生运行或 Windows UNC 共享目录。
 
 本机安装程序再次读取仍为 0.2.244，ACME 请求头修复需使用含修复的新版程序。整体质量复查未完成：数据迁移多格式转义、完整安装/升级矩阵、真实桌面 IPC 和公网证书签发继续待查。没有数据库变更，未修改 `update.sql`；未新增测试文件，未运行本地前端 dev/build。
+
+## 2026-10-04：v0.2.255 Nginx / Apache 数据迁移与备份恢复
+
+v0.2.253 的 Windows 安装器现已生成，五个 Release 附件齐全。v0.2.254 的 main CI 五个任务、Release 三个平台原生验证均成功；记录时 macOS 双架构 DMG/app 已发布，Windows 安装器仍在构建，未将该版报告为全平台安装包完成。
+
+- 数据迁移不再对 Nginx / Apache 配置直接做普通文本替换：复用 Nginx 词法读取参数，Apache 区分普通路径、Include/Directory glob 与 DirectoryMatch 正则，改写后按配置规则引用完整参数。兼容历史 `//?/` include、Apache 续行和旧版 PHP RewriteRule 路径。
+- Unix 的字面反斜杠不再当作目录分隔符。Nginx include 在迁移前后开始或停止使用系统 glob 时转换整条参数的相应转义层，保留真正的站点通配后缀。
+- 配置参数按完整目录边界匹配，带空格、方括号、点号的同名前缀外部目录不被误改；明确包含上级目录引用时阻止自动迁移。配置引号不闭合时返回错误，源配置及空目标保持不变。
+- 备份预览与恢复根据目标配置格式转换历史路径，原备份保持原样；配置编辑器的旧备份恢复入口也传入真实目标路径。迁移排除 `etc/apache/logs`、服务 pid 与 Nginx 临时目录，避免改写历史日志。
+
+13 项目录迁移定向回归通过。真实 Apache 2.4.69 + PHP 8.4.26 在原有路径/端口/重复启停验证后，复制数据目录、将原目录改名为不可用，再从新目录恢复旧备份并完成语法校验及启动。PHP 的 SCRIPT_FILENAME 指向新目录，PATH_INFO 与查询参数保留，私有目录仍为 403，`.well-known` 正常，历史日志逐字保留。隔离实例停止后未留下 Apache 或 24000 段的 PHP 进程。
+
+最终本地完整回归 core 738、集成 45、platform 15 通过，55 项 ignored；桌面端 `cargo check --locked -p niceservbay` 与改动行格式检查通过。版本清单和 Cargo.lock 中三个本项目 crate 同步为 0.2.255；设置页、菜单及浏览器预览均引用 web package.json 版本，已核实同步。
+
+Unix 新增迁移回归需由远程 runner 确认；PHP/MySQL/Redis、JSON/YAML/dotenv、Caddy 与脚本等格式的迁移仍需分别复查，未声称本轮完成所有格式。Windows UNC、剩余套件升级矩阵、真实桌面 IPC 与公网证书签发继续待验。整体目标保持进行中。
+
+没有数据库结构或用户数据库变更，未修改 `update.sql`。只扩展已有 Rust 测试模块，未新增测试文件，未运行本地前端 dev/build。本机安装程序再次核实仍为 0.2.244；已发布的新安装包包含 ACME JOSE 请求头修复，未代用户运行安装器或注册公网账号。

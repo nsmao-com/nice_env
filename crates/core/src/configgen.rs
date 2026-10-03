@@ -77,7 +77,7 @@ fn nginx_structure_error() -> AppError {
 }
 
 /// 只解析指令边界，不重新序列化用户配置。引号、注释、转义、${变量} 均不能当作块边界。
-pub(crate) fn nginx_directives(content: &str) -> Result<Vec<NginxDirective>> {
+fn nginx_tokens(content: &str) -> Result<Vec<NginxToken>> {
     let bytes = content.as_bytes();
     let mut tokens = Vec::new();
     let mut pos = 0;
@@ -165,6 +165,11 @@ pub(crate) fn nginx_directives(content: &str) -> Result<Vec<NginxDirective>> {
             delimiter: None,
         });
     }
+    Ok(tokens)
+}
+
+pub(crate) fn nginx_directives(content: &str) -> Result<Vec<NginxDirective>> {
+    let tokens = nginx_tokens(content)?;
     fn parse(tokens: &[NginxToken], pos: &mut usize, depth: usize) -> Result<Vec<NginxDirective>> {
         if depth > 128 {
             return Err(nginx_structure_error());
@@ -207,6 +212,70 @@ pub(crate) fn nginx_directives(content: &str) -> Result<Vec<NginxDirective>> {
         Ok(nodes)
     }
     parse(&tokens, &mut 0, 0)
+}
+
+pub(crate) fn rebase_nginx_config(
+    content: &str,
+    rebase: &crate::paths::DataPathRebase,
+) -> Result<String> {
+    let mut directive = None;
+    let mut changes = Vec::new();
+    for token in nginx_tokens(content)? {
+        if token.delimiter.is_some() {
+            directive = None;
+            continue;
+        }
+        let Some(name) = directive.as_deref() else {
+            directive = Some(token.word);
+            continue;
+        };
+        let value = if name == "include" && cfg!(unix) && token.word.contains(['*', '?', '[']) {
+            let value = rebase.config_value(&token.word, |path| {
+                crate::paths::escaped_glob_path(Path::new(path))
+            })?;
+            if value != token.word && !value.contains(['*', '?', '[']) {
+                // 新路径不再进入系统 glob 时，撤去原先仅供 glob 使用的一层转义。
+                let mut literal = String::new();
+                let mut chars = value.chars();
+                while let Some(character) = chars.next() {
+                    literal.push(if character == '\\' {
+                        chars.next().unwrap_or(character)
+                    } else {
+                        character
+                    });
+                }
+                literal
+            } else {
+                value
+            }
+        } else {
+            let value = rebase.config_value(&token.word, str::to_owned)?;
+            // 新目录第一次引入 glob 字符时，整条 include（含原后缀）都要引用。
+            if name == "include"
+                && cfg!(unix)
+                && value != token.word
+                && value.contains(['*', '?', '['])
+            {
+                crate::paths::escaped_glob_path(Path::new(&value))
+            } else {
+                value
+            }
+        };
+        if value != token.word {
+            let quoted = value
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\t', "\\t");
+            changes.push((token.start, token.end, format!("\"{quoted}\"")));
+        }
+    }
+    let mut output = content.to_string();
+    for (start, end, value) in changes.into_iter().rev() {
+        output.replace_range(start..end, &value);
+    }
+    Ok(output)
 }
 
 fn directive_span(content: &str, node: &NginxDirective) -> std::ops::Range<usize> {
@@ -1460,6 +1529,121 @@ pub(crate) fn httpd_sites_pattern(paths: &Paths) -> String {
         "{}/*.conf",
         httpd_glob_text(&crate::paths::portable_path_text(&paths.apache_sites_dir()))
     )
+}
+
+pub(crate) fn rebase_httpd_config(
+    content: &str,
+    rebase: &crate::paths::DataPathRebase,
+) -> Result<String> {
+    let bytes = content.as_bytes();
+    let mut at = 0;
+    let mut directive = String::new();
+    let mut argument = 0;
+    let mut block = false;
+    let mut changes = Vec::new();
+    while at < bytes.len() {
+        if bytes[at..].starts_with(b"\\\r\n") {
+            at += 3;
+            continue;
+        }
+        if bytes[at..].starts_with(b"\\\n") {
+            at += 2;
+            continue;
+        }
+        if bytes[at].is_ascii_whitespace() {
+            if bytes[at] == b'\n' {
+                directive.clear();
+            }
+            at += 1;
+            continue;
+        }
+        if (directive.is_empty() && bytes[at] == b'#') || (block && bytes[at] == b'>') {
+            while at < bytes.len() && bytes[at] != b'\n' {
+                if bytes[at..].starts_with(b"\\\r\n") {
+                    at += 3;
+                } else if bytes[at..].starts_with(b"\\\n") {
+                    at += 2;
+                } else {
+                    at += 1;
+                }
+            }
+            continue;
+        }
+        let start = at;
+        let quote = matches!(bytes[at], b'\'' | b'"').then_some(bytes[at]);
+        if let Some(quote) = quote {
+            at += 1;
+            while at < bytes.len() && bytes[at] != quote {
+                if bytes[at] == b'\\'
+                    && bytes
+                        .get(at + 1)
+                        .is_some_and(|next| *next == quote || *next == b'\\')
+                {
+                    at += 1;
+                }
+                at += 1;
+            }
+            if at == bytes.len() {
+                return Err(AppError::new(
+                    "DATA_DIR_CONFIG_SYNTAX",
+                    "Apache 配置引号未闭合，无法转换迁移路径",
+                ));
+            }
+            at += 1;
+        } else {
+            while at < bytes.len()
+                && !bytes[at].is_ascii_whitespace()
+                && !(block && bytes[at] == b'>')
+            {
+                if bytes[at..].starts_with(b"\\\r\n") {
+                    at += 3;
+                } else if bytes[at..].starts_with(b"\\\n") {
+                    at += 2;
+                } else {
+                    at += 1;
+                }
+            }
+        }
+        let raw = content[start..at].replace("\\\r\n", "").replace("\\\n", "");
+        if directive.is_empty() {
+            directive = raw
+                .trim_start_matches(['<', '/'])
+                .trim_end_matches('>')
+                .to_ascii_lowercase();
+            block = bytes[start] == b'<';
+            argument = 0;
+            continue;
+        }
+        argument += 1;
+        let decoded = httpd_argument(&raw);
+        let value = match directive.as_str() {
+            "directory" | "include" | "includeoptional" => {
+                rebase.config_value(&decoded, httpd_glob_text)?
+            }
+            "directorymatch" | "locationmatch" | "filesmatch" => rebase.config_pattern(&decoded)?,
+            "rewriterule" if argument == 1 => rebase.config_pattern(&decoded)?,
+            "rewriterule" if argument == 2 && decoded.starts_with("fcgi://") => {
+                if let Some(slash) = decoded[7..].find('/').map(|index| index + 8) {
+                    format!(
+                        "{}{}",
+                        &decoded[..slash],
+                        rebase.config_value(&decoded[slash..], str::to_owned)?
+                    )
+                } else {
+                    decoded.clone()
+                }
+            }
+            _ => rebase.config_value(&decoded, str::to_owned)?,
+        };
+        if value != decoded {
+            changes.push((start, at, format!("\"{}\"", httpd_config_text(&value))));
+        }
+    }
+    let mut output = content.to_string();
+    for (start, end, value) in changes.into_iter().rev() {
+        output.replace_range(start..end, &value);
+    }
+    Ok(output)
 }
 
 fn sync_httpd_config(current: &str, paths: &Paths, root: &Path, http: u16, https: u16) -> String {

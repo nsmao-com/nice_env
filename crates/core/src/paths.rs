@@ -444,7 +444,7 @@ pub(crate) struct DataPathRebase {
     sources: Vec<String>,
     target: String,
     patterns: regex::Regex,
-    replacements: Vec<String>,
+    forms: Vec<(String, String)>,
 }
 
 /// 把 Windows 扩展路径前缀从面向用户的文本中移除。
@@ -500,24 +500,43 @@ pub(crate) fn escaped_glob_path(path: &Path) -> String {
 
 impl DataPathRebase {
     pub(crate) fn new(source: &Path, target: &Path) -> crate::error::Result<Self> {
-        let canonical = std::fs::canonicalize(source).ok().map(|path|portable_path_text(&path));
+        let canonical = std::fs::canonicalize(source)
+            .ok()
+            .map(|path| portable_path_text(&path));
         let source = portable_path_text(source).trim_end_matches('/').to_string();
         let mut sources = vec![source.clone()];
-        if let Some(canonical) = canonical { if !sources.contains(&canonical) { sources.push(canonical); } }
-        sources.sort_by_key(|s|std::cmp::Reverse(s.len()));
+        if let Some(canonical) = canonical {
+            if !sources.contains(&canonical) {
+                sources.push(canonical);
+            }
+        }
+        sources.sort_by_key(|s| std::cmp::Reverse(s.len()));
         let target = portable_path_text(target).trim_end_matches('/').to_string();
         if source.is_empty() || source.ends_with(':') {
-            return Err(crate::error::AppError::new("DATA_DIR_INVALID", "不能将磁盘根目录作为迁移源"));
+            return Err(crate::error::AppError::new(
+                "DATA_DIR_INVALID",
+                "不能将磁盘根目录作为迁移源",
+            ));
         }
         // 这些字符会改变现有 shell/配置文件的引号语义，不能直接代入旧模板。
-        if target.chars().any(|c| c.is_control() || "\"'`$%&|<>^;(){}".contains(c)) {
-            return Err(crate::error::AppError::new("DATA_DIR_INVALID", "目标目录包含无法安全写入服务配置的字符，请选择其它目录"));
+        if target
+            .chars()
+            .any(|c| c.is_control() || "\"'`$%&|<>^;(){}".contains(c))
+        {
+            return Err(crate::error::AppError::new(
+                "DATA_DIR_INVALID",
+                "目标目录包含无法安全写入服务配置的字符，请选择其它目录",
+            ));
         }
         let mut forms = Vec::new();
         for source in &sources {
             forms.push((source.clone(), target.clone()));
             if cfg!(windows) {
-                let extended = if let Some(unc) = source.strip_prefix("//") { format!("//?/UNC/{unc}") } else { format!("//?/{source}") };
+                let extended = if let Some(unc) = source.strip_prefix("//") {
+                    format!("//?/UNC/{unc}")
+                } else {
+                    format!("//?/{source}")
+                };
                 forms.push((extended.clone(), target.clone()));
                 for form in [source, &extended] {
                     let old = form.replace('/', "\\");
@@ -527,12 +546,23 @@ impl DataPathRebase {
                 }
             }
         }
-        forms.sort_by(|a,b| b.0.len().cmp(&a.0.len()));
-        forms.dedup_by(|a,b| a.0 == b.0);
-        let pattern = forms.iter().map(|(old,_)| format!("({})", regex::escape(old))).collect::<Vec<_>>().join("|");
-        let patterns = regex::RegexBuilder::new(&pattern).case_insensitive(cfg!(windows)).build()
+        forms.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        forms.dedup_by(|a, b| a.0 == b.0);
+        let pattern = forms
+            .iter()
+            .map(|(old, _)| format!("({})", regex::escape(old)))
+            .collect::<Vec<_>>()
+            .join("|");
+        let patterns = regex::RegexBuilder::new(&pattern)
+            .case_insensitive(cfg!(windows))
+            .build()
             .map_err(|e| crate::error::AppError::internal("准备目录路径替换", e.to_string()))?;
-        Ok(Self { sources, target, patterns, replacements: forms.into_iter().map(|(_,new)|new).collect() })
+        Ok(Self {
+            sources,
+            target,
+            patterns,
+            forms,
+        })
     }
 
     pub(crate) fn path(&self, value: &str) -> String {
@@ -540,15 +570,24 @@ impl DataPathRebase {
         let mut lexical = PathBuf::new();
         for component in Path::new(value).components() {
             match component {
-                Component::CurDir => {},
-                Component::ParentDir if lexical.file_name().is_some() => { lexical.pop(); },
+                Component::CurDir => {}
+                Component::ParentDir if lexical.file_name().is_some() => {
+                    lexical.pop();
+                }
                 other => lexical.push(other.as_os_str()),
             }
         }
         let normalized = portable_path_text(&lexical);
         let source = self.sources.iter().find(|source| {
-            normalized.get(..source.len()).is_some_and(|prefix| if cfg!(windows) { prefix.eq_ignore_ascii_case(source) } else { prefix == *source })
-                && normalized.get(source.len()..).is_some_and(|suffix|suffix.is_empty() || suffix.starts_with('/'))
+            normalized.get(..source.len()).is_some_and(|prefix| {
+                if cfg!(windows) {
+                    prefix.eq_ignore_ascii_case(source)
+                } else {
+                    prefix == *source
+                }
+            }) && normalized
+                .get(source.len()..)
+                .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
         });
         if let Some(source) = source {
             let suffix = &normalized[source.len()..];
@@ -564,25 +603,142 @@ impl DataPathRebase {
     }
 
     pub(crate) fn text(&self, value: &str) -> crate::error::Result<String> {
+        self.replace_text(value, &self.patterns, &self.forms, false, false)
+    }
+
+    /// 配置词法解析后的参数；调用方负责按原配置格式重新引用修改后的完整参数。
+    pub(crate) fn config_value(
+        &self,
+        value: &str,
+        encode: impl Fn(&str) -> String,
+    ) -> crate::error::Result<String> {
+        self.encoded_value(value, encode, false)
+    }
+
+    pub(crate) fn config_pattern(&self, value: &str) -> crate::error::Result<String> {
+        self.encoded_value(value, regex::escape, true)
+    }
+
+    fn encoded_value(
+        &self,
+        value: &str,
+        encode: impl Fn(&str) -> String,
+        regex_path: bool,
+    ) -> crate::error::Result<String> {
+        let mut forms: Vec<_> = self
+            .forms
+            .iter()
+            .map(|(old, new)| (encode(old), encode(new)))
+            .collect();
+        forms.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        forms.dedup_by(|a, b| a.0 == b.0);
+        let pattern = forms
+            .iter()
+            .map(|(old, _)| format!("({})", regex::escape(old)))
+            .collect::<Vec<_>>()
+            .join("|");
+        let patterns = regex::RegexBuilder::new(&pattern)
+            .case_insensitive(cfg!(windows))
+            .build()
+            .map_err(|e| crate::error::AppError::internal("转换配置路径编码", e.to_string()))?;
+        self.replace_text(value, &patterns, &forms, true, regex_path)
+    }
+
+    fn config_text(&self, relative: &Path, value: &str) -> crate::error::Result<String> {
+        let relative = portable_path_text(relative);
+        let name = relative.rsplit('/').next().unwrap_or("");
+        let conf = name.ends_with(".conf") || name.ends_with(".conf.disabled");
+        if (relative.starts_with("etc/nginx/") || relative.starts_with("runtimes/nginx/"))
+            && (conf
+                || [
+                    "mime.types",
+                    "fastcgi_params",
+                    "fastcgi.conf",
+                    "uwsgi_params",
+                    "scgi_params",
+                ]
+                .contains(&name))
+        {
+            return crate::configgen::rebase_nginx_config(value, self);
+        }
+        if (relative.starts_with("etc/apache/") || relative.starts_with("runtimes/apache/")) && conf
+        {
+            return crate::configgen::rebase_httpd_config(value, self);
+        }
+        self.text(value)
+    }
+
+    fn replace_text(
+        &self,
+        value: &str,
+        patterns: &regex::Regex,
+        forms: &[(String, String)],
+        quoted: bool,
+        pattern: bool,
+    ) -> crate::error::Result<String> {
         let mut out = String::new();
         let mut cursor = 0;
-        for captures in self.patterns.captures_iter(value) {
-            let Some(found) = captures.get(0) else { continue; };
+        for captures in patterns.captures_iter(value) {
+            let Some(found) = captures.get(0) else {
+                continue;
+            };
             let before = value[..found.start()].chars().next_back();
             let after = value[found.end()..].chars().next();
             let boundary = |c: char| c.is_whitespace() || "\"'=;:,()[]{}".contains(c);
-            if !before.is_none_or(boundary) || !after.is_none_or(|c| boundary(c) || c == '/' || c == '\\') { continue; }
-            let suffix = value[found.end()..].split(|c: char| boundary(c)).next().unwrap_or("");
-            if suffix.split(['/', '\\']).any(|part| part == "..") {
-                return Err(crate::error::AppError::new("DATA_DIR_PATH_AMBIGUOUS", "配置中的旧路径包含上级目录引用，无法自动修正")
-                    .with_hint("请先将相关路径改为完整绝对路径后重试"));
+            if quoted {
+                // 参数内部的空格、方括号等都是文件名字符，不能当作路径边界。
+                // 正则只接受明确的起始锚点/分组；字面反斜杠转义也不能误认成子目录。
+                let prefix = &value[..found.start()];
+                let prefix_ok = prefix.is_empty()
+                    || (pattern
+                        && matches!(
+                            prefix,
+                            "^" | "(?i)" | "(?i)^" | "(?i:" | "^(?i:" | "(?:" | "^(?:"
+                        ));
+                let suffix_ok = after.is_none_or(|c| {
+                    c == '/'
+                        || (pattern && matches!(c, ')' | '$'))
+                        || (!pattern && cfg!(windows) && c == '\\')
+                });
+                if !prefix_ok || !suffix_ok {
+                    continue;
+                }
+            } else if !before.is_none_or(boundary)
+                || !after.is_none_or(|c| boundary(c) || c == '/' || (cfg!(windows) && c == '\\'))
+            {
+                continue;
             }
-            let Some(replacement) = captures.iter().skip(1).position(|item| item.is_some()).map(|i| &self.replacements[i]) else { continue; };
-            if replacement.contains(' ') && !found.as_str().contains(' ') {
+            let suffix = if quoted {
+                &value[found.end()..]
+            } else {
+                value[found.end()..].split(boundary).next().unwrap_or("")
+            };
+            if suffix
+                .split(|c| c == '/' || (!pattern && cfg!(windows) && c == '\\'))
+                .any(|part| part == ".." || (pattern && part == r"\.\."))
+            {
+                return Err(crate::error::AppError::new(
+                    "DATA_DIR_PATH_AMBIGUOUS",
+                    "配置中的旧路径包含上级目录引用，无法自动修正",
+                )
+                .with_hint("请先将相关路径改为完整绝对路径后重试"));
+            }
+            let Some(replacement) = captures
+                .iter()
+                .skip(1)
+                .position(|item| item.is_some())
+                .map(|i| &forms[i].1)
+            else {
+                continue;
+            };
+            if !quoted && replacement.contains(' ') && !found.as_str().contains(' ') {
                 let line = value[..found.start()].rsplit('\n').next().unwrap_or("");
                 if line.matches('"').count() % 2 == 0 && line.matches('\'').count() % 2 == 0 {
-                    return Err(crate::error::AppError::new("DATA_DIR_PATH_QUOTING", "配置中存在未加引号的旧路径，无法安全迁移到含空格的目录")
-                        .with_hint("请选择不含空格的目录，或先为相关配置中的完整路径添加引号后重试"));
+                    return Err(crate::error::AppError::new(
+                        "DATA_DIR_PATH_QUOTING",
+                        "配置中存在未加引号的旧路径，无法安全迁移到含空格的目录",
+                    )
+                    .with_hint("请选择不含空格的目录，或先为相关配置中的完整路径添加引号后重试"));
                 }
             }
             out.push_str(&value[cursor..found.start()]);
@@ -778,38 +934,85 @@ fn copy_tree(source: &Path, target: &Path, stats: &mut (u64, u64), root: bool) -
     Ok(())
 }
 
-fn rebase_config_files(root: &Path, directory: &Path, rebase: &DataPathRebase) -> crate::error::Result<u64> {
+fn rebase_config_files(
+    root: &Path,
+    directory: &Path,
+    rebase: &DataPathRebase,
+) -> crate::error::Result<u64> {
     let mut rewritten = 0;
     for entry in std::fs::read_dir(directory)? {
         let entry = entry?;
         let path = entry.path();
-        let relative = path.strip_prefix(root).map_err(|_| crate::error::AppError::new("DATA_DIR_INVALID", "配置文件超出迁移目录"))?;
-        let first = relative.components().next().map(|c| c.as_os_str().to_string_lossy().into_owned()).unwrap_or_default();
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| crate::error::AppError::new("DATA_DIR_INVALID", "配置文件超出迁移目录"))?;
+        let first = relative
+            .components()
+            .next()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .unwrap_or_default();
         // 历史、下载及数据库业务内容保持原样，不做全盘字符串替换。
-        if matches!(first.as_str(), "backup" | "logs" | "downloads" | "certs" | "cron-locks") { continue; }
+        if matches!(
+            first.as_str(),
+            "backup" | "logs" | "downloads" | "certs" | "cron-locks"
+        ) {
+            continue;
+        }
+        let relative_text = portable_path_text(relative);
+        if [
+            "etc/apache/logs",
+            "etc/apache/run",
+            "etc/nginx/run",
+            "etc/nginx/temp",
+        ]
+        .iter()
+        .any(|prefix| relative_text == *prefix || relative_text.starts_with(&format!("{prefix}/")))
+        {
+            continue;
+        }
         let metadata = entry.metadata()?;
         if metadata.is_dir() {
             rewritten += rebase_config_files(root, &path, rebase)?;
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_lowercase();
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-        let config = first == "etc" || first == "user-modules" || name == ".user.ini"
-            || ((first == "runtimes" || first == "data") && matches!(ext.as_str(), "conf" | "cnf" | "ini" | "cfg" | "properties" | "cmd" | "bat" | "ps1" | "sh"))
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let config = first == "etc"
+            || first == "user-modules"
+            || name == ".user.ini"
+            || ((first == "runtimes" || first == "data")
+                && matches!(
+                    ext.as_str(),
+                    "conf" | "cnf" | "ini" | "cfg" | "properties" | "cmd" | "bat" | "ps1" | "sh"
+                ))
             || name == ".niceenv-package.json";
-        if !config { continue; }
+        if !config {
+            continue;
+        }
         if metadata.len() > 16 * 1024 * 1024 {
-            return Err(crate::error::AppError::new("DATA_DIR_CONFIG_SIZE", format!("配置文件过大，无法自动检查：{}", relative.display())));
+            return Err(crate::error::AppError::new(
+                "DATA_DIR_CONFIG_SIZE",
+                format!("配置文件过大，无法自动检查：{}", relative.display()),
+            ));
         }
         let bytes = std::fs::read(&path)?;
         let Ok(text) = std::str::from_utf8(&bytes) else {
             // 二进制凭据/缓存保持字节不变；旧路径出现在非 UTF-8 配置时不能假装完成。
             if rebase.patterns.is_match(&String::from_utf8_lossy(&bytes)) {
-                return Err(crate::error::AppError::new("DATA_DIR_CONFIG_ENCODING", format!("配置不是 UTF-8，无法修正旧路径：{}", relative.display())));
+                return Err(crate::error::AppError::new(
+                    "DATA_DIR_CONFIG_ENCODING",
+                    format!("配置不是 UTF-8，无法修正旧路径：{}", relative.display()),
+                ));
             }
             continue;
         };
-        let rebased = rebase.text(text).map_err(|e| e.with_detail(relative.display().to_string()))?;
+        let rebased = rebase
+            .config_text(relative, text)
+            .map_err(|e| e.with_detail(relative.display().to_string()))?;
         if rebased != text {
             std::fs::write(&path, rebased)?;
             rewritten += 1;
@@ -827,15 +1030,26 @@ fn read_path_history(base: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(history)
 }
 
-pub(crate) fn rebase_backup_content(base: &Path, content: Vec<u8>) -> io::Result<Vec<u8>> {
+pub(crate) fn rebase_backup_content(
+    base: &Path,
+    target: &Path,
+    content: Vec<u8>,
+) -> io::Result<Vec<u8>> {
+    let relative = target
+        .strip_prefix(base)
+        .map_err(|_| backup_error("备份目标超出数据目录"))?;
     let mut history = read_path_history(base)?;
     // 长路径优先，避免多次迁移的相邻目录前缀互相覆盖。
-    history.sort_by_key(|path|std::cmp::Reverse(path.as_os_str().len()));
-    if history.is_empty() { return Ok(content); }
+    history.sort_by_key(|path| std::cmp::Reverse(path.as_os_str().len()));
+    if history.is_empty() {
+        return Ok(content);
+    }
     let mut text = String::from_utf8(content).map_err(io::Error::other)?;
     for source in history {
-        let rebase = DataPathRebase::new(&source,base).map_err(io::Error::other)?;
-        text = rebase.text(&text).map_err(io::Error::other)?;
+        let rebase = DataPathRebase::new(&source, base).map_err(io::Error::other)?;
+        text = rebase
+            .config_text(relative, &text)
+            .map_err(io::Error::other)?;
     }
     Ok(text.into_bytes())
 }
@@ -1285,7 +1499,7 @@ fn read_backup_snapshot(
     if expected_hash.is_some_and(|hash| hash != digest) {
         return Err(backup_error("备份内容校验失败，原配置未改动"));
     }
-    let content = rebase_backup_content(base, content)?;
+    let content = rebase_backup_content(base, &target, content)?;
     let relocated_digest = hex::encode(Sha256::digest(&content));
     let current = read_optional(&target)?;
     let revision = hex::encode(Sha256::digest(
@@ -1700,31 +1914,210 @@ mod tests {
 
     #[test]
     fn data_dir_path_rebase_preserves_boundaries_and_path_styles() {
-        let old = if cfg!(windows) { "C:/old-data" } else { "/old-data" };
-        let new = if cfg!(windows) { "D:/new-data" } else { "/new-data" };
-        let rebase = DataPathRebase::new(Path::new(old),Path::new(new)).unwrap();
-        assert_eq!(rebase.path(&format!("{old}/etc/a.ini")), format!("{new}/etc/a.ini"));
-        assert_eq!(rebase.path(&format!("{old}-external/a")), format!("{old}-external/a"));
+        let old = if cfg!(windows) {
+            "C:/old-data"
+        } else {
+            "/old-data"
+        };
+        let new = if cfg!(windows) {
+            "D:/new-data"
+        } else {
+            "/new-data"
+        };
+        let rebase = DataPathRebase::new(Path::new(old), Path::new(new)).unwrap();
+        for suffix in [
+            " sibling/file",
+            "[other]/file",
+            ".external/file",
+            "-external/file",
+        ] {
+            let external = format!("{old}{suffix}");
+            assert_eq!(
+                rebase.config_value(&external, str::to_owned).unwrap(),
+                external
+            );
+            let pattern = format!("^{}", regex::escape(&external));
+            assert_eq!(rebase.config_pattern(&pattern).unwrap(), pattern);
+        }
+        assert_eq!(
+            rebase
+                .config_pattern(&format!("^{}$", regex::escape(old)))
+                .unwrap(),
+            format!("^{}$", regex::escape(new))
+        );
+        assert!(rebase
+            .config_value(
+                &format!("{old}/folder with spaces/../../external"),
+                str::to_owned
+            )
+            .is_err());
+        assert!(rebase
+            .config_pattern(&format!("^{}/\\.\\./external", regex::escape(old)))
+            .is_err());
+        let continued = format!("# 中文注释 {old}\\\r\nDocumentRoot {old}/comment\r\nDocumentRoot {old}/www\\\r\n/site\r\nAlias /external \"{old} sibling/site\"\r\n");
+        let expected = format!("# 中文注释 {old}\\\r\nDocumentRoot {old}/comment\r\nDocumentRoot \"{new}/www/site\"\r\nAlias /external \"{old} sibling/site\"\r\n");
+        assert_eq!(
+            crate::configgen::rebase_httpd_config(&continued, &rebase).unwrap(),
+            expected
+        );
+        assert_eq!(
+            rebase.path(&format!("{old}/etc/a.ini")),
+            format!("{new}/etc/a.ini")
+        );
+        assert_eq!(
+            rebase.path(&format!("{old}-external/a")),
+            format!("{old}-external/a")
+        );
         let value = format!("include \"{old}/etc/*.conf\";\nroot {old}-external/www;\nurl https://example.test{old}/assets;");
         assert_eq!(rebase.text(&value).unwrap(), format!("include \"{new}/etc/*.conf\";\nroot {old}-external/www;\nurl https://example.test{old}/assets;"));
         if cfg!(windows) {
-            assert_eq!(rebase.path("c:\\OLD-data\\runtime"), "D:\\new-data\\runtime");
-            assert_eq!(rebase.text(r#"{"path":"C:\\old-data\\etc"}"#).unwrap(), r#"{"path":"D:\\new-data\\etc"}"#);
-            assert_eq!(rebase.text(r#"root "\\?\C:\old-data\www";"#).unwrap(), r#"root "D:\new-data\www";"#);
-            let unc = DataPathRebase::new(Path::new(r"\\?\UNC\server\share\old"),Path::new("D:/new-data")).unwrap();
-            assert_eq!(unc.text(r#"root "\\?\UNC\server\share\old\www";"#).unwrap(),r#"root "D:\new-data\www";"#);
+            assert_eq!(
+                crate::configgen::rebase_nginx_config(
+                    r#"include "//?/C:/old-data/etc/*.conf";"#,
+                    &rebase
+                )
+                .unwrap(),
+                r#"include "D:/new-data/etc/*.conf";"#
+            );
+            assert_eq!(
+                rebase.path("c:\\OLD-data\\runtime"),
+                "D:\\new-data\\runtime"
+            );
+            assert_eq!(
+                rebase.text(r#"{"path":"C:\\old-data\\etc"}"#).unwrap(),
+                r#"{"path":"D:\\new-data\\etc"}"#
+            );
+            assert_eq!(
+                rebase.text(r#"root "\\?\C:\old-data\www";"#).unwrap(),
+                r#"root "D:\new-data\www";"#
+            );
+            let unc = DataPathRebase::new(
+                Path::new(r"\\?\UNC\server\share\old"),
+                Path::new("D:/new-data"),
+            )
+            .unwrap();
+            assert_eq!(
+                unc.text(r#"root "\\?\UNC\server\share\old\www";"#).unwrap(),
+                r#"root "D:\new-data\www";"#
+            );
         } else {
             // Unix 文件名的反斜杠不能触发整条路径的 Windows 样式转换。
             assert_eq!(
                 rebase.path(&format!("{old}/etc/config\\archive.json")),
                 format!("{new}/etc/config\\archive.json")
             );
+            assert_eq!(
+                rebase
+                    .text(&format!("root \"{old}\\external/file\";"))
+                    .unwrap(),
+                format!("root \"{old}\\external/file\";")
+            );
         }
-        assert_eq!(rebase.path(&format!("{old}/../external")),format!("{old}/../external"));
-        assert!(rebase.text(&format!("root \"{old}/../external\";")).is_err());
-        let spaced = DataPathRebase::new(Path::new(old),Path::new(&format!("{new} with space"))).unwrap();
+        assert_eq!(
+            rebase.path(&format!("{old}/../external")),
+            format!("{old}/../external")
+        );
+        assert!(rebase
+            .text(&format!("root \"{old}/../external\";"))
+            .is_err());
+        let spaced =
+            DataPathRebase::new(Path::new(old), Path::new(&format!("{new} with space"))).unwrap();
         assert!(spaced.text(&format!("command {old}/tool")).is_err());
-        assert_eq!(spaced.text(&format!("command \"{old}/tool\"")).unwrap(), format!("command \"{new} with space/tool\""));
+        assert_eq!(
+            spaced.text(&format!("command \"{old}/tool\"")).unwrap(),
+            format!("command \"{new} with space/tool\"")
+        );
+        let source = PathBuf::from(format!("{old}/source [old]"));
+        let target = PathBuf::from(format!("{new}/target [new]"));
+        #[cfg(unix)]
+        let (source, target) = (source.join(r"literal\old"), target.join(r"literal\new"));
+        let from = Paths::new(source.clone());
+        let to = Paths::new(target.clone());
+        let rebase = DataPathRebase::new(&source, &target).unwrap();
+        let nginx = |paths: &Paths| {
+            crate::configgen::render_nginx_conf(
+                paths,
+                &paths.base.join("runtimes/nginx"),
+                8080,
+                8443,
+                &[],
+                None,
+            )
+        };
+        assert_eq!(
+            rebase
+                .config_text(Path::new("etc/nginx/nginx.conf"), &nginx(&from))
+                .unwrap(),
+            nginx(&to)
+        );
+        #[cfg(unix)]
+        for (old_name, new_name) in [("plain", "bracket[1]"), ("bracket[1]", "plain")] {
+            let from = Paths::new(
+                PathBuf::from("/old-data")
+                    .join(old_name)
+                    .join(r"literal\old"),
+            );
+            let to = Paths::new(
+                PathBuf::from("/new-data")
+                    .join(new_name)
+                    .join(r"literal\new"),
+            );
+            let rebase = DataPathRebase::new(&from.base, &to.base).unwrap();
+            let render = |paths: &Paths| {
+                crate::configgen::render_nginx_conf(
+                    paths,
+                    &paths.base.join(r"runtime\nginx"),
+                    8080,
+                    8443,
+                    &[],
+                    None,
+                )
+            };
+            assert_eq!(
+                rebase
+                    .config_text(Path::new("etc/nginx/nginx.conf"), &render(&from))
+                    .unwrap(),
+                render(&to)
+            );
+        }
+        let apache = |paths: &Paths| {
+            crate::configgen::render_httpd_conf(
+                paths,
+                &paths.base.join("runtimes/apache"),
+                &[],
+                8080,
+                8443,
+            )
+        };
+        assert_eq!(
+            rebase
+                .config_text(Path::new("etc/apache/httpd.conf"), &apache(&from))
+                .unwrap(),
+            apache(&to)
+        );
+        let mut site: crate::model::Site = serde_json::from_value(serde_json::json!({
+            "id":"migration", "name":"migration", "domains":["migration.test"], "rootDir":source.join("www/project [root]"),
+            "runtime":{"kind":"php","webServer":"apache"}, "https":false, "rewrite":"none", "createdAt":1,"updatedAt":1
+        })).unwrap();
+        let old_vhost =
+            crate::configgen::render_httpd_vhost(&site, 8080, 8443, &from.certs(), Some(19000));
+        site.root_dir = portable_path_text(&target.join("www/project [root]"));
+        let new_vhost =
+            crate::configgen::render_httpd_vhost(&site, 8080, 8443, &to.certs(), Some(19000));
+        // Apache 接受 \. 和 \\. 两种配置写法，比较解码后的语义。
+        let normalize = |text: &str| {
+            text.lines()
+                .map(crate::configgen::httpd_argument)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            normalize(
+                &rebase
+                    .config_text(Path::new("etc/apache/sites/migration.conf"), &old_vhost)
+                    .unwrap()
+            ),
+            normalize(&new_vhost)
+        );
     }
 
     #[test]
@@ -1781,17 +2174,28 @@ mod tests {
     fn data_dir_copy_failure_leaves_source_and_target_untouched() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
-        let paths = Paths::new(source.clone()); paths.ensure_dirs().unwrap();
+        let paths = Paths::new(source.clone());
+        paths.ensure_dirs().unwrap();
         let _store = crate::store::Store::open(paths.db()).unwrap();
         let old = portable_path_text(&source);
-        let content = format!("include {old}/etc/*.conf;");
+        let content = format!("include \"{old}/etc/*.conf;");
         std::fs::write(paths.nginx_conf(), &content).unwrap();
         let target = temp.path().join("contains space");
         std::fs::create_dir(&target).unwrap();
-        assert_eq!(copy_data_dir(&source, &target).unwrap_err().code, "DATA_DIR_PATH_QUOTING");
+        assert_eq!(
+            copy_data_dir(&source, &target).unwrap_err().code,
+            "CONFIG_STRUCTURE"
+        );
         assert!(std::fs::read_dir(&target).unwrap().next().is_none());
-        assert_eq!(std::fs::read_to_string(paths.nginx_conf()).unwrap(), content);
-        assert!(!std::fs::read_dir(temp.path()).unwrap().any(|entry|entry.unwrap().file_name().to_string_lossy().contains("-migrating-")));
+        assert_eq!(
+            std::fs::read_to_string(paths.nginx_conf()).unwrap(),
+            content
+        );
+        assert!(!std::fs::read_dir(temp.path()).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("-migrating-")));
     }
 
     #[test]

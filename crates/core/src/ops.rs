@@ -4724,12 +4724,9 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
                     .all(|offset| std::net::TcpListener::bind(("127.0.0.1", port + offset)).is_ok())
             })
             .unwrap();
-        state
-            .store
-            .set_port_override("php@8.4.26", Some(php_port))
-            .unwrap();
+        state.store.set_port_assign("php@8.4.26", php_port).unwrap();
         state.start_service("php@8.4.26").unwrap();
-        let project = temp.path().join("project # O'Brien %1 & space [2]");
+        let project = state.paths.base.join("project # O'Brien %1 & space [2]");
         std::fs::create_dir_all(project.join("assets/.git")).unwrap();
         std::fs::create_dir_all(project.join(".well-known")).unwrap();
         std::fs::write(project.join("index.php"), r#"<?php header('Content-Type: application/json'); echo json_encode(array_intersect_key($_SERVER,array_flip(['SCRIPT_FILENAME','SCRIPT_NAME','PATH_INFO','QUERY_STRING'])));"#).unwrap();
@@ -4792,7 +4789,111 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
             state.stop_service("apache").unwrap();
         }
         state.stop_service("php@8.4.26").unwrap();
-        println!("Apache: custom config/ports, bracketed include paths, PHP filename/DirectoryIndex/PATH_INFO, private files and repeated starts passed");
+        let site_config = state.paths.apache_sites_dir().join("php-path.conf");
+        let old_config = std::fs::read_to_string(&site_config).unwrap();
+        crate::paths::write_with_backup(
+            &site_config,
+            &format!("{old_config}# migration marker\n"),
+            &state.paths.backup(),
+        )
+        .unwrap();
+        let backup = crate::paths::list_backup_files(&state.paths.base)
+            .unwrap()
+            .into_iter()
+            .find(|entry| {
+                entry
+                    .target_path
+                    .as_deref()
+                    .is_some_and(|path| state.paths.base.join(path) == site_config)
+            })
+            .unwrap()
+            .name;
+        let historical_log = format!("previous data directory: {}\n", state.paths.base.display());
+        std::fs::write(
+            state.paths.etc().join("apache/logs/migration-history.log"),
+            &historical_log,
+        )
+        .unwrap();
+        let original = state.paths.base.clone();
+        let target = temp.path().join("migrated [target] with spaces");
+        crate::paths::copy_data_dir(&original, &target).unwrap();
+        drop(_cleanup);
+        drop(state);
+        std::fs::rename(&original, temp.path().join("original-unavailable")).unwrap();
+        let migrated = isolated_state(Paths::new(target));
+        let _cleanup = Cleanup(&migrated);
+        assert_eq!(
+            std::fs::read_to_string(
+                migrated
+                    .paths
+                    .etc()
+                    .join("apache/logs/migration-history.log")
+            )
+            .unwrap(),
+            historical_log
+        );
+        let moved_site = migrated
+            .store
+            .list_sites()
+            .unwrap()
+            .into_iter()
+            .find(|site| site.id == "php-path")
+            .unwrap();
+        assert!(Path::new(&moved_site.root_dir).starts_with(&migrated.paths.base));
+        let restored = crate::paths::restore_backup(&migrated.paths.base, &backup).unwrap();
+        let ports = PortsProfile::from_settings(&migrated.store);
+        let restored_config = std::fs::read_to_string(&restored).unwrap();
+        let expected_config = configgen::render_httpd_vhost(
+            &moved_site,
+            ports.apache_http,
+            ports.apache_https,
+            &migrated.paths.certs().join("sites"),
+            Some(php_port),
+        );
+        assert_eq!(
+            restored_config
+                .lines()
+                .map(configgen::httpd_argument)
+                .collect::<Vec<_>>(),
+            expected_config
+                .lines()
+                .map(configgen::httpd_argument)
+                .collect::<Vec<_>>()
+        );
+        configgen::validate_httpd(&root.join("bin/httpd.exe"), &migrated.paths.apache_conf())
+            .unwrap();
+        migrated.start_service("php@8.4.26").unwrap();
+        migrated.start_service("apache").unwrap();
+        let response = client
+            .get(format!(
+                "http://127.0.0.1:{new_port}/index.php/path/info?x=after-migration"
+            ))
+            .header("Host", "php-path.test")
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let json: serde_json::Value = response.json().unwrap();
+        assert_eq!(
+            json["SCRIPT_FILENAME"],
+            crate::paths::portable_path_text(&Path::new(&moved_site.root_dir).join("index.php"))
+        );
+        assert_eq!(json["PATH_INFO"], "/path/info");
+        assert_eq!(json["QUERY_STRING"], "x=after-migration");
+        for (path, expected) in [("/assets/.git/config", 403), ("/.well-known/probe", 200)] {
+            assert_eq!(
+                client
+                    .get(format!("http://127.0.0.1:{new_port}{path}"))
+                    .header("Host", "php-path.test")
+                    .send()
+                    .unwrap()
+                    .status()
+                    .as_u16(),
+                expected
+            );
+        }
+        migrated.stop_service("apache").unwrap();
+        migrated.stop_service("php@8.4.26").unwrap();
+        println!("Apache: custom config/ports, bracketed includes, PHP request metadata, private files, repeated starts and migration/backup restore with the original directory unavailable passed");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 use crate::{
     error::{AppError, Result},
     model::{RewritePreset, Site, SiteKind},
-    paths::{nginx_path, Paths},
+    paths::{portable_path_text, Paths},
     store::Store,
 };
 use std::path::{Path, PathBuf};
@@ -10,6 +10,86 @@ use std::path::{Path, PathBuf};
 // Caddyfile 保留正则里的反斜杠；JSON 的双反斜杠转义会把匹配语义改变。
 fn quoted(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\\\""))
+}
+
+/// Caddyfile 只转义双引号，不能用 JSON 的反斜杠规则编码文件路径。
+/// 原样引用避免尾部反斜杠吞掉闭合引号；同时含反引号时使用上游支持的 heredoc。
+pub(crate) fn quoted_path_text(value: &str) -> String {
+    if !value.contains('\\') {
+        return quoted(value);
+    }
+    if !value.contains('`') {
+        return format!("`{value}`");
+    }
+    let mut marker = "NICEENV_PATH".to_string();
+    while value.contains(&marker) {
+        marker.push('_');
+    }
+    format!("<<{marker}\n{value}\n{marker}")
+}
+
+fn quoted_path(path: &Path) -> String {
+    quoted_path_text(&portable_path_text(path))
+}
+
+fn argument_text(value: &str) -> String {
+    if let Some(value) = value
+        .strip_prefix('`')
+        .and_then(|value| value.strip_suffix('`'))
+    {
+        return value.to_string();
+    }
+    if let Some(value) = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    {
+        let mut output = String::new();
+        let mut chars = value.chars();
+        while let Some(character) = chars.next() {
+            if character == '\\' {
+                if let Some(next) = chars.next() {
+                    if next != '"' {
+                        output.push('\\');
+                    }
+                    output.push(next);
+                } else {
+                    output.push(character);
+                }
+            } else {
+                output.push(character);
+            }
+        }
+        return output;
+    }
+    if let Some((opening, body)) = value
+        .strip_prefix("<<")
+        .and_then(|value| value.split_once('\n'))
+    {
+        let marker = opening.trim_end_matches('\r');
+        if let Some(body) = body.strip_suffix(marker) {
+            if let Some((body, padding)) = body.rsplit_once('\n') {
+                return body
+                    .lines()
+                    .map(|line| line.strip_prefix(padding).unwrap_or(line))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+            }
+        }
+    }
+    value.to_string()
+}
+
+pub(crate) fn expand_template_paths(
+    source: &str,
+    expand: impl Fn(&str) -> Option<String>,
+) -> Result<String> {
+    let mut output = source.to_string();
+    for token in tokens(source)?.into_iter().rev() {
+        if let Some(value) = expand(&argument_text(&token.value)) {
+            output.replace_range(token.start..token.end, &quoted_path_text(&value));
+        }
+    }
+    Ok(output)
 }
 
 pub(crate) fn config_path(paths: &Paths, store: &Store) -> Result<PathBuf> {
@@ -90,7 +170,37 @@ fn tokens(source: &str) -> Result<Vec<Token>> {
         }
         let start = at;
         let quote = (bytes[at] == b'"' || bytes[at] == b'`').then_some(bytes[at]);
-        if let Some(quote) = quote {
+        if source[start..].starts_with("<<") {
+            let line_end = source[start..]
+                .find('\n')
+                .map(|end| start + end)
+                .ok_or_else(|| AppError::new("CADDY_CONFIG", "Caddyfile heredoc 缺少正文"))?;
+            let marker = source[start + 2..line_end].trim_end_matches('\r');
+            if marker.is_empty()
+                || !marker
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+            {
+                return Err(AppError::new("CADDY_CONFIG", "Caddyfile heredoc 标记无效"));
+            }
+            let close = source[line_end + 1..]
+                .find(marker)
+                .map(|end| line_end + 1 + end)
+                .ok_or_else(|| AppError::new("CADDY_CONFIG", "Caddyfile heredoc 未闭合"))?;
+            if !source[line_end + 1..close]
+                .rsplit('\n')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+            {
+                return Err(AppError::new(
+                    "CADDY_CONFIG",
+                    "Caddyfile heredoc 结束标记必须位于行首缩进后",
+                ));
+            }
+            at = close + marker.len();
+        } else if let Some(quote) = quote {
             at += 1;
             let mut closed = false;
             while at < bytes.len() {
@@ -226,15 +336,23 @@ fn global_options(source: &str, http: u16, https: u16, errors: &str) -> Result<S
 pub(crate) fn import_line(paths: &Paths) -> String {
     format!(
         "import {}",
-        quoted(&format!("{}/*.conf", nginx_path(&paths.caddy_sites_dir())))
+        quoted_path_text(&format!(
+            "{}/*.conf",
+            crate::paths::escaped_glob_path(&paths.caddy_sites_dir())
+        ))
     )
 }
 
 pub(crate) fn includes_sites(source: &str, paths: &Paths) -> bool {
-    let expected = quoted(&format!("{}/*.conf", nginx_path(&paths.caddy_sites_dir())));
+    let expected = format!(
+        "{}/*.conf",
+        crate::paths::escaped_glob_path(&paths.caddy_sites_dir())
+    );
     tokens(source).is_ok_and(|tokens| {
         tokens.windows(2).any(|pair| {
-            pair[0].depth == 0 && pair[0].value == "import" && pair[1].value == expected
+            pair[0].depth == 0
+                && pair[0].value == "import"
+                && argument_text(&pair[1].value) == expected
         })
     })
 }
@@ -311,12 +429,12 @@ pub(crate) fn prepare(
                 ("storage file_system", resolved.data.join("storage")),
                 ("root *", resolved.data.join("www")),
             ] {
-                let path = nginx_path(&path);
+                let path = portable_path_text(&path);
                 if line.trim() == format!("{directive} {path}") {
                     let indent = &line[..line.len() - line.trim_start().len()];
                     return format!(
                         "{indent}{directive} {}{}",
-                        quoted(&path),
+                        quoted_path_text(&path),
                         if line.ends_with('\n') { "\n" } else { "" }
                     );
                 }
@@ -389,7 +507,7 @@ pub(crate) fn prepare(
                 changed.push((path, original, updated));
             }
             errors.push_str(&format!("\tlog niceenv_site_error_{id} {{\n\t\tlevel ERROR\n\t\tinclude http.log.error.niceenv_{id}_http http.log.error.niceenv_{id}_https\n\t\toutput file {file}\n\t}}\n", id = site.id,
-            file = quoted(&nginx_path(&paths.logs().join("caddy").join(format!("{}.error.log", site.id))))));
+            file = quoted_path(&paths.logs().join("caddy").join(format!("{}.error.log", site.id)))));
         }
         let mut content = if sites.is_empty() && !includes_sites(&initial, paths) {
             initial.clone()
@@ -676,7 +794,7 @@ fn proxy(
         })
         && paths.certs().join("ca.crt").is_file()
     {
-        out.push_str(&format!("\t\t\t\ttransport http {{\n\t\t\t\t\ttls_trust_pool file {{\n\t\t\t\t\t\tpem_file {}\n\t\t\t\t\t}}\n\t\t\t\t}}\n", quoted(&nginx_path(&paths.certs().join("ca.crt")))));
+        out.push_str(&format!("\t\t\t\ttransport http {{\n\t\t\t\t\ttls_trust_pool file {{\n\t\t\t\t\t\tpem_file {}\n\t\t\t\t\t}}\n\t\t\t\t}}\n", quoted_path(&paths.certs().join("ca.crt"))));
     }
     if let Some(rule) = rule {
         let upstream_path = if rule.strip_prefix {
@@ -765,8 +883,8 @@ fn render_block(
             crate::configgen::site_certificate_files(site, &paths.certs().join("sites"));
         out.push_str(&format!(
             "\ttls {} {}\n",
-            quoted(&nginx_path(&cert)),
-            quoted(&nginx_path(&key))
+            quoted_path(&cert),
+            quoted_path(&key)
         ));
     }
     if let (Some(auth), Some(hash)) = (site.runtime.basic_auth.as_ref().filter(|auth| auth.enabled), password_hash) {
@@ -775,22 +893,22 @@ fn render_block(
     out.push_str(&format!(
         "\tlog niceenv_{}_{scheme} {{\n\t\toutput file {}\n\t}}\n",
         site.id,
-        quoted(&nginx_path(
+        quoted_path(
             &paths
                 .logs()
                 .join("caddy")
                 .join(format!("{}.access.log", site.id))
-        ))
+        )
     ));
     out.push_str(&format!(
         "\tlog niceenv_{}_{scheme}_errors {{\n\t\tno_hostname\n\t\toutput file {}\n\t}}\n",
         site.id,
-        quoted(&nginx_path(
+        quoted_path(
             &paths
                 .logs()
                 .join("caddy")
                 .join(format!("{}.error.log", site.id))
-        ))
+        )
     ));
     if !secure && site.https && site.runtime.https_redirect.is_some() {
         out.push_str("\troute {\n");
@@ -802,7 +920,7 @@ fn render_block(
     if site.runtime.kind != SiteKind::Redirect {
         out.push_str(&format!(
             "\troot * {}\n",
-            quoted(&nginx_path(Path::new(&site.root_dir)))
+            quoted_path(Path::new(&site.root_dir))
         ));
     }
     // 显式 route 顺序：来源限制 → 跨域 → 私有文件保护 → 路径代理 → 站点主体。
@@ -986,6 +1104,29 @@ mod tests {
             assert!(validate_rewrite(invalid).is_err(), "{invalid}");
         }
         validate_rewrite("@missing not file\nrewrite @missing /index.php?{query}\n").unwrap();
+        for path in [
+            r"/tmp/literal\new\tail",
+            "/tmp/end\\",
+            "/tmp/tick`\\\"quote",
+            "/tmp/NICEENV_PATH`\\",
+        ] {
+            let quoted = quoted_path_text(path);
+            let source =
+                format!("{{\n admin off\n}}\nhttp://:8080 {{\n root * {quoted}\n respond ok\n}}\n");
+            let updated = global_options(&source, 31000, 31001, "").unwrap();
+            assert!(updated.contains(&format!("root * {quoted}")));
+            assert_eq!(global_options(&updated, 31000, 31001, "").unwrap(), updated);
+        }
+        #[cfg(unix)]
+        {
+            let paths = Paths::new(PathBuf::from(r"/tmp/data\[1]"));
+            let imported = import_line(&paths);
+            assert!(includes_sites(&imported, &paths));
+            assert!(!includes_sites(
+                "import /tmp/data/[1]/etc/caddy/sites/*.conf",
+                &paths
+            ));
+        }
     }
 
     #[test]
@@ -995,6 +1136,31 @@ mod tests {
         let executable =
             PathBuf::from(std::env::var_os("NSB_VERIFY_CADDY").expect("NSB_VERIFY_CADDY"));
         let temp = tempfile::tempdir().unwrap();
+        // 原生 adapter 回读路径，覆盖尾部反斜杠和双引号/反引号组合。
+        for value in [
+            r"/tmp/literal\new\tail",
+            "/tmp/end\\",
+            "/tmp/tick`\\\"quote",
+        ] {
+            let file = temp.path().join("path-probe.Caddyfile");
+            std::fs::write(&file, format!("{{\n admin off\n auto_https off\n}}\nhttp://:18971 {{\n root * {}\n respond ok\n}}\n", quoted_path_text(value))).unwrap();
+            let output = platform::command(&executable)
+                .args(["adapt", "--adapter", "caddyfile", "--config"])
+                .arg(&file)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(
+                json.pointer("/apps/http/servers/srv0/routes/0/handle/0/root")
+                    .and_then(|value| value.as_str()),
+                Some(value)
+            );
+        }
         let state = crate::CoreState::init(
             Some(temp.path().join("caddy sites with spaces")),
             Arc::new(|_| {}),

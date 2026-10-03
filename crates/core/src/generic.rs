@@ -60,27 +60,133 @@ pub struct Resolved {
 /// 占位符展开：{root} {data} {etc} {port} {log} {bin}
 /// 派生端口：{port+1} / {port+1000} / {port-7000}（多端口服务如 MinIO 控制台、Temporal UI）
 pub fn expand(template: &str, r: &Resolved) -> String {
-    expand_inner(template, r, false)
+    expand_paths(
+        &substitute_ports(template, r.port).replace("{httpPort}", &r.http_port.to_string()),
+        r,
+        str::to_owned,
+    )
 }
 
-/// 配置文件类模板展开：路径用正斜杠。
-/// 配置格式（Caddyfile / YAML / TOML / ini）里反斜杠是转义字符，
-/// Windows 路径直接写进去会被吞掉；正斜杠各平台通吃（与 configgen 的 nginx_path 同策略）。
-pub fn expand_config(template: &str, r: &Resolved) -> String {
-    expand_inner(template, r, true)
+static PATH_TOKEN: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+    regex::Regex::new(r"\{(root|data|etc|log|bin)\}").expect("constant path token")
+});
+
+fn expand_paths(template: &str, r: &Resolved, encode: impl Fn(&str) -> String) -> String {
+    // 只扫描模板一次，目录名里恰好包含 {etc} 等字面文本时不能二次展开。
+    PATH_TOKEN
+        .replace_all(template, |captures: &regex::Captures<'_>| {
+            let value = match &captures[1] {
+                "root" => crate::paths::portable_path_text(&r.root),
+                "data" => crate::paths::portable_path_text(&r.data),
+                "etc" => crate::paths::portable_path_text(&r.etc),
+                "log" => crate::paths::portable_path_text(&r.log),
+                "bin" => crate::paths::portable_path_text(&r.bin),
+                _ => unreachable!(),
+            };
+            encode(&value)
+        })
+        .into_owned()
 }
 
-fn expand_inner(template: &str, r: &Resolved, _slash_paths: bool) -> String {
-    let path_str = |p: &std::path::Path| crate::paths::portable_path_text(p);
-    // 端口类占位符（含 {port+N}）先展开，避免 {port} 抢先替换掉 {port+N} 的前缀
-    let with_ports = substitute_ports(template, r.port);
-    with_ports
-        .replace("{root}", &path_str(&r.root))
-        .replace("{data}", &path_str(&r.data))
-        .replace("{etc}", &path_str(&r.etc))
-        .replace("{httpPort}", &r.http_port.to_string())
-        .replace("{log}", &path_str(&r.log))
-        .replace("{bin}", &path_str(&r.bin))
+/// 只在新建配置时展开路径；保留模板布局和注释，按各格式的字符串规则引用。
+pub fn expand_config(template: &str, r: &Resolved) -> Result<String> {
+    let template =
+        substitute_ports(template, r.port).replace("{httpPort}", &r.http_port.to_string());
+    let file = r
+        .spec
+        .config_file
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if file == "caddyfile" {
+        return crate::caddy::expand_template_paths(&template, |value| {
+            PATH_TOKEN
+                .is_match(value)
+                .then(|| expand_paths(value, r, str::to_owned))
+        });
+    }
+    let yaml = file.ends_with(".yaml") || file.ends_with(".yml");
+    let env = file == ".env" || file.ends_with(".env");
+    let ini = file.ends_with(".ini") || file.ends_with(".cnf");
+    let invalid = || {
+        AppError::new("CONFIG_TEMPLATE", "服务配置模板中的路径格式无法安全展开")
+            .with_hint("请检查路径所在的配置值和引号；原有配置不会被覆盖。")
+    };
+    template
+        .split_inclusive('\n')
+        .map(|line| {
+            if !PATH_TOKEN.is_match(line) || line.trim_start().starts_with(['#', ';']) {
+                return Ok(line.to_string());
+            }
+            if !yaml && !env && !ini {
+                return Err(invalid());
+            }
+            let separator = line
+                .find(if yaml { ':' } else { '=' })
+                .ok_or_else(invalid)?;
+            let rest = &line[separator + 1..];
+            let start = separator + 1 + rest.len() - rest.trim_start_matches([' ', '\t']).len();
+            let mut quote = None;
+            let mut escaped = false;
+            let mut end = line.trim_end_matches(['\r', '\n']).len();
+            for (offset, character) in line[start..end].char_indices() {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if character == '\\' && quote != Some('\'') {
+                    escaped = true;
+                    continue;
+                }
+                if let Some(current) = quote {
+                    if character == current {
+                        quote = None;
+                    }
+                } else if matches!(character, '\'' | '"') {
+                    quote = Some(character);
+                } else if character == '#'
+                    && (ini || offset == 0 || line[..start + offset].ends_with(char::is_whitespace))
+                {
+                    end = start + offset;
+                    break;
+                }
+            }
+            if quote.is_some() {
+                return Err(invalid());
+            }
+            end = start + line[start..end].trim_end().len();
+            let scalar = &line[start..end];
+            let encode_double = |value: &str| {
+                let json = serde_json::Value::String(value.to_string()).to_string();
+                let inner = json[1..json.len() - 1].to_string();
+                if env {
+                    inner.replace('$', "\\$")
+                } else {
+                    inner
+                }
+            };
+            let replacement = if scalar.starts_with('"') && scalar.ends_with('"') {
+                expand_paths(scalar, r, encode_double)
+            } else if scalar.starts_with('\'') && scalar.ends_with('\'') {
+                expand_paths(scalar, r, |value| {
+                    if yaml {
+                        value.replace('\'', "''")
+                    } else if env {
+                        value.replace('\'', "'\\''")
+                    } else {
+                        value.replace('\\', "\\\\").replace('\'', "\\'")
+                    }
+                })
+            } else if env {
+                // 模板自身的环境变量仍交给 dotenv 展开，注入路径中的 $ 必须保留为字面值。
+                let literal = scalar.replace('\\', "\\\\").replace('"', "\\\"");
+                format!("\"{}\"", expand_paths(&literal, r, encode_double))
+            } else {
+                serde_json::Value::String(expand_paths(scalar, r, str::to_owned)).to_string()
+            };
+            Ok(format!("{}{replacement}{}", &line[..start], &line[end..]))
+        })
+        .collect()
 }
 
 /// 替换所有 `{port}` / `{port+N}` / `{port-N}`；port 为 None 时清空
@@ -1521,41 +1627,71 @@ fn select_port(store: &Store, r: &Resolved) -> Result<Option<u16>> {
     Ok(Some(desired))
 }
 
-/// 只替换模板声明的端口数字，保留其余自定义行、缩进、注释和换行符。
-/// INI 按节、YAML 按父级路径匹配；缺失或多义时停止，不能覆盖其他配置段的同名项。
-fn sync_config_ports(current: &str, template: &str, r: &Resolved) -> Result<String> {
-    let mut lines: Vec<String> = current.split_inclusive('\n').map(str::to_owned).collect();
-    let scopes = |content: &str| -> Vec<String> {
-        let file = r.spec.config_file.as_deref().unwrap_or("").to_ascii_lowercase();
-        let ini = file.ends_with(".ini") || file.ends_with(".cnf");
-        let yaml = file.ends_with(".yaml") || file.ends_with(".yml");
-        let mut section = String::new(); let mut parents: Vec<(usize, String)> = Vec::new();
-        content.lines().map(|line| {
+fn config_line_scopes(content: &str, r: &Resolved) -> Vec<String> {
+    let file = r
+        .spec
+        .config_file
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let ini = file.ends_with(".ini") || file.ends_with(".cnf");
+    let yaml = file.ends_with(".yaml") || file.ends_with(".yml");
+    let mut section = String::new();
+    let mut parents: Vec<(usize, String)> = Vec::new();
+    content
+        .lines()
+        .map(|line| {
             let trimmed = line.trim();
             if ini {
-                if let Some((name, _)) = trimmed.strip_prefix('[').and_then(|s| s.split_once(']')) { section = name.trim().to_ascii_lowercase(); }
+                if let Some((name, _)) = trimmed.strip_prefix('[').and_then(|s| s.split_once(']')) {
+                    section = name.trim().to_ascii_lowercase();
+                }
             }
             if yaml && !trimmed.is_empty() && !trimmed.starts_with('#') {
                 let indent = line.len() - line.trim_start().len();
-                while parents.last().is_some_and(|(depth, _)| *depth >= indent) { parents.pop(); }
-                section = parents.iter().map(|(_, key)| key.as_str()).collect::<Vec<_>>().join("/");
+                while parents.last().is_some_and(|(depth, _)| *depth >= indent) {
+                    parents.pop();
+                }
+                section = parents
+                    .iter()
+                    .map(|(_, key)| key.as_str())
+                    .collect::<Vec<_>>()
+                    .join("/");
                 if let Some((key, value)) = trimmed.split_once(':') {
-                    if (value.trim().is_empty() || value.trim().starts_with('#')) && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                    if (value.trim().is_empty() || value.trim().starts_with('#'))
+                        && key
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                    {
                         parents.push((indent, key.to_string()));
                     }
                 }
             }
             section.clone()
-        }).collect()
-    };
-    let current_scopes = scopes(current); let template_scopes = scopes(template);
+        })
+        .collect()
+}
+
+/// 只替换模板声明的端口数字，保留其余自定义行、缩进、注释和换行符。
+/// INI 按节、YAML 按父级路径匹配；缺失或多义时停止，不能覆盖其他配置段的同名项。
+fn sync_config_ports(current: &str, template: &str, r: &Resolved) -> Result<String> {
+    let mut lines: Vec<String> = current.split_inclusive('\n').map(str::to_owned).collect();
+    let current_scopes = config_line_scopes(current, r);
+    let template_scopes = config_line_scopes(template, r);
     for (line_index, line) in template.lines().enumerate() {
         let line = line.trim();
         let tokens: Vec<_> = PORT_TOKEN.captures_iter(line).collect();
-        if tokens.is_empty() { continue; }
-        let literal = |text: &str| regex::escape(&expand_config(text, r))
-            .replace(' ', "[ \\t]*").replace('\t', "[ \\t]*").replace('=', "[ \\t]*=[ \\t]*");
-        let mut pattern = String::from(r"^[ \t]*"); let mut end = 0;
+        if tokens.is_empty() {
+            continue;
+        }
+        let literal = |text: &str| {
+            regex::escape(&expand(text, r))
+                .replace(' ', "[ \\t]*")
+                .replace('\t', "[ \\t]*")
+                .replace('=', "[ \\t]*=[ \\t]*")
+        };
+        let mut pattern = String::from(r"^[ \t]*");
+        let mut end = 0;
         for token in &tokens {
             let matched = token.get(0).unwrap();
             pattern.push_str(&literal(&line[end..matched.start()]));
@@ -1596,21 +1732,27 @@ fn managed_rnacos(r: &Resolved) -> bool {
 
 /// 修正旧模板生成的未引用路径；只匹配受管路径的原始整行，保留自定义值和注释。
 fn quote_legacy_rnacos_paths(content: &str, r: &Resolved) -> String {
-    content.split_inclusive('\n').map(|line| {
-        let body = line.trim_end_matches(['\r', '\n']);
-        for (key, suffix) in [
-            ("RNACOS_DATA_DIR", "nacos_db"),
-            ("RNACOS_CONFIG_DB_FILE", "nacos_db/config.db"),
-            ("RNACOS_NAMING_DB_FILE", "nacos_db/naming.db"),
-        ] {
-            let value = expand_config(&format!("{{data}}/{suffix}"), r);
-            if body == format!("{key}={value}") || body == format!("{key}=\"{value}\"") {
-                let escaped = value.replace('\\', "\\\\").replace('"', "\\\"").replace('$', "\\$");
-                return format!("{key}=\"{escaped}\"{}", &line[body.len()..]);
+    content
+        .split_inclusive('\n')
+        .map(|line| {
+            let body = line.trim_end_matches(['\r', '\n']);
+            for (key, suffix) in [
+                ("RNACOS_DATA_DIR", "nacos_db"),
+                ("RNACOS_CONFIG_DB_FILE", "nacos_db/config.db"),
+                ("RNACOS_NAMING_DB_FILE", "nacos_db/naming.db"),
+            ] {
+                let value = expand(&format!("{{data}}/{suffix}"), r);
+                if body == format!("{key}={value}") || body == format!("{key}=\"{value}\"") {
+                    let escaped = value
+                        .replace('\\', "\\\\")
+                        .replace('"', "\\\"")
+                        .replace('$', "\\$");
+                    return format!("{key}=\"{escaped}\"{}", &line[body.len()..]);
+                }
             }
-        }
-        line.to_string()
-    }).collect()
+            line.to_string()
+        })
+        .collect()
 }
 
 #[allow(deprecated)] // from_path 会修改整个应用的环境；这里只使用上游提供的只读迭代器。
@@ -1633,6 +1775,51 @@ fn rnacos_config_env(content: &str, directory: &std::path::Path) -> Result<Vec<(
     Ok(env)
 }
 
+/// 只修正与旧模板完整匹配的路径行；自定义路径、额外参数和注释保持原样。
+fn sync_template_paths(current: &str, template: &str, r: &Resolved) -> Result<String> {
+    let mut corrections = Vec::new();
+    let current_scopes = config_line_scopes(current, r);
+    let template_scopes = config_line_scopes(template, r);
+    for (index, line) in template
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| PATH_TOKEN.is_match(line) && !line.trim_start().starts_with(['#', ';']))
+    {
+        let old = expand(line, r);
+        let scope = &template_scopes[index];
+        if current
+            .lines()
+            .enumerate()
+            .any(|(index, line)| &current_scopes[index] == scope && line.trim() == old.trim())
+        {
+            let corrected = expand_config(line, r)?;
+            if corrected.trim() != old.trim() {
+                corrections.push((scope, old.trim().to_string(), corrected.trim().to_string()));
+            }
+        }
+    }
+    Ok(current
+        .split_inclusive('\n')
+        .enumerate()
+        .map(|(index, line)| {
+            let Some((_, _, corrected)) = corrections
+                .iter()
+                .find(|(scope, old, _)| *scope == &current_scopes[index] && line.trim() == old)
+            else {
+                return line.to_string();
+            };
+            let start = line.len() - line.trim_start().len();
+            let end = line.trim_end().len();
+            let corrected = if line.ends_with("\r\n") {
+                corrected.replace('\n', "\r\n")
+            } else {
+                corrected.clone()
+            };
+            format!("{}{corrected}{}", &line[..start], &line[end..])
+        })
+        .collect())
+}
+
 fn prepare_config(paths: &Paths, r: &Resolved) -> Result<Vec<(String, String)>> {
     let mut env = Vec::new();
     if let (Some(cf), Some(tpl)) = (&r.spec.config_file, &r.spec.config_template) {
@@ -1650,18 +1837,41 @@ fn prepare_config(paths: &Paths, r: &Resolved) -> Result<Vec<(String, String)>> 
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e.into()),
         };
-        let mut content = match &previous { Some(current) => sync_config_ports(current, tpl, r)?, None => expand_config(tpl, r) };
+        let mut content = match &previous {
+            Some(current) => sync_template_paths(&sync_config_ports(current, tpl, r)?, tpl, r)?,
+            None => expand_config(tpl, r)?,
+        };
         if r.entry.id == "mariadb" {
             // resolve 已确认仅为托管路径；同步旧空目录配置，避免下次启动仍指向共享目录。
             let mut section = String::new();
-            content = content.split_inclusive('\n').map(|line| {
-                let trimmed = line.trim();
-                if trimmed.starts_with('[') && trimmed.ends_with(']') { section = trimmed[1..trimmed.len()-1].to_ascii_lowercase(); }
-                if ["mysqld", "server", "mariadb", "mariadbd"].contains(&section.as_str())
-                    && trimmed.split_once('=').is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case("datadir")) {
-                    format!("datadir={}{}", crate::paths::nginx_path(&r.data), if line.ends_with("\r\n") { "\r\n" } else if line.ends_with('\n') { "\n" } else { "" })
-                } else { line.to_string() }
-            }).collect();
+            content = content
+                .split_inclusive('\n')
+                .map(|line| {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                        section = trimmed[1..trimmed.len() - 1].to_ascii_lowercase();
+                    }
+                    if ["mysqld", "server", "mariadb", "mariadbd"].contains(&section.as_str())
+                        && trimmed
+                            .split_once('=')
+                            .is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case("datadir"))
+                    {
+                        format!(
+                            "datadir=\"{}\"{}",
+                            crate::paths::quoted_config_path(&r.data),
+                            if line.ends_with("\r\n") {
+                                "\r\n"
+                            } else if line.ends_with('\n') {
+                                "\n"
+                            } else {
+                                ""
+                            }
+                        )
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect();
         }
         if managed_rnacos(r) {
             content = quote_legacy_rnacos_paths(&content, r);
@@ -2088,6 +2298,65 @@ pub fn is_script(p: &std::path::Path) -> bool {
         .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "bat" | "cmd" | "ps1"))
 }
 
+/// MySQL/MariaDB option-file 字符串：注释在引号外，已知反斜杠转义按上游解码。
+fn mysql_option_text(value: &str) -> String {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut end = value.len();
+    for (offset, character) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(current) = quote {
+            if character == current {
+                quote = None;
+            }
+        } else if matches!(character, '\'' | '"') {
+            quote = Some(character);
+        } else if character == '#' {
+            end = offset;
+            break;
+        }
+    }
+    let value = value[..end].trim();
+    let value = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            value
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .unwrap_or(value);
+    let mut output = String::new();
+    let mut chars = value.chars();
+    while let Some(character) = chars.next() {
+        if character != '\\' {
+            output.push(character);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => output.push('\n'),
+            Some('r') => output.push('\r'),
+            Some('t') => output.push('\t'),
+            Some('b') => output.push('\u{8}'),
+            Some('s') => output.push(' '),
+            Some(next @ ('\\' | '\'' | '"')) => output.push(next),
+            Some(next) => {
+                output.push('\\');
+                output.push(next);
+            }
+            None => output.push('\\'),
+        }
+    }
+    output
+}
+
 /// 新实例按版本隔离；保留旧 my.ini 所指向的共享目录，不移动用户数据库。
 pub(crate) fn mariadb_data_dir(paths: &Paths, version: &str) -> Result<PathBuf> {
     let isolated = crate::paths::checked_data_path(&paths.base, &format!("data/mariadb-versions/{version}"))?;
@@ -2099,8 +2368,14 @@ pub(crate) fn mariadb_data_dir(paths: &Paths, version: &str) -> Result<PathBuf> 
         Err(error) => return Err(error.into()),
     };
     let normalize = |value: &str| {
-        let value = value.trim().trim_matches(['\'', '"']).replace('\\', "/").trim_end_matches('/').to_string();
-        if cfg!(windows) { value.to_lowercase() } else { value }
+        let value = crate::paths::portable_path_text(std::path::Path::new(value))
+            .trim_end_matches('/')
+            .to_string();
+        if cfg!(windows) {
+            value.to_lowercase()
+        } else {
+            value
+        }
     };
     let mut section = String::new();
     let mut data = None;
@@ -2108,7 +2383,9 @@ pub(crate) fn mariadb_data_dir(paths: &Paths, version: &str) -> Result<PathBuf> 
         if line.starts_with('[') && line.ends_with(']') { section = line[1..line.len()-1].to_ascii_lowercase(); }
         if ["mysqld", "server", "mariadb", "mariadbd"].contains(&section.as_str()) {
             if let Some((key, value)) = line.split_once('=') {
-                if key.trim().eq_ignore_ascii_case("datadir") { data = Some(normalize(value)); }
+                if key.trim().eq_ignore_ascii_case("datadir") {
+                    data = Some(normalize(&mysql_option_text(value)));
+                }
             }
         }
     }
@@ -2349,8 +2626,47 @@ mod startup_tests {
         std::fs::write(legacy.join("old.err"), "[Note] Starting MariaDB 11.4.8-MariaDB source revision verified\n").unwrap();
         verify_mariadb_data_version(&legacy, "11.4.8").unwrap();
         assert!(verify_mariadb_data_version(&legacy, "10.11.13").is_err());
-        assert_eq!(mariadb_data_dir(&state.paths, "12.3.3").unwrap(), state.paths.data().join("mariadb-versions/12.3.3"));
-        assert_eq!(std::fs::read(legacy.join("sentinel")).unwrap(), b"existing database");
+        assert_eq!(
+            mariadb_data_dir(&state.paths, "12.3.3").unwrap(),
+            state.paths.data().join("mariadb-versions/12.3.3")
+        );
+        assert_eq!(
+            std::fs::read(legacy.join("sentinel")).unwrap(),
+            b"existing database"
+        );
+        std::fs::write(
+            &config,
+            format!(
+                "[mysqld]\ndatadir=\"{}\" # managed directory\n",
+                crate::paths::quoted_config_path(&legacy)
+            ),
+        )
+        .unwrap();
+        assert_eq!(mariadb_data_dir(&state.paths, "11.4.8").unwrap(), legacy);
+        #[cfg(unix)]
+        {
+            let paths = Paths::new(_temp.path().join(r"data\new\tail"));
+            let legacy = paths.data().join("mariadb");
+            std::fs::create_dir_all(legacy.join("mysql")).unwrap();
+            let file = paths.etc().join("mariadb/11.4.8/my.ini");
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(
+                &file,
+                format!(
+                    "[mysqld]\ndatadir=\"{}\"\n",
+                    crate::paths::quoted_config_path(&legacy)
+                ),
+            )
+            .unwrap();
+            assert_eq!(mariadb_data_dir(&paths, "11.4.8").unwrap(), legacy);
+            let different = crate::paths::portable_path_text(&legacy).replace('\\', "/");
+            std::fs::create_dir_all(std::path::Path::new(&different).join("mysql")).unwrap();
+            std::fs::write(&file, format!("[mysqld]\ndatadir=\"{different}\"\n")).unwrap();
+            assert_eq!(
+                mariadb_data_dir(&paths, "11.4.8").unwrap_err().code,
+                "MARIADB_DATA_UNMANAGED"
+            );
+        }
     }
 
     #[test]
@@ -2398,13 +2714,95 @@ mod startup_tests {
     }
 
     #[test]
+    fn config_paths_roundtrip_through_yaml_and_dotenv_without_reexpanding_names() {
+        let (temp, _state, mut r) = fixture("qdrant");
+        r.data = temp.path().join("data {etc} # O'Brien $NSB_PATH_TEST [1]");
+        #[cfg(unix)]
+        {
+            r.data = r.data.join(r"literal\new\tail");
+        }
+        r.root = temp.path().join("runtime {data}");
+        let raw = crate::paths::portable_path_text(&r.data);
+        assert_eq!(expand("{data}/storage", &r), format!("{raw}/storage"));
+        assert_eq!(
+            expand("{root}", &r),
+            crate::paths::portable_path_text(&r.root)
+        );
+        r.spec.config_file = Some("config.yaml".into());
+        let template = "# preserve comment\r\nstorage:\r\n  plain: {data}/plain#part # keep plain\r\n  double: \"{data}/double\" # keep double\r\n  single: '{data}/single' # keep single\r\n";
+        let rendered = expand_config(template, &r).unwrap();
+        let decoded: yaml_serde::Value = yaml_serde::from_str(&rendered).unwrap();
+        for (key, suffix) in [
+            ("plain", "plain#part"),
+            ("double", "double"),
+            ("single", "single"),
+        ] {
+            assert_eq!(
+                decoded["storage"][key].as_str(),
+                Some(format!("{raw}/{suffix}").as_str())
+            );
+            assert!(rendered.contains(&format!(" # keep {key}\r\n")));
+        }
+        assert!(rendered.starts_with("# preserve comment\r\n"));
+        r.spec.config_file = Some(".env".into());
+        let template = "NSB_PATH_TEST=must-not-replace-literal-path\nPLAIN={data}/plain # keep\nDOUBLE=\"{data}/double\"\nSINGLE='{data}/single'\n";
+        let rendered = expand_config(template, &r).unwrap();
+        let decoded = rnacos_config_env(&rendered, temp.path()).unwrap();
+        for (key, suffix) in [
+            ("PLAIN", "plain"),
+            ("DOUBLE", "double"),
+            ("SINGLE", "single"),
+        ] {
+            assert_eq!(
+                decoded.iter().find(|(name, _)| name == key).unwrap().1,
+                format!("{raw}/{suffix}")
+            );
+        }
+        assert!(rendered.contains(" # keep\n"));
+        r.spec.config_file = Some("config.yaml".into());
+        let template =
+            "storage:\n  storage_path: {data}/storage\n  snapshots_path: \"{data}/snapshots\"\n";
+        let legacy = format!(
+            "# user comment\n{}custom: preserved\n",
+            expand(template, &r)
+        );
+        let repaired = sync_template_paths(&legacy, template, &r).unwrap();
+        let decoded: yaml_serde::Value = yaml_serde::from_str(&repaired).unwrap();
+        assert_eq!(
+            decoded["storage"]["snapshots_path"].as_str(),
+            Some(format!("{raw}/snapshots").as_str())
+        );
+        assert_eq!(decoded["custom"].as_str(), Some("preserved"));
+        assert!(repaired.starts_with("# user comment\n"));
+        assert_eq!(
+            sync_template_paths(&repaired, template, &r).unwrap(),
+            repaired
+        );
+        let other_section = format!("custom:\n  snapshots_path: \"{raw}/snapshots\"\n");
+        let with_custom = format!("{repaired}{other_section}");
+        assert_eq!(
+            sync_template_paths(&with_custom, template, &r).unwrap(),
+            with_custom
+        );
+        let custom = "storage:\n  storage_path: custom/location # leave this value\n  snapshots_path: other/location\n";
+        assert_eq!(sync_template_paths(custom, template, &r).unwrap(), custom);
+    }
+
+    #[test]
     fn template_ports_update_without_losing_custom_settings_or_comments() {
         for id in ["caddy", "mariadb", "qdrant", "rnacos"] {
             let (_temp, state, mut r) = fixture(id);
             r.port = Some(31000);
             let template = r.spec.config_template.as_ref().unwrap();
-            let generated = expand_config(template, &r).replace('\n', "\r\n").replace("port=31000", "port = 31000 ; inline comment");
-            let extra = if id == "mariadb" { "\r\n[custom]\r\nport=31000\r\nsetting=keep\r\n" } else { "\r\n# custom setting 31000 remains\r\n" };
+            let generated = expand_config(template, &r)
+                .unwrap()
+                .replace('\n', "\r\n")
+                .replace("port=31000", "port = 31000 ; inline comment");
+            let extra = if id == "mariadb" {
+                "\r\n[custom]\r\nport=31000\r\nsetting=keep\r\n"
+            } else {
+                "\r\n# custom setting 31000 remains\r\n"
+            };
             let current = format!("# custom heading\r\n{generated}{extra}");
             let output = r.etc.join(r.spec.config_file.as_ref().unwrap());
             std::fs::write(&output, &current).unwrap();
@@ -2425,7 +2823,7 @@ mod startup_tests {
     fn ambiguous_or_invalid_configs_never_replace_user_files_or_assign_ports() {
         let (_temp, state, mut r) = fixture("caddy"); r.port = Some(31000);
         let path = r.etc.join("Caddyfile");
-        let generated = expand_config(r.spec.config_template.as_deref().unwrap(), &r);
+        let generated = expand_config(r.spec.config_template.as_deref().unwrap(), &r).unwrap();
         for current in ["# a completely custom server".to_string(), format!("{generated}\nhttp://:31000 {{\n respond \"other\"\n}}\n")] {
             std::fs::write(&path, &current).unwrap(); r.port = Some(32000);
             assert_eq!(prepare_config(&state.paths, &r).unwrap_err().code, "CONFIG_PORT_SYNC");
@@ -2441,7 +2839,7 @@ mod startup_tests {
     fn yaml_port_updates_only_touch_the_declared_service_section() {
         let (_temp, state, mut r) = fixture("qdrant"); r.port = Some(31000);
         let tpl = r.spec.config_template.as_ref().unwrap();
-        let generated = expand_config(tpl, &r);
+        let generated = expand_config(tpl, &r).unwrap();
         let extra = "\ncustom:\n  http_port: 31000\n  grpc_port: 31001\n";
         let output = r.etc.join("config.yaml");
         std::fs::write(&output, format!("{generated}{extra}")).unwrap();
@@ -2529,7 +2927,7 @@ mod startup_tests {
     fn rnacos_env_validation_preserves_files_and_never_changes_parent_environment() {
         let (_temp, state, mut r) = fixture("rnacos"); r.port = Some(32000);
         let config = r.etc.join(".env");
-        let base = expand_config(r.spec.config_template.as_deref().unwrap(), &r);
+        let base = expand_config(r.spec.config_template.as_deref().unwrap(), &r).unwrap();
         let legacy = base.replace("RNACOS_DATA_DIR=\"", "RNACOS_DATA_DIR=").replace("nacos_db\"", "nacos_db");
         let marker = format!("NICEENV_CONFIG_FIXTURE_{}", rand::random::<u64>());
         let content = format!("# keep user comment\r\n{}\r\n{marker}='literal $value'\r\n", legacy.replace('\n', "\r\n"));
@@ -2537,9 +2935,17 @@ mod startup_tests {
         let env = prepare_config(&state.paths, &r).unwrap();
         assert!(env.iter().any(|(k, v)| k == &marker && v == "literal $value"));
         assert!(std::env::var_os(&marker).is_none());
-        assert!(std::fs::read_to_string(&config).unwrap().starts_with("# keep user comment\r\n"));
-        assert!(env.iter().any(|(k, v)| k == "RNACOS_DATA_DIR" && v == &expand_config("{data}/nacos_db", &r)));
-        for invalid in ["BROKEN='secret-unclosed", "CUSTOM=one\nCUSTOM=two", "CUSTOM=hidden\0value"] {
+        assert!(std::fs::read_to_string(&config)
+            .unwrap()
+            .starts_with("# keep user comment\r\n"));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "RNACOS_DATA_DIR" && v == &expand("{data}/nacos_db", &r)));
+        for invalid in [
+            "BROKEN='secret-unclosed",
+            "CUSTOM=one\nCUSTOM=two",
+            "CUSTOM=hidden\0value",
+        ] {
             let content = format!("{base}{invalid}\n");
             std::fs::write(&config, &content).unwrap();
             let error = prepare_config(&state.paths, &r).unwrap_err();
@@ -3788,7 +4194,7 @@ mod startup_tests {
         r.port = Some(base);
         let config = r.etc.join(".env");
         let password = format!("fixture-{}", rand::random::<u64>());
-        let content = format!("{}\n# native fixture\nNSB_FIXTURE_RNACOS_HOST='{sdk_host}'\nRNACOS_SDK_HOST=${{NSB_FIXTURE_RNACOS_HOST}}\nRNACOS_CONSOLE_HOST={console_host}\nRNACOS_HTTP_WORKERS=1\nRNACOS_NAMING_INSTANCE_METADATA_PERSISTENCE_ENABLE=false\nRNACOS_ENABLE_OPEN_API_AUTH=false\nRNACOS_INIT_ADMIN_USERNAME=fixture\nRNACOS_INIT_ADMIN_PASSWORD={password}\n", expand_config(r.spec.config_template.as_deref().unwrap(), &r));
+        let content = format!("{}\n# native fixture\nNSB_FIXTURE_RNACOS_HOST='{sdk_host}'\nRNACOS_SDK_HOST=${{NSB_FIXTURE_RNACOS_HOST}}\nRNACOS_CONSOLE_HOST={console_host}\nRNACOS_HTTP_WORKERS=1\nRNACOS_NAMING_INSTANCE_METADATA_PERSISTENCE_ENABLE=false\nRNACOS_ENABLE_OPEN_API_AUTH=false\nRNACOS_INIT_ADMIN_USERNAME=fixture\nRNACOS_INIT_ADMIN_PASSWORD={password}\n", expand_config(r.spec.config_template.as_deref().unwrap(), &r).unwrap());
         std::fs::write(&config, content).unwrap();
         struct Cleanup<'a>(&'a crate::CoreState);
         impl Drop for Cleanup<'_> { fn drop(&mut self) { let _ = self.0.stop_service("rnacos"); } }
@@ -3899,7 +4305,7 @@ mod startup_tests {
         std::fs::copy(executable, &r.bin).unwrap();
         let port = (42000..44000).find(|port| [0, 1000, 2000].iter().all(|offset| tcp_port_bindable(port + offset))).unwrap();
         state.store.set_port_override("rnacos", Some(port)).unwrap(); r.port = Some(port);
-        let content = format!("{}\nRNACOS_SDK_HOST=127.0.0.1\nRNACOS_CONSOLE_HOST=127.0.0.1\nRNACOS_HTTP_WORKERS=1\nRNACOS_ENABLE_OPEN_API_AUTH=true\nRNACOS_RAFT_AUTO_INIT=false\nRNACOS_NAMING_INSTANCE_METADATA_PERSISTENCE_ENABLE=false\n", expand_config(r.spec.config_template.as_deref().unwrap(), &r));
+        let content = format!("{}\nRNACOS_SDK_HOST=127.0.0.1\nRNACOS_CONSOLE_HOST=127.0.0.1\nRNACOS_HTTP_WORKERS=1\nRNACOS_ENABLE_OPEN_API_AUTH=true\nRNACOS_RAFT_AUTO_INIT=false\nRNACOS_NAMING_INSTANCE_METADATA_PERSISTENCE_ENABLE=false\n", expand_config(r.spec.config_template.as_deref().unwrap(), &r).unwrap());
         std::fs::write(r.etc.join(".env"), &content).unwrap();
         let mut entry = r.entry.clone(); entry.run.as_mut().unwrap().health_timeout_sec = 15;
         std::fs::write(r.root.join(".niceenv-package.json"), serde_json::to_vec(&entry).unwrap()).unwrap();
@@ -3919,7 +4325,7 @@ mod startup_tests {
         std::fs::copy(executable, &r.bin).unwrap();
         let port = (30000..42000).find(|port| [0, 1000, 2000].iter().all(|offset| tcp_port_bindable(port + offset))).unwrap();
         state.store.set_port_override("rnacos", Some(port)).unwrap(); r.port = Some(port);
-        let content = format!("{}\nRNACOS_SDK_HOST=127.0.0.1\nRNACOS_CONSOLE_HOST=127.0.0.1\nRNACOS_HTTP_WORKERS=1\nRNACOS_ENABLE_OPEN_API_AUTH=false\nRNACOS_NAMING_INSTANCE_METADATA_PERSISTENCE_ENABLE=true\n", expand_config(r.spec.config_template.as_deref().unwrap(), &r));
+        let content = format!("{}\nRNACOS_SDK_HOST=127.0.0.1\nRNACOS_CONSOLE_HOST=127.0.0.1\nRNACOS_HTTP_WORKERS=1\nRNACOS_ENABLE_OPEN_API_AUTH=false\nRNACOS_NAMING_INSTANCE_METADATA_PERSISTENCE_ENABLE=true\n", expand_config(r.spec.config_template.as_deref().unwrap(), &r).unwrap());
         std::fs::write(r.etc.join(".env"), &content).unwrap();
         struct Cleanup<'a>(&'a crate::CoreState);
         impl Drop for Cleanup<'_> { fn drop(&mut self) { let _ = self.0.stop_service("rnacos"); } }

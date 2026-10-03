@@ -482,6 +482,22 @@ pub(crate) fn quoted_config_path(path: &Path) -> String {
         .replace('"', "\\\"")
 }
 
+/// 文件系统 glob 的字面目录部分；调用方再追加自己的通配符并按配置格式引用。
+pub(crate) fn escaped_glob_path(path: &Path) -> String {
+    let text = portable_path_text(path);
+    if !cfg!(unix) {
+        return text;
+    }
+    let mut escaped = String::new();
+    for character in text.chars() {
+        if matches!(character, '\\' | '*' | '?' | '[' | ']') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
 impl DataPathRebase {
     pub(crate) fn new(source: &Path, target: &Path) -> crate::error::Result<Self> {
         let canonical = std::fs::canonicalize(source).ok().map(|path|portable_path_text(&path));

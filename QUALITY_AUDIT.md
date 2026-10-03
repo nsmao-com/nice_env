@@ -50,7 +50,7 @@ cargo run --locked -p nsb-core --bin check_versions -- --all --json --force
 
 ## 后续仍需完成
 
-- [ ] 完整平台 CI 实际结果及失败修复，尤其 Unix 专有用例。
+- [x] v0.2.252 的 Windows、Linux、Web、macOS Intel/ARM64 CI 全部成功；后续改动仍须重新通过对应平台门槛。
 - [ ] macOS Intel/ARM64 原生安装、启动、停止、升级、卸载与应用更新，含 `.app` 外的数据位置。
 - [ ] Windows 各套件的下载、解压、配置、运行和已安装状态完整矩阵；上游在线不等同安装成功。
 - [ ] 全部配置格式的 Unix 反斜杠、引号、空格与 Windows UNC/扩展前缀审计；`nginx_path` 的跨格式复用仍需检查。
@@ -144,3 +144,35 @@ v0.2.251 的 Windows、Linux 与 Web CI 通过。macOS Intel/ARM64 的 core 与�
 本地完整回归通过 core 737、集成 45、platform 15，55 项 ignored；桌面端 `cargo check --locked` 与改动行格式检查通过。额外运行现有原生 Nginx 配置校验和 MySQL 参数解析用例，两项通过。Unix 新增路径用例及 macOS 进程组回归仍需远程 runner 确认。
 
 Apache 的正则/URL、Caddyfile、通用模板及数据迁移仍有独立格式规则待处理，未将本次修复描述为全部服务支持完成。没有数据库变更，未修改 `update.sql`；未新增测试文件，未运行本地前端 dev/build。整体复查继续进行。
+
+## 2026-10-04：v0.2.253 Caddy、通用配置模板与 MariaDB 路径
+
+v0.2.252 的 [分支 CI](https://github.com/nsmao-com/nice_env/actions/runs/37134197742) 五个平台任务全部成功；[Release](https://github.com/nsmao-com/nice_env/actions/runs/37134197774) 三个原生验证任务与三个安装包构建全部成功。Windows x64 安装器、macOS Intel/ARM64 的 DMG 和 app 归档均已实际出现在 Release 附件中。
+
+macOS 双架构原生套件验证已执行完成：
+
+| 套件 | Intel | ARM64 |
+| --- | --- | --- |
+| MySQL | 8.4.11 | 26.7.0 |
+| MongoDB | 8.3.11 | 9.0.2 |
+| mihomo | 1.19.31 | 1.19.31 |
+| NATS | 2.15.0 | 2.15.0 |
+| Go | 1.27.1 | 1.27.1 |
+| Node.js | 24.21.0 | 26.10.0 |
+| mongosh | 2.12.0 | 2.12.0 |
+| Database Tools | 100.19.1 | 100.19.1 |
+| Composer | 2.10.3 | 2.10.3 |
+
+全部完成下载安装、已安装列表、离线记录重载、重复安装及卸载保留数据；MySQL/MongoDB/mihomo/NATS 完成两次启动、健康检查与停止。Go/Node/mongosh/Database Tools 执行真实版本命令，Composer 仅验证 PHAR 安装，未验证 PHP 执行。以上不代表版本升级、协议级持久化或桌面 IPC 验收已完成。
+
+- Caddy 路径保留 Unix 字面反斜杠，按 Caddyfile 规则选择双引号、raw backtick 或 heredoc。导入路径另行转义 glob；识别已有 import 时比较解码后的参数，避免不同引用形式产生重复导入。
+- 通用模板单次展开路径，目录名中的 `{etc}` 等字面文本不会再被当作占位符替换。YAML、dotenv、MySQL/MariaDB ini 按各自的字符串规则编码；dotenv 路径中的 `$` 保持字面值。只修复同一配置段内与旧模板完整匹配的路径行，保留其他配置段、自定义路径、注释及换行格式。
+- MariaDB 数据目录读取按 MySQL option-file 规则处理引号、行内注释及反斜杠转义；不再把 Unix 上两个不同目录的字面反斜杠与分隔符混为一谈。写出的受管 datadir 同样经过配置字符串转义。
+
+本地完整回归通过 core 738、集成 45、platform 15，55 项 ignored；最终配置段限制补改后，generic 定向回归 27 项通过、13 项 ignored，桌面端 cargo check 和改动行格式检查通过。未将 ignored 用例计为成功。
+
+真实 Caddy 2.11.4 adapter 回读尾部反斜杠、反引号/双引号组合路径，原生站点 HTTP/HTTPS/访问限制/日志/启停流程和端口跨重启同步均通过。YAML/dotenv 使用实际解析器回读；MySQL 8.4.11 `--print-defaults` 核实引号、反斜杠、`#` 注释和分号字面值规则。Unix 文件系统下的新增路径用例仍需本版远程 runner 确认。
+
+本机已安装程序此前核实仍为 0.2.244，尚未包含 v0.2.245 的 ACME JOSE 请求头修复；v0.2.252 安装包已包含该修复。未代用户运行安装器或注册公网 ACME 账号。
+
+Apache 的正则/URL、数据迁移的多格式编码、剩余套件矩阵与真实桌面交互继续待查；整体目标保持进行中。没有数据库结构或用户数据库变更，未修改 `update.sql`；未新增测试文件，未运行本地前端 dev/build。

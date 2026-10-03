@@ -37,14 +37,7 @@ fn nginx_include_pattern(path: &Path, sites_glob: bool) -> String {
     // Nginx 遇到 *?[ 会再交给系统 glob。Unix 的目录字符要先经过这一层转义，
     // 再经过配置字符串转义；否则合法的反斜杠或方括号目录会静默漏掉站点。
     let mut pattern = if cfg!(unix) && (sites_glob || text.contains(['*', '?', '['])) {
-        let mut escaped = String::new();
-        for character in text.chars() {
-            if matches!(character, '\\' | '*' | '?' | '[' | ']') {
-                escaped.push('\\');
-            }
-            escaped.push(character);
-        }
-        escaped
+        crate::paths::escaped_glob_path(path)
     } else {
         text
     };

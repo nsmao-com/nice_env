@@ -210,3 +210,22 @@ v0.2.253 的 Windows 安装器现已生成，五个 Release 附件齐全。v0.2.
 Unix 新增迁移回归需由远程 runner 确认；PHP/MySQL/Redis、JSON/YAML/dotenv、Caddy 与脚本等格式的迁移仍需分别复查，未声称本轮完成所有格式。Windows UNC、剩余套件升级矩阵、真实桌面 IPC 与公网证书签发继续待验。整体目标保持进行中。
 
 没有数据库结构或用户数据库变更，未修改 `update.sql`。只扩展已有 Rust 测试模块，未新增测试文件，未运行本地前端 dev/build。本机安装程序再次核实仍为 0.2.244；已发布的新安装包包含 ACME JOSE 请求头修复，未代用户运行安装器或注册公网账号。
+
+## 2026-10-04：v0.2.256 PHP / MySQL / Redis 配置迁移
+
+v0.2.255 的 main CI 五个任务及 Release 六个任务现已全部成功，Windows 安装器和 macOS 双架构 DMG/app 共五个附件齐全。本机 `D:/NiceEnv/niceservbay.exe` 再次读取仍为 0.2.244；ACME JWS 请求头从 v0.2.245 起已修正为 `application/jose+json`，账号、订单与 POST-as-GET 的本机 HTTP 回归继续通过，不需要因此更换邮箱或 DNS 凭据。
+
+- PHP/MySQL INI 和 Redis 配置迁移改为只转换明确的路径选项。按各自的单引号、双引号、反斜杠与十六进制转义规则解码比较，再保留原后缀的写法；密码、SQL、注释与模块后续参数即使形似旧目录也保持原样。
+- PHP 保留 include_path/open_basedir 路径列表、session.save_path 的数字前缀及路径后缀中的环境变量表达式。MySQL/MariaDB 支持路径列表、带空格但不带引号的 !include/!includedir；根据 MySQL 8.4.11 原生解析结果修正引号外 `\#` 的注释边界。
+- Redis 5/6 的 include 按普通文件名转换；Redis 7+ 按 POSIX glob 处理，包括 Windows MSYS2 发行版。复用 Nginx 已有的 glob 转换逻辑，区分迁移后开始或停止触发 glob 的情况。
+- 原生 Redis 8 验证发现更严重的启动问题：主配置文件路径也会执行 glob，目录含方括号时可能跳过整份配置，按默认设置启动。对 Redis 7+ 的相关启动参数按 glob 规则转义；Redis 5/6 保留原来的参数语义。
+
+原生验证：PHP 8.4.26 迁移后回读 error_log、include_path、session.save_path；MySQL 8.4.11 通过真正的 --print-defaults 检查新日志路径、带空格的 include、引号/注释及未改动的密码，并检查 stderr，而非只看退出码。Redis 5.0.14 与 8.10.2 均在原目录改名不可用后，从新目录恢复旧备份、加载 include，连续两次启动核对数据、密码保护、timeout 与实际数据目录。目标含空格、方括号和 #；隔离服务已停止，未修改用户的服务配置或数据库。
+
+已确认的限制：Redis 8.10.2 在此类方括号路径下，直接执行原生 CONFIG REWRITE 仍返回找不到文件；隔离实测确认原配置保持不变。应用自身的配置保存不使用该命令。PHP PATH 节名、更多扩展路径选项、JSON/YAML/dotenv、Caddy 与脚本等仍需复查；未把本批范围宣称为任意自定义配置全面兼容。
+
+上游目录重新在线查询：Nginx 1.31.6、Apache 2.4.69、PHP 8.5.11。下载器已有 HTTP 200 HTML 错误页拦截；旧清单版本不在最新目录时仍可能回退旧地址的行为继续待查，不能直接把“最新目录未列出”当成“所有旧版本都不可安装”。Windows UNC、macOS 原生套件完整矩阵、真实桌面 IPC 和公网 ACME 签发/续期仍未完成。
+
+最终代码完整回归通过：core 738 项、集成 45 项、platform 15 项，55 项 ignored 未计为通过；两个 Redis 原生用例另行执行通过。桌面端 `cargo check --locked -p niceservbay`、改动行格式检查及 `git diff --check` 通过。macOS/Linux 的新增迁移路径仍以本版远程 runner 结果为准。
+
+本批未改数据库结构，未修改 `update.sql`；只扩展现有 Rust 测试模块，未新增测试文件，未运行本地前端 dev/build。版本清单、桌面配置与 Cargo.lock 中三个本项目 crate 已同步为 0.2.256，三个界面版本兜底继续引用 web package.json。整体复查保持进行中。

@@ -488,6 +488,11 @@ pub(crate) fn escaped_glob_path(path: &Path) -> String {
     if !cfg!(unix) {
         return text;
     }
+    escaped_posix_glob_text(&text)
+}
+
+/// POSIX glob；Redis 7+ 的 Windows MSYS2 发行也使用同一套规则。
+pub(crate) fn escaped_posix_glob_text(text: &str) -> String {
     let mut escaped = String::new();
     for character in text.chars() {
         if matches!(character, '\\' | '*' | '?' | '[' | ']') {
@@ -664,6 +669,47 @@ impl DataPathRebase {
         if (relative.starts_with("etc/apache/") || relative.starts_with("runtimes/apache/")) && conf
         {
             return crate::configgen::rebase_httpd_config(value, self);
+        }
+        let ini = name.ends_with(".ini") || name.ends_with(".cnf");
+        if name == ".user.ini"
+            || (ini && (relative.starts_with("etc/php/") || relative.starts_with("runtimes/php/")))
+        {
+            return crate::configgen::rebase_ini_config(
+                value,
+                self,
+                crate::configgen::IniDialect::Php,
+            );
+        }
+        if ini
+            && [
+                "etc/mysql/",
+                "runtimes/mysql/",
+                "etc/mariadb/",
+                "runtimes/mariadb/",
+            ]
+            .iter()
+            .any(|prefix| relative.starts_with(prefix))
+        {
+            return crate::configgen::rebase_ini_config(
+                value,
+                self,
+                crate::configgen::IniDialect::Mysql,
+            );
+        }
+        if conf && (relative.starts_with("etc/redis/") || relative.starts_with("runtimes/redis/")) {
+            let major = relative.split('/').nth(2).and_then(|version| {
+                version
+                    .trim_start_matches('v')
+                    .split('.')
+                    .next()?
+                    .parse::<u32>()
+                    .ok()
+            });
+            return crate::configgen::rebase_redis_config(
+                value,
+                self,
+                major.is_some_and(|major| major >= 7),
+            );
         }
         self.text(value)
     }
@@ -2118,6 +2164,135 @@ mod tests {
             ),
             normalize(&new_vhost)
         );
+        let php = |paths: &Paths| {
+            crate::configgen::render_php_ini(paths, "8.4", &paths.base.join("runtimes/php/8.4"))
+        };
+        assert_eq!(
+            rebase
+                .config_text(Path::new("etc/php/8.4/php.ini"), &php(&from))
+                .unwrap(),
+            php(&to)
+        );
+        let mysql = |paths: &Paths| {
+            crate::configgen::render_mysql_ini(
+                paths,
+                "8.4",
+                &paths.base.join("runtimes/mysql/8.4"),
+                3306,
+            )
+        };
+        assert_eq!(
+            rebase
+                .config_text(Path::new("etc/mysql/8.4/my.ini"), &mysql(&from))
+                .unwrap(),
+            mysql(&to)
+        );
+        let old = quoted_config_path(&source);
+        let new = quoted_config_path(&target);
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        let php_custom = format!("; keep {old}\r\n[PHP]\r\ninclude_path=\"{old}/lib{sep}{old}/shared{sep}{old} sibling\" ; note\r\nsession.save_path=\"2;0600;{old}/session\"\r\npdo_password=\"{old}/secret\"\r\n");
+        let expected = format!("; keep {old}\r\n[PHP]\r\ninclude_path=\"{new}/lib{sep}{new}/shared{sep}{old} sibling\" ; note\r\nsession.save_path=\"2;0600;{new}/session\"\r\npdo_password=\"{old}/secret\"\r\n");
+        assert_eq!(
+            rebase
+                .config_text(Path::new("www/.user.ini"), &php_custom)
+                .unwrap(),
+            expected
+        );
+        let mysql_custom = format!("# keep {old}\n[mysqld]\nloose-log-error = \"{old}/logs/error.log\" # note\n[client]\npassword=\"{old}/secret\"\n");
+        let expected = format!("# keep {old}\n[mysqld]\nloose-log-error = \"{new}/logs/error.log\" # note\n[client]\npassword=\"{old}/secret\"\n");
+        assert_eq!(
+            rebase
+                .config_text(Path::new("etc/mariadb/11/my.ini"), &mysql_custom)
+                .unwrap(),
+            expected
+        );
+        let redis = |paths: &Paths| crate::configgen::render_redis_conf(paths, "7", 6379);
+        assert_eq!(
+            rebase
+                .config_text(Path::new("etc/redis/7/redis.conf"), &redis(&from))
+                .unwrap(),
+            redis(&to)
+        );
+        let redis_custom = format!("# keep {old}\r\ndir \"{old}/data\"\r\nrequirepass \"{old}/secret\"\r\nloadmodule \"{old}/module.so\" password \"{old}/secret\"\r\n");
+        let expected = format!("# keep {old}\r\ndir \"{new}/data\"\r\nrequirepass \"{old}/secret\"\r\nloadmodule \"{new}/module.so\" password \"{old}/secret\"\r\n");
+        assert_eq!(
+            rebase
+                .config_text(Path::new("etc/redis/7/redis.conf"), &redis_custom)
+                .unwrap(),
+            expected
+        );
+        let include = |base: &Path| {
+            format!(
+                "include \"{}/*.conf\"\n",
+                escaped_posix_glob_text(&portable_path_text(&base.join("conf.d")))
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+            )
+        };
+        assert_eq!(
+            rebase
+                .config_text(Path::new("etc/redis/7/redis.conf"), &include(&source))
+                .unwrap(),
+            include(&target)
+        );
+        assert_eq!(
+            rebase
+                .config_text(
+                    Path::new("etc/redis/5/redis.conf"),
+                    &format!("include \"{old}/extra.conf\"\n")
+                )
+                .unwrap(),
+            format!("include \"{new}/extra.conf\"\n")
+        );
+        let php_single = format!(
+            "error_log='{}'\n",
+            portable_path_text(&source.join("logs/error.log"))
+        );
+        let expected = format!(
+            "error_log='{}'\n",
+            portable_path_text(&target.join("logs/error.log"))
+        );
+        assert_eq!(
+            rebase
+                .config_text(Path::new("etc/php/8.4/php.ini"), &php_single)
+                .unwrap(),
+            expected
+        );
+        let php_dynamic = format!("error_log=\"{old}/logs/${{NAME}}.log\"\n");
+        assert_eq!(
+            rebase
+                .config_text(Path::new("etc/php/8.4/php.ini"), &php_dynamic)
+                .unwrap(),
+            format!("error_log=\"{new}/logs/${{NAME}}.log\"\n")
+        );
+        let redis_hex = format!("dir \"\\x{:02x}{}/data\"\n", old.as_bytes()[0], &old[1..]);
+        assert_eq!(
+            rebase
+                .config_text(Path::new("etc/redis/7/redis.conf"), &redis_hex)
+                .unwrap(),
+            format!("dir \"{new}/data\"\n")
+        );
+        let mysql_unquoted = format!("[mysqld]\ntmpdir={old}/data{sep}/external\\\\folder\n");
+        assert_eq!(
+            rebase
+                .config_text(Path::new("etc/mysql/8.4/my.ini"), &mysql_unquoted)
+                .unwrap(),
+            format!("[mysqld]\ntmpdir=\"{new}/data{sep}/external\\\\folder\"\n")
+        );
+        #[cfg(unix)]
+        {
+            // PHP 未知转义保留反斜杠，用户手写的单反斜杠也指向同一真实目录。
+            let php = format!(
+                "error_log=\"{}/logs/error.log\"\n",
+                portable_path_text(&source)
+            );
+            assert_eq!(
+                rebase
+                    .config_text(Path::new("etc/php/8.4/php.ini"), &php)
+                    .unwrap(),
+                format!("error_log=\"{new}/logs/error.log\"\n")
+            );
+        }
     }
 
     #[test]

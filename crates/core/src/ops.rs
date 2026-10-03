@@ -807,8 +807,24 @@ fn redis_launch_args(paths: &Paths, version: &str, port: u16, exe: &Path) -> Vec
             slash
         }
     };
+    let config = path_arg(paths.redis_conf(version));
+    // Redis 7+ 连主配置文件名也会执行 glob；未匹配时会静默忽略整份配置。
+    // 仅在实际触发 glob 时转义，避免旧版本或普通路径把反斜杠当作文件名。
+    let glob_config = (cfg!(unix) || posix)
+        && version
+            .trim_start_matches('v')
+            .split('.')
+            .next()
+            .and_then(|major| major.parse::<u32>().ok())
+            .is_some_and(|major| major >= 7)
+        && config.contains(['*', '?', '[']);
+    let config = if glob_config {
+        crate::paths::escaped_posix_glob_text(&config)
+    } else {
+        config
+    };
     vec![
-        path_arg(paths.redis_conf(version)),
+        config,
         "--port".into(),
         port.to_string(),
         "--dir".into(),
@@ -5377,6 +5393,106 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
         state.stop_service("redis").unwrap();
         assert!(pids.iter().all(|pid| !platform::process_alive(*pid)));
         assert_eq!(occupied.local_addr().unwrap().port(), desired);
+        // 让密码也长得像旧路径，确认迁移只转换目录而不改变认证材料。
+        let original = state.paths.base.clone();
+        let path_password = crate::paths::portable_path_text(&original.join("literal-secret"));
+        let view = state.redis_password(version).unwrap();
+        assert!(
+            state
+                .save_redis_password(version, &view.revision, &path_password, false)
+                .unwrap()
+                .connection_saved
+        );
+        let include = state
+            .paths
+            .etc_dir("redis", version)
+            .join("extra with spaces.conf");
+        std::fs::write(&include, "timeout 77\n").unwrap();
+        let before_migration = format!(
+            "{}\ninclude \"{}\"\n",
+            std::fs::read_to_string(&config).unwrap(),
+            crate::paths::quoted_config_path(&include)
+        );
+        std::fs::write(&config, &before_migration).unwrap();
+        crate::paths::write_with_backup(
+            &config,
+            &format!("{before_migration}# migration marker\n"),
+            &state.paths.backup(),
+        )
+        .unwrap();
+        let backup = crate::paths::list_backup_files(&original)
+            .unwrap()
+            .into_iter()
+            .find(|entry| {
+                entry
+                    .target_path
+                    .as_deref()
+                    .is_some_and(|path| original.join(path) == config)
+                    && std::fs::read_to_string(&entry.path).unwrap() == before_migration
+            })
+            .unwrap()
+            .name;
+        let executable_relative = root.strip_prefix(&original).unwrap().join("redis-cli.exe");
+        let target = temp.path().join("migrated redis [target] # with spaces");
+        crate::paths::copy_data_dir(&original, &target).unwrap();
+        drop(db);
+        drop(_cleanup);
+        drop(state);
+        std::fs::rename(&original, temp.path().join("original-unavailable")).unwrap();
+        let migrated = isolated_state(Paths::new(target));
+        let _cleanup = StopRedisOnDrop(&migrated);
+        crate::paths::restore_backup(&migrated.paths.base, &backup).unwrap();
+        let restored = std::fs::read_to_string(migrated.paths.redis_conf(version)).unwrap();
+        assert_eq!(
+            restored
+                .lines()
+                .find(|line| line.starts_with("requirepass ")),
+            before_migration
+                .lines()
+                .find(|line| line.starts_with("requirepass "))
+        );
+        assert_eq!(
+            crate::stats::RedisCredentials::load(&migrated.store, version)
+                .unwrap()
+                .password,
+            path_password
+        );
+        for _ in 0..2 {
+            migrated.start_service("redis").unwrap();
+            assert_eq!(migrated.redis_stats().unwrap().keys, Some(2));
+            assert_eq!(
+                crate::stats::redis_stats_authenticated(port, &credentials(""), None)
+                    .unwrap_err()
+                    .code,
+                "REDIS_AUTH_REQUIRED"
+            );
+            let read = |args: &[&str]| {
+                let output = platform::command(migrated.paths.base.join(&executable_relative))
+                    .env("REDISCLI_AUTH", &path_password)
+                    .args(["-p", &port.to_string(), "--raw"])
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .replace("\r\n", "\n")
+            };
+            assert_eq!(read(&["GET", "isolated-fixture"]), "1");
+            assert_eq!(read(&["CONFIG", "GET", "timeout"]), "timeout\n77");
+            let directory = read(&["CONFIG", "GET", "dir"]);
+            let directory = directory.strip_prefix("dir\n").unwrap();
+            let directory = directory
+                .strip_prefix("/cygdrive/")
+                .filter(|path| path.as_bytes().get(1) == Some(&b'/'))
+                .map(|path| format!("{}:{}", &path[..1], &path[1..]))
+                .unwrap_or_else(|| directory.to_string());
+            assert_eq!(
+                PathBuf::from(&directory).canonicalize().unwrap(),
+                migrated.paths.redis_data_dir().canonicalize().unwrap()
+            );
+            migrated.stop_service("redis").unwrap();
+        }
         println!("Redis: CONFIG GET confirmed memory/policy/databases across restarts; fallback port stable and recorded; owned processes stopped");
     }
 
@@ -5440,6 +5556,53 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
             .replace('\\', "/")
             .contains(&nginx_path(&paths.mysql_data_dir("8.0.46"))));
         assert!(!paths.mysql_data_dir("8.0.46").exists());
+        let store = Store::open(paths.db()).unwrap();
+        let include = paths
+            .etc_dir("mysql", "8.0.46")
+            .join("extra with spaces.cnf");
+        std::fs::write(&include, "[mysqld]\nmax_connections=456\n").unwrap();
+        let old = crate::paths::quoted_config_path(&paths.base);
+        std::fs::write(
+            &file,
+            format!(
+                "{custom}\n!include {}\n[mysqld]\nreport-password=\"{old}/literal-secret\"\nssl-ca={old}/a\\\"#b\"\n",
+                crate::paths::portable_path_text(&include)
+            ),
+        )
+        .unwrap();
+        let target = temp.path().join("migrated mysql [target] # with spaces");
+        crate::paths::copy_data_dir(&paths.base, &target).unwrap();
+        drop(store);
+        std::fs::rename(&paths.base, temp.path().join("original-unavailable")).unwrap();
+        let migrated = Paths::new(target);
+        let parsed = platform::command(root.join("bin/mysqld.exe"))
+            .arg(format!(
+                "--defaults-file={}",
+                crate::paths::portable_path_text(&migrated.mysql_ini("8.0.46"))
+            ))
+            .arg("--print-defaults")
+            .output()
+            .unwrap();
+        assert!(parsed.status.success());
+        assert!(
+            parsed.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&parsed.stderr)
+        );
+        let options = String::from_utf8_lossy(&parsed.stdout);
+        assert!(options.contains("--max_connections=456"));
+        assert!(options.contains(&format!(
+            "--log-error={}/mysql/error.log",
+            crate::paths::portable_path_text(&migrated.logs())
+        )));
+        assert!(options.contains(&format!(
+            "--report-password={}/literal-secret",
+            crate::paths::portable_path_text(&paths.base)
+        )));
+        assert!(options.contains(&format!(
+            "--ssl-ca={}/a\"#b\"",
+            crate::paths::portable_path_text(&migrated.base)
+        )));
         println!("MySQL: actual option parser confirmed tuning and command-line port/datadir precedence; no server or database initialization");
     }
 
@@ -5784,6 +5947,32 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
         assert_eq!(check().status, "ok");
         assert!(!sentinel.exists());
         assert!(!state.paths.backup().exists() || std::fs::read_dir(state.paths.backup()).unwrap().next().is_none());
+        let original = state.paths.base.clone();
+        let old = crate::paths::quoted_config_path(&original);
+        let separator = if cfg!(windows) { ';' } else { ':' };
+        std::fs::write(&ini, format!("[PHP]\nerror_log=\"{old}/logs/php/error.log\" ; keep {old}\ninclude_path=\"{old}/lib{separator}{old}/shared\"\nsession.save_path=\"2;0600;{old}/sessions\"\n")).unwrap();
+        let target = temp.path().join("migrated php [target] # with spaces");
+        crate::paths::copy_data_dir(&original, &target).unwrap();
+        drop(state);
+        std::fs::rename(&original, temp.path().join("original-unavailable")).unwrap();
+        let migrated = Paths::new(target);
+        let output = platform::command(php.join(exe_name("php"))).env("PHP_INI_SCAN_DIR", "").arg("-c").arg(migrated.php_ini("8.4.26")).args(["-r", "echo json_encode([ini_get('error_log'),ini_get('include_path'),ini_get('session.save_path')]);"]).output().unwrap();
+        assert!(output.status.success());
+        assert!(
+            output.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let values: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
+        let new = crate::paths::portable_path_text(&migrated.base);
+        assert_eq!(
+            values,
+            [
+                format!("{new}/logs/php/error.log"),
+                format!("{new}/lib{separator}{new}/shared"),
+                format!("2;0600;{new}/sessions")
+            ]
+        );
     }
 
     #[test]

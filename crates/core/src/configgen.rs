@@ -214,6 +214,35 @@ pub(crate) fn nginx_directives(content: &str) -> Result<Vec<NginxDirective>> {
     parse(&tokens, &mut 0, 0)
 }
 
+fn rebase_posix_glob_pattern(value: &str, rebase: &crate::paths::DataPathRebase) -> Result<String> {
+    if value.contains(['*', '?', '[']) {
+        let rebased = rebase.config_value(value, crate::paths::escaped_posix_glob_text)?;
+        if rebased != value && !rebased.contains(['*', '?', '[']) {
+            // 新路径不再进入系统 glob 时，撤去仅供 glob 使用的一层转义。
+            let mut literal = String::new();
+            let mut chars = rebased.chars();
+            while let Some(character) = chars.next() {
+                literal.push(if character == '\\' {
+                    chars.next().unwrap_or(character)
+                } else {
+                    character
+                });
+            }
+            Ok(literal)
+        } else {
+            Ok(rebased)
+        }
+    } else {
+        let rebased = rebase.config_value(value, str::to_owned)?;
+        // 新目录第一次引入 glob 字符时，整条路径（含原后缀）都要引用。
+        if rebased != value && rebased.contains(['*', '?', '[']) {
+            Ok(crate::paths::escaped_posix_glob_text(&rebased))
+        } else {
+            Ok(rebased)
+        }
+    }
+}
+
 pub(crate) fn rebase_nginx_config(
     content: &str,
     rebase: &crate::paths::DataPathRebase,
@@ -229,37 +258,10 @@ pub(crate) fn rebase_nginx_config(
             directive = Some(token.word);
             continue;
         };
-        let value = if name == "include" && cfg!(unix) && token.word.contains(['*', '?', '[']) {
-            let value = rebase.config_value(&token.word, |path| {
-                crate::paths::escaped_glob_path(Path::new(path))
-            })?;
-            if value != token.word && !value.contains(['*', '?', '[']) {
-                // 新路径不再进入系统 glob 时，撤去原先仅供 glob 使用的一层转义。
-                let mut literal = String::new();
-                let mut chars = value.chars();
-                while let Some(character) = chars.next() {
-                    literal.push(if character == '\\' {
-                        chars.next().unwrap_or(character)
-                    } else {
-                        character
-                    });
-                }
-                literal
-            } else {
-                value
-            }
+        let value = if name == "include" && cfg!(unix) {
+            rebase_posix_glob_pattern(&token.word, rebase)?
         } else {
-            let value = rebase.config_value(&token.word, str::to_owned)?;
-            // 新目录第一次引入 glob 字符时，整条 include（含原后缀）都要引用。
-            if name == "include"
-                && cfg!(unix)
-                && value != token.word
-                && value.contains(['*', '?', '['])
-            {
-                crate::paths::escaped_glob_path(Path::new(&value))
-            } else {
-                value
-            }
+            rebase.config_value(&token.word, str::to_owned)?
         };
         if value != token.word {
             let quoted = value
@@ -977,6 +979,352 @@ define_syslog_variables=Off
 
 /* ================= mysql my.ini ================= */
 
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum IniDialect {
+    Php,
+    Mysql,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum PathWordDialect {
+    Php,
+    Mysql,
+    Redis,
+}
+
+fn decode_path_word(
+    raw: &str,
+    quote: Option<char>,
+    dialect: PathWordDialect,
+) -> Result<(String, Vec<usize>)> {
+    let bytes = raw.as_bytes();
+    let mut decoded = Vec::new();
+    let mut ends = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let escapes = dialect == PathWordDialect::Mysql
+            || quote == Some('"')
+            || (dialect == PathWordDialect::Redis
+                && quote == Some('\'')
+                && bytes.get(at + 1) == Some(&b'\''));
+        if bytes[at] == b'\\' && escapes && at + 1 < bytes.len() {
+            let next = bytes[at + 1];
+            if dialect == PathWordDialect::Redis
+                && quote == Some('"')
+                && next == b'x'
+                && bytes
+                    .get(at + 2..at + 4)
+                    .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit))
+            {
+                decoded.push(u8::from_str_radix(&raw[at + 2..at + 4], 16).unwrap());
+                at += 4;
+                ends.push(at);
+                continue;
+            }
+            let special = match next {
+                b'\\' if dialect != PathWordDialect::Redis || quote == Some('"') => Some(b'\\'),
+                b'"' if dialect == PathWordDialect::Mysql || quote == Some('"') => Some(b'"'),
+                b'\'' if dialect == PathWordDialect::Mysql || dialect == PathWordDialect::Redis => {
+                    Some(b'\'')
+                }
+                b'n' if dialect != PathWordDialect::Php => Some(b'\n'),
+                b'r' if dialect != PathWordDialect::Php => Some(b'\r'),
+                b't' if dialect != PathWordDialect::Php => Some(b'\t'),
+                b'b' if dialect != PathWordDialect::Php => Some(8),
+                b's' if dialect == PathWordDialect::Mysql => Some(b' '),
+                b'a' if dialect == PathWordDialect::Redis => Some(7),
+                next if dialect == PathWordDialect::Redis && quote == Some('"') => Some(next),
+                _ => None,
+            };
+            if let Some(special) = special {
+                decoded.push(special);
+                at += 2;
+                ends.push(at);
+                continue;
+            }
+        }
+        decoded.push(bytes[at]);
+        at += 1;
+        ends.push(at);
+    }
+    let decoded = String::from_utf8(decoded).map_err(|_| {
+        AppError::new(
+            "DATA_DIR_CONFIG_ENCODING",
+            "配置中的路径转义不是有效 UTF-8，无法自动迁移",
+        )
+    })?;
+    Ok((decoded, ends))
+}
+
+/// 解码用于路径比较，但保留原后缀的字面写法（例如 PHP 的环境变量表达式）。
+fn rebase_path_word(
+    raw: &str,
+    quote: Option<char>,
+    dialect: PathWordDialect,
+    rebase: &crate::paths::DataPathRebase,
+) -> Result<String> {
+    let (decoded, ends) = decode_path_word(raw, quote, dialect)?;
+    let rebased = rebase.config_value(&decoded, str::to_owned)?;
+    if decoded == rebased {
+        return Ok(raw.to_string());
+    }
+    let Some(quote) = quote else {
+        return Ok(rebased);
+    };
+    let shared = decoded
+        .chars()
+        .rev()
+        .zip(rebased.chars().rev())
+        .take_while(|(left, right)| left == right)
+        .map(|(c, _)| c.len_utf8())
+        .sum::<usize>();
+    let raw_end = decoded
+        .len()
+        .checked_sub(shared + 1)
+        .map_or(0, |index| ends[index]);
+    let prefix = &rebased[..rebased.len() - shared];
+    let prefix = if dialect == PathWordDialect::Php && quote == '\'' {
+        prefix.to_string()
+    } else if dialect == PathWordDialect::Redis && quote == '\'' {
+        prefix.replace('\'', "\\'")
+    } else {
+        prefix
+            .replace('\\', "\\\\")
+            .replace(quote, &format!("\\{quote}"))
+    };
+    Ok(format!("{prefix}{}", &raw[raw_end..]))
+}
+
+/// 只迁移文件/目录选项，不能改写密码、SQL、注释等恰好包含旧目录的内容。
+pub(crate) fn rebase_ini_config(
+    content: &str,
+    rebase: &crate::paths::DataPathRebase,
+    dialect: IniDialect,
+) -> Result<String> {
+    let mut output = String::new();
+    for (number, line) in content.split_inclusive('\n').enumerate() {
+        let trimmed = line.trim_start();
+        if dialect == IniDialect::Mysql {
+            if let Some((directive, tail)) = trimmed.split_once(char::is_whitespace) {
+                if matches!(directive, "!include" | "!includedir") {
+                    // MySQL 把剩余整行作为文件名；含空格也不能添加引号。
+                    let start = line.len() - tail.trim_start().len();
+                    let path = line[start..].trim_end();
+                    output.push_str(&line[..start]);
+                    output.push_str(&rebase.config_value(path, str::to_owned)?);
+                    output.push_str(&line[start + path.len()..]);
+                    continue;
+                }
+            }
+        }
+        if trimmed.starts_with([';', '#', '[']) {
+            output.push_str(line);
+            continue;
+        }
+        let Some((key, tail)) = line.split_once('=') else {
+            output.push_str(line);
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase().replace('-', "_");
+        let key = key
+            .strip_prefix("loose_")
+            .unwrap_or(&key)
+            .trim_end_matches("[]");
+        let path_option = match dialect {
+            IniDialect::Php => matches!(
+                key,
+                "extension"
+                    | "zend_extension"
+                    | "extension_dir"
+                    | "error_log"
+                    | "doc_root"
+                    | "user_dir"
+                    | "upload_tmp_dir"
+                    | "sys_temp_dir"
+                    | "browscap"
+                    | "auto_prepend_file"
+                    | "auto_append_file"
+                    | "include_path"
+                    | "open_basedir"
+                    | "session.save_path"
+                    | "opcache.file_cache"
+                    | "opcache.preload"
+                    | "opcache.blacklist_filename"
+                    | "openssl.cafile"
+                    | "openssl.capath"
+                    | "curl.cainfo"
+                    | "xdebug.log"
+                    | "xdebug.output_dir"
+                    | "xdebug.profiler_output_dir"
+                    | "xdebug.trace_output_dir"
+            ),
+            IniDialect::Mysql => matches!(
+                key,
+                "basedir"
+                    | "datadir"
+                    | "tmpdir"
+                    | "plugin_dir"
+                    | "lc_messages_dir"
+                    | "character_sets_dir"
+                    | "log_error"
+                    | "general_log_file"
+                    | "slow_query_log_file"
+                    | "log_bin"
+                    | "log_bin_index"
+                    | "relay_log"
+                    | "relay_log_index"
+                    | "relay_log_info_file"
+                    | "pid_file"
+                    | "socket"
+                    | "secure_file_priv"
+                    | "ssl_ca"
+                    | "ssl_capath"
+                    | "ssl_cert"
+                    | "ssl_key"
+                    | "ssl_crl"
+                    | "ssl_crlpath"
+                    | "admin_ssl_ca"
+                    | "admin_ssl_capath"
+                    | "admin_ssl_cert"
+                    | "admin_ssl_key"
+                    | "admin_ssl_crl"
+                    | "admin_ssl_crlpath"
+                    | "innodb_data_home_dir"
+                    | "innodb_log_group_home_dir"
+                    | "innodb_undo_directory"
+                    | "innodb_tmpdir"
+                    | "innodb_temp_tablespaces_dir"
+                    | "innodb_doublewrite_dir"
+                    | "innodb_directories"
+                    | "innodb_data_file_path"
+                    | "innodb_temp_data_file_path"
+                    | "aria_log_dir_path"
+                    | "slave_load_tmpdir"
+                    | "replica_load_tmpdir"
+                    | "rocksdb_datadir"
+                    | "rocksdb_wal_dir"
+            ),
+        };
+        if !path_option {
+            output.push_str(line);
+            continue;
+        }
+        let fail = || {
+            AppError::new(
+                "DATA_DIR_CONFIG_SYNTAX",
+                format!(
+                    "第 {} 行路径配置无法安全转换，请检查引号与拼接表达式",
+                    number + 1
+                ),
+            )
+        };
+        let start = line.len() - tail.trim_start().len();
+        let value = &line[start..];
+        let quote = value.chars().next().filter(|c| matches!(c, '\'' | '"'));
+        let comment = if dialect == IniDialect::Php { ';' } else { '#' };
+        let (body, end) = if let Some(quote) = quote {
+            let mut chars = value[1..].char_indices();
+            let mut end = None;
+            while let Some((offset, character)) = chars.next() {
+                if character == '\\' && (dialect == IniDialect::Mysql || quote == '"') {
+                    chars.next();
+                } else if character == quote {
+                    end = Some(offset + 2);
+                    break;
+                }
+            }
+            let end = end.ok_or_else(fail)?;
+            let after = value[end..].trim();
+            if !after.is_empty() && !after.starts_with(comment) {
+                return Err(fail());
+            }
+            (&value[1..end - 1], end)
+        } else {
+            let end = if dialect == IniDialect::Mysql {
+                crate::generic::mysql_option_value_end(value)
+            } else {
+                value.find(comment).unwrap_or(value.len())
+            };
+            let body = value[..end].trim_end();
+            (body, body.len())
+        };
+        let encode = |path: &str| {
+            if dialect == IniDialect::Php && quote == Some('\'') {
+                path.to_string()
+            } else {
+                path.replace('\\', "\\\\")
+                    .replace(quote.unwrap_or('"'), &format!("\\{}", quote.unwrap_or('"')))
+            }
+        };
+        let word_dialect = if dialect == IniDialect::Php {
+            PathWordDialect::Php
+        } else {
+            PathWordDialect::Mysql
+        };
+        let decoded;
+        let body = if quote.is_none() {
+            decoded = decode_path_word(body, None, word_dialect)?.0;
+            decoded.as_str()
+        } else {
+            body
+        };
+        let rewrite = |value: &str| -> Result<String> {
+            if quote.is_none() {
+                rebase.config_value(value, str::to_owned)
+            } else {
+                rebase_path_word(value, quote, word_dialect, rebase)
+            }
+        };
+        let list_separator = match (dialect, key) {
+            (IniDialect::Php, "include_path" | "open_basedir") | (IniDialect::Mysql, "tmpdir") => {
+                Some(if cfg!(windows) { ';' } else { ':' })
+            }
+            (
+                IniDialect::Mysql,
+                "innodb_directories" | "innodb_data_file_path" | "innodb_temp_data_file_path",
+            ) => Some(';'),
+            _ => None,
+        };
+        let rebased = if let Some(separator) = list_separator {
+            body.split(separator)
+                .map(rewrite)
+                .collect::<Result<Vec<_>>>()?
+                .join(&separator.to_string())
+        } else if dialect == IniDialect::Php && key == "session.save_path" {
+            // files session handler 可使用 N;MODE;/path，不能把这些前缀当作目录。
+            let mut path = body;
+            for _ in 0..2 {
+                if let Some((prefix, tail)) = path.split_once(';') {
+                    if !prefix.is_empty() && prefix.bytes().all(|byte| byte.is_ascii_digit()) {
+                        path = tail;
+                        continue;
+                    }
+                }
+                break;
+            }
+            format!("{}{}", &body[..body.len() - path.len()], rewrite(path)?)
+        } else {
+            rewrite(body)?
+        };
+        if rebased == body {
+            output.push_str(line);
+            continue;
+        }
+        output.push_str(&line[..start]);
+        if let Some(quote) = quote {
+            output.push(quote);
+            output.push_str(&rebased);
+            output.push(quote);
+        } else {
+            output.push('"');
+            output.push_str(&encode(&rebased));
+            output.push('"');
+        }
+        output.push_str(&value[end..]);
+    }
+    Ok(output)
+}
+
 /// 只替换调用方明确拥有的逻辑行。其他行、注释、空白和多行指令原样保留。
 /// 每组分别给出原位置替换内容与缺失时追加内容（INI 追加时需携带节名）。
 fn sync_managed_lines(
@@ -1215,6 +1563,109 @@ default-character-set=utf8mb4
 }
 
 /* ================= redis.conf ================= */
+
+pub(crate) fn rebase_redis_config(
+    content: &str,
+    rebase: &crate::paths::DataPathRebase,
+    glob_include: bool,
+) -> Result<String> {
+    let mut output = String::new();
+    for (number, line) in content.split_inclusive('\n').enumerate() {
+        let trimmed = line.trim_start();
+        let Some((key, tail)) = trimmed.split_once(char::is_whitespace) else {
+            output.push_str(line);
+            continue;
+        };
+        if !matches!(
+            key.to_ascii_lowercase().as_str(),
+            "dir"
+                | "logfile"
+                | "pidfile"
+                | "unixsocket"
+                | "aclfile"
+                | "cluster-config-file"
+                | "tls-cert-file"
+                | "tls-key-file"
+                | "tls-ca-cert-file"
+                | "tls-dh-params-file"
+                | "tls-client-cert-file"
+                | "tls-client-key-file"
+                | "loadmodule"
+                | "include"
+        ) {
+            output.push_str(line);
+            continue;
+        }
+        let start = line.len() - tail.trim_start().len();
+        let value = &line[start..];
+        let quote = value.chars().next().filter(|c| matches!(c, '\'' | '"'));
+        let fail = || {
+            AppError::new(
+                "DATA_DIR_CONFIG_SYNTAX",
+                format!("Redis 第 {} 行路径引号或参数边界无效", number + 1),
+            )
+        };
+        let (body, end) = if let Some(quote) = quote {
+            let mut chars = value[1..].char_indices().peekable();
+            let mut end = None;
+            while let Some((offset, character)) = chars.next() {
+                if character == '\\'
+                    && (quote == '"' || chars.peek().is_some_and(|(_, next)| *next == '\''))
+                {
+                    chars.next();
+                } else if character == quote {
+                    end = Some(offset + 2);
+                    break;
+                }
+            }
+            let end = end.ok_or_else(fail)?;
+            if value[end..]
+                .chars()
+                .next()
+                .is_some_and(|c| !c.is_ascii_whitespace())
+            {
+                return Err(fail());
+            }
+            (&value[1..end - 1], end)
+        } else {
+            let end = value
+                .find(|c: char| c.is_ascii_whitespace())
+                .unwrap_or(value.len());
+            (&value[..end], end)
+        };
+        let rebased = if key.eq_ignore_ascii_case("include") && glob_include {
+            let (decoded, _) = decode_path_word(body, quote, PathWordDialect::Redis)?;
+            let rebased = rebase_posix_glob_pattern(&decoded, rebase)?;
+            if decoded == rebased {
+                body.to_string()
+            } else if quote == Some('"') {
+                rebased.replace('\\', "\\\\").replace('"', "\\\"")
+            } else if quote == Some('\'') {
+                rebased.replace('\'', "\\'")
+            } else {
+                rebased
+            }
+        } else {
+            rebase_path_word(body, quote, PathWordDialect::Redis, rebase)?
+        };
+        if rebased == body {
+            output.push_str(line);
+            continue;
+        }
+        output.push_str(&line[..start]);
+        if let Some(quote) = quote {
+            output.push(quote);
+            output.push_str(&rebased);
+            output.push(quote);
+        } else {
+            output.push('"');
+            output.push_str(&rebased.replace('\\', "\\\\").replace('"', "\\\""));
+            output.push('"');
+        }
+        output.push_str(&value[end..]);
+    }
+    Ok(output)
+}
 
 pub fn render_redis_conf(paths: &Paths, version: &str, port: u16) -> String {
     format!(

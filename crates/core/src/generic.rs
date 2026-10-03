@@ -2298,8 +2298,8 @@ pub fn is_script(p: &std::path::Path) -> bool {
         .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "bat" | "cmd" | "ps1"))
 }
 
-/// MySQL/MariaDB option-file 字符串：注释在引号外，已知反斜杠转义按上游解码。
-fn mysql_option_text(value: &str) -> String {
+/// MySQL 在引号外仍把 \# 视为注释；引号内才用反斜杠跳过转义字符。
+pub(crate) fn mysql_option_value_end(value: &str) -> usize {
     let mut quote = None;
     let mut escaped = false;
     let mut end = value.len();
@@ -2308,7 +2308,7 @@ fn mysql_option_text(value: &str) -> String {
             escaped = false;
             continue;
         }
-        if character == '\\' {
+        if character == '\\' && quote.is_some() {
             escaped = true;
             continue;
         }
@@ -2323,7 +2323,12 @@ fn mysql_option_text(value: &str) -> String {
             break;
         }
     }
-    let value = value[..end].trim();
+    end
+}
+
+/// MySQL/MariaDB option-file 字符串：注释在引号外，已知反斜杠转义按上游解码。
+fn mysql_option_text(value: &str) -> String {
+    let value = value[..mysql_option_value_end(value)].trim();
     let value = value
         .strip_prefix('"')
         .and_then(|value| value.strip_suffix('"'))
@@ -2615,6 +2620,11 @@ mod startup_tests {
 
     #[test]
     fn mariadb_legacy_data_is_preserved_and_unknown_versions_are_not_upgraded() {
+        assert_eq!(mysql_option_text(r"C:/old-data/a\#b"), r"C:/old-data/a\");
+        assert_eq!(
+            mysql_option_text(r##"C:/old-data/a\"#b""##),
+            "C:/old-data/a\"#b\""
+        );
         let (_temp, state, r) = fixture_version("mariadb", Some("11.4.8"));
         let legacy = state.paths.data().join("mariadb");
         let config = r.etc.join("my.ini");

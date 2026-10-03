@@ -2,7 +2,7 @@
 
 use crate::error::{AppError, Result};
 use crate::model::{RewritePreset, Site};
-use crate::paths::{nginx_path, portable_text, write_with_backup, Paths};
+use crate::paths::{nginx_path, portable_path_text, quoted_config_path, write_with_backup, Paths};
 use std::path::Path;
 
 fn previous_config(path: &Path) -> Result<Option<String>> {
@@ -30,6 +30,34 @@ pub const PHP_POOL_WORKERS: u16 = 4;
 
 pub fn nginx_upstream_name(php_version: &str) -> String {
     format!("nsb_php_{}", php_version.replace('.', "_"))
+}
+
+fn nginx_include_pattern(path: &Path, sites_glob: bool) -> String {
+    let text = portable_path_text(path);
+    // Nginx 遇到 *?[ 会再交给系统 glob。Unix 的目录字符要先经过这一层转义，
+    // 再经过配置字符串转义；否则合法的反斜杠或方括号目录会静默漏掉站点。
+    let mut pattern = if cfg!(unix) && (sites_glob || text.contains(['*', '?', '['])) {
+        let mut escaped = String::new();
+        for character in text.chars() {
+            if matches!(character, '\\' | '*' | '?' | '[' | ']') {
+                escaped.push('\\');
+            }
+            escaped.push(character);
+        }
+        escaped
+    } else {
+        text
+    };
+    if sites_glob {
+        pattern.push_str("/*.conf");
+    }
+    pattern
+}
+
+fn quoted_nginx_include(path: &Path, sites_glob: bool) -> String {
+    nginx_include_pattern(path, sites_glob)
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
 }
 
 #[derive(Debug)]
@@ -91,7 +119,14 @@ pub(crate) fn nginx_directives(content: &str) -> Result<Vec<NginxDirective>> {
                 if pos == bytes.len() {
                     return Err(nginx_structure_error());
                 }
-                word.push(bytes[pos]);
+                // 与 ngx_conf_read_token 一致：未知转义保留反斜杠，不能吞掉路径字符。
+                match bytes[pos] {
+                    b't' => word.push(b'\t'),
+                    b'r' => word.push(b'\r'),
+                    b'n' => word.push(b'\n'),
+                    b'\\' | b'\'' | b'"' => word.push(bytes[pos]),
+                    other => word.extend_from_slice(&[b'\\', other]),
+                }
                 pos += 1;
                 continue;
             }
@@ -205,8 +240,8 @@ fn sync_nginx_config(current: &str, generated: &str, paths: &Paths) -> Result<St
     if current.as_bytes()[old_http.end - 1] != b'}' {
         return Err(nginx_structure_error());
     }
-    let sites = format!("{}/*.conf", nginx_path(&paths.nginx_sites_dir()));
-    let normalize_path = |value: &str| portable_text(value).replace('\\', "/");
+    let sites = nginx_include_pattern(&paths.nginx_sites_dir(), true);
+    let normalize_path = |value: &str| portable_path_text(Path::new(value));
     let managed_sites = normalize_path(&sites);
     let same_path = |left: &str, right: &str| {
         if cfg!(windows) {
@@ -436,12 +471,12 @@ pub fn render_nginx_conf(
     let adminer_loc = match (adminer_path.filter(|p| p.exists()), php_pools.first()) {
         (Some(p), Some((ver, _))) => {
             let upstream = nginx_upstream_name(ver);
-            let file = nginx_path(p);
+            let file = quoted_config_path(p);
             // 公共参数含 SCRIPT_FILENAME / DOCUMENT_ROOT，Adminer 的固定入口必须在其后覆盖。
             format!(
                 "        location = /_adminer {{ return 302 /_adminer/; }}\n        location /_adminer/ {{\n            allow 127.0.0.1;\n            deny all;\n            fastcgi_pass {upstream};\n            fastcgi_index index.php;\n            include \"{params}\";\n            fastcgi_param SCRIPT_FILENAME \"{file}\";\n            fastcgi_param DOCUMENT_ROOT \"{dir}\";\n        }}\n",
-                dir = nginx_path(p.parent().unwrap_or(std::path::Path::new("."))),
-                params = nginx_path(&paths.etc().join("nginx").join("fastcgi_params")),
+                dir = quoted_config_path(p.parent().unwrap_or(std::path::Path::new("."))),
+                params = quoted_nginx_include(&paths.etc().join("nginx").join("fastcgi_params"), false),
             )
         }
         _ => String::new(),
@@ -510,20 +545,20 @@ http {{
     }}
 
 {upstreams}
-    include "{sites}/*.conf";
+    include "{sites}";
 }}
 "#,
-        pid = nginx_path(&paths.etc().join("nginx").join("run").join("nginx.pid")),
-        error_log = nginx_path(&paths.logs().join("nginx").join("error.log")),
-        access_log = nginx_path(&paths.logs().join("nginx").join("access.log")),
-        mime = nginx_path(&nginx_root.join("conf").join("mime.types")),
-        temp = nginx_path(&paths.etc().join("nginx").join("temp")),
-        certs = nginx_path(&paths.certs()),
+        pid = quoted_config_path(&paths.etc().join("nginx").join("run").join("nginx.pid")),
+        error_log = quoted_config_path(&paths.logs().join("nginx").join("error.log")),
+        access_log = quoted_config_path(&paths.logs().join("nginx").join("access.log")),
+        mime = quoted_nginx_include(&nginx_root.join("conf").join("mime.types"), false),
+        temp = quoted_config_path(&paths.etc().join("nginx").join("temp")),
+        certs = quoted_config_path(&paths.certs()),
         http_port = http_port,
         https_port = https_port,
         adminer_loc = adminer_loc,
         upstreams = upstreams,
-        sites = nginx_path(&paths.nginx_sites_dir()),
+        sites = quoted_nginx_include(&paths.nginx_sites_dir(), true),
     )
 }
 
@@ -641,8 +676,8 @@ pub fn render_site_conf_with_auth(
         let (certificate, key) = site_certificate_files(site, cert_dir);
         format!(
             "    ssl_certificate     \"{}\";\n    ssl_certificate_key \"{}\";",
-            nginx_path(&certificate),
-            nginx_path(&key),
+            quoted_config_path(&certificate),
+            quoted_config_path(&key),
         )
     } else {
         String::new()
@@ -651,7 +686,14 @@ pub fn render_site_conf_with_auth(
     let (access_maps, access_gate) = crate::siteaccess::nginx(&site.id, site.runtime.access.as_ref());
     let cors = site.runtime.cors.as_ref().map(|cors| crate::sitecors::nginx(&site.id, cors));
     let error_pages = nginx_error_pages(site.runtime.error_pages.as_ref());
-    let basic_auth = auth_file.map(|path| format!("    auth_basic \"Restricted\";\n    auth_basic_user_file \"{}\";\n", nginx_path(path))).unwrap_or_default();
+    let basic_auth = auth_file
+        .map(|path| {
+            format!(
+                "    auth_basic \"Restricted\";\n    auth_basic_user_file \"{}\";\n",
+                quoted_config_path(path)
+            )
+        })
+        .unwrap_or_default();
     let body = match &site.runtime.kind {
         crate::model::SiteKind::Redirect => redirect_directives(site, false),
         crate::model::SiteKind::Php => {
@@ -663,7 +705,7 @@ pub fn render_site_conf_with_auth(
             }
             s.push_str(&format!(
                 "    location ~ \\.php$ {{\n        try_files $uri =404;\n        fastcgi_pass {upstream};\n        include \"{}\";\n    }}\n",
-                nginx_path(fastcgi_params_path)
+                quoted_nginx_include(fastcgi_params_path, false)
             ));
             s
         }
@@ -721,8 +763,8 @@ server {{
 "#,
         name = site.name,
         id = site.id,
-        access_log = nginx_path(&log_dir.join(format!("{}.access.log", site.id))),
-        error_log = nginx_path(&log_dir.join(format!("{}.error.log", site.id))),
+        access_log = quoted_config_path(&log_dir.join(format!("{}.access.log", site.id))),
+        error_log = quoted_config_path(&log_dir.join(format!("{}.error.log", site.id))),
         error_pages = error_pages,
         basic_auth = basic_auth,
         listen = listen,
@@ -730,14 +772,14 @@ server {{
         ssl_lines = ssl_lines,
         document_root = if site.runtime.kind == crate::model::SiteKind::Redirect { String::new() } else {
             let index = if site.runtime.kind == crate::model::SiteKind::Php { "index.php index.html index.htm" } else { "index.html index.htm" };
-            format!("root \"{}\";\n    index {index};", nginx_path(std::path::Path::new(&site.root_dir)))
+            format!("root \"{}\";\n    index {index};", quoted_config_path(std::path::Path::new(&site.root_dir)))
         },
         body = cors.as_ref().map_or_else(|| body.clone(), |cors| nginx_cors_headers_in_locations(&body, &cors.headers)),
         cors_maps = cors.as_ref().map_or("", |cors| cors.maps.as_str()),
         http_redirect = https_redirect.map(|status| {
             let suffix = https_port_suffix(https_port);
             let hosts = https_redirect_hosts(site);
-            format!("server {{\n    listen 127.0.0.1:{http_port};\n    server_name {server_names};\n    access_log \"{}\";\n    error_log \"{}\" warn;\n{access_gate}    if ($host !~* \"^(?:{hosts})$\") {{ return 421; }}\n    return {status} \"https://$host{suffix}$request_uri\";\n}}\n", nginx_path(&log_dir.join(format!("{}.access.log", site.id))), nginx_path(&log_dir.join(format!("{}.error.log", site.id))))
+            format!("server {{\n    listen 127.0.0.1:{http_port};\n    server_name {server_names};\n    access_log \"{}\";\n    error_log \"{}\" warn;\n{access_gate}    if ($host !~* \"^(?:{hosts})$\") {{ return 421; }}\n    return {status} \"https://$host{suffix}$request_uri\";\n}}\n", quoted_config_path(&log_dir.join(format!("{}.access.log", site.id))), quoted_config_path(&log_dir.join(format!("{}.error.log", site.id))))
         }).unwrap_or_default(),
         cors_headers = cors.as_ref().map_or("", |cors| cors.headers.as_str()),
         cors_preflight = cors.as_ref().map_or("", |cors| cors.before_content.as_str()),
@@ -858,16 +900,16 @@ session.save_path="{sess}"
 define_syslog_variables=Off
 "#,
         version = version,
-        error_log = nginx_path(
+        error_log = quoted_config_path(
             &paths
                 .logs()
                 .join("php")
                 .join(version)
                 .join("php_errors.log")
         ),
-        ext = nginx_path(&runtime_dir.join("ext")),
+        ext = quoted_config_path(&runtime_dir.join("ext")),
         gd = crate::phpext::gd_extension_name(runtime_dir, version),
-        sess = nginx_path(&paths.data().join("php").join(version).join("sess")),
+        sess = quoted_config_path(&paths.data().join("php").join(version).join("sess")),
     )
 }
 
@@ -994,11 +1036,15 @@ fn sync_mysql_config(
     port: u16,
 ) -> String {
     let options = [
-        ("mysqld", "basedir", format!("\"{}\"", nginx_path(basedir))),
+        (
+            "mysqld",
+            "basedir",
+            format!("\"{}\"", quoted_config_path(basedir)),
+        ),
         (
             "mysqld",
             "datadir",
-            format!("\"{}\"", nginx_path(&paths.mysql_data_dir(version))),
+            format!("\"{}\"", quoted_config_path(&paths.mysql_data_dir(version))),
         ),
         ("mysqld", "port", port.to_string()),
         ("client", "port", port.to_string()),
@@ -1039,7 +1085,7 @@ fn sync_redis_config(current: &str, paths: &Paths, port: u16) -> String {
         ("port", port.to_string()),
         (
             "dir",
-            format!("\"{}\"", nginx_path(&paths.redis_data_dir())),
+            format!("\"{}\"", quoted_config_path(&paths.redis_data_dir())),
         ),
         ("daemonize", "no".into()),
     ];
@@ -1098,11 +1144,11 @@ port={port}
 default-character-set=utf8mb4
 "#,
         version = version,
-        basedir = nginx_path(basedir),
-        datadir = nginx_path(&paths.mysql_data_dir(version)),
+        basedir = quoted_config_path(basedir),
+        datadir = quoted_config_path(&paths.mysql_data_dir(version)),
         port = port,
         mysqlx = mysqlx,
-        log_error = nginx_path(&paths.logs().join("mysql").join("error.log")),
+        log_error = quoted_config_path(&paths.logs().join("mysql").join("error.log")),
     )
 }
 
@@ -1131,7 +1177,7 @@ logfile ""
 "#,
         version = version,
         port = port,
-        dir = nginx_path(&paths.redis_data_dir()),
+        dir = quoted_config_path(&paths.redis_data_dir()),
     )
 }
 
@@ -1868,17 +1914,18 @@ secret: fixture-secret
         let included_bucket = missing_bucket.replace("http {", "http {\n    include user-options.conf;");
         assert!(!sync_nginx_config(&included_bucket, &generated, &paths).unwrap().contains("server_names_hash_bucket_size"));
 
-        // 旧版本可能同时留下普通路径和 `//?/` 长路径形式；两条都属于
-        // NiceEnv 托管 include，重写时只能保留一条。
-        let managed_sites = nginx_path(&paths.nginx_sites_dir());
-        let output_body = output.trim_end().strip_suffix('}').unwrap().trim_end();
-        let legacy_sites = format!(
-            "{output_body}\n    include \"//?/{managed_sites}/*.conf\";\n}}\n"
-        );
-        let repaired_sites = sync_nginx_config(&legacy_sites, &generated, &paths).unwrap();
-        let managed_include = format!("include \"{managed_sites}/*.conf\";");
-        assert_eq!(repaired_sites.matches(&managed_include).count(), 1);
-        assert!(!repaired_sites.contains("//?/"));
+        // Windows 旧版本可能同时留下普通路径和 `//?/` 长路径形式；只能保留一条。
+        #[cfg(windows)]
+        {
+            let managed_sites = portable_path_text(&paths.nginx_sites_dir());
+            let output_body = output.trim_end().strip_suffix('}').unwrap().trim_end();
+            let legacy_sites =
+                format!("{output_body}\n    include \"//?/{managed_sites}/*.conf\";\n}}\n");
+            let repaired_sites = sync_nginx_config(&legacy_sites, &generated, &paths).unwrap();
+            let managed_include = format!("include \"{managed_sites}/*.conf\";");
+            assert_eq!(repaired_sites.matches(&managed_include).count(), 1);
+            assert!(!repaired_sites.contains("//?/"));
+        }
 
         let legacy = "# site: demo (fixture) — NiceEnv 托管\r\nserver {\r\n    listen 8080; # keep comment\r\n    listen 8443 ssl;\r\n    listen 0.0.0.0:9000;\r\n    listen [::1]:9001;\r\n    location / { return 200 'listen 9999;'; }\r\n}\r\n";
         let localized = localize_legacy_site_listeners(legacy).unwrap();
@@ -1894,6 +1941,65 @@ secret: fixture-secret
         assert_eq!(std::fs::read_to_string(&site_path).unwrap(), localized);
         localize_legacy_nginx_sites(&paths, None).unwrap();
         assert_eq!(std::fs::read_to_string(&site_path).unwrap(), localized);
+    }
+
+    #[test]
+    fn nginx_tokens_keep_unknown_escapes_and_decode_supported_escapes() {
+        let parsed =
+            nginx_directives(r#"include "/tmp/a\dir"; value "a\tb\rc\nd\"e\\f\'g";"#).unwrap();
+        assert_eq!(parsed[0].words[1], r"/tmp/a\dir");
+        assert_eq!(parsed[1].words[1], "a\tb\rc\nd\"e\\f'g");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quoted_service_paths_preserve_unix_backslashes_and_nginx_include_identity() {
+        let paths = Paths::new(Path::new(r#"/tmp/literal\new\tail with spaces"#).to_path_buf());
+        let runtime = Path::new(r#"/tmp/runtime\version"#);
+        let generated = render_nginx_conf(&paths, runtime, 8080, 8443, &[], None);
+        let nodes = nginx_directives(&generated).unwrap();
+        let pid = nodes.iter().find(|node| node.words[0] == "pid").unwrap();
+        assert_eq!(
+            pid.words[1],
+            portable_path_text(&paths.etc().join("nginx/run/nginx.pid"))
+        );
+        // 这两个 Unix 目录不同，不能把用户自定义的正斜杠 include 当作托管项删除。
+        let other = portable_path_text(&paths.nginx_sites_dir()).replace('\\', "/");
+        let custom = format!("    include \"{other}/*.conf\"; # user include\n");
+        let current = generated.replace("http {\n", &format!("http {{\n{custom}"));
+        let updated = sync_nginx_config(&current, &generated, &paths).unwrap();
+        assert!(updated.contains(&custom));
+        let managed = format!(
+            "include \"{}\";",
+            quoted_nginx_include(&paths.nginx_sites_dir(), true)
+        );
+        assert_eq!(updated.matches(&managed).count(), 1);
+        assert_eq!(
+            sync_nginx_config(&updated, &generated, &paths).unwrap(),
+            updated
+        );
+
+        let escaped = r"/tmp/literal\\new\\tail with spaces";
+        assert!(render_php_ini(&paths, "8.4", runtime).contains(&format!(
+            "error_log=\"{escaped}/logs/php/8.4/php_errors.log\""
+        )));
+        let mysql = render_mysql_ini(&paths, "8.4", runtime, 3306);
+        assert!(mysql.contains(&format!("datadir=\"{escaped}/data/mysql/8.4\"")));
+        assert_eq!(
+            sync_mysql_config(&mysql, &paths, "8.4", runtime, 3306),
+            mysql
+        );
+        let redis = render_redis_conf(&paths, "8", 6379);
+        assert!(redis.contains(&format!("dir \"{escaped}/data/redis\"")));
+        assert_eq!(sync_redis_config(&redis, &paths, 6379), redis);
+        assert_eq!(
+            quoted_config_path(Path::new("/tmp/quote\" and end\\")),
+            "/tmp/quote\\\" and end\\\\"
+        );
+        assert_eq!(
+            nginx_include_pattern(Path::new(r"/tmp/literal\[v1]"), true),
+            r"/tmp/literal\\\[v1\]/*.conf"
+        );
     }
 
     #[test]

@@ -129,3 +129,18 @@ ARM64 原生证据（均经应用安装器下载，临时目录含空格）：My
 本地 ACME 8 项、重启 4 项、目录 21 项回归通过，桌面端 `cargo check --locked -p niceservbay` 和改动行格式检查通过。macOS 新增的进程组判断、符号链接边界及完整套件验收继续交给真实双架构 runner，未以本机结果代替。
 
 没有数据库结构或用户数据库变更，未修改 `update.sql`；未新增测试文件、未运行本地前端 dev/build。剩余清单继续有效，整体目标仍未完成。
+
+## 2026-10-03：v0.2.252 配置路径转义与 macOS 僵尸进程组
+
+v0.2.251 的 Windows、Linux 与 Web CI 通过。macOS Intel/ARM64 的 core 与集成用例通过，但平台回归均在 `process_group_gone` 检查已退出且未回收的子进程组时返回 `EPERM`；Release 前置验证同样失败，安装包构建 skipped，未发布新安装包。
+
+- Apple 官方 XNU `bsd/kern/kern_sig.c` 的 `killpg1` 明确跳过 zombie，组存在但没有可发送信号的成员时，POSIX 模式返回 `EPERM`。现在 macOS 的此分支同样执行已有 libproc 完整成员枚举；只有所有成员已不再运行才判断完成，无权限或枚举不完整仍不能报告清理成功。保留反复终止、回收前确认退出的现有回归。
+- Nginx、PHP ini、MySQL ini、Redis 配置路径使用独立的双引号编码：Windows 清理扩展路径前缀并使用正斜杠；Unix 保留字面反斜杠，再转义反斜杠和双引号。命令参数不使用配置编码。
+- Nginx include 在 Unix 上另行处理 glob 层的反斜杠与通配字符，避免合法目录里的 `\\`、`[` 等被当作模式。同步托管 include 时保持 Unix 路径身份，不删除指向不同正斜杠目录的用户 include。Windows 的历史 `//?/` 去重继续验证。
+- Nginx 指令读取按上游 `ngx_conf_read_token` 处理 `\\t`、`\\r`、`\\n`、引号及反斜杠；未知转义保留，避免同步时误认路径或正则。
+
+实际解析器验证：PHP 8.4.26 的 `ini_get` 与 MySQL 8.4.11 的 `--print-defaults` 完整回读字面反斜杠、双引号、尾部反斜杠、单引号与空格样本；Nginx 1.31.6 配置校验、Redis 5.0.14 配置解析的预期“目录不存在”错误同样回显原始路径。后两者使用不存在的临时验证目标，不启动服务；这项证据是配置词法解析，不能代替 Unix 文件系统上的实际服务验收。
+
+本地完整回归通过 core 737、集成 45、platform 15，55 项 ignored；桌面端 `cargo check --locked` 与改动行格式检查通过。额外运行现有原生 Nginx 配置校验和 MySQL 参数解析用例，两项通过。Unix 新增路径用例及 macOS 进程组回归仍需远程 runner 确认。
+
+Apache 的正则/URL、Caddyfile、通用模板及数据迁移仍有独立格式规则待处理，未将本次修复描述为全部服务支持完成。没有数据库变更，未修改 `update.sql`；未新增测试文件，未运行本地前端 dev/build。整体复查继续进行。

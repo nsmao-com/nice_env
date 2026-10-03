@@ -569,7 +569,11 @@ pub fn process_group_gone(pid: u32) -> Result<bool> {
     if pid == 0 || pid > i32::MAX as u32 {
         return Err(PlatformError::Io("无效的进程组 ID".into()));
     }
-    if unsafe { libc::kill(-(pid as libc::pid_t), 0) } == 0 {
+    let probe = unsafe { libc::kill(-(pid as libc::pid_t), 0) };
+    let error = std::io::Error::last_os_error();
+    // macOS killpg 会跳过 zombie；组仍存在但只剩 zombie 时返回 EPERM。
+    // EPERM 本身不能证明清理成功，仍须完整枚举并核实每个成员均已退出。
+    if probe == 0 || (cfg!(target_os = "macos") && error.raw_os_error() == Some(libc::EPERM)) {
         #[cfg(target_os = "linux")]
         {
             // kill(0) 也匹配已退出、等待父进程回收的僵尸；它们已不再运行或占用监听端口。
@@ -633,8 +637,11 @@ pub fn process_group_gone(pid: u32) -> Result<bool> {
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         return Ok(false);
     }
-    let error = std::io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) { Ok(true) } else { Err(io_err(error)) }
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(true)
+    } else {
+        Err(io_err(error))
+    }
 }
 
 /// Unix：先终止进程组，组不存在时退回单进程。

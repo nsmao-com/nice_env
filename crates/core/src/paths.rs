@@ -473,6 +473,15 @@ pub fn portable_path_text(path: &Path) -> String {
     }
 }
 
+/// Nginx、PHP ini、MySQL ini 与 Redis 双引号路径的内部文本（不含外层引号）。
+/// Windows 先使用普通正斜杠路径；Unix 的字面反斜杠必须转义，不能改成目录分隔符。
+/// 不用于命令参数、Caddyfile、正则或 URL；这些用途有各自的编码规则。
+pub(crate) fn quoted_config_path(path: &Path) -> String {
+    portable_path_text(path)
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+}
+
 impl DataPathRebase {
     pub(crate) fn new(source: &Path, target: &Path) -> crate::error::Result<Self> {
         let canonical = std::fs::canonicalize(source).ok().map(|path|portable_path_text(&path));

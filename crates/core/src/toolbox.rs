@@ -1285,11 +1285,11 @@ pub fn database_console_start_for(
     let mut command = platform::command(&php_exe);
     command
         .arg("-c")
-        .arg(&ini)
+        .arg(crate::paths::portable_path_text(&ini))
         .args(["-S", &format!("127.0.0.1:{port}"), "-t"])
-        .arg(&dir)
+        .arg(crate::paths::portable_path_text(&dir))
         .current_dir(&dir)
-        .env("PHPRC", &ini)
+        .env("PHPRC", crate::paths::portable_path_text(&ini))
         .env("PHP_INI_SCAN_DIR", "")
         .env_remove("PHP_CLI_SERVER_WORKERS")
         .stdin(Stdio::null())

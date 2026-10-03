@@ -263,7 +263,7 @@ fn probe_xdebug(paths: &Paths, version: &str) -> (bool, Option<String>) {
     let out = platform::command(&exe)
         .arg("-n")
         .arg("-c")
-        .arg(paths.php_ini(version))
+        .arg(crate::paths::portable_path_text(&paths.php_ini(version)))
         .arg("-r")
         .arg("echo extension_loaded('xdebug') ? phpversion('xdebug') : '';")
         .output();

@@ -1716,10 +1716,10 @@ pub fn validate_httpd(httpd_exe: &std::path::Path, conf: &std::path::Path) -> Re
     command
         .current_dir(root)
         .arg("-d")
-        .arg(root)
+        .arg(crate::paths::portable_path_text(root))
         .arg("-t")
         .arg("-f")
-        .arg(conf);
+        .arg(crate::paths::portable_path_text(conf));
     let (ok, output) = crate::cfgeditor::run_validator(&mut command)?;
     if !ok {
         return Err(

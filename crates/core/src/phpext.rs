@@ -232,7 +232,7 @@ fn loaded_modules(paths: &Paths, version: &str, ini_path: &Path) -> BTreeSet<Str
             .current_dir(&root)
             .env("PHP_INI_SCAN_DIR", "")
             .arg("-c")
-            .arg(ini_path)
+            .arg(crate::paths::portable_path_text(ini_path))
             .arg("-m"),
     ) else {
         return BTreeSet::new();
@@ -678,7 +678,7 @@ pub fn set_extension(paths: &Paths, version: &str, ext: &str, enable: bool) -> R
                 .current_dir(paths.runtime_dir("php", version))
                 .env("PHP_INI_SCAN_DIR", "")
                 .arg("-c")
-                .arg(&ini_path)
+                .arg(crate::paths::portable_path_text(&ini_path))
                 .arg("-m"),
         );
         match out {

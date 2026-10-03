@@ -152,7 +152,7 @@ fn run_tool(state: &CoreState, version: &str, executable: &Path, uri: &str, args
     if !credentials.username.is_empty() {
         writeln!(config,"password: {}",serde_json::to_string(&credentials.password).map_err(|_|invalid("无法准备备份认证"))?)?;
         config.flush()?;
-        command.arg(format!("--config={}",config.path().display())).arg(format!("--username={}",credentials.username))
+        command.arg(format!("--config={}",crate::paths::portable_path_text(config.path()))).arg(format!("--username={}",credentials.username))
             .arg(format!("--authenticationDatabase={}",credentials.auth_database));
     }
     command.arg(format!("--uri={uri}/?directConnection=true&serverSelectionTimeoutMS=5000&connectTimeoutMS=5000"))
@@ -170,7 +170,7 @@ fn create_inner(state: &CoreState, version: &str, database: &str, kind: &str) ->
     let dir = directory(state)?; fs::create_dir_all(&dir)?;
     let pending = tempfile::Builder::new().prefix(".pending-").tempdir_in(&dir)?;
     let archive = pending.path().join("archive.gz");
-    run_tool(state, version, &exe, info["uri"].as_str().ok_or_else(|| invalid("实例地址无效"))?, &[format!("--db={database}"), format!("--archive={}", archive.display()), "--gzip".into()], pending.path())?;
+    run_tool(state, version, &exe, info["uri"].as_str().ok_or_else(|| invalid("实例地址无效"))?, &[format!("--db={database}"), format!("--archive={}", crate::paths::portable_path_text(&archive)), "--gzip".into()], pending.path())?;
     crate::ops::verify_database_listener(&state.manager, "mongodb", info["port"].as_u64().unwrap_or(0) as u16)?;
     let (size_bytes, sha256) = copy_hash(&archive, std::io::sink())?;
     if size_bytes == 0 { return Err(invalid("导出的备份为空")); }
@@ -273,7 +273,7 @@ pub fn restore(state: &CoreState, version: &str, id: &str, target: &str, revisio
     let (exe, _) = tool(state, "mongorestore", Some(&backup.tools_version))?;
     let info = inspect(state, version, target, false)?;
     let uri = info["uri"].as_str().ok_or_else(|| invalid("实例地址无效"))?;
-    let args = vec![format!("--archive={}", archive.display()), "--gzip".into(), "--stopOnError".into(),
+    let args = vec![format!("--archive={}", crate::paths::portable_path_text(&archive)), "--gzip".into(), "--stopOnError".into(),
         format!("--nsInclude={}.*", backup.database), format!("--nsFrom={}.*", backup.database), format!("--nsTo={target}.*")];
     let mut dry = args.clone(); dry.push("--dryRun".into()); run_tool(state, version, &exe, uri, &dry, pending.path())?;
     let safety_backup = if current.exists { Some(create_inner(state, version, target, "before-restore")?) } else { None };

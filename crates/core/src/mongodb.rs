@@ -206,9 +206,10 @@ pub(crate) fn execute_as(state: &CoreState, version: &str, request: serde_json::
     let mut output = tempfile::tempfile()?;
     let mut error = tempfile::tempfile()?;
     let mut command = platform::command(executable);
-    command.args(["--quiet", "--norc", "--nodb", "--file"]).arg(&script).current_dir(temp.path())
-        .env("HOME", temp.path()).env("USERPROFILE", temp.path()).env("APPDATA", temp.path()).env("LOCALAPPDATA", temp.path())
-        .env("MONGOSH_LOG_DIR", temp.path()).stdin(Stdio::from(input_file)).stdout(output.try_clone()?).stderr(error.try_clone()?);
+    let temp_path = crate::paths::portable_path_text(temp.path());
+    command.args(["--quiet", "--norc", "--nodb", "--file"]).arg(crate::paths::portable_path_text(&script)).current_dir(temp.path())
+        .env("HOME", &temp_path).env("USERPROFILE", &temp_path).env("APPDATA", &temp_path).env("LOCALAPPDATA", &temp_path)
+        .env("MONGOSH_LOG_DIR", &temp_path).stdin(Stdio::from(input_file)).stdout(output.try_clone()?).stderr(error.try_clone()?);
     let status = crate::dbadmin::wait_client(&mut command, Duration::from_secs(20), || {})?;
     if !status.success() {
         return Err(AppError::new("MONGO_SHELL_FAILED", "MongoDB Shell 执行失败，请检查工具安装及实例状态")

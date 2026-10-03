@@ -450,10 +450,10 @@ pub(crate) fn adapt(
     let mut command = platform::command(&resolved.bin);
     command
         .args(["adapt", "--adapter", "caddyfile", "--validate", "--config"])
-        .arg(config)
+        .arg(crate::paths::portable_path_text(config))
         .current_dir(&resolved.root)
-        .env("XDG_DATA_HOME", resolved.data.join("xdg"))
-        .env("XDG_CONFIG_HOME", resolved.data.join("xdg"))
+        .env("XDG_DATA_HOME", crate::paths::portable_path_text(&resolved.data.join("xdg")))
+        .env("XDG_CONFIG_HOME", crate::paths::portable_path_text(&resolved.data.join("xdg")))
         .stdin(std::process::Stdio::null())
         .stdout(output.try_clone()?)
         .stderr(errors.try_clone()?);

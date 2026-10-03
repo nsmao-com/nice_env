@@ -70,14 +70,8 @@ pub fn expand_config(template: &str, r: &Resolved) -> String {
     expand_inner(template, r, true)
 }
 
-fn expand_inner(template: &str, r: &Resolved, slash_paths: bool) -> String {
-    let path_str = |p: &std::path::Path| {
-        if slash_paths {
-            p.to_string_lossy().replace('\\', "/")
-        } else {
-            p.to_string_lossy().to_string()
-        }
-    };
+fn expand_inner(template: &str, r: &Resolved, _slash_paths: bool) -> String {
+    let path_str = |p: &std::path::Path| crate::paths::portable_path_text(p);
     // 端口类占位符（含 {port+N}）先展开，避免 {port} 抢先替换掉 {port+N} 的前缀
     let with_ports = substitute_ports(template, r.port);
     with_ports
@@ -747,7 +741,7 @@ fn inspect_sftpgo(store: &Store, paths: &Paths, r: &Resolved, previously_started
         ("/smtp/templates_path", "SFTPGO_SMTP__TEMPLATES_PATH", "templates"),
     ] {
         if !effective_env.contains_key(key) && config.pointer(pointer).is_none_or(|value| value.as_str() == Some(default)) {
-            let value = r.root.join(default).to_string_lossy().into_owned();
+            let value = crate::paths::portable_path_text(&r.root.join(default));
             env.push((key.into(), value.clone())); process_env.insert(key.into(), value);
         }
     }
@@ -1203,7 +1197,7 @@ fn qdrant_snapshot_env(store: &Store, paths: &Paths, manager: &ServiceManager, r
         || qdrant_path_key(&location) == qdrant_path_key(&target)) {
         std::fs::create_dir_all(&target)?;
         // 原文件的注释和自定义设置不重写；只修正上游默认的易丢失路径。
-        return Ok(vec![("QDRANT__STORAGE__SNAPSHOTS_PATH".into(), target.to_string_lossy().into_owned())]);
+        return Ok(vec![("QDRANT__STORAGE__SNAPSHOTS_PATH".into(), crate::paths::portable_path_text(&target))]);
     }
     Ok(vec![])
 }
@@ -1843,14 +1837,14 @@ pub fn start(
     }
     if r.entry.id == "mariadb" {
         args.extend([
-            format!("--basedir={}", r.root.parent().ok_or_else(|| AppError::new("MARIADB_PATH", "MariaDB 安装路径无效"))?.display()),
-            format!("--datadir={}", r.data.display()),
+            format!("--basedir={}", crate::paths::portable_path_text(r.root.parent().ok_or_else(|| AppError::new("MARIADB_PATH", "MariaDB 安装路径无效"))?)),
+            format!("--datadir={}", crate::paths::portable_path_text(&r.data)),
             format!("--port={}", r.port.ok_or_else(|| AppError::new("DATABASE_PORT_UNKNOWN", "MariaDB 端口未配置"))?),
             "--bind-address=127.0.0.1".into(),
         ]);
         if cfg!(windows) { args.push("--console".into()); }
     }
-    if let Some(config) = &sftpgo { args.extend(["--config-file".into(), config.file.to_string_lossy().into_owned()]); }
+    if let Some(config) = &sftpgo { args.extend(["--config-file".into(), crate::paths::portable_path_text(&config.file)]); }
     let cwd = r
         .spec
         .cwd
@@ -1869,7 +1863,7 @@ pub fn start(
 
     // .bat/.cmd 不是可执行文件：Windows 上须经 cmd.exe 转发（Tomcat/Neo4j/MariaDB 等）
     let (program, args) = if cfg!(windows) && is_script(&r.bin) {
-        let mut cmd = r.bin.to_string_lossy().to_string();
+        let mut cmd = crate::paths::portable_path_text(&r.bin);
         // cmd 会按空格重切命令串，包一层引号保证带空格路径也正确
         if cmd.contains(' ') {
             cmd = format!("\"{cmd}\"");
@@ -2106,7 +2100,7 @@ fn initialize_mariadb(r: &Resolved) -> Result<()> {
     let mut output = tempfile::tempfile()?;
     let mut command = platform::command(r.root.join("mariadb-install-db.exe"));
     // 不传 --service 或命令行密码；隔离初始化成功后才发布数据目录。
-    command.arg(format!("--datadir={}", pending.path().display()))
+    command.arg(format!("--datadir={}", crate::paths::portable_path_text(pending.path())))
         .arg(format!("--port={}", r.port.unwrap_or(3306)))
         .current_dir(&r.root).stdin(std::process::Stdio::null())
         .stdout(output.try_clone()?).stderr(output.try_clone()?);
@@ -2184,7 +2178,7 @@ fn run_init_if_needed(r: &Resolved) -> Result<()> {
     // Windows 的 RabbitMQ 插件脚本是 .bat；与服务启动路径保持一致，经 cmd.exe
     // 转发，并把受管环境传给初始化命令，确保 RABBITMQ_BASE 指向当前实例。
     let (program, args) = if cfg!(windows) && is_script(&init_exe) {
-        let mut command = init_exe.to_string_lossy().to_string();
+        let mut command = crate::paths::portable_path_text(&init_exe);
         if command.contains(' ') { command = format!("\"{command}\""); }
         let mut forwarded = vec!["/C".to_string(), command];
         forwarded.extend(args);

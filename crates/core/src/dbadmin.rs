@@ -170,7 +170,7 @@ pub(crate) fn client_command(
     file.sync_all()?;
     let mut command = platform::command(exe);
     command
-        .arg(format!("--defaults-file={}", defaults.display()))
+        .arg(format!("--defaults-file={}", crate::paths::portable_path_text(&defaults)))
         .args([
             "--protocol=TCP",
             "--host",
@@ -180,13 +180,13 @@ pub(crate) fn client_command(
         ])
         .env(
             "MYSQL_TEST_LOGIN_FILE",
-            private.path().join("unused.mylogin.cnf"),
+            crate::paths::portable_path_text(&private.path().join("unused.mylogin.cnf")),
         )
         .env_remove("MYSQL_PWD");
     // portable 客户端的默认插件目录可能指向构建机器；私有配置同时隔离了包内 my.ini。
     // 指定本安装的插件目录，MariaDB 才能加载连接 MySQL 8 所需的 caching_sha2_password。
     if let Some(plugins) = exe.parent().and_then(Path::parent).map(|root| root.join("lib/plugin")).filter(|path| path.is_dir()) {
-        command.arg(format!("--plugin-dir={}", plugins.display()));
+        command.arg(format!("--plugin-dir={}", crate::paths::portable_path_text(&plugins)));
     }
     Ok((private, command))
 }
@@ -1135,7 +1135,7 @@ impl PostgresClient {
         command.args(["--no-password", "--host=127.0.0.1", "--username=postgres"])
             .arg(format!("--dbname=postgresql://postgres@127.0.0.1:{}/{database}{options}", self.port))
             .arg(format!("--port={}", self.port))
-            .env("PGPASSFILE", passfile).env("PGCONNECT_TIMEOUT", "5").env("PGCLIENTENCODING", "UTF8")
+            .env("PGPASSFILE", crate::paths::portable_path_text(&passfile)).env("PGCONNECT_TIMEOUT", "5").env("PGCLIENTENCODING", "UTF8")
             .env("PGAPPNAME", "NiceEnv").env("LC_ALL", "C");
         Ok((private, command))
     }

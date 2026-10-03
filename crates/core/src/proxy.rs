@@ -255,7 +255,12 @@ pub(crate) fn validate_profile(paths: &Paths, store: &Store, content: &str) -> R
     file.write_all(content.as_bytes())?;
     file.flush()?;
     let (ok, _) = crate::cfgeditor::run_validator(platform::command(&exe)
-        .current_dir(paths.mihomo_dir()).arg("-t").arg("-d").arg(paths.mihomo_dir()).arg("-f").arg(file.path()))?;
+        .current_dir(paths.mihomo_dir())
+        .arg("-t")
+        .arg("-d")
+        .arg(crate::paths::portable_path_text(&paths.mihomo_dir()))
+        .arg("-f")
+        .arg(crate::paths::portable_path_text(file.path())))?;
     if !ok {
         return Err(AppError::new("PROXY_CONFIG_INVALID", "订阅未通过 mihomo 原生校验，原配置未改变")
             .with_hint("请确认订阅适用于当前 mihomo 版本，检查节点、规则与 provider 配置"));

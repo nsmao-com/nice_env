@@ -848,7 +848,11 @@ pub fn validate(
                         .arg("-c")
                         .arg(crate::paths::nginx_path(tmp.path()));
                 } else {
-                    command.arg("-d").arg(&root).arg("-f").arg(tmp.path());
+                    command
+                        .arg("-d")
+                        .arg(crate::paths::portable_path_text(&root))
+                        .arg("-f")
+                        .arg(crate::paths::portable_path_text(tmp.path()));
                 }
                 match run_validator(&mut command) {
                     Ok((ok, output)) => {

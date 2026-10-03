@@ -485,7 +485,7 @@ fn start_php(
             args: vec!["-b".into(), format!("127.0.0.1:{port}")],
             cwd: Some(exe.parent().map(PathBuf::from).unwrap_or_default()),
             env: vec![
-                ("PHPRC".into(), ini_dir.to_string_lossy().to_string()),
+                ("PHPRC".into(), crate::paths::portable_path_text(&ini_dir)),
                 ("PHP_INI_SCAN_DIR".into(), "".into()),
                 ("PHP_FCGI_MAX_REQUESTS".into(), "1000".into()),
             ],
@@ -582,7 +582,7 @@ fn start_mysql(
         let mut init_args = mysql_launch_args(paths, version, &basedir, mysql_port);
         for arg in &mut init_args {
             if arg.starts_with("--datadir=") {
-                *arg = format!("--datadir={}", pending.path().display());
+                *arg = format!("--datadir={}", crate::paths::portable_path_text(pending.path()));
             }
         }
         init_args.push("--initialize-insecure".to_string());
@@ -711,12 +711,12 @@ fn mysql_launch_args(paths: &Paths, version: &str, basedir: &Path, port: u16) ->
     vec![
         format!(
             "--defaults-file={}",
-            paths.mysql_ini(version).to_string_lossy()
+            crate::paths::portable_path_text(&paths.mysql_ini(version))
         ),
-        format!("--basedir={}", basedir.to_string_lossy()),
+        format!("--basedir={}", crate::paths::portable_path_text(basedir)),
         format!(
             "--datadir={}",
-            paths.mysql_data_dir(version).to_string_lossy()
+            crate::paths::portable_path_text(&paths.mysql_data_dir(version))
         ),
         format!("--port={port}"),
     ]
@@ -772,9 +772,9 @@ fn start_mihomo(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>) -> 
         program: exe.clone(),
         args: vec![
             "-d".into(),
-            paths.mihomo_dir().to_string_lossy().to_string(),
+            crate::paths::portable_path_text(&paths.mihomo_dir()),
             "-f".into(),
-            paths.mihomo_config().to_string_lossy().to_string(),
+            crate::paths::portable_path_text(&paths.mihomo_config()),
         ],
         cwd: Some(paths.mihomo_dir()),
         env: vec![],
@@ -796,7 +796,7 @@ fn redis_launch_args(paths: &Paths, version: &str, port: u16, exe: &Path) -> Vec
         dir.join("msys-2.0.dll").is_file() || dir.join("cygwin1.dll").is_file()
     });
     let path_arg = |path: PathBuf| {
-        let native = path.to_string_lossy().to_string();
+        let native = crate::paths::portable_path_text(&path);
         if !posix { return native; }
         let slash = native.replace('\\', "/");
         let slash = slash.strip_prefix("//?/UNC/").map(|s| format!("//{s}"))
@@ -840,9 +840,9 @@ fn start_apache(
         program: exe.clone(),
         args: vec![
             "-d".into(),
-            root.to_string_lossy().to_string(),
+            crate::paths::portable_path_text(&root),
             "-f".into(),
-            paths.apache_conf().to_string_lossy().to_string(),
+            crate::paths::portable_path_text(&paths.apache_conf()),
         ],
         cwd: Some(root.clone()),
         env: vec![],
@@ -896,7 +896,7 @@ fn start_postgresql(
         store.set_setting(&crate::dbadmin::postgres_password_key(&version), &password)?;
         let mut output = tempfile::tempfile()?;
         let mut command = platform::command(root.join("bin").join(exe_name("initdb")));
-        command.arg("-D").arg(pending.path()).args(["-U", "postgres", "-A", "scram-sha-256", "-E", "UTF8", "--no-locale"])
+        command.arg("-D").arg(crate::paths::portable_path_text(pending.path())).args(["-U", "postgres", "-A", "scram-sha-256", "-E", "UTF8", "--no-locale"])
             .arg("--pwfile").arg(&passfile).current_dir(&root)
             .stdin(std::process::Stdio::null()).stdout(output.try_clone()?).stderr(output.try_clone()?);
         let status = crate::dbadmin::wait_client(&mut command, Duration::from_secs(180), || {})?;
@@ -915,7 +915,7 @@ fn start_postgresql(
     #[allow(unused_mut)]
     let mut pg_args: Vec<String> = vec![
         "-D".into(),
-        datadir.to_string_lossy().to_string(),
+        crate::paths::portable_path_text(&datadir),
         "-p".into(),
         port.to_string(),
         "-c".into(),
@@ -1001,15 +1001,15 @@ fn start_mongodb(
         args: {
             let mut args = vec![
             "--config".into(),
-            paths.mongo_conf(&version).to_string_lossy().to_string(),
+            crate::paths::portable_path_text(&paths.mongo_conf(&version)),
             "--dbpath".into(),
-            dbpath.to_string_lossy().to_string(),
+            crate::paths::portable_path_text(&dbpath),
             "--port".into(),
             ports.mongodb.to_string(),
             "--bind_ip".into(),
             "127.0.0.1".into(),
             "--logpath".into(),
-            logfile.to_string_lossy().to_string(),
+            crate::paths::portable_path_text(&logfile),
             "--logappend".into(),
             ];
             if require_auth {
@@ -1191,9 +1191,9 @@ fn stop_service_with_mode(store: &Store, paths: &Paths, manager: &Arc<ServiceMan
                     let _ = platform::command(&exe)
                         .args([
                             "-d".into(),
-                            root.to_string_lossy().to_string(),
+                            crate::paths::portable_path_text(&root),
                             "-f".into(),
-                            paths.apache_conf().to_string_lossy().to_string(),
+                            crate::paths::portable_path_text(&paths.apache_conf()),
                             "-k".into(),
                             "stop".into(),
                         ])
@@ -1529,9 +1529,9 @@ fn reload_apache(root: &Path, exe: &Path, paths: &Paths, store: &Store, manager:
     let out = platform::command(exe)
         .args([
             "-d".into(),
-            root.to_string_lossy().to_string(),
+            crate::paths::portable_path_text(root),
             "-f".into(),
-            paths.apache_conf().to_string_lossy().to_string(),
+            crate::paths::portable_path_text(&paths.apache_conf()),
             "-k".into(),
             "restart".into(),
         ])
@@ -2399,7 +2399,11 @@ fn validate_configs_selected(
                     .arg("-c")
                     .arg(crate::paths::nginx_path(&conf));
             } else {
-                command.arg("-d").arg(&root).arg("-f").arg(&conf);
+                command
+                    .arg("-d")
+                    .arg(crate::paths::portable_path_text(&root))
+                    .arg("-f")
+                    .arg(crate::paths::portable_path_text(&conf));
             }
             let (ok, output) = crate::cfgeditor::run_validator_with_timeout(&mut command, timeout)?;
             let status = if !ok {

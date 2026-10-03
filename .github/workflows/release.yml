@@ -86,6 +86,13 @@ jobs:
             echo "::error title=版本号不一致::tag 为 $TAG，但 tauri.conf.json 的版本号是 $ver（应为 v$ver）"
             exit 1
           fi
+          node <<'NODE'
+          const fs = require('node:fs');
+          for (const file of ['package.json', 'apps/desktop/package.json', 'apps/web/package.json', 'packages/schema/package.json']) {
+            const { version } = JSON.parse(fs.readFileSync(file, 'utf8'));
+            if (`v${version}` !== process.env.TAG) throw new Error(`${file} 的版本 ${version} 与 ${process.env.TAG} 不一致`);
+          }
+          NODE
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable

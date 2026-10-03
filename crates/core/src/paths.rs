@@ -940,7 +940,7 @@ pub(crate) fn checked_data_path(base: &Path, relative: &str) -> io::Result<PathB
     if relative.is_empty() || relative.contains(['\\', ':', '\0', '<', '>', '"', '|', '?', '*']) {
         return Err(backup_error("配置路径无效"));
     }
-    let mut result = system_path(base);
+    let mut result = base.to_path_buf();
     for part in relative.split('/') {
         let device = part.split('.').next().unwrap_or("").to_ascii_uppercase();
         let numbered_device = device
@@ -966,8 +966,8 @@ pub(crate) fn checked_data_path(base: &Path, relative: &str) -> io::Result<PathB
             return Err(backup_error("配置路径无效"));
         }
         result.push(part);
-        result = system_path(&result);
-        match std::fs::symlink_metadata(&result) {
+        // 只在检查时解析系统别名；返回值保留 base 的写法，供后续 strip_prefix 比较。
+        match std::fs::symlink_metadata(system_path(&result)) {
             Ok(metadata) if linked(&metadata) => {
                 return Err(backup_error("配置路径包含软链接或目录联接，无法自动恢复"))
             }
@@ -1294,7 +1294,7 @@ mod tests {
             assert_eq!(system_path(Path::new(alias)), Path::new(target));
             assert_eq!(
                 checked_data_path(Path::new("/"), &alias[1..]).unwrap(),
-                Path::new(target)
+                Path::new(alias)
             );
         }
         let temp = tempfile::tempdir_in("/tmp").unwrap();

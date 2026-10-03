@@ -575,19 +575,25 @@ fn render_terminal_script(dirs: &[String], windows: bool) -> Result<String> {
     } else {
         let quote = |text: &str| format!("'{}'", text.replace('\'', "'\"'\"'"));
         let joined = quote(&dirs.join(":"));
-        let choices = dirs.iter().map(|d| quote(d)).collect::<Vec<_>>().join("|");
+        let choices = dirs.iter().map(|d| quote(d)).collect::<Vec<_>>().join(" ");
         Ok(format!(
-            // 赋值上下文不会分词；避免旧版 macOS sh 在双引号内解析 case 模式的缺陷。
+            // 不把用户路径嵌入 case 模式：旧版 macOS sh 无法可靠解析其中的引号和括号。
             r#"PATH=$(
   nsb_result={joined}
   nsb_rest=${{PATH-}}
   if [ -n "$nsb_rest" ]; then
     while :; do
       nsb_item=${{nsb_rest%%:*}}
-      case "$nsb_item" in
-        {choices}) ;;
-        *) nsb_result=$nsb_result:$nsb_item ;;
-      esac
+      nsb_selected=0
+      for nsb_dir in {choices}; do
+        if [ "$nsb_item" = "$nsb_dir" ]; then
+          nsb_selected=1
+          break
+        fi
+      done
+      if [ "$nsb_selected" = 0 ]; then
+        nsb_result=$nsb_result:$nsb_item
+      fi
       case "$nsb_rest" in
         *:*) nsb_rest=${{nsb_rest#*:}} ;;
         *) break ;;
@@ -2073,26 +2079,31 @@ mod tests {
         let dirs = v(&["/Nice Env/O'Brien/$nsbInjection`&()\\/bin", "/second/bin"]);
         let script = render_terminal_script(&dirs, false).unwrap();
         let program = format!("PATH='/other::/second/bin:/other:'\nnsbInjection=EXPANDED\n{script}\n{script}\n[ -z \"${{nsb_result+x}}\" ] || exit 2\nprintf '%s' \"$PATH\"");
-        // /bin/sh 不认识 Bash 启动参数。
-        #[cfg(not(windows))]
-        let output = platform::command("/bin/sh")
-            .args(["-c", &program])
-            .output()
-            .unwrap();
-        #[cfg(windows)]
-        let output = platform::command(shell)
-            .args(["--noprofile", "--norc", "-c", &program])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            String::from_utf8(output.stdout).unwrap(),
-            format!("{}:{}:/other::/other:", dirs[0], dirs[1])
-        );
+        let verify = |shell: &std::path::Path| {
+            // /bin/sh 不认识 Bash 启动参数。
+            #[cfg(not(windows))]
+            let output = platform::command(shell)
+                .args(["-c", &program])
+                .output()
+                .unwrap();
+            #[cfg(windows)]
+            let output = platform::command(shell)
+                .args(["--noprofile", "--norc", "-c", &program])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                format!("{}:{}:/other::/other:", dirs[0], dirs[1])
+            );
+        };
+        verify(&shell);
+        #[cfg(target_os = "macos")]
+        verify(std::path::Path::new("/bin/zsh"));
     }
 
     #[test]

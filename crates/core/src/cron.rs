@@ -372,9 +372,11 @@ fn run_shell(command: &str, run: &ActiveRun, timeout: Duration) -> (String, Stri
         use std::os::windows::process::CommandExt;
         let mut cmd = platform::command("cmd");
         // 用户输入的是完整 shell 命令；cmd 不使用 C argv 转义规则。
-        // 隐藏子控制台使用 UTF-8，避免英文 Windows 的 OEM 代码页将中文替换为 ?。
-        cmd.args(["/D", "/S", "/C"])
-            .raw_arg(format!("\"chcp 65001 >nul && {command}\""));
+        // cmd 会缓存启动代码页，必须先设置 UTF-8 再启动实际执行命令的 cmd。
+        // 延迟展开只发生在外层，避免用户命令的 %、!、^ 被两层 shell 重复解释。
+        cmd.env("NSB_CRON_COMMAND", command)
+            .args(["/D", "/V:ON", "/S", "/C"])
+            .raw_arg("\"chcp 65001 >nul && cmd /D /V:OFF /S /C \"!NSB_CRON_COMMAND!\"\"");
         cmd
     };
     #[cfg(not(windows))]
@@ -740,12 +742,12 @@ mod tests {
         let output = result.last_output.unwrap();
         assert!(output.contains("fixture-out"));
         assert!(output.contains("fixture-err"));
-        job.command = "echo recovered 中文输出".into();
+        job.command = "echo recovered 中文输出 🦀".into();
         store.save_cron_job(&job, false).unwrap();
         let result = run_job(&store, &job.id, true).unwrap();
         assert_eq!(result.last_exit.as_deref(), Some("exit 0"));
         let output = result.last_output.unwrap();
-        assert!(output.contains("recovered 中文输出"), "{output}");
+        assert!(output.contains("recovered 中文输出 🦀"), "{output}");
     }
 
     #[test]

@@ -438,7 +438,9 @@ impl VerifiedProcess {
         match process_start_marker(self.pid) {
             Some(marker) => Ok(marker != self.started || !process_alive(self.pid)),
             None if !process_alive(self.pid) => Ok(true),
-            None => Err(PlatformError::Io("无法确认进程是否已经退出".into())),
+            // macOS 在终止到进入 zombie 之间可能暂时读不到身份；由调用方的有界等待重试。
+            // 无法核实时保守地视作尚未退出，不能把它当成停机成功。
+            None => Ok(false),
         }
     }
 }

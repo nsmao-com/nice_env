@@ -49,29 +49,73 @@ export function usePackages() {
   });
 }
 
-/** 同步所有套件列表缓存；较早返回的批量目录不能覆盖已刷新的单项。 */
-async function publishVersionCatalogs(qc: QueryClient, incoming: VersionCatalog[], replace: boolean) {
-  const filters = { queryKey: ["version-catalogs"], predicate: (query: { queryKey: readonly unknown[] }) => Array.isArray(query.queryKey[1]) };
-  await qc.cancelQueries(filters, { silent: true });
-  qc.setQueriesData<VersionCatalog[]>(filters, (previous) => {
-    // 单项结果不能冒充完整的首次加载；下方重新读取仍为空的活动列表。
-    if (!previous && !replace) return undefined;
-    const old = new Map((previous ?? []).map((catalog) => [catalog.id, catalog]));
-    const next = replace ? new Map<string, VersionCatalog>() : new Map(old);
-    for (const catalog of incoming) {
-      const current = old.get(catalog.id);
-      next.set(catalog.id, current?.cachedAt != null && catalog.cachedAt != null && current.cachedAt > catalog.cachedAt ? current : catalog);
-    }
+/** 同一 QueryClient 的页面共用请求顺序，IPC Promise 不依赖 cancelQueries 取消。 */
+type CatalogRequest = { force: boolean; pending: boolean; promise: Promise<VersionCatalog> };
+const catalogRequests = new WeakMap<QueryClient, Map<string, CatalogRequest>>();
+const catalogLoadingKey = ["version-catalog-loading"] as const;
+
+function catalogFilters(id: string) {
+  return { queryKey: ["version-catalogs"], predicate: (query: { queryKey: readonly unknown[] }) => Array.isArray(query.queryKey[1]) && query.queryKey[1].includes(id) };
+}
+
+function previousCatalog(qc: QueryClient, id: string): VersionCatalog | undefined {
+  return qc.getQueriesData<VersionCatalog[]>(catalogFilters(id))
+    .flatMap(([, catalogs]) => catalogs ?? [])
+    .filter((catalog) => catalog.id === id)
+    .sort((a, b) => (b.cachedAt ?? 0) - (a.cachedAt ?? 0))[0];
+}
+
+function publishVersionCatalog(qc: QueryClient, catalog: VersionCatalog) {
+  const current = previousCatalog(qc, catalog.id);
+  const newer = current?.cachedAt != null && current.cachedAt > (catalog.cachedAt ?? 0);
+  // 最新请求失败时仍展示已知版本，同时保留失败状态与原因。
+  const selected = newer ? (catalog.error ? { ...catalog, remote: current.remote, cachedAt: current.cachedAt } : current) : catalog;
+  qc.setQueriesData<VersionCatalog[]>(catalogFilters(catalog.id), (previous = []) => {
+    const next = new Map(previous.map((item) => [item.id, item]));
+    next.set(catalog.id, selected);
     return [...next.values()].sort((a, b) => a.id.localeCompare(b.id));
   });
-  await qc.refetchQueries({ ...filters, type: "active", predicate: (query) => filters.predicate(query) && query.state.data === undefined });
+  return selected;
+}
+
+function loadVersionCatalog(qc: QueryClient, id: string, force: boolean): Promise<VersionCatalog> {
+  let requests = catalogRequests.get(qc);
+  if (!requests) { requests = new Map(); catalogRequests.set(qc, requests); }
+  const current = requests.get(id);
+  if (current?.pending && (current.force || !force)) return current.promise;
+  const active = requests;
+  const request: CatalogRequest = {
+    force,
+    pending: true,
+    promise: Promise.resolve().then(async () => {
+      try {
+        const catalog = await api.versionCatalog(id, force);
+        const latest = active.get(id);
+        if (latest && latest !== request) return latest.promise;
+        return publishVersionCatalog(qc, catalog);
+      } catch (error) {
+        const latest = active.get(id);
+        if (latest && latest !== request) return latest.promise;
+        publishVersionCatalog(qc, {
+          ...(previousCatalog(qc, id) ?? { id, remote: [] }), online: false, error: normalizeError(error).message,
+        });
+        throw error;
+      } finally {
+        request.pending = false;
+        if (active.get(id) === request) {
+          qc.setQueryData<Record<string, boolean>>(catalogLoadingKey, (loading = {}) => ({ ...loading, [id]: false }));
+        }
+      }
+    }),
+  };
+  active.set(id, request);
+  qc.setQueryData<Record<string, boolean>>(catalogLoadingKey, (loading = {}) => ({ ...loading, [id]: true }));
+  return request.promise;
 }
 
 /** 项目 LTS 刷新与套件菜单使用同一入口，不创建旧的单项缓存键。 */
 export async function refreshVersionCatalog(qc: QueryClient, id: string) {
-  const catalog = await api.versionCatalog(id, true);
-  await publishVersionCatalogs(qc, [catalog], false);
-  return catalog;
+  return loadVersionCatalog(qc, id, true);
 }
 
 /**
@@ -97,45 +141,35 @@ export function useVersionCatalogs(packageIds: string[]) {
     enabled: false,
     initialData: [] as VersionCatalog[],
   });
+  const { data: loading = {} } = useQuery<Record<string, boolean>>({
+    queryKey: catalogLoadingKey,
+    queryFn: async () => ({}),
+    enabled: false,
+    initialData: {},
+  });
   const [loadingIds, setLoadingIds] = React.useState<Set<string>>(() => new Set());
   const loadGeneration = React.useRef(0);
-  const publishCatalog = React.useCallback((catalog: VersionCatalog) => {
-    qc.setQueryData<VersionCatalog[]>(queryKey, (previous = []) => {
-      const current = new Map(previous.map((item) => [item.id, item]));
-      const old = current.get(catalog.id);
-      if (!(old?.cachedAt != null && catalog.cachedAt != null && old.cachedAt > catalog.cachedAt)) {
-        current.set(catalog.id, catalog);
-      }
-      return [...current.values()].sort((a, b) => a.id.localeCompare(b.id));
-    });
-  }, [qc, queryKey]);
   const loadCatalogs = React.useCallback(async (requestedIds: string[], force: boolean) => {
     const queue = [...new Set(requestedIds)];
     const generation = ++loadGeneration.current;
     setLoadingIds(new Set(queue));
     let cursor = 0;
     const results: VersionCatalog[] = [];
-    const publish = (catalog: VersionCatalog) => {
-      if (generation !== loadGeneration.current) return;
-      results.push(catalog);
-      publishCatalog(catalog);
-      setLoadingIds((previous) => {
-        if (!previous.has(catalog.id)) return previous;
-        const next = new Set(previous);
-        next.delete(catalog.id);
-        return next;
-      });
-    };
     const worker = async () => {
       while (generation === loadGeneration.current) {
         const id = queue[cursor++];
         if (!id) return;
+        const pending = loadVersionCatalog(qc, id, force);
+        setLoadingIds((previous) => {
+          const next = new Set(previous);
+          next.delete(id);
+          return next;
+        });
         try {
-          publish(await api.versionCatalog(id, force));
+          results.push(await pending);
         } catch (error) {
-          publish({
-            id,
-            remote: [],
+          results.push({
+            ...(previousCatalog(qc, id) ?? { id, remote: [] }),
             online: false,
             error: normalizeError(error).message,
           });
@@ -144,7 +178,7 @@ export function useVersionCatalogs(packageIds: string[]) {
     };
     await Promise.all(Array.from({ length: Math.min(6, queue.length) }, () => worker()));
     return results;
-  }, [publishCatalog]);
+  }, [qc]);
 
   React.useEffect(() => {
     if (ids.length === 0) {
@@ -165,29 +199,16 @@ export function useVersionCatalogs(packageIds: string[]) {
     byId.set(id, {
       id, remote: [], online: false,
       ...catalog,
-      loading: loadingIds.has(id),
+      loading: loadingIds.has(id) || loading[id] === true,
     });
   });
   const refresh = React.useCallback(async (id: string) => {
-    setLoadingIds((previous) => {
-      const next = new Set(previous);
-      next.add(id);
-      return next;
-    });
     try {
-      const catalog = await api.versionCatalog(id, true);
-      publishCatalog(catalog);
+      await refreshVersionCatalog(qc, id);
     } catch (error) {
       toastError(error);
-    } finally {
-      setLoadingIds((previous) => {
-        if (!previous.has(id)) return previous;
-        const next = new Set(previous);
-        next.delete(id);
-        return next;
-      });
     }
-  }, [publishCatalog]);
+  }, [qc]);
   const refreshAll = React.useCallback(async () => {
     return loadCatalogs(ids, true);
   }, [ids, loadCatalogs]);

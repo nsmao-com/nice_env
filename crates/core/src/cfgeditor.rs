@@ -842,7 +842,11 @@ pub fn validate(
                 let mut command = platform::command(&exe);
                 command.current_dir(&root).arg("-t");
                 if kind == ConfigKind::NginxMain {
-                    command.arg("-p").arg(&root).arg("-c").arg(tmp.path());
+                    command
+                        .arg("-p")
+                        .arg(crate::paths::nginx_path(&root))
+                        .arg("-c")
+                        .arg(crate::paths::nginx_path(tmp.path()));
                 } else {
                     command.arg("-d").arg(&root).arg("-f").arg(tmp.path());
                 }

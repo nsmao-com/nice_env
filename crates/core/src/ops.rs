@@ -433,9 +433,9 @@ fn start_nginx(
         program: exe.clone(),
         args: vec![
             "-p".into(),
-            root.to_string_lossy().to_string(),
+            crate::paths::nginx_path(&root),
             "-c".into(),
-            paths.nginx_conf().to_string_lossy().to_string(),
+            crate::paths::nginx_path(&paths.nginx_conf()),
         ],
         cwd: Some(root.clone()),
         env: vec![],
@@ -1174,9 +1174,9 @@ fn stop_service_with_mode(store: &Store, paths: &Paths, manager: &Arc<ServiceMan
                     let _ = platform::command(&exe)
                         .args([
                             "-p".into(),
-                            root.to_string_lossy().to_string(),
+                            crate::paths::nginx_path(&root),
                             "-c".into(),
-                            paths.nginx_conf().to_string_lossy().to_string(),
+                            crate::paths::nginx_path(&paths.nginx_conf()),
                             "-s".into(),
                             "stop".into(),
                         ])
@@ -1508,9 +1508,9 @@ pub fn reload_nginx(store: &Store, paths: &Paths, manager: &ServiceManager) -> R
     let out = platform::command(&exe)
         .args([
             "-p".into(),
-            root.to_string_lossy().to_string(),
+            crate::paths::nginx_path(&root),
             "-c".into(),
-            paths.nginx_conf().to_string_lossy().to_string(),
+            crate::paths::nginx_path(&paths.nginx_conf()),
             "-s".into(),
             "reload".into(),
         ])
@@ -2393,7 +2393,11 @@ fn validate_configs_selected(
             let mut command = platform::command(exe);
             command.current_dir(&root).arg("-t");
             if package.id == "nginx" {
-                command.arg("-p").arg(&root).arg("-c").arg(&conf);
+                command
+                    .arg("-p")
+                    .arg(crate::paths::nginx_path(&root))
+                    .arg("-c")
+                    .arg(crate::paths::nginx_path(&conf));
             } else {
                 command.arg("-d").arg(&root).arg("-f").arg(&conf);
             }

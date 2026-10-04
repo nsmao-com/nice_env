@@ -146,6 +146,10 @@ impl AcmeClient {
     ) -> Result<(Self, Option<String>)> {
         let http = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(30))
+            // 部分系统代理/旧网关在 HTTP/2 转发时会改写 ACME 的请求头，
+            // 导致 CA 看到的 Content-Type 不是 RFC 8555 要求的 JOSE 类型。
+            // ACME 请求量很小，固定使用 HTTP/1.1 可保持请求头原样透传。
+            .http1_only()
             .user_agent("NiceEnv/0.1 (+https://github.com)")
             .build()
             .map_err(|e| AppError::internal("构建 HTTP 客户端", e.to_string()))?;

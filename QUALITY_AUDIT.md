@@ -2,6 +2,15 @@
 
 本记录用于跟踪 Windows/macOS、路径与数据目录、上游版本和安装状态的复查。**整体复查未完成**；代码编译、单元测试、下载包核验和原生服务运行是不同的验收层级，不能相互替代。
 
+## 2026-10-05：ACME 代理兼容与版本发布
+
+| 范围 | 发现与修复 | 验证情况 |
+| --- | --- | --- |
+| ACME JWS 传输 | ACME 客户端继续对所有 JWS POST 使用 `application/jose+json`，并固定 HTTP/1.1，避免部分系统代理或旧网关在 HTTP/2 转发时改写 Content-Type | `cargo test --locked -p nsb-core acme::tests --lib -- --test-threads=1`：8 项通过；本机接收端继续断言账号、订单和 POST-as-GET 请求头 |
+| 版本同步 | 版本同步到 v0.2.283，安装包、桌面端、Rust crate、Web 和 schema 的版本保持一致 | 待发布提交、annotated tag 和远程 CI 验证 |
+
+本批没有数据库结构变更，未修改 `update.sql`；未运行前端 dev/build，未新增测试文件。整体质量复查仍未完成，后续清单继续有效。
+
 ## 2026-10-04：安装器压缩包隔离与版本刷新并发
 
 | 范围 | 发现与修复 | 验证情况 |

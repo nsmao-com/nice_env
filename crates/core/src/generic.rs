@@ -4387,12 +4387,15 @@ mod startup_tests {
                     .unwrap(),
             )
             .unwrap();
-            assert_eq!(
-                snapshot["run"]["env"]["NICEENV_SECRET"],
-                format!(
-                    "{}/literal-secret",
-                    crate::paths::portable_path_text(&r.etc)
-                )
+            let expected_secret = format!(
+                "{}/literal-secret",
+                crate::paths::portable_path_text(&r.etc)
+            );
+            assert_same_path(
+                snapshot["run"]["env"]["NICEENV_SECRET"]
+                    .as_str()
+                    .expect("snapshot secret path"),
+                std::path::Path::new(&expected_secret),
             );
             assert_same_path(
                 snapshot["run"]["env"]["SFTPGO_FTPD__BANNER_FILE"]

@@ -1411,7 +1411,12 @@ pub(crate) fn write_with_backup_expected(
 
 /// Windows 路径转 nginx 正斜杠形式
 pub fn nginx_path(p: &Path) -> String {
-    let text = p.to_string_lossy().replace('\\', "/");
+    // `portable_path_text` 只在 Windows 把反斜杠转换为分隔符；Unix 上反斜杠
+    // 可以是合法文件名字符，不能在写入 nginx 配置时被误改成目录层级；
+    // 写入配置时要再转义一次，避免 Nginx 把它当作控制字符。
+    let text = portable_path_text(p);
+    #[cfg(not(windows))]
+    let text = text.replace('\\', "\\\\");
     // Nginx 配置文件不需要 Windows 文件 API 使用的 `\\?\` 长路径前缀。
     // 如果直接写入，用户会看到 `//?/D:/...`，并且旧配置同步时会和普通路径
     // 被识别成两条不同的 include。
@@ -1949,6 +1954,7 @@ mod tests {
         let argument = portable_path_text(&path);
         assert_eq!(std::fs::read_to_string(&argument).unwrap(), "unchanged");
         assert_eq!(argument, path.to_string_lossy());
+        assert_eq!(nginx_path(&path), path.to_string_lossy().replace('\\', "\\\\"));
     }
 
     fn fixture() -> (tempfile::TempDir, Paths) {

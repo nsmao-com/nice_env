@@ -475,17 +475,17 @@ function RunHistoryDrawer({ automation, onClose }: { automation: CertAutomation 
   const t = useT();
   return (
     <Dialog open={automation !== null} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-h-[85vh] max-w-xl overflow-y-auto">
-        <DialogHeader>
+      <DialogContent className="min-w-0 max-h-[85vh] max-w-xl overflow-y-auto">
+        <DialogHeader className="min-w-0">
           <DialogTitle>{t("certauto.history")}</DialogTitle>
-          <DialogDescription>{automation?.domains.join(" · ")}</DialogDescription>
+          <DialogDescription className="min-w-0">{automation?.domains.join(" · ")}</DialogDescription>
         </DialogHeader>
         {(!automation || automation.runs.length === 0) && (
           <p className="rounded-lg border border-dashed border-border px-4 py-6 text-center text-[12px] text-faint">
             {t("certauto.noRuns")}
           </p>
         )}
-        <div className="flex flex-col gap-2">
+        <div className="flex min-w-0 flex-col gap-2">
           {automation?.runs.map((r, i) => (
             <RunItem key={r.at} run={r} defaultOpen={i === 0} />
           ))}
@@ -498,18 +498,18 @@ function RunHistoryDrawer({ automation, onClose }: { automation: CertAutomation 
 function RunItem({ run, defaultOpen }: { run: CertRunRecord; defaultOpen: boolean }) {
   const [open, setOpen] = React.useState(defaultOpen);
   return (
-    <div className="rounded-lg border border-border">
+    <div className="min-w-0 rounded-lg border border-border">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] transition-colors hover:bg-card-2/40"
+        className="flex min-w-0 w-full items-center gap-2 px-3 py-2 text-left text-[12px] transition-colors hover:bg-card-2/40"
       >
         {run.ok ? <CircleCheck className="h-3.5 w-3.5 shrink-0 text-running" /> : <CircleAlert className="h-3.5 w-3.5 shrink-0 text-error" />}
-        <span className="flex-1 truncate">{run.message}</span>
+        <span className="min-w-0 flex-1 truncate">{run.message}</span>
         <span className="shrink-0 text-[10.5px] text-faint">{new Date(run.at).toLocaleString()}</span>
       </button>
       {open && run.log.length > 0 && (
-        <pre className="max-h-52 overflow-y-auto border-t border-border bg-card-2/30 px-3 py-2 font-mono text-[10.5px] leading-relaxed text-secondary">
+        <pre className="min-w-0 max-w-full max-h-52 overflow-auto whitespace-pre-wrap break-words border-t border-border bg-card-2/30 px-3 py-2 font-mono text-[10.5px] leading-relaxed text-secondary [overflow-wrap:anywhere]">
           {run.log.join("\n")}
         </pre>
       )}

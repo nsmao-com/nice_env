@@ -189,8 +189,12 @@ impl Installer {
     pub fn bundled() -> Self {
         #[cfg(windows)]
         let raw = include_str!("../../../manifest/packages.win.json");
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
         let raw = include_str!("../../../manifest/packages.mac.json");
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        // 当前发布清单只覆盖 Windows 和 macOS；Linux 不能误装 macOS 二进制。
+        // Linux 构建仍可运行核心服务，但套件列表必须为空，等有对应清单后再开放。
+        let raw = r#"{"revision":0,"packages":[]}"#;
         let manifest: crate::model::Manifest =
             serde_json::from_str(raw).expect("内置清单 JSON 必须合法");
         Self { manifest }

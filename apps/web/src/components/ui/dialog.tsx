@@ -63,7 +63,7 @@ const DialogContent = React.forwardRef<
       className={cn(
         // 浮层 = Liquid Glass 厚材质（glass-pop：更高不透明度 + 40px 模糊 +
         // 极淡外描边 + 顶部高光），圆角 28（半高 Sheet 档）；深色下比页面背景亮一级
-        "glass-pop fixed left-1/2 top-1/2 z-50 grid max-h-[calc(100dvh-1.5rem)] w-[calc(100vw-1.5rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 overflow-y-auto rounded-3xl p-6 duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
+        "glass-pop fixed left-1/2 top-1/2 z-50 grid min-w-0 max-h-[calc(100dvh-1.5rem)] w-[calc(100vw-1.5rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 overflow-y-auto rounded-3xl p-6 duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
         className
       )}
       {...props}
@@ -82,7 +82,7 @@ const DialogContent = React.forwardRef<
 DialogContent.displayName = "DialogContent";
 
 const DialogHeader = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
-  <div className={cn("flex flex-col gap-1.5 text-left", className)} {...props} />
+  <div className={cn("flex min-w-0 flex-col gap-1.5 text-left", className)} {...props} />
 );
 DialogHeader.displayName = "DialogHeader";
 
@@ -97,7 +97,7 @@ const DialogTitle = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <DialogPrimitive.Title
     ref={ref}
-    className={cn("text-base font-semibold leading-none", className)}
+    className={cn("min-w-0 break-words text-base font-semibold leading-none [overflow-wrap:anywhere]", className)}
     {...props}
   />
 ));
@@ -107,7 +107,7 @@ const DialogDescription = React.forwardRef<
   React.ComponentRef<typeof DialogPrimitive.Description>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Description>
 >(({ className, ...props }, ref) => (
-  <DialogPrimitive.Description ref={ref} className={cn("text-sm text-muted", className)} {...props} />
+  <DialogPrimitive.Description ref={ref} className={cn("min-w-0 break-words text-sm text-muted [overflow-wrap:anywhere]", className)} {...props} />
 ));
 DialogDescription.displayName = "DialogDescription";
 

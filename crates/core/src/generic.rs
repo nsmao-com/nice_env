@@ -1773,7 +1773,7 @@ fn qdrant_snapshot_directory(entry: &PackageManifestEntry, root: &std::path::Pat
 
 fn qdrant_path_key(path: &std::path::Path) -> String {
     let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let text = path.to_string_lossy().replace('\\', "/");
+    let text = crate::paths::portable_path_text(&path);
     let text = text.strip_prefix("//?/").unwrap_or(&text).trim_end_matches('/');
     if cfg!(windows) { text.to_lowercase() } else { text.into() }
 }
@@ -3786,6 +3786,29 @@ mod startup_tests {
             assert_eq!(qdrant_snapshot_directory(&r.entry, &r.root, &state.paths).unwrap(), state.paths.data().join("qdrant/lowercase-snapshots"));
             r.entry.run.as_mut().unwrap().env.as_mut().unwrap().insert("QDRANT__STORAGE__SNAPSHOTS_PATH".into(), "other".into());
             assert_eq!(qdrant_snapshot_directory(&r.entry, &r.root, &state.paths).unwrap_err().code, "QDRANT_CONFIG_ENV");
+        }
+    }
+
+    #[test]
+    fn qdrant_path_key_uses_platform_path_rules() {
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                qdrant_path_key(std::path::Path::new(r"C:\NiceEnv\Data\Qdrant")),
+                "c:/niceenv/data/qdrant"
+            );
+            assert_eq!(
+                qdrant_path_key(std::path::Path::new(r"//?/C:/NiceEnv/Data/Qdrant/")),
+                "c:/niceenv/data/qdrant"
+            );
+        }
+        #[cfg(unix)]
+        {
+            let with_backslash = std::path::Path::new("/tmp/niceenv\\qdrant");
+            let with_slash = std::path::Path::new("/tmp/niceenv/qdrant");
+            assert_eq!(qdrant_path_key(with_backslash), "/tmp/niceenv\\qdrant");
+            assert_eq!(qdrant_path_key(with_slash), "/tmp/niceenv/qdrant");
+            assert_ne!(qdrant_path_key(with_backslash), qdrant_path_key(with_slash));
         }
     }
 

@@ -7,7 +7,7 @@
 | 范围 | 发现与修复 | 验证情况 |
 | --- | --- | --- |
 | ACME JWS 传输 | ACME 客户端继续对所有 JWS POST 使用 `application/jose+json`，并固定 HTTP/1.1，避免部分系统代理或旧网关在 HTTP/2 转发时改写 Content-Type | `cargo test --locked -p nsb-core acme::tests --lib -- --test-threads=1`：8 项通过；本机接收端继续断言账号、订单和 POST-as-GET 请求头 |
-| 版本同步 | 版本同步到 v0.2.283，安装包、桌面端、Rust crate、Web 和 schema 的版本保持一致 | 待发布提交、annotated tag 和远程 CI 验证 |
+| 版本同步 | 版本同步到 v0.2.283，安装包、桌面端、Rust crate、Web 和 schema 的版本保持一致 | `main` 与 annotated tag 已通过一次 `git push --atomic` 推送；Release workflow `37218789682` 已触发，macOS ARM64 原生套件验证失败，Windows 与 macOS Intel 仍在运行，当前尚未生成安装包 |
 
 本批没有数据库结构变更，未修改 `update.sql`；未运行前端 dev/build，未新增测试文件。整体质量复查仍未完成，后续清单继续有效。
 

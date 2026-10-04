@@ -7,7 +7,17 @@
 | 范围 | 发现与修复 | 验证情况 |
 | --- | --- | --- |
 | ACME JWS 传输 | ACME 客户端继续对所有 JWS POST 使用 `application/jose+json`，并固定 HTTP/1.1，避免部分系统代理或旧网关在 HTTP/2 转发时改写 Content-Type | `cargo test --locked -p nsb-core acme::tests --lib -- --test-threads=1`：8 项通过；本机接收端继续断言账号、订单和 POST-as-GET 请求头 |
-| 版本同步 | 版本同步到 v0.2.283，安装包、桌面端、Rust crate、Web 和 schema 的版本保持一致 | `main` 与 annotated tag 已通过一次 `git push --atomic` 推送；Release workflow `37218789682` 已触发，macOS ARM64 原生套件验证失败，Windows 与 macOS Intel 仍在运行，当前尚未生成安装包 |
+| 版本同步 | 版本同步到 v0.2.284，安装包、桌面端、Rust crate、Web 和 schema 的版本保持一致 | 本轮版本文件已同步，待提交并按项目约定用 `git push --atomic` 推送；上一个 Release workflow `37218789682` 已触发，macOS ARM64 原生套件验证失败，Windows 与 macOS Intel 仍在运行 |
+
+本批没有数据库结构变更，未修改 `update.sql`；未运行前端 dev/build，未新增测试文件。整体质量复查仍未完成，后续清单继续有效。
+
+## 2026-10-05：下载缓存维护与上游版本复核
+
+| 范围 | 发现与修复 | 验证情况 |
+| --- | --- | --- |
+| 下载缓存 | 启动时清理根目录中超过 7 天的 `.pkg`，以及超过 24 小时的 `.part` / `.part.json`；每完成 5 次下载请求再做一次维护。只扫描下载根目录，保护活动任务及其附属包，不触碰 `pnpm-store`、`pnpm-cache`、`node-cache` | `download::tests`：6 项通过，覆盖活动任务保护、目录缓存保护、续传、镜像回退和取消 |
+| 上游版本 | Nginx、Node.js、Go、MySQL、MongoDB、NATS 真实上游查询全部成功；Nginx 返回 80 个版本，最新 1.31.6；二次读取命中缓存 | `check_versions`：7 pass / 0 fail；最新版本下载地址均返回 HTTP 206 |
+| ACME JWS | 当前客户端对账号、订单和 POST-as-GET 统一发送 `application/jose+json` 并固定 HTTP/1.1；当前运行包已包含 `ACME_CONTENT_TYPE` 诊断文本 | `acme::tests`：8 项通过；当前源码和 `D:\NiceEnv\\niceservbay.exe` 均含修复。若界面仍显示原始英文错误，应先退出旧进程并安装新包 |
 
 本批没有数据库结构变更，未修改 `update.sql`；未运行前端 dev/build，未新增测试文件。整体质量复查仍未完成，后续清单继续有效。
 

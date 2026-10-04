@@ -309,11 +309,14 @@ impl CoreState {
         generic::register_services(&paths, &store, &manager);
         // 上次会话崩溃/被强杀时留下的进程：启动即清理，否则它们占着端口让服务起不来
         let orphans = ops::sweep_orphans(&paths, &store, &manager);
+        let downloader = Arc::new(Downloader::new());
+        // 启动时只清理下载根目录的过期 .pkg/.part 文件；pnpm、Node 等目录缓存保持不动。
+        let _ = downloader.cleanup_stale_cache(&paths);
         let state = Arc::new(Self {
             paths,
             store,
             manager,
-            downloader: Arc::new(Downloader::new()),
+            downloader,
             installer,
             emit,
         });

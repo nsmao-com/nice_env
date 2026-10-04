@@ -78,7 +78,11 @@ impl Drop for DownloadTask {
 
 pub struct Downloader {
     tasks: TaskMap,
+    maintenance_ticks: AtomicU8,
 }
+
+const PARTIAL_CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const PACKAGE_CACHE_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ResumeInfo {
@@ -90,6 +94,25 @@ impl Downloader {
     pub fn new() -> Self {
         Self {
             tasks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            maintenance_ticks: AtomicU8::new(0),
+        }
+    }
+
+    /// 启动时清理下载根目录中已过期的安装包和断点片段。
+    /// 只处理根目录的下载缓存文件，不触碰 pnpm/node 缓存目录。
+    pub fn cleanup_stale_cache(&self, paths: &Paths) -> usize {
+        cleanup_download_cache(
+            paths,
+            &self.tasks,
+            PACKAGE_CACHE_MAX_AGE,
+            PARTIAL_CACHE_MAX_AGE,
+        )
+    }
+
+    fn note_task_finished(&self, paths: &Paths) {
+        let tick = self.maintenance_ticks.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+        if tick % 5 == 0 {
+            let _ = self.cleanup_stale_cache(paths);
         }
     }
 
@@ -196,7 +219,11 @@ impl Downloader {
         paths: &Paths,
         emit: &dyn Fn(crate::Event),
     ) -> Result<PathBuf> {
-        self.download_cached_with_task(task, task.id(), urls, expected_sha256, expected_size, paths, emit).await
+        let result = self
+            .download_cached_with_task(task, task.id(), urls, expected_sha256, expected_size, paths, emit)
+            .await;
+        self.note_task_finished(paths);
+        result
     }
 
     /// 上游替换了同版本文件时，旧片段不能与新文件拼接。
@@ -213,7 +240,11 @@ impl Downloader {
         if asset.is_empty() || !asset.bytes().all(|c| c.is_ascii_alphanumeric() || b"-._".contains(&c)) {
             return Err(AppError::new("INVALID_PACKAGE_KEY", "非法的附属资源标识"));
         }
-        self.download_cached_with_task(task, &format!("{}--{asset}", task.id()), urls, expected_sha256, expected_size, paths, emit).await
+        let result = self
+            .download_cached_with_task(task, &format!("{}--{asset}", task.id()), urls, expected_sha256, expected_size, paths, emit)
+            .await;
+        self.note_task_finished(paths);
+        result
     }
 
     async fn download_cached_with_task(
@@ -553,6 +584,45 @@ fn discard_partial(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn cleanup_download_cache(
+    paths: &Paths,
+    tasks: &TaskMap,
+    package_max_age: Duration,
+    partial_max_age: Duration,
+) -> usize {
+    let now = std::time::SystemTime::now();
+    let active = tasks.lock().keys().cloned().collect::<Vec<_>>();
+    let Ok(entries) = std::fs::read_dir(paths.downloads()) else { return 0 };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() { continue; }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else { continue };
+        let (max_age, is_cache) = if name.ends_with(".part") || name.ends_with(".part.json") {
+            (partial_max_age, true)
+        } else if name.ends_with(".pkg") {
+            (package_max_age, true)
+        } else {
+            (Duration::ZERO, false)
+        };
+        if !is_cache || active.iter().any(|id| {
+            name == format!("{id}.pkg")
+                || name == format!("{id}.part")
+                || name == format!("{id}.part.json")
+                || name.starts_with(&format!("{id}--"))
+        }) {
+            continue;
+        }
+        let Ok(modified) = meta.modified() else { continue };
+        let Ok(age) = now.duration_since(modified) else { continue };
+        if age >= max_age && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
     let (range, total) = value.strip_prefix("bytes ")?.split_once('/')?;
     let (start, end) = range.split_once('-')?;
@@ -832,5 +902,30 @@ mod tests {
             b"data"
         );
         assert!(!paths.downloads().join("body.pkg").exists());
+    }
+
+    #[test]
+    fn cache_cleanup_only_removes_root_download_caches_and_keeps_active_tasks() {
+        let (_temp, paths, downloader) = fixture();
+        for name in ["old.pkg", "old.part", "old.part.json"] {
+            std::fs::write(paths.downloads().join(name), b"stale").unwrap();
+        }
+        std::fs::create_dir(paths.downloads().join("pnpm-store")).unwrap();
+        std::fs::write(paths.downloads().join("pnpm-store/cache.pkg"), b"keep").unwrap();
+        std::fs::write(paths.downloads().join("notes.txt"), b"keep").unwrap();
+        for name in ["active@1.0.0.pkg", "active@1.0.0.part", "active@1.0.0.part.json", "active@1.0.0--ui.pkg"] {
+            std::fs::write(paths.downloads().join(name), b"active").unwrap();
+        }
+        let task = downloader.begin_task("active@1.0.0").unwrap();
+        assert_eq!(
+            cleanup_download_cache(&paths, &downloader.tasks, Duration::ZERO, Duration::ZERO),
+            3
+        );
+        for name in ["active@1.0.0.pkg", "active@1.0.0.part", "active@1.0.0.part.json", "active@1.0.0--ui.pkg"] {
+            assert!(paths.downloads().join(name).exists(), "active cache removed: {name}");
+        }
+        assert!(paths.downloads().join("pnpm-store/cache.pkg").exists());
+        assert!(paths.downloads().join("notes.txt").exists());
+        drop(task);
     }
 }

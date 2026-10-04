@@ -2102,7 +2102,7 @@ mod tests {
                 1 => custom.sha256 = Some("a".repeat(64)),
                 2 => custom.entry = "custom/httpd.exe".into(),
                 3 => custom.mirrors.push("https://example.org/apache.zip".into()),
-                _ => { let mut source = crate::versions::source_for(&custom).unwrap(); source.kind = "static".into(); custom.version_source = Some(source); },
+                _ => { custom.version_source = Some(crate::model::VersionSource { kind: "static".into(), ..Default::default() }); },
             }
             assert_eq!(serde_json::to_value(upgrade_available_entry(custom.clone())).unwrap(), serde_json::to_value(custom).unwrap());
         }

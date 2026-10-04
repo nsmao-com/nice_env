@@ -940,8 +940,9 @@ fn start_postgresql(
     // unix socket 目录只在类 Unix 有意义；Windows 仅 TCP
     #[cfg(not(windows))]
     {
-        std::fs::create_dir_all(paths.apache_run_dir())?;
-        pg_args.extend(["-c".into(), format!("unix_socket_directories={}", paths.apache_run_dir().to_string_lossy())]);
+        let socket_dir = paths.postgres_run_dir(&version);
+        std::fs::create_dir_all(&socket_dir)?;
+        pg_args.extend(["-c".into(), format!("unix_socket_directories={}", socket_dir.to_string_lossy())]);
     }
     let spec = SpawnSpec {
         program: postgres.clone(),

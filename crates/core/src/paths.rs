@@ -98,6 +98,7 @@ impl Paths {
             self.etc().join("apache").join("sites"),
             self.etc().join("apache").join("run"),
             self.etc().join("apache").join("logs"),
+            self.etc().join("postgresql"),
             self.etc().join("caddy").join("sites"),
         ] {
             std::fs::create_dir_all(d)?;
@@ -186,6 +187,12 @@ impl Paths {
     }
     pub fn postgres_conf(&self, version: &str) -> PathBuf {
         self.postgres_data_dir(version).join("postgresql.conf")
+    }
+    /// PostgreSQL Unix sockets are runtime state, not Apache state or database data.
+    /// Keep the directory version-scoped so side-by-side major versions cannot
+    /// collide when one is being upgraded or inspected.
+    pub fn postgres_run_dir(&self, version: &str) -> PathBuf {
+        self.etc().join("postgresql").join(version).join("run")
     }
     pub fn mongo_data_dir(&self, version: &str) -> PathBuf {
         self.data().join("mongodb").join(version)
@@ -1958,6 +1965,17 @@ mod tests {
             nginx_path(&path),
             path.to_string_lossy().replace('\\', "\\\\")
         );
+    }
+
+    #[test]
+    fn postgres_runtime_directory_is_version_scoped_and_separate_from_apache() {
+        let paths = Paths::new(PathBuf::from("/tmp/niceenv-paths"));
+        assert_ne!(paths.postgres_run_dir("16.6"), paths.apache_run_dir());
+        assert_eq!(
+            paths.postgres_run_dir("16.6"),
+            PathBuf::from("/tmp/niceenv-paths/etc/postgresql/16.6/run")
+        );
+        assert_ne!(paths.postgres_run_dir("16.6"), paths.postgres_run_dir("17.6"));
     }
 
     fn fixture() -> (tempfile::TempDir, Paths) {

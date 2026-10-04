@@ -2,6 +2,15 @@
 
 本记录用于跟踪 Windows/macOS、路径与数据目录、上游版本和安装状态的复查。**整体复查未完成**；代码编译、单元测试、下载包核验和原生服务运行是不同的验收层级，不能相互替代。
 
+## 2026-10-04：v0.2.279 ACME 请求与 PostgreSQL 运行目录隔离
+
+| 范围 | 发现与修复 | 验证情况 |
+| --- | --- | --- |
+| ACME 账号注册 | `newAccount`、下单、挑战、完成和 POST-as-GET 的 JWS 请求统一发送 `application/jose+json`；覆盖证书服务返回 `Unable to validate JWS :: Invalid Content-Type header on POST` 的人话提示，避免用户误改邮箱或 DNS 凭据 | `cargo test --locked -p nsb-core acme::tests`：8 项通过；包含本机 HTTP 接收端对账号、订单和 POST-as-GET 请求头的断言。运行旧版桌面程序仍需更新到本版本 |
+| PostgreSQL 运行目录 | 类 Unix 启动不再复用 Apache 的运行目录；改为 `etc/postgresql/{version}/run`，不同版本的 Unix socket 相互隔离 | `paths::tests::postgres_runtime_directory_is_version_scoped_and_separate_from_apache`：通过 |
+
+本批没有数据库结构变更，未修改 `update.sql`；未运行前端 dev/build，未新增测试文件。整体质量复查仍未完成，后续清单继续有效。
+
 ## 2026-10-04：v0.2.266 ACME 提示与跨平台回归修复
 
 | 范围 | 发现与修复 | 验证情况 |

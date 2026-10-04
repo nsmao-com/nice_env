@@ -5,7 +5,8 @@
 import { PackageManifestEntry, HostsEntry as HostsEntrySchema, DiagnosticsBundle as DiagnosticsBundleSchema } from "@nsb/schema";
 import { normalizeError } from "./backend";
 import type { ConfigCheck, BackupPreview, ConfigResetPreview, TunnelInfo, OllamaModelRow, OllamaPullStatus } from "./api";
-import bundledManifest from "../../../../manifest/packages.win.json";
+import bundledWindowsManifest from "../../../../manifest/packages.win.json";
+import bundledMacManifest from "../../../../manifest/packages.mac.json";
 import { version as bundledAppVersion } from "../../package.json";
 import type {
   DownloadProgress,
@@ -69,6 +70,12 @@ import { cmpVersionDesc, resolvedStackItems, stackVersionConflicts, normalizePro
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const siteFileArchives = new Map<string, SiteFileBackup[]>();
 const siteFilePlans = new Map<string, SiteFilePlan>();
+
+/** 浏览器预览按宿主平台选择对应清单；服务端渲染默认 Windows，避免访问 navigator。 */
+const bundledManifest =
+  typeof navigator !== "undefined" && /mac/i.test(`${navigator.platform} ${navigator.userAgent}`)
+    ? bundledMacManifest
+    : bundledWindowsManifest;
 
 type MockSiteFile = { content: string; modifiedAt: number };
 const mockSiteFiles = new Map<string, Map<string, MockSiteFile>>();

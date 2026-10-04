@@ -5,6 +5,22 @@
 use futures_util::{stream, StreamExt};
 use std::path::PathBuf;
 
+fn selected_ids(args: &[String], manifest_arg: Option<usize>) -> Vec<String> {
+    args.iter()
+        .enumerate()
+        .filter(|(index, value)| {
+            !value.starts_with("--") && !manifest_arg.is_some_and(|m| *index == m + 1)
+        })
+        .map(|(_, value)| value.clone())
+        .collect()
+}
+
+fn only_options(args: &[String], manifest_arg: Option<usize>) -> bool {
+    args.iter().enumerate().all(|(index, value)| {
+        value.starts_with("--") || manifest_arg.is_some_and(|m| index == m + 1)
+    })
+}
+
 #[tokio::main]
 async fn main() {
     let base = PathBuf::from(".versions-home");
@@ -24,14 +40,7 @@ async fn main() {
         nsb_core::install::Installer::bundled()
     };
     let json = args.iter().any(|s| s == "--json");
-    let selected: Vec<String> = args
-        .iter()
-        .enumerate()
-        .filter(|(index, value)| {
-            !value.starts_with("--") && !manifest_arg.is_some_and(|m| *index == m + 1)
-        })
-        .map(|(_, value)| value.clone())
-        .collect();
+    let selected = selected_ids(&args, manifest_arg);
     let force = args.iter().any(|s| s == "--force");
     let ids: Vec<String> = if !selected.is_empty() {
         selected
@@ -45,7 +54,7 @@ async fn main() {
         ids.sort();
         ids.dedup();
         ids
-    } else if args.is_empty() {
+    } else if args.is_empty() || only_options(&args, manifest_arg) {
         // 覆盖每一种版本源类型
         [
             "php",
@@ -61,7 +70,8 @@ async fn main() {
         .map(|s| s.to_string())
         .collect()
     } else {
-        args
+        // 只有套件 ID 才会进入 selected；保留分支防止未来新增参数时静默把选项当 ID。
+        Vec::new()
     };
     if json {
         let catalogs: Vec<_> = stream::iter(&ids)
@@ -219,5 +229,24 @@ async fn main() {
     println!("\n==== check_versions: {pass} pass / {fail} fail ====");
     if fail > 0 {
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{only_options, selected_ids};
+
+    #[test]
+    fn flags_and_manifest_path_are_not_treated_as_package_ids() {
+        let args = vec!["--manifest".into(), "manifest.json".into(), "--force".into()];
+        assert!(selected_ids(&args, Some(0)).is_empty());
+        assert!(only_options(&args, Some(0)));
+    }
+
+    #[test]
+    fn explicit_package_ids_are_preserved() {
+        let args = vec!["--force".into(), "nginx".into(), "php".into()];
+        assert_eq!(selected_ids(&args, None), vec!["nginx", "php"]);
+        assert!(!only_options(&args, None));
     }
 }

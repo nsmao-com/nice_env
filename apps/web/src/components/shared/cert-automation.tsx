@@ -200,7 +200,10 @@ export function CertAutomationSection() {
         });
       }
     } catch (e) {
-      toastError(e, t(retry ? "certauto.deployFailed" : "certauto.issueFailed"));
+      const message = accountErrorText(actionErrorText(e), t);
+      toast.error(t(retry ? "certauto.deployFailed" : "certauto.issueFailed"), {
+        description: message || t("certauto.issueFailedHint"),
+      });
     } finally {
       issueRequests.current.delete(a.id);
       setIssuingIds(new Set(issueRequests.current));

@@ -704,9 +704,11 @@ fn acme_error(body: &str, what: &str) -> AppError {
         Err(_) => ("ACME_ERROR".to_string(), body.chars().take(300).collect()),
     };
     let normalized_detail = detail.to_ascii_lowercase();
-    if normalized_detail.contains("content-type")
-        && normalized_detail.contains("application/jose+json")
-    {
+    let normalized_body = body.to_ascii_lowercase();
+    let is_content_type_error = [normalized_detail.as_str(), normalized_body.as_str()]
+        .into_iter()
+        .any(|text| text.contains("content-type") && text.contains("application/jose+json"));
+    if is_content_type_error {
         return AppError::new("ACME_CONTENT_TYPE", format!("{what}：证书服务拒绝了请求格式，暂时无法继续签发"))
             .with_hint("请更新 NiceEnv 后重试；无需更换联系邮箱或 DNS 凭据。若最新版仍出现此错误，请反馈错误详情。")
             .with_detail(detail);
@@ -875,6 +877,12 @@ mod tests {
         server.join().unwrap();
         let error = acme_error(
             r#"{"type":"urn:ietf:params:acme:error:malformed","detail":"Invalid Content-Type header on POST. Content-Type must be application/jose+json"}"#,
+            "注册 ACME 账号",
+        );
+        assert_eq!(error.code, "ACME_CONTENT_TYPE");
+        assert!(error.hint.unwrap().contains("无需更换联系邮箱"));
+        let error = acme_error(
+            "Unable to validate JWS :: Invalid Content-Type header on POST. Content-Type must be \"application/jose+json\"",
             "注册 ACME 账号",
         );
         assert_eq!(error.code, "ACME_CONTENT_TYPE");

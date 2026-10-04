@@ -75,7 +75,10 @@ async fn main() {
             .await;
         // 保持 stdout 纯 JSON，同时让脚本/CI 能从退出码发现在线源失败。
         // 静态清单和未声明版本源的目录没有 error，不应被误报为失败。
-        let failed = catalogs.iter().filter(|catalog| catalog.error.is_some()).count();
+        let failed = catalogs
+            .iter()
+            .filter(|catalog| catalog.error.is_some())
+            .count();
         println!(
             "{}",
             serde_json::to_string_pretty(&catalogs).expect("目录 JSON")

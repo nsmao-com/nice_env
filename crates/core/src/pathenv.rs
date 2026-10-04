@@ -693,11 +693,7 @@ fn commands_in_dir(bin_dir: &std::path::Path, prefer: &str) -> Vec<String> {
     } else {
         prefer.to_string()
     };
-    let prefer_stem = prefer_path
-        .rsplit('/')
-        .next()
-        .unwrap_or(prefer)
-        .to_string();
+    let prefer_stem = prefer_path.rsplit('/').next().unwrap_or(prefer).to_string();
     let prefer_stem = if cfg!(windows) {
         prefer_stem
             .rsplit_once('.')

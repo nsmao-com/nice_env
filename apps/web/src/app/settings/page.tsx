@@ -1378,7 +1378,7 @@ export default function SettingsPage() {
                     value={settings.manifestUrl}
                     onChange={(e) => setSettings({ ...settings, manifestUrl: e.target.value })}
                     onBlur={(e) => update("manifestUrl", e.target.value)}
-                    placeholder="https://…/packages.<platform>.json"
+                    placeholder="https://…/packages.json"
                     className="h-8 w-full font-mono text-[11px] sm:w-80"
                   />
                 </SettingRow>

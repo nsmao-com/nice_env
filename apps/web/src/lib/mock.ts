@@ -65,17 +65,20 @@ import type {
 } from "@nsb/schema";
 import { emitLocal } from "./backend";
 import type { SiteFileBackup, SiteFileScope, SiteFilePlan, BackupPlanConfig } from "./api";
-import { cmpVersionDesc, resolvedStackItems, stackVersionConflicts, normalizeProxyTarget, siteRedirectTarget, siteCorsProblem, siteAccessProblem, siteProxyProblem, isPhpSiteSettingValid, isEnvSecretKey, isEnvFileName, applicationRuntime, validApplication, sameVersion, sameOptionalVersion } from "./utils";
+import { cmpVersionDesc, resolvedStackItems, stackVersionConflicts, normalizeProxyTarget, siteRedirectTarget, siteCorsProblem, siteAccessProblem, siteProxyProblem, isPhpSiteSettingValid, isEnvSecretKey, isEnvFileName, applicationRuntime, validApplication, sameVersion, sameOptionalVersion, frontendPlatform, isPlatformCompatible } from "./utils";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const siteFileArchives = new Map<string, SiteFileBackup[]>();
 const siteFilePlans = new Map<string, SiteFilePlan>();
 
-/** 浏览器预览按宿主平台选择对应清单；服务端渲染默认 Windows，避免访问 navigator。 */
+/** 预览复用页面的平台判定；浏览器无法可靠识别芯片，桌面端安装仍由 Rust 原生判定。 */
 const bundledManifest =
-  typeof navigator !== "undefined" && /mac/i.test(`${navigator.platform} ${navigator.userAgent}`)
+  typeof window !== "undefined" && frontendPlatform().os === "macos"
     ? bundledMacManifest
     : bundledWindowsManifest;
+// 先筛选再按 id/version 建索引，避免另一个架构覆盖同版本的下载地址和入口。
+const previewPackages = bundledManifest.packages.filter((entry) =>
+  typeof window === "undefined" || isPlatformCompatible(entry.os, entry.arch));
 
 type MockSiteFile = { content: string; modifiedAt: number };
 const mockSiteFiles = new Map<string, Map<string, MockSiteFile>>();
@@ -994,13 +997,13 @@ function seed() {
   for (const site of sites.values()) seedMockSiteFiles(site);
 
   // 浏览器复用正式清单，不再维护另一份过期版本表或编造上游历史。
-  for (const raw of bundledManifest.packages) {
+  for (const raw of previewPackages) {
     const entry = PackageManifestEntry.parse(raw);
     const service = [...services.values()].find((s) => s.id.split("@")[0] === entry.id && sameVersion(s.version, entry.version));
     const installed = !!service;
     packages.set(`${entry.id}@${entry.version}`, {
       ...entry,
-      availableVersions: bundledManifest.packages.filter((p) => p.id === entry.id).map((p) => p.version),
+      availableVersions: previewPackages.filter((p) => p.id === entry.id).map((p) => p.version),
       active: installed,
       ...(installed ? { install: {
         version: entry.version,

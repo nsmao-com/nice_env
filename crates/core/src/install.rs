@@ -246,7 +246,7 @@ impl Installer {
                 new.is_empty() || !old.is_empty() && old.iter().all(|value| new.contains(value))
             };
             self.manifest.packages.retain(|e| {
-                !(e.id == p.id && e.version == p.version
+                !(e.id == p.id && same_version(&e.version, &p.version)
                     && covers(&p.os, &e.os) && covers(&p.arch, &e.arch))
             });
             self.manifest.packages.push(p);
@@ -3060,6 +3060,15 @@ mod manifest_layer_tests {
             base.manifest.packages[0].url, "https://b/1",
             "同版本应被覆盖"
         );
+
+        // 上游 tag 常带 v 前缀，不能把 v1.0.0 与 1.0.0 当成两套安装版本。
+        let mut prefixed = Installer {
+            manifest: manifest_with("prefix", "1.0.0", "https://plain/1"),
+        };
+        prefixed.merge_manifest(manifest_with("prefix", "v1.0.0", "https://prefixed/1"));
+        assert_eq!(prefixed.manifest.packages.len(), 1);
+        assert_eq!(prefixed.manifest.packages[0].version, "v1.0.0");
+        assert_eq!(prefixed.manifest.packages[0].url, "https://prefixed/1");
 
         base.merge_manifest(manifest_with("bar", "2.0.0", "https://c/2"));
         assert_eq!(base.manifest.packages.len(), 2);

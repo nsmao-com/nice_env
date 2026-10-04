@@ -2105,25 +2105,6 @@
       "sha256": "f9d6e191ab098c0d416e7d588a24420a8621cd2f4720dab2459b8b7b2d2d8b4e"
     },
     {
-      "id": "temurin-jdk21",
-      "version": "21.0.12.1+1",
-      "category": "runtime",
-      "displayName": "Temurin JDK 21 LTS",
-      "description": "Eclipse Temurin OpenJDK 21（Tomcat / Gradle / Neo4j 依赖它）",
-      "os": [
-        "windows"
-      ],
-      "arch": [
-        "x64"
-      ],
-      "kind": "archive",
-      "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_x64_windows_hotspot_21.0.12.1_1.zip",
-      "sizeBytes": 205073461,
-      "entry": "jdk-21.0.12.1+1/bin/java.exe",
-      "homepage": "https://adoptium.net",
-      "sha256": "f9d6e191ab098c0d416e7d588a24420a8621cd2f4720dab2459b8b7b2d2d8b4e"
-    },
-    {
       "id": "gradle",
       "version": "9.7.1",
       "category": "runtime",
@@ -5213,38 +5194,6 @@
         "healthTimeoutSec": 25
       },
       "sha256": "f096265ec2fcbe9bb6e2d64268db167ced3fcbb83d894bdb9e2fcdb26f2ea7e2"
-    },
-    {
-      "id": "etcd",
-      "version": "3.7.2",
-      "category": "service-mesh",
-      "displayName": "etcd",
-      "description": "分布式 KV 存储（K8s 同款；Windows 为官方 Tier 3 支持）",
-      "os": [
-        "windows"
-      ],
-      "arch": [
-        "x64"
-      ],
-      "kind": "archive",
-      "url": "https://github.com/etcd-io/etcd/releases/download/v3.7.2/etcd-v3.7.2-windows-amd64.zip",
-      "sizeBytes": 24508798,
-      "entry": "etcd-v3.7.2-windows-amd64/etcd.exe",
-      "homepage": "https://etcd.io",
-      "defaultPort": 2379,
-      "run": {
-        "args": [
-          "--data-dir",
-          "{data}",
-          "--listen-client-urls",
-          "http://127.0.0.1:{port}",
-          "--advertise-client-urls",
-          "http://127.0.0.1:{port}"
-        ],
-        "health": "tcp",
-        "healthTimeoutSec": 20
-      },
-      "sha256": "76989536a5f333642687fbd85603087c3deb4d316fd86fdfb63897b05f851cf4"
     },
     {
       "id": "erlang",

@@ -17,6 +17,11 @@ fn main() {
     std::env::set_var("NSB_SKIP_HOSTS", "1");
 
     let state = nsb_core::CoreState::init(Some(base.clone()), Arc::new(|_| {})).expect("初始化");
+    // 安全档：验收服务不能抢占宿主机上的 11211/8025 等默认端口。
+    state
+        .store
+        .set_setting("portProfile", "safe")
+        .expect("端口档位");
 
     let mut pass = 0usize;
     let mut fail = 0usize;

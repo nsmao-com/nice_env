@@ -387,8 +387,10 @@ pub async fn catalog(
     // 排队期间其它调用可能已经填入缓存。强制刷新也复用本次等待期间
     // 刚写入的结果，但不会把请求开始前的旧缓存当成刷新成功。
     if let Some(hit) = if force {
-        read_cache_any(store, &cache_key)
-            .filter(|cat| cat.cached_at.is_some_and(|cached_at| cached_at >= requested_at))
+        read_cache_any(store, &cache_key).filter(|cat| {
+            cat.cached_at
+                .is_some_and(|cached_at| cached_at >= requested_at)
+        })
     } else {
         read_cache(store, &cache_key)
     } {

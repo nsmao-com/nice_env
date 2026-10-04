@@ -1641,41 +1641,38 @@ fn extract_targz(
     if single_gzip {
         // 单文件 .gz → 解压到清单指定的相对路径。
         let relative = safe_archive_path(entry).ok_or_else(|| {
-            AppError::new("EXTRACT_FAILED", "gzip 入口路径无效")
-                .with_detail(entry.to_string())
+            AppError::new("EXTRACT_FAILED", "gzip 入口路径无效").with_detail(entry.to_string())
         })?;
         let target = dest.join(relative);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|e| AppError::io("创建解压目录", e))?;
         }
-        let mut output = std::fs::File::create(&target).map_err(|e| AppError::io("创建解压文件", e))?;
+        let mut output =
+            std::fs::File::create(&target).map_err(|e| AppError::io("创建解压文件", e))?;
         let mut decoder = decoder;
         copy_checked(&mut decoder, &mut output, &|| task.check_cancelled())?;
         #[cfg(unix)]
-        std::fs::set_permissions(
-            &target,
-            std::fs::Permissions::from_mode(0o755),
-        )?;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))?;
         return Ok(());
     }
 
     let mut archive = tar::Archive::new(decoder);
-    let entries = archive
-        .entries()
-        .map_err(|e| AppError::new("EXTRACT_FAILED", "读取 tar.gz 条目失败").with_detail(e.to_string()))?;
+    let entries = archive.entries().map_err(|e| {
+        AppError::new("EXTRACT_FAILED", "读取 tar.gz 条目失败").with_detail(e.to_string())
+    })?;
     for item in entries {
         task.check_cancelled()?;
-        let mut item = item
-            .map_err(|e| AppError::new("EXTRACT_FAILED", "读取 tar.gz 条目失败").with_detail(e.to_string()))?;
-        let path = item
-            .path()
-            .map_err(|e| AppError::new("EXTRACT_FAILED", "读取 tar.gz 路径失败").with_detail(e.to_string()))?;
-        let name = path.to_str().ok_or_else(|| {
-            AppError::new("EXTRACT_FAILED", "tar.gz 含有无法识别的文件名")
+        let mut item = item.map_err(|e| {
+            AppError::new("EXTRACT_FAILED", "读取 tar.gz 条目失败").with_detail(e.to_string())
         })?;
+        let path = item.path().map_err(|e| {
+            AppError::new("EXTRACT_FAILED", "读取 tar.gz 路径失败").with_detail(e.to_string())
+        })?;
+        let name = path
+            .to_str()
+            .ok_or_else(|| AppError::new("EXTRACT_FAILED", "tar.gz 含有无法识别的文件名"))?;
         let relative = safe_archive_path(name).ok_or_else(|| {
-            AppError::new("EXTRACT_FAILED", "tar.gz 含有不安全的路径")
-                .with_detail(name.to_string())
+            AppError::new("EXTRACT_FAILED", "tar.gz 含有不安全的路径").with_detail(name.to_string())
         })?;
         let target = dest.join(relative);
         let entry_type = item.header().entry_type();
@@ -1684,20 +1681,20 @@ fn extract_targz(
             continue;
         }
         if !entry_type.is_file() {
-            return Err(AppError::new("EXTRACT_FAILED", "tar.gz 含有不支持的链接或特殊文件")
-                .with_detail(name.to_string()));
+            return Err(
+                AppError::new("EXTRACT_FAILED", "tar.gz 含有不支持的链接或特殊文件")
+                    .with_detail(name.to_string()),
+            );
         }
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|e| AppError::io("创建解压目录", e))?;
         }
-        let mut output = std::fs::File::create(&target).map_err(|e| AppError::io("创建解压文件", e))?;
+        let mut output =
+            std::fs::File::create(&target).map_err(|e| AppError::io("创建解压文件", e))?;
         copy_checked(&mut item, &mut output, &|| task.check_cancelled())?;
         #[cfg(unix)]
         if let Ok(mode) = item.header().mode() {
-            std::fs::set_permissions(
-                &target,
-                std::fs::Permissions::from_mode(mode & 0o777),
-            )?;
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode & 0o777))?;
         }
     }
     Ok(())

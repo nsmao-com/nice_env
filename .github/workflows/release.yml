@@ -36,7 +36,22 @@ jobs:
         with:
           key: platform-core-${{ matrix.os }}
       - name: Verify core and platform before publishing installers
-        run: cargo test --locked -p nsb-core -p platform --no-fail-fast -- --test-threads=1
+        shell: bash
+        run: |
+          set +e
+          log_file="$(mktemp)"
+          cargo test --locked -p nsb-core -p platform --no-fail-fast -- --test-threads=1 2>&1 | tee "$log_file"
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            failed_tests=$(grep -E '^test .* \.\.\. FAILED$' "$log_file" | sed -E 's/^test (.*) \.\.\. FAILED$/\1/' | paste -sd ';' -)
+            if [ -z "$failed_tests" ]; then
+              failed_tests=$(grep -A8 '^failures:' "$log_file" | sed -n '2,8p' | paste -sd ';' -)
+            fi
+            failed_tests=${failed_tests:-"未能从测试输出提取失败用例，请查看该步骤日志"}
+            echo "::error title=macOS 平台测试失败::$failed_tests"
+          fi
+          rm -f "$log_file"
+          exit "$status"
       - name: Verify official macOS packages with native binaries
         if: runner.os == 'macOS'
         timeout-minutes: 25

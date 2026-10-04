@@ -158,7 +158,13 @@ const isRunning = (a?: CertAutomation | null) => a?.state === "issuing" || a?.st
 const isWaiting = (a: CertAutomation) => a.state === "waiting" || a.state === "deploy_waiting";
 const canRetryDeploy = (a: CertAutomation) => Boolean(a.deploymentId && (a.expiresAt ?? 0) > Date.now() && ["deploy_error", "deploy_waiting", "deploy_interrupted"].includes(a.state));
 const actionErrorText = (error: unknown) => { const value = normalizeError(error); return [value.message, value.hint].filter(Boolean).join("\n"); };
-const isLegacyAccountError = (message?: string | null) => Boolean(message && /newAccount 未返回 Location|Location \(kid\)|Invalid Content-Type header on POST|application\/jose\+json|Unable to validate JWS/i.test(message));
+const isContentTypeError = (message?: string | null) => Boolean(message && /ACME_CONTENT_TYPE|Invalid Content-Type header on POST|application\/jose\+json/i.test(message));
+const isMissingAccountError = (message?: string | null) => Boolean(message && /newAccount 未返回 Location|Location \(kid\)/i.test(message));
+const accountErrorText = (message: string | null | undefined, t: ReturnType<typeof useT>) => {
+  if (isContentTypeError(message)) return `${t("certauto.contentTypeError")}\n${t("certauto.contentTypeErrorHint")}`;
+  if (isMissingAccountError(message)) return `${t("certauto.accountError")}\n${t("certauto.accountErrorHint")}`;
+  return message;
+};
 
 export function CertAutomationSection() {
   const t = useT();
@@ -188,9 +194,7 @@ export function CertAutomationSection() {
       if (result.state === "ok") {
         toast.success(t("certauto.issuedOk"), { description: result.domains.join(", ") });
       } else {
-        const lastError = isLegacyAccountError(result.lastError)
-          ? `${t("certauto.accountError")}\n${t("certauto.accountErrorHint")}`
-          : result.lastError;
+        const lastError = accountErrorText(result.lastError, t);
         toast.error(t(result.state.startsWith("deploy_") ? "certauto.deployFailed" : "certauto.issueFailed"), {
           description: lastError || t("certauto.issueFailedHint"),
         });
@@ -327,9 +331,7 @@ function AutomationCard({
   const [toggling, setToggling] = React.useState(false);
   const toggleRequest = React.useRef(false);
   const daysLeft = a.expiresAt ? Math.max(0, Math.round((a.expiresAt - Date.now()) / 86400_000)) : null;
-  const displayLastError = isLegacyAccountError(a.lastError)
-    ? `${t("certauto.accountError")}\n${t("certauto.accountErrorHint")}`
-    : a.lastError;
+  const displayLastError = accountErrorText(a.lastError, t);
 
   const toggle = async (enabled: boolean) => {
     if (busy || toggleRequest.current) return;

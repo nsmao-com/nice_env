@@ -487,6 +487,9 @@ impl Installer {
         // 上游 tag 有时带 v 前缀，必须按规范化版本去重，否则会出现同一版本两行。
         let mut seen = std::collections::HashSet::new();
         let mut entries: Vec<_> = self.manifest.packages.iter()
+            // macOS 清单同时保存 arm64 与 x64；必须先按当前平台过滤，再按
+            // id+版本去重，否则排在前面的另一架构条目会污染套件列表。
+            .filter(|p| Self::is_platform_compatible(p))
             .filter(|p| seen.insert((p.id.clone(), canonical_version(&p.version).to_owned())))
             .filter_map(|p| self.find(&format!("{}@{}", p.id, p.version)))
             .collect();
@@ -3154,7 +3157,10 @@ mod find_latest_tests {
         foreign_twin.arch = vec!["unsupported".into()];
         inst.manifest.packages.insert(0, foreign_twin);
         assert_eq!(inst.find("jdk@21.0.9+10").unwrap().arch, native.arch);
-        assert_eq!(inst.package_views(&[]).len(), 2);
+        let views = inst.package_views(&[]);
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].manifest.version, native.version);
+        assert_eq!(views[0].manifest.arch, native.arch);
     }
 
     #[test]

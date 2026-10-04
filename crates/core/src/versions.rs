@@ -11,8 +11,14 @@ use crate::model::{PackageManifestEntry, RemoteVersion, VersionCatalog, VersionS
 use crate::store::Store;
 use futures_util::{stream, StreamExt};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock};
 
 static FETCH_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(6);
+// 同一个套件/平台的强制刷新可能同时来自套件页、设置页和安装器。
+// 通过按缓存键串行化，避免并发重复请求上游并互相覆盖结果。
+static FETCH_GATES: LazyLock<parking_lot::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 
 /// 缓存有效期：6 小时（GitHub 匿名限流 60/h，多人/多次刷新也够用）
 pub const CACHE_TTL_MS: i64 = 6 * 60 * 60 * 1000;
@@ -369,13 +375,26 @@ pub async fn catalog(
         }
     }
 
-    let _permit = FETCH_SLOTS.acquire().await;
-    // 排队期间其它调用可能已经填入缓存。
-    if !force {
-        if let Some(hit) = read_cache(store, &cache_key) {
-            return hit;
-        }
+    let requested_at = crate::services::now_ms();
+    let gate = {
+        let mut gates = FETCH_GATES.lock();
+        gates
+            .entry(cache_key.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let _gate = gate.lock().await;
+    // 排队期间其它调用可能已经填入缓存。强制刷新也复用本次等待期间
+    // 刚写入的结果，但不会把请求开始前的旧缓存当成刷新成功。
+    if let Some(hit) = if force {
+        read_cache_any(store, &cache_key)
+            .filter(|cat| cat.cached_at.is_some_and(|cached_at| cached_at >= requested_at))
+    } else {
+        read_cache(store, &cache_key)
+    } {
+        return hit;
     }
+    let _permit = FETCH_SLOTS.acquire().await;
     match fetch(store, &src, template).await {
         Ok(mut cat) => {
             cat.online = true;

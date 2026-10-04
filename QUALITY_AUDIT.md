@@ -2,6 +2,16 @@
 
 本记录用于跟踪 Windows/macOS、路径与数据目录、上游版本和安装状态的复查。**整体复查未完成**；代码编译、单元测试、下载包核验和原生服务运行是不同的验收层级，不能相互替代。
 
+## 2026-10-04：安装器压缩包隔离与版本刷新并发
+
+| 范围 | 发现与修复 | 验证情况 |
+| --- | --- | --- |
+| tar.gz / 单文件 gzip | 安装器不再调用系统 `tar` 或 `gzip`；改用 Rust 解压，逐条拒绝绝对路径、`..`、符号链接、硬链接和特殊条目，并保留取消检查与 Unix 权限 | `cargo test --locked -p nsb-core install::zip_slip_tests`：8 项通过；tar 安装与损坏归档回归通过；单文件 `.gz` 回归通过 |
+| 版本目录并发刷新 | 同一套件、平台和版本源的请求按缓存键串行化；强制刷新只复用等待期间刚写入的结果，不会被旧缓存遮蔽，也不会让同时触发的页面重复请求上游 | `cargo check --workspace --locked` 通过；版本目录代码与前端请求顺序复查通过 |
+| ACME 注册提示 | 当前源码保留所有 JWS POST 的 `application/jose+json`，并把 CA 返回的 Content-Type / 缺少 Location 错误映射为可操作中文提示 | `cargo test --locked -p nsb-core acme::tests`：8 项通过；`pnpm --dir apps/web check` 通过 |
+
+本批没有数据库结构变更，未修改 `update.sql`；未运行前端 dev/build，未新增测试文件。整体质量复查仍未完成，后续清单继续有效。
+
 ## 2026-10-04：v0.2.280 ACME 注册诊断与配置校验
 
 | 范围 | 发现与修复 | 验证情况 |

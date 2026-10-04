@@ -1550,6 +1550,22 @@ fn safe_archive_path(name: &str) -> Option<std::path::PathBuf> {
     }
 }
 
+#[cfg(test)]
+fn write_gzip_tar(path: &Path, entries: &[(&str, &[u8])]) {
+    let file = std::fs::File::create(path).unwrap();
+    let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let mut builder = tar::Builder::new(encoder);
+    for (name, body) in entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_path(name).unwrap();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder.append(&header, *body).unwrap();
+    }
+    builder.into_inner().unwrap().finish().unwrap();
+}
+
 /// 套件 id / 版本号会直接拼进目录路径（runtimes/{id}/{version}），
 /// 必须是单个普通路径段，不能借 `..` 或分隔符指到别处。
 fn is_safe_path_component(s: &str) -> bool {
@@ -1604,9 +1620,8 @@ fn extract_zip_checked(archive: &Path, dest: &Path, check: &dyn Fn() -> Result<(
     Ok(())
 }
 
-/// tar.gz 解压：调用系统 tar（macOS bsdtar / Windows 10+ 内置）。
-/// `.gz` 单文件（mihomo 等）按源 URL 识别，落到清单声明的 entry 路径。
-/// 缓存名没有原始扩展名；tar 包失败不能退回 gunzip，否则会把整个 tar 误当主程序。
+/// tar.gz / 单文件 gzip 解压：使用 Rust 实现，避免依赖 Windows/macOS 的外部命令。
+/// tar 条目逐个校验路径，只接受普通文件和目录，拒绝链接条目。
 fn extract_targz(
     archive: &Path,
     dest: &Path,
@@ -1614,37 +1629,76 @@ fn extract_targz(
     source_url: &str,
     task: &crate::download::DownloadTask,
 ) -> Result<()> {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     let single_gzip = reqwest::Url::parse(source_url).ok().is_some_and(|url| {
         let path = url.path().to_ascii_lowercase();
         path.ends_with(".gz") && !path.ends_with(".tar.gz")
     });
-    if !single_gzip {
-        let mut tar = platform::command("tar");
-        tar.arg("-xzf").arg(archive).arg("-C").arg(dest);
-        tar.stdout(std::process::Stdio::null());
-        let (status, stderr) = run_extractor(&mut tar, task)?;
-        if !status.success() {
-            return Err(AppError::new("EXTRACT_FAILED", "tar.gz 解压失败").with_detail(stderr));
+    let file = std::fs::File::open(archive).map_err(|e| AppError::io("打开压缩包", e))?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    if single_gzip {
+        // 单文件 .gz → 解压到清单指定的相对路径。
+        let relative = safe_archive_path(entry).ok_or_else(|| {
+            AppError::new("EXTRACT_FAILED", "gzip 入口路径无效")
+                .with_detail(entry.to_string())
+        })?;
+        let target = dest.join(relative);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| AppError::io("创建解压目录", e))?;
         }
+        let mut output = std::fs::File::create(&target).map_err(|e| AppError::io("创建解压文件", e))?;
+        let mut decoder = decoder;
+        copy_checked(&mut decoder, &mut output, &|| task.check_cancelled())?;
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &target,
+            std::fs::Permissions::from_mode(0o755),
+        )?;
         return Ok(());
     }
-    // 单文件 .gz → gunzip 到 entry 指定的相对路径
-    let target = dest.join(entry_relative_path(entry));
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| AppError::io("创建解压目录", e))?;
-    }
-    let mut gzip = platform::command("gzip");
-    gzip.arg("-dc")
-        .arg(archive)
-        .stdout(std::fs::File::create(&target)?);
-    let (status, stderr) = run_extractor(&mut gzip, task)?;
-    if !status.success() {
-        return Err(AppError::new("EXTRACT_FAILED", "gzip 解压失败").with_detail(stderr));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))?;
+
+    let mut archive = tar::Archive::new(decoder);
+    let entries = archive
+        .entries()
+        .map_err(|e| AppError::new("EXTRACT_FAILED", "读取 tar.gz 条目失败").with_detail(e.to_string()))?;
+    for item in entries {
+        task.check_cancelled()?;
+        let mut item = item
+            .map_err(|e| AppError::new("EXTRACT_FAILED", "读取 tar.gz 条目失败").with_detail(e.to_string()))?;
+        let path = item
+            .path()
+            .map_err(|e| AppError::new("EXTRACT_FAILED", "读取 tar.gz 路径失败").with_detail(e.to_string()))?;
+        let name = path.to_str().ok_or_else(|| {
+            AppError::new("EXTRACT_FAILED", "tar.gz 含有无法识别的文件名")
+        })?;
+        let relative = safe_archive_path(name).ok_or_else(|| {
+            AppError::new("EXTRACT_FAILED", "tar.gz 含有不安全的路径")
+                .with_detail(name.to_string())
+        })?;
+        let target = dest.join(relative);
+        let entry_type = item.header().entry_type();
+        if entry_type.is_dir() {
+            std::fs::create_dir_all(&target).map_err(|e| AppError::io("创建解压目录", e))?;
+            continue;
+        }
+        if !entry_type.is_file() {
+            return Err(AppError::new("EXTRACT_FAILED", "tar.gz 含有不支持的链接或特殊文件")
+                .with_detail(name.to_string()));
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| AppError::io("创建解压目录", e))?;
+        }
+        let mut output = std::fs::File::create(&target).map_err(|e| AppError::io("创建解压文件", e))?;
+        copy_checked(&mut item, &mut output, &|| task.check_cancelled())?;
+        #[cfg(unix)]
+        if let Ok(mode) = item.header().mode() {
+            std::fs::set_permissions(
+                &target,
+                std::fs::Permissions::from_mode(mode & 0o777),
+            )?;
+        }
     }
     Ok(())
 }
@@ -1707,54 +1761,6 @@ fn copy_checked<R: std::io::Read + ?Sized>(
             .write_all(&buffer[..n])
             .map_err(|e| AppError::io("写入套件内容", e))?;
     }
-}
-
-fn run_extractor(
-    command: &mut std::process::Command,
-    task: &crate::download::DownloadTask,
-) -> Result<(std::process::ExitStatus, String)> {
-    use std::io::{Read, Seek};
-    task.check_cancelled()?;
-    let mut stderr = tempfile::tempfile()?;
-    command
-        .stdin(std::process::Stdio::null())
-        .stderr(stderr.try_clone()?);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            command.pre_exec(platform::spawn_pre_exec);
-        }
-    }
-    let mut group = platform::ProcessGroup::new()?;
-    let mut child = command
-        .spawn()
-        .map_err(|e| AppError::io("启动套件解压程序", e))?;
-    if let Err(err) = group.attach(child.id()) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(err.into());
-    }
-    let result = loop {
-        if let Err(err) = task.check_cancelled() {
-            break Err(err);
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-            Err(err) => break Err(AppError::io("等待套件解压程序", err)),
-        }
-    };
-    if result.is_err() {
-        let _ = group.terminate(true);
-        let _ = child.kill();
-    }
-    let _ = child.wait();
-    let status = result?;
-    stderr.rewind()?;
-    let mut detail = String::new();
-    stderr.take(16 * 1024).read_to_string(&mut detail)?;
-    Ok((status, detail))
 }
 
 /* ================= 平台兼容性 ================= */
@@ -2300,19 +2306,7 @@ mod tests {
         std::fs::create_dir(&source).unwrap();
         std::fs::write(source.join("program.bin"), b"owned tar payload").unwrap();
         let archive = temp.path().join("fixture.tar.gz");
-        let output = platform::command("tar")
-            .arg("-czf")
-            .arg(&archive)
-            .arg("-C")
-            .arg(&source)
-            .arg("program.bin")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        write_gzip_tar(&archive, &[("program.bin", b"owned tar payload")]);
         let key = cached_package(
             &mut state,
             "tar-good",
@@ -2337,6 +2331,33 @@ mod tests {
             .store
             .find_installed("tar-bad", Some("1.0.0"))
             .is_none());
+    }
+
+    #[test]
+    fn single_gzip_extracts_to_declared_entry_without_external_gzip() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("mihomo.gz");
+        let output = temp.path().join("package");
+        std::fs::create_dir_all(&output).unwrap();
+        let file = std::fs::File::create(&archive).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, b"portable binary payload").unwrap();
+        encoder.finish().unwrap();
+
+        let downloader = crate::download::Downloader::new();
+        let task = downloader.begin_task("mihomo-gzip").unwrap();
+        extract_targz(
+            &archive,
+            &output,
+            "bin/mihomo",
+            "https://example.invalid/mihomo.gz?download=1",
+            &task,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(output.join("bin/mihomo")).unwrap(),
+            b"portable binary payload"
+        );
     }
 
     #[test]
@@ -3242,6 +3263,38 @@ mod zip_slip_tests {
     use super::*;
     use std::io::Write;
 
+    fn write_gzip_tar_link(path: &Path, entry_type: tar::EntryType, name: &str, link: &str) {
+        let file = std::fs::File::create(path).unwrap();
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_path(name).unwrap();
+        header.set_entry_type(entry_type);
+        header.set_link_name(link).unwrap();
+        header.set_size(0);
+        header.set_cksum();
+        builder.append(&header, std::io::empty()).unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+    }
+
+    fn write_gzip_tar_raw_path(path: &Path, name: &str, body: &[u8]) {
+        let file = std::fs::File::create(path).unwrap();
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_path("placeholder").unwrap();
+        let raw = name.as_bytes();
+        assert!(raw.len() < 100);
+        let bytes = header.as_mut_bytes();
+        bytes[..100].fill(0);
+        bytes[..raw.len()].copy_from_slice(raw);
+        header.set_size(body.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder.append(&header, body).unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+    }
+
     #[test]
     fn safe_archive_path_rejects_escapes() {
         for bad in [
@@ -3312,6 +3365,67 @@ mod zip_slip_tests {
         );
         assert!(!outside.exists(), "绝对路径 / .. 条目不能写到解压目录之外");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn extract_targz_keeps_paths_inside_dest_and_supports_normal_files() {
+        let base = tempfile::tempdir().unwrap();
+        let dest = base.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let archive = base.path().join("normal.tar.gz");
+        write_gzip_tar(&archive, &[("bin/program", b"ok")]);
+        let downloader = crate::download::Downloader::new();
+        let task = downloader.begin_task("tar-normal").unwrap();
+        extract_targz(
+            &archive,
+            &dest,
+            "bin/program",
+            "https://example.invalid/normal.tar.gz",
+            &task,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(dest.join("bin/program")).unwrap(), b"ok");
+
+        let outside = base.path().join("escape.txt");
+        let archive = base.path().join("escape.tar.gz");
+        write_gzip_tar_raw_path(&archive, "../escape.txt", b"must not escape");
+        let task = downloader.begin_task("tar-escape").unwrap();
+        let error = extract_targz(
+            &archive,
+            &dest,
+            "bin/program",
+            "https://example.invalid/escape.tar.gz",
+            &task,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "EXTRACT_FAILED");
+        assert!(!outside.exists());
+    }
+
+    #[test]
+    fn extract_targz_rejects_symlink_and_hardlink_entries() {
+        let base = tempfile::tempdir().unwrap();
+        let dest = base.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let downloader = crate::download::Downloader::new();
+        for (suffix, entry_type) in [
+            ("symlink", tar::EntryType::symlink()),
+            ("hardlink", tar::EntryType::hard_link()),
+        ] {
+            let archive = base.path().join(format!("{suffix}.tar.gz"));
+            write_gzip_tar_link(&archive, entry_type, "link", "outside");
+            let task = downloader.begin_task(&format!("tar-{suffix}")).unwrap();
+            let error = extract_targz(
+                &archive,
+                &dest,
+                "bin/program",
+                &format!("https://example.invalid/{suffix}.tar.gz"),
+                &task,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "EXTRACT_FAILED");
+            assert!(!dest.join("link").exists());
+        }
     }
 
     #[test]

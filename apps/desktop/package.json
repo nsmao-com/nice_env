@@ -1,6 +1,6 @@
 {
   "name": "@nsb/desktop",
-  "version": "0.2.286",
+  "version": "0.2.287",
   "private": true,
   "scripts": {
     "tauri": "node scripts/tauri.mjs",

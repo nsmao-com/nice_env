@@ -453,7 +453,11 @@ pub(crate) fn terminal_package_directory(package: &crate::model::InstalledPackag
     let entry = terminal_cli_entry(&package.id, &meta.entry, cfg!(windows));
     let dir = bin_dir_for(&package.install_path, &entry)
         .ok_or_else(|| "无法确定安装入口，请重新安装该版本".to_string())?;
-    let relative = entry.replace('\\', "/");
+    let relative = if cfg!(windows) {
+        entry.replace('\\', "/")
+    } else {
+        entry.to_string()
+    };
     if relative
         .split('/')
         .any(|part| part == ".." || part.contains(':'))
@@ -494,7 +498,11 @@ pub(crate) fn terminal_package_directory(package: &crate::model::InstalledPackag
 
 fn terminal_cli_entry(id: &str, entry: &str, windows: bool) -> String {
     if id != "php" { return entry.into(); }
-    let entry = entry.replace('\\', "/");
+    let entry = if windows {
+        entry.replace('\\', "/")
+    } else {
+        entry.to_string()
+    };
     let parent = entry.rsplit_once('/').map(|(parent, _)| parent).unwrap_or("");
     let parent = if !windows && (parent == "sbin" || parent.ends_with("/sbin")) {
         format!("{}bin", &parent[..parent.len() - 4])
@@ -627,7 +635,11 @@ pub fn bin_dir_for(install_path: &str, entry: &str) -> Option<String> {
     if entry.trim().is_empty() || is_non_executable_entry(entry) {
         return None;
     }
-    let rel = entry.replace('\\', "/");
+    let rel = if cfg!(windows) {
+        entry.replace('\\', "/")
+    } else {
+        entry.to_string()
+    };
     let parent = match rel.rsplit_once('/') {
         Some((p, _)) => p,
         None => "",
@@ -676,8 +688,12 @@ fn commands_in_dir(bin_dir: &std::path::Path, prefer: &str) -> Vec<String> {
             names.push(stem);
         }
     }
-    let prefer_stem = prefer
-        .replace('\\', "/")
+    let prefer_path = if cfg!(windows) {
+        prefer.replace('\\', "/")
+    } else {
+        prefer.to_string()
+    };
+    let prefer_stem = prefer_path
         .rsplit('/')
         .next()
         .unwrap_or(prefer)
@@ -2133,6 +2149,11 @@ mod tests {
         assert_eq!(
             bin_dir_for("/runtime\\", "bin/tool").unwrap(),
             "/runtime\\/bin"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            bin_dir_for("/runtime", "bin/tool\\name").unwrap(),
+            "/runtime/bin"
         );
     }
 

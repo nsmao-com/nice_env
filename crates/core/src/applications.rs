@@ -214,8 +214,14 @@ fn launch_spec(paths: &Paths, store: &Store, site: &Site) -> Result<(SpawnSpec, 
             format!("{} {}：{reason}", package.id, package.version),
         )
     })?;
+    // 清单 entry 在 Windows 上允许使用反斜杠；Unix 上反斜杠可以是合法文件名字符，不能无条件当作分隔符。
+    let entry_path = if cfg!(windows) {
+        entry.entry.replace('\\', "/")
+    } else {
+        entry.entry.clone()
+    };
     let program = PathBuf::from(&package.install_path)
-        .join(entry.entry.replace('\\', "/"))
+        .join(entry_path)
         .canonicalize()?;
     let cwd = app
         .cwd

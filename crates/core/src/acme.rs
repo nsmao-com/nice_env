@@ -20,6 +20,7 @@ use std::time::Duration;
 
 /// RFC 8555 §6.2 要求所有携带 JWS 的 ACME POST 使用这个媒体类型。
 const ACME_JWS_CONTENT_TYPE: &str = "application/jose+json";
+const ACME_JWS_ACCEPT: &str = "application/json";
 
 fn build_acme_http(no_proxy: bool) -> Result<reqwest::blocking::Client> {
     let mut builder = reqwest::blocking::Client::builder()
@@ -441,7 +442,12 @@ impl AcmeClient {
         let response = self
             .http
             .post(url)
+            // 显式固定 Content-Type、Accept 和 Content-Length，避免某些 Windows
+            // 系统代理把 Vec body 当成普通 JSON 或改成 chunked 请求后，CA
+            // 把 JWS 误判为不符合 RFC 8555 §6.2 的 POST。
             .header(reqwest::header::CONTENT_TYPE, ACME_JWS_CONTENT_TYPE)
+            .header(reqwest::header::ACCEPT, ACME_JWS_ACCEPT)
+            .header(reqwest::header::CONTENT_LENGTH, request_body.len())
             .body(request_body)
             .send()
             .map_err(|e| AppError::new("ACME_HTTP", format!("请求 {url} 失败：{e}")))?;
@@ -875,6 +881,7 @@ mod tests {
                 assert_eq!(line, "POST /acme HTTP/1.1\r\n");
                 let mut length = 0;
                 let mut types = Vec::new();
+                let mut accepts = Vec::new();
                 loop {
                     line.clear();
                     assert!(input.read_line(&mut line).unwrap() > 0);
@@ -885,11 +892,15 @@ mod tests {
                     if name.eq_ignore_ascii_case("content-type") {
                         types.push(value.trim().to_owned());
                     }
+                    if name.eq_ignore_ascii_case("accept") {
+                        accepts.push(value.trim().to_owned());
+                    }
                     if name.eq_ignore_ascii_case("content-length") {
                         length = value.trim().parse::<usize>().unwrap();
                     }
                 }
                 assert_eq!(types, [ACME_JWS_CONTENT_TYPE]);
+                assert_eq!(accepts, [ACME_JWS_ACCEPT]);
                 let mut body = vec![0; length];
                 input.read_exact(&mut body).unwrap();
                 let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1030,6 +1041,7 @@ mod tests {
                 );
                 let mut length = 0;
                 let mut content_type = None;
+                let mut accept = None;
                 loop {
                     line.clear();
                     assert!(input.read_line(&mut line).unwrap() > 0);
@@ -1040,12 +1052,16 @@ mod tests {
                     if name.eq_ignore_ascii_case("content-type") {
                         content_type = Some(value.trim().to_owned());
                     }
+                    if name.eq_ignore_ascii_case("accept") {
+                        accept = Some(value.trim().to_owned());
+                    }
                     if name.eq_ignore_ascii_case("content-length") {
                         length = value.trim().parse::<usize>().unwrap();
                     }
                 }
                 if index != 1 {
                     assert_eq!(content_type.as_deref(), Some(ACME_JWS_CONTENT_TYPE));
+                    assert_eq!(accept.as_deref(), Some(ACME_JWS_ACCEPT));
                     let mut body = vec![0; length];
                     input.read_exact(&mut body).unwrap();
                 }

@@ -473,6 +473,7 @@ impl Installer {
             display_name: installed.id.clone(),
             description: String::new(),
             homepage: None,
+            note: None,
             os: vec![],
             arch: vec![],
             kind: "binary".into(),
@@ -967,6 +968,8 @@ impl Installer {
             "archive" => extract_zip_checked(&archive, &prepared, &|| task.check_cancelled())?,
             // tar.gz / gz：用系统 tar（macOS 自带 bsdtar；Windows 10+ 亦内置）
             "targz" => extract_targz(&archive, &prepared, &entry.entry, &entry.url, task)?,
+            // 7z：纯 Rust 解压，避免依赖用户是否安装 7-Zip。
+            "sevenzip" => extract_sevenzip_checked(&archive, &prepared, task)?,
             // 单文件（composer.phar 等）：直接落盘
             "binary" => {
                 let dest = prepared.join(entry_relative_path(&entry.entry));
@@ -1646,8 +1649,48 @@ fn extract_targz(
     Ok(())
 }
 
-fn copy_checked(
-    input: &mut impl std::io::Read,
+/// 7z 解压：使用纯 Rust 实现，并复用归档路径校验，避免依赖系统 7-Zip 和路径穿越。
+fn extract_sevenzip_checked(
+    archive: &Path,
+    dest: &Path,
+    task: &crate::download::DownloadTask,
+) -> Result<()> {
+    task.check_cancelled()?;
+    let mut cancelled = None;
+    let result = sevenz_rust::decompress_file_with_extract_fn(
+        archive,
+        dest,
+        |entry, reader, _| {
+            if let Err(err) = task.check_cancelled() {
+                cancelled = Some(err);
+                return Err(sevenz_rust::Error::other("安装已取消"));
+            }
+            let Some(relative) = safe_archive_path(entry.name()) else {
+                // 与 zip 提取保持一致：拒绝绝对路径、盘符、.. 和 NTFS ADS。
+                return Ok(true);
+            };
+            let target = dest.join(relative);
+            if entry.is_directory() {
+                std::fs::create_dir_all(&target).map_err(sevenz_rust::Error::io)?;
+                return Ok(true);
+            }
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(sevenz_rust::Error::io)?;
+            }
+            let mut output = std::fs::File::create(&target).map_err(sevenz_rust::Error::io)?;
+            copy_checked(reader, &mut output, &|| task.check_cancelled())
+                .map_err(|err| sevenz_rust::Error::other(err.to_string()))?;
+            Ok(true)
+        },
+    );
+    if let Some(err) = cancelled {
+        return Err(err);
+    }
+    result.map_err(|err| AppError::new("EXTRACT_FAILED", "7z 解压失败").with_detail(err.to_string()))
+}
+
+fn copy_checked<R: std::io::Read + ?Sized>(
+    input: &mut R,
     output: &mut impl std::io::Write,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
@@ -3268,6 +3311,36 @@ mod zip_slip_tests {
             "ok"
         );
         assert!(!outside.exists(), "绝对路径 / .. 条目不能写到解压目录之外");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn sevenzip_extracts_with_safe_relative_paths() {
+        let base = std::env::temp_dir().join(format!("nsb-sevenzip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let source = base.join("source.bin");
+        let archive = base.join("sample.7z");
+        let dest = base.join("dest");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(&source, b"sevenzip fixture").unwrap();
+
+        let mut writer = sevenz_rust::SevenZWriter::create(&archive).unwrap();
+        let entry = sevenz_rust::SevenZArchiveEntry::from_path(
+            &source,
+            "ruby/bin/ruby.exe".to_string(),
+        );
+        writer
+            .push_archive_entry(entry, Some(std::fs::File::open(&source).unwrap()))
+            .unwrap();
+        writer.finish().unwrap();
+
+        let downloader = crate::download::Downloader::new();
+        let task = downloader.begin_task("sevenzip-fixture").unwrap();
+        extract_sevenzip_checked(&archive, &dest, &task).unwrap();
+        assert_eq!(
+            std::fs::read(dest.join("ruby/bin/ruby.exe")).unwrap(),
+            b"sevenzip fixture"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -4,7 +4,7 @@ members = ["apps/desktop/src-tauri", "crates/core", "crates/platform"]
 
 [workspace.package]
 edition = "2021"
-version = "0.2.276"
+version = "0.2.277"
 license = "Proprietary"
 
 [workspace.dependencies]
@@ -17,6 +17,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 sha2 = "0.10"
 hex = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+sevenz-rust = "0.6.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 sysinfo = "0.32"
 rcgen = { version = "0.13", features = ["pem", "x509-parser"] }

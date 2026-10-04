@@ -158,9 +158,11 @@ export const PackageManifestEntry = z.object({
   displayName: z.string(),
   description: z.string(),
   homepage: z.string().optional(),
+  /** 安装限制、发行说明等人类可读注记。 */
+  note: z.string().optional(),
   os: z.array(Os),
   arch: z.array(Arch),
-  kind: z.enum(["archive", "binary", "targz"]),
+  kind: z.enum(["archive", "binary", "targz", "sevenzip"]),
   url: z.string(),
   mirrors: z.array(z.string()).optional(),
   sha256: z.string().optional(),

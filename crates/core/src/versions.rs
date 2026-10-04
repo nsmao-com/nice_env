@@ -569,9 +569,7 @@ async fn fetch_github(
 
         let assets = rel["assets"].as_array().cloned().unwrap_or_default();
         let picked = match &asset_re {
-            Some(re) => assets
-                .iter()
-                .find(|a| a["name"].as_str().map(|n| re.is_match(n)).unwrap_or(false)),
+            Some(re) => pick_github_asset(&assets, re, template),
             None => None,
         };
         let Some(asset) = picked else { continue };
@@ -606,6 +604,47 @@ async fn fetch_github(
         });
     }
     Ok(limit_and_sort(out, src))
+}
+
+/// 在同一 release 有多个匹配资产时按目标架构、校验信息和文件名稳定选择。
+/// GitHub API 的返回顺序不是选择契约，不能直接取第一个。
+fn pick_github_asset<'a>(
+    assets: &'a [serde_json::Value],
+    matcher: &regex::Regex,
+    template: &PackageManifestEntry,
+) -> Option<&'a serde_json::Value> {
+    let mut matches: Vec<&serde_json::Value> = assets
+        .iter()
+        .filter(|asset| {
+            let Some(name) = asset["name"].as_str() else { return false };
+            matcher.is_match(name)
+                && asset["browser_download_url"].as_str().is_some()
+                && asset_name_matches_arch(name, template)
+        })
+        .collect();
+    matches.sort_by(|a, b| {
+        let a_digest = a["digest"].as_str().is_some();
+        let b_digest = b["digest"].as_str().is_some();
+        b_digest
+            .cmp(&a_digest)
+            .then_with(|| b["size"].as_u64().unwrap_or(0).cmp(&a["size"].as_u64().unwrap_or(0)))
+            .then_with(|| a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or("")))
+    });
+    matches.into_iter().next()
+}
+
+fn asset_name_matches_arch(name: &str, template: &PackageManifestEntry) -> bool {
+    let name = name.to_ascii_lowercase();
+    let arm = template.arch.iter().any(|arch| arch == "arm64");
+    if arm {
+        !["x86_64", "amd64", "x64", "i386", "i686", "386"]
+            .iter()
+            .any(|marker| name.contains(marker))
+    } else {
+        !["arm64", "aarch64", "armv7", "armhf"]
+            .iter()
+            .any(|marker| name.contains(marker))
+    }
 }
 
 /// Node.js：官方 dist 索引；校验文件延迟到安装选中的版本时读取。
@@ -994,13 +1033,15 @@ fn render_template(tpl: Option<&str>, version: &str, template: &PackageManifestE
 }
 
 fn archive_kind(url: &str) -> &'static str {
-    if url.ends_with(".tar.gz")
-        || url.ends_with(".tgz")
-        || url.ends_with(".gz")
-        || url.ends_with(".7z")
-    {
+    // 只看 URL path，忽略查询参数和大小写；否则签名下载地址会被误判为 binary。
+    let path = reqwest::Url::parse(url)
+        .map(|parsed| parsed.path().to_ascii_lowercase())
+        .unwrap_or_else(|_| url.to_ascii_lowercase());
+    if path.ends_with(".7z") {
+        "sevenzip"
+    } else if path.ends_with(".tar.gz") || path.ends_with(".tgz") || path.ends_with(".gz") {
         "targz"
-    } else if url.ends_with(".zip") {
+    } else if path.ends_with(".zip") {
         "archive"
     } else {
         "binary"
@@ -1114,6 +1155,31 @@ fn version_parts(v: &str) -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_kind_uses_url_path_and_keeps_7z_separate_from_tar() {
+        assert_eq!(archive_kind("https://example.test/pkg.7z?download=1"), "sevenzip");
+        assert_eq!(archive_kind("https://example.test/pkg.TAR.GZ?sig=abc"), "targz");
+        assert_eq!(archive_kind("https://example.test/pkg.zip?sig=abc"), "archive");
+    }
+
+    #[test]
+    fn github_asset_selection_is_stable_and_respects_architecture() {
+        let mut template: PackageManifestEntry = serde_json::from_value(serde_json::json!({
+            "id": "demo", "version": "1.0.0", "category": "tool", "displayName": "Demo",
+            "description": "", "os": ["macos"], "arch": ["arm64"], "kind": "archive",
+            "url": "https://example.test/demo.zip", "sizeBytes": 1, "entry": "demo"
+        })).unwrap();
+        let matcher = regex::Regex::new(r"^demo-.*\.zip$").unwrap();
+        let first = serde_json::json!({"name":"demo-1.2.0-x64.zip","browser_download_url":"https://example.test/x64.zip","size":90,"digest":"sha256:bad"});
+        let second = serde_json::json!({"name":"demo-1.2.0-arm64.zip","browser_download_url":"https://example.test/arm64.zip","size":10,"digest":"sha256:good"});
+        let mut assets = vec![first, second];
+        assert_eq!(pick_github_asset(&assets, &matcher, &template).unwrap()["name"], "demo-1.2.0-arm64.zip");
+        assets.reverse();
+        assert_eq!(pick_github_asset(&assets, &matcher, &template).unwrap()["name"], "demo-1.2.0-arm64.zip");
+        template.arch = vec!["x64".into()];
+        assert_eq!(pick_github_asset(&assets, &matcher, &template).unwrap()["name"], "demo-1.2.0-x64.zip");
+    }
 
     #[test]
     fn apache_catalog_uses_latest_build_and_checksum_for_the_exact_archive() {

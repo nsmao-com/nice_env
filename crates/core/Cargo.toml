@@ -20,6 +20,7 @@ reqwest = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 zip = { workspace = true }
+sevenz-rust = { workspace = true }
 # 复用锁文件已有的 gzip 实现，流式校验及提取 MongoDB 官方归档。
 flate2 = "1.1.10"
 rusqlite = { workspace = true }

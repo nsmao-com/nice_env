@@ -443,6 +443,9 @@ pub struct PackageManifestEntry {
     pub description: String,
     #[serde(default)]
     pub homepage: Option<String>,
+    /// 清单或上游提供的安装限制、发行说明等人类可读注记。
+    #[serde(default)]
+    pub note: Option<String>,
     pub os: Vec<String>,
     pub arch: Vec<String>,
     pub kind: String,

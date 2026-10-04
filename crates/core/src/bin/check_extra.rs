@@ -81,9 +81,13 @@ fn main() {
     nsb_core::ops::register_services(&state.paths, &state.store, &state.manager);
 
     /* ---------- 2. 纯运行时版本自检 ---------- */
-    fn run_cmd(exe: &PathBuf, args: &[&str]) -> Result<String, String> {
-        let out = std::process::Command::new(exe)
-            .args(args)
+    fn run_cmd_env(exe: &PathBuf, args: &[&str], env: &[(&str, &str)]) -> Result<String, String> {
+        let mut command = std::process::Command::new(exe);
+        command.args(args);
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let out = command
             .output()
             .map_err(|e| e.to_string())?;
         let s = format!(
@@ -96,6 +100,9 @@ fn main() {
         } else {
             Err(s)
         }
+    }
+    fn run_cmd(exe: &PathBuf, args: &[&str]) -> Result<String, String> {
+        run_cmd_env(exe, args, &[])
     }
     let rt = state.paths.runtimes();
     let node = run_cmd(
@@ -254,7 +261,11 @@ fn main() {
     );
 
     /* ---------- 4. PostgreSQL ---------- */
-    check!("PostgreSQL 默认使用中版本 = 17.6", {
+    check!("PostgreSQL 默认使用中版本 = 17.6", (|| -> Result<String, String> {
+        // 验收目录可能被重复使用；明确选择本轮要验证的版本，避免上一次
+        // 运行留下的 activePostgresqlVersion 让结果依赖执行顺序。
+        nsb_core::ops::set_active_version(&state.store, "postgresql", "17.6")
+            .map_err(|e| e.to_string())?;
         let v = nsb_core::ops::installed_by_choice(&state.store, "postgresql")
             .map(|p| p.version)
             .unwrap_or_default();
@@ -263,15 +274,24 @@ fn main() {
         } else {
             Err(format!("active={v}（期望 17.6）"))
         }
-    });
+    })());
     check!("启动 PostgreSQL（使用中版本 initdb+监听）", {
         state
             .start_service("postgresql")
             .map(|_| "25432 就绪".to_string())
     });
-    let psql = rt.join("postgresql/16.9/pgsql/bin/psql.exe");
-    check!("psql SELECT 1", {
-        run_cmd(
+    check!("psql SELECT 1", (|| -> Result<String, String> {
+        let active = nsb_core::ops::installed_by_choice(&state.store, "postgresql")
+            .ok_or_else(|| "PostgreSQL 没有活动安装记录".to_string())?;
+        let psql = state
+            .paths
+            .runtime_dir("postgresql", &active.version)
+            .join("pgsql")
+            .join(if cfg!(windows) { "bin/psql.exe" } else { "bin/psql" });
+        let password = state
+            .postgres_password(&active.version)
+            .map_err(|e| e.to_string())?;
+        run_cmd_env(
             &psql,
             &[
                 "-h",
@@ -285,8 +305,9 @@ fn main() {
                 "-c",
                 "SELECT version();",
             ],
+            &[("PGPASSWORD", password.as_str()), ("PGCONNECT_TIMEOUT", "5")],
         )
-    });
+    })());
 
     /* ---------- 5. MongoDB ---------- */
     check!("启动 MongoDB 8.0", {

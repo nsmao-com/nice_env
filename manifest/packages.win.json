@@ -2141,13 +2141,13 @@
       "arch": [
         "x64"
       ],
-      "kind": "targz",
+      "kind": "sevenzip",
       "url": "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-4.0.7-1/rubyinstaller-4.0.7-1-x64.7z",
       "sizeBytes": 17742012,
       "entry": "rubyinstaller-4.0.7-1-x64/bin/ruby.exe",
       "homepage": "https://rubyinstaller.org",
       "sha256": "7a9be96d3448ecbd9a81eccae1f619131dfcc761f2c98dded03ece6c05d0474f",
-      "note": "Windows 包为 .7z（需要 7-Zip 解压器），安装管线目前只支持 zip/tar.gz；待支持 7z 后即可补多版本。当前版本仍可正常安装使用。"
+      "note": "Windows 包为 .7z，NiceEnv 使用内置解压器处理，不需要额外安装 7-Zip。"
     },
     {
       "id": "rust",

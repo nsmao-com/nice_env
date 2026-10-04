@@ -355,7 +355,7 @@
       "url": "https://fastdl.mongodb.org/osx/mongodb-macos-arm64-9.0.2.tgz",
       "sha256": "9a30e942877445dc143d83671eba6cda2ec93a99160c8a8de57595853dc76de3",
       "sizeBytes": 0,
-      "entry": "mongodb-macos-aarch64--9.0.2/bin/mongod",
+      "entry": "mongodb-macos-arm64-9.0.2/bin/mongod",
       "defaultPort": 28017,
       "run": {
         "args": [
@@ -387,7 +387,7 @@
       "url": "https://fastdl.mongodb.org/osx/mongodb-macos-arm64-8.0.4.tgz",
       "sha256": "219e3b3d7b31c049ff7bcf7470d38eff704e56df2ac18d4df78425e2985ccf58",
       "sizeBytes": 82223795,
-      "entry": "mongodb-macos-aarch64-8.0.4/bin/mongod",
+      "entry": "mongodb-macos-arm64-8.0.4/bin/mongod",
       "defaultPort": 28017,
       "run": {
         "args": [
@@ -512,7 +512,7 @@
       "url": "https://fastdl.mongodb.org/osx/mongodb-macos-arm64-7.0.24.tgz",
       "sha256": "31854a6632332ac5fbac2b601ee46ca5af2937a84caa70b18c0d8436ce982c1f",
       "sizeBytes": 69447167,
-      "entry": "mongodb-macos-aarch64-7.0.24/bin/mongod",
+      "entry": "mongodb-macos-arm64-7.0.24/bin/mongod",
       "homepage": "https://www.mongodb.com",
       "defaultPort": 28017,
       "run": {
@@ -711,7 +711,7 @@
       "kind": "targz",
       "url": "https://fastdl.mongodb.org/osx/mongodb-macos-arm64-8.3.11.tgz",
       "sizeBytes": 0,
-      "entry": "mongodb-macos-aarch64--8.3.11/bin/mongod",
+      "entry": "mongodb-macos-arm64-8.3.11/bin/mongod",
       "defaultPort": 28017,
       "run": {
         "args": [
@@ -840,7 +840,7 @@
       "kind": "targz",
       "url": "https://fastdl.mongodb.org/osx/mongodb-macos-x86_64-8.3.11.tgz",
       "sizeBytes": 97291515,
-      "entry": "mongodb-macos-x86_64--8.3.11/bin/mongod",
+      "entry": "mongodb-macos-x86_64-8.3.11/bin/mongod",
       "defaultPort": 28017,
       "run": {
         "args": [

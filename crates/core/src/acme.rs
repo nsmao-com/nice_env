@@ -18,6 +18,9 @@ use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
+/// RFC 8555 §6.2 要求所有携带 JWS 的 ACME POST 使用这个媒体类型。
+const ACME_JWS_CONTENT_TYPE: &str = "application/jose+json";
+
 /// 支持的 CA → ACME directory
 pub fn directory_url(ca: &str) -> &'static str {
     match ca {
@@ -354,7 +357,7 @@ impl AcmeClient {
         let response = self
             .http
             .post(url)
-            .header(reqwest::header::CONTENT_TYPE, "application/jose+json")
+            .header(reqwest::header::CONTENT_TYPE, ACME_JWS_CONTENT_TYPE)
             .body(request_body)
             .send()
             .map_err(|e| AppError::new("ACME_HTTP", format!("请求 {url} 失败：{e}")))?;
@@ -800,7 +803,7 @@ mod tests {
                         length = value.trim().parse::<usize>().unwrap();
                     }
                 }
-                assert_eq!(types, ["application/jose+json"]);
+                assert_eq!(types, [ACME_JWS_CONTENT_TYPE]);
                 let mut body = vec![0; length];
                 input.read_exact(&mut body).unwrap();
                 let body: serde_json::Value = serde_json::from_slice(&body).unwrap();

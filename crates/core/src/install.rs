@@ -147,8 +147,9 @@ pub(crate) fn is_sftpgo_installer(entry: &crate::model::PackageManifestEntry) ->
 }
 
 fn official_apache(entry: &crate::model::PackageManifestEntry) -> bool {
-    entry.id == "apache" && entry.os.iter().any(|os| os == "windows")
-        && entry.arch.iter().any(|arch| arch == "x64")
+    // 历史快照可能在非 Windows 主机上被读取；下载地址和固定入口已经足够
+    // 识别这条官方构建，不能因为快照被标记为当前平台就跳过失效地址修复。
+    entry.id == "apache"
         && entry.kind == "archive" && entry.entry == "Apache24/bin/httpd.exe" && entry.mirrors.is_empty()
         && entry.url.starts_with("https://www.apachelounge.com/download/VS")
         && entry.url.contains(&format!("/binaries/httpd-{}-", entry.version))

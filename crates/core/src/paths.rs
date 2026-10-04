@@ -1954,7 +1954,10 @@ mod tests {
         let argument = portable_path_text(&path);
         assert_eq!(std::fs::read_to_string(&argument).unwrap(), "unchanged");
         assert_eq!(argument, path.to_string_lossy());
-        assert_eq!(nginx_path(&path), path.to_string_lossy().replace('\\', "\\\\"));
+        assert_eq!(
+            nginx_path(&path),
+            path.to_string_lossy().replace('\\', "\\\\")
+        );
     }
 
     fn fixture() -> (tempfile::TempDir, Paths) {

@@ -21,6 +21,22 @@ use std::time::Duration;
 /// RFC 8555 §6.2 要求所有携带 JWS 的 ACME POST 使用这个媒体类型。
 const ACME_JWS_CONTENT_TYPE: &str = "application/jose+json";
 
+fn build_acme_http(no_proxy: bool) -> Result<reqwest::blocking::Client> {
+    let mut builder = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        // 部分系统代理/旧网关在 HTTP/2 转发时会改写 ACME 的请求头，
+        // 导致 CA 看到的 Content-Type 不是 RFC 8555 要求的 JOSE 类型。
+        // ACME 请求量很小，固定使用 HTTP/1.1 可保持请求头原样透传。
+        .http1_only()
+        .user_agent("NiceEnv/0.1 (+https://github.com)");
+    if no_proxy {
+        builder = builder.no_proxy();
+    }
+    builder
+        .build()
+        .map_err(|e| AppError::internal("构建 HTTP 客户端", e.to_string()))
+}
+
 /// 支持的 CA → ACME directory
 pub fn directory_url(ca: &str) -> &'static str {
     match ca {
@@ -126,6 +142,9 @@ impl AccountKey {
 
 pub struct AcmeClient {
     http: reqwest::blocking::Client,
+    /// 系统代理改写 ACME JWS 请求头时，保留一个直连客户端作为一次性回退。
+    /// 直连失败仍返回代理请求得到的原始错误，避免掩盖真实原因。
+    direct_http: Option<reqwest::blocking::Client>,
     dir: serde_json::Value,
     account: AccountKey,
     kid: String,
@@ -144,15 +163,10 @@ impl AcmeClient {
         email: &str,
         eab: Option<(&str, &str)>,
     ) -> Result<(Self, Option<String>)> {
-        let http = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(30))
-            // 部分系统代理/旧网关在 HTTP/2 转发时会改写 ACME 的请求头，
-            // 导致 CA 看到的 Content-Type 不是 RFC 8555 要求的 JOSE 类型。
-            // ACME 请求量很小，固定使用 HTTP/1.1 可保持请求头原样透传。
-            .http1_only()
-            .user_agent("NiceEnv/0.1 (+https://github.com)")
-            .build()
-            .map_err(|e| AppError::internal("构建 HTTP 客户端", e.to_string()))?;
+        let http = build_acme_http(false)?;
+        // 系统代理可能只改写 POST 请求头，directory GET 仍能正常返回。
+        // 预先构建直连客户端；构建失败不影响代理模式，真正需要时再报原始错误。
+        let direct_http = build_acme_http(true).ok();
 
         let dir_resp = http
             .get(directory_url(ca))
@@ -176,6 +190,7 @@ impl AcmeClient {
 
         let mut client = Self {
             http,
+            direct_http,
             dir,
             account,
             kid: String::new(),
@@ -300,14 +315,24 @@ impl AcmeClient {
                 );
                 continue;
             }
-            return Err(acme_error(
+            let error = acme_error(
                 &body,
                 if new_account {
                     "注册 ACME 账号"
                 } else {
                     url
                 },
-            ));
+            );
+            if error.code == "ACME_CONTENT_TYPE" {
+                if let Some(direct_http) = self.direct_http.take() {
+                    // nonce 由代理端点签发，切换传输路径后必须重新获取，
+                    // 否则 CA 可能把旧 nonce 判定为无效。
+                    self.http = direct_http;
+                    self.nonce = None;
+                    continue;
+                }
+            }
+            return Err(error);
         }
         Err(last.unwrap_or_else(|| AppError::new("ACME_RETRY", "重试次数用尽")))
     }
@@ -714,7 +739,7 @@ fn acme_error(body: &str, what: &str) -> AppError {
         .any(|text| text.contains("content-type") && text.contains("application/jose+json"));
     if is_content_type_error {
         return AppError::new("ACME_CONTENT_TYPE", format!("{what}：证书服务拒绝了请求格式，暂时无法继续签发"))
-            .with_hint("请更新 NiceEnv 后重试；无需更换联系邮箱或 DNS 凭据。若最新版仍出现此错误，请反馈错误详情。")
+            .with_hint("NiceEnv 已先后尝试系统代理和直连发送符合规范的请求；若仍失败，请检查代理是否能访问证书服务，或改选 Let's Encrypt（推荐）。无需更换联系邮箱或 DNS 凭据。")
             .with_detail(detail);
     }
     let problem = code
@@ -850,6 +875,7 @@ mod tests {
                 .timeout(Duration::from_secs(3))
                 .build()
                 .unwrap(),
+            direct_http: None,
             dir: serde_json::Value::Null,
             account,
             kid: "https://ca.example/account/1".into(),
@@ -869,9 +895,9 @@ mod tests {
             } else {
                 client.jws_post(&url, payload)
             })
-                .unwrap()
-                .status()
-                .is_success());
+            .unwrap()
+            .status()
+            .is_success());
         }
         assert_eq!(client.nonce.as_deref(), Some("next-5"));
         let exhausted = client.post_as_get(&url).unwrap_err();
@@ -911,6 +937,101 @@ mod tests {
             assert!(error.hint.is_some());
             assert_eq!(error.detail.as_deref(), Some("original CA detail"));
         }
+    }
+
+    #[test]
+    fn content_type_rejection_retries_without_system_proxy() {
+        use std::io::{BufRead, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/acme", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for index in 0..3 {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    if let Ok((stream, _)) = listener.accept() {
+                        break stream;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "ACME fallback request not received"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut input = std::io::BufReader::new(&mut stream);
+                let mut line = String::new();
+                input.read_line(&mut line).unwrap();
+                assert_eq!(
+                    line,
+                    if index == 1 {
+                        "HEAD /acme HTTP/1.1\r\n"
+                    } else {
+                        "POST /acme HTTP/1.1\r\n"
+                    }
+                );
+                let mut length = 0;
+                let mut content_type = None;
+                loop {
+                    line.clear();
+                    assert!(input.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    let (name, value) = line.split_once(':').unwrap();
+                    if name.eq_ignore_ascii_case("content-type") {
+                        content_type = Some(value.trim().to_owned());
+                    }
+                    if name.eq_ignore_ascii_case("content-length") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                if index != 1 {
+                    assert_eq!(content_type.as_deref(), Some(ACME_JWS_CONTENT_TYPE));
+                    let mut body = vec![0; length];
+                    input.read_exact(&mut body).unwrap();
+                }
+                let response = if index == 0 {
+                    let body = r#"{"type":"urn:ietf:params:acme:error:malformed","detail":"Invalid Content-Type header on POST. Content-Type must be application/jose+json"}"#;
+                    format!(
+                        "HTTP/1.1 400 Bad Request\r\nReplay-Nonce: proxy-nonce\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                } else if index == 1 {
+                    "HTTP/1.1 200 OK\r\nReplay-Nonce: direct-nonce\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_owned()
+                };
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        let (account, _) = AccountKey::generate().unwrap();
+        let client_builder = || {
+            reqwest::blocking::Client::builder()
+                .no_proxy()
+                .http1_only()
+                .timeout(Duration::from_secs(3))
+                .build()
+                .unwrap()
+        };
+        let mut client = AcmeClient {
+            http: client_builder(),
+            direct_http: Some(client_builder()),
+            dir: serde_json::json!({"newNonce": url}),
+            account,
+            kid: "https://ca.example/account/1".into(),
+            nonce: Some("fixture-nonce".into()),
+            pending_order_url: None,
+        };
+        let response = client
+            .jws_post_new(&url, &serde_json::json!({"termsOfServiceAgreed": true}))
+            .unwrap();
+        assert!(response.status().is_success());
+        assert!(client.direct_http.is_none());
+        server.join().unwrap();
     }
 
     #[test]

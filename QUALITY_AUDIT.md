@@ -2,6 +2,17 @@
 
 本记录用于跟踪 Windows/macOS、路径与数据目录、上游版本和安装状态的复查。**整体复查未完成**；代码编译、单元测试、下载包核验和原生服务运行是不同的验收层级，不能相互替代。
 
+## 2026-10-04：v0.2.280 ACME 注册诊断与配置校验
+
+| 范围 | 发现与修复 | 验证情况 |
+| --- | --- | --- |
+| ACME JWS 注册 | 保留所有 ACME JWS POST 的 `application/jose+json`；前端现在按 `ACME_CONTENT_TYPE` / `ACME_ACCOUNT` 错误码展示对应中文说明，不再丢失结构化错误 | `cargo test --locked -p nsb-core acme::tests`：8 项通过；请求头接收端覆盖账号、订单和 POST-as-GET |
+| 证书机构与 EAB | 签发前拒绝未知 CA；ZeroSSL、Google、BuyPass 缺少 EAB KID/HMAC Key 时在本地直接说明；Let's Encrypt 保持免 EAB | `certauto::tests::validate_explains_ca_and_contact_requirements_before_network_request`：通过 |
+| 联系邮箱 | 非空邮箱在访问 CA 前检查基本格式，错误提示说明邮箱用途和正确写法 | 同上验证覆盖无效邮箱与 `user@example.com` |
+| EAB 表单 | EAB 字段仅在需要的 CA 下出现并标为必填，说明其与 DNS 服务商、手动 TXT 验证无关 | `pnpm --dir apps/web check`：通过 |
+
+本批没有数据库结构变更，未修改 `update.sql`；未运行前端 dev/build，未新增测试文件。整体质量复查仍未完成，后续清单继续有效。
+
 ## 2026-10-04：v0.2.279 ACME 请求与 PostgreSQL 运行目录隔离
 
 | 范围 | 发现与修复 | 验证情况 |

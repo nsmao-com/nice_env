@@ -290,6 +290,8 @@ const DNS_KINDS: &[&str] = &[
     // 不接 API：用户自己加 TXT 记录，等公共解析可见后继续（certd 的手动模式）
     "manual",
 ];
+const ACME_CAS: &[&str] = &["letsencrypt", "letsencrypt-staging", "zerossl", "google", "buypass"];
+const EAB_CAS: &[&str] = &["zerossl", "google", "buypass"];
 const TARGET_KINDS: &[&str] = &["btpanel", "onepanel", "aliyun", "tencent", "ssh", "local"];
 const NOTIFY_KINDS: &[&str] = &[
     "", "none", "generic", "dingtalk", "wecom", "feishu", "email",
@@ -310,6 +312,28 @@ fn validate(a: &CertAutomation) -> Result<()> {
     }
     if a.domains.is_empty() {
         return Err(AppError::new("BAD_DOMAINS", "至少填写一个要签发的域名"));
+    }
+    if !ACME_CAS.contains(&a.ca.as_str()) {
+        return Err(AppError::new("ACME_CA", "证书颁发机构选择无效")
+            .with_hint("请选择 Let's Encrypt（推荐）或列表中的其它证书颁发机构。"));
+    }
+    if EAB_CAS.contains(&a.ca.as_str())
+        && (a.eab_kid.trim().is_empty() || a.eab_hmac_key.trim().is_empty())
+    {
+        return Err(AppError::new("ACME_EAB", "当前证书颁发机构需要外部账号绑定（EAB）")
+            .with_hint("请在证书颁发机构控制台获取 EAB KID 和 HMAC Key；如果没有这两项，请改选 Let's Encrypt（推荐）。"));
+    }
+    if !a.email.trim().is_empty() {
+        let email = a.email.trim();
+        let valid = !email.chars().any(char::is_whitespace)
+            && email.matches('@').count() == 1
+            && email.split_once('@').is_some_and(|(local, domain)| {
+                !local.is_empty() && domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.')
+            });
+        if !valid {
+            return Err(AppError::new("ACME_EMAIL", "联系邮箱格式不正确")
+                .with_hint("请输入类似 name@example.com 的邮箱；该邮箱只用于证书服务通知。"));
+        }
     }
     for d in &a.domains {
         let d = d.trim_end_matches('.');
@@ -2050,6 +2074,26 @@ mod tests {
         assert!(validate(&a).is_ok());
         a.domains = vec!["*x.a.com".into()];
         assert!(validate(&a).is_err());
+    }
+
+    #[test]
+    fn validate_explains_ca_and_contact_requirements_before_network_request() {
+        let mut a = sample();
+        a.ca = "unknown-ca".into();
+        let error = validate(&a).unwrap_err();
+        assert_eq!(error.code, "ACME_CA");
+
+        a.ca = "zerossl".into();
+        let error = validate(&a).unwrap_err();
+        assert_eq!(error.code, "ACME_EAB");
+
+        a.ca = "letsencrypt".into();
+        a.email = "not-an-email".into();
+        let error = validate(&a).unwrap_err();
+        assert_eq!(error.code, "ACME_EMAIL");
+
+        a.email = "user@example.com".into();
+        assert!(validate(&a).is_ok());
     }
 
     #[test]

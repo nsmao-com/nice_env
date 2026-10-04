@@ -160,10 +160,15 @@ const canRetryDeploy = (a: CertAutomation) => Boolean(a.deploymentId && (a.expir
 const actionErrorText = (error: unknown) => { const value = normalizeError(error); return [value.message, value.hint].filter(Boolean).join("\n"); };
 const isContentTypeError = (message?: string | null) => Boolean(message && /ACME_CONTENT_TYPE|Invalid Content-Type header on POST|application\/jose\+json/i.test(message));
 const isMissingAccountError = (message?: string | null) => Boolean(message && /newAccount 未返回 Location|Location \(kid\)/i.test(message));
-const accountErrorText = (message: string | null | undefined, t: ReturnType<typeof useT>) => {
-  if (isContentTypeError(message)) return `${t("certauto.contentTypeError")}\n${t("certauto.contentTypeErrorHint")}`;
-  if (isMissingAccountError(message)) return `${t("certauto.accountError")}\n${t("certauto.accountErrorHint")}`;
-  return message;
+const accountErrorText = (error: unknown, t: ReturnType<typeof useT>) => {
+  const value = normalizeError(error);
+  if (value.code === "ACME_CONTENT_TYPE" || isContentTypeError([value.message, value.hint, value.detail].filter(Boolean).join("\n"))) {
+    return `${t("certauto.contentTypeError")}\n${t("certauto.contentTypeErrorHint")}`;
+  }
+  if (value.code === "ACME_ACCOUNT" || isMissingAccountError([value.message, value.hint, value.detail].filter(Boolean).join("\n"))) {
+    return `${t("certauto.accountError")}\n${t("certauto.accountErrorHint")}`;
+  }
+  return [value.message, value.hint].filter(Boolean).join("\n");
 };
 
 export function CertAutomationSection() {
@@ -200,7 +205,7 @@ export function CertAutomationSection() {
         });
       }
     } catch (e) {
-      const message = accountErrorText(actionErrorText(e), t);
+      const message = accountErrorText(e, t);
       toast.error(t(retry ? "certauto.deployFailed" : "certauto.issueFailed"), {
         description: message || t("certauto.issueFailedHint"),
       });
@@ -800,6 +805,8 @@ function AutomationDialog({
                     value={form.eabKid}
                     onChange={(e) => patch({ eabKid: e.target.value })}
                     placeholder={t("certauto.field.eabKid")}
+                    required={needEab}
+                    aria-required={needEab}
                     className="font-mono text-[12px]"
                   />
                 </div>
@@ -811,6 +818,8 @@ function AutomationDialog({
                     value={form.eabHmacKey}
                     onChange={(e) => patch({ eabHmacKey: e.target.value })}
                     placeholder={t("certauto.field.eabHmacKey")}
+                    required={needEab}
+                    aria-required={needEab}
                     className="font-mono text-[12px]"
                   />
                 </div>

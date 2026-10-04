@@ -294,7 +294,7 @@ impl AcmeClient {
         for _ in 0..3 {
             let resp = self.jws_post_once(url, payload, new_account)?;
             let status = resp.status();
-            if status.is_success() || status.as_u16() != 400 {
+            if status.is_success() {
                 return Ok(resp);
             }
             let body = resp.text().unwrap_or_default();
@@ -997,7 +997,7 @@ mod tests {
                 let response = if index == 0 {
                     let body = r#"{"type":"urn:ietf:params:acme:error:malformed","detail":"Invalid Content-Type header on POST. Content-Type must be application/jose+json"}"#;
                     format!(
-                        "HTTP/1.1 400 Bad Request\r\nReplay-Nonce: proxy-nonce\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 415 Unsupported Media Type\r\nReplay-Nonce: proxy-nonce\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     )
                 } else if index == 1 {

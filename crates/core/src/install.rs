@@ -149,12 +149,14 @@ pub(crate) fn is_sftpgo_installer(entry: &crate::model::PackageManifestEntry) ->
 fn official_apache(entry: &crate::model::PackageManifestEntry) -> bool {
     // 历史快照可能在非 Windows 主机上被读取；下载地址和固定入口已经足够
     // 识别这条官方构建，不能因为快照被标记为当前平台就跳过失效地址修复。
+    // 没有显式 version_source 时，Windows 清单会通过内置源识别；跨平台读取
+    // 旧快照时 source_for 可能因平台筛选返回 None，因此这里仅在显式声明时校验来源。
     entry.id == "apache"
         && entry.kind == "archive" && entry.entry == "Apache24/bin/httpd.exe" && entry.mirrors.is_empty()
         && entry.url.starts_with("https://www.apachelounge.com/download/VS")
         && entry.url.contains(&format!("/binaries/httpd-{}-", entry.version))
         && entry.url.ends_with(".zip")
-        && crate::versions::source_for(entry).is_some_and(|source| source.kind == "apache")
+        && entry.version_source.as_ref().is_none_or(|source| source.kind == "apache")
 }
 
 /// 修正历史可下载条目；已安装快照保留实际安装时的下载信息和入口。

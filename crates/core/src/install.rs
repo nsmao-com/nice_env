@@ -1901,6 +1901,10 @@ mod tests {
         run.env.as_mut().unwrap().remove("RNACOS_HTTP_CONSOLE_PORT");
         run.config_template = Some("RNACOS_HTTP_PORT={port}\nRNACOS_GRPC_PORT={port+1000}\nRNACOS_HTTP_CONSOLE_PORT={port+2000}\nRNACOS_DATA_DIR={data}/nacos_db\nRNACOS_CONFIG_DB_FILE={data}/nacos_db/config.db\nRNACOS_NAMING_DB_FILE={data}/nacos_db/naming.db\n".into());
         legacy.entry = "original/rnacos.exe".into();
+        // 该回归夹具复用 Windows 清单，但 package_views 会按当前平台筛选。
+        // 标记为当前平台，测试仍只关注快照升级行为。
+        legacy.os = vec![current_os().into()];
+        legacy.arch = vec![current_arch().into()];
         let installed = install_fixture(&state, "rnacos", &legacy.version);
         let snapshot = Path::new(&installed.install_path).join(".niceenv-package.json");
         let raw = serde_json::to_vec(&legacy).unwrap();
@@ -1935,6 +1939,9 @@ mod tests {
         state.installer.manifest = serde_json::from_str(include_str!("../../../manifest/packages.win.json")).unwrap();
         let expected = state.installer.find("consul").unwrap().run.unwrap();
         let mut legacy = state.installer.find("consul").unwrap();
+        // 该回归夹具复用 Windows 清单，但 package_views 会按当前平台筛选。
+        legacy.os = vec![current_os().into()];
+        legacy.arch = vec![current_arch().into()];
         legacy.run = Some(serde_json::from_value(serde_json::json!({
             "args":["agent","-dev","-client","127.0.0.1","-http-port","{port}"], "health":"tcp", "healthTimeoutSec":20
         })).unwrap());
@@ -2065,6 +2072,9 @@ mod tests {
         state.installer.manifest = serde_json::from_str(include_str!("../../../manifest/packages.win.json")).unwrap();
         let current = state.installer.find("apache@2.4.68").unwrap();
         let mut legacy = current.clone();
+        // 该回归夹具复用 Windows 清单，但 package_views 会按当前平台筛选。
+        legacy.os = vec![current_os().into()];
+        legacy.arch = vec![current_arch().into()];
         legacy.url = "https://www.apachelounge.com/download/VS18/binaries/httpd-2.4.68-260827-Win64-VS18.zip".into();
         legacy.sha256 = Some("a6b7de9fdccb28456f5b1f884920fe0b2425aadfca25c63ae1c0969d43bb355b".into());
         legacy.size_bytes = 14584378;

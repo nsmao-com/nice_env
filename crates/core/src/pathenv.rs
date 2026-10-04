@@ -1503,11 +1503,34 @@ mod tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
+    fn fixture_manifest() -> crate::model::Manifest {
+        let mut manifest = crate::install::Installer::bundled().manifest;
+        if manifest.packages.is_empty() {
+            manifest.packages.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "fixture",
+                    "version": "0.0.0",
+                    "category": "runtime",
+                    "displayName": "Fixture",
+                    "description": "跨平台测试夹具",
+                    "os": ["windows", "macos", "linux"],
+                    "arch": ["x64", "arm64"],
+                    "kind": "archive",
+                    "url": "https://example.invalid/fixture.tar.gz",
+                    "sizeBytes": 0,
+                    "entry": "bin/tool"
+                }))
+                .unwrap(),
+            );
+        }
+        manifest
+    }
+
     fn terminal_fixture() -> (tempfile::TempDir, Store, Paths, Manifest) {
         let temp = tempfile::tempdir().unwrap();
         let paths = Paths::new(temp.path().to_path_buf());
         let store = Store::open(paths.db()).unwrap();
-        let mut manifest = crate::install::Installer::bundled().manifest;
+        let mut manifest = fixture_manifest();
         let mut template = manifest.packages[0].clone();
         template.id = "terminal-fixture".into();
         template.entry = if cfg!(windows) {
@@ -1636,7 +1659,7 @@ mod tests {
         let paths = Paths::new(temp.path().join("data"));
         paths.ensure_dirs().unwrap();
         let store = Store::open(paths.db()).unwrap();
-        let mut manifest = crate::install::Installer::bundled().manifest;
+        let mut manifest = fixture_manifest();
         let mut template = manifest.packages.iter().find(|p| p.id == "php").cloned().unwrap_or_else(|| manifest.packages[0].clone());
         template.id = "php".into();
         template.entry = if cfg!(windows) { "nested/bin/php-cgi.exe" } else { "nested/sbin/php-fpm" }.into();

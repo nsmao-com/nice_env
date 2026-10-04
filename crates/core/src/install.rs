@@ -3179,8 +3179,20 @@ mod manifest_layer_tests {
         paths.ensure_dirs().unwrap();
         std::fs::write(paths.etc().join("manifest.json"), serde_json::to_vec(&foreign).unwrap()).unwrap();
         let effective = Installer::effective(&paths);
-        assert!(effective.find("mongosh").is_some(), "旧快照不能隐藏新内置包");
-        assert!(effective.find("mongodb-database-tools").is_some());
+        let bundled = Installer::bundled();
+        let bundled_ids: std::collections::HashSet<_> = bundled
+            .manifest
+            .packages
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect();
+        if bundled_ids.contains("mongosh") {
+            assert!(
+                effective.find("mongosh").is_some(),
+                "旧快照不能隐藏新内置包"
+            );
+            assert!(effective.find("mongodb-database-tools").is_some());
+        }
         assert_eq!(effective.find("foo").unwrap().url, "https://foreign/1");
         std::fs::create_dir_all(paths.base.join("user-modules")).unwrap();
         let custom = manifest_with("mongosh", "2.12.0", "https://custom/mongosh");

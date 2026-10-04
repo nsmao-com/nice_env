@@ -1299,7 +1299,11 @@ mod tests {
         assert_eq!(v[4], "1.2.0");
 
         // Database Tools 官方索引不是按新旧排序，还包含 99.0.0 占位发行。
-        let template = crate::install::Installer::bundled().template_for("mongodb-database-tools").unwrap();
+        let installer = crate::install::Installer {
+            manifest: serde_json::from_str(include_str!("../../../manifest/packages.win.json"))
+                .unwrap(),
+        };
+        let template = installer.template_for("mongodb-database-tools").unwrap();
         for (os, arch, upstream_arch) in [("windows", "x64", "x86_64"), ("macos", "arm64", "arm64"), ("macos", "x64", "x86_64")] {
             let mut template = template.clone();
             template.os = vec![os.into()]; template.arch = vec![arch.into()];

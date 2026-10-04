@@ -163,19 +163,50 @@ impl AcmeClient {
         email: &str,
         eab: Option<(&str, &str)>,
     ) -> Result<(Self, Option<String>)> {
-        let http = build_acme_http(false)?;
-        // 系统代理可能只改写 POST 请求头，directory GET 仍能正常返回。
-        // 预先构建直连客户端；构建失败不影响代理模式，真正需要时再报原始错误。
+        let proxy_http = build_acme_http(false)?;
+        // 优先直连，避免系统代理改写 ACME JWS 的 Content-Type；直连不可用时再退回系统代理。
+        // 两条客户端都保留到账号注册阶段，便于 nonce/JWS 请求遇到连接错误时切换。
         let direct_http = build_acme_http(true).ok();
-
-        let dir_resp = http
-            .get(directory_url(ca))
-            .send()
-            .and_then(|r| r.error_for_status())
-            .map_err(|e| {
-                AppError::new("ACME_DIRECTORY", format!("拉取 ACME directory 失败：{e}"))
+        let directory = directory_url(ca);
+        let (http, alternate_http, dir_resp) = if let Some(direct_http) = direct_http {
+            match direct_http
+                .get(directory)
+                .send()
+                .and_then(|response| response.error_for_status())
+            {
+                Ok(response) => (direct_http, Some(proxy_http), response),
+                Err(direct_error) => match proxy_http
+                    .get(directory)
+                    .send()
+                    .and_then(|response| response.error_for_status())
+                {
+                    Ok(response) => (proxy_http, Some(direct_http), response),
+                    Err(proxy_error) => {
+                        return Err(AppError::new(
+                            "ACME_DIRECTORY",
+                            format!("拉取 ACME directory 失败：{proxy_error}"),
+                        )
+                        .with_hint("检查网络能否访问证书颁发机构；国内可先在代理页开启系统代理")
+                        .with_detail(format!(
+                            "直连失败：{direct_error}；系统代理失败：{proxy_error}"
+                        )));
+                    }
+                },
+            }
+        } else {
+            let response = proxy_http
+                .get(directory)
+                .send()
+                .and_then(|response| response.error_for_status())
+                .map_err(|error| {
+                    AppError::new(
+                        "ACME_DIRECTORY",
+                        format!("拉取 ACME directory 失败：{error}"),
+                    )
                     .with_hint("检查网络能否访问证书颁发机构；国内可先在代理页开启系统代理")
-            })?;
+                })?;
+            (proxy_http, None, response)
+        };
         let dir: serde_json::Value = dir_resp.json().map_err(|e| {
             AppError::new("ACME_DIRECTORY", format!("directory 不是合法 JSON：{e}"))
         })?;
@@ -190,7 +221,7 @@ impl AcmeClient {
 
         let mut client = Self {
             http,
-            direct_http,
+            direct_http: alternate_http,
             dir,
             account,
             kid: String::new(),
@@ -262,11 +293,23 @@ impl AcmeClient {
             .and_then(|v| v.as_str())
             .ok_or_else(|| AppError::new("ACME_DIRECTORY", "directory 缺少 newNonce"))?
             .to_string();
-        let resp = self
-            .http
-            .head(&url)
-            .send()
-            .and_then(|r| r.error_for_status())
+        let resp = match self.http.head(&url).send() {
+            Ok(resp) => resp,
+            Err(error) => {
+                if let Some(alternate_http) = self.direct_http.take() {
+                    // 直连或系统代理可能只对 HEAD 不可用；切换传输路径后重新取 nonce。
+                    self.http = alternate_http;
+                    self.nonce = None;
+                    return self.fetch_nonce();
+                }
+                return Err(AppError::new(
+                    "ACME_NONCE",
+                    format!("获取 nonce 失败：{error}"),
+                ));
+            }
+        };
+        let resp = resp
+            .error_for_status()
             .map_err(|e| AppError::new("ACME_NONCE", format!("获取 nonce 失败：{e}")))?;
         resp.headers()
             .get("replay-nonce")
@@ -292,7 +335,19 @@ impl AcmeClient {
     ) -> Result<reqwest::blocking::Response> {
         let mut last = None;
         for _ in 0..3 {
-            let resp = self.jws_post_once(url, payload, new_account)?;
+            let resp = match self.jws_post_once(url, payload, new_account) {
+                Ok(resp) => resp,
+                Err(error) if error.code == "ACME_HTTP" => {
+                    if let Some(alternate_http) = self.direct_http.take() {
+                        // 请求在当前传输路径上连不上时，保留 JWS 内容并换另一条路径重试。
+                        self.http = alternate_http;
+                        self.nonce = None;
+                        continue;
+                    }
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
+            };
             let status = resp.status();
             if status.is_success() {
                 return Ok(resp);

@@ -45,7 +45,13 @@ pub(crate) fn provider(
     };
     let driver = value("driver", "sqlite");
     if !matches!(driver.as_str(), "sqlite" | "bolt") {
-        return Ok(None);
+        // 远程库和 memory provider 的账号目录无法从本地文件副本核对；
+        // 跳过后继续切换会留下旧 home_dir，甚至让上传文件被当成配置改写。
+        return Err(AppError::new(
+            "DATA_DIR_SFTPGO_PROVIDER",
+            "当前 SFTPGo 账号库类型不支持自动迁移用户目录，未切换数据目录",
+        )
+        .with_hint("请继续使用原数据目录。如需迁移，请先通过 SFTPGo 备份账号，改用本地 SQLite 或 Bolt 账号库并确认账号可用后重试。原账号库、配置和文件均已保留。"));
     }
     let name = value("name", "sftpgo.db");
     let connection = value("connection_string", "");

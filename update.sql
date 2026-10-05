@@ -200,3 +200,5 @@
 -- Bolt 账号库不执行 SQL：只读解析迁移副本，由已安装 SFTPGo 离线导入变更。
 -- 导入前后校验所有 bucket、主键、序列、账号数据及关联关系；仅允许物理目录和
 -- 上游正常维护的用户/组 updated_at 改变，失败取消切换。源库始终保持原样。
+-- MySQL/PostgreSQL/CockroachDB、memory 或未知 SFTPGo provider 无法从本地副本验证
+-- 账号物理目录，迁移前明确拒绝切换；不会连接远程库或执行 SQL，也不修改源配置。

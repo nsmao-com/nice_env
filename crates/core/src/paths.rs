@@ -3366,7 +3366,7 @@ mod tests {
 
     #[test]
     fn sftpgo_account_migration_rejects_invalid_and_external_databases_without_switching() {
-        for case in ["invalid-group", "external", "bolt", "provider-conflict"] {
+        for case in ["invalid-group", "external", "bolt", "provider-conflict", "mysql", "postgresql", "cockroachdb", "memory", "unknown-driver"] {
             let temp = tempfile::tempdir().unwrap();
             let source = temp.path().join("source");
             let target = temp.path().join("destination");
@@ -3383,16 +3383,27 @@ mod tests {
             conn.execute("INSERT INTO users VALUES(1,?1)", [portable_path_text(&source.join("data/home"))]).unwrap();
             conn.execute("INSERT INTO groups VALUES(1,?1)", [if case == "invalid-group" {"broken JSON"} else {"{}"}]).unwrap();
             drop(conn);
-            let config = serde_json::json!({"data_provider":{"driver":if case == "bolt" {"bolt"} else {"sqlite"},"name":portable_path_text(&database)}});
-            std::fs::write(directory.join("sftpgo.json"), config.to_string()).unwrap();
+            let unsupported = matches!(case, "mysql" | "postgresql" | "cockroachdb" | "memory" | "unknown-driver");
+            let remote = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            remote.set_nonblocking(true).unwrap();
+            let config = serde_json::json!({"data_provider":{
+                "driver":if unsupported {case} else if case == "bolt" {"bolt"} else {"sqlite"},
+                "name":portable_path_text(&database), "host":"127.0.0.1", "port":remote.local_addr().unwrap().port(),
+                "password":"fixture-only-remote-secret"}});
+            let config_path = directory.join("sftpgo.json");
+            std::fs::write(&config_path, config.to_string()).unwrap();
             if case == "provider-conflict" {
                 let mut second = config.clone();
                 second["data_provider"]["sql_tables_prefix"] = "different_".into();
                 std::fs::write(directory.join("sftpgo.yaml"), second.to_string()).unwrap();
             }
             let before = std::fs::read(&database).unwrap();
-            assert_eq!(copy_data_dir(&source, &target).unwrap_err().code,
-                if case == "bolt" { "DATA_DIR_SFTPGO_BOLT" } else { "DATA_DIR_SFTPGO_STATE" }, "{case}");
+            let error = copy_data_dir(&source, &target).unwrap_err();
+            assert_eq!(error.code,
+                if unsupported { "DATA_DIR_SFTPGO_PROVIDER" } else if case == "bolt" { "DATA_DIR_SFTPGO_BOLT" } else { "DATA_DIR_SFTPGO_STATE" }, "{case}");
+            assert!(!format!("{error:?}").contains("fixture-only-remote-secret"));
+            assert_eq!(std::fs::read_to_string(&config_path).unwrap(), config.to_string());
+            assert!(matches!(remote.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
             assert_eq!(std::fs::read(&database).unwrap(), before);
             assert!(!target.exists());
             assert!(!std::fs::read_dir(temp.path()).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().contains("-migrating-")));

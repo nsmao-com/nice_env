@@ -1065,6 +1065,11 @@ fn rebase_config_files(
             rewritten += 1;
         }
     }
+    for provider in resources.providers.values() {
+        if crate::sftpgo_data::rebase_provider(provider, rebase)? {
+            rewritten += 1;
+        }
+    }
     Ok(rewritten)
 }
 
@@ -1080,6 +1085,7 @@ struct MigrationResources {
     paths: Vec<String>,
     files: std::collections::HashMap<PathBuf, Vec<u8>>,
     env_dirs: Vec<String>,
+    providers: std::collections::HashMap<String, crate::sftpgo_data::Provider>,
 }
 
 fn migration_resources(
@@ -1103,14 +1109,37 @@ fn migration_resources(
             }
             let text = std::fs::read_to_string(file)?;
             let mut resources = MigrationResources::default();
-            let mut cwd = None;
             let mut references = crate::configpaths::sftpgo_resources(&text, json)?;
             let directory = source.join(relative).parent().unwrap().to_path_buf();
-            if directory.join("env.d").is_dir() {
+            let mut cwd;
+            {
                 let store = crate::store::Store::open_read_only(source.join("nsb.sqlite"))?;
                 let planned = crate::generic::sftpgo_migrate_environment(&store, &Paths::new(source.to_path_buf()), directory, &text, json, rebase)?;
-                cwd = Some(planned.cwd);
+                cwd = planned.cwd;
                 references.extend(planned.resources);
+                if let Some(mut provider) = planned.provider {
+                    let mapped = rebase.path(&portable_path_text(&provider.path));
+                    let key = config_path_key(Path::new(&mapped));
+                    if resource_contains(&target_key, &key) {
+                        provider.path = root.join(mapped[target_key.len()..].trim_start_matches(['/', '\\']));
+                        // 默认文件名以及 SQLite 日志也属于账号库，不按文本配置改写。
+                        let key = config_path_key(&provider.path);
+                        resources.paths.push(key.clone());
+                        for suffix in ["-wal", "-shm", "-journal"] {
+                            resources.paths.push(format!("{key}{suffix}"));
+                        }
+                    } else {
+                        provider.external = true;
+                    }
+                    for directory in crate::sftpgo_data::data_directories(&provider, rebase)? {
+                        let mapped = rebase.path(&portable_path_text(&directory));
+                        let key = config_path_key(Path::new(&mapped));
+                        if resource_contains(&target_key, &key) {
+                            resources.paths.push(format!("{root_key}{}", &key[target_key.len()..]));
+                        }
+                    }
+                    resources.providers.insert(config_path_key(&provider.path), provider);
+                }
                 resources.env_dirs.push(config_path_key(&file.parent().unwrap().join("env.d")));
                 for (path, bytes) in planned.files {
                     let mapped = portable_path_text(Path::new(&rebase.path(&portable_path_text(&path))));
@@ -1196,6 +1225,14 @@ fn migration_resources(
             let plan = plans[*index].1.as_ref().map_err(Clone::clone)?;
             resources.paths.extend(plan.paths.iter().cloned());
             resources.env_dirs.extend(plan.env_dirs.iter().cloned());
+            for (key, provider) in &plan.providers {
+                if resources.providers.insert(key.clone(), provider.clone())
+                    .is_some_and(|previous| previous != *provider)
+                {
+                    return Err(crate::error::AppError::new("DATA_DIR_SFTPGO_STATE",
+                        "多份 SFTPGo 配置对同一账号库使用不同的驱动或表前缀，未切换数据目录"));
+                }
+            }
             for (path, bytes) in &plan.files {
                 if resources
                     .files
@@ -3238,6 +3275,205 @@ mod tests {
         );
         assert!(std::fs::read_dir(&target).unwrap().next().is_none());
         assert_eq!(std::fs::read_to_string(&sftpgo).unwrap(), content);
+    }
+
+    #[test]
+    fn sftpgo_account_paths_migrate_without_changing_credentials_or_virtual_paths() {
+        for prefix in ["", "custom_\""] {
+            let temp = tempfile::tempdir().unwrap();
+            let source = temp.path().join("source data");
+            let target = temp.path().join("新 data # [1]");
+            let paths = Paths::new(source.clone());
+            paths.ensure_dirs().unwrap();
+            drop(crate::store::Store::open(paths.db()).unwrap());
+            let directory = source.join("etc/sftpgo/1");
+            std::fs::create_dir_all(&directory).unwrap();
+            let old = portable_path_text(&source);
+            let quote = |name: &str| format!("\"{}{}\"", prefix.replace('"', "\"\""), name);
+            let users = quote("users");
+            let folders = quote("folders");
+            let groups = quote("groups");
+            let database = directory.join("accounts #1.db");
+            let conn = rusqlite::Connection::open(&database).unwrap();
+            conn.execute_batch(&format!(
+                "CREATE TABLE {users}(id INTEGER PRIMARY KEY, home_dir TEXT NOT NULL, password TEXT, permissions TEXT, filesystem TEXT);
+                 CREATE TABLE {folders}(id INTEGER PRIMARY KEY, path TEXT, filesystem TEXT);
+                 CREATE TABLE {groups}(id INTEGER PRIMARY KEY, user_settings TEXT, description TEXT);"
+            )).unwrap();
+            let secret = format!("{old}/literal-password");
+            let permissions = serde_json::json!({format!("{old}/virtual"): ["list"]}).to_string();
+            let filesystem = serde_json::json!({"provider": 5, "sftpconfig": {"prefix": format!("{old}/remote")}}).to_string();
+            conn.execute(&format!("INSERT INTO {users} VALUES(1,?1,?2,?3,?4)"),
+                rusqlite::params![format!("{old}/data/sftpgo/home"), secret, permissions, filesystem]).unwrap();
+            conn.execute(&format!("INSERT INTO {users} VALUES(2,?1,?2,?3,?4)"),
+                rusqlite::params![format!("{old} sibling/home"), secret, permissions, filesystem]).unwrap();
+            conn.execute(&format!("INSERT INTO {folders} VALUES(1,?1,?2)"),
+                rusqlite::params![format!("{old}/data/sftpgo/shared"), filesystem]).unwrap();
+            let settings = serde_json::json!({"home_dir": format!("{old}/data/sftpgo/%username%"),
+                "filesystem": {"s3config": {"key_prefix": format!("{old}/remote-prefix")}},
+                "filters": {"file_patterns": [{"path": format!("{old}/virtual"),"allowed_patterns":["*"]}]}});
+            conn.execute(&format!("INSERT INTO {groups} VALUES(1,?1,?2)"),
+                rusqlite::params![settings.to_string(), secret]).unwrap();
+            conn.execute(&format!("INSERT INTO {groups} VALUES(2,?1,?2)"),
+                rusqlite::params![settings.to_string().into_bytes(), secret]).unwrap();
+            drop(conn);
+            let uploads = source.join("data/sftpgo/home");
+            std::fs::create_dir_all(&uploads).unwrap();
+            std::fs::write(uploads.join("uploaded.ini"), format!("path={old}/literal-upload")).unwrap();
+            std::fs::write(directory.join("sftpgo.json"), serde_json::json!({
+                "data_provider":{"driver":"sqlite","name":"accounts #1.db","sql_tables_prefix":prefix}
+            }).to_string()).unwrap();
+            let before = std::fs::read(&database).unwrap();
+            copy_data_dir(&source, &target).unwrap();
+            assert_eq!(std::fs::read(&database).unwrap(), before);
+            assert_eq!(std::fs::read_to_string(target.join("data/sftpgo/home/uploaded.ini")).unwrap(), format!("path={old}/literal-upload"));
+            let copied = target.join("etc/sftpgo/1/accounts #1.db");
+            let conn = rusqlite::Connection::open(&copied).unwrap();
+            let row: (String, String, String, String) = conn.query_row(
+                &format!("SELECT home_dir,password,permissions,filesystem FROM {users} WHERE id=1"),
+                [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap();
+            assert_eq!(row, (portable_path_text(&target.join("data/sftpgo/home")), secret.clone(), permissions, filesystem.clone()));
+            assert_eq!(conn.query_row(&format!("SELECT home_dir FROM {users} WHERE id=2"), [], |r|r.get::<_,String>(0)).unwrap(), format!("{old} sibling/home"));
+            assert_eq!(conn.query_row(&format!("SELECT path FROM {folders} WHERE id=1"), [], |r|r.get::<_,String>(0)).unwrap(), portable_path_text(&target.join("data/sftpgo/shared")));
+            let (actual, description): (String, String) = conn.query_row(
+                &format!("SELECT user_settings,description FROM {groups} WHERE id=1"), [], |r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+            let mut expected = settings;
+            expected["home_dir"] = portable_path_text(&target.join("data/sftpgo/%username%")).into();
+            assert_eq!(serde_json::from_str::<serde_json::Value>(&actual).unwrap(), expected);
+            let binary: Vec<u8> = conn.query_row(&format!("SELECT user_settings FROM {groups} WHERE id=2"),
+                [], |r|r.get(0)).unwrap();
+            assert_eq!(serde_json::from_slice::<serde_json::Value>(&binary).unwrap(), expected);
+            assert_eq!(description, secret);
+            assert_eq!(conn.query_row(&format!("SELECT filesystem FROM {folders}"), [], |r|r.get::<_,String>(0)).unwrap(), filesystem);
+            drop(conn);
+            let stable = std::fs::read(&copied).unwrap();
+            assert!(!crate::sftpgo_data::rebase_provider(&crate::sftpgo_data::Provider {
+                path: copied.clone(), driver: "sqlite".into(), prefix: prefix.into(), external: false,
+            }, &DataPathRebase::new(&source, &target).unwrap()).unwrap());
+            assert_eq!(std::fs::read(copied).unwrap(), stable);
+        }
+    }
+
+    #[test]
+    fn sftpgo_account_migration_rejects_invalid_and_external_databases_without_switching() {
+        for case in ["invalid-group", "external", "bolt", "provider-conflict"] {
+            let temp = tempfile::tempdir().unwrap();
+            let source = temp.path().join("source");
+            let target = temp.path().join("destination");
+            let paths = Paths::new(source.clone());
+            paths.ensure_dirs().unwrap();
+            drop(crate::store::Store::open(paths.db()).unwrap());
+            let directory = source.join("etc/sftpgo/1");
+            std::fs::create_dir_all(&directory).unwrap();
+            let database = if case == "external" { temp.path().join("outside.db") } else { directory.join("accounts.db") };
+            let conn = rusqlite::Connection::open(&database).unwrap();
+            conn.execute_batch("CREATE TABLE users(id INTEGER PRIMARY KEY,home_dir TEXT);
+                CREATE TABLE folders(id INTEGER PRIMARY KEY,path TEXT);
+                CREATE TABLE groups(id INTEGER PRIMARY KEY,user_settings TEXT);").unwrap();
+            conn.execute("INSERT INTO users VALUES(1,?1)", [portable_path_text(&source.join("data/home"))]).unwrap();
+            conn.execute("INSERT INTO groups VALUES(1,?1)", [if case == "invalid-group" {"broken JSON"} else {"{}"}]).unwrap();
+            drop(conn);
+            let config = serde_json::json!({"data_provider":{"driver":if case == "bolt" {"bolt"} else {"sqlite"},"name":portable_path_text(&database)}});
+            std::fs::write(directory.join("sftpgo.json"), config.to_string()).unwrap();
+            if case == "provider-conflict" {
+                let mut second = config.clone();
+                second["data_provider"]["sql_tables_prefix"] = "different_".into();
+                std::fs::write(directory.join("sftpgo.yaml"), second.to_string()).unwrap();
+            }
+            let before = std::fs::read(&database).unwrap();
+            assert_eq!(copy_data_dir(&source, &target).unwrap_err().code, "DATA_DIR_SFTPGO_STATE", "{case}");
+            assert_eq!(std::fs::read(&database).unwrap(), before);
+            assert!(!target.exists());
+            assert!(!std::fs::read_dir(temp.path()).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().contains("-migrating-")));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires NSB_SFTPGO_NATIVE pointing to an official SFTPGo binary; offline initialization only"]
+    fn native_sftpgo_accounts_survive_data_directory_migration() {
+        let program = PathBuf::from(std::env::var_os("NSB_SFTPGO_NATIVE").expect("NSB_SFTPGO_NATIVE"));
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source data");
+        let target = temp.path().join("新 data # [1]");
+        let paths = Paths::new(source.clone());
+        paths.ensure_dirs().unwrap();
+        drop(crate::store::Store::open(paths.db()).unwrap());
+        let directory = source.join("etc/sftpgo/2.7.6");
+        std::fs::create_dir_all(&directory).unwrap();
+        let home = source.join("data/sftpgo/users/migration-fixture");
+        let shared = source.join("data/sftpgo/shared");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(home.join("kept.txt"), "user contents").unwrap();
+        std::fs::write(shared.join("shared.txt"), "shared contents").unwrap();
+        std::fs::write(directory.join("sftpgo.json"), serde_json::json!({
+            "data_provider": {"driver":"sqlite","name":"accounts.db","sql_tables_prefix":"fixture_"}
+        }).to_string()).unwrap();
+        let seed = temp.path().join("accounts.json");
+        std::fs::write(&seed, serde_json::json!({"version":16,
+            "folders":[{"name":"shared","mapped_path":portable_path_text(&shared)}],
+            "groups":[{"name":"fixture-group","user_settings":{"home_dir":portable_path_text(&source.join("data/sftpgo/group/%username%"))}}],
+            "users":[{"username":"migration-fixture","password":"Fixture-Only-Password-123!","status":1,
+                "home_dir":portable_path_text(&home),"permissions":{"/":["*"]},
+                "virtual_folders":[{"name":"shared","mapped_path":portable_path_text(&shared),"virtual_path":"/shared","quota_size":-1,"quota_files":-1}]}]
+        }).to_string()).unwrap();
+        let initialize = |directory: &Path, seed: Option<&Path>| {
+            let mut command = platform::command(&program);
+            command.current_dir(temp.path()).args(["initprovider","--config-dir"]).arg(directory);
+            if let Some(seed) = seed { command.arg("--loaddata-from").arg(seed); }
+            for (key, _) in std::env::vars_os() {
+                if key.to_string_lossy().to_ascii_uppercase().starts_with("SFTPGO_") { command.env_remove(key); }
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        };
+        initialize(&directory, Some(&seed));
+        // 使用官方建库结果核对每张表的所有值，避免只验证路径而遗漏账号权限/凭据。
+        fn snapshot(path: &Path) -> std::collections::BTreeMap<String, (Vec<String>, Vec<Vec<rusqlite::types::Value>>)> {
+            let conn = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            let tables: Vec<String> = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").unwrap()
+                .query_map([], |r|r.get(0)).unwrap().collect::<std::result::Result<_,_>>().unwrap();
+            tables.into_iter().map(|name| {
+                let mut statement = conn.prepare(&format!("SELECT * FROM \"{}\" ORDER BY rowid",name.replace('"',"\"\""))).unwrap();
+                let columns = statement.column_names().iter().map(|s| s.to_string()).collect::<Vec<_>>();
+                let rows = statement.query_map([], |row| (0..columns.len()).map(|i|row.get(i)).collect::<rusqlite::Result<Vec<_>>>()).unwrap()
+                    .collect::<std::result::Result<Vec<_>,_>>().unwrap();
+                (name, (columns, rows))
+            }).collect()
+        }
+        let database = directory.join("accounts.db");
+        let mut expected = snapshot(&database);
+        let rebase = DataPathRebase::new(&source, &target).unwrap();
+        for (name, field) in [("fixture_users","home_dir"),("fixture_folders","path"),("fixture_groups","user_settings")] {
+            let (columns, rows) = expected.get_mut(name).expect("official provider table");
+            assert!(!rows.is_empty(), "native import must create {name}");
+            let index = columns.iter().position(|c|c==field).unwrap();
+            for row in rows {
+                use rusqlite::types::Value;
+                let mut value = match &row[index] {
+                    Value::Text(text) => text.clone(),
+                    Value::Blob(bytes) => String::from_utf8(bytes.clone()).unwrap(),
+                    _ => panic!("physical path must be text or UTF-8 bytes in {name}"),
+                };
+                if field == "user_settings" {
+                    let mut settings: serde_json::Value = serde_json::from_str(&value).unwrap();
+                    settings["home_dir"] = rebase.path(settings["home_dir"].as_str().unwrap()).into();
+                    value = settings.to_string();
+                } else { value = rebase.path(&value); }
+                row[index] = if matches!(row[index], Value::Blob(_)) { Value::Blob(value.into_bytes()) } else { Value::Text(value) };
+            }
+        }
+        let before = std::fs::read(&database).unwrap();
+        copy_data_dir(&source, &target).unwrap();
+        assert_eq!(std::fs::read(&database).unwrap(), before);
+        let migrated = target.join("etc/sftpgo/2.7.6/accounts.db");
+        assert_eq!(snapshot(&migrated), expected);
+        // 原路径消失后让官方程序再次打开目标库，防止目标依然依赖源目录。
+        std::fs::rename(&source, temp.path().join("retained source")).unwrap();
+        initialize(&target.join("etc/sftpgo/2.7.6"), None);
+        assert_eq!(snapshot(&migrated), expected);
+        assert_eq!(std::fs::read_to_string(target.join("data/sftpgo/users/migration-fixture/kept.txt")).unwrap(), "user contents");
+        assert_eq!(std::fs::read_to_string(target.join("data/sftpgo/shared/shared.txt")).unwrap(), "shared contents");
     }
 
     #[test]

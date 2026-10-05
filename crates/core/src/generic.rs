@@ -364,9 +364,10 @@ pub(crate) fn sftpgo_migration_cwd(
 }
 
 pub(crate) struct SftpgoMigration {
-    pub cwd: PathBuf,
+    pub cwd: Option<PathBuf>,
     pub resources: Vec<crate::configpaths::ResourcePath>,
     pub files: Vec<(PathBuf, Vec<u8>)>,
+    pub provider: Option<crate::sftpgo_data::Provider>,
 }
 
 pub(crate) fn sftpgo_migrate_environment(
@@ -377,6 +378,26 @@ pub(crate) fn sftpgo_migrate_environment(
     json: bool,
     rebase: &crate::paths::DataPathRebase,
 ) -> Result<SftpgoMigration> {
+    // 尚无安装记录的历史配置仍需迁移账号库；相对 connection_string 不能猜工作目录。
+    if crate::ops::installed_by_choice(store, "sftpgo").is_none()
+        && !directory.join("env.d").is_dir()
+    {
+        let environment = sftpgo_inherited_environment();
+        let config = crate::configpaths::sftpgo_config(content, json)?;
+        let (updated, resources) =
+            crate::configpaths::sftpgo_environment_paths(&config, &environment, rebase)?;
+        if updated.iter().any(|(key, value)| environment.get(key) != Some(value)) {
+            return Err(AppError::new("DATA_DIR_ENV_OVERRIDE",
+                "系统环境变量仍引用旧数据目录，未切换数据目录")
+                .with_hint("请先检查 SFTPGo 系统环境变量；原账号库和文件已保留。"));
+        }
+        return Ok(SftpgoMigration {
+            cwd: None,
+            resources,
+            files: Vec::new(),
+            provider: crate::sftpgo_data::provider(content, json, &environment, &directory, None)?,
+        });
+    }
     let mut r = resolve_with_sftpgo_directory(store, paths, "sftpgo", Some(directory.clone()))?;
     if !managed_sftpgo(&r.entry, &r.spec) {
         return Err(AppError::new(
@@ -398,6 +419,7 @@ pub(crate) fn sftpgo_migrate_environment(
         .unwrap_or_else(|| r.root.clone());
     let cwd =
         std::path::absolute(cwd).map_err(|error| AppError::io("解析 SFTPGo 工作目录", error))?;
+    let provider = crate::sftpgo_data::provider(content, json, &effective, &directory, Some(&cwd))?;
     let snapshot_path = PathBuf::from(&r.inst.install_path).join(".niceenv-package.json");
     let original_snapshot = match std::fs::read(&snapshot_path) {
         Ok(bytes) => Some(bytes),
@@ -481,9 +503,10 @@ pub(crate) fn sftpgo_migrate_environment(
         output.push((snapshot_path, original));
     }
     Ok(SftpgoMigration {
-        cwd,
+        cwd: Some(cwd),
         resources,
         files: output,
+        provider,
     })
 }
 
@@ -1004,9 +1027,13 @@ fn sftpgo_parse_env_with(
     Ok(environment)
 }
 
+fn sftpgo_inherited_environment() -> std::collections::HashMap<String, String> {
+    std::env::vars_os().filter_map(|(key, value)|
+        Some((sftpgo_env_key(&key.into_string().ok()?), value.into_string().ok()?))).collect()
+}
+
 fn sftpgo_process_env(r: &Resolved) -> Result<std::collections::HashMap<String, String>> {
-    let mut environment: std::collections::HashMap<_, _> = std::env::vars_os().filter_map(|(key, value)|
-        Some((sftpgo_env_key(&key.into_string().ok()?), value.into_string().ok()?))).collect();
+    let mut environment = sftpgo_inherited_environment();
     let mut names = std::collections::HashSet::new();
     for (key, value) in r.spec.env.iter().flatten() {
         let key = sftpgo_env_key(key);
@@ -3527,7 +3554,12 @@ mod startup_tests {
             let directory = state.paths.etc_dir("sftpgo", version);
             std::fs::create_dir(directory.join("resources")).unwrap();
             std::fs::write(directory.join("resources/master.key"), &secret).unwrap();
-            std::fs::write(directory.join("sftpgo.json"), r#"{"data_provider":{"driver":"bolt","name":"accounts.db"},"kms":{"secrets":{"master_key_path":"master.key"}}}"#).unwrap();
+            // 目录选择使用的伪 Bolt 字节不能充当可迁移账号库，迁移阶段使用有效 SQLite。
+            let conn = rusqlite::Connection::open(directory.join("migration.sqlite")).unwrap();
+            conn.execute_batch("CREATE TABLE users(id INTEGER PRIMARY KEY,home_dir TEXT);
+                CREATE TABLE folders(id INTEGER PRIMARY KEY,path TEXT);").unwrap();
+            drop(conn);
+            std::fs::write(directory.join("sftpgo.json"), r#"{"data_provider":{"driver":"sqlite","name":"migration.sqlite"},"kms":{"secrets":{"master_key_path":"master.key"}}}"#).unwrap();
         }
         let migration = tempfile::tempdir().unwrap();
         let target = migration.path().join("migration destination");
@@ -4314,6 +4346,39 @@ mod startup_tests {
                 .0
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn sftpgo_account_migration_uses_run_environment_even_without_env_directory() {
+        let (_temp, state, mut r) = fixture("sftpgo");
+        let destination = tempfile::tempdir().unwrap();
+        let target = destination.path().join("new data");
+        std::fs::create_dir_all(&r.data).unwrap();
+        let database = r.data.join("accounts.db");
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        conn.execute_batch("CREATE TABLE run_users(id INTEGER PRIMARY KEY,home_dir TEXT);
+            CREATE TABLE run_folders(id INTEGER PRIMARY KEY,path TEXT);
+            CREATE TABLE run_groups(id INTEGER PRIMARY KEY,user_settings TEXT);").unwrap();
+        let old_home = crate::paths::portable_path_text(&r.data.join("home"));
+        conn.execute("INSERT INTO run_users VALUES(1,?1)", [&old_home]).unwrap();
+        drop(conn);
+        let env = r.entry.run.as_mut().unwrap().env.as_mut().unwrap();
+        env.insert("SFTPGO_DATA_PROVIDER__DRIVER".into(), "sqlite".into());
+        env.insert("SFTPGO_DATA_PROVIDER__NAME".into(), "{data}/accounts.db".into());
+        env.insert("SFTPGO_DATA_PROVIDER__SQL_TABLES_PREFIX".into(), "run_".into());
+        std::fs::write(PathBuf::from(&r.inst.install_path).join(".niceenv-package.json"),
+            serde_json::to_vec(&r.entry).unwrap()).unwrap();
+        std::fs::write(r.etc.join("sftpgo.json"),
+            r#"{"data_provider":{"driver":"mysql","name":"unused","sql_tables_prefix":"wrong_"}}"#).unwrap();
+        assert!(!r.etc.join("env.d").exists());
+        let before = std::fs::read(&database).unwrap();
+        crate::paths::copy_data_dir(&state.paths.base, &target).unwrap();
+        assert_eq!(std::fs::read(&database).unwrap(), before);
+        let rebase = crate::paths::DataPathRebase::new(&state.paths.base, &target).unwrap();
+        let migrated = rebase.path(&crate::paths::portable_path_text(&database));
+        let conn = rusqlite::Connection::open(migrated).unwrap();
+        assert_eq!(conn.query_row("SELECT home_dir FROM run_users", [], |r|r.get::<_,String>(0)).unwrap(),
+            rebase.path(&old_home));
     }
 
     #[test]

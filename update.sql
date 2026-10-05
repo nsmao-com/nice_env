@@ -182,3 +182,18 @@
 -- 仅上一条确实删除记录时执行；其他栈的启动选择保持不变。
 -- UPDATE settings SET value='' WHERE key='startStackOnLaunch' AND value=:stack_id;
 -- COMMIT;
+
+-- SFTPGo 数据目录迁移：修正账号库内的物理用户目录、虚拟文件夹映射和用户组主目录。
+-- 已用官方 SFTPGo 2.7.6 初始化的 SQLite schema 33 列出全部表，并确认 users、
+-- folders、groups 的字段及索引。无表结构变更，不需要手工执行，不操作源账号库。
+-- 以下语句仅在迁移暂存副本执行，先 PRAGMA quick_check、枚举表和检查字段；
+-- 配置了 sql_tables_prefix 时对完整表名进行双引号转义后引用。
+-- BEGIN IMMEDIATE;
+-- UPDATE users SET home_dir=:after WHERE id=:id AND home_dir=:before;
+-- UPDATE folders SET path=:after WHERE id=:id AND path=:before;
+-- UPDATE groups SET user_settings=:after WHERE id=:id AND user_settings=:before;
+-- :after 仅替换迁移源目录边界内的物理路径；user_settings 仅修改 JSON home_dir。
+-- 保留字段原有的 TEXT/BLOB 存储形式，兼容官方程序写入的二进制 JSON。
+-- 密码、权限、远程文件系统前缀、虚拟路径、配额和计数不修改。
+-- 各行必须匹配一条；再次 PRAGMA quick_check 后 COMMIT，否则回滚并取消目录切换。
+-- 已迁移的值不会再次替换。外部账号库和当前不支持改写的 Bolt 库在切换前返回错误。

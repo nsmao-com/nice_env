@@ -55,6 +55,7 @@ pub mod proxy;
 pub mod scanner;
 pub mod serde_proxy;
 pub mod services;
+mod sftpgo_data;
 pub mod sites;
 pub mod sitecors;
 pub mod siteaccess;

@@ -1,6 +1,18 @@
 # NiceEnv 质量复查记录
 
-本记录用于跟踪 Windows/macOS、路径与数据目录、上游版本和安装状态的复查。**整体复查未完成**；代码编译、单元测试、下载包核验和原生服务运行是不同的验收层级，不能相互替代。
+本记录用于跟踪 Windows/macOS、路径与数据目录、上游版本和安装状态的复查。本轮按用户 2026-10-05 的要求进入最终收尾，不再扩大功能范围；以最新收尾记录和对应版本 CI/Release 结果为准。历史条目保留当时状态，未实测的环境不计入通过。
+
+## 2026-10-05：v0.2.312 最终收尾检查
+
+- v0.2.311 的 Windows 核心回归与 Web 检查成功；Linux、macOS Intel/ARM 暴露两个收尾阻塞项，不能将该版本报告为跨平台验证通过。Linux 在相对 `alias-dir/../shared.inc` 上提前返回 `DATA_DIR_PATH_AMBIGUOUS`；macOS 将 `[[:digit:]]` 匹配为空，与原测试的 Linux 预期不一致。
+- Nginx 相对 include 现在只映射主配置目录，再由系统解析原相对片段，避免先拼成旧绝对路径触发无关的父目录保护；保留通配符展开顺序、文件身份、循环和用途冲突检查。相对引用跨出数据目录时仍拒绝迁移并提示改为外部绝对路径。没有放宽通用配置的旧绝对路径保护。
+- 按 [Apple libc glob 源码](https://github.com/apple-oss-distributions/Libc/blob/main/gen/FreeBSD/glob.c) 核对 Darwin 不支持 POSIX 命名字符类的行为，既有测试分别断言 macOS 的空匹配和 Linux 的数字文件匹配；保留范围、否定、隐藏文件与目录边界断言，没有跳过该测试。
+- 本地 `pnpm check` 通过；配置生成及配置编辑器的路径序列化链路复核，界面路径仍使用 `serialize_path` 去除 Windows 扩展前缀。近期提交未发现新增的前端 console/debugger 或 Rust dbg 调试残留；命令行诊断工具及既有测试输出保留。用户原有的 toolbox-tools.tsx、i18n.ts 和未跟踪文件保持原样。
+- v0.2.310 Release 已成功，Windows setup、macOS Intel/ARM DMG 和两个 app 压缩包均已公开。当前用户进程仍为 v0.2.283。本地 3000 端口拒绝连接，未启动 dev，因此本轮没有新增页面实测结果，也未替换用户运行程序。
+
+验收边界：本次收尾不等同于所有第三方套件、任意自定义配置、真实 UNC 共享和用户真实域名的签发/续期均已实测。已有自动回归与原生服务用例按各自覆盖范围计入结果；未使用用户生产服务或账号库进行破坏性验证。没有新增依赖、测试文件或数据库变更，未修改 `update.sql`，未运行本地前端 dev/build。
+
+v0.2.312 本地最终结果：core 758 passed / 0 failed / 59 ignored，platform 15 passed / 0 failed；同一源码的真实 Nginx/Apache 配置与迁移用例 1 passed / 0 failed / 0 ignored。8 个版本文件、UI 版本来源、第三方锁定依赖未变、改动行格式与 diff 检查通过。定向 cargo clean 清理 21 个文件、103.2 MiB；本轮没有下载新运行时。跨平台结果以新 tag 的 CI/Release 为准，不能沿用 v0.2.311 的失败构建作为发布完成依据。
 
 ## 2026-10-05：v0.2.311 Nginx include 上下文与文件身份
 

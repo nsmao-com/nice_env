@@ -1175,6 +1175,36 @@ impl NginxMigration<'_> {
                     "无法确认 Nginx include 或凭据所用的主配置目录，未切换数据目录",
                 )
             })?;
+            if include {
+                // 相对 include 的目录基准随主配置一起迁移。仅映射基准，
+                // 不把带 ../ 的相对片段拼成旧绝对路径再交给路径替换器。
+                let mut depth = base.strip_prefix(self.root).unwrap().components().count();
+                for component in path.components() {
+                    match component {
+                        Component::Normal(_) => depth += 1,
+                        Component::CurDir => {}
+                        Component::ParentDir if depth > 0 => depth -= 1,
+                        _ => {
+                            return Err(crate::error::AppError::new(
+                                "DATA_DIR_PATH_AMBIGUOUS",
+                                "Nginx 相对 include 跨出数据目录，无法保证迁移后仍指向原文件",
+                            )
+                            .with_hint("请将该外部 include 改为完整绝对路径后再迁移。原目录和文件均已保留。"));
+                        }
+                    }
+                }
+                let base = portable_path_text(base);
+                if cfg!(unix) && (base.contains(['*', '?', '[']) || value.contains(['*', '?', '[']))
+                {
+                    let suffix = if value.contains(['*', '?', '[']) {
+                        value.to_string()
+                    } else {
+                        escaped_posix_glob_text(value)
+                    };
+                    return Ok(PathBuf::from(escaped_posix_glob_text(&base)).join(suffix));
+                }
+                return Ok(PathBuf::from(base).join(path));
+            }
             self.source
                 .join(base.strip_prefix(self.root).unwrap())
                 .join(path)
@@ -3671,7 +3701,15 @@ mod tests {
             assert!(!matches.contains(&glob_dir.join(".hidden.conf")));
             for (mask, names) in [
                 ("[a-z].conf", vec!["a.conf", "b.conf"]),
-                ("[[:digit:]].conf", vec!["1.conf"]),
+                // Darwin libc 的 glob 不实现 POSIX 命名字符类；与其原生 Nginx 保持一致。
+                (
+                    "[[:digit:]].conf",
+                    if cfg!(target_os = "macos") {
+                        vec![]
+                    } else {
+                        vec!["1.conf"]
+                    },
+                ),
                 ("[!ab].conf", vec!["1.conf"]),
             ] {
                 let mut matched =
@@ -3683,7 +3721,8 @@ mod tests {
                     names
                         .into_iter()
                         .map(|name| glob_dir.join(name))
-                        .collect::<Vec<_>>()
+                        .collect::<Vec<_>>(),
+                    "native glob pattern: {mask}"
                 );
             }
         }
@@ -3800,6 +3839,7 @@ mod tests {
                 "include alias-dir/../nginx.conf;",
                 "DATA_DIR_CONFIG_INCLUDE",
             ),
+            ("include ../../../external.conf;", "DATA_DIR_PATH_AMBIGUOUS"),
         ] {
             std::fs::write(paths.nginx_conf(), content).unwrap();
             assert_eq!(copy_data_dir(&source, &target).unwrap_err().code, expected);

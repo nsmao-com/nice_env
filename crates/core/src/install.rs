@@ -70,6 +70,11 @@ fn upgrade_legacy_run(mut entry: crate::model::PackageManifestEntry) -> crate::m
         }
         return entry;
     }
+    // 以下修复来自 Windows 历史清单。按实际程序入口判断，避免在 macOS
+    // 自定义模块上注入 .exe/.bat；也允许在别的平台读取 Windows 安装快照。
+    if !entry.entry.ends_with(".exe") && !entry.entry.ends_with(".bat") {
+        return entry;
+    }
     if entry.id == "mariadb" {
         let bundled: crate::model::Manifest = serde_json::from_str(include_str!("../../../manifest/packages.win.json")).expect("内置清单合法");
         if let Some(current) = bundled.packages.into_iter().find(|p| p.id == "mariadb").and_then(|p| p.run) {
@@ -119,9 +124,11 @@ fn upgrade_legacy_run(mut entry: crate::model::PackageManifestEntry) -> crate::m
         if entry.run.as_ref().is_some_and(|run| serde_json::to_value(run).ok() == serde_json::to_value(&legacy).ok()) {
             let bundled: crate::model::Manifest = serde_json::from_str(include_str!("../../../manifest/packages.win.json"))
                 .expect("内置清单 JSON 必须合法");
-            entry.run = bundled.packages.into_iter()
+            if let Some(current) = bundled.packages.into_iter()
                 .find(|candidate| candidate.id == "rabbitmq" && same_version(&candidate.version, &entry.version))
-                .and_then(|candidate| candidate.run);
+                .and_then(|candidate| candidate.run) {
+                entry.run = Some(current);
+            }
         }
         return entry;
     }
@@ -2038,6 +2045,9 @@ mod tests {
         let installed = install_fixture(&state, "rabbitmq", &legacy.version);
         let snapshot = Path::new(&installed.install_path).join(".niceenv-package.json");
         let raw = serde_json::to_vec(&legacy).unwrap(); std::fs::write(&snapshot, &raw).unwrap();
+        let mut unknown_version = legacy.clone();
+        unknown_version.version = "99.0.0".into();
+        assert_eq!(serde_json::to_value(upgrade_legacy_run(unknown_version.clone())).unwrap(), serde_json::to_value(unknown_version).unwrap());
         let upgraded = state.installer.installed_entry(&installed);
         assert_eq!(serde_json::to_value(upgraded.run.unwrap()).unwrap(), serde_json::to_value(&expected).unwrap());
         assert_eq!(std::fs::read(&snapshot).unwrap(), raw);
@@ -2052,6 +2062,31 @@ mod tests {
             std::fs::write(&snapshot, serde_json::to_vec(&custom).unwrap()).unwrap();
             assert_eq!(serde_json::to_value(state.installer.installed_entry(&installed)).unwrap(), serde_json::to_value(custom).unwrap());
         }
+    }
+
+    #[test]
+    fn windows_legacy_run_repairs_do_not_modify_native_macos_entries() {
+        let bundled: crate::model::Manifest = serde_json::from_str(include_str!("../../../manifest/packages.win.json")).unwrap();
+        let mut rabbitmq = bundled.packages.iter().find(|entry| entry.id == "rabbitmq").unwrap().clone();
+        rabbitmq.os = vec!["macos".into()];
+        rabbitmq.entry = format!("rabbitmq_server-{}/sbin/rabbitmq-server", rabbitmq.version);
+        rabbitmq.url = format!("https://github.com/rabbitmq/rabbitmq-server/releases/download/v{0}/rabbitmq-server-generic-unix-{0}.tar.xz", rabbitmq.version);
+        rabbitmq.run = Some(serde_json::from_value(serde_json::json!({
+            "args": [], "health": "tcp", "healthTimeoutSec": 40,
+            "requires": ["erlang"],
+            "env": { "RABBITMQ_BASE": "{data}", "RABBITMQ_NODE_PORT": "{port}" }
+        })).unwrap());
+        assert_eq!(serde_json::to_value(upgrade_legacy_run(rabbitmq.clone())).unwrap(), serde_json::to_value(rabbitmq).unwrap());
+
+        let mut consul = bundled.packages.into_iter().find(|entry| entry.id == "consul").unwrap();
+        consul.os = vec!["macos".into()];
+        consul.entry = "consul".into();
+        consul.url = format!("https://releases.hashicorp.com/consul/{0}/consul_{0}_darwin_arm64.zip", consul.version);
+        consul.run = Some(serde_json::from_value(serde_json::json!({
+            "args": ["agent", "-dev", "-client", "127.0.0.1", "-http-port", "{port}"],
+            "health": "tcp", "healthTimeoutSec": 20
+        })).unwrap());
+        assert_eq!(serde_json::to_value(upgrade_legacy_run(consul.clone())).unwrap(), serde_json::to_value(consul).unwrap());
     }
 
     #[tokio::test]

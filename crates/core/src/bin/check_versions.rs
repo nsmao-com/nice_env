@@ -21,6 +21,16 @@ fn only_options(args: &[String], manifest_arg: Option<usize>) -> bool {
     })
 }
 
+async fn probe_download(client: &reqwest::Client, url: &str) -> Result<u16, String> {
+    let response = client.get(url).header("Range", "bytes=0-64")
+        .send().await.map_err(|error| error.to_string())?;
+    if response.status().is_success() {
+        Ok(response.status().as_u16())
+    } else {
+        Err(format!("HTTP {}", response.status()))
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let base = PathBuf::from(".versions-home");
@@ -154,35 +164,42 @@ async fn main() {
                     fail += 1;
                     continue;
                 }
-                // 抽查实际安装候选地址可达（直连失败时会继续尝试 GitHub 加速源）。
+                // 与安装流程一样，逐个候选地址尝试系统代理和直连；不读取完整安装包。
                 let client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(25))
                     .build()
                     .unwrap();
+                let direct = reqwest::Client::builder()
+                    .no_proxy()
+                    .timeout(std::time::Duration::from_secs(25))
+                    .build()
+                    .unwrap();
                 let candidates = installer.candidate_urls_for(&synthesized, &store);
-                let mut reachable: Option<(String, u16)> = None;
-                let mut last_error = String::new();
+                let mut reachable = None;
+                let mut errors = Vec::new();
                 for candidate in candidates {
-                    match client
-                        .get(&candidate)
-                        .header("Range", "bytes=0-64")
-                        .send()
-                        .await
-                    {
-                        Ok(r) if r.status().is_success() || r.status().is_redirection() => {
-                            reachable = Some((candidate, r.status().as_u16()));
+                    match probe_download(&client, &candidate).await {
+                        Ok(status) => {
+                            reachable = Some((candidate, status, "系统网络"));
                             break;
                         }
-                        Ok(r) => last_error = format!("HTTP {}", r.status()),
-                        Err(e) => last_error = e.to_string(),
+                        Err(proxy_error) => match probe_download(&direct, &candidate).await {
+                            Ok(status) => {
+                                reachable = Some((candidate, status, "直连回退"));
+                                break;
+                            }
+                            Err(direct_error) => errors.push(format!(
+                                "{candidate}：系统网络失败（{proxy_error}）；直连失败（{direct_error}）"
+                            )),
+                        },
                     }
                 }
-                if let Some((url, status)) = reachable {
-                    let source = if url == newest.url { "直连" } else { "镜像回退" };
-                    println!("       ✓ 最新版本下载地址可达（{source}，HTTP {status}）");
+                if let Some((url, status, transport)) = reachable {
+                    let source = if url == newest.url { "上游" } else { "镜像回退" };
+                    println!("       ✓ 最新版本下载地址可达（{source}，{transport}，HTTP {status}）");
                     pass += 1;
                 } else {
-                    println!("       ✗ 最新版本候选地址均不可达：{last_error}");
+                    println!("       ✗ 最新版本候选地址均不可达：{}", errors.join("；"));
                     fail += 1;
                 }
             }

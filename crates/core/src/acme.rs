@@ -1158,6 +1158,17 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "registers an isolated Let's Encrypt staging account; no domains, DNS credentials or certificate orders"]
+    fn letsencrypt_staging_account_registration_and_reuse() {
+        let (registered, pem) = AcmeClient::connect("letsencrypt-staging", None, "", None).unwrap();
+        assert!(registered.kid.starts_with("https://acme-staging-v02.api.letsencrypt.org/acme/acct/"));
+        let pem = pem.expect("new account key");
+        let (reused, fresh_pem) = AcmeClient::connect("letsencrypt-staging", Some(&pem), "", None).unwrap();
+        assert_eq!(reused.kid, registered.kid);
+        assert!(fresh_pem.is_none());
+    }
+
+    #[test]
     fn hmac_sha256_matches_rfc_vector() {
         // RFC 4231 / 著名测试向量
         assert_eq!(

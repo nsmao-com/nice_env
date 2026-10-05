@@ -678,9 +678,13 @@ pub(crate) fn local_output_resource(path: &str) -> Result<String> {
         }
     };
     for part in suffix.into_iter().rev() { resolved.push(part); }
-    let mut path = resolved.to_string_lossy().replace('\\', "/");
-    if let Some(unc) = path.strip_prefix("//?/UNC/") { path = format!("//{unc}"); }
-    else if let Some(plain) = path.strip_prefix("//?/") { path = plain.into(); }
+    let mut path = resolved.to_string_lossy().into_owned();
+    if cfg!(windows) {
+        path = path.replace('\\', "/");
+        if let Some(unc) = path.strip_prefix("//?/UNC/") { path = format!("//{unc}"); }
+        else if let Some(plain) = path.strip_prefix("//?/") { path = plain.into(); }
+    }
+    // macOS 常见卷不区分大小写，资源互斥键保守合并大小写别名；实际写入路径保持原样。
     if cfg!(any(windows, target_os = "macos")) { path = path.to_lowercase(); }
     Ok(format!("file:{path}"))
 }
@@ -721,8 +725,10 @@ fn local_pair_with_publish(cert: &str, key: &str, cert_pem: &str, key_pem: &str,
     use std::io::{Read, Write};
     let _files = crate::tls::CERT_FILES.lock();
     let paths = [local_path(cert)?, local_path(key)?];
-    let comparable = |p: &std::path::Path| if cfg!(windows) { p.to_string_lossy().to_lowercase() } else { p.to_string_lossy().into_owned() };
-    if comparable(&paths[0]) == comparable(&paths[1]) { return Err(AppError::new("DEPLOY_PATH", "证书和私钥不能指向同一文件")); }
+    // 与部署互斥使用同一资源身份；macOS 常见卷上的大小写别名也不能一边写证书、一边写私钥。
+    if local_output_resource(cert)? == local_output_resource(key)? {
+        return Err(AppError::new("DEPLOY_PATH", "证书和私钥不能指向同一文件"));
+    }
     let mut previous = Vec::new(); let mut pending = Vec::new();
     for (path, content) in paths.iter().zip([cert_pem, key_pem]) {
         let meta = match std::fs::symlink_metadata(path) {
@@ -1463,6 +1469,24 @@ mod tests {
                 std::fs::remove_file(&cert).unwrap(); std::fs::remove_file(&key).unwrap();
             }
             assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn local_pair_rejects_case_aliases_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cert = dir.path().join("Chain.pem");
+        let key = dir.path().join("chain.pem");
+        for existing in [false, true] {
+            if existing { std::fs::write(&cert, "keep existing certificate").unwrap(); }
+            let error = local_pair(cert.to_str().unwrap(), key.to_str().unwrap(), "new-cert", "new-key").unwrap_err();
+            assert_eq!(error.code, "DEPLOY_PATH");
+            if existing {
+                assert_eq!(std::fs::read_to_string(&cert).unwrap(), "keep existing certificate");
+            } else {
+                assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+            }
         }
     }
 

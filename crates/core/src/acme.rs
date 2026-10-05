@@ -249,14 +249,27 @@ impl AcmeClient {
             payload["externalAccountBinding"] =
                 eab_jws(kid, hmac_key, &account_url, &client.account)?;
         }
-        let resp = client.jws_post_new(&account_url, &payload)?;
-        let status = resp.status();
-        let location = resp
-            .headers()
-            .get("location")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
-        let body = resp.text().unwrap_or_default();
+        // 某些系统代理会保留 2xx 状态和响应体，却吞掉账号资源的 Location 头。
+        // newAccount 对同一 JWK 是幂等的，切换备用连接重试可以避免把代理问题
+        // 误报成账号注册失败；备用连接用尽后再给出明确的中文错误。
+        let (status, location, body) = loop {
+            let resp = client.jws_post_new(&account_url, &payload)?;
+            let status = resp.status();
+            let location = resp
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let body = resp.text().unwrap_or_default();
+            if status.is_success() && location.is_none() {
+                if let Some(alternate_http) = client.direct_http.take() {
+                    client.http = alternate_http;
+                    client.nonce = None;
+                    continue;
+                }
+            }
+            break (status, location, body);
+        };
         if !status.is_success() {
             let mut error = acme_error(&body, "注册 ACME 账号");
             if error.hint.is_none() {

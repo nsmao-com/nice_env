@@ -2108,6 +2108,18 @@ mod tests {
         // htpasswd 的第二个冒号开始备注；Windows 盘符不能作为 PLAIN 密码字面值。
         let password_bytes = format!("audit:{{PLAIN}}audit-password:{literal}\n");
         std::fs::write(&password_file, &password_bytes).unwrap();
+        let map_dir = paths.etc().join("nginx/map-values");
+        std::fs::create_dir_all(&map_dir).unwrap();
+        let nested_map = root.join("conf/map-extra.inc");
+        std::fs::write(&nested_map, format!("default \"{literal}\";\n")).unwrap();
+        std::fs::write(
+            map_dir.join("main.conf"),
+            format!(
+                "root \"{literal}\";\ninclude \"{}\";\n",
+                crate::paths::portable_path_text(&nested_map)
+            ),
+        )
+        .unwrap();
         let site = paths.base.join("www");
         std::fs::create_dir_all(&site).unwrap();
         std::fs::write(site.join("index.html"), "migrated static document").unwrap();
@@ -2124,12 +2136,14 @@ error_log "{old}/logs/nginx/error.log";
 events {{}}
 http {{
     access_log off;
+    map $host $mapped {{ include map-values/*.conf; }}
     server {{
         listen 127.0.0.1:{nginx_port};
         root "{old}/www";
         set $secret "{literal}";
         add_header X-Literal "{literal}";
         add_header X-Secret $secret;
+        add_header X-Mapped $mapped;
         location /literal {{ return 200 "{literal}"; }}
         location /protected {{
             auth_basic "migration audit";
@@ -2286,6 +2300,23 @@ Header always set X-Secret "%{{APP_SECRET}}e"
                 literal
             );
             assert_eq!(response.text().unwrap(), expected);
+        }
+        for host in ["root", "another.example.test"] {
+            let response = client
+                .get(format!("http://127.0.0.1:{nginx_port}/index.html"))
+                .header("Host", host)
+                .send()
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(
+                response
+                    .headers()
+                    .get("x-mapped")
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                literal
+            );
         }
         let conf = migrated.nginx_conf();
         let protected_url = format!("http://127.0.0.1:{nginx_port}/protected");

@@ -9,6 +9,106 @@ use std::os::windows::process::CommandExt;
 
 pub mod pathenv;
 
+/// 与 Nginx include 一致的系统 glob：Unix 使用 glob(3)，Windows 使用 FindFirstFileW。
+/// 只展开名称，不读取或修改匹配文件；无匹配不是错误。
+pub fn config_glob(pattern: &str) -> std::io::Result<Vec<std::path::PathBuf>> {
+    use std::io;
+    #[cfg(unix)]
+    {
+        use std::{
+            ffi::{CStr, CString, OsStr},
+            os::unix::ffi::OsStrExt,
+            path::PathBuf,
+        };
+        let pattern = CString::new(pattern)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "glob contains NUL"))?;
+        struct Glob(libc::glob_t);
+        impl Drop for Glob {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::globfree(&mut self.0);
+                }
+            }
+        }
+        // SAFETY: glob_t 由 glob 初始化；guard 在所有返回路径释放系统分配的名称。
+        let mut result = Glob(unsafe { std::mem::zeroed() });
+        let status = unsafe { libc::glob(pattern.as_ptr(), 0, None, &mut result.0) };
+        if status == libc::GLOB_NOMATCH {
+            return Ok(Vec::new());
+        }
+        if status != 0 {
+            return Err(io::Error::other(format!("glob failed ({status})")));
+        }
+        let mut paths = Vec::new();
+        for index in 0..result.0.gl_pathc {
+            // SAFETY: glob 返回 gl_pathc 个以 NUL 结尾的文件名。
+            let name = unsafe { CStr::from_ptr(*result.0.gl_pathv.add(index as usize)) };
+            paths.push(PathBuf::from(OsStr::from_bytes(name.to_bytes())));
+        }
+        Ok(paths)
+    }
+    #[cfg(windows)]
+    {
+        use std::{ffi::OsString, os::windows::ffi::OsStringExt, path::Path};
+        use windows_sys::Win32::{
+            Foundation::{
+                ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES, ERROR_PATH_NOT_FOUND, HANDLE,
+                INVALID_HANDLE_VALUE,
+            },
+            Storage::FileSystem::{FindClose, FindFirstFileW, FindNextFileW, WIN32_FIND_DATAW},
+        };
+        if pattern.contains('\0') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "glob contains NUL",
+            ));
+        }
+        let wide: Vec<u16> = pattern.encode_utf16().chain(Some(0)).collect();
+        let mut data: WIN32_FIND_DATAW = unsafe { std::mem::zeroed() };
+        let handle = unsafe { FindFirstFileW(wide.as_ptr(), &mut data) };
+        if handle == INVALID_HANDLE_VALUE {
+            let error = io::Error::last_os_error();
+            return if matches!(
+                error.raw_os_error().map(|code| code as u32),
+                Some(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND)
+            ) {
+                Ok(Vec::new())
+            } else {
+                Err(error)
+            };
+        }
+        struct Find(HANDLE);
+        impl Drop for Find {
+            fn drop(&mut self) {
+                unsafe {
+                    FindClose(self.0);
+                }
+            }
+        }
+        let handle = Find(handle);
+        let parent = Path::new(pattern)
+            .parent()
+            .unwrap_or_else(|| Path::new("."));
+        let mut paths = Vec::new();
+        loop {
+            let length = data
+                .cFileName
+                .iter()
+                .position(|unit| *unit == 0)
+                .unwrap_or(data.cFileName.len());
+            paths.push(parent.join(OsString::from_wide(&data.cFileName[..length])));
+            if unsafe { FindNextFileW(handle.0, &mut data) } == 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) {
+                    break;
+                }
+                return Err(error);
+            }
+        }
+        Ok(paths)
+    }
+}
+
 /// 本机控制通道凭据仅允许文件所有者与系统读取；写入凭据前调用。
 pub fn restrict_file_to_owner(path: &std::path::Path) -> Result<()> {
     #[cfg(unix)]

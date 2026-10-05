@@ -2,6 +2,18 @@
 
 本记录用于跟踪 Windows/macOS、路径与数据目录、上游版本和安装状态的复查。**整体复查未完成**；代码编译、单元测试、下载包核验和原生服务运行是不同的验收层级，不能相互替代。
 
+## 2026-10-05：v0.2.311 Nginx include 上下文与文件身份
+
+- 在既有目录迁移用例中复现：`map` 的外部 include 被独立当作普通配置处理，名为 `root` 的映射键引发错误替换；初次断言失败为多改写一个文件（5 vs 4）。迁移现在递归传递 map/geo/split_clients/types 数据上下文，任意后缀的 include（含 runtime 下的 `.inc`）均按实际用途规划，只改路径参数，保留业务映射值。重复引用保留上下文，联合检查跨文件变量依赖。
+- 使用 Unix `glob(3)`、Windows `FindFirstFileW` / `FindNextFileW` 代替自造通配符正则。glob 前保留 `../`，匹配后再 canonicalize 文件身份，避免不同 `./`、`../` 或短路径写法绕过循环/共享文件内容冲突检查。沿用完整源目录映射后再定位暂存副本，保留 macOS `/var` / `/private/var` 等合法父目录别名。
+- 外部 include 需要修改、外部 include/凭据实际指向旧数据目录、配置/资源混用、同一文件在不同上下文要求不同字节时拒绝迁移，保持源文件和空目标不变。限制 include 深度、单文件与累计大小。没有把外部配置复制进托管目录或修改外部文件。
+- 扩展既有原生 Nginx/Apache 验证：map 中的通配符 include、嵌套 runtime `.inc`、两个 Host 的映射响应、凭据 401/200、旧目录改名后静态访问、重载和停止。复用已有官方程序，无新下载。Windows 定向迁移用例 3 passed；最后一次别名修正与版本同步后，完整回归 core 758 passed / 0 failed / 59 ignored、platform 15 passed / 0 failed，同一源码的原生用例再次 1 passed / 0 failed / 0 ignored。
+- 重新核实用户正在运行 `D:/NiceEnv/niceservbay.exe` v0.2.283。源码已固定 ACME JWS Content-Type 并提供对应中文错误；此前 Let's Encrypt staging 注册与账号复用真实验证已通过。v0.2.309 Release 成功，Windows setup、macOS Intel/ARM DMG 和两个 app 压缩包均已公开。v0.2.310 main/tag CI 与三个平台运行时成功，检查时 Windows 安装包仍在构建；没有更换用户当前程序。
+
+本批未新增测试文件或依赖包，仅开启既有 windows-sys 的 FileSystem 功能；无数据库变更，未修改 `update.sql`，未运行本地前端 dev/build。Unix 原生 glob、符号链接与父目录别名用例需由 macOS CI 执行。Apache/其余服务资源字节保护、动态路径、UNC 真实共享、桌面交互与真实域名签发/续期仍待继续检查，整体目标保持进行中。
+
+8 个版本文件同步为 0.2.311；设置页、菜单与预览仍从 package.json 读取版本。无第三方锁定依赖变动，改动行格式、diff 检查通过。定向 `cargo clean -p nsb-core -p platform` 清理 56 个文件、303.8 MiB；未删除已被拒绝清理的下载目录或用户数据。
+
 ## 2026-10-05：v0.2.310 Nginx 凭据文件迁移保护
 
 - 在既有迁移用例中复现：`auth_basic_user_file` 引用的文本内容含旧目录时，会被通用字符串替换改写。Nginx 密码、证书、私钥、SSL 口令和票据文件现在加入已有的只读资源规划，再按引用用途保留原始字节；文件名为 `.conf` 也不能当配置改写。SFTPGo 的资源规划与账号库处理仍沿用既有流程。

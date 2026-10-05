@@ -55,8 +55,8 @@ fn quoted_nginx_include(path: &Path, sites_glob: bool) -> String {
 
 #[derive(Debug)]
 pub(crate) struct NginxDirective {
-    start: usize,
-    end: usize,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
     pub(crate) words: Vec<String>,
     pub(crate) children: Vec<NginxDirective>,
 }
@@ -215,7 +215,10 @@ pub(crate) fn nginx_directives(content: &str) -> Result<Vec<NginxDirective>> {
 }
 
 /// 凭据内容不能按配置改写；映射表中的同名键也不是文件指令。
-pub(crate) fn nginx_migration_references(content: &str) -> Result<(Vec<String>, Vec<String>)> {
+pub(crate) fn nginx_migration_references(
+    content: &str,
+    data: bool,
+) -> Result<(Vec<String>, Vec<String>)> {
     fn visit(
         nodes: &[NginxDirective],
         data: bool,
@@ -287,12 +290,7 @@ pub(crate) fn nginx_migration_references(content: &str) -> Result<(Vec<String>, 
     }
     let mut files = Vec::new();
     let mut includes = Vec::new();
-    visit(
-        &nginx_directives(content)?,
-        false,
-        &mut files,
-        &mut includes,
-    );
+    visit(&nginx_directives(content)?, data, &mut files, &mut includes);
     Ok((files, includes))
 }
 
@@ -332,6 +330,14 @@ pub(crate) fn rebase_nginx_config(
     content: &str,
     rebase: &crate::paths::DataPathRebase,
 ) -> Result<String> {
+    rebase_nginx_fragment(content, rebase, false)
+}
+
+pub(crate) fn rebase_nginx_fragment(
+    content: &str,
+    rebase: &crate::paths::DataPathRebase,
+    data: bool,
+) -> Result<String> {
     let mut directive = None;
     let mut argument = 0;
     let mut first_argument = String::new();
@@ -339,7 +345,7 @@ pub(crate) fn rebase_nginx_config(
     let mut variables = Vec::new();
     let mut path_values = Vec::new();
     let mut has_mapping = false;
-    let mut data_blocks = Vec::new();
+    let mut data_blocks = vec![data];
     for token in nginx_tokens(content)? {
         if let Some(delimiter) = token.delimiter {
             if delimiter == b'{' {
@@ -357,7 +363,8 @@ pub(crate) fn rebase_nginx_config(
             continue;
         }
         let Some(name) = directive.as_deref() else {
-            has_mapping |= matches!(token.word.as_str(), "map" | "geo" | "split_clients");
+            has_mapping |= data_blocks.last() != Some(&true)
+                && matches!(token.word.as_str(), "map" | "geo" | "split_clients");
             directive = Some(token.word);
             argument = 0;
             first_argument.clear();
@@ -3078,6 +3085,7 @@ secret: fixture-secret
         assert_eq!(parsed[1].words[1], "a\tb\rc\nd\"e\\f'g");
         let (files, includes) = nginx_migration_references(
             "http { map $host $x { auth_basic_user_file ignored; include values.conf; } server { auth_basic_user_file 'a b.txt'; ssl_password_file off; ssl_certificate_key engine:pkcs11:key; ssl_certificate data:$cert; include sites/*.conf; } }",
+            false,
         ).unwrap();
         assert_eq!(files, ["a b.txt", "off"]);
         assert_eq!(includes, ["values.conf", "sites/*.conf"]);

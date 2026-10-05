@@ -70,9 +70,10 @@ fn upgrade_legacy_run(mut entry: crate::model::PackageManifestEntry) -> crate::m
         }
         return entry;
     }
-    // 以下修复来自 Windows 历史清单。按实际程序入口判断，避免在 macOS
-    // 自定义模块上注入 .exe/.bat；也允许在别的平台读取 Windows 安装快照。
-    if !entry.entry.ends_with(".exe") && !entry.entry.ends_with(".bat") {
+    // 以下修复来自 Windows 历史清单。清单明确限定 Windows 时也允许无扩展名
+    // 包装入口；否则按实际入口识别，避免修改原生 macOS 模块，同时允许跨平台读取旧快照。
+    let windows_only = !entry.os.is_empty() && entry.os.iter().all(|os| os == "windows");
+    if !windows_only && !entry.entry.ends_with(".exe") && !entry.entry.ends_with(".bat") {
         return entry;
     }
     if entry.id == "mariadb" {
@@ -2086,6 +2087,11 @@ mod tests {
             "args": ["agent", "-dev", "-client", "127.0.0.1", "-http-port", "{port}"],
             "health": "tcp", "healthTimeoutSec": 20
         })).unwrap());
+        let mut windows_wrapper = consul.clone();
+        windows_wrapper.os = vec!["windows".into()];
+        windows_wrapper.entry = "consul-launcher".into();
+        let upgraded = upgrade_legacy_run(windows_wrapper);
+        assert!(upgraded.run.unwrap().args.iter().any(|arg| arg == "-data-dir"));
         assert_eq!(serde_json::to_value(upgrade_legacy_run(consul.clone())).unwrap(), serde_json::to_value(consul).unwrap());
     }
 

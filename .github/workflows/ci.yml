@@ -206,7 +206,7 @@ jobs:
           for package in "${packages[@]}"; do
             set +e
             NSB_NATIVE_PACKAGE="$package" cargo test --locked -p nsb-core --lib \
-              install::tests::official_macos_package_lifecycle -- --ignored --exact --nocapture --test-threads=1 \
+              install::tests::official_package_lifecycle -- --ignored --exact --nocapture --test-threads=1 \
               2>&1 | tee "native-package-logs/$package.log"
             result=${PIPESTATUS[0]}
             set -e

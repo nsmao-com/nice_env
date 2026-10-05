@@ -2398,19 +2398,104 @@ mod tests {
         );
     }
 
+    fn native_nats_request(port: u16, subject: &str, payload: &[u8]) -> serde_json::Value {
+        use std::io::{BufRead, Read, Write};
+        let timeout = std::time::Duration::from_secs(5);
+        let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        let stream = std::net::TcpStream::connect_timeout(&address, timeout).unwrap();
+        stream.set_read_timeout(Some(timeout)).unwrap();
+        stream.set_write_timeout(Some(timeout)).unwrap();
+        let mut input = std::io::BufReader::new(stream);
+        let mut line = String::new();
+        input.read_line(&mut line).unwrap();
+        let info: serde_json::Value =
+            serde_json::from_str(line.strip_prefix("INFO ").expect("NATS INFO").trim()).unwrap();
+        assert_eq!(info["jetstream"], true, "{info}");
+        let inbox = format!("_INBOX.NICEENV_{}", rand::random::<u64>());
+        write!(input.get_mut(), "CONNECT {{\"verbose\":false,\"pedantic\":true}}\r\nSUB {inbox} 1\r\nUNSUB 1 1\r\nPUB {subject} {inbox} {}\r\n", payload.len()).unwrap();
+        input.get_mut().write_all(payload).unwrap();
+        input.get_mut().write_all(b"\r\n").unwrap();
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "NATS response timed out: {subject}"
+            );
+            line.clear();
+            assert!(input.read_line(&mut line).unwrap() > 0, "NATS disconnected");
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            match fields.first().copied() {
+                Some("PING") => input.get_mut().write_all(b"PONG\r\n").unwrap(),
+                Some("+OK" | "PONG" | "INFO") => {}
+                Some("MSG") => {
+                    assert!(matches!(fields.len(), 4 | 5), "{line}");
+                    assert_eq!(fields[1], inbox);
+                    assert_eq!(fields[2], "1");
+                    let size: usize = fields.last().unwrap().parse().unwrap();
+                    assert!(size <= 1024 * 1024);
+                    let mut body = vec![0; size];
+                    input.read_exact(&mut body).unwrap();
+                    let mut ending = [0; 2];
+                    input.read_exact(&mut ending).unwrap();
+                    assert_eq!(&ending, b"\r\n");
+                    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    assert!(value.get("error").is_none(), "{subject}: {value}");
+                    return value;
+                }
+                _ => panic!("Unexpected NATS response: {line}"),
+            }
+        }
+    }
+
+    fn native_nats_readback(port: u16) {
+        use base64::Engine;
+        let info = native_nats_request(port, "$JS.API.STREAM.INFO.NICEENV_AUDIT", b"");
+        assert_eq!(info["config"]["storage"], "file");
+        assert_eq!(info["state"]["messages"], 1);
+        let message = native_nats_request(
+            port,
+            "$JS.API.STREAM.MSG.GET.NICEENV_AUDIT",
+            br#"{"seq":1}"#,
+        );
+        assert_eq!(message["message"]["subject"], "niceenv.audit");
+        assert_eq!(message["message"]["seq"], 1);
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(message["message"]["data"].as_str().unwrap())
+                .unwrap(),
+            "NiceEnv 持久化消息\nsecond line".as_bytes()
+        );
+    }
+
     #[test]
-    #[ignore = "requires macOS, NSB_NATIVE_PACKAGE and NSB_SKIP_HOSTS=1; downloads official packages and uses temporary service data"]
-    fn official_macos_package_lifecycle() {
-        assert_eq!(current_os(), "macos");
-        assert_eq!(std::env::var("NSB_SKIP_HOSTS").as_deref(), Ok("1"));
+    #[ignore = "requires NSB_NATIVE_PACKAGE and NSB_SKIP_HOSTS=1; official macOS packages or Windows NATS in temporary data"]
+    fn official_package_lifecycle() {
         let id = std::env::var("NSB_NATIVE_PACKAGE").expect("NSB_NATIVE_PACKAGE");
+        assert!(current_os() == "macos" || (cfg!(windows) && id == "nats"));
+        assert_eq!(std::env::var("NSB_SKIP_HOSTS").as_deref(), Ok("1"));
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let (_temp, mut state) = fixture();
-        state.paths = Paths::new(_temp.path().join("NiceEnv native data"));
+        let data_name = if id == "nats" {
+            if cfg!(windows) {
+                "NiceEnv native 中文 # [1]"
+            } else {
+                r#"NiceEnv native 中文 \ " # [1]"#
+            }
+        } else {
+            "NiceEnv native data"
+        };
+        state.paths = Paths::new(_temp.path().join(data_name));
         state.paths.ensure_dirs().unwrap();
         state.store = Store::open(state.paths.db()).unwrap();
         state.store.set_setting("pathEnvEnabled", "0").unwrap();
         state.store.set_setting("portProfile", "safe").unwrap();
+        if id == "nats" {
+            let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            state
+                .store
+                .set_port_override("nats", Some(port.local_addr().unwrap().port()))
+                .unwrap();
+        }
         let entry = state.installer.template_for(&id).expect("native package");
         assert!(Installer::is_platform_compatible(&entry));
         let key = format!("{id}@{}", entry.version);
@@ -2468,6 +2553,7 @@ mod tests {
         };
         assert_eq!(offline.installed_entry(&record).entry, actual.entry);
         assert!(offline.package_views(&[record])[0].install.is_some());
+        drop(reopened);
 
         if matches!(id.as_str(), "mysql" | "mongodb" | "mihomo" | "nats") {
             let service = if id == "mysql" {
@@ -2488,7 +2574,7 @@ mod tests {
                 }
             }
             let _cleanup = Cleanup(&state, service.clone());
-            for _ in 0..2 {
+            for cycle in 0..2 {
                 state.start_service(&service).unwrap_or_else(|error| {
                     panic!(
                         "{key}: {error:?}\n{}",
@@ -2499,6 +2585,22 @@ mod tests {
                 assert_eq!(running.state, crate::model::ServiceState::Running);
                 assert!(!running.pids.is_empty());
                 assert!(running.pids.iter().all(|pid| platform::process_alive(*pid)));
+                if id == "nats" {
+                    let port = running.port.unwrap();
+                    if cycle == 0 {
+                        let created = native_nats_request(port, "$JS.API.STREAM.CREATE.NICEENV_AUDIT",
+                            br#"{"name":"NICEENV_AUDIT","subjects":["niceenv.audit"],"storage":"file","num_replicas":1}"#);
+                        assert_eq!(created["config"]["storage"], "file");
+                        let ack = native_nats_request(
+                            port,
+                            "niceenv.audit",
+                            "NiceEnv 持久化消息\nsecond line".as_bytes(),
+                        );
+                        assert_eq!(ack["stream"], "NICEENV_AUDIT");
+                        assert_eq!(ack["seq"], 1);
+                    }
+                    native_nats_readback(port);
+                }
                 state.stop_service(&service).unwrap();
                 assert!(running
                     .pids
@@ -2527,6 +2629,44 @@ mod tests {
             std::fs::read_to_string(preserved).unwrap(),
             "retain user data"
         );
+        if id == "nats" {
+            // 重装后再次读取同一条真实消息，不能仅凭哨兵文件推断用户数据完整。
+            runtime.block_on(state.install_package(&key)).unwrap();
+            let source = state.paths.base.clone();
+            let target = _temp.path().join("migrated 中文 data # [2]");
+            let migrated = crate::paths::copy_data_dir(&source, &target).unwrap();
+            drop(state);
+            std::fs::rename(&source, _temp.path().join("retired source")).unwrap();
+            let paths = Paths::new(std::path::PathBuf::from(migrated.path));
+            let state = crate::CoreState {
+                store: Store::open(paths.db()).unwrap(),
+                paths,
+                manager: Arc::new(crate::services::ServiceManager::new()),
+                installer: Installer::bundled(),
+                downloader: Arc::new(crate::download::Downloader::new()),
+                emit: Arc::new(|_| {}),
+            };
+            struct Cleanup<'a>(&'a crate::CoreState);
+            impl Drop for Cleanup<'_> {
+                fn drop(&mut self) {
+                    let _ = self.0.stop_service("nats");
+                }
+            }
+            let _cleanup = Cleanup(&state);
+            state.start_service("nats").unwrap();
+            let running = state.manager.snapshot("nats").unwrap();
+            native_nats_readback(running.port.unwrap());
+            let store_dir =
+                crate::generic::service_data_dir(&state.store, &state.paths, "nats").unwrap();
+            assert!(store_dir.join("jetstream").is_dir());
+            assert!(store_dir.starts_with(&state.paths.base));
+            state.stop_service("nats").unwrap();
+            assert!(running
+                .pids
+                .iter()
+                .all(|pid| !platform::process_alive(*pid)));
+            println!("{key}: real JetStream message survived restart, reinstall and migration with original directory unavailable");
+        }
         println!("{key}: official install, installed list, offline reload, repeat install and uninstall passed");
     }
 

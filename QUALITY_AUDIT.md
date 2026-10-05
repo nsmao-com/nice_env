@@ -2,6 +2,24 @@
 
 本记录用于跟踪 Windows/macOS、路径与数据目录、上游版本和安装状态的复查。**整体复查未完成**；代码编译、单元测试、下载包核验和原生服务运行是不同的验收层级，不能相互替代。
 
+## 2026-10-05：v0.2.304–v0.2.307 账号目录与 NATS 持久化复查
+
+- v0.2.304 的 Release 被两个路径断言拦截：Windows 临时目录的短名与长名、macOS `/var` 与 `/private/var` 指向同一目录。v0.2.305 按迁移返回的真实目标目录验证，未放宽账号内容保留断言；其 Release 三平台 runtime 均已成功。
+- v0.2.305 增加 Bolt 本地账号库迁移：只读校验数据库，通过已安装 SFTPGo 对副本离线导入物理路径，再逐项校验账号、权限、密码、加密凭据和关联。Windows 官方 SFTPGo 2.7.6 的 SQLite/Bolt 两项原生迁移通过，覆盖损坏库和无效程序失败回滚。v0.2.306 明确拒绝无法验证的远程/memory/未知 provider，运行环境覆盖配置文件时同样拦截；该限制不是远程库自动迁移已经实现。
+- v0.2.306 本地 core 758 项、platform 15 项通过，59 项默认 ignored 未计为通过。Release 三平台 runtime 成功、安装包构建尚在进行；常规 CI `37267600851` 的 Rust 任务因改动行格式失败，不能报告整条 CI 成功。v0.2.307 修正这两批涉及的格式区域，并通过 `.github/check-rust-format.py d2e8a31`，没有格式化整个历史文件。
+- 原生套件用例改为 `official_package_lifecycle`，沿用 macOS 双架构工作流，并增加 Windows NATS 验证。NATS 不再只验证 Running/PID：经真实 TCP 协议创建 file 类型 JetStream stream，写入含中文和换行的消息，核对发布确认、序号、消息数及原始内容；第二次启动直接读取同一条消息，不重建 stream。
+- Windows NATS 2.15.0 已通过一项完整原生用例：官方包下载安装与版本命令、安装列表、离线记录、重复安装、两次启停和真实消息持久化、卸载保留数据、重装、数据目录迁移后读回。原目录先改名不可访问，目标目录含中文、空格、`#`、方括号；Unix 源目录另含字面反斜杠与引号，其真实行为仍须本轮 macOS runner 验证。测试结束确认没有遗留 nats-server 进程。
+
+本轮协议依据 NATS 官方 [文本协议](https://github.com/nats-io/nats.docs/blob/master/reference/nats-protocol/nats-protocol/README.md) 和 [JetStream API](https://github.com/nats-io/nats.docs/blob/master/using-nats/jetstream/nats_api_reference.md)。Context7 resolve 返回 fetch failed，改为读取官方资料。没有增加依赖或测试文件，未运行本地前端 dev/build，未操作用户实际服务或账号数据库。
+
+v0.2.307 最终本地回归：core 758 项、platform 15 项通过，59 项 ignored 未计入通过；NATS 原生用例另行执行为 1 passed / 0 failed / 0 ignored。两份 workflow YAML 解析、版本一致性和改动行格式检查通过。
+
+账号迁移行为已在 `update.sql` 记录；v0.2.307 仅扩展既有验收和修正格式，没有数据库变更，未再次修改 `update.sql`。此前两次定向 cargo clean 分别清理 201.5 MiB 和 103.0 MiB；本轮 NATS 包和消息数据位于自动清理的临时目录，验证后 D 盘可用约 95.22 GiB。
+
+当前安装进程仍核实为 `D:/NiceEnv/niceservbay.exe` v0.2.283；v0.2.303 已公开发布含后续 ACME 修复的安装包。旧记录中通过查找二进制字符串推断“当前运行包已含修复”的结论不足以证明实际请求行为，不作为验收证据。未代用户更换当前安装进程。
+
+整体待验事项仍保留：NATS 跨版本升级、macOS 本轮协议与特殊路径、其余套件完整安装/升级/协议矩阵、Windows UNC 实际共享目录、桌面 IPC 交互、真实域名 ACME 手动 TXT/自动 DNS 全流程和续期。不能以本次单个服务通过替代这些要求。
+
 ## 2026-10-05：ACME 代理兼容与版本发布
 
 | 范围 | 发现与修复 | 验证情况 |

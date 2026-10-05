@@ -959,7 +959,9 @@ fn run_command_with_timeout(
                 match pipe.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(count) => {
-                        let Some(limit) = limit else { continue; };
+                        let Some(limit) = limit else {
+                            continue;
+                        };
                         let keep = count.min(limit.saturating_sub(bytes.len()));
                         bytes.extend_from_slice(&buffer[..keep]);
                         if keep < count {

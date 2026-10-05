@@ -419,9 +419,12 @@ pub(crate) fn sftpgo_migrate_environment(
         .unwrap_or_else(|| r.root.clone());
     let cwd =
         std::path::absolute(cwd).map_err(|error| AppError::io("解析 SFTPGo 工作目录", error))?;
-    let mut provider = crate::sftpgo_data::provider(content, json, &effective, &directory, Some(&cwd))?;
+    let mut provider =
+        crate::sftpgo_data::provider(content, json, &effective, &directory, Some(&cwd))?;
     if let Some(provider) = &mut provider {
-        if provider.driver == "bolt" { provider.executable = Some(r.bin.clone()); }
+        if provider.driver == "bolt" {
+            provider.executable = Some(r.bin.clone());
+        }
     }
     let snapshot_path = PathBuf::from(&r.inst.install_path).join(".niceenv-package.json");
     let original_snapshot = match std::fs::read(&snapshot_path) {
@@ -4385,14 +4388,22 @@ mod startup_tests {
             rebase.path(&old_home));
         drop(conn);
         // 配置文件声明本地库时，实际运行环境指定远程库仍必须拦截迁移。
-        std::fs::write(r.etc.join("sftpgo.json"), r#"{"data_provider":{"driver":"sqlite"}}"#).unwrap();
+        std::fs::write(
+            r.etc.join("sftpgo.json"),
+            r#"{"data_provider":{"driver":"sqlite"}}"#,
+        )
+        .unwrap();
         for from_file in [false, true] {
             let driver = if from_file { "postgresql" } else { "mysql" };
             let env = r.entry.run.as_mut().unwrap().env.as_mut().unwrap();
             if from_file {
                 env.remove("SFTPGO_DATA_PROVIDER__DRIVER");
                 std::fs::create_dir_all(r.etc.join("env.d")).unwrap();
-                std::fs::write(r.etc.join("env.d/provider.env"), format!("SFTPGO_DATA_PROVIDER__DRIVER={driver}\n")).unwrap();
+                std::fs::write(
+                    r.etc.join("env.d/provider.env"),
+                    format!("SFTPGO_DATA_PROVIDER__DRIVER={driver}\n"),
+                )
+                .unwrap();
             } else {
                 env.insert("SFTPGO_DATA_PROVIDER__DRIVER".into(), driver.into());
             }
@@ -4400,8 +4411,12 @@ mod startup_tests {
             let snapshot = serde_json::to_vec(&r.entry).unwrap();
             std::fs::write(&snapshot_path, &snapshot).unwrap();
             let rejected = destination.path().join(format!("reject-{driver}"));
-            assert_eq!(crate::paths::copy_data_dir(&state.paths.base, &rejected).unwrap_err().code,
-                "DATA_DIR_SFTPGO_PROVIDER");
+            assert_eq!(
+                crate::paths::copy_data_dir(&state.paths.base, &rejected)
+                    .unwrap_err()
+                    .code,
+                "DATA_DIR_SFTPGO_PROVIDER"
+            );
             assert!(!rejected.exists());
             assert_eq!(std::fs::read(&database).unwrap(), before);
             assert_eq!(std::fs::read(&snapshot_path).unwrap(), snapshot);

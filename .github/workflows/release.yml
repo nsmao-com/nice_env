@@ -52,6 +52,15 @@ jobs:
           fi
           rm -f "$log_file"
           exit "$status"
+      - name: Verify official Windows NATS with persistent data
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 15
+        shell: bash
+        env:
+          NSB_SKIP_HOSTS: "1"
+          NSB_NATIVE_PACKAGE: nats
+        run: cargo test --locked -p nsb-core --lib install::tests::official_package_lifecycle -- --exact --ignored --nocapture --test-threads=1
       - name: Verify official macOS packages with native binaries
         if: runner.os == 'macOS'
         # 官方套件生命周期验证依赖上游二进制和 macOS runner 的即时状态；
@@ -64,7 +73,7 @@ jobs:
         run: |
           status=0
           for package in mysql mongodb mihomo nats go node mongosh mongodb-database-tools composer; do
-            if ! NSB_NATIVE_PACKAGE="$package" cargo test --locked -p nsb-core --lib install::tests::official_macos_package_lifecycle -- --exact --ignored --nocapture --test-threads=1; then
+            if ! NSB_NATIVE_PACKAGE="$package" cargo test --locked -p nsb-core --lib install::tests::official_package_lifecycle -- --exact --ignored --nocapture --test-threads=1; then
               echo "::warning title=macOS 原生套件验证失败::$package（不阻断安装包发布）"
               status=1
             fi

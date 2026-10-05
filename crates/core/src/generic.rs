@@ -419,7 +419,10 @@ pub(crate) fn sftpgo_migrate_environment(
         .unwrap_or_else(|| r.root.clone());
     let cwd =
         std::path::absolute(cwd).map_err(|error| AppError::io("解析 SFTPGo 工作目录", error))?;
-    let provider = crate::sftpgo_data::provider(content, json, &effective, &directory, Some(&cwd))?;
+    let mut provider = crate::sftpgo_data::provider(content, json, &effective, &directory, Some(&cwd))?;
+    if let Some(provider) = &mut provider {
+        if provider.driver == "bolt" { provider.executable = Some(r.bin.clone()); }
+    }
     let snapshot_path = PathBuf::from(&r.inst.install_path).join(".niceenv-package.json");
     let original_snapshot = match std::fs::read(&snapshot_path) {
         Ok(bytes) => Some(bytes),
@@ -4372,7 +4375,8 @@ mod startup_tests {
             r#"{"data_provider":{"driver":"mysql","name":"unused","sql_tables_prefix":"wrong_"}}"#).unwrap();
         assert!(!r.etc.join("env.d").exists());
         let before = std::fs::read(&database).unwrap();
-        crate::paths::copy_data_dir(&state.paths.base, &target).unwrap();
+        let migrated = crate::paths::copy_data_dir(&state.paths.base, &target).unwrap();
+        let target = PathBuf::from(migrated.path);
         assert_eq!(std::fs::read(&database).unwrap(), before);
         let rebase = crate::paths::DataPathRebase::new(&state.paths.base, &target).unwrap();
         let migrated = rebase.path(&crate::paths::portable_path_text(&database));

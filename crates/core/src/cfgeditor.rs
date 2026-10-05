@@ -926,14 +926,30 @@ pub(crate) fn run_validator_with_timeout(
     command: &mut std::process::Command,
     timeout: std::time::Duration,
 ) -> Result<(bool, String)> {
+    run_command_with_timeout(command, timeout, Some(64 * 1024))
+}
+
+/// 离线维护命令只使用退出状态与数据读回验证，不收集可能包含账号信息的输出。
+pub(crate) fn run_quiet_command_with_timeout(
+    command: &mut std::process::Command,
+    timeout: std::time::Duration,
+) -> Result<bool> {
+    run_command_with_timeout(command, timeout, None).map(|(success, _)| success)
+}
+
+fn run_command_with_timeout(
+    command: &mut std::process::Command,
+    timeout: std::time::Duration,
+    limit: Option<usize>,
+) -> Result<(bool, String)> {
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     };
-    const LIMIT: usize = 64 * 1024;
     fn drain(
         mut pipe: impl Read + Send + 'static,
         exceeded: Arc<AtomicBool>,
+        limit: Option<usize>,
     ) -> std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>> {
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -943,7 +959,8 @@ pub(crate) fn run_validator_with_timeout(
                 match pipe.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(count) => {
-                        let keep = count.min(LIMIT.saturating_sub(bytes.len()));
+                        let Some(limit) = limit else { continue; };
+                        let keep = count.min(limit.saturating_sub(bytes.len()));
                         bytes.extend_from_slice(&buffer[..keep]);
                         if keep < count {
                             exceeded.store(true, Ordering::Release);
@@ -981,8 +998,8 @@ pub(crate) fn run_validator_with_timeout(
         return Err(error.into());
     }
     let exceeded = Arc::new(AtomicBool::new(false));
-    let stdout = drain(child.stdout.take().unwrap(), exceeded.clone());
-    let stderr = drain(child.stderr.take().unwrap(), exceeded.clone());
+    let stdout = drain(child.stdout.take().unwrap(), exceeded.clone(), limit);
+    let stderr = drain(child.stderr.take().unwrap(), exceeded.clone(), limit);
     let deadline = std::time::Instant::now() + timeout;
     let status = loop {
         if exceeded.load(Ordering::Acquire) {

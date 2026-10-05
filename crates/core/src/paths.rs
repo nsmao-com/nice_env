@@ -1118,6 +1118,14 @@ fn migration_resources(
                 cwd = planned.cwd;
                 references.extend(planned.resources);
                 if let Some(mut provider) = planned.provider {
+                    if let Some(executable) = &mut provider.executable {
+                        let mapped = portable_path_text(Path::new(&rebase.path(&portable_path_text(executable))));
+                        if !resource_contains(&target_key, &config_path_key(Path::new(&mapped))) {
+                            return Err(crate::error::AppError::new("DATA_DIR_SFTPGO_RUN",
+                                "SFTPGo 程序不在托管数据目录中，无法验证迁移副本"));
+                        }
+                        *executable = root.join(mapped[target_key.len()..].trim_start_matches('/'));
+                    }
                     let mapped = rebase.path(&portable_path_text(&provider.path));
                     let key = config_path_key(Path::new(&mapped));
                     if resource_contains(&target_key, &key) {
@@ -3324,7 +3332,8 @@ mod tests {
                 "data_provider":{"driver":"sqlite","name":"accounts #1.db","sql_tables_prefix":prefix}
             }).to_string()).unwrap();
             let before = std::fs::read(&database).unwrap();
-            copy_data_dir(&source, &target).unwrap();
+            let migrated = copy_data_dir(&source, &target).unwrap();
+            let target = PathBuf::from(migrated.path);
             assert_eq!(std::fs::read(&database).unwrap(), before);
             assert_eq!(std::fs::read_to_string(target.join("data/sftpgo/home/uploaded.ini")).unwrap(), format!("path={old}/literal-upload"));
             let copied = target.join("etc/sftpgo/1/accounts #1.db");
@@ -3349,6 +3358,7 @@ mod tests {
             let stable = std::fs::read(&copied).unwrap();
             assert!(!crate::sftpgo_data::rebase_provider(&crate::sftpgo_data::Provider {
                 path: copied.clone(), driver: "sqlite".into(), prefix: prefix.into(), external: false,
+                executable: None,
             }, &DataPathRebase::new(&source, &target).unwrap()).unwrap());
             assert_eq!(std::fs::read(copied).unwrap(), stable);
         }
@@ -3381,7 +3391,8 @@ mod tests {
                 std::fs::write(directory.join("sftpgo.yaml"), second.to_string()).unwrap();
             }
             let before = std::fs::read(&database).unwrap();
-            assert_eq!(copy_data_dir(&source, &target).unwrap_err().code, "DATA_DIR_SFTPGO_STATE", "{case}");
+            assert_eq!(copy_data_dir(&source, &target).unwrap_err().code,
+                if case == "bolt" { "DATA_DIR_SFTPGO_BOLT" } else { "DATA_DIR_SFTPGO_STATE" }, "{case}");
             assert_eq!(std::fs::read(&database).unwrap(), before);
             assert!(!target.exists());
             assert!(!std::fs::read_dir(temp.path()).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().contains("-migrating-")));
@@ -3394,7 +3405,7 @@ mod tests {
         let program = PathBuf::from(std::env::var_os("NSB_SFTPGO_NATIVE").expect("NSB_SFTPGO_NATIVE"));
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source data");
-        let target = temp.path().join("新 data # [1]");
+        let target = temp.path().canonicalize().unwrap().join("新 data # [1]");
         let paths = Paths::new(source.clone());
         paths.ensure_dirs().unwrap();
         drop(crate::store::Store::open(paths.db()).unwrap());
@@ -3419,7 +3430,7 @@ mod tests {
         }).to_string()).unwrap();
         let initialize = |directory: &Path, seed: Option<&Path>| {
             let mut command = platform::command(&program);
-            command.current_dir(temp.path()).args(["initprovider","--config-dir"]).arg(directory);
+            command.current_dir(temp.path()).args(["initprovider","--config-dir"]).arg(portable_path_text(directory));
             if let Some(seed) = seed { command.arg("--loaddata-from").arg(seed); }
             for (key, _) in std::env::vars_os() {
                 if key.to_string_lossy().to_ascii_uppercase().starts_with("SFTPGO_") { command.env_remove(key); }
@@ -3474,6 +3485,169 @@ mod tests {
         assert_eq!(snapshot(&migrated), expected);
         assert_eq!(std::fs::read_to_string(target.join("data/sftpgo/users/migration-fixture/kept.txt")).unwrap(), "user contents");
         assert_eq!(std::fs::read_to_string(target.join("data/sftpgo/shared/shared.txt")).unwrap(), "shared contents");
+    }
+
+    #[test]
+    fn sftpgo_bolt_reader_rejects_truncation_invalid_extents_and_page_cycles() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("fixture.db");
+        for page_size in [4096, 16384] {
+        let root = page_size * 2;
+        let mut bytes = vec![0u8; page_size * 4];
+        let put = |bytes: &mut [u8], start: usize, value: u64, size: usize| {
+            bytes[start..start+size].copy_from_slice(&value.to_le_bytes()[..size]);
+        };
+        for id in 0..2 {
+            let page = &mut bytes[id*page_size..(id+1)*page_size];
+            put(page,0,id as u64,8); put(page,8,4,2);
+            put(page,16,0xed0cdaed,4); put(page,20,2,4); put(page,24,page_size as u64,4);
+            put(page,32,2,8); put(page,48,3,8); put(page,56,4,8); put(page,64,id as u64,8);
+            let checksum = page[16..72].iter().fold(0xcbf29ce484222325_u64,
+                |hash,byte|(hash ^ *byte as u64).wrapping_mul(0x100000001b3));
+            put(page,72,checksum,8);
+        }
+        put(&mut bytes,root,2,8); put(&mut bytes,root+8,2,2);
+        std::fs::write(&path,&bytes).unwrap();
+        assert!(crate::sftpgo_bolt::read(&path).unwrap().buckets.is_empty());
+        for length in [0,16,79,page_size,root,page_size*3-1] {
+            std::fs::write(&path,&bytes[..length]).unwrap();
+            assert!(crate::sftpgo_bolt::read(&path).is_err(),"truncated at {length}");
+        }
+        for case in ["checksum","page-id","overflow","flags","cycle","offset"] {
+            let mut damaged=bytes.clone();
+            match case {
+                "checksum"=>{damaged[72]^=1;damaged[page_size+72]^=1;},
+                "page-id"=>put(&mut damaged,root,3,8),
+                "overflow"=>put(&mut damaged,root+12,u32::MAX as u64,4),
+                "flags"=>put(&mut damaged,root+8,0,2),
+                "cycle"=>{
+                    put(&mut damaged,root+8,1,2);put(&mut damaged,root+10,1,2);
+                    put(&mut damaged,root+16,16,4);put(&mut damaged,root+20,1,4);
+                    put(&mut damaged,root+24,2,8);damaged[root+32]=b'x';
+                },
+                _=>{
+                    put(&mut damaged,root+10,1,2);put(&mut damaged,root+20,u32::MAX as u64,4);
+                    put(&mut damaged,root+24,1,4);
+                }
+            }
+            std::fs::write(&path,damaged).unwrap();
+            assert!(crate::sftpgo_bolt::read(&path).is_err(),"{case}");
+        }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires NSB_SFTPGO_NATIVE; reads an official Bolt fixture and verifies offline imports"]
+    fn native_sftpgo_bolt_accounts_keep_state_during_offline_import() {
+        let program = PathBuf::from(std::env::var_os("NSB_SFTPGO_NATIVE").expect("NSB_SFTPGO_NATIVE"));
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source data");
+        let target = temp.path().canonicalize().unwrap().join("new 中文 data");
+        let paths = Paths::new(source.clone());
+        paths.ensure_dirs().unwrap();
+        let store = crate::store::Store::open(paths.db()).unwrap();
+        let manifest: crate::model::Manifest = serde_json::from_str(include_str!("../../../manifest/packages.win.json")).unwrap();
+        let mut entry = manifest.packages.iter().find(|entry| entry.id == "sftpgo" && entry.version == "2.7.6").unwrap().clone();
+        entry.entry = format!("sftpgo{}", std::env::consts::EXE_SUFFIX);
+        let runtime = paths.runtime_dir("sftpgo", &entry.version);
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::copy(&program, runtime.join(&entry.entry)).unwrap();
+        std::fs::write(runtime.join(".niceenv-package.json"), serde_json::to_vec(&entry).unwrap()).unwrap();
+        store.upsert_installed(&crate::model::InstalledPackage {
+            id:"sftpgo".into(),version:entry.version.clone(),category:entry.category.clone(),
+            install_path:portable_path_text(&runtime),config_path:String::new(),installed_at:0,
+        }).unwrap();
+        drop(store);
+        let directory = paths.etc_dir("sftpgo","2.7.6");
+        std::fs::create_dir_all(&directory).unwrap();
+        let config = directory.join("sftpgo.json");
+        std::fs::write(&config, r#"{"data_provider":{"driver":"bolt","name":"accounts.db"}}"#).unwrap();
+        let home = source.join("users");
+        let shared = source.join("shared");
+        let password = bcrypt::hash("Fixture-Only-Password!", 4).unwrap();
+        let mut users = (0..48).map(|i| serde_json::json!({
+            "username":format!("fixture-{i:03}"),"password":password,"status":1,
+            "home_dir":portable_path_text(&home.join(format!("user-{i}"))),
+            "permissions":{"/":["*"]},"description":if i == 0 {"x".repeat(12000)} else {String::new()},
+            "groups":[{"name":"fixture-group","type":2}],
+            "virtual_folders":[{"name":"shared","mapped_path":portable_path_text(&shared),"virtual_path":"/shared","quota_size":-1,"quota_files":-1}]
+        })).collect::<Vec<_>>();
+        users[47]["filesystem"] = serde_json::json!({"provider":5,"sftpconfig":{
+            "endpoint":"127.0.0.1:9","username":"fixture","prefix":"/remote-only",
+            "password":{"status":"Plain","payload":"fixture-only-encryption"}}});
+        let seed = temp.path().join("accounts.json");
+        std::fs::write(&seed,serde_json::json!({"version":16,"users":users,
+            "folders":[{"name":"shared","mapped_path":portable_path_text(&shared)}],
+            "groups":[{"name":"fixture-group","user_settings":{"home_dir":portable_path_text(&home.join("%username%"))}}]
+        }).to_string()).unwrap();
+        let initialize = |directory: &Path, seed: &Path| {
+            let mut command = platform::command(&program);
+            command.current_dir(temp.path()).args(["initprovider","--config-dir"]).arg(portable_path_text(directory))
+                .arg("--loaddata-from").arg(seed).args(["--loaddata-mode","0"]);
+            for (key,_) in std::env::vars_os() {
+                if key.to_string_lossy().to_ascii_uppercase().starts_with("SFTPGO_") { command.env_remove(key); }
+            }
+            let (success, output) = crate::cfgeditor::run_validator_with_timeout(&mut command, std::time::Duration::from_secs(30)).unwrap();
+            assert!(success, "{output}");
+        };
+        initialize(&directory, &seed);
+        let database = directory.join("accounts.db");
+        let before = crate::sftpgo_bolt::read(&database).unwrap();
+        assert_eq!(before.buckets[b"users".as_slice()].values.len(), 48);
+        assert_eq!(before.buckets[b"groups".as_slice()].values.len(), 1);
+        let unchanged = std::fs::read(&database).unwrap();
+        let remote: serde_json::Value = serde_json::from_slice(&before.buckets[b"users".as_slice()].values[b"fixture-047".as_slice()]).unwrap();
+        let encrypted_status = remote["filesystem"]["sftpconfig"]["password"]["status"].as_str().unwrap();
+        assert!(!encrypted_status.is_empty() && encrypted_status != "Plain");
+        let rebase = DataPathRebase::new(&source, &target).unwrap();
+        let uploaded = home.join("user-0");
+        std::fs::create_dir_all(&uploaded).unwrap();
+        std::fs::write(uploaded.join("uploaded.ini"), format!("keep={}",portable_path_text(&source))).unwrap();
+        copy_data_dir(&source, &target).unwrap();
+        let migrated_db = target.join("etc/sftpgo/2.7.6/accounts.db");
+        let after = crate::sftpgo_bolt::read(&migrated_db).unwrap();
+        assert_eq!(std::fs::read(&database).unwrap(), unchanged);
+        assert_eq!(std::fs::read(target.join("users/user-0/uploaded.ini")).unwrap(),std::fs::read(uploaded.join("uploaded.ini")).unwrap());
+        assert!(!crate::sftpgo_bolt::migrate(&migrated_db, None, &rebase).unwrap());
+        assert_eq!(before.sequence, after.sequence);
+        assert_eq!(before.buckets.keys().collect::<Vec<_>>(),after.buckets.keys().collect::<Vec<_>>());
+        for (name, bucket) in &before.buckets {
+            let updated = &after.buckets[name];
+            assert_eq!(bucket.sequence, updated.sequence);
+            assert_eq!(bucket.values.keys().collect::<Vec<_>>(), updated.values.keys().collect::<Vec<_>>());
+            for (key, original) in &bucket.values {
+                let mut expected: serde_json::Value = serde_json::from_slice(original).unwrap();
+                let mut actual: serde_json::Value = serde_json::from_slice(&updated.values[key]).unwrap();
+                let name = std::str::from_utf8(name).unwrap();
+                if ["users","groups","folders"].contains(&name) {
+                    let field = match name { "folders"=>"/mapped_path", "groups"=>"/user_settings/home_dir", _=>"/home_dir" };
+                    if let Some(path) = expected.pointer_mut(field) { *path = rebase.path(path.as_str().unwrap()).into(); }
+                    if let Some(values) = expected.as_object_mut() { values.remove("updated_at"); }
+                    if let Some(values) = actual.as_object_mut() { values.remove("updated_at"); }
+                }
+                assert_eq!(actual,expected,"bucket {name}, record {}",String::from_utf8_lossy(key));
+            }
+        }
+        let mut broken = unchanged.clone();
+        let page_size = u32::from_le_bytes(broken[24..28].try_into().unwrap()) as usize;
+        broken[72] ^= 1;
+        broken[page_size + 72] ^= 1;
+        let damaged = temp.path().join("damaged.db");
+        std::fs::write(&damaged, broken).unwrap();
+        assert!(crate::sftpgo_bolt::read(&damaged).is_err());
+        let failed_target = temp.path().join("must not switch");
+        std::fs::copy(&damaged, &database).unwrap();
+        let damaged_before = std::fs::read(&database).unwrap();
+        assert!(copy_data_dir(&source,&failed_target).is_err());
+        assert!(!failed_target.exists());
+        assert_eq!(std::fs::read(&database).unwrap(), damaged_before);
+        std::fs::write(&database, unchanged).unwrap();
+        std::fs::write(runtime.join(&entry.entry), b"invalid executable").unwrap();
+        let original = std::fs::read(&database).unwrap();
+        let error = copy_data_dir(&source, &failed_target).unwrap_err();
+        assert_eq!(error.code,"DATA_DIR_SFTPGO_IMPORT");
+        assert_eq!(std::fs::read(&database).unwrap(), original);
+        assert!(!failed_target.exists());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! SFTPGo 本地账号库中的物理目录。只处理迁移副本，不改密码、权限或远程存储前缀。
 
 use crate::error::{AppError, Result};
-use crate::paths::{DataPathRebase, portable_path_text};
+use crate::paths::{portable_path_text, DataPathRebase};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -13,6 +13,7 @@ pub(crate) struct Provider {
     pub driver: String,
     pub prefix: String,
     pub external: bool,
+    pub executable: Option<PathBuf>,
 }
 
 fn invalid(message: &str) -> AppError {
@@ -75,6 +76,7 @@ pub(crate) fn provider(
         driver,
         prefix: value("sql_tables_prefix", ""),
         external: false,
+        executable: None,
     }))
 }
 
@@ -88,13 +90,6 @@ fn check_provider(provider: &Provider) -> Result<bool> {
     }
     if std::fs::metadata(&provider.path)?.len() == 0 {
         return Ok(false);
-    }
-    if provider.driver != "sqlite" {
-        return Err(
-            invalid("此 SFTPGo 使用 Bolt 账号库，当前无法自动迁移其中的用户目录").with_hint(
-                "请先在 SFTPGo 中导出账号并改用 SQLite，再迁移数据目录。原账号库和文件均已保留。",
-            ),
-        );
     }
     if provider.external {
         return Err(invalid("SFTPGo 账号库位于数据目录之外，无法安全迁移其中的用户目录")
@@ -238,6 +233,9 @@ pub(crate) fn data_directories(
     if !check_provider(provider)? {
         return Ok(Vec::new());
     }
+    if provider.driver == "bolt" {
+        return Ok(crate::sftpgo_bolt::plan(&provider.path, rebase)?.directories);
+    }
     let conn = rusqlite::Connection::open_with_flags(
         &provider.path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -249,6 +247,9 @@ pub(crate) fn data_directories(
 pub(crate) fn rebase_provider(provider: &Provider, rebase: &DataPathRebase) -> Result<bool> {
     if !check_provider(provider)? {
         return Ok(false);
+    }
+    if provider.driver == "bolt" {
+        return crate::sftpgo_bolt::migrate(&provider.path, provider.executable.as_deref(), rebase);
     }
     let mut conn = rusqlite::Connection::open_with_flags(
         &provider.path,

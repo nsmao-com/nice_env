@@ -5608,11 +5608,12 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
     }
 
     #[test]
-    #[ignore = "requires NSB_NGINX_ROOT; starts only a copied Nginx on isolated ephemeral ports"]
+    #[ignore = "requires NSB_NGINX_ROOT and NSB_PHP_ROOT; starts isolated Nginx/PHP with temporary configuration"]
     fn selected_nginx_version_survives_install_and_uninstall_of_other_versions() {
         use crate::model::InstalledPackage;
         use std::io::{Read, Write};
         let source = PathBuf::from(std::env::var("NSB_NGINX_ROOT").expect("NSB_NGINX_ROOT"));
+        let php = PathBuf::from(std::env::var("NSB_PHP_ROOT").expect("NSB_PHP_ROOT"));
         let version = source
             .file_name()
             .unwrap()
@@ -5637,6 +5638,7 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
         impl Drop for StopOnDrop<'_> {
             fn drop(&mut self) {
                 let _ = self.0.stop_service("nginx");
+                let _ = self.0.stop_service("php@8.4.26");
             }
         }
         let _cleanup = StopOnDrop(&state);
@@ -5729,8 +5731,21 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
         state
             .save_config("nginx-main", &custom, false, Some(&original))
             .unwrap();
-        state.store.set_port_assign("php@8.4.26", 9110).unwrap();
+        register_fixture(&state, "php", "8.4.26", &php);
+        let php_port = (24000..28000)
+            .find(|port| {
+                (0..configgen::PHP_POOL_WORKERS)
+                    .all(|offset| std::net::TcpListener::bind(("127.0.0.1", port + offset)).is_ok())
+            })
+            .unwrap();
+        state.store.set_port_assign("php@8.4.26", php_port).unwrap();
         rebuild_and_reload(&state.store, &state.paths, &state.manager).unwrap();
+        assert!(!std::fs::read_to_string(state.paths.nginx_conf())
+            .unwrap()
+            .contains("nsb_php_8_4_26"));
+        state.start_service("php@8.4.26").unwrap();
+        let php_pids = state.manager.snapshot("php@8.4.26").unwrap().pids;
+        assert_eq!(php_pids.len(), configgen::PHP_POOL_WORKERS as usize);
         assert!(http_response(port)
             .to_ascii_lowercase()
             .contains("x-niceenv-custom: persisted"));
@@ -5752,6 +5767,15 @@ if(await c.db('niceenv_safety_check').collection('extra').countDocuments()!==1)t
         assert!(std::fs::read_to_string(state.paths.nginx_conf())
             .unwrap()
             .contains("gzip off;"));
+        state.stop_service("php@8.4.26").unwrap();
+        rebuild_and_reload(&state.store, &state.paths, &state.manager).unwrap();
+        assert!(!std::fs::read_to_string(state.paths.nginx_conf())
+            .unwrap()
+            .contains("nsb_php_8_4_26"));
+        assert!(http_response(next_port)
+            .to_ascii_lowercase()
+            .contains("x-niceenv-custom: persisted"));
+        assert!(php_pids.iter().all(|pid| !platform::process_alive(*pid)));
         let last_pids = state.manager.snapshot("nginx").unwrap().pids;
         state.stop_service("nginx").unwrap();
         let stopped = state.manager.snapshot("nginx").unwrap();

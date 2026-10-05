@@ -503,13 +503,70 @@ async fn get_json(client: &reqwest::Client, url: &str) -> Result<serde_json::Val
         .map_err(|e| AppError::internal("解析上游版本索引", e.to_string()))
 }
 
-fn http() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+fn http_with_proxy(no_proxy: bool) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(45))
         .connect_timeout(std::time::Duration::from_secs(15))
-        .user_agent("NiceEnv/0.1 (+local dev env manager)")
+        .user_agent("NiceEnv/0.1 (+local dev env manager)");
+    if no_proxy {
+        builder = builder.no_proxy();
+    }
+    builder
         .build()
         .map_err(|e| AppError::internal("创建 HTTP 客户端", e.to_string()))
+}
+
+fn http() -> Result<reqwest::Client> {
+    http_with_proxy(false)
+}
+
+fn http_direct() -> Result<reqwest::Client> {
+    http_with_proxy(true)
+}
+
+fn github_is_rate_limited(response: &reqwest::Response) -> bool {
+    response.status().as_u16() == 403
+        || response.status().as_u16() == 429
+        || response
+            .headers()
+            .get("x-ratelimit-remaining")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.trim() == "0")
+}
+
+fn github_rate_limit_detail(response: &reqwest::Response) -> String {
+    let remaining = response
+        .headers()
+        .get("x-ratelimit-remaining")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("未知");
+    let reset = response
+        .headers()
+        .get("x-ratelimit-reset")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<i64>().ok())
+        .map(|timestamp| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_secs() as i64)
+                .unwrap_or_default();
+            let wait = (timestamp - now).max(0);
+            if wait == 0 {
+                "恢复时间已到".to_string()
+            } else {
+                format!("约 {} 分钟后恢复", (wait + 59) / 60)
+            }
+        })
+        .unwrap_or_else(|| "恢复时间未知".to_string());
+    format!("剩余请求 {remaining} 次，{reset}")
+}
+
+async fn github_send(client: &reqwest::Client, url: &str) -> reqwest::Result<reqwest::Response> {
+    client
+        .get(url)
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await
 }
 
 /// GitHub Releases：一次请求拿到该 repo 最近 100 个 release（含 asset digest）
@@ -520,22 +577,54 @@ async fn fetch_github(
     let repo = src.repo.as_deref().ok_or_else(|| {
         AppError::new("BAD_VERSION_SOURCE", "github 版本源缺少 repo（owner/name）")
     })?;
-    let client = http()?;
     let url = format!("https://api.github.com/repos/{repo}/releases?per_page=100");
-    let resp = client
-        .get(&url)
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .send()
-        .await
-        .map_err(|e| AppError::download(&url, e.to_string()))?;
+    let direct = http_direct().ok();
+    let proxy = http()?;
+    let direct_result = match direct.as_ref() {
+        Some(client) => Some(github_send(client, &url).await),
+        None => None,
+    };
+    let resp = match direct_result {
+        Some(Ok(response)) if !github_is_rate_limited(&response) => response,
+        Some(Ok(response)) => {
+            let detail = github_rate_limit_detail(&response);
+            match github_send(&proxy, &url).await {
+                Ok(proxy_response) if !github_is_rate_limited(&proxy_response) => proxy_response,
+                Ok(proxy_response) => {
+                    return Err(AppError::new(
+                        "GITHUB_RATE_LIMIT",
+                        "GitHub 接口请求过于频繁，暂时无法读取版本列表",
+                    )
+                    .with_hint(format!(
+                        "直连和系统代理出口都被 GitHub 限制（直连：{detail}；代理：{}）。稍后再试；已缓存或清单内置版本仍可安装。",
+                        github_rate_limit_detail(&proxy_response)
+                    )));
+                }
+                Err(proxy_error) => {
+                    return Err(AppError::new(
+                        "GITHUB_RATE_LIMIT",
+                        "GitHub 接口请求过于频繁，暂时无法读取版本列表",
+                    )
+                    .with_hint(format!(
+                        "直连出口已被 GitHub 限制（{detail}），系统代理也无法访问：{proxy_error}。稍后再试；已缓存或清单内置版本仍可安装。"
+                    )));
+                }
+            }
+        }
+        Some(Err(direct_error)) => match github_send(&proxy, &url).await {
+            Ok(proxy_response) => proxy_response,
+            Err(proxy_error) => {
+                return Err(AppError::download(
+                    &url,
+                    format!("直连失败：{direct_error}；系统代理失败：{proxy_error}"),
+                ));
+            }
+        },
+        None => github_send(&proxy, &url)
+            .await
+            .map_err(|e| AppError::download(&url, e.to_string()))?,
+    };
 
-    if resp.status().as_u16() == 403 {
-        return Err(AppError::new(
-            "GITHUB_RATE_LIMIT",
-            "GitHub 接口请求过于频繁（匿名限流 60 次/小时）",
-        )
-        .with_hint("稍后再试；已内置常用版本可直接安装"));
-    }
     if !resp.status().is_success() {
         return Err(AppError::download(&url, format!("HTTP {}", resp.status())));
     }

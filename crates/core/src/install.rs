@@ -2398,7 +2398,12 @@ mod tests {
         );
     }
 
-    fn native_nats_request(port: u16, subject: &str, payload: &[u8]) -> serde_json::Value {
+    fn native_nats_request(
+        port: u16,
+        version: &str,
+        subject: &str,
+        payload: &[u8],
+    ) -> serde_json::Value {
         use std::io::{BufRead, Read, Write};
         let timeout = std::time::Duration::from_secs(5);
         let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
@@ -2411,6 +2416,7 @@ mod tests {
         let info: serde_json::Value =
             serde_json::from_str(line.strip_prefix("INFO ").expect("NATS INFO").trim()).unwrap();
         assert_eq!(info["jetstream"], true, "{info}");
+        assert_eq!(info["version"], version, "actual NATS server version");
         let inbox = format!("_INBOX.NICEENV_{}", rand::random::<u64>());
         write!(input.get_mut(), "CONNECT {{\"verbose\":false,\"pedantic\":true}}\r\nSUB {inbox} 1\r\nUNSUB 1 1\r\nPUB {subject} {inbox} {}\r\n", payload.len()).unwrap();
         input.get_mut().write_all(payload).unwrap();
@@ -2447,13 +2453,14 @@ mod tests {
         }
     }
 
-    fn native_nats_readback(port: u16) {
+    fn native_nats_readback(port: u16, version: &str) {
         use base64::Engine;
-        let info = native_nats_request(port, "$JS.API.STREAM.INFO.NICEENV_AUDIT", b"");
+        let info = native_nats_request(port, version, "$JS.API.STREAM.INFO.NICEENV_AUDIT", b"");
         assert_eq!(info["config"]["storage"], "file");
         assert_eq!(info["state"]["messages"], 1);
         let message = native_nats_request(
             port,
+            version,
             "$JS.API.STREAM.MSG.GET.NICEENV_AUDIT",
             br#"{"seq":1}"#,
         );
@@ -2498,9 +2505,16 @@ mod tests {
         }
         let entry = state.installer.template_for(&id).expect("native package");
         assert!(Installer::is_platform_compatible(&entry));
-        let key = format!("{id}@{}", entry.version);
-        let installed = runtime.block_on(state.install_package(&key)).unwrap();
-        let actual = state.installer.installed_entry(&installed);
+        // NATS 从前一正式版开始，避免把同版本重装误当成升级验收。
+        let initial_version = if id == "nats" {
+            "2.14.7"
+        } else {
+            &entry.version
+        };
+        let mut key = format!("{id}@{initial_version}");
+        let mut installed = runtime.block_on(state.install_package(&key)).unwrap();
+        let mut actual = state.installer.installed_entry(&installed);
+        assert_eq!(actual.version, initial_version);
         let program = Path::new(&installed.install_path).join(entry_relative_path(&actual.entry));
         assert!(program.is_file(), "{}", program.display());
         if id == "composer" {
@@ -2588,18 +2602,19 @@ mod tests {
                 if id == "nats" {
                     let port = running.port.unwrap();
                     if cycle == 0 {
-                        let created = native_nats_request(port, "$JS.API.STREAM.CREATE.NICEENV_AUDIT",
+                        let created = native_nats_request(port, &actual.version, "$JS.API.STREAM.CREATE.NICEENV_AUDIT",
                             br#"{"name":"NICEENV_AUDIT","subjects":["niceenv.audit"],"storage":"file","num_replicas":1}"#);
                         assert_eq!(created["config"]["storage"], "file");
                         let ack = native_nats_request(
                             port,
+                            &actual.version,
                             "niceenv.audit",
                             "NiceEnv 持久化消息\nsecond line".as_bytes(),
                         );
                         assert_eq!(ack["stream"], "NICEENV_AUDIT");
                         assert_eq!(ack["seq"], 1);
                     }
-                    native_nats_readback(port);
+                    native_nats_readback(port, &actual.version);
                 }
                 state.stop_service(&service).unwrap();
                 assert!(running
@@ -2609,6 +2624,81 @@ mod tests {
                 assert!(state.manager.snapshot(&service).unwrap().pids.is_empty());
             }
             println!("{key}: two native start/health/stop cycles passed");
+            if id == "nats" {
+                assert_ne!(actual.version, entry.version);
+                state.start_service(&service).unwrap();
+                let previous = state.manager.snapshot(&service).unwrap();
+                let next_key = format!("{id}@{}", entry.version);
+                let next = runtime.block_on(state.install_package(&next_key)).unwrap();
+                assert_eq!(next.version, entry.version);
+                let listed = state.list_packages().unwrap();
+                for version in [&actual.version, &next.version] {
+                    assert_eq!(
+                        listed
+                            .iter()
+                            .filter(|p| p.manifest.id == id
+                                && &p.manifest.version == version
+                                && p.install.is_some())
+                            .count(),
+                        1
+                    );
+                }
+                assert_eq!(
+                    state.manager.snapshot(&service).unwrap().pids,
+                    previous.pids
+                );
+                assert_eq!(
+                    crate::ops::installed_by_choice(&state.store, &id)
+                        .unwrap()
+                        .version,
+                    actual.version
+                );
+                native_nats_readback(previous.port.unwrap(), &actual.version);
+                assert_eq!(
+                    state
+                        .set_active_version(&id, &next.version)
+                        .unwrap_err()
+                        .code,
+                    "SERVICE_BUSY"
+                );
+                state.stop_service(&service).unwrap();
+                assert!(previous
+                    .pids
+                    .iter()
+                    .all(|pid| !platform::process_alive(*pid)));
+                state.set_active_version(&id, &next.version).unwrap();
+                state.start_service(&service).unwrap();
+                let upgraded = state.manager.snapshot(&service).unwrap();
+                assert_eq!(upgraded.state, crate::model::ServiceState::Running);
+                assert!(!upgraded.pids.is_empty());
+                native_nats_readback(upgraded.port.unwrap(), &next.version);
+
+                // 新版仍在运行时卸载旧版，必须保留新版进程和共享消息目录。
+                state.uninstall_package(&key).unwrap();
+                assert!(!Path::new(&installed.install_path).exists());
+                assert!(state
+                    .store
+                    .find_installed(&id, Some(&actual.version))
+                    .is_none());
+                assert_eq!(
+                    state.manager.snapshot(&service).unwrap().pids,
+                    upgraded.pids
+                );
+                assert!(upgraded
+                    .pids
+                    .iter()
+                    .all(|pid| platform::process_alive(*pid)));
+                native_nats_readback(upgraded.port.unwrap(), &next.version);
+                state.stop_service(&service).unwrap();
+                assert!(upgraded
+                    .pids
+                    .iter()
+                    .all(|pid| !platform::process_alive(*pid)));
+                println!("{key} -> {next_key}: native upgrade retained the same JetStream message; installing the new version and removing the old version preserved the running process");
+                key = next_key;
+                installed = next;
+                actual = state.installer.installed_entry(&installed);
+            }
         }
         let preserved = state.paths.data().join(&id).join("audit-preserve.txt");
         std::fs::create_dir_all(preserved.parent().unwrap()).unwrap();
@@ -2649,13 +2739,17 @@ mod tests {
             struct Cleanup<'a>(&'a crate::CoreState);
             impl Drop for Cleanup<'_> {
                 fn drop(&mut self) {
-                    let _ = self.0.stop_service("nats");
+                    if self.0.stop_service("nats").is_err() {
+                        if let Ok(preview) = self.0.service_stop_preview("nats") {
+                            let _ = self.0.force_stop_service("nats", &preview.revision);
+                        }
+                    }
                 }
             }
             let _cleanup = Cleanup(&state);
             state.start_service("nats").unwrap();
             let running = state.manager.snapshot("nats").unwrap();
-            native_nats_readback(running.port.unwrap());
+            native_nats_readback(running.port.unwrap(), &actual.version);
             let store_dir =
                 crate::generic::service_data_dir(&state.store, &state.paths, "nats").unwrap();
             assert!(store_dir.join("jetstream").is_dir());

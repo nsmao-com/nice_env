@@ -4,8 +4,7 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-    # 手动触发：在 Actions 页选择分支（通常是 main）并填入要发布的 tag。
-    # tag 不存在时，tauri-action 创建 Release 时会在该分支当前提交上创建它。
+    # 手动重跑必须填写已经推送的 tag，检查和打包都使用该 tag 的代码。
     inputs:
       tag:
         description: "要发布的版本 tag（例如 v0.2.1），须与 tauri.conf.json 的版本号一致"
@@ -31,6 +30,8 @@ jobs:
         os: [windows-latest, macos-15-intel, macos-latest]
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -103,6 +104,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       # 锁文件是 pnpm 10 的 lockfileVersion 9.0；package.json 无 packageManager 字段
       - name: Setup pnpm
@@ -123,6 +126,13 @@ jobs:
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
+          set -euo pipefail
+          git check-ref-format "refs/tags/$TAG"
+          git fetch --no-tags origin "refs/tags/$TAG"
+          if [ "$(git cat-file -t FETCH_HEAD)" != tag ] || [ "$(git rev-parse 'FETCH_HEAD^{commit}')" != "$(git rev-parse HEAD)" ]; then
+            echo "::error title=发布标签不一致::远程必须存在指向当前构建提交的 annotated tag，不能由安装包任务临时创建或移动标签"
+            exit 1
+          fi
           ver=$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")
           if [ "$TAG" != "v$ver" ]; then
             echo "::error title=版本号不一致::tag 为 $TAG，但 tauri.conf.json 的版本号是 $ver（应为 v$ver）"
@@ -163,7 +173,10 @@ jobs:
           # 工作区 tauri 脚本先按 --target 编译 CLI/MCP，并注入 externalBin 后再打包。
           tauriScript: pnpm tauri
           tagName: ${{ inputs.tag || github.ref_name }}
-          releaseCommitish: ${{ github.sha }}
+          # tag 已验证并固定到构建提交，API 的 target_commitish 不用于移动既有 tag。
+          # 若传历史 SHA，而 main 在构建期间改过 workflow，GitHub 会额外要求
+          # GITHUB_TOKEN 无法获得的 workflows:write，导致出包后创建 Release 403。
+          releaseCommitish: ${{ github.event.repository.default_branch }}
           releaseName: "NiceEnv v__VERSION__"
           releaseBody: |
             自动构建的安装包（v__VERSION__）：

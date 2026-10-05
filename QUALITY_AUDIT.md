@@ -2,6 +2,16 @@
 
 本记录用于跟踪 Windows/macOS、路径与数据目录、上游版本和安装状态的复查。**整体复查未完成**；代码编译、单元测试、下载包核验和原生服务运行是不同的验收层级，不能相互替代。
 
+## 2026-10-05：v0.2.308 NATS 跨版本升级与 Release 创建修复
+
+- 扩展既有 `official_package_lifecycle`，NATS 从官方 2.14.7 安装并写入 JetStream 消息，再升级至内置正式版 2.15.0。旧版运行时安装新版，核对 PID、默认版本和真实协议版本仍是旧版；运行时切换返回 `SERVICE_BUSY`；停止后切换新版，再读取同一条消息。新版运行时卸载旧版，核对新版进程和共享数据不受影响，最后继续卸载重装、特殊路径迁移和原目录不可访问后的读回。每次请求都验证服务端 INFO 的版本号。Windows 原生用例 1 passed / 0 failed / 0 ignored，没有遗留 NATS 进程；macOS 的新增升级环节待新 tag 的原生任务确认。
+- v0.2.307 常规 CI `37268875573` 已成功，包含 Windows、macOS Intel、macOS ARM 的核心回归，以及 Rust/Web 检查；tag CI `37268875433` 也成功。单独的 NATS 原生任务 `37268899646` 中 ARM 已成功，Intel 尚在执行；这些是 v0.2.307 的同版本持久化验收，不能算作本次跨版本升级已经通过。
+- v0.2.305 / v0.2.306 的 macOS 包已构建，但创建 Release 返回 `Resource not accessible by integration`。日志明确包含 `Contents: write`，并非缺少该配置。GitHub 官方 [Release API 文档](https://docs.github.com/en/rest/releases/releases?apiVersion=2026-03-10#create-a-release) 说明：`target_commitish` 的 workflow 与当前默认分支不同，会要求 `GITHUB_TOKEN` 无法获得的 workflow 写权限。本项目连续发版后，历史 SHA 与 main 的工作流产生差异，符合该触发条件。
+- 发布任务先从远程获取并验证 annotated tag 指向构建提交，缺失或不一致直接失败；Tauri 的 `releaseCommitish` 改用默认分支（既有 tag 决定发布源码，不会被这个参数移动）。手动重跑的检查与构建均 checkout 指定 tag，禁止自动补建标签。修复的实际发布结果仍须后续 Release 任务确认，不将 YAML 检查通过视为安装包已发布。
+- ACME 当前源码回归 9 passed / 0 failed / 1 ignored；默认 ignored 的 Let's Encrypt staging 注册验证随后单独执行，真实注册账号与同一密钥复用账号 1 passed / 0 failed / 0 ignored，没有提交域名或创建证书订单。当前安装进程再次核实为 v0.2.283；v0.2.303 的 Windows 与 macOS 五个附件已公开可下载，并包含后续请求头和传输回退修复。未更换用户正在运行的程序。
+
+没有增加依赖或测试文件；没有数据库变更，未修改 `update.sql`。未运行本地前端 dev/build。版本文件同步至 0.2.308，workflow YAML、发布脚本 Bash 语法和版本一致性检查通过；实际执行标签检查片段，正确远程 annotated tag 通过，构建提交不一致被拒绝。此前 core 758 / platform 15 的完整回归保留其 v0.2.307 版本范围，本次不将它重新计为 v0.2.308 的实测结果。
+
 ## 2026-10-05：v0.2.304–v0.2.307 账号目录与 NATS 持久化复查
 
 - v0.2.304 的 Release 被两个路径断言拦截：Windows 临时目录的短名与长名、macOS `/var` 与 `/private/var` 指向同一目录。v0.2.305 按迁移返回的真实目标目录验证，未放宽账号内容保留断言；其 Release 三平台 runtime 均已成功。
@@ -35,7 +45,7 @@ v0.2.307 最终本地回归：core 758 项、platform 15 项通过，59 项 igno
 | --- | --- | --- |
 | 下载缓存 | 启动时清理根目录中超过 7 天的 `.pkg`，以及超过 24 小时的 `.part` / `.part.json`；每完成 5 次下载请求再做一次维护。只扫描下载根目录，保护活动任务及其附属包，不触碰 `pnpm-store`、`pnpm-cache`、`node-cache` | `download::tests`：6 项通过，覆盖活动任务保护、目录缓存保护、续传、镜像回退和取消 |
 | 上游版本 | Nginx、Node.js、Go、MySQL、MongoDB、NATS 真实上游查询全部成功；Nginx 返回 80 个版本，最新 1.31.6；二次读取命中缓存 | `check_versions`：7 pass / 0 fail；最新版本下载地址均返回 HTTP 206 |
-| ACME JWS | 当前客户端对账号、订单和 POST-as-GET 统一发送 `application/jose+json` 并固定 HTTP/1.1；当前运行包已包含 `ACME_CONTENT_TYPE` 诊断文本 | `acme::tests`：8 项通过；当前源码和 `D:\NiceEnv\\niceservbay.exe` 均含修复。若界面仍显示原始英文错误，应先退出旧进程并安装新包 |
+| ACME JWS | 当前客户端对账号、订单和 POST-as-GET 统一发送 `application/jose+json` 并固定 HTTP/1.1 | 当时 `acme::tests`：8 项通过。此前通过二进制字符串推断当前运行包包含全部修复的结论已撤回；实际进程仍为 v0.2.283，应以本文最新的版本核对和协议验证为准 |
 
 本批没有数据库结构变更，未修改 `update.sql`；未运行前端 dev/build，未新增测试文件。整体质量复查仍未完成，后续清单继续有效。
 

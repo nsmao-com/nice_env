@@ -487,20 +487,66 @@ async fn fetch(store: &Store, src: &VersionSource, template: &PackageManifestEnt
 mod upstream;
 
 async fn get_text(client: &reqwest::Client, url: &str) -> Result<String> {
-    client
-        .get(url)
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|e| AppError::download(url, e.to_string()))?
-        .text()
-        .await
-        .map_err(|e| AppError::download(url, e.to_string()))
+    async fn once(client: &reqwest::Client, url: &str) -> Result<String> {
+        client
+            .get(url)
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|e| AppError::download(url, e.to_string()))?
+            .text()
+            .await
+            .map_err(|e| AppError::download(url, e.to_string()))
+    }
+
+    match once(client, url).await {
+        Ok(text) => Ok(text),
+        Err(primary_error) => {
+            // 版本源请求默认会遵循系统代理。代理软件经常只影响某些域名，
+            // 因此失败后再走一次明确禁用代理的直连，避免整个版本目录被判定为不可用。
+            let direct = http_direct().map_err(|direct_error| {
+                AppError::download(
+                    url,
+                    format!(
+                        "系统代理请求失败：{primary_error}；创建直连客户端失败：{direct_error}"
+                    ),
+                )
+            })?;
+            once(&direct, url).await.map_err(|direct_error| {
+                AppError::download(
+                    url,
+                    format!("系统代理请求失败：{primary_error}；直连请求失败：{direct_error}"),
+                )
+                .with_hint("已自动尝试系统代理和直连；请检查网络或代理设置后刷新版本列表。")
+            })
+        }
+    }
 }
 
 async fn get_json(client: &reqwest::Client, url: &str) -> Result<serde_json::Value> {
     serde_json::from_str(&get_text(client, url).await?)
         .map_err(|e| AppError::internal("解析上游版本索引", e.to_string()))
+}
+
+/// 只验证下载地址是否可访问，不下载完整安装包。代理失败时用直连复核，
+/// 否则 Elasticsearch 这类“先探测资产再展示版本”的上游会静默丢掉全部版本。
+pub(super) async fn url_exists(client: &reqwest::Client, url: &str) -> bool {
+    async fn once(client: &reqwest::Client, url: &str) -> bool {
+        client
+            .get(url)
+            .header("Range", "bytes=0-0")
+            .send()
+            .await
+            .is_ok_and(|response| response.status().is_success())
+    }
+
+    if once(client, url).await {
+        return true;
+    }
+    if let Ok(direct) = http_direct() {
+        return once(&direct, url).await;
+    }
+    false
 }
 
 fn http_with_proxy(no_proxy: bool) -> Result<reqwest::Client> {
@@ -782,14 +828,7 @@ async fn fetch_nodejs(
     } else {
         format!("win-{arch}-zip")
     };
-    let rows: Vec<serde_json::Value> = client
-        .get(url)
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|e| AppError::download(url, e.to_string()))?
-        .json()
-        .await
+    let rows: Vec<serde_json::Value> = serde_json::from_value(get_json(&client, url).await?)
         .map_err(|e| AppError::internal("解析 Node 版本索引", e.to_string()))?;
 
     let ver_filter = src
@@ -875,15 +914,7 @@ pub(crate) fn node_lts_version(store: &Store, alias: &str) -> Result<String> {
 pub async fn node_sha256(version: &str, download_url: &str) -> Result<String> {
     let client = http()?;
     let url = format!("https://nodejs.org/dist/v{version}/SHASUMS256.txt");
-    let text = client
-        .get(&url)
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|e| AppError::download(&url, e.to_string()))?
-        .text()
-        .await
-        .map_err(|e| AppError::internal("读取 Node 校验文件", e.to_string()))?;
+    let text = get_text(&client, &url).await?;
     let needle = download_url.rsplit('/').next().unwrap_or("");
     text.lines()
         .find_map(|line| {
@@ -961,14 +992,7 @@ async fn fetch_go(
         "amd64"
     };
     let url = "https://go.dev/dl/?mode=json&include=all";
-    let rows: Vec<serde_json::Value> = client
-        .get(url)
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|e| AppError::download(url, e.to_string()))?
-        .json()
-        .await
+    let rows: Vec<serde_json::Value> = serde_json::from_value(get_json(&client, url).await?)
         .map_err(|e| AppError::internal("解析 Go 版本索引", e.to_string()))?;
 
     let ver_filter = src

@@ -88,11 +88,26 @@ pub(super) fn mongodb_tools_releases(data: &Value, src: &VersionSource, template
 }
 
 async fn mysql_html(client: &reqwest::Client, url: &str) -> Result<String> {
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| AppError::download(url, e.to_string()))?;
+    let response = match client.get(url).send().await {
+        Ok(response) => response,
+        Err(primary_error) => {
+            let direct = http_direct().map_err(|direct_error| {
+                AppError::download(
+                    url,
+                    format!(
+                        "系统代理请求失败：{primary_error}；创建直连客户端失败：{direct_error}"
+                    ),
+                )
+            })?;
+            direct.get(url).send().await.map_err(|direct_error| {
+                AppError::download(
+                    url,
+                    format!("系统代理请求失败：{primary_error}；直连请求失败：{direct_error}"),
+                )
+                .with_hint("已自动尝试系统代理和直连；请检查网络或代理设置后刷新版本列表。")
+            })?
+        }
+    };
     if response.status().as_u16() != 403 {
         return response
             .error_for_status()
@@ -493,13 +508,7 @@ pub(super) async fn fetch(
                 .map(|r| {
                     let client = &client;
                     async move {
-                        let response = client
-                            .get(&r.url)
-                            .header("Range", "bytes=0-0")
-                            .send()
-                            .await
-                            .ok()?;
-                        response.status().is_success().then_some(r)
+                        url_exists(client, &r.url).await.then_some(r)
                     }
                 })
                 .buffer_unordered(4)

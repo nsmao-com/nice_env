@@ -166,11 +166,6 @@ export function useVersionCatalogs(packageIds: string[]) {
         const id = queue[cursor++];
         if (!id) return;
         const pending = loadVersionCatalog(qc, id, force);
-        setLoadingIds((previous) => {
-          const next = new Set(previous);
-          next.delete(id);
-          return next;
-        });
         try {
           results.push(await pending);
         } catch (error) {
@@ -179,6 +174,15 @@ export function useVersionCatalogs(packageIds: string[]) {
             online: false,
             error: normalizeError(error).message,
           });
+        } finally {
+          // 请求完成后再结束 loading；旧一轮请求不能清理新一轮的状态。
+          if (generation === loadGeneration.current) {
+            setLoadingIds((previous) => {
+              const next = new Set(previous);
+              next.delete(id);
+              return next;
+            });
+          }
         }
       }
     };

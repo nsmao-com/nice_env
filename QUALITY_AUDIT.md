@@ -2,6 +2,18 @@
 
 本记录用于跟踪 Windows/macOS、路径与数据目录、上游版本和安装状态的复查。**整体复查未完成**；代码编译、单元测试、下载包核验和原生服务运行是不同的验收层级，不能相互替代。
 
+## 2026-10-05：v0.2.309 Web 配置迁移、Windows Nginx 中文命令路径
+
+- 先在既有目录迁移用例中复现 Nginx / Apache 将响应正文、Header、SetEnv 密码、URL 等业务字面值误当成磁盘路径改写，再将替换范围限定为明确的路径参数。保留注释、原换行和无关参数；补齐 Apache 单参数 Alias、LoadFile 与 SSLSessionCache 的路径处理。Nginx map/geo/split_clients 中的映射值不能因名称恰好是 root 等指令而被改写。
+- 自定义 set / map / geo / split_clients / Define 间接引用旧目录时，递归检查变量依赖；迁移入口联合检查多个配置文件，发现无法安全转换时返回 `DATA_DIR_CONFIG_VARIABLE`，不提交目标目录、不修改源文件。Apache 托管 NSB_ETC 宏若还用于响应头等业务值，同样拒绝误改。该保护是拒绝有歧义的自动迁移，不代表任意动态配置均可自动迁移。
+- 实际 Windows Nginx 1.31.6 复现了中文数据目录经 argv 进入系统代码页、随后被当作 UTF-8 打开而失败（错误 1113）。启动、停止、重载、配置编辑器及批量配置校验统一使用命令参数生成函数：共享中文目录由进程工作目录传递，-p/-c 使用 ASCII 相对路径；仍无法表示的内部路径给出明确提示。Unix 保持原有路径参数方式。
+- 扩展既有原生 Web 配置用例：保留原重置/备份恢复校验；将隔离的数据目录迁移至含中文、空格、`#`、方括号的目标，把原目录改名不可访问；通过 Nginx 1.31.6、Apache 2.4.69 的真实 HTTP 检查静态文件、单参数 Alias、响应头、SetEnv / set 值不变，并验证 Nginx 真正重载新 Header 和停止。初次完整原生验收 1 passed / 0 failed / 0 ignored；最终发布源码回归结果在下方另记。Apache 官方压缩包 SHA-256 为 `9b47a2363a71fef6209c88e79743db81311e1753c4564e007141934123132c10`，只在本轮临时目录解压。
+- 核实 v0.2.308 main CI `37270760352`、tag CI `37270760708`、macOS Intel/ARM NATS 跨版本验收 `37270812102` 均成功。Release `37270760286` 的两个 macOS runtime 成功，Windows 被 `certauto::tests::actual_deployment_holds_shared_output_until_script_finishes` 的 4 秒脚本就绪等待拦截，没有安装包 Release。将此既有用例改为就绪/释放信号握手，检查失败也释放并回收线程，保留真实的资源互斥断言；同时修正 workflow 将 Windows 失败误标成 macOS 的标题。
+
+本批未增加依赖或测试文件，没有数据库变更，未修改 `update.sql`，未运行本地前端 dev/build。待继续覆盖：自定义模块/脚本的动态路径、跨 include 的复杂映射、Unix socket 参数、非 SFTPGo 的凭据/资源文件字节保护、UNC 真实共享目录，以及其余套件和真实桌面交互矩阵。以上局部验收不能替代整体复查完成。
+
+v0.2.309 最终本地回归：core 758 passed / 0 failed / 59 ignored，platform 15 passed / 0 failed；同一源码随后单独执行真实 Nginx/Apache 用例为 1 passed / 0 failed / 0 ignored。版本一致性、UI 版本来源、Release YAML 和改动行格式检查通过。定向 `cargo clean -p nsb-core -p platform` 清理 202.0 MiB；本轮 Apache 临时下载目录的递归删除被自动审批以 `blocked by policy` 拒绝，目录保留，未改用其他方式绕过。当前实际安装进程仍为 v0.2.283，未替换用户程序。
+
 ## 2026-10-05：v0.2.308 NATS 跨版本升级与 Release 创建修复
 
 - 扩展既有 `official_package_lifecycle`，NATS 从官方 2.14.7 安装并写入 JetStream 消息，再升级至内置正式版 2.15.0。旧版运行时安装新版，核对 PID、默认版本和真实协议版本仍是旧版；运行时切换返回 `SERVICE_BUSY`；停止后切换新版，再读取同一条消息。新版运行时卸载旧版，核对新版进程和共享数据不受影响，最后继续卸载重装、特殊路径迁移和原目录不可访问后的读回。每次请求都验证服务端 INFO 的版本号。Windows 原生用例 1 passed / 0 failed / 0 ignored，没有遗留 NATS 进程；macOS 的新增升级环节待新 tag 的原生任务确认。

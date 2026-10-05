@@ -1652,30 +1652,88 @@ mod tests {
 
     #[test]
     fn actual_deployment_holds_shared_output_until_script_finishes() {
-        let (dir, state, mut a) = fixture(); a.deploy_local = false; a.dns.kind = "manual".into();
+        let (dir, state, mut a) = fixture();
+        a.deploy_local = false;
+        a.dns.kind = "manual".into();
         a.targets = vec![local_target(dir.path(), "shared")];
         let marker = dir.path().join("script-ready");
+        let release = dir.path().join("script-release");
         let script = if cfg!(windows) {
-            format!(r#"powershell.exe -NoProfile -NonInteractive -Command "[IO.File]::WriteAllText('{}','ready'); Start-Sleep -Milliseconds 1200""#, marker.to_string_lossy().replace('\'', "''"))
-        } else { format!("printf ready > '{}' && sleep 1", marker.to_string_lossy().replace('\'', "'\\''")) };
+            format!(
+                r#"powershell.exe -NoProfile -NonInteractive -Command "[IO.File]::WriteAllText('{}','ready'); while (-not [IO.File]::Exists('{}')) {{ Start-Sleep -Milliseconds 20 }}""#,
+                marker.to_string_lossy().replace('\'', "''"),
+                release.to_string_lossy().replace('\'', "''")
+            )
+        } else {
+            format!(
+                "printf ready > '{}' && while [ ! -f '{}' ]; do sleep 0.02; done",
+                marker.to_string_lossy().replace('\'', "'\\''"),
+                release.to_string_lossy().replace('\'', "'\\''")
+            )
+        };
         a.targets[0].config.insert("script".into(), script);
-        let first = material(&a, 40); retain_issued(&state, &mut a, &first).unwrap(); a.state = "deploy_error".into();
+        let first = material(&a, 40);
+        retain_issued(&state, &mut a, &first).unwrap();
+        a.state = "deploy_error".into();
         state.store.save_cert_automation(&a).unwrap();
-        let mut b = a.clone(); b.id = "other-auto".into(); b.targets[0].config.remove("script");
+        let mut b = a.clone();
+        b.id = "other-auto".into();
+        b.targets[0].config.remove("script");
         state.store.save_cert_automation(&b).unwrap();
-        let second = material(&b, 50); retain_issued(&state, &mut b, &second).unwrap(); b.state = "deploy_error".into();
+        let second = material(&b, 50);
+        retain_issued(&state, &mut b, &second).unwrap();
+        b.state = "deploy_error".into();
         state.store.save_cert_automation(&b).unwrap();
-        let background = state.clone(); let id = a.id.clone();
+        let background = state.clone();
+        let id = a.id.clone();
         let worker = std::thread::spawn(move || background.certauto_retry_deploy(&id));
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
-        while !marker.exists() { assert!(std::time::Instant::now() < deadline); std::thread::sleep(std::time::Duration::from_millis(10)); }
-        assert_eq!(state.certauto_retry_deploy(&b.id).unwrap_err().code, "CERT_AUTO_RESOURCE_BUSY");
-        assert_eq!(std::fs::read_to_string(dir.path().join("shared.crt")).unwrap(), first.chain);
-        assert_eq!(state.store.get_cert_automation(&b.id).unwrap().unwrap().state, "deploy_error");
-        assert_eq!(worker.join().unwrap().unwrap().state, "ok");
+        // 等待脚本明确就绪，再主动释放；不把慢机器的进程启动时间当成部署失败，
+        // 也不依赖固定休眠窗口来证明锁仍被持有。断言失败同样释放并回收工作线程。
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !marker.exists() {
+                assert!(
+                    !worker.is_finished(),
+                    "部署在脚本就绪前结束：{:?}",
+                    state.store.get_cert_automation(&a.id).unwrap()
+                );
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "部署脚本未在 30 秒内就绪"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_eq!(
+                state.certauto_retry_deploy(&b.id).unwrap_err().code,
+                "CERT_AUTO_RESOURCE_BUSY"
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("shared.crt")).unwrap(),
+                first.chain
+            );
+            assert_eq!(
+                state
+                    .store
+                    .get_cert_automation(&b.id)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                "deploy_error"
+            );
+        }));
+        std::fs::write(&release, "release").unwrap();
+        let deployed = worker.join().unwrap();
+        if let Err(panic) = checked {
+            std::panic::resume_unwind(panic);
+        }
+        assert_eq!(deployed.unwrap().state, "ok");
         assert_eq!(state.certauto_retry_deploy(&b.id).unwrap().state, "ok");
-        assert_eq!(std::fs::read_to_string(dir.path().join("shared.crt")).unwrap(), second.chain);
-        assert!(!account_key_path(&state.paths, &a.id).exists()); assert!(!account_key_path(&state.paths, &b.id).exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("shared.crt")).unwrap(),
+            second.chain
+        );
+        assert!(!account_key_path(&state.paths, &a.id).exists());
+        assert!(!account_key_path(&state.paths, &b.id).exists());
     }
 
     #[test]

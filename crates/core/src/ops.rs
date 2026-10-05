@@ -431,12 +431,7 @@ fn start_nginx(
     let site_endpoints = crate::sites::snapshot_endpoints(paths, store, "nginx");
     let spec = SpawnSpec {
         program: exe.clone(),
-        args: vec![
-            "-p".into(),
-            crate::paths::portable_path_text(&root),
-            "-c".into(),
-            crate::paths::portable_path_text(&paths.nginx_conf()),
-        ],
+        args: configgen::nginx_config_args(&root, &paths.nginx_conf())?,
         cwd: Some(root.clone()),
         env: vec![],
         detached: None,
@@ -1188,17 +1183,14 @@ fn stop_service_with_mode(store: &Store, paths: &Paths, manager: &Arc<ServiceMan
         match id {
             "nginx" => {
                 if let Ok((root, exe)) = nginx_exe(store) {
-                    let _ = platform::command(&exe)
-                        .args([
-                            "-p".into(),
-                            crate::paths::portable_path_text(&root),
-                            "-c".into(),
-                            crate::paths::portable_path_text(&paths.nginx_conf()),
-                            "-s".into(),
-                            "stop".into(),
-                        ])
-                        .output();
-                    std::thread::sleep(Duration::from_millis(800));
+                    if let Ok(args) = configgen::nginx_config_args(&root, &paths.nginx_conf()) {
+                        let _ = platform::command(&exe)
+                            .current_dir(&root)
+                            .args(args)
+                            .args(["-s", "stop"])
+                            .output();
+                        std::thread::sleep(Duration::from_millis(800));
+                    }
                 }
                 terminate_group(manager, id)?;
                 Ok(())
@@ -1523,14 +1515,9 @@ pub fn reload_nginx(store: &Store, paths: &Paths, manager: &ServiceManager) -> R
     configgen::validate_nginx(&exe, &paths.nginx_conf())?;
     let site_endpoints = crate::sites::snapshot_endpoints(paths, store, "nginx");
     let out = platform::command(&exe)
-        .args([
-            "-p".into(),
-            crate::paths::portable_path_text(&root),
-            "-c".into(),
-            crate::paths::portable_path_text(&paths.nginx_conf()),
-            "-s".into(),
-            "reload".into(),
-        ])
+        .current_dir(&root)
+        .args(configgen::nginx_config_args(&root, &paths.nginx_conf())?)
+        .args(["-s", "reload"])
         .output()
         .map_err(|e| AppError::io("重载 nginx", e))?;
     if !out.status.success() {
@@ -2413,11 +2400,7 @@ fn validate_configs_selected(
             let mut command = platform::command(exe);
             command.current_dir(&root).arg("-t");
             if package.id == "nginx" {
-                command
-                    .arg("-p")
-                    .arg(crate::paths::portable_path_text(&root))
-                    .arg("-c")
-                    .arg(crate::paths::portable_path_text(&conf));
+                command.args(configgen::nginx_config_args(&root, &conf)?);
             } else {
                 command
                     .arg("-d")

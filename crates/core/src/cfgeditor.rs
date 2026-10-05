@@ -842,11 +842,7 @@ pub fn validate(
                 let mut command = platform::command(&exe);
                 command.current_dir(&root).arg("-t");
                 if kind == ConfigKind::NginxMain {
-                    command
-                        .arg("-p")
-                        .arg(crate::paths::portable_path_text(&root))
-                        .arg("-c")
-                        .arg(crate::paths::portable_path_text(tmp.path()));
+                    command.args(crate::configgen::nginx_config_args(&root, tmp.path())?);
                 } else {
                     command
                         .arg("-d")
@@ -860,7 +856,11 @@ pub fn validate(
                             messages.push(line.to_string());
                             let is_current = line
                                 .replace('\\', "/")
-                                .contains(&tmp.path().to_string_lossy().replace('\\', "/"));
+                                .contains(&tmp.path().to_string_lossy().replace('\\', "/"))
+                                || line.contains(&format!(
+                                    "{}:",
+                                    tmp.path().file_name().unwrap().to_string_lossy()
+                                ));
                             if !ok || line.contains("[warn]") {
                                 issues.push(ConfigIssue {
                                     line: if is_current {
@@ -2002,43 +2002,327 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    #[ignore = "requires NSB_NGINX_ROOT and NSB_APACHE_ROOT; validates reset and restored configs without starting services"]
+    #[ignore = "requires NSB_NGINX_ROOT and NSB_APACHE_ROOT; validates reset/restore and serves isolated HTTP after data migration"]
     fn native_web_configs_validate_after_reset_and_toolbox_restore() {
-        let (_temp, paths, store) = fixture();
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().join("original data"));
+        paths.ensure_dirs().unwrap();
+        let store = crate::store::Store::open(paths.db()).unwrap();
         let nginx_source = PathBuf::from(std::env::var("NSB_NGINX_ROOT").expect("NSB_NGINX_ROOT"));
-        let nginx_version = nginx_source.file_name().unwrap().to_string_lossy().strip_prefix("nginx-").unwrap().to_string();
+        let nginx_version = nginx_source
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .strip_prefix("nginx-")
+            .unwrap()
+            .to_string();
         let install = paths.runtime_dir("nginx", &nginx_version);
         let root = install.join(format!("nginx-{nginx_version}"));
-        for dir in ["logs", "temp", "conf"] { std::fs::create_dir_all(root.join(dir)).unwrap(); }
-        for file in ["nginx.exe", "conf/mime.types"] { std::fs::copy(nginx_source.join(file), root.join(file)).unwrap(); }
+        for dir in ["logs", "temp", "conf"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        for file in ["nginx.exe", "conf/mime.types"] {
+            std::fs::copy(nginx_source.join(file), root.join(file)).unwrap();
+        }
         let apache_root = PathBuf::from(std::env::var("NSB_APACHE_ROOT").expect("NSB_APACHE_ROOT"));
-        for (id, version, location) in [("nginx", nginx_version.as_str(), install.as_path()), ("apache", "2.4.66", apache_root.parent().unwrap())] {
-            store.upsert_installed(&crate::model::InstalledPackage {
-                id: id.into(), version: version.into(), category: "web-server".into(),
-                install_path: location.to_string_lossy().into(), config_path: String::new(), installed_at: 0,
-            }).unwrap();
+        for (id, version, location) in [
+            ("nginx", nginx_version.as_str(), install.as_path()),
+            ("apache", "2.4.66", apache_root.parent().unwrap()),
+        ] {
+            store
+                .upsert_installed(&crate::model::InstalledPackage {
+                    id: id.into(),
+                    version: version.into(),
+                    category: "web-server".into(),
+                    install_path: location.to_string_lossy().into(),
+                    config_path: String::new(),
+                    installed_at: 0,
+                })
+                .unwrap();
         }
         let ports = crate::services::PortsProfile::from_settings(&store);
-        crate::configgen::write_nginx_conf(&paths, &root, &[], ports.http, ports.https, None).unwrap();
-        crate::configgen::write_httpd_conf(&paths, &apache_root, &[], ports.apache_http, ports.apache_https, None).unwrap();
+        crate::configgen::write_nginx_conf(&paths, &root, &[], ports.http, ports.https, None)
+            .unwrap();
+        crate::configgen::write_httpd_conf(
+            &paths,
+            &apache_root,
+            &[],
+            ports.apache_http,
+            ports.apache_https,
+            None,
+        )
+        .unwrap();
         for (kind, path, extra) in [
-            (ConfigKind::NginxMain, paths.nginx_conf(), "\nworker_rlimit_nofile 4096;\n"),
-            (ConfigKind::ApacheConf, paths.apache_conf(), "\nTimeout 123\n"),
+            (
+                ConfigKind::NginxMain,
+                paths.nginx_conf(),
+                "\nworker_rlimit_nofile 4096;\n",
+            ),
+            (
+                ConfigKind::ApacheConf,
+                paths.apache_conf(),
+                "\nTimeout 123\n",
+            ),
         ] {
             let custom = format!("{}{extra}", std::fs::read_to_string(&path).unwrap());
             std::fs::write(&path, &custom).unwrap();
             let preview = preview_config_reset(&paths, &store, kind.id()).unwrap();
             assert!(preview.changed);
             reset_config(&paths, &store, kind.id(), &preview.revision).unwrap();
-            let result = validate(&paths, &store, kind, &std::fs::read_to_string(&path).unwrap()).unwrap();
-            assert!(result.ok, "reset {:?}: {:?} {:?}", kind, result.messages, result.issues);
-            let backup = crate::paths::list_backup_files(&paths.base).unwrap().into_iter()
-                .find(|b| std::fs::read_to_string(&b.path).ok().as_deref() == Some(custom.as_str())).unwrap();
+            let result = validate(
+                &paths,
+                &store,
+                kind,
+                &std::fs::read_to_string(&path).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                result.ok,
+                "reset {:?}: {:?} {:?}",
+                kind, result.messages, result.issues
+            );
+            let backup = crate::paths::list_backup_files(&paths.base)
+                .unwrap()
+                .into_iter()
+                .find(|b| std::fs::read_to_string(&b.path).ok().as_deref() == Some(custom.as_str()))
+                .unwrap();
             let preview = crate::paths::preview_backup(&paths.base, &backup.name).unwrap();
-            crate::paths::restore_backup_checked(&paths.base, &backup.name, Some(&preview.revision)).unwrap();
+            crate::paths::restore_backup_checked(
+                &paths.base,
+                &backup.name,
+                Some(&preview.revision),
+            )
+            .unwrap();
             assert_eq!(std::fs::read_to_string(&path).unwrap(), custom);
             let result = validate(&paths, &store, kind, &custom).unwrap();
-            assert!(result.ok, "restore {:?}: {:?} {:?}", kind, result.messages, result.issues);
+            assert!(
+                result.ok,
+                "restore {:?}: {:?} {:?}",
+                kind, result.messages, result.issues
+            );
+        }
+
+        let old = crate::paths::portable_path_text(&paths.base);
+        let literal = format!("{old}/literal");
+        let site = paths.base.join("www");
+        std::fs::create_dir_all(&site).unwrap();
+        std::fs::write(site.join("index.html"), "migrated static document").unwrap();
+        let nginx_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let apache_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let nginx_port = nginx_listener.local_addr().unwrap().port();
+        let apache_port = apache_listener.local_addr().unwrap().port();
+        std::fs::write(
+            paths.nginx_conf(),
+            format!(
+                r#"
+pid "{old}/etc/nginx/run/nginx.pid";
+error_log "{old}/logs/nginx/error.log";
+events {{}}
+http {{
+    access_log off;
+    server {{
+        listen 127.0.0.1:{nginx_port};
+        root "{old}/www";
+        set $secret "{literal}";
+        add_header X-Literal "{literal}";
+        add_header X-Secret $secret;
+        location /literal {{ return 200 "{literal}"; }}
+    }}
+}}
+"#
+            ),
+        )
+        .unwrap();
+        let apache = crate::paths::portable_path_text(&apache_root);
+        std::fs::write(
+            paths.apache_conf(),
+            format!(
+                r#"
+ServerRoot "{apache}"
+LoadModule authz_core_module modules/mod_authz_core.so
+LoadModule dir_module modules/mod_dir.so
+LoadModule env_module modules/mod_env.so
+LoadModule headers_module modules/mod_headers.so
+LoadModule alias_module modules/mod_alias.so
+Listen 127.0.0.1:{apache_port}
+ServerName localhost
+PidFile "{old}/etc/apache/run/httpd.pid"
+ErrorLog "{old}/etc/apache/logs/error.log"
+DocumentRoot "{old}/www"
+DirectoryIndex index.html
+SetEnv APP_SECRET "{literal}"
+Header always set X-Literal "{literal}"
+Header always set X-Secret "%{{APP_SECRET}}e"
+<Directory "{old}/www">
+    Require all granted
+</Directory>
+<Location /alias>
+    Alias "{old}/www/index.html"
+</Location>
+"#
+            ),
+        )
+        .unwrap();
+        drop(store);
+        let migrated = Paths::new(temp.path().join("迁移后 data # [2]"));
+        crate::paths::copy_data_dir(&paths.base, &migrated.base).unwrap();
+        std::fs::rename(&paths.base, temp.path().join("retired")).unwrap();
+        assert!(!paths.base.exists());
+        let store = crate::store::Store::open(migrated.db()).unwrap();
+        drop((nginx_listener, apache_listener));
+        for (kind, path) in [
+            (ConfigKind::NginxMain, migrated.nginx_conf()),
+            (ConfigKind::ApacheConf, migrated.apache_conf()),
+        ] {
+            let content = std::fs::read_to_string(path).unwrap();
+            assert!(content.contains(&literal));
+            let result = validate(&migrated, &store, kind, &content).unwrap();
+            assert!(
+                result.ok,
+                "migrated {kind:?}: {:?} {:?}",
+                result.messages, result.issues
+            );
+        }
+        struct Children(Vec<std::process::Child>, platform::ProcessGroup);
+        impl Drop for Children {
+            fn drop(&mut self) {
+                for child in &mut self.0 {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+        let mut children = Children(Vec::new(), platform::ProcessGroup::new().unwrap());
+        let nginx_root = migrated
+            .runtime_dir("nginx", &nginx_version)
+            .join(format!("nginx-{nginx_version}"));
+        for (exe, cwd, args) in [
+            (nginx_root.join("nginx.exe"), nginx_root.clone(), {
+                let mut args =
+                    crate::configgen::nginx_config_args(&nginx_root, &migrated.nginx_conf())
+                        .unwrap();
+                args.extend(["-g".into(), "daemon off;".into()]);
+                args
+            }),
+            (
+                apache_root.join("bin/httpd.exe"),
+                apache_root.clone(),
+                vec![
+                    "-X".into(),
+                    "-f".into(),
+                    crate::paths::portable_path_text(&migrated.apache_conf()),
+                ],
+            ),
+        ] {
+            let child = platform::command(exe)
+                .args(args)
+                .current_dir(cwd)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            children.0.push(child);
+            children.1.attach(children.0.last().unwrap().id()).unwrap();
+        }
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+        for (port, path, expected) in [
+            (nginx_port, "/index.html", "migrated static document"),
+            (nginx_port, "/literal", literal.as_str()),
+            (apache_port, "/index.html", "migrated static document"),
+            (apache_port, "/alias", "migrated static document"),
+        ] {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            let response = loop {
+                if let Ok(response) = client.get(format!("http://127.0.0.1:{port}{path}")).send() {
+                    break response;
+                }
+                assert!(
+                    children
+                        .0
+                        .iter_mut()
+                        .all(|child| child.try_wait().unwrap().is_none()),
+                    "isolated service exited"
+                );
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "isolated service did not start"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            };
+            assert_eq!(response.status(), reqwest::StatusCode::OK, "{port}{path}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get("x-literal")
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                literal
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get("x-secret")
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                literal
+            );
+            assert_eq!(response.text().unwrap(), expected);
+        }
+        let conf = migrated.nginx_conf();
+        let current = std::fs::read_to_string(&conf).unwrap();
+        let next_literal = format!("{literal}/reloaded");
+        std::fs::write(
+            &conf,
+            current.replace(
+                &format!("add_header X-Literal \"{literal}\""),
+                &format!("add_header X-Literal \"{next_literal}\""),
+            ),
+        )
+        .unwrap();
+        for signal in ["reload", "stop"] {
+            let output = platform::command(nginx_root.join("nginx.exe"))
+                .current_dir(&nginx_root)
+                .args(crate::configgen::nginx_config_args(&nginx_root, &conf).unwrap())
+                .args(["-s", signal])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{signal}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            loop {
+                if signal == "stop" {
+                    if children.0[0].try_wait().unwrap().is_some() {
+                        break;
+                    }
+                } else if let Ok(response) = client
+                    .get(format!("http://127.0.0.1:{nginx_port}/index.html"))
+                    .send()
+                {
+                    if response
+                        .headers()
+                        .get("x-literal")
+                        .and_then(|v| v.to_str().ok())
+                        == Some(next_literal.as_str())
+                    {
+                        assert_eq!(response.text().unwrap(), "migrated static document");
+                        break;
+                    }
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "Nginx {signal} did not complete"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
         }
     }
 

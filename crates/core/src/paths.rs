@@ -670,6 +670,11 @@ impl DataPathRebase {
         if let Some((service, json)) = crate::configpaths::service(relative) {
             return crate::configpaths::rebase(value, service, json, self);
         }
+        match web_config_service(relative) {
+            Some("nginx") => return crate::configgen::rebase_nginx_config(value, self),
+            Some("apache") => return crate::configgen::rebase_httpd_config(value, self),
+            _ => {}
+        }
         let relative = config_path_key(relative);
         let name = relative.rsplit('/').next().unwrap_or("");
         let name = name.strip_suffix(".disabled").unwrap_or(name);
@@ -678,23 +683,6 @@ impl DataPathRebase {
             && (conf || name == "Caddyfile" || (cfg!(windows) && name == "caddyfile"))
         {
             return crate::caddy::rebase_config(value, self, Path::new(&self.target));
-        }
-        if (relative.starts_with("etc/nginx/") || relative.starts_with("runtimes/nginx/"))
-            && (conf
-                || [
-                    "mime.types",
-                    "fastcgi_params",
-                    "fastcgi.conf",
-                    "uwsgi_params",
-                    "scgi_params",
-                ]
-                .contains(&name))
-        {
-            return crate::configgen::rebase_nginx_config(value, self);
-        }
-        if (relative.starts_with("etc/apache/") || relative.starts_with("runtimes/apache/")) && conf
-        {
-            return crate::configgen::rebase_httpd_config(value, self);
         }
         let ini = name.ends_with(".ini") || name.ends_with(".cnf");
         if name == ".user.ini"
@@ -1006,6 +994,30 @@ fn copy_tree(source: &Path, target: &Path, stats: &mut (u64, u64), root: bool) -
     Ok(())
 }
 
+fn web_config_service(relative: &Path) -> Option<&'static str> {
+    let relative = config_path_key(relative);
+    let name = relative.rsplit('/').next().unwrap_or("");
+    let name = name.strip_suffix(".disabled").unwrap_or(name);
+    if (relative.starts_with("etc/nginx/") || relative.starts_with("runtimes/nginx/"))
+        && (name.ends_with(".conf")
+            || [
+                "mime.types",
+                "fastcgi_params",
+                "uwsgi_params",
+                "scgi_params",
+            ]
+            .contains(&name))
+    {
+        Some("nginx")
+    } else if (relative.starts_with("etc/apache/") || relative.starts_with("runtimes/apache/"))
+        && name.ends_with(".conf")
+    {
+        Some("apache")
+    } else {
+        None
+    }
+}
+
 fn rebase_config_files(
     root: &Path,
     source: &Path,
@@ -1015,6 +1027,7 @@ fn rebase_config_files(
     migration_config_files(root, root, &mut files)?;
     let resources = migration_resources(root, source, &files, rebase)?;
     let mut rewritten = 0;
+    let mut web_configs = std::collections::HashMap::<&str, String>::new();
     for path in files {
         if resources
             .paths
@@ -1046,6 +1059,11 @@ fn rebase_config_files(
             }
             continue;
         };
+        if let Some(service) = web_config_service(relative) {
+            let combined = web_configs.entry(service).or_default();
+            combined.push_str(text);
+            combined.push('\n');
+        }
         let rebased = rebase
             .config_text(relative, text)
             .map_err(|e| e.with_detail(relative.display().to_string()))?;
@@ -1053,6 +1071,16 @@ fn rebase_config_files(
             std::fs::write(&path, rebased)?;
             rewritten += 1;
         }
+    }
+    // 定义和使用可以分散在多个 include 文件中。提交迁移目录之前联合检查，
+    // 不能因为各文件单独转换成功，就留下仍指向旧目录的变量引用。
+    for (service, content) in web_configs {
+        let result = if service == "nginx" {
+            crate::configgen::rebase_nginx_config(&content, rebase)
+        } else {
+            crate::configgen::rebase_httpd_config(&content, rebase)
+        };
+        result.map_err(|error| error.with_detail(format!("{service} 配置及其 include 文件")))?;
     }
     for (path, bytes) in resources.files {
         let existing = match std::fs::read(&path) {
@@ -2261,6 +2289,106 @@ mod tests {
         let structured_target = format!("{new} with spaces #资料");
         let structured =
             DataPathRebase::new(Path::new(old), Path::new(&structured_target)).unwrap();
+        let nginx = format!(
+            "# keep {old}\r\nhttp {{\r\n server {{\r\n  root \"{old}/www\";\r\n  add_header X-Audit \"{old}/literal\";\r\n  proxy_set_header X-Secret \"{old}/literal\";\r\n  fastcgi_param APP_SECRET \"{old}/literal\";\r\n  fastcgi_param SCRIPT_FILENAME \"{old}/www/index.php\";\r\n  set $secret \"{old}/literal\";\r\n  location \"{old}/url\" {{ return 200 \"{old}/literal\"; }}\r\n }}\r\n}}\r\n"
+        );
+        let httpd = format!(
+            "# keep {old}\r\nDocumentRoot \"{old}/www\"\r\nHeader set X-Audit \"{old}/literal\"\r\nRequestHeader set X-Secret \"{old}/literal\"\r\nSetEnv APP_SECRET \"{old}/literal\"\r\nDefine APP_SECRET \"{old}/literal\"\r\nAlias \"{old}/url\" \"{old}/www/assets\"\r\n<Location \"{old}/url\">\r\nErrorDocument 404 \"{old}/literal\"\r\n</Location>\r\n"
+        );
+        let expected_nginx = nginx
+            .replace(
+                &format!("root \"{old}/www\""),
+                &format!("root \"{structured_target}/www\""),
+            )
+            .replace(
+                &format!("SCRIPT_FILENAME \"{old}/www/index.php\""),
+                &format!("SCRIPT_FILENAME \"{structured_target}/www/index.php\""),
+            );
+        let expected_httpd = httpd
+            .replace(
+                &format!("DocumentRoot \"{old}/www\""),
+                &format!("DocumentRoot \"{structured_target}/www\""),
+            )
+            .replace(
+                &format!("\"{old}/www/assets\""),
+                &format!("\"{structured_target}/www/assets\""),
+            );
+        assert_eq!(
+            (
+                structured
+                    .config_text(Path::new("etc/nginx/nginx.conf"), &nginx)
+                    .unwrap(),
+                structured
+                    .config_text(Path::new("etc/apache/httpd.conf"), &httpd)
+                    .unwrap(),
+            ),
+            (expected_nginx, expected_httpd),
+            "physical paths must migrate without changing headers, URLs or application secrets"
+        );
+        let mapped_literal = format!("map $host $secret {{ root \"{old}/literal\"; default \"{old}/literal\"; }} add_header X-Secret $secret;");
+        assert_eq!(
+            crate::configgen::rebase_nginx_config(&mapped_literal, &structured).unwrap(),
+            mapped_literal
+        );
+        let generated = crate::configgen::render_httpd_conf(
+            &Paths::new(PathBuf::from(old)),
+            &PathBuf::from(format!("{old}/Apache24")),
+            &[],
+            8080,
+            8443,
+        );
+        let generated = crate::configgen::rebase_httpd_config(&generated, &structured).unwrap();
+        assert!(generated.contains(&format!(
+            "Define NSB_ETC \"{structured_target}/etc/apache\""
+        )));
+        assert!(generated.contains("SSLSessionCache \"shmcb:${NSB_ETC}/logs/ssl_scache(512000)\""));
+        let cache = format!("SSLSessionCache \"shmcb:{old}/cache(512000)\"\n");
+        assert_eq!(
+            crate::configgen::rebase_httpd_config(&cache, &structured).unwrap(),
+            format!("SSLSessionCache \"shmcb:{structured_target}/cache(512000)\"\n")
+        );
+        let aliases = format!("<Location /files>\r\nAlias \"{old}/www\"\r\n</Location>\r\nAlias \"{old}/url\" \\\r\n \"{old}/www\"\r\nLoadFile \"{old}/one.so\" \"{old}/two.so\"\r\n");
+        let expected = aliases
+            .replace(&format!("{old}/www"), &format!("{structured_target}/www"))
+            .replace(
+                &format!("{old}/one.so"),
+                &format!("{structured_target}/one.so"),
+            )
+            .replace(
+                &format!("{old}/two.so"),
+                &format!("{structured_target}/two.so"),
+            );
+        assert_eq!(
+            crate::configgen::rebase_httpd_config(&aliases, &structured).unwrap(),
+            expected
+        );
+        for nginx in [
+            format!("set $base \"{old}\"; set $nested $base/www; root $nested;"),
+            format!("map $host $base {{ default \"{old}\"; }} root $base;"),
+            format!("geo $base {{ default \"{old}\"; }} root ${{base}};"),
+            format!("split_clients $request_id $base {{ * \"{old}\"; }} root $base;"),
+        ] {
+            assert_eq!(
+                crate::configgen::rebase_nginx_config(&nginx, &structured)
+                    .unwrap_err()
+                    .code,
+                "DATA_DIR_CONFIG_VARIABLE"
+            );
+        }
+        let macro_path = format!("Define BASE \"{old}\"\nDefine NESTED \"${{BASE}}/www\"\nDocumentRoot \"${{NESTED}}\"\n");
+        assert_eq!(
+            crate::configgen::rebase_httpd_config(&macro_path, &structured)
+                .unwrap_err()
+                .code,
+            "DATA_DIR_CONFIG_VARIABLE"
+        );
+        let mixed_macro = format!("Define NSB_ETC \"{old}/etc/apache\"\nDocumentRoot \"${{NSB_ETC}}/htdocs\"\nHeader set X-Literal \"${{NSB_ETC}}\"\n");
+        assert_eq!(
+            crate::configgen::rebase_httpd_config(&mixed_macro, &structured)
+                .unwrap_err()
+                .code,
+            "DATA_DIR_CONFIG_VARIABLE"
+        );
         let yaml = format!("# 中文注释 {old}/unchanged\r\nshared: &shared '{old}/shared'\r\nsecret: *shared\r\nstorage: {{dbPath: *shared}} # keep flow\r\nsystemLog:\r\n  path: &log \"{old}/mongo.log\" # keep log comment\r\nnet:\r\n  tls:\r\n    certificateKeyFile: |- # keep block comment\r\n      {old}/tls.pem\r\ncustom:\r\n  password: *log\r\n  external: '{old} sibling/file'\r\n");
         let updated = structured
             .config_text(Path::new("etc/mongodb/8.0/mongod.conf"), &yaml)
@@ -3259,6 +3387,33 @@ mod tests {
             .to_string_lossy()
             .contains("-migrating-")));
         std::fs::write(paths.nginx_conf(), "# valid configuration\n").unwrap();
+        for (main, include, definition, reference) in [
+            (
+                paths.nginx_conf(),
+                paths.nginx_sites_dir().join("vars.conf"),
+                format!("set $base \"{old}\";"),
+                "root $base;",
+            ),
+            (
+                paths.apache_conf(),
+                paths.apache_sites_dir().join("vars.conf"),
+                format!("Define BASE \"{old}\"\n"),
+                "DocumentRoot \"${BASE}\"\n",
+            ),
+        ] {
+            std::fs::create_dir_all(include.parent().unwrap()).unwrap();
+            std::fs::write(&main, &definition).unwrap();
+            std::fs::write(&include, reference).unwrap();
+            assert_eq!(
+                copy_data_dir(&source, &target).unwrap_err().code,
+                "DATA_DIR_CONFIG_VARIABLE"
+            );
+            assert_eq!(std::fs::read_to_string(&main).unwrap(), definition);
+            assert_eq!(std::fs::read_to_string(&include).unwrap(), reference);
+            assert!(std::fs::read_dir(&target).unwrap().next().is_none());
+            std::fs::write(main, "# valid configuration\n").unwrap();
+            std::fs::remove_file(include).unwrap();
+        }
         let mongo = source.join("etc/mongodb/8.0/mongod.conf");
         std::fs::create_dir_all(mongo.parent().unwrap()).unwrap();
         std::fs::write(&mongo, "storage: [ invalid\n").unwrap();

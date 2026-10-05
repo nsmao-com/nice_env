@@ -251,16 +251,111 @@ pub(crate) fn rebase_nginx_config(
     rebase: &crate::paths::DataPathRebase,
 ) -> Result<String> {
     let mut directive = None;
+    let mut argument = 0;
+    let mut first_argument = String::new();
     let mut changes = Vec::new();
+    let mut variables = Vec::new();
+    let mut path_values = Vec::new();
+    let mut has_mapping = false;
+    let mut data_blocks = Vec::new();
     for token in nginx_tokens(content)? {
-        if token.delimiter.is_some() {
+        if let Some(delimiter) = token.delimiter {
+            if delimiter == b'{' {
+                data_blocks.push(
+                    data_blocks.last().copied().unwrap_or(false)
+                        || matches!(
+                            directive.as_deref(),
+                            Some("map" | "geo" | "split_clients" | "types")
+                        ),
+                );
+            } else if delimiter == b'}' {
+                data_blocks.pop();
+            }
             directive = None;
             continue;
         }
         let Some(name) = directive.as_deref() else {
+            has_mapping |= matches!(token.word.as_str(), "map" | "geo" | "split_clients");
             directive = Some(token.word);
+            argument = 0;
+            first_argument.clear();
             continue;
         };
+        argument += 1;
+        if argument == 1 {
+            first_argument.clone_from(&token.word);
+        }
+        if data_blocks.last() == Some(&true) && name != "include" {
+            continue;
+        }
+        if name == "set" && argument == 2 {
+            variables.push((
+                first_argument.trim_start_matches('$').to_string(),
+                token.word.clone(),
+            ));
+        }
+        // URL、响应正文、请求头和应用参数都可能恰好像旧目录，不能按文本猜路径。
+        let path_argument = match name {
+            "include"
+            | "root"
+            | "alias"
+            | "pid"
+            | "lock_file"
+            | "working_directory"
+            | "load_module"
+            | "error_log"
+            | "access_log"
+            | "auth_basic_user_file"
+            | "client_body_temp_path"
+            | "proxy_temp_path"
+            | "fastcgi_temp_path"
+            | "uwsgi_temp_path"
+            | "scgi_temp_path"
+            | "proxy_cache_path"
+            | "fastcgi_cache_path"
+            | "uwsgi_cache_path"
+            | "scgi_cache_path"
+            | "proxy_store"
+            | "fastcgi_store"
+            | "uwsgi_store"
+            | "scgi_store"
+            | "ssl_certificate"
+            | "ssl_certificate_key"
+            | "ssl_client_certificate"
+            | "ssl_trusted_certificate"
+            | "ssl_crl"
+            | "ssl_dhparam"
+            | "ssl_password_file"
+            | "ssl_session_ticket_key"
+            | "proxy_ssl_certificate"
+            | "proxy_ssl_certificate_key"
+            | "proxy_ssl_trusted_certificate"
+            | "proxy_ssl_crl"
+            | "proxy_ssl_password_file"
+            | "grpc_ssl_certificate"
+            | "grpc_ssl_certificate_key"
+            | "grpc_ssl_trusted_certificate"
+            | "grpc_ssl_crl"
+            | "grpc_ssl_password_file"
+            | "uwsgi_ssl_certificate"
+            | "uwsgi_ssl_certificate_key"
+            | "uwsgi_ssl_trusted_certificate"
+            | "uwsgi_ssl_crl"
+            | "uwsgi_ssl_password_file" => argument == 1,
+            "index" => true,
+            "fastcgi_param" | "uwsgi_param" | "scgi_param" => {
+                argument == 2
+                    && matches!(
+                        first_argument.as_str(),
+                        "SCRIPT_FILENAME" | "DOCUMENT_ROOT" | "PATH_TRANSLATED"
+                    )
+            }
+            _ => false,
+        };
+        if !path_argument {
+            continue;
+        }
+        path_values.push(token.word.clone());
         let value = if name == "include" && cfg!(unix) {
             rebase_posix_glob_pattern(&token.word, rebase)?
         } else {
@@ -276,11 +371,75 @@ pub(crate) fn rebase_nginx_config(
             changes.push((token.start, token.end, format!("\"{quoted}\"")));
         }
     }
+    fn collect_maps(nodes: &[NginxDirective], variables: &mut Vec<(String, String)>) {
+        for node in nodes {
+            if matches!(node.words[0].as_str(), "map" | "geo" | "split_clients") {
+                if let Some(name) = node.words.last().and_then(|word| word.strip_prefix('$')) {
+                    for entry in &node.children {
+                        if let Some(value) = entry.words.last() {
+                            variables.push((name.to_string(), value.clone()));
+                        }
+                    }
+                }
+            }
+            collect_maps(&node.children, variables);
+        }
+    }
+    if has_mapping {
+        collect_maps(&nginx_directives(content)?, &mut variables);
+    }
+    validate_rebase_variables(&variables, &path_values, rebase, "Nginx", |_| true)?;
     let mut output = content.to_string();
     for (start, end, value) in changes.into_iter().rev() {
         output.replace_range(start..end, &value);
     }
     Ok(output)
+}
+
+// 定义可同时用于文件路径和业务数据，不能全局改写；跨文件定义由迁移入口合并检查。
+fn validate_rebase_variables(
+    definitions: &[(String, String)],
+    paths: &[String],
+    rebase: &crate::paths::DataPathRebase,
+    service: &str,
+    seed: impl Fn(&str) -> bool,
+) -> Result<()> {
+    let references = regex::Regex::new(if service == "Apache" {
+        r"\$\{([^}]+)\}"
+    } else {
+        r"\$\{([A-Za-z0-9_]+)\}|\$([A-Za-z0-9_]+)"
+    })
+    .unwrap();
+    let mut affected = std::collections::HashSet::new();
+    for (name, value) in definitions {
+        if seed(name) && rebase.config_value(value, str::to_owned)? != *value {
+            affected.insert(name.as_str());
+        }
+    }
+    let uses_affected = |value: &str, affected: &std::collections::HashSet<&str>| {
+        references.captures_iter(value).any(|capture| {
+            affected.contains(capture.get(1).or_else(|| capture.get(2)).unwrap().as_str())
+        })
+    };
+    loop {
+        let before = affected.len();
+        for (name, value) in definitions {
+            if uses_affected(value, &affected) {
+                affected.insert(name.as_str());
+            }
+        }
+        if before == affected.len() {
+            break;
+        }
+    }
+    if paths.iter().any(|value| uses_affected(value, &affected)) {
+        return Err(AppError::new(
+            "DATA_DIR_CONFIG_VARIABLE",
+            format!("{service} 配置通过自定义变量引用旧数据目录，无法安全自动迁移"),
+        )
+        .with_hint("请先在文件路径指令中填入完整路径，并将请求头、密码等业务变量与托管目录变量分开后重试。当前数据目录和原配置未修改。"));
+    }
+    Ok(())
 }
 
 fn directive_span(content: &str, node: &NginxDirective) -> std::ops::Range<usize> {
@@ -1910,17 +2069,51 @@ pub fn write_mihomo_config(paths: &Paths, content: &str) -> Result<()> {
     Ok(())
 }
 
+/// Nginx 的 -p/-c 参数；调用命令必须将工作目录设为 root。
+pub(crate) fn nginx_config_args(root: &Path, conf: &Path) -> Result<Vec<String>> {
+    let prefix = portable_path_text(root);
+    let config = portable_path_text(conf);
+    #[cfg(windows)]
+    if !prefix.is_ascii() || !config.is_ascii() {
+        // nginx 的配置文件按 UTF-8 读取，但 Windows 的 main(argv) 仍使用系统代码页。
+        // 工作目录由 CreateProcessW 传递；共同的非 ASCII 目录不再经过 argv。
+        let base = prefix.trim_end_matches('/').split('/').collect::<Vec<_>>();
+        let target = config.split('/').collect::<Vec<_>>();
+        let shared = base
+            .iter()
+            .zip(&target)
+            .take_while(|(left, right)| left.eq_ignore_ascii_case(right))
+            .count();
+        let same_volume = if prefix.starts_with("//") {
+            shared >= 4
+        } else {
+            shared >= 1
+        };
+        let relative = if same_volume {
+            std::iter::repeat_n("..", base.len() - shared)
+                .chain(target[shared..].iter().copied())
+                .collect::<Vec<_>>()
+                .join("/")
+        } else {
+            config.clone()
+        };
+        if !relative.is_ascii() {
+            return Err(AppError::new("NGINX_COMMAND_PATH", "Nginx 无法读取此配置路径中的特殊字符")
+                .with_hint("请将 Nginx 程序和配置放在同一个数据目录下，并让其内部的子目录和配置文件名使用英文。共同的数据目录名称可以包含中文。"));
+        }
+        return Ok(vec!["-p".into(), "./".into(), "-c".into(), relative]);
+    }
+    Ok(vec!["-p".into(), prefix, "-c".into(), config])
+}
+
 /// 校验 nginx 配置语法：nginx -t
 pub fn validate_nginx(nginx_exe: &std::path::Path, conf: &std::path::Path) -> Result<()> {
     let root = nginx_exe.parent().ok_or_else(nginx_structure_error)?;
     let mut command = platform::command(nginx_exe);
     command
         .current_dir(root)
-        .arg("-p")
-        .arg(crate::paths::portable_path_text(root))
-        .arg("-t")
-        .arg("-c")
-        .arg(crate::paths::portable_path_text(conf));
+        .args(nginx_config_args(root, conf)?)
+        .arg("-t");
     let (ok, output) = crate::cfgeditor::run_validator(&mut command)?;
     if !ok {
         return Err(
@@ -1993,8 +2186,12 @@ pub(crate) fn rebase_httpd_config(
     let mut at = 0;
     let mut directive = String::new();
     let mut argument = 0;
+    let mut first_argument = String::new();
     let mut block = false;
     let mut changes = Vec::new();
+    let mut variables = Vec::new();
+    let mut path_values = Vec::new();
+    let mut business_values = Vec::new();
     while at < bytes.len() {
         if bytes[at..].starts_with(b"\\\r\n") {
             at += 3;
@@ -2066,17 +2263,42 @@ pub(crate) fn rebase_httpd_config(
                 .to_ascii_lowercase();
             block = bytes[start] == b'<';
             argument = 0;
+            first_argument.clear();
             continue;
         }
         argument += 1;
         let decoded = httpd_argument(&raw);
+        if argument == 1 {
+            first_argument.clone_from(&decoded);
+        }
+        if directive == "define" && argument == 2 {
+            variables.push((first_argument.clone(), decoded.clone()));
+        }
+        // Alias 在 Location 块中允许省略 URL，只保留一个磁盘路径参数。
+        let mut next = at;
+        while next < bytes.len() {
+            if bytes[next..].starts_with(b"\\\r\n") {
+                next += 3;
+            } else if bytes[next..].starts_with(b"\\\n") {
+                next += 2;
+            } else if matches!(bytes[next], b' ' | b'\t' | b'\r') {
+                next += 1;
+            } else {
+                break;
+            }
+        }
+        let last_argument = next == bytes.len() || bytes[next] == b'\n';
         let value = match directive.as_str() {
-            "directory" | "include" | "includeoptional" => {
+            "directory" | "include" | "includeoptional" if argument == 1 => {
+                path_values.push(decoded.clone());
                 rebase.config_value(&decoded, httpd_glob_text)?
             }
-            "directorymatch" | "locationmatch" | "filesmatch" => rebase.config_pattern(&decoded)?,
-            "rewriterule" if argument == 1 => rebase.config_pattern(&decoded)?,
+            "directorymatch" if argument == 1 => {
+                path_values.push(decoded.clone());
+                rebase.config_pattern(&decoded)?
+            }
             "rewriterule" if argument == 2 && decoded.starts_with("fcgi://") => {
+                path_values.push(decoded.clone());
                 if let Some(slash) = decoded[7..].find('/').map(|index| index + 8) {
                     format!(
                         "{}{}",
@@ -2087,12 +2309,85 @@ pub(crate) fn rebase_httpd_config(
                     decoded.clone()
                 }
             }
-            _ => rebase.config_value(&decoded, str::to_owned)?,
+            "serverroot"
+            | "documentroot"
+            | "defaultruntimedir"
+            | "pidfile"
+            | "errorlog"
+            | "customlog"
+            | "globallog"
+            | "transferlog"
+            | "typesconfig"
+            | "authuserfile"
+            | "authgroupfile"
+            | "sslcertificatefile"
+            | "sslcertificatekeyfile"
+            | "sslcertificatechainfile"
+            | "sslcacertificatefile"
+            | "sslcacertificatepath"
+            | "sslcarevocationfile"
+            | "sslcarevocationpath"
+            | "sslsessionticketkeyfile"
+            | "sslproxycacertificatefile"
+            | "sslproxycacertificatepath"
+            | "sslproxycarevocationfile"
+            | "sslproxycarevocationpath"
+            | "sslproxymachinecertificatefile"
+            | "sslproxymachinecertificatepath"
+            | "sslproxymachinecertificatechainfile"
+            | "cacheroot"
+            | "davlockdb"
+            | "scoreboardfile"
+            | "chrootdir"
+                if argument == 1 =>
+            {
+                path_values.push(decoded.clone());
+                rebase.config_value(&decoded, str::to_owned)?
+            }
+            "alias" | "scriptalias" if argument == 2 || (argument == 1 && last_argument) => {
+                path_values.push(decoded.clone());
+                rebase.config_value(&decoded, str::to_owned)?
+            }
+            "aliasmatch" | "scriptaliasmatch" | "loadmodule" if argument == 2 => {
+                path_values.push(decoded.clone());
+                rebase.config_value(&decoded, str::to_owned)?
+            }
+            "loadfile" => {
+                path_values.push(decoded.clone());
+                rebase.config_value(&decoded, str::to_owned)?
+            }
+            "sslsessioncache" | "sslstaplingcache" if argument == 1 => {
+                path_values.push(decoded.clone());
+                if let Some((backend, path)) = decoded
+                    .split_once(':')
+                    .filter(|(backend, _)| matches!(*backend, "shmcb" | "dbm"))
+                {
+                    format!("{backend}:{}", rebase.config_value(path, str::to_owned)?)
+                } else {
+                    rebase.config_value(&decoded, str::to_owned)?
+                }
+            }
+            // NiceEnv 生成的目录宏；任意 Define/SetEnv 的值属于用户业务数据。
+            "define" if argument == 2 && first_argument == "NSB_ETC" => {
+                rebase.config_value(&decoded, str::to_owned)?
+            }
+            _ => {
+                if directive != "define" {
+                    business_values.push(decoded.clone());
+                }
+                decoded.clone()
+            }
         };
         if value != decoded {
             changes.push((start, at, format!("\"{}\"", httpd_config_text(&value))));
         }
     }
+    validate_rebase_variables(&variables, &path_values, rebase, "Apache", |name| {
+        name != "NSB_ETC"
+    })?;
+    validate_rebase_variables(&variables, &business_values, rebase, "Apache", |name| {
+        name == "NSB_ETC"
+    })?;
     let mut output = content.to_string();
     for (start, end, value) in changes.into_iter().rev() {
         output.replace_range(start..end, &value);

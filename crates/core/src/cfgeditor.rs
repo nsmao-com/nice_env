@@ -2104,6 +2104,10 @@ mod tests {
 
         let old = crate::paths::portable_path_text(&paths.base);
         let literal = format!("{old}/literal");
+        let password_file = paths.etc().join("nginx/credentials.conf");
+        // htpasswd 的第二个冒号开始备注；Windows 盘符不能作为 PLAIN 密码字面值。
+        let password_bytes = format!("audit:{{PLAIN}}audit-password:{literal}\n");
+        std::fs::write(&password_file, &password_bytes).unwrap();
         let site = paths.base.join("www");
         std::fs::create_dir_all(&site).unwrap();
         std::fs::write(site.join("index.html"), "migrated static document").unwrap();
@@ -2127,6 +2131,11 @@ http {{
         add_header X-Literal "{literal}";
         add_header X-Secret $secret;
         location /literal {{ return 200 "{literal}"; }}
+        location /protected {{
+            auth_basic "migration audit";
+            auth_basic_user_file credentials.conf;
+            alias "{old}/www/index.html";
+        }}
     }}
 }}
 "#
@@ -2168,6 +2177,10 @@ Header always set X-Secret "%{{APP_SECRET}}e"
         crate::paths::copy_data_dir(&paths.base, &migrated.base).unwrap();
         std::fs::rename(&paths.base, temp.path().join("retired")).unwrap();
         assert!(!paths.base.exists());
+        assert_eq!(
+            std::fs::read(migrated.etc().join("nginx/credentials.conf")).unwrap(),
+            password_bytes.as_bytes()
+        );
         let store = crate::store::Store::open(migrated.db()).unwrap();
         drop((nginx_listener, apache_listener));
         for (kind, path) in [
@@ -2275,6 +2288,18 @@ Header always set X-Secret "%{{APP_SECRET}}e"
             assert_eq!(response.text().unwrap(), expected);
         }
         let conf = migrated.nginx_conf();
+        let protected_url = format!("http://127.0.0.1:{nginx_port}/protected");
+        assert_eq!(
+            client.get(&protected_url).send().unwrap().status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+        let response = client
+            .get(&protected_url)
+            .basic_auth("audit", Some("audit-password"))
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.text().unwrap(), "migrated static document");
         let current = std::fs::read_to_string(&conf).unwrap();
         let next_literal = format!("{literal}/reloaded");
         std::fs::write(

@@ -1111,9 +1111,168 @@ fn resource_contains(resource: &str, path: &str) -> bool {
 #[derive(Default)]
 struct MigrationResources {
     paths: Vec<String>,
+    config_patterns: Vec<regex::Regex>,
     files: std::collections::HashMap<PathBuf, Vec<u8>>,
     env_dirs: Vec<String>,
     providers: std::collections::HashMap<String, crate::sftpgo_data::Provider>,
+}
+
+fn nginx_migration_include_pattern(
+    value: &str,
+    windows: bool,
+) -> crate::error::Result<regex::Regex> {
+    let mut pattern = String::from("^");
+    let mut chars = value.chars().peekable();
+    while let Some(character) = chars.next() {
+        match character {
+            '*' => pattern.push_str("[^/]*"),
+            '?' => pattern.push_str(if windows { "[^/]?" } else { "[^/]" }),
+            '\\' if !windows => {
+                pattern.push_str(&regex::escape(&chars.next().unwrap_or('\\').to_string()))
+            }
+            '[' if !windows => {
+                let remainder = chars.clone();
+                let mut class = String::new();
+                if chars.peek() == Some(&'!') || chars.peek() == Some(&'^') {
+                    chars.next();
+                    class.push('^');
+                }
+                if chars.peek() == Some(&']') {
+                    chars.next();
+                    class.push_str("\\]");
+                }
+                let mut closed = false;
+                while let Some(next) = chars.next() {
+                    if next == ']' {
+                        closed = true;
+                        break;
+                    }
+                    class.push(next);
+                    if next == '[' && chars.peek() == Some(&':') {
+                        // POSIX 命名字符类的内层 ] 不是整个字符类的结尾。
+                        for part in chars.by_ref() {
+                            class.push(part);
+                            if part == ']' {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if !closed {
+                    chars = remainder;
+                    pattern.push_str("\\[");
+                    continue;
+                }
+                pattern.push_str(&format!("[{class}&&[^/]]"));
+            }
+            other => pattern.push_str(&regex::escape(&other.to_string())),
+        }
+    }
+    pattern.push('$');
+    regex::RegexBuilder::new(&pattern)
+        .case_insensitive(windows)
+        .build()
+        .map_err(|_| {
+            crate::error::AppError::new(
+                "DATA_DIR_RESOURCE_BASE",
+                "无法安全解析 Nginx include 通配符，未切换数据目录",
+            )
+        })
+}
+
+fn nginx_migration_resources(
+    root: &Path,
+    source: &Path,
+    file: &Path,
+    rebase: &DataPathRebase,
+) -> crate::error::Result<MigrationResources> {
+    let relative = file.strip_prefix(root).unwrap();
+    if std::fs::metadata(file)?.len() > 16 * 1024 * 1024 {
+        return Err(crate::error::AppError::new(
+            "DATA_DIR_CONFIG_SIZE",
+            "配置文件过大，无法自动检查",
+        ));
+    }
+    let (references, includes) =
+        crate::configgen::nginx_migration_references(&std::fs::read_to_string(file)?)?;
+    let mut resources = MigrationResources::default();
+    let root_key = config_path_key(root);
+    let target_key = config_path_key(Path::new(&rebase.target));
+    let stage_rebase = DataPathRebase::new(source, root)?;
+    for (reference, include) in references
+        .into_iter()
+        .map(|path| (path, false))
+        .chain(includes.into_iter().map(|path| (path, true)))
+    {
+        if !include && reference.contains('$') {
+            return Err(crate::error::AppError::new(
+                "DATA_DIR_RESOURCE_BASE",
+                "Nginx 凭据路径包含动态变量，无法确认需要保留的资源文件",
+            )
+            .with_hint("请先将证书或密码文件配置为固定路径后再迁移。原目录和文件均已保留。"));
+        }
+        let path = PathBuf::from(reference);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            // Nginx 的凭据相对主配置目录，不是 include 文件所在目录或进程目录。
+            let base = if config_path_key(relative).starts_with("etc/nginx/") {
+                root.join("etc/nginx")
+            } else {
+                file.ancestors()
+                    .skip(1)
+                    .take_while(|directory| directory.starts_with(root) && *directory != root)
+                    .find(|directory| directory.join("nginx.conf").is_file())
+                    .ok_or_else(|| {
+                        crate::error::AppError::new(
+                            "DATA_DIR_RESOURCE_BASE",
+                            "无法确认 Nginx 凭据所用的主配置目录，未切换数据目录",
+                        )
+                    })?
+                    .to_path_buf()
+            };
+            source.join(base.strip_prefix(root).unwrap()).join(path)
+        };
+        if include {
+            let pattern = if cfg!(unix) {
+                crate::configgen::rebase_posix_glob_pattern(
+                    &portable_path_text(&path),
+                    &stage_rebase,
+                )?
+            } else {
+                stage_rebase.config_value(&portable_path_text(&path), str::to_owned)?
+            };
+            // Win32 的 *.* 也匹配没有扩展名的文件；扩大匹配只会拒绝有歧义的用途。
+            let mut normalized = PathBuf::new();
+            for part in Path::new(&pattern).components() {
+                match part {
+                    Component::CurDir => {}
+                    Component::ParentDir => {
+                        normalized.pop();
+                    }
+                    part => normalized.push(part.as_os_str()),
+                }
+            }
+            let pattern = portable_path_text(&normalized);
+            let pattern = if cfg!(windows) {
+                pattern.replace("*.*", "*")
+            } else {
+                pattern
+            };
+            resources
+                .config_patterns
+                .push(nginx_migration_include_pattern(&pattern, cfg!(windows))?);
+            continue;
+        }
+        let mapped = rebase.path(&portable_path_text(&path));
+        let key = config_path_key(Path::new(&mapped));
+        if resource_contains(&target_key, &key) {
+            resources
+                .paths
+                .push(format!("{root_key}{}", &key[target_key.len()..]));
+        }
+    }
+    Ok(resources)
 }
 
 fn migration_resources(
@@ -1128,6 +1287,12 @@ fn migration_resources(
     let mut plans = Vec::new();
     for file in files {
         let relative = file.strip_prefix(root).unwrap();
+        if web_config_service(relative) == Some("nginx") {
+            let result = nginx_migration_resources(root, source, file, rebase)
+                .map_err(|error| error.with_detail(relative.display().to_string()));
+            plans.push((config_path_key(file), result));
+            continue;
+        }
         let Some(("sftpgo", json)) = crate::configpaths::service(relative) else {
             continue;
         };
@@ -1260,6 +1425,9 @@ fn migration_resources(
         for index in &roots {
             let plan = plans[*index].1.as_ref().map_err(Clone::clone)?;
             resources.paths.extend(plan.paths.iter().cloned());
+            resources
+                .config_patterns
+                .extend(plan.config_patterns.iter().cloned());
             resources.env_dirs.extend(plan.env_dirs.iter().cloned());
             for (key, provider) in &plan.providers {
                 if resources.providers.insert(key.clone(), provider.clone())
@@ -1287,6 +1455,28 @@ fn migration_resources(
     }
     resources.paths.sort();
     resources.paths.dedup();
+    if resources
+        .paths
+        .iter()
+        .cloned()
+        .chain(files.iter().map(|file| config_path_key(file)))
+        .any(|path| {
+            resources
+                .paths
+                .iter()
+                .any(|resource| resource_contains(resource, &path))
+                && resources
+                    .config_patterns
+                    .iter()
+                    .any(|pattern| pattern.is_match(&path))
+        })
+    {
+        return Err(crate::error::AppError::new(
+            "DATA_DIR_RESOURCE_CONFLICT",
+            "同一文件同时被 Nginx include 和凭据或资源指令引用，无法安全迁移",
+        )
+        .with_hint("请将密码、证书与 include 配置分开存放；原目录和文件均已保留。"));
+    }
     for path in resources.files.keys() {
         if resources
             .paths
@@ -3262,7 +3452,10 @@ mod tests {
         store.upsert_installed(&crate::model::InstalledPackage {id:"fixture".into(),version:"1".into(),category:"runtime".into(),install_path:runtime.to_string_lossy().into_owned(),config_path:paths.etc().to_string_lossy().into_owned(),installed_at:123}).unwrap();
         let old = portable_path_text(&source);
         let external = format!("{old}-external");
-        let config = format!("root \"{old}/www\";\ninclude \"{old}/etc/*.conf\";\nexternal \"{external}/etc\";\n");
+        let config = format!("root \"{old}/www\";\ninclude \"{old}/etc/*.conf\";\nexternal \"{external}/etc\";\nauth_basic_user_file credentials.txt;\nssl_password_file \"{old}/etc/nginx/password.conf\";\n");
+        let credential = format!("audit:{{PLAIN}}{old}/private-value\n");
+        std::fs::write(paths.etc().join("nginx/credentials.txt"), &credential).unwrap();
+        std::fs::write(paths.etc().join("nginx/password.conf"), &credential).unwrap();
         std::fs::write(paths.nginx_conf(), &config).unwrap();
         std::fs::write(paths.backup().join("original.conf"), &config).unwrap();
         #[cfg(windows)]
@@ -3323,6 +3516,13 @@ mod tests {
             );
         }
         let new = result.path.clone();
+        for name in ["credentials.txt", "password.conf"] {
+            assert_eq!(
+                std::fs::read(target.join("etc/nginx").join(name)).unwrap(),
+                credential.as_bytes(),
+                "{name}"
+            );
+        }
         let copied = crate::store::Store::open(target.join("nsb.sqlite")).unwrap();
         let installed = copied.list_installed().unwrap().remove(0);
         assert_eq!(portable_path_text(Path::new(&installed.install_path)),format!("{new}/runtimes/fixture/1"));
@@ -3362,6 +3562,32 @@ mod tests {
 
     #[test]
     fn data_dir_copy_failure_leaves_source_and_target_untouched() {
+        assert!(
+            nginx_migration_include_pattern("/etc/*.conf", cfg!(windows))
+                .unwrap()
+                .is_match("/etc/password.conf")
+        );
+        assert!(
+            !nginx_migration_include_pattern("/etc/*.conf", cfg!(windows))
+                .unwrap()
+                .is_match("/etc/nested/password.conf")
+        );
+        {
+            for (pattern, path) in [
+                (r"/etc/literal\[a\]/?.conf", "/etc/literal[a]/x.conf"),
+                ("/etc/[a-z].conf", "/etc/k.conf"),
+                ("/etc/[!a].conf", "/etc/b.conf"),
+                ("/etc/[[:digit:]].conf", "/etc/1.conf"),
+                ("/etc/[unclosed.conf", "/etc/[unclosed.conf"),
+            ] {
+                assert!(
+                    nginx_migration_include_pattern(pattern, false)
+                        .unwrap()
+                        .is_match(path),
+                    "{pattern}"
+                );
+            }
+        }
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
         let paths = Paths::new(source.clone());
@@ -3414,6 +3640,37 @@ mod tests {
             std::fs::write(main, "# valid configuration\n").unwrap();
             std::fs::remove_file(include).unwrap();
         }
+        let credential_path = paths.etc().join("nginx/password.conf");
+        let credential = format!("root \"{old}/unchanged\";\n");
+        std::fs::write(&credential_path, &credential).unwrap();
+        for (content, expected) in [
+            (
+                "auth_basic_user_file password.conf;\ninclude ./*.conf;",
+                "DATA_DIR_RESOURCE_CONFLICT",
+            ),
+            (
+                "auth_basic_user_file $password_file;",
+                "DATA_DIR_RESOURCE_BASE",
+            ),
+            (
+                "auth_basic_user_file nginx.conf;",
+                "DATA_DIR_RESOURCE_CONFLICT",
+            ),
+        ] {
+            std::fs::write(paths.nginx_conf(), content).unwrap();
+            assert_eq!(copy_data_dir(&source, &target).unwrap_err().code, expected);
+            assert!(std::fs::read_dir(&target).unwrap().next().is_none());
+            assert_eq!(
+                std::fs::read_to_string(paths.nginx_conf()).unwrap(),
+                content
+            );
+            assert_eq!(
+                std::fs::read_to_string(&credential_path).unwrap(),
+                credential
+            );
+        }
+        std::fs::write(paths.nginx_conf(), "# valid configuration\n").unwrap();
+        std::fs::remove_file(credential_path).unwrap();
         let mongo = source.join("etc/mongodb/8.0/mongod.conf");
         std::fs::create_dir_all(mongo.parent().unwrap()).unwrap();
         std::fs::write(&mongo, "storage: [ invalid\n").unwrap();
@@ -3438,6 +3695,26 @@ mod tests {
         );
         assert!(std::fs::read_dir(&target).unwrap().next().is_none());
         assert_eq!(std::fs::read_to_string(&sftpgo).unwrap(), content);
+        // 整个资源目录内的文件也可能被其它服务当作配置引用。
+        let directory = paths.etc().join("nginx/resources");
+        std::fs::create_dir_all(&directory).unwrap();
+        let included = directory.join("value.conf");
+        std::fs::write(&included, "# shared resource\n").unwrap();
+        std::fs::write(
+            &sftpgo,
+            r#"{"httpd":{"templates_path":"../../nginx/resources"}}"#,
+        )
+        .unwrap();
+        std::fs::write(paths.nginx_conf(), "include resources/*.conf;").unwrap();
+        assert_eq!(
+            copy_data_dir(&source, &target).unwrap_err().code,
+            "DATA_DIR_RESOURCE_CONFLICT"
+        );
+        assert!(std::fs::read_dir(&target).unwrap().next().is_none());
+        assert_eq!(
+            std::fs::read_to_string(included).unwrap(),
+            "# shared resource\n"
+        );
     }
 
     #[test]
@@ -4436,7 +4713,7 @@ mod tests {
         let old = portable_path_text(&source.base);
         let original = format!("root \"{old}/www\";\n");
         std::fs::write(source.nginx_conf(),&original).unwrap();
-        write_with_backup(&source.nginx_conf(),"changed",&source.backup()).unwrap();
+        write_with_backup(&source.nginx_conf(), "# changed\n", &source.backup()).unwrap();
         let backup = list_backup_files(&source.base).unwrap().remove(0);
         let target = temp.path().join("destination"); copy_data_dir(&source.base,&target).unwrap();
         let preview = preview_backup(&target,&backup.name).unwrap();

@@ -2,6 +2,19 @@
 
 本记录用于跟踪 Windows/macOS、路径与数据目录、上游版本和安装状态的复查。**整体复查未完成**；代码编译、单元测试、下载包核验和原生服务运行是不同的验收层级，不能相互替代。
 
+## 2026-10-05：v0.2.310 Nginx 凭据文件迁移保护
+
+- 在既有迁移用例中复现：`auth_basic_user_file` 引用的文本内容含旧目录时，会被通用字符串替换改写。Nginx 密码、证书、私钥、SSL 口令和票据文件现在加入已有的只读资源规划，再按引用用途保留原始字节；文件名为 `.conf` 也不能当配置改写。SFTPGo 的资源规划与账号库处理仍沿用既有流程。
+- 按 Nginx 官方语义，将相对凭据路径解析到主配置目录，而不是 include 文件所在目录或进程工作目录。已有 AST 负责解析引号、转义与块上下文，同名的 map/geo/types 数据项不会成为凭据指令。内嵌证书及 key 的 engine/store 引用不当作普通文件。
+- 同一文件被凭据指令和 include（含通配符）引用时返回 `DATA_DIR_RESOURCE_CONFLICT`；无法确认主配置基准或凭据路径含动态变量时拒绝自动迁移并保留原目录。该保护不代表动态证书路径自动迁移已实现。
+- 扩展既有 Windows Nginx/Apache 原生用例，加入 `.conf` 密码文件以及 HTTP 无凭据/原密码访问断言。源目录在迁移后改名不可访问，目标仍含中文、空格、`#` 和方括号。复用上一轮校验过的程序，未新增下载，也未操作用户实际服务或账号库。
+- 首轮完整回归 756 passed / 2 failed / 59 ignored：一项历史备份用例使用不完整的 `changed` 占位文本，改为合法注释并保留恢复内容断言；一项既有 MCP 进程回收用例在高并发下 3 秒未等到 PowerShell 就绪，未改动该用例，单独复验 1 passed。最终回归与原生结果完成后记录在下方。
+- v0.2.309 的 main CI `37275227466`、tag CI `37275228899` 已成功；Release `37275228736` 的 Windows、macOS Intel、macOS ARM 运行时均成功，检查时三个安装包任务仍在构建。当前真实安装进程仍为 v0.2.283，未替换用户程序。
+
+本批没有增加依赖或测试文件，没有数据库变更，未修改 `update.sql`，未运行本地前端 dev/build。本次范围是已识别 Nginx 配置的凭据引用；跨 include 的复杂映射、任意扩展名的外部配置片段、Apache/其余服务资源字节保护、动态路径、UNC 真实共享目录和桌面交互仍待继续检查，不能把本批视作整体完成。
+
+v0.2.310 最终本地回归（4 路并发）：core 758 passed / 0 failed / 59 ignored，platform 15 passed / 0 failed；随后同一源码的原生 Nginx/Apache 用例 1 passed / 0 failed / 0 ignored，覆盖凭据原字节、401/200、静态文件、原目录不可访问、重载与停止。原生用例初次将 Windows 盘符放入 PLAIN 密码导致 htpasswd 冒号分隔、认证 401，已改成合法密码和含旧路径的备注，保留整文件字节断言。资源目录与 Nginx include 的交叉用途冲突也已覆盖；POSIX 转义、字符范围、否定和命名字符类在 Windows 本地一起执行。版本一致性、UI 版本来源、依赖版本不变、改动行格式与 diff 检查通过。定向 `cargo clean -p nsb-core -p platform` 清理 206.5 MiB；本轮复用已有官方下载，没有新增下载缓存。
+
 ## 2026-10-05：v0.2.309 Web 配置迁移、Windows Nginx 中文命令路径
 
 - 先在既有目录迁移用例中复现 Nginx / Apache 将响应正文、Header、SetEnv 密码、URL 等业务字面值误当成磁盘路径改写，再将替换范围限定为明确的路径参数。保留注释、原换行和无关参数；补齐 Apache 单参数 Alias、LoadFile 与 SSLSessionCache 的路径处理。Nginx map/geo/split_clients 中的映射值不能因名称恰好是 root 等指令而被改写。

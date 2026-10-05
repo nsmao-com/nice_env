@@ -214,6 +214,88 @@ pub(crate) fn nginx_directives(content: &str) -> Result<Vec<NginxDirective>> {
     parse(&tokens, &mut 0, 0)
 }
 
+/// 凭据内容不能按配置改写；映射表中的同名键也不是文件指令。
+pub(crate) fn nginx_migration_references(content: &str) -> Result<(Vec<String>, Vec<String>)> {
+    fn visit(
+        nodes: &[NginxDirective],
+        data: bool,
+        files: &mut Vec<String>,
+        includes: &mut Vec<String>,
+    ) {
+        for node in nodes {
+            let name = node.words[0].as_str();
+            if name == "include" {
+                if let Some(value) = node.words.get(1) {
+                    includes.push(value.clone());
+                }
+            }
+            if !data
+                && matches!(
+                    name,
+                    "auth_basic_user_file"
+                        | "ssl_certificate"
+                        | "ssl_certificate_key"
+                        | "ssl_client_certificate"
+                        | "ssl_trusted_certificate"
+                        | "ssl_crl"
+                        | "ssl_dhparam"
+                        | "ssl_password_file"
+                        | "ssl_session_ticket_key"
+                        | "proxy_ssl_certificate"
+                        | "proxy_ssl_certificate_key"
+                        | "proxy_ssl_trusted_certificate"
+                        | "proxy_ssl_crl"
+                        | "proxy_ssl_password_file"
+                        | "grpc_ssl_certificate"
+                        | "grpc_ssl_certificate_key"
+                        | "grpc_ssl_trusted_certificate"
+                        | "grpc_ssl_crl"
+                        | "grpc_ssl_password_file"
+                        | "uwsgi_ssl_certificate"
+                        | "uwsgi_ssl_certificate_key"
+                        | "uwsgi_ssl_trusted_certificate"
+                        | "uwsgi_ssl_crl"
+                        | "uwsgi_ssl_password_file"
+                )
+            {
+                if let Some(value) = node.words.get(1) {
+                    if !(value.is_empty()
+                        || (name == "auth_basic_user_file" && value == "off")
+                        || ((name.ends_with("_certificate_key")
+                            || matches!(
+                                name,
+                                "ssl_certificate"
+                                    | "proxy_ssl_certificate"
+                                    | "grpc_ssl_certificate"
+                                    | "uwsgi_ssl_certificate"
+                            ))
+                            && value.starts_with("data:"))
+                        || (name.ends_with("_certificate_key")
+                            && (value.starts_with("engine:") || value.starts_with("store:"))))
+                    {
+                        files.push(value.clone());
+                    }
+                }
+            }
+            visit(
+                &node.children,
+                data || matches!(name, "map" | "geo" | "split_clients" | "types"),
+                files,
+                includes,
+            );
+        }
+    }
+    let mut files = Vec::new();
+    let mut includes = Vec::new();
+    visit(
+        &nginx_directives(content)?,
+        false,
+        &mut files,
+        &mut includes,
+    );
+    Ok((files, includes))
+}
+
 pub(crate) fn rebase_posix_glob_pattern(
     value: &str,
     rebase: &crate::paths::DataPathRebase,
@@ -2994,6 +3076,11 @@ secret: fixture-secret
             nginx_directives(r#"include "/tmp/a\dir"; value "a\tb\rc\nd\"e\\f\'g";"#).unwrap();
         assert_eq!(parsed[0].words[1], r"/tmp/a\dir");
         assert_eq!(parsed[1].words[1], "a\tb\rc\nd\"e\\f'g");
+        let (files, includes) = nginx_migration_references(
+            "http { map $host $x { auth_basic_user_file ignored; include values.conf; } server { auth_basic_user_file 'a b.txt'; ssl_password_file off; ssl_certificate_key engine:pkcs11:key; ssl_certificate data:$cert; include sites/*.conf; } }",
+        ).unwrap();
+        assert_eq!(files, ["a b.txt", "off"]);
+        assert_eq!(includes, ["values.conf", "sites/*.conf"]);
     }
 
     #[cfg(unix)]

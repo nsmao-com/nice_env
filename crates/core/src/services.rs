@@ -984,11 +984,7 @@ pub fn precheck_port(port: u16, what: &str) -> Result<()> {
         diag = crate::ports::diagnose_port(port)?;
     }
     if !diag.in_use {
-        let mut err = AppError::new("PORT_UNAVAILABLE", format!("端口 {port} 暂时无法绑定"))
-            .with_hint("端口可能已被其它套接字绑定或由系统保留；请稍后重试，或在设置中选择其它端口")
-            .with_detail(format!("启动 {what} 前端口预检失败：{bind_error}"));
-        err.port = Some(port);
-        return Err(err);
+        return Err(port_unavailable_error(port, what, &bind_error));
     }
     let mut err = AppError::port_conflict(port, diag.process_name.as_deref())
         .with_detail(format!("启动 {what} 前端口预检失败"));
@@ -996,6 +992,25 @@ pub fn precheck_port(port: u16, what: &str) -> Result<()> {
         err = err.with_pid(pid);
     }
     Err(err)
+}
+
+fn port_unavailable_error(port: u16, what: &str, cause: &std::io::Error) -> AppError {
+    let (message, hint) = if cause.kind() == std::io::ErrorKind::PermissionDenied {
+        (
+            format!("{what} 未启动：系统拒绝使用端口 {port}"),
+            "未发现监听此端口的进程，但系统拒绝绑定；可能是系统保留端口或权限限制。请在服务配置或「设置 → 服务与端口」中改用其它空闲端口，再启动服务；连接该服务的项目也需同步修改端口。",
+        )
+    } else {
+        (
+            format!("{what} 未启动：端口 {port} 暂时无法绑定"),
+            "未发现监听此端口的进程，但端口可能仍被其它套接字占用。请稍后重试；若持续失败，在服务配置或「设置 → 服务与端口」中改用其它空闲端口，并同步修改项目的连接端口。",
+        )
+    };
+    let mut err = AppError::new("PORT_UNAVAILABLE", message)
+        .with_hint(hint)
+        .with_detail(format!("启动 {what} 前端口预检失败：{cause}"));
+    err.port = Some(port);
+    err
 }
 
 /// 为 php 版本分配端口池（9100–9199，每池 4 个，避开已用）。
@@ -1191,6 +1206,25 @@ mod fallback_tests {
         assert_eq!(precheck_port(0, "Fixture").unwrap_err().code, "BAD_PORT");
         assert_eq!(find_free_port_near(u16::MAX, &[], 32), None);
         assert_eq!(find_free_port_near(u16::MAX - 1, &[u16::MAX], 32), None);
+    }
+
+    #[test]
+    fn denied_port_explains_system_restrictions_without_inventing_a_holder() {
+        let cause = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let err = port_unavailable_error(6379, "Redis", &cause);
+        assert_eq!(err.code, "PORT_UNAVAILABLE");
+        assert_eq!(err.port, Some(6379));
+        assert!(err.message.contains("系统拒绝"));
+        assert!(err.hint.as_deref().unwrap().contains("服务与端口"));
+        assert!(err.pid.is_none() && err.holder.is_none());
+        assert!(err.detail.as_deref().unwrap().contains(&cause.to_string()));
+        let busy = port_unavailable_error(
+            6379,
+            "Redis",
+            &std::io::Error::from(std::io::ErrorKind::AddrInUse),
+        );
+        assert!(!busy.message.contains("系统拒绝"));
+        assert!(busy.hint.as_deref().unwrap().contains("稍后重试"));
     }
 
     #[test]

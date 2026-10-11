@@ -222,7 +222,7 @@ fn builtin_source(id: &str) -> Option<VersionSource> {
             "github",
             "redis-windows/redis-windows",
             "",
-            r"^Redis-[\d.]+-Windows-x64-msys2\.zip$",
+            r"^Redis-(?P<version>\d+\.\d+\.\d+)-Windows-x64-msys2\.zip$",
             "Redis-{version}-Windows-x64-msys2/redis-server.exe",
         ),
         "strawberry-perl" => (
@@ -298,13 +298,14 @@ fn builtin_source(id: &str) -> Option<VersionSource> {
             _ => None,
         },
         version_strip: None,
-        max_versions: Some(
-            if matches!(id, "php" | "node" | "python" | "go" | "nginx") {
-                80
-            } else {
-                40
-            },
-        ),
+        max_versions: Some(if id == "redis" {
+            // 保留 6.x / 7.x 分支，避免全部被较新的 8.x 补丁挤出列表。
+            200
+        } else if matches!(id, "php" | "node" | "python" | "go" | "nginx") {
+            80
+        } else {
+            40
+        }),
         include_prerelease: Some(false),
     })
 }
@@ -422,7 +423,9 @@ pub async fn catalog(
 /* ================= 缓存 ================= */
 
 fn read_cache(store: &Store, key: &str) -> Option<VersionCatalog> {
-    let cat = read_cache_any(store, key)?;
+    let mut cat = read_cache_any(store, key)?;
+    // 命中旧缓存不代表本次访问了上游；并发强制刷新仍复用刚完成的在线结果。
+    cat.online = false;
     let age = crate::services::now_ms() - cat.cached_at.unwrap_or(0);
     (age >= 0 && age < CACHE_TTL_MS).then_some(cat)
 }
@@ -615,7 +618,7 @@ async fn github_send(client: &reqwest::Client, url: &str) -> reqwest::Result<req
         .await
 }
 
-/// GitHub Releases：一次请求拿到该 repo 最近 100 个 release（含 asset digest）
+/// GitHub Releases：按目录容量分页读取（每页 100 项，最多 10 页）。
 async fn fetch_github(
     src: &VersionSource,
     template: &PackageManifestEntry,
@@ -623,18 +626,36 @@ async fn fetch_github(
     let repo = src.repo.as_deref().ok_or_else(|| {
         AppError::new("BAD_VERSION_SOURCE", "github 版本源缺少 repo（owner/name）")
     })?;
-    let url = format!("https://api.github.com/repos/{repo}/releases?per_page=100");
     let direct = http_direct().ok();
     let proxy = http()?;
-    let direct_result = match direct.as_ref() {
-        Some(client) => Some(github_send(client, &url).await),
+    let pages = src.max_versions.unwrap_or(60).div_ceil(100).clamp(1, 10);
+    let mut releases = Vec::new();
+    for page in 1..=pages {
+        let url = format!("https://api.github.com/repos/{repo}/releases?per_page=100&page={page}");
+        let rows = github_release_page(direct.as_ref(), &proxy, &url).await?;
+        let last_page = rows.len() < 100;
+        releases.extend(rows);
+        if last_page {
+            break;
+        }
+    }
+    github_releases(&releases, src, template)
+}
+
+async fn github_release_page(
+    direct: Option<&reqwest::Client>,
+    proxy: &reqwest::Client,
+    url: &str,
+) -> Result<Vec<serde_json::Value>> {
+    let direct_result = match direct {
+        Some(client) => Some(github_send(client, url).await),
         None => None,
     };
     let resp = match direct_result {
         Some(Ok(response)) if !github_is_rate_limited(&response) => response,
         Some(Ok(response)) => {
             let detail = github_rate_limit_detail(&response);
-            match github_send(&proxy, &url).await {
+            match github_send(proxy, url).await {
                 Ok(proxy_response) if !github_is_rate_limited(&proxy_response) => proxy_response,
                 Ok(proxy_response) => {
                     return Err(AppError::new(
@@ -657,29 +678,34 @@ async fn fetch_github(
                 }
             }
         }
-        Some(Err(direct_error)) => match github_send(&proxy, &url).await {
+        Some(Err(direct_error)) => match github_send(proxy, url).await {
             Ok(proxy_response) => proxy_response,
             Err(proxy_error) => {
                 return Err(AppError::download(
-                    &url,
+                    url,
                     format!("直连失败：{direct_error}；系统代理失败：{proxy_error}"),
                 ));
             }
         },
-        None => github_send(&proxy, &url)
+        None => github_send(proxy, url)
             .await
-            .map_err(|e| AppError::download(&url, e.to_string()))?,
+            .map_err(|e| AppError::download(url, e.to_string()))?,
     };
 
     if !resp.status().is_success() {
-        return Err(AppError::download(&url, format!("HTTP {}", resp.status())));
+        return Err(AppError::download(url, format!("HTTP {}", resp.status())));
     }
 
-    let releases: Vec<serde_json::Value> = resp
-        .json()
+    resp.json()
         .await
-        .map_err(|e| AppError::internal("解析 GitHub 响应", e.to_string()))?;
+        .map_err(|e| AppError::internal("解析 GitHub 响应", e.to_string()))
+}
 
+fn github_releases(
+    releases: &[serde_json::Value],
+    src: &VersionSource,
+    template: &PackageManifestEntry,
+) -> Result<Vec<RemoteVersion>> {
     let allow_pre = src.include_prerelease.unwrap_or(false);
     let asset_re = src
         .asset_match
@@ -687,10 +713,6 @@ async fn fetch_github(
         .map(|p| regex::Regex::new(p))
         .transpose()
         .map_err(|e| AppError::new("BAD_VERSION_SOURCE", format!("下载文件匹配规则无效：{e}")))?;
-    let ver_filter = src
-        .version_filter
-        .as_ref()
-        .and_then(|p| regex::Regex::new(p).ok());
     let strip = src.tag_prefix.as_deref().unwrap_or("");
 
     let mut out = Vec::new();
@@ -698,7 +720,7 @@ async fn fetch_github(
         if rel["draft"].as_bool().unwrap_or(false) {
             continue;
         }
-        let pre = rel["prerelease"].as_bool().unwrap_or(false);
+        let mut pre = rel["prerelease"].as_bool().unwrap_or(false);
         if pre && !allow_pre {
             continue;
         }
@@ -719,10 +741,6 @@ async fn fetch_github(
                 }
             }
         }
-        if ver_filter.as_ref().is_some_and(|re| !re.is_match(&version)) {
-            continue;
-        }
-
         let assets = rel["assets"].as_array().cloned().unwrap_or_default();
         let picked = match &asset_re {
             Some(re) => pick_github_asset(&assets, re, template),
@@ -733,6 +751,19 @@ async fn fetch_github(
             continue;
         };
         let filename = asset["name"].as_str().unwrap_or("");
+        // 部分上游 tag 带打包修订号（如 Redis 8.6.1.1），程序版本与入口目录
+        // 仍为 8.6.1。声明 version 捕获组的源以实际资产名为准，保留原下载 URL。
+        if let Some(asset_version) = asset_re
+            .as_ref()
+            .and_then(|re| re.captures(filename))
+            .and_then(|captures| captures.name("version"))
+        {
+            pre |= is_prerelease(&version);
+            if pre && !allow_pre {
+                continue;
+            }
+            version = asset_version.as_str().to_string();
+        }
         // Strawberry Perl 使用 SP_54231_64bit 形式的 tag，实际版本在发行文件名中。
         if template.id == "strawberry-perl" {
             version = filename
@@ -1291,6 +1322,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cached_catalog_keeps_fetch_time_without_claiming_live_access() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("state.db")).unwrap();
+        let fetched_at = crate::services::now_ms();
+        let catalog = VersionCatalog {
+            id: "redis".into(),
+            online: true,
+            cached_at: Some(fetched_at),
+            ..Default::default()
+        };
+        write_cache(&store, "versionCatalog:fixture", &catalog);
+        assert!(
+            read_cache_any(&store, "versionCatalog:fixture")
+                .unwrap()
+                .online
+        );
+        let cached = read_cache(&store, "versionCatalog:fixture").unwrap();
+        assert!(!cached.online);
+        assert_eq!(cached.cached_at, Some(fetched_at));
+        assert!(cached.error.is_none());
+    }
+
+    #[test]
     fn archive_kind_uses_url_path_and_keeps_7z_separate_from_tar() {
         assert_eq!(archive_kind("https://example.test/pkg.7z?download=1"), "sevenzip");
         assert_eq!(archive_kind("https://example.test/pkg.TAR.GZ?sig=abc"), "targz");
@@ -1313,6 +1367,73 @@ mod tests {
         assert_eq!(pick_github_asset(&assets, &matcher, &template).unwrap()["name"], "demo-1.2.0-arm64.zip");
         template.arch = vec!["x64".into()];
         assert_eq!(pick_github_asset(&assets, &matcher, &template).unwrap()["name"], "demo-1.2.0-x64.zip");
+    }
+
+    #[test]
+    fn redis_windows_catalog_keeps_history_and_uses_asset_versions() {
+        let installer = crate::install::Installer {
+            manifest: serde_json::from_str(include_str!("../../../manifest/packages.win.json"))
+                .unwrap(),
+        };
+        let template = installer.template_for("redis").unwrap();
+        let mut source = source_for(&template).unwrap();
+        let release = |tag: &str, version: &str| {
+            let filename = format!("Redis-{version}-Windows-x64-msys2.zip");
+            serde_json::json!({
+                "tag_name": tag,
+                "draft": false,
+                "prerelease": false,
+                "assets": [{
+                    "name": filename,
+                    "browser_download_url": format!(
+                        "https://github.com/redis-windows/redis-windows/releases/download/{tag}/{filename}"
+                    ),
+                    "size": 123,
+                    "digest": format!("sha256:{}", "a".repeat(64))
+                }]
+            })
+        };
+        let mut rows: Vec<_> = (0..105)
+            .map(|patch| {
+                let version = format!("8.2.{patch}");
+                release(&version, &version)
+            })
+            .collect();
+        rows.extend([
+            release("6.0.17", "6.0.17"),
+            release("7.0.15", "7.0.15"),
+            release("8.6.1.1", "8.6.1"),
+        ]);
+        let mut draft = release("99.0.0", "99.0.0");
+        draft["draft"] = serde_json::json!(true);
+        let mut prerelease = release("98.0.0-rc1", "98.0.0");
+        prerelease["prerelease"] = serde_json::json!(true);
+        let mut wrong_arch = release("97.0.0", "97.0.0");
+        wrong_arch["assets"][0]["name"] = serde_json::json!("Redis-97.0.0-Windows-arm64-msys2.zip");
+        let tag_prerelease = release("96.0.0-rc1", "96.0.0");
+        rows.extend([draft, prerelease, wrong_arch, tag_prerelease]);
+
+        let versions = github_releases(&rows, &source, &template).unwrap();
+        assert_eq!(versions.len(), 108);
+        assert_eq!(versions.last().unwrap().version, "6.0.17");
+        assert!(versions.iter().any(|v| v.version == "7.0.15"));
+        let corrected = &versions[0];
+        assert_eq!(corrected.version, "8.6.1");
+        assert_eq!(
+            corrected.entry,
+            "Redis-8.6.1-Windows-x64-msys2/redis-server.exe"
+        );
+        assert!(corrected.url.contains("/download/8.6.1.1/Redis-8.6.1-"));
+        assert_eq!(corrected.sha256.as_deref(), Some("a".repeat(64).as_str()));
+        assert_eq!(corrected.kind, "archive");
+        assert!(!versions.iter().any(|v| v.version == "8.6.1.1"));
+
+        // 筛选以规范化后的程序版本为准，不能先用打包 tag 排除。
+        source.version_filter = Some(r"^8\.6\.1$".into());
+        assert_eq!(github_releases(&rows, &source, &template).unwrap().len(), 1);
+        source.version_filter = None;
+        source.max_versions = Some(2);
+        assert_eq!(github_releases(&rows, &source, &template).unwrap().len(), 2);
     }
 
     #[test]

@@ -85,6 +85,7 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
   const pathBusy = useIsMutating({ mutationKey: ["pathenv-change"] }) > 0;
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
+  const [filter, setFilter] = React.useState<"all" | "installed" | "available">("all");
   const [busy, setBusy] = React.useState<string | null>(null);
   const busyRef = React.useRef(false);
   const triggerRef = React.useRef<HTMLButtonElement>(null);
@@ -100,16 +101,20 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
   }, [open, failure]);
 
   const installedCount = items.filter((i) => i.installed).length;
+  const availableCount = items.filter((i) => !i.installed && !i.incompatible).length;
   const headline = summarise(items, `${installedCount} ${t("versions.countUnit")}`);
   const anyRunning = statusKnown && items.some((item) => item.running);
+  const cachedDate = catalog?.cachedAt != null ? new Date(catalog.cachedAt) : null;
+  const updatedAt = cachedDate && Number.isFinite(cachedDate.getTime()) ? cachedDate : null;
 
   const filtered = React.useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return items;
-    return items.filter(
-      (i) => i.version.toLowerCase().includes(q) || (i.note ?? "").toLowerCase().includes(q)
-    );
-  }, [items, query]);
+    return items.filter((item) => {
+      if (filter === "installed" && !item.installed) return false;
+      if (filter === "available" && (item.installed || item.incompatible)) return false;
+      return !q || item.version.toLowerCase().includes(q) || (item.note ?? "").toLowerCase().includes(q);
+    });
+  }, [items, query, filter]);
 
   // 已安装状态优先；内置历史版本独立展示，不把目录未收录等同于已撤下。
   const groups = React.useMemo(() => {
@@ -239,6 +244,20 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
             <TooltipContent>{t(isTauri ? "versions.refresh" : "versions.preview")}</TooltipContent>
           </Tooltip>
         </div>
+        <div role="group" aria-label={t("versions.filter")} className="flex shrink-0 flex-wrap gap-1 px-2 pb-2">
+          {([
+            { value: "all", label: t("versions.all"), count: items.length },
+            { value: "installed", label: t("versions.installed"), count: installedCount },
+            { value: "available", label: t("versions.available"), count: availableCount },
+          ] as const).map((option) => (
+            <button key={option.value} type="button" aria-pressed={filter === option.value}
+              onClick={() => setFilter(option.value)}
+              className={cn("inline-flex min-h-8 items-center gap-1.5 rounded-md px-2 text-[11px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary",
+                filter === option.value ? "bg-fill text-foreground" : "text-muted hover:bg-fill hover:text-foreground")}>
+              {option.label}<span className="tabular text-[10px] text-muted">{option.count}</span>
+            </button>
+          ))}
+        </div>
         <div role="separator" className="mx-3 border-t border-dashed border-separator" />
 
         {/* 搜索和来源固定；列表、提示和错误一起滚动，矮窗口也能操作版本。 */}
@@ -257,7 +276,10 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
         {/* 版本列表 */}
           {groups.length === 0 && (
             <p role="status" className="px-3 py-4 text-center text-[12px] text-faint">
-              {catalog?.loading ? t("versions.loading") : t(query.trim() ? "versions.empty" : "versions.noVersions")}
+              {query.trim() ? t("versions.empty")
+                : filter === "installed" ? t("versions.noInstalled")
+                : catalog?.loading ? t("versions.loading")
+                : t(filter === "available" ? "versions.noAvailable" : "versions.noVersions")}
             </p>
           )}
           {groups.map((g, index) => (
@@ -310,7 +332,12 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
                           <span className="break-all font-mono text-[12px]">{item.version}</span>
                           {item.active && (
                             <span className="rounded-full bg-primary px-1.5 py-px text-[9px] font-medium text-primary-fg">
-                              {t(group.multiInstance || !group.isService ? "versions.default" : "packages.inUse")}
+                              {t("versions.default")}
+                            </span>
+                          )}
+                          {statusKnown && item.running && (
+                            <span className="rounded-full bg-running-soft px-1.5 py-px text-[9px] font-medium text-running">
+                              {t("state.running")}
                             </span>
                           )}
                           {sameVersion(item.version, latest) && !item.installed && (
@@ -348,7 +375,7 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
                             ? item.active ? null : t("versions.switch")
                           : item.transitioning
                             ? t("common.loading")
-                          : item.canStop
+                          : item.canStop || item.running
                             ? t("versions.stop")
                             : item.active || group.multiInstance
                               ? t("versions.start")
@@ -423,20 +450,23 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
 
         {/* 底部：数据来源 */}
         <div role="separator" className="mx-3 border-t border-dashed border-separator" />
-        <div className="flex shrink-0 items-center justify-between gap-2 px-2.5 py-1.5 text-[10px] text-muted">
-          <span>
-            {!isTauri
-              ? t("versions.preview")
-              : catalog?.loading
-                ? t("versions.loading")
-                : catalog?.online
-              ? t("versions.fromRemote")
-              : catalog?.cachedAt
-                ? t("versions.fromCache")
-                : t("versions.fromManifest")}
-          </span>
-          <span className="shrink-0 tabular" aria-label={query.trim() ? `${t("versions.matches")} ${filtered.length} / ${items.length}` : undefined}>
-            {query.trim() ? `${filtered.length} / ${items.length}` : items.length}
+        <div className="flex shrink-0 items-start justify-between gap-2 px-2.5 py-2 text-[10px] text-muted">
+          <div className="min-w-0 space-y-0.5 [overflow-wrap:anywhere]">
+            <p>
+              {!isTauri
+                ? t("versions.preview")
+                : catalog?.loading
+                  ? t("versions.loading")
+                  : catalog?.online && !catalog.error
+                    ? t("versions.fromRemote")
+                    : catalog?.cachedAt
+                      ? t("versions.fromCache")
+                      : t("versions.fromManifest")}
+            </p>
+            {isTauri && updatedAt && <p>{t("versions.updatedAt")} <time dateTime={updatedAt.toISOString()}>{updatedAt.toLocaleString()}</time></p>}
+          </div>
+          <span className="shrink-0 tabular" aria-label={`${t("versions.matches")} ${filtered.length} / ${items.length}`}>
+            {query.trim() || filter !== "all" ? `${filtered.length} / ${items.length}` : items.length}
           </span>
         </div>
       </PopoverContent>

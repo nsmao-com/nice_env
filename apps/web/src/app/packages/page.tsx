@@ -1147,7 +1147,7 @@ function PackageRow({
               )}
               {installedCount > 0 && (
                 <Badge variant="outline" className="shrink-0 text-[10px]">
-                  {installedCount}/{group.versions.length} {t("packages.installedCount")}
+                  {installedCount} {t("packages.installedCount")}
                 </Badge>
               )}
             </div>
@@ -1207,7 +1207,10 @@ function PackageRow({
                     <ServiceAutoStartButton service={service} disabled={disabled || actionBusy} />
                     <ServiceWebButton service={service} disabled={disabled} />
                     <SftpgoConfigButton service={service} disabled={disabled} />
-                    {service.lastError && service.state === "error" && <p className="w-full break-words text-error [overflow-wrap:anywhere]">{service.lastError.message}</p>}
+                    {service.lastError && service.state === "error" && <div role="alert" className="w-full break-words text-error [overflow-wrap:anywhere]">
+                      <p>{service.lastError.message}</p>
+                      {service.lastError.hint && <p className="mt-1 text-error/80">{service.lastError.hint}</p>}
+                    </div>}
                   </div>)}
               </div>
             ) : group.defaultPort != null ? <p className="mt-1 text-[11px] text-muted">{t("packages.defaultPort")} :{group.defaultPort}</p> : null}

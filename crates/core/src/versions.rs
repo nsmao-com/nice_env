@@ -1351,9 +1351,14 @@ mod tests {
         assert!(!cached.online);
         assert_eq!(cached.cached_at, Some(fetched_at));
         assert!(cached.error.is_none());
-        let template = crate::install::Installer::bundled()
-            .template_for("node")
-            .unwrap();
+        // 缓存行为不依赖宿主平台是否提供可安装套件（Linux CI 没有内置清单）。
+        let template: PackageManifestEntry = serde_json::from_value(serde_json::json!({
+            "id": "node", "version": "22.0.0", "category": "runtime", "displayName": "Node.js",
+            "description": "", "os": ["windows"], "arch": ["x64"], "kind": "archive",
+            "url": "https://example.test/node.zip", "sizeBytes": 1, "entry": "node.exe",
+            "versionSource": { "kind": "nodejs" }
+        }))
+        .unwrap();
         let source = source_for(&template).unwrap();
         let key = catalog_cache_key(&template, &source);
         let mut old = catalog;

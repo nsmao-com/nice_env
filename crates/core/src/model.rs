@@ -965,6 +965,7 @@ pub struct PortDiagnosis {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "serialize_optional_path")]
     pub cmdline: Option<String>,
 }
 
@@ -983,6 +984,7 @@ pub struct PortScanEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "serialize_optional_path")]
     pub cmdline: Option<String>,
     /// 该服务当前是否处于运行态
     pub running: bool,
@@ -1139,6 +1141,7 @@ pub struct ListenerInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "serialize_optional_path")]
     pub cmdline: Option<String>,
     /// 该 pid 是否属于本应用拉起的服务
     pub owned_by_self: bool,

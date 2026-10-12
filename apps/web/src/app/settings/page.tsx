@@ -197,6 +197,7 @@ export default function SettingsPage() {
   const { setTheme, resolvedTheme } = useTheme();
   const setLang = useUI((s) => s.setLang);
   const setCodeDefaults = useUI((s) => s.setCodeDefaults);
+  const setOnboardingOpen = useUI((s) => s.setOnboardingOpen);
   const queryClient = useQueryClient();
   const [settings, setSettings] = React.useState<AppSettings | null>(null);
   const [checking, setChecking] = React.useState(false);
@@ -618,7 +619,7 @@ export default function SettingsPage() {
         </div>
       )}
 
-      <PageHeader title={t("settings.title")} subtitle={t("settings.subtitle")} />
+      <PageHeader title={t("settings.title")} subtitle={t("settings.subtitle")} actions={<Button variant="secondary" onClick={() => setOnboardingOpen(true)}>{t("ob.open")}</Button>} />
 
       {/* 窄窗口：左侧竖排导航放不下，改为横向一排 —— 不然除「外观」外的分区根本进不去 */}
       <div className="mb-4 flex gap-1 overflow-x-auto pb-1 lg:hidden">

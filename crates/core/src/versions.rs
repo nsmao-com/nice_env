@@ -298,14 +298,8 @@ fn builtin_source(id: &str) -> Option<VersionSource> {
             _ => None,
         },
         version_strip: None,
-        max_versions: Some(if id == "redis" {
-            // 保留 6.x / 7.x 分支，避免全部被较新的 8.x 补丁挤出列表。
-            200
-        } else if matches!(id, "php" | "node" | "python" | "go" | "nginx") {
-            80
-        } else {
-            40
-        }),
+        // 保留旧稳定分支；列表先读缓存、按需访问上游，避免以缩短历史换取响应速度。
+        max_versions: Some(200),
         include_prerelease: Some(false),
     })
 }
@@ -359,17 +353,7 @@ pub async fn catalog(
     }
 
     // 源/平台/入口发生变化后不复用旧缓存，更不能跨平台使用下载地址。
-    let signature = format!(
-        "{src:?}:{:?}:{:?}:{}:{}",
-        template.os, template.arch, template.entry, template.kind
-    );
-    // v5 废弃旧 macOS Intel 源误返回的 ARM64 下载记录，按目标架构重新枚举。
-    let cache_revision = "v5";
-    let cache_key = format!(
-        "versionCatalog:{cache_revision}:{}:{:x}",
-        template.id,
-        Sha256::digest(signature)
-    );
+    let cache_key = catalog_cache_key(template, &src);
     if !force {
         if let Some(hit) = read_cache(store, &cache_key) {
             return hit;
@@ -421,6 +405,31 @@ pub async fn catalog(
 }
 
 /* ================= 缓存 ================= */
+
+fn catalog_cache_key(template: &PackageManifestEntry, src: &VersionSource) -> String {
+    let signature = format!(
+        "{src:?}:{:?}:{:?}:{}:{}",
+        template.os, template.arch, template.entry, template.kind
+    );
+    // 保留同一缓存签名，升级后仍可立即显示已知的完整版本目录。
+    format!(
+        "versionCatalog:v5:{}:{:x}",
+        template.id,
+        Sha256::digest(signature)
+    )
+}
+
+/// 只读本地缓存，不访问网络；过期记录也可先显示，随后按需刷新。
+pub fn cached_catalog(store: &Store, template: &PackageManifestEntry) -> VersionCatalog {
+    let mut catalog = source_for(template)
+        .and_then(|source| read_cache_any(store, &catalog_cache_key(template, &source)))
+        .unwrap_or_else(|| VersionCatalog {
+            id: template.id.clone(),
+            ..Default::default()
+        });
+    catalog.online = false;
+    catalog
+}
 
 fn read_cache(store: &Store, key: &str) -> Option<VersionCatalog> {
     let mut cat = read_cache_any(store, key)?;
@@ -1342,6 +1351,22 @@ mod tests {
         assert!(!cached.online);
         assert_eq!(cached.cached_at, Some(fetched_at));
         assert!(cached.error.is_none());
+        let template = crate::install::Installer::bundled()
+            .template_for("node")
+            .unwrap();
+        let source = source_for(&template).unwrap();
+        let key = catalog_cache_key(&template, &source);
+        let mut old = catalog;
+        old.id = template.id.clone();
+        old.cached_at = Some(fetched_at - 24 * 60 * 60 * 1000);
+        write_cache(&store, &key, &old);
+        assert!(read_cache(&store, &key).is_none());
+        let immediate = cached_catalog(&store, &template);
+        assert_eq!(immediate.cached_at, old.cached_at);
+        assert!(!immediate.online);
+        let mut other = template;
+        other.entry.push_str("-different-source");
+        assert!(cached_catalog(&store, &other).cached_at.is_none());
     }
 
     #[test]

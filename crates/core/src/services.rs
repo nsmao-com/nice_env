@@ -338,7 +338,7 @@ impl ServiceManager {
     pub fn push_log(&self, id: &str, line: &str) {
         if let Some(e) = self.entry(id) {
             let mut ring = e.ring.lock();
-            ring.push_back(line.to_string());
+            ring.push_back(crate::paths::portable_text(line));
             while ring.len() > 2000 {
                 ring.pop_front();
             }
@@ -733,7 +733,7 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(
                         continue;
                     }
                     let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                    let full = format!("[{ts}] [{tag}] {l}");
+                    let full = crate::paths::portable_text(&format!("[{ts}] [{tag}] {l}"));
                     manager.push_log(&sid, &full);
                     append_to_log_file(&manager, &sid, &full);
                 }
@@ -801,7 +801,12 @@ pub(crate) fn read_log_tail(path: &std::path::Path, lines: usize) -> Result<Vec<
     }
     // 原生日志可能含非 UTF-8 字节；替换坏字节，保留后续诊断行。
     let decoded = String::from_utf8_lossy(&content);
-    let mut tail = decoded.lines().rev().take(lines).map(str::to_owned).collect::<Vec<_>>();
+    let mut tail = decoded
+        .lines()
+        .rev()
+        .take(lines)
+        .map(crate::paths::portable_text)
+        .collect::<Vec<_>>();
     tail.reverse();
     Ok(tail)
 }
@@ -1190,6 +1195,17 @@ mod fallback_tests {
 
         assert_eq!(manager.tail("fixture", 1), vec!["latest line"]);
         assert_eq!(manager.tail("fixture", 10), vec!["old line", "latest line"]);
+        std::fs::write(
+            manager.log_path("fixture").unwrap(),
+            r"mysqld \\?\D:\NiceEnv\mysql.exe ready",
+        )
+        .unwrap();
+        assert_eq!(
+            manager.tail("fixture", 10),
+            vec![r"mysqld D:\NiceEnv\mysql.exe ready"]
+        );
+        manager.push_log("fixture", r"config //?/D:/NiceEnv/my.ini");
+        assert_eq!(manager.tail("fixture", 1), vec!["config D:/NiceEnv/my.ini"]);
     }
 
     #[test]

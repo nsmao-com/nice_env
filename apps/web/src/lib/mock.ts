@@ -1505,13 +1505,12 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       if (!input.name.trim()) throw { code: "BAD_STACK", message: "栈名称不能为空" };
       if (!input.items.length) throw { code: "BAD_STACK", message: "栈里至少要有一个服务" };
       if (input.id && !prev) throw { code: "STACK_NOT_FOUND", message: "此服务栈已被删除，请关闭编辑器后刷新列表" };
-      if (prev?.builtin) throw { code: "STACK_BUILTIN", message: "内置预设不能直接修改" };
       const stack: Stack = {
         id,
         name: input.name.trim(),
         description: input.description ?? "",
         items: [...input.items].sort((a, b) => a.order - b.order).filter((item, index, all) => all.findIndex((other) => other.serviceId === item.serviceId) === index),
-        builtin: false,
+        builtin: prev?.builtin ?? false,
         createdAt: prev?.createdAt ?? now(),
         updatedAt: now(),
       };

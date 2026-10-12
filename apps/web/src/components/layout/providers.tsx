@@ -31,16 +31,9 @@ function AppearanceSync() {
   });
 
   React.useEffect(() => {
-    if (!isTauri) return;
-    api
-      .getSettings()
-      .then((s) => {
-        // 「跟随系统」必须原样交给 next-themes：这里统一按亮度分辨率会把系统主题丢掉
-        if (s.appearance === "system") setTheme("system");
-        else setTheme(s.appearance === "dark" ? "dark" : "light");
-      })
-      .catch(() => undefined);
-  }, [setTheme]);
+    if (!isTauri || !data) return;
+    setTheme(data.appearance === "system" ? "system" : data.appearance === "dark" ? "dark" : "light");
+  }, [data, setTheme]);
 
   React.useEffect(() => {
     if (data) applyAppearance(data);

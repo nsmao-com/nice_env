@@ -453,7 +453,7 @@ function StackEditor({ open, stack, services, packages, ready, loadError, retryL
     if (versionConflicts.length) { setError(t("stack.versionConflict")); return; }
     busyRef.current = true; setBusy(true); setError(null);
     try {
-      await api.saveStack({ id: stack && !stack.builtin ? stack.id : undefined,
+      await api.saveStack({ id: stack?.id,
         name: name.trim(), description: description.trim(),
         items: items.map((item, index) => ({ serviceId: item.serviceId, label: item.label, order: (index + 1) * 10 })),
       });
@@ -469,7 +469,7 @@ function StackEditor({ open, stack, services, packages, ready, loadError, retryL
       <DialogContent hideClose={busy} aria-busy={busy} className="flex max-h-[85dvh] max-w-2xl flex-col gap-0 overflow-hidden p-0 data-[state=open]:zoom-in-100 data-[state=closed]:zoom-out-100">
         <DialogHeader className="shrink-0 border-b border-border px-4 py-4 pr-12 sm:px-6 sm:pr-12">
           <DialogTitle>{stack ? t("stack.edit") : t("stack.new")}</DialogTitle>
-          <DialogDescription>{stack?.builtin ? t("stack.presetSaveAs") : t("stack.editorHint")}</DialogDescription>
+          <DialogDescription>{t("stack.editorHint")}</DialogDescription>
         </DialogHeader>
         <form id={formId} className="min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6" onSubmit={(event) => { event.preventDefault(); void save(); }}>
           <fieldset disabled={busy} className="min-w-0 space-y-4">

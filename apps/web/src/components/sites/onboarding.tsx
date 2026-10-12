@@ -11,6 +11,9 @@ import { normalizeError } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { RingProgress } from "@/components/shared/ring-progress";
 import { cn, cmpVersionDesc, isPlatformCompatible } from "@/lib/utils";
 
@@ -55,7 +58,7 @@ function InstallingList({ items }: { items: SetupItem[] }) {
   </ul>;
 }
 
-/** 首次启动引导：选场景 → 准备套件 → 按场景进入站点或数据库。 */
+/** 首次启动和菜单入口共用：基本设置 → 选场景 → 准备套件 → 下一步。 */
 export function Onboarding() {
   const t = useT();
   const router = useRouter();
@@ -64,9 +67,14 @@ export function Onboarding() {
   const invalidate = useInvalidate();
   const startTask = useInstallTasks((s) => s.start);
   const setWizardOpen = useUI((s) => s.setWizardOpen);
-  const [open, setOpen] = React.useState(false);
+  const open = useUI((s) => s.onboardingOpen);
+  const setOpen = useUI((s) => s.setOnboardingOpen);
   const [scene, setScene] = React.useState<(typeof SCENES)[number]["id"] | null>(null);
-  const [phase, setPhase] = React.useState<"pick" | "installing" | "done">("pick");
+  const [phase, setPhase] = React.useState<"basic" | "pick" | "installing" | "done">("basic");
+  const [appearance, setAppearance] = React.useState("system");
+  const [checkUpdates, setCheckUpdates] = React.useState(true);
+  const [tray, setTray] = React.useState(true);
+  const wasOpen = React.useRef(false);
   const [items, setItems] = React.useState<SetupItem[]>([]);
   const [batchError, setBatchError] = React.useState("");
   const [saveError, setSaveError] = React.useState("");
@@ -87,13 +95,35 @@ export function Onboarding() {
     if (checked.current || !settingsQuery.data || settingsQuery.isError || packageQuery.isError || !packageQuery.dataUpdatedAt) return;
     checked.current = true;
     if (!settingsQuery.data.onboardingDone && !packageQuery.data.some((p) => p.install)) setOpen(true);
-  }, [settingsQuery.data, settingsQuery.isError, packageQuery.data, packageQuery.dataUpdatedAt, packageQuery.isError]);
+  }, [settingsQuery.data, settingsQuery.isError, packageQuery.data, packageQuery.dataUpdatedAt, packageQuery.isError, setOpen]);
+
+  React.useEffect(() => {
+    if (open && !wasOpen.current && !running.current) {
+      setPhase("basic"); setSaveError(""); setBatchError("");
+      setAppearance(settingsQuery.data?.appearance ?? "system");
+      setCheckUpdates(settingsQuery.data?.checkUpdateOnLaunch ?? true);
+      setTray(settingsQuery.data?.minimizeToTray ?? true);
+    }
+    wasOpen.current = open;
+  }, [open, settingsQuery.data]);
 
   const selected = SCENES.find((s) => s.id === scene);
   const missing = selected?.packages.filter((id) => !packageQuery.data.some((p) => p.id === id && (p.install || isPlatformCompatible(p.os, p.arch)))) ?? [];
   const ready = phase === "done" && items.length > 0 && items.every((item) => item.status === "done") && !batchError;
   const completed = items.filter((item) => item.status === "done").length;
   const readFailed = packageQuery.isError || settingsQuery.isError;
+
+  const saveBasics = async () => {
+    if (savingRef.current || !settingsQuery.data) return;
+    savingRef.current = true; setSaving(true); setSaveError("");
+    try {
+      await api.setSetting("appearance", appearance);
+      await api.setSetting("checkUpdateOnLaunch", checkUpdates);
+      await api.setSetting("minimizeToTray", tray);
+      setPhase("pick");
+    } catch (error) { setSaveError(`${t("ob.saveFailed")} ${normalizeError(error).message}`); }
+    finally { invalidate("settings"); savingRef.current = false; setSaving(false); }
+  };
 
   const startInstall = async () => {
     if (!selected || running.current || savingRef.current) return;
@@ -169,13 +199,13 @@ export function Onboarding() {
     }
   };
 
-  const heading = phase === "pick" ? t("onboarding.welcome") : phase === "installing" ? t("onboarding.installing")
+  const heading = phase === "basic" ? t("ob.basicTitle") : phase === "pick" ? t("onboarding.welcome") : phase === "installing" ? t("onboarding.installing")
     : ready ? t("ob.doneTitle") : t("ob.incompleteTitle");
-  const description = phase === "pick" ? t("ob.chooseHint") : phase === "installing" ? t("ob.stepsHint")
+  const description = phase === "basic" ? t("ob.basicHint") : phase === "pick" ? t("ob.chooseHint") : phase === "installing" ? t("ob.stepsHint")
     : !ready ? t("ob.incompleteHint") : scene === "db" ? t("ob.databaseReadyHint") : scene === "frontend" ? t("ob.frontendReadyHint") : t("ob.nowCreate");
 
   return <Dialog open={open} onOpenChange={(value) => { if (!value) void finish(); }}>
-    <DialogContent hideClose={saving} className="flex max-h-[calc(100dvh-24px)] max-w-[600px] flex-col gap-0 overflow-hidden p-0"
+    <DialogContent hideClose={saving} className="flex w-[calc(100vw-24px)] max-h-[calc(100dvh-24px)] max-w-[600px] flex-col gap-0 overflow-hidden p-0"
       onCloseAutoFocus={(event) => {
         const next = nextAction.current;
         nextAction.current = undefined;
@@ -187,7 +217,7 @@ export function Onboarding() {
       <div className="shrink-0 px-4 py-4 pr-12 sm:px-6 sm:pr-12">
         <div className="flex items-center gap-3">
           <div className={cn("flex h-10 w-10 shrink-0 items-center justify-center rounded-xl", phase === "done" ? ready ? "bg-running-soft text-running" : "bg-warn/10 text-warn" : "bg-primary-soft text-primary")}>
-            {phase === "pick" ? <Rocket className="h-5 w-5" /> : phase === "installing" ? <Loader2 className="h-5 w-5 animate-spin motion-reduce:animate-none" /> : ready ? <Check className="h-5 w-5" /> : <AlertTriangle className="h-5 w-5" />}
+            {phase === "pick" || phase === "basic" ? <Rocket className="h-5 w-5" /> : phase === "installing" ? <Loader2 className="h-5 w-5 animate-spin motion-reduce:animate-none" /> : ready ? <Check className="h-5 w-5" /> : <AlertTriangle className="h-5 w-5" />}
           </div>
           <div className="min-w-0">
             <DialogTitle className="text-[15px] leading-snug">{heading}</DialogTitle>
@@ -195,14 +225,21 @@ export function Onboarding() {
         </div>
       </div>
       <div role="separator" className="mx-4 shrink-0 border-t border-dashed border-separator sm:mx-6" />
-      <div ref={bodyRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4 sm:px-6">
+      <div ref={bodyRef} className="min-h-0 min-w-0 flex-1 space-y-4 overflow-auto px-4 py-4 sm:px-6 [overflow-wrap:anywhere]">
+        <ol className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-muted" aria-label={t("ob.open")}>{(["basic", "pick", "installing", "done"] as const).map((step, index) => <li key={step} aria-current={step === phase ? "step" : undefined} className={step === phase ? "font-medium text-primary" : ""}>{index + 1}. {t(`ob.step.${step}`)}</li>)}</ol>
         {saveError && <div className="space-y-2">
           <p role="alert" className="text-xs text-error [overflow-wrap:anywhere]">{saveError}</p>
           <Button size="sm" variant="outline" disabled={saving} onClick={() => { nextAction.current = failedAction.current; setOpen(false); }}>{t("ob.continueWithoutSaving")}</Button>
         </div>}
         <DialogDescription className="text-xs leading-relaxed">{description}</DialogDescription>
         {batchError && <p role="alert" className="text-xs text-error [overflow-wrap:anywhere]">{batchError}</p>}
-        {phase === "pick" ? <>
+        {phase === "basic" ? <div className="space-y-4">
+          <div className="space-y-2"><Label htmlFor="onboarding-appearance">{t("ob.appearance")}</Label><Select value={appearance} onValueChange={setAppearance} disabled={saving || !settingsQuery.data}><SelectTrigger id="onboarding-appearance"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="system">{t("ob.system")}</SelectItem><SelectItem value="light">{t("ob.light")}</SelectItem><SelectItem value="dark">{t("ob.dark")}</SelectItem></SelectContent></Select></div>
+          <div className="flex items-center justify-between gap-4"><Label htmlFor="onboarding-updates" className="leading-relaxed">{t("ob.updates")}</Label><Switch id="onboarding-updates" checked={checkUpdates} onCheckedChange={setCheckUpdates} disabled={saving || !settingsQuery.data} /></div>
+          <div className="flex items-center justify-between gap-4"><Label htmlFor="onboarding-tray" className="leading-relaxed">{t("ob.tray")}</Label><Switch id="onboarding-tray" checked={tray} onCheckedChange={setTray} disabled={saving || !settingsQuery.data} /></div>
+          <p className="rounded-lg bg-fill p-3 text-xs leading-relaxed text-muted">{t("ob.existingHint")}</p>
+          {readFailed && <div role="alert" className="space-y-2 text-xs text-error"><p>{t("ob.readFailed")}</p><Button size="sm" variant="outline" onClick={() => { void packageQuery.refetch(); void settingsQuery.refetch(); }}>{t("install.retry")}</Button></div>}
+        </div> : phase === "pick" ? <>
           <div className="grid gap-3 sm:grid-cols-3" role="group" aria-label={t("onboarding.scene")}>
             {SCENES.map((option) => <button key={option.id} type="button" aria-pressed={scene === option.id} onClick={() => setScene(option.id)}
               className={cn("flex items-center gap-3 rounded-xl border p-3 text-left transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary sm:flex-col sm:items-start", scene === option.id ? "border-primary/60 bg-primary-soft" : "border-border bg-card-2/40 hover:border-border-strong")}>
@@ -226,7 +263,8 @@ export function Onboarding() {
       <div className="shrink-0 space-y-2 px-4 py-3 sm:px-6">
         {saving && <p role="status" className="text-xs text-muted">{t("detail.saving")}</p>}
         <div className="flex flex-wrap items-center justify-end gap-2">
-          {phase === "pick" ? <>
+          {phase === "basic" ? <><Button variant="ghost" disabled={saving} onClick={() => void finish()}>{t("ob.skip")}</Button><Button disabled={saving || !settingsQuery.data || readFailed} onClick={() => void saveBasics()}>{t("ob.next")}<ChevronRight className="h-3.5 w-3.5" /></Button></> : phase === "pick" ? <>
+            <Button variant="outline" disabled={saving} onClick={() => setPhase("basic")}>{t("ob.back")}</Button>
             <Button variant="ghost" disabled={saving} onClick={() => void finish(missing.length ? "packages" : undefined)}>{t(missing.length ? "ob.managePackages" : "ob.skip")}</Button>
             <Button disabled={!scene || missing.length > 0 || readFailed || saving} onClick={() => void startInstall()}>{t("ob.installBtn")}<ChevronRight className="h-3.5 w-3.5" /></Button>
           </> : phase === "installing" ? <Button variant="outline" disabled={saving} onClick={() => void finish("packages")}>{t("ob.bgInstall")}</Button>

@@ -470,6 +470,7 @@ pub struct XdebugSetupInput {
     pub client_port: u16,
     /// 用户已下好的 DLL 路径（为空则走在线下载）
     #[serde(default)]
+    #[serde(serialize_with = "crate::model::serialize_optional_path")]
     pub dll_path: Option<String>,
 }
 

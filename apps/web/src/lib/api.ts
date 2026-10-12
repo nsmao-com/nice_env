@@ -146,8 +146,8 @@ export const setActiveVersion = (id: string, version: string) =>
   safe(invoke<boolean>("set_active_version", { id, version }));
 
 /* 远程版本目录：从上游枚举完整版本历史（带缓存） */
-export const versionCatalog = (id: string, force = false) =>
-  safe(invoke<VersionCatalog>("version_catalog", { id, force }));
+export const versionCatalog = (id: string, force = false, cachedOnly = false) =>
+  safe(invoke<VersionCatalog>("version_catalog", { id, force, cachedOnly }));
 export const versionCatalogs = (force = false) =>
   safe(invoke<VersionCatalog[]>("version_catalogs", { force }));
 

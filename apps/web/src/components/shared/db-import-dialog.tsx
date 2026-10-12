@@ -12,14 +12,16 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { fmtBytes } from "@/lib/utils";
 
 /** 检测来源 → 选择业务库 → 确认目标 → 完整导出、保护性备份与还原。 */
-export function DbImportDialog({ open, onOpenChange, version, engine, targetLabel }: {
-  open: boolean; onOpenChange: (open: boolean) => void; version: string; engine: DatabaseEngine; targetLabel: string;
+export function DbImportDialog({ open, onOpenChange, version, engine, targetLabel, targetSignature, targetReady }: {
+  open: boolean; onOpenChange: (open: boolean) => void; version: string; engine: DatabaseEngine; targetLabel: string; targetSignature: string; targetReady: boolean;
 }) {
   const t = useT();
   const invalidate = useInvalidate();
+  const [environment, setEnvironment] = React.useState("FlyEnv");
   const [source, setSource] = React.useState({ host: "127.0.0.1", port: "3306", user: "root", password: "" });
   const [phase, setPhase] = React.useState<"idle" | "probing" | "importing">("idle");
   const busyRef = React.useRef(false);
@@ -29,7 +31,10 @@ export function DbImportDialog({ open, onOpenChange, version, engine, targetLabe
   const [confirmed, setConfirmed] = React.useState(false);
   const [error, setError] = React.useState("");
   const [report, setReport] = React.useState<api.DatabaseImportReport | null>(null);
-  const valid = source.host.trim().length > 0 && source.user.trim().length > 0 && /^\d+$/.test(source.port) && Number(source.port) >= 1 && Number(source.port) <= 65535;
+  const [openedTarget, setOpenedTarget] = React.useState<string | null>(null);
+  React.useEffect(() => { if (!open) setOpenedTarget(null); else if (openedTarget === null) setOpenedTarget(targetSignature); }, [open, openedTarget, targetSignature]);
+  const targetChanged = openedTarget !== null && openedTarget !== targetSignature;
+  const valid = targetReady && !targetChanged && openedTarget !== null && source.host.trim().length > 0 && source.user.trim().length > 0 && /^\d+$/.test(source.port) && Number(source.port) >= 1 && Number(source.port) <= 65535;
   const change = (field: keyof typeof source, value: string) => {
     if (busyRef.current) return;
     setSource((current) => ({ ...current, [field]: value }));
@@ -68,8 +73,11 @@ export function DbImportDialog({ open, onOpenChange, version, engine, targetLabe
   return <Dialog open={open} onOpenChange={close}>
     <DialogContent className="flex max-w-xl max-h-[calc(100dvh-2rem)] flex-col overflow-hidden p-4 sm:p-6" hideClose={busy}>
       <DialogHeader><DialogTitle>{t("dbImport.title")}</DialogTitle><DialogDescription>{t("dbImport.desc")}</DialogDescription></DialogHeader>
-      <div className="min-h-0 space-y-4 overflow-y-auto pr-1">
+      <div className="min-h-0 min-w-0 space-y-4 overflow-auto pr-1 [overflow-wrap:anywhere]">
+      {(targetChanged || !targetReady) && <p role="alert" className="text-sm text-error">{t("dbImport.targetChanged")}</p>}
+      <ol className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-muted" aria-label={t("dbImport.steps")}><li className={!dbs ? "font-medium text-primary" : ""}>1. {t("dbImport.connect")}</li><li className={dbs && !confirmed ? "font-medium text-primary" : ""}>2. {t("dbImport.choose")}</li><li className={confirmed || report ? "font-medium text-primary" : ""}>3. {t("dbImport.transfer")}</li></ol>
       <form className="space-y-3" onSubmit={(event) => { event.preventDefault(); void probe(); }}>
+        <div className="space-y-1.5"><Label htmlFor="source-environment">{t("dbImport.environment")}</Label><Select value={environment} disabled={busy} onValueChange={setEnvironment}><SelectTrigger id="source-environment"><SelectValue /></SelectTrigger><SelectContent>{["FlyEnv", "phpStudy", "ServBay", "XAMPP", "Other"].map((name) => <SelectItem key={name} value={name}>{name === "Other" ? t("dbImport.other") : name}</SelectItem>)}</SelectContent></Select><p className="text-xs leading-relaxed text-muted">{t("dbImport.sourceHelp").replace("{name}", environment === "Other" ? t("dbImport.other") : environment)}</p></div>
         <div className="grid grid-cols-[minmax(0,1fr)_6rem] gap-3">
           <div className="space-y-1.5"><Label htmlFor="source-host">{t("dbImport.host")}</Label><Input id="source-host" disabled={busy} value={source.host} onChange={(e) => change("host", e.target.value)} /></div>
           <div className="space-y-1.5"><Label htmlFor="source-port">{t("dbImport.port")}</Label><Input id="source-port" inputMode="numeric" disabled={busy} value={source.port} onChange={(e) => change("port", e.target.value)} /></div>

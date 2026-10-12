@@ -440,6 +440,7 @@ fn validate_update_data_location(base: &Path, os: &str) -> crate::error::Result<
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DataDirMigration {
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub path: String,
     pub files: u64,
     pub bytes: u64,
@@ -461,6 +462,8 @@ pub(crate) struct DataPathRebase {
 /// 中会变成用户无法理解的 `//?/D:/...`。这里只处理前缀，不改动路径主体。
 pub fn portable_text(value: &str) -> String {
     value
+        .replace(r"\\\\?\\UNC\\", r"\\\\")
+        .replace(r"\\\\?\\", "")
         .replace("\\\\?\\UNC\\", "\\\\")
         .replace("\\\\?\\", "")
         .replace("//?/UNC/", "//")

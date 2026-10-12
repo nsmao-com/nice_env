@@ -287,7 +287,7 @@
         "tagPrefix": "v",
         "assetMatch": "^mihomo-darwin-arm64-v[\\d.]+\\.gz$",
         "entryTemplate": "mihomo-darwin-arm64-v{version}",
-        "maxVersions": 40
+        "maxVersions": 200
       }
     },
     {
@@ -311,7 +311,7 @@
       "versionSource": {
         "kind": "nodejs",
         "entryTemplate": "node-v{version}-darwin-arm64/bin/node",
-        "maxVersions": 60
+        "maxVersions": 200
       }
     },
     {
@@ -335,7 +335,7 @@
       "versionSource": {
         "kind": "go",
         "entryTemplate": "go/bin/go",
-        "maxVersions": 60
+        "maxVersions": 200
       }
     },
     {
@@ -445,7 +445,7 @@
       "versionSource": {
         "kind": "nodejs",
         "entryTemplate": "node-v{version}-darwin-arm64/bin/node",
-        "maxVersions": 60
+        "maxVersions": 200
       }
     },
     {
@@ -469,7 +469,7 @@
       "versionSource": {
         "kind": "nodejs",
         "entryTemplate": "node-v{version}-darwin-arm64/bin/node",
-        "maxVersions": 60
+        "maxVersions": 200
       }
     },
     {
@@ -493,7 +493,7 @@
       "versionSource": {
         "kind": "go",
         "entryTemplate": "go/bin/go",
-        "maxVersions": 60
+        "maxVersions": 200
       }
     },
     {
@@ -562,7 +562,7 @@
         "tagPrefix": "v",
         "assetMatch": "^mihomo-darwin-arm64-v[\\d.]+\\.gz$",
         "entryTemplate": "mihomo-darwin-arm64-v{version}",
-        "maxVersions": 40
+        "maxVersions": 200
       }
     },
     {
@@ -606,7 +606,7 @@
       "versionSource": {
         "kind": "nodejs",
         "entryTemplate": "node-v{version}-darwin-arm64/bin/node",
-        "maxVersions": 60
+        "maxVersions": 200
       },
       "sha256": "751fdf7439f115d87ee2a8f3f18c065b6151852068e3e666ac60ac2996f75ac9"
     },
@@ -630,7 +630,7 @@
       "versionSource": {
         "kind": "nodejs",
         "entryTemplate": "node-v{version}-darwin-arm64/bin/node",
-        "maxVersions": 60
+        "maxVersions": 200
       },
       "sha256": "bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057"
     },
@@ -654,7 +654,7 @@
       "versionSource": {
         "kind": "go",
         "entryTemplate": "go/bin/go",
-        "maxVersions": 60
+        "maxVersions": 200
       },
       "sha256": "ee215d57e0ec269c60cc9ceca68e6bda321ba9ee5afe24f4b0988703c2d87d12"
     },
@@ -691,7 +691,7 @@
         "tagPrefix": "v",
         "assetMatch": "^mihomo-darwin-arm64-v[\\d.]+\\.gz$",
         "entryTemplate": "mihomo-darwin-arm64-v{version}",
-        "maxVersions": 40
+        "maxVersions": 200
       },
       "sha256": "d131f44b3deb2a8356f7ac75048ad67a10d53243323951c4f3cda7b672922963"
     },
@@ -889,7 +889,7 @@
         "tagPrefix": "v",
         "assetMatch": "^mihomo-darwin-amd64-v[\\d.]+\\.gz$",
         "entryTemplate": "mihomo-darwin-amd64-v{version}",
-        "maxVersions": 40
+        "maxVersions": 200
       },
       "sha256": "3546681ebef3415e5dcbe7210a61aa80748136e95e6552768fd883df345508ed"
     },
@@ -913,7 +913,7 @@
       "versionSource": {
         "kind": "go",
         "entryTemplate": "go/bin/go",
-        "maxVersions": 60
+        "maxVersions": 200
       },
       "sha256": "8f8f52c6649542cf027bbc9b9c68d1ec042f9f34808a40413f0b8b3f66f3caa4"
     },
@@ -937,7 +937,7 @@
       "versionSource": {
         "kind": "nodejs",
         "entryTemplate": "node-v{version}-darwin-x64/bin/node",
-        "maxVersions": 60
+        "maxVersions": 200
       },
       "sha256": "1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097"
     },

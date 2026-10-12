@@ -1348,6 +1348,21 @@ impl CoreState {
     }
 
     /// 批量版本目录（前端一次拉全部有版本源的包，避免 N 次 invoke）
+    pub fn cached_version_catalog(&self, id: &str) -> Result<model::VersionCatalog> {
+        let template = self
+            .installer
+            .template_for(id)
+            .ok_or_else(|| AppError::new("PACKAGE_NOT_FOUND", format!("清单里没有套件 {id}")))?;
+        if !install::Installer::is_platform_compatible(&template) {
+            return Ok(model::VersionCatalog {
+                id: id.into(),
+                ..Default::default()
+            });
+        }
+        Ok(versions::cached_catalog(&self.store, &template))
+    }
+
+    /// 批量版本目录（用户主动刷新时使用）。
     pub async fn version_catalogs(&self, force: bool) -> Vec<model::VersionCatalog> {
         let mut ids: Vec<String> = self
             .installer

@@ -651,7 +651,7 @@ fn stacks_presets_and_crud() {
     assert_eq!(copy.name, "副本");
     assert_eq!(copy.items.len(), 3, "副本保留条目");
 
-    // 内置预设不可修改、不可删除
+    // 内置预设允许原位编辑，保留删除保护。
     assert!(nsb_core::stacks::delete(&store, "builtin-lnmp").is_err());
     assert!(
         nsb_core::stacks::save(
@@ -667,8 +667,8 @@ fn stacks_presets_and_crud() {
                 }],
             },
         )
-        .is_err(),
-        "内置预设不能被直接改写"
+        .is_ok(),
+        "编辑内置预设应保存到原来的服务栈"
     );
 
     // 自定义栈可删

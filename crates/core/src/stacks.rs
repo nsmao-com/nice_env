@@ -94,10 +94,6 @@ pub fn save(store: &Store, input: StackInput) -> Result<Stack> {
     };
     let stack = match existing {
         Some(mut s) => {
-            if s.builtin {
-                return Err(AppError::new("STACK_BUILTIN", "内置预设不能直接修改")
-                    .with_hint("先「另存为」一份再改，预设本身留着当模板"));
-            }
             s.name = name.to_string();
             s.description = input.description;
             s.items = normalized_items(input.items);
@@ -366,6 +362,35 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(temp.path().join("fixture.sqlite")).unwrap();
         ensure_presets(&store).unwrap();
+        let preset = store.get_stack("builtin-lnmp").unwrap().unwrap();
+        store.set_start_stack_on_launch(&preset.id).unwrap();
+        let edited = save(
+            &store,
+            StackInput {
+                id: Some(preset.id.clone()),
+                name: "Edited preset".into(),
+                description: "Saved in place".into(),
+                items: vec![StackItem {
+                    service_id: "redis".into(),
+                    label: None,
+                    order: 10,
+                }],
+            },
+        )
+        .unwrap();
+        assert_eq!(edited.id, preset.id);
+        assert!(edited.builtin);
+        assert_eq!(edited.created_at, preset.created_at);
+        assert_eq!(store.list_stacks().unwrap().len(), 3);
+        assert_eq!(
+            store.get_setting("startStackOnLaunch").as_deref(),
+            Some(preset.id.as_str())
+        );
+        ensure_presets(&store).unwrap();
+        assert_eq!(
+            store.get_stack(&preset.id).unwrap().unwrap().items[0].service_id,
+            "redis"
+        );
         let input = || StackInput {
             id: None, name: "Versions".into(), description: String::new(),
             items: vec![StackItem { service_id: "php".into(), label: None, order: 10 },

@@ -954,10 +954,14 @@ async fn version_catalog(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
     id: String,
     force: Option<bool>,
+    cached_only: Option<bool>,
 ) -> Result<nsb_core::model::VersionCatalog, tauri::Error> {
     let _activity = map_jh(nsb_core::paths::DataDirActivity::shared(&state.paths.base))?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        if cached_only.unwrap_or(false) {
+            return map_jh(st.cached_version_catalog(&id));
+        }
         tauri::async_runtime::block_on(async move {
             map_jh(st.version_catalog(&id, force.unwrap_or(false)).await)
         })
@@ -4395,9 +4399,7 @@ fn db_backup_list(
 
 #[tauri::command]
 fn db_backup_dir(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> String {
-    nsb_core::dbbackup::backup_dir(&state.paths)
-        .to_string_lossy()
-        .to_string()
+    nsb_core::paths::portable_path_text(&nsb_core::dbbackup::backup_dir(&state.paths))
 }
 
 /// 导出选中的数据库。进度走 db://backup 事件回传。
@@ -5125,10 +5127,21 @@ async fn full_log(state: State<'_, std::sync::Arc<nsb_core::CoreState>>, id: Str
         let path = map_jh(st.log_source_path(&id))?;
         let file = std::fs::File::open(&path).map_err(|e| box_err(nsb_core::AppError::io("读取完整日志", e)))?;
         let mut bytes = Vec::new();
-        file.take(64 * 1024 * 1024 + 1).read_to_end(&mut bytes).map_err(|e| box_err(nsb_core::AppError::io("读取完整日志", e)))?;
-        if bytes.len() > 64 * 1024 * 1024 { return Err(box_err(nsb_core::AppError::new("LOG_TOO_LARGE", "日志超过 64 MB，请在日志目录中打开原文件；未截断显示为完整日志"))); }
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
-    }).await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+        file.take(64 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| box_err(nsb_core::AppError::io("读取完整日志", e)))?;
+        if bytes.len() > 64 * 1024 * 1024 {
+            return Err(box_err(nsb_core::AppError::new(
+                "LOG_TOO_LARGE",
+                "日志超过 64 MB，请在日志目录中打开原文件；未截断显示为完整日志",
+            )));
+        }
+        Ok(nsb_core::paths::portable_text(&String::from_utf8_lossy(
+            &bytes,
+        )))
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 
 /* ================= 日志导出 ================= */

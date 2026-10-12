@@ -285,7 +285,7 @@ export default function PackagesPage() {
     byId: catalogById,
     refresh: refreshCatalogs,
     refreshAll: refreshAllCatalogs,
-  } = useVersionCatalogs(packages.map((p) => p.id));
+  } = useVersionCatalogs(packages.map((p) => p.id), packages.filter((p) => p.install).map((p) => p.id));
   const [catalogRefreshing, setCatalogRefreshing] = React.useState(false);
   const catalogRefreshRef = React.useRef(false);
   const [reconciling, setReconciling] = React.useState(false);

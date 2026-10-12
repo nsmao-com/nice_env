@@ -361,10 +361,14 @@ impl Installer {
                         .filter(|timestamp| *timestamp > 0)
                         .unwrap_or_else(|| modified_at_ms(&runtime_dir)),
                 };
-                let changed = current.is_none_or(|previous| previous.category != installed.category
-                    || previous.install_path != installed.install_path
-                    || previous.config_path != installed.config_path);
-                store.upsert_installed(&installed)?;
+                let changed = current.is_none_or(|previous| {
+                    previous.category != installed.category
+                        || previous.install_path != installed.install_path
+                        || previous.config_path != installed.config_path
+                });
+                if changed {
+                    store.upsert_installed(&installed)?;
+                }
                 if let Some(previous) = current {
                     if changed {
                         result.refreshed.push(installed.clone());

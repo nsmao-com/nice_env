@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, RefreshCw, Loader2 } from "lucide-react";
@@ -9,21 +10,24 @@ import { useUI } from "@/lib/store";
 import { Sidebar } from "./sidebar";
 import { Topbar } from "./topbar";
 import { DesktopWindowProvider, useDesktopWindow, WindowControls } from "./titlebar";
-import { CommandPalette } from "./command-palette";
-import { SiteWizard } from "@/components/sites/site-wizard";
-import { Onboarding } from "@/components/sites/onboarding";
 import { toastError, useInvalidate, useSettings } from "@/lib/hooks";
 import { toast } from "sonner";
 import { useT } from "@/lib/store";
 import { isTauri, listen } from "@/lib/backend";
 import { cn } from "@/lib/utils";
-import { UpdateDialog } from "@/components/shared/update-dialog";
 import * as api from "@/lib/api";
 import { Button } from "@/components/ui/button";
+
+const CommandPalette = dynamic(() => import("./command-palette").then((m) => m.CommandPalette), { ssr: false });
+const SiteWizard = dynamic(() => import("@/components/sites/site-wizard").then((m) => m.SiteWizard), { ssr: false });
+const Onboarding = dynamic(() => import("@/components/sites/onboarding").then((m) => m.Onboarding), { ssr: false });
+const UpdateDialog = dynamic(() => import("@/components/shared/update-dialog").then((m) => m.UpdateDialog), { ssr: false });
 
 function ShellFrame({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const wizardOpen = useUI((s) => s.wizardOpen);
+  const [wizardLoaded, setWizardLoaded] = React.useState(false);
+  React.useEffect(() => { if (wizardOpen) setWizardLoaded(true); }, [wizardOpen]);
   const wizardKind = useUI((s) => s.wizardKind);
   const wizardProject = useUI((s) => s.wizardProject);
   const wizardProjectDefaults = useUI((s) => s.wizardProjectDefaults);
@@ -88,14 +92,14 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
       </div>
       <CommandPalette />
       <CertAlertListener />
-      <SiteWizard
+      {(wizardOpen || wizardLoaded) && <SiteWizard
         open={wizardOpen}
         initialKind={wizardKind}
         existingProject={wizardProject}
         existingDefaults={wizardProjectDefaults}
         onOpenChange={setWizardOpen}
         onCreated={() => invalidate("sites", "hosts", "certs", "databases")}
-      />
+      />}
       <Onboarding />
       <UpdateWatcher />
       <WindowControls />
@@ -230,6 +234,8 @@ function CertAlertListener() {
  */
 function UpdateWatcher() {
   const [open, setOpen] = React.useState(false);
+  const [loaded, setLoaded] = React.useState(false);
+  React.useEffect(() => { if (open) setLoaded(true); }, [open]);
   const { data: settings } = useSettings();
 
   React.useEffect(() => {
@@ -246,7 +252,7 @@ function UpdateWatcher() {
     return () => clearTimeout(id);
   }, [settings]);
 
-  return <UpdateDialog open={open} onOpenChange={setOpen} />;
+  return open || loaded ? <UpdateDialog open={open} onOpenChange={setOpen} /> : null;
 }
 
 /** 页面标题区（每个页面顶部） */

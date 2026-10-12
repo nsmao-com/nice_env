@@ -731,7 +731,13 @@ fn start_redis(
     let redis_port =
         crate::services::fallback_port_for(store, "redis", ports.redis, &[]).unwrap_or(ports.redis);
     configgen::write_redis_conf(paths, &version, redis_port)?;
-    precheck_port(redis_port, "Redis")?;
+    // Windows 原生预检与 MSYS2/Cygwin Redis 的套接字实现可能不同。
+    // 有实际监听者仍拒绝启动；无监听者时以 Redis 本体及监听归属为准。
+    let precheck = match precheck_port(redis_port, "Redis") {
+        Ok(()) => None,
+        Err(error) if cfg!(windows) && error.code == "PORT_UNAVAILABLE" => Some(error),
+        Err(error) => return Err(error),
+    };
     let spec = SpawnSpec {
         program: exe.clone(),
         args: redis_launch_args(paths, &version, redis_port, &exe),
@@ -739,13 +745,40 @@ fn start_redis(
         env: vec![],
         detached: None,
     };
+    let log_marker = format!("Redis {version} 本次启动 · {}", crate::services::now_ms());
+    manager.push_log("redis", &log_marker);
     spawn_tracked(manager, "redis", &spec)?;
-    if !wait_healthy(redis_port, Duration::from_secs(10)) {
-        return Err(AppError::new("REDIS_START_TIMEOUT", "Redis 启动超时")
-            .with_hint("查看日志页 redis 输出，检查端口和配置")
-            .with_detail(manager.tail("redis", 30).join("\n")));
+    manager.set_started_port("redis", redis_port);
+    let waiting = std::time::Instant::now();
+    loop {
+        if verify_database_listener(manager, "redis", redis_port).is_ok() {
+            return Ok(());
+        }
+        if waiting.elapsed() >= Duration::from_secs(10)
+            || manager
+                .snapshot("redis")
+                .is_none_or(|service| service.pids.is_empty())
+        {
+            let lines = manager.tail("redis", 30);
+            let start = lines
+                .iter()
+                .rposition(|line| line == &log_marker)
+                .unwrap_or(0);
+            let detail = lines[start..].join("\n");
+            let denied = detail.to_ascii_lowercase().contains("permission denied")
+                || detail.contains("10013")
+                || detail.contains("访问权限");
+            let error = if denied && precheck.is_some() {
+                AppError::new("REDIS_PORT_DENIED", format!("Redis 实际启动失败：系统拒绝绑定端口 {redis_port}"))
+                    .with_hint("已尝试启动 Redis，并非仅凭端口预检判断。请核对另一环境使用的 Redis 版本、当前监听端口及运行权限；Windows 的保留端口可能随系统网络服务变化。可在端口工具中检查，或在服务配置中选择空闲端口。")
+            } else {
+                AppError::new("REDIS_START_FAILED", "Redis 未建立属于本实例的监听")
+                    .with_hint("请查看本次 Redis 日志中的失败原因；旧日志中的 Ready to accept connections 不代表本次启动成功。")
+            };
+            return Err(error.with_detail(detail));
+        }
+        std::thread::sleep(Duration::from_millis(200));
     }
-    Ok(())
 }
 
 fn start_mihomo(store: &Store, paths: &Paths, manager: &Arc<ServiceManager>) -> Result<()> {

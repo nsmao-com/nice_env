@@ -83,6 +83,10 @@ function loadVersionCatalog(qc: QueryClient, id: string, force: boolean): Promis
   if (!requests) { requests = new Map(); catalogRequests.set(qc, requests); }
   const current = requests.get(id);
   if (current?.pending && (current.force || !force)) return current.promise;
+  const cached = previousCatalog(qc, id);
+  if (!force && cached?.cachedAt && !cached.error && Date.now() - cached.cachedAt < 6 * 60 * 60 * 1000) {
+    return Promise.resolve(publishVersionCatalog(qc, { ...cached, online: false }));
+  }
   const active = requests;
   const request: CatalogRequest = {
     force,
@@ -129,13 +133,14 @@ export async function refreshVersionCatalog(qc: QueryClient, id: string, afterIn
  * 后端带 6 小时缓存，这里 staleTime 设长一些避免重复请求；
  * 「刷新版本」用 refresh() 强制绕过缓存。
  */
-export function useVersionCatalogs(packageIds: string[]) {
+export function useVersionCatalogs(packageIds: string[], eagerIds = packageIds) {
   const qc = useQueryClient();
   const ids = React.useMemo(() => {
     const priority = new Map(["nginx", "php", "mysql", "redis", "node", "python", "go"].map((id, index) => [id, index]));
     return [...new Set(packageIds)].sort((a, b) => (priority.get(a) ?? 100) - (priority.get(b) ?? 100) || a.localeCompare(b));
   }, [packageIds.join("\u0000")]);
   const idKey = ids.join("\u0000");
+  const eagerKey = [...new Set(eagerIds)].sort().join("\u0000");
   // 目录不能再用一次批量 IPC 阻塞几十个上游请求；每个套件独立读取，先显示
   // 清单/缓存版本，再把远程结果按有限并发写回同一个查询缓存。
   const queryKey = React.useMemo(() => ["version-catalogs", ids] as const, [idKey]);
@@ -145,7 +150,7 @@ export function useVersionCatalogs(packageIds: string[]) {
     staleTime: Infinity,
     retry: false,
     enabled: false,
-    initialData: [] as VersionCatalog[],
+    initialData: () => ids.flatMap((id) => { const cached = previousCatalog(qc, id); return cached ? [cached] : []; }),
   });
   const { data: loading = {} } = useQuery<Record<string, boolean>>({
     queryKey: catalogLoadingKey,
@@ -196,11 +201,31 @@ export function useVersionCatalogs(packageIds: string[]) {
       setLoadingIds(new Set());
       return;
     }
-    void loadCatalogs(ids, false);
+    let disposed = false;
+    const warming = ++loadGeneration.current;
+    setLoadingIds(new Set(eagerKey.split("\u0000").filter(Boolean)));
+    // 缓存读取与上游请求分开排队，慢上游不能挡住后面套件的本地版本列表。
+    void (async () => {
+      let cursor = 0;
+      const readCache = async () => {
+        while (!disposed) {
+          const id = ids[cursor++];
+          if (!id) return;
+          if (previousCatalog(qc, id)?.cachedAt) continue;
+          try {
+            const cached = await api.versionCatalog(id, false, true);
+            if (!disposed && !catalogRequests.get(qc)?.get(id)?.pending) publishVersionCatalog(qc, cached);
+          } catch { /* 离线缓存读取失败后仍保留清单，后续刷新显示具体错误。 */ }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(6, ids.length) }, readCache));
+      if (!disposed && warming === loadGeneration.current) await loadCatalogs(eagerKey.split("\u0000").filter((id) => ids.includes(id)), false);
+    })();
     return () => {
+      disposed = true;
       loadGeneration.current += 1;
     };
-  }, [idKey, ids, loadCatalogs]);
+  }, [idKey, ids, eagerKey, qc, loadCatalogs]);
 
   const catalogs = new Map((query.data ?? []).map((catalog) => [catalog.id, catalog]));
   const byId = new Map<string, VersionCatalog & { loading: boolean }>();

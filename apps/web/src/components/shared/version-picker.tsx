@@ -7,6 +7,7 @@ import { Check, ChevronDown, Download, FolderOpen, Loader2, Pin, Power, RefreshC
 import type { RemoteVersion } from "@nsb/schema";
 import { cn, sameVersion } from "@/lib/utils";
 import { useT } from "@/lib/store";
+import { toastError } from "@/lib/hooks";
 import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
@@ -169,7 +170,15 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
   const showRefreshHint = !!catalog?.error;
 
   return (
-    <Popover open={open} onOpenChange={(next) => { if (!busyRef.current && !pathBusy) setOpen(next); }}>
+    <Popover open={open} onOpenChange={(next) => {
+      if (busyRef.current || pathBusy) return;
+      setOpen(next);
+      if (next && isTauri && onRefresh && !catalog?.loading && !refreshRef.current
+        && (!catalog?.cachedAt || Date.now() - catalog.cachedAt >= 6 * 60 * 60 * 1000)) {
+        refreshRef.current = true; setRefreshing(true);
+        void Promise.resolve().then(onRefresh).catch(toastError).finally(() => { refreshRef.current = false; setRefreshing(false); });
+      }
+    }}>
       <PopoverTrigger asChild>
         <button
           ref={triggerRef}

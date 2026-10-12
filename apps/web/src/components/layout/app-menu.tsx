@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { version as bundledAppVersion } from "../../../package.json";
 import {
@@ -32,7 +33,6 @@ import * as api from "@/lib/api";
 import { isTauri, listen, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { cn, bulkTarget, mergeBulkReport } from "@/lib/utils";
 import { ConfirmDialog } from "@/components/shared/misc";
-import { UpdateDialog } from "@/components/shared/update-dialog";
 import { BulkResult, BulkTargetList } from "@/components/shared/bulk-actions";
 import type { BulkReport, BulkTarget } from "@nsb/schema";
 import {
@@ -56,6 +56,7 @@ import { useDesktopWindow } from "./titlebar";
 
 const REPO_URL = "https://github.com/nsmao-com/nice_env";
 const RELEASES_URL = `${REPO_URL}/releases`;
+const UpdateDialog = dynamic(() => import("@/components/shared/update-dialog").then((m) => m.UpdateDialog), { ssr: false });
 
 export function AppLogo({ className }: { className?: string }) {
   return (
@@ -86,6 +87,7 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
   const t = useT();
   const router = useRouter();
   const setWizardOpen = useUI((s) => s.setWizardOpen);
+  const setOnboardingOpen = useUI((s) => s.setOnboardingOpen);
   const serviceQuery = useServices();
   const stackQuery = useStacks();
   const sitesQuery = useSites();
@@ -103,6 +105,8 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
   const [checking, setChecking] = React.useState(false);
   const [version, setVersion] = React.useState(bundledAppVersion);
   const [updateOpen, setUpdateOpen] = React.useState(false);
+  const [updateLoaded, setUpdateLoaded] = React.useState(false);
+  React.useEffect(() => { if (updateOpen) setUpdateLoaded(true); }, [updateOpen]);
   const [confirm, setConfirm] = React.useState<null | "stopAll" | "restartAll" | "quit">(null);
   const [busy, setBusy] = React.useState(false);
   const [restartBusy, setRestartBusy] = React.useState(false);
@@ -237,6 +241,7 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
           <DropdownMenuItem onSelect={() => setWizardOpen(true)}>
             <Plus /> {t("appmenu.newSite")}
           </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => setOnboardingOpen(true)}><Rocket />{t("ob.open")}</DropdownMenuItem>
           <DropdownMenuItem onSelect={() => router.push("/sites")}>
             <Globe2 /> {t("appmenu.sites")}
           </DropdownMenuItem>
@@ -325,7 +330,7 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
         </DropdownMenuContent>
       </DropdownMenu>
 
-      <UpdateDialog open={updateOpen} onOpenChange={(open) => { setUpdateOpen(open); if (!open) setChecking(false); }} />
+      {(updateOpen || updateLoaded) && <UpdateDialog open={updateOpen} onOpenChange={(open) => { setUpdateOpen(open); if (!open) setChecking(false); }} />}
 
       <ConfirmDialog
         open={confirm === "restartAll"}

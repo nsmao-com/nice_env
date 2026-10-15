@@ -67,12 +67,13 @@ fn endpoint_from_config(site: &Site, content: &str) -> Option<SiteEndpoint> {
         .or_else(|| site.domains.first())?.replacen("*.", "www.", 1);
     let matches_name = |name: &str| name.eq_ignore_ascii_case(&domain)
         || name.strip_prefix("*.").is_some_and(|suffix| domain.to_ascii_lowercase().ends_with(&format!(".{}", suffix.to_ascii_lowercase())));
+    let target_ip = domain.parse::<std::net::Ipv4Addr>().unwrap_or(std::net::Ipv4Addr::LOCALHOST);
     let local_port = |value: &str| -> Option<(u16, bool)> {
         if let Ok(port) = value.parse::<u16>() { return (port > 0).then_some((port, true)); }
         if let Some(port) = value.strip_prefix("*:") { return port.parse::<u16>().ok().filter(|p| *p > 0).map(|port| (port, true)); }
         let address = value.parse::<std::net::SocketAddr>().ok()?;
-        // hosts 管理将站点指向 127.0.0.1；不能把仅网卡 IP / IPv6 的监听冒充该入口。
-        (address.is_ipv4() && (address.ip().is_unspecified() || address.ip() == std::net::Ipv4Addr::LOCALHOST) && address.port() > 0)
+        // 域名由 hosts 指向 127.0.0.1，IP 站点必须匹配实际访问地址。
+        (address.is_ipv4() && (address.ip().is_unspecified() || address.ip() == target_ip) && address.port() > 0)
             .then_some((address.port(), address.ip().is_unspecified()))
     };
     let mut ports = Vec::new();
@@ -240,8 +241,12 @@ pub(crate) fn running_url(paths: &Paths, mut site: Site, manager: &ServiceManage
     let endpoint = loaded_endpoint(manager, &site).ok_or_else(|| AppError::new("SITE_URL_UNAVAILABLE", "站点未运行或尚未确认本次加载的访问地址")
         .with_hint("请启动站点或重启对应 Web 服务；自定义监听地址请在配置中核对。"))?;
     let status = manager.snapshot(&site.runtime.web_server).ok_or_else(|| AppError::new("SITE_URL_UNAVAILABLE", "站点服务已停止"))?;
-    let target = std::net::SocketAddr::from(([127, 0, 0, 1], endpoint.port));
-    if !crate::ports::owns_listener(target, &status.pids)? {
+    let url = reqwest::Url::parse(&endpoint.url).map_err(|_| AppError::new("SITE_URL_UNAVAILABLE", "站点访问地址无效，请重新启动站点"))?;
+    let address = url.host_str().and_then(|host| host.parse::<std::net::Ipv4Addr>().ok()).unwrap_or(std::net::Ipv4Addr::LOCALHOST);
+    let target = std::net::SocketAddr::from((address, endpoint.port));
+    let owned = if address.is_loopback() { crate::ports::owns_listener(target, &status.pids)? }
+        else { crate::ports::owns_interface_listener(target, &status.pids)? };
+    if !owned {
         return Err(AppError::new("SITE_URL_UNAVAILABLE", "站点端口尚未就绪或已被其他进程占用").with_hint("请查看对应 Web 服务的日志与端口诊断后重试。"));
     }
     Ok(endpoint.url)
@@ -5380,6 +5385,14 @@ func main() { fmt.Println("managed-app-log"); http.HandleFunc("/",func(w http.Re
                 "{listener}"
             );
         }
+        site.domains = vec!["127.0.0.6".into()];
+        let ip_config = "server { listen 127.0.0.1:18080; server_name 127.0.0.6; }";
+        assert!(endpoint_from_config(&site, ip_config).is_none(), "127.0.0.1 cannot stand in for the site's IP");
+        for listener in ["127.0.0.6:18080", "0.0.0.0:18080"] {
+            let endpoint = endpoint_from_config(&site, &ip_config.replace("127.0.0.1:18080", listener)).unwrap();
+            assert_eq!(endpoint.url, "http://127.0.0.6:18080");
+        }
+        assert!(endpoint_from_config(&site, &ip_config.replace("127.0.0.1:18080", "127.0.0.7:18080")).is_none());
         site.domains = vec!["*.demo.test".into()];
         assert_eq!(
             endpoint_from_config(&site, "server { listen 80; server_name *.DEMO.TEST; }")

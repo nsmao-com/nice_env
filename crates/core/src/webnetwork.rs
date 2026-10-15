@@ -232,6 +232,10 @@ mod checks {
         ] {
             if std::env::var("NSB_LAN_SERVER").is_ok_and(|value| value != server) { continue; }
             let root = PathBuf::from(std::env::var_os(variable).expect(variable));
+            let version = if server == "nginx" {
+                root.file_name().and_then(|name| name.to_str()).and_then(|name| name.strip_prefix("nginx-"))
+                    .expect("NSB_NGINX_ROOT must name the nginx-<version> directory")
+            } else { version };
             let temp = tempfile::tempdir().unwrap();
             let state = crate::CoreState::init(Some(temp.path().join("LAN settings")), Arc::new(|_| {})).unwrap();
             struct Cleanup(Arc<crate::CoreState>, &'static str);
@@ -249,6 +253,7 @@ mod checks {
                 "name":"LAN fixture","domains":["lan-fixture.test"],"rootDir":project,"https":true,"rewrite":"none","template":"none","writeEnvExample":false,
                 "runtime":{"kind":"static","webServer":server,"httpsRedirect":307}
             })).unwrap();
+            if server == "nginx" { input.domains.insert(0, "127.0.0.6".into()); }
             drop((http, tls));
             let site = crate::sites::create(&input, &state.paths, &state.store, &state.manager).unwrap();
             let ca = reqwest::Certificate::from_pem(&std::fs::read(state.paths.certs().join("ca.crt")).unwrap()).unwrap();
@@ -258,7 +263,13 @@ mod checks {
                 .build().unwrap();
             let local = client(Ipv4Addr::LOCALHOST.into()); let lan = client(address.into());
             let url = format!("https://lan-fixture.test:{tls_port}/");
+            let ip_url = format!("https://127.0.0.6:{tls_port}/");
             assert_eq!(local.get(&url).send().unwrap().text().unwrap(), "lan-site", "{server}");
+            if server == "nginx" {
+                assert_eq!(local.get(&ip_url).send().unwrap().text().unwrap(), "lan-site");
+                assert_eq!(local.get(format!("http://127.0.0.6:{port}/")).send().unwrap().text().unwrap(), "lan-site");
+                assert_eq!(crate::sites::access_url(&state.paths, &state.store, &state.manager, &site.id).unwrap(), ip_url.trim_end_matches('/'));
+            }
             assert!(lan.get(&url).send().is_err(), "{server} unexpectedly reachable before opt-in");
             assert!(info(&state.paths, &state.store, &state.manager, &site.id).unwrap().addresses.iter().all(|entry| !entry.listening));
             // 第一次启用失败也必须能恢复未设置的默认本机模式。
@@ -271,6 +282,7 @@ mod checks {
             apply(&state.paths, &state.store, &state.manager, &site.id, server, true).unwrap_or_else(|error| panic!("{server}: {error:?}"));
             assert_eq!(local.get(&url).send().unwrap().text().unwrap(), "lan-site", "{server} local");
             assert_eq!(lan.get(&url).send().unwrap().text().unwrap(), "lan-site", "{server} LAN TLS");
+            if server == "nginx" { assert_eq!(local.get(&ip_url).send().unwrap().text().unwrap(), "lan-site"); }
             assert_eq!(lan.get(format!("http://lan-fixture.test:{port}/")).send().unwrap().text().unwrap(), "lan-site", "{server} redirect");
             let current = info(&state.paths, &state.store, &state.manager, &site.id).unwrap();
             assert!(current.enabled && current.local_ca && current.addresses.iter().any(|entry| entry.address == address.to_string() && entry.listening));
@@ -285,6 +297,10 @@ mod checks {
             apply(&state.paths, &state.store, &state.manager, &site.id, server, false).unwrap();
             assert_eq!(local.get(&url).send().unwrap().text().unwrap(), "lan-site");
             assert!(lan.get(&url).send().is_err(), "{server} still reachable after disabling");
+            if server == "nginx" {
+                assert_eq!(local.get(&ip_url).send().unwrap().text().unwrap(), "lan-site");
+                assert_eq!(crate::sites::access_url(&state.paths, &state.store, &state.manager, &site.id).unwrap(), ip_url.trim_end_matches('/'));
+            }
             assert!(info(&state.paths, &state.store, &state.manager, &site.id).unwrap().addresses.iter().all(|entry| !entry.listening));
             // 只有局域网 IP 上的外部监听与新通配地址冲突；原来的回环站点应能恢复。
             let external = std::net::TcpListener::bind((address, port)).unwrap();

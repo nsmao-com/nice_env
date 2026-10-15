@@ -724,6 +724,7 @@ fn localize_legacy_nginx_sites(paths: &Paths, network: Option<bool>) -> Result<(
         }
         let previous = std::fs::read_to_string(&path)?;
         let mut content = localize_legacy_site_listeners(&previous)?;
+        content = complete_loopback_site_listeners(&content)?;
         if let Some(enabled) = network {
             if previous.lines().next().is_some_and(|line| line.starts_with("# site: ") && line.contains("NiceEnv 托管")) {
                 content = network_listeners(&content, enabled, false)?;
@@ -744,6 +745,60 @@ fn localize_legacy_nginx_sites(paths: &Paths, network: Option<bool>) -> Result<(
     Ok(())
 }
 
+fn loopback_aliases<'a>(domains: impl Iterator<Item = &'a str>) -> Vec<std::net::Ipv4Addr> {
+    let mut addresses = Vec::new();
+    for address in domains.filter_map(|domain| domain.parse::<std::net::Ipv4Addr>().ok()) {
+        if address.is_loopback() && address != std::net::Ipv4Addr::LOCALHOST && !addresses.contains(&address) {
+            addresses.push(address);
+        }
+    }
+    addresses
+}
+
+fn site_listeners(site: &Site, port: u16, ssl: bool) -> String {
+    std::iter::once(std::net::Ipv4Addr::LOCALHOST)
+        .chain(loopback_aliases(site.domains.iter().map(String::as_str)))
+        .map(|address| format!("listen {address}:{port}{}", if ssl { " ssl" } else { "" }))
+        .collect::<Vec<_>>().join(";\n    ")
+}
+
+/// 升级已有托管站点时补齐 IP 别名的监听，保留用户正文、端口、显式监听和注释。
+fn complete_loopback_site_listeners(current: &str) -> Result<String> {
+    let source = current.trim_start_matches('\u{feff}');
+    if !source.lines().next().is_some_and(|line| line.starts_with("# site: ") && line.contains("NiceEnv 托管")) {
+        return Ok(current.into());
+    }
+    let offset = current.len() - source.len();
+    let nodes = nginx_directives(source)?;
+    let newline = if current.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut inserts = Vec::new();
+    for server in nodes.iter().filter(|node| node.words[0] == "server") {
+        let aliases = loopback_aliases(server.children.iter().filter(|node| node.words[0] == "server_name")
+            .flat_map(|node| node.words[1..].iter().map(String::as_str)));
+        let listeners: Vec<_> = server.children.iter().filter(|node| node.words[0] == "listen").collect();
+        let mut existing: Vec<_> = listeners.iter().filter_map(|node| node.words.get(1))
+            .filter_map(|value| value.parse::<std::net::SocketAddrV4>().ok()).collect();
+        for node in &listeners {
+            // 仅扩展应用生成的普通 HTTP / HTTPS 监听，自定义协议参数留给用户维护。
+            if node.words.len() != 2 && !(node.words.len() == 3 && node.words[2] == "ssl") { continue; }
+            let Some(address) = node.words.get(1).and_then(|value| value.parse::<std::net::SocketAddrV4>().ok()) else { continue; };
+            if !address.ip().is_unspecified() && *address.ip() != std::net::Ipv4Addr::LOCALHOST { continue; }
+            let mut added = String::new();
+            for alias in &aliases {
+                let target = std::net::SocketAddrV4::new(*alias, address.port());
+                if !existing.contains(&target) {
+                    added.push_str(&format!("{newline}    listen {target}{};", if node.words.len() == 3 { " ssl" } else { "" }));
+                    existing.push(target);
+                }
+            }
+            if !added.is_empty() { inserts.push((offset + node.end, added)); }
+        }
+    }
+    let mut result = current.to_string();
+    for (at, added) in inserts.into_iter().rev() { result.insert_str(at, &added); }
+    Ok(result)
+}
+
 /// 只调整托管 server 的监听参数，保留端口、SSL 标记、正文与用户注释。
 pub(crate) fn network_listeners(source: &str, enabled: bool, main: bool) -> Result<String> {
     let nodes = nginx_directives(source.trim_start_matches('\u{feff}'))?;
@@ -758,6 +813,11 @@ pub(crate) fn network_listeners(source: &str, enabled: bool, main: bool) -> Resu
     for server in servers {
         for node in server.children.iter().filter(|node| node.words[0] == "listen") {
             let value = node.words.get(1).ok_or_else(nginx_structure_error)?;
+            // IP 别名始终保留回环监听；只切换默认入口，避免生成重复的通配监听。
+            if value.parse::<std::net::SocketAddrV4>().is_ok_and(|address|
+                address.ip().is_loopback() && *address.ip() != std::net::Ipv4Addr::LOCALHOST && address.port() > 0) {
+                continue;
+            }
             let port = value.strip_prefix("127.0.0.1:").or_else(|| value.strip_prefix("0.0.0.0:"))
                 .or_else(|| value.strip_prefix("*:"))
                 .unwrap_or(value).parse::<u16>().ok().filter(|port| *port > 0)
@@ -981,11 +1041,11 @@ pub fn render_site_conf_with_auth(
     let server_names = site.domains.join(" ");
     let https_redirect = site.https.then_some(site.runtime.https_redirect).flatten();
     let listen = if https_redirect.is_some() {
-        format!("listen 127.0.0.1:{https_port} ssl")
+        site_listeners(site, https_port, true)
     } else if site.https {
-        format!("listen 127.0.0.1:{http_port};\n    listen 127.0.0.1:{https_port} ssl")
+        format!("{};\n    {}", site_listeners(site, http_port, false), site_listeners(site, https_port, true))
     } else {
-        format!("listen 127.0.0.1:{http_port}")
+        site_listeners(site, http_port, false)
     };
     let ssl_lines = if site.https {
         let (certificate, key) = site_certificate_files(site, cert_dir);
@@ -1094,7 +1154,8 @@ server {{
         http_redirect = https_redirect.map(|status| {
             let suffix = https_port_suffix(https_port);
             let hosts = https_redirect_hosts(site);
-            format!("server {{\n    listen 127.0.0.1:{http_port};\n    server_name {server_names};\n    access_log \"{}\";\n    error_log \"{}\" warn;\n{access_gate}    if ($host !~* \"^(?:{hosts})$\") {{ return 421; }}\n    return {status} \"https://$host{suffix}$request_uri\";\n}}\n", quoted_config_path(&log_dir.join(format!("{}.access.log", site.id))), quoted_config_path(&log_dir.join(format!("{}.error.log", site.id))))
+            let listeners = site_listeners(site, http_port, false);
+            format!("server {{\n    {listeners};\n    server_name {server_names};\n    access_log \"{}\";\n    error_log \"{}\" warn;\n{access_gate}    if ($host !~* \"^(?:{hosts})$\") {{ return 421; }}\n    return {status} \"https://$host{suffix}$request_uri\";\n}}\n", quoted_config_path(&log_dir.join(format!("{}.access.log", site.id))), quoted_config_path(&log_dir.join(format!("{}.error.log", site.id))))
         }).unwrap_or_default(),
         cors_headers = cors.as_ref().map_or("", |cors| cors.headers.as_str()),
         cors_preflight = cors.as_ref().map_or("", |cors| cors.before_content.as_str()),
@@ -3075,6 +3136,41 @@ secret: fixture-secret
         assert_eq!(std::fs::read_to_string(&site_path).unwrap(), localized);
         localize_legacy_nginx_sites(&paths, None).unwrap();
         assert_eq!(std::fs::read_to_string(&site_path).unwrap(), localized);
+    }
+
+    #[test]
+    fn nginx_loopback_aliases_cover_http_tls_redirect_and_existing_sites() {
+        let (_temp, paths) = fixture();
+        let mut site: Site = serde_json::from_value(serde_json::json!({
+            "id":"ip-site", "name":"IP site", "domains":["demo.test", "127.0.0.6", "127.0.0.6", "127.0.0.1", "192.0.2.1"],
+            "rootDir":"/project", "https":false, "rewrite":"none", "createdAt":0, "updatedAt":0,
+            "runtime":{"kind":"static", "webServer":"nginx"}
+        })).unwrap();
+        for (https, redirect) in [(false, None), (true, None), (true, Some(307))] {
+            site.https = https; site.runtime.https_redirect = redirect;
+            let generated = render_site_conf(&site, 18080, 18443, &paths.etc().join("fastcgi_params"), &paths.certs(), &paths.logs());
+            assert_eq!(generated.matches("listen 127.0.0.6:18080;").count(), 1);
+            assert_eq!(generated.matches("listen 127.0.0.6:18443 ssl;").count(), usize::from(https));
+            assert!(!generated.contains("listen 192.0.2.1:"));
+            assert_eq!(complete_loopback_site_listeners(&generated).unwrap(), generated);
+            let lan = network_listeners(&generated, true, false).unwrap();
+            assert_eq!(lan.matches("listen 0.0.0.0:18080;").count(), 1);
+            assert!(lan.contains("listen 127.0.0.6:18080;"));
+            assert_eq!(network_listeners(&lan, false, false).unwrap(), generated);
+            let legacy = generated.replace("    listen 127.0.0.6:18080;\n", "").replace("    listen 127.0.0.6:18443 ssl;\n", "");
+            assert_eq!(complete_loopback_site_listeners(&legacy).unwrap(), generated);
+            let crlf = legacy.replace('\n', "\r\n");
+            assert_eq!(complete_loopback_site_listeners(&format!("\u{feff}{crlf}")).unwrap(), format!("\u{feff}{}", generated.replace('\n', "\r\n")));
+            let custom = legacy.replacen("# site:", "# custom:", 1);
+            assert_eq!(complete_loopback_site_listeners(&custom).unwrap(), custom);
+            // 已有站点在启动同步时升级，重复启动不能增加重复监听。
+            let path = paths.nginx_sites_dir().join("ip-site.conf");
+            std::fs::write(&path, &legacy).unwrap();
+            localize_legacy_nginx_sites(&paths, None).unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), generated);
+            localize_legacy_nginx_sites(&paths, None).unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), generated);
+        }
     }
 
     #[test]

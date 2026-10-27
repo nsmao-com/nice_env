@@ -128,7 +128,7 @@ pub fn run() {
 
             /* ---------- 托盘 ---------- */
             let tray_state = app.state::<Arc<CoreState>>().inner().clone();
-            tray::build(app.handle(), tray_state.clone())?;
+            tray::build(app.handle())?;
 
             /* ---------- 启动时自动拉起指定服务栈（设置里可配） ---------- */
             {

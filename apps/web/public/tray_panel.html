@@ -406,9 +406,28 @@ async function refreshState() {
   } catch (error) { if (revision === stateRevision) loadError = errorText(error); }
   render();
 }
-function syncHeight() {
-  if (TAURI) inv("tray_panel_resize", {height:Math.ceil($("wrap").getBoundingClientRect().height) + 16}).catch(() => {});
+let appliedHeight = null;
+let heightPending = false;
+let heightDirty = false;
+async function syncHeight() {
+  if (!TAURI || document.hidden) return;
+  if (heightPending) { heightDirty = true; return; }
+  const height = Math.max(320, Math.min(680, Math.ceil($("wrap").getBoundingClientRect().height) + 16));
+  if (height === appliedHeight) return;
+  heightPending = true;
+  try {
+    if (await inv("tray_panel_resize", {height})) appliedHeight = height;
+  } catch { /* 下次显示或渲染时重试，保持面板可用。 */ }
+  finally {
+    heightPending = false;
+    if (heightDirty) { heightDirty = false; requestAnimationFrame(syncHeight); }
+  }
 }
+document.addEventListener("visibilitychange", () => {
+  appliedHeight = null;
+  if (!document.hidden) requestAnimationFrame(syncHeight);
+});
+window.addEventListener("focus", () => { appliedHeight = null; requestAnimationFrame(syncHeight); });
 
 // 预览只操作当前演示数据，也逐项返回缺失或失败，不声称修改了本机服务。
 async function previewCommand(command, args) {

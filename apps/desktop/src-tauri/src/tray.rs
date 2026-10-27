@@ -15,6 +15,7 @@
 use nsb_core::model::ServiceState;
 use nsb_core::CoreState;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{
     image::Image,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -34,6 +35,7 @@ static LAST_TRAY_RECT: std::sync::Mutex<(f64, f64, f64, f64)> =
 /// 紧接着才收到 Click 事件。若刚因失焦隐藏过，就认定这次点击是「想收起」，
 /// 不再重新弹出——否则面板会永远关不上。
 static PANEL_BLURRED_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+static PANEL_OPENING: AtomicBool = AtomicBool::new(false);
 
 /* ================= 服务元数据 ================= */
 
@@ -304,10 +306,10 @@ pub fn panel_state_json<R: Runtime>(
     })
 }
 
-/// 把最新状态推给面板（打开中才会真正收到；隐藏时收不到也无妨，
-/// 下次弹出前会再推一次）
+/// 隐藏的 WebView 也会接收事件并渲染，不能向其推送状态后触发窗口尺寸更新。
+/// 下次打开时重新读取，避免后台服务启动牵动 Windows 的 WebView/UI Automation。
 fn push_state<R: Runtime>(app: &AppHandle<R>, state: &Arc<CoreState>) {
-    if app.get_webview_window(PANEL_LABEL).is_some() {
+    if app.get_webview_window(PANEL_LABEL).is_some_and(|panel| panel.is_visible().unwrap_or(false)) {
         let _ = app.emit("tray://state", panel_state_json(app, state));
     }
 }
@@ -315,7 +317,7 @@ fn push_state<R: Runtime>(app: &AppHandle<R>, state: &Arc<CoreState>) {
 /* ================= 面板窗口 ================= */
 
 /// 创建托盘面板小窗：无边框 + 透明 + 置顶 + 不进任务栏，初始隐藏。
-/// 提前建好（webview 预加载），弹出时零白屏。
+/// 首次打开时在后台任务中创建；启动应用时不预加载隐藏的 WebView。
 fn build_panel<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let panel = tauri::WebviewWindowBuilder::new(
         app,
@@ -388,39 +390,60 @@ fn position_panel<R: Runtime>(app: &AppHandle<R>) {
 /// 托盘点击 → 弹出 / 收起面板。（tx/ty/tw/th = 托盘图标矩形，物理像素）
 fn toggle_panel<R: Runtime>(app: &AppHandle<R>, tx: f64, ty: f64, tw: f64, th: f64) {
     *LAST_TRAY_RECT.lock().unwrap_or_else(|p| p.into_inner()) = (tx, ty, tw, th);
-    let Some(panel) = app.get_webview_window(PANEL_LABEL) else {
-        return;
-    };
 
     // 刚因失焦藏起来过 → 这次点击视为「收起」（见 PANEL_BLURRED_AT 注释）
     let blurred_recently = match *PANEL_BLURRED_AT.lock().unwrap_or_else(|p| p.into_inner()) {
         Some(t) => t.elapsed().as_millis() < 350,
         None => false,
     };
-    let visible = panel.is_visible().unwrap_or(false);
-    if visible || blurred_recently {
-        if visible {
-            let _ = panel.hide();
+    if blurred_recently { return; }
+    if app.get_webview_window(PANEL_LABEL).is_none() {
+        if let Err(error) = build_panel(app) {
+            use tauri_plugin_dialog::DialogExt;
+            show_main(app);
+            app.dialog().message(format!("无法打开托盘面板：{error}。可在主窗口继续管理服务。"))
+                .title("NiceEnv").kind(tauri_plugin_dialog::MessageDialogKind::Error).show(|_| {});
+            return;
         }
+    }
+    let Some(panel) = app.get_webview_window(PANEL_LABEL) else { return; };
+    let visible = panel.is_visible().unwrap_or(false);
+    if visible {
+        let _ = panel.hide();
         return;
     }
 
     let state = app.state::<Arc<CoreState>>().inner().clone();
-    push_state(app, &state);
     position_panel(app);
     let _ = panel.show();
     let _ = panel.set_focus();
+    push_state(app, &state);
+}
+
+/// WebView2 的创建和状态读取不能放进托盘的 UI 事件回调；连续点击合并为一次。
+fn request_toggle_panel<R: Runtime>(app: &AppHandle<R>, tx: f64, ty: f64, tw: f64, th: f64) {
+    if PANEL_OPENING.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() { return; }
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        struct Opening;
+        impl Drop for Opening {
+            fn drop(&mut self) { PANEL_OPENING.store(false, Ordering::Release); }
+        }
+        let _opening = Opening;
+        toggle_panel(&app, tx, ty, tw, th);
+    });
 }
 
 /* ================= 托盘装配 ================= */
 
-/// 托盘图标 + 面板窗口（setup 阶段调用一次）
-pub fn build<R: Runtime>(app: &AppHandle<R>, state: Arc<CoreState>) -> tauri::Result<()> {
-    build_panel(app)?;
-
+/// setup 只创建托盘图标；面板由首次右键点击按需创建。
+pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    // setup 在 WebView 主循环启动前执行；进程枚举和内存采样不能放在这里，
+    // 否则自动启动服务时窗口会长时间处于无响应状态。
+    let icon = base_icon(app);
     TrayIconBuilder::with_id(TRAY_ID)
-        .icon(badge_icon(&base_icon(app), running_count(&state)))
-        .tooltip(tooltip_text(&state))
+        .icon(icon)
+        .tooltip("NiceEnv — 正在读取服务状态…")
         .on_tray_icon_event(move |tray, event| match event {
             // 左键：进主窗口；右键：弹出/收起自绘面板（原生菜单已弃用）
             TrayIconEvent::Click {
@@ -441,13 +464,16 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, state: Arc<CoreState>) -> tauri::Re
                 };
                 match button {
                     MouseButton::Left => show_main(app),
-                    MouseButton::Right => toggle_panel(app, tx, ty, tw, th),
+                    MouseButton::Right => request_toggle_panel(app, tx, ty, tw, th),
                     _ => {}
                 }
             }
             _ => {}
         })
         .build(app)?;
+
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || refresh(&handle));
 
     Ok(())
 }
@@ -540,11 +566,17 @@ pub fn tray_open_main<R: Runtime>(
 /// 面板按内容自适应高度后上报（Rust 侧改窗口尺寸并保持贴着托盘）
 #[tauri::command]
 pub fn tray_panel_resize(app: tauri::AppHandle, height: f64) -> bool {
+    if !height.is_finite() { return false; }
     let Some(panel) = app.get_webview_window(PANEL_LABEL) else {
         return false;
     };
-    let h = height.clamp(320.0, 680.0);
-    let _ = panel.set_size(tauri::LogicalSize::new(PANEL_W, h));
+    if !panel.is_visible().unwrap_or(false) { return false; }
+    let h = height.ceil().clamp(320.0, 680.0);
+    let Ok(scale) = panel.scale_factor() else { return false; };
+    let Ok(current) = panel.inner_size() else { return false; };
+    let target = tauri::LogicalSize::new(PANEL_W, h).to_physical::<u32>(scale);
+    if current == target { return true; }
+    if panel.set_size(tauri::LogicalSize::new(PANEL_W, h)).is_err() { return false; }
     position_panel(&app);
     true
 }

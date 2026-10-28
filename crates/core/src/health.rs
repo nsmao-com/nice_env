@@ -562,7 +562,11 @@ pub(crate) fn check_ports(r: &mut HealthReport, store: &crate::store::Store, ser
         }
         let listeners = crate::ports::listeners()?;
         let mut system = sysinfo::System::new();
-        system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            sysinfo::ProcessRefreshKind::new(),
+        );
         let parents = system
             .processes()
             .iter()

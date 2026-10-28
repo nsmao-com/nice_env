@@ -19,6 +19,9 @@ export function HealthCard() {
   const router = useRouter();
   const health = useQuery({
     queryKey: ["health-report"], queryFn: api.healthCheck, retry: false,
+    // 体检可能读取系统进程、证书和 PHP 扩展；不要在首页/服务自启时自动抢占资源。
+    // 用户进入卡片后点击刷新再执行，已有报告仍可复用。
+    enabled: false,
     staleTime: 60_000, refetchOnWindowFocus: false, refetchOnReconnect: false, networkMode: "always",
   });
   const report = health.data;
@@ -46,8 +49,9 @@ export function HealthCard() {
           {report?.summary ?? t(loading ? "common.loading" : error ? "health.readFailed" : "health.pending")}
         </p>
       </div>
-      <Button size="sm" variant="ghost" className="h-9 w-9 shrink-0 p-0" onClick={load} disabled={loading} aria-label={t("health.retry")} title={t("health.retry")}>
+      <Button size="sm" variant="ghost" className="min-h-9 h-auto shrink-0 whitespace-normal" onClick={load} disabled={loading}>
         <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
+        {t(loading ? "health.checking" : report || error ? "health.retry" : "health.start")}
       </Button>
     </CardHeader>
     <CardContent className="min-w-0 space-y-3 [overflow-wrap:anywhere]">

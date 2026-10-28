@@ -118,14 +118,19 @@ pub fn processes_memory_mb(pids: &[u32]) -> f64 {
 /// Windows 上 sysinfo 哪怕只刷新一个 pid，也要用 NtQuerySystemInformation 把全部
 /// 系统进程拉一遍；服务列表逐个服务查，同样的全量枚举会重复 N 次，所以批量查。
 pub fn processes_memory_map(pids: &[u32]) -> std::collections::HashMap<u32, f64> {
-    use sysinfo::{Pid, ProcessesToUpdate, System};
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
     let mut out = std::collections::HashMap::new();
     if pids.is_empty() {
         return out;
     }
     let mut sys = System::new();
     let targets: Vec<Pid> = pids.iter().map(|p| Pid::from_u32(*p)).collect();
-    sys.refresh_processes(ProcessesToUpdate::Some(&targets), true);
+    // 服务轮询只展示内存；不查询可执行文件路径、CPU 或磁盘 I/O。
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&targets),
+        true,
+        ProcessRefreshKind::new().with_memory(),
+    );
     for pid in &targets {
         if let Some(p) = sys.process(*pid) {
             out.insert(pid.as_u32(), p.memory() as f64 / 1024.0 / 1024.0);

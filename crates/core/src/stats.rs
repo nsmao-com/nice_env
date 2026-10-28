@@ -14,6 +14,7 @@ static LAST_CPU_REFRESH: Lazy<Mutex<Option<std::time::Instant>>> = Lazy::new(|| 
 static DISK_CACHE: Lazy<Mutex<Option<(std::time::Instant, f64, f64)>>> =
     Lazy::new(|| Mutex::new(None));
 const DISK_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+static DISK_REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn get_system_stats() -> SystemStats {
     {
@@ -37,6 +38,7 @@ pub fn get_system_stats() -> SystemStats {
     let cpu = sys.global_cpu_usage();
     let mem_total = sys.total_memory() as f64 / 1024.0 / 1024.0;
     let mem_used = sys.used_memory() as f64 / 1024.0 / 1024.0;
+    drop(sys);
 
     // 磁盘：数据目录所在盘
     let (disk_free, disk_total) = disk_of_base();
@@ -71,15 +73,28 @@ pub fn get_system_stats() -> SystemStats {
 }
 
 fn disk_of_base() -> (f64, f64) {
-    let mut cache = DISK_CACHE.lock();
-    if let Some((at, free, total)) = *cache {
+    let cache = *DISK_CACHE.lock();
+    if let Some((at, free, total)) = cache {
         if at.elapsed() < DISK_CACHE_TTL {
             return (free, total);
         }
     }
-    let (free, total) = query_disk_of_base();
-    *cache = Some((std::time::Instant::now(), free, total));
-    (free, total)
+    // 网络盘/休眠磁盘可能长时间阻塞系统枚举。最多一个后台采样，轮询立即返回
+    // 上次容量；不持有 CPU 或磁盘缓存锁等待 I/O，也不堆积重复采样线程。
+    use std::sync::atomic::Ordering;
+    if DISK_REFRESHING.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+        let started = std::thread::Builder::new().name("disk-stats".into()).spawn(|| {
+            struct Refresh;
+            impl Drop for Refresh {
+                fn drop(&mut self) { DISK_REFRESHING.store(false, Ordering::Release); }
+            }
+            let _refresh = Refresh;
+            let (free, total) = query_disk_of_base();
+            *DISK_CACHE.lock() = Some((std::time::Instant::now(), free, total));
+        });
+        if started.is_err() { DISK_REFRESHING.store(false, Ordering::Release); }
+    }
+    cache.map(|(_, free, total)| (free, total)).unwrap_or_default()
 }
 
 fn query_disk_of_base() -> (f64, f64) {

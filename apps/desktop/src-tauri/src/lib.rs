@@ -16,6 +16,7 @@ static APP_TRANSITION: AtomicU8 = AtomicU8::new(0);
 struct StartupFailure(AppError);
 struct DesktopStartup {
     child: std::sync::Mutex<Option<nsb_core::restart::RestartChild>>,
+    initialized: Arc<nsb_core::restart::StartupGate>,
     gate: Arc<nsb_core::restart::StartupGate>,
     frontend: nsb_core::restart::StartupGate,
     stack: std::sync::Mutex<StartupStackStatus>,
@@ -77,6 +78,7 @@ pub fn run() {
     if child.is_some() { APP_TRANSITION.store(1,Ordering::Release); }
     let startup = Arc::new(DesktopStartup {
         child: std::sync::Mutex::new(child),
+        initialized: Arc::new(nsb_core::restart::StartupGate::default()),
         gate: Arc::new(nsb_core::restart::StartupGate::default()),
         frontend: nsb_core::restart::StartupGate::default(),
         stack: std::sync::Mutex::new(StartupStackStatus::default()),
@@ -101,7 +103,7 @@ pub fn run() {
                 let _ = handle.emit(e.channel(), e.payload());
             });
             let control_lease = nsb_core::control::Lease::acquire(None, std::time::Duration::from_secs(10))?;
-            let state = CoreState::init(Some(control_lease.base.clone()), emit)?;
+            let state = CoreState::init_desktop(Some(control_lease.base.clone()), emit)?;
             if let Some(child) = setup_startup.child.lock().unwrap_or_else(|e|e.into_inner()).as_ref() {
                 child.verify_path(&state.paths.base)?;
             }
@@ -120,6 +122,17 @@ pub fn run() {
             app.manage(control);
             app.manage(state);
 
+            let startup_state = app.state::<Arc<CoreState>>().inner().clone();
+            let startup_ready = setup_startup.clone();
+            std::thread::Builder::new().name("desktop-startup-init".into()).spawn(move || {
+                if startup_state.finish_desktop_startup().is_ok() {
+                    startup_ready.initialized.start();
+                } else {
+                    startup_ready.initialized.cancel();
+                    startup_ready.gate.cancel();
+                }
+            }).map_err(|error| nsb_core::error::AppError::internal("创建后台初始化任务", error.to_string()))?;
+
             /* ---------- 证书自动化调度：启动 30s 后先补一轮，之后每小时检查到期 ---------- */
             {
                 let st = app.state::<Arc<CoreState>>().inner().clone();
@@ -136,7 +149,7 @@ pub fn run() {
                 let handle_for_stack = app.handle().clone();
                 let startup_for_stack = setup_startup.clone();
                 let spawned = std::thread::Builder::new().name("startup-stack".into()).spawn(move || {
-                    if !startup_for_stack.gate.wait() {
+                    if !startup_for_stack.initialized.wait() || !startup_for_stack.gate.wait() {
                         *startup_for_stack.stack.lock().unwrap_or_else(|e| e.into_inner()) = StartupStackStatus {
                             phase: StartupStackPhase::Failed,
                             error: Some(AppError::new("STARTUP_CANCELLED", "本次应用启动已中止，未执行服务栈自动启动")),
@@ -208,8 +221,9 @@ pub fn run() {
                 let st = tray_state.clone();
                 let handle_for_wd = app.handle().clone();
                 let gate = setup_startup.gate.clone();
+                let initialized = setup_startup.initialized.clone();
                 std::thread::spawn(move || {
-                    if !gate.wait() { return; }
+                    if !initialized.wait() || !gate.wait() { return; }
                     loop {
                         let cfg = st.watchdog_config();
                         std::thread::sleep(std::time::Duration::from_secs(cfg.interval_sec.max(1)));
@@ -642,6 +656,7 @@ pub fn run() {
                     let gate = startup.gate.clone();
                     let ready = startup.clone();
                     let started = std::thread::Builder::new().name("restart-handoff".into()).spawn(move || {
+                        if !ready.initialized.wait() { return; }
                         if !ready.frontend.wait_timeout(std::time::Duration::from_secs(35)) {
                             child.fail(AppError::new("RESTART_FRONTEND_TIMEOUT", "新窗口页面未能完成加载，请检查安装文件后重试"));
                             gate.cancel();
@@ -663,7 +678,10 @@ pub fn run() {
                         }
                     });
                     if started.is_err() { startup.gate.cancel(); APP_TRANSITION.store(2,Ordering::Release); app.exit(1); }
-                } else { startup.gate.start(); }
+                } else {
+                    let ready = startup.clone();
+                    std::thread::spawn(move || { if ready.initialized.wait() { ready.gate.start(); } });
+                }
             }
             if let tauri::RunEvent::ExitRequested { api, .. } = &event {
                 if APP_TRANSITION.load(Ordering::Acquire) != 2 {

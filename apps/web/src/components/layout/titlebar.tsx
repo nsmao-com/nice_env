@@ -47,19 +47,30 @@ export function DesktopWindowProvider({ children }: { children: React.ReactNode 
     if (!isTauri) return;
     const w = getCurrentWindow();
     let un: (() => void) | undefined;
-    w.isMaximized()
-      .then(setMaximized)
-      .catch(() => undefined);
-    w.onResized(async () => {
+    let disposed = false;
+    let reading = false;
+    let dirty = false;
+    const refresh = async () => {
+      dirty = true;
+      if (reading || disposed) return;
+      reading = true;
       try {
-        setMaximized(await w.isMaximized());
-      } catch {
-        /* ignore */
-      }
-    }).then((u) => {
-      un = u;
-    });
-    return () => un?.();
+        while (dirty && !disposed) {
+          dirty = false;
+          const next = await w.isMaximized();
+          if (!disposed) setMaximized(next);
+        }
+      } catch { /* 窗口已关闭时停止读取。 */ }
+      finally { reading = false; }
+    };
+    void refresh();
+    w.onResized(() => { void refresh(); }).then((u) => {
+      if (disposed) u(); else un = u;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      un?.();
+    };
   }, []);
 
   const api = React.useMemo<DesktopWindow>(() => {

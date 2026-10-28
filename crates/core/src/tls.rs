@@ -329,8 +329,9 @@ pub fn ca_trusted(paths: &Paths) -> bool {
         for user_store in [true, false] {
             let mut command = platform::command("certutil");
             if user_store { command.arg("-user"); }
-            if command.args(["-store", "Root", &fingerprint]).output()
-                .is_ok_and(|out| out.status.success()) { return true; }
+            if crate::cfgeditor::run_quiet_command_with_timeout(
+                command.args(["-store", "Root", &fingerprint]), std::time::Duration::from_secs(5),
+            ).unwrap_or(false) { return true; }
         }
         false
     }
@@ -338,8 +339,10 @@ pub fn ca_trusted(paths: &Paths) -> bool {
     {
         let _ = fingerprint;
         // 校验指定文件的完整信任链；只看钥匙串里的 CN 会误认同名旧 CA。
-        platform::command("security").args(["verify-cert", "-p", "ssl", "-L", "-R", "offline", "-c"])
-            .arg(paths.certs().join("ca.crt")).output().is_ok_and(|out| out.status.success())
+        crate::cfgeditor::run_quiet_command_with_timeout(
+            platform::command("security").args(["verify-cert", "-p", "ssl", "-L", "-R", "offline", "-c"])
+                .arg(paths.certs().join("ca.crt")), std::time::Duration::from_secs(5),
+        ).unwrap_or(false)
     }
 }
 

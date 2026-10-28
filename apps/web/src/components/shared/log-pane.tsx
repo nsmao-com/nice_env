@@ -38,7 +38,7 @@ type LevelFilter = "all" | "error" | "warn";
 
 /**
  * 日志面板：级别高亮 + 关键字搜索 + 级别过滤 + 自动滚动 + 一键复制。
- * 完整快照分页显示，实时尾部使用浏览器 content-visibility 延迟绘制。
+ * 快照和实时尾部均分页显示，避免一次创建数万行语法高亮节点。
  */
 export function LogPane({
   serviceId,
@@ -100,18 +100,18 @@ export function LogPane({
   const filtered = React.useMemo(() => {
     const q = query.trim().toLowerCase();
     return parsed.filter((p) => {
-      const raw = p.raw.toLowerCase();
       if (filter === "error" && p.level !== "error") return false;
       if (filter === "warn" && p.level !== "warn") return false;
-      if (q && !raw.includes(q)) return false;
+      if (q && !p.raw.toLowerCase().includes(q)) return false;
       return true;
     });
   }, [parsed, filter, query]);
 
   React.useEffect(() => setPage(0), [query, filter]);
   const pageCount = Math.max(1, Math.ceil(filtered.length / 500));
-  const activePage = Math.min(page, pageCount - 1);
-  const displayed = snapshot ? filtered.slice(activePage * 500, (activePage + 1) * 500) : filtered;
+  const activePage = !snapshot && autoScroll ? pageCount - 1 : Math.min(page, pageCount - 1);
+  const displayed = React.useMemo(() => filtered.slice(activePage * 500, (activePage + 1) * 500)
+    .map((entry) => parseLogLine(entry.raw)), [filtered, activePage]);
   /** 级别计数（给过滤按钮显示徽标） */
   const counts = React.useMemo(() => {
     let err = 0;
@@ -127,7 +127,7 @@ export function LogPane({
     if (autoScroll && boxRef.current && !paused) {
       boxRef.current.scrollTop = boxRef.current.scrollHeight;
     }
-  }, [filtered, autoScroll, paused]);
+  }, [displayed, autoScroll, paused]);
 
   const joined = React.useMemo(() => filtered.map((p) => p.raw).join("\n"), [filtered]);
 
@@ -155,7 +155,7 @@ export function LogPane({
     let i = 0;
     let k = lower.indexOf(needle);
     if (k < 0) return text;
-    while (k >= 0) {
+    while (k >= 0 && parts.length < 256) {
       if (k > i) parts.push(text.slice(i, k));
       parts.push(
         <mark key={`${k}-${i}`} className="rounded-[3px] bg-[color-mix(in_srgb,var(--code-key)_22%,var(--code-bg))] text-[color:var(--code-fg)]">
@@ -338,7 +338,7 @@ export function LogPane({
           // 用户手动往回滚 → 停掉自动滚动，避免「看不到自己在读什么」
           const el = e.currentTarget;
           const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-          if (!atBottom && autoScroll) setAutoScroll(false);
+          if (!atBottom && autoScroll) { setPage(activePage); setAutoScroll(false); }
         }}
         className="nsb-code min-w-0 shrink-0 overflow-auto rounded-xl border border-border p-3 font-mono leading-relaxed [contain:content]"
         style={{ ...paletteVars, height, fontSize: "var(--code-font-size)" }}
@@ -349,11 +349,10 @@ export function LogPane({
           <p className="text-[color:var(--code-muted)]">{error ? t("log.retryHint") : lines.length > 0 ? t("log.noMatch") : emptyHint ?? t("log.empty")}</p>
         ) : (
           <>
-            {displayed.map((entry, i) => {
-              const p = parseLogLine(entry.raw);
+            {displayed.map((p, i) => {
               const style = LEVEL_STYLE[p.level];
               // 行号：过滤后重新编号（用户看到的就是当前视图的第几行）
-              const lineNo = (snapshot ? activePage * 500 : 0) + i + 1;
+              const lineNo = activePage * 500 + i + 1;
               return (
                 <div
                   key={i}
@@ -405,7 +404,7 @@ export function LogPane({
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" variant="secondary" disabled={!serviceId || fullBusy} onClick={() => void loadFull()}>{fullBusy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}{t("log.loadFull")}</Button>
         <Button size="sm" variant="ghost" disabled={!serviceId || exporting} onClick={() => void exportFull()}><Download className="h-3.5 w-3.5" />{t("logs.export")}</Button>
-        {snapshot && <><Button size="sm" variant="ghost" disabled={activePage === 0} onClick={() => setPage(activePage - 1)}>←</Button><span className="text-xs">{activePage + 1} / {pageCount}</span><Button size="sm" variant="ghost" disabled={activePage + 1 >= pageCount} onClick={() => setPage(activePage + 1)}>→</Button></>}
+        {pageCount > 1 && <><Button size="sm" variant="ghost" aria-label={t("log.previousPage")} disabled={activePage === 0} onClick={() => { setAutoScroll(false); setPage(activePage - 1); }}>←</Button><span className="text-xs">{activePage + 1} / {pageCount}</span><Button size="sm" variant="ghost" aria-label={t("log.nextPage")} disabled={activePage + 1 >= pageCount} onClick={() => { setAutoScroll(false); setPage(activePage + 1); }}>→</Button></>}
       </div>
       <p className="text-[10.5px] text-faint">{t("log.exportScope")}</p>
     </div>

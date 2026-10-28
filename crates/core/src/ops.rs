@@ -387,7 +387,7 @@ fn start_service_inner(
             if let Some(p) = actual_port {
                 manager.set_started_port(id, p);
             }
-            if let Some(e) = manager.services.lock().get(id).cloned() {
+            if let Some(e) = manager.entry(id) {
                 *e.started_at.lock() = Some(std::time::SystemTime::now());
             }
             if !manager.snapshot(id).is_some_and(|status| status.state == ServiceState::Running && !status.pids.is_empty()) {
@@ -462,7 +462,7 @@ fn start_php(
     let base = allocate_php_pool(store, &service_id)?;
 
     // 清理旧 pid 记录
-    if let Some(e) = manager.services.lock().get(&service_id).cloned() {
+    if let Some(e) = manager.entry(&service_id) {
         e.pids.lock().clear();
         *e.group.lock() = Some(platform::ProcessGroup::new().map_err(AppError::from)?);
     }
@@ -1199,7 +1199,7 @@ fn stop_service_with_mode(store: &Store, paths: &Paths, manager: &Arc<ServiceMan
         manager.watchdog.note_user_stopped(id);
         return Ok(());
     }
-    if let Some(entry) = manager.services.lock().get(id).cloned() {
+    if let Some(entry) = manager.entry(id) {
         let identities = entry.identities.lock().clone();
         if entry.pids.lock().iter().any(|pid| identities.get(pid).is_none_or(|identity| identity.current().is_none())) {
             return Err(AppError::new("PROCESS_IDENTITY_UNAVAILABLE", "服务进程身份暂时无法确认，请检查权限后重试停止"));
@@ -1217,11 +1217,10 @@ fn stop_service_with_mode(store: &Store, paths: &Paths, manager: &Arc<ServiceMan
             "nginx" => {
                 if let Ok((root, exe)) = nginx_exe(store) {
                     if let Ok(args) = configgen::nginx_config_args(&root, &paths.nginx_conf()) {
-                        let _ = platform::command(&exe)
+                        let _ = crate::cfgeditor::run_quiet_command_with_timeout(platform::command(&exe)
                             .current_dir(&root)
                             .args(args)
-                            .args(["-s", "stop"])
-                            .output();
+                            .args(["-s", "stop"]), Duration::from_secs(5));
                         std::thread::sleep(Duration::from_millis(800));
                     }
                 }
@@ -1230,7 +1229,7 @@ fn stop_service_with_mode(store: &Store, paths: &Paths, manager: &Arc<ServiceMan
             }
             "apache" => {
                 if let Ok((root, exe)) = apache_paths(store) {
-                    let _ = platform::command(&exe)
+                    let _ = crate::cfgeditor::run_quiet_command_with_timeout(platform::command(&exe)
                         .args([
                             "-d".into(),
                             crate::paths::portable_path_text(&root),
@@ -1238,8 +1237,7 @@ fn stop_service_with_mode(store: &Store, paths: &Paths, manager: &Arc<ServiceMan
                             crate::paths::portable_path_text(&paths.apache_conf()),
                             "-k".into(),
                             "stop".into(),
-                        ])
-                        .output();
+                        ]), Duration::from_secs(5));
                     std::thread::sleep(Duration::from_millis(800));
                 }
                 terminate_group(manager, id)?;
@@ -1310,7 +1308,7 @@ fn stop_service_with_mode(store: &Store, paths: &Paths, manager: &Arc<ServiceMan
 
     // 清 pid/状态：先确认进程真的没了，否则保留 pid 让下次 stop 能重试
     let mut survivors: Vec<u32> = Vec::new();
-    if let Some(e) = manager.services.lock().get(id).cloned() {
+    if let Some(e) = manager.entry(id) {
         let pids = e.pids.lock().clone();
         let identities = e.identities.lock().clone();
         for _ in 0..10 {
@@ -1495,7 +1493,7 @@ fn wait_database_stopped(manager: &Arc<ServiceManager>, id: &str, name: &str) ->
 }
 
 fn terminate_group(manager: &Arc<ServiceManager>, id: &str) -> Result<()> {
-    if let Some(e) = manager.services.lock().get(id).cloned() {
+    if let Some(e) = manager.entry(id) {
         let identities = e.identities.lock().clone();
         let tracked: Vec<_> = e
             .pids
@@ -2058,7 +2056,7 @@ pub fn sweep_orphans(paths: &Paths, store: &Store, manager: &Arc<ServiceManager>
                 .blocked_services
                 .retain(|id| id != &record.id);
             if verified.is_empty() {
-                if let Some(entry) = manager.services.lock().get(&record.id).cloned() {
+                if let Some(entry) = manager.entry(&record.id) {
                     let mut error = entry.last_error.lock();
                     if error.as_ref().is_some_and(|error| {
                         matches!(
@@ -2126,7 +2124,7 @@ pub fn sweep_orphans(paths: &Paths, store: &Store, manager: &Arc<ServiceManager>
                     &verified,
                     record.port.filter(|port| *port > 0),
                 );
-                if let Some(entry) = manager.services.lock().get(&record.id).cloned() {
+                if let Some(entry) = manager.entry(&record.id) {
                     *entry.site_endpoints.lock() = record.site_endpoints.clone();
                     *entry.web_target.lock() = record.web_target.clone();
                     if let Some(started) = record.started_at.and_then(|millis| std::time::UNIX_EPOCH.checked_add(Duration::from_millis(millis))) {

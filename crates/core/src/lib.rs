@@ -288,6 +288,16 @@ pub struct CoreState {
 
 impl CoreState {
     pub fn init(base: Option<std::path::PathBuf>, emit: EventSink) -> Result<Arc<Self>> {
+        Self::init_with_startup(base, emit, true)
+    }
+
+    /// 桌面端先建立可供窗口使用的最小状态，耗时的安装目录扫描和历史进程
+    /// 接管由窗口显示后在后台完成。CLI/MCP 继续使用 `init` 保持原子初始化语义。
+    pub fn init_desktop(base: Option<std::path::PathBuf>, emit: EventSink) -> Result<Arc<Self>> {
+        Self::init_with_startup(base, emit, false)
+    }
+
+    fn init_with_startup(base: Option<std::path::PathBuf>, emit: EventSink, eager: bool) -> Result<Arc<Self>> {
         let base = paths::Paths::resolve(base)?;
         let paths = paths::Paths::new(base);
         std::fs::create_dir_all(&paths.base)?;
@@ -297,23 +307,27 @@ impl CoreState {
                 .with_hint("数据目录不可写，可在环境变量 NSB_HOME 指定其它位置")
         })?;
         let store = store::Store::open(paths.db())?;
-        paths::finish_data_dir_activation(&paths, || {
-            pathenv::sync(&store, &paths, &install::Installer::effective(&paths).manifest)
-        })?;
+        if eager {
+            paths::finish_data_dir_activation(&paths, || {
+                pathenv::sync(&store, &paths, &install::Installer::effective(&paths).manifest)
+            })?;
+        }
         // 服务栈内置预设（首次运行写入；用户改过的不动）
         let _ = stacks::ensure_presets(&store);
         // 先从运行目录补齐可能丢失的安装记录，再注册服务；这样数据库恢复或
         // 跨版本迁移后，已有的 Nginx/PHP/数据库版本会在首屏直接出现。
         let installer = install::Installer::effective(&paths);
-        installer.reconcile_installed(&paths, &store)?;
+        if eager { installer.reconcile_installed(&paths, &store)?; }
         let manager = Arc::new(ServiceManager::new());
-        ops::register_services(&paths, &store, &manager);
-        generic::register_services(&paths, &store, &manager);
+        if eager {
+            ops::register_services(&paths, &store, &manager);
+            generic::register_services(&paths, &store, &manager);
+        }
         // 上次会话崩溃/被强杀时留下的进程：启动即清理，否则它们占着端口让服务起不来
-        let orphans = ops::sweep_orphans(&paths, &store, &manager);
+        let orphans = if eager { Some(ops::sweep_orphans(&paths, &store, &manager)) } else { None };
         let downloader = Arc::new(Downloader::new());
         // 启动时只清理下载根目录的过期 .pkg/.part 文件；pnpm、Node 等目录缓存保持不动。
-        let _ = downloader.cleanup_stale_cache(&paths);
+        if eager { let _ = downloader.cleanup_stale_cache(&paths); }
         let state = Arc::new(Self {
             paths,
             store,
@@ -322,7 +336,8 @@ impl CoreState {
             installer,
             emit,
         });
-        if !orphans.adopted.is_empty() || !orphans.killed.is_empty() || !orphans.unresolved.is_empty() {
+        if let Some(orphans) = orphans {
+          if !orphans.adopted.is_empty() || !orphans.killed.is_empty() || !orphans.unresolved.is_empty() {
             let mut parts = Vec::new();
             if !orphans.adopted.is_empty() {
                 let d = orphans
@@ -353,9 +368,31 @@ impl CoreState {
                 state: if orphans.unresolved.is_empty() { "orphans-resolved" } else { "orphans-pending" }.into(),
                 error: Some(parts.join("；")),
             }));
+          }
         }
         // 调度器由桌面端在启动交接提交后放行；CLI/MCP 初始化不启动后台任务。
         Ok(state)
+    }
+
+    /// 完成桌面端延后初始化；必须在启动服务栈前调用一次。
+    pub fn finish_desktop_startup(&self) -> Result<()> {
+        let _activity = paths::DataDirActivity::shared(&self.paths.base)?;
+        paths::finish_data_dir_activation(&self.paths, || {
+            pathenv::sync(&self.store, &self.paths, &self.installer.manifest)
+        })?;
+        self.installer.reconcile_installed(&self.paths, &self.store)?;
+        ops::register_services(&self.paths, &self.store, &self.manager);
+        generic::register_services(&self.paths, &self.store, &self.manager);
+        let orphans = ops::sweep_orphans(&self.paths, &self.store, &self.manager);
+        let _ = self.downloader.cleanup_stale_cache(&self.paths);
+        if !orphans.adopted.is_empty() || !orphans.killed.is_empty() || !orphans.unresolved.is_empty() {
+            let mut parts = Vec::new();
+            if !orphans.adopted.is_empty() { parts.push(format!("接管 {}", orphans.adopted.iter().map(|(sid, pid)| format!("{sid}(pid {pid})")).collect::<Vec<_>>().join(", "))); }
+            if !orphans.killed.is_empty() { parts.push(format!("清理 {}", orphans.killed.iter().map(|(sid, pid)| format!("{sid}(pid {pid})")).collect::<Vec<_>>().join(", "))); }
+            parts.extend(orphans.unresolved.iter().cloned());
+            (self.emit)(Event::DownloadProgress(model::DownloadProgress { task_id: "orphans".into(), request_id: None, received: 0, total: 0, speed_bps: 0, eta_sec: 0.0, state: if orphans.unresolved.is_empty() { "orphans-resolved" } else { "orphans-pending" }.into(), error: Some(parts.join("；")) }));
+        }
+        Ok(())
     }
 
     /// 供外部调用的便捷（下载进度等）

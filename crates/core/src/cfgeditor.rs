@@ -942,6 +942,17 @@ fn run_command_with_timeout(
     timeout: std::time::Duration,
     limit: Option<usize>,
 ) -> Result<(bool, String)> {
+    let output = run_process_with_timeout(command, timeout, limit)?;
+    Ok((output.status.success(), format!("{}\n{}",
+        platform::decode_command_output(&output.stdout), platform::decode_command_output(&output.stderr))))
+}
+
+/// 与校验器共用超时、输出上限和子进程回收，保留 stdout/stderr 供探针分别解析。
+pub(crate) fn run_process_with_timeout(
+    command: &mut std::process::Command,
+    timeout: std::time::Duration,
+    limit: Option<usize>,
+) -> Result<std::process::Output> {
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -993,7 +1004,7 @@ fn run_command_with_timeout(
     let mut group = platform::ProcessGroup::new()?;
     let mut child = command
         .spawn()
-        .map_err(|e| AppError::io("运行配置校验器", e))?;
+        .map_err(|e| AppError::io("运行命令", e))?;
     if let Err(error) = group.attach(child.id()) {
         let _ = child.kill();
         let _ = child.wait();
@@ -1007,7 +1018,7 @@ fn run_command_with_timeout(
         if exceeded.load(Ordering::Acquire) {
             break Err(AppError::new(
                 "VALIDATION_OUTPUT_LIMIT",
-                "配置校验单路输出超过 64 KiB 上限，已停止校验进程；请检查配置和扩展错误",
+                format!("命令单路输出超过 {} KiB 上限，已停止命令进程；请检查配置和日志", limit.unwrap_or_default() / 1024),
             ));
         }
         match child.try_wait() {
@@ -1018,10 +1029,10 @@ fn run_command_with_timeout(
             Ok(None) => {
                 break Err(AppError::new(
                     "VALIDATION_TIMEOUT",
-                    "配置校验超时，已停止校验进程及其子进程",
+                    "命令执行超时，已停止命令进程及其子进程",
                 ))
             }
-            Err(error) => break Err(AppError::io("等待配置校验器", error)),
+            Err(error) => break Err(AppError::io("等待命令结束", error)),
         }
     };
     // 校验主进程退出后也清理继承管道的子进程，防止读取输出一直等待。
@@ -1030,29 +1041,29 @@ fn run_command_with_timeout(
         let _ = child.kill();
     }
     let _ = child.wait();
-    let read = |receiver: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>| -> Result<String> {
+    let read = |receiver: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>| -> Result<Vec<u8>> {
         let bytes = receiver
             .recv_timeout(std::time::Duration::from_secs(1))
             .map_err(|_| {
                 AppError::new(
                     "VALIDATION_OUTPUT_INCOMPLETE",
-                    "校验输出管道未关闭，未能完整读取结果",
+                    "命令输出管道未关闭，未能完整读取结果",
                 )
             })?
-            .map_err(|error| AppError::io("读取配置校验结果", error))?;
-        Ok(platform::decode_command_output(&bytes))
+            .map_err(|error| AppError::io("读取命令结果", error))?;
+        Ok(bytes)
     };
-    let captured = read(stdout).and_then(|out| read(stderr).map(|err| format!("{out}\n{err}")));
+    let captured = read(stdout).and_then(|out| read(stderr).map(|err| (out, err)));
     let status = status?;
     cleanup.map_err(AppError::from)?;
-    let output = captured?;
+    let (stdout, stderr) = captured?;
     if exceeded.load(Ordering::Acquire) {
         return Err(AppError::new(
             "VALIDATION_OUTPUT_LIMIT",
-            "配置校验输出超过上限，无法确认完整校验结果",
+                "命令输出超过上限，无法确认完整结果",
         ));
     }
-    Ok((status.success(), output))
+    Ok(std::process::Output { status, stdout, stderr })
 }
 
 fn validate_caddy(paths: &Paths, store: &crate::store::Store, version: Option<&str>, content: &str) -> Result<ConfigValidation> {

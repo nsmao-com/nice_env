@@ -2765,7 +2765,8 @@ pub fn graceful_stop(store: &Store, paths: &Paths, service_id: &str) {
         return;
     };
     let args: Vec<String> = stop_args.iter().map(|a| expand(a, &r)).collect();
-    let _ = platform::command(&r.bin).args(&args).output();
+    let _ = crate::cfgeditor::run_quiet_command_with_timeout(
+        platform::command(&r.bin).args(&args), Duration::from_secs(5));
     std::thread::sleep(Duration::from_millis(600));
 }
 
@@ -3025,13 +3026,12 @@ fn run_init_if_needed(r: &Resolved) -> Result<()> {
     } else {
         (init_exe, args)
     };
-    let out = platform::command(&program)
+    let out = crate::cfgeditor::run_process_with_timeout(platform::command(&program)
         .args(&args)
         .current_dir(&r.root)
-        .envs(env)
-        .output()
+        .envs(env), Duration::from_secs(300), Some(2 * 1024 * 1024))
         .map_err(|e| {
-            AppError::io(&format!("执行 {} 初始化", r.entry.display_name), e)
+            AppError::new("SERVICE_INIT_FAILED", format!("执行 {} 初始化失败：{}", r.entry.display_name, e.message))
                 .with_hint("套件可能不完整；可在套件页卸载后重新安装")
         })?;
     if !out.status.success() {

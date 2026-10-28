@@ -168,10 +168,8 @@ pub fn detect_build(paths: &Paths, version: &str) -> Result<PhpBuild> {
         )
         .with_hint("先到「套件 / 服务」安装该版本 PHP"));
     }
-    let out = platform::command(&exe)
-        .arg("-i")
-        .output()
-        .map_err(|e| AppError::io("运行 php -i", e))?;
+    let out = crate::cfgeditor::run_process_with_timeout(platform::command(&exe)
+        .args(["-n", "-i"]), std::time::Duration::from_secs(15), Some(512 * 1024))?;
     let text = String::from_utf8_lossy(&out.stdout);
     parse_build_fingerprint(&text).ok_or_else(|| {
         AppError::new("PHP_BUILD_UNKNOWN", "无法识别该 PHP 的构建信息")
@@ -260,13 +258,13 @@ fn probe_xdebug(paths: &Paths, version: &str) -> (bool, Option<String>) {
     if !exe.is_file() {
         return (false, None);
     }
-    let out = platform::command(&exe)
+    let out = crate::cfgeditor::run_process_with_timeout(platform::command(&exe)
         .arg("-n")
         .arg("-c")
         .arg(crate::paths::portable_path_text(&paths.php_ini(version)))
         .arg("-r")
-        .arg("echo extension_loaded('xdebug') ? phpversion('xdebug') : '';")
-        .output();
+        .arg("echo extension_loaded('xdebug') ? phpversion('xdebug') : '';"),
+        std::time::Duration::from_secs(15), Some(64 * 1024));
     match out {
         Ok(o) => {
             let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -426,13 +424,13 @@ pub fn verify(paths: &Paths, version: &str) -> (bool, Option<String>, Vec<String
     if !exe.is_file() {
         return (false, None, vec!["找不到 php 可执行文件".into()]);
     }
-    let out = platform::command(&exe)
+    let out = crate::cfgeditor::run_process_with_timeout(platform::command(&exe)
         .arg("-n")
         .arg("-c")
         .arg(&ini_path)
         .arg("-r")
-        .arg("echo extension_loaded('xdebug') ? phpversion('xdebug') : '';")
-        .output();
+        .arg("echo extension_loaded('xdebug') ? phpversion('xdebug') : '';"),
+        std::time::Duration::from_secs(15), Some(64 * 1024));
     match out {
         Ok(o) => {
             let stdout = String::from_utf8_lossy(&o.stdout).trim().to_string();

@@ -266,7 +266,7 @@ impl ServiceManager {
         }
     }
 
-    fn entry(&self, id: &str) -> Option<Arc<ServiceEntry>> {
+    pub(crate) fn entry(&self, id: &str) -> Option<Arc<ServiceEntry>> {
         self.services.lock().get(id).cloned()
     }
 
@@ -338,9 +338,16 @@ impl ServiceManager {
     pub fn push_log(&self, id: &str, line: &str) {
         if let Some(e) = self.entry(id) {
             let mut ring = e.ring.lock();
-            ring.push_back(crate::paths::portable_text(line));
-            while ring.len() > 2000 {
-                ring.pop_front();
+            let mut line = crate::paths::portable_text(line);
+            if line.len() > MAX_LOG_LINE_BYTES {
+                let end = line.floor_char_boundary(MAX_LOG_LINE_BYTES);
+                line.truncate(end);
+                line.push_str(" …[日志行过长，已截断]");
+            }
+            ring.push_back(line);
+            let mut bytes: usize = ring.iter().map(String::len).sum();
+            while ring.len() > 2000 || bytes > 2 * 1024 * 1024 {
+                if let Some(line) = ring.pop_front() { bytes -= line.len(); }
             }
         }
     }
@@ -723,9 +730,9 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(
         let mut line = Vec::new();
         loop {
             line.clear();
-            match reader.read_until(b'\n', &mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
+            match read_bounded_log_line(&mut reader, &mut line) {
+                Ok(false) | Err(_) => break,
+                Ok(true) => {
                     // 原生程序可能输出系统编码；不能因一行不是 UTF-8 就中断整个日志流。
                     let decoded = String::from_utf8_lossy(&line);
                     let l = decoded.trim_end_matches(['\r', '\n']);
@@ -740,6 +747,28 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(
             }
         }
     })
+}
+
+const MAX_LOG_LINE_BYTES: usize = 64 * 1024;
+
+/// 持续排空输出管道，但单行只保留 64 KiB；没有换行的输出不能无限扩张内存。
+fn read_bounded_log_line(reader: &mut impl BufRead, line: &mut Vec<u8>) -> std::io::Result<bool> {
+    let mut consumed = false;
+    let mut truncated = false;
+    loop {
+        let bytes = reader.fill_buf()?;
+        if bytes.is_empty() { break; }
+        consumed = true;
+        let end = bytes.iter().position(|byte| *byte == b'\n');
+        let count = end.map_or(bytes.len(), |end| end + 1);
+        let keep = count.min(MAX_LOG_LINE_BYTES.saturating_sub(line.len()));
+        line.extend_from_slice(&bytes[..keep]);
+        truncated |= keep < count;
+        reader.consume(count);
+        if end.is_some() { break; }
+    }
+    if truncated { line.extend_from_slice(" …[日志行过长，已截断]".as_bytes()); }
+    Ok(consumed)
 }
 
 fn append_to_log_file(manager: &ServiceManager, service_id: &str, line: &str) {

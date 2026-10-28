@@ -36,6 +36,8 @@ static LAST_TRAY_RECT: std::sync::Mutex<(f64, f64, f64, f64)> =
 /// 不再重新弹出——否则面板会永远关不上。
 static PANEL_BLURRED_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
 static PANEL_OPENING: AtomicBool = AtomicBool::new(false);
+static REFRESH_RUNNING: AtomicBool = AtomicBool::new(false);
+static REFRESH_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /* ================= 服务元数据 ================= */
 
@@ -172,15 +174,6 @@ fn badge_icon(base: &Image<'static>, running: usize) -> Image<'static> {
     Image::new_owned(px, w as u32, h as u32)
 }
 
-/// 当前运行中的服务数（角标与 tooltip 用）
-fn running_count(state: &CoreState) -> usize {
-    state
-        .service_status_list()
-        .into_iter()
-        .filter(|s| s.state == ServiceState::Running)
-        .count()
-}
-
 /// 应用图标作为托盘图标基底（拷成 owned，便于加角标）
 fn base_icon<R: Runtime>(app: &AppHandle<R>) -> Image<'static> {
     match app.default_window_icon() {
@@ -190,8 +183,7 @@ fn base_icon<R: Runtime>(app: &AppHandle<R>) -> Image<'static> {
     }
 }
 
-fn tooltip_text(state: &Arc<CoreState>) -> String {
-    let services = state.service_status_list();
+fn tooltip_text(services: &[nsb_core::model::ServiceStatus]) -> String {
     let running = services
         .iter()
         .filter(|s| s.state == ServiceState::Running)
@@ -472,8 +464,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         })
         .build(app)?;
 
-    let handle = app.clone();
-    tauri::async_runtime::spawn_blocking(move || refresh(&handle));
+    refresh(app);
 
     Ok(())
 }
@@ -488,6 +479,23 @@ fn show_main<R: Runtime>(app: &AppHandle<R>) {
 
 /// 重建图标角标 + 推送面板状态（服务状态变化后调用：启停、栈启动、端口清理）
 pub fn refresh<R: Runtime>(app: &AppHandle<R>) {
+    REFRESH_REQUESTED.store(true, Ordering::Release);
+    if REFRESH_RUNNING.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() { return; }
+    let app = app.clone();
+    // 异步命令完成后的回调也可能位于 async runtime；不要在那里扫描进程或
+    // 同步等待窗口操作。服务连续变化合并为一个后台刷新，最后一次变化不会丢失。
+    tauri::async_runtime::spawn_blocking(move || loop {
+        REFRESH_REQUESTED.store(false, Ordering::Release);
+        refresh_now(&app);
+        REFRESH_RUNNING.store(false, Ordering::Release);
+        if !REFRESH_REQUESTED.load(Ordering::Acquire)
+            || REFRESH_RUNNING.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            break;
+        }
+    });
+}
+
+fn refresh_now<R: Runtime>(app: &AppHandle<R>) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;
     };
@@ -498,8 +506,10 @@ pub fn refresh<R: Runtime>(app: &AppHandle<R>) {
         push_state(app, &state);
         return;
     }
-    let _ = tray.set_icon(Some(badge_icon(&base_icon(app), running_count(&state))));
-    let _ = tray.set_tooltip(Some(tooltip_text(&state)));
+    let services = state.service_status_list();
+    let running = services.iter().filter(|s| s.state == ServiceState::Running).count();
+    let _ = tray.set_icon(Some(badge_icon(&base_icon(app), running)));
+    let _ = tray.set_tooltip(Some(tooltip_text(&services)));
     push_state(app, &state);
 }
 

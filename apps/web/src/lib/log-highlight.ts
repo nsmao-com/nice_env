@@ -79,6 +79,8 @@ export function detectLevel(line: string): LogLevel {
  * 否则会被切成 "12" + "ms" 两个 token，状态码判断也会串味。
  */
 export function tokenizeLog(line: string): LogToken[] {
+  // 长行按原文展示；高亮不能为一条 JSON/堆栈创建成千上万个 DOM 节点。
+  if (line.length > 8192) return [{ kind: "text", text: line }];
   const tokens: LogToken[] = [];
   const streamPrefixLength = STREAM_PREFIX.exec(line)?.[0].length ?? 0;
   const atom = new RegExp(
@@ -109,7 +111,7 @@ export function tokenizeLog(line: string): LogToken[] {
 
   let last = 0;
   let m: RegExpExecArray | null;
-  while ((m = atom.exec(line)) !== null) {
+  while (tokens.length < 256 && (m = atom.exec(line)) !== null) {
     if (m.index > last) {
       tokens.push({ kind: "text", text: line.slice(last, m.index) });
     }

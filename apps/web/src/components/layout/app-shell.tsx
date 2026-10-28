@@ -40,24 +40,26 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
   /* 托盘菜单点「总览 / 套件 / 端口工具…」时后端会发这个事件把窗口带到前台并跳页 */
   React.useEffect(() => {
     let un: (() => void) | undefined;
+    let disposed = false;
     listen<{ path: string }>("tray://navigate", (p) => {
-      if (p?.path) router.push(p.path);
-    }).then((u) => (un = u));
-    return () => un?.();
+      if (!disposed && p?.path) router.push(p.path);
+    }).then((u) => { if (disposed) u(); else un = u; });
+    return () => { disposed = true; un?.(); };
   }, [router]);
 
   /* 启动服务时自动收掉了端口占用者 → 必须让用户知道（悄悄结束别人的进程不可接受） */
   React.useEffect(() => {
     let un: (() => void) | undefined;
+    let disposed = false;
     listen<{ serviceId: string; freed: number[] }>("ports://auto-freed", (p) => {
-      if (!p?.freed?.length) return;
+      if (disposed || !p?.freed?.length) return;
       toast.info(t("svc.autoFreedTitle"), {
         description: `${p.freed.map((x) => `:${x}`).join(" ")} — ${t("svc.autoFreedHint")}`,
         duration: 9000,
       });
       invalidate("services");
-    }).then((u) => (un = u));
-    return () => un?.();
+    }).then((u) => { if (disposed) u(); else un = u; });
+    return () => { disposed = true; un?.(); };
   }, [t, invalidate]);
 
   /* 导入配置后端口/栈/站点都可能变，统一让相关查询失效 */

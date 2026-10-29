@@ -1,11 +1,10 @@
 "use client";
 
 import * as React from "react";
-import dynamic from "next/dynamic";
-import Link from "next/link";
+import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, RefreshCw, Loader2 } from "lucide-react";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "react-router-dom";
 import { useUI } from "@/lib/store";
 import { Sidebar } from "./sidebar";
 import { Topbar } from "./topbar";
@@ -18,13 +17,13 @@ import { cn } from "@/lib/utils";
 import * as api from "@/lib/api";
 import { Button } from "@/components/ui/button";
 
-const CommandPalette = dynamic(() => import("./command-palette").then((m) => m.CommandPalette), { ssr: false });
-const SiteWizard = dynamic(() => import("@/components/sites/site-wizard").then((m) => m.SiteWizard), { ssr: false });
-const Onboarding = dynamic(() => import("@/components/sites/onboarding").then((m) => m.Onboarding), { ssr: false });
-const UpdateDialog = dynamic(() => import("@/components/shared/update-dialog").then((m) => m.UpdateDialog), { ssr: false });
+const CommandPalette = React.lazy(() => import("./command-palette").then((m) => ({ default: m.CommandPalette })));
+const SiteWizard = React.lazy(() => import("@/components/sites/site-wizard").then((m) => ({ default: m.SiteWizard })));
+const Onboarding = React.lazy(() => import("@/components/sites/onboarding").then((m) => ({ default: m.Onboarding })));
+const UpdateDialog = React.lazy(() => import("@/components/shared/update-dialog").then((m) => ({ default: m.UpdateDialog })));
 
 function ShellFrame({ children }: { children: React.ReactNode }) {
-  const router = useRouter();
+  const navigate = useNavigate();
   const wizardOpen = useUI((s) => s.wizardOpen);
   const [wizardLoaded, setWizardLoaded] = React.useState(false);
   React.useEffect(() => { if (wizardOpen) setWizardLoaded(true); }, [wizardOpen]);
@@ -42,10 +41,10 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
     let un: (() => void) | undefined;
     let disposed = false;
     listen<{ path: string }>("tray://navigate", (p) => {
-      if (!disposed && p?.path) router.push(p.path);
+      if (!disposed && p?.path) navigate(p.path);
     }).then((u) => { if (disposed) u(); else un = u; });
     return () => { disposed = true; un?.(); };
-  }, [router]);
+  }, [navigate]);
 
   /* 启动服务时自动收掉了端口占用者 → 必须让用户知道（悄悄结束别人的进程不可接受） */
   React.useEffect(() => {
@@ -84,7 +83,7 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
       <div className="nsb-workspace relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-card">
         <Topbar />
         <main className="relative min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
-          {/* 路由内容由 Next 管理；避免退出动画保留旧树或让返回页面停留在透明状态。 */}
+          {/* 路由内容由 React Router 管理，页面加载时保留侧栏和窗口控件。 */}
           <div className="mx-auto h-full min-w-0 w-full max-w-[1240px] px-3 py-4 sm:px-6 sm:py-6">
             <RecoveryAlert />
             <StartupStackAlert />
@@ -92,17 +91,17 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
           </div>
         </main>
       </div>
-      <CommandPalette />
+      <React.Suspense fallback={null}><CommandPalette /></React.Suspense>
       <CertAlertListener />
-      {(wizardOpen || wizardLoaded) && <SiteWizard
+      <React.Suspense fallback={null}>{(wizardOpen || wizardLoaded) && <SiteWizard
         open={wizardOpen}
         initialKind={wizardKind}
         existingProject={wizardProject}
         existingDefaults={wizardProjectDefaults}
         onOpenChange={setWizardOpen}
         onCreated={() => invalidate("sites", "hosts", "certs", "databases")}
-      />}
-      <Onboarding />
+      />}</React.Suspense>
+      <React.Suspense fallback={null}><Onboarding /></React.Suspense>
       <UpdateWatcher />
       <WindowControls />
     </div>
@@ -138,17 +137,17 @@ function StartupStackAlert() {
         {report.failed.map(({ serviceId, error }) => <li key={serviceId} className="space-y-1">
           <p className="text-error">{serviceId} · {error.message}</p>
           {error.hint && <p className="text-muted">{error.hint}</p>}
-          <Link className="inline-block underline underline-offset-2" href={`/logs?service=${encodeURIComponent(serviceId)}`}>{t("logs.title")}</Link>
+          <Link className="inline-block underline underline-offset-2" to={`/logs?service=${encodeURIComponent(serviceId)}`}>{t("logs.title")}</Link>
         </li>)}
         {report.skipped.map((id) => <li key={`missing:${id}`} className="text-warn">
-          {id} · {t("bulk.unavailable")} · <Link className="underline underline-offset-2" href={`/packages?search=${encodeURIComponent(id.split("@")[0])}`}>{t("nav.packages")}</Link>
+          {id} · {t("bulk.unavailable")} · <Link className="underline underline-offset-2" to={`/packages?search=${encodeURIComponent(id.split("@")[0])}`}>{t("nav.packages")}</Link>
         </li>)}
       </ul>
     </>}
     {!running && <p className="text-xs text-muted">{t("startupStack.recoveryHint")}</p>}
     <div className="flex flex-wrap items-center gap-2">
       {query.error && <Button size="sm" variant="outline" disabled={query.isFetching} onClick={() => void query.refetch()}>{t("packages.reload")}</Button>}
-      <Button size="sm" variant="outline" asChild><Link href="/stacks">{t("stack.title")}</Link></Button>
+      <Button size="sm" variant="outline" asChild><Link to="/stacks">{t("stack.title")}</Link></Button>
       {(!running || query.error) && <Button size="sm" variant="ghost" onClick={() => setDismissed(true)}>{t("common.close")}</Button>}
     </div>
   </section>;
@@ -192,7 +191,7 @@ function RecoveryAlert() {
           <RefreshCw className={cn("h-3.5 w-3.5", busy && "animate-spin")} />
           {t(busy ? "recovery.checking" : query.isError ? "recovery.reload" : "recovery.retry")}
         </Button>
-        <Button size="sm" variant="ghost" asChild><Link href="/tools">{t("recovery.tools")}</Link></Button>
+        <Button size="sm" variant="ghost" asChild><Link to="/tools">{t("recovery.tools")}</Link></Button>
       </div>
       {!isTauri && <p className="text-[11px] text-faint">{t("recovery.preview")}</p>}
     </section>
@@ -254,7 +253,7 @@ function UpdateWatcher() {
     return () => clearTimeout(id);
   }, [settings]);
 
-  return open || loaded ? <UpdateDialog open={open} onOpenChange={setOpen} /> : null;
+  return open || loaded ? <React.Suspense fallback={null}><UpdateDialog open={open} onOpenChange={setOpen} /></React.Suspense> : null;
 }
 
 /** 页面标题区（每个页面顶部） */

@@ -1,11 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "NiceEnv",
-  "version": "0.2.319",
+  "version": "0.2.320",
   "identifier": "com.niceservbay.app",
   "build": {
     "beforeDevCommand": "pnpm --filter @nsb/web dev",
-    "devUrl": "http://localhost:3000",
+    "devUrl": "http://127.0.0.1:3000",
     "beforeBuildCommand": "pnpm --filter @nsb/web build",
     "frontendDist": "../../web/out"
   },

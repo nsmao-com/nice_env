@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { Globe, Rocket, Database, Boxes, Check, ChevronRight, Sparkles, AlertTriangle, Loader2 } from "lucide-react";
 import { useUI, useT } from "@/lib/store";
@@ -61,7 +61,7 @@ function InstallingList({ items }: { items: SetupItem[] }) {
 /** 首次启动和菜单入口共用：基本设置 → 选场景 → 准备套件 → 下一步。 */
 export function Onboarding() {
   const t = useT();
-  const router = useRouter();
+  const navigate = useNavigate();
   const packageQuery = usePackages();
   const settingsQuery = useSettings();
   const invalidate = useInvalidate();
@@ -212,7 +212,7 @@ export function Onboarding() {
         if (!next) return;
         event.preventDefault();
         if (next === "site") setWizardOpen(true, scene === "frontend" ? "static" : "php");
-        else router.push(next === "databases" ? "/databases" : "/packages");
+        else navigate(next === "databases" ? "/databases" : "/packages");
       }}>
       <div className="shrink-0 px-4 py-4 pr-12 sm:px-6 sm:pr-12">
         <div className="flex items-center gap-3">

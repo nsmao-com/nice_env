@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Package, RefreshCw, SlidersHorizontal, TerminalSquare } from "lucide-react";
 import type { Site, ProjectRuntimeVersions } from "@nsb/schema";
@@ -27,7 +27,7 @@ export function SiteTerminalButton({ site, showLabel = false, disabled = false, 
   initialTab?: "terminal" | "project";
 }) {
   const t = useT();
-  const router = useRouter();
+  const navigate = useNavigate();
   const qc = useQueryClient();
   const [open, setOpen] = React.useState(false);
   const [tab, setTab] = React.useState("terminal");
@@ -117,7 +117,7 @@ export function SiteTerminalButton({ site, showLabel = false, disabled = false, 
     packageTarget.current = id;
     if (dirty) { setConfirm("packages"); return; }
     close();
-    router.push(id ? `/packages?search=${encodeURIComponent(id)}` : "/packages");
+    navigate(id ? `/packages?search=${encodeURIComponent(id)}` : "/packages");
   };
   const data = environment.data;
   const triggerLabel = t(initialTab === "project" ? "sites.project.title" : "sites.terminal.title");
@@ -204,6 +204,6 @@ export function SiteTerminalButton({ site, showLabel = false, disabled = false, 
       </DialogContent>
     </Dialog>
     <ConfirmDialog open={confirm !== null} onOpenChange={(next) => { if (!next) setConfirm(null); }} title={t("cfgeditor.discardTitle")} description={t("sites.project.discard")}
-      confirmText={t(confirm === "lts" ? "sites.project.ltsRefresh" : confirm === "reload" ? "env.reload" : confirm === "packages" ? "sites.project.goPackages" : "cfgeditor.discard")} onConfirm={() => { const action = confirm; setConfirm(null); if (action === "close") close(); else if (action === "lts") void refreshLts(); else if (action === "packages") { close(); router.push(packageTarget.current ? `/packages?search=${encodeURIComponent(packageTarget.current)}` : "/packages"); } else void reloadProject(); }} />
+      confirmText={t(confirm === "lts" ? "sites.project.ltsRefresh" : confirm === "reload" ? "env.reload" : confirm === "packages" ? "sites.project.goPackages" : "cfgeditor.discard")} onConfirm={() => { const action = confirm; setConfirm(null); if (action === "close") close(); else if (action === "lts") void refreshLts(); else if (action === "packages") { close(); navigate(packageTarget.current ? `/packages?search=${encodeURIComponent(packageTarget.current)}` : "/packages"); } else void reloadProject(); }} />
   </>;
 }

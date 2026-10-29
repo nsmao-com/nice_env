@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
+import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { Globe2, Loader2, ExternalLink, Square, Trash2 } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -101,7 +101,7 @@ export function TunnelPanel({ siteId }: { siteId?: string }) {
           </Button>
           {active && <p role="status" className="text-[11px] text-muted">{t("sites.share.active")}</p>}
           <p className="text-[11px] text-muted">{t("sites.share.requires")}{" "}
-            <Link className="underline underline-offset-2" href="/packages?search=cloudflared">{t("sites.share.install")}</Link>
+            <Link className="underline underline-offset-2" to="/packages?search=cloudflared">{t("sites.share.install")}</Link>
           </p>
         </form>
         {query.error && <div role="alert" className="flex flex-wrap items-center gap-2 rounded-lg bg-error-soft p-3 text-xs text-error">

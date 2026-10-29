@@ -1,8 +1,8 @@
 {
   "name": "niceservbay",
   "private": true,
-  "version": "0.2.319",
-  "description": "NiceEnv — one-stop local dev environment manager (Tauri 2 + Next.js)",
+  "version": "0.2.320",
+  "description": "NiceEnv — one-stop local dev environment manager (Tauri 2 + React + Vite)",
   "scripts": {
     "dev": "pnpm --filter @nsb/web dev",
     "build:web": "pnpm --filter @nsb/web build",
@@ -10,6 +10,6 @@
     "check": "pnpm -r run check"
   },
   "engines": {
-    "node": ">=20"
+    "node": "^20.19.0 || >=22.12.0"
   }
 }

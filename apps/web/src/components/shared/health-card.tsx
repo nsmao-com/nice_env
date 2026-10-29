@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "react-router-dom";
 import { Activity, AlertCircle, AlertTriangle, CheckCircle2, ChevronRight, Info, RefreshCw } from "lucide-react";
 import type { HealthReport } from "@nsb/schema";
 import { useT } from "@/lib/store";
@@ -16,7 +16,7 @@ import { Skeleton } from "@/components/ui/misc";
 /** 保留上次快照；同一查询共享正在进行的请求，隐藏只影响当前报告的显示。 */
 export function HealthCard() {
   const t = useT();
-  const router = useRouter();
+  const navigate = useNavigate();
   const health = useQuery({
     queryKey: ["health-report"], queryFn: api.healthCheck, retry: false,
     // 体检可能读取系统进程、证书和 PHP 扩展；不要在首页/服务自启时自动抢占资源。
@@ -87,7 +87,7 @@ export function HealthCard() {
                 </div>
               </div>
               <div className="mt-2 flex flex-wrap justify-end gap-1">
-                {item.route && <Button size="sm" variant="ghost" className="min-h-8 h-auto whitespace-normal px-2 text-[11px]" onClick={() => router.push(item.route!)}>
+                {item.route && <Button size="sm" variant="ghost" className="min-h-8 h-auto whitespace-normal px-2 text-[11px]" onClick={() => navigate(item.route!)}>
                   {t("health.fix")}<ChevronRight className="h-3 w-3 shrink-0" />
                 </Button>}
                 {item.severity !== "error" && <Button size="sm" variant="ghost" className="min-h-8 h-auto whitespace-normal px-2 text-[11px] text-muted"

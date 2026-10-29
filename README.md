@@ -3,9 +3,11 @@
 **Windows + macOS 一站式本地开发环境管理器** — 装一个桌面 App，点几下就能跑站点。
 对标 ServBay / FlyEnv / phpStudy，交互与视觉全面现代化（Linear / Raycast 气质）。
 
-Tauri 2（Rust 后端能力）+ Next.js 16（静态导出）+ Tailwind v4 + shadcn/ui + Motion。
+Tauri 2（Rust 后端能力）+ React 19 + Vite + Tailwind v4 + shadcn/ui + Motion。
 
 ## 快速开始
+
+前端工具链需要 Node.js 20.19+ 或 22.12+（推荐 Node.js 22 LTS），使用 pnpm 10。
 
 ```bash
 # 开发
@@ -82,12 +84,16 @@ Nginx、Apache 和 Caddy 均在内容处理前检查来源，覆盖 HTTP/HTTPS�
 
 ```
 apps/desktop/src-tauri   Tauri 2 壳：命令接线(55+) / 托盘菜单 / 窗口行为 / --smoke-test
-apps/web                 Next.js App Router (output:'export')：10 个页面 + 向导 + 命令面板
+apps/web                 React + Vite：19 个页面 + 向导 + 命令面板，React Router Hash 路由
 packages/schema          Zod schema（TS 侧唯一事实，Rust serde 对齐）
 crates/core              服务管理 / 下载器 / hosts / TLS / 站点 / 服务栈 / 端口诊断 / 统计 / Clash
 crates/platform          Windows Job Object / 系统代理(注册表+wininet) / hosts 标记块 / 提权
 manifest/                套件清单（真实 URL + sha256，可远程更新）
 ```
+
+前端从 `index.html` / `src/main.tsx` 挂载 React，不再使用 Next.js 的服务端渲染、预渲染或水合。页面组件保留在 `src/app/`，由显式路由表按需加载。
+桌面与浏览器预览共用 Hash 路由，例如 `/#/logs?service=nginx`；刷新不会请求单独的页面文件。构建输出仍为 `apps/web/out/`，`public/tray_panel.html` 原样复制，Tauri 命令与事件协议保持不变。
+`next-themes` 仅作为独立 React 主题库使用，不依赖 Next.js。
 
 **Rust 侧核心模块**（均无 Tauri 依赖，可独立测试）：
 

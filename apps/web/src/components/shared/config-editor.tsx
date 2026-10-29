@@ -1,8 +1,7 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { Link, useSearchParams } from "react-router-dom";
 import { CodeEditor, type CodeEditorHandle } from "./code-editor";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
@@ -93,7 +92,7 @@ export function ConfigEditor() {
   const t = useT();
   const [search, setSearch] = React.useState("");
   const [editing, setEditing] = React.useState<ConfigFileInfo | null>(null);
-  const searchParams = useSearchParams();
+  const [searchParams] = useSearchParams();
   const requestedService = searchParams.get("service");
   const autoOpened = React.useRef(false);
   const { data: files = [], isPending, isFetching, error, refetch } = useQuery({ queryKey: ["config-files"], queryFn: api.configList });
@@ -137,7 +136,7 @@ export function ConfigEditor() {
               {requestedFile && <p className="font-mono text-[10.5px] text-muted">{requestedFile.path}</p>}
               <div className="flex flex-wrap gap-2">
                 <Button size="sm" variant="secondary" disabled={isFetching} onClick={() => void refetch({ cancelRefetch: false })}>{t("install.retry")}</Button>
-                <Button size="sm" variant="ghost" asChild><Link href="/configuration">{t("cfgeditor.showAll")}</Link></Button>
+                <Button size="sm" variant="ghost" asChild><Link to="/configuration">{t("cfgeditor.showAll")}</Link></Button>
               </div>
             </div>
           )}

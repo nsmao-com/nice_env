@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
+import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -342,11 +342,12 @@ export default function PackagesPage() {
       });
   }, [packageQuery.dataUpdatedAt, packageQuery.error, refreshState]);
 
-  // 服务卡片可以把缺失依赖直接带到套件页；只在首次挂载时读取，用户随后编辑搜索框不会被 URL 覆盖。
+  const [searchParams] = useSearchParams();
+  const requestedSearch = searchParams.get("search")?.trim();
+  // 同页再次跳转也接收新搜索词；手动编辑搜索框不会被普通重渲染覆盖。
   React.useEffect(() => {
-    const value = new URLSearchParams(window.location.search).get("search")?.trim();
-    if (value) setQuery(value);
-  }, []);
+    if (requestedSearch) setQuery(requestedSearch);
+  }, [requestedSearch]);
   const openInstall = (target: InstallTarget, trigger: HTMLButtonElement | null) => {
     setBulkUpdateQueue([]);
     setBulkUpdateIndex(0);

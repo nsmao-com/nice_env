@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Copy, ExternalLink, FolderOpen, RefreshCw, Trash2, ScrollText, Square } from "lucide-react";
@@ -76,7 +76,7 @@ export function SiteDetailSheet({
   onClose: () => void;
 }) {
   const t = useT();
-  const router = useRouter();
+  const navigate = useNavigate();
   const invalidate = useInvalidate();
   const queryClient = useQueryClient();
   const { data: packages } = usePackages();
@@ -324,7 +324,7 @@ export function SiteDetailSheet({
             <Button variant="secondary" size="sm" disabled={busy || dirty} onClick={openDuplicate}>
               <Copy className="h-3.5 w-3.5" /> {t("detail.copy")}
             </Button>
-            <Button variant="secondary" size="sm" disabled={busy || dirty} onClick={() => router.push("/logs?service=" + encodeURIComponent("site:" + site.id))}>
+            <Button variant="secondary" size="sm" disabled={busy || dirty} onClick={() => navigate("/logs?service=" + encodeURIComponent("site:" + site.id))}>
               <ScrollText className="h-3.5 w-3.5" /> {t("detail.logs")}
             </Button>
             <Button
@@ -565,7 +565,7 @@ export function SiteDetailSheet({
               </div>
               {applicationStatus && <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-fill p-3 text-xs">
                 <span>{t("appProcess.state")} · {t(("state." + applicationStatus.state) as "state.running")}</span>
-                <Button variant="ghost" size="sm" disabled={busy || dirty} onClick={() => router.push(`/logs?service=${encodeURIComponent(`site-app:${site.id}`)}`)}><ScrollText className="size-3.5" />{t("appProcess.logs")}</Button>
+                <Button variant="ghost" size="sm" disabled={busy || dirty} onClick={() => navigate(`/logs?service=${encodeURIComponent(`site-app:${site.id}`)}`)}><ScrollText className="size-3.5" />{t("appProcess.logs")}</Button>
               </div>}
               {appRuntime ? <SiteApplicationFields id="site-edit-app" kind={draft.runtime.kind} value={draft.runtime.application} versions={appVersions}
                 rootDir={draft.rootDir} disabled={busy} locked={applicationBusy} onChange={(application) => setDraft({ ...draft, runtime: { ...draft.runtime, application } })} />

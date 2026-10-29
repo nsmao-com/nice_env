@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
+import { Link } from "react-router-dom";
 import {
   CheckSquare,
   Loader2,
@@ -186,7 +186,7 @@ export function BulkActions({ services }: { services: ServiceStatus[] }) {
                       <p className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10.5px] text-warn">
                         <span>{t("svc.needDeps")}</span>
                         {s.missingRequires.map((dependency) => (
-                          <Link key={dependency} href={`/packages?search=${encodeURIComponent(packageIdFromDependency(dependency))}`} className="font-mono underline decoration-dashed underline-offset-2">
+                          <Link key={dependency} to={`/packages?search=${encodeURIComponent(packageIdFromDependency(dependency))}`} className="font-mono underline decoration-dashed underline-offset-2">
                             {dependency}
                           </Link>
                         ))}
@@ -352,7 +352,7 @@ export function BulkResult({ report, error, services, targets, busy = false }: {
                     <div className="mt-1 pl-5 text-[11px] text-error">
                       <p>{failure.error.message}</p>
                       {failure.error.hint && <p className="mt-1 text-muted">{failure.error.hint}</p>}
-                      <Link aria-disabled={busy} tabIndex={busy ? -1 : undefined} onClick={(event) => { if (busy) event.preventDefault(); }} className="mt-1 inline-block text-primary underline underline-offset-2 aria-disabled:opacity-50" href={isConsole ? "/databases" : `/logs?service=${encodeURIComponent(id)}`}>{t(isConsole ? "nav.databases" : "logs.title")}</Link>
+                      <Link aria-disabled={busy} tabIndex={busy ? -1 : undefined} onClick={(event) => { if (busy) event.preventDefault(); }} className="mt-1 inline-block text-primary underline underline-offset-2 aria-disabled:opacity-50" to={isConsole ? "/databases" : `/logs?service=${encodeURIComponent(id)}`}>{t(isConsole ? "nav.databases" : "logs.title")}</Link>
                     </div>
                   )}
                 </li>

@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { HealthCard } from "@/components/shared/health-card";
 import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -58,7 +58,8 @@ export function UtilityWorkspace({ section = "tools" }: { section?: "tools" | "n
   const t = useT();
   const [portRequest, setPortRequest] = React.useState<{ port: number; at: number } | null>(null);
   const inspectPort = (port: number) => { setPortRequest({ port, at: Date.now() }); document.getElementById("nsb-tool-ports")?.scrollIntoView({ block: "start", behavior: "smooth" }); };
-  const router = useRouter();
+  const navigate = useNavigate();
+  const { hash } = useLocation();
   const pendingTool = useUI((st) => st.pendingTool);
   const consumeTool = useUI((st) => st.consumeTool);
   const pendingPort = useUI((st) => st.pendingPort);
@@ -72,12 +73,12 @@ export function UtilityWorkspace({ section = "tools" }: { section?: "tools" | "n
   }, [section, pendingPort, consumePort]);
 
   React.useEffect(() => {
-    if (pendingTool) { consumeTool(); router.replace(pendingTool === "config" ? "/configuration" : "/diagnostics"); }
+    if (pendingTool) { consumeTool(); navigate(pendingTool === "config" ? "/configuration" : "/diagnostics", { replace: true }); }
     else if (section === "tools") {
       const destination: Record<string, string> = { "#nsb-tool-config": "/configuration", "#nsb-tool-pathenv": "/environment", "#nsb-tool-repair": "/diagnostics", "#nsb-tool-diagnostics": "/diagnostics" };
-      const next = destination[window.location.hash]; if (next) router.replace(next);
+      const next = destination[hash]; if (next) navigate(next, { replace: true });
     }
-  }, [pendingTool, consumeTool, router, section]);
+  }, [pendingTool, consumeTool, navigate, section, hash]);
   const title = section === "tools" ? t("tools.title") : t(("nav." + section) as "nav.network");
   return <div className="pb-8">
     <PageHeader title={title} subtitle={t(("workspace." + section) as "workspace.tools")} />
@@ -1001,7 +1002,7 @@ function DnsTool() {
           </div>
           {dns ? <Button variant="secondary" size="sm" disabled={busy || changing || !serviceReady} onClick={toggle}>
             {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}{running ? t("dns.stop") : t("dns.start")}
-          </Button> : serviceReady && <a href="/packages" className="rounded-md px-2 py-1.5 text-xs text-primary hover:underline">{t("dns.install")}</a>}
+          </Button> : serviceReady && <Link to="/packages" className="rounded-md px-2 py-1.5 text-xs text-primary hover:underline">{t("dns.install")}</Link>}
           {services.error && <Button size="sm" variant="ghost" onClick={() => void services.refetch()} disabled={services.isFetching}>{t("bulk.retry")}</Button>}
         </div>
         {(services.error || settings.error) && <p role="alert" className="break-words text-xs text-error">{normalizeError(services.error ?? settings.error).message}</p>}

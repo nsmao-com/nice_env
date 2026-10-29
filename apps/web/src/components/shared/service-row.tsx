@@ -1,8 +1,7 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { Link, useNavigate } from "react-router-dom";
 import { motion } from "motion/react";
 import { AlertTriangle, RotateCw, ScrollText, Server, ShieldAlert, Stethoscope } from "lucide-react";
 import type { ServiceStatus } from "@nsb/schema";
@@ -26,7 +25,7 @@ import { useServiceActions } from "@/lib/hooks";
  */
 export function ServiceRow({ service, dragHandle, dragPreview = false }: { service: ServiceStatus; dragHandle?: React.ReactNode; dragPreview?: boolean }) {
   const t = useT();
-  const router = useRouter();
+  const navigate = useNavigate();
   const { busy, failure, conflict, toggle, restart, resolveConflict, retry } = useServiceActions(service, dragPreview);
   const [diagOpen, setDiagOpen] = React.useState(false);
   const running = service.state === "running";
@@ -103,7 +102,7 @@ export function ServiceRow({ service, dragHandle, dragPreview = false }: { servi
                 {service.missingRequires.map((dependency) => (
                   <Link
                     key={dependency}
-                    href={`/packages?search=${encodeURIComponent(packageIdFromDependency(dependency))}`}
+                    to={`/packages?search=${encodeURIComponent(packageIdFromDependency(dependency))}`}
                     className="font-mono underline decoration-dashed underline-offset-2 hover:text-foreground"
                   >
                     {dependency}
@@ -159,7 +158,7 @@ export function ServiceRow({ service, dragHandle, dragPreview = false }: { servi
             title={t("logs.title")}
             aria-label={t("logs.title")}
             disabled={dragPreview}
-            onClick={() => router.push(`/logs?service=${encodeURIComponent(service.id)}`)}
+            onClick={() => navigate(`/logs?service=${encodeURIComponent(service.id)}`)}
           >
             <ScrollText className="h-3.5 w-3.5" />
           </Button>

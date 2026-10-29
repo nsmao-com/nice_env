@@ -1,8 +1,7 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { Link, useLocation } from "react-router-dom";
 import { motion } from "motion/react";
 import {
   FileCog, Network, Terminal, DatabaseBackup, Stethoscope, CalendarClock, Radio, Brain, FileCode2,
@@ -70,7 +69,7 @@ export function Sidebar() {
   const collapsed = narrow || preferredCollapsed;
   const toggle = useUI((s) => s.toggleSidebar);
   const t = useT();
-  const pathname = usePathname();
+  const { pathname } = useLocation();
   const { isMac, isDesktop } = useDesktopWindow();
 
   return (
@@ -107,7 +106,7 @@ export function Sidebar() {
               const label = t(item.key);
               const body = (
                 <Link
-                  href={item.href}
+                  to={item.href}
                   aria-label={label}
                   aria-current={active ? "page" : undefined}
                   className={cn(
@@ -154,7 +153,7 @@ export function Sidebar() {
         <Tooltip>
           <TooltipTrigger asChild>
             <Link
-              href="/settings"
+              to="/settings"
               aria-label={t("nav.settings")}
               aria-current={pathname === "/settings" ? "page" : undefined}
               className={cn(

@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
+import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import {
   CalendarClock,
@@ -306,7 +306,7 @@ export function OllamaTool() {
     <div className="flex min-w-0 flex-col gap-3">
       {!isTauri && <p className="rounded-lg bg-info-soft p-3 text-xs text-info">{t("tools.ollama.preview")}</p>}
       <div className="flex flex-wrap items-center gap-2">
-        <Button size="sm" variant="secondary" asChild><Link href="/packages">{t("tools.ollama.manageService")}</Link></Button>
+        <Button size="sm" variant="secondary" asChild><Link to="/packages">{t("tools.ollama.manageService")}</Link></Button>
         <Button size="sm" variant="ghost" onClick={() => void api.openInBrowser("https://ollama.com/library").catch(toastError)}><ExternalLink className="h-3.5 w-3.5" />{t("tools.ollama.library")}</Button>
         <Button size="icon-sm" variant="ghost" className="ml-auto" aria-label={t("tools.ollama.refresh")} disabled={models.isFetching || task.isFetching} onClick={() => void refresh()}><RefreshCw className={cn("h-3.5 w-3.5", models.isFetching && "animate-spin")} /></Button>
       </div>

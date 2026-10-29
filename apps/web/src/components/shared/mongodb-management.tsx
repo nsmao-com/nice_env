@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
+import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ChevronLeft, ChevronRight, Database, Loader2, RefreshCw, Search, Trash2 } from "lucide-react";
@@ -38,7 +38,7 @@ export function MongoManagement({ service, onLockChange }: { service?: ServiceSt
   const signature = `${service?.version}:${service?.port}:${service?.pids.join(",")}`;
   React.useEffect(() => { onLockChange(authBusy || browserBusy || backupBusy); return () => onLockChange(false); }, [authBusy, backupBusy, browserBusy, onLockChange]);
   return <div className="min-w-0 space-y-5">
-    <div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><h2 className="text-base font-semibold">MongoDB {service?.version ?? ""}</h2><p className="mt-1 text-xs leading-5 text-muted">{t("mongo.intro")}</p></div><Button variant="secondary" size="sm" asChild><Link href="/packages">{t("mongo.packages")}</Link></Button></div>
+    <div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><h2 className="text-base font-semibold">MongoDB {service?.version ?? ""}</h2><p className="mt-1 text-xs leading-5 text-muted">{t("mongo.intro")}</p></div><Button variant="secondary" size="sm" asChild><Link to="/packages">{t("mongo.packages")}</Link></Button></div>
     <DatabaseDataDir engine="mongodb" version={service?.version} />
     {!running ? <Card><CardContent className="py-8"><Database className="mb-3 h-6 w-6 text-muted" /><p className="text-sm">{t(service ? "mongo.stopped" : "mongo.notInstalled")}</p><p className="mt-2 text-xs leading-5 text-muted">{t("mongo.requireShell")}</p></CardContent></Card> : <MongoBrowser key={signature} version={service!.version!} signature={signature} onLockChange={setBrowserBusy} />}
     {!!service?.version && <MongoAuthPanel version={service.version} signature={signature} onLockChange={setAuthBusy} />}

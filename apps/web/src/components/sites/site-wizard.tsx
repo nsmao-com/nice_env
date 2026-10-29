@@ -6,7 +6,7 @@ import { isSiteHostname, siteRedirectTarget } from "@/lib/utils";
 
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "react-router-dom";
 import type { ProjectPhpCompatibility } from "@nsb/schema";
 import { ProjectPhpCheck, projectPhpProblem, recommendedProjectPhp } from "./project-php-compatibility";
 import { ProjectPlatformCheck } from "./project-platform-check";
@@ -111,7 +111,7 @@ export function SiteWizard({
   existingDefaults?: ExistingProjectDefaults | null;
 }) {
   const t = useT();
-  const router = useRouter();
+  const navigate = useNavigate();
   const { isDesktop, isMac } = useDesktopWindow();
   const { data: packages, refetch: refreshPackages } = usePackages();
   const { data: settings } = useSettings();
@@ -386,8 +386,8 @@ export function SiteWizard({
   const openPackages = React.useCallback(() => {
     if (creating) return;
     onOpenChange(false);
-    router.push("/packages");
-  }, [creating, onOpenChange, router]);
+    navigate("/packages");
+  }, [creating, onOpenChange, navigate]);
 
   return (
     <Dialog open={open} onOpenChange={(o) => !creating && onOpenChange(o)}>

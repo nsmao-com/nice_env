@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
+import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ArchiveRestore, DatabaseBackup, Download, Ellipsis, FolderOpen, Loader2, RefreshCw, Trash2, Upload } from "lucide-react";
@@ -149,7 +149,7 @@ export function MongoBackupPanel({ service, signature, externalDisabled = false,
     <CardContent className="min-w-0 space-y-4">
       <DatabaseBackupPlan engine="mongodb" version={version} instanceKey={signature} targetLabel={`MongoDB ${version}`} ready={ready} disabled={operationBusy || externalDisabled || !!selected || !!importPreview || !!removal} onLockChange={setPlanLocked} />
       {!isTauri && <p className="text-xs text-warn">{t("mongoBackup.demo")}</p>}
-      <p className="text-xs leading-5 text-muted">{t("mongoBackup.pauseWrites")} <Link href="/packages" className="underline underline-offset-4">{t("mongo.packages")}</Link></p>
+      <p className="text-xs leading-5 text-muted">{t("mongoBackup.pauseWrites")} <Link to="/packages" className="underline underline-offset-4">{t("mongo.packages")}</Link></p>
       {!running && <p className="text-sm text-muted">{t("mongoBackup.stopped")}</p>}
       {overview.isError && running && <div className="space-y-2"><Failure error={overview.error} /><Button size="sm" variant="secondary" disabled={busy || overview.isFetching} onClick={() => void overview.refetch()}>{t("mongo.retry")}</Button></div>}
       <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-end"><div className="min-w-0 flex-1 space-y-2"><Label htmlFor="mongo-backup-database">{t("mongoBackup.source")}</Label><Select value={databases.includes(database) ? database : ""} onValueChange={setDatabase} disabled={!ready || busy}><SelectTrigger id="mongo-backup-database"><SelectValue placeholder={t("mongoBackup.chooseDatabase")} /></SelectTrigger><SelectContent>{databases.map(name => <SelectItem key={name} value={name} className="break-all">{name}</SelectItem>)}</SelectContent></Select></div><Button disabled={!ready || busy || !databases.includes(database)} onClick={() => void create()}><DatabaseBackup className="h-4 w-4" />{t("mongoBackup.create")}</Button></div>

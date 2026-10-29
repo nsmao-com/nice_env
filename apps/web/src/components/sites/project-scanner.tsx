@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { ProjectPhpCheck, projectPhpProblem, recommendedProjectPhp } from "./project-php-compatibility";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { FolderSearch, Loader2, BadgeCheck } from "lucide-react";
@@ -81,7 +81,7 @@ export function ProjectScannerDialog({ open, onOpenChange, onCreated }: {
   open: boolean; onOpenChange: (value: boolean) => void; onCreated?: () => void;
 }) {
   const t = useT();
-  const router = useRouter();
+  const navigate = useNavigate();
   const client = useQueryClient();
   const invalidate = useInvalidate();
   const packageQuery = usePackages();
@@ -304,7 +304,7 @@ export function ProjectScannerDialog({ open, onOpenChange, onCreated }: {
             {(queryError || missingPhp || !webServers.length || !webServers.includes(webServer as "nginx" | "apache" | "caddy")) && <div role="alert" className="space-y-2 text-xs text-error">
               <p className="[overflow-wrap:anywhere]">{queryError ? normalizeError(queryError).message : t(missingPhp && webServers.length ? "scanSetup.phpRequired" : "scanSetup.webRequired")}</p>
               <div className="flex flex-wrap gap-2"><Button size="sm" variant="secondary" disabled={busy} onClick={() => { void packageQuery.refetch(); void siteQuery.refetch(); }}>{t("siteFiles.retry")}</Button>
-                <Button size="sm" variant="ghost" disabled={busy} onClick={() => { if (!busyRef.current) { onOpenChange(false); router.push("/packages"); } }}>{t("scanSetup.packages")}</Button></div>
+                <Button size="sm" variant="ghost" disabled={busy} onClick={() => { if (!busyRef.current) { onOpenChange(false); navigate("/packages"); } }}>{t("scanSetup.packages")}</Button></div>
             </div>}
           </section>
           <div className="flex flex-wrap items-center gap-2">

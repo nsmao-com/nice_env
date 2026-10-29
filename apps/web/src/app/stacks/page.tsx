@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
+import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -193,14 +193,14 @@ export default function StacksPage() {
                     {versionConflicts.length > 0 && <p role="alert" className="text-xs text-error [overflow-wrap:anywhere]">{t("stack.versionConflict")} {versionConflicts.join(", ")}</p>}
                     {mismatched.length > 0 && <p className="flex flex-wrap gap-x-2 gap-y-1 text-xs text-warn">
                       <span>{t("stack.singleVersionHint")}</span>
-                      {mismatched.map((id) => <Link key={id} href={`/packages?search=${encodeURIComponent(id)}`} className="underline decoration-dashed underline-offset-2">{serviceFamilyName(id, packages, services)}</Link>)}
+                      {mismatched.map((id) => <Link key={id} to={`/packages?search=${encodeURIComponent(id)}`} className="underline decoration-dashed underline-offset-2">{serviceFamilyName(id, packages, services)}</Link>)}
                     </p>}
                     {dependenciesBlocked && (
                       <p role="status" className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-warn">
                         <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
                         <span>{t("stack.dependenciesBlocked")}</span>
                         {missingDependencies.map((dependency) => (
-                          <Link key={dependency} href={`/packages?search=${encodeURIComponent(packageIdFromDependency(dependency))}`} className="font-mono underline decoration-dashed underline-offset-2">
+                          <Link key={dependency} to={`/packages?search=${encodeURIComponent(packageIdFromDependency(dependency))}`} className="font-mono underline decoration-dashed underline-offset-2">
                             {dependency}
                           </Link>
                         ))}
@@ -352,12 +352,12 @@ function StackExecutionResult({ result, services, busy, running, canRetry, onRet
     {!!report?.skipped.length && <div className="mt-3 text-xs text-warn [overflow-wrap:anywhere]">
       <p>{t("stack.resultSkippedHint")}</p>
       <ul className="mt-1 flex flex-wrap gap-x-3 gap-y-1">{report.skipped.map((id) => <li key={id}>
-        <Link className="underline decoration-dashed underline-offset-2" href={`/packages?search=${encodeURIComponent(stackItemBase(id))}`}>{id}</Link>
+        <Link className="underline decoration-dashed underline-offset-2" to={`/packages?search=${encodeURIComponent(stackItemBase(id))}`}>{id}</Link>
       </li>)}</ul>
     </div>}
     {report?.failed.some((failure) => failure.error.code === "PORT_IN_USE") && <p className="mt-3 text-xs text-muted [overflow-wrap:anywhere]">
       {t("stack.portRecoveryHint")} {[...new Set(report.failed.filter((failure) => failure.error.code === "PORT_IN_USE").map((failure) => failure.error.port))].map((port) =>
-        <Link key={port ?? "unknown"} href="/tools" onClick={() => { if (port != null) useUI.getState().requestPort(port); }}
+        <Link key={port ?? "unknown"} to="/tools" onClick={() => { if (port != null) useUI.getState().requestPort(port); }}
           className="ml-2 inline-block text-primary underline decoration-dashed underline-offset-2">{t("stack.checkPorts")}{port != null ? ` ${port}` : ""}</Link>)}
     </p>}
     {!!report?.failed.length && <Button type="button" size="sm" variant="secondary" className="mt-3 h-auto min-h-8 max-w-full whitespace-normal"
@@ -516,7 +516,7 @@ function StackEditor({ open, stack, services, packages, ready, loadError, retryL
                         </Select>
                       )}
                       <p className={cn("mt-2 text-[11px] [overflow-wrap:anywhere]", ready && !service ? "text-warn" : "text-muted")}>{stackItemHint(item.serviceId, service, packages, services, t, ready)}</p>
-                      {ready && !service && <Link href={`/packages?search=${encodeURIComponent(base)}`} className="mt-1 inline-block text-[11px] text-accent underline decoration-dashed underline-offset-2">{t("stack.openPackages")}</Link>}
+                      {ready && !service && <Link to={`/packages?search=${encodeURIComponent(base)}`} className="mt-1 inline-block text-[11px] text-accent underline decoration-dashed underline-offset-2">{t("stack.openPackages")}</Link>}
                     </li>
                   );
                 })}

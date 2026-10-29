@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "react-router-dom";
 import {
   Globe,
   ExternalLink,
@@ -61,7 +61,7 @@ export function CommandPalette() {
   const setOpen = useUI((s) => s.setCommandOpen);
   const setWizardOpen = useUI((s) => s.setWizardOpen);
   const t = useT();
-  const router = useRouter();
+  const navigate = useNavigate();
   const serviceQuery = useServices(open ? 2000 : 0);
   const siteQuery = useSites();
   const stackQuery = useStacks();
@@ -135,7 +135,7 @@ export function CommandPalette() {
               <RotateCw className="h-3.5 w-3.5 shrink-0" />
               {failure.resolve ? t("svc.freePortAndRetry") : `${t("bulk.retry")} · ${t(`common.${failure.action}`)}`}
             </Button>
-            <Button size="sm" variant="ghost" className="h-auto min-h-8" disabled={busy} onClick={() => run(() => router.push(`/logs?service=${encodeURIComponent(failure.service.id)}`))}>
+            <Button size="sm" variant="ghost" className="h-auto min-h-8" disabled={busy} onClick={() => run(() => navigate(`/logs?service=${encodeURIComponent(failure.service.id)}`))}>
               <ScrollText className="h-3.5 w-3.5" />{t("logs.title")}
             </Button>
           </div>
@@ -161,7 +161,7 @@ export function CommandPalette() {
             onSelect={() =>
               run(() => {
                 useUI.getState().requestScan();
-                router.push("/sites");
+                navigate("/sites");
               })
             }
           >
@@ -170,7 +170,7 @@ export function CommandPalette() {
           {/* 体检与诊断：出问题时的第一落点 */}
           <CommandItem
             value="health check 体检 诊断 问题"
-            onSelect={() => run(() => router.push("/"))}
+            onSelect={() => run(() => navigate("/"))}
           >
             <Activity /> {t("cmd.healthCheck")}
           </CommandItem>
@@ -179,7 +179,7 @@ export function CommandPalette() {
             onSelect={() =>
               run(() => {
                 useUI.getState().requestTool("diagnostics");
-                router.push("/diagnostics");
+                navigate("/diagnostics");
               })
             }
           >
@@ -191,7 +191,7 @@ export function CommandPalette() {
             onSelect={() =>
               run(() => {
 
-                router.push("/configuration");
+                navigate("/configuration");
               })
             }
           >
@@ -204,7 +204,7 @@ export function CommandPalette() {
 
         <CommandGroup heading={t("cmd.pages")}>
           {PAGES.map((p) => (
-            <CommandItem key={p.href} onSelect={() => run(() => router.push(p.href))}>
+            <CommandItem key={p.href} onSelect={() => run(() => navigate(p.href))}>
               <p.icon /> {t(p.labelKey as never)}
             </CommandItem>
           ))}

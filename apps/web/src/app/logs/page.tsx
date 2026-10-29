@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { Loader2, ScrollText } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/store";
-import { useSearchParams } from "next/navigation";
+import { useSearchParams } from "react-router-dom";
 import { toastError, useServices, useSettings, useSites } from "@/lib/hooks";
 import { isTauri } from "@/lib/backend";
 import * as api from "@/lib/api";
@@ -17,22 +17,13 @@ import { PageHeader } from "@/components/layout/app-shell";
 import { ServiceHistoryDialog } from "@/components/shared/service-history-dialog";
 
 export default function LogsPage() {
-  // 静态导出时 useSearchParams 需要 Suspense 边界
-  return (
-    <React.Suspense fallback={null}>
-      <LogsPageInner />
-    </React.Suspense>
-  );
-}
-
-function LogsPageInner() {
   const t = useT();
   const servicesQuery = useServices(4000);
   const { data: services, error: servicesError } = servicesQuery;
   const sitesQuery = useSites();
   const { data: sites, error: sitesError } = sitesQuery;
   const { data: settings } = useSettings();
-  const searchParams = useSearchParams();
+  const [searchParams] = useSearchParams();
   const wanted = searchParams.get("service");
   const [selected, setSelected] = React.useState<string | null>(wanted);
   const [query, setQuery] = React.useState("");

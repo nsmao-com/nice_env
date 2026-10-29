@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "react-router-dom";
 import { AlertTriangle, CheckCircle2, Info, Loader2, MinusCircle, RotateCw, ScrollText, Stethoscope, Wrench, XCircle } from "lucide-react";
 import type { ServiceCheck, ServiceStatus } from "@nsb/schema";
 import { cn } from "@/lib/utils";
@@ -20,7 +20,7 @@ export function ServiceDiagnostics({ service, open, onOpenChange }: {
   service: ServiceStatus; open: boolean; onOpenChange: (open: boolean) => void;
 }) {
   const t = useT();
-  const router = useRouter();
+  const navigateTo = useNavigate();
   const client = useQueryClient();
   const [forceOpen, setForceOpen] = React.useState(false);
   const forceBusy = React.useRef(false);
@@ -43,7 +43,7 @@ export function ServiceDiagnostics({ service, open, onOpenChange }: {
   const report = query.data;
   const error = query.error ? normalizeError(query.error) : null;
   const running = query.isFetching;
-  const navigate = (route: string) => { onOpenChange(false); router.push(route); };
+  const navigate = (route: string) => { onOpenChange(false); navigateTo(route); };
 
   return <><Dialog open={open} onOpenChange={(next) => { if (!forceBusy.current) { if (!next) setForceOpen(false); onOpenChange(next); } }}>
     <DialogContent className="flex max-h-[calc(100dvh-2rem)] max-w-xl flex-col gap-0 overflow-hidden p-0">

@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
+import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { Database, HardDrive, KeyRound, Play, Plus, Search, Table2, Trash2, UserRound, ExternalLink, Loader2, Import, X } from "lucide-react";
 import { useT } from "@/lib/store";
@@ -254,7 +254,7 @@ function MySqlWorkspace({ onLockChange, importRequested }: { onLockChange: (lock
         <h2 className="text-sm font-medium">{t("dbImport.prepare")}</h2>
         <ol className="list-decimal space-y-2 pl-5 text-xs leading-relaxed text-secondary"><li>{t("dbImport.prepareSource")}</li><li>{t("dbImport.prepareTarget")}</li><li>{t("dbImport.prepareTransfer")}</li></ol>
         <p role="status" className="text-xs text-muted">{ready ? `${t("db.target")}：${targetLabel}` : !version ? t("dbImport.needInstall") : !running ? t("dbImport.needStart") : t("dbImport.needConnect")}</p>
-        <div className="flex flex-wrap gap-2">{!version && <Button size="sm" variant="outline" asChild><Link href="/packages?search=mysql">{t("ob.managePackages")}</Link></Button>}<Button size="sm" disabled={!actionReady} onClick={() => setImportOpen(true)}>{t("dbImport.continue")}</Button></div>
+        <div className="flex flex-wrap gap-2">{!version && <Button size="sm" variant="outline" asChild><Link to="/packages?search=mysql">{t("ob.managePackages")}</Link></Button>}<Button size="sm" disabled={!actionReady} onClick={() => setImportOpen(true)}>{t("dbImport.continue")}</Button></div>
       </section>}
       <div className="mb-5 flex flex-wrap justify-end gap-2">
             <Button variant="secondary" disabled={!running || workspaceLocked || backupLocked || createOpen || userOpen || rootOpen || importOpen || !!dropTarget} onClick={() => setRootOpen(true)}>

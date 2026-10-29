@@ -3,7 +3,7 @@
 import type { DatabaseEngine } from "@nsb/schema";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "react-router-dom";
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import * as api from "./api";
@@ -513,7 +513,7 @@ const emptyStackActions = (): StackActionState => ({ sequence: 0, busyId: null, 
 export function useStackActions() {
   const t = useT();
   const qc = useQueryClient();
-  const router = useRouter();
+  const navigate = useNavigate();
   const invalidate = useInvalidate();
   const { data } = useQuery<StackActionState>({
     queryKey: STACK_ACTION_KEY, queryFn: emptyStackActions, initialData: emptyStackActions,
@@ -543,11 +543,11 @@ export function useStackActions() {
           skipped: [...new Set([...original.skipped, ...report.skipped])],
         };
       } else result.report = report;
-      toastStackReport(t, result.report, action, () => router.push("/stacks"));
+      toastStackReport(t, result.report, action, () => navigate("/stacks"));
     } catch (error) {
       result.error = normalizeError(error);
       toast.error(result.error.message, { description: result.error.hint,
-        action: { label: t("stack.viewResult"), onClick: () => router.push("/stacks") } });
+        action: { label: t("stack.viewResult"), onClick: () => navigate("/stacks") } });
     } finally {
       qc.setQueryData<StackActionState>(STACK_ACTION_KEY, (latest) => latest?.results[id]?.sequence === sequence
         ? { ...latest, busyId: null, results: { ...latest.results, [id]: { ...result } } } : latest);

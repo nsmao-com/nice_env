@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
+import { Link } from "react-router-dom";
 import { motion, AnimatePresence } from "motion/react";
 import type { ServiceStatus } from "@nsb/schema";
 import {
@@ -144,7 +144,7 @@ export default function DashboardPage() {
               {selectedStack ? `${t("dash.startStack")}「${selectedStack.name}」` : t("dash.quickStart")}
             </Button>
             <Button variant="ghost" size="sm" asChild title={t("stack.title")}>
-              <Link href="/stacks">
+              <Link to="/stacks">
                 <Layers className="h-3.5 w-3.5" />
               </Link>
             </Button>
@@ -255,7 +255,7 @@ export default function DashboardPage() {
                   {/* 批量操作：不用为一次性的一批服务专门存一个栈 */}
                   <BulkActions services={services} />
                   <Button variant="ghost" size="sm" asChild>
-                    <Link href="/packages">
+                    <Link to="/packages">
                       {t("dashboard.managePackages")} <ChevronRight className="h-3.5 w-3.5" />
                     </Link>
                   </Button>
@@ -269,7 +269,7 @@ export default function DashboardPage() {
                 hint={t("dashboard.stackGo")}
                 action={
                   <Button asChild>
-                    <Link href="/packages">{t("dashboard.browsePackages")}</Link>
+                    <Link to="/packages">{t("dashboard.browsePackages")}</Link>
                   </Button>
                 }
               />
@@ -294,7 +294,7 @@ export default function DashboardPage() {
                 title={t("dash.recentSites")}
                 actions={
                   <Button variant="ghost" size="sm" asChild>
-                    <Link href="/sites">
+                    <Link to="/sites">
                       {t("dashboard.allSites")} <ChevronRight className="h-3.5 w-3.5" />
                     </Link>
                   </Button>

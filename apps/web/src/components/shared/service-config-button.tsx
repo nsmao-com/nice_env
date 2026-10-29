@@ -2,7 +2,7 @@
 
 import { Settings2 } from "lucide-react";
 import type { ServiceStatus } from "@nsb/schema";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { useT } from "@/lib/store";
 
@@ -26,7 +26,7 @@ const CONFIGURABLE_SERVICES = new Set([
 
 export function ServiceConfigButton({ service, disabled = false }: { service: ServiceStatus; disabled?: boolean }) {
   const t = useT();
-  const router = useRouter();
+  const navigate = useNavigate();
   const baseId = service.id.split("@")[0];
   if (!CONFIGURABLE_SERVICES.has(baseId)) return null;
 
@@ -42,7 +42,7 @@ export function ServiceConfigButton({ service, disabled = false }: { service: Se
       title={label}
       onClick={() => {
         const target = service.version && !service.id.includes("@") ? `${service.id}@${service.version}` : service.id;
-        router.push(`/configuration?service=${encodeURIComponent(target)}`);
+        navigate(`/configuration?service=${encodeURIComponent(target)}`);
       }}
     >
       <Settings2 className="h-3.5 w-3.5 shrink-0" />

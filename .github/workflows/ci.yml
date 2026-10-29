@@ -52,9 +52,9 @@ jobs:
           path: platform-core.log
           if-no-files-found: warn
 
-  # ---------- 前端：Next.js 静态导出 ----------
+  # ---------- 前端：React + Vite 静态资源 ----------
   web:
-    name: Web (Next.js)
+    name: Web (React + Vite)
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
@@ -83,11 +83,15 @@ jobs:
       - name: Logic tests (@nsb/web)
         run: pnpm --filter @nsb/web run check:logic
 
-      - name: Build static export (@nsb/web)
+      - name: Build desktop frontend (@nsb/web)
         run: pnpm --filter @nsb/web run build
 
-      - name: Verify static export
-        run: test -f apps/web/out/index.html
+      - name: Verify desktop frontend
+        run: |
+          test -f apps/web/out/index.html
+          test -f apps/web/out/tray_panel.html
+          test -d apps/web/out/assets
+          test ! -d apps/web/out/_next
 
       - name: Upload static export
         uses: actions/upload-artifact@v5

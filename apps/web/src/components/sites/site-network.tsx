@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
+import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
@@ -95,7 +95,7 @@ export function SiteNetworkDialog({ id, name, onClose }: { id: string; name: str
             {dnsLine && <div className="flex items-center gap-2 rounded-lg bg-fill p-3"><code className="min-w-0 flex-1 break-all">{dnsLine}</code><CopyButton text={dnsLine} /></div>}
             {url && listening ? <div className="flex items-center gap-2 rounded-lg bg-fill p-3"><code className="min-w-0 flex-1 break-all">{url}</code><CopyButton text={url} /></div>
               : <p className="text-muted">{t("lan.addressPending")}</p>}
-            {data.localCa && <p className="leading-relaxed text-muted">{t("lan.caHint")}{" "}<Link href="/tls" className="underline underline-offset-2">{t("lan.certificates")}</Link></p>}
+            {data.localCa && <p className="leading-relaxed text-muted">{t("lan.caHint")}{" "}<Link to="/tls" className="underline underline-offset-2">{t("lan.certificates")}</Link></p>}
             <p className="leading-relaxed text-muted">{t("lan.firewallHint")}</p>
           </section>
         </>}

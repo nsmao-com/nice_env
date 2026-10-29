@@ -10,7 +10,7 @@ import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, Command
 import { CodeEditor } from "@/components/shared/code-editor";
 import { REWRITE_TEMPLATES } from "@/lib/rewrite-templates";
 import { BookOpen, Check, ChevronsUpDown } from "lucide-react";
-import Link from "next/link";
+import { Link } from "react-router-dom";
 
 const CATEGORIES = [
   { value: "PHP 框架", labelKey: "rewrites.phpFramework" },
@@ -30,7 +30,7 @@ export function CustomRewriteSelect({ server, value, onChange, disabled }: { ser
     setOpen(false);
   };
   return <div className="space-y-3 rounded-xl border border-border bg-fill/30 p-4">
-    <div className="flex flex-wrap items-center justify-between gap-2 text-xs"><span className="inline-flex items-center gap-2 font-medium"><BookOpen className="h-4 w-4 text-primary" />{t("rewrites.selectTitle")}<span className="font-normal text-muted">{t("rewrites.available").replace("{count}", String(builtins.length + templates.length))}</span></span><Link className="rounded px-1 py-1 text-primary hover:underline" href="/rewrites">{t("rewrites.manage")}</Link></div>
+    <div className="flex flex-wrap items-center justify-between gap-2 text-xs"><span className="inline-flex items-center gap-2 font-medium"><BookOpen className="h-4 w-4 text-primary" />{t("rewrites.selectTitle")}<span className="font-normal text-muted">{t("rewrites.available").replace("{count}", String(builtins.length + templates.length))}</span></span><Link className="rounded px-1 py-1 text-primary hover:underline" to="/rewrites">{t("rewrites.manage")}</Link></div>
     <Popover open={open && !disabled} onOpenChange={setOpen}>
       <PopoverTrigger asChild><Button type="button" variant="secondary" role="combobox" aria-expanded={open} aria-label={t("rewrites.selectAria")} disabled={disabled} className="h-auto min-h-10 w-full justify-between rounded-lg border border-border px-3 text-left font-normal"><span className="min-w-0 truncate">{value?.name ?? t("rewrites.selectPlaceholder")}</span><ChevronsUpDown className="h-4 w-4 shrink-0 text-muted" /></Button></PopoverTrigger>
       <PopoverContent align="start" className="w-[var(--radix-popover-trigger-width)] min-w-[min(320px,calc(100vw-32px))] max-w-[calc(100vw-32px)] p-0">

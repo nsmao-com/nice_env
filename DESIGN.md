@@ -1,7 +1,7 @@
 # NiceEnv — 本地开发环境集成管理器
 
 Windows + macOS 一站式本地开发环境管理器（对标 ServBay / FlyEnv / phpStudy，交互与视觉更现代）。
-Tauri 2 + Rust 后端能力 + Next.js (App Router, 静态导出) 前端。
+Tauri 2 + Rust 后端能力 + React + Vite 前端，使用 React Router Hash 路由。
 
 ## 1. 最终目录结构
 
@@ -27,10 +27,11 @@ nice-servbay/
 │   │           ├── lib.rs        # command 注册、窗口行为
 │   │           ├── tray.rs       # 状态感知的托盘菜单（栈/服务/站点/导航 + 运行数角标）
 │   │           └── smoke.rs      # --smoke-test 无头验收管线
-│   └── web/                      # Next.js App Router（output: 'export'）
-│       ├── next.config.ts
+│   └── web/                      # React + Vite，静态产物仍输出到 out/
+│       ├── index.html / vite.config.mts
 │       └── src/
-│           ├── app/              # /  sites/  packages/  stacks/  databases/  tls/
+│           ├── main.tsx          # React 根入口、Hash 路由、按页懒加载
+│           ├── app/              # 普通 React 页面组件，保留现有目录
 │           │                     # proxy/  tools/  logs/  settings/
 │           ├── components/
 │           │   ├── ui/           # shadcn 组件（手写迁移）

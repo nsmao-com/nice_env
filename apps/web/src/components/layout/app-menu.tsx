@@ -1,8 +1,7 @@
 "use client";
 
 import * as React from "react";
-import dynamic from "next/dynamic";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "react-router-dom";
 import { version as bundledAppVersion } from "../../../package.json";
 import {
   ChevronDown,
@@ -56,7 +55,7 @@ import { useDesktopWindow } from "./titlebar";
 
 const REPO_URL = "https://github.com/nsmao-com/nice_env";
 const RELEASES_URL = `${REPO_URL}/releases`;
-const UpdateDialog = dynamic(() => import("@/components/shared/update-dialog").then((m) => m.UpdateDialog), { ssr: false });
+const UpdateDialog = React.lazy(() => import("@/components/shared/update-dialog").then((m) => ({ default: m.UpdateDialog })));
 
 export function AppLogo({ className }: { className?: string }) {
   return (
@@ -85,7 +84,7 @@ export function AppLogo({ className }: { className?: string }) {
 
 export function AppMenu({ collapsed }: { collapsed: boolean }) {
   const t = useT();
-  const router = useRouter();
+  const navigate = useNavigate();
   const setWizardOpen = useUI((s) => s.setWizardOpen);
   const setOnboardingOpen = useUI((s) => s.setOnboardingOpen);
   const serviceQuery = useServices();
@@ -242,10 +241,10 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
             <Plus /> {t("appmenu.newSite")}
           </DropdownMenuItem>
           <DropdownMenuItem onSelect={() => setOnboardingOpen(true)}><Rocket />{t("ob.open")}</DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => router.push("/sites")}>
+          <DropdownMenuItem onSelect={() => navigate("/sites")}>
             <Globe2 /> {t("appmenu.sites")}
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => router.push("/stacks")}>
+          <DropdownMenuItem onSelect={() => navigate("/stacks")}>
             <Layers /> {t("appmenu.stacks")}
           </DropdownMenuItem>
           {favoriteSites.length > 0 && <>
@@ -275,23 +274,23 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
             </DropdownMenuItem>
           </>}
           <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={() => router.push("/packages")}>
+          <DropdownMenuItem onSelect={() => navigate("/packages")}>
             <Boxes /> {t("appmenu.packages")}
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => router.push("/configuration")}>
+          <DropdownMenuItem onSelect={() => navigate("/configuration")}>
             <FileCog /> {t("appmenu.configuration")}
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => router.push("/logs")}>
+          <DropdownMenuItem onSelect={() => navigate("/logs")}>
             <ScrollText /> {t("appmenu.logs")}
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => router.push("/diagnostics")}>
+          <DropdownMenuItem onSelect={() => navigate("/diagnostics")}>
             <Stethoscope /> {t("appmenu.diagnostics")}
           </DropdownMenuItem>
           <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={() => router.push("/settings")}>
+          <DropdownMenuItem onSelect={() => navigate("/settings")}>
             <Settings /> {t("appmenu.settings")}
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => router.push("/databases")}>
+          <DropdownMenuItem onSelect={() => navigate("/databases")}>
             <Database /> {t("appmenu.databaseTools")}
           </DropdownMenuItem>
           <DropdownMenuItem
@@ -330,7 +329,7 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
         </DropdownMenuContent>
       </DropdownMenu>
 
-      {(updateOpen || updateLoaded) && <UpdateDialog open={updateOpen} onOpenChange={(open) => { setUpdateOpen(open); if (!open) setChecking(false); }} />}
+      <React.Suspense fallback={null}>{(updateOpen || updateLoaded) && <UpdateDialog open={updateOpen} onOpenChange={(open) => { setUpdateOpen(open); if (!open) setChecking(false); }} />}</React.Suspense>
 
       <ConfirmDialog
         open={confirm === "restartAll"}

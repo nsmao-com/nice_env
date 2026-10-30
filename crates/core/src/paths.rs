@@ -2197,6 +2197,22 @@ pub fn restore_backup_checked(
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_extended_paths_are_normalized_at_command_and_config_boundaries() {
+        for (raw, expected) in [
+            (r"\\?\D:\Nice Env\中文\node", "D:/Nice Env/中文/node"),
+            ("//?/D:/Nice Env/中文/node", "D:/Nice Env/中文/node"),
+            (r"\\?\UNC\server\share\中文", "//server/share/中文"),
+        ] {
+            assert_eq!(portable_path_text(Path::new(raw)), expected);
+            assert_eq!(crate::pathenv::bin_dir_for(raw, "node.exe").unwrap(), expected);
+            assert_eq!(quoted_config_path(Path::new(raw)), expected);
+        }
+        let original = "https://example.test/?q=中文&next=?";
+        assert_eq!(portable_text(original), original);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn system_aliases_allow_real_files_but_still_reject_nested_links() {

@@ -660,9 +660,10 @@ pub fn bin_dir_for(install_path: &str, entry: &str) -> Option<String> {
     } else {
         format!("{base}/{parent}")
     };
-    // Windows 扩展路径不接受混合分隔符，否则真实目录会被误判为不存在。
-    Some(if cfg!(windows) && base.starts_with(r"\\?\") {
-        joined.replace('/', "\\")
+    // PATH 和 shell wrapper 是第三方命令边界，不能携带 Windows 扩展前缀。
+    // 文件系统自身仍使用安装记录中的原始路径来支持长路径。
+    Some(if cfg!(windows) {
+        crate::paths::portable_path_text(std::path::Path::new(&joined))
     } else {
         joined
     })

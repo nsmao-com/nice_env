@@ -85,6 +85,7 @@ pub fn run() {
     });
     let setup_startup = startup.clone();
     tauri::Builder::default()
+        .manage(Arc::new(nsb_core::assistant::Assistant::default()))
         .manage(startup.clone())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -622,6 +623,10 @@ pub fn run() {
             get_mcp_clients,
             configure_mcp_client,
             check_updates,
+            assistant_chat,
+            assistant_models,
+            assistant_tool,
+            assistant_confirm,
             // 套件清单：远端刷新 / 恢复内置 / 状态
             refresh_remote_manifest,
             reset_remote_manifest,
@@ -3803,20 +3808,44 @@ fn set_port_override(
 }
 
 const APP_RELEASES_API: &str = "https://api.github.com/repos/nsmao-com/nice_env/releases/latest";
+#[tauri::command]
+async fn assistant_chat(request: nsb_core::assistant::ChatRequest) -> Result<serde_json::Value, AppError> {
+    nsb_core::assistant::chat(request).await
+}
+
+#[tauri::command]
+async fn assistant_models(request: nsb_core::assistant::ModelsRequest) -> Result<Vec<String>, AppError> {
+    nsb_core::assistant::models(request).await
+}
+
+#[tauri::command]
+async fn assistant_tool(
+    state: State<'_, Arc<CoreState>>,
+    assistant: State<'_, Arc<nsb_core::assistant::Assistant>>,
+    name: String, args: serde_json::Value,
+) -> Result<nsb_core::assistant::ToolReply, AppError> {
+    let state = state.inner().clone();
+    let assistant = assistant.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || assistant.prepare(&state, &name, &args)).await
+        .map_err(|_| AppError::new("ASSISTANT_TASK", "诊断任务未能完成，请重试"))?
+}
+
+#[tauri::command]
+async fn assistant_confirm(
+    state: State<'_, Arc<CoreState>>,
+    assistant: State<'_, Arc<nsb_core::assistant::Assistant>>,
+    token: String, approved: bool,
+) -> Result<nsb_core::assistant::ToolReply, AppError> {
+    let state = state.inner().clone();
+    let assistant = assistant.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || assistant.confirm(&state, &token, approved)).await
+        .map_err(|_| AppError::new("ASSISTANT_TASK", "操作任务未能完成，请先检查服务状态"))?
+}
+
 const APP_RELEASES_PAGE: &str = "https://github.com/nsmao-com/nice_env/releases";
 
 fn version_newer(remote: &str, local: &str) -> bool {
-    let parse = |s: &str| -> Vec<u64> {
-        s.trim()
-            .trim_start_matches(|c: char| c == 'v' || c == 'V')
-            .split(|c: char| !c.is_ascii_digit())
-            .filter(|p| !p.is_empty())
-            .filter_map(|p| p.parse::<u64>().ok())
-            .collect()
-    };
-    let a = parse(remote);
-    let b = parse(local);
-    a > b
+    nsb_core::versions::app_version_newer(remote, local)
 }
 
 /// GitHub Release 的完整信息：版本 / 页面 / 说明 / 可下载的安装包
@@ -4043,9 +4072,15 @@ fn manifest_status(state: State<'_, std::sync::Arc<nsb_core::CoreState>>) -> ser
 /// - 套件清单：拉取远端 manifest 的 revision 与内置清单比对（`manifestUpdate`）。
 ///   远端地址可用设置项 `manifestUrl` 覆盖；未配置或网络失败时该字段为 null（未知）。
 #[tauri::command]
-fn check_updates(
+async fn check_updates(
     state: State<'_, std::sync::Arc<nsb_core::CoreState>>,
 ) -> Result<serde_json::Value, tauri::Error> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || check_updates_blocking(&state))
+        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))?
+}
+
+fn check_updates_blocking(state: &nsb_core::CoreState) -> Result<serde_json::Value, tauri::Error> {
     // 与「当前生效」的清单比：已应用过远端快照后，再拿内置 revision 比会永远提示有更新
     let current_rev = nsb_core::install::Installer::effective(&state.paths)
         .manifest
@@ -4102,7 +4137,7 @@ fn check_updates(
                     "assetUrl": info.asset_url,
                     "assetSize": info.asset_size,
                 });
-                (Some(info.tag), Some(info.html_url), Some(newer), Some(rel))
+                (Some(info.tag.trim_start_matches(['v', 'V']).to_string()), Some(info.html_url), Some(newer), Some(rel))
             }
             Ok(None) => (
                 Some(current_ver.to_string()),

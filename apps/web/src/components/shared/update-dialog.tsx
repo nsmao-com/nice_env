@@ -17,7 +17,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import type { UpdateCheckResult, UpdateProgress, DownloadUpdateResult } from "@nsb/schema";
-import { cn, fmtBytes, fmtSpeed, fmtDuration } from "@/lib/utils";
+import { cn, fmtBytes, fmtSpeed, fmtDuration, formatAppVersion } from "@/lib/utils";
 import { useT } from "@/lib/store";
 import { toastError } from "@/lib/hooks";
 import * as api from "@/lib/api";
@@ -210,7 +210,7 @@ export function UpdateDialog({
               <DialogDescription className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px]">
                 {result && (
                   <>
-                    <span className="font-mono">v{result.appVersion}</span>
+                    <span className="font-mono">{formatAppVersion(result.appVersion)}</span>
                     {phase !== "checking" && phase !== "error" && (
                       <>
                         <span className="text-faint">→</span>
@@ -222,7 +222,7 @@ export function UpdateDialog({
                               : "text-faint"
                           )}
                         >
-                          v{result.latestVersion ?? "?"}
+                          {formatAppVersion(result.latestVersion)}
                         </span>
                       </>
                     )}
@@ -263,7 +263,7 @@ export function UpdateDialog({
               <p className="text-[13px] text-secondary">{t("update.upToDateHint")}</p>
               {result && (
                 <div className="grid grid-cols-2 gap-2">
-                  <InfoTile icon={Package} label={t("update.appVersion")} value={`v${result.appVersion}`} />
+                  <InfoTile icon={Package} label={t("update.appVersion")} value={formatAppVersion(result.appVersion)} />
                   <InfoTile
                     icon={ShieldCheck}
                     label={t("settings.manifestRev")}
@@ -278,11 +278,11 @@ export function UpdateDialog({
             <div className="flex flex-col gap-4">
               {/* 版本信息 */}
               <div className="grid grid-cols-2 gap-2">
-                <InfoTile icon={Package} label={t("update.currentVersion")} value={`v${result?.appVersion ?? "?"}`} />
+                <InfoTile icon={Package} label={t("update.currentVersion")} value={formatAppVersion(result?.appVersion)} />
                 <InfoTile
                   icon={ArrowDownToLine}
                   label={t("update.latestVersion")}
-                  value={`v${result?.latestVersion ?? "?"}`}
+                  value={formatAppVersion(result?.latestVersion)}
                   highlight
                 />
                 {rel?.assetSize ? (

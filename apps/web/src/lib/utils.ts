@@ -358,6 +358,11 @@ export function normalizeVersion(version: string): string {
   return version.trim().replace(/^[vV]+/, "");
 }
 
+export function formatAppVersion(version?: string | null): string {
+  const normalized = normalizeVersion(version ?? "");
+  return normalized ? `v${normalized}` : "—";
+}
+
 export function sameVersion(left: string | null | undefined, right: string | null | undefined): boolean {
   return left != null && right != null && normalizeVersion(left) === normalizeVersion(right);
 }

@@ -991,6 +991,20 @@ export const dnsRestore = (name: string, automatic = false) => safe(invoke<boole
 
 export const fullLog = (id: string) => safe(invoke<string>("full_log", { id }));
 
+export interface AssistantCall { id: string; type: "function"; function: { name: string; arguments: string } }
+export interface AssistantMessage { role: "user" | "assistant" | "tool"; content: string | null; tool_calls?: AssistantCall[]; tool_call_id?: string }
+export interface AssistantConnection { endpoint: string; model: string; apiKey: string }
+export interface AssistantApproval { token: string; title: string; detail: string }
+export interface AssistantToolReply { result: string | null; approval: AssistantApproval | null }
+export const assistantChat = (connection: AssistantConnection, messages: AssistantMessage[]) =>
+  safe(invoke<AssistantMessage>("assistant_chat", { request: { ...connection, messages } }));
+export const assistantModels = (connection: AssistantConnection) =>
+  safe(invoke<string[]>("assistant_models", { request: { endpoint: connection.endpoint, apiKey: connection.apiKey } }));
+export const assistantTool = (name: string, args: unknown) =>
+  safe(invoke<AssistantToolReply>("assistant_tool", { name, args }));
+export const assistantConfirm = (token: string, approved: boolean) =>
+  safe(invoke<AssistantToolReply>("assistant_confirm", { token, approved }));
+
 export interface DatabaseGrid { columns: string[]; rows: (string | null)[][] }
 export interface DatabaseWorkspaceRequest { database: string; action: "tables" | "schema" | "rows" | "sql" | "update"; table?: string; offset?: number; sql?: string; confirmed?: boolean; column?: string; value?: string | null; original?: (string | null)[] }
 export const databaseWorkspace = (engine: DatabaseEngine, version: string, request: DatabaseWorkspaceRequest) => safe(invoke<DatabaseGrid[]>("db_workspace", { engine, version, request }));

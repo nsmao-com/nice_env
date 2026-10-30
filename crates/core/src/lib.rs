@@ -2,6 +2,7 @@
 
 pub mod acme;
 pub mod applications;
+pub mod assistant;
 pub mod bulk;
 pub mod caddy;
 pub mod certauto;

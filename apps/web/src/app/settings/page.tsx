@@ -43,7 +43,7 @@ import {
   UI_FONT_OPTIONS,
   type AppSettings,
 } from "@nsb/schema";
-import { cn, fmtBytes } from "@/lib/utils";
+import { cn, fmtBytes, formatAppVersion } from "@/lib/utils";
 import { useUI, useT } from "@/lib/store";
 import { toastError, useStacks } from "@/lib/hooks";
 import * as api from "@/lib/api";
@@ -1343,7 +1343,7 @@ export default function SettingsPage() {
                     <div className="flex flex-col">
                       <span className="text-[12.5px] text-secondary">
                         {t("settings.currentVersion")}{" "}
-                        <code className="font-mono text-foreground">v{appVersion || bundledAppVersion}</code>
+                        <code className="font-mono text-foreground">{formatAppVersion(appVersion || bundledAppVersion)}</code>
                       </span>
                       <span className="text-[10.5px] text-faint">{t("settings.manifestHint")}</span>
                     </div>
@@ -1444,7 +1444,7 @@ export default function SettingsPage() {
                   <div className="flex flex-col gap-0.5">
                     <span className="text-[12.5px] text-secondary">{t("about.desc")}</span>
                     <span className="text-[10.5px] text-faint">
-                      {t("settings.currentVersion")} v{appVersion || bundledAppVersion}
+                      {t("settings.currentVersion")} {formatAppVersion(appVersion || bundledAppVersion)}
                     </span>
                   </div>
                   <div className="flex gap-2">

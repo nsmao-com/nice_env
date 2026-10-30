@@ -853,11 +853,12 @@ pub fn validate(
                 }
                 match run_validator(&mut command) {
                     Ok((ok, output)) => {
+                        let output = crate::paths::portable_text(&output);
                         for line in output.lines().map(str::trim).filter(|l| !l.is_empty()) {
                             messages.push(line.to_string());
                             let is_current = line
                                 .replace('\\', "/")
-                                .contains(&tmp.path().to_string_lossy().replace('\\', "/"))
+                                .contains(&crate::paths::portable_path_text(tmp.path()))
                                 || line.contains(&format!(
                                     "{}:",
                                     tmp.path().file_name().unwrap().to_string_lossy()

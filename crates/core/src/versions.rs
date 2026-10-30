@@ -14,6 +14,19 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
+/// Compare release tags using SemVer; build metadata does not make an update newer.
+pub fn app_version_newer(remote: &str, local: &str) -> bool {
+    let parse = |value: &str| semver::Version::parse(value.trim().trim_start_matches(['v', 'V']));
+    match (parse(remote), parse(local)) {
+        (Ok(mut remote), Ok(mut local)) => {
+            remote.build = semver::BuildMetadata::EMPTY;
+            local.build = semver::BuildMetadata::EMPTY;
+            remote > local
+        }
+        _ => false,
+    }
+}
+
 static FETCH_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(6);
 // 同一个套件/平台的强制刷新可能同时来自套件页、设置页和安装器。
 // 通过按缓存键串行化，避免并发重复请求上游并互相覆盖结果。
@@ -1410,6 +1423,16 @@ fn version_parts(v: &str) -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn application_updates_compare_semver_without_duplicate_prefixes() {
+        assert!(app_version_newer("v1.0.0", "0.2.322"));
+        assert!(!app_version_newer("v1.0.0", "1.0.0"));
+        assert!(!app_version_newer("v1.0.0-rc.1", "1.0.0"));
+        assert!(app_version_newer(" V1.0.0 ", "v1.0.0-rc.1"));
+        assert!(!app_version_newer("v1.0.0+build.2", "1.0.0+build.1"));
+        assert!(!app_version_newer("latest", "1.0.0"));
+    }
 
     #[test]
     fn cached_catalog_keeps_fetch_time_without_claiming_live_access() {

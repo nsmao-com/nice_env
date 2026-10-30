@@ -3,7 +3,7 @@
 import * as React from "react";
 import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, RefreshCw, Loader2 } from "lucide-react";
+import { AlertTriangle, RefreshCw, Loader2, Bot } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useUI } from "@/lib/store";
 import { Sidebar } from "./sidebar";
@@ -21,8 +21,12 @@ const CommandPalette = React.lazy(() => import("./command-palette").then((m) => 
 const SiteWizard = React.lazy(() => import("@/components/sites/site-wizard").then((m) => ({ default: m.SiteWizard })));
 const Onboarding = React.lazy(() => import("@/components/sites/onboarding").then((m) => ({ default: m.Onboarding })));
 const UpdateDialog = React.lazy(() => import("@/components/shared/update-dialog").then((m) => ({ default: m.UpdateDialog })));
+const AssistantPanel = React.lazy(() => import("@/components/shared/assistant-panel").then((m) => ({ default: m.AssistantPanel })));
 
 function ShellFrame({ children }: { children: React.ReactNode }) {
+  const [assistantOpen, setAssistantOpen] = React.useState(false);
+  const [assistantLoaded, setAssistantLoaded] = React.useState(false);
+  const english = useUI((s) => s.lang) === "en";
   const navigate = useNavigate();
   const wizardOpen = useUI((s) => s.wizardOpen);
   const [wizardLoaded, setWizardLoaded] = React.useState(false);
@@ -103,6 +107,10 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
       />}</React.Suspense>
       <React.Suspense fallback={null}><Onboarding /></React.Suspense>
       <UpdateWatcher />
+      <Button className="fixed bottom-5 right-5 z-40 h-11 gap-2 rounded-full px-4 shadow-lg" onClick={() => { setAssistantLoaded(true); setAssistantOpen(true); }} aria-label={english ? "Open AI assistant" : "打开 AI 环境助手"}>
+        <Bot className="h-4 w-4" /><span className="text-xs">{english ? "AI Assistant" : "AI 助手"}</span>
+      </Button>
+      {assistantLoaded && <React.Suspense fallback={null}><AssistantPanel open={assistantOpen} onOpenChange={setAssistantOpen} /></React.Suspense>}
       <WindowControls />
     </div>
   );

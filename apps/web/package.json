@@ -1,6 +1,6 @@
 {
   "name": "@nsb/web",
-  "version": "0.2.322",
+  "version": "1.0.0",
   "private": true,
   "scripts": {
     "dev": "vite",

@@ -30,7 +30,7 @@ import { useUI, useT } from "@/lib/store";
 import { useServices, useStacks, useSites, useSettings, serviceHasProcess, toastError, useQuickServiceActions } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import { isTauri, listen, normalizeError, type AppErrorShape } from "@/lib/backend";
-import { cn, bulkTarget, mergeBulkReport } from "@/lib/utils";
+import { cn, bulkTarget, mergeBulkReport, formatAppVersion } from "@/lib/utils";
 import { ConfirmDialog } from "@/components/shared/misc";
 import { BulkResult, BulkTargetList } from "@/components/shared/bulk-actions";
 import type { BulkReport, BulkTarget } from "@nsb/schema";
@@ -223,7 +223,7 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="w-56" onCloseAutoFocus={(e) => e.preventDefault()}>
           <DropdownMenuLabel>
-            NiceEnv <span className="font-mono text-faint">v{version}</span>
+            NiceEnv <span className="font-mono text-faint">{formatAppVersion(version)}</span>
           </DropdownMenuLabel>
           <DropdownMenuSeparator />
           <DropdownMenuItem disabled={checking} onSelect={() => run(checkUpdate)}>
@@ -398,7 +398,7 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
           </DialogHeader>
           <p className="text-[13px] text-secondary">
             {t("settings.currentVersion")}{" "}
-            <code className="rounded bg-card-2 px-1.5 py-0.5 font-mono text-[12px]">v{version}</code>
+            <code className="rounded bg-card-2 px-1.5 py-0.5 font-mono text-[12px]">{formatAppVersion(version)}</code>
           </p>
           <DialogFooter>
             <Button variant="secondary" onClick={() => api.openInBrowser(REPO_URL).catch(toastError)}>

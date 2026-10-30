@@ -195,7 +195,7 @@ pub fn handle_tool_call(state: &Arc<crate::CoreState>, name: &str, args: &Value)
                 package.install.map(|installed| json!({
                     "id": installed.id, "version": installed.version,
                     "name": package.manifest.display_name, "category": installed.category,
-                    "active": package.active, "installPath": installed.install_path,
+                    "active": package.active, "installPath": crate::paths::portable_path_text(std::path::Path::new(&installed.install_path)),
                     "installedAt": installed.installed_at,
                 }))
             }).collect();
@@ -313,10 +313,129 @@ fn rpc_error(id: Value, code: i32, message: &str) -> Value {
 mod tests {
     use super::*;
 
+    #[test]
+    fn assistant_requires_single_use_confirmation_and_rejects_unknown_tools() {
+        let (_base, state) = state();
+        let assistant = crate::assistant::Assistant::default();
+        state.manager.register("assistant-fixture", "Fixture", Some("1.0.0".into()), None, None, state.paths.logs().join("fixture.log"));
+        assert!(assistant.prepare(&state, "shell", &json!({"command":"whoami"})).is_err());
+        assert!(assistant.prepare(&state, "read_logs", &json!({"id":"assistant-fixture","path":"secret"})).is_err());
+        let proposal = serde_json::to_value(assistant.prepare(&state, "start_service", &json!({"id":"assistant-fixture"})).unwrap()).unwrap();
+        let token = proposal["approval"]["token"].as_str().unwrap();
+        assert!(proposal["result"].is_null());
+        assert!(state.manager.snapshot("assistant-fixture").unwrap().pids.is_empty());
+        let cancelled = assistant.confirm(&state, token, false).unwrap();
+        assert!(cancelled.result.unwrap().contains("cancelled"));
+        assert!(assistant.confirm(&state, token, true).is_err());
+        assert!(state.manager.snapshot("assistant-fixture").unwrap().pids.is_empty());
+        let proposal = serde_json::to_value(assistant.prepare(&state, "stop_service", &json!({"id":"assistant-fixture"})).unwrap()).unwrap();
+        state.manager.register("assistant-fixture", "Fixture", Some("2.0.0".into()), None, None, state.paths.logs().join("fixture.log"));
+        assert!(assistant.confirm(&state, proposal["approval"]["token"].as_str().unwrap(), true).is_err());
+    }
+
+    #[tokio::test]
+    async fn assistant_compatible_http_round_trip_and_invalid_endpoints() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut buffer = [0; 4096];
+                let count = stream.read(&mut buffer).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&buffer[..count]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                    let length: usize = head.lines().find_map(|line| line.strip_prefix("content-length:")).unwrap().trim().parse().unwrap();
+                    if request.len() >= end + 4 + length {
+                        assert!(head.starts_with("post /v1/chat/completions "));
+                        let body: Value = serde_json::from_slice(&request[end + 4..]).unwrap();
+                        assert_eq!(body["model"], "fixture");
+                        assert!(body["tools"].as_array().unwrap().len() >= 10);
+                        assert!(!body.to_string().contains("private-password-value"));
+                        break;
+                    }
+                }
+            }
+            let body = json!({"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-fixture","type":"function","function":{"name":"list_services","arguments":"{}"}}]}}]}).to_string();
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).as_bytes()).await.unwrap();
+        });
+        let response = crate::assistant::chat(crate::assistant::ChatRequest {
+            endpoint: format!("http://{address}/v1"), model: "fixture".into(), api_key: String::new(),
+            messages: vec![json!({"role":"user","content":"password=private-password-value"})],
+        }).await.unwrap();
+        assert_eq!(response["tool_calls"][0]["function"]["name"], "list_services");
+        server.await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut buffer = [0; 4096];
+                let count = stream.read(&mut buffer).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&buffer[..count]);
+                if request.windows(4).any(|w| w == b"\r\n\r\n") { break; }
+            }
+            assert!(String::from_utf8_lossy(&request).starts_with("GET /v1/models "));
+            let body = r#"{"data":[{"id":"fixture-b"},{"id":"fixture-a"},{"id":"fixture-b"}]}"#;
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).as_bytes()).await.unwrap();
+        });
+        assert_eq!(crate::assistant::models(crate::assistant::ModelsRequest { endpoint: format!("http://{address}/v1/chat/completions"), api_key: String::new() }).await.unwrap(), vec!["fixture-a", "fixture-b"]);
+        server.await.unwrap();
+        for endpoint in ["http://example.com/v1", "https://user:password@example.com/v1", "https://example.com/v1?key=secret", "file:///tmp/model"] {
+            assert!(crate::assistant::chat(crate::assistant::ChatRequest { endpoint: endpoint.into(), model: "fixture".into(), api_key: String::new(), messages: vec![json!({"role":"user","content":"hello"})] }).await.is_err());
+        }
+    }
+
     fn state() -> (tempfile::TempDir, Arc<crate::CoreState>) {
         let base = tempfile::tempdir().unwrap();
         let state = crate::CoreState::init(Some(base.path().to_path_buf()), Arc::new(|_| {})).unwrap();
         (base, state)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires NSB_NGINX_ROOT; validates isolated config only, never starts services"]
+    fn assistant_native_nginx_repair_preserves_unicode_paths_and_backup() {
+        let source = std::path::PathBuf::from(std::env::var_os("NSB_NGINX_ROOT").expect("NSB_NGINX_ROOT"));
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().join("NiceEnv 中文 空格");
+        std::fs::create_dir(&base).unwrap();
+        let state = crate::CoreState::init(Some(base.canonicalize().unwrap()), Arc::new(|_| {})).unwrap();
+        let install = state.paths.runtime_dir("nginx", "1.31.8");
+        let root = install.join("nginx-1.31.8");
+        std::fs::create_dir_all(root.join("logs")).unwrap();
+        std::fs::create_dir_all(root.join("temp")).unwrap();
+        std::fs::copy(source.join("nginx.exe"), root.join("nginx.exe")).unwrap();
+        state.store.upsert_installed(&crate::model::InstalledPackage { id:"nginx".into(), version:"1.31.8".into(), category:"webserver".into(), install_path:install.to_string_lossy().into(), config_path:String::new(), installed_at:0 }).unwrap();
+        std::fs::create_dir_all(state.paths.nginx_sites_dir()).unwrap();
+        let site = state.paths.nginx_sites_dir().join("fixture.conf");
+        std::fs::write(&site, "server { listen 127.0.0.1:18681; location / { fastcgi_pass nsb_php_8_4_26; } }").unwrap();
+        let before = format!("# keep custom settings\nerror_log \"{}\";\nevents {{ worker_connections 64; }}\nhttp {{ keepalive_timeout 123; include \"{}\"; }}\n", crate::paths::portable_path_text(&root.join("logs/error.log")), crate::paths::portable_path_text(&site));
+        std::fs::write(state.paths.nginx_conf(), &before).unwrap();
+        let assistant = crate::assistant::Assistant::default();
+        let proposal = serde_json::to_value(assistant.prepare(&state, "repair_nginx", &json!({})).unwrap()).unwrap();
+        assert_eq!(std::fs::read_to_string(state.paths.nginx_conf()).unwrap(), before);
+        std::fs::write(state.paths.nginx_conf(), format!("{before}# concurrent edit\n")).unwrap();
+        assert!(assistant.confirm(&state, proposal["approval"]["token"].as_str().unwrap(), true).is_err());
+        assert!(std::fs::read_to_string(state.paths.nginx_conf()).unwrap().ends_with("# concurrent edit\n"));
+        std::fs::write(state.paths.nginx_conf(), &before).unwrap();
+        let proposal = serde_json::to_value(assistant.prepare(&state, "repair_nginx", &json!({})).unwrap()).unwrap();
+        let reply = assistant.confirm(&state, proposal["approval"]["token"].as_str().unwrap(), true).unwrap();
+        assert!(reply.result.unwrap().contains("\"ok\":true"));
+        let after = std::fs::read_to_string(state.paths.nginx_conf()).unwrap();
+        assert!(after.contains("keepalive_timeout 123"));
+        assert!(after.contains("upstream nsb_php_8_4_26"));
+        assert!(!after.contains("//?/"));
+        let backups = crate::cfgeditor::list_config_backups_selected(&state.paths, &state.store, Some("nginx-main")).unwrap();
+        assert!(backups.iter().any(|backup| std::fs::read_to_string(&backup.path).ok().as_deref() == Some(before.as_str())));
+        let validated = state.validate_config("nginx-main", &after).unwrap();
+        assert!(validated.ok, "{:?}", validated);
+        assert!(state.manager.snapshot("nginx").is_none_or(|service| service.pids.is_empty()));
     }
 
     #[test]

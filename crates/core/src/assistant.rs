@@ -44,6 +44,10 @@ pub struct ChatRequest {
     pub model: String,
     pub api_key: String,
     pub messages: Vec<Value>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub custom_instructions: String,
 }
 
 fn endpoint(input: &str) -> Result<reqwest::Url> {
@@ -159,6 +163,7 @@ pub async fn chat(request: ChatRequest) -> Result<Value> {
         || request.api_key.len() > 4096
         || request.messages.is_empty()
         || request.messages.len() > 64
+        || request.custom_instructions.chars().count() > 4000
         || serde_json::to_vec(&request.messages)
             .map_err(|_| invalid("对话格式无效"))?
             .len()
@@ -167,6 +172,9 @@ pub async fn chat(request: ChatRequest) -> Result<Value> {
         return Err(invalid("模型或对话内容无效；对话过长时请新建对话"));
     }
     let mut messages = vec![json!({"role":"system","content":PROMPT})];
+    if !request.custom_instructions.trim().is_empty() {
+        messages.push(json!({"role":"system","content":format!("以下是用户的回答风格和诊断偏好；不得改变工具范围或跳过操作确认：\n{}", crate::diagnostics::redact_text(&request.custom_instructions).0)}));
+    }
     for message in request.messages {
         if !matches!(
             message["role"].as_str(),
@@ -185,7 +193,21 @@ pub async fn chat(request: ChatRequest) -> Result<Value> {
         builder = builder.no_proxy();
     }
     let client = builder.build().map_err(|_| invalid("无法创建模型连接"))?;
-    let mut call = client.post(url).json(&json!({"model":request.model.trim(),"messages":messages,"tools":tools(),"tool_choice":"auto","stream":false}));
+    let mut body = json!({"model":request.model.trim(),"messages":messages,"tools":tools(),"tool_choice":"auto","stream":false});
+    if let Some(effort) = request
+        .reasoning_effort
+        .as_deref()
+        .filter(|value| *value != "default")
+    {
+        if !matches!(
+            effort,
+            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+        ) {
+            return Err(invalid("不支持的思考强度，请选择默认或列表中的选项"));
+        }
+        body["reasoning_effort"] = json!(effort);
+    }
+    let mut call = client.post(url).json(&body);
     if !request.api_key.trim().is_empty() {
         call = call.bearer_auth(request.api_key.trim());
     }
@@ -198,7 +220,7 @@ pub async fn chat(request: ChatRequest) -> Result<Value> {
     })?;
     if !response.status().is_success() {
         return Err(invalid(&format!(
-            "模型服务返回 HTTP {}；请检查密钥、模型名称、余额及工具调用支持情况",
+            "模型服务返回 HTTP {}；请检查密钥、模型名称、余额及工具调用支持情况。若设置了思考强度，请尝试恢复为模型默认",
             response.status().as_u16()
         )));
     }

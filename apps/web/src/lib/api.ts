@@ -993,7 +993,8 @@ export const fullLog = (id: string) => safe(invoke<string>("full_log", { id }));
 
 export interface AssistantCall { id: string; type: "function"; function: { name: string; arguments: string } }
 export interface AssistantMessage { role: "user" | "assistant" | "tool"; content: string | null; tool_calls?: AssistantCall[]; tool_call_id?: string }
-export interface AssistantConnection { endpoint: string; model: string; apiKey: string }
+export type AssistantReasoning = "default" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export interface AssistantConnection { endpoint: string; model: string; apiKey: string; reasoningEffort?: AssistantReasoning; customInstructions?: string }
 export interface AssistantApproval { token: string; title: string; detail: string }
 export interface AssistantToolReply { result: string | null; approval: AssistantApproval | null }
 export const assistantChat = (connection: AssistantConnection, messages: AssistantMessage[]) =>

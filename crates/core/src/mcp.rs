@@ -407,6 +407,11 @@ mod tests {
                         assert!(head.starts_with("post /v1/chat/completions "));
                         let body: Value = serde_json::from_slice(&request[end + 4..]).unwrap();
                         assert_eq!(body["model"], "fixture");
+                        assert_eq!(body["reasoning_effort"], "high");
+                        assert!(body["messages"][1]["content"]
+                            .as_str()
+                            .unwrap()
+                            .contains("先概括原因"));
                         assert!(body["tools"].as_array().unwrap().len() >= 10);
                         assert!(!body.to_string().contains("private-password-value"));
                         break;
@@ -420,6 +425,8 @@ mod tests {
             endpoint: format!("http://{address}/v1"),
             model: "fixture".into(),
             api_key: String::new(),
+            reasoning_effort: Some("high".into()),
+            custom_instructions: "先概括原因".into(),
             messages: vec![json!({"role":"user","content":"password=private-password-value"})],
         })
         .await
@@ -467,6 +474,8 @@ mod tests {
                 endpoint: endpoint.into(),
                 model: "fixture".into(),
                 api_key: String::new(),
+                reasoning_effort: None,
+                custom_instructions: String::new(),
                 messages: vec![json!({"role":"user","content":"hello"})]
             })
             .await

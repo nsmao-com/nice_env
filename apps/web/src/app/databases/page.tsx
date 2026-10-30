@@ -235,7 +235,8 @@ function MySqlWorkspace({ onLockChange, importRequested }: { onLockChange: (lock
   // 但当前已经打开的弹窗仍要能继续提交或重试。
   const dialogReady = ready && !workspaceLocked && !backupLocked;
   const actionReady = dialogReady && !createOpen && !userOpen && !rootOpen && !importOpen && !dropTarget;
-  const workspaceReady = dialogReady && !createOpen && !userOpen && !rootOpen && !importOpen && !dropTarget;
+  // The workspace lock blocks sibling actions, never its own confirmation dialog.
+  const workspaceReady = ready && !backupLocked && !createOpen && !userOpen && !rootOpen && !importOpen && !dropTarget && !deleteUser && !passwordUser && !grantUser;
   const backupReady = ready && !workspaceLocked && !createOpen && !userOpen && !rootOpen && !importOpen && !dropTarget;
   React.useEffect(() => { onLockChange(locked); return () => onLockChange(false); }, [locked, onLockChange]);
   React.useEffect(() => { setDatabaseSearch(""); }, [engine, version]);

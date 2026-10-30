@@ -1288,8 +1288,33 @@ async fn site_files_inspect_restore(app:tauri::AppHandle,state: State<'_,std::sy
     let st=state.inner().clone();tauri::async_runtime::spawn_blocking(move ||map_jh(nsb_core::sitebackup::inspect_restore(&st,&id,&name,parent.as_deref(),&site_files_progress(app,id.clone(),operation_id)))).await.map_err(|e|tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 #[tauri::command]
-async fn site_files_restore(app:tauri::AppHandle,state: State<'_,std::sync::Arc<CoreState>>, id:String, name:String, parent:Option<String>, revision:String, trusted:bool, operation_id:String) -> Result<String,tauri::Error> {
-    let st=state.inner().clone();tauri::async_runtime::spawn_blocking(move ||map_jh(nsb_core::sitebackup::restore(&st,&id,&name,parent.as_deref(),&revision,trusted,&site_files_progress(app,id.clone(),operation_id)))).await.map_err(|e|tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
+async fn site_files_restore(
+    app: tauri::AppHandle,
+    state: State<'_, std::sync::Arc<CoreState>>,
+    id: String,
+    name: String,
+    parent: Option<String>,
+    revision: String,
+    trusted: bool,
+    operation_id: String,
+) -> Result<String, tauri::Error> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        map_jh(
+            nsb_core::sitebackup::restore(
+                &st,
+                &id,
+                &name,
+                parent.as_deref(),
+                &revision,
+                trusted,
+                &site_files_progress(app, id.clone(), operation_id),
+            )
+            .map(|path| nsb_core::paths::portable_text(&path)),
+        )
+    })
+    .await
+    .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("{e}")))?
 }
 #[tauri::command]
 async fn site_files_delete(state: State<'_,std::sync::Arc<CoreState>>, id:String, name:String) -> Result<(),tauri::Error> {

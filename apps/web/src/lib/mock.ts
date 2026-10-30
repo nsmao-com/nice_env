@@ -315,7 +315,7 @@ function mockSiteFileScope(id: string, project: boolean, exclude: boolean): Site
 
 /** 浏览器预览使用的应用版本；桌面端版本由各端 manifest 注入。 */
 const MOCK_APP_VERSION = bundledAppVersion;
-const MOCK_NEXT_VERSION = "1.0.4";
+const MOCK_NEXT_VERSION = "1.0.5";
 
 const mockMongoDatabases = new Map<string, Record<string, Record<string, unknown>[]>>([
   ["niceenv_demo", { documents: Array.from({ length: 23 }, (_, i) => ({ _id: { $oid: (i+1).toString(16).padStart(24,"0") }, title: `预览文档 ${i+1}`, active: i%2 === 0, count: { $numberInt: String(i+1) }, createdAt: { $date: { $numberLong: "1790611200000" } } })) }],

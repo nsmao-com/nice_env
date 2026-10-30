@@ -1217,7 +1217,9 @@ pub fn restore(
         return Err(restore_changed());
     }
     progress("complete", files, bytes);
-    Ok(crate::paths::portable_path_text(&pending.keep()))
+    // Internal callers compare canonical paths and require the native Windows prefix.
+    // Convert only at the desktop response boundary.
+    Ok(pending.keep().to_string_lossy().into())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -1685,6 +1685,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           if (selected) {
             mockPathEnv.versions[id] = version;
             mockPathEnv.selected.push(id);
+            if (["npm", "pnpm"].includes(id) && !mockPathEnv.selected.includes("node")) mockPathEnv.selected.push("node");
             mockPathEnv.enabled = true;
           }
         }
@@ -1729,7 +1730,8 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           chosen = [...chosen.filter((entry) => entry.id !== id), selected];
         }
         const prioritized = (id: string) => Object.hasOwn(required, id) || (id === "php" && site?.runtime.kind === "php");
-        chosen.sort((a, b) => Number(prioritized(b.id)) - Number(prioritized(a.id)) || a.id.localeCompare(b.id));
+        const packageManager = (id: string) => ["npm", "pnpm"].includes(id);
+        chosen.sort((a, b) => Number(packageManager(b.id)) - Number(packageManager(a.id)) || Number(prioritized(b.id)) - Number(prioritized(a.id)) || a.id.localeCompare(b.id));
         const cwd = site ? site.rootDir.replace(/[\\/](public|out|dist|build)[\\/]?$/, "") : "…";
         const quoted = chosen.map((entry) => `'${entry.binDir.replace(/['‘’‚‛]/g, (quote) => quote + quote)}'`).join(",\n    ");
         return {
@@ -1758,7 +1760,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         } as T;
       }
       const managedDirs = mockPathEnv.enabled
-        ? entries.filter((e) => e.selected).map((e) => e.binDir)
+        ? entries.filter((e) => e.selected).sort((a, b) => Number(["npm", "pnpm"].includes(b.id)) - Number(["npm", "pnpm"].includes(a.id)) || a.id.localeCompare(b.id)).map((e) => e.binDir)
         : [];
       return {
         enabled: mockPathEnv.enabled,

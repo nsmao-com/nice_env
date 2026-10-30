@@ -1,6 +1,6 @@
 {
-  "revision": 48,
-  "updated": "2026-09-30",
+  "revision": 49,
+  "updated": "2026-10-30",
   "packages": [
     {
       "id": "mongosh",
@@ -5824,6 +5824,102 @@
         "singleInstance": false,
         "dataDir": "mysql"
       }
+    },
+    {
+      "id": "npm",
+      "version": "11.6.2",
+      "category": "tool",
+      "displayName": "npm",
+      "description": "npm 独立命令行版本（需要 Node.js 运行时）",
+      "homepage": "https://www.npmjs.com/",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "targz",
+      "url": "https://registry.npmjs.org/npm/-/npm-11.6.2.tgz",
+      "sha256": "585f95094ee5cb2788ee11d90f2a518a7c9ef6e083fa141d0b63ca3383675a20",
+      "note": "Node.js ^20.17.0 || >=22.9.0",
+      "sizeBytes": 2663834,
+      "entry": "package/bin/npm-cli.js",
+      "requires": [
+        "node"
+      ],
+      "versionSource": { "kind": "npm-registry", "maxVersions": 100 }
+    },
+    {
+      "id": "npm",
+      "version": "10.9.2",
+      "category": "tool",
+      "displayName": "npm",
+      "description": "npm 独立命令行版本（需要 Node.js 运行时）",
+      "homepage": "https://www.npmjs.com/",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "targz",
+      "url": "https://registry.npmjs.org/npm/-/npm-10.9.2.tgz",
+      "sha256": "5cd1e5ab971ea6333f910bc2d50700167c5ef4e66da279b2a3efc874c6b116e4",
+      "note": "Node.js ^18.17.0 || >=20.5.0",
+      "sizeBytes": 2714270,
+      "entry": "package/bin/npm-cli.js",
+      "requires": [
+        "node"
+      ],
+      "versionSource": { "kind": "npm-registry", "maxVersions": 100 }
+    },
+    {
+      "id": "pnpm",
+      "version": "10.18.2",
+      "category": "tool",
+      "displayName": "pnpm",
+      "description": "pnpm 独立命令行版本（需要 Node.js 运行时）",
+      "homepage": "https://pnpm.io/",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "targz",
+      "url": "https://registry.npmjs.org/pnpm/-/pnpm-10.18.2.tgz",
+      "sha256": "93421022fe0156d7cbdf699edc3d7eab39654986eac14f927d02b85f0dac6d61",
+      "note": "Node.js >=18.12",
+      "sizeBytes": 4154536,
+      "entry": "package/bin/pnpm.cjs",
+      "requires": [
+        "node"
+      ],
+      "versionSource": { "kind": "npm-registry", "maxVersions": 100 }
+    },
+    {
+      "id": "pnpm",
+      "version": "9.15.9",
+      "category": "tool",
+      "displayName": "pnpm",
+      "description": "pnpm 独立命令行版本（需要 Node.js 运行时）",
+      "homepage": "https://pnpm.io/",
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "x64"
+      ],
+      "kind": "targz",
+      "url": "https://registry.npmjs.org/pnpm/-/pnpm-9.15.9.tgz",
+      "sha256": "cf86a7ad764406395d4286a6d09d730711720acc6d93e9dce9ac7ac4dc4a28a7",
+      "note": "Node.js >=18.12",
+      "sizeBytes": 4311450,
+      "entry": "package/bin/pnpm.cjs",
+      "requires": [
+        "node"
+      ],
+      "versionSource": { "kind": "npm-registry", "maxVersions": 100 }
     }
   ]
 }

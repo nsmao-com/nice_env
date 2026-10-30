@@ -31,6 +31,8 @@ rand = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
 regex = { workspace = true }
+# 复用锁文件中的版本解析器，校验 npm/pnpm 声明的 Node engines。
+semver = "1.0.28"
 once_cell = { workspace = true }
 parking_lot = { workspace = true }
 tempfile = { workspace = true }

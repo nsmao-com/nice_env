@@ -431,7 +431,8 @@ fn terminal_environment_selected(store: &Store, paths: &Paths, manifest: &Manife
             }
         }
     }
-    entries.sort_by_key(|entry| (!required.contains_key(&entry.id), entry.id.clone()));
+    entries.sort_by_key(|entry| (command_priority(&entry.id), !required.contains_key(&entry.id), entry.id.clone()));
+    validate_js_cli_node(&installed, &entries.iter().map(|entry| (entry.id.as_str(), entry.version.as_str())).collect::<Vec<_>>())?;
     let dirs = entries
         .iter()
         .map(|entry| entry.bin_dir.clone())
@@ -497,6 +498,11 @@ pub(crate) fn terminal_package_directory(package: &crate::model::InstalledPackag
 }
 
 fn terminal_cli_entry(id: &str, entry: &str, windows: bool) -> String {
+    if matches!(id, "npm" | "pnpm") && !matches!(entry, "package/pnpm" | "package/pnpm.exe") {
+        let parent = entry.rsplit_once('/').map(|(parent, _)| parent).unwrap_or("");
+        let name = if windows { format!("{id}.cmd") } else { id.into() };
+        return if parent.is_empty() { name } else { format!("{parent}/{name}") };
+    }
     if id != "php" { return entry.into(); }
     let entry = if windows {
         entry.replace('\\', "/")
@@ -780,8 +786,53 @@ fn desired_dirs_checked(store: &Store, manifest: &Manifest) -> Result<Vec<String
         }
     }
     // 按 id 排序，保证多次调用结果稳定
-    dirs.sort_by(|a, b| a.0.cmp(&b.0));
+    dirs.sort_by_key(|(id, _)| (command_priority(id), id.clone()));
     Ok(dirs.into_iter().map(|(_, d)| d).collect())
+}
+
+// 独立选择的 npm/pnpm 必须先于 Node 自带的 npm/npx/Corepack shim。
+fn command_priority(id: &str) -> u8 {
+    if matches!(id, "npm" | "pnpm") { 0 } else { 1 }
+}
+
+fn node_engine_matches(range: &str, version: &str) -> bool {
+    let Ok(version) = semver::Version::parse(version.trim_start_matches('v')) else { return false; };
+    // 官方 npm/pnpm 使用 || 并集及空格分隔的比较器；不认识的范围按不兼容处理。
+    range.split("||").any(|alternative| {
+        let comparators = alternative.split_whitespace().collect::<Vec<_>>().join(", ");
+        semver::VersionReq::parse(&comparators).is_ok_and(|requirement| requirement.matches(&version))
+    })
+}
+
+fn validate_js_cli_node(installed: &[crate::model::InstalledPackage], selected: &[(&str, &str)]) -> Result<()> {
+    for (id, version) in selected.iter().copied().filter(|(id, _)| matches!(*id, "npm" | "pnpm")) {
+        let node = selected.iter().find(|(id, _)| *id == "node").map(|(_, version)| *version)
+            .ok_or_else(|| AppError::new("JS_CLI_NODE_REQUIRED", format!("{id} {version} 需要 Node.js，请先在环境变量中选择 Node.js 版本")))?;
+        let package = installed.iter().find(|package| package.id == id && package.version == version)
+            .ok_or_else(|| AppError::new("PATH_VERSION_UNAVAILABLE", "所选包管理器已卸载"))?;
+        let path = std::path::Path::new(&package.install_path).join("package/package.json");
+        if !path.is_file() {
+            return Err(AppError::new("JS_CLI_METADATA", "包管理器缺少 package.json，请重新安装"));
+        }
+        let file = std::fs::File::open(path)?;
+        if file.metadata()?.len() > 1024 * 1024 { return Err(AppError::new("JS_CLI_METADATA", "包管理器的 package.json 过大")); }
+        let metadata: serde_json::Value = serde_json::from_reader(file)
+            .map_err(|e| AppError::internal("读取包管理器版本要求", e.to_string()))?;
+        // pnpm 12 原生子包不带 engines，使用安装快照保存的主包要求。
+        let snapshot = if id == "pnpm" && metadata.get("name").and_then(|value| value.as_str()).is_some_and(|name| matches!(name,
+            "@pnpm/exe.win32-x64" | "@pnpm/exe.win32-arm64" | "@pnpm/exe.darwin-x64" | "@pnpm/exe.darwin-arm64")) {
+            std::fs::read_to_string(std::path::Path::new(&package.install_path).join(".niceenv-package.json")).ok()
+                .and_then(|content| serde_json::from_str::<crate::model::PackageManifestEntry>(&content).ok())
+        } else { None };
+        let range = metadata.pointer("/engines/node").and_then(|value| value.as_str())
+            .or_else(|| snapshot.as_ref().and_then(|snapshot| snapshot.note.as_deref()).and_then(|note| note.strip_prefix("Node.js ")))
+            .ok_or_else(|| AppError::new("JS_CLI_METADATA", "包管理器缺少 Node.js 兼容性声明，请重新安装"))?;
+        if !node_engine_matches(range, node) {
+            return Err(AppError::new("JS_CLI_NODE_INCOMPATIBLE", format!("{id} {version} 要求 Node.js {range}，当前选择为 {node}"))
+                .with_hint("请先移除该包管理器的 PATH 选择，切换到兼容的 Node.js 后再选择包管理器版本。"));
+        }
+    }
+    Ok(())
 }
 
 /// 读取已保存的系统配置；错误必须传给前端，不能伪装成关闭或空列表。
@@ -977,6 +1028,18 @@ pub fn apply(store: &Store, paths: &Paths, manifest: &Manifest) -> Result<PathEn
     let _ = paths;
     let enabled = store.get_setting_checked(ENABLED_KEY)?.as_deref() == Some("1");
     let desired = if enabled {
+        let installed = store.list_installed()?;
+        let versions = read_selection(store, VERSIONS_KEY)?;
+        let selected = read_selection::<Option<Vec<String>>>(store, SELECTED_KEY)?;
+        let mut choices = Vec::new();
+        for id in ["node", "npm", "pnpm"] {
+            if wants(&selected, id) {
+                if let Some(package) = chosen_from(store, &installed, &versions, id)? {
+                    choices.push((id, package.version.as_str()));
+                }
+            }
+        }
+        validate_js_cli_node(&installed, &choices)?;
         desired_dirs_checked(store, manifest)?
     } else {
         Vec::new()
@@ -1117,6 +1180,11 @@ pub fn set_version(
     if selected {
         versions.insert(id.to_string(), version.to_string());
         ids.push(id.to_string());
+        if matches!(id, "npm" | "pnpm") && !ids.iter().any(|value| value == "node") {
+            // 包管理器的 cmd 启动器依赖 node；自动把当前 Node 版本加入 PATH，
+            // 用户仍可在 Node.js 选择器中切换版本。
+            ids.push("node".into());
+        }
     }
     update_selection(store, manifest, || {
         store.set_setting_json(VERSIONS_KEY, &versions)?;
@@ -1593,6 +1661,63 @@ mod tests {
                 .as_deref(),
             Some("2.0.0")
         );
+        assert!(store.get_setting(DIRS_KEY).is_none());
+        assert!(node_engine_matches("^20.17.0 || >=22.9.0", "22.14.0"));
+        assert!(node_engine_matches(">=18.12", "18.12.0"));
+        assert!(!node_engine_matches("^20.17.0 || >=22.9.0", "22.8.0"));
+        assert!(!node_engine_matches("^20.17.0 || >=22.9.0", "21.0.0"));
+        assert!(!node_engine_matches(">=18.12", "18.11.0"));
+        assert!(node_engine_matches(">=18.12 <23", "22.14.0"));
+        assert!(!node_engine_matches(">=18.12 <23", "24.0.0"));
+        assert_eq!(terminal_cli_entry("npm", "package/bin/npm-cli.js", true), "package/bin/npm.cmd");
+        assert_eq!(terminal_cli_entry("pnpm", "package/bin/pnpm.cjs", false), "package/bin/pnpm");
+    }
+
+    #[test]
+    fn js_package_managers_precede_node_and_reject_incompatible_selection() {
+        let (temp, store, paths, mut manifest) = terminal_fixture();
+        manifest.packages.clear();
+        for (id, version, entry) in [("node", "22.14.0", "bin/node"), ("node", "18.11.0", "bin/node"),
+            ("npm", "11.6.2", "package/bin/npm-cli.js"), ("npm", "10.9.2", "package/bin/npm-cli.js"),
+            ("pnpm", "10.18.2", "package/bin/pnpm.cjs")] {
+            let root = temp.path().join(format!("{id}-{version}"));
+            let entry = if id == "node" && cfg!(windows) { "bin/node.exe" } else { entry };
+            let cli = root.join(terminal_cli_entry(id, entry, cfg!(windows)));
+            std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+            std::fs::write(&cli, "fixture").unwrap();
+            std::fs::write(root.join(entry), "fixture").unwrap();
+            #[cfg(unix)] {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            if id != "node" {
+                std::fs::write(root.join("package/package.json"), r#"{"engines":{"node":"^20.17.0 || >=22.9.0"}}"#).unwrap();
+            }
+            store.upsert_installed(&crate::model::InstalledPackage {
+                id: id.into(), version: version.into(), category: "tool".into(),
+                install_path: root.to_string_lossy().into_owned(), config_path: String::new(), installed_at: 0,
+            }).unwrap();
+            manifest.packages.push(serde_json::from_value(serde_json::json!({
+                "id":id,"version":version,"category":"tool","displayName":id,"description":"",
+                "os":[],"arch":[],"kind":"targz","url":"https://example.invalid/fixture.tgz","sizeBytes":0,"entry":entry
+            })).unwrap());
+        }
+        store.set_setting(SELECTED_KEY, r#"["node","npm","pnpm"]"#).unwrap();
+        store.set_setting(VERSIONS_KEY, r#"{"node":"22.14.0","npm":"10.9.2","pnpm":"10.18.2"}"#).unwrap();
+        let first = terminal_environment(&store, &paths, &manifest).unwrap();
+        assert_eq!(first.entries.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>(), vec!["npm", "pnpm", "node"]);
+        assert_eq!(first.entries[0].version, "10.9.2");
+        assert!(desired_dirs_checked(&store, &manifest).unwrap()[0].contains("npm-10.9.2"));
+        store.set_setting(VERSIONS_KEY, r#"{"node":"22.14.0","npm":"11.6.2","pnpm":"10.18.2"}"#).unwrap();
+        let switched = terminal_environment(&store, &paths, &manifest).unwrap();
+        assert_eq!(switched.entries[0].version, "11.6.2");
+        assert_ne!(first.revision, switched.revision);
+        assert!(!switched.script.contains("npm-10.9.2"));
+        store.set_setting(VERSIONS_KEY, r#"{"node":"18.11.0","npm":"11.6.2"}"#).unwrap();
+        assert_eq!(terminal_environment(&store, &paths, &manifest).unwrap_err().code, "JS_CLI_NODE_INCOMPATIBLE");
+        store.set_setting(SELECTED_KEY, r#"["node"]"#).unwrap();
+        assert_eq!(terminal_environment(&store, &paths, &manifest).unwrap().entries.len(), 1);
+        assert!(!is_enabled(&store));
         assert!(store.get_setting(DIRS_KEY).is_none());
     }
 

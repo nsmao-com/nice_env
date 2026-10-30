@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { Link } from "react-router-dom";
 import { useIsMutating, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Terminal, RefreshCw, CheckCircle2, AlertTriangle, FolderX } from "lucide-react";
@@ -9,11 +10,12 @@ import { useT } from "@/lib/store";
 import { usePathEnv, toastError } from "@/lib/hooks";
 import { normalizeError, type AppErrorShape } from "@/lib/backend";
 import * as api from "@/lib/api";
-import { cn } from "@/lib/utils";
+import { cn, cmpVersionDesc } from "@/lib/utils";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 /**
  * 环境变量（PATH 注入）。
@@ -124,9 +126,42 @@ export function PathEnvCard() {
           <p className="py-4 text-center text-[12px] text-faint">{t("tools.pathEnvEmpty")}</p>
         )}
 
+        {ready && <div className="space-y-3 rounded-lg border border-border p-3">
+          <div>
+            <p className="text-xs font-medium">{t("tools.nodeVersionTitle")}</p>
+            <p className="mt-1 text-[11px] leading-relaxed text-faint">{t("tools.nodeVersionHint")}</p>
+          </div>
+          {["node", "npm", "pnpm"].map((id) => {
+            const versions = entries.filter((entry) => entry.id === id).sort((a, b) => cmpVersionDesc(a.version, b.version));
+            const selected = versions.find((entry) => entry.selected);
+            const label = id === "node" ? "Node.js" : id;
+            return <div key={id} className="space-y-1.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="w-14 text-xs font-medium">{label}</span>
+                <Select value={selected?.version ?? "none"} disabled={busy || pathBusy || versions.length === 0}
+                  onValueChange={(value) => {
+                    if (value === "none") { if (selected) toggleEntry(selected, false); return; }
+                    const next = versions.find((entry) => entry.version === value);
+                    if (next) toggleEntry(next, true);
+                  }}>
+                  <SelectTrigger className="h-8 min-w-0 flex-1 text-xs" aria-label={`${label} ${t("tools.nodeVersionChoose")}`}><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">{t(id === "npm" ? "tools.nodeBundledNpm" : "tools.nodeVersionNone")}</SelectItem>
+                    {versions.map((entry) => <SelectItem key={entry.version} value={entry.version} disabled={!entry.exists}>{entry.version}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+                <Button size="sm" variant="ghost" asChild><Link to={`/packages?search=${id}`}>{t("tools.nodeInstallVersions")}</Link></Button>
+              </div>
+              {selected && <p className="break-all pl-16 text-[10px] text-faint">{selected.binDir}</p>}
+              {selected && !enabled && <p className="pl-16 text-[10px] text-warn">{t("tools.nodePathDisabled")}</p>}
+            </div>;
+          })}
+          <p className="text-[10.5px] leading-relaxed text-faint">{t("tools.nodeTerminalHint")}</p>
+        </div>}
+
         {ready && entries.length > 0 && (
           <div className="flex flex-col gap-1.5">
-            {entries.map((e) => (
+            {entries.filter((entry) => !["node", "npm", "pnpm"].includes(entry.id)).map((e) => (
               <PathEnvRow
                 key={`${e.id}@${e.version}`}
                 entry={e}

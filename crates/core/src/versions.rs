@@ -407,10 +407,13 @@ pub async fn catalog(
 /* ================= 缓存 ================= */
 
 fn catalog_cache_key(template: &PackageManifestEntry, src: &VersionSource) -> String {
-    let signature = format!(
+    let mut signature = format!(
         "{src:?}:{:?}:{:?}:{}:{}",
         template.os, template.arch, template.entry, template.kind
     );
+    if src.kind == "npm-registry" {
+        signature.push_str(&format!(":{}:{}:native-v1", crate::install::current_os(), crate::install::current_arch()));
+    }
     // 保留同一缓存签名，升级后仍可立即显示已知的完整版本目录。
     format!(
         "versionCatalog:v5:{}:{:x}",
@@ -474,6 +477,7 @@ async fn fetch(store: &Store, src: &VersionSource, template: &PackageManifestEnt
     let list = match src.kind.as_str() {
         "github" => fetch_github(src, template).await?,
         "nodejs" => fetch_nodejs(store, src, template).await?,
+        "npm-registry" => fetch_npm_registry(src, template).await?,
         "php" => fetch_php(src, template).await?,
         "go" => fetch_go(src, template).await?,
         "nginx" => fetch_nginx(src, template).await?,
@@ -500,15 +504,27 @@ mod upstream;
 
 async fn get_text(client: &reqwest::Client, url: &str) -> Result<String> {
     async fn once(client: &reqwest::Client, url: &str) -> Result<String> {
-        client
-            .get(url)
+        let npm_registry = url.starts_with("https://registry.npmjs.org/");
+        let mut request = client.get(url);
+        if matches!(url, "https://registry.npmjs.org/npm" | "https://registry.npmjs.org/pnpm") {
+            request = request.header("Accept", "application/vnd.npm.install-v1+json");
+        }
+        let mut response = request
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)
-            .map_err(|e| AppError::download(url, e.to_string()))?
-            .text()
-            .await
-            .map_err(|e| AppError::download(url, e.to_string()))
+            .map_err(|e| AppError::download(url, e.to_string()))?;
+        if npm_registry {
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(|e| AppError::download(url, e.to_string()))? {
+                if bytes.len() + chunk.len() > 32 * 1024 * 1024 {
+                    return Err(AppError::new("VERSION_CATALOG_TOO_LARGE", "npm 版本目录过大，请稍后重试"));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            return String::from_utf8(bytes).map_err(|e| AppError::download(url, e.to_string()));
+        }
+        response.text().await.map_err(|e| AppError::download(url, e.to_string()))
     }
 
     match once(client, url).await {
@@ -538,6 +554,71 @@ async fn get_text(client: &reqwest::Client, url: &str) -> Result<String> {
 async fn get_json(client: &reqwest::Client, url: &str) -> Result<serde_json::Value> {
     serde_json::from_str(&get_text(client, url).await?)
         .map_err(|e| AppError::internal("解析上游版本索引", e.to_string()))
+}
+
+async fn fetch_npm_registry(src: &VersionSource, template: &PackageManifestEntry) -> Result<Vec<RemoteVersion>> {
+    if !matches!(template.id.as_str(), "npm" | "pnpm") {
+        return Err(AppError::new("BAD_VERSION_SOURCE", "此版本源仅用于 npm 和 pnpm"));
+    }
+    let index = get_json(&http()?, &format!("https://registry.npmjs.org/{}", template.id)).await?;
+    let versions = index.get("versions").and_then(|value| value.as_object())
+        .ok_or_else(|| AppError::new("BAD_VERSION_SOURCE", "npm 官方目录缺少版本信息"))?;
+    let list = versions.iter().filter_map(|(version, value)| {
+        // 固定官方地址与包名，版本目录不能把安装请求重定向到任意站点。
+        if version.is_empty() || !version.bytes().all(|b| b.is_ascii_alphanumeric() || b".-+".contains(&b)) { return None; }
+        let mut url = format!("https://registry.npmjs.org/{0}/-/{0}-{version}.tgz", template.id);
+        if value.pointer("/dist/tarball").and_then(|v| v.as_str()) != Some(url.as_str()) { return None; }
+        let mut entry = template.entry.clone();
+        let os = if template.os.iter().any(|os| os == "windows") { "win32" } else { "darwin" };
+        let arch = crate::install::current_arch();
+        let native = format!("@pnpm/exe.{os}-{arch}");
+        if template.id == "pnpm" && value.get("optionalDependencies").and_then(|deps| deps.get(&native)).and_then(|v| v.as_str()) == Some(version) {
+            url = format!("https://registry.npmjs.org/{native}/-/exe.{os}-{arch}-{version}.tgz");
+            entry = if os == "win32" { "package/pnpm.exe" } else { "package/pnpm" }.into();
+        } else {
+            let expected = if template.id == "npm" { "bin/npm-cli.js" } else { "bin/pnpm.cjs" };
+            let actual = value.get("bin").and_then(|bin| bin.get(&template.id)).and_then(|v| v.as_str());
+            if template.id == "pnpm" && actual == Some("bin/pnpm.mjs") { entry = "package/bin/pnpm.mjs".into(); }
+            else if actual != Some(expected) { return None; }
+        }
+        Some(RemoteVersion {
+            version: version.clone(), url, sha256: None, size_bytes: None,
+            entry, kind: "targz".into(),
+            prerelease: is_prerelease(version),
+            note: value.pointer("/engines/node").and_then(|v| v.as_str()).map(|range| format!("Node.js {range}")),
+            released_at: index.get("time").and_then(|time| time.get(version)).and_then(|v| v.as_str()).map(str::to_owned),
+        })
+    }).collect();
+    Ok(limit_and_sort(list, src))
+}
+
+pub(crate) async fn verify_npm_archive(entry: &PackageManifestEntry, archive: &std::path::Path) -> Result<()> {
+    use base64::Engine;
+    if !matches!(entry.id.as_str(), "npm" | "pnpm") { return Ok(()); }
+    // 固定清单的 SHA-256 已由下载器校验，离线缓存安装不再依赖版本目录。
+    if entry.sha256.as_ref().is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())) { return Ok(()); }
+    let registry_package = entry.url.strip_prefix("https://registry.npmjs.org/")
+        .and_then(|path| path.split_once("/-/")).map(|(name, _)| name)
+        .filter(|name| *name == entry.id || (entry.id == "pnpm" && matches!(*name,
+            "@pnpm/exe.win32-x64" | "@pnpm/exe.win32-arm64" | "@pnpm/exe.darwin-x64" | "@pnpm/exe.darwin-arm64")))
+        .ok_or_else(|| AppError::new("JS_CLI_INTEGRITY", "包管理器来源不属于支持的官方发行包"))?;
+    let metadata = get_json(&http()?, &format!("https://registry.npmjs.org/{registry_package}/{}", entry.version)).await?;
+    let expected = metadata.pointer("/dist/integrity").and_then(|value| value.as_str())
+        .and_then(|value| value.strip_prefix("sha512-"))
+        .and_then(|value| base64::engine::general_purpose::STANDARD.decode(value).ok())
+        .ok_or_else(|| AppError::new("JS_CLI_INTEGRITY", "官方 npm 目录缺少 SHA-512 校验值"))?;
+    let archive = archive.to_path_buf();
+    let actual = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+        use std::io::Read;
+        use sha2::Digest;
+        let mut file = std::fs::File::open(archive)?;
+        let mut hash = sha2::Sha512::new();
+        let mut buffer = [0u8; 65536];
+        loop { let count = file.read(&mut buffer)?; if count == 0 { break; } hash.update(&buffer[..count]); }
+        Ok(hash.finalize().to_vec())
+    }).await.map_err(|error| AppError::internal("校验包管理器", error.to_string()))??;
+    if actual != expected { return Err(AppError::new("JS_CLI_INTEGRITY", "包管理器下载内容与官方 SHA-512 不一致，请重新下载")); }
+    Ok(())
 }
 
 /// 只验证下载地址是否可访问，不下载完整安装包。代理失败时用直连复核，

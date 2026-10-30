@@ -1,6 +1,6 @@
 {
-  "revision": 12,
-  "updated": "2026-10-03",
+  "revision": 13,
+  "updated": "2026-10-30",
   "note": "macOS 清单（arm64/x64）；已核对所列包的官方来源。新增 Intel 套件已核对实际 Mach-O 架构、入口及 SHA256，运行兼容性仍需对应 macOS 验证；MySQL 8.4.11 的官方构建要求 macOS 15。PHP/Nginx/Redis 尚无已验收的 macOS 二进制，候选源见 README「在 macOS 上构建」章节。",
   "packages": [
     {
@@ -1002,6 +1002,106 @@
         "entryTemplate": "nats-server-v{version}-darwin-amd64/nats-server"
       },
       "sha256": "5bd8b59ca5bf93fab3da2c5843cf564cd6e2e291e22ae3b861746e7ebe259b95"
+    },
+    {
+      "id": "npm",
+      "version": "11.6.2",
+      "category": "tool",
+      "displayName": "npm",
+      "description": "npm 独立命令行版本（需要 Node.js 运行时）",
+      "homepage": "https://www.npmjs.com/",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64",
+        "x64"
+      ],
+      "kind": "targz",
+      "url": "https://registry.npmjs.org/npm/-/npm-11.6.2.tgz",
+      "sha256": "585f95094ee5cb2788ee11d90f2a518a7c9ef6e083fa141d0b63ca3383675a20",
+      "note": "Node.js ^20.17.0 || >=22.9.0",
+      "sizeBytes": 2663834,
+      "entry": "package/bin/npm-cli.js",
+      "requires": [
+        "node"
+      ],
+      "versionSource": { "kind": "npm-registry", "maxVersions": 100 }
+    },
+    {
+      "id": "npm",
+      "version": "10.9.2",
+      "category": "tool",
+      "displayName": "npm",
+      "description": "npm 独立命令行版本（需要 Node.js 运行时）",
+      "homepage": "https://www.npmjs.com/",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64",
+        "x64"
+      ],
+      "kind": "targz",
+      "url": "https://registry.npmjs.org/npm/-/npm-10.9.2.tgz",
+      "sha256": "5cd1e5ab971ea6333f910bc2d50700167c5ef4e66da279b2a3efc874c6b116e4",
+      "note": "Node.js ^18.17.0 || >=20.5.0",
+      "sizeBytes": 2714270,
+      "entry": "package/bin/npm-cli.js",
+      "requires": [
+        "node"
+      ],
+      "versionSource": { "kind": "npm-registry", "maxVersions": 100 }
+    },
+    {
+      "id": "pnpm",
+      "version": "10.18.2",
+      "category": "tool",
+      "displayName": "pnpm",
+      "description": "pnpm 独立命令行版本（需要 Node.js 运行时）",
+      "homepage": "https://pnpm.io/",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64",
+        "x64"
+      ],
+      "kind": "targz",
+      "url": "https://registry.npmjs.org/pnpm/-/pnpm-10.18.2.tgz",
+      "sha256": "93421022fe0156d7cbdf699edc3d7eab39654986eac14f927d02b85f0dac6d61",
+      "note": "Node.js >=18.12",
+      "sizeBytes": 4154536,
+      "entry": "package/bin/pnpm.cjs",
+      "requires": [
+        "node"
+      ],
+      "versionSource": { "kind": "npm-registry", "maxVersions": 100 }
+    },
+    {
+      "id": "pnpm",
+      "version": "9.15.9",
+      "category": "tool",
+      "displayName": "pnpm",
+      "description": "pnpm 独立命令行版本（需要 Node.js 运行时）",
+      "homepage": "https://pnpm.io/",
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64",
+        "x64"
+      ],
+      "kind": "targz",
+      "url": "https://registry.npmjs.org/pnpm/-/pnpm-9.15.9.tgz",
+      "sha256": "cf86a7ad764406395d4286a6d09d730711720acc6d93e9dce9ac7ac4dc4a28a7",
+      "note": "Node.js >=18.12",
+      "sizeBytes": 4311450,
+      "entry": "package/bin/pnpm.cjs",
+      "requires": [
+        "node"
+      ],
+      "versionSource": { "kind": "npm-registry", "maxVersions": 100 }
     }
   ]
 }

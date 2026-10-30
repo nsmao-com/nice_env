@@ -1174,6 +1174,9 @@ function PackageRow({
                 )}
               </div>
             )}
+            {["node", "npm", "pnpm"].includes(group.id) && <Button size="sm" variant="ghost" className="mt-1 px-0 text-primary" asChild>
+              <Link to="/environment">{t("tools.nodeVersionTitle")}</Link>
+            </Button>}
             {update && <div className="mt-2 space-y-1.5">
               <Button type="button" size="sm" variant="secondary"
                 className="h-auto min-h-8 max-w-full py-1.5 text-left text-xs whitespace-normal [overflow-wrap:anywhere]"

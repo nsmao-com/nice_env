@@ -466,6 +466,14 @@ impl Installer {
             if installed.id == "redis" && Path::new(&installed.install_path).join("redis-server.exe").is_file() {
                 entry.entry = "redis-server.exe".into();
             }
+            if installed.id == "pnpm" && entry.version_source.as_ref().is_some_and(|source| source.kind == "npm-registry") {
+                let major = installed.version.trim_start_matches('v').split('.').next().and_then(|part| part.parse::<u64>().ok());
+                entry.entry = match major {
+                    Some(12..) => if cfg!(windows) { "package/pnpm.exe" } else { "package/pnpm" },
+                    Some(11) => "package/bin/pnpm.mjs",
+                    _ => "package/bin/pnpm.cjs",
+                }.into();
+            }
             entry.display_name = entry
                 .display_name
                 .replace(&entry.version, &installed.version);
@@ -572,6 +580,9 @@ impl Installer {
             .unwrap_or(if same_file { template.size_bytes } else { 0 });
         e.kind = remote.kind.clone();
         e.entry = remote.entry.clone();
+        if e.version_source.as_ref().is_some_and(|source| source.kind == "npm-registry") {
+            e.note = remote.note.clone();
+        }
         // 远程版本默认不带 mirrors（镜像策略仍在下载时按域名前缀应用）
         e.mirrors.clear();
         e
@@ -962,6 +973,7 @@ impl Installer {
         let (entry, archive) = self
             .download_entry(entry, paths, store, downloader, task, emit)
             .await?;
+        crate::versions::verify_npm_archive(&entry, &archive).await?;
 
         task.check_cancelled()?;
         emit(crate::Event::state(&task_id, "extracting"));
@@ -1043,6 +1055,7 @@ impl Installer {
         if !entry_path.is_file() || std::fs::metadata(&entry_path)?.len() == 0 {
             return Err(AppError::new("ENTRY_MISSING", "套件主程序不是有效文件"));
         }
+        ensure_js_cli_wrappers(&entry, &prepared)?;
         self.ensure_qdrant_web_ui(&entry, entry_path.parent().unwrap(), paths, store, downloader, task, emit, false).await?;
         task.check_cancelled()?;
 
@@ -1360,6 +1373,42 @@ impl Installer {
         }
         Ok(users)
     }
+}
+
+/// npm/pnpm 的官方 npm 包只提供 JS 入口，Windows 不会直接执行 .js。
+/// 在受管 bin 目录补充轻量 cmd 启动器，让它们能与 Node 版本独立选择并共存。
+fn ensure_js_cli_wrappers(entry: &crate::model::PackageManifestEntry, root: &Path) -> Result<()> {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    if !matches!(entry.id.as_str(), "npm" | "pnpm") || (entry.id == "pnpm" && matches!(entry.entry.as_str(), "package/pnpm" | "package/pnpm.exe")) {
+        return Ok(());
+    }
+    let bin = root.join(entry_relative_path(&entry.entry)).parent().map(Path::to_path_buf)
+        .ok_or_else(|| AppError::new("JS_CLI_LAYOUT", "JS 包入口目录无效"))?;
+    let (command, script) = if entry.id == "npm" { ("npm", "npm-cli.js") }
+        else { ("pnpm", if entry.entry.ends_with("pnpm.mjs") { "pnpm.mjs" } else { "pnpm.cjs" }) };
+    let script_path = bin.join(script);
+    if !script_path.is_file() { return Err(AppError::new("JS_CLI_ENTRY_MISSING", format!("{} 包缺少 {}", entry.display_name, script))); }
+    let wrapper = if cfg!(windows) {
+        format!("@echo off\r\nnode \"%~dp0{script}\" %*\r\n")
+    } else {
+        format!("#!/bin/sh\nexec node \"$(dirname \"$0\")/{script}\" \"$@\"\n")
+    };
+    let wrapper_path = bin.join(if cfg!(windows) { format!("{command}.cmd") } else { command.to_string() });
+    std::fs::write(&wrapper_path, wrapper).map_err(|e| AppError::io("创建 JS 命令启动器", e))?;
+    #[cfg(unix)] {
+        std::fs::set_permissions(&wrapper_path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    if command == "npm" {
+        if !bin.join("npx-cli.js").is_file() { return Err(AppError::new("JS_CLI_ENTRY_MISSING", "npm 包缺少 npx 入口")); }
+        let npx: String = if cfg!(windows) { "@echo off\r\nnode \"%~dp0npx-cli.js\" %*\r\n".into() }
+            else { "#!/bin/sh\nexec node \"$(dirname \"$0\")/npx-cli.js\" \"$@\"\n".into() };
+        let npx_path = bin.join(if cfg!(windows) { "npx.cmd" } else { "npx" });
+        std::fs::write(&npx_path, npx)
+            .map_err(|e| AppError::io("创建 npx 命令启动器", e))?;
+        #[cfg(unix)] std::fs::set_permissions(&npx_path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
 }
 
 fn modified_at_ms(path: &Path) -> i64 {
@@ -1830,6 +1879,29 @@ mod settle_entry_tests {
         let got = settle_entry_file(&d, std::path::Path::new("bin/mihomo.exe")).unwrap();
         assert_eq!(got, d.join("bin/mihomo.exe"));
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn js_cli_install_creates_independent_launchers_without_running_packages() {
+        let manifest: crate::model::Manifest = serde_json::from_str(include_str!("../../../manifest/packages.win.json")).unwrap();
+        for id in ["npm", "pnpm"] {
+            let entry = manifest.packages.iter().find(|entry| entry.id == id).unwrap();
+            let temp = tempfile::tempdir().unwrap();
+            write(&temp.path().join(&entry.entry), b"// fixture");
+            if id == "npm" { write(&temp.path().join("package/bin/npx-cli.js"), b"// fixture"); }
+            ensure_js_cli_wrappers(entry, temp.path()).unwrap();
+            let filename = if cfg!(windows) { format!("{id}.cmd") } else { id.into() };
+            let launcher = temp.path().join("package/bin").join(filename);
+            let original = std::fs::read_to_string(&launcher).unwrap();
+            assert!(original.contains(if id == "npm" { "npm-cli.js" } else { "pnpm.cjs" }));
+            assert!(!original.contains(temp.path().to_str().unwrap()));
+            ensure_js_cli_wrappers(entry, temp.path()).unwrap();
+            assert_eq!(std::fs::read_to_string(&launcher).unwrap(), original);
+            #[cfg(unix)] {
+                use std::os::unix::fs::PermissionsExt;
+                assert_ne!(std::fs::metadata(&launcher).unwrap().permissions().mode() & 0o111, 0);
+            }
+        }
     }
 
     #[test]

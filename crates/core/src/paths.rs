@@ -2214,6 +2214,33 @@ mod tests {
         }
         let original = "https://example.test/?q=中文&next=?";
         assert_eq!(portable_text(original), original);
+        let raw = r"\\?\D:\NiceEnv\nsb-data\data\mysql\8.0.46";
+        let expected = r"D:\NiceEnv\nsb-data\data\mysql\8.0.46";
+        let progress = crate::model::DbBackupProgress {
+            database: "demo".into(),
+            bytes: 0,
+            total: None,
+            state: "done".into(),
+            message: Some(raw.into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&progress).unwrap()["message"],
+            expected
+        );
+        assert_eq!(
+            progress.message.as_deref(),
+            Some(raw),
+            "serialization preserves native paths"
+        );
+        let grid = crate::dbworkspace::Grid {
+            columns: vec!["literal".into()],
+            rows: vec![vec![Some(raw.into())]],
+        };
+        assert_eq!(
+            serde_json::to_value(grid).unwrap()["rows"][0][0],
+            raw,
+            "SQL cells must never be normalized"
+        );
     }
 
     #[cfg(target_os = "macos")]

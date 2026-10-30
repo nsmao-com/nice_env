@@ -11,3 +11,4 @@
 - 分支与新 tag 必须使用 `git push --atomic` 一次推送；任一步失败都不能把仅提交分支汇报为发布完成。
 - 推送后核对远程分支、tag 与发布提交一致，确认 `.github/workflows/release.yml` 已触发。汇报实际构建状态，不把“已触发”说成“安装包已发布”。
 - 只提交本次任务相关文件，保留用户已有的其他修改和本地生成文件。
+- 路径修复必须审查整个调用边界：结构体路径字段使用 `serialize_path` / `serialize_optional_path` / `serialize_paths`，直接返回字符串的路径接口与外部工具参数使用 `portable_path_text` / `portable_text`；不能只修前端显示。原生文件 API 保留长路径能力，UNC 共享不能丢失前导双斜杠；禁止对数据库单元格、SQL、密码或配置原文进行全局字符串替换。

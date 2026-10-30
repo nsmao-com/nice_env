@@ -516,10 +516,7 @@ impl MySqlClient {
         let path = self.run("SELECT @@datadir;")?;
         let normalize = |path: &Path| {
             let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-            let value = path
-                .to_string_lossy()
-                .replace('\\', "/")
-                .trim_start_matches("//?/")
+            let value = crate::paths::portable_path_text(&path)
                 .trim_end_matches('/')
                 .to_string();
             if cfg!(windows) {

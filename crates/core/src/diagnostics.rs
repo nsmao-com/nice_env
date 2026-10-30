@@ -594,7 +594,7 @@ pub fn save_to_file(paths: &Paths, bundle: &DiagnosticsBundle) -> Result<String>
     let (_, path) = file
         .keep()
         .map_err(|e| AppError::io("保存诊断包", e.error))?;
-    Ok(path.to_string_lossy().into())
+    Ok(crate::paths::portable_path_text(&path))
 }
 
 /// 单服务诊断与环境体检共用端口归属和现有原生配置检查；不由前端拼接过期状态。
@@ -614,9 +614,11 @@ pub enum ServiceCheckState {
 pub struct ServiceCheck {
     pub id: String,
     pub state: ServiceCheckState,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub detail: String,
     /// process / tcp / native / readability / log-keywords / none / demo
     pub method: String,
+    #[serde(serialize_with = "crate::model::serialize_paths")]
     pub lines: Vec<String>,
 }
 

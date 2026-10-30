@@ -1964,7 +1964,7 @@ async fn database_data_dir(
     tauri::async_runtime::spawn_blocking(move || {
         let path = map_jh(st.database_data_dir(&engine, &version))?;
         path.to_str()
-            .map(str::to_owned)
+            .map(nsb_core::paths::portable_text)
             .ok_or_else(|| box_err(nsb_core::AppError::new("DATABASE_PATH_ENCODING", "数据目录包含无法显示的字符")))
     })
     .await
@@ -1980,7 +1980,7 @@ async fn service_data_dir(
     tauri::async_runtime::spawn_blocking(move || {
         let path = map_jh(st.service_data_dir(&service_id))?;
         path.to_str()
-            .map(str::to_owned)
+            .map(nsb_core::paths::portable_text)
             .ok_or_else(|| box_err(nsb_core::AppError::new("SERVICE_DATA_PATH_ENCODING", "服务数据目录包含无法显示的字符")))
     })
     .await
@@ -3576,7 +3576,10 @@ struct IntegrationTools {
 /// 仅检查当前应用随包分发的工具，不从 PATH 挑选另一版本，也不执行工具。
 fn inspect_integration_tool(dir: &std::path::Path, name: &str) -> nsb_core::error::Result<IntegrationTool> {
     let path = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    let display = path.to_str().ok_or_else(|| AppError::new("TOOL_PATH_ENCODING", "工具路径包含无法显示的字符"))?.to_owned();
+    let display = nsb_core::paths::portable_text(
+        path.to_str()
+            .ok_or_else(|| AppError::new("TOOL_PATH_ENCODING", "工具路径包含无法显示的字符"))?,
+    );
     let result = (|| -> nsb_core::error::Result<bool> {
         let metadata = match std::fs::metadata(&path) {
             Ok(metadata) => metadata,
@@ -3605,9 +3608,15 @@ fn inspect_integration_tool(dir: &std::path::Path, name: &str) -> nsb_core::erro
 #[tauri::command]
 fn get_integration_tools(state: State<'_, Arc<CoreState>>) -> Result<IntegrationTools, tauri::Error> {
     map_jh((|| {
-        let exe = std::env::current_exe().map_err(|error| AppError::internal("读取应用安装位置失败", error.to_string()))?;
-        let dir = exe.parent().ok_or_else(|| AppError::new("TOOL_PATH_INVALID", "无法确定应用安装目录"))?;
-        let data_dir = state.paths.base.to_str().ok_or_else(|| AppError::new("TOOL_PATH_ENCODING", "数据目录包含无法显示的字符"))?.to_owned();
+        let exe = std::env::current_exe()
+            .map_err(|error| AppError::internal("读取应用安装位置失败", error.to_string()))?;
+        let dir = exe
+            .parent()
+            .ok_or_else(|| AppError::new("TOOL_PATH_INVALID", "无法确定应用安装目录"))?;
+        let data_dir =
+            nsb_core::paths::portable_text(state.paths.base.to_str().ok_or_else(|| {
+                AppError::new("TOOL_PATH_ENCODING", "数据目录包含无法显示的字符")
+            })?);
         Ok(IntegrationTools {
             platform: std::env::consts::OS,
             data_dir,

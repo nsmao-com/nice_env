@@ -2202,6 +2202,7 @@ pub struct ConfigCheck {
     pub method: String, // native | readability | none
     pub ok: bool,
     pub status: String, // ok | warning | fail | skipped
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub detail: String,
     pub checked_at: i64,
 }

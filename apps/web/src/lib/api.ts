@@ -1007,5 +1007,6 @@ export const assistantConfirm = (token: string, approved: boolean) =>
   safe(invoke<AssistantToolReply>("assistant_confirm", { token, approved }));
 
 export interface DatabaseGrid { columns: string[]; rows: (string | null)[][] }
-export interface DatabaseWorkspaceRequest { database: string; action: "tables" | "schema" | "rows" | "sql" | "update"; table?: string; offset?: number; sql?: string; confirmed?: boolean; column?: string; value?: string | null; original?: (string | null)[] }
+export interface DatabaseFilter { column: string; operator: "eq" | "ne" | "contains" | "gt" | "gte" | "lt" | "lte" | "null" | "not_null"; value?: string }
+export interface DatabaseWorkspaceRequest { database: string; action: "tables" | "schema" | "rows" | "sql" | "update"; table?: string; offset?: number; sql?: string; confirmed?: boolean; column?: string; value?: string | null; original?: (string | null)[]; pageSize?: number; filters?: DatabaseFilter[]; sortColumn?: string; descending?: boolean }
 export const databaseWorkspace = (engine: DatabaseEngine, version: string, request: DatabaseWorkspaceRequest) => safe(invoke<DatabaseGrid[]>("db_workspace", { engine, version, request }));

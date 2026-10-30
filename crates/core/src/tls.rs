@@ -1195,7 +1195,7 @@ fn write_certificate_export(paths: &Paths, store: &Store, out_path: &std::path::
     temporary.write_all(bytes).map_err(|e| AppError::io("写入导出文件失败", e))?;
     temporary.as_file().sync_all()?;
     temporary.persist(&target).map_err(|e| AppError::io("保存导出文件失败", e.error))?;
-    Ok(out_path.to_string_lossy().to_string())
+    Ok(crate::paths::portable_path_text(out_path))
 }
 
 /// 保留 PBES2/AES-256 与 SHA-256 MAC，避免高层 writer 把密码和证书主体强制转成 BMPString。

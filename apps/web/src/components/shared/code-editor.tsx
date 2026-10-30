@@ -3,7 +3,7 @@
 import * as React from "react";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { EditorView, keymap } from "@codemirror/view";
-import { EditorState } from "@codemirror/state";
+import { EditorState, Prec } from "@codemirror/state";
 import { tags } from "@lezer/highlight";
 import { StreamLanguage, HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { indentSelection, undo, redo } from "@codemirror/commands";
@@ -12,7 +12,7 @@ import { nginx } from "@codemirror/legacy-modes/mode/nginx";
 import { properties } from "@codemirror/legacy-modes/mode/properties";
 import { shell } from "@codemirror/legacy-modes/mode/shell";
 import { json } from "@codemirror/lang-json";
-import { sql } from "@codemirror/lang-sql";
+import { sql, MySQL } from "@codemirror/lang-sql";
 import { yaml } from "@codemirror/lang-yaml";
 import { Search, WrapText, AlignLeft, Undo2, Redo2 } from "lucide-react";
 import { useTheme } from "next-themes";
@@ -56,13 +56,14 @@ const hosts = {
   },
 };
 
-export type CodeEditorHandle = { jumpToLine: (line: number) => void };
+export type CodeEditorHandle = { jumpToLine: (line: number) => void; selectedText: () => string };
 
 /** Shared editable surface; search includes replace, case matching and regular expressions. */
 export const CodeEditor = React.forwardRef<CodeEditorHandle, {
   value: string; onChange: (value: string) => void; label: string; language?: string;
   readOnly?: boolean; height?: string;
-}>(function CodeEditor({ value, onChange, label, language, readOnly = false, height = "380px" }, ref) {
+  sqlSchema?: Record<string, string[]>; sqlTable?: string; onExecute?: (sql: string) => void;
+}>(function CodeEditor({ value, onChange, label, language, readOnly = false, height = "380px", sqlSchema, sqlTable, onExecute }, ref) {
   const t = useT();
   const english = useUI((state) => state.lang === "en");
   const editor = React.useRef<ReactCodeMirrorRef>(null);
@@ -98,7 +99,8 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, {
       { tag: [tags.propertyName, tags.attributeName, tags.tagName], color: "var(--code-key)" },
       { tag: [tags.variableName, tags.typeName], color: "var(--code-variable)" },
     ])),
-    lang === "json" ? json() : lang === "yaml" ? yaml() : lang === "sql" ? sql() : StreamLanguage.define(lang === "hosts" ? hosts : lang === "redis" ? redis : lang === "apache" ? apache : lang === "nginx" ? nginx : lang === "shell" || lang === "caddy" ? shell : properties),
+    lang === "json" ? json() : lang === "yaml" ? yaml() : lang === "sql" ? sql(sqlSchema ? { dialect: MySQL, schema: sqlSchema, defaultTable: sqlTable, upperCaseKeywords: true } : undefined) : StreamLanguage.define(lang === "hosts" ? hosts : lang === "redis" ? redis : lang === "apache" ? apache : lang === "nginx" ? nginx : lang === "shell" || lang === "caddy" ? shell : properties),
+    ...(onExecute ? [Prec.highest(keymap.of([{ key: "Mod-Enter", run: (view) => { if (!readOnly) { const { from, to } = view.state.selection.main; onExecute(from === to ? view.state.doc.toString() : view.state.sliceDoc(from, to)); } return true; } }]))] : []),
     EditorView.contentAttributes.of({ "aria-label": label }),
     EditorState.tabSize.of(2),
     ...(wrap ? [EditorView.lineWrapping] : []),
@@ -132,8 +134,8 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, {
       "&.cm-focused": { outline: "none" },
     }),
     keymap.of([{ key: "Mod-Shift-f", run: () => { format(); return true; } }]),
-  ], [lang, label, wrap, readOnly, english]);
-  React.useImperativeHandle(ref, () => ({ jumpToLine: (number) => {
+  ], [lang, label, wrap, readOnly, english, sqlSchema, sqlTable, onExecute]);
+  React.useImperativeHandle(ref, () => ({ selectedText: () => { const view = editor.current?.view; if (!view) return ""; const { from, to } = view.state.selection.main; return view.state.sliceDoc(from, to); }, jumpToLine: (number) => {
     const view = editor.current?.view; if (!view) return;
     const line = view.state.doc.line(Math.max(1, Math.min(number, view.state.doc.lines)));
     view.dispatch({ selection: { anchor: line.from, head: line.to }, effects: EditorView.scrollIntoView(line.from, { y: "center" }) }); view.focus();

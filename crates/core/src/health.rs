@@ -24,6 +24,7 @@ pub struct CheckItem {
     pub id: String,
     pub severity: Severity,
     pub title: String,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub detail: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
@@ -46,6 +47,7 @@ pub struct CheckCoverage {
     pub id: String,
     pub label: String,
     pub state: CheckState,
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub detail: String,
 }
 

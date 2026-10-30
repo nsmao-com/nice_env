@@ -21,7 +21,7 @@ import { cn, fmtBytes } from "@/lib/utils";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem, SelectSeparator } from "@/components/ui/select";
 import { isTauri, normalizeError } from "@/lib/backend";
-import { useT } from "@/lib/store";
+import { useT, useUI } from "@/lib/store";
 import { useAdminer, toastError } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import { TunnelPanel } from "@/components/shared/tunnel-panel";
@@ -78,6 +78,17 @@ function relTime(ts?: number | null): string {
 
 export function CronTool() {
   const t = useT();
+  const english = useUI((state) => state.lang === "en");
+  const text = (zh: string, en: string) => english ? en : zh;
+  const platform = useQuery({ queryKey: ["integration-tools"], queryFn: api.getIntegrationTools, staleTime: Infinity, retry: false });
+  const windows = platform.data?.platform === "windows";
+  const examples = [
+    { name: text("网站健康检查", "Website health check"), minutes: 5, command: "curl --fail --silent --show-error --max-time 20 http://localhost/", hint: text("检查本机网站是否正常，非 2xx/3xx 响应会标为失败。", "Check your local site; HTTP errors mark the run as failed.") },
+    { name: text("Laravel 调度器", "Laravel scheduler"), minutes: 1, command: `${windows ? 'cd /d "D:\\Projects\\my-app"' : 'cd "/path/to/my-app"'} && php artisan schedule:run`, hint: text("先把项目路径改为 Laravel 根目录，并在环境变量中启用 PHP。", "Set your Laravel project directory and enable PHP in PATH.") },
+    { name: text("运行 PHP 脚本", "Run a PHP script"), minutes: 30, command: `php "${windows ? 'D:\\Projects\\my-app\\scripts\\task.php' : '/path/to/my-app/scripts/task.php'}"`, hint: text("替换成实际脚本路径；PHP 需已安装并加入环境变量。", "Choose your actual script path; PHP must be available in PATH.") },
+    { name: text("运行 Node.js 脚本", "Run a Node.js script"), minutes: 60, command: `node "${windows ? 'D:\\Projects\\my-app\\scripts\\task.mjs' : '/path/to/my-app/scripts/task.mjs'}"`, hint: text("替换脚本路径，并选择已启用的 Node.js 版本。", "Set the script path and activate your Node.js version.") },
+    { name: text("运行项目 pnpm 任务", "Run a pnpm task"), minutes: 1440, command: `${windows ? 'cd /d "D:\\Projects\\my-app"' : 'cd "/path/to/my-app"'} && pnpm run maintenance`, hint: text("修改项目路径和 package.json 中的任务名 maintenance。", "Set your project directory and the maintenance script name from package.json.") },
+  ];
   const client = useQueryClient();
   const query = useQuery({ queryKey: ["cron-jobs"], queryFn: api.cronJobs, refetchInterval: 2000, retry: false });
   const jobs = query.data ?? [];
@@ -87,6 +98,8 @@ export function CronTool() {
   const [intervalMin, setIntervalMin] = React.useState("30");
   const [preset, setPreset] = React.useState("30");
   const [saving, setSaving] = React.useState(false);
+  const [enabled, setEnabled] = React.useState(false);
+  const [exampleHint, setExampleHint] = React.useState("");
   const saveGuard = React.useRef(false);
   const [saveError, setSaveError] = React.useState<string | null>(null);
   const [expanded, setExpanded] = React.useState<string | null>(null);
@@ -99,9 +112,10 @@ export function CronTool() {
   const nameId = React.useId();
   const presets = [1, 5, 15, 30, 60, 1440];
   const refresh = () => query.refetch();
-  const reset = () => { setEditing(null); setName(""); setCommand(""); setSaveError(null); };
+  const reset = () => { setEditing(null); setName(""); setCommand(""); setSaveError(null); setEnabled(false); setExampleHint(""); };
   const edit = (job: CronJob) => {
     setEditing(job); setName(job.name); setCommand(job.command); setIntervalMin(String(job.intervalMin));
+    setEnabled(job.enabled); setExampleHint("");
     setPreset(presets.includes(job.intervalMin) ? String(job.intervalMin) : "custom"); setSaveError(null);
     form.current?.scrollIntoView({ block: "center", behavior: "smooth" });
     form.current?.querySelector<HTMLInputElement>("input")?.focus({ preventScroll: true });
@@ -125,7 +139,7 @@ export function CronTool() {
     saveGuard.current = true; setSaving(true); setSaveError(null);
     try {
       await api.cronSave({ id: editing?.id ?? "", name: name.trim(), command: command.trim(), intervalMin: minutes,
-        enabled: editing?.enabled ?? true, createdAt: editing?.createdAt ?? Date.now() });
+        enabled, createdAt: editing?.createdAt ?? Date.now() });
       reset(); toast.success(t("tools.cron.saved")); await refresh();
     } catch (e) { setSaveError(normalizeError(e).message); }
     finally { saveGuard.current = false; setSaving(false); }
@@ -198,6 +212,7 @@ export function CronTool() {
         })}
         <form ref={form} onSubmit={save} className="flex flex-col gap-3 rounded-lg border border-dashed border-border p-3">
           <p className="break-words text-xs font-medium">{editing ? `${t("tools.cron.edit")} · ${editing.name}` : t("tools.cron.new")}</p>
+          {!editing && <div className="space-y-2 rounded-lg bg-fill p-3"><p className="text-xs font-medium">{text("从常用示例开始", "Start with an example")}</p><div className="flex flex-wrap gap-2">{examples.map((example) => <Button key={example.name} type="button" size="sm" variant="secondary" disabled={saving || !platform.data} onClick={() => { setName(example.name); setCommand(example.command); setIntervalMin(String(example.minutes)); setPreset(String(example.minutes)); setExampleHint(example.hint); setEnabled(false); setSaveError(null); }}>{example.name}</Button>)}</div><p className="text-[11px] text-muted">{exampleHint || text("示例只填写表单。先修改路径和参数，保存后可手动试运行，再开启定时执行。", "Examples fill the form only. Adjust paths and arguments, save, then run once before enabling the schedule.")}</p>{platform.error && <p className="text-xs text-error">{text("无法读取系统类型，请重试以使用示例。", "Could not detect your platform. Retry to use examples.")}<Button type="button" size="sm" variant="ghost" onClick={() => void platform.refetch()}>{t("install.retry")}</Button></p>}</div>}
           <label htmlFor={nameId} className="space-y-1.5 text-xs text-muted">{t("tools.cron.nameLabel")}
             <Input id={nameId} value={name} disabled={saving} maxLength={128} onChange={(e) => setName(e.target.value)} placeholder={t("tools.cron.namePh")} required />
           </label>
@@ -215,6 +230,8 @@ export function CronTool() {
             </div>
           </div>
           <p className="text-[11px] leading-relaxed text-faint">{t("tools.cron.hint2")}</p>
+          <label className="flex items-center gap-2 text-xs"><Switch checked={enabled} onCheckedChange={setEnabled} disabled={saving} />{text("保存后启用定时执行", "Enable scheduled execution after saving")}</label>
+          <p className="text-[11px] text-muted">{text(`每 ${intervalMin || "—"} 分钟执行一次；仅 NiceEnv 运行时调度，不是每天固定时刻。`, `Runs every ${intervalMin || "—"} minutes while NiceEnv is open, not at a fixed time of day.`)}</p>
           {saveError && <p role="alert" className="break-words text-xs text-error">{saveError}</p>}
           <div className="flex flex-wrap justify-end gap-2">
             {editing && <Button type="button" variant="ghost" disabled={saving} onClick={reset}>{t("common.cancel")}</Button>}

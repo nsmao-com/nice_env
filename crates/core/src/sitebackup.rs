@@ -1217,7 +1217,7 @@ pub fn restore(
         return Err(restore_changed());
     }
     progress("complete", files, bytes);
-    Ok(pending.keep().to_string_lossy().into())
+    Ok(crate::paths::portable_path_text(&pending.keep()))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -135,8 +135,8 @@ fn members(bytes: &[u8], at: usize) -> Result<Vec<Member>> {
 }
 
 fn expected(spec: &ClientSpec, executable: &Path, data: &Path) -> Result<Value> {
-    let executable = executable.to_str().ok_or_else(bad_config)?;
-    let data = data.to_str().ok_or_else(bad_config)?;
+    let executable = crate::paths::portable_text(executable.to_str().ok_or_else(bad_config)?);
+    let data = crate::paths::portable_text(data.to_str().ok_or_else(bad_config)?);
     let mut value = json!({"command":executable,"args":[],"env":{"NSB_HOME":data}});
     if spec.group == "servers" { value["type"] = json!("stdio"); }
     Ok(value)
@@ -160,7 +160,19 @@ fn entry(text: &str, group: &str) -> Result<Option<Value>> {
 }
 
 fn matches_current(value: &Value, expected: &Value) -> bool {
-    value["command"] == expected["command"] && value["env"]["NSB_HOME"] == expected["env"]["NSB_HOME"]
+    let same_path = |left: &Value, right: &Value| {
+        let (Some(left), Some(right)) = (left.as_str(), right.as_str()) else {
+            return false;
+        };
+        if cfg!(windows) {
+            crate::paths::portable_path_text(Path::new(left))
+                .eq_ignore_ascii_case(&crate::paths::portable_path_text(Path::new(right)))
+        } else {
+            left == right
+        }
+    };
+    same_path(&value["command"], &expected["command"])
+        && same_path(&value["env"]["NSB_HOME"], &expected["env"]["NSB_HOME"])
         && value.get("args").is_none_or(|args| args == &json!([]))
         && value.get("type").is_none_or(|kind| kind == "stdio") && value.get("url").is_none()
         && value.get("disabled").is_none_or(|disabled| disabled == false)

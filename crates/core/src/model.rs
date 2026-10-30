@@ -123,7 +123,9 @@ pub struct SftpgoConfigDirectory {
     #[serde(serialize_with = "serialize_path")]
     pub directory: String,
     pub label: String,
+    #[serde(serialize_with = "serialize_optional_path")]
     pub config_file: Option<String>,
+    #[serde(serialize_with = "serialize_paths")]
     pub state_files: Vec<String>,
     pub modified_at: Option<u64>,
     pub issue: Option<String>,
@@ -1281,6 +1283,7 @@ pub struct DbBackupProgress {
     /// running / done / error
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "serialize_optional_path")]
     pub message: Option<String>,
 }
 

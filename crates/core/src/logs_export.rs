@@ -87,7 +87,7 @@ pub fn write_log_file(
     for i in 1..=999 {
         let target = dir.join(if i == 1 { name.clone() } else { format!("{stem}-{i}.log") });
         match temp.persist_noclobber(&target) {
-            Ok(_) => return Ok(target.to_string_lossy().to_string()),
+            Ok(_) => return Ok(crate::paths::portable_path_text(&target)),
             Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => temp = e.file,
             Err(e) => return Err(AppError::io("保存日志文件", e.error)),
         }

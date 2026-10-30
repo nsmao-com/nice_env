@@ -217,6 +217,7 @@ pub struct ConfigValidation {
     pub ok: bool,
     /// 校验器的原始输出（成功时也可能有警告）
     #[serde(default)]
+    #[serde(serialize_with = "crate::model::serialize_paths")]
     pub messages: Vec<String>,
     /// 结构自检发现的问题（行号 + 说明）
     #[serde(default)]
@@ -229,6 +230,7 @@ pub struct ConfigIssue {
     /// 1-based 行号；0 表示与具体行无关
     pub line: usize,
     pub severity: String, // error / warning
+    #[serde(serialize_with = "crate::model::serialize_path")]
     pub message: String,
 }
 
@@ -1253,6 +1255,7 @@ pub struct ConfigBackup {
     pub path: String,
     pub size_bytes: u64,
     pub created_at: i64,
+    #[serde(serialize_with = "crate::model::serialize_optional_path")]
     pub target: Option<String>,
 }
 

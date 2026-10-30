@@ -464,14 +464,15 @@ pub fn preview_config_reset(
         ConfigKind::CaddyConf => return Err(AppError::new("CONFIG_RESET_UNSUPPORTED", "Caddy 配置请先启动服务生成，或从配置历史恢复")),
         ConfigKind::NginxMain => {
             let (root, _) = crate::ops::nginx_exe(store)?;
-            crate::configgen::render_nginx_conf(
+            let content = crate::configgen::render_nginx_conf(
                 paths,
                 &root,
                 ports.http,
                 ports.https,
                 &pools,
                 crate::configgen::adminer_path(paths).as_deref(),
-            )
+            );
+            crate::configgen::complete_nginx_php_upstreams(paths, &content)?
         }
         ConfigKind::ApacheConf => {
             let (root, _) = crate::ops::apache_paths(store)?;

@@ -2095,6 +2095,67 @@ pub fn ensure_all_configs(
     Ok(())
 }
 
+/// 已启用的站点可能早于 PHP 池启动。保留合法的 upstream 名称，但不把请求
+/// 发到已停止池的旧端口（该端口可能已被其他进程占用）。PHP 启动时由真实池替换。
+pub(crate) fn complete_nginx_php_upstreams(paths: &Paths, content: &str) -> Result<String> {
+    use std::collections::BTreeSet;
+
+    fn collect(nodes: &[NginxDirective], references: &mut BTreeSet<String>, defined: &mut BTreeSet<String>) {
+        for node in nodes {
+            if let Some(name) = node.words.get(1) {
+                if name.strip_prefix("nsb_php_").is_some_and(|suffix| {
+                    !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                }) {
+                    match node.words[0].as_str() {
+                        "fastcgi_pass" => { references.insert(name.clone()); }
+                        "upstream" => { defined.insert(name.clone()); }
+                        _ => {}
+                    }
+                }
+            }
+            collect(&node.children, references, defined);
+        }
+    }
+
+    let nodes = nginx_directives(content)?;
+    let mut http = nodes.iter().filter(|node| node.words[0] == "http");
+    let block = http.next().ok_or_else(nginx_structure_error)?;
+    if http.next().is_some() || content.as_bytes()[block.end - 1] != b'}' {
+        return Err(nginx_structure_error());
+    }
+    let mut references = BTreeSet::new();
+    let mut defined = BTreeSet::new();
+    collect(&block.children, &mut references, &mut defined);
+    let directory = crate::paths::checked_data_path(&paths.base, "etc/nginx/sites")?;
+    match std::fs::read_dir(directory) {
+        Ok(entries) => {
+            for entry in entries {
+                let name = entry?.file_name();
+                let name = name.to_string_lossy();
+                // 与主配置的 *.conf include 一致，禁用站点不需要占位池。
+                if !name.ends_with(".conf") { continue; }
+                let path = crate::paths::checked_data_path(&paths.base, &format!("etc/nginx/sites/{name}"))?;
+                if !path.is_file() { continue; }
+                let site = std::fs::read_to_string(path)?;
+                collect(&nginx_directives(&site)?, &mut references, &mut defined);
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(AppError::io("读取 Nginx 站点配置", error)),
+    }
+    let newline = if content.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut additions = String::new();
+    for name in references.difference(&defined) {
+        additions.push_str(&format!("    upstream {name} {{{newline}        server 127.0.0.1:1 down;{newline}    }}{newline}"));
+    }
+    if additions.is_empty() { return Ok(content.to_owned()); }
+    // 独占一行，兼容用户将 http 块写成单行的情况。
+    additions.insert_str(0, newline);
+    let mut output = content.to_owned();
+    output.insert_str(block.end - 1, &additions);
+    Ok(output)
+}
+
 pub fn write_nginx_conf(
     paths: &Paths,
     nginx_root: &std::path::Path,
@@ -2124,6 +2185,7 @@ pub fn write_nginx_conf(
     let conf = match network { Some(enabled) => network_listeners(&conf, enabled, true)?, None => conf };
     crate::tls::ensure_server_fallback(paths)?;
     localize_legacy_nginx_sites(paths, network)?;
+    let conf = complete_nginx_php_upstreams(paths, &conf)?;
     publish_config(paths, "nginx-main", &path, &conf, previous.as_deref())?;
     let fp = paths.etc().join("nginx").join("fastcgi_params");
     if !fp.exists() {
@@ -2268,7 +2330,7 @@ pub fn validate_nginx(nginx_exe: &std::path::Path, conf: &std::path::Path) -> Re
     if !ok {
         return Err(
             AppError::new("NGINX_CONF_INVALID", "nginx 配置语法校验失败")
-                .with_hint("请检查高级设置里改过的内容；系统会在修改前自动备份")
+                .with_hint("请根据下方错误检查主配置和站点配置；可在配置历史中查看修改前的备份")
                 .with_detail(output),
         );
     }
@@ -3136,6 +3198,29 @@ secret: fixture-secret
         assert_eq!(std::fs::read_to_string(&site_path).unwrap(), localized);
         localize_legacy_nginx_sites(&paths, None).unwrap();
         assert_eq!(std::fs::read_to_string(&site_path).unwrap(), localized);
+
+        // 安装/重建配置时 PHP 可能已停止；只有启用站点引用的缺失池需要占位。
+        std::fs::write(&site_path, "server { location ~ \\.php$ { fastcgi_pass nsb_php_8_4_26; } }\n# fastcgi_pass nsb_php_comment;\n").unwrap();
+        std::fs::write(paths.nginx_sites_dir().join("disabled.conf.disabled"), "server { fastcgi_pass nsb_php_disabled; }").unwrap();
+        let pending = complete_nginx_php_upstreams(&paths, &output).unwrap();
+        assert!(pending.contains("worker_processes  4; # user workers"));
+        assert_eq!(pending.matches("upstream nsb_php_8_4_26 {").count(), 1);
+        assert!(pending.contains("server 127.0.0.1:1 down;"));
+        assert!(pending.contains("server 127.0.0.1:9110;"));
+        assert!(!pending.contains("nsb_php_disabled"));
+        assert!(!pending.contains("nsb_php_comment"));
+        assert_eq!(complete_nginx_php_upstreams(&paths, &pending).unwrap(), pending);
+        let crlf = output.replace('\n', "\r\n");
+        assert_eq!(complete_nginx_php_upstreams(&paths, &crlf).unwrap(), pending.replace('\n', "\r\n"));
+        let running = render_nginx_conf(&paths, Path::new("C:/new/conf-root"), 8081, 8444, &[("8.4.26".into(), 9120)], None);
+        let synced = sync_nginx_config(&pending, &running, &paths).unwrap();
+        let synced = complete_nginx_php_upstreams(&paths, &synced).unwrap();
+        assert_eq!(synced.matches("upstream nsb_php_8_4_26 {").count(), 1);
+        assert!(synced.contains("server 127.0.0.1:9120;"));
+        assert!(!synced.contains(" down;"));
+        std::fs::remove_file(&site_path).unwrap();
+        let stopped = sync_nginx_config(&synced, &output, &paths).unwrap();
+        assert!(!complete_nginx_php_upstreams(&paths, &stopped).unwrap().contains("nsb_php_8_4_26"));
     }
 
     #[test]

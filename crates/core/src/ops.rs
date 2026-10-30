@@ -2305,7 +2305,7 @@ fn validate_configs_selected(
             checks.push(ConfigCheck {
                 kind: key,
                 name: format!("{label} {}", package.version),
-                path: path.as_ref().map(|path| path.to_string_lossy().into()),
+                path: path.as_ref().map(|path| crate::paths::portable_path_text(path)),
                 method: if id == "memcached" && service.is_some() {
                     "tcp"
                 } else if matches!(id, "mysql" | "redis" | "memcached") {

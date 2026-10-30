@@ -626,7 +626,7 @@ impl ServiceCheck {
             id: id.into(),
             state,
             method: method.into(),
-            detail: detail.into(),
+            detail: crate::paths::portable_text(&detail.into()),
             lines: Vec::new(),
         }
     }
@@ -1344,6 +1344,8 @@ mod tests {
         assert_eq!(red.matches("<home>").count(), 3, "{red}");
         assert!(red.contains("Alice-other"));
         assert!(!red.contains(r"Users\Alice\project"));
+        let check = ServiceCheck::new("config", ServiceCheckState::Unavailable, "native", r"配置路径：\\?\D:\NiceEnv\nsb-data\etc\nginx\nginx.conf");
+        assert_eq!(check.detail, r"配置路径：D:\NiceEnv\nsb-data\etc\nginx\nginx.conf");
     }
 
     #[test]

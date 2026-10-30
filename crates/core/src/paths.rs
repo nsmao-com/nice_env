@@ -2206,7 +2206,10 @@ mod tests {
             (r"\\?\UNC\server\share\中文", "//server/share/中文"),
         ] {
             assert_eq!(portable_path_text(Path::new(raw)), expected);
-            assert_eq!(crate::pathenv::bin_dir_for(raw, "node.exe").unwrap(), expected);
+            assert_eq!(
+                crate::pathenv::bin_dir_for(raw, "node.exe").unwrap(),
+                expected
+            );
             assert_eq!(quoted_config_path(Path::new(raw)), expected);
         }
         let original = "https://example.test/?q=中文&next=?";

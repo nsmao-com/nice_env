@@ -3809,12 +3809,16 @@ fn set_port_override(
 
 const APP_RELEASES_API: &str = "https://api.github.com/repos/nsmao-com/nice_env/releases/latest";
 #[tauri::command]
-async fn assistant_chat(request: nsb_core::assistant::ChatRequest) -> Result<serde_json::Value, AppError> {
+async fn assistant_chat(
+    request: nsb_core::assistant::ChatRequest,
+) -> Result<serde_json::Value, AppError> {
     nsb_core::assistant::chat(request).await
 }
 
 #[tauri::command]
-async fn assistant_models(request: nsb_core::assistant::ModelsRequest) -> Result<Vec<String>, AppError> {
+async fn assistant_models(
+    request: nsb_core::assistant::ModelsRequest,
+) -> Result<Vec<String>, AppError> {
     nsb_core::assistant::models(request).await
 }
 
@@ -3822,11 +3826,13 @@ async fn assistant_models(request: nsb_core::assistant::ModelsRequest) -> Result
 async fn assistant_tool(
     state: State<'_, Arc<CoreState>>,
     assistant: State<'_, Arc<nsb_core::assistant::Assistant>>,
-    name: String, args: serde_json::Value,
+    name: String,
+    args: serde_json::Value,
 ) -> Result<nsb_core::assistant::ToolReply, AppError> {
     let state = state.inner().clone();
     let assistant = assistant.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || assistant.prepare(&state, &name, &args)).await
+    tauri::async_runtime::spawn_blocking(move || assistant.prepare(&state, &name, &args))
+        .await
         .map_err(|_| AppError::new("ASSISTANT_TASK", "诊断任务未能完成，请重试"))?
 }
 
@@ -3834,11 +3840,13 @@ async fn assistant_tool(
 async fn assistant_confirm(
     state: State<'_, Arc<CoreState>>,
     assistant: State<'_, Arc<nsb_core::assistant::Assistant>>,
-    token: String, approved: bool,
+    token: String,
+    approved: bool,
 ) -> Result<nsb_core::assistant::ToolReply, AppError> {
     let state = state.inner().clone();
     let assistant = assistant.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || assistant.confirm(&state, &token, approved)).await
+    tauri::async_runtime::spawn_blocking(move || assistant.confirm(&state, &token, approved))
+        .await
         .map_err(|_| AppError::new("ASSISTANT_TASK", "操作任务未能完成，请先检查服务状态"))?
 }
 
@@ -4077,7 +4085,8 @@ async fn check_updates(
 ) -> Result<serde_json::Value, tauri::Error> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || check_updates_blocking(&state))
-        .await.map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))?
+        .await
+        .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e.to_string())))?
 }
 
 fn check_updates_blocking(state: &nsb_core::CoreState) -> Result<serde_json::Value, tauri::Error> {
@@ -4137,7 +4146,12 @@ fn check_updates_blocking(state: &nsb_core::CoreState) -> Result<serde_json::Val
                     "assetUrl": info.asset_url,
                     "assetSize": info.asset_size,
                 });
-                (Some(info.tag.trim_start_matches(['v', 'V']).to_string()), Some(info.html_url), Some(newer), Some(rel))
+                (
+                    Some(info.tag.trim_start_matches(['v', 'V']).to_string()),
+                    Some(info.html_url),
+                    Some(newer),
+                    Some(rel),
+                )
             }
             Ok(None) => (
                 Some(current_ver.to_string()),

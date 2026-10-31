@@ -148,7 +148,7 @@ func assistantHTTP(ctx context.Context, u *url.URL, key, method string, body any
 		}
 		reader = bytes.NewReader(data)
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport := outboundTransport()
 	if slices.Contains([]string{"localhost", "127.0.0.1", "::1"}, strings.ToLower(u.Hostname())) {
 		transport.Proxy = nil
 	}

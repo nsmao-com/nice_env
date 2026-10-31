@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"gopkg.in/yaml.v3"
 	"niceenv/internal/process"
 )
 
@@ -270,7 +271,7 @@ func (c *Core) registerConfigs() {
 			}
 			selected = target.key
 		}
-		return c.configBackups(selected)
+		return c.configBackups(ctx, selected)
 	})
 	c.registerConfigRestore()
 	c.registerConfigReset()
@@ -373,9 +374,32 @@ func (c *Core) validateConfig(ctx context.Context, target configTarget, content 
 		return result, nil
 	}
 	if target.spec.pkg != "nginx" && target.spec.pkg != "apache" && target.spec.pkg != "caddy" {
-		result.OK = false
-		result.Messages = append(result.Messages, "该格式的原生校验器尚未迁移，不能确认配置有效。需要保存原文时可明确选择强制保存。")
-		result.Issues = append(result.Issues, configIssue{Severity: "warning", Message: result.Messages[0]})
+		if target.spec.language == "yaml" {
+			decoder := yaml.NewDecoder(strings.NewReader(content))
+			var document map[string]any
+			err := decoder.Decode(&document)
+			if err == nil {
+				var extra any
+				if next := decoder.Decode(&extra); next != io.EOF {
+					err = next
+					if err == nil {
+						err = errors.New("服务配置只能包含一个 YAML 文档")
+					}
+				}
+			}
+			if err != nil && err != io.EOF {
+				result.OK = false
+				result.Issues = append(result.Issues, configIssue{Severity: "error", Message: err.Error()})
+			}
+		} else if target.spec.pkg == "redis" {
+			for index, line := range strings.Split(content, "\n") {
+				if !validRedisConfigLine(strings.TrimSpace(line)) {
+					result.OK = false
+					result.Issues = append(result.Issues, configIssue{Line: index + 1, Severity: "error", Message: "引号未闭合，或引号后的参数缺少空格"})
+				}
+			}
+		}
+		result.Messages = append(result.Messages, "已完成基础格式检查；选项名称、外部文件和完整配置是否生效需由对应服务确认。")
 		return result, nil
 	}
 	if err := managedDirectory(c.Home, filepath.Dir(target.path)); err != nil {
@@ -396,7 +420,11 @@ func (c *Core) validateConfig(ctx context.Context, target configTarget, content 
 	args := []string{}
 	switch target.spec.pkg {
 	case "nginx":
-		args = []string{"-p", DisplayPath(root) + string(filepath.Separator), "-c", DisplayPath(name), "-t"}
+		root, args, err = nginxCommandPaths(target.program, name)
+		if err != nil {
+			return result, err
+		}
+		args = append(args, "-t")
 	case "apache":
 		root = filepath.Dir(root)
 		args = []string{"-d", DisplayPath(root), "-f", DisplayPath(name), "-t"}
@@ -431,6 +459,34 @@ func (c *Core) validateConfig(ctx context.Context, target configTarget, content 
 		result.Issues = append(result.Issues, configIssue{Severity: "error", Message: "服务原生配置校验失败，原文件未修改"})
 	}
 	return result, nil
+}
+
+// Match Redis sdssplitargs quoting without interpreting directives or secrets.
+func validRedisConfigLine(line string) bool {
+	if line == "" || strings.HasPrefix(line, "#") {
+		return true
+	}
+	var quote byte
+	for i := 0; i < len(line); i++ {
+		ch := line[i]
+		if quote == 0 {
+			if ch == '\'' || ch == '"' {
+				quote = ch
+			}
+			continue
+		}
+		if ch == '\\' && i+1 < len(line) && (quote == '"' || line[i+1] == '\'') {
+			i++
+			continue
+		}
+		if ch == quote {
+			quote = 0
+			if i+1 < len(line) && !strings.ContainsRune(" \t\r\n\v\f", rune(line[i+1])) {
+				return false
+			}
+		}
+	}
+	return quote == 0
 }
 
 func (c *Core) writeConfig(ctx context.Context, target configTarget, content string, expected *string) error {
@@ -495,51 +551,37 @@ func (c *Core) writeConfigExpected(ctx context.Context, target configTarget, con
 	}
 	return atomicWrite(target.path, []byte(content))
 }
-func (c *Core) configBackups(selected string) ([]map[string]any, error) {
-	dir := filepath.Join(c.Home, "backup", "config")
-	entries, err := os.ReadDir(dir)
+func (c *Core) configBackups(ctx context.Context, selected string) ([]map[string]any, error) {
+	entries, err := c.listFileBackups(ctx)
 	out := []map[string]any{}
-	if os.IsNotExist(err) {
-		return out, nil
-	}
 	if err != nil {
 		return nil, err
 	}
+	// Resolve installed targets once for the complete history, not per backup.
+	targets, err := c.configTargets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	snapshot := &configBackupSnapshot{targets: targets}
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".bak") {
+		if !entry["restorable"].(bool) {
 			continue
 		}
-		prefix, _, ok := strings.Cut(entry.Name(), "-")
-		if !ok {
+		name := entry["name"].(string)
+		_, _, target, _, err := c.configBackupSource(ctx, name, snapshot)
+		if err != nil || strings.HasPrefix(target.key, "file@") {
 			continue
 		}
-		decoded, err := hex.DecodeString(prefix)
-		if err != nil {
-			continue
-		}
-		key := string(decoded)
+		key := target.key
 		if selected != "" && key != selected {
 			continue
 		}
-		kind, version, exact := strings.Cut(key, "@")
-		known := false
-		for _, spec := range configSpecs {
-			if spec.kind == kind && (spec.shared && !exact || !spec.shared && exact && safePart(version)) {
-				known = true
-				break
-			}
+		if strings.HasPrefix(name, "config/") {
+			name = strings.TrimPrefix(name, "config/")
+		} else if !strings.HasPrefix(name, "files/") {
+			name = "legacy/" + name
 		}
-		if !known {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return nil, err
-		}
-		if !info.Mode().IsRegular() {
-			continue
-		}
-		out = append(out, map[string]any{"name": entry.Name(), "path": Path(filepath.Join(dir, entry.Name())), "sizeBytes": info.Size(), "createdAt": info.ModTime().Unix(), "target": key})
+		out = append(out, map[string]any{"name": name, "path": entry["path"], "sizeBytes": entry["sizeBytes"], "createdAt": entry["modifiedAt"].(int64) / 1000, "target": key})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i]["createdAt"].(int64) > out[j]["createdAt"].(int64) })
 	if len(out) > 30 {

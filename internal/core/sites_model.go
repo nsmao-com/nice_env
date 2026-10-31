@@ -87,7 +87,7 @@ type Site struct {
 	Rewrite      string            `json:"rewrite"`
 	DB           *siteDB           `json:"db"`
 	Status       string            `json:"status"`
-	PHPOverrides map[string]string `json:"phpOverrides"`
+	PHPOverrides map[string]string `json:"phpOverrides,omitempty"`
 	CreatedAt    int64             `json:"createdAt"`
 	UpdatedAt    int64             `json:"updatedAt"`
 }

@@ -354,7 +354,7 @@ func (c *Core) writeCertPair(ctx context.Context, certPath, keyPath string, cert
 	}
 	for i, data := range before {
 		if exists[i] {
-			if err = atomicWrite(filepath.Join(backup, fmt.Sprintf("%d.bak", i)), data); err != nil {
+			if err = writePrivateAtomic(filepath.Join(backup, fmt.Sprintf("%d.bak", i)), data); err != nil {
 				return err
 			}
 		}
@@ -372,7 +372,7 @@ func (c *Core) writeCertPair(ctx context.Context, certPath, keyPath string, cert
 			if (err == nil) != exists[i] || !bytes.Equal(current, before[i]) {
 				return invalid("证书文件在保存前发生变化")
 			}
-			if err = atomicWrite(paths[i], data); err != nil {
+			if err = writePrivateAtomic(paths[i], data); err != nil {
 				return err
 			}
 			written++
@@ -386,7 +386,7 @@ func (c *Core) writeCertPair(ctx context.Context, certPath, keyPath string, cert
 	for i := written - 1; i >= 0; i-- {
 		var err error
 		if exists[i] {
-			err = atomicWrite(paths[i], before[i])
+			err = writePrivateAtomic(paths[i], before[i])
 		} else {
 			err = os.Remove(paths[i])
 		}

@@ -181,6 +181,77 @@ func projectDocument(content []byte, exists bool) (map[string]json.RawMessage, m
 	}
 	return doc, versions, nil
 }
+
+// PinProjectPHP retains the CLI's existing .nsb.json contract and preserves all
+// unrelated JSON fields. The same checked atomic writer is used by the editor.
+func PinProjectPHP(directory, version string) error {
+	parts, ok := numericRuntimeVersion(version, false)
+	if !ok || len(parts) != 3 {
+		return invalid("版本必须为 php@x.y.z")
+	}
+	abs, err := filepath.Abs(DisplayPath(directory))
+	if err != nil {
+		return err
+	}
+	if !plainProjectDirectory(abs) {
+		return invalid("项目目录不存在或经过链接")
+	}
+	root, err := os.OpenRoot(abs)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	body, exists, err := envRead(root, ".nsb.json")
+	if err != nil {
+		return err
+	}
+	document := map[string]json.RawMessage{}
+	if exists && (json.Unmarshal(body, &document) != nil || document == nil) {
+		return invalid(".nsb.json 必须是有效对象，原文件已保留")
+	}
+	document["php"], err = json.Marshal(version)
+	if err != nil {
+		return err
+	}
+	next, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		return err
+	}
+	return replaceEnv(root, ".nsb.json", body, exists, append(next, '\n'))
+}
+
+func legacyProjectPHP(directory string) (string, error) {
+	root, err := os.OpenRoot(DisplayPath(directory))
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	body, exists, err := envRead(root, ".nsb.json")
+	if err != nil || !exists {
+		return "", err
+	}
+	var doc map[string]json.RawMessage
+	if json.Unmarshal(body, &doc) != nil || doc == nil {
+		return "", invalid(".nsb.json 格式无效，请修正项目锁定文件")
+	}
+	value, present := doc["php"]
+	if !present {
+		return "", nil
+	}
+	var version string
+	if json.Unmarshal(value, &version) != nil {
+		return "", invalid(".nsb.json 的 php 版本必须是字符串")
+	}
+	version = strings.TrimSpace(version)
+	parts, ok := numericRuntimeVersion(version, false)
+	if !ok || len(parts) != 3 {
+		return "", invalid(".nsb.json 的 php 版本必须为 x.y.z")
+	}
+	return version, nil
+}
 func numericRuntimeVersion(version string, node bool) ([]uint64, bool) {
 	if node {
 		version = strings.TrimPrefix(version, "v")

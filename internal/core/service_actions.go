@@ -71,7 +71,7 @@ func (c *Core) registerServices() {
 		defer c.services.mu.RUnlock()
 		return map[string]any{"service": cloneStatus(e), "revision": e.revision}, nil
 	})
-	c.handle("tail_logs", func(_ context.Context, data json.RawMessage) (any, error) {
+	c.handle("tail_logs", func(ctx context.Context, data json.RawMessage) (any, error) {
 		in, err := decode[struct {
 			ID    string `json:"id"`
 			Lines int    `json:"lines"`
@@ -85,13 +85,10 @@ func (c *Core) registerServices() {
 		if in.Lines < 1 || in.Lines > 5000 {
 			return nil, invalid("日志条数必须为 1–5000")
 		}
-		e, err := c.serviceEntry(in.ID, "")
+		path, err := c.logSourcePath(ctx, in.ID)
 		if err != nil {
 			return nil, err
 		}
-		c.services.mu.RLock()
-		path := string(e.status.LogFile)
-		c.services.mu.RUnlock()
 		return readServiceLog(path, in.Lines)
 	})
 }
@@ -199,6 +196,10 @@ func (c *Core) serviceError(e *serviceEntry, err error) {
 }
 
 func (c *Core) startService(ctx context.Context, e *serviceEntry) error {
+	return c.startServiceAttempt(ctx, e, false)
+}
+
+func (c *Core) startServiceAttempt(ctx context.Context, e *serviceEntry, automatic bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -208,6 +209,11 @@ func (c *Core) startService(ctx context.Context, e *serviceEntry) error {
 	c.services.mu.RUnlock()
 	if child != nil {
 		if state == "running" {
+			if !automatic {
+				c.services.mu.Lock()
+				e.watch.started(time.Now(), false)
+				c.services.mu.Unlock()
+			}
 			return nil
 		}
 		return serviceBusy()
@@ -241,6 +247,22 @@ func (c *Core) startService(ctx context.Context, e *serviceEntry) error {
 			_ = unlock()
 		}
 	}()
+	if err = c.prepareManifestService(ctx, e, r); err != nil {
+		c.serviceError(e, err)
+		return err
+	}
+	if e.pkg.ID == "coredns" {
+		if err = c.prepareCoreDNS(ctx, e, r); err != nil {
+			c.serviceError(e, err)
+			return err
+		}
+	}
+	if e.pkg.ID == "mihomo" {
+		if err = c.prepareMihomo(ctx, e, r); err != nil {
+			c.serviceError(e, err)
+			return err
+		}
+	}
 	if e.pkg.ID == "php" {
 		if err = c.preparePHP(ctx, e, r); err != nil {
 			c.serviceError(e, err)
@@ -259,9 +281,41 @@ func (c *Core) startService(ctx context.Context, e *serviceEntry) error {
 			return err
 		}
 	}
+	if e.pkg.ID == "qdrant" {
+		if err = c.prepareQdrant(ctx, e, r); err != nil {
+			c.serviceError(e, err)
+			return err
+		}
+	}
+	if e.pkg.ID == "mongodb" {
+		if err = c.prepareMongo(ctx, e, r); err != nil {
+			c.serviceError(e, err)
+			return err
+		}
+	}
+	if e.pkg.ID == "sftpgo" {
+		if err = c.prepareSftpgo(ctx, e, r); err != nil {
+			c.serviceError(e, err)
+			return err
+		}
+	}
+	for id, prepare := range map[string]func(context.Context, *serviceEntry, *resolvedService) error{"tomcat": c.prepareTomcat, "neo4j": c.prepareNeo4j, "rabbitmq": c.prepareRabbitMQ, "elasticsearch": c.prepareElasticsearch} {
+		if e.pkg.ID == id {
+			if err = prepare(ctx, e, r); err != nil {
+				c.serviceError(e, err)
+				return err
+			}
+		}
+	}
 	if err = checkServicePorts(ctx, r.ports); err != nil {
 		c.serviceError(e, err)
 		return err
+	}
+	if e.pkg.ID == "consul" {
+		if err = checkConsulUDP(ctx, r.port); err != nil {
+			c.serviceError(e, err)
+			return err
+		}
 	}
 	if e.pkg.ID == "nginx" {
 		if err = c.prepareNginx(ctx, e, r); err != nil {
@@ -299,10 +353,23 @@ func (c *Core) startService(ctx context.Context, e *serviceEntry) error {
 	life, cancel := context.WithCancel(context.Background())
 	c.services.mu.Lock()
 	e.status.State = "starting"
+	if e.pkg.ID == "qdrant" || e.pkg.ID == "mihomo" {
+		e.status.Port = r.port
+	}
 	e.status.LastError = nil
 	e.revision = revision
 	c.services.mu.Unlock()
-	spec := process.Spec{Program: r.program, Args: r.args, Directory: r.cwd, Environment: r.env, Stdout: log, Stderr: log}
+	spec := process.Spec{Program: r.program, Args: r.args, Directory: r.cwd, Environment: r.env, RemoveEnvironment: r.removeEnvironment, Stdout: log, Stderr: log}
+	if e.pkg.ID == "nats" || e.pkg.ID == "rnacos" {
+		spec.ConsoleSignals = true
+		spec.ConsoleInterrupt = true
+	}
+	if e.pkg.ID == "minio" || e.pkg.ID == "coredns" || e.pkg.ID == "qdrant" || e.pkg.ID == "mongodb" || e.pkg.ID == "sftpgo" || e.pkg.ID == "mihomo" || e.pkg.ID == "tomcat" || e.pkg.ID == "neo4j" || e.pkg.ID == "elasticsearch" || e.pkg.ID == "rabbitmq" {
+		spec.ConsoleSignals = true
+	}
+	if e.pkg.ID == "qdrant" || e.pkg.ID == "mongodb" || e.pkg.ID == "sftpgo" || e.pkg.ID == "mihomo" || e.pkg.ID == "tomcat" || e.pkg.ID == "neo4j" || e.pkg.ID == "elasticsearch" {
+		spec.ConsoleInterrupt = true
+	}
 	if e.pkg.ID == "postgresql" {
 		spec.RemoveEnvironment = postgresRemoveEnvironment()
 	}
@@ -373,7 +440,13 @@ func (c *Core) startService(ctx context.Context, e *serviceEntry) error {
 	}()
 	if err = c.waitServiceReady(ctx, e, r, child); err != nil {
 		c.serviceError(e, err)
-		if isMySQLEngine(e.pkg.ID) || e.pkg.ID == "redis" || e.pkg.ID == "postgresql" {
+		if e.pkg.ID == "consul" {
+			return &AppError{Code: "CONSUL_START_PENDING", Message: "Consul 尚未完成端口与 leader 检查，进程仍由应用管理，请检查日志后停止或重试", Detail: err.Error()}
+		}
+		if e.pkg.ID == "minio" {
+			return &AppError{Code: "MINIO_START_PENDING", Message: "MinIO 尚未通过就绪检查，进程仍由应用管理，请检查日志；未强制结束存储服务", Detail: err.Error()}
+		}
+		if isMySQLEngine(e.pkg.ID) || e.pkg.ID == "redis" || e.pkg.ID == "postgresql" || e.pkg.ID == "qdrant" || e.pkg.ID == "mongodb" || e.pkg.ID == "sftpgo" {
 			// A database may be recovering its redo log. Never turn a readiness
 			// timeout or a cancelled UI request into an unrequested forced kill.
 			return &AppError{Code: "DATABASE_START_PENDING", Message: "数据库尚未通过启动检查，进程仍由应用管理，请检查日志后重试停止", Detail: err.Error()}
@@ -412,12 +485,25 @@ func (c *Core) startService(ctx context.Context, e *serviceEntry) error {
 		}
 		closePostgres(conn)
 	}
+	if e.pkg.ID == "sftpgo" {
+		binding, err := sftpgoRelativeDirectory(c.Home, r.etc)
+		if err == nil {
+			err = c.Store.saveSetting(ctx, "sftpgoConfigDir", binding)
+		}
+		if err != nil {
+			c.serviceError(e, err)
+			return err
+		}
+	}
 	if e.pkg.ID == "php" {
 		if err = c.reloadNginxPools(ctx); err != nil {
 			stopErr := c.stopOwned(ctx, e, true)
 			return errors.Join(err, stopErr)
 		}
 	}
+	c.services.mu.Lock()
+	e.watch.started(time.Now(), automatic)
+	c.services.mu.Unlock()
 	return nil
 }
 
@@ -436,6 +522,7 @@ func (c *Core) waitServiceReady(ctx context.Context, e *serviceEntry, r *resolve
 	defer cancel()
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
+	var consulStable time.Time
 	processOnly := e.pkg.Run.Health == "process"
 	if !processOnly && r.port == 0 {
 		return invalid("TCP 服务没有声明端口")
@@ -453,7 +540,11 @@ func (c *Core) waitServiceReady(ctx context.Context, e *serviceEntry, r *resolve
 		if processOnly {
 			return nil
 		}
-		conn, err := (&net.Dialer{Timeout: 200 * time.Millisecond}).DialContext(ctx, "tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(r.port)))
+		host := "127.0.0.1"
+		if r.qdrant != nil && r.qdrant.host != "0.0.0.0" {
+			host = r.qdrant.host
+		}
+		conn, err := (&net.Dialer{Timeout: 200 * time.Millisecond}).DialContext(ctx, "tcp4", net.JoinHostPort(host, strconv.Itoa(r.port)))
 		if err != nil {
 			continue
 		}
@@ -464,7 +555,7 @@ func (c *Core) waitServiceReady(ctx context.Context, e *serviceEntry, r *resolve
 			return &AppError{Code: "SERVICE_PORT_UNVERIFIED", Message: "端口已监听，但无法读取监听进程归属"}
 		}
 		wanted := map[int]bool{r.port: true}
-		if e.pkg.ID == "php" {
+		if e.pkg.ID == "php" || e.pkg.ID == "consul" || e.pkg.ID == "minio" || e.pkg.ID == "qdrant" || e.pkg.ID == "mihomo" || e.pkg.ID == "neo4j" || e.pkg.ID == "rabbitmq" || e.pkg.ID == "elasticsearch" {
 			for _, port := range r.ports {
 				wanted[port] = true
 			}
@@ -480,15 +571,78 @@ func (c *Core) waitServiceReady(ctx context.Context, e *serviceEntry, r *resolve
 			if !owned {
 				return &AppError{Code: "PORT_OWNED_ELSEWHERE", Message: "该端口已由其他程序监听，未将其认作服务启动成功"}
 			}
+			if (e.pkg.ID == "consul" || e.pkg.ID == "minio" || e.pkg.ID == "coredns" || e.pkg.ID == "tomcat" || e.pkg.ID == "neo4j" || e.pkg.ID == "rabbitmq" || e.pkg.ID == "elasticsearch") && listener.Laddr.IP != "127.0.0.1" {
+				return invalid("受管服务 TCP 端口未限定为本机访问")
+			}
 			delete(wanted, int(listener.Laddr.Port))
 		}
 		if len(wanted) == 0 {
+			if e.pkg.ID == "coredns" {
+				ready, err := coreDNSReady(ctx, r, child)
+				if err != nil {
+					return err
+				}
+				if !ready {
+					continue
+				}
+			}
+			if e.pkg.ID == "minio" {
+				ready, err := minioReady(ctx, r)
+				if err != nil {
+					return err
+				}
+				if !ready {
+					consulStable = time.Time{}
+					continue
+				}
+				if consulStable.IsZero() {
+					consulStable = time.Now()
+				}
+				if time.Since(consulStable) < 300*time.Millisecond {
+					continue
+				}
+			}
+			if e.pkg.ID == "consul" {
+				ready, err := consulReady(ctx, r.port, child)
+				if err != nil {
+					return err
+				}
+				if !ready {
+					consulStable = time.Time{}
+					continue
+				}
+				if consulStable.IsZero() {
+					consulStable = time.Now()
+				}
+				if time.Since(consulStable) < 300*time.Millisecond {
+					continue
+				}
+			}
 			return nil
 		}
+		consulStable = time.Time{}
 	}
 }
 
 func (c *Core) stopOwned(ctx context.Context, e *serviceEntry, force bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if e.pkg.ID == "coredns" {
+		if err := c.restoreDNSBeforeStop(ctx); err != nil {
+			return err
+		}
+	}
+	if e.pkg.ID == "mihomo" {
+		if err := c.setProxySystem(ctx, false); err != nil {
+			return err
+		}
+	}
+	c.services.mu.Lock()
+	e.watch.enabled = false
+	e.watch.next = time.Time{}
+	e.watch.attempts = 0
+	c.services.mu.Unlock()
 	c.services.mu.RLock()
 	child, done, r := e.child, e.done, e.resolved
 	c.services.mu.RUnlock()
@@ -525,6 +679,18 @@ func (c *Core) stopOwned(ctx context.Context, e *serviceEntry, force bool) error
 			}
 		} else if e.pkg.ID == "postgresql" {
 			if err := c.shutdownPostgres(ctx, e); err != nil {
+				return err
+			}
+		} else if e.pkg.ID == "rabbitmq" {
+			if err := c.shutdownRabbitMQ(ctx, e); err != nil {
+				return err
+			}
+		} else if e.pkg.ID == "consul" {
+			if err := c.shutdownConsul(ctx, e); err != nil {
+				return err
+			}
+		} else if e.pkg.ID == "minio" {
+			if err := shutdownMinIO(ctx, child, r); err != nil {
 				return err
 			}
 		} else if e.pkg.ID == "apache" {

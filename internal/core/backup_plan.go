@@ -82,7 +82,7 @@ func databasePlanKey(engine, version string) (string, error) {
 	if engine == "postgresql" {
 		return "postgresBackupPlan@" + version, nil
 	}
-	if engine == "mysql" || engine == "mariadb" {
+	if engine == "mysql" || engine == "mariadb" || engine == "mongodb" {
 		return engine + "BackupPlan@" + version, nil
 	}
 	return "", invalid("备份计划数据库类型无效")
@@ -186,6 +186,7 @@ func (c *Core) backupPlanLockPath(engine, version string) (string, error) {
 func (c *Core) registerBackupPlans() {
 	c.backupPlans.running = map[string]bool{}
 	c.registerMySQLBackupPlans()
+	c.registerMongoBackupPlans()
 	c.handle("postgres_backup_plan", func(ctx context.Context, data json.RawMessage) (any, error) {
 		in, err := decode[struct {
 			Version string `json:"version"`
@@ -374,7 +375,7 @@ func (c *Core) rotatePostgresBackups(version string, oid uint32, keep int, newes
 	return nil
 }
 func (c *Core) runDueBackupPlans(ctx context.Context) {
-	rows, err := c.Store.db.QueryContext(ctx, "SELECT key FROM settings WHERE key LIKE 'postgresBackupPlan@%' OR key LIKE 'mysqlBackupPlan@%' OR key LIKE 'mariadbBackupPlan@%'")
+	rows, err := c.Store.db.QueryContext(ctx, "SELECT key FROM settings WHERE key LIKE 'postgresBackupPlan@%' OR key LIKE 'mysqlBackupPlan@%' OR key LIKE 'mariadbBackupPlan@%' OR key LIKE 'mongodbBackupPlan@%'")
 	if err != nil {
 		return
 	}
@@ -410,6 +411,8 @@ func (c *Core) runDueBackupPlans(ctx context.Context) {
 		}
 		if engine == "postgresql" {
 			_, _ = c.runPostgresPlan(ctx, version, false)
+		} else if engine == "mongodb" {
+			_, _ = c.runMongoPlan(ctx, version, false)
 		} else {
 			_, _ = c.runMySQLPlan(ctx, engine, version, false)
 		}
@@ -434,7 +437,11 @@ func (c *Core) backupScheduler(parent context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			c.runDueBackupPlans(ctx)
+			if c.beginDataActivity() {
+				c.runDueBackupPlans(ctx)
+				c.runDueSiteFilePlans(ctx)
+				c.dataDir.activity.RUnlock()
+			}
 		}
 	}
 }

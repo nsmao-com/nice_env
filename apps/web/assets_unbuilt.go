@@ -8,6 +8,6 @@ import (
 )
 
 // Source-only compilation is supported without stale or placeholder UI assets.
-func Handler() (http.Handler, error) {
+func Handler(_ bool) (http.Handler, error) {
 	return nil, errors.New("web assets are not embedded: explicitly build the web frontend, then compile with -tags desktopassets")
 }

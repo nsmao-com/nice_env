@@ -31,6 +31,22 @@ func Shell(command, directory string, stdout, stderr io.Writer) (Spec, error) {
 }
 
 func start(ctx context.Context, spec Spec) (*Child, error) {
+	if spec.ConsoleInterrupt {
+		if !spec.ConsoleSignals || spec.commandLine != "" {
+			return nil, errors.New("interrupt console requires native arguments")
+		}
+		launcher, err := os.Executable()
+		if err != nil {
+			return nil, err
+		}
+		spec.Args = append([]string{consoleLaunchFlag, spec.Program}, spec.Args...)
+		spec.Program = launcher
+	}
+	var err error
+	spec, err = batchSpec(spec)
+	if err != nil {
+		return nil, err
+	}
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return nil, err
@@ -141,7 +157,11 @@ func start(ctx context.Context, spec Spec) (*Child, error) {
 	if err = ctx.Err(); err != nil {
 		return nil, err
 	}
-	err = windows.CreateProcess(program, command, nil, nil, true, windows.CREATE_NO_WINDOW|windows.CREATE_UNICODE_ENVIRONMENT|windows.EXTENDED_STARTUPINFO_PRESENT, &block[0], directory, &si.StartupInfo, &info)
+	flags := uint32(windows.CREATE_NO_WINDOW | windows.CREATE_UNICODE_ENVIRONMENT | windows.EXTENDED_STARTUPINFO_PRESENT)
+	if spec.ConsoleSignals {
+		flags = flags&^windows.CREATE_NO_WINDOW | windows.CREATE_NEW_CONSOLE
+	}
+	err = windows.CreateProcess(program, command, nil, nil, true, flags, &block[0], directory, &si.StartupInfo, &info)
 	runtime.KeepAlive(block)
 	runtime.KeepAlive(handles)
 	runtime.KeepAlive(job)
@@ -153,6 +173,9 @@ func start(ctx context.Context, spec Spec) (*Child, error) {
 	launched = true
 	p := &Child{PID: int(info.ProcessId), done: make(chan struct{})}
 	p.terminate = func() error { return windows.TerminateJobObject(job, 1) }
+	if spec.ConsoleSignals {
+		p.graceful = func() error { return requestConsoleStop(info.Process, info.ProcessId, spec.ConsoleInterrupt) }
+	}
 	p.owns = func(pid int) (bool, error) {
 		handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
 		if err != nil {

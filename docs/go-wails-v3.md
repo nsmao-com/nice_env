@@ -1,76 +1,73 @@
-# Go + Wails v3 迁移状态
+# Go + Wails v3 迁移与验收
 
-当前工作直接在 `main` 上进行，**尚未完成全量替换，不可作为正式版发布**。
-现有 React 19 + Vite 界面继续复用。Go 后端不调用 Rust 可执行文件，不使用模拟数据冒充本机结果。
-原 Rust 核心和 Tauri 壳仍保留，作为业务行为的对照及未迁移功能的现用实现。
+当前 `main` 使用 Go + Wails v3、React 19 + Vite。Rust/Tauri 源码、Cargo 工程和打包入口已移除；业务命令由 Go 实现，不调用旧版可执行文件。v2.0.0 发布仍待最终平台及升级验收，不应把下列本机结果视为已经发布。
 
-## 已落地的基础
+## 实现范围
 
-- `cmd/niceenv`：Wails v3 原生窗口、关闭到托盘、托盘导航、Go IPC 和原生事件。
-- `internal/desktop`：唯一绑定服务 `Bridge.Invoke`，结构化错误，初始化在后台进行。
-- `internal/core`：纯 Go SQLite 存储、公共设置白名单、服务清单和生命周期锁、受管进程树、计划任务执行、服务状态快照、站点/证书记录读取、套件清单读取、文本文件读写、合并系统采样请求。
-- `cmd/niceenv-cli`：共用 Go 命令注册表的单次调用入口；不启动 WebView、计划任务或受管服务。
-- 前端业务组件使用 `isDesktop` 和统一的文件、窗口适配器；Wails 检测使用原生资产处理器注入的标识，浏览器预览独立使用 mock。
-- Wails 能力清单缓存阻止未迁移接口持续发送 IPC；错误明确提示未迁移，不返回假成功。
-- 运行/错误状态阴影改为静态，减少空闲重绘；CPU/内存/磁盘采样共享结果，每次最多一个后台任务，历史记录有上限。
+旧版 328 个命令均已接入 Go 核心或桌面适配层，契约保留在 `native-command-contract.json`。`scripts/wails-port-status.mjs --require-complete` 检查入口缺项，不能代替运行验证。
 
-## 明确未完成的部分
+- `cmd/niceenv`、`internal/desktop`：原生窗口、托盘面板、事件、文件选择、系统打开、自启动、退出与数据迁移重启。
+- `internal/core`：套件安装/版本、服务生命周期/原生配置校验、站点/脚手架、数据库工作台/备份/外部导入、目录迁移、证书/ACME/部署、代理/DNS/隧道、环境/工具镜像、任务/看门狗、AI、MCP、更新。
+- `internal/process`：Windows Job Object、Unix 进程组、进程身份校验、正常停机信号、隐藏子进程与分离的 CLI 控制器。
+- `cmd/niceenv-cli`：独立验收批量入口；打包为 nsbctl/nsb-mcp 时使用桌面控制器，CLI 退出不会停止其管理的服务。
+- `apps/web`：沿用 React 页面，统一 Wails Invoke 与事件适配。浏览器预览 mock 与原生执行分离。
 
-注册了命令不等于该功能全部迁移完成。以 `pnpm check:wails-port` 的实时清单为准。
-旧命令共有 **328 个**，其中包括之前容易漏掉的 5 个托盘命令。
+## 数据目录
 
-- 设置写入目前只接受已移植的公共偏好；自启动、启动服务栈、伪静态模板及服务相关设置拒绝写入。
-- 开发壳关闭自动启动服务；`startup_stack_status` 的 disabled 表示开发版本策略，不表示成功启动过服务。
-- 通用清单服务已具备受管启动、状态快照、端口预检、监听进程归属核验、日志和停止确认边界；Nginx 已接入原生 `-t`、PHP upstream 修复和优雅退出。PHP/MySQL 等专用服务仍必须接入各自初始化适配器。
-- 套件列表支持内置清单、本地清单、用户模块、安装快照及安装记录合并；通用 archive/tar.gz/binary 安装、SHA-256 缓存、路径安全、切换版本和快照恢复已迁移。npm/pnpm 专用元数据、PATH 同步和完整卸载引用检查仍待迁移。
-- 服务进程树所有权、生命周期锁、端口冲突和停止确认的基础已迁移；孤儿进程恢复、数据库专用停机和完整健康检查仍待移植。
-- MySQL/MariaDB/PostgreSQL/Redis/MongoDB 的管理、权限、查询、备份恢复和定时备份尚待移植；通用配置编辑已支持原子保存、版本绑定备份和 Nginx 原生体检。
-- 证书签发/部署/监测、站点文件管理、AI 对话与操作确认、代理、DNS、隧道、计划任务执行、CLI/MCP 外部控制等仍有缺项。
-- 正式版数据目录交接、应用更新、安装包、签名、公证、旧安装升级和发布工作流尚未切换。
-- 托盘当前是原生菜单，尚未迁移旧托盘面板及其服务操作。
+默认源码构建为开发模式，使用 `os.UserConfigDir()/NiceEnv-Wails-Development`，可通过 `NICEENV_WAILS_HOME` 指向带开发标记的隔离目录。
 
-## 目录与数据保护
+正式打包通过 ldflags 设置 `BuildChannel=production`，依次读取显式覆盖、NSB_HOME、旧版 `com.niceservbay.app/data-directory.json` 与安装旁的 nsb-data（Windows）。macOS 默认使用用户配置目录 NiceEnv。无效的已选目录不会静默回退到空环境。
 
-开发默认目录：`os.UserConfigDir()/NiceEnv-Wails-Development`。
-可通过进程环境变量 `NICEENV_WAILS_HOME` 指定独立空目录。
-不读取现用 `NSB_HOME`、旧数据目录选择文件或安装路径，不自动接管任何旧服务。
-目录必须为空或含有效 `.niceenv-wails-development` 标记；不允许直接打开现用 NiceEnv/FlyEnv 数据目录。
+首次读取 v1 数据前，检查活动锁、目录归属和遗留运行时进程；对 SQLite 做完整性检查及包含 WAL 的一致性快照，保存在 `backup/upgrade-v2`，再补齐元数据列。运行时数据库原文不做路径字符串替换。数据移动使用快照、哈希清单、目标副本路径重映射和重启就绪握手，旧目录保持可恢复。
 
-复用现有 SQLite 十张表的字段；运行时 DDL/DML 模板已记录到根目录 `update.sql`，不是需要在业务 MySQL 执行的脚本。
-路径只在 `Path` 序列化或系统打开边界转换；文件原文、SQL、密码等任意文本不做全局替换。
+JSON 路径字段使用 `Path`，外部工具参数与打开文件边界使用 `DisplayPath`。保留原生长路径与 UNC 语义，不修改 SQL、密码、数据库单元格或任意配置原文。
 
-## 编译与核验
+## 构建与发布
 
-Go 模块最低版本 1.25，Wails 固定 `v3.0.0-alpha2.117`，前端运行时固定与该 SDK 源码一致的 `3.0.0-alpha.97`。
-现有本机 Go 1.23 不满足要求。使用独立新工具链时，`GOROOT` 必须与工具链一致；不要修改用户系统全局 Go 配置。
+Go 最低 1.26，Wails 固定 `v3.0.0-alpha2.117`，前端运行时固定 `3.0.0-alpha.97`。
 
-源代码编译检查不要求前端产物，也不会隐式运行前端 dev/build：
+不需要前端打包的检查：
 
 ```sh
 go build -mod=readonly ./...
 go vet -mod=readonly ./...
 pnpm --filter @nsb/web check
-pnpm check:wails-port
+pnpm --filter @nsb/schema check
+node scripts/wails-port-status.mjs --require-complete
 ```
 
-带界面的 Windows 可执行文件需要先显式构建当前前端，再 `go build -tags desktopassets -o NiceEnv-Wails.exe ./cmd/niceenv`。
-本任务遵守禁止执行前端 build/dev 的要求，未执行这一步，也未启动 GUI。
-缺少 `desktopassets` 的二进制启动时会说明资产未嵌入；带资产的版本会检查 bridge 元标记，拒绝把旧前端误当成 Wails 界面加载。
+正式包需要显式构建的 `apps/web/out`。`pnpm package:desktop` 只打包现有资源，不隐式启动或构建前端；版本来自各工作区一致的 package.json。Windows 生成资源、桌面/CLI/MCP 与 NSIS；macOS 在对应架构原生机器生成 app、ad-hoc 签名和 dmg。未配置商业签名、公证。
 
-可用 `go run ./cmd/niceenv-cli -command backend_capabilities` 只核验注册接口。
-`-stdin` 从标准输入读取参数，敏感参数不应放在命令行参数中。
-`.github/workflows/wails.yml` 只编译/静态检查并输出接口缺项，不发布安装包。
+CI 使用 Go 编译/静态检查与前端类型/现有逻辑检查。Release 验证 annotated tag 和版本，Windows x64、macOS Intel/Apple Silicon 全部出包后统一校验 SHA256 并发布。安装器不递归删除安装目录，卸载保留 nsb-data 与用户文件。
 
-发布前必须执行 `node scripts/wails-port-status.mjs --require-complete` 并逐项验证行为契约。
-该命令只检查注册缺项，不证明数据安全、行为兼容、运行性能或平台验收通过；不能用空实现补齐数量。
-全量功能和 Windows/macOS 验证未通过之前，不创建正式版 tag，也不将更新通道指向开发壳。
+## 已完成的 Windows 隔离验证
 
-## 当前验证记录
+本机证据位于忽略目录 `artifacts/function-audit/`，数据位于 `.wails-home/`，未使用现用 NiceEnv/FlyEnv 数据库。
 
-- Windows Go/Wails 编译和 `go vet`；前端 `tsc --noEmit`。
-- 使用 Go 1.25.13 复核最低工具链系列；设置、204 条套件记录、服务栈和系统指标通过现有前端 Zod schema 校验。
-- Wails 官方绑定生成器识别 1 个服务、1 个方法，调用名与前端一致。
-- 独立 `.wails-home` 中验证：设置读写/校验/保护、内置服务栈保护、增删复制与排序去重、204 条 Windows 套件清单、空记录读取、中文文本读写、SQLite 完整性检查、未知命令明确失败、系统指标读取。
-- 含中文、空格且长度为 305 字符的数据路径已通过 SQLite 初始化和路径返回核验；未验证 UNC 网络共享。
-- 没有修改、启动或停止现用 NiceEnv/FlyEnv 数据库。
-- 未新增测试文件，未执行前端 dev/build，未做 GUI 交互、实际空闲 CPU 对比、macOS 原生验证或正式安装包验收。
+| 范围 | 验证内容 |
+| --- | --- |
+| 服务 | Nginx/Apache/Caddy/PHP、MySQL/PostgreSQL/Redis、MongoDB、Memcached、Consul、MinIO、CoreDNS、Qdrant、SFTPGo、mihomo、JVM 服务的实际启停、端口归属、专用就绪与配置保留 |
+| 网站 | 静态/PHP/代理/跳转、网络模式、PHP pin、脚手架、项目归档、配置失败恢复；Nginx 重载后立即访问及 8 秒长请求不中断 |
+| 数据库 | MySQL/PostgreSQL 工作台和备份路径、Redis/MongoDB 数据与认证/备份、Adminer/phpMyAdmin 实际 HTTP 登录；双 MySQL 8.0 外部导入、旧目标备份、同实例拒绝 |
+| 数据移动 | 文件哈希与路径重映射、源目录保留、取消冻结、SFTPGo SQLite/Bolt、Tomcat/PostgreSQL 配置、桌面迁移重启和回退 |
+| v1 升级 | WAL 快照、缺列补齐、重复升级、坏 SQLite/陌生目录拒绝、旧锁互斥、旧目录选择文件解析，共 10 类场景 |
+| 自动化 | 计划任务、看门狗、启动栈、AI 本地协议与工具确认、MCP tools/list/实际服务查询、CLI 退出后服务存活 |
+| 证书与联网 | 本地证书、ACME 材料/离线协议/1Panel 模拟部署、SSH 指纹握手、Cloudflare 隧道、系统代理读取与本机直连 |
+| 安装包 | Windows 安装/版本/卸载，卸载后数据库哨兵和自定义文件保留，审计恢复原有快捷方式和卸载注册表 |
+| 配置引用 | Nginx map/include 上下文、Apache ServerRoot/include、凭据字节保护、循环/跨用途冲突/间接目录变量拒绝、历史备份预览与恢复；10 类隔离场景通过，真实 Nginx/Apache 语法与 Nginx HTTP 通过 |
+| 并发读取 | 同一 Wails 控制器 16 路并发、64 次 PATH 状态/终端预览/数据库备份列表及目录读取；修复只读请求争用服务操作锁和首次建目录竞态 |
+| 中文路径 | Windows Nginx 以 Unicode 工作目录配合 ASCII 相对参数进行配置校验、启动和停止，真实 HTTP 验证通过 |
+
+备份列表复用单次请求内的目标索引，避免每份历史备份重复扫描目录；预览和恢复仍重新读取并校验版本。runtime 包资源不按扩展名全量改写，Web 配置按实际 include 和资源引用规划。无法安全确定的动态资源路径、循环、跨用途共享和字符类通配符会拒绝自动迁移并保留源目录，不能将这种保护理解为任意自定义配置均可无交互迁移。
+
+最新前端资源已构建并用于 Windows 安装包；继续验收时未再次运行前端 dev/build。GUI 已观察首页、套件、数据库、环境变量、配置备份和 AI 面板；AI 面板不模糊背景。真实 AI 账号未用于发送内容。一次 UI 输入工具坐标错误后，重新捕获窗口并使用键盘退出引导，后续页面导航恢复。
+
+空环境、计划任务页静置 15.2 秒采样：桌面与 WebView2 子树 CPU 合计约为单核心的 32.99%，20 逻辑处理器下折算整机约 1.65%；工作集合计约 671.1 MiB，可能重复计算共享页。该采样不是所有页面的性能上限，也没有同场景 Tauri 基线。
+
+## 仍需完成的验收
+
+- 全页面完整交互矩阵与任意第三方自定义配置，不以已观察的主要页面代替。
+- macOS 两架构的原生构建、安装与服务行为；本机 Windows 结果不能代替。
+- 真实 ACME CA、SMTP、远程 SSH/云部署、真实 AI 服务需要对应服务和凭据；本地协议验证不能冒充联网验收。
+- 相同环境、页面、数据和操作的 Tauri/Wails 性能基线对比；没有可比基线时不宣称固定节省比例。
+- 最终 v2.0.0 annotated tag、原子 push、远程 SHA 和 Actions/Release 验证。

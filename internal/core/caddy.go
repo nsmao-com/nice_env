@@ -111,9 +111,13 @@ func (c *Core) prepareCaddy(ctx context.Context, e *serviceEntry, r *resolvedSer
 	if !strings.Contains(text, include) {
 		text += "\n" + include + "\n"
 	}
-	// The generated fallback is local; custom site blocks are preserved verbatim.
-	fallback := regexp.MustCompile(`(?m)^http://127\.0\.0\.1:[0-9]+ \{\r?\n    bind 127\.0\.0\.1\r?\n    respond NiceEnv\r?\n\}`)
-	text = fallback.ReplaceAllString(text, fmt.Sprintf("http://127.0.0.1:%d {\n    bind 127.0.0.1\n    respond NiceEnv\n}", options.http))
+	// Only the generated fallback follows the managed network preference.
+	fallback := regexp.MustCompile(`(?m)^http://127\.0\.0\.1:[0-9]+ \{\r?\n    bind (?:127\.0\.0\.1|0\.0\.0\.0)\r?\n    respond NiceEnv\r?\n\}`)
+	bind := "127.0.0.1"
+	if options.network {
+		bind = "0.0.0.0"
+	}
+	text = fallback.ReplaceAllString(text, fmt.Sprintf("http://127.0.0.1:%d {\n    bind %s\n    respond NiceEnv\n}", options.http, bind))
 	target := configTarget{spec: configSpecs[10], key: "caddy-conf@" + e.pkg.Version, path: path, program: r.program, version: e.pkg.Version}
 	validation, err := c.validateConfig(ctx, target, text)
 	if err != nil {

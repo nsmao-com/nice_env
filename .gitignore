@@ -33,5 +33,9 @@ apps/desktop/src-tauri/binaries/
 
 # Go / Wails migration output (independent from the installed app)
 /NiceEnv-Wails.exe
+/niceenv-cli.exe
 /niceenv-wails
+/NiceEnv-Audit.exe
+/nsbctl.exe
+/cmd/niceenv/wails_windows_*.syso
 /.wails-home/

@@ -417,9 +417,13 @@ export default function SettingsPage() {
         ...(r.certMonitors > 0 ? [`${t("settings.backup.rptCertMon")}: ${r.certMonitors}`] : []),
         ...(r.skippedSites > 0 ? [`${t("settings.backup.rptSkipped")}: ${r.skippedSites}`] : []),
       ].join(" · ");
+      const notices = [...(r.warnings ?? [])];
       if (r.missingPackages.length > 0) {
+        notices.unshift(`${t("settings.backup.missing")}: ${r.missingPackages.join(", ")}`);
+      }
+      if (notices.length > 0) {
         toast.warning(t("settings.backup.importDone"), {
-          description: `${desc}\n${t("settings.backup.missing")}: ${r.missingPackages.join(", ")}`,
+          description: [desc, ...notices].join("\n"),
           duration: 10000,
         });
       } else {
@@ -433,9 +437,7 @@ export default function SettingsPage() {
   );
 
   /**
-   * 拖拽导入。Tauri 关掉了窗口级原生拖放（dragDropEnabled=false），
-   * 但 DOM 上的 HTML5 文件拖放照常工作——这条路在浏览器与桌面端一致，
-   * 所以两种环境都启用。
+   * 使用 HTML5 文件拖放读取备份文本，浏览器与 Wails 桌面端共用后端校验。
    */
   const onDrop = React.useCallback(
     async (e: React.DragEvent) => {
@@ -1515,18 +1517,17 @@ function integrationCliCommand(tools: api.IntegrationTools): string | null {
   if (tools.platform === "windows") {
     // PowerShell 也把弯单引号视为字符串边界，必须一并转义。
     const quote = (value: string) => `'${value.replace(/['\u2018\u2019\u201a\u201b]/g, "$&$&")}'`;
-    return `$env:NSB_HOME = ${quote(tools.dataDir)}; & ${quote(tools.cli.path)} status`;
+    return `& ${quote(tools.cli.path)} --remote --niceenv-data-home ${quote(tools.dataDir)} --command list_service_status`;
   }
   const quote = (value: string) => `'${value.replace(/'/g, `'"'"'`)}'`;
-  return `NSB_HOME=${quote(tools.dataDir)} ${quote(tools.cli.path)} status`;
+  return `${quote(tools.cli.path)} --remote --niceenv-data-home ${quote(tools.dataDir)} --command list_service_status`;
 }
 
 function integrationMcpConfig(tools: api.IntegrationTools, format: "standard" | "vscode" = "standard"): string | null {
   if (!tools.mcp.available) return null;
   const server = {
     command: tools.mcp.path,
-    args: [],
-    env: { NSB_HOME: tools.dataDir },
+    args: ["--mcp", "--niceenv-data-home", tools.dataDir],
   };
   return JSON.stringify(format === "vscode" ? { servers: { niceenv: { type: "stdio", ...server } } } : { mcpServers: { niceenv: server } }, null, 2);
 }
@@ -1572,7 +1573,7 @@ function IntegrationToolsPanel() {
             const code = kind === "cli" ? cliCommand : mcpConfig;
             return <section key={kind} className="min-w-0 space-y-3 border-t border-dashed border-border pt-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <h3 className="text-[12.5px] font-medium">{kind === "cli" ? "nsbctl · CLI" : "nsb-mcp · MCP"}</h3>
+                <h3 className="text-[12.5px] font-medium">{kind === "cli" ? "NiceEnv CLI" : "NiceEnv MCP"}</h3>
                 <Badge variant={tool.error ? "error" : tool.available ? "running" : "warn"}>
                   {t(tool.error ? "settings.integration.unavailable" : tool.available ? "settings.integration.found" : "settings.integration.missing")}
                 </Badge>

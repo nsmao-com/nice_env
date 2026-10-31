@@ -352,19 +352,33 @@ func (c *Core) createSite(ctx context.Context, data json.RawMessage) (any, error
 	if err != nil {
 		return nil, err
 	}
-	defer unlock()
+	defer func() {
+		if unlock != nil {
+			unlock()
+		}
+	}()
 	site := in.Input.Site
+	c.siteCreateProgress(string(in.Input.RootDir), "preparing")
 	site.ID, err = newID("site")
 	if err != nil {
 		return nil, err
 	}
 	site.CreatedAt = time.Now().UnixMilli()
 	site.UpdatedAt = site.CreatedAt
+	if site.Runtime.Kind == "php" && (site.Runtime.PHPVersion == nil || *site.Runtime.PHPVersion == "") {
+		version, err := legacyProjectPHP(string(site.RootDir))
+		if err != nil {
+			return nil, err
+		}
+		if version != "" {
+			site.Runtime.PHPVersion = &version
+		}
+	}
 	if err = c.validateSite(ctx, &site); err != nil {
 		return nil, err
 	}
-	if in.Input.Template != "" && in.Input.Template != "none" || in.Input.WriteEnvExample {
-		return nil, &AppError{Code: "SITE_SCAFFOLD_PENDING", Message: "项目脚手架正在迁移"}
+	if err = validateSiteTemplate(site, in.Input.Template, in.Input.CreateDB, in.Input.WriteEnvExample, in.ExistingProject != nil); err != nil {
+		return nil, err
 	}
 	if in.ExistingProject != nil {
 		if site.PHPOverrides != nil {
@@ -374,8 +388,25 @@ func (c *Core) createSite(ctx context.Context, data json.RawMessage) (any, error
 			return nil, err
 		}
 	}
-	if in.Input.CreateDB != nil || site.DB != nil && site.DB.Enabled {
-		return nil, &AppError{Code: "SITE_DATABASE_PROVISION_PENDING", Message: "站点数据库创建正在迁移"}
+	if _, err = c.serviceEntry(site.Runtime.WebServer, ""); err != nil {
+		return nil, err
+	}
+	// Downloads and framework installation can take minutes. Do not hold the
+	// service/configuration locks while waiting for an external tool or network.
+	unlock()
+	unlock = nil
+	project := string(site.RootDir)
+	if in.ExistingProject == nil {
+		if err = c.scaffoldSite(ctx, &site, in.Input.Template); err != nil {
+			return nil, err
+		}
+	}
+	unlock, err = c.siteLock()
+	if err != nil {
+		return nil, err
+	}
+	if err = c.validateSite(ctx, &site); err != nil {
+		return nil, err
 	}
 	if err = c.validateSiteInstalled(ctx, site); err != nil {
 		return nil, err
@@ -394,9 +425,21 @@ func (c *Core) createSite(ctx context.Context, data json.RawMessage) (any, error
 	started := []*serviceEntry{}
 	saved, hostsAttempted := false, false
 	err = func() error {
+		if in.Input.CreateDB != nil {
+			c.siteCreateProgress(project, "database")
+			binding, err := c.provisionSiteDatabase(ctx, *in.Input.CreateDB, &started)
+			if err != nil {
+				return err
+			}
+			site.DB = binding
+			if err = prepareSiteDatabaseFiles(journal, project, in.Input.Template, binding, in.Input.WriteEnvExample, in.ExistingProject != nil); err != nil {
+				return err
+			}
+		}
 		if err := c.ensureSiteServices(ctx, site, &started); err != nil {
 			return err
 		}
+		c.siteCreateProgress(project, "configuring")
 		if err := journal.apply(ctx); err != nil {
 			return err
 		}
@@ -404,6 +447,7 @@ func (c *Core) createSite(ctx context.Context, data json.RawMessage) (any, error
 			return err
 		}
 		saved = true
+		c.siteCreateProgress(project, "starting")
 		if err := c.applySiteWeb(ctx, site, true, &started); err != nil {
 			return err
 		}
@@ -412,6 +456,9 @@ func (c *Core) createSite(ctx context.Context, data json.RawMessage) (any, error
 		return err
 	}()
 	if err != nil {
+		if site.DB != nil && site.DB.Enabled && in.Input.CreateDB != nil {
+			err = &AppError{Code: "SITE_CREATE_INCOMPLETE", Message: "站点未创建完成，已创建的数据库和账号已保留", Hint: "请在数据库页核对新建数据库；项目文件已保留，可不勾选创建数据库重新接入项目。", Detail: err.Error()}
+		}
 		return nil, c.siteRollback(err, journal, func(restore context.Context) error {
 			failures := []error{}
 			if saved {

@@ -73,7 +73,9 @@ func parallelValues[T any](ctx context.Context, inputs []T, workers int, work fu
 	return out
 }
 func urlAvailable(ctx context.Context, address string) bool {
-	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+	transport := outboundTransport()
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 15 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) > 5 || req.URL.Scheme != "https" || req.URL.User != nil {
 			return invalid("下载地址重定向无效")
 		}

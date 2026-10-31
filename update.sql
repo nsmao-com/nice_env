@@ -374,6 +374,89 @@
 -- INSERT INTO probe(id,value) VALUES(1,:sample) ON CONFLICT(id) DO UPDATE SET value=EXCLUDED.value;
 -- UPDATE probe SET value=:changed_sample WHERE id=1;
 
+-- v2.0.0 Go/Wails：正式版沿用旧版 SQLite 表；打开前持新旧控制锁和目录活动锁，
+-- 枚举 sqlite_master 并逐表 PRAGMA table_info 校验。首次升级先生成包含 WAL 的只读一致快照。
+-- VACUUM main INTO :backup_file;
+-- 仅在 PRAGMA table_info(sites) 确认缺少 php_overrides 后补列，重复启动不重复执行。
+-- ALTER TABLE sites ADD COLUMN php_overrides TEXT;
+-- 应用原有 CREATE TABLE IF NOT EXISTS 定义补齐旧版缺失的可选表，不覆盖已有数据。
+-- 验证仅使用 .wails-home/audit-upgrade-* 的人工隔离样本；没有修改现用业务数据库。
+
+-- v2.0.0 站点向导：只在确认数据库和账号均不存在后创建，禁止覆盖同名对象。
+-- 数据库/账号名称经校验后按驱动规则引用，密码使用参数；以下仅记录运行时模板。
+-- CREATE DATABASE :quoted_database CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+-- CREATE USER :username@'localhost' IDENTIFIED BY :password;
+-- GRANT ALL PRIVILEGES ON :escaped_database_pattern.* TO :username@'localhost';
+-- 仅本次创建账号/授权立即失败时补偿；站点后续配置失败保留数据库并明确提示。
+-- DROP USER :username@'localhost';
+-- DROP DATABASE :quoted_database;
+
+-- v2.0.0 目录迁移：只修改已停止服务的目标副本；先列全表并核对字段、完整性。
+-- SFTPGo SQLite 在同一事务中按主键改路径，表名前缀来自已验证的应用配置。
+-- UPDATE :users_table SET home_dir=:rebased_path WHERE id=:id;
+-- UPDATE :folders_table SET path=:rebased_path WHERE id=:id;
+-- UPDATE :groups_table SET user_settings=:rebased_settings_json WHERE id=:id;
+-- 只重写 user_settings 中明确的本地路径字段，密码、凭据和远程存储参数保留。
+-- RabbitMQ 固定原节点名，避免数据目录移动后被误识别为全新节点。
+-- INSERT INTO settings(key,value) VALUES('rabbitNodeName',:node_name)
+-- ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+
+-- Go/Wails 站点网络与文件归档计划：沿用 SQLite settings，无新表或字段。
+-- webLan.<server> 与受管配置 journal 同步保存；失败恢复原值，原来无记录则删除该键。
+-- siteFileBackupPlan@<站点ID的SHA256> 保存已确认的范围、调度时间及执行结果。
+-- INSERT INTO settings(key,value) VALUES(:key,:value)
+-- ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+-- DELETE FROM settings WHERE key=:key;
+-- 隔离功能验证使用 .wails-home/audit-network-*，已完整列出表并核对 sites/settings 字段。
+-- UPDATE sites SET updated_at=:changed_audit_timestamp WHERE id=:audit_site_id;
+-- UPDATE settings SET value=:audit_plan_json WHERE key=:audit_plan_key;
+
+-- Go/Wails 管理台及看门狗：沿用 SQLite settings，无表结构变化。
+-- 管理台仅为受管 phpMyAdmin 生成有效的随机 cookie 密钥；不导出此本机密钥。
+-- 看门狗总开关仅在专用入口保存；重试计数、退避和进程归属只保存在内存。
+-- INSERT INTO settings(key,value) VALUES(:key,:value)
+-- ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+-- :key 为 phpMyAdminCookieSecret 或 watchdogEnabled。
+-- 隔离看门狗验证在新建 .wails-home/audit-watchdog-* 中复制已有隔离安装记录，
+-- 同样使用上方 installed 参数化 INSERT，并设置随机 nginx 端口、2 次重试、1 秒周期。
+-- :key 为 portOverride.nginx、activeNginxVersion、watchdogMaxAttempts、watchdogIntervalSec；
+-- 不写入真实 NiceEnv/FlyEnv 数据，不修改系统代理。
+
+-- Go/Wails backup-v1 配置导入：沿用 SQLite 既有表，先完整校验，然后在单一事务保存。
+-- 不启动服务、不改 hosts、不复制项目/数据库/私钥；域名及订阅/监控/自动化目标去重。
+-- 来源站点与服务栈重新生成 ID，自动化暂停并清空来源执行结果；私密本机设置不覆盖。
+-- BEGIN;
+-- INSERT INTO settings(key,value) VALUES(:key,:value)
+-- ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+-- INSERT INTO sites(id,name,domains,root_dir,runtime,https,rewrite,db,php_overrides,created_at,updated_at)
+-- VALUES(:id,:name,:domains,:root_dir,:runtime,:https,:rewrite,:db,:php_overrides,:created_at,:updated_at);
+-- INSERT INTO stacks(id,name,description,items,builtin,created_at,updated_at)
+-- VALUES(:id,:name,:description,:items,0,:created_at,:updated_at);
+-- INSERT INTO proxy_profiles(id,name,url,active,added_at) VALUES(:id,:name,:url,0,:added_at);
+-- INSERT INTO cert_automations(id,data,updated_at) VALUES(:id,:data,:updated_at);
+-- INSERT INTO cert_monitors(id,data,updated_at) VALUES(:id,:data,:updated_at);
+-- COMMIT;
+-- 插入项在事务内先按逻辑键核对存在性；任意写入失败全部回滚，不返回部分导入成功。
+-- 隔离验证：audit-transfer-* 中注入损坏的自动化 JSON，验证事务后段失败回滚；
+-- 仅删除该临时标识，不修改其它记录。使用上方参数化 INSERT 与以下 DELETE：
+-- DELETE FROM cert_automations WHERE id=:audit_corrupt_id;
+-- Basic Auth 可选哈希扩展只生成新的受管认证文件，不新增数据库字段；
+-- 文件发布失败回滚上述 SQL，提交失败则通过文件 journal 恢复原文件。
+
+-- Go/Wails 功能审计：仅新建 .wails-home/audit-* 隔离 SQLite，未修改用户业务数据库。
+-- 已先枚举十张表并核对 installed/sites/settings/stacks/cron_jobs 的字段。
+-- 安装记录从已有隔离样本只读复制；启动验证的 config_path 留空，配置/数据在新 Home 下生成。
+-- INSERT INTO installed(key,id,version,category,install_path,config_path,installed_at)
+-- VALUES(:key,:id,:version,:category,:install_path,:config_path,:installed_at)
+-- ON CONFLICT(key) DO NOTHING;
+-- 站点文件与环境变量验证使用隔离项目目录；没有修改 hosts、系统 PATH 或代理。
+-- INSERT INTO sites(id,name,domains,root_dir,runtime,https,rewrite,db,php_overrides,created_at,updated_at)
+-- VALUES(:id,:name,:domains,:root_dir,:runtime,:https,:rewrite,:db,:php_overrides,:created_at,:updated_at)
+-- ON CONFLICT(id) DO NOTHING;
+-- 跳转体检样本：空根目录 + 正常目标 / 本站回环 / 无效状态码，按固定样本 ID 幂等覆盖。
+-- UPDATE sites SET root_dir=:root_dir,runtime=:runtime WHERE id=:audit_site_id;
+-- 设置、服务栈、计划任务的回归使用应用已有参数化 DML（见上方模板），未新增运行时 SQL。
+
 -- Go/Wails MySQL/MariaDB 备份与计划：继续使用 settings，无新表或字段。
 -- INSERT INTO settings(key,value) VALUES(:key,:value)
 -- ON CONFLICT(key) DO UPDATE SET value=excluded.value;

@@ -274,6 +274,13 @@ func (c *Core) siteCertificate(ctx context.Context, site Site, create bool) (cer
 		}
 	}
 	record, err := c.certificateRecord(ctx, id)
+	if err != nil && site.Runtime.ImportedCertID == nil && site.Runtime.ACMECertID == nil {
+		// ACME deployment replaces the shared default certificate record while
+		// preserving its output paths. Prefer that record after a restart too.
+		if acme, acmeErr := c.certificateRecord(ctx, "acme-"+site.Domains[0]); acmeErr == nil {
+			record, err = acme, nil
+		}
+	}
 	valid := func() error {
 		if err != nil {
 			return err

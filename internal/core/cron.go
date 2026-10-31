@@ -341,10 +341,12 @@ func (c *Core) StartSchedulers(ctx context.Context) {
 			c.cron.mu.Unlock()
 			return
 		}
-		c.cron.wg.Add(3)
+		c.cron.wg.Add(5)
 		c.cron.mu.Unlock()
 		go c.backupScheduler(ctx)
 		go c.monitorScheduler(ctx)
+		go c.watchdogScheduler(ctx)
+		go c.certAutoScheduler(ctx)
 		go func() {
 			defer c.cron.wg.Done()
 			ticker := time.NewTicker(20 * time.Second)
@@ -375,7 +377,12 @@ func (c *Core) StartSchedulers(ctx context.Context) {
 					if closing {
 						return
 					}
-					go func(id string) { _, _ = c.runCron(ctx, id, false) }(job.ID)
+					go func(id string) {
+						if c.beginDataActivity() {
+							defer c.dataDir.activity.RUnlock()
+							_, _ = c.runCron(ctx, id, false)
+						}
+					}(job.ID)
 				}
 			}
 		}()

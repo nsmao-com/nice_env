@@ -10,7 +10,7 @@
   - 动作复用主窗口命令（start_service / start_stack / open_in_browser …），
     托盘特有动作用 tray_open_main / tray_stop_all / tray_panel_resize / tray_panel_hide；
   - 收藏站点优先展示，运行中服务可直接批量重启；渲染完成后按内容高度 invoke `tray_panel_resize` 自适应窗口高度。
-  直接用浏览器打开本文件（无 __TAURI__）自动进入 mock 预览：
+  直接用浏览器打开本文件（无 Wails 桌面标记）自动进入 mock 预览：
   #demo=quiet | #demo=busy | #demo=dark
 -->
 <html lang="zh-CN">
@@ -181,8 +181,9 @@
 
 /* ================= 基建 ================= */
 
-const TAURI = !!(window.__TAURI__ && window.__TAURI__.core);
-const inv = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
+const DESKTOP = !!window.__NICEENV_WAILS__;
+const runtime = DESKTOP ? import('/wails/runtime.js') : null;
+const inv = async (cmd, args) => (await runtime).Call.ByName('niceenv/internal/desktop.Bridge.Invoke', cmd, args || {});
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -261,7 +262,7 @@ function render() {
   document.documentElement.dataset.theme = theme();
   renderFeedback();
   if (!S) { requestAnimationFrame(syncHeight); return; }
-  $("headSub").textContent = TAURI ? `v${S.version}` : "浏览器演示 · 不操作本机服务";
+  $("headSub").textContent = DESKTOP ? `v${S.version.replace(/^v/, '')}` : "浏览器演示 · 不操作本机服务";
   const all = S.services || [];
   const active = all.filter(hasProcess).length;
   const running = all.filter((s) => s.state === "running").length;
@@ -339,7 +340,7 @@ async function runServiceOperation(key, command, args) {
   if (busy.size || loadError) return;
   busy.add(key); actionError = ""; render();
   try {
-    const report = TAURI ? await inv(command, args) : await previewCommand(command, args);
+    const report = DESKTOP ? await inv(command, args) : await previewCommand(command, args);
     const stop = command.includes("stop");
     const restart = command.includes("restart");
     const verb = restart ? "重启" : stop ? "停止" : "启动";
@@ -350,7 +351,7 @@ async function runServiceOperation(key, command, args) {
     const single = command === "start_service" || command === "stop_service";
     result = {
       title: single ? `${nameOf(args.id)}已${verb}` : failed.length || skipped.length ? "部分服务未完成" : `服务${verb}操作完成`,
-      summary: single ? (TAURI ? "已读取实际操作结果。" : "演示状态已更新，本机服务未改变。") : `成功 ${succeeded.length} · 已在目标状态 ${already.length} · 失败 ${failed.length}`,
+      summary: single ? (DESKTOP ? "已读取实际操作结果。" : "演示状态已更新，本机服务未改变。") : `成功 ${succeeded.length} · 已在目标状态 ${already.length} · 失败 ${failed.length}`,
       failed, skipped, retry: failed.length ? command === "tray_stop_all"
         ? {key, command, args:{targets:failed.map((f) => targetOf(S.services.find((s) => s.id === f.serviceId) || {id:f.serviceId, label:nameOf(f.serviceId)}))}, label:"重试失败项"}
         : {key:"retry-action", command:restart ? "bulk_restart" : stop ? "bulk_stop" : "bulk_start", args:{targets:failed.map((f) => targetOf(S.services.find((s) => s.id === f.serviceId) || {id:f.serviceId, label:nameOf(f.serviceId)}))}, label:"重试失败项"} : null,
@@ -381,11 +382,11 @@ async function act(key) {
     if (key === "main" || key === "check-update" || key === "act:about") {
       command = "tray_open_main"; args = {path:null, action:key === "main" ? null : key === "check-update" ? "check-update" : "about"};
     } else if (key.startsWith("nav:")) { command = "tray_open_main"; args = {path:key.slice(4), action:null}; }
-    else if (key.startsWith("site:")) { const site = S?.sites.find((s) => s.id === key.slice(5)); if (!site) return; command = "open_in_browser"; args = {url:site.url}; }
+    else if (key.startsWith("site:")) { const site = S?.sites.find((s) => s.id === key.slice(5)); if (!site) return; command = "open_in_browser"; args = {url:DESKTOP ? await inv("site_access_url", {id:site.id}) : site.url}; }
     else if (key === "act:datadir") { command = "open_in_folder"; args = {path:S.dataDir}; }
     else if (key === "act:quit") { command = "quit_app"; args = {}; }
     else return;
-    if (TAURI) await inv(command, args);
+    if (DESKTOP) await inv(command, args);
     else { actionError = "浏览器演示仅展示服务操作；此操作请在 NiceEnv 桌面端执行。"; render(); }
   } catch (error) { actionError = errorText(error); render(); $("feedback").focus(); }
 }
@@ -393,7 +394,7 @@ async function act(key) {
 async function refreshState() {
   const revision = ++stateRevision;
   try {
-    if (TAURI) {
+    if (DESKTOP) {
       const snapshot = await inv("tray_panel_state", {});
       if (revision !== stateRevision) return;
       S = snapshot;
@@ -410,7 +411,7 @@ let appliedHeight = null;
 let heightPending = false;
 let heightDirty = false;
 async function syncHeight() {
-  if (!TAURI || document.hidden) return;
+  if (!DESKTOP || document.hidden) return;
   if (heightPending) { heightDirty = true; return; }
   const height = Math.max(320, Math.min(680, Math.ceil($("wrap").getBoundingClientRect().height) + 16));
   if (height === appliedHeight) return;
@@ -462,13 +463,25 @@ async function previewCommand(command, args) {
   return report;
 }
 
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && TAURI) inv("tray_panel_hide", {}).catch(() => {}); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && DESKTOP) inv("tray_panel_hide", {}).catch(() => {}); });
 document.addEventListener("contextmenu", (e) => e.preventDefault());
 $("logoBox").innerHTML = ICONS.logo;
-if (TAURI) {
-  refreshState();
-  window.__TAURI__.event.listen("tray://state", (e) => { stateRevision++; S = e.payload; loadError = (S.readErrors || []).join("；"); render(); })
-    .catch((error) => { loadError = `无法订阅状态变化：${errorText(error)}`; render(); });
+if (DESKTOP) {
+  // A hidden tray has no polling timer, and requests never overlap.
+  let refreshTimer;
+  let refreshPending = false;
+  async function refreshVisible() {
+    clearTimeout(refreshTimer);
+    if (document.hidden || refreshPending) return;
+    refreshPending = true;
+    try { await refreshState(); } finally {
+      refreshPending = false;
+      if (!document.hidden) refreshTimer = setTimeout(refreshVisible, 3000);
+    }
+  }
+  document.addEventListener("visibilitychange", () => { clearTimeout(refreshTimer); if (!document.hidden) void refreshVisible(); });
+  window.addEventListener("focus", refreshVisible);
+  void refreshVisible();
 } else {
   const q = new URLSearchParams(location.hash.replace(/^#\??/, ""));
   const active = q.get("demo") === "busy";

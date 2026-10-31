@@ -180,6 +180,10 @@ func (c *Core) mysqlTool(ctx context.Context, e *serviceEntry, password, tool st
 	if !info.Mode().IsRegular() {
 		return invalid("数据库备份工具不是普通文件")
 	}
+	return c.mysqlClient(ctx, program, r.cwd, "127.0.0.1", r.port, "root", password, args, input, output, progress)
+}
+
+func (c *Core) mysqlClient(ctx context.Context, program, directory, host string, port int, user, password string, args []string, input *os.File, output io.Writer, progress func()) error {
 	private, err := os.MkdirTemp("", "niceenv-mysql-client-")
 	if err != nil {
 		return err
@@ -188,15 +192,19 @@ func (c *Core) mysqlTool(ctx context.Context, e *serviceEntry, password, tool st
 	passfile := filepath.Join(private, "client.cnf")
 	// Option-file quoted values require escaping both backslash and quotes;
 	// newlines remain escapes and cannot inject additional client settings.
-	secret := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\r", `\r`, "\t", `\t`).Replace(password)
-	text := "[client]\nhost=127.0.0.1\nport=" + strconv.Itoa(r.port) + "\nuser=root\npassword=\"" + secret + "\"\nprotocol=tcp\ndefault-character-set=utf8mb4\n"
+	quote := func(s string) string {
+		return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\r", `\r`, "\t", `\t`).Replace(s) + `"`
+	}
+	// mysqldump does not accept mysql's connect-timeout option. The caller's
+	// context bounds every tool; mysql adds its own connect timeout when restoring.
+	text := "[client]\nhost=" + quote(host) + "\nport=" + strconv.Itoa(port) + "\nuser=" + quote(user) + "\npassword=" + quote(password) + "\nprotocol=tcp\ndefault-character-set=utf8mb4\n"
 	if err = os.WriteFile(passfile, []byte(text), 0600); err != nil {
 		return err
 	}
 	arguments := append([]string{"--defaults-file=" + DisplayPath(passfile)}, args...)
 	remove := []string{"MYSQL_PWD", "MYSQL_HOST", "MYSQL_TCP_PORT", "MYSQL_UNIX_PORT", "MYSQL_HOME", "MARIADB_HOME", "LIBMYSQL_PLUGIN_DIR"}
 	diagnostic := process.NewLimitedBuffer(64 * 1024)
-	child, err := process.Start(ctx, process.Spec{Program: program, Directory: r.cwd, Args: arguments, Stdin: input, Stdout: output, Stderr: diagnostic, RemoveEnvironment: remove, Environment: map[string]string{"MYSQL_TEST_LOGIN_FILE": filepath.Join(private, "absent-login.cnf")}})
+	child, err := process.Start(ctx, process.Spec{Program: program, Directory: directory, Args: arguments, Stdin: input, Stdout: output, Stderr: diagnostic, RemoveEnvironment: remove, Environment: map[string]string{"MYSQL_TEST_LOGIN_FILE": filepath.Join(private, "absent-login.cnf")}})
 	if err != nil {
 		return err
 	}

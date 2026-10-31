@@ -13,6 +13,14 @@ func (c *Core) PrepareQuit(ctx context.Context) error {
 		return serviceBusy()
 	}
 	defer c.services.lifecycle.Unlock()
+	if err := c.stopTunnels(ctx); err != nil {
+		c.CancelQuit()
+		return err
+	}
+	if err := c.stopDatabaseConsole(ctx); err != nil {
+		c.CancelQuit()
+		return err
+	}
 	c.services.mu.Lock()
 	c.services.closing = true
 	entries := make([]*serviceEntry, 0, len(c.services.entries))
@@ -46,10 +54,24 @@ func (c *Core) PrepareQuit(ctx context.Context) error {
 		}
 	}
 	if err := errors.Join(failures...); err != nil {
+		c.tunnels.mu.Lock()
+		c.tunnels.closing = false
+		c.tunnels.mu.Unlock()
 		c.services.mu.Lock()
 		c.services.closing = false
 		c.services.mu.Unlock()
 		return err
 	}
 	return nil
+}
+
+// An installer launch can fail after services have stopped. Keep the window
+// usable so the user can retry or restart the stopped services.
+func (c *Core) CancelQuit() {
+	c.tunnels.mu.Lock()
+	c.tunnels.closing = false
+	c.tunnels.mu.Unlock()
+	c.services.mu.Lock()
+	c.services.closing = false
+	c.services.mu.Unlock()
 }

@@ -63,7 +63,11 @@ func (c *Core) previewConfigReset(ctx context.Context, kind string) (configReset
 	if !configResettable(target.spec.pkg) {
 		return out, target, nil, &AppError{Code: "CONFIG_RESET_UNSUPPORTED", Message: "该服务没有安全的默认重置模板，请编辑配置或从历史备份恢复"}
 	}
-	e, err := c.serviceEntry(target.spec.pkg, target.version)
+	serviceID := target.spec.pkg
+	if serviceID == "php" || isMySQLEngine(serviceID) {
+		serviceID += "@" + target.version
+	}
+	e, err := c.serviceEntry(serviceID, target.version)
 	if err != nil {
 		return out, target, nil, err
 	}

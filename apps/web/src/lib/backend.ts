@@ -19,8 +19,8 @@ export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Pr
           .then((value: { commands: string[] }) => new Set(value.commands))
           .catch((error: unknown) => { wailsCommands = undefined; throw error; });
         if (!(await wailsCommands).has(cmd)) throw {
-          code: "COMMAND_NOT_PORTED", message: "此功能尚未迁移到 Go 后端", detail: cmd,
-          hint: "当前是独立开发版本，不可替代现用正式版。",
+          code: "COMMAND_NOT_SUPPORTED", message: "当前版本不支持此操作", detail: cmd,
+          hint: "请确认界面与应用版本一致。",
         } satisfies AppErrorShape;
       }
       return await Call.ByName(bridgeMethod, cmd, args ?? {}) as T;

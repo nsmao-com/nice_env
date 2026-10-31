@@ -3,32 +3,24 @@
 **Windows + macOS 一站式本地开发环境管理器** — 装一个桌面 App，点几下就能跑站点。
 对标 ServBay / FlyEnv / phpStudy，交互与视觉全面现代化（Linear / Raycast 气质）。
 
-Tauri 2（Rust 后端能力）+ React 19 + Vite + Tailwind v4 + shadcn/ui + Motion。
+Go + Wails v3 + React 19 + Vite + Tailwind v4 + shadcn/ui + Motion。
 
 ## 快速开始
 
-前端工具链需要 Node.js 20.19+ 或 22.12+（推荐 Node.js 22 LTS），使用 pnpm 10。
+需要 Go 1.26+、Node.js 20.19+ 或 22.12+（推荐 Node.js 22），使用 pnpm 10。Wails 固定 v3.0.0-alpha2.117。完整验收状态见 [迁移与验收](docs/go-wails-v3.md)。
 
 ```bash
-# 开发
 pnpm install
-pnpm dev                 # 前端 dev (localhost:3000)
-pnpm tauri dev           # 桌面壳（自动起前端）
-
-# 打包（Windows NSIS）
-pnpm tauri build
-
-# 无头验收（完整闭环，独立目录+安全端口，不碰系统环境）
-./target/release/niceservbay.exe --smoke-test
+go build -mod=readonly ./...
+go vet -mod=readonly ./...
+node scripts/wails-port-status.mjs --require-complete
 
 # 前端类型检查 + 纯逻辑单测（日志高亮解析：无损/级别/状态码）
 pnpm --filter @nsb/web check
 pnpm --filter @nsb/web check:logic
 ```
 
-> 冒烟测试会**强制切到安全端口档**再跑：应用默认走标准端口（80/3306/6379），
-> 而开发机上往往已经跑着真实的 MySQL/Redis，不隔离就会互相打架。
-> 它同时会关掉「自动释放端口」——冒烟过程中绝不结束任何进程。
+正式打包：明确构建 `apps/web/out` 后执行 `pnpm package:desktop`，输出到 `artifacts/release`。该命令不隐式构建前端；Windows 需要 NSIS 和 wails3，macOS 需要 Xcode CLT。默认 Go 构建使用隔离开发数据目录，正式打包才启用旧版数据目录和升级快照。
 
 ## 首次启动引导
 
@@ -66,7 +58,7 @@ MySQL / MariaDB 页面可选择实例和数据库，搜索表与视图，展开�
 
 ## Windows 路径边界
 
-`\\\\?\\` 是 Windows 原生长路径前缀，内部文件访问保留该能力。界面上的数据库/服务数据目录、集成工具、备份/恢复、证书/日志导出和结构化诊断统一使用可读路径；写入第三方工具配置时同样转换，并保留 UNC 网络共享语义。该处理不改写数据库单元格、SQL、密码、配置原文或历史日志文件。后续新增路径返回值也必须使用统一的路径转换或序列化助手，不能直接返回 `Path::display()` / `to_string_lossy()`。
+`\\\\?\\` 是 Windows 原生长路径前缀，内部文件访问保留该能力。界面上的数据库/服务数据目录、集成工具、备份/恢复、证书/日志导出和结构化诊断统一使用可读路径；写入第三方工具配置时同样转换，并保留 UNC 网络共享语义。该处理不改写数据库单元格、SQL、密码、配置原文或历史日志文件。后续新增路径返回值也必须使用统一的路径转换或序列化助手，使用 Go `Path` 与 `DisplayPath`，不能直接暴露原生扩展路径前缀。
 
 ## Node.js、npm 与 pnpm 版本切换
 
@@ -123,38 +115,38 @@ Nginx、Apache 和 Caddy 均在内容处理前检查来源，覆盖 HTTP/HTTPS�
 ## 架构
 
 ```
-apps/desktop/src-tauri   Tauri 2 壳：命令接线(55+) / 托盘菜单 / 窗口行为 / --smoke-test
+cmd/niceenv              Wails v3 桌面入口
+cmd/niceenv-cli          nsbctl / nsb-mcp / 隔离批量命令入口
+internal/desktop         原生窗口、托盘、Go 绑定、系统打开、重启
 apps/web                 React + Vite：19 个页面 + 向导 + 命令面板，React Router Hash 路由
-packages/schema          Zod schema（TS 侧唯一事实，Rust serde 对齐）
-crates/core              服务管理 / 下载器 / hosts / TLS / 站点 / 服务栈 / 端口诊断 / 统计 / Clash
-crates/platform          Windows Job Object / 系统代理(注册表+wininet) / hosts 标记块 / 提权
+packages/schema          Zod schema（与 Go JSON 契约对齐）
+internal/core            服务、安装、站点、数据库、证书、任务、代理与配置
+internal/process         Windows Job Object / Unix 进程组 / 进程身份与信号
+packaging                Windows NSIS / macOS app 资源
 manifest/                套件清单（真实 URL + sha256，可远程更新）
 ```
 
 前端从 `index.html` / `src/main.tsx` 挂载 React，不再使用 Next.js 的服务端渲染、预渲染或水合。页面组件保留在 `src/app/`，由显式路由表按需加载。
-桌面与浏览器预览共用 Hash 路由，例如 `/#/logs?service=nginx`；刷新不会请求单独的页面文件。构建输出仍为 `apps/web/out/`，`public/tray_panel.html` 原样复制，Tauri 命令与事件协议保持不变。
+桌面与浏览器预览共用 Hash 路由，例如 `/#/logs?service=nginx`；刷新不会请求单独的页面文件。构建输出为 `apps/web/out/`，`public/tray_panel.html` 随原生资源嵌入，命令与事件协议通过 Wails 适配。
 `next-themes` 仅作为独立 React 主题库使用，不依赖 Next.js。
 
-**Rust 侧核心模块**（均无 Tauri 依赖，可独立测试）：
+**Go 核心模块**：
 
 | 模块 | 职责 |
 |------|------|
-| `download.rs` | 断点续传(Range) + sha256 校验 + 取消 + 进度事件 |
-| `services.rs` | 服务状态机、Job Object 进程树、日志采集(ring+文件)、健康检查、端口方案(档位+逐个覆盖) |
-| `ops.rs` | **内置编排**服务启停：nginx(校验+重启策略) / php-cgi 端口池 / mysql(初始化+设密) / redis / mihomo |
-| `generic.rs` | **清单驱动**的通用服务启停：清单声明 `run` 即可启停，无需写 Rust 分支 |
-| `stacks.rs` | **服务栈**：内置预设 + 用户自定义组合，一键按序启动/逆序停止，逐项失败回报 |
-| `ports.rs` | 端口诊断 + 区间扫描 + 结束占用者（自有服务走优雅停止，外部进程才 kill） |
-| `configgen.rs` | nginx.conf / php.ini / my.ini / redis.conf / mihomo.yaml 生成（写前备份） |
-| `sites.rs` | 站点 CRUD → vhost + hosts + 证书 + 建库 + .env.example |
-| `transfer.rs` | 配置导入/导出（站点 + 设置 + 端口覆盖 + 服务栈 + 订阅） |
-| `tls.rs` | rcgen 根 CA + 站点证书（SAN 多域名）+ certutil/security 信任 |
-| `proxy.rs` | mihomo 生命周期、订阅导入(端口接管)、REST API、系统代理(带恢复) |
+| `install.go` | 套件校验、解压、取消、进度与安装提交 |
+| `service_actions.go` | 服务状态机、真实 PID/端口、正常停止与异常恢复 |
+| `service_manifest.go` | 清单 `run` 的通用启动与专用服务适配 |
+| `stacks.go` | 服务栈依赖、启动、停止与失败重试 |
+| `config.go` | 原生配置校验、并发检查、备份保存与恢复 |
+| `sites.go` | 站点配置、hosts、证书、建库、脚手架与恢复 |
+| `config_import.go` / `config_export.go` | 配置快照、导入验证与事务恢复 |
+| `certificates.go` | 根 CA、多域名证书、导入导出和系统信任 |
+| `proxy.go` | mihomo 生命周期、订阅、REST API、系统代理恢复 |
 
 ### 服务如何扩展（两种路径）
 
-**1. 内置编排**（`ops.rs`）——需要特殊处理的少数服务，如 nginx 的 `-t` 校验 + reload、
-MySQL 的 `--initialize-insecure` + 设密、php-cgi 的端口池。写 Rust 分支。
+**1. 专用适配**（`internal/core`）——如 Nginx 原生校验与工作进程重载、MySQL 暂存初始化与设密、PHP 端口池等，由 Go 模块处理。
 
 **2. 清单声明**（`manifest/*.json` 的 `run` 字段）——绝大多数服务走这条：
 只需在清单条目里加一段 `run` 描述，App 就自动获得「安装 → 注册 → 启停 → 健康检查 → 日志」。
@@ -246,7 +238,7 @@ Corefile 每次启动按当前 TLD 设置自动重建。
 
 ## CLI 与 AI 集成（nsbctl / nsb-mcp）
 
-**nsbctl**：与桌面端共用数据目录的命令行工具。`pnpm tauri build` 和 Release 工作流
+**nsbctl**：与桌面端共用数据目录的命令行工具。`pnpm package:desktop` 和 Release 工作流
 会先按目标架构编译 `nsbctl` / `nsb-mcp`，再附带到安装包：Windows 位于应用安装目录，
 macOS 位于 `NiceEnv.app/Contents/MacOS`。无需额外安装 Node.js 或 Rust 来使用这些工具。
 桌面端「设置 → 高级 → 命令行与 AI 集成」会检查这些文件，并提供可复制的 CLI 状态查询
@@ -258,8 +250,7 @@ macOS 位于 `NiceEnv.app/Contents/MacOS`。无需额外安装 Node.js 或 Rust 
 时不覆盖；已有条目指向其他环境时需在界面确认更换。接入状态表示配置已就绪，仍需重启客户端
 并查询服务状态确认实际连接。
 缺少工具或无法读取时会显示原因和重新检查入口；迁移数据或更改安装位置后需重新复制配置。
-开发时也可用 `cargo build -p nsb-core --bin nsbctl --bin nsb-mcp --locked` 单独编译到
-`target/debug`；`pnpm --filter @nsb/desktop prepare:tools --debug` 仅准备 Rust 工具，不打包前端。
+开发时可使用 `go build -o nsbctl.exe ./cmd/niceenv-cli` 单独编译，再复制为 `nsb-mcp.exe`；源码构建默认使用隔离开发目录。
 
 桌面已打开时，工具通过经过认证的本机通道使用桌面进程的真实状态与启停逻辑。
 桌面未打开时，单次命令取得独占控制权；另一个工具正在操作时会明确提示稍后重试。
@@ -615,9 +606,9 @@ MySQL / mihomo / Node / Go / MongoDB / Composer，**PHP、Nginx、Redis、Apache
 
 ## 安装形态与数据目录
 
-- NSIS 安装包（`target/release/bundle/nsis/`）为 **currentUser 模式**：安装向导可自选任意可写目录（默认 `%LOCALAPPDATA%\Programs\NiceEnv`）
-- **数据跟随安装目录**：安装版把 `runtimes / etc / data / logs / certs / backup` 全部放在 `{安装目录}/nsb-data/`，整个目录可拷贝迁移；安装目录不可写时自动回退 LocalAppData
-- 开发模式（cargo target 下运行）仍使用 `%LOCALAPPDATA%\NiceEnv`，`NSB_HOME` 环境变量可强制覆盖
+- NSIS 安装包（`artifacts/release/`）为 **currentUser 模式**：沿用已有安装位置，新安装默认 `%LOCALAPPDATA%\NiceEnv`。
+- 未选自定义数据目录时，Windows 正式版将运行时、配置、数据库、日志、证书及备份放在安装旁的 `nsb-data`；不可写或已选目录无效时明确报错，不静默切换成空环境。卸载保留数据。
+- 开发构建默认使用用户配置目录中的 `NiceEnv-Wails-Development`；`NICEENV_WAILS_HOME` 可指定隔离目录，正式版同时兼容旧版 `NSB_HOME` 和数据目录选择文件。
 - 设置页「数据目录」卡片实时显示真实路径（`get_data_dir`）
 
 ## 配置导入 / 导出
@@ -693,99 +684,31 @@ MySQL / mihomo / Node / Go / MongoDB / Composer，**PHP、Nginx、Redis、Apache
 清单条目里带 `note` 字段写明具体原因，例如 Ruby 的 Windows 包只有 `.7z`（安装管线暂只支持
 zip/tar.gz），Flutter 的历史版本需按带时间戳的 release 目录拼接。不存在「有多个版本却没加」的情况。
 
-新增服务验收：`cargo run --release -p nsb-core --bin check_extra`（Apache 真实执行 PHP / PG initdb+psql / Mongo 就绪 / 无孤儿，24 项）。
+## 验收与发布
 
-## 验收清单（每步都已自动化在 `--smoke-test` 中）
+Go 迁移的实际验收范围和限制见 [迁移与验收](docs/go-wails-v3.md)。旧版 Rust 的 smoke-test 不再是当前版本入口，也不将旧版通过结果当成 Go 验证结果。
 
-```bash
-./target/release/niceservbay.exe --smoke-test
-```
+本机验证使用标记隔离目录与随机高端口，不接管现用 NiceEnv/FlyEnv 数据库。CLI 批量模式共享一个 Core，输入结束时正常停止服务并关闭资源；正式 nsbctl/nsb-mcp 则连接桌面控制器，保留服务生命周期。
 
-| # | 验收项 | 结果 |
-|---|--------|------|
-| 1 | 初始化数据目录 + SQLite | ✅ |
-| 2 | 下载缓存预置（断点续传/sha256 幂等） | ✅ |
-| 3-8 | 安装 nginx/php×2/mysql/redis/mihomo（真实解压+默认配置） | ✅ |
-| 9-13 | 五个服务启动 + 健康检查 | ✅ |
-| 14 | 服务状态灯 = 真实进程状态 | ✅ |
-| 15 | 创建 PHP 8.3 站点（含建库建号 + .env.example） | ✅ |
-| 16 | 浏览器语义访问：Host 头命中站点（http://smoke83.nsb.test:8080） | ✅ |
-| 17 | `phpinfo()` 执行 | ✅ |
-| 18 | .env.example 连接信息写入 | ✅ |
-| 19 | **PHP PDO 连 MySQL**（建表/插入/查询 VERSION） | ✅ `MYSQL_OK:8.0.46` |
-| 20 | **PHP 连 Redis**（原生 RESP SET/GET） | ✅ `REDIS_OK` |
-| 21-22 | **双 PHP 版本同时服务**（8.3.33 + 7.4.33 按站点绑定） | ✅ |
-| 23-24 | 反向代理站点 → 本机 :18080 后端 | ✅ |
-| 25-27 | mihomo 启动 + REST API + **混合端口真实代理外网** | ✅ |
-| 28 | 系统代理状态读取（不修改） | ✅ |
-| 29 | 根 CA + 站点证书签发 | ✅ |
-| 30 | 端口诊断（谁占用→pid） | ✅ |
-| 31 | 日志管线 tail | ✅ |
-| 32 | 全部服务干净停止（Job Object 无孤儿进程） | ✅ |
+Windows 发布包使用 NSIS。macOS 在对应架构的原生 runner 上编译 Go/Wails，生成 app、ad-hoc 签名和 dmg；没有商业代码签名或公证。Release 必须等 Windows x64、macOS Intel 和 Apple Silicon 三个包全部成功，校验哈希后统一发布。
 
-单元测试：`cargo test -p nsb-core` → 9/9（hosts 标记块合并 / mihomo 订阅端口接管 / php.ini / 站点 conf / 下载断点续传 + 校验失败拒绝 / 端口池幂等分配）。
+GUI 验收需覆盖首次启动、服务栈、创建 PHP 站点、数据库工作台、证书、计划任务、AI、托盘、重启和更新。编译通过及 328 个命令齐全都不能替代这些行为验收。
 
-### 手动验收（GUI）
+## 数据与进程保护
 
-1. `pnpm tauri build` 后安装 NSIS 包，或 `pnpm tauri dev`
-2. 首次启动引导 → 选「PHP 网站」→ 自动安装 Nginx+PHP+MySQL+Redis（环形进度）
-3. 创建站点向导：名称 → 根目录（模板「空白 PHP」）→ PHP 版本 → HTTPS → 数据库 → 伪静态
-4. 打开浏览器访问 `http://你的域名.test:8080` → 看到 `It works! PHP 8.3.33`
-5. 「证书与域名」页信任根 CA（UAC）→ `https://域名.test:8443` 无警告
-6. 关闭窗口 → 托盘常驻 → 右键「启动常用栈 / 停止全部 / 退出」
+- 开发构建使用独立数据目录，正式构建沿用已选择的旧目录并在升级前创建 SQLite 快照。
+- hosts 只修改托管标记块，系统操作遵循原生授权，失败不静默覆盖。
+- 配置保存前备份，恢复核对预览修订号；历史备份只重映射已识别的路径字段。
+- 数据库内容、SQL、密码和日志不进行全局路径替换。
+- Windows 受管服务使用 Job Object；正常退出先执行服务原生停机，再确认进程结束。
+- 卸载只删除已知程序文件，保留 nsb-data 与安装目录里的用户文件。
 
-## 在 macOS 上构建与验收
-
-> 本仓库主要在 Windows 上开发。macOS 侧已做如下**可验证的**就绪工作：
-> - `cargo check --target aarch64-apple-darwin -p platform` 通过（全部平台敏感代码：进程组、
->   hosts 标记块、networksetup 系统代理、kill -0 存活探测的类型正确性）
-> - 清单按 OS 自动选择（`manifest/packages.mac.json`），`targz` 解压（系统 tar/gzip）已实现
-> - `tauri.conf.json` bundle targets 含 `app`/`dmg`；exe/目录名已抽象（`ops::exe_name`/`mysql_root_name`）
-> - core 全量交叉检查的唯一障碍是 `libsqlite3-sys` 需要 Xcode CLT 的 `cc`——mac 上天然满足
-
-**步骤**（在一台 macOS 12+ 机器上，Apple Silicon 或 Intel）：
-
-```bash
-xcode-select --install          # 需要clang
-git clone <repo> && cd nice-servbay
-pnpm install
-pnpm tauri build                # 产出 target/release/bundle/dmg/*.dmg 与 *.app
-./target/release/niceservbay --smoke-test   # 无头验收（同 Windows 33 项）
-```
-
-**三项人工验收**：
-
-1. **HTTPS 无警告**：安装并打开 App → TLS 页「信任根证书」（输入密码，`security add-trusted-cert`）
-   → 创建 HTTPS 站点 → 浏览器访问 `https://域名.test:8443` 应无警告。
-   （密码学前提已被 smoke 第 30 项 `openssl verify -CAfile ca.crt site.crt` 证明）
-2. **托盘启停**：关闭主窗口（默认最小化到托盘）→ 托盘菜单「启动常用栈 (LNMP)」→
-   服务灯变绿；「停止全部服务」→ 变灰；「退出」清理所有子进程。
-3. **冒烟**：`./target/release/niceservbay --smoke-test` 应全绿（mac 清单当前含 MySQL/mihomo，
-   PHP/Nginx/Redis 见下）。
-
-**macOS 二进制源现状（诚实说明）**：mac 清单目前只收录源头已验证可达（HTTP 206）的
-MySQL 8.0.46（`cdn.mysql.com` macos15 tarball）与 mihomo（darwin-arm64）。PHP/Nginx/Redis
-无官方 mac 二进制（nginx.org/redis.io 只有源码），候选方案（在 mac 上验证后补入 manifest 即可，
-安装器无需改动）：
-
-- PHP：`crazywhalecc/static-php-cli` GitHub Releases（需含 php-cgi 的构建变体）
-- Nginx / Redis：源码编译（`./configure && make install`，需新增 `source-build` 安装 kind）
-  或 Homebrew bottle 直链（与「非侵入」原则有取舍）
-
-## 安全红线（测试即证明）
-
-- 所有运行时装在 `{LocalAppData}/NiceEnv`，非侵入、不污染 PATH
-- hosts 以标记块写入，失败给人话指引（不静默强写）
-- 冒烟测试全程：不改系统 hosts、不开系统代理、不 kill 非本应用进程
-- MySQL 数据目录在应用数据目录内，root 密码只存本机 SQLite
-- Windows 子进程全部挂 Job Object（KILL_ON_JOB_CLOSE），应用退出无孤儿
-
-## 已知边界（Phase 3 范围）
+## 已知边界与平台限制
 
 - Windows 端口扫描同时识别 IPv4 与 IPv6。SFTPGo、Qdrant 使用 IPv6、指定本机 IP 或可解析的本地主机名监听时，启动检查和管理台入口按实际监听地址工作；打开前会解析主机名并确认目标地址、端口属于当前服务进程，不会把远程 DNS 地址当成本机管理台。原生验收覆盖 SFTPGo 2.7.5→2.7.6 的 IPv4、IPv6 和本机虚拟网卡，以及 Qdrant 1.19.1 的 IPv6；macOS 仍需原生验收。
 - r-nacos 的健康检查与管理台入口分别取自本次进程的真实 SDK、控制台监听地址，支持两者使用不同 IP，并遵循上游实际生效的 `.env`、变量插值和环境覆盖。IPv6 配置沿用上游格式，例如 `RNACOS_SDK_HOST=[::1]`；未设置 `RNACOS_CONSOLE_HOST` 时由上游继承 SDK 地址。通配监听转换为同地址族的回环入口；控制台主机名由 r-nacos 解析并监听，NiceEnv 仅使用系统核实的本机 IP。运行中编辑配置不会改写当前入口，重新启动后才记录新入口；不会向任意远端地址发送健康请求。带区域标识的 IPv6 HTTP 地址仍需 WebView/系统 URL 链路验收，macOS 和多节点集群仍需原生验收。
 - Windows r-nacos 0.8.6 / 0.8.7 存在上游初始化竞态，可能在 `src/raft/filestore/raftapply.rs` 第 421–424 行的依赖读取处 panic。NiceEnv 检测到后会停止服务并保留配置和数据；HTTP 可连接或写入接口返回 `true` 都不能单独证明配置保存成功。遇到这个具体错误且不需要**注册实例元数据持久化**时，可在该服务的 `.env` 中显式设置 `RNACOS_NAMING_INSTANCE_METADATA_PERSISTENCE_ENABLE=false` 后重试。这会停止加载和保存注册实例元数据，配置中心配置仍可持久化；需要该功能时应保留原配置并等待上游修复。父进程环境或自定义运行描述中同名变量的优先级高于 `.env`，也需要核对。NiceEnv 不自动关闭该功能、不删除 Raft 数据、不替换官方程序。已在两个版本上验证此配置下的真实写入读回、重启保留、端口回落和登录鉴权；该规避方式不代表已修复上游竞态，也不能修复失败启动遗留的异常 Raft 数据。NiceEnv 额外核对 Raft 的 leader、角色和已应用日志；状态接口需要鉴权时，等待上游健康检查的初始宽限期结束后再次确认，通常至少需要约 14 秒。仍未就绪时会停止服务并保留数据，已有异常数据应从可用备份恢复。
-- Windows nginx `-s reload` 有平台差异：站点变更采用亚秒级「快速重启」保证生效（`ops.rs` 有注释）
+- Windows Nginx reload 会等待新工作进程稳定，避免操作返回后立即访问旧配置；长请求允许旧工作进程继续排空。
 - Caddy、Nginx、Apache 已接入站点管理：支持静态/PHP/反向代理/域名跳转、路径代理、跨域、站点启停和日志。Caddy 使用应用已有证书，配置按安装版本保留，HTTP 与 HTTPS 端口可分别设置。
-- macOS 侧 hosts 写入走 osascript 提权（`platform::run_elevated` 已预留），需在 mac 上联调
+- macOS hosts 写入使用原生提权辅助流程，仍需对应平台的实际授权与行为验收。
 - Node/Python/Java/Go 站点：数据模型（SiteRuntime.kind）与 nginx 反代路径已支持「反代到 dev server」用法

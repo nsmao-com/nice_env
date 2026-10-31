@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -23,6 +24,11 @@ var publicDefaults = map[string]any{
 	"logTailLines": float64(500), "logAutoRefresh": true, "confirmKill": true, "hideScrollbars": true, "onboardingDone": false,
 }
 
+// Called only after the desktop adapter has changed and verified the OS entry.
+func (c *Core) SaveAutostartPreference(ctx context.Context, enabled bool) error {
+	return c.Store.saveSetting(ctx, "autostart", enabled)
+}
+
 func (c *Core) registerSettings() {
 	c.handle("get_settings", func(ctx context.Context, _ json.RawMessage) (any, error) { return c.settings(ctx) })
 	c.handle("get_start_stack_on_launch", func(ctx context.Context, _ json.RawMessage) (any, error) {
@@ -40,17 +46,61 @@ func (c *Core) registerSettings() {
 		if err = c.validateSetting(args.Key, args.Value); err != nil {
 			return nil, err
 		}
+		if args.Key == "startStackOnLaunch" && args.Value.(string) != "" {
+			if _, err = scanStack(c.Store.db.QueryRowContext(ctx, stackSelect+" WHERE id=?", args.Value)); err != nil {
+				return nil, stackError(err)
+			}
+		}
+		if args.Key == "portProfile" {
+			if !c.services.lifecycle.TryLock() {
+				return nil, serviceBusy()
+			}
+			defer c.services.lifecycle.Unlock()
+			c.services.mu.RLock()
+			running := false
+			for _, entry := range c.services.entries {
+				running = running || entry.child != nil
+			}
+			c.services.mu.RUnlock()
+			if running {
+				return nil, invalid("请先停止受管服务，再切换端口方案；已有单项端口设置会保留")
+			}
+			before, exists, err := c.Store.setting(ctx, args.Key)
+			if err != nil {
+				return nil, err
+			}
+			if err = c.Store.saveSetting(ctx, args.Key, args.Value); err != nil {
+				return nil, err
+			}
+			if err = c.refreshServices(ctx); err != nil {
+				var rollback error
+				if exists {
+					rollback = c.Store.saveSetting(context.Background(), args.Key, before)
+				} else {
+					_, rollback = c.Store.db.ExecContext(context.Background(), "DELETE FROM settings WHERE key=?", args.Key)
+				}
+				return nil, errors.Join(err, rollback, c.refreshServices(context.Background()))
+			}
+			return true, nil
+		}
 		return true, c.Store.saveSetting(ctx, args.Key, args.Value)
 	})
 }
 
 func (c *Core) settings(ctx context.Context) (map[string]any, error) {
 	result := make(map[string]any, len(publicDefaults)+1)
+	// Read one coherent snapshot rather than issuing a query for every public
+	// preference. Private settings remain local and are never added to result.
+	stored, err := c.Store.tableRows(ctx, "SELECT key,value FROM settings", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	values := make(map[string]string, len(stored))
+	for _, row := range stored {
+		values[row["key"].(string)] = row["value"].(string)
+	}
 	for key, fallback := range publicDefaults {
-		value, found, err := c.Store.setting(ctx, key)
-		if err != nil {
-			return nil, err
-		}
+		value, found := values[key]
 		result[key] = fallback
 		if !found {
 			continue
@@ -64,15 +114,14 @@ func (c *Core) settings(ctx context.Context) (map[string]any, error) {
 			result[key] = decoded
 		}
 	}
-	rows, err := c.Store.tableRows(ctx, "SELECT key,value FROM settings WHERE key LIKE 'portOverride.%'", nil, nil)
-	if err != nil {
-		return nil, err
-	}
 	overrides := map[string]int{}
-	for _, row := range rows {
+	for key, value := range values {
+		if !strings.HasPrefix(key, "portOverride.") {
+			continue
+		}
 		var port int
-		if json.Unmarshal([]byte(row["value"].(string)), &port) == nil && port > 0 && port <= 65535 {
-			overrides[strings.TrimPrefix(row["key"].(string), "portOverride.")] = port
+		if json.Unmarshal([]byte(value), &port) == nil && port > 0 && port <= 65535 {
+			overrides[strings.TrimPrefix(key, "portOverride.")] = port
 		}
 	}
 	result["portOverrides"] = overrides
@@ -88,8 +137,43 @@ func (c *Core) validateSetting(key string, value any) error {
 		return invalid("设置值类型无效")
 	}
 	switch key {
-	case "autostart", "startStackOnLaunch", "rewriteTemplates", "portProfile", "defaultWebServer":
-		return &AppError{Code: "COMMAND_NOT_PORTED", Message: "此设置的系统联动尚未迁移，未保存更改", Detail: key}
+	case "autostart":
+		return &AppError{Code: "SETTING_PROTECTED", Message: "登录启动需通过桌面系统集成设置"}
+	case "portProfile":
+		if value != "standard" && value != "safe" {
+			return invalid("端口方案无效")
+		}
+	case "defaultWebServer":
+		if value != "nginx" && value != "apache" && value != "caddy" {
+			return invalid("默认 Web 服务器无效")
+		}
+	case "rewriteTemplates":
+		items := value.([]any)
+		if len(items) > 100 {
+			return invalid("最多保存 100 个重写模板")
+		}
+		names := map[string]bool{}
+		for _, item := range items {
+			raw, err := json.Marshal(item)
+			if err != nil {
+				return err
+			}
+			var rewrite siteRewrite
+			if json.Unmarshal(raw, &rewrite) != nil {
+				return invalid("重写模板格式无效")
+			}
+			if rewrite.Server != "nginx" && rewrite.Server != "apache" && rewrite.Server != "caddy" {
+				return invalid("重写模板服务器无效")
+			}
+			if err = validateSiteRewrite(&rewrite, rewrite.Server); err != nil {
+				return err
+			}
+			id := rewrite.Server + ":" + rewrite.Name
+			if names[id] {
+				return invalid("同一服务器的重写模板名称不能重复")
+			}
+			names[id] = true
+		}
 	case "language":
 		if value != "zh" && value != "en" {
 			return invalid("语言选项无效")

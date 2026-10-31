@@ -20,6 +20,11 @@ type resolvedService struct {
 	ports                        []int
 	freshDatabase                bool
 	siteConfigs                  map[string]string
+	minio                        *minioSettings
+	qdrant                       *qdrantSettings
+	removeEnvironment            []string
+	dnsZone                      string
+	sftpgoWebURL                 string
 }
 
 var serviceToken = regexp.MustCompile(`\{(root|data|etc|log|bin|httpPort|port(?:[+-][0-9]+)?)\}`)
@@ -81,11 +86,10 @@ func (c *Core) resolveService(ctx context.Context, e *serviceEntry) (*resolvedSe
 	if p.Install == nil || p.Run == nil {
 		return nil, &AppError{Code: "NOT_A_SERVICE", Message: "该套件不是可管理服务"}
 	}
-	// These packages have dedicated initialization/configuration/stop protocols.
-	// Never launch their manifest display arguments as a substitute for the adapter.
-	switch p.ID {
-	case "mongodb", "mihomo", "sftpgo", "consul", "minio", "qdrant", "coredns", "tomcat", "rabbitmq", "neo4j":
-		return nil, &AppError{Code: "SERVICE_ADAPTER_PENDING", Message: "此服务的专用配置和停机流程尚在迁移", Detail: p.ID}
+	if p.ID == "consul" {
+		if err := validateConsulSpec(p); err != nil {
+			return nil, err
+		}
 	}
 	root := p.Install.InstallPath
 	if !filepath.IsAbs(root) {
@@ -114,10 +118,25 @@ func (c *Core) resolveService(ctx context.Context, e *serviceEntry) (*resolvedSe
 	if err != nil || !filepath.IsLocal(rel) {
 		return nil, invalid("服务入口重定向到安装目录之外")
 	}
-	if runtime.GOOS == "windows" && strings.ToLower(filepath.Ext(program)) != ".exe" {
-		return nil, &AppError{Code: "SERVICE_SCRIPT_PENDING", Message: "脚本服务的前台运行适配尚在迁移"}
+	if ext := strings.ToLower(filepath.Ext(program)); runtime.GOOS == "windows" && ext != ".exe" && ext != ".bat" && ext != ".cmd" {
+		return nil, invalid("Windows 服务入口须为 exe、bat 或 cmd")
 	}
 	r := &resolvedService{program: program, cwd: filepath.Dir(program), etc: filepath.Join(c.Home, "etc", p.ID, p.Version), log: string(e.status.LogFile), port: e.status.Port, env: map[string]string{}}
+	if p.ID == "sftpgo" {
+		if bound, found, err := c.Store.setting(ctx, "sftpgoConfigDir"); err != nil {
+			return nil, err
+		} else if found {
+			bound = strings.ReplaceAll(bound, "\\", "/")
+			parts := strings.Split(bound, "/")
+			if len(parts) != 3 || parts[0] != "etc" || parts[1] != "sftpgo" || !safePart(parts[2]) {
+				return nil, invalid("SFTPGo 配置目录无效")
+			}
+			r.etc = filepath.Join(c.Home, filepath.FromSlash(bound))
+			if info, err := os.Stat(r.etc); err != nil || !info.IsDir() {
+				return nil, &AppError{Code: "SFTPGO_CONFIG_MISSING", Message: "原 SFTPGo 配置目录不存在，未创建空库"}
+			}
+		}
+	}
 	dataDir := p.Run.DataDir
 	if dataDir == "" {
 		dataDir = p.ID
@@ -126,7 +145,7 @@ func (c *Core) resolveService(ctx context.Context, e *serviceEntry) (*resolvedSe
 	if err != nil {
 		return nil, err
 	}
-	if p.ID == "php" || isMySQLEngine(p.ID) || p.ID == "postgresql" {
+	if p.ID == "php" || isMySQLEngine(p.ID) || p.ID == "postgresql" || p.ID == "mongodb" {
 		r.data = filepath.Join(c.Home, "data", p.ID, p.Version)
 	}
 	profile, _, err := c.Store.setting(ctx, "portProfile")
@@ -147,9 +166,6 @@ func (c *Core) resolveService(ctx context.Context, e *serviceEntry) (*resolvedSe
 	}
 	if p.Run.Health != "" && p.Run.Health != "tcp" && p.Run.Health != "process" {
 		return nil, invalid("不支持的服务健康检查类型")
-	}
-	if !isMySQLEngine(p.ID) && p.ID != "redis" && p.ID != "apache" && p.ID != "caddy" && p.ID != "postgresql" && (p.Run.ConfigTemplate != "" || len(p.Run.InitArgs) > 0) {
-		return nil, &AppError{Code: "SERVICE_INITIALIZATION_PENDING", Message: "此服务的配置初始化尚在迁移"}
 	}
 	if r.args, err = r.expandArgs(p.Run.Args); err != nil {
 		return nil, err
@@ -207,6 +223,11 @@ func (c *Core) resolveService(ctx context.Context, e *serviceEntry) (*resolvedSe
 	}
 	for port := range ports {
 		r.ports = append(r.ports, port)
+	}
+	if p.ID == "minio" {
+		if err := resolveMinIO(p, r); err != nil {
+			return nil, err
+		}
 	}
 	return r, nil
 }

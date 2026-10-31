@@ -433,19 +433,26 @@ func (c *Core) pathCommand(ctx context.Context, data json.RawMessage, action str
 	if err != nil {
 		return nil, err
 	}
-	if !c.services.lifecycle.TryLock() {
-		return nil, serviceBusy()
+	if action == "status" {
+		if !c.services.lifecycle.TryRLock() {
+			return nil, serviceBusy()
+		}
+		defer c.services.lifecycle.RUnlock()
+	} else {
+		if !c.services.lifecycle.TryLock() {
+			return nil, serviceBusy()
+		}
+		defer c.services.lifecycle.Unlock()
+		dir := filepath.Join(c.Home, "service-locks")
+		if err = managedDirectory(c.Home, dir); err != nil {
+			return nil, err
+		}
+		unlock, err := process.Lock(filepath.Join(dir, "pathenv.lock"))
+		if err != nil {
+			return nil, err
+		}
+		defer unlock()
 	}
-	defer c.services.lifecycle.Unlock()
-	dir := filepath.Join(c.Home, "service-locks")
-	if err = managedDirectory(c.Home, dir); err != nil {
-		return nil, err
-	}
-	unlock, err := process.Lock(filepath.Join(dir, "pathenv.lock"))
-	if err != nil {
-		return nil, err
-	}
-	defer unlock()
 	s, err := c.pathSelection(ctx)
 	if err != nil {
 		return nil, err

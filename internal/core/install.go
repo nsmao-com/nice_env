@@ -165,11 +165,7 @@ func (c *Core) installPackage(parent context.Context, key, request string) (resu
 		return nil, invalid("套件版本无效")
 	}
 	if pkg.Kind != "archive" && pkg.Kind != "targz" && pkg.Kind != "binary" && pkg.Kind != "sevenzip" {
-		return nil, &AppError{Code: "ARCHIVE_FORMAT_PENDING", Message: "此压缩格式尚未接入 Go 解压器"}
-	}
-	// Qdrant UI assets require their dedicated fetcher.
-	if pkg.ID == "qdrant" {
-		return nil, &AppError{Code: "PACKAGE_ADAPTER_PENDING", Message: "此套件的完整性或附属资源安装流程尚在迁移"}
+		return nil, &AppError{Code: "ARCHIVE_FORMAT_UNSUPPORTED", Message: "套件清单的压缩格式不受支持，请刷新清单"}
 	}
 	key = pkg.ID + "@" + pkg.Version
 	ctx, cancel := context.WithTimeout(parent, 30*time.Minute)
@@ -289,6 +285,24 @@ func (c *Core) installPackage(parent context.Context, key, request string) (resu
 	if err = os.WriteFile(filepath.Join(prepared, ".niceenv-package.json"), bytes, 0600); err != nil {
 		return nil, err
 	}
+	if pkg.ID == "qdrant" {
+		static := filepath.Join(filepath.Dir(program), "static")
+		if _, statErr := os.Lstat(static); os.IsNotExist(statErr) {
+			dist, cleanup, prepareErr := c.prepareQdrantWeb(ctx, key, request, filepath.Dir(program))
+			if prepareErr != nil {
+				return nil, prepareErr
+			}
+			err = os.Rename(dist, static)
+			cleanup()
+			if err != nil {
+				return nil, err
+			}
+		} else if statErr != nil {
+			return nil, statErr
+		} else if info, statErr := os.Stat(filepath.Join(static, "index.html")); statErr != nil || !info.Mode().IsRegular() {
+			return nil, invalid("Qdrant 发行包中的管理台不完整，未覆盖已有内容")
+		}
+	}
 	if !c.services.lifecycle.TryLock() {
 		return nil, serviceBusy()
 	}
@@ -373,7 +387,9 @@ func (c *Core) downloadPackage(ctx context.Context, key, request, address, check
 			return nil
 		}
 	}
-	client := &http.Client{Timeout: 30 * time.Minute, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+	transport := outboundTransport()
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 30 * time.Minute, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) > 5 || req.URL.Scheme != "https" || req.URL.User != nil {
 			return invalid("下载重定向不安全或次数过多")
 		}

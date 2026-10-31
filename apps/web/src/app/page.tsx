@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { motion, AnimatePresence } from "motion/react";
 import type { ServiceStatus } from "@nsb/schema";
@@ -450,68 +451,66 @@ function AnomalyCard() {
   const t = useT();
   const { data: services } = useServices(5000);
   const { data: stats } = useSystemStats(10000);
-  const { data: certs, error: certError } = useCertsSafe();
-  const [issues, setIssues] = React.useState<
-    { kind: string; title: string; hint?: string }[]
-  >([]);
-  const [readError, setReadError] = React.useState<string | null>(null);
-
-  React.useEffect(() => {
-    let alive = true;
-    (async () => {
-      const found: { kind: string; title: string; hint?: string }[] = [];
-      let firstError: string | null = certError;
-      /* 端口冲突：后端按当前端口方案全量核对，逐端口输出占用者 */
-      try {
-        const rows = await api.scanPorts();
-        for (const r of rows.filter((r) => r.verdict === "conflict")) {
-          found.push({
-            kind: "port",
-            title: `${t("dash.portConflict")}：${r.port} (${r.label}) → ${r.processName ?? t("dashboard.unknownProcess")}`,
-            hint: t("dashboard.portScanHint"),
-          });
-        }
-      } catch (error) {
-        firstError ??= normalizeError(error).message;
-      }
-      /* 证书 30 天内到期 */
-      const soon = Date.now() + 30 * 86400_000;
-      for (const c of certs) {
-        if (c.kind === "site" && c.notAfter < soon && c.notAfter > Date.now()) {
-          found.push({
-            kind: "cert",
-            title: `${t("dash.certExpiring")}：${c.subject}`,
-            hint: t("dash.tlsHint"),
-          });
-        }
-      }
-      /* 磁盘 */
-      if (stats && stats.diskFreeGb < 10) {
+  const certQuery = useQuery({
+    queryKey: ["certs"],
+    queryFn: api.listCerts,
+    networkMode: "always",
+    staleTime: 15_000,
+    refetchInterval: 15_000,
+    retry: false,
+  });
+  const certs = certQuery.data;
+  // 系统监听表独立限频；资源采样和语言变化不再触发全量端口扫描。
+  const portQuery = useQuery({
+    queryKey: ["dashboard-port-scan", services.map(({ id, state, port, pids }) => ({ id, state, port, pids }))],
+    queryFn: api.scanPorts,
+    networkMode: "always",
+    staleTime: 15_000,
+    refetchInterval: 15_000,
+    retry: false,
+  });
+  const error = portQuery.error ?? certQuery.error;
+  const readError = error ? normalizeError(error).message : null;
+  const checking = portQuery.isPending || certQuery.isPending;
+  const issues = React.useMemo(() => {
+    const found: { kind: string; title: string; hint?: string }[] = (portQuery.data ?? [])
+      .filter((row) => row.verdict === "conflict")
+      .map((row) => ({
+        kind: "port",
+        title: `${t("dash.portConflict")}：${row.port} (${row.label}) → ${row.processName ?? t("dashboard.unknownProcess")}`,
+        hint: t("dashboard.portScanHint"),
+      }));
+    /* 证书 30 天内到期 */
+    const soon = Date.now() + 30 * 86400_000;
+    for (const c of certs ?? []) {
+      if (c.kind === "site" && c.notAfter < soon && c.notAfter > Date.now()) {
         found.push({
-          kind: "disk",
-          title: `${t("dash.diskLow")}：剩余 ${stats.diskFreeGb.toFixed(1)} GB`,
-          hint: t("dashboard.dataDirHint"),
+          kind: "cert",
+          title: `${t("dash.certExpiring")}：${c.subject}`,
+          hint: t("dash.tlsHint"),
         });
       }
-      /* 上次启动失败 */
-      for (const s of services) {
-        if (s.state === "error" && s.lastError) {
-          found.push({
-            kind: "fail",
-            title: `${t("dash.lastFailure")}：${s.label}`,
-            hint: s.lastError.hint ?? s.lastError.message,
-          });
-        }
+    }
+    /* 磁盘 */
+    if (stats && stats.diskFreeGb < 10) {
+      found.push({
+        kind: "disk",
+        title: `${t("dash.diskLow")}：剩余 ${stats.diskFreeGb.toFixed(1)} GB`,
+        hint: t("dashboard.dataDirHint"),
+      });
+    }
+    /* 上次启动失败 */
+    for (const s of services) {
+      if (s.state === "error" && s.lastError) {
+        found.push({
+          kind: "fail",
+          title: `${t("dash.lastFailure")}：${s.label}`,
+          hint: s.lastError.hint ?? s.lastError.message,
+        });
       }
-      if (alive) {
-        setIssues(found);
-        setReadError(firstError);
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [services, certs, stats, t, certError]);
+    }
+    return found;
+  }, [services, certs, stats?.diskFreeGb, t, portQuery.data]);
 
   return (
     <Card className="p-4">
@@ -521,12 +520,16 @@ function AnomalyCard() {
           {t("dash.anomalies")}
         </CardTitle>
         <CardDescription className="text-[11px]">
-          {readError ? t("dash.anomalyReadFailed") : issues.length ? `${issues.length} ${t("dash.issuesCount")}` : t("dash.noAnomaly")}
+          {readError ? t("dash.anomalyReadFailed") : checking ? t("common.loading") : issues.length ? `${issues.length} ${t("dash.issuesCount")}` : t("dash.noAnomaly")}
         </CardDescription>
       </CardHeader>
       <CardContent className="p-0">
-        {readError && <div role="alert" className="mb-2 rounded-lg border border-error/25 bg-error-soft/40 px-3 py-2 text-[11px] text-error [overflow-wrap:anywhere]">{t("dash.anomalyReadFailed")}：{readError}</div>}
-        {issues.length === 0 && readError ? null : issues.length === 0 ? (
+        {readError && <div role="alert" className="mb-2 rounded-lg border border-error/25 bg-error-soft/40 px-3 py-2 text-[11px] text-error [overflow-wrap:anywhere]">
+          {t("dash.anomalyReadFailed")}：{readError}
+          <Button variant="ghost" size="sm" className="ml-2" disabled={portQuery.isFetching || certQuery.isFetching} onClick={() => void Promise.all([portQuery.refetch(), certQuery.refetch()])}>{t("common.retry")}</Button>
+        </div>}
+        {checking && <p role="status" className="text-xs text-faint">{t("common.loading")}</p>}
+        {issues.length === 0 && (readError || checking) ? null : issues.length === 0 ? (
           <div className="flex items-center gap-2 rounded-lg border border-running/20 bg-running-soft px-3 py-2.5 text-[12px] text-running">
             <CheckCircle2 className="h-3.5 w-3.5" /> {t("dash.noAnomaly")}
           </div>
@@ -543,26 +546,4 @@ function AnomalyCard() {
       </CardContent>
     </Card>
   );
-}
-
-function useCertsSafe() {
-  const [state, setState] = React.useState<{
-    data: { kind: string; subject: string; notAfter: number }[];
-    error: string | null;
-  }>({ data: [], error: null });
-  React.useEffect(() => {
-    let alive = true;
-    const load = () =>
-      api
-        .listCerts()
-        .then((data) => alive && setState({ data, error: null }))
-        .catch((error) => alive && setState((current) => ({ ...current, error: normalizeError(error).message })));
-    load();
-    const id = setInterval(load, 15000);
-    return () => {
-      alive = false;
-      clearInterval(id);
-    };
-  }, []);
-  return state;
 }

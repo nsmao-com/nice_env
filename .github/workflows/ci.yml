@@ -3,231 +3,45 @@ name: CI
 on:
   push:
     branches: [main, master]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
-    inputs:
-      native_package:
-        description: macOS package to verify with real binaries
-        type: choice
-        default: all
-        options: [all, mysql, mongodb, mihomo, nats, node, go, composer]
+
+permissions:
+  contents: read
 
 jobs:
-  # 在实际目标系统执行，而不是把 Linux 测试或跨架构编译当作平台验收。
-  platform-core:
-    name: Core runtime (${{ matrix.os }})
-    # 发版时分支和 tag 一起推送，平台矩阵只执行分支对应的一次。
-    if: github.ref_type != 'tag' && github.event_name != 'workflow_dispatch'
+  go:
+    name: Go native checks (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
     strategy:
       fail-fast: false
-      matrix:
-        os: [windows-latest, macos-15-intel, macos-latest]
+      matrix: { os: [windows-latest, macos-15-intel, macos-latest] }
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: platform-core-${{ matrix.os }}
-      - name: Run core and platform tests
+      - uses: actions/setup-go@v6
+        with: { go-version-file: go.mod, cache: true }
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - run: go build -mod=readonly ./...
+      - run: go vet -mod=readonly ./...
+      - name: Native command coverage
         shell: bash
-        env:
-          CARGO_TERM_COLOR: never
-        run: |
-          set +e
-          cargo test --locked -p nsb-core -p platform --no-fail-fast -- --test-threads=1 2>&1 | tee platform-core.log
-          status=${PIPESTATUS[0]}
-          if [ "$status" -ne 0 ]; then
-            summary=$(grep -E 'panicked at|^test .* FAILED|^test result:|^error:|assertion failed|left:|right:' platform-core.log | tr '\r\n' ' ' | sed 's/%/%25/g' | cut -c1-3500)
-            echo "::error title=平台测试失败::${summary}"
-          fi
-          exit "$status"
-      - name: Preserve platform verification log
-        if: always()
-        uses: actions/upload-artifact@v5
-        with:
-          name: platform-core-${{ matrix.os }}
-          path: platform-core.log
-          if-no-files-found: warn
+        env: { NICEENV_WAILS_HOME: "${{ runner.temp }}/niceenv-wails" }
+        run: node scripts/wails-port-status.mjs --require-complete
 
-  # ---------- 前端：React + Vite 静态资源 ----------
   web:
     name: Web (React + Vite)
-    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-        with:
-          fetch-depth: 2
-
-      # package.json 没有 packageManager 字段，锁文件为 pnpm 10 的 lockfileVersion 9.0
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v5
-        with:
-          version: 10
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: 22
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Type-check (@nsb/web)
-        run: pnpm --filter @nsb/web run check
-
-      - name: Logic tests (@nsb/web)
-        run: pnpm --filter @nsb/web run check:logic
-
-      - name: Build desktop frontend (@nsb/web)
-        run: pnpm --filter @nsb/web run build
-
-      - name: Verify desktop frontend
-        run: |
-          test -f apps/web/out/index.html
-          test -f apps/web/out/tray_panel.html
-          test -d apps/web/out/assets
-          test ! -d apps/web/out/_next
-
-      - name: Upload static export
-        uses: actions/upload-artifact@v5
-        with:
-          name: web-static-export
-          path: apps/web/out
-          if-no-files-found: error
-
-  # ---------- Rust：core 测试 + 桌面壳编译检查 ----------
-  rust:
-    name: Rust (nsb-core / niceservbay)
-    if: github.event_name != 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 2
-
-      # Tauri 2 在 Linux 上的系统依赖。
-      # 用 libayatana-appindicator3-dev 而不是 libappindicator3-dev：
-      # 后者在 Ubuntu 24.04（ubuntu-latest）已被移除，装它会直接让这步失败。
-      # libdbus-1-dev 是必需的：tauri 默认开启 dbus feature（tao → dbus crate →
-      # libdbus-sys 用 pkg-config 探测 "dbus-1"，缺失会直接 panic）。
-      # lsof 是 nsb-core 在非 Windows 上枚举监听端口用的外部命令
-      # （ports.rs::platform_listeners，测试 scan_app_ports_distinguishes_self_and_conflict
-      # 会调用它）；GitHub 的 ubuntu 镜像并未预装 lsof。
-      - name: Install Linux system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libxdo-dev \
-            libdbus-1-dev \
-            libssl-dev \
-            patchelf \
-            lsof \
-            build-essential \
-            curl wget file
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      # 只检查本次提交改动的 Rust 行。仓库历史包含大量未按当前 stable
-      # rustfmt 排版的存量文件，不能因一次提交把无关文件全部重排。
-      - name: Check formatting
-        run: python3 .github/check-rust-format.py
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-
-      # tauri::generate_context!() 只在启用 tauri/custom-protocol（打包/发布）时才要求
-      # build.frontendDist 存在；dev 模式下有 devUrl 就已跳过（因此 cargo check 本身
-      # 不依赖 web 构建产物）。这里给个占位目录，防止将来有人打开 custom-protocol
-      # 后 cargo check 因为缺 apps/web/out 而失败。
-      - name: Ensure frontend dist placeholder
-        run: mkdir -p apps/web/out
-
-      - name: Test core crate
-        run: |
-          set +e
-          # 单个测试二进制内串行执行，避免共享环境变量的用例互相干扰。
-          # 不手工限定目标列表，保留 lib、bin、集成测试和文档测试的完整覆盖。
-          cargo test -p nsb-core --no-fail-fast -- --test-threads=1 2>&1 | tee /tmp/core-test.log
-          status=${PIPESTATUS[0]}
-          if [ "$status" -ne 0 ]; then
-            # 失败摘要写进 GitHub 注解：日志需要仓库权限才能看，注解是公开可见的，
-            # 便于在没有 admin 权限时也能定位平台相关的测试失败。
-            summary=$(grep -E "panicked at|AppError|assertion|^test .* FAILED|^test result|left:|right:|FAILED$" /tmp/core-test.log \
-              | tr '\r\n' ' ' | sed 's/%/%25/g' | cut -c1-3500)
-            echo "::error title=nsb-core 测试失败::${summary}"
-            exit "$status"
-          fi
-
-      - name: Check desktop crate
-        run: cargo check -p niceservbay
-
-      # 不加 -D warnings：存量的风格类警告只提示不拦截，
-      # 但 clippy 默认 deny 的逻辑错误（如 `x || true` 恒真表达式）会让这步失败
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets
-
-  native-packages:
-    name: Native packages (${{ matrix.os }})
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-15-intel, macos-latest]
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: native-packages-${{ matrix.os }}
-      - name: Verify real package lifecycle
-        shell: bash
-        env:
-          NSB_SKIP_HOSTS: "1"
-          NATIVE_PACKAGE_SELECTION: ${{ inputs.native_package }}
-          CARGO_TERM_COLOR: never
-        run: |
-          case "$NATIVE_PACKAGE_SELECTION" in
-            all) packages=(mysql mongodb mihomo nats node go composer) ;;
-            mysql|mongodb|mihomo|nats|node|go|composer) packages=("$NATIVE_PACKAGE_SELECTION") ;;
-            *) echo "Unsupported package selection"; exit 1 ;;
-          esac
-          mkdir -p native-package-logs
-          uname -a | tee native-package-logs/platform.log
-          status=0
-          for package in "${packages[@]}"; do
-            set +e
-            NSB_NATIVE_PACKAGE="$package" cargo test --locked -p nsb-core --lib \
-              install::tests::official_package_lifecycle -- --ignored --exact --nocapture --test-threads=1 \
-              2>&1 | tee "native-package-logs/$package.log"
-            result=${PIPESTATUS[0]}
-            set -e
-            if [ "$result" -eq 0 ] && ! grep -q 'test result: ok. 1 passed; 0 failed; 0 ignored;' "native-package-logs/$package.log"; then
-              echo "::error title=Native verification did not execute::$package did not run the expected lifecycle test"
-              result=1
-            fi
-            if [ "$result" -ne 0 ]; then
-              echo "::error title=Native package verification failed::$package on $RUNNER_OS / $RUNNER_ARCH"
-              status=1
-            fi
-          done
-          exit "$status"
-      - name: Preserve native package evidence
-        if: always()
-        uses: actions/upload-artifact@v5
-        with:
-          name: native-packages-${{ matrix.os }}
-          path: native-package-logs
-          if-no-files-found: error
+      - uses: pnpm/action-setup@v5
+        with: { version: 10 }
+      - uses: actions/setup-node@v5
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @nsb/schema check
+      - run: pnpm --filter @nsb/web check
+      - run: pnpm --filter @nsb/web check:logic
+      - run: pnpm --filter @nsb/web build
+      - uses: actions/upload-artifact@v5
+        with: { name: web-static-export, path: apps/web/out, if-no-files-found: error }

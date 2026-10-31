@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	gprocess "github.com/shirou/gopsutil/v4/process"
 	"niceenv/internal/process"
 )
 
@@ -302,6 +303,11 @@ func (c *Core) prepareNginx(ctx context.Context, e *serviceEntry, r *resolvedSer
 		}
 		text = fmt.Sprintf("worker_processes 1;\nerror_log %s;\npid %s;\nevents { worker_connections 1024; }\nhttp {\n    include %s;\n    default_type application/octet-stream;\n    access_log off;\n    server { listen 127.0.0.1:%d; server_name localhost; location / { return 200 'NiceEnv'; } }\n    include %s;\n}\n", nginxQuote(filepath.Join(filepath.Dir(r.log), "error.log")), nginxQuote(filepath.Join(r.etc, "nginx.pid")), nginxQuote(filepath.Join(filepath.Dir(r.program), "conf", "mime.types")), r.port, nginxQuote(filepath.Join(r.etc, "sites", "*.conf")))
 	}
+	enabled, err := c.webNetworkMode(ctx, "nginx")
+	if err != nil {
+		return err
+	}
+	text = networkNginxFallback(text, enabled)
 	updated, err := c.completeNginxPools(text)
 	if err != nil {
 		return err
@@ -325,13 +331,54 @@ func (c *Core) prepareNginx(ctx context.Context, e *serviceEntry, r *resolvedSer
 	if err = c.writeConfig(ctx, target, updated, expected); err != nil {
 		return err
 	}
-	r.args = []string{"-p", DisplayPath(filepath.Dir(r.program)) + string(filepath.Separator), "-c", DisplayPath(path)}
+	r.cwd, r.args, err = nginxCommandPaths(r.program, path)
+	if err != nil {
+		return err
+	}
 	if runtime.GOOS != "windows" {
 		r.args = append(r.args, "-g", "daemon off;")
 	}
 	r.stopArgs = append(append([]string{}, r.args...), "-s", "quit")
 	r.siteConfigs = loaded
 	return nil
+}
+
+// Windows nginx decodes argv through the system code page. Pass the shared
+// directory through CreateProcessW's cwd and keep argv paths ASCII, preserving
+// the runtime prefix used to resolve relative directives in custom configs.
+func nginxCommandPaths(program, config string) (string, []string, error) {
+	root := filepath.Dir(program)
+	if runtime.GOOS != "windows" {
+		return root, []string{"-p", DisplayPath(root) + string(filepath.Separator), "-c", DisplayPath(config)}, nil
+	}
+	cwd := root
+	for {
+		rel, err := filepath.Rel(cwd, config)
+		if err == nil && filepath.IsLocal(rel) {
+			break
+		}
+		parent := filepath.Dir(cwd)
+		if parent == cwd {
+			return "", nil, invalid("Nginx 程序与配置必须位于同一磁盘或共享目录")
+		}
+		cwd = parent
+	}
+	prefix, err := filepath.Rel(cwd, root)
+	if err != nil {
+		return "", nil, err
+	}
+	configuration, err := filepath.Rel(root, config)
+	if err != nil {
+		return "", nil, err
+	}
+	for _, path := range []string{prefix, configuration} {
+		for _, ch := range path {
+			if ch > 127 {
+				return "", nil, invalid("Nginx 内部程序或配置目录含非 ASCII 字符，请保留默认内部目录名；数据根目录可以使用中文")
+			}
+		}
+	}
+	return cwd, []string{"-p", filepath.ToSlash(prefix) + "/", "-c", filepath.ToSlash(configuration)}, nil
 }
 
 func (c *Core) nginxSiteSnapshot() (map[string]string, error) {
@@ -354,14 +401,14 @@ func (c *Core) nginxSiteSnapshot() (map[string]string, error) {
 	return result, nil
 }
 
-func (c *Core) verifyNginxStop(e *serviceEntry, r *resolvedService) error {
+func (c *Core) nginxMasterPID(e *serviceEntry, r *resolvedService) (int, error) {
 	text, err := readConfigText(filepath.Join(r.etc, "nginx.conf"))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	nodes, err := parseNginx(text)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	pidPath := filepath.Join(filepath.Dir(r.program), "logs", "nginx.pid")
 	for _, node := range nodes {
@@ -374,23 +421,28 @@ func (c *Core) verifyNginxStop(e *serviceEntry, r *resolvedService) error {
 	}
 	pidText, err := readConfigText(pidPath)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(pidText))
 	if err != nil {
-		return invalid("Nginx PID 文件无效")
+		return 0, invalid("Nginx PID 文件无效")
 	}
 	c.services.mu.RLock()
 	child := e.child
 	c.services.mu.RUnlock()
 	if child == nil {
-		return nil
+		return 0, invalid("Nginx 进程已停止")
 	}
 	owned, err := child.OwnsPID(pid)
 	if err != nil || !owned {
-		return &AppError{Code: "NGINX_PID_UNVERIFIED", Message: "Nginx 停机目标不属于本次受管进程，未发送信号"}
+		return 0, &AppError{Code: "NGINX_PID_UNVERIFIED", Message: "Nginx 操作目标不属于本次受管进程，未发送信号"}
 	}
-	return nil
+	return pid, nil
+}
+
+func (c *Core) verifyNginxStop(e *serviceEntry, r *resolvedService) error {
+	_, err := c.nginxMasterPID(e, r)
+	return err
 }
 
 // Called with the lifecycle lock held, after pool state changes. Preserve the
@@ -409,7 +461,16 @@ func (c *Core) reloadNginxPools(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err = c.verifyNginxStop(e, &r); err != nil {
+	masterPID, err := c.nginxMasterPID(e, &r)
+	if err != nil {
+		return err
+	}
+	masterIdentity, err := process.Identity(masterPID)
+	if err != nil {
+		return err
+	}
+	before, err := nginxChildren(ctx, masterPID)
+	if err != nil {
 		return err
 	}
 	if err = c.prepareNginx(ctx, e, &r); err != nil {
@@ -436,8 +497,72 @@ func (c *Core) reloadNginxPools(ctx context.Context) error {
 		}
 		return err
 	}
+	// nginx -s reload only sends a signal. Returning at that point can serve the
+	// old default site or a stopped PHP upstream immediately after a successful
+	// create/start response. Confirm a stable new child of the verified master.
+	stable := map[int32]string{}
+	var replacementReady time.Time
+	for {
+		identity, identityErr := process.Identity(masterPID)
+		if identityErr != nil || identity != masterIdentity {
+			return invalid("Nginx 在加载配置期间退出，请检查服务日志")
+		}
+		after, scanErr := nginxChildren(checkCtx, masterPID)
+		if scanErr != nil {
+			return scanErr
+		}
+		confirmed := false
+		for pid, marker := range after {
+			if before[pid] != marker && stable[pid] == marker {
+				confirmed = true
+				break
+			}
+		}
+		if confirmed && replacementReady.IsZero() {
+			replacementReady = time.Now()
+		}
+		// The Windows master can leave the previous workers accepting briefly
+		// after spawning replacements. Do not overlap another reload with that
+		// handover (for example PHP start immediately followed by site creation).
+		for pid, marker := range before {
+			if after[pid] == marker && (replacementReady.IsZero() || time.Since(replacementReady) < time.Second) {
+				confirmed = false
+				break
+			}
+		}
+		// Long requests / WebSockets may legitimately keep retired workers alive.
+		// Once replacements stay alive through the handover window, let them drain.
+		if confirmed {
+			break
+		}
+		stable = after
+		select {
+		case <-checkCtx.Done():
+			return &AppError{Code: "NGINX_RELOAD_UNCONFIRMED", Message: "Nginx 已收到加载信号，但新工作进程尚未就绪，请检查服务日志后刷新"}
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 	c.services.mu.Lock()
 	e.resolved = &r
 	c.services.mu.Unlock()
 	return nil
+}
+
+func nginxChildren(ctx context.Context, pid int) (map[int32]string, error) {
+	master, err := gprocess.NewProcessWithContext(ctx, int32(pid))
+	if err != nil {
+		return nil, err
+	}
+	children, err := master.ChildrenWithContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := map[int32]string{}
+	for _, child := range children {
+		marker, err := process.Identity(int(child.Pid))
+		if err == nil {
+			result[child.Pid] = marker
+		}
+	}
+	return result, nil
 }

@@ -48,6 +48,9 @@ func (c *Core) uninstallPreview(ctx context.Context, key string) (uninstallPrevi
 		return out, target, &AppError{Code: "PACKAGE_NOT_INSTALLED", Message: "该套件版本未安装"}
 	}
 	version = target.Version
+	if console := c.databaseConsoleStatus(); console != nil && (id == "php" && version == console.PHPVersion || id == console.PackageID && version == console.AdminerVersion) {
+		out.Blockers = append(out.Blockers, uninstallBlocker{Kind: "service", Name: "数据库管理台正在使用此版本，请先停止管理台"})
+	}
 	if !safePart(version) {
 		return out, target, invalid("已安装版本标识无效")
 	}

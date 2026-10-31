@@ -118,8 +118,10 @@ func (c *Core) healthCheck(ctx context.Context) (healthReport, error) {
 	} else {
 		for _, site := range sites {
 			problems := []string{}
-			if info, err := os.Stat(string(site.RootDir)); err != nil || !info.IsDir() || !filepath.IsAbs(string(site.RootDir)) {
-				problems = append(problems, "根目录不存在或无法访问："+DisplayPath(string(site.RootDir)))
+			if site.Runtime.Kind != "redirect" {
+				if info, err := os.Stat(string(site.RootDir)); err != nil || !info.IsDir() || !filepath.IsAbs(string(site.RootDir)) {
+					problems = append(problems, "根目录不存在或无法访问："+DisplayPath(string(site.RootDir)))
+				}
 			}
 			web := site.Runtime.WebServer
 			if web != "nginx" && web != "apache" && web != "caddy" {
@@ -133,6 +135,10 @@ func (c *Core) healthCheck(ctx context.Context) (healthReport, error) {
 			if site.Runtime.Kind == "php" {
 				if site.Runtime.PHPVersion == nil || !has["php@"+canonicalVersion(*site.Runtime.PHPVersion)] {
 					problems = append(problems, "未安装指定 PHP 版本")
+				}
+			} else if site.Runtime.Kind == "redirect" {
+				if _, err := redirectURL(site.Runtime.Redirect, site.Domains); err != nil {
+					problems = append(problems, err.Error())
 				}
 			} else if site.Runtime.Kind != "static" && site.Runtime.Application == nil {
 				target := ""

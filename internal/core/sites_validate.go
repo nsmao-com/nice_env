@@ -317,6 +317,12 @@ func validateSiteRewrite(rewrite *siteRewrite, server string) error {
 	return nil
 }
 func (c *Core) validateSite(ctx context.Context, site *Site) error {
+	return c.validateSiteForTransfer(ctx, site, false)
+}
+
+// Configuration import may precede runtime installation; all syntax and domain
+// checks still apply, and the ordinary start path verifies installed runtimes.
+func (c *Core) validateSiteForTransfer(ctx context.Context, site *Site, importing bool) error {
 	if site.ID != "" && !siteIdentifier.MatchString(site.ID) {
 		return invalid("站点标识无效")
 	}
@@ -446,12 +452,14 @@ func (c *Core) validateSite(ctx context.Context, site *Site) error {
 		if err != nil || !ip.IsLoopback() || u.Scheme != "http" || u.Path != "/" {
 			return invalid("托管应用必须使用本机 HTTP 地址且不含路径")
 		}
-		packages, err := c.installedRuntimePackages(ctx)
-		if err != nil {
-			return err
-		}
-		if err = validateRuntimeVersions(map[string]string{id: app.Version}, packages); err != nil {
-			return err
+		if !importing {
+			packages, err := c.installedRuntimePackages(ctx)
+			if err != nil {
+				return err
+			}
+			if err = validateRuntimeVersions(map[string]string{id: app.Version}, packages); err != nil {
+				return err
+			}
 		}
 	}
 	if site.Rewrite == "" {

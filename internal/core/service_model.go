@@ -67,18 +67,20 @@ type ServiceStatus struct {
 	MissingRequires []string  `json:"missingRequires"`
 }
 type serviceEntry struct {
-	status      ServiceStatus // guarded by serviceManager.mu
-	pkg         Package
-	child       *process.Child
-	cancel      context.CancelFunc
-	done        chan struct{}
-	started     time.Time
-	revision    string
-	resolved    *resolvedService
-	application *Site
+	status        ServiceStatus // guarded by serviceManager.mu
+	pkg           Package
+	child         *process.Child
+	cancel        context.CancelFunc
+	done          chan struct{}
+	started       time.Time
+	revision      string
+	resolved      *resolvedService
+	application   *Site
+	watch         serviceWatch // guarded by serviceManager.mu
+	mongoRecovery bool         // guarded by serviceManager.lifecycle; never persisted
 }
 type serviceManager struct {
-	lifecycle sync.Mutex // operations use TryLock; status never acquires it
+	lifecycle sync.RWMutex // mutations use TryLock; environment previews share TryRLock
 	mu        sync.RWMutex
 	entries   map[string]*serviceEntry
 	history   []ServiceHistory
@@ -327,10 +329,12 @@ func managedDirectory(home, path string) error {
 		current = filepath.Join(current, part)
 		info, err := os.Lstat(current)
 		if os.IsNotExist(err) {
-			if err = os.Mkdir(current, 0700); err != nil {
+			if err = os.Mkdir(current, 0700); err != nil && !os.IsExist(err) {
 				return err
 			}
-			continue
+			// Concurrent read requests may prepare the same directory. Recheck
+			// its type and resolved boundary even when another request created it.
+			info, err = os.Lstat(current)
 		}
 		if err != nil {
 			return err

@@ -123,7 +123,10 @@ func (c *Core) renderApacheConfig(ctx context.Context, e *serviceEntry, r *resol
 		moduleLines = append(moduleLines, "LoadModule "+module+"_module "+apachePath(path))
 	}
 	// Modules must load before directives that depend on them.
-	text = strings.Join(moduleLines, "\n") + "\n" + strings.Join(out, "\n")
+	text = strings.Join(out, "\n")
+	if len(moduleLines) > 0 {
+		text = strings.Join(moduleLines, "\n") + "\n" + text
+	}
 	include := "IncludeOptional " + apachePath(filepath.Join(r.etc, "sites", "*.conf"))
 	if !strings.Contains(text, include) {
 		text += "\n" + include + "\n"

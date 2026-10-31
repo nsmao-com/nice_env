@@ -9,18 +9,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"niceenv/internal/process"
 
 	_ "modernc.org/sqlite"
 )
 
 type Store struct{ db *sql.DB }
 
-// OpenStore accepts only a Wails-owned development directory. Existing NiceEnv
-// databases must be imported as a reviewed snapshot, never silently opened live.
-func OpenStore(ctx context.Context, home string) (*Store, error) {
-	if err := PrepareDevelopmentHome(home); err != nil {
-		return nil, err
-	}
+// The caller holds all application ownership locks and has backed up legacy data.
+func openStore(ctx context.Context, home string) (*Store, error) {
 	database := filepath.Join(home, "nsb.sqlite")
 	uriPath := filepath.ToSlash(DisplayPath(database))
 	// SQLite file URIs need /C:/..., otherwise the drive becomes an authority.
@@ -40,6 +39,14 @@ func OpenStore(ctx context.Context, home string) (*Store, error) {
 		db.Close()
 		return nil, &AppError{Code: "STORE_OPEN_FAILED", Message: "无法打开应用数据文件", Detail: err.Error()}
 	}
+	columns, err := storeTableColumns(ctx, db, "sites")
+	if err == nil && !columns["php_overrides"] {
+		_, err = db.ExecContext(ctx, "ALTER TABLE sites ADD COLUMN php_overrides TEXT")
+	}
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &Store{db: db}, nil
 }
 
@@ -47,6 +54,24 @@ func PrepareDevelopmentHome(home string) error {
 	if err := os.MkdirAll(home, 0700); err != nil {
 		return err
 	}
+	lock := filepath.Join(home, ".niceenv-bootstrap.lock")
+	if info, err := os.Lstat(lock); err == nil && !info.Mode().IsRegular() {
+		return invalid("初始化锁不是普通文件")
+	}
+	until := time.Now().Add(5 * time.Second)
+	var unlock func() error
+	for {
+		var err error
+		unlock, err = process.Lock(lock)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, process.ErrLocked) || time.Now().After(until) {
+			return err
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	defer unlock()
 	marker := filepath.Join(home, ".niceenv-wails-development")
 	const signature = "NiceEnv Wails development data\n"
 	if data, err := os.ReadFile(marker); err == nil && string(data) == signature {
@@ -56,8 +81,10 @@ func PrepareDevelopmentHome(home string) error {
 	if err != nil {
 		return err
 	}
-	if len(entries) != 0 {
-		return &AppError{Code: "DATA_DIRECTORY_PROTECTED", Message: "此目录不是 Wails 开发数据目录", Hint: "请选择独立空目录，避免修改现用 NiceEnv 或 FlyEnv 数据。"}
+	for _, entry := range entries {
+		if entry.Name() != ".niceenv-bootstrap.lock" {
+			return &AppError{Code: "DATA_DIRECTORY_PROTECTED", Message: "此目录不是 Wails 开发数据目录", Hint: "请选择独立空目录，避免修改现用 NiceEnv 或 FlyEnv 数据。"}
+		}
 	}
 	file, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {

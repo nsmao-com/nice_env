@@ -79,7 +79,10 @@ func (c *Core) pushMonitorAlert(ctx context.Context, endpoint, state, message st
 	if err != nil {
 		return err
 	}
-	if err = validateMonitorNotification(settings); err != nil {
+	return sendCertWebhook(ctx, settings, endpoint, state, message)
+}
+func sendCertWebhook(ctx context.Context, settings monitorNotification, endpoint, state, message string) error {
+	if err := validateMonitorNotification(settings); err != nil {
 		return err
 	}
 	if settings.Kind == "none" {
@@ -101,7 +104,9 @@ func (c *Core) pushMonitorAlert(ctx context.Context, endpoint, state, message st
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	transport := outboundTransport()
+	defer transport.CloseIdleConnections()
+	client := http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -357,7 +362,10 @@ func (c *Core) monitorScheduler(parent context.Context) {
 			if m.LastChecked != nil && time.Since(time.UnixMilli(*m.LastChecked)) < time.Hour {
 				continue
 			}
-			_, _ = c.certMonitorCheck(ctx, m.ID)
+			if c.beginDataActivity() {
+				_, _ = c.certMonitorCheck(ctx, m.ID)
+				c.dataDir.activity.RUnlock()
+			}
 		}
 	}
 }

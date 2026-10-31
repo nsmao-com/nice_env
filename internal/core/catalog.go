@@ -116,6 +116,9 @@ func loadCatalog(home string) (Catalog, error) {
 			return result, &AppError{Code: "MANIFEST_INVALID", Message: "本地套件清单格式无效", Detail: DisplayPath(path)}
 		}
 		merge(layer.Packages)
+		if layer.Revision > result.Revision {
+			result.Revision, result.Updated = layer.Revision, layer.Updated
+		}
 	}
 	result.Packages = make([]map[string]any, 0, len(order))
 	for _, key := range order {
@@ -231,6 +234,18 @@ func (c *Core) packageViews(ctx context.Context) ([]map[string]any, error) {
 		}
 		index, found := indices[key]
 		if snapshot != nil {
+			// Older snapshots may omit presentation metadata. Keep their exact
+			// executable/run definition; only fill missing display fields.
+			defaults := map[string]any{"displayName": id, "description": "已安装的历史版本", "os": []any{}, "arch": []any{}, "sizeBytes": float64(0)}
+			for field, fallback := range defaults {
+				if snapshot[field] != nil {
+					continue
+				}
+				if found && entries[index][field] != nil {
+					fallback = entries[index][field]
+				}
+				snapshot[field] = fallback
+			}
 			if found {
 				entries[index] = snapshot
 			} else {

@@ -20,9 +20,15 @@ type Spec struct {
 	Directory         string
 	Environment       map[string]string
 	RemoveEnvironment []string
-	Stdin             *os.File
-	Stdout            io.Writer
-	Stderr            io.Writer
+	// ConsoleSignals requests a private hidden console on Windows for programs
+	// with a native Ctrl+Break shutdown handler. It never shares the parent's console.
+	ConsoleSignals bool
+	// ConsoleInterrupt selects Ctrl+C for native handlers (such as Qdrant's
+	// Tokio/Actix shutdown). It still uses an exclusive hidden console.
+	ConsoleInterrupt bool
+	Stdin            *os.File
+	Stdout           io.Writer
+	Stderr           io.Writer
 	// CommandLine is only set by Shell for cmd.exe's own quoting rules.
 	commandLine string
 }

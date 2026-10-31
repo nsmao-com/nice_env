@@ -25,7 +25,9 @@ func upstreamGet(ctx context.Context, address string) ([]byte, error) {
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil {
 		return nil, invalid("版本源地址必须是 HTTPS 地址")
 	}
-	client := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(request *http.Request, via []*http.Request) error {
+	transport := outboundTransport()
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 30 * time.Second, CheckRedirect: func(request *http.Request, via []*http.Request) error {
 		if len(via) > 5 || request.URL.Scheme != "https" || request.URL.User != nil {
 			return invalid("版本源重定向无效")
 		}

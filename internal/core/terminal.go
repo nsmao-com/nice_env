@@ -199,14 +199,25 @@ func (c *Core) terminalCommand(ctx context.Context, data json.RawMessage, open b
 	if err != nil {
 		return nil, err
 	}
-	if !c.siteChanges.TryLock() {
-		return nil, serviceBusy()
+	if !open {
+		if !c.siteChanges.TryRLock() {
+			return nil, serviceBusy()
+		}
+		defer c.siteChanges.RUnlock()
+		if !c.services.lifecycle.TryRLock() {
+			return nil, serviceBusy()
+		}
+		defer c.services.lifecycle.RUnlock()
+	} else {
+		if !c.siteChanges.TryLock() {
+			return nil, serviceBusy()
+		}
+		defer c.siteChanges.Unlock()
+		if !c.services.lifecycle.TryLock() {
+			return nil, serviceBusy()
+		}
+		defer c.services.lifecycle.Unlock()
 	}
-	defer c.siteChanges.Unlock()
-	if !c.services.lifecycle.TryLock() {
-		return nil, serviceBusy()
-	}
-	defer c.services.lifecycle.Unlock()
 	environment, err := c.terminalEnvironment(ctx, in.SiteID)
 	if err != nil {
 		return nil, err

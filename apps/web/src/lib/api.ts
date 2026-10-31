@@ -940,6 +940,7 @@ export interface ConfigImportReport {
   certAutomations: number;
   certMonitors: number;
   missingPackages: string[];
+  warnings?: string[];
 }
 export const importConfig = (path: string) => safe(invoke<ConfigImportReport>("import_config", { path }));
 /** 拖拽导入：WebView 拿不到文件真实路径，读文本交给后端解析 */

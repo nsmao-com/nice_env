@@ -1,7 +1,7 @@
 {
   "name": "niceservbay",
   "private": true,
-  "version": "1.0.4",
+  "version": "2.0.0",
   "description": "NiceEnv — local development environment manager (Go + Wails v3 + React)",
   "scripts": {
     "check:wails-port": "node scripts/wails-port-status.mjs",
@@ -9,6 +9,7 @@
     "build:web": "pnpm --filter @nsb/web build",
     "check:go": "go vet ./...",
     "compile:desktop": "go build -tags desktopassets -o NiceEnv-Wails.exe ./cmd/niceenv",
+    "package:desktop": "node scripts/package-desktop.mjs",
     "check": "pnpm -r run check"
   },
   "engines": {

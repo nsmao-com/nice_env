@@ -14,6 +14,11 @@ func (c *Core) registerRecords() {
 		for i := range rows {
 			rows[i] = sanitizedSite(rows[i])
 			rows[i].Status = c.siteStatus(rows[i])
+			if rows[i].Status == "running" {
+				if address, err := c.siteAccessURL(ctx, rows[i]); err == nil {
+					rows[i].AccessURL = &address
+				}
+			}
 		}
 		return rows, nil
 	})

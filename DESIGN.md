@@ -1,9 +1,11 @@
 # NiceEnv — 本地开发环境集成管理器
 
 Windows + macOS 一站式本地开发环境管理器（对标 ServBay / FlyEnv / phpStudy，交互与视觉更现代）。
-Tauri 2 + Rust 后端能力 + React + Vite 前端，使用 React Router Hash 路由。
+当前实现为 Go + Wails v3 后端与桌面壳、React + Vite 前端，使用 React Router Hash 路由。
 
-## 1. 最终目录结构
+当前目录、数据兼容和验收范围见 [Go/Wails 迁移与验收](docs/go-wails-v3.md)。下文保留 v1 的设计与历次验收记录，其中 Rust、Tauri、Cargo 路径及检查结果仅代表历史版本，不是 v2 的构建入口或验收结论。
+
+## 1. v1 历史目录结构
 
 ```
 nice-servbay/

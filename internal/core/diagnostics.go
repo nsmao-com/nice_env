@@ -241,30 +241,7 @@ func (c *Core) registerDiagnostics() {
 		if err != nil {
 			return nil, err
 		}
-		if in.Port < 1 || in.Port > 65535 {
-			return nil, invalid("端口必须为 1–65535")
-		}
-		connections, err := gnet.ConnectionsWithContext(ctx, "tcp")
-		if err != nil {
-			return nil, err
-		}
-		result := map[string]any{"port": in.Port, "inUse": false, "pid": nil, "processName": nil, "cmdline": nil}
-		for _, conn := range connections {
-			if conn.Status != "LISTEN" || int(conn.Laddr.Port) != in.Port {
-				continue
-			}
-			result["inUse"], result["pid"] = true, conn.Pid
-			if p, err := gprocess.NewProcessWithContext(ctx, conn.Pid); err == nil {
-				if name, err := p.NameWithContext(ctx); err == nil {
-					result["processName"] = name
-				}
-				if command, err := p.CmdlineWithContext(ctx); err == nil {
-					result["cmdline"] = redactDiagnostic(command)
-				}
-			}
-			break
-		}
-		return result, nil
+		return DiagnosePort(ctx, in.Port)
 	})
 	c.handle("validate_configs", func(ctx context.Context, data json.RawMessage) (any, error) {
 		in, err := decode[struct {
@@ -295,20 +272,17 @@ func (c *Core) registerDiagnostics() {
 		}
 		return out, nil
 	})
-	c.handle("full_log", func(_ context.Context, data json.RawMessage) (any, error) {
+	c.handle("full_log", func(ctx context.Context, data json.RawMessage) (any, error) {
 		in, err := decode[struct {
 			ID string `json:"id"`
 		}](data)
 		if err != nil {
 			return nil, err
 		}
-		e, err := c.serviceEntry(in.ID, "")
+		path, err := c.logSourcePath(ctx, in.ID)
 		if err != nil {
 			return nil, err
 		}
-		c.services.mu.RLock()
-		path := string(e.status.LogFile)
-		c.services.mu.RUnlock()
 		content, err := readConfigText(path)
 		if os.IsNotExist(err) {
 			return "", nil
@@ -383,6 +357,36 @@ func (c *Core) registerDiagnostics() {
 		}
 		return nil, &AppError{Code: "LOG_NAME_EXHAUSTED", Message: "同名日志导出过多，请更换文件名"}
 	})
+}
+
+// DiagnosePort is read-only and also works before an application home exists.
+func DiagnosePort(ctx context.Context, port int) (map[string]any, error) {
+	if port < 1 || port > 65535 {
+		return nil, invalid("端口必须为 1–65535")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	connections, err := gnet.ConnectionsWithContext(ctx, "tcp")
+	if err != nil {
+		return nil, err
+	}
+	result := map[string]any{"port": port, "inUse": false, "pid": nil, "processName": nil, "cmdline": nil}
+	for _, conn := range connections {
+		if conn.Status != "LISTEN" || int(conn.Laddr.Port) != port {
+			continue
+		}
+		result["inUse"], result["pid"] = true, conn.Pid
+		if p, err := gprocess.NewProcessWithContext(ctx, conn.Pid); err == nil {
+			if name, err := p.NameWithContext(ctx); err == nil {
+				result["processName"] = name
+			}
+			if command, err := p.CmdlineWithContext(ctx); err == nil {
+				result["cmdline"] = redactDiagnostic(command)
+			}
+		}
+		break
+	}
+	return result, nil
 }
 
 func sanitizeLogName(value string) string {

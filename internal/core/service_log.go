@@ -2,14 +2,44 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 )
 
 const serviceLogLimit int64 = 4 * 1024 * 1024
+
+func (c *Core) logSourcePath(ctx context.Context, id string) (string, error) {
+	kind, siteID := "", ""
+	if strings.HasPrefix(id, "site:") {
+		kind, siteID = "access", strings.TrimPrefix(id, "site:")
+	}
+	if strings.HasPrefix(id, "site-error:") {
+		kind, siteID = "error", strings.TrimPrefix(id, "site-error:")
+	}
+	if kind != "" {
+		site, err := c.site(ctx, siteID)
+		if err != nil {
+			return "", err
+		}
+		server := site.Runtime.WebServer
+		if server != "nginx" && server != "apache" && server != "caddy" {
+			return "", invalid("站点 Web 服务配置无效")
+		}
+		return filepath.Join(c.Home, "logs", server, site.ID+"."+kind+".log"), nil
+	}
+	e, err := c.serviceEntry(id, "")
+	if err != nil {
+		return "", err
+	}
+	c.services.mu.RLock()
+	defer c.services.mu.RUnlock()
+	return string(e.status.LogFile), nil
+}
 
 // Keep draining on disk errors; report the first error when the process exits.
 type serviceLog struct {

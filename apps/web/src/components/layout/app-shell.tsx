@@ -87,7 +87,7 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
       <div className="nsb-workspace relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-card">
         <Topbar />
         {desktopRuntime === "wails" && typeof window !== "undefined" && !("__NICEENV_PRODUCTION__" in window && window.__NICEENV_PRODUCTION__ === true) && <p role="status" className="border-b border-border bg-warn-soft px-4 py-2 text-xs text-warn">
-          {english ? "Wails development build · Separate data directory. Some features are still being migrated." : "Wails 开发版 · 当前使用独立数据目录，部分功能尚未迁移。"}
+          {english ? "Wails development build · Separate data directory." : "Wails 开发版 · 当前使用独立数据目录。"}
         </p>}
         <main className="relative min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
           {/* 路由内容由 React Router 管理，页面加载时保留侧栏和窗口控件。 */}

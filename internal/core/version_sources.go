@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/Masterminds/semver/v3"
 )
 
 func builtinVersionSource(id string) versionSource {
@@ -269,6 +271,10 @@ func fetchNPMVersions(ctx context.Context, template map[string]any, source versi
 		if !safePart(version) || meta.Version != version || meta.Name != id {
 			continue
 		}
+		parsed, err := semver.StrictNewVersion(version)
+		if err != nil {
+			continue
+		}
 		address := "https://registry.npmjs.org/" + id + "/-/" + id + "-" + version + ".tgz"
 		if meta.Dist.Tarball != address {
 			continue
@@ -295,7 +301,7 @@ func fetchNPMVersions(ctx context.Context, template map[string]any, source versi
 		if meta.Engines.Node != "" {
 			note = "Node.js " + meta.Engines.Node
 		}
-		out = append(out, remoteVersion{Version: version, URL: address, Entry: entry, Kind: "targz", Prerelease: prerelease(version), Note: note, ReleasedAt: index.Time[version]})
+		out = append(out, remoteVersion{Version: version, URL: address, Entry: entry, Kind: "targz", Prerelease: parsed.Prerelease() != "", Note: note, ReleasedAt: index.Time[version]})
 	}
 	return out, nil
 }

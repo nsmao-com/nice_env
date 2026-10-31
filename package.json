@@ -1,7 +1,7 @@
 {
   "name": "niceservbay",
   "private": true,
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "NiceEnv — local development environment manager (Go + Wails v3 + React)",
   "scripts": {
     "check:wails-port": "node scripts/wails-port-status.mjs",

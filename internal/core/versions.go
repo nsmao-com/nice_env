@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Masterminds/semver/v3"
 )
 
 type versionSource struct {
@@ -73,7 +75,7 @@ func versionCacheKey(template map[string]any, source versionSource) string {
 	digest := sha256.Sum256(payload)
 	return "versionCatalog:go-v1:" + template["id"].(string) + ":" + hex.EncodeToString(digest[:])
 }
-func (c *Core) readVersionCache(ctx context.Context, key, id string) (versionCatalog, error) {
+func (c *Core) readVersionCache(ctx context.Context, key, id string, source versionSource) (versionCatalog, error) {
 	out := versionCatalog{ID: id, Remote: []remoteVersion{}}
 	raw, exists, err := c.Store.setting(ctx, key)
 	if err != nil {
@@ -84,6 +86,12 @@ func (c *Core) readVersionCache(ctx context.Context, key, id string) (versionCat
 	}
 	if out.Remote == nil {
 		out.Remote = []remoteVersion{}
+	}
+	if id == "npm" || id == "pnpm" {
+		out.Remote, err = normalizeVersions(out.Remote, source)
+		if err != nil {
+			return out, err
+		}
 	}
 	out.Online = false
 	return out, nil
@@ -102,7 +110,7 @@ func (c *Core) versionCatalog(ctx context.Context, id string, force, cachedOnly 
 		return out, nil
 	}
 	key := versionCacheKey(template, source)
-	out, err = c.readVersionCache(ctx, key, id)
+	out, err = c.readVersionCache(ctx, key, id, source)
 	if err != nil {
 		return out, err
 	}
@@ -127,7 +135,7 @@ func (c *Core) versionCatalog(ctx context.Context, id string, force, cachedOnly 
 		return out, ctx.Err()
 	}
 	defer func() { <-gate }()
-	out, err = c.readVersionCache(ctx, key, id)
+	out, err = c.readVersionCache(ctx, key, id, source)
 	if err != nil {
 		return out, err
 	}
@@ -177,6 +185,13 @@ func normalizeVersions(list []remoteVersion, source versionSource) ([]remoteVers
 	}
 	out := []remoteVersion{}
 	for _, item := range list {
+		if source.Kind == "npm-registry" {
+			parsed, parseErr := semver.StrictNewVersion(item.Version)
+			if parseErr != nil {
+				continue
+			}
+			item.Prerelease = parsed.Prerelease() != ""
+		}
 		if !safePart(item.Version) || !source.IncludePrerelease && item.Prerelease || filter != nil && !filter.MatchString(item.Version) {
 			continue
 		}
@@ -195,6 +210,15 @@ func normalizeVersions(list []remoteVersion, source versionSource) ([]remoteVers
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Version == out[j].Version {
 			return out[i].SHA256 != "" && out[j].SHA256 == ""
+		}
+		// Registry versions follow SemVer; other sources may use vendor build
+		// suffixes such as 4.0.7-1 and must retain their existing ordering.
+		if source.Kind == "npm-registry" {
+			a, aerr := semver.StrictNewVersion(out[i].Version)
+			b, berr := semver.StrictNewVersion(out[j].Version)
+			if aerr == nil && berr == nil {
+				return a.GreaterThan(b)
+			}
 		}
 		return newerVersion(out[i].Version, out[j].Version)
 	})

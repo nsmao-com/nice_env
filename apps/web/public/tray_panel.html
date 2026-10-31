@@ -3,9 +3,9 @@
   NiceEnv 托盘面板（仿搜狗输入法托盘弹窗的卡片式风格）
   ------------------------------------------------------------
   自包含 HTML/CSS/JS，无框架无外部资源，由托盘小窗（tray-panel）加载：
-  - dev 模式走 Next dev server（public/ 直接伺服）；
-  - 打包后走 Tauri 资产协议（static export 时 public/ 拷进 out/）。
-  与 Rust 的约定：
+  - Go 资产处理器直接嵌入此文件，开发验收与正式打包共用同一份面板；
+  - 通过 Wails runtime 调用 Go 桌面桥接层，不依赖前端开发服务器。
+  与 Go 的约定：
   - invoke `tray_panel_state` 拉初始数据；listen `tray://state` 收增量推送；
   - 动作复用主窗口命令（start_service / start_stack / open_in_browser …），
     托盘特有动作用 tray_open_main / tray_stop_all / tray_panel_resize / tray_panel_hide；

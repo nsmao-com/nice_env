@@ -247,22 +247,26 @@ function CertAlertListener() {
 function UpdateWatcher() {
   const [open, setOpen] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
+  const checked = React.useRef(false);
   React.useEffect(() => { if (open) setLoaded(true); }, [open]);
   const { data: settings } = useSettings();
+  const checkOnLaunch = settings?.checkUpdateOnLaunch === true;
 
   React.useEffect(() => {
-    if (!isDesktop || !settings || !settings.checkUpdateOnLaunch) return;
+    if (!isDesktop || !checkOnLaunch || checked.current) return;
+    let disposed = false;
     // 延迟几秒，避开启动时的并发请求高峰
     const id = setTimeout(async () => {
+      checked.current = true;
       try {
         const r = await api.checkUpdates();
-        if (r.appUpdate) setOpen(true);
+        if (!disposed && r.appUpdate) setOpen(true);
       } catch {
         /* 网络不通就不打扰 */
       }
     }, 4000);
-    return () => clearTimeout(id);
-  }, [settings]);
+    return () => { disposed = true; clearTimeout(id); };
+  }, [checkOnLaunch]);
 
   return open || loaded ? <React.Suspense fallback={null}><UpdateDialog open={open} onOpenChange={setOpen} /></React.Suspense> : null;
 }

@@ -78,7 +78,7 @@ export function Sidebar() {
       transition={{ type: "spring", stiffness: 420, damping: 36 }}
       className="nsb-sidebar relative z-20 flex h-full shrink-0 select-none flex-col"
     >
-      {/* 品牌行整行可拖动窗口；菜单按钮可点击，双击最大化走 Tauri 原生脚本 */}
+      {/* 品牌行整行可拖动窗口；菜单按钮可点击，双击最大化由 Wails 处理。 */}
       <div
         className={cn(
           "nsb-sidebar-brand flex shrink-0 items-center gap-2 px-4",

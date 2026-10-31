@@ -72,7 +72,7 @@ function MicroBar({ label, pct }: { label: string; pct: number }) {
           <span className="text-[10px] font-medium tracking-wide text-faint">{label}</span>
           <div className="h-1 w-14 overflow-hidden rounded-full bg-card-2">
             <div
-              className={`h-full rounded-full ${color} transition-all duration-500`}
+              className={`h-full rounded-full ${color}`}
               style={{ width: `${clamped}%` }}
             />
           </div>

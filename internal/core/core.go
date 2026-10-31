@@ -115,21 +115,6 @@ func Open(ctx context.Context, home, version string, emit EventSink) (*Core, err
 		return map[string]any{"phase": "disabled", "stackId": nil, "stackName": nil, "report": nil, "error": nil}, nil
 	})
 	c.handle("backend_capabilities", func(context.Context, json.RawMessage) (any, error) { return c.Capabilities(), nil })
-	c.handle("process_recovery_status", func(context.Context, json.RawMessage) (any, error) {
-		return map[string]any{"adopted": []any{}, "killed": []any{}, "unresolved": []string{}, "blockedServices": []string{}}, nil
-	})
-	c.handle("recover_processes", func(context.Context, json.RawMessage) (any, error) {
-		return map[string]any{"adopted": []any{}, "killed": []any{}, "unresolved": []string{}, "blockedServices": []string{}}, nil
-	})
-	c.handle("get_autostart_status", func(ctx context.Context, _ json.RawMessage) (any, error) {
-		value, exists, err := c.Store.setting(ctx, "startStackOnLaunch")
-		if err != nil {
-			return nil, err
-		}
-		return exists && value == "true", nil
-	})
-	c.handle("pending_data_dir_migration", func(context.Context, json.RawMessage) (any, error) { return nil, nil })
-	c.handle("cancel_data_dir_migration", func(context.Context, json.RawMessage) (any, error) { return true, nil })
 	return c, nil
 }
 

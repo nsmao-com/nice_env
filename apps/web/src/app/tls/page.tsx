@@ -7,7 +7,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { CertRecord } from "@nsb/schema";
 import { useUI, useT } from "@/lib/store";
 import { useCerts, toastError } from "@/lib/hooks";
-import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
+import { isDesktop, normalizeError, type AppErrorShape } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -79,11 +79,11 @@ export default function TlsPage() {
   /** 从文件夹批量导入证书文件（certd 没导出配置、只剩证书文件时的迁移路） */
   const importCertDir = async () => {
     if (importRef.current) return;
-    if (!isTauri) { toast.info(t("tls.desktopOnly")); return; }
+    if (!isDesktop) { toast.info(t("tls.desktopOnly")); return; }
     importRef.current = true;
     setImporting(true);
     try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
+      const { open } = await import("@/lib/desktop-dialog");
       const dir = await open({ title: t("tls.importDirTitle"), directory: true, multiple: false });
       if (!dir || typeof dir !== "string") return;
       const r = await api.certImportDir(dir);
@@ -398,7 +398,7 @@ function PfxExportDialog({ cert, onClose, onCloseAutoFocus }: { cert: CertExport
 
   const doExport = async () => {
     if (!cert || busyRef.current) return;
-    if (!isTauri) { setError({ code: "DESKTOP_ONLY", message: t("tls.desktopOnly") }); return; }
+    if (!isDesktop) { setError({ code: "DESKTOP_ONLY", message: t("tls.desktopOnly") }); return; }
     if (format === "jks" && [...password].length < 6) {
       setError({ code: "JKS_PASSWORD", message: t("pfx.jksMin") }); return;
     }
@@ -407,7 +407,7 @@ function PfxExportDialog({ cert, onClose, onCloseAutoFocus }: { cert: CertExport
     setBusy(true);
     setError(null);
     try {
-      const { save } = await import("@tauri-apps/plugin-dialog");
+      const { save } = await import("@/lib/desktop-dialog");
       const ext = format === "pfx" ? "pfx" : format === "jks" ? "jks" : format === "pem" ? "pem" : "der";
       const path = await save({
         title: t("pfx.saveTitle"),
@@ -494,13 +494,13 @@ function PfxExportDialog({ cert, onClose, onCloseAutoFocus }: { cert: CertExport
           {unsupportedPfxPassword && <p id="pfx-password-error" role="alert" className="text-xs text-error">{t("pfx.passwordUnsupported")}</p>}
         </div>
         ) : null}
-        {!isTauri && <p className="text-xs text-muted">{t("tls.desktopOnly")}</p>}
+        {!isDesktop && <p className="text-xs text-muted">{t("tls.desktopOnly")}</p>}
         {error && <CertError error={error} />}
         </div>
         <div className="mx-2 border-t border-dashed border-border/60" />
         <DialogFooter className="shrink-0 flex-wrap">
           <Button variant="ghost" onClick={onClose} disabled={busy}>{t("common.cancel")}</Button>
-          <Button onClick={doExport} disabled={busy || !isTauri || unsupportedPfxPassword || (format === "jks" && [...password].length < 6)}>
+          <Button onClick={doExport} disabled={busy || !isDesktop || unsupportedPfxPassword || (format === "jks" && [...password].length < 6)}>
             {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <KeyRound className="h-3.5 w-3.5" />}
             {t("pfx.export")}
           </Button>

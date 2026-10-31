@@ -2,8 +2,8 @@
 
 import * as React from "react";
 import { Minus, Square, X } from "lucide-react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
-import { isTauri } from "@/lib/backend";
+import { getCurrentWindow } from "@/lib/desktop-window";
+import { isDesktop } from "@/lib/backend";
 import { useT } from "@/lib/store";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
@@ -32,7 +32,7 @@ export function useDesktopWindow() {
   return React.useContext(DesktopWindowContext);
 }
 
-// 双击拖拽区最大化 / 还原由 Tauri 原生脚本（internal_toggle_maximize）处理：
+// 双击拖拽区最大化 / 还原交由桌面运行时处理：
 // macOS 上 mouseup 触发、可拖动取消，行为与系统一致。应用层不要再挂
 // onDoubleClick 切换，否则会和原生脚本各切换一次，看起来像没反应。
 
@@ -44,7 +44,7 @@ export function DesktopWindowProvider({ children }: { children: React.ReactNode 
   React.useEffect(() => {
     setMounted(true);
     setIsMac(/Mac/i.test(navigator.userAgent));
-    if (!isTauri) return;
+    if (!isDesktop) return;
     const w = getCurrentWindow();
     let un: (() => void) | undefined;
     let disposed = false;
@@ -74,10 +74,10 @@ export function DesktopWindowProvider({ children }: { children: React.ReactNode 
   }, []);
 
   const api = React.useMemo<DesktopWindow>(() => {
-    const run = (fn: (w: ReturnType<typeof getCurrentWindow>) => void) => {
-      if (!isTauri) return;
+    const run = (fn: (w: ReturnType<typeof getCurrentWindow>) => Promise<void>) => {
+      if (!isDesktop) return;
       try {
-        fn(getCurrentWindow());
+        void fn(getCurrentWindow()).catch(() => undefined);
       } catch {
         /* ignore */
       }
@@ -85,11 +85,11 @@ export function DesktopWindowProvider({ children }: { children: React.ReactNode 
     return {
       mounted,
       isMac,
-      isDesktop: mounted && isTauri,
+      isDesktop: mounted && isDesktop,
       maximized,
-      minimize: () => run((w) => void w.minimize()),
-      toggleMaximize: () => run((w) => void w.toggleMaximize()),
-      close: () => run((w) => void w.close()),
+      minimize: () => run((w) => w.minimize()),
+      toggleMaximize: () => run((w) => w.toggleMaximize()),
+      close: () => run((w) => w.close()),
     };
   }, [mounted, isMac, maximized]);
 

@@ -82,7 +82,7 @@ import type {
   CertMonitor,
   DownloadUpdateResult,
 } from "@nsb/schema";
-import { browserUrl, invoke, isTauri, safe } from "./backend";
+import { browserUrl, invoke, isDesktop, safe } from "./backend";
 
 /* 服务 */
 export const processRecoveryStatus = () => safe(invoke<ProcessRecoveryReport>("process_recovery_status"));
@@ -324,7 +324,7 @@ export const getSystemStats = () => safe(invoke<SystemStats>("get_system_stats")
 export const openInBrowser = (input: string): Promise<boolean> => openResolvedBrowserUrl(() => input);
 
 async function openResolvedBrowserUrl(resolve: () => string | Promise<string>): Promise<boolean> {
-  if (isTauri) return safe(invoke<boolean>("open_in_browser", { url: browserUrl(await resolve()) }));
+  if (isDesktop) return safe(invoke<boolean>("open_in_browser", { url: browserUrl(await resolve()) }));
   // 必须在点击的同步阶段打开，不能经过 mock 延迟而丢失浏览器的用户手势。
   // 先隔离空白窗口的 opener，再导航；只有拿到窗口句柄才能识别弹窗被拦截。
   const opened = window.open("about:blank", "_blank");

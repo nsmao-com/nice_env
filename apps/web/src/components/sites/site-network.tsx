@@ -6,7 +6,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import * as api from "@/lib/api";
-import { isTauri, normalizeError } from "@/lib/backend";
+import { isDesktop, normalizeError } from "@/lib/backend";
 import { useT } from "@/lib/store";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -58,7 +58,7 @@ export function SiteNetworkDialog({ id, name, onClose }: { id: string; name: str
         <DialogDescription className="text-xs leading-relaxed">{t("lan.description")}</DialogDescription>
       </DialogHeader>
       <div className="min-h-0 space-y-4 overflow-y-auto pr-1 text-xs">
-        {!isTauri && <p className="rounded-lg bg-info-soft p-3 text-info">{t("lan.preview")}</p>}
+        {!isDesktop && <p className="rounded-lg bg-info-soft p-3 text-info">{t("lan.preview")}</p>}
         {query.isPending && <p role="status" className="py-4 text-muted">{t("common.loading")}</p>}
         {query.error && <div role="alert" className="flex flex-wrap items-center gap-2 rounded-lg bg-error-soft p-3 text-error">
           <span className="min-w-0 flex-1 break-words">{normalizeError(query.error).message}</span>

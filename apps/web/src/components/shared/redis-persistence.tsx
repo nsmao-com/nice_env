@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { HardDriveDownload, Loader2 } from "lucide-react";
 import type { RedisPersistence, RedisSnapshotReceipt } from "@nsb/schema";
 import * as api from "@/lib/api";
-import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
+import { isDesktop, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { useT } from "@/lib/store";
 import { sameVersion } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -66,7 +66,7 @@ function RedisPersistenceDialog({ version, onClose }: { version: string; onClose
     <DialogContent hideClose={busy} className="flex max-h-[90dvh] max-w-xl flex-col overflow-hidden p-4 sm:p-6">
       <DialogHeader className="shrink-0 pr-6"><DialogTitle className="leading-snug">Redis {version} · {t("redisPersistence.title")}</DialogTitle><DialogDescription>{t("redisPersistence.intro")}</DialogDescription></DialogHeader>
       <div className="min-h-0 space-y-4 overflow-y-auto px-0.5 text-xs leading-relaxed">
-        {!isTauri && <p className="text-warn">{t("redisPersistence.demo")}</p>}
+        {!isDesktop && <p className="text-warn">{t("redisPersistence.demo")}</p>}
         {query.isPending && <p role="status">{t("common.loading")}</p>}
         {failure && <div ref={errorRef} tabIndex={-1} role="alert" className="space-y-1 rounded-lg bg-error-soft p-3 text-error outline-none [overflow-wrap:anywhere]"><p>{failure.message}</p>{failure.hint && <p>{failure.hint}</p>}</div>}
         {receipt && <p role="status" className={`rounded-lg p-3 ${outcome === "failed" || outcome === "restarted" || slow ? "bg-warn-soft text-warn" : "bg-fill text-secondary"}`}>{t(slow ? "redisPersistence.slow" : `redisPersistence.${outcome ?? "waiting"}`)}</p>}

@@ -1,15 +1,31 @@
 /**
- * 后端适配层：桌面端走 Tauri invoke；浏览器开发走 mock（数据结构即最终 schema）。
+ * 后端适配层：桌面端只使用 Wails；浏览器预览使用 mock。
  * 前端禁止直接操作文件系统，一切经此层。
  */
 
-export const isTauri =
-  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+export const desktopRuntime = typeof window === "undefined" ? "browser"
+  : "__NICEENV_WAILS__" in window ? "wails" : "browser";
+export const isDesktop = desktopRuntime !== "browser";
+
+let wailsCommands: Promise<Set<string>> | undefined;
+const bridgeMethod = "niceenv/internal/desktop.Bridge.Invoke";
 
 export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  if (isTauri) {
-    const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<T>(cmd, args);
+  if (desktopRuntime === "wails") {
+    const { Call } = await import("@wailsio/runtime");
+    try {
+      if (cmd !== "backend_capabilities") {
+        wailsCommands ??= Promise.resolve(Call.ByName(bridgeMethod, "backend_capabilities", {}))
+          .then((value: { commands: string[] }) => new Set(value.commands))
+          .catch((error: unknown) => { wailsCommands = undefined; throw error; });
+        if (!(await wailsCommands).has(cmd)) throw {
+          code: "COMMAND_NOT_PORTED", message: "此功能尚未迁移到 Go 后端", detail: cmd,
+          hint: "当前是独立开发版本，不可替代现用正式版。",
+        } satisfies AppErrorShape;
+      }
+      return await Call.ByName(bridgeMethod, cmd, args ?? {}) as T;
+    }
+    catch (error) { throw normalizeError(error); }
   }
   const { mockInvoke } = await import("./mock");
   return mockInvoke<T>(cmd, args);
@@ -58,12 +74,17 @@ export function normalizeError(e: unknown): AppErrorShape {
   if (e && typeof e === "object") {
     const anyE = e as Record<string, unknown>;
     if (anyE.code && anyE.message) return e as AppErrorShape;
+    if (anyE.cause && typeof anyE.cause === "object") {
+      const cause = anyE.cause as Record<string, unknown>;
+      if (typeof cause.code === "string" && typeof cause.message === "string") return cause as unknown as AppErrorShape;
+    }
+    if (typeof anyE.message === "string") return { code: "UNKNOWN", message: anyE.message };
   }
   return { code: "UNKNOWN", message: String(e) };
 }
 
 /**
- * 浏览器本地事件总线：桌面端事件由 Rust emit，浏览器（mock）没有 IPC，
+ * 浏览器本地事件总线：桌面端事件由原生后端发出，浏览器（mock）没有 IPC，
  * 就在这里用同一个名字转发，让「下载进度」这类 UI 在 dev 下也能看到效果。
  */
 type LocalHandler = (payload: unknown) => void;
@@ -79,15 +100,14 @@ export function emitLocal(event: string, payload: unknown) {
   });
 }
 
-/** 订阅 Rust 侧事件（下载进度等）；浏览器下订阅本地事件总线 */
+/** 订阅原生事件（下载进度等）；浏览器下订阅本地事件总线 */
 export async function listen<T>(
   event: string,
   handler: (payload: T) => void
 ): Promise<() => void> {
-  if (isTauri) {
-    const { listen } = await import("@tauri-apps/api/event");
-    const un = await listen<T>(event, (ev) => handler(ev.payload));
-    return un;
+  if (desktopRuntime === "wails") {
+    const { Events } = await import("@wailsio/runtime");
+    return Events.On(event, (ev) => handler(ev.data as T));
   }
   const set = localBus.get(event) ?? new Set<LocalHandler>();
   const h: LocalHandler = (p) => handler(p as T);

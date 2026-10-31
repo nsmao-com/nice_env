@@ -7,7 +7,7 @@ import { Stethoscope, Loader2, Copy, Save, ShieldCheck } from "lucide-react";
 import type { DiagnosticsBundle } from "@nsb/schema";
 import { useT } from "@/lib/store";
 import { copyText } from "@/lib/hooks";
-import { isTauri, normalizeError } from "@/lib/backend";
+import { isDesktop, normalizeError } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { CodeBlock } from "@/components/shared/code-block";
@@ -44,7 +44,7 @@ export function DiagnosticsCard() {
       } else if (bundle) {
         const path = await save.mutateAsync(bundle);
         setSaved(path);
-        toast.success(t(isTauri ? "diag.saved" : "diag.downloaded"), { description: path });
+        toast.success(t(isDesktop ? "diag.saved" : "diag.downloaded"), { description: path });
       }
     } catch (cause) {
       setError(normalizeError(cause).message);
@@ -66,14 +66,14 @@ export function DiagnosticsCard() {
         </Button>
         <Button size="sm" variant="ghost" className="min-h-9 h-auto whitespace-normal py-2" onClick={() => void run("save")} disabled={busy}>
           {save.isPending ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> : <Save className="h-3.5 w-3.5 shrink-0" />}
-          {t(isTauri ? "diag.save" : "diag.download")}
+          {t(isDesktop ? "diag.save" : "diag.download")}
         </Button>
       </>}
     </div>
-    <p className="text-[11px] leading-relaxed text-muted">{t(isTauri ? "diag.snapshotHint" : "diag.demoHint")}</p>
+    <p className="text-[11px] leading-relaxed text-muted">{t(isDesktop ? "diag.snapshotHint" : "diag.demoHint")}</p>
     {busy && <p role="status" className="text-[11px] text-muted">{t(building ? "diag.building" : "diag.saving")}</p>}
     {error && <p ref={errorRef} tabIndex={-1} role="alert" className="break-words rounded-md border border-error/30 p-3 text-xs text-error">{error}</p>}
-    {saved && <p role="status" className="break-all text-[11px] text-muted">{t(isTauri ? "diag.saved" : "diag.downloaded")}：{saved}</p>}
+    {saved && <p role="status" className="break-all text-[11px] text-muted">{t(isDesktop ? "diag.saved" : "diag.downloaded")}：{saved}</p>}
     {bundle && <div ref={reportRef} tabIndex={-1} aria-label={t("diag.preview")} className="min-w-0 space-y-3 rounded-md outline-none focus-visible:ring-2 focus-visible:ring-primary">
       <div className="flex flex-wrap gap-x-3 gap-y-2 text-[11px] text-muted">
         <span>{t("diag.stats").replace("{s}", String(bundle.serviceCount)).replace("{n}", String(bundle.siteCount)).replace("{l}", String(bundle.logLines))}</span>

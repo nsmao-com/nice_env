@@ -22,12 +22,11 @@ export function Topbar() {
     : 0;
 
   return (
-    // data-tauri-drag-region="deep"：整条顶栏都是拖拽区（点子元素也能拖）。
-    // 裸属性只在本元素被点中时生效，文字/图标上会拖不动；
-    // 双击最大化由 Tauri 原生脚本处理，不要再挂 React 的 onDoubleClick（会切换两次互相抵消）。
+    // 原生拖动由 CSS 的 --wails-draggable 声明，按钮区域覆盖为 no-drag。
+    // 双击最大化交给 Wails 处理，避免 React 再切换一次。
     <header
       className="nsb-topbar flex h-[52px] shrink-0 select-none items-center gap-2 px-3 sm:gap-3 sm:px-4"
-      data-tauri-drag-region="deep"
+      data-window-drag-region="deep"
     >
       <button
         type="button"
@@ -40,7 +39,7 @@ export function Topbar() {
         <Kbd className="relative">Ctrl K</Kbd>
       </button>
 
-      <div className="min-w-4 flex-1 self-stretch" data-tauri-drag-region="deep" />
+      <div className="min-w-4 flex-1 self-stretch" data-window-drag-region="deep" />
 
       <div className="hidden items-center gap-3 md:flex">
         <MicroBar label="CPU" pct={cpu} />

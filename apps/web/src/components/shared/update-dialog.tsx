@@ -21,7 +21,7 @@ import { cn, fmtBytes, fmtSpeed, fmtDuration, formatAppVersion } from "@/lib/uti
 import { useT } from "@/lib/store";
 import { toastError } from "@/lib/hooks";
 import * as api from "@/lib/api";
-import { isTauri, listen, normalizeError } from "@/lib/backend";
+import { isDesktop, listen, normalizeError } from "@/lib/backend";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -138,7 +138,7 @@ export function UpdateDialog({
   };
 
   const restartForManifest = async () => {
-    if (!isTauri || manifestState !== "applied" || manifestRestarting) return;
+    if (!isDesktop || manifestState !== "applied" || manifestRestarting) return;
     setManifestRestarting(true);
     try {
       await api.restartApp();
@@ -366,7 +366,7 @@ export function UpdateDialog({
                 </div>
               )}
 
-              {!isTauri && (
+              {!isDesktop && (
                 <p className="rounded-md bg-fill px-3 py-2 text-[11px] text-faint">
                   {t("update.browserMode")}
                 </p>
@@ -401,7 +401,7 @@ export function UpdateDialog({
                   {t("update.applyManifest")}
                 </Button>
               )}
-              {manifestState === "applied" && isTauri && (
+              {manifestState === "applied" && isDesktop && (
                 <Button onClick={() => void restartForManifest()} disabled={manifestRestarting}>
                   {manifestRestarting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
                   {t(manifestRestarting ? "update.restartingForManifest" : "update.restartForManifest")}

@@ -7,7 +7,7 @@ import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from "@tan
 import type { DownloadProgress } from "@nsb/schema";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
-import { isTauri, listen } from "@/lib/backend";
+import { isDesktop, listen, normalizeError } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { applyAppearance } from "@/lib/appearance";
 import { refreshVersionCatalog, toastError } from "@/lib/hooks";
@@ -26,12 +26,12 @@ function AppearanceSync() {
     queryKey: ["settings"],
     queryFn: api.getSettings,
     staleTime: 30_000,
-    enabled: isTauri,
+    enabled: isDesktop,
     retry: 0,
   });
 
   React.useEffect(() => {
-    if (!isTauri || !data) return;
+    if (!isDesktop || !data) return;
     setTheme(data.appearance === "system" ? "system" : data.appearance === "dark" ? "dark" : "light");
   }, [data, setTheme]);
 
@@ -40,7 +40,7 @@ function AppearanceSync() {
   }, [data]);
 
   React.useEffect(() => {
-    if (!isTauri || !data || readySent.current) return;
+    if (!isDesktop || !data || readySent.current) return;
     readySent.current = true;
     // 设置读取和 React 挂载都完成后才确认页面就绪；交接完成后重取准备期间受限的数据。
     void api.frontendReady().then((activated) => {
@@ -110,7 +110,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
             // 请求经本地 IPC（浏览器预览走内存后端）；断网不能暂停设置、配置或数据库读取。
             networkMode: "always",
             staleTime: 1500,
-            retry: 1,
+            retry: (count, error) => count < 1 && normalizeError(error).code !== "COMMAND_NOT_PORTED",
             refetchOnWindowFocus: false,
             refetchOnReconnect: true,
           },

@@ -20,7 +20,7 @@ import {
 import type { CertReport, ImportedCert } from "@nsb/schema";
 import { useT } from "@/lib/store";
 import { toastError } from "@/lib/hooks";
-import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
+import { isDesktop, normalizeError, type AppErrorShape } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
@@ -57,11 +57,11 @@ export function CertHealthCard({ onExport }: { onExport: (cert: ImportedCert, tr
 
   const pickReplacement = async (field: "certPath" | "keyPath") => {
     if (busyRef.current) return;
-    if (!isTauri) { toast.info(t("tls.desktopOnly")); return; }
+    if (!isDesktop) { toast.info(t("tls.desktopOnly")); return; }
     busyRef.current = true;
     setBusy(true);
     try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
+      const { open } = await import("@/lib/desktop-dialog");
       const path = await open({ title: t(field === "certPath" ? "cert.pickCert" : "cert.pickKey"), multiple: false,
         filters: [{ name: "PEM", extensions: field === "certPath" ? ["crt", "pem", "cer"] : ["key", "pem"] }] });
       if (typeof path === "string") {
@@ -94,11 +94,11 @@ export function CertHealthCard({ onExport }: { onExport: (cert: ImportedCert, tr
 
   const doImport = async () => {
     if (busyRef.current) return;
-    if (!isTauri) { toast.info(t("tls.desktopOnly")); return; }
+    if (!isDesktop) { toast.info(t("tls.desktopOnly")); return; }
     busyRef.current = true;
     setBusy(true);
     try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
+      const { open } = await import("@/lib/desktop-dialog");
       const certPath = await open({
         title: t("cert.pickCert"),
         multiple: false,

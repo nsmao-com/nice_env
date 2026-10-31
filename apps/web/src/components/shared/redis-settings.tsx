@@ -7,7 +7,7 @@ import type { ConfigFileInfo, RedisSettings, RedisSettingsView } from "@nsb/sche
 import * as api from "@/lib/api";
 import { useT } from "@/lib/store";
 import { useInvalidate } from "@/lib/hooks";
-import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
+import { isDesktop, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -105,7 +105,7 @@ function RedisSettingsDialog({ version, onClose }: { version: string; onClose: (
         <DialogHeader className="shrink-0 pr-6"><DialogTitle className="leading-snug">Redis {version} · {t("redisSettings.title")}</DialogTitle><DialogDescription>{t("redisSettings.intro")}</DialogDescription></DialogHeader>
         <form onSubmit={save} className="flex min-h-0 flex-1 flex-col gap-4">
           <div className="min-h-0 space-y-4 overflow-y-auto px-0.5 text-xs leading-relaxed">
-            {!isTauri && <p className="text-warn">{t("redisSettings.demo")}</p>}
+            {!isDesktop && <p className="text-warn">{t("redisSettings.demo")}</p>}
             {query.isFetching && <p role="status" className="text-muted">{t("common.loading")}</p>}
             {failure && <div ref={errorRef} tabIndex={-1} role="alert" className="space-y-1 rounded-lg bg-error-soft p-3 text-error outline-none [overflow-wrap:anywhere]"><p>{failure.message}</p>{failure.hint && <p>{failure.hint}</p>}</div>}
             {saved && <p role="status" className="rounded-lg bg-fill p-3 text-secondary">{t("redisSettings.saved")}</p>}

@@ -8,7 +8,7 @@ import type { RemoteVersion } from "@nsb/schema";
 import { cn, sameVersion } from "@/lib/utils";
 import { useT } from "@/lib/store";
 import { toastError } from "@/lib/hooks";
-import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
+import { isDesktop, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { PathEnvToggle } from "@/components/shared/path-env-toggle";
@@ -173,7 +173,7 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
     <Popover open={open} onOpenChange={(next) => {
       if (busyRef.current || pathBusy) return;
       setOpen(next);
-      if (next && isTauri && onRefresh && !catalog?.loading && !refreshRef.current
+      if (next && isDesktop && onRefresh && !catalog?.loading && !refreshRef.current
         && (!catalog?.cachedAt || Date.now() - catalog.cachedAt >= 6 * 60 * 60 * 1000)) {
         refreshRef.current = true; setRefreshing(true);
         void Promise.resolve().then(onRefresh).catch(toastError).finally(() => { refreshRef.current = false; setRefreshing(false); });
@@ -244,13 +244,13 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
                     setRefreshing(false);
                   }
                 }}
-                disabled={!isTauri || busy !== null || refreshing || catalog?.loading}
+                disabled={!isDesktop || busy !== null || refreshing || catalog?.loading}
                 className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border text-faint transition-colors hover:border-border-strong hover:text-secondary disabled:opacity-50"
               >
                 <RefreshCw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
               </button>
             </TooltipTrigger>
-            <TooltipContent>{t(isTauri ? "versions.refresh" : "versions.preview")}</TooltipContent>
+            <TooltipContent>{t(isDesktop ? "versions.refresh" : "versions.preview")}</TooltipContent>
           </Tooltip>
         </div>
         <div role="group" aria-label={t("versions.filter")} className="flex shrink-0 flex-wrap gap-1 px-2 pb-2">
@@ -462,7 +462,7 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
         <div className="flex shrink-0 items-start justify-between gap-2 px-2.5 py-2 text-[10px] text-muted">
           <div className="min-w-0 space-y-0.5 [overflow-wrap:anywhere]">
             <p>
-              {!isTauri
+              {!isDesktop
                 ? t("versions.preview")
                 : catalog?.loading
                   ? t("versions.loading")
@@ -472,7 +472,7 @@ export function VersionPicker({ group, items, catalog, disabled = false, statusK
                       ? t("versions.fromCache")
                       : t("versions.fromManifest")}
             </p>
-            {isTauri && updatedAt && <p>{t("versions.updatedAt")} <time dateTime={updatedAt.toISOString()}>{updatedAt.toLocaleString()}</time></p>}
+            {isDesktop && updatedAt && <p>{t("versions.updatedAt")} <time dateTime={updatedAt.toISOString()}>{updatedAt.toLocaleString()}</time></p>}
           </div>
           <span className="shrink-0 tabular" aria-label={`${t("versions.matches")} ${filtered.length} / ${items.length}`}>
             {query.trim() || filter !== "all" ? `${filtered.length} / ${items.length}` : items.length}

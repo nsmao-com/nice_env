@@ -5,7 +5,7 @@ import { FolderOpen, Loader2 } from "lucide-react";
 import type { ServiceStatus } from "@nsb/schema";
 import { Button } from "@/components/ui/button";
 import { useT } from "@/lib/store";
-import { isTauri, normalizeError } from "@/lib/backend";
+import { isDesktop, normalizeError } from "@/lib/backend";
 import { toastError } from "@/lib/hooks";
 import * as api from "@/lib/api";
 
@@ -32,13 +32,13 @@ export function ServiceDataDirButton({ service, disabled = false }: { service: S
   };
 
   const label = t("svc.dataDir" as never);
-  const hint = !isTauri ? t("svc.dataDirBrowserHint" as never) : `${label} · ${service.label}`;
+  const hint = !isDesktop ? t("svc.dataDirBrowserHint" as never) : `${label} · ${service.label}`;
   return <Button
     type="button"
     variant="ghost"
     size="sm"
     className="min-h-8 shrink-0 gap-1.5 px-2 text-[11px] text-primary"
-    disabled={disabled || busy || !isTauri}
+    disabled={disabled || busy || !isDesktop}
     aria-label={`${label} · ${service.label}`}
     title={hint}
     onClick={() => void open()}

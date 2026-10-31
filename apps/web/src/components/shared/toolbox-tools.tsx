@@ -20,7 +20,7 @@ import type { CronJob, OllamaPullStatus } from "@/lib/api";
 import { cn, fmtBytes } from "@/lib/utils";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem, SelectSeparator } from "@/components/ui/select";
-import { isTauri, normalizeError } from "@/lib/backend";
+import { isDesktop, normalizeError } from "@/lib/backend";
 import { useT, useUI } from "@/lib/store";
 import { useAdminer, toastError } from "@/lib/hooks";
 import * as api from "@/lib/api";
@@ -169,7 +169,7 @@ export function CronTool() {
   return (
     <ToolCard icon={CalendarClock} title={t("tools.cron.title")} hint={t("tools.cron.hint")}>
       <div className="flex min-w-0 flex-col gap-3">
-        {!isTauri && <p className="rounded-lg bg-info-soft p-3 text-xs text-info">{t("tools.cron.preview")}</p>}
+        {!isDesktop && <p className="rounded-lg bg-info-soft p-3 text-xs text-info">{t("tools.cron.preview")}</p>}
         {query.error && <div role="alert" className="flex flex-wrap items-center gap-2 rounded-lg bg-error-soft p-3 text-xs text-error">
           <span className="min-w-0 flex-1 break-words">{t("tools.cron.readFailed")} · {normalizeError(query.error).message}</span>
           <Button size="sm" variant="secondary" disabled={query.isFetching} onClick={() => void refresh()}>{t("install.retry")}</Button>
@@ -321,7 +321,7 @@ export function OllamaTool() {
 
   return <ToolCard icon={Bot} title={t("tools.ollama.title")} hint={t("tools.ollama.hint")}>
     <div className="flex min-w-0 flex-col gap-3">
-      {!isTauri && <p className="rounded-lg bg-info-soft p-3 text-xs text-info">{t("tools.ollama.preview")}</p>}
+      {!isDesktop && <p className="rounded-lg bg-info-soft p-3 text-xs text-info">{t("tools.ollama.preview")}</p>}
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" variant="secondary" asChild><Link to="/packages">{t("tools.ollama.manageService")}</Link></Button>
         <Button size="sm" variant="ghost" onClick={() => void api.openInBrowser("https://ollama.com/library").catch(toastError)}><ExternalLink className="h-3.5 w-3.5" />{t("tools.ollama.library")}</Button>

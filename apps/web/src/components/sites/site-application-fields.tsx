@@ -3,7 +3,7 @@
 import type { SiteRuntime } from "@nsb/schema";
 import { FolderOpen, Plus, Trash2 } from "lucide-react";
 import { useT } from "@/lib/store";
-import { isTauri } from "@/lib/backend";
+import { isDesktop } from "@/lib/backend";
 import { applicationRuntime, sameVersion } from "@/lib/utils";
 import { toastError } from "@/lib/hooks";
 import { Button } from "@/components/ui/button";
@@ -27,9 +27,9 @@ export function SiteApplicationFields({ id, kind, value, versions, rootDir, disa
   if (!runtime) return null;
   const blocked = disabled || locked;
   const pick = async (index?: number) => {
-    if (!isTauri || !value || blocked) return;
+    if (!isDesktop || !value || blocked) return;
     try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
+      const { open } = await import("@/lib/desktop-dialog");
       const path = await open({ directory: index === undefined, multiple: false, title: t(index === undefined ? "appProcess.cwd" : "appProcess.pickFile") });
       if (typeof path !== "string") return;
       onChange(index === undefined ? { ...value, cwd: path } : { ...value, args: value.args.map((arg, i) => i === index ? path : arg) });
@@ -47,7 +47,7 @@ export function SiteApplicationFields({ id, kind, value, versions, rootDir, disa
       </div>
       {locked && <p className="text-xs leading-relaxed text-muted">{t("appProcess.stopBeforeEdit")}</p>}
       {value && <>
-        {!isTauri && <p className="rounded-lg bg-warn-soft p-3 text-xs leading-relaxed text-warn">{t("appProcess.demo")}</p>}
+        {!isDesktop && <p className="rounded-lg bg-warn-soft p-3 text-xs leading-relaxed text-warn">{t("appProcess.demo")}</p>}
         <div className="space-y-1.5">
           <Label htmlFor={`${id}-version`}>{runtime.label} · {t("appProcess.version")}</Label>
           <Select value={value.version || undefined} disabled={blocked || !versions.length} onValueChange={(version) => onChange({ ...value, version })}>
@@ -67,7 +67,7 @@ export function SiteApplicationFields({ id, kind, value, versions, rootDir, disa
             <Input value={arg} disabled={blocked} aria-label={`${t("appProcess.argument")} ${index + 1}`}
               className="min-w-0 flex-1 font-mono text-xs" spellCheck={false}
               onChange={(event) => onChange({ ...value, args: value.args.map((item, i) => i === index ? event.target.value : item) })} />
-            {isTauri && <Button type="button" variant="ghost" size="icon" disabled={blocked} title={t("appProcess.pickFile")} aria-label={`${t("appProcess.pickFile")} ${index + 1}`} onClick={() => pick(index)}><FolderOpen className="size-4" /></Button>}
+            {isDesktop && <Button type="button" variant="ghost" size="icon" disabled={blocked} title={t("appProcess.pickFile")} aria-label={`${t("appProcess.pickFile")} ${index + 1}`} onClick={() => pick(index)}><FolderOpen className="size-4" /></Button>}
             <Button type="button" variant="ghost" size="icon" disabled={blocked || value.args.length <= 1} aria-label={`${t("appProcess.removeArgument")} ${index + 1}`}
               onClick={() => onChange({ ...value, args: value.args.filter((_, i) => i !== index) })}><Trash2 className="size-3.5" /></Button>
           </div>)}
@@ -80,7 +80,7 @@ export function SiteApplicationFields({ id, kind, value, versions, rootDir, disa
             <div className="flex gap-2">
               <Input id={`${id}-cwd`} value={value.cwd ?? ""} placeholder={rootDir} disabled={blocked} className="min-w-0 flex-1 font-mono text-xs"
                 onChange={(event) => onChange({ ...value, cwd: event.target.value || undefined })} />
-              {isTauri && <Button type="button" variant="secondary" size="icon" disabled={blocked} aria-label={t("appProcess.cwd")} onClick={() => pick()}><FolderOpen className="size-4" /></Button>}
+              {isDesktop && <Button type="button" variant="secondary" size="icon" disabled={blocked} aria-label={t("appProcess.cwd")} onClick={() => pick()}><FolderOpen className="size-4" /></Button>}
             </div>
           </div>
         </details>

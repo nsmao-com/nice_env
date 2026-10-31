@@ -6,7 +6,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Package, RefreshCw, SlidersHorizontal, TerminalSquare } from "lucide-react";
 import type { Site, ProjectRuntimeVersions } from "@nsb/schema";
 import * as api from "@/lib/api";
-import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
+import { isDesktop, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { useT } from "@/lib/store";
 import { refreshVersionCatalog } from "@/lib/hooks";
 import { Button } from "@/components/ui/button";
@@ -105,7 +105,7 @@ export function SiteTerminalButton({ site, showLabel = false, disabled = false, 
     finally { running.current = false; setBusy(null); }
   };
   const launch = async () => {
-    if (running.current || dirty || environment.isFetching || environment.error || !environment.data || !isTauri || error?.code === "TERMINAL_ENV_CHANGED") return;
+    if (running.current || dirty || environment.isFetching || environment.error || !environment.data || !isDesktop || error?.code === "TERMINAL_ENV_CHANGED") return;
     running.current = true; setBusy("open"); setError(null); setOpened(false);
     try { await api.openTerminal(environment.data.revision, site.id); setOpened(true); }
     catch (e) { setError(normalizeError(e)); }
@@ -135,7 +135,7 @@ export function SiteTerminalButton({ site, showLabel = false, disabled = false, 
         <Tabs value={tab} onValueChange={setTab} className="flex min-h-0 flex-1 flex-col gap-3">
           <TabsList className="max-w-full shrink-0 flex-wrap self-start"><TabsTrigger value="terminal" disabled={!!busy}>{t("sites.terminal.preview")}</TabsTrigger><TabsTrigger value="project" disabled={!!busy}>{t("sites.project.title")}{dirty && <span aria-label={t("detail.unsaved")}> •</span>}</TabsTrigger></TabsList>
           <TabsContent value="terminal" className="mt-0 min-h-0 min-w-0 space-y-4 overflow-y-auto text-xs leading-relaxed" aria-busy={environment.isFetching}>
-          {!isTauri && <p className="text-warn">{t("sites.terminal.demo")}</p>}
+          {!isDesktop && <p className="text-warn">{t("sites.terminal.demo")}</p>}
           {dirty && <p role="status" className="rounded-lg bg-warn-soft p-3 text-warn">{t("sites.project.pending")}</p>}
           {environment.isFetching && <p role="status" className="text-secondary">{t("common.loading")}</p>}
           {problem && <div ref={errorRef} tabIndex={-1} role="alert" className="space-y-2 rounded-lg bg-error-soft p-3 text-error outline-none focus-visible:ring-2 focus-visible:ring-error [overflow-wrap:anywhere]"><p>{problem.message}</p>{problem.hint && <p>{problem.hint}</p>}
@@ -154,7 +154,7 @@ export function SiteTerminalButton({ site, showLabel = false, disabled = false, 
           </TabsContent>
           <TabsContent value="project" className="mt-0 min-h-0 min-w-0 space-y-4 overflow-y-auto text-xs leading-relaxed" aria-busy={!!busy || project.isFetching}>
             <p className="text-secondary">{t("sites.project.hint")}</p>
-            {!isTauri && <p className="text-warn">{t("sites.project.demo")}</p>}
+            {!isDesktop && <p className="text-warn">{t("sites.project.demo")}</p>}
             {project.isFetching && <p role="status" className="text-secondary">{t("common.loading")}</p>}
             {projectProblem && <div ref={projectErrorRef} tabIndex={-1} role="alert" className="space-y-2 rounded-lg bg-error-soft p-3 text-error outline-none focus-visible:ring-2 focus-visible:ring-error [overflow-wrap:anywhere]"><p>{projectProblem.message}</p>{projectProblem.hint && <p>{projectProblem.hint}</p>}</div>}
             {draft && <>
@@ -197,10 +197,10 @@ export function SiteTerminalButton({ site, showLabel = false, disabled = false, 
               <details><summary className="cursor-pointer text-secondary">{t("sites.project.file")}</summary><div className="mt-2 space-y-2"><p className="font-mono [overflow-wrap:anywhere]">{draft.base.path}</p><p className="text-secondary">{t("sites.project.backup")}</p><p className="text-secondary">{t("sites.project.detectScope")}</p></div></details>
               {dirty && <p role="status" className="text-warn">{t("detail.unsaved")}</p>}
             </>}
-            {saved && <p role="status" className="rounded-lg bg-fill p-3 text-secondary">{t(isTauri ? "sites.project.saved" : "sites.project.demoSaved")}</p>}
+            {saved && <p role="status" className="rounded-lg bg-fill p-3 text-secondary">{t(isDesktop ? "sites.project.saved" : "sites.project.demoSaved")}</p>}
           </TabsContent>
         </Tabs>
-        {tab === "project" ? <DialogFooter className="shrink-0 flex-wrap gap-2"><Button variant="ghost" disabled={!!busy || project.isFetching} onClick={() => dirty ? setConfirm("reload") : void reloadProject()}><RefreshCw className="h-3.5 w-3.5" />{t("env.reload")}</Button><Button disabled={!!busy || project.isFetching || !draft || !dirty || invalid} onClick={() => void save()}>{t(busy === "save" ? "sites.project.saving" : "sites.project.save")}</Button></DialogFooter> : <DialogFooter className="shrink-0 flex-wrap gap-2"><Button variant="ghost" disabled={!!busy || environment.isFetching} onClick={() => void refresh()}><RefreshCw className="h-3.5 w-3.5" />{t("tools.refresh")}</Button><Button disabled={!!busy || dirty || environment.isFetching || !!environment.error || error?.code === "TERMINAL_ENV_CHANGED" || !data || !isTauri} onClick={() => void launch()}>{t(busy === "open" ? "sites.terminal.opening" : "dashboard.openTerminal")}</Button></DialogFooter>}
+        {tab === "project" ? <DialogFooter className="shrink-0 flex-wrap gap-2"><Button variant="ghost" disabled={!!busy || project.isFetching} onClick={() => dirty ? setConfirm("reload") : void reloadProject()}><RefreshCw className="h-3.5 w-3.5" />{t("env.reload")}</Button><Button disabled={!!busy || project.isFetching || !draft || !dirty || invalid} onClick={() => void save()}>{t(busy === "save" ? "sites.project.saving" : "sites.project.save")}</Button></DialogFooter> : <DialogFooter className="shrink-0 flex-wrap gap-2"><Button variant="ghost" disabled={!!busy || environment.isFetching} onClick={() => void refresh()}><RefreshCw className="h-3.5 w-3.5" />{t("tools.refresh")}</Button><Button disabled={!!busy || dirty || environment.isFetching || !!environment.error || error?.code === "TERMINAL_ENV_CHANGED" || !data || !isDesktop} onClick={() => void launch()}>{t(busy === "open" ? "sites.terminal.opening" : "dashboard.openTerminal")}</Button></DialogFooter>}
       </DialogContent>
     </Dialog>
     <ConfirmDialog open={confirm !== null} onOpenChange={(next) => { if (!next) setConfirm(null); }} title={t("cfgeditor.discardTitle")} description={t("sites.project.discard")}

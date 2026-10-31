@@ -3,10 +3,6 @@
   "version": "1.0.4",
   "private": true,
   "scripts": {
-    "tauri": "node scripts/tauri.mjs",
-    "prepare:tools": "node scripts/tauri.mjs prepare-tools"
-  },
-  "devDependencies": {
-    "@tauri-apps/cli": "^2.11.0"
+    "check": "go vet ../../cmd/niceenv ../../internal/desktop"
   }
 }

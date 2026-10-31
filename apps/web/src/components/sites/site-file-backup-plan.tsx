@@ -5,7 +5,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { CalendarClock } from "lucide-react";
 import { toast } from "sonner";
 import * as api from "@/lib/api";
-import { isTauri, listen, normalizeError } from "@/lib/backend";
+import { isDesktop, listen, normalizeError } from "@/lib/backend";
 import { useT } from "@/lib/store";
 import { fmtBytes } from "@/lib/utils";
 import { BackupScheduleFields } from "@/components/shared/database-backup-plan";
@@ -104,7 +104,7 @@ export function SiteFileBackupPlan({ siteId, revision, active, disabled, onBusyC
         </div>
       </div>
       <p className="text-xs leading-relaxed text-muted">{t("siteSchedule.hint")}</p>
-      {!isTauri && <p className="text-xs leading-relaxed text-warn">{t("siteSchedule.preview")}</p>}
+      {!isDesktop && <p className="text-xs leading-relaxed text-warn">{t("siteSchedule.preview")}</p>}
       {plan.isPending ? <p role="status" className="text-xs text-muted">{t("common.loading")}</p>
         : plan.isError ? <div role="alert" className="space-y-2 text-xs text-error [overflow-wrap:anywhere]"><p>{normalizeError(plan.error).message}</p><Button size="sm" variant="ghost" onClick={() => void plan.refetch()}>{t("siteFiles.retry")}</Button></div>
         : plan.data && <div className="space-y-2 border-t border-dashed border-separator pt-3 text-xs text-muted">

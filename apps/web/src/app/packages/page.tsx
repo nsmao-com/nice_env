@@ -40,7 +40,7 @@ import { PACKAGE_CATEGORY_ORDER, PackageUninstallPreview } from "@nsb/schema";
 import { cn, fmtBytes, fmtSpeed, isPlatformCompatible, bulkTarget, mergeBulkReport, normalizeVersion, sameVersion } from "@/lib/utils";
 import { useUI, useT } from "@/lib/store";
 import { usePackages, useServices, useSettings, useVersionCatalogs, serviceHasProcess } from "@/lib/hooks";
-import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
+import { isDesktop, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { useInstallTasks, activeProgressFor } from "@/lib/install-tasks";
 import * as api from "@/lib/api";
 import { Card } from "@/components/ui/card";
@@ -323,7 +323,7 @@ export default function PackagesPage() {
   // 该操作只在桌面端执行，且每个页面会话只触发一次；没有变化时不会刷新或打扰用户。
   const autoReconcileRef = React.useRef(false);
   React.useEffect(() => {
-    if (!isTauri || autoReconcileRef.current || packageQuery.dataUpdatedAt === 0 || packageQuery.error) return;
+    if (!isDesktop || autoReconcileRef.current || packageQuery.dataUpdatedAt === 0 || packageQuery.error) return;
     autoReconcileRef.current = true;
     reconcileRef.current = true;
     setReconciling(true);
@@ -407,7 +407,7 @@ export default function PackagesPage() {
     toast.success(t("packages.bulkUpdatesDone"));
   };
   const refreshAllVersions = async () => {
-    if (!isTauri || catalogRefreshRef.current || packages.length === 0) return;
+    if (!isDesktop || catalogRefreshRef.current || packages.length === 0) return;
     catalogRefreshRef.current = true;
     setCatalogRefreshing(true);
     setCatalogRefreshIssue(null);
@@ -431,7 +431,7 @@ export default function PackagesPage() {
     }
   };
   const reconcileInstalled = async () => {
-    if (!isTauri || reconcileRef.current || reconciling) return;
+    if (!isDesktop || reconcileRef.current || reconciling) return;
     reconcileRef.current = true;
     setReconciling(true);
     try {
@@ -654,10 +654,10 @@ export default function PackagesPage() {
               </SelectContent>
             </Select>
             {hasFilters && <Button variant="ghost" size="sm" onClick={resetFilters}>{t("packages.resetFilters")}</Button>}
-            <Button variant="ghost" size="sm" disabled={!isTauri || !dataReady || catalogRefreshing} onClick={() => void refreshAllVersions()} title={t("packages.refreshVersionsHint")}>
+            <Button variant="ghost" size="sm" disabled={!isDesktop || !dataReady || catalogRefreshing} onClick={() => void refreshAllVersions()} title={t("packages.refreshVersionsHint")}>
               <RefreshCw className={cn("h-3.5 w-3.5", catalogRefreshing && "animate-spin")} /> {t("packages.refreshVersions")}
             </Button>
-            <Button variant="ghost" size="sm" disabled={!isTauri || reconciling || !dataReady} onClick={() => void reconcileInstalled()} title={t("packages.reconcileInstalledHint")}>
+            <Button variant="ghost" size="sm" disabled={!isDesktop || reconciling || !dataReady} onClick={() => void reconcileInstalled()} title={t("packages.reconcileInstalledHint")}>
               <ScanSearch className={cn("h-3.5 w-3.5", reconciling && "animate-spin")} /> {t("packages.reconcileInstalled")}
             </Button>
             {bulkUpdateTargets.length > 0 && <Button variant="secondary" size="sm" disabled={!dataReady || catalogsLoading || bulkUpdateQueue.length > 0} onClick={startBulkUpdates}>

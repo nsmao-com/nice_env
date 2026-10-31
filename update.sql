@@ -115,6 +115,17 @@
 -- ON CONFLICT(key) DO UPDATE SET value=:value;
 -- :key 依次为 monitorNotifyKind、monitorNotifyUrl；不把实际 Webhook 凭据写入此文件。
 
+-- Go + Wails：计划任务执行状态沿用 cron_jobs 表，不新增字段或表。
+-- 启动前以 cron-locks/<id>.lock 取得跨进程独占锁；事务把 last_exit 写为
+-- 'running'，进程树完成后仅按 last_run_at 和 last_exit='running' 写回结果。
+-- 打开应用时，能够取得同一锁的遗留 running 任务标记为 interrupted 并暂停，
+-- 不按未知 PID 猜测或结束其它应用的进程。
+-- INSERT INTO cron_jobs(id,name,command,interval_min,enabled,created_at)
+-- VALUES(:id,:name,:command,:interval_min,:enabled,:created_at);
+-- UPDATE cron_jobs SET last_run_at=:last_run_at,last_exit='running',last_output=NULL WHERE id=:id;
+-- UPDATE cron_jobs SET last_exit=:last_exit,last_output=:last_output
+-- WHERE id=:id AND last_run_at=:last_run_at AND last_exit='running';
+
 -- v0.2.47：通用服务的配置准备完成后，原子保存端口分配及自动回落覆盖。
 -- 沿用 SQLite port_assign、settings 表，无新增表、列、索引或 migration。
 -- 以下为应用运行时参数化 SQL 记录，无需手工执行；本轮未操作真实用户数据库。
@@ -202,3 +213,186 @@
 -- 上游正常维护的用户/组 updated_at 改变，失败取消切换。源库始终保持原样。
 -- MySQL/PostgreSQL/CockroachDB、memory 或未知 SFTPGo provider 无法从本地副本验证
 -- 账号物理目录，迁移前明确拒绝切换；不会连接远程库或执行 SQL，也不修改源配置。
+
+-- Go/Wails 全量替换：当前在 main 开发，沿用现有 SQLite 布局，仅操作隔离验证目录。
+-- 不在现用 NiceEnv、FlyEnv 或业务 MySQL 实例执行；不创建 migration。
+-- 以下为运行时语句记录，已有字段/表无需重新部署。
+-- PRAGMA journal_mode=WAL;
+-- CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+-- CREATE TABLE IF NOT EXISTS installed(key TEXT PRIMARY KEY,id TEXT NOT NULL,version TEXT NOT NULL,category TEXT NOT NULL,install_path TEXT NOT NULL,config_path TEXT NOT NULL,installed_at INTEGER NOT NULL);
+-- CREATE TABLE IF NOT EXISTS sites(id TEXT PRIMARY KEY,name TEXT NOT NULL,domains TEXT NOT NULL,root_dir TEXT NOT NULL,runtime TEXT NOT NULL,https INTEGER NOT NULL DEFAULT 0,rewrite TEXT NOT NULL,db TEXT,php_overrides TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
+-- CREATE TABLE IF NOT EXISTS certs(id TEXT PRIMARY KEY,kind TEXT NOT NULL,subject TEXT NOT NULL,sans TEXT NOT NULL,not_before INTEGER NOT NULL,not_after INTEGER NOT NULL,cert_path TEXT NOT NULL,key_path TEXT);
+-- CREATE TABLE IF NOT EXISTS proxy_profiles(id TEXT PRIMARY KEY,name TEXT NOT NULL,url TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 0,added_at INTEGER NOT NULL);
+-- CREATE TABLE IF NOT EXISTS port_assign(service_id TEXT PRIMARY KEY,base_port INTEGER NOT NULL);
+-- CREATE TABLE IF NOT EXISTS stacks(id TEXT PRIMARY KEY,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',items TEXT NOT NULL,builtin INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
+-- CREATE TABLE IF NOT EXISTS cert_automations(id TEXT PRIMARY KEY,data TEXT NOT NULL,updated_at INTEGER NOT NULL);
+-- CREATE TABLE IF NOT EXISTS cert_monitors(id TEXT PRIMARY KEY,data TEXT NOT NULL,updated_at INTEGER NOT NULL);
+-- CREATE TABLE IF NOT EXISTS cron_jobs(id TEXT PRIMARY KEY,name TEXT NOT NULL,command TEXT NOT NULL,interval_min INTEGER NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,last_run_at INTEGER,last_exit TEXT,last_output TEXT);
+-- INSERT INTO settings(key,value) VALUES(:key,:value) ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+-- INSERT INTO stacks(id,name,description,items,builtin,created_at,updated_at)
+-- VALUES(:id,:name,:description,:items,:builtin,:created_at,:updated_at);
+-- UPDATE stacks SET name=:name,description=:description,items=:items,updated_at=:updated_at WHERE id=:id;
+-- DELETE FROM stacks WHERE id=:id;
+-- UPDATE settings SET value='' WHERE key='startStackOnLaunch' AND value=:id;
+-- 内置服务栈只在 stacks 为空时初始化；删除前拒绝 builtin，修改前确认记录存在。
+
+-- Go 套件安装：在临时目录解压与校验入口后，事务写记录并发布程序目录。
+-- 发布后事务失败则移回暂存目录；若应用在提交间中断，可按安装快照重新登记。
+-- INSERT INTO installed(key,id,version,category,install_path,config_path,installed_at)
+-- VALUES(:key,:id,:version,:category,:install_path,:config_path,:installed_at);
+-- 使用中版本和自动启动清单均先校验已注册版本，在服务生命周期锁内保存。
+-- INSERT INTO settings(key,value) VALUES(:key,:value)
+-- ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+-- :key 为 active<package>Version 或 autoStartServices；不记录凭据。
+
+-- Go 计划任务编辑、启用、删除与中断恢复；保护正在运行的任务。
+-- UPDATE cron_jobs SET name=:name,command=:command,interval_min=:interval_min
+-- WHERE id=:id AND last_exit IS NOT 'running';
+-- DELETE FROM cron_jobs WHERE id=:id AND last_exit IS NOT 'running';
+-- UPDATE cron_jobs SET enabled=:enabled WHERE id=:id;
+-- UPDATE cron_jobs SET enabled=0,last_exit='interrupted',last_output=:message
+-- WHERE id=:id AND last_run_at IS :last_run_at AND last_exit='running';
+
+-- v2.0.0 Go 移植开发中：PHP 池端口、MySQL 凭据恢复和数据库工作台。
+-- 应用 SQLite schema 不变，以下仅记录运行时模板，不是手工执行脚本。
+-- INSERT INTO port_assign(service_id,base_port) VALUES(:service_id,:base_port)
+-- ON CONFLICT(service_id) DO UPDATE SET base_port=excluded.base_port;
+-- INSERT INTO settings(key,value) VALUES(:key,:value)
+-- ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+-- DELETE FROM settings WHERE key=:pending_credential_key;
+-- root 凭据变更前保存待提交凭据；确认实际实例后提交，失败保留恢复依据。
+-- MySQL 操作仅在校验受管监听进程和 @@datadir 后执行。
+-- CREATE DATABASE <quoted_identifier> CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+-- DROP DATABASE <quoted_identifier>;
+-- CREATE USER :username@'localhost' IDENTIFIED BY :password;
+-- GRANT ALL PRIVILEGES ON <quoted_identifier>.* TO :username@'localhost';
+-- DROP USER :username@'localhost'; -- 仅回滚本次创建成功但授权失败的用户
+-- ALTER USER 'root'@'localhost' IDENTIFIED BY :password;
+-- UPDATE <quoted_table> SET <quoted_column>=:value
+-- WHERE <all_original_columns_null_safe_binary_equal> LIMIT 1;
+-- 工作台任意 SQL 仍必须经用户明确确认；此文件不记录用户查询和真实凭据。
+-- 验证只使用 .wails-home 下新建的隔离数据库，未修改 NiceEnv/FlyEnv 实际数据。
+
+-- v2.0.0 Go 迁移：数据库账号管理与 Redis 连接设置，无 schema 变化。
+-- MySQL 每次操作重新校验受管进程与实际数据目录；账号状态指纹绑定进程实例。
+-- SET PASSWORD FOR :username@:host = :password; -- 保留现有认证插件
+-- DROP USER :username@:host; -- 预览并确认无对象/角色/代理依赖后删除准确账号
+-- GRANT <validated_privileges> ON <escaped_scope>.* TO :username@:host;
+-- REVOKE <validated_privileges> ON <escaped_scope>.* FROM :username@:host;
+-- GRANT USAGE ON <escaped_scope>.* TO :username@:host WITH GRANT OPTION;
+-- REVOKE GRANT OPTION ON <escaped_scope>.* FROM :username@:host;
+-- 库名含 %/_ 时按 partial_revokes 语义转义，避免扩大授权范围。
+-- Redis 连接设置仅在验证真实受管实例认证成功后保存；用户名/密码不返回 AI 工具。
+-- INSERT INTO settings(key,value) VALUES(:redis_connection_key,:credentials_json)
+-- ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+-- MySQL 初始化恢复记录绑定私有暂存目录生成的 auto.cnf 摘要，避免误认其它数据。
+-- DELETE FROM settings WHERE key IN (:pending_credential_key,:bootstrap_key);
+-- Memcached 参数按版本持久化，下次启动生效。
+-- INSERT INTO settings(key,value) VALUES(:memcached_settings_key,:settings_json)
+-- ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+-- 服务停止后保存端口覆盖，刷新服务计划；null 恢复原档位。
+-- INSERT INTO settings(key,value) VALUES(:port_override_key,:port)
+-- ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+-- DELETE FROM settings WHERE key=:port_override_key;
+-- hosts 写入成功后同步托管手工条目；记录保存失败时按文件快照恢复 hosts。
+-- INSERT INTO settings(key,value) VALUES('extraHosts',:entries_json)
+-- ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+-- Go 本地证书沿用 certs 表；文件先备份成对写入，入库失败恢复原证书和私钥。
+-- 同一路径上的旧本地/ACME 记录与新记录在同一事务中更新。
+-- DELETE FROM certs WHERE cert_path=:cert_path AND id<>:id;
+-- INSERT INTO certs(id,kind,subject,sans,not_before,not_after,cert_path,key_path)
+-- VALUES(:id,:kind,:subject,:sans,:not_before,:not_after,:cert_path,:key_path)
+-- ON CONFLICT(id) DO UPDATE SET kind=excluded.kind,subject=excluded.subject,
+-- sans=excluded.sans,not_before=excluded.not_before,not_after=excluded.not_after,
+-- cert_path=excluded.cert_path,key_path=excluded.key_path;
+-- DELETE FROM certs WHERE id=:id; -- 仅未被站点使用的本地证书，先保存恢复副本
+
+-- Go PATH、版本目录与卸载沿用 settings/installed，无表结构变更。
+-- 下列为应用参数化 SQL 记录，不要对生产 MySQL 手工执行。
+-- PATH 写入前保存文件/注册表快照；四项选择在同一事务提交，失败恢复系统值。
+-- INSERT INTO settings(key,value) VALUES(:key,:value)
+-- ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+-- :key 为 pathEnvEnabled/pathEnvSelected/pathEnvVersions/pathEnvDirs。
+-- pathEnvDirs 只保存应用添加的目录，用户预先存在的 PATH 条目不取得删除权。
+-- 版本目录缓存键 versionCatalog:go-v1:<id>:<source_digest> 绑定平台和下载规则。
+-- Node.js 官方索引的 LTS 映射保存在 nodeLtsAliases:v1，读取项目时不访问网络。
+-- 安装与 active<id>Version 写入同一事务，保留安装前的实际默认版本。
+-- 版本切换失败时恢复原设置；原设置不存在时使用以下删除：
+-- DELETE FROM settings WHERE key=:active_key;
+-- 卸载前重新检查站点、项目版本、用户服务栈和套件依赖，并停止匹配版本的受管服务。
+-- 程序目录先改名暂存，事务失败恢复原目录；配置和数据目录不在删除范围。
+-- BEGIN IMMEDIATE;
+-- DELETE FROM installed WHERE id=:id AND version=:version;
+-- DELETE FROM settings WHERE key=:active_key AND value=:version;
+-- COMMIT;
+
+-- Go/Wails 站点保存及回滚；仅应用本地 SQLite 的运行时参数化模板，非业务 MySQL 脚本。
+-- Basic Auth 明文和数据库密码不写入站点记录；哈希保存于认证文件。
+-- INSERT INTO sites(id,name,domains,root_dir,runtime,https,rewrite,db,php_overrides,created_at,updated_at)
+-- VALUES(:id,:name,:domains,:root_dir,:runtime,:https,:rewrite,:db,:php_overrides,:created_at,:updated_at)
+-- ON CONFLICT(id) DO UPDATE SET name=excluded.name,domains=excluded.domains,
+-- root_dir=excluded.root_dir,runtime=excluded.runtime,https=excluded.https,rewrite=excluded.rewrite,
+-- db=excluded.db,php_overrides=excluded.php_overrides,updated_at=excluded.updated_at;
+-- 新建时不使用 ON CONFLICT，防止碰撞覆盖；恢复旧记录时保留原 created_at。
+-- 删除仅操作站点记录、对应配置及明确选中的未共享本地证书，不删除项目文件或数据库。
+-- BEGIN IMMEDIATE;
+-- DELETE FROM sites WHERE id=:site_id;
+-- DELETE FROM certs WHERE id=:unshared_local_certificate_id;
+-- INSERT INTO settings(key,value) VALUES('extraHosts',:retained_entries)
+-- ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+-- COMMIT;
+-- 失败回滚：原 extraHosts 不存在时恢复缺失状态。
+-- DELETE FROM settings WHERE key='extraHosts';
+
+-- Go/Wails PostgreSQL 管理与备份迁移：无新表或结构升级。
+-- 下列是运行时 SQL 模板记录，不是供 MySQL 执行的脚本；动态标识符在 Go 中校验并引用。
+-- 操作前核对受管监听进程、数据目录、数据库/角色清单及 OID。
+-- CREATE DATABASE <new_name> OWNER <existing_owner> TEMPLATE template0 ENCODING 'UTF8';
+-- DROP DATABASE <confirmed_name>; -- 拒绝系统库、模板库和 OID 变化
+-- BEGIN;
+-- LOCK TABLE pg_catalog.pg_authid IN SHARE ROW EXCLUSIVE MODE;
+-- CREATE ROLE <new_role> LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD <secret>;
+-- ALTER ROLE <confirmed_role> PASSWORD <secret>;
+-- ALTER ROLE <confirmed_role> <LOGIN_OR_NOLOGIN> CONNECTION LIMIT <validated_limit>;
+-- DROP ROLE <confirmed_role>; -- 拒绝超级用户和系统账号
+-- COMMIT;
+-- 超级用户密码更新前在 SQLite 保存 pending 凭据，验证新连接后提交当前凭据。
+-- INSERT INTO settings(key,value) VALUES(:key,:value)
+-- ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+-- :key 为 postgresPassword@<version> / postgresPassword@<version>.pending /
+-- postgresBackupPlan@<version>；计划保存时间、状态及归档名，不保存连接凭据。
+-- pg_restore 仅向新建库执行可信归档，使用 --single-transaction --no-owner
+-- --no-privileges --no-tablespaces，失败保留新库；不会自动删库或终止业务连接。
+-- 替换前 pg_dump 保存安全备份；恢复到暂存库后事务内重命名，并核对双方 OID/复制状态。
+-- BEGIN;
+-- ALTER DATABASE <confirmed_target> RENAME TO <retained_original>;
+-- ALTER DATABASE <restored_staging> RENAME TO <confirmed_target>;
+-- COMMIT;
+-- 提交后重新连接核对最终 OID；原数据库保留，归档文件使用不覆盖发布。
+-- 隔离 .wails-home 验证库使用的幂等样本 SQL（已先列出表和确认字段）：
+-- CREATE TABLE IF NOT EXISTS probe (id integer PRIMARY KEY, value text NOT NULL);
+-- INSERT INTO probe(id,value) VALUES(1,:sample) ON CONFLICT(id) DO UPDATE SET value=EXCLUDED.value;
+-- UPDATE probe SET value=:changed_sample WHERE id=1;
+
+-- Go/Wails MySQL/MariaDB 备份与计划：继续使用 settings，无新表或字段。
+-- INSERT INTO settings(key,value) VALUES(:key,:value)
+-- ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+-- :key 包含 mysqlBackupPlan@<version>、mariadbBackupPlan@<version>、
+-- mariadbRootPassword@<version>、mariadbBootstrap@<version>。
+-- 凭据验证及初始化完成后清理对应引擎的 pending/bootstrap，不跨版本或跨引擎清理。
+-- DELETE FROM settings WHERE key IN (:pending_key,:bootstrap_key);
+-- 新实例仅在隔离初始化成功且受管监听归属/@@datadir 核验后设置 root 密码。
+-- ALTER USER 'root'@'localhost' IDENTIFIED BY :new_password;
+-- MariaDB 普通账号改密保留认证插件及认证顺序，先检查 global_priv/auth_or 摘要。
+-- SET SESSION sql_log_off=ON;
+-- SET SESSION old_passwords=:validated_0_or_1;
+-- SET PASSWORD FOR :user@:host = PASSWORD(:new_password);
+-- MySQL 使用 SET PASSWORD FOR :user@:host = :new_password;
+-- mysqldump/mariadb-dump 生成的 SQL 会包含业务表 DDL/DML，文件以独占名称原子发布。
+-- 恢复前保存当前全部业务库的安全备份；执行所选 SQL 快照，失败明确报告可能已部分写入。
+-- 自动轮转只删除同引擎、版本、库名 SHA256 且尾部自动备份标记一致的归档。
+-- 隔离验证用 MySQL/MariaDB 样本（已先列出表并查询字段/索引，不涉及现用数据库）：
+-- CREATE TABLE IF NOT EXISTS probe (id int PRIMARY KEY,value text NOT NULL)
+-- ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+-- INSERT INTO probe(id,value) VALUES(1,:sample) ON DUPLICATE KEY UPDATE value=VALUES(value);
+-- UPDATE probe SET value=:changed_sample WHERE id=1;

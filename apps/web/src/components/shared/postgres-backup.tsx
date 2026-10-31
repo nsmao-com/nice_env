@@ -6,7 +6,7 @@ import type { DbBackupFile } from "@nsb/schema";
 import { ArchiveRestore, DatabaseBackup, FolderOpen, Loader2, Trash2, Upload } from "lucide-react";
 import { toast } from "sonner";
 import * as api from "@/lib/api";
-import { isTauri, listen, normalizeError } from "@/lib/backend";
+import { isDesktop, listen, normalizeError } from "@/lib/backend";
 import { useInvalidate, toastError } from "@/lib/hooks";
 import { useT } from "@/lib/store";
 import { fmtBytes } from "@/lib/utils";
@@ -67,10 +67,10 @@ export function PostgresBackupCard({ version, port, signature, ready, databases,
   const fail = (error: unknown) => { const parsed = normalizeError(error); setError([parsed.message, parsed.hint, parsed.detail].filter(Boolean).join(" ")); };
   const pick = async () => {
     if (lock.current || !ready) return;
-    if (!isTauri) { toast.info(t("dbBackup.desktopOnly")); return; }
+    if (!isDesktop) { toast.info(t("dbBackup.desktopOnly")); return; }
     lock.current = true; setBusy(true); setError("");
     try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
+      const { open } = await import("@/lib/desktop-dialog");
       const path = await open({ title: t("pgBackup.pickFile"), multiple: false, directory: false, filters: [{ name: "PostgreSQL custom archive", extensions: ["dump"] }] });
       if (typeof path === "string") begin("restore", { path, name: path.split(/[\\/]/).pop() ?? path });
     } catch (error) { fail(error); }

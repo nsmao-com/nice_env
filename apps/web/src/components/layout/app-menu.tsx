@@ -29,7 +29,7 @@ import {
 import { useUI, useT } from "@/lib/store";
 import { useServices, useStacks, useSites, useSettings, serviceHasProcess, toastError, useQuickServiceActions } from "@/lib/hooks";
 import * as api from "@/lib/api";
-import { isTauri, listen, normalizeError, type AppErrorShape } from "@/lib/backend";
+import { isDesktop, listen, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { cn, bulkTarget, mergeBulkReport, formatAppVersion } from "@/lib/utils";
 import { ConfirmDialog } from "@/components/shared/misc";
 import { BulkResult, BulkTargetList } from "@/components/shared/bulk-actions";
@@ -320,7 +320,7 @@ export function AppMenu({ collapsed }: { collapsed: boolean }) {
             disabled={busy || quick.busy}
             onSelect={() => {
               // 退出会停掉所有服务：先确认，避免误点导致站点全下线
-              if (isTauri) { setQuitError(null); setConfirm("quit"); }
+              if (isDesktop) { setQuitError(null); setConfirm("quit"); }
               else close();
             }}
           >

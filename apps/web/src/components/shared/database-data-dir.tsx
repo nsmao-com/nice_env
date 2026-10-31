@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { useQuery } from "@tanstack/react-query";
 import type { DatabaseDataDirEngine } from "@/lib/api";
 import * as api from "@/lib/api";
-import { isTauri, normalizeError } from "@/lib/backend";
+import { isDesktop, normalizeError } from "@/lib/backend";
 import { useT } from "@/lib/store";
 import { Button } from "@/components/ui/button";
 
@@ -40,8 +40,8 @@ export function DatabaseDataDir({ engine, version, enabled = true }: {
           size="sm"
           variant="ghost"
           className="ml-auto h-auto min-h-7 shrink-0 px-2 py-1 text-xs"
-          disabled={!isTauri || !query.data || query.isFetching}
-          title={!isTauri ? t("db.dataDirBrowserHint") : undefined}
+          disabled={!isDesktop || !query.data || query.isFetching}
+          title={!isDesktop ? t("db.dataDirBrowserHint") : undefined}
           onClick={() => void open()}
         >
           {query.isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderOpen className="h-3.5 w-3.5" />}
@@ -52,7 +52,7 @@ export function DatabaseDataDir({ engine, version, enabled = true }: {
         {version && query.isPending ? t("db.loading") : query.data ?? t("db.dataDirUnavailable")}
       </code>
       {query.isError && <p className="mt-1 break-words text-[11px] text-error">{t("db.dataDirReadFailed")}</p>}
-      {!isTauri && <p className="mt-1 text-[11px] leading-4 text-muted">{t("db.dataDirBrowserHint")}</p>}
+      {!isDesktop && <p className="mt-1 text-[11px] leading-4 text-muted">{t("db.dataDirBrowserHint")}</p>}
     </div>
   );
 }

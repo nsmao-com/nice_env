@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import type { DbBackupFile, DbBackupProgress } from "@nsb/schema";
 import { useQuery } from "@tanstack/react-query";
-import { isTauri, normalizeError } from "@/lib/backend";
+import { isDesktop, normalizeError } from "@/lib/backend";
 import { useT } from "@/lib/store";
 import { useInvalidate, toastError } from "@/lib/hooks";
 import { listen } from "@/lib/backend";
@@ -130,8 +130,8 @@ export function DbBackupCard({ version, engine, targetLabel, ready, databases: d
     if (!ready || !begin()) return;
     let selected = false;
     try {
-      if (!isTauri) { toast.info(t("dbBackup.desktopOnly")); return; }
-      const { open } = await import("@tauri-apps/plugin-dialog");
+      if (!isDesktop) { toast.info(t("dbBackup.desktopOnly")); return; }
+      const { open } = await import("@/lib/desktop-dialog");
       const path = await open({ title: t("dbBackup.importSql"), multiple: false, directory: false, filters: [{ name: "SQL", extensions: ["sql"] }] });
       if (typeof path === "string") {
         selected = true;

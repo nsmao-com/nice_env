@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 import { useT } from "@/lib/store";
 import { useSearchParams } from "react-router-dom";
 import { toastError, useServices, useSettings, useSites } from "@/lib/hooks";
-import { isTauri } from "@/lib/backend";
+import { isDesktop } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -85,13 +85,13 @@ export default function LogsPage() {
     try {
       const name = `${source.replace(/[^a-zA-Z0-9._-]/g, "_")}-${new Date().toISOString().slice(0, 10)}.log`;
       let path: string | null = name;
-      if (isTauri) {
-        const { save } = await import("@tauri-apps/plugin-dialog");
+      if (isDesktop) {
+        const { save } = await import("@/lib/desktop-dialog");
         path = await save({ defaultPath: name, filters: [{ name: "Log", extensions: ["log", "txt"] }] });
       }
       if (!path) return;
       const bytes = await api.exportLog(source, path);
-      toast.success(t(isTauri ? "logs.exported" : "log.downloadStarted"), {
+      toast.success(t(isDesktop ? "logs.exported" : "log.downloadStarted"), {
         description: `${label} · ${bytes.toLocaleString()} B · ${path}`,
       });
     } catch (e) {

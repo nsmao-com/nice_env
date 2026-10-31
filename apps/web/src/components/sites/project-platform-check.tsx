@@ -5,7 +5,7 @@ import type { ProjectPlatformReport } from "@nsb/schema";
 import { Loader2, Puzzle, RefreshCw } from "lucide-react";
 import { useT } from "@/lib/store";
 import { usePackages } from "@/lib/hooks";
-import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
+import { isDesktop, normalizeError, type AppErrorShape } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { PhpExtensionsDialog } from "@/components/shared/php-extensions";
@@ -35,7 +35,7 @@ function PlatformPanel({ project, siteId, version, disabled = false, directoryCh
   const mounted = React.useRef(false);
   const busy = React.useRef(false);
   React.useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  const blocked = disabled || checking || directoryChanged || !available || !version || !isTauri;
+  const blocked = disabled || checking || directoryChanged || !available || !version || !isDesktop;
   const check = async () => {
     if (blocked || busy.current) return;
     busy.current = true; setChecking(true); setReport(null); setError(null); setStale(false); setPage(0); setShowPassed(false);
@@ -78,7 +78,7 @@ function PlatformPanel({ project, siteId, version, disabled = false, directoryCh
         </Button>
       </div>
     </div>
-    {!isTauri ? <p className="text-xs text-muted">{t("platformCheck.desktop")}</p>
+    {!isDesktop ? <p className="text-xs text-muted">{t("platformCheck.desktop")}</p>
       : directoryChanged ? <p className="text-xs text-warn">{t("platformCheck.saveDirectory")}</p>
       : !available ? <p className="text-xs text-muted">{t("platformCheck.selectPhp")}</p>
       : <p role="status" className={`text-xs leading-relaxed ${issues.length ? "text-warn" : "text-secondary"}`}>{t(stale ? "platformCheck.stale" : status).replace("{count}", String(issues.length))}</p>}

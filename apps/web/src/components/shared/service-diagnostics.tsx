@@ -8,7 +8,7 @@ import { AlertTriangle, CheckCircle2, Info, Loader2, MinusCircle, RotateCw, Scro
 import type { ServiceCheck, ServiceStatus } from "@nsb/schema";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/store";
-import { isTauri, normalizeError } from "@/lib/backend";
+import { isDesktop, normalizeError } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/misc";
@@ -104,7 +104,7 @@ export function ServiceDiagnostics({ service, open, onOpenChange }: {
       forceBusy.current = true; force.mutate(preview.data.revision);
     }}>
     <div className="min-w-0 space-y-2 text-xs [overflow-wrap:anywhere]">
-      {!isTauri && <p className="text-warn">{t("svc.forceStopPreview")}</p>}
+      {!isDesktop && <p className="text-warn">{t("svc.forceStopPreview")}</p>}
       {preview.isFetching && <p role="status" className="text-muted">{t("svc.forceStopLoading")}</p>}
       {preview.data && <div className="rounded-lg bg-card-2/50 p-3">
         <p className="font-medium">{preview.data.service.label}{preview.data.service.version ? ` · ${preview.data.service.version}` : ""}</p>

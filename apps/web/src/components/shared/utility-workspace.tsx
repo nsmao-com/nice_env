@@ -25,7 +25,7 @@ import { HostsEntry as HostsEntrySchema } from "@nsb/schema";
 import { useUI, useT } from "@/lib/store";
 import { useHosts, useInvalidate, toastError, useSettings, useSites, useServices, copyText } from "@/lib/hooks";
 import * as api from "@/lib/api";
-import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
+import { isDesktop, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { cn } from "@/lib/utils";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -257,8 +257,8 @@ function HostsTool() {
     void hosts.refetch();
   }, false);
   const importFile = () => run(async () => {
-    if (!isTauri) { toast.info(t("tools.hostsDesktopOnly")); return; }
-    const { open } = await import("@tauri-apps/plugin-dialog");
+    if (!isDesktop) { toast.info(t("tools.hostsDesktopOnly")); return; }
+    const { open } = await import("@/lib/desktop-dialog");
     const path = await open({ multiple: false, filters: [{ name: "hosts", extensions: ["hosts", "txt", "conf"] }] });
     if (!path || typeof path !== "string") return;
     const parsed = parseText(await api.readTextFile(path));
@@ -270,7 +270,7 @@ function HostsTool() {
   });
   const exportFile = () => run(async () => {
     const body = manual.map((entry) => `${entry.ip}\t${entry.domain}`).join("\n");
-    if (!isTauri) {
+    if (!isDesktop) {
       const url = URL.createObjectURL(new Blob([body], { type: "text/plain;charset=utf-8" }));
       const link = document.createElement("a");
       link.href = url;
@@ -278,7 +278,7 @@ function HostsTool() {
       link.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     } else {
-      const { save } = await import("@tauri-apps/plugin-dialog");
+      const { save } = await import("@/lib/desktop-dialog");
       const path = await save({ defaultPath: "hosts-nsb.txt", filters: [{ name: "hosts", extensions: ["txt", "hosts"] }] });
       if (!path || typeof path !== "string") return;
       await api.writeTextFile(path, body);
@@ -348,7 +348,7 @@ function HostsTool() {
             <code className="min-w-0 flex-1 break-all text-xs text-muted">{textFile?.path}</code>
             <Badge variant={textDirty ? "default" : "muted"}>{textDirty ? t("tools.hostsUnsaved") : t("tools.hostsSynced")}</Badge>
           </div>
-          {!isTauri && <p className="text-xs text-warn">{t("tools.hostsPreview")}</p>}
+          {!isDesktop && <p className="text-xs text-warn">{t("tools.hostsPreview")}</p>}
           <p className="text-[11px] leading-relaxed text-muted">{t("tools.hostsTextHint")}</p>
           <CodeEditor label={t("tools.hostsModeText")} language="hosts" value={textDraft} readOnly={busy || !textFile} onChange={setTextDraft} height="420px" />
           <div className="flex flex-wrap gap-2">
@@ -432,7 +432,7 @@ function PortLookupTool({ request }: { request: { port: number; at: number } | n
     <ToolCard icon={Power} title={t("tools.portLookup")} hint={t("tools.portLookupHint")}>
       <div className="min-w-0 space-y-3" aria-busy={busy}>
         <p className="text-[11px] leading-relaxed text-muted">{t("tools.portTcpScope")}</p>
-        {!isTauri && <p className="rounded-md bg-warn/10 p-2 text-[11px] text-warn">{t("tools.portDemo")}</p>}
+        {!isDesktop && <p className="rounded-md bg-warn/10 p-2 text-[11px] text-warn">{t("tools.portDemo")}</p>}
         <Tabs value={mode} onValueChange={(value) => setMode(value as "single" | "range")}>
           <TabsList><TabsTrigger value="single">{t("tools.portSingle")}</TabsTrigger><TabsTrigger value="range">{t("tools.portRange")}</TabsTrigger></TabsList>
         </Tabs>
@@ -499,7 +499,7 @@ function PortTool({ onInspect }: { onInspect: (port: number) => void }) {
   return <ToolCard icon={Radar} title={t("tools.ports")} hint={t("tools.portsTitle")}>
     <div className="min-w-0 space-y-3">
       <p className="text-[11px] leading-relaxed text-muted">{t("tools.portAppScope")}</p>
-      {!isTauri && <p className="text-[11px] text-warn">{t("tools.portDemo")}</p>}
+      {!isDesktop && <p className="text-[11px] text-warn">{t("tools.portDemo")}</p>}
       <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs text-muted">{t("tools.portCheckApp")}</span><Button variant="secondary" size="sm" disabled={busy || app.isFetching} onClick={() => void app.refetch({ cancelRefetch: false })}>{app.isFetching && <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />}{t("tools.portCheckRun")}</Button></div>
       {app.error && <div role="alert" className="rounded-lg border border-error/30 p-3 text-xs text-error [overflow-wrap:anywhere]">{normalizeError(app.error).message}{app.data && <p className="mt-1">{t("tools.portPrevious")}</p>}</div>}
       {app.isPending && <p role="status" className="text-xs text-muted">{t("tools.scanning")}</p>}
@@ -566,7 +566,7 @@ function TerminalInjectTool() {
           </div>}
           {data && !error && <>
             <p className="text-[11px] leading-relaxed text-muted">{t("tools.termInjectScope")}</p>
-            {!isTauri && <p className="rounded-lg bg-warn/10 p-2 text-[11px] leading-relaxed text-warn">{t("tools.termInjectDemo")}</p>}
+            {!isDesktop && <p className="rounded-lg bg-warn/10 p-2 text-[11px] leading-relaxed text-warn">{t("tools.termInjectDemo")}</p>}
             {data.warnings.length > 0 && <div role="status" className="rounded-lg border border-warn/30 p-2.5 text-[11px] text-warn">
               <p className="font-medium">{t("tools.termInjectSkipped")}</p>
               <ul className="mt-1 list-disc space-y-1 pl-4 [overflow-wrap:anywhere]">{data.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>
@@ -581,7 +581,7 @@ function TerminalInjectTool() {
               <CodeBlock code={data.script} lang="shell" title={data.shell === "powershell" ? "PowerShell" : "Bash / Zsh"} maxHeight={240} compact />
             </> : <p className="rounded-lg bg-fill p-3 text-[12px] leading-relaxed text-muted">{t("tools.termInjectNone")}</p>}
             <div className="flex flex-wrap gap-2">
-              <Button variant="secondary" size="sm" className="h-auto whitespace-normal py-2 text-left" disabled={opening || environment.isFetching || !isTauri} onClick={() => void open()}>
+              <Button variant="secondary" size="sm" className="h-auto whitespace-normal py-2 text-left" disabled={opening || environment.isFetching || !isDesktop} onClick={() => void open()}>
                 {opening && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
                 {data.shell === "powershell" ? t("tools.termInjectOpenPs") : t("dashboard.openTerminal")}
               </Button>
@@ -797,7 +797,7 @@ function RepairTool() {
           {(checking || rows.length > 0) && <div ref={reportRef} tabIndex={-1} className="min-w-0 space-y-3 rounded-lg border border-border p-3 outline-none focus-visible:ring-2 focus-visible:ring-primary" aria-label={t("tools.checkReport")}>
             <p className="text-[12px] font-medium">{t("tools.checkReport")}</p>
             <p className="text-[11px] leading-relaxed text-muted">{t("tools.checkScope")}</p>
-            {!isTauri && <p className="text-[11px] text-warn">{t("tools.checkDemo")}</p>}
+            {!isDesktop && <p className="text-[11px] text-warn">{t("tools.checkDemo")}</p>}
             {checking && <p role="status" className="flex items-start gap-2 text-[11px] text-muted"><Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin" />{t("tools.checkRunning")}</p>}
             {rows.length > 0 && <>
               <div role="status" className="flex flex-wrap gap-x-3 gap-y-1 text-[11px]">

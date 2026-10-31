@@ -9,7 +9,7 @@ import { CustomRewriteSelect } from "./custom-rewrite-select";
 import type { CreateSiteInput, Site, RewritePreset } from "@nsb/schema";
 import { useT, useUI } from "@/lib/store";
 import { cn, cmpVersionDesc, normalizeProxyTarget, isPhpSiteSettingValid, APPLICATION_RUNTIMES, applicationRuntime, validApplication, sameVersion, siteErrorPagesProblem, siteBasicAuthProblem } from "@/lib/utils";
-import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
+import { isDesktop, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { usePackages, useService, useInvalidate, toastError, siteUrl } from "@/lib/hooks";
 import * as api from "@/lib/api";
 import {
@@ -423,11 +423,11 @@ export function SiteDetailSheet({
               />
               <Button
                 variant="secondary"
-                disabled={busy || applicationBusy || !isTauri}
-                title={!isTauri ? t("detail.desktopFolder") : undefined}
+                disabled={busy || applicationBusy || !isDesktop}
+                title={!isDesktop ? t("detail.desktopFolder") : undefined}
                 onClick={async () => {
                   try {
-                    const { open } = await import("@tauri-apps/plugin-dialog");
+                    const { open } = await import("@/lib/desktop-dialog");
                     const picked = await open({ directory: true });
                     if (typeof picked === "string") setDraft({ ...draft, rootDir: picked });
                   } catch (e) {

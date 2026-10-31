@@ -5,7 +5,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { AlertTriangle, ChevronRight, Download, FilePlus, FileText, Folder, FolderPlus, Loader2, Move, Pencil, RefreshCw, Save, Trash2, Upload } from "lucide-react";
 import { useT } from "@/lib/store";
-import { isTauri, normalizeError } from "@/lib/backend";
+import { isDesktop, normalizeError } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { fmtBytes } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -162,8 +162,8 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
     setWorking(true); setError(null);
     try {
       let source: string | null = "C:/Demo/uploads/readme.md";
-      if (isTauri) {
-        const { open } = await import("@tauri-apps/plugin-dialog");
+      if (isDesktop) {
+        const { open } = await import("@/lib/desktop-dialog");
         const picked = await open({ directory: false, multiple: false, title: t("siteFiles.browserUpload" as never) });
         source = typeof picked === "string" ? picked : null;
       }
@@ -183,8 +183,8 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
     if (entry.directory || busyRef.current || disabled) return;
     setWorking(true); setError(null);
     try {
-      if (isTauri) {
-        const { save } = await import("@tauri-apps/plugin-dialog");
+      if (isDesktop) {
+        const { save } = await import("@/lib/desktop-dialog");
         const destination = await save({
           title: t("siteFiles.browserDownload" as never),
           defaultPath: entry.name,
@@ -280,7 +280,7 @@ export function SiteFileBrowser({ siteId, active, disabled, onBusyChange }: {
         </Button>
       </div>
     </div>
-    {!isTauri && <p className="flex items-start gap-2 rounded-lg bg-warn-soft p-3 text-xs leading-relaxed text-warn"><AlertTriangle className="mt-0.5 size-3.5 shrink-0" />{t("siteFiles.browserPreview" as never)}</p>}
+    {!isDesktop && <p className="flex items-start gap-2 rounded-lg bg-warn-soft p-3 text-xs leading-relaxed text-warn"><AlertTriangle className="mt-0.5 size-3.5 shrink-0" />{t("siteFiles.browserPreview" as never)}</p>}
     {disabled && <p className="text-xs text-warn">{t("siteFiles.browserUnavailable")}</p>}
     <>
       <div className="flex min-w-0 items-center gap-1 overflow-x-auto rounded-lg bg-fill px-2.5 py-2 text-xs">

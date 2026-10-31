@@ -2,11 +2,13 @@
   "name": "niceservbay",
   "private": true,
   "version": "1.0.4",
-  "description": "NiceEnv — one-stop local dev environment manager (Tauri 2 + React + Vite)",
+  "description": "NiceEnv — local development environment manager (Go + Wails v3 + React)",
   "scripts": {
+    "check:wails-port": "node scripts/wails-port-status.mjs",
     "dev": "pnpm --filter @nsb/web dev",
     "build:web": "pnpm --filter @nsb/web build",
-    "tauri": "pnpm --filter @nsb/desktop tauri",
+    "check:go": "go vet ./...",
+    "compile:desktop": "go build -tags desktopassets -o NiceEnv-Wails.exe ./cmd/niceenv",
     "check": "pnpm -r run check"
   },
   "engines": {

@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Archive, Download, Ellipsis, FolderOpen, Loader2, RotateCcw, Trash2, Upload } from "lucide-react";
 import type { RedisBackupEntry, RedisBackupRemoval, RedisImportPreview, RedisRestorePreview } from "@nsb/schema";
 import * as api from "@/lib/api";
-import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
+import { isDesktop, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { useT } from "@/lib/store";
 import { fmtBytes, sameVersion } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -63,8 +63,8 @@ function RedisBackupsDialog({ version, running, onClose }: { version: string; ru
   const pickImport = (previous?: string) => {
     void perform("inspectImport", async () => {
       let source = previous ?? "preview/external/dump.rdb";
-      if (!previous && isTauri) {
-        const { open } = await import("@tauri-apps/plugin-dialog");
+      if (!previous && isDesktop) {
+        const { open } = await import("@/lib/desktop-dialog");
         const selected = await open({ title: t("redisBackup.pickImport"), multiple: false, directory: false, filters: [{ name: "Redis RDB", extensions: ["rdb"] }] });
         if (typeof selected !== "string") return;
         source = selected;
@@ -90,8 +90,8 @@ function RedisBackupsDialog({ version, running, onClose }: { version: string; ru
     if (entry.problem) return;
     void perform("export", async () => {
       let destination = `preview/export/redis-${entry.id}.rdb`;
-      if (isTauri) {
-        const { save } = await import("@tauri-apps/plugin-dialog");
+      if (isDesktop) {
+        const { save } = await import("@/lib/desktop-dialog");
         const selected = await save({ title: t("redisBackup.exportTitle"), defaultPath: `redis-${entry.id}.rdb`, filters: [{ name: "Redis RDB", extensions: ["rdb"] }] });
         if (typeof selected !== "string") return;
         destination = selected;
@@ -143,7 +143,7 @@ function RedisBackupsDialog({ version, running, onClose }: { version: string; ru
       <DialogContent hideClose={!!busy} className="flex max-h-[90dvh] max-w-2xl flex-col overflow-hidden p-4 sm:p-6">
         <DialogHeader className="shrink-0 pr-6"><DialogTitle className="leading-snug">Redis {version} · {t("redisBackup.title")}</DialogTitle><DialogDescription>{t("redisBackup.intro")}</DialogDescription></DialogHeader>
         <div className="min-h-0 space-y-4 overflow-y-auto px-0.5 text-xs leading-relaxed">
-          {!isTauri && <p className="text-warn">{t("redisBackup.demo")}</p>}
+          {!isDesktop && <p className="text-warn">{t("redisBackup.demo")}</p>}
           {query.isPending && <p role="status">{t("common.loading")}</p>}
           {!preview && !importPreview && !removal && errorBox}
           {message && <p role="status" className="rounded-lg bg-fill p-3 text-secondary [overflow-wrap:anywhere]">{message}</p>}
@@ -171,7 +171,7 @@ function RedisBackupsDialog({ version, running, onClose }: { version: string; ru
         </div>
         <DialogFooter className="shrink-0 flex-wrap border-t border-dashed border-separator pt-3">
           <Button variant="secondary" size="sm" disabled={!!busy} onClick={() => pickImport()}><Upload className="size-3.5" />{t("redisBackup.import")}</Button>
-          <Button variant="ghost" size="sm" disabled={!!busy || !isTauri || !query.data} onClick={() => void perform("folder", async () => { await api.openInFolder(query.data!.directory); })}><FolderOpen className="size-3.5" />{t("redisBackup.folder")}</Button>
+          <Button variant="ghost" size="sm" disabled={!!busy || !isDesktop || !query.data} onClick={() => void perform("folder", async () => { await api.openInFolder(query.data!.directory); })}><FolderOpen className="size-3.5" />{t("redisBackup.folder")}</Button>
           <Button variant="ghost" size="sm" disabled={!!busy || query.isFetching} onClick={() => { setError(null); void query.refetch(); }}>{t("redisBackup.refresh")}</Button>
           <Button variant="ghost" size="sm" disabled={!!busy} onClick={onClose}>{t("common.close")}</Button>
           <Button size="sm" disabled={!!busy || !running} onClick={create}>{t("redisBackup.create")}</Button>

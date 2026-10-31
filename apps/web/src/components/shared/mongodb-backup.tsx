@@ -7,7 +7,7 @@ import { toast } from "sonner";
 import { ArchiveRestore, DatabaseBackup, Download, Ellipsis, FolderOpen, Loader2, RefreshCw, Trash2, Upload } from "lucide-react";
 import type { MongoBackup, MongoBackupRemoval, MongoImportPreview, MongoRestorePreview, ServiceStatus } from "@nsb/schema";
 import * as api from "@/lib/api";
-import { isTauri, normalizeError } from "@/lib/backend";
+import { isDesktop, normalizeError } from "@/lib/backend";
 import { useT } from "@/lib/store";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -104,8 +104,8 @@ export function MongoBackupPanel({ service, signature, externalDisabled = false,
   };
   const chooseImport = (previous?: string) => void fileAction(async () => {
     let source = previous ?? "preview/external/mongodb.archive.gz";
-    if (isTauri && !previous) {
-      const { open } = await import("@tauri-apps/plugin-dialog");
+    if (isDesktop && !previous) {
+      const { open } = await import("@/lib/desktop-dialog");
       const chosen = await open({ title: t("mongoBackup.import"), multiple: false, directory: false, filters: [{ name: "MongoDB archive", extensions: ["gz", "archive"] }, { name: t("mongoBackup.allFiles"), extensions: ["*"] }] });
       if (typeof chosen !== "string") return; source = chosen;
     }
@@ -126,8 +126,8 @@ export function MongoBackupPanel({ service, signature, externalDisabled = false,
   };
   const exportFile = (backup: MongoBackup) => void fileAction(async () => {
     let destination = `preview/export/mongodb-${backup.id}.archive.gz`;
-    if (isTauri) {
-      const { save } = await import("@tauri-apps/plugin-dialog");
+    if (isDesktop) {
+      const { save } = await import("@/lib/desktop-dialog");
       const chosen = await save({ title: t("mongoBackup.export"), defaultPath: `mongodb-${backup.id}.archive.gz`, filters: [{ name: "MongoDB gzip archive", extensions: ["gz"] }] });
       if (typeof chosen !== "string") return; destination = chosen;
     }
@@ -148,7 +148,7 @@ export function MongoBackupPanel({ service, signature, externalDisabled = false,
     <CardHeader><div className="flex flex-wrap items-center justify-between gap-2"><CardTitle>{t("mongoBackup.title")}</CardTitle><Button variant="ghost" size="sm" disabled={busy || backups.isFetching} onClick={() => void backups.refetch()}><RefreshCw className="h-3.5 w-3.5" />{t("mongo.refresh")}</Button></div><CardDescription>{t("mongoBackup.intro")}</CardDescription></CardHeader>
     <CardContent className="min-w-0 space-y-4">
       <DatabaseBackupPlan engine="mongodb" version={version} instanceKey={signature} targetLabel={`MongoDB ${version}`} ready={ready} disabled={operationBusy || externalDisabled || !!selected || !!importPreview || !!removal} onLockChange={setPlanLocked} />
-      {!isTauri && <p className="text-xs text-warn">{t("mongoBackup.demo")}</p>}
+      {!isDesktop && <p className="text-xs text-warn">{t("mongoBackup.demo")}</p>}
       <p className="text-xs leading-5 text-muted">{t("mongoBackup.pauseWrites")} <Link to="/packages" className="underline underline-offset-4">{t("mongo.packages")}</Link></p>
       {!running && <p className="text-sm text-muted">{t("mongoBackup.stopped")}</p>}
       {overview.isError && running && <div className="space-y-2"><Failure error={overview.error} /><Button size="sm" variant="secondary" disabled={busy || overview.isFetching} onClick={() => void overview.refetch()}>{t("mongo.retry")}</Button></div>}
@@ -157,7 +157,7 @@ export function MongoBackupPanel({ service, signature, externalDisabled = false,
       {operationBusy && <p role="status" className="flex items-center gap-2 text-sm text-muted"><Loader2 className="h-4 w-4 shrink-0 animate-spin" />{t("mongoBackup.working")}</p>}
       {!!error && <Failure error={error} />}{restored && <p role="status" className="break-all text-sm text-running">{restored}</p>}
       <div className="min-w-0 space-y-3 border-t border-dashed border-border pt-4">
-        <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-medium">{t("mongoBackup.history")}</h3><div className="flex flex-wrap gap-1"><Button variant="secondary" size="sm" disabled={busy} onClick={() => chooseImport()}><Upload className="h-3.5 w-3.5" />{t("mongoBackup.import")}</Button><Button variant="ghost" size="sm" disabled={busy || !isTauri || !backups.data} onClick={() => void fileAction(async () => { await api.openInFolder(backups.data!.directory); })}><FolderOpen className="h-3.5 w-3.5" />{t("mongoBackup.folder")}</Button></div></div>
+        <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-medium">{t("mongoBackup.history")}</h3><div className="flex flex-wrap gap-1"><Button variant="secondary" size="sm" disabled={busy} onClick={() => chooseImport()}><Upload className="h-3.5 w-3.5" />{t("mongoBackup.import")}</Button><Button variant="ghost" size="sm" disabled={busy || !isDesktop || !backups.data} onClick={() => void fileAction(async () => { await api.openInFolder(backups.data!.directory); })}><FolderOpen className="h-3.5 w-3.5" />{t("mongoBackup.folder")}</Button></div></div>
         {backups.isPending && <p role="status" className="text-sm text-muted">{t("mongo.loading")}</p>}
         {backups.isError ? <Failure error={backups.error} /> : backups.data && <>
           <div className="flex min-w-0 items-center gap-2"><code className="min-w-0 break-all text-xs text-muted">{backups.data.directory}</code><CopyButton text={backups.data.directory} className="shrink-0" /></div>

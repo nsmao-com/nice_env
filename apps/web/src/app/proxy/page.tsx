@@ -25,7 +25,7 @@ import type { ProxyGroupView } from "@nsb/schema";
 import { cn, fmtBytes } from "@/lib/utils";
 import { useT } from "@/lib/store";
 import { toastError } from "@/lib/hooks";
-import { isTauri, normalizeError } from "@/lib/backend";
+import { isDesktop, normalizeError } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -621,7 +621,7 @@ function ImportProfileDialog({
     setError(null);
     try {
       await api.proxyImport(name.trim() || t("proxy.mySubs"), parsed.href);
-      toast.success(t(isTauri ? "proxy.subImported" : "proxy.previewImported"));
+      toast.success(t(isDesktop ? "proxy.subImported" : "proxy.previewImported"));
       onOpenChange(false);
       setName("");
       setUrl("");
@@ -643,7 +643,7 @@ function ImportProfileDialog({
             {t("proxy.privacyHint")}
           </DialogDescription>
         </DialogHeader>
-        {!isTauri && <p className="rounded-lg bg-info-soft p-3 text-xs text-info">{t("proxy.previewHint")}</p>}
+        {!isDesktop && <p className="rounded-lg bg-info-soft p-3 text-xs text-info">{t("proxy.previewHint")}</p>}
         <div className="flex flex-col gap-3">
           <label className="space-y-1.5 text-xs text-muted">{t("proxy.nameLabel")}
             <Input value={name} disabled={busy} maxLength={128} onChange={(e) => setName(e.target.value)} placeholder={t("proxy.namePlaceholder")} />

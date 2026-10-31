@@ -410,7 +410,8 @@
   }
 
   .nsb-shell-desktop .nsb-sidebar-brand,
-  .nsb-shell-desktop [data-tauri-drag-region] {
+  .nsb-shell-desktop [data-window-drag-region] {
+    --wails-draggable: drag;
     -webkit-app-region: drag;
     app-region: drag;
     cursor: default;
@@ -418,6 +419,7 @@
 
   .nsb-shell-desktop .nsb-no-drag,
   .nsb-shell-desktop .nsb-no-drag * {
+    --wails-draggable: no-drag;
     -webkit-app-region: no-drag;
     app-region: no-drag;
     pointer-events: auto;
@@ -514,30 +516,12 @@
     display: none;
   }
 
-  /* 运行态呼吸光 —— 极弱，仅 running */
+  /* 稳定状态保持静态，避免空闲服务卡片持续重绘阴影。 */
   .breath {
-    animation: breath 3.2s ease-in-out infinite;
-  }
-  @keyframes breath {
-    0%,
-    100% {
-      box-shadow: 0 0 0 0 transparent;
-    }
-    50% {
-      box-shadow: 0 0 18px 0 rgba(52, 199, 89, 0.16);
-    }
+    box-shadow: 0 0 0 1px rgba(52, 199, 89, 0.12);
   }
   .pulse-error {
-    animation: pulse-error 1.6s ease-in-out infinite;
-  }
-  @keyframes pulse-error {
-    0%,
-    100% {
-      box-shadow: 0 0 0 0 transparent;
-    }
-    50% {
-      box-shadow: 0 0 16px 0 rgba(255, 66, 69, 0.2);
-    }
+    box-shadow: 0 0 0 1px rgba(255, 66, 69, 0.2);
   }
   .animate-progress-slide {
     animation: progress-slide 1.2s ease-in-out infinite;

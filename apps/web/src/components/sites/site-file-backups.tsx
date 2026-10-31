@@ -6,7 +6,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Archive, FolderOpen, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import * as api from "@/lib/api";
-import { isTauri, listen, normalizeError } from "@/lib/backend";
+import { isDesktop, listen, normalizeError } from "@/lib/backend";
 import { toastError } from "@/lib/hooks";
 import { useT } from "@/lib/store";
 import { fmtBytes } from "@/lib/utils";
@@ -100,7 +100,7 @@ export function SiteFileBackups({ siteId, revision, active, disabled, dirty, onB
     <div className="space-y-2">
       <h3 className="text-sm font-semibold">{t("siteFiles.title")}</h3>
       <p className="text-xs leading-relaxed text-muted">{t("siteFiles.hint")}</p>
-      {!isTauri && <p className="rounded-lg bg-warn-soft p-3 text-xs leading-relaxed text-warn">{t("siteFiles.preview")}</p>}
+      {!isDesktop && <p className="rounded-lg bg-warn-soft p-3 text-xs leading-relaxed text-warn">{t("siteFiles.preview")}</p>}
       {dirty && <p role="status" className="text-xs leading-relaxed text-warn">{t("siteFiles.dirty")}</p>}
     </div>
     <SiteFileBackupPlan siteId={siteId} revision={revision} active={active} disabled={busy || disabled || dirty || !!restore || !!deleting || importOpen} onBusyChange={onPlanBusyChange} />
@@ -137,10 +137,10 @@ export function SiteFileBackups({ siteId, revision, active, disabled, dirty, onB
     {restored && <div className="space-y-2 rounded-xl bg-running-soft p-3">
       <p className="text-xs font-medium text-running">{t("siteFiles.restored")}</p>
       <p className="font-mono text-xs [overflow-wrap:anywhere]">{restored}</p>
-      <div className="flex flex-wrap gap-2"><Button size="sm" variant="secondary" disabled={!isTauri} onClick={() => api.openInFolder(restored).catch(toastError)}><FolderOpen className="size-3.5" />{t("siteFiles.folder")}</Button><CopyButton text={restored} /></div>
+      <div className="flex flex-wrap gap-2"><Button size="sm" variant="secondary" disabled={!isDesktop} onClick={() => api.openInFolder(restored).catch(toastError)}><FolderOpen className="size-3.5" />{t("siteFiles.folder")}</Button><CopyButton text={restored} /></div>
       <div className="space-y-3 border-t border-dashed border-separator pt-3">
         <p className="text-xs leading-relaxed text-muted">{t("siteResume.hint")}</p>
-        {!isTauri && <p className="text-xs leading-relaxed text-muted">{t("siteFiles.preview")}</p>}
+        {!isDesktop && <p className="text-xs leading-relaxed text-muted">{t("siteFiles.preview")}</p>}
         <Button size="sm" variant="secondary" disabled={locked} onClick={() => void run(async () => {
           setProjects(null); setSelectedProject("");
           const found = await api.scanProjects(restored);
@@ -192,7 +192,7 @@ export function SiteFileBackups({ siteId, revision, active, disabled, dirty, onB
           </div>
           <div className="flex flex-wrap gap-2 border-t border-dashed border-separator pt-3">
             <Button size="sm" variant="secondary" disabled={locked || !item.restorable} onClick={(event) => { restoreOpener.current = event.currentTarget; setError(null); setParent(null); setTrusted(false); setRestorePreview(null); setRestore(item); }}>{t("siteVerify.open")}</Button>
-            <Button size="sm" variant="ghost" disabled={!isTauri || busy} onClick={() => api.openInFolder(item.path).catch(toastError)}><FolderOpen className="size-3.5" />{t("siteFiles.folder")}</Button>
+            <Button size="sm" variant="ghost" disabled={!isDesktop || busy} onClick={() => api.openInFolder(item.path).catch(toastError)}><FolderOpen className="size-3.5" />{t("siteFiles.folder")}</Button>
             <Button size="sm" variant="ghost" className="text-error" disabled={locked} onClick={(event) => { deleteOpener.current = event.currentTarget; setError(null); setDeleting(item); }}><Trash2 className="size-3.5" />{t("common.delete")}</Button>
           </div>
         </li>)}</ul>}
@@ -205,17 +205,17 @@ export function SiteFileBackups({ siteId, revision, active, disabled, dirty, onB
       <DialogContent hideClose={busy} className="flex max-h-[85dvh] flex-col overflow-hidden" onCloseAutoFocus={(event) => { if (importOpener.current?.isConnected) { event.preventDefault(); importOpener.current.focus(); } }}>
         <div className="min-h-0 min-w-0 space-y-4 overflow-y-auto">
           <DialogHeader><DialogTitle className="pr-5 leading-snug">{t("siteImport.title")}</DialogTitle><DialogDescription className="text-xs leading-relaxed">{t("siteImport.hint")}</DialogDescription></DialogHeader>
-          {!isTauri && <p className="rounded-lg bg-warn-soft p-3 text-xs leading-relaxed text-warn">{t("siteFiles.preview")}</p>}
+          {!isDesktop && <p className="rounded-lg bg-warn-soft p-3 text-xs leading-relaxed text-warn">{t("siteFiles.preview")}</p>}
           <div className="space-y-2">
             <p className="text-xs font-medium">{t("siteImport.source")}</p>
             <p className="text-xs leading-relaxed text-muted [overflow-wrap:anywhere]">{importPath || t("siteImport.empty")}</p>
             <div className="flex flex-wrap gap-2"><Button size="sm" variant="secondary" disabled={locked} onClick={() => void run(async (operationId) => {
               let picked: string | null = "C:/Demo/backups/sample-site.zip";
-              if (isTauri) { const { open } = await import("@tauri-apps/plugin-dialog"); const result = await open({ directory: false, multiple: false, filters: [{ name: "NiceEnv ZIP", extensions: ["zip"] }] }); picked = typeof result === "string" ? result : null; }
+              if (isDesktop) { const { open } = await import("@/lib/desktop-dialog"); const result = await open({ directory: false, multiple: false, filters: [{ name: "NiceEnv ZIP", extensions: ["zip"] }] }); picked = typeof result === "string" ? result : null; }
               if (!picked) return;
               setImportPath(picked); setImportPreview(null); setImportConfirmed(false);
               setImportPreview(await api.siteFilesInspectImport(siteId, picked, operationId));
-            })}>{t(isTauri ? "siteImport.choose" : "siteImport.sample")}</Button>
+            })}>{t(isDesktop ? "siteImport.choose" : "siteImport.sample")}</Button>
               {importPath && <Button size="sm" variant="ghost" disabled={locked} onClick={() => void run(async (operationId) => { setImportPreview(null); setImportConfirmed(false); setImportPreview(await api.siteFilesInspectImport(siteId, importPath, operationId)); })}>{t("siteFiles.retry")}</Button>}
             </div>
           </div>
@@ -250,19 +250,19 @@ export function SiteFileBackups({ siteId, revision, active, disabled, dirty, onB
           <DialogHeader><DialogTitle className="pr-5 leading-snug">{t("siteVerify.open")}</DialogTitle><DialogDescription className="text-xs leading-relaxed">{t("siteFiles.restoreHint")}</DialogDescription></DialogHeader>
           {restoreArchive && <div className="space-y-2 rounded-lg bg-fill p-3 text-xs [overflow-wrap:anywhere]"><p className="font-mono">{restoreArchive.name}</p><p className="font-mono text-muted">{restoreArchive.root}</p><p>{t("siteFiles.excluded")}: {restoreArchive.excluded.join(", ") || t("siteFiles.noExclusions")}</p></div>}
           <div className="space-y-2"><p className="text-xs font-medium">{t("siteFiles.parent")}</p><p className="font-mono text-xs [overflow-wrap:anywhere]">{parent || t("siteFiles.defaultParent")}</p>
-            <div className="flex flex-wrap gap-2"><Button size="sm" variant="secondary" disabled={locked || !isTauri} onClick={async () => {
+            <div className="flex flex-wrap gap-2"><Button size="sm" variant="secondary" disabled={locked || !isDesktop} onClick={async () => {
               if (busyRef.current || planBusyRef.current || disabled || dirty) return;
               setWorking(true);
-              try { const { open } = await import("@tauri-apps/plugin-dialog"); const picked = await open({ directory: true }); if (typeof picked === "string") setParent(picked); }
+              try { const { open } = await import("@/lib/desktop-dialog"); const picked = await open({ directory: true }); if (typeof picked === "string") setParent(picked); }
               catch (failure) { setError(normalizeError(failure).message); }
               finally { setWorking(false); }
             }}>{t("siteFiles.choose")}</Button>{parent && <Button size="sm" variant="ghost" disabled={locked} onClick={() => setParent(null)}>{t("siteFiles.default")}</Button>}</div>
-            {!isTauri && <p className="text-xs text-muted">{t("siteFiles.desktopPicker")}</p>}
+            {!isDesktop && <p className="text-xs text-muted">{t("siteFiles.desktopPicker")}</p>}
           </div>
-          {!isTauri && <p className="rounded-lg bg-warn-soft p-3 text-xs leading-relaxed text-warn">{t("siteFiles.preview")}</p>}
+          {!isDesktop && <p className="rounded-lg bg-warn-soft p-3 text-xs leading-relaxed text-warn">{t("siteFiles.preview")}</p>}
           {!restorePreview ? <p className="text-xs leading-relaxed text-muted">{t("siteVerify.hint")}</p> : <section className="space-y-3 border-t border-dashed border-separator pt-4">
             <div role="status" className="space-y-2 rounded-lg bg-running-soft p-3 text-xs [overflow-wrap:anywhere]">
-              <p className="font-medium text-running">{t(isTauri ? "siteVerify.passed" : "siteVerify.previewPassed")}</p>
+              <p className="font-medium text-running">{t(isDesktop ? "siteVerify.passed" : "siteVerify.previewPassed")}</p>
               <p>{t("siteFiles.files").replace("{count}", String(restorePreview.archive.files))} · {fmtBytes(restorePreview.archive.originalBytes)} · {new Date(restorePreview.verifiedAt).toLocaleString()}</p>
               <p className="text-muted">{t("siteVerify.destination")}</p><p className="font-mono">{restorePreview.parent}</p>
             </div>
@@ -270,7 +270,7 @@ export function SiteFileBackups({ siteId, revision, active, disabled, dirty, onB
               {restorePreview.entries.length ? <ul className="mt-3 max-h-48 space-y-2 overflow-y-auto rounded-lg bg-fill p-3">{restorePreview.entries.map((entry) => <li key={entry.path} className="flex min-w-0 items-start justify-between gap-3"><span className="min-w-0 font-mono [overflow-wrap:anywhere]">{entry.path}{entry.directory ? "/" : ""}</span><span className="shrink-0 text-muted">{entry.directory ? t("siteVerify.directory") : fmtBytes(entry.size)}</span></li>)}</ul> : <p className="mt-2 text-muted">{t("siteVerify.empty")}</p>}
               <p className="mt-2 leading-relaxed text-muted">{t("siteVerify.allChecked")}</p>
             </details>
-            {isTauri && <details className="text-xs text-muted"><summary className="cursor-pointer">ZIP SHA256</summary><div className="mt-2 flex items-start gap-2"><code className="min-w-0 flex-1 [overflow-wrap:anywhere]">{restorePreview.sha256}</code><CopyButton text={restorePreview.sha256} /></div></details>}
+            {isDesktop && <details className="text-xs text-muted"><summary className="cursor-pointer">ZIP SHA256</summary><div className="mt-2 flex items-start gap-2"><code className="min-w-0 flex-1 [overflow-wrap:anywhere]">{restorePreview.sha256}</code><CopyButton text={restorePreview.sha256} /></div></details>}
             <label className="flex items-start gap-2.5 text-xs leading-relaxed"><input type="checkbox" className="mt-0.5 size-4 shrink-0 accent-primary" checked={trusted} disabled={locked} onChange={(event) => setTrusted(event.target.checked)} /><span>{t("siteFiles.trust")}</span></label>
           </section>}
           {progressView}{errorView}

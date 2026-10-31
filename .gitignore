@@ -30,3 +30,8 @@ apps/desktop/src-tauri/binaries/
 # .cargo/config.toml 是本机 crates.io 镜像设置（rsproxy.cn）；
 # 提交上去会让 CI 也走该镜像，各人按自己网络情况本地保留即可。
 .cargo/
+
+# Go / Wails migration output (independent from the installed app)
+/NiceEnv-Wails.exe
+/niceenv-wails
+/.wails-home/

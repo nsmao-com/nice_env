@@ -86,7 +86,7 @@ export function Sidebar() {
           isDesktop && isMac && !collapsed && "pl-[78px]",
           isDesktop && isMac && collapsed && "px-0"
         )}
-        data-tauri-drag-region="deep"
+        data-window-drag-region="deep"
       >
         {!(isDesktop && isMac && collapsed) && <AppMenu collapsed={collapsed} />}
         {!collapsed && <div className="h-full min-w-2 flex-1 self-stretch" />}

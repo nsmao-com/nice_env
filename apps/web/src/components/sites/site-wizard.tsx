@@ -30,7 +30,7 @@ import {
 import { RewritePreset as RewriteSchema, type ScannedProject, type CreateSiteInput, type RewritePreset, type SiteKind, type SiteCreateProgress } from "@nsb/schema";
 import { cn, cmpVersionDesc, normalizeProxyTarget, sameVersion } from "@/lib/utils";
 import { useT, type ExistingProjectDefaults } from "@/lib/store";
-import { isTauri, listen, normalizeError } from "@/lib/backend";
+import { isDesktop, listen, normalizeError } from "@/lib/backend";
 import { usePackages, useSettings, siteUrl, toastError } from "@/lib/hooks";
 import { useInstallTasks } from "@/lib/install-tasks";
 import * as api from "@/lib/api";
@@ -290,8 +290,8 @@ export function SiteWizard({
   }, [existingProject, phpChecking, existingPhpProblem, https, certificateSelection.problem, step, name, domain, aliases, rootDir, kind, phpVersion, phpVersions, webInstalled, normalizedProxyTarget, databaseValid, composerTemplate, composerInstalled, templatePhpCompatible, templateNodeCompatible, isProxy, applicationValid, isRedirect, redirectResult.error]);
 
   const pickFolder = async () => {
-    if (isTauri) {
-      const { open } = await import("@tauri-apps/plugin-dialog");
+    if (isDesktop) {
+      const { open } = await import("@/lib/desktop-dialog");
       const picked = await open({ directory: true, multiple: false, title: t("wz.pickRoot") });
       if (typeof picked === "string") setRootDir(picked);
     } else {

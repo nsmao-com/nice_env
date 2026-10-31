@@ -9,7 +9,7 @@ import { FolderSearch, Loader2, BadgeCheck } from "lucide-react";
 import { SiteKind, RewritePreset, type ScannedProject, type CreateSiteInput, type Site } from "@nsb/schema";
 import { useT, useUI } from "@/lib/store";
 import { useInvalidate, usePackages, useSettings, useSites, toastError } from "@/lib/hooks";
-import { isTauri, normalizeError } from "@/lib/backend";
+import { isDesktop, normalizeError } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { cn, cmpVersionDesc, normalizeProxyTarget, sameVersion } from "@/lib/utils";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
@@ -164,7 +164,7 @@ export function ProjectScannerDialog({ open, onOpenChange, onCreated }: {
     try {
       let dir = root.trim();
       if (pick) {
-        const { open: choose } = await import("@tauri-apps/plugin-dialog");
+        const { open: choose } = await import("@/lib/desktop-dialog");
         const result = await choose({ directory: true, multiple: false, title: t("scanner.pickTitle") });
         if (typeof result !== "string" || !mounted.current) return;
         dir = result; setRoot(dir);
@@ -271,10 +271,10 @@ export function ProjectScannerDialog({ open, onOpenChange, onCreated }: {
           <div className="flex flex-wrap gap-2">
             <Input id="scan-root" value={root} disabled={busy} className="min-w-0 flex-1 basis-48 font-mono text-xs"
               onChange={(event) => { if (!busyRef.current) { setRoot(event.target.value); reset(); } }} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void startScan(false); } }} placeholder={t("scanner.pathPlaceholder")} />
-            <Button variant="secondary" disabled={busy || !isTauri} onClick={() => void startScan(true)}>{t("scanner.browse")}</Button>
+            <Button variant="secondary" disabled={busy || !isDesktop} onClick={() => void startScan(true)}>{t("scanner.browse")}</Button>
             <Button disabled={busy || !root.trim()} onClick={() => void startScan(false)}>{mode === "scanning" && <Loader2 className="size-4 animate-spin motion-reduce:animate-none" />}{t("scanner.scan")}</Button>
           </div>
-          {!isTauri && <p className="text-xs leading-relaxed text-muted">{t("scanSetup.preview")}</p>}
+          {!isDesktop && <p className="text-xs leading-relaxed text-muted">{t("scanSetup.preview")}</p>}
           {error && <p ref={errorRef} tabIndex={-1} role="alert" className="rounded-lg bg-error-soft p-3 text-xs leading-relaxed text-error [overflow-wrap:anywhere]">{error}</p>}
         </div>
         {mode === "scanning" && <p role="status" className="text-xs text-muted">{t("common.loading")}</p>}
@@ -349,7 +349,7 @@ export function ProjectScannerDialog({ open, onOpenChange, onCreated }: {
               </div>}
               {outcome?.status === "created" && <div className="flex flex-wrap items-center gap-2">
                 <p className="min-w-0 font-mono text-xs [overflow-wrap:anywhere]">{draft.domain}</p>
-                <Button size="sm" variant="ghost" disabled={busy || !isTauri} onClick={() => { if (outcome.siteId) void api.openSite(outcome.siteId).catch(toastError); }}>{t("scanSetup.open")}</Button>
+                <Button size="sm" variant="ghost" disabled={busy || !isDesktop} onClick={() => { if (outcome.siteId) void api.openSite(outcome.siteId).catch(toastError); }}>{t("scanSetup.open")}</Button>
               </div>}
               {project.siteKind === "php" && <ProjectPhpCheck report={project.phpCompatibility} version={draft.phpVersion} acknowledged={!!draft.allowUnverifiedPhp} disabled={disabled} loading={mode === "checking" && checkingPath.current === project.path}
                 onAcknowledge={(value) => patch(project.path, { allowUnverifiedPhp: value })} onRefresh={() => void refreshPhp(project)} />}

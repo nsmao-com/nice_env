@@ -1,0 +1,58 @@
+name: Wails migration checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "go.mod"
+      - "go.sum"
+      - "cmd/**"
+      - "internal/**"
+      - "apps/web/**"
+      - "apps/desktop/assets.go"
+      - "manifest/**"
+      - "scripts/wails-port-status.mjs"
+      - ".github/workflows/wails.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Go / Wails (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-15-intel, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Go compilation (does not build the web frontend)
+        run: go build -mod=readonly ./...
+      - name: Go static analysis
+        run: go vet -mod=readonly ./...
+      - name: Read native capabilities in an isolated home
+        shell: bash
+        env:
+          NICEENV_WAILS_HOME: ${{ runner.temp }}/niceenv-wails
+        run: go run ./cmd/niceenv-cli -command backend_capabilities
+      - name: Report commands still needing migration
+        shell: bash
+        run: node scripts/wails-port-status.mjs > wails-port-status.json
+      - uses: actions/upload-artifact@v5
+        with:
+          name: wails-port-status-${{ matrix.os }}
+          path: wails-port-status.json
+
+# Deliberately no tag/release/upload-binary step. This workflow validates the
+# main replacement work; publication must wait for full functionality and validation.

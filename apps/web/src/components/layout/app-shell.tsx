@@ -12,7 +12,7 @@ import { DesktopWindowProvider, useDesktopWindow, WindowControls } from "./title
 import { toastError, useInvalidate, useSettings } from "@/lib/hooks";
 import { toast } from "sonner";
 import { useT } from "@/lib/store";
-import { isTauri, listen } from "@/lib/backend";
+import { desktopRuntime, isDesktop, listen } from "@/lib/backend";
 import { cn } from "@/lib/utils";
 import * as api from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -82,10 +82,13 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
       )}
     >
       {/* 工作区上方的留白也必须参与原生窗口拖动；侧栏和窗口按钮位于其上方。 */}
-      {isDesktop && <div className={cn("absolute inset-x-0 top-0 z-10 select-none", isMac ? "h-[var(--workspace-inset)]" : "h-[var(--caption-height)]", isMac && maximized && "hidden")} data-tauri-drag-region="deep" aria-hidden="true" />}
+      {isDesktop && <div className={cn("absolute inset-x-0 top-0 z-10 select-none", isMac ? "h-[var(--workspace-inset)]" : "h-[var(--caption-height)]", isMac && maximized && "hidden")} data-window-drag-region="deep" aria-hidden="true" />}
       <Sidebar />
       <div className="nsb-workspace relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-card">
         <Topbar />
+        {desktopRuntime === "wails" && <p role="status" className="border-b border-border bg-warn-soft px-4 py-2 text-xs text-warn">
+          {english ? "Wails development build · Separate data directory. Some features are still being migrated." : "Wails 开发版 · 当前使用独立数据目录，部分功能尚未迁移。"}
+        </p>}
         <main className="relative min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
           {/* 路由内容由 React Router 管理，页面加载时保留侧栏和窗口控件。 */}
           <div className="mx-auto h-full min-w-0 w-full max-w-[1240px] px-3 py-4 sm:px-6 sm:py-6">
@@ -120,13 +123,13 @@ function StartupStackAlert() {
   const t = useT();
   const [dismissed, setDismissed] = React.useState(false);
   const query = useQuery({
-    queryKey: ["startup-stack-status"], queryFn: api.startupStackStatus, enabled: isTauri,
+    queryKey: ["startup-stack-status"], queryFn: api.startupStackStatus, enabled: isDesktop,
     networkMode: "always", retry: false,
     refetchInterval: (state) => ["waiting", "running"].includes(state.state.data?.phase ?? "waiting") && !state.state.error ? 1000 : false,
   });
   const status = query.data;
   const running = status?.phase === "running";
-  if (!isTauri || dismissed || (!query.error && !running && status?.phase !== "partial" && status?.phase !== "failed")) return null;
+  if (!isDesktop || dismissed || (!query.error && !running && status?.phase !== "partial" && status?.phase !== "failed")) return null;
   const problem = query.error ? t("startupStack.readFailed") : status?.error?.message;
   const report = status?.report;
   return <section role={running && !query.error ? "status" : "alert"} className="mb-5 min-w-0 space-y-3 rounded-xl border border-warn/25 bg-warn-soft px-4 py-3 [overflow-wrap:anywhere]">
@@ -195,13 +198,13 @@ function RecoveryAlert() {
         {query.data?.unresolved.map((message, index) => <li key={`${index}:${message}`}>{message}</li>)}
       </ul>}
       <div className="flex flex-wrap items-center gap-2">
-        <Button size="sm" variant="outline" disabled={busy || (!isTauri && !query.isError)} onClick={() => void retry()}>
+        <Button size="sm" variant="outline" disabled={busy || (!isDesktop && !query.isError)} onClick={() => void retry()}>
           <RefreshCw className={cn("h-3.5 w-3.5", busy && "animate-spin")} />
           {t(busy ? "recovery.checking" : query.isError ? "recovery.reload" : "recovery.retry")}
         </Button>
         <Button size="sm" variant="ghost" asChild><Link to="/tools">{t("recovery.tools")}</Link></Button>
       </div>
-      {!isTauri && <p className="text-[11px] text-faint">{t("recovery.preview")}</p>}
+      {!isDesktop && <p className="text-[11px] text-faint">{t("recovery.preview")}</p>}
     </section>
   );
 }
@@ -248,7 +251,7 @@ function UpdateWatcher() {
   const { data: settings } = useSettings();
 
   React.useEffect(() => {
-    if (!isTauri || !settings || !settings.checkUpdateOnLaunch) return;
+    if (!isDesktop || !settings || !settings.checkUpdateOnLaunch) return;
     // 延迟几秒，避开启动时的并发请求高峰
     const id = setTimeout(async () => {
       try {

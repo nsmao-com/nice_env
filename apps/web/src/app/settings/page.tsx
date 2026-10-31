@@ -35,7 +35,7 @@ import {
   Activity,
   Terminal,
 } from "lucide-react";
-import { isTauri, listen, normalizeError } from "@/lib/backend";
+import { isDesktop, listen, normalizeError } from "@/lib/backend";
 import {
   ACCENT_PRESETS,
   CODE_THEME_OPTIONS,
@@ -241,7 +241,7 @@ export default function SettingsPage() {
   }, [queryClient]);
 
   const syncManifest = async () => {
-    if (!settings || !isTauri || manifestSyncing) return;
+    if (!settings || !isDesktop || manifestSyncing) return;
     const url = settings.manifestUrl.trim();
     if (!url) return;
     setManifestSyncing(true);
@@ -263,7 +263,7 @@ export default function SettingsPage() {
   };
 
   const resetManifest = async () => {
-    if (manifestSyncing || !isTauri) return;
+    if (manifestSyncing || !isDesktop) return;
     setManifestSyncing(true);
     try {
       await api.resetRemoteManifest();
@@ -486,12 +486,12 @@ export default function SettingsPage() {
   };
 
   const chooseDataDirMigration = async () => {
-    if (!isTauri) {
+    if (!isDesktop) {
       toast.info(t("settings.migrate.desktopOnly"));
       return;
     }
     try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
+      const { open } = await import("@/lib/desktop-dialog");
       const selected = await open({
         title: t("settings.migrate.chooseTitle"),
         directory: true,
@@ -1278,10 +1278,10 @@ export default function SettingsPage() {
                   <div className="flex flex-wrap items-center gap-2">
                     <Button
                       variant="secondary"
-                      disabled={!isTauri}
+                      disabled={!isDesktop}
                       onClick={async () => {
                         try {
-                          const { save } = await import("@tauri-apps/plugin-dialog");
+                          const { save } = await import("@/lib/desktop-dialog");
                           const now = new Date();
                           const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`;
                           const path = await save({
@@ -1303,10 +1303,10 @@ export default function SettingsPage() {
                     </Button>
                     <Button
                       variant="secondary"
-                      disabled={!isTauri}
+                      disabled={!isDesktop}
                       onClick={async () => {
                         try {
-                          const { open } = await import("@tauri-apps/plugin-dialog");
+                          const { open } = await import("@/lib/desktop-dialog");
                           const path = await open({
                             title: t("settings.backup.importTitle"),
                             multiple: false,
@@ -1390,7 +1390,7 @@ export default function SettingsPage() {
                       variant="ghost"
                       size="sm"
                       className="h-7 text-[11px] text-faint hover:text-foreground"
-                      disabled={!isTauri || manifestSyncing || !settings.manifestUrl.trim()}
+                      disabled={!isDesktop || manifestSyncing || !settings.manifestUrl.trim()}
                       title={t("settings.syncManifestHint")}
                       onClick={() => void syncManifest()}
                     >
@@ -1401,7 +1401,7 @@ export default function SettingsPage() {
                       variant="ghost"
                       size="sm"
                       className="h-7 text-[11px] text-faint hover:text-foreground"
-                      disabled={!isTauri || manifestSyncing}
+                      disabled={!isDesktop || manifestSyncing}
                       onClick={() => void resetManifest()}
                     >
                       <RotateCcw className="h-3 w-3" /> {t("settings.resetManifest")}
@@ -1537,7 +1537,7 @@ function IntegrationToolsPanel() {
   const query = useQuery({
     queryKey: ["integration-tools"],
     queryFn: api.getIntegrationTools,
-    enabled: isTauri,
+    enabled: isDesktop,
     networkMode: "always",
     staleTime: 0,
     retry: false,
@@ -1550,13 +1550,13 @@ function IntegrationToolsPanel() {
     <CardHeader className="flex-row flex-wrap items-center gap-3">
       <Terminal className="h-4 w-4 shrink-0 text-primary" />
       <CardTitle className="min-w-0 flex-1 text-[13px]">{t("settings.integration.title")}</CardTitle>
-      {isTauri && <Button size="sm" variant="secondary" disabled={query.isFetching} onClick={() => void query.refetch()}>
+      {isDesktop && <Button size="sm" variant="secondary" disabled={query.isFetching} onClick={() => void query.refetch()}>
         <RefreshCw className={cn("h-3.5 w-3.5", query.isFetching && "animate-spin")} />{t("settings.integration.refresh")}
       </Button>}
     </CardHeader>
     <CardContent className="min-w-0 space-y-4">
       <p className="text-[11.5px] leading-relaxed text-faint">{t("settings.integration.hint")}</p>
-      {!isTauri ? <p role="status" className="rounded-lg bg-fill p-3 text-xs leading-relaxed text-muted">{t("settings.integration.preview")}</p>
+      {!isDesktop ? <p role="status" className="rounded-lg bg-fill p-3 text-xs leading-relaxed text-muted">{t("settings.integration.preview")}</p>
         : query.isPending ? <p role="status" className="text-xs text-faint">{t("common.loading")}</p>
         : problem ? <div role="alert" className="space-y-1 text-xs text-error [overflow-wrap:anywhere]">
           <p>{t("settings.integration.failed")}</p><p>{problem.message}</p>
@@ -1627,7 +1627,7 @@ function McpConnectionCheck() {
   const [error, setError] = React.useState<ReturnType<typeof normalizeError> | null>(null);
   React.useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const check = async () => {
-    if (busyRef.current || !isTauri) return;
+    if (busyRef.current || !isDesktop) return;
     busyRef.current = true;
     setBusy(true); setReport(null); setError(null);
     try {
@@ -1643,7 +1643,7 @@ function McpConnectionCheck() {
   return <div className="min-w-0 space-y-3 rounded-lg bg-fill/50 p-3">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <h4 className="text-xs font-medium">{t("settings.integration.checkTitle")}</h4>
-      <Button size="sm" variant="secondary" disabled={busy || !isTauri} onClick={() => void check()}>
+      <Button size="sm" variant="secondary" disabled={busy || !isDesktop} onClick={() => void check()}>
         <RefreshCw className={cn("h-3.5 w-3.5", busy && "animate-spin motion-reduce:animate-none")} />
         {t(busy ? "settings.integration.checking" : report || error ? "settings.integration.checkAgain" : "settings.integration.checkAction")}
       </Button>
@@ -1677,7 +1677,7 @@ function McpClientsPanel({ toolAvailable }: { toolAvailable: boolean }) {
   const [replaceTarget, setReplaceTarget] = React.useState<api.McpClientStatus | null>(null);
   const [failure, setFailure] = React.useState<{ id: string; message: string; hint?: string } | null>(null);
   const [backupPath, setBackupPath] = React.useState<string | null>(null);
-  const query = useQuery({ queryKey: ["mcp-clients"], queryFn: api.getMcpClients, enabled: isTauri, networkMode: "always", staleTime: 0, retry: false });
+  const query = useQuery({ queryKey: ["mcp-clients"], queryFn: api.getMcpClients, enabled: isDesktop, networkMode: "always", staleTime: 0, retry: false });
   const run = async (row: api.McpClientStatus, action: "connect" | "remove", replace = false) => {
     if (busyRef.current || !row.revision) return;
     busyRef.current = true;
@@ -1800,7 +1800,7 @@ function WatchdogPanel({ enabled, onChange }: { enabled: boolean; onChange: (val
       {enabled && (
         <div className="space-y-3 border-t border-dashed border-border pt-3">
           <p className="text-xs font-medium">{t("settings.watchdogStatus")}</p>
-          {!isTauri && <p className="text-[11px] leading-relaxed text-faint">{t("settings.watchdogPreview")}</p>}
+          {!isDesktop && <p className="text-[11px] leading-relaxed text-faint">{t("settings.watchdogPreview")}</p>}
           {query.isPending ? <p role="status" className="text-xs text-faint">{t("settings.watchdogLoading")}</p>
             : query.isError ? <div role="alert" className="flex flex-wrap items-center gap-2 text-xs text-error">
               <span className="min-w-0 break-words">{t("settings.watchdogLoadFailed")}</span>
@@ -1818,7 +1818,7 @@ function WatchdogPanel({ enabled, onChange }: { enabled: boolean; onChange: (val
                     <Badge variant={entry.exhausted ? "error" : entry.running ? "running" : "warn"}>
                       {t(entry.exhausted ? "settings.watchdogExhausted" : entry.running ? "settings.watchdogRunning" : "settings.watchdogWaiting")}
                     </Badge>
-                    {entry.exhausted && <Button size="sm" variant="outline" disabled={busy !== null || !isTauri || !query.data.enabled} onClick={() => void retry(entry.id)}>
+                    {entry.exhausted && <Button size="sm" variant="outline" disabled={busy !== null || !isDesktop || !query.data.enabled} onClick={() => void retry(entry.id)}>
                       {busy === entry.id ? <RefreshCw className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />}
                       {t("settings.watchdogRetry")}
                     </Button>}
@@ -1914,7 +1914,7 @@ function AutostartSetting() {
     staleTime: 0,
     retry: false,
   };
-  const query = useQuery({ ...options, enabled: isTauri });
+  const query = useQuery({ ...options, enabled: isDesktop });
   const ready = typeof query.data === "boolean" && !query.error;
   const problem = error ?? (query.error ? normalizeError(query.error) : null);
   const read = async () => {
@@ -1924,7 +1924,7 @@ function AutostartSetting() {
     return actual;
   };
   const run = async (enabled?: boolean) => {
-    if (!isTauri || busyRef.current || (enabled !== undefined && (!ready || query.isFetching))) return;
+    if (!isDesktop || busyRef.current || (enabled !== undefined && (!ready || query.isFetching))) return;
     busyRef.current = true;
     setBusy(enabled === undefined ? "read" : "save");
     setError(null);
@@ -1950,14 +1950,14 @@ function AutostartSetting() {
   };
   return <div className="space-y-2">
     <SettingRow label={t("settings.autostart")}>
-      {!isTauri ? <span className="text-xs text-muted">{t("settings.autostartDesktopOnly")}</span>
+      {!isDesktop ? <span className="text-xs text-muted">{t("settings.autostartDesktopOnly")}</span>
         : ready ? <Switch aria-label={t("settings.autostart")} checked={query.data} disabled={busy !== null || query.isFetching}
           onCheckedChange={(value) => void run(value)} />
           : <span role="status" className="text-xs text-muted">{t(query.isFetching || busy === "read" ? "common.loading" : "packages.statusUnknown")}</span>}
     </SettingRow>
     <p className="text-[11.5px] leading-relaxed text-faint [overflow-wrap:anywhere]">{t("settings.autostartHint")}</p>
     {busy === "save" && <p role="status" className="text-xs text-muted">{t("settings.autostartSaving")}</p>}
-    {isTauri && problem && <div role="alert" className="space-y-2 rounded-lg bg-error-soft p-3 text-xs text-error [overflow-wrap:anywhere]">
+    {isDesktop && problem && <div role="alert" className="space-y-2 rounded-lg bg-error-soft p-3 text-xs text-error [overflow-wrap:anywhere]">
       <p>{problem.message}</p>
       {problem.hint && <p>{problem.hint}</p>}
       <Button size="sm" variant="secondary" disabled={busy !== null || query.isFetching} onClick={() => void run()}>{t("packages.reload")}</Button>

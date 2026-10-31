@@ -7,7 +7,7 @@ import { Globe2, Loader2, ExternalLink, Square, Trash2 } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as api from "@/lib/api";
 import type { TunnelInfo } from "@/lib/api";
-import { isTauri, normalizeError } from "@/lib/backend";
+import { isDesktop, normalizeError } from "@/lib/backend";
 import { useT } from "@/lib/store";
 import { toastError } from "@/lib/hooks";
 import { Button } from "@/components/ui/button";
@@ -67,7 +67,7 @@ export function TunnelPanel({ siteId }: { siteId?: string }) {
 
   return (
       <div className="flex min-w-0 flex-col gap-3">
-        {!isTauri && <p className="rounded-lg bg-info-soft p-3 text-xs text-info">{t("tools.tunnel.preview")}</p>}
+        {!isDesktop && <p className="rounded-lg bg-info-soft p-3 text-xs text-info">{t("tools.tunnel.preview")}</p>}
         <form className="flex min-w-0 flex-col gap-2" onSubmit={(event) => { event.preventDefault(); void start(); }}>
           {!siteId && <>
           <label id={targetId} className="text-xs text-muted">{t("tools.tunnel.target")}</label>
@@ -123,7 +123,7 @@ export function TunnelPanel({ siteId }: { siteId?: string }) {
           <div className="mt-2 flex flex-wrap items-center gap-1 border-t border-dashed border-border pt-2">
             {tn.url && <>
               {!query.error && tn.alive && tn.state === "connected" && tn.localReachable && <CopyButton text={tn.url} />}
-              <Button size="sm" variant="ghost" disabled={!isTauri || !!query.error || !tn.alive || tn.state !== "connected" || !tn.localReachable}
+              <Button size="sm" variant="ghost" disabled={!isDesktop || !!query.error || !tn.alive || tn.state !== "connected" || !tn.localReachable}
                 onClick={() => void api.openInBrowser(tn.url!).catch(toastError)}><ExternalLink className="h-3.5 w-3.5" />{t("common.open")}</Button>
             </>}
             <Button size="sm" variant="ghost" aria-expanded={expanded === tn.id} onClick={() => setExpanded(expanded === tn.id ? null : tn.id)}>{t("tools.tunnel.output")}</Button>

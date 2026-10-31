@@ -21,7 +21,7 @@ import {
 import type { CertAutomation, CertRunRecord, DeployResult, DeployTarget } from "@nsb/schema";
 import { useT } from "@/lib/store";
 import { toastError } from "@/lib/hooks";
-import { isTauri, normalizeError } from "@/lib/backend";
+import { isDesktop, normalizeError } from "@/lib/backend";
 import * as api from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Card } from "@/components/ui/card";
@@ -571,9 +571,9 @@ function DeploymentTargetFields({ target, onChange }: { target: DeployTarget; on
     else onChange({ [key]: value });
   };
   const choose = async (key: string) => {
-    if (!isTauri) { toast.info(t("tls.desktopOnly")); return; }
+    if (!isDesktop) { toast.info(t("tls.desktopOnly")); return; }
     try {
-      const dialog = await import("@tauri-apps/plugin-dialog");
+      const dialog = await import("@/lib/desktop-dialog");
       const value = key === "identityFile"
         ? await dialog.open({ title: t("certauto.field.sshKeyPath"), multiple: false })
         : await dialog.save({ title: t(key === "certPath" ? "certauto.field.localCertPath" : "certauto.field.localKeyPath"), defaultPath: config[key] || undefined });

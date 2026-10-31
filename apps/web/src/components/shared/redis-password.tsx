@@ -8,7 +8,7 @@ import * as api from "@/lib/api";
 import { useT } from "@/lib/store";
 import { useInvalidate } from "@/lib/hooks";
 import { sameVersion } from "@/lib/utils";
-import { isTauri, normalizeError, type AppErrorShape } from "@/lib/backend";
+import { isDesktop, normalizeError, type AppErrorShape } from "@/lib/backend";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -93,7 +93,7 @@ function RedisPasswordDialog({ version, running, changed, onClose }: { version: 
         <DialogHeader className="shrink-0 pr-6"><DialogTitle className="leading-snug">Redis {version} · {t("redisPassword.title")}</DialogTitle><DialogDescription>{t("redisPassword.intro")}</DialogDescription></DialogHeader>
         <form onSubmit={submit} className="flex min-h-0 flex-col gap-4">
           <div className="min-h-0 space-y-4 overflow-y-auto px-0.5 text-xs leading-relaxed">
-            {!isTauri && <p className="text-warn">{t("redisSettings.demo")}</p>}
+            {!isDesktop && <p className="text-warn">{t("redisSettings.demo")}</p>}
             {query.isFetching && <p role="status">{t("common.loading")}</p>}
             {failure && confirm !== "stop" && <div ref={errorRef} tabIndex={-1} role="alert" className="space-y-1 rounded-lg bg-error-soft p-3 text-error outline-none [overflow-wrap:anywhere]"><p>{failure.message}</p>{failure.hint && <p>{failure.hint}</p>}</div>}
             {changed && <p role="alert" className="text-error">{t("db.pgChanged")}</p>}

@@ -6,7 +6,7 @@ import type { MongoAuthView } from "@nsb/schema";
 import { Eye, EyeOff, KeyRound, RefreshCw, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import * as api from "@/lib/api";
-import { isTauri, normalizeError } from "@/lib/backend";
+import { isDesktop, normalizeError } from "@/lib/backend";
 import { useT } from "@/lib/store";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -82,7 +82,7 @@ export function MongoAuthPanel({ version, signature, onLockChange }: { version: 
   return <Card>
     <CardHeader><div className="flex flex-wrap items-center justify-between gap-2"><CardTitle className="flex items-center gap-2"><ShieldCheck className="h-4 w-4" />{t("mongoAuth.title")}</CardTitle><Button size="sm" variant="ghost" disabled={busy || query.isFetching} onClick={() => void query.refetch()}><RefreshCw className="h-3.5 w-3.5" />{t("mongo.refresh")}</Button></div><CardDescription>{t("mongoAuth.intro")}</CardDescription></CardHeader>
     <CardContent className="min-w-0 space-y-3">
-      {!isTauri && <p className="text-xs text-warn">{t("mongoAuth.demo")}</p>}
+      {!isDesktop && <p className="text-xs text-warn">{t("mongoAuth.demo")}</p>}
       {query.isPending && <p role="status" className="text-sm text-muted">{t("mongo.loading")}</p>}
       {query.isError && <p role="alert" className="break-words text-sm text-error">{normalizeError(query.error).message}</p>}
       {view && <>

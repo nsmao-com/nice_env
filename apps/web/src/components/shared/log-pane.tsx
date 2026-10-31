@@ -21,7 +21,7 @@ import { useT } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import * as api from "@/lib/api";
 import { copyText, toastError } from "@/lib/hooks";
-import { isTauri } from "@/lib/backend";
+import { isDesktop } from "@/lib/backend";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useLogTail } from "@/lib/hooks";
@@ -137,10 +137,10 @@ export function LogPane({
     try {
       const name = serviceId.replace(/[^a-zA-Z0-9._-]/g, "_") + "-full.log";
       let path: string | null = name;
-      if (isTauri) { const { save } = await import("@tauri-apps/plugin-dialog"); path = await save({ defaultPath: name, filters: [{ name: "Log", extensions: ["log", "txt"] }] }); }
+      if (isDesktop) { const { save } = await import("@/lib/desktop-dialog"); path = await save({ defaultPath: name, filters: [{ name: "Log", extensions: ["log", "txt"] }] }); }
       if (!path) return;
       const bytes = await api.exportLog(serviceId, path);
-      toast.success(t(isTauri ? "logs.exported" : "log.downloadStarted"), { description: bytes.toLocaleString() + " B · " + path });
+      toast.success(t(isDesktop ? "logs.exported" : "log.downloadStarted"), { description: bytes.toLocaleString() + " B · " + path });
     } catch (error) { toastError(error); }
     finally { exportBusy.current = false; setExporting(false); }
   };
@@ -177,7 +177,7 @@ export function LogPane({
     try {
       const text = joined.endsWith("\n") ? joined : joined + "\n";
       const path = await api.logExport(serviceId, text);
-      toast.success(t(isTauri ? "log.exported" : "log.downloadStarted"), { description: path });
+      toast.success(t(isDesktop ? "log.exported" : "log.downloadStarted"), { description: path });
     } catch (e) {
       toastError(e);
     } finally {

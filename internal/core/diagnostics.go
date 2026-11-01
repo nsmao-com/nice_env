@@ -287,6 +287,10 @@ func (c *Core) registerDiagnostics() {
 		if os.IsNotExist(err) {
 			return "", nil
 		}
+		var appErr *AppError
+		if errors.As(err, &appErr) {
+			return nil, &AppError{Code: "LOG_PREVIEW_UNAVAILABLE", Message: "完整日志预览仅支持不超过 8 MiB 的 UTF-8 普通文件", Hint: "可使用导出完整日志保存原始内容，或继续查看实时尾部日志"}
+		}
 		return content, err
 	})
 	c.handle("export_log", func(ctx context.Context, data json.RawMessage) (any, error) {
@@ -297,16 +301,11 @@ func (c *Core) registerDiagnostics() {
 		if err != nil {
 			return nil, err
 		}
-		args, _ := json.Marshal(map[string]string{"id": in.ID})
-		value, err := c.handlers["full_log"](ctx, args)
+		path, err := c.logSourcePath(ctx, in.ID)
 		if err != nil {
 			return nil, err
 		}
-		if !filepath.IsAbs(in.Dest) {
-			return nil, invalid("请选择日志导出绝对路径")
-		}
-		content := value.(string)
-		return len(content), atomicWrite(in.Dest, []byte(content))
+		return exportServiceLog(ctx, path, in.Dest)
 	})
 	c.handle("log_export", func(ctx context.Context, data json.RawMessage) (any, error) {
 		in, err := decode[struct {

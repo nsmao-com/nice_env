@@ -64,6 +64,13 @@ func (c *Core) registerFiles() {
 // Write in the destination directory so rename cannot cross volumes. A failed
 // write leaves the old file intact and removes only our own temporary file.
 func atomicWrite(path string, data []byte) error {
+	return atomicWriteWith(path, func(file *os.File) error {
+		_, err := file.Write(data)
+		return err
+	})
+}
+
+func atomicWriteWith(path string, write func(*os.File) error) error {
 	mode := os.FileMode(0600)
 	if info, err := os.Lstat(path); err == nil {
 		if !info.Mode().IsRegular() {
@@ -83,7 +90,7 @@ func atomicWrite(path string, data []byte) error {
 		file.Close()
 		return err
 	}
-	if _, err = file.Write(data); err != nil {
+	if err = write(file); err != nil {
 		file.Close()
 		return err
 	}

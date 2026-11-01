@@ -116,6 +116,58 @@ func (l *serviceLog) Close() error {
 	return errors.Join(l.err, l.file.Close())
 }
 
+// Export a byte snapshot of the current file without passing log contents through
+// the WebView or the bounded UTF-8 configuration reader. Appends after opening are
+// left for the next export; rotation keeps this file handle valid.
+func exportServiceLog(ctx context.Context, path, dest string) (int64, error) {
+	if !filepath.IsAbs(dest) {
+		return 0, invalid("请选择日志导出绝对路径")
+	}
+	if sameLocalPath(path, dest) {
+		return 0, invalid("导出目标不能覆盖正在读取的日志")
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	before, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return 0, atomicWrite(dest, nil)
+	}
+	if err != nil {
+		return 0, err
+	}
+	if !before.Mode().IsRegular() {
+		return 0, invalid("日志不是普通文件")
+	}
+	input, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer input.Close()
+	info, err := input.Stat()
+	if err != nil {
+		return 0, err
+	}
+	if !info.Mode().IsRegular() || !os.SameFile(before, info) {
+		return 0, invalid("日志文件已变化，请重新导出")
+	}
+	if target, err := os.Stat(dest); err == nil && os.SameFile(info, target) {
+		return 0, invalid("导出目标不能覆盖正在读取的日志")
+	} else if err != nil && !os.IsNotExist(err) {
+		return 0, err
+	}
+	var size int64
+	err = atomicWriteWith(dest, func(output *os.File) error {
+		var err error
+		size, err = io.CopyN(output, contextReader{ctx, input}, info.Size())
+		if err != nil {
+			return err
+		}
+		return ctx.Err()
+	})
+	return size, err
+}
+
 func readServiceLog(path string, lines int) ([]map[string]any, error) {
 	result := []map[string]any{}
 	file, err := os.Open(path)

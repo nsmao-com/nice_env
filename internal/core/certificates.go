@@ -300,6 +300,62 @@ func certUsed(site certSite, record certRecord) bool {
 	}
 	return len(site.Domains) > 0 && strings.EqualFold(site.Domains[0], record.Subject)
 }
+
+// Refresh only running servers whose HTTPS sites use this certificate. Keep
+// their identity so rollback can restart a server if its reload stopped it.
+func (c *Core) writeLiveCertPair(ctx context.Context, record certRecord, sites []certSite, certPEM, keyPEM []byte, commit func() error) error {
+	servers := map[string]bool{}
+	for _, site := range sites {
+		if site.HTTPS && certUsed(site, record) {
+			server := site.Runtime.WebServer
+			if server == "" {
+				server = "nginx"
+			}
+			servers[server] = true
+		}
+	}
+	var running []*serviceEntry
+	c.services.mu.RLock()
+	for _, server := range []string{"nginx", "apache", "caddy"} {
+		entry := c.services.entries[server]
+		if servers[server] && entry != nil && entry.child != nil && entry.status.State == "running" {
+			running = append(running, entry)
+		}
+	}
+	c.services.mu.RUnlock()
+	attempted := false
+	err := c.writeCertPair(ctx, string(record.CertPath), string(record.KeyPath), certPEM, keyPEM, func() error {
+		attempted = true
+		for _, entry := range running {
+			if err := c.reloadWebIfRunning(ctx, entry.pkg.ID); err != nil {
+				return err
+			}
+		}
+		return commit()
+	})
+	if err == nil || !attempted {
+		return err
+	}
+	// writeCertPair has restored the original files before returning an error.
+	restore, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var failures []error
+	for _, entry := range running {
+		c.services.mu.RLock()
+		active := entry.child != nil
+		c.services.mu.RUnlock()
+		if active {
+			failures = append(failures, c.reloadWebIfRunning(restore, entry.pkg.ID))
+		} else {
+			failures = append(failures, c.startService(restore, entry))
+		}
+	}
+	if recoveryErr := errors.Join(failures...); recoveryErr != nil {
+		return &AppError{Code: "CERT_RELOAD_ROLLBACK_FAILED", Message: "证书更新失败，恢复原证书后部分 Web 服务未能重新加载", Detail: errors.Join(err, recoveryErr).Error(), Hint: "请检查服务配置与运行状态；原证书备份保留在 backup/certificates"}
+	}
+	return err
+}
+
 func (c *Core) saveCertRecord(ctx context.Context, r certRecord) error {
 	sans, err := json.Marshal(r.SANs)
 	if err != nil {
@@ -526,15 +582,7 @@ func (c *Core) issueCertificate(ctx context.Context, domains []string) (certReco
 	if err != nil {
 		return certRecord{}, err
 	}
-	err = c.writeCertPair(ctx, string(r.CertPath), string(r.KeyPath), certPEM, keyPEM, func() error {
-		if err := c.reloadNginxPools(ctx); err != nil {
-			return err
-		}
-		return c.saveCertRecord(ctx, r)
-	})
-	if err != nil {
-		_ = c.reloadNginxPools(context.Background())
-	}
+	err = c.writeLiveCertPair(ctx, r, sites, certPEM, keyPEM, func() error { return c.saveCertRecord(ctx, r) })
 	return r, err
 }
 
@@ -685,9 +733,8 @@ func (c *Core) importCertificate(ctx context.Context, certPath, keyPath, id stri
 			}
 		}
 	}
-	err = c.writeCertPair(ctx, string(r.CertPath), string(r.KeyPath), certPEM, keyPEM, func() error { return c.reloadNginxPools(ctx) })
+	err = c.writeLiveCertPair(ctx, r, sites, certPEM, keyPEM, func() error { return nil })
 	if err != nil {
-		_ = c.reloadNginxPools(context.Background())
 		return certChoice{}, err
 	}
 	return c.inspectCertificate(r, sites), nil

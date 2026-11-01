@@ -93,6 +93,10 @@ v2.0.7 修复站点编辑的嵌套对象更新语义：未提交的顶层字段�
 
 补充项目与模板验收：项目运行时配置 13 次调用验证版本固定、过期编辑拒绝、未知字段保留、原文备份和版本文件冲突；四个真实框架项目及两个无 Composer 项目的兼容性/环境检查共 16 次，另有缺失扩展、PHP 不兼容和开发依赖分组选项等 5 次边界调用。内置 60 份模板均逐项保存并回读，分别用于真实 Nginx、Apache、Caddy 的校验、启动和重载。报告为 `project-runtime-roundtrip.json`、`project-platform-real-projects.json`、`project-platform-edge.json`、`rewrite-template-save.json`、`rewrite-template-native-after.json`。项目文件及隔离站点设置已恢复；未改用户现用数据库或系统 hosts。
 
+v2.0.9 修复本地证书重新签发与导入证书替换只重载 Nginx 的遗漏。按实际 HTTPS 绑定重载运行中的 Nginx、Apache、Caddy，未使用该证书的服务不重载；失败时恢复证书和私钥，并重新加载原证书，恢复失败明确报告。真实 TLS 握手复现 Apache/Caddy 继续提供旧证书，修复后签发、导入替换、错误配置回滚及修复后重试共 24 项通过；三种服务共享证书时，部分重载成功后另一服务失败的回滚及再次替换另有 5 项通过。证据为 `cert-reload-before-2.0.8.json`、`cert-reload-after.json`、`cert-reload-shared-after.json`。
+
+补充验收覆盖数据库特殊字符密码与错误凭据保护、PostgreSQL 替换恢复保留旧库和安全备份、npm/pip/Composer 镜像配置原文备份、站点批量启停及删除保留项目、Windows 控制进程崩溃后关闭受管进程及外部监听冲突保护。下载取消另以正式版控制器验证请求编号隔离、取消后重试、暂存目录清理和无虚假安装记录。均使用隔离实例，未改用户现用数据。
+
 ## 仍需完成的验收
 
 - 全页面完整交互矩阵与任意第三方自定义配置，不以已观察的主要页面代替。

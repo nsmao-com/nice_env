@@ -141,10 +141,17 @@ func (c *Core) mysqlAccountCommand(ctx context.Context, data json.RawMessage, ac
 	if len(a.Username) > 384 || len(a.Host) > 1020 || strings.IndexFunc(a.Username+a.Host, unicode.IsControl) >= 0 {
 		return nil, invalid("账号或来源主机无效")
 	}
-	if !c.services.lifecycle.TryLock() {
-		return nil, serviceBusy()
+	if action == "grants" || action == "drop-info" || action == "password-info" {
+		if !c.services.lifecycle.TryRLock() {
+			return nil, serviceBusy()
+		}
+		defer c.services.lifecycle.RUnlock()
+	} else {
+		if !c.services.lifecycle.TryLock() {
+			return nil, serviceBusy()
+		}
+		defer c.services.lifecycle.Unlock()
 	}
-	defer c.services.lifecycle.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	e, err := c.selectedMySQL(ctx, in.Engine, in.Version)

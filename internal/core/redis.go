@@ -360,10 +360,18 @@ func (c *Core) redisCommand(ctx context.Context, data json.RawMessage, action st
 	if request.Version == "" {
 		request.Version = in.Version
 	}
-	if !c.services.lifecycle.TryLock() {
-		return nil, serviceBusy()
+	switch action {
+	case "connection", "stats", "keys", "preview", "persistence":
+		if !c.services.lifecycle.TryRLock() {
+			return nil, serviceBusy()
+		}
+		defer c.services.lifecycle.RUnlock()
+	default:
+		if !c.services.lifecycle.TryLock() {
+			return nil, serviceBusy()
+		}
+		defer c.services.lifecycle.Unlock()
 	}
-	defer c.services.lifecycle.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	e, err := c.selectedRedis(request.Version)

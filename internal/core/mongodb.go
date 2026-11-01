@@ -272,10 +272,18 @@ func (c *Core) registerMongo() {
 		if err = in.Request.validate(); err != nil {
 			return nil, err
 		}
-		if !c.services.lifecycle.TryLock() {
-			return nil, serviceBusy()
+		switch in.Request.Action {
+		case "overview", "collections", "documents":
+			if !c.services.lifecycle.TryRLock() {
+				return nil, serviceBusy()
+			}
+			defer c.services.lifecycle.RUnlock()
+		default:
+			if !c.services.lifecycle.TryLock() {
+				return nil, serviceBusy()
+			}
+			defer c.services.lifecycle.Unlock()
 		}
-		defer c.services.lifecycle.Unlock()
 		credentials, err := c.mongoCredentials(ctx, in.Version)
 		if err != nil {
 			return nil, err

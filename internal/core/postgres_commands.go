@@ -130,10 +130,18 @@ func (c *Core) postgresCommand(ctx context.Context, data json.RawMessage, action
 	if !safePart(in.Version) {
 		return nil, invalid("PostgreSQL 版本无效")
 	}
-	if !c.services.lifecycle.TryLock() {
-		return nil, serviceBusy()
+	switch action {
+	case "connection", "password", "databases", "roles", "role_access":
+		if !c.services.lifecycle.TryRLock() {
+			return nil, serviceBusy()
+		}
+		defer c.services.lifecycle.RUnlock()
+	default:
+		if !c.services.lifecycle.TryLock() {
+			return nil, serviceBusy()
+		}
+		defer c.services.lifecycle.Unlock()
 	}
-	defer c.services.lifecycle.Unlock()
 	if action == "password" {
 		if _, err := c.serviceEntry("postgresql", in.Version); err != nil {
 			return nil, err

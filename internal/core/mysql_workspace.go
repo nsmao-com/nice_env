@@ -123,10 +123,18 @@ func (c *Core) databaseWorkspace(ctx context.Context, data json.RawMessage) (any
 		return nil, err
 	}
 	r := in.Request
-	if !c.services.lifecycle.TryLock() {
-		return nil, serviceBusy()
+	if r.Action == "tables" || r.Action == "schema" || r.Action == "rows" {
+		if !c.services.lifecycle.TryRLock() {
+			return nil, serviceBusy()
+		}
+		defer c.services.lifecycle.RUnlock()
+	} else {
+		// Custom SQL may mutate data even when it starts with SELECT.
+		if !c.services.lifecycle.TryLock() {
+			return nil, serviceBusy()
+		}
+		defer c.services.lifecycle.Unlock()
 	}
-	defer c.services.lifecycle.Unlock()
 	e, err := c.selectedMySQL(ctx, in.Engine, in.Version)
 	if err != nil {
 		return nil, err

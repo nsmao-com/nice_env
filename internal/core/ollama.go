@@ -209,10 +209,17 @@ func (c *Core) ollamaCommand(ctx context.Context, data json.RawMessage, action s
 			return nil, err
 		}
 	}
-	if !c.services.lifecycle.TryLock() {
-		return nil, serviceBusy()
+	if action == "models" {
+		if !c.services.lifecycle.TryRLock() {
+			return nil, serviceBusy()
+		}
+		defer c.services.lifecycle.RUnlock()
+	} else {
+		if !c.services.lifecycle.TryLock() {
+			return nil, serviceBusy()
+		}
+		defer c.services.lifecycle.Unlock()
 	}
-	defer c.services.lifecycle.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	client, base, e, err := c.ollamaHTTP(ctx)

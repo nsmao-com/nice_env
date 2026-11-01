@@ -109,10 +109,17 @@ func (c *Core) mysqlCommand(ctx context.Context, data json.RawMessage, action st
 	if err != nil {
 		return nil, err
 	}
-	if !c.services.lifecycle.TryLock() {
-		return nil, serviceBusy()
+	if action == "list" || action == "users" || action == "password" {
+		if !c.services.lifecycle.TryRLock() {
+			return nil, serviceBusy()
+		}
+		defer c.services.lifecycle.RUnlock()
+	} else {
+		if !c.services.lifecycle.TryLock() {
+			return nil, serviceBusy()
+		}
+		defer c.services.lifecycle.Unlock()
 	}
-	defer c.services.lifecycle.Unlock()
 	e, err := c.selectedMySQL(ctx, in.Engine, in.Version)
 	if err != nil {
 		return nil, err

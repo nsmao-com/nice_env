@@ -85,6 +85,10 @@ v2.0.4 修复 PHP 扩展、Xdebug、Adminer 状态、Memcached 统计/设置查�
 
 v2.0.5 将完整日志导出与配置文本读取分开：原先超过 8 MiB 或非 UTF-8 的日志无法导出，现在按打开时的文件长度流式复制原始字节，经同目录临时文件同步落盘后发布，避免大日志进入 WebView 内存。导出目标不能是源日志、其硬链接或目录。界面完整预览保留 8 MiB 限制并提示使用导出，实时尾部读取不变。13 项验收覆盖 9 MiB、非 UTF-8、空文件、源文件保护、相对路径拒绝、缺失日志与原子文本写入回归；另有 10 项日志/诊断操作核对尾部行数、中文及反斜杠原文、同名导出不覆盖、保留文件名与敏感字段脱敏。证据为 `log-large-before/after.json`、`log-diagnostics-roundtrip.json`，原日志已恢复、临时导出已清理。
 
+v2.0.6 将 MySQL 列表/账号预览/工作台浏览、PostgreSQL 状态与元数据、Redis 浏览/统计/持久化状态、MongoDB 浏览/认证状态及 Ollama 模型列表改为共享生命周期读锁；任意 SQL、数据和权限修改、模型拉取/删除、服务启停继续独占。真实并发复现中，MySQL 64 次有 63 次误报忙碌，PostgreSQL 48 次有 47 次，Ollama 40 次有 37 次；修复后五类服务共 224 次并发读取无错误。MySQL/PostgreSQL 自定义 SQL 运行期间仍拒绝交叉查询和停机，SQL 完成后读取恢复；15 项调用核对确认保护与生命周期行为。报告为 `mysql-read-before/after.json`、`postgres-read-before.json`、`ollama-read-before.json`、`databases-ollama-read-after.json`、`redis-read-after.json`、`database-read-write-locks.json`。Redis 初始端口冲突被正确拒绝，随后使用隔离端口 29679 验收。
+
+Ollama 0.35.0 官方发行包已实际下载、校验并安装，真实拉取 `all-minilm:22m`、取消后重试、模型列表及删除通过；错误名称、旧任务取消、重复拉取和重复删除均被拒绝。模型验收后删除，受管服务已停止，报告为 `ollama-install.json` 与 `ollama-roundtrip.json`。MCP 客户端接入另有 20 项隔离验证，包括真实握手、工具查询、Cursor/Claude Desktop/VS Code 接入和移除，以及保留其他配置与拒绝过期修改；未改真实客户端配置，报告为 `mcp-client-roundtrip.json`。
+
 ## 仍需完成的验收
 
 - 全页面完整交互矩阵与任意第三方自定义配置，不以已观察的主要页面代替。

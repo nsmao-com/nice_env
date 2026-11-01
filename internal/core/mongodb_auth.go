@@ -137,10 +137,10 @@ func (c *Core) registerMongoAuth() {
 		if err != nil {
 			return nil, err
 		}
-		if !c.services.lifecycle.TryLock() {
+		if !c.services.lifecycle.TryRLock() {
 			return nil, serviceBusy()
 		}
-		defer c.services.lifecycle.Unlock()
+		defer c.services.lifecycle.RUnlock()
 		return c.mongoAuthStatus(ctx, in.Version)
 	})
 	c.handle("mongodb_auth_connection", func(ctx context.Context, data json.RawMessage) (any, error) {

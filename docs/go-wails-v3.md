@@ -89,6 +89,10 @@ v2.0.6 将 MySQL 列表/账号预览/工作台浏览、PostgreSQL 状态与元�
 
 Ollama 0.35.0 官方发行包已实际下载、校验并安装，真实拉取 `all-minilm:22m`、取消后重试、模型列表及删除通过；错误名称、旧任务取消、重复拉取和重复删除均被拒绝。模型验收后删除，受管服务已停止，报告为 `ollama-install.json` 与 `ollama-roundtrip.json`。MCP 客户端接入另有 20 项隔离验证，包括真实握手、工具查询、Cursor/Claude Desktop/VS Code 接入和移除，以及保留其他配置与拒绝过期修改；未改真实客户端配置，报告为 `mcp-client-roundtrip.json`。
 
+v2.0.7 修复站点编辑的嵌套对象更新语义：未提交的顶层字段继续保留，提交的 runtime 和 phpOverrides 按完整编辑快照替换。原先 Go 对旧结构体和 map 的递归解码会让已清除的自定义伪静态、HTTPS 跳转、错误页及 PHP 参数残留；现在与前端对象替换保持一致。隔离复现与修复后 17 次调用覆盖关闭 HTTPS、删除模板、删除单个/全部 PHP 参数、错误页缩减、仅改名称保留设置、非法 runtime 拒绝且原数据保留，以及运行中 Nginx 重载后的配置内容。证据为 `site-replacement-before.json`、`site-replacement-after.json`。
+
+补充项目与模板验收：项目运行时配置 13 次调用验证版本固定、过期编辑拒绝、未知字段保留、原文备份和版本文件冲突；四个真实框架项目及两个无 Composer 项目的兼容性/环境检查共 16 次，另有缺失扩展、PHP 不兼容和开发依赖分组选项等 5 次边界调用。内置 60 份模板均逐项保存并回读，分别用于真实 Nginx、Apache、Caddy 的校验、启动和重载。报告为 `project-runtime-roundtrip.json`、`project-platform-real-projects.json`、`project-platform-edge.json`、`rewrite-template-save.json`、`rewrite-template-native-after.json`。项目文件及隔离站点设置已恢复；未改用户现用数据库或系统 hosts。
+
 ## 仍需完成的验收
 
 - 全页面完整交互矩阵与任意第三方自定义配置，不以已观察的主要页面代替。

@@ -486,7 +486,9 @@ func (c *Core) updateSite(ctx context.Context, data json.RawMessage) (any, error
 		return nil, err
 	}
 	key, err := decode[struct {
-		ID string `json:"id"`
+		ID           string          `json:"id"`
+		Runtime      json.RawMessage `json:"runtime"`
+		PHPOverrides json.RawMessage `json:"phpOverrides"`
 	}](in.Site)
 	if err != nil {
 		return nil, err
@@ -500,7 +502,9 @@ func (c *Core) updateSite(ctx context.Context, data json.RawMessage) (any, error
 	if err != nil {
 		return nil, err
 	}
-	// Decode onto a deep copy, so omitted patch fields retain their saved values.
+	// Omitted top-level fields retain their saved values. Supplied runtime and
+	// PHP settings are complete editor snapshots: removed keys must not survive
+	// Go's recursive struct/map decoding (unlike the frontend's object replacement).
 	encoded, err := json.Marshal(previous)
 	if err != nil {
 		return nil, err
@@ -508,6 +512,12 @@ func (c *Core) updateSite(ctx context.Context, data json.RawMessage) (any, error
 	var site Site
 	if err = json.Unmarshal(encoded, &site); err != nil {
 		return nil, err
+	}
+	if len(key.Runtime) != 0 {
+		site.Runtime = siteRuntime{}
+	}
+	if len(key.PHPOverrides) != 0 {
+		site.PHPOverrides = nil
 	}
 	if err = json.Unmarshal(in.Site, &site); err != nil {
 		return nil, invalid("站点修改格式无效")

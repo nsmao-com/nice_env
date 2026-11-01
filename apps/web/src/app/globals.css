@@ -345,6 +345,17 @@
     margin-top: var(--caption-height);
   }
 
+  .nsb-expanded-workspace {
+    position: fixed;
+    inset: 0.75rem;
+    z-index: 40;
+  }
+
+  /* 展开面板保留桌面标题栏，避免收起按钮与原生窗口控件重叠。 */
+  .nsb-shell-desktop .nsb-expanded-workspace {
+    top: calc(var(--caption-height) + 0.75rem);
+  }
+
   .nsb-shell-mac .nsb-window-controls {
     display: none;
   }

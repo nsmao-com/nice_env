@@ -65,7 +65,7 @@ func upstreamGet(ctx context.Context, address string) ([]byte, error) {
 		return nil, err
 	}
 	if len(data) > limit {
-		return nil, invalid("版本目录超过 32 MiB 限制")
+		return nil, &AppError{Code: "VERSION_CATALOG_TOO_LARGE", Message: "版本目录超过 32 MiB 限制"}
 	}
 	return data, nil
 }

@@ -20,7 +20,7 @@ import (
 	"niceenv/internal/process"
 )
 
-var version = "2.0.9-dev"
+var version = "2.0.10-dev"
 
 func main() {
 	if handled, err := process.RunConsoleHelper(os.Args[1:]); handled {

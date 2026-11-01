@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"runtime"
@@ -110,11 +111,31 @@ func fetchGitHubVersions(ctx context.Context, template map[string]any, source ve
 		Assets     []asset `json:"assets"`
 	}
 	out := []remoteVersion{}
-	pages := (source.MaxVersions + 99) / 100
-	pages = max(1, min(10, pages))
-	for page := 1; page <= pages; page++ {
+	releaseLimit := max(1, min(10, (source.MaxVersions+99)/100)) * 100
+	pageSize := 100
+	// Temurin releases carry hundreds of assets per release. Keep each response
+	// bounded without reducing the number of releases available for selection.
+	if strings.EqualFold(source.Repo, "adoptium/temurin21-binaries") {
+		pageSize = 20
+	}
+	for offset := 0; offset < releaseLimit; {
 		var rows []release
-		if err = upstreamJSON(ctx, fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=100&page=%d", source.Repo, page), &rows); err != nil {
+		page := offset/pageSize + 1
+		if err = upstreamJSON(ctx, fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=%d&page=%d", source.Repo, pageSize, page), &rows); err != nil {
+			var appErr *AppError
+			if errors.As(err, &appErr) && appErr.Code == "VERSION_CATALOG_TOO_LARGE" && pageSize > 1 {
+				// Every smaller size divides the preceding size, so a retry starts
+				// at the same release offset even when a later page is too large.
+				switch pageSize {
+				case 100:
+					pageSize = 20
+				case 20:
+					pageSize = 5
+				default:
+					pageSize = 1
+				}
+				continue
+			}
 			return nil, err
 		}
 		for _, row := range rows {
@@ -177,9 +198,10 @@ func fetchGitHubVersions(ctx context.Context, template map[string]any, source ve
 			}
 			out = append(out, remoteVersion{Version: version, URL: a.URL, SHA256: hash, SizeBytes: a.Size, Entry: strings.ReplaceAll(renderVersionEntry(template, source, version), "{asset}", a.Name), Kind: archiveKind(a.URL), Prerelease: pre, ReleasedAt: row.Published})
 		}
-		if len(rows) < 100 {
+		if len(rows) < pageSize {
 			break
 		}
+		offset += len(rows)
 	}
 	return out, nil
 }

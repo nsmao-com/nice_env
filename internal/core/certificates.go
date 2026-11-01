@@ -944,10 +944,10 @@ func (c *Core) exportCertificate(ctx context.Context, id, outPath, format, passw
 
 func (c *Core) registerCertificates() {
 	c.handle("list_certs", func(ctx context.Context, _ json.RawMessage) (any, error) {
-		if !c.certChanges.TryLock() {
+		if !c.certChanges.TryRLock() {
 			return nil, serviceBusy()
 		}
-		defer c.certChanges.Unlock()
+		defer c.certChanges.RUnlock()
 		return c.listCertificates(ctx)
 	})
 	c.handle("issue_cert", func(ctx context.Context, data json.RawMessage) (any, error) {
@@ -984,10 +984,10 @@ func (c *Core) registerCertificates() {
 		return true, nil
 	})
 	c.handle("cert_imported_list", func(ctx context.Context, _ json.RawMessage) (any, error) {
-		if !c.certChanges.TryLock() {
+		if !c.certChanges.TryRLock() {
 			return nil, serviceBusy()
 		}
-		defer c.certChanges.Unlock()
+		defer c.certChanges.RUnlock()
 		return c.importedCertificates(ctx)
 	})
 	c.handle("cert_import", func(ctx context.Context, data json.RawMessage) (any, error) {
@@ -1041,10 +1041,10 @@ func (c *Core) registerCertificates() {
 		return c.exportCertificateCommand(ctx, data, "jks")
 	})
 	c.handle("site_certificate_choices", func(ctx context.Context, _ json.RawMessage) (any, error) {
-		if !c.certChanges.TryLock() {
+		if !c.certChanges.TryRLock() {
 			return nil, serviceBusy()
 		}
-		defer c.certChanges.Unlock()
+		defer c.certChanges.RUnlock()
 		out, err := c.importedCertificates(ctx)
 		if err != nil {
 			return nil, err

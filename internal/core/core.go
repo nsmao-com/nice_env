@@ -35,7 +35,7 @@ type Core struct {
 	snapshotKey     [32]byte
 	siteChanges     sync.RWMutex
 	hostChanges     sync.Mutex
-	certChanges     sync.Mutex
+	certChanges     sync.RWMutex
 	ollama          ollamaManager
 	versions        versionManager
 	projectChecks   sync.Mutex

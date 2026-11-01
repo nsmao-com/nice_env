@@ -27,10 +27,10 @@ type certHealth struct {
 }
 
 func (c *Core) certHealth(ctx context.Context) (any, error) {
-	if !c.certChanges.TryLock() {
+	if !c.certChanges.TryRLock() {
 		return nil, serviceBusy()
 	}
-	defer c.certChanges.Unlock()
+	defer c.certChanges.RUnlock()
 	records, err := c.certificateRecords(ctx)
 	if err != nil {
 		return nil, err

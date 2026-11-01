@@ -79,6 +79,10 @@ v2.0.3 修复证书页并发加载时误报 `SERVICE_BUSY`：证书列表、体�
 
 补充验证了证书私钥不匹配时保留原文件、替换与四种格式导出、计划任务执行/停止/运行中防重复操作，以及配置非法内容拒绝、过期编辑和回滚预览拒绝、备份恢复原内容。报告为 `cert-cron-roundtrip.json` 和 `config-rollback-roundtrip.json`，均使用隔离目录，未新增测试文件或改动用户现用数据。
 
+v2.0.4 修复 PHP 扩展、Xdebug、Adminer 状态、Memcached 统计/设置查询以及环境体检之间的独占锁争用。只读操作共享生命周期锁；服务修改保持独占，体检使用单独防重复锁，PHP 首次配置生成单独串行，管理台退出状态查询不再修改运行时指针。PHP/Xdebug/Adminer 的 12 次并发读取从 11 次忙碌错误降到 0 次；体检期间 40 次读取从全部失败降到 0 次；Memcached 的 40 次读取从 25 次失败降到 0 次。体检期间重复体检和配置修改仍被正确拒绝。报告为 `php-read-before/after.json`、`php-first-read.json`、`health-read-before/after.json`、`memcached-read-before/after.json`。
+
+新增隔离行为验收：Adminer HTTP 页面、48 次运行状态并发读取、正常停止、仅终止验收实例的 PHP 子进程后清理与重启；PHP curl 扩展开关、原生 ini_get 核对、内置扩展和无效配置拒绝；从 Xdebug 官方源安装 3.5.3，实际加载/停用/启用并核对调试端口，随后恢复原 php.ini；Memcached 实际写入/清空、128 MiB 内存配置生效及旧 revision 拒绝，结束后恢复设置并停止服务。报告为 `adminer-lifecycle-concurrency.json`、`php-xdebug-roundtrip.json`、`memcached-roundtrip.json`。Go build/vet、类型检查、现有 21 项逻辑检查通过；本机未配置 C 编译器，Go race 检查未能执行，不计入通过项。
+
 ## 仍需完成的验收
 
 - 全页面完整交互矩阵与任意第三方自定义配置，不以已观察的主要页面代替。

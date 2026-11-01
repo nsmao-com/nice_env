@@ -44,7 +44,6 @@ func (c *Core) databaseConsoleStatus() *consoleStatus {
 	}
 	select {
 	case <-c.console.done:
-		c.console = nil
 		return nil
 	default:
 		status := c.console.status
@@ -56,6 +55,12 @@ func (c *Core) stopDatabaseConsole(ctx context.Context) error {
 		return nil
 	}
 	run := c.console
+	select {
+	case <-run.done:
+		c.console = nil
+		return nil
+	default:
+	}
 	if err := run.child.Stop(); err != nil {
 		return err
 	}
@@ -72,10 +77,10 @@ func (c *Core) stopDatabaseConsole(ctx context.Context) error {
 }
 func (c *Core) registerDatabaseConsole() {
 	c.handle("adminer_status", func(ctx context.Context, _ json.RawMessage) (any, error) {
-		if !c.services.lifecycle.TryLock() {
+		if !c.services.lifecycle.TryRLock() {
 			return nil, serviceBusy()
 		}
-		defer c.services.lifecycle.Unlock()
+		defer c.services.lifecycle.RUnlock()
 		return c.databaseConsoleStatus(), nil
 	})
 	c.handle("adminer_stop", func(ctx context.Context, _ json.RawMessage) (any, error) {

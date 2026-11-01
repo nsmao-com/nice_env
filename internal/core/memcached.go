@@ -84,10 +84,17 @@ func (c *Core) memcachedCommand(ctx context.Context, data json.RawMessage, actio
 	if err != nil {
 		return nil, err
 	}
-	if !c.services.lifecycle.TryLock() {
-		return nil, serviceBusy()
+	if action == "settings" || action == "stats" {
+		if !c.services.lifecycle.TryRLock() {
+			return nil, serviceBusy()
+		}
+		defer c.services.lifecycle.RUnlock()
+	} else {
+		if !c.services.lifecycle.TryLock() {
+			return nil, serviceBusy()
+		}
+		defer c.services.lifecycle.Unlock()
 	}
-	defer c.services.lifecycle.Unlock()
 	if action == "settings" || action == "save" {
 		settings, err := c.memcachedSettings(ctx, in.Version)
 		if err != nil {

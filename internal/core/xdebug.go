@@ -306,10 +306,10 @@ func (c *Core) registerXdebug() {
 		if err != nil {
 			return nil, err
 		}
-		if !c.services.lifecycle.TryLock() {
+		if !c.services.lifecycle.TryRLock() {
 			return nil, serviceBusy()
 		}
-		defer c.services.lifecycle.Unlock()
+		defer c.services.lifecycle.RUnlock()
 		return c.xdebugStatus(ctx, in.Version)
 	})
 	c.handle("xdebug_setup", c.xdebugSetup)

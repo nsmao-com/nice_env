@@ -56,6 +56,10 @@ func phpEnabled(text string) map[string]bool {
 	return result
 }
 func (c *Core) phpTarget(ctx context.Context, version string) (*serviceEntry, *resolvedService, configTarget, error) {
+	// Callers retain the lifecycle lock. Read requests may share it, but first
+	// access must publish directories and php.ini once before probing modules.
+	c.phpConfig.Lock()
+	defer c.phpConfig.Unlock()
 	if !safePart(version) {
 		return nil, nil, configTarget{}, invalid("PHP 版本无效")
 	}
@@ -229,10 +233,10 @@ func (c *Core) registerPHP() {
 		if err != nil {
 			return nil, err
 		}
-		if !c.services.lifecycle.TryLock() {
+		if !c.services.lifecycle.TryRLock() {
 			return nil, serviceBusy()
 		}
-		defer c.services.lifecycle.Unlock()
+		defer c.services.lifecycle.RUnlock()
 		return c.phpExtensionView(ctx, in.Version)
 	})
 	c.handle("set_php_extension", c.setPHPExtension)

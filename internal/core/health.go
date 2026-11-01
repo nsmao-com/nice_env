@@ -84,14 +84,20 @@ func (r *healthReport) finish(empty bool) {
 }
 func (c *Core) healthCheck(ctx context.Context) (healthReport, error) {
 	r := healthReport{Items: []healthItem{}, Checks: []healthCoverage{}}
-	if !c.services.lifecycle.TryLock() {
+	if !c.healthChecks.TryLock() {
 		return r, &AppError{Code: "HEALTH_BUSY", Message: "正在体检或调整服务，请稍后重新检查"}
 	}
-	defer c.services.lifecycle.Unlock()
-	if !c.siteChanges.TryLock() {
+	defer c.healthChecks.Unlock()
+	// Keep the snapshot stable against mutations without blocking other readers.
+	// PHP's first-use configuration is serialized separately by phpTarget.
+	if !c.services.lifecycle.TryRLock() {
+		return r, &AppError{Code: "HEALTH_BUSY", Message: "正在体检或调整服务，请稍后重新检查"}
+	}
+	defer c.services.lifecycle.RUnlock()
+	if !c.siteChanges.TryRLock() {
 		return r, serviceBusy()
 	}
-	defer c.siteChanges.Unlock()
+	defer c.siteChanges.RUnlock()
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	installed, err := c.Store.tableRows(ctx, "SELECT id,version,install_path AS installPath FROM installed ORDER BY id,version", nil, nil)

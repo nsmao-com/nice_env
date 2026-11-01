@@ -36,6 +36,8 @@ type Core struct {
 	siteChanges     sync.RWMutex
 	hostChanges     sync.Mutex
 	certChanges     sync.RWMutex
+	phpConfig       sync.Mutex // serializes lazy PHP configuration initialization
+	healthChecks    sync.Mutex
 	ollama          ollamaManager
 	versions        versionManager
 	projectChecks   sync.Mutex
